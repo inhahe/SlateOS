@@ -1,15 +1,53 @@
-//! Virtual desktop overview (Expose / Mission Control).
+//! Virtual desktop overview (Exposé / Mission Control).
 //!
-//! Provides a fullscreen overlay that shows all windows across all virtual
-//! desktops in a grid layout.  The user can click a thumbnail to switch
-//! to that window, use arrow keys to navigate, type to search by title or
-//! app name, and manage desktops (add, switch, close windows).
+//! A fullscreen overlay showing every window across every virtual desktop. The
+//! user can click a card to switch to that window, navigate with the arrow
+//! keys, type to search by title, and switch or close from within it.
 //!
 //! Three view modes are supported:
 //! - **AllWindows** — grid of windows on the current desktop.
 //! - **AllDesktops** — horizontal lanes, one per desktop, each showing its windows.
 //! - **RecentApps** — most-recently-used window list across all desktops.
+//!
+//! # What the cards are, and are not
+//!
+//! **They are titled rectangles with their windows' proportions, not pictures.**
+//! [`OverviewState::apply_window_list`] takes each window's real rectangle from
+//! the same `WindowList` that refreshes the taskbar, and the layout scales that
+//! rectangle to fit — so a wide window reads as a wide card. It never asks the
+//! compositor for window *contents*, because there is no verb for that: a
+//! scaled read of another client's buffer is a capability question of the same
+//! shape as reading another client's title, only worse, since a title is a
+//! string and a thumbnail is the screen. Proportional titled rectangles are a
+//! usable Exposé without it; see `known-issues.md`,
+//! `TD-C-ANY-CLIENT-CAN-READ-EVERY-WINDOW-TITLE`.
+//!
+//! **There is no application name.** A window's identity here is its title,
+//! because the title is the whole of what the shell is told. The wire carries
+//! an id, a pid, a layer, a title, state bits, a desktop number and a
+//! rectangle — no application identity, which is a property of the *program*
+//! and would have to come from package metadata keyed by executable. Search
+//! matches titles for the same reason.
+//!
+//! # Nothing here moves
+//!
+//! There is no fade, slide or scale, and the absence is deliberate: the shell
+//! has no clock. `oswindow::EventLoop::run` blocks in `Connection::wait()`,
+//! which takes no timeout, so nothing can step an animation between input
+//! events. Code here must therefore draw its *final* state on the first frame —
+//! a draw path gated on progress that nothing advances renders nothing at all.
+//! See `known-issues.md`, `TD-C-THE-SHELL-HAS-NO-FRAME-CLOCK`.
+//!
+//! # One layout, two readers
+//!
+//! [`overview_layout`] is the single answer to where each card goes.
+//! [`render_overview`] draws those rectangles and [`on_mouse_click`] hit-tests
+//! the same ones; neither works the layout out for itself. Two computations of
+//! one layout is how a click comes to select the window next to the one that
+//! was lit. See `design-decisions.md` §520.
 
+use crate::{Layer, ShellControlAction, ShellRequest, WindowId};
+use guiremote::window_list::WindowList;
 use guitk::color::Color;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::step;
@@ -59,7 +97,6 @@ pub struct WindowThumbnail {
     pub height: f32,
     pub is_focused: bool,
     pub is_minimized: bool,
-    pub app_name: String,
 }
 
 /// A group of thumbnails belonging to a single virtual desktop.
@@ -77,7 +114,6 @@ pub struct ThumbnailLayout {
     pub window_id: u64,
     pub desktop_id: u32,
     pub title: String,
-    pub app_name: String,
     pub is_focused: bool,
     pub is_minimized: bool,
     /// Computed render position / size inside the overview viewport.
@@ -92,8 +128,6 @@ pub struct ThumbnailLayout {
 pub struct OverviewState {
     pub mode: OverviewMode,
     pub visible: bool,
-    /// 0.0 = fully hidden, 1.0 = fully visible (used for fade animation).
-    pub animation_progress: f32,
     pub lanes: Vec<DesktopLane>,
     pub hovered_window: Option<u64>,
     pub selected_desktop: Option<u32>,
@@ -107,7 +141,6 @@ impl OverviewState {
         Self {
             mode: OverviewMode::AllWindows,
             visible: false,
-            animation_progress: 0.0,
             lanes: Vec::new(),
             hovered_window: None,
             selected_desktop: None,
@@ -117,10 +150,13 @@ impl OverviewState {
     }
 
     /// Show the overview in the given mode.
+    ///
+    /// The search box starts empty every time rather than remembering the last
+    /// query: an overview that opens already filtered is one that opens looking
+    /// like most of the desktop has closed.
     pub fn show(&mut self, mode: OverviewMode) {
         self.mode = mode;
         self.visible = true;
-        self.animation_progress = 0.0;
         self.search_query.clear();
         self.search_results.clear();
         self.hovered_window = None;
@@ -129,7 +165,6 @@ impl OverviewState {
     /// Hide the overview.
     pub fn hide(&mut self) {
         self.visible = false;
-        self.animation_progress = 1.0; // will animate down to 0
     }
 
     /// Toggle visibility using the given mode.
@@ -141,21 +176,108 @@ impl OverviewState {
         }
     }
 
-    /// Advance the animation by `dt` (seconds).  Returns `true` while the
-    /// animation is still in progress and the caller should keep ticking.
-    pub fn tick_animation(&mut self, dt: f32, config: &OverviewConfig) -> bool {
-        let duration_secs = config.animation_duration_ms as f32 / 1000.0;
-        if duration_secs <= 0.0 {
-            self.animation_progress = if self.visible { 1.0 } else { 0.0 };
-            return false;
+    // There was a fade here: `animation_progress`, stepped from 0 to 1 by a
+    // `tick_animation(dt)` the caller was to run every frame, with the backdrop
+    // opacity scaled by it.
+    //
+    // Nothing ever called it, and nothing could. This shell's event loop
+    // (`oswindow::EventLoop::run`) blocks in `wait()` when there is no input —
+    // it is event-driven, not frame-driven, and there is no timer source and no
+    // frame callback anywhere in the stack. So `animation_progress` stayed at
+    // the 0.0 that `show` set, and every draw path began `if progress <= 0.0 {
+    // return }`: opening the overview produced an overlay that was blank,
+    // un-clickable, and permanently so.
+    //
+    // That is not a missing polish detail, it is the feature not working, and
+    // keeping the field to preserve the *possibility* of a fade would have
+    // meant shipping the blank version to protect the animated one that does
+    // not exist. The fade comes back when the shell has a clock to run it from;
+    // see `known-issues.md`, TD-C-THE-SHELL-HAS-NO-FRAME-CLOCK.
+
+    /// Rebuild the lanes from a window list.
+    ///
+    /// This is the whole of the overview's data path, and it is deliberately a
+    /// *replacement* rather than a merge: every frame supersedes the last one
+    /// entirely, so there is no accumulated copy of the desktop that can drift
+    /// out of step with what the compositor is actually showing. The lanes, the
+    /// rectangles, which desktop is current — all of it comes from the same
+    /// frame, which is why the overview cannot disagree with the taskbar about
+    /// which desktop is showing (they are folded from one `WindowList` in one
+    /// call; see `DesktopShell::apply_window_list`).
+    ///
+    /// `num_desktops` is the shell's, not the list's. A desktop with no windows
+    /// on it does not appear anywhere in a window list, and it is still a
+    /// desktop the user can switch to — an overview that showed only the
+    /// occupied ones would make an empty desktop unreachable, which is the same
+    /// class of bug as `TD-C-VIRTUAL-DESKTOPS-HIDE-NOTHING` in a new place. So
+    /// the lanes are the *shell's* desktops, and some of them are empty.
+    ///
+    /// Only `Layer::Normal` windows appear. The background (the wallpaper) and
+    /// the overlays (the taskbar, this overlay's own surfaces) are furniture:
+    /// they are not things the user switches to, and a thumbnail of the taskbar
+    /// inside a window switcher is noise that also happens to be clickable.
+    /// This matches `apply_window_list`'s filter exactly, deliberately — two
+    /// different answers to "which windows are there" is precisely the drift
+    /// this projection exists to avoid.
+    pub fn apply_window_list(&mut self, list: &WindowList, num_desktops: u32) {
+        let mut lanes: Vec<DesktopLane> = (0..num_desktops)
+            .map(|desktop_id| DesktopLane {
+                desktop_id,
+                // One-based, because the taskbar's desktop indicator counts
+                // from one and two different numbers for one desktop on one
+                // screen is worse than either convention.
+                name: format!("Desktop {}", desktop_id.saturating_add(1)),
+                thumbnails: Vec::new(),
+                is_current: desktop_id == list.current_workspace,
+            })
+            .collect();
+
+        for info in &list.windows {
+            if info.layer != Layer::Normal {
+                continue;
+            }
+            // A window filed on a desktop this shell does not have is dropped
+            // rather than clamped into the last lane. The compositor is the
+            // authority on desktop numbers and the shell's count could be
+            // behind it; showing such a window under the wrong desktop's
+            // heading would be a confident lie, whereas leaving it out is
+            // visibly incomplete and self-correcting on the next frame.
+            let Some(lane) = lanes.get_mut(info.workspace as usize) else {
+                continue;
+            };
+            lane.thumbnails.push(WindowThumbnail {
+                window_id: info.id,
+                desktop_id: info.workspace,
+                title: info.title.clone(),
+                // The wire's `i32`/`u32` rectangle, widened to the `f32` the
+                // layout works in. Widening, not converting: every `i32` and
+                // every `u32` up to 2^24 is exact in an `f32`, and a window
+                // placed past sixteen million pixels is not a case worth
+                // distorting the type for.
+                x: info.x as f32,
+                y: info.y as f32,
+                width: info.width as f32,
+                height: info.height as f32,
+                is_focused: info.focused,
+                is_minimized: info.minimized,
+            });
         }
-        let step = dt / duration_secs;
-        if self.visible {
-            self.animation_progress = (self.animation_progress + step).min(1.0);
-            self.animation_progress < 1.0
-        } else {
-            self.animation_progress = (self.animation_progress - step).max(0.0);
-            self.animation_progress > 0.0
+
+        self.lanes = lanes;
+        // The query survives a refresh — the user is mid-search and the window
+        // list arriving underneath them is not a reason to clear what they
+        // typed — but the *results* are ids that may no longer exist, so they
+        // are recomputed rather than kept.
+        self.update_search();
+        // Same for hover: an id that has gone would otherwise stay highlighted
+        // and, worse, would be what Enter activates.
+        if let Some(hovered) = self.hovered_window
+            && !self
+                .lanes
+                .iter()
+                .any(|l| l.thumbnails.iter().any(|t| t.window_id == hovered))
+        {
+            self.hovered_window = None;
         }
     }
 
@@ -168,6 +290,20 @@ impl OverviewState {
     }
 
     /// Update the search results based on the current query.
+    ///
+    /// Titles only. This used to also match an `app_name` on each thumbnail,
+    /// which read as a second, coarser key — type "editor" and get every window
+    /// of the editor whatever each one is called. Nothing in the system could
+    /// ever supply that string: the window list carries an id, a pid, a layer,
+    /// a title, state bits, a desktop number and a rectangle, and no
+    /// application identity; the only code that ever set the field was this
+    /// module's own test fixtures, always to the literal `"app"`. So the
+    /// promise was being kept against test data and broken against a real
+    /// desktop, where every window's app name was the empty string — which
+    /// `contains` matches for *any* query, quietly making the search return
+    /// everything. Better to match one key honestly. See
+    /// `known-issues.md` → `TD-C-THE-OVERVIEW-SCREEN-IS-1856-LINES-NOBODY-CALLS`
+    /// for what would have to exist before an application name could come back.
     pub fn update_search(&mut self) {
         if self.search_query.is_empty() {
             self.search_results.clear();
@@ -178,10 +314,7 @@ impl OverviewState {
             .lanes
             .iter()
             .flat_map(|l| l.thumbnails.iter())
-            .filter(|t| {
-                t.title.to_lowercase().contains(&query)
-                    || t.app_name.to_lowercase().contains(&query)
-            })
+            .filter(|t| t.title.to_lowercase().contains(&query))
             .map(|t| t.window_id)
             .collect();
     }
@@ -218,8 +351,6 @@ pub struct OverviewConfig {
     pub max_columns: u32,
     /// Whether desktop labels are drawn in AllDesktops mode.
     pub show_desktop_labels: bool,
-    /// Fade-in / fade-out duration in milliseconds.
-    pub animation_duration_ms: u32,
     /// Opacity of the dark overlay background (0.0 – 1.0).
     pub background_opacity: f32,
 }
@@ -230,7 +361,6 @@ impl Default for OverviewConfig {
             thumbnail_padding: 16.0,
             max_columns: 5,
             show_desktop_labels: true,
-            animation_duration_ms: 250,
             background_opacity: 0.85,
         }
     }
@@ -245,10 +375,6 @@ impl OverviewConfig {
         out.push_str(&format!(
             "show_desktop_labels={}\n",
             self.show_desktop_labels
-        ));
-        out.push_str(&format!(
-            "animation_duration_ms={}\n",
-            self.animation_duration_ms
         ));
         out.push_str(&format!("background_opacity={}\n", self.background_opacity));
         out
@@ -279,11 +405,6 @@ impl OverviewConfig {
                     }
                     "show_desktop_labels" => {
                         cfg.show_desktop_labels = val == "true";
-                    }
-                    "animation_duration_ms" => {
-                        if let Ok(v) = val.parse::<u32>() {
-                            cfg.animation_duration_ms = v;
-                        }
                     }
                     "background_opacity" => {
                         if let Ok(v) = val.parse::<f32>() {
@@ -351,7 +472,6 @@ pub fn compute_grid_layout(
             window_id: thumb.window_id,
             desktop_id: thumb.desktop_id,
             title: thumb.title.clone(),
-            app_name: thumb.app_name.clone(),
             is_focused: thumb.is_focused,
             is_minimized: thumb.is_minimized,
             render_x: rx,
@@ -417,7 +537,6 @@ pub fn compute_lane_layout(
                 window_id: thumb.window_id,
                 desktop_id: thumb.desktop_id,
                 title: thumb.title.clone(),
-                app_name: thumb.app_name.clone(),
                 is_focused: thumb.is_focused,
                 is_minimized: thumb.is_minimized,
                 render_x: rx,
@@ -447,6 +566,58 @@ fn fit_aspect(w: f32, h: f32, max_w: f32, max_h: f32) -> (f32, f32) {
 // Rendering
 // ============================================================================
 
+/// The y coordinate the thumbnail area starts at, below the search bar.
+const CONTENT_TOP: f32 = 70.0;
+/// Margin left below the thumbnail area and at either side of it.
+const CONTENT_MARGIN: f32 = 20.0;
+
+/// Where every thumbnail lands on a `screen_w` × `screen_h` display.
+///
+/// This is the *one* answer to that question. [`render_overview`] draws these
+/// rectangles and [`on_mouse_click`] hit-tests them, and both get them from
+/// here rather than each working them out — the same discipline
+/// [`crate::DesktopShell::render_zone_overlay`] follows for the snap overlay,
+/// and for the same reason: two computations of one layout is how a click
+/// comes to select the window next to the one that was lit.
+///
+/// Returns an empty vector while the overlay is closed or still animating in
+/// from nothing, which is what makes a click during that window select
+/// nothing rather than whatever happens to be under the cursor.
+#[must_use]
+pub fn overview_layout(
+    state: &OverviewState,
+    config: &OverviewConfig,
+    screen_w: f32,
+    screen_h: f32,
+) -> Vec<ThumbnailLayout> {
+    if !state.visible {
+        return Vec::new();
+    }
+    let content_h = screen_h - CONTENT_TOP - CONTENT_MARGIN;
+    let content_w = screen_w - CONTENT_MARGIN * 2.0;
+    match state.mode {
+        OverviewMode::AllWindows | OverviewMode::RecentApps => {
+            let thumbs = collect_thumbs_for_mode(state);
+            compute_grid_layout(
+                &thumbs,
+                CONTENT_MARGIN,
+                CONTENT_TOP,
+                content_w,
+                content_h,
+                config,
+            )
+        }
+        OverviewMode::AllDesktops => compute_lane_layout(
+            &state.lanes,
+            CONTENT_MARGIN,
+            CONTENT_TOP,
+            content_w,
+            content_h,
+            config,
+        ),
+    }
+}
+
 /// Render the full overview overlay into a list of `RenderCommand`s.
 ///
 /// `screen_w` / `screen_h` are the total display dimensions.
@@ -456,11 +627,11 @@ pub fn render_overview(
     screen_w: f32,
     screen_h: f32,
 ) -> Vec<RenderCommand> {
-    if state.animation_progress <= 0.0 {
+    if !state.visible {
         return Vec::new();
     }
 
-    let alpha = (config.background_opacity * state.animation_progress * 255.0) as u8;
+    let alpha = (config.background_opacity * 255.0) as u8;
     let mut cmds = Vec::with_capacity(128);
 
     // Dark overlay background.
@@ -477,23 +648,10 @@ pub fn render_overview(
     render_search_bar(&mut cmds, state, screen_w);
 
     // Content area (below search bar).
-    let content_y = 70.0;
-    let content_h = screen_h - content_y - 20.0; // 20px bottom margin
+    let content_y = CONTENT_TOP;
+    let content_h = screen_h - content_y - CONTENT_MARGIN;
 
-    let layouts = match state.mode {
-        OverviewMode::AllWindows | OverviewMode::RecentApps => {
-            let thumbs = collect_thumbs_for_mode(state);
-            compute_grid_layout(&thumbs, 20.0, content_y, screen_w - 40.0, content_h, config)
-        }
-        OverviewMode::AllDesktops => compute_lane_layout(
-            &state.lanes,
-            20.0,
-            content_y,
-            screen_w - 40.0,
-            content_h,
-            config,
-        ),
-    };
+    let layouts = overview_layout(state, config, screen_w, screen_h);
 
     // Desktop labels (AllDesktops only).
     if state.mode == OverviewMode::AllDesktops && config.show_desktop_labels {
@@ -510,10 +668,19 @@ pub fn render_overview(
         render_thumbnail_card(&mut cmds, layout, is_hovered, is_dimmed);
     }
 
-    // "+" button for adding a new desktop (AllDesktops mode).
-    if state.mode == OverviewMode::AllDesktops {
-        render_add_desktop_button(&mut cmds, screen_w, screen_h);
-    }
+    // There was a "+" button here, bottom-right, for adding a virtual desktop.
+    // It is gone, along with `OverviewAction::AddDesktop` and the click region
+    // that produced it, because nothing could carry the request: `ShellControl`
+    // has verbs for switching to a desktop and moving a window between
+    // desktops, and none for creating one — the compositor's workspace count is
+    // fixed at start-up, and whether it should be mutable is an open question
+    // (`known-issues.md`, the overview entry).
+    //
+    // Drawing it anyway would be this feature's own original sin repeated in
+    // miniature: a control that is on screen, takes the click, and does
+    // nothing. Better a desktop count the user can see is fixed than a button
+    // that teaches them it is not and then proves otherwise. When the count
+    // becomes mutable, the button comes back with a verb behind it.
 
     cmds
 }
@@ -745,52 +912,14 @@ fn render_thumbnail_card(
         });
     }
 
-    // App name label below the card.
-    let app_color = if is_dimmed {
-        MOCHA_OVERLAY0
-    } else {
-        MOCHA_SUBTEXT0
-    };
-    cmds.push(RenderCommand::Text {
-        x: x + dx,
-        y: y + dy + h + dh + 4.0,
-        text: layout.app_name.clone(),
-        color: app_color,
-        font_size: 10.0,
-        font_weight: FontWeightHint::Regular,
-        max_width: Some((w + dw).max(0.0)),
-        overflow: TextOverflow::Ellipsis,
-    });
+    // No second label under the card. There used to be one, drawing each
+    // window's application name; nothing in the system could supply that
+    // string, so on a real desktop it drew an empty line of reserved space
+    // under every thumbnail — the layout paying for text that was never going
+    // to arrive.
 
     // Suppress unused-variable warning — label_h is used to document intent.
     let _ = label_h;
-}
-
-/// Render the "+" add-desktop button in AllDesktops mode.
-fn render_add_desktop_button(cmds: &mut Vec<RenderCommand>, screen_w: f32, screen_h: f32) {
-    let btn_w = 40.0;
-    let btn_h = 40.0;
-    let bx = screen_w - btn_w - 20.0;
-    let by = screen_h - btn_h - 20.0;
-
-    cmds.push(RenderCommand::FillRect {
-        x: bx,
-        y: by,
-        width: btn_w,
-        height: btn_h,
-        color: MOCHA_SURFACE1,
-        corner_radii: CornerRadii::all(20.0),
-    });
-    cmds.push(RenderCommand::Text {
-        x: bx + 12.0,
-        y: by + 8.0,
-        text: "+".to_string(),
-        color: MOCHA_TEXT,
-        font_size: 18.0,
-        font_weight: FontWeightHint::Bold,
-        max_width: Some(20.0),
-        overflow: TextOverflow::Ellipsis,
-    });
 }
 
 // ============================================================================
@@ -798,20 +927,35 @@ fn render_add_desktop_button(cmds: &mut Vec<RenderCommand>, screen_w: f32, scree
 // ============================================================================
 
 /// Result of processing an input event inside the overview.
+///
+/// The variants split cleanly in two: things that happen entirely inside this
+/// overlay (`None`, `Close`, `NavigateSelection`, `SearchChanged`) and things
+/// the compositor has to be asked for, which are all one variant, `Request`.
+///
+/// It used to carry three more — `SwitchToWindow(u64)`, `SwitchToDesktop(u32)`
+/// and `CloseWindow(u64)` — which were a fourth spelling of verbs the shell
+/// already had ([`ShellControlAction::Activate`], [`ShellRequest::SwitchDesktop`],
+/// [`ShellControlAction::Close`]). A second spelling of a verb is a second thing
+/// to drift: the moment one side grows a rule the other does not, the overview
+/// and the taskbar disagree about what clicking a window means, and nothing
+/// type-checks the difference. They are gone, exactly as the zone-snapping work
+/// deleted the shell's second copy of the edge rules.
+///
+/// A fourth, `AddDesktop`, went with them, but for the opposite reason: not a
+/// duplicate verb but a verb with nothing behind it. `ShellControl` cannot
+/// create a virtual desktop — the compositor's workspace count is fixed at
+/// start-up (design-decisions.md §518) — so the "+" button that produced it was
+/// a control that took the click and did nothing. Keeping the variant "to say
+/// so out loud" said it only to a programmer reading this file; the user got a
+/// dead button. It comes back when there is a verb to put behind it.
 #[derive(Debug, Clone, PartialEq)]
 pub enum OverviewAction {
     /// No action — the event was not consumed.
     None,
     /// Close the overview.
     Close,
-    /// Switch to the window with the given ID.
-    SwitchToWindow(u64),
-    /// Switch to the given desktop (by id).
-    SwitchToDesktop(u32),
-    /// Request to close the window with the given ID.
-    CloseWindow(u64),
-    /// Request to add a new virtual desktop.
-    AddDesktop,
+    /// Ask the compositor for something, in the shell's one vocabulary.
+    Request(ShellRequest),
     /// Navigate selection (arrow keys).
     NavigateSelection,
     /// The search query changed.
@@ -832,7 +976,10 @@ pub fn on_key(state: &mut OverviewState, key: OverviewKey) -> OverviewAction {
         OverviewKey::Enter => {
             if let Some(wid) = state.hovered_window {
                 state.hide();
-                OverviewAction::SwitchToWindow(wid)
+                OverviewAction::Request(ShellRequest::window(
+                    WindowId(wid),
+                    ShellControlAction::Activate,
+                ))
             } else {
                 OverviewAction::None
             }
@@ -891,25 +1038,22 @@ pub fn on_mouse_move(
 /// Process a mouse click.
 ///
 /// The close button occupies the top-right corner of each hovered thumbnail.
+///
+/// Takes no screen size: everything clickable in the overview is a rectangle in
+/// `layouts`, and `layouts` already came from [`overview_layout`], which is the
+/// one place the screen size is applied. It used to take both, for the "+"
+/// add-desktop button that was positioned relative to the bottom-right corner —
+/// the only thing here that was placed independently of the layout pass, and
+/// therefore the only thing that could be drawn in one place and clicked in
+/// another. It is gone; so is the second copy of the screen size.
 pub fn on_mouse_click(
     state: &mut OverviewState,
     mx: f32,
     my: f32,
     layouts: &[ThumbnailLayout],
-    screen_w: f32,
-    screen_h: f32,
 ) -> OverviewAction {
     if !state.visible {
         return OverviewAction::None;
-    }
-
-    // Check "+" add-desktop button (AllDesktops mode).
-    if state.mode == OverviewMode::AllDesktops {
-        let btn_x = screen_w - 60.0;
-        let btn_y = screen_h - 60.0;
-        if mx >= btn_x && mx <= btn_x + 40.0 && my >= btn_y && my <= btn_y + 40.0 {
-            return OverviewAction::AddDesktop;
-        }
     }
 
     // Check thumbnails.
@@ -924,12 +1068,18 @@ pub fn on_mouse_click(
             let cb_x = lx + lw - 22.0;
             let cb_y = ly - 6.0;
             if mx >= cb_x && mx <= cb_x + 18.0 && my >= cb_y && my <= cb_y + 18.0 {
-                return OverviewAction::CloseWindow(layout.window_id);
+                return OverviewAction::Request(ShellRequest::window(
+                    WindowId(layout.window_id),
+                    ShellControlAction::Close,
+                ));
             }
 
             // Otherwise — switch to this window.
             state.hide();
-            return OverviewAction::SwitchToWindow(layout.window_id);
+            return OverviewAction::Request(ShellRequest::window(
+                WindowId(layout.window_id),
+                ShellControlAction::Activate,
+            ));
         }
     }
 
@@ -944,7 +1094,7 @@ pub fn on_mouse_click(
         });
         if let Some(did) = target {
             state.hide();
-            return OverviewAction::SwitchToDesktop(did);
+            return OverviewAction::Request(ShellRequest::SwitchDesktop { desktop: did });
         }
     }
 
@@ -1084,7 +1234,7 @@ mod tests {
 
     // -- Helpers -------------------------------------------------------------
 
-    fn sample_thumb(id: u64, desktop: u32, title: &str, app: &str) -> WindowThumbnail {
+    fn sample_thumb(id: u64, desktop: u32, title: &str) -> WindowThumbnail {
         WindowThumbnail {
             window_id: id,
             desktop_id: desktop,
@@ -1095,7 +1245,6 @@ mod tests {
             height: 600.0,
             is_focused: false,
             is_minimized: false,
-            app_name: app.to_string(),
         }
     }
 
@@ -1104,16 +1253,13 @@ mod tests {
             DesktopLane {
                 desktop_id: 0,
                 name: "Desktop 1".to_string(),
-                thumbnails: vec![
-                    sample_thumb(1, 0, "Terminal", "term"),
-                    sample_thumb(2, 0, "Editor", "code"),
-                ],
+                thumbnails: vec![sample_thumb(1, 0, "Terminal"), sample_thumb(2, 0, "Editor")],
                 is_current: true,
             },
             DesktopLane {
                 desktop_id: 1,
                 name: "Desktop 2".to_string(),
-                thumbnails: vec![sample_thumb(3, 1, "Browser", "firefox")],
+                thumbnails: vec![sample_thumb(3, 1, "Browser")],
                 is_current: false,
             },
         ]
@@ -1129,7 +1275,6 @@ mod tests {
     fn test_state_new_is_hidden() {
         let s = OverviewState::new();
         assert!(!s.visible);
-        assert_eq!(s.animation_progress, 0.0);
     }
 
     #[test]
@@ -1176,52 +1321,39 @@ mod tests {
         assert!(s.search_results.is_empty());
     }
 
-    // -- Animation -----------------------------------------------------------
+    // -- Visibility ----------------------------------------------------------
+    //
+    // Four tests lived here — `test_animation_tick_advances`,
+    // `_reaches_one`, `_hide_reaches_zero`, `_zero_duration_instant` — and all
+    // four passed, because they called `tick_animation` themselves. Nothing in
+    // the shell ever did: `oswindow::EventLoop::run` blocks in `wait()` when
+    // there is no input, so there is no frame on which to advance a fade.
+    // `animation_progress` therefore never left the 0.0 that `show` set, and
+    // every draw path bailed on it — an overview that opened blank and stayed
+    // blank. The tests were a closed loop that proved the arithmetic and
+    // nothing about the screen.
+    //
+    // What replaces them is the claim `show` now actually makes.
 
     #[test]
-    fn test_animation_tick_advances() {
+    fn showing_the_overview_is_enough_to_draw_it() {
         let mut s = OverviewState::new();
-        s.show(OverviewMode::AllWindows);
         let cfg = default_config();
-        let still_going = s.tick_animation(0.1, &cfg);
-        assert!(still_going);
-        assert!(s.animation_progress > 0.0);
-        assert!(s.animation_progress < 1.0);
-    }
-
-    #[test]
-    fn test_animation_reaches_one() {
-        let mut s = OverviewState::new();
+        assert!(
+            render_overview(&s, &cfg, 1920.0, 1080.0).is_empty(),
+            "a hidden overview drew something"
+        );
         s.show(OverviewMode::AllWindows);
-        let cfg = default_config();
-        // Tick enough to finish.
-        for _ in 0..50 {
-            s.tick_animation(0.02, &cfg);
-        }
-        assert!((s.animation_progress - 1.0).abs() < f32::EPSILON);
-    }
-
-    #[test]
-    fn test_animation_hide_reaches_zero() {
-        let mut s = OverviewState::new();
-        s.animation_progress = 1.0;
+        assert!(
+            !render_overview(&s, &cfg, 1920.0, 1080.0).is_empty(),
+            "a shown overview drew nothing — the caller has no second step to \
+             take, so this is the whole of what opening it does"
+        );
         s.hide();
-        let cfg = default_config();
-        for _ in 0..50 {
-            s.tick_animation(0.02, &cfg);
-        }
-        assert!(s.animation_progress.abs() < f32::EPSILON);
-    }
-
-    #[test]
-    fn test_animation_zero_duration_instant() {
-        let mut s = OverviewState::new();
-        s.show(OverviewMode::AllWindows);
-        let mut cfg = default_config();
-        cfg.animation_duration_ms = 0;
-        let still_going = s.tick_animation(0.01, &cfg);
-        assert!(!still_going);
-        assert!((s.animation_progress - 1.0).abs() < f32::EPSILON);
+        assert!(
+            render_overview(&s, &cfg, 1920.0, 1080.0).is_empty(),
+            "a hidden overview drew something"
+        );
     }
 
     // -- Search --------------------------------------------------------------
@@ -1258,15 +1390,29 @@ mod tests {
     }
 
     #[test]
-    fn test_search_filters_by_app_name() {
+    fn a_query_matching_no_title_matches_no_window() {
+        // This test used to be `test_search_filters_by_app_name`, and it typed
+        // "fire" to find a thumbnail whose `app_name` was "firefox". The field
+        // was deleted because nothing could ever fill it: the window list the
+        // shell receives carries a title, an id, a workspace and a rectangle,
+        // and no application identity at all. So on a real desktop every
+        // `app_name` was the empty string — and `"".contains(query)` is true
+        // for *every* query, which meant the search silently returned the whole
+        // desktop instead of narrowing it.
+        //
+        // What replaces it is the claim that matching is now total: a query
+        // that matches no title matches nothing. That is the assertion the old
+        // one could not make, because the old one passed either way.
         let mut s = OverviewState::new();
         s.lanes = sample_lanes();
-        s.type_search_char('f');
-        s.type_search_char('i');
-        s.type_search_char('r');
-        s.type_search_char('e');
-        // "firefox" should match.
-        assert!(s.search_results.contains(&3));
+        for ch in "firefox".chars() {
+            s.type_search_char(ch);
+        }
+        assert!(
+            s.search_results.is_empty(),
+            "no window is titled 'firefox', yet the search found {:?}",
+            s.search_results
+        );
     }
 
     #[test]
@@ -1301,7 +1447,7 @@ mod tests {
 
     #[test]
     fn test_grid_layout_single_window() {
-        let thumbs = vec![sample_thumb(1, 0, "Win", "app")];
+        let thumbs = vec![sample_thumb(1, 0, "Win")];
         let config = default_config();
         let result = compute_grid_layout(&thumbs, 0.0, 0.0, 800.0, 600.0, &config);
         assert_eq!(result.len(), 1);
@@ -1312,7 +1458,7 @@ mod tests {
     #[test]
     fn test_grid_layout_multiple_windows() {
         let thumbs: Vec<_> = (0..6)
-            .map(|i| sample_thumb(i, 0, &format!("Win {}", i), "app"))
+            .map(|i| sample_thumb(i, 0, &format!("Win {}", i)))
             .collect();
         let config = default_config();
         let result = compute_grid_layout(&thumbs, 0.0, 0.0, 1920.0, 1080.0, &config);
@@ -1322,7 +1468,7 @@ mod tests {
     #[test]
     fn test_grid_layout_no_overlap() {
         let thumbs: Vec<_> = (0..4)
-            .map(|i| sample_thumb(i, 0, &format!("Win {}", i), "app"))
+            .map(|i| sample_thumb(i, 0, &format!("Win {}", i)))
             .collect();
         let config = default_config();
         let result = compute_grid_layout(&thumbs, 0.0, 0.0, 1920.0, 1080.0, &config);
@@ -1348,7 +1494,7 @@ mod tests {
     #[test]
     fn test_grid_layout_respects_max_columns() {
         let thumbs: Vec<_> = (0..10)
-            .map(|i| sample_thumb(i, 0, &format!("Win {}", i), "app"))
+            .map(|i| sample_thumb(i, 0, &format!("Win {}", i)))
             .collect();
         let mut config = default_config();
         config.max_columns = 3;
@@ -1366,7 +1512,7 @@ mod tests {
 
     #[test]
     fn test_grid_layout_preserves_aspect_ratio() {
-        let mut thumb = sample_thumb(1, 0, "Wide", "app");
+        let mut thumb = sample_thumb(1, 0, "Wide");
         thumb.width = 1600.0;
         thumb.height = 400.0; // 4:1 aspect ratio
         let config = default_config();
@@ -1382,7 +1528,7 @@ mod tests {
 
     #[test]
     fn test_grid_layout_zero_area() {
-        let thumbs = vec![sample_thumb(1, 0, "Win", "app")];
+        let thumbs = vec![sample_thumb(1, 0, "Win")];
         let config = default_config();
         let result = compute_grid_layout(&thumbs, 0.0, 0.0, 0.0, 0.0, &config);
         assert!(result.is_empty());
@@ -1391,7 +1537,7 @@ mod tests {
     #[test]
     fn test_grid_layout_many_windows() {
         let thumbs: Vec<_> = (0..20)
-            .map(|i| sample_thumb(i, 0, &format!("Win {}", i), "app"))
+            .map(|i| sample_thumb(i, 0, &format!("Win {}", i)))
             .collect();
         let config = default_config();
         let result = compute_grid_layout(&thumbs, 0.0, 0.0, 1920.0, 1080.0, &config);
@@ -1410,7 +1556,7 @@ mod tests {
         let lanes = vec![DesktopLane {
             desktop_id: 0,
             name: "Desktop 1".to_string(),
-            thumbnails: vec![sample_thumb(1, 0, "Win", "app")],
+            thumbnails: vec![sample_thumb(1, 0, "Win")],
             is_current: true,
         }];
         let config = default_config();
@@ -1450,7 +1596,7 @@ mod tests {
             DesktopLane {
                 desktop_id: 1,
                 name: "Has windows".to_string(),
-                thumbnails: vec![sample_thumb(1, 1, "Win", "app")],
+                thumbnails: vec![sample_thumb(1, 1, "Win")],
                 is_current: false,
             },
         ];
@@ -1511,7 +1657,6 @@ mod tests {
     fn test_render_visible_produces_commands() {
         let mut state = OverviewState::new();
         state.show(OverviewMode::AllWindows);
-        state.animation_progress = 1.0;
         state.lanes = sample_lanes();
         let config = default_config();
         let cmds = render_overview(&state, &config, 1920.0, 1080.0);
@@ -1519,14 +1664,20 @@ mod tests {
     }
 
     #[test]
-    fn test_render_alldesktops_has_add_button() {
+    fn nothing_draws_an_add_desktop_button() {
+        // This was `test_render_alldesktops_has_add_button`, asserting the "+"
+        // *was* drawn. It is inverted rather than deleted because the button is
+        // the kind of thing that gets added back by someone reading
+        // `render_desktop_labels` and noticing there is no way to make a fourth
+        // desktop. There still is not: `ShellControl` has no verb for it, so a
+        // button would take the click and do nothing. Adding the verb is what
+        // unblocks the button, and this assertion is what says so at the moment
+        // someone tries it the other way round.
         let mut state = OverviewState::new();
         state.show(OverviewMode::AllDesktops);
-        state.animation_progress = 1.0;
         state.lanes = sample_lanes();
         let config = default_config();
         let cmds = render_overview(&state, &config, 1920.0, 1080.0);
-        // The "+" text should be present.
         let has_plus = cmds.iter().any(|c| {
             if let RenderCommand::Text { text, .. } = c {
                 text == "+"
@@ -1534,14 +1685,13 @@ mod tests {
                 false
             }
         });
-        assert!(has_plus);
+        assert!(!has_plus, "a control was drawn that nothing can carry out");
     }
 
     #[test]
     fn test_render_search_bar_placeholder() {
         let mut state = OverviewState::new();
         state.show(OverviewMode::AllWindows);
-        state.animation_progress = 1.0;
         let config = default_config();
         let cmds = render_overview(&state, &config, 1920.0, 1080.0);
         let has_placeholder = cmds.iter().any(|c| {
@@ -1558,7 +1708,6 @@ mod tests {
     fn test_render_with_search_query() {
         let mut state = OverviewState::new();
         state.show(OverviewMode::AllWindows);
-        state.animation_progress = 1.0;
         state.lanes = sample_lanes();
         state.search_query = "term".to_string();
         state.update_search();
@@ -1591,7 +1740,13 @@ mod tests {
         s.show(OverviewMode::AllWindows);
         s.hovered_window = Some(42);
         let action = on_key(&mut s, OverviewKey::Enter);
-        assert_eq!(action, OverviewAction::SwitchToWindow(42));
+        assert_eq!(
+            action,
+            OverviewAction::Request(ShellRequest::window(
+                WindowId(42),
+                ShellControlAction::Activate
+            ))
+        );
     }
 
     #[test]
@@ -1658,7 +1813,6 @@ mod tests {
             window_id: 10,
             desktop_id: 0,
             title: "Win".to_string(),
-            app_name: "app".to_string(),
             is_focused: false,
             is_minimized: false,
             render_x: 100.0,
@@ -1679,7 +1833,6 @@ mod tests {
             window_id: 10,
             desktop_id: 0,
             title: "Win".to_string(),
-            app_name: "app".to_string(),
             is_focused: false,
             is_minimized: false,
             render_x: 100.0,
@@ -1699,7 +1852,6 @@ mod tests {
             window_id: 7,
             desktop_id: 0,
             title: "Win".to_string(),
-            app_name: "app".to_string(),
             is_focused: false,
             is_minimized: false,
             render_x: 100.0,
@@ -1707,25 +1859,37 @@ mod tests {
             render_width: 200.0,
             render_height: 150.0,
         }];
-        let action = on_mouse_click(&mut s, 150.0, 150.0, &layouts, 1920.0, 1080.0);
-        assert_eq!(action, OverviewAction::SwitchToWindow(7));
+        let action = on_mouse_click(&mut s, 150.0, 150.0, &layouts);
+        assert_eq!(
+            action,
+            OverviewAction::Request(ShellRequest::window(
+                WindowId(7),
+                ShellControlAction::Activate
+            ))
+        );
         assert!(!s.visible);
     }
 
     #[test]
-    fn test_mouse_click_add_desktop() {
+    fn the_bottom_right_corner_is_not_a_button() {
+        // This was `test_mouse_click_add_desktop`, and it clicked (1870, 1030)
+        // on a 1920x1080 screen to hit a "+" button that asked for a new
+        // virtual desktop. Nothing could carry that ask — `ShellControl` has no
+        // verb for creating a workspace — so the button took the click and did
+        // nothing, which is the exact defect the overview itself was filed for.
+        // The button is gone, and this is the assertion that it stayed gone:
+        // that corner is backdrop like any other part of the backdrop.
         let mut s = OverviewState::new();
         s.show(OverviewMode::AllDesktops);
-        // "+" button is at (screen_w - 60, screen_h - 60) with size 40x40.
-        let action = on_mouse_click(&mut s, 1870.0, 1030.0, &[], 1920.0, 1080.0);
-        assert_eq!(action, OverviewAction::AddDesktop);
+        let action = on_mouse_click(&mut s, 1870.0, 1030.0, &[]);
+        assert_eq!(action, OverviewAction::None);
     }
 
     #[test]
     fn test_mouse_click_empty_area() {
         let mut s = OverviewState::new();
         s.show(OverviewMode::AllWindows);
-        let action = on_mouse_click(&mut s, 5.0, 5.0, &[], 1920.0, 1080.0);
+        let action = on_mouse_click(&mut s, 5.0, 5.0, &[]);
         assert_eq!(action, OverviewAction::None);
     }
 
@@ -1773,7 +1937,6 @@ mod tests {
         let cfg = OverviewConfig::default();
         assert_eq!(cfg.max_columns, 5);
         assert!(cfg.show_desktop_labels);
-        assert_eq!(cfg.animation_duration_ms, 250);
     }
 
     #[test]
@@ -1782,7 +1945,6 @@ mod tests {
             thumbnail_padding: 24.0,
             max_columns: 3,
             show_desktop_labels: false,
-            animation_duration_ms: 400,
             background_opacity: 0.9,
         };
         let text = cfg.to_text();
@@ -1790,7 +1952,6 @@ mod tests {
         assert!((parsed.thumbnail_padding - 24.0).abs() < f32::EPSILON);
         assert_eq!(parsed.max_columns, 3);
         assert!(!parsed.show_desktop_labels);
-        assert_eq!(parsed.animation_duration_ms, 400);
         assert!((parsed.background_opacity - 0.9).abs() < 0.001);
     }
 

@@ -296,6 +296,123 @@ pub enum ResourceType {
     /// [`Pipe`]: ResourceType::Pipe
     /// [`StreamSocket`]: ResourceType::StreamSocket
     Pty = 26,
+
+    /// The system clock, as an object.
+    ///
+    /// There is exactly one, so `resource_id` is reserved and is 0.  A process
+    /// needs this type with `Rights::WRITE` to set the absolute time
+    /// (`clock_settime`, `settimeofday`) or to slew it (`adjtimex`).  Reading
+    /// the clock needs nothing and never will.
+    ///
+    /// Unlike most types here this names no per-open instance: it exists so
+    /// that "may set the time" is derived from a held object rather than
+    /// asserted.  §312 projects `CAP_SYS_TIME` from it; see design-decisions.md
+    /// §269 for why this is its own type, and §350 for the projection (lane B's
+    /// request `b-a-three-resource-types-for-clock-ports-and-rlimits`).
+    SystemClock = 27,
+
+    /// Authority to bind a local port that the system reserves.
+    ///
+    /// `resource_id` is a specific port number, or **0 for the class** — the
+    /// `resource_id == 0` convention this file documents for
+    /// [`Process`](ResourceType::Process)/[`Thread`](ResourceType::Thread).
+    /// Port 0 is "pick one for me" in the sockets API and is never a bindable
+    /// address, so the two readings cannot collide, exactly as PIDs starting
+    /// at 1 keeps `Process` unambiguous.
+    ///
+    /// The per-port form is what makes this worth having over a boolean — a
+    /// web server should hold port 80 and not port 22 — even though the class
+    /// grant is what `init` uses today, because a daemon that reads its port
+    /// from a config file does not know it at spawn time.  Keeping
+    /// `resource_id` *meaning* the port from the start makes the fine-grained
+    /// form a grant change later rather than an ABI change.  §312 projects
+    /// `CAP_NET_BIND_SERVICE` from it.
+    PrivilegedPort = 28,
+
+    /// A process's own resource limits.
+    ///
+    /// `resource_id` is the target PID, or 0 for the class.  Needed with
+    /// `Rights::WRITE` to raise a *hard* limit; lowering a soft limit is
+    /// unprivileged and is not gated.  With
+    /// [`Rights::MEMORY_LOCK`](crate::cap::Rights::MEMORY_LOCK) it is also the
+    /// preimage of `CAP_IPC_LOCK` — locking memory past the per-process quota,
+    /// which is not a write to anything and so does not fit `WRITE`.  §312
+    /// projects `CAP_SYS_RESOURCE` and `CAP_IPC_LOCK` from it.
+    ResourceLimit = 29,
+}
+
+impl ResourceType {
+    /// The highest discriminant in use.
+    ///
+    /// Discriminants are contiguous from `Channel = 1`, so this doubles as the
+    /// variant count. Consumers that need "every type" iterate `1..=LAST`
+    /// rather than keeping their own list — see
+    /// [`groups::test_admin_grants_every_resource_type`](crate::cap::groups).
+    pub const LAST: u16 = Self::ResourceLimit as u16;
+
+    /// This type's wire discriminant, as sent to userspace.
+    ///
+    /// Written as an exhaustive match rather than `self as u16` — which would
+    /// be one line and generate identical code — so that it doubles as a
+    /// **compile-time tripwire**: adding a variant makes this fail to compile,
+    /// which lands whoever added it *here*, reading the list below. Two other
+    /// exhaustive matches (`ipc::cleanup_handles`, `proc::fork::dup_one`) would
+    /// also break, but neither of them can tell you about the four items below,
+    /// and a compile error that only says "handle this in fork" invites
+    /// handling it in fork and stopping.
+    ///
+    /// **When this breaks, update — in this order:**
+    ///
+    /// 1. [`Self::LAST`], above. Everything that iterates the types reads it.
+    /// 2. `cap::groups::init`'s `admin_grants` list. The `admin` group is
+    ///    documented to grant *every* type and is boot-tested against
+    ///    `1..=LAST`, so omitting it turns a green boot red — which is the
+    ///    intended outcome, not an inconvenience: it forces the "should admin
+    ///    have this?" question to be answered rather than defaulted.
+    /// 3. `test_cap_entry_info_abi`'s `ResourceType::LAST` pin. Doing step 1
+    ///    turns the boot red until you do this one — deliberately, because
+    ///    step 4 is the one with no compiler behind it at all and this is the
+    ///    last place that can make you stop and read it.
+    /// 4. Lane B's mirrored copy in `posix/src/sys_capability.rs`, which no
+    ///    compiler here can see. File a request; do not assume they will
+    ///    notice.
+    ///
+    /// The single or-pattern arm is deliberate — per-variant arms would invite
+    /// someone to give the new one a body and consider the matter closed.
+    #[must_use]
+    pub const fn discriminant(self) -> u16 {
+        match self {
+            Self::Channel
+            | Self::Pipe
+            | Self::SharedMemory
+            | Self::EventFd
+            | Self::CompletionPort
+            | Self::Process
+            | Self::Thread
+            | Self::PortIo
+            | Self::DeviceIrq
+            | Self::File
+            | Self::Socket
+            | Self::Timer
+            | Self::IoScheduler
+            | Self::Service
+            | Self::Namespace
+            | Self::StreamSocket
+            | Self::MemFd
+            | Self::Epoll
+            | Self::SignalFd
+            | Self::Timerfd
+            | Self::Inotify
+            | Self::AlsaPcm
+            | Self::Drm
+            | Self::NetRaw
+            | Self::NetSocket
+            | Self::Pty
+            | Self::SystemClock
+            | Self::PrivilegedPort
+            | Self::ResourceLimit => self as u16,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -353,7 +470,7 @@ impl CapEntryInfo {
     #[must_use]
     pub fn from_entry(entry: &table::CapEntry) -> Self {
         Self {
-            resource_type: entry.resource_type as u16,
+            resource_type: entry.resource_type.discriminant(),
             _reserved: [0; 3],
             rights: entry.rights.raw(),
             resource_id: entry.resource_id,
@@ -447,11 +564,59 @@ fn test_cap_entry_info_abi() -> KernelResult<()> {
         return Err(KernelError::InternalError);
     }
 
-    // The discriminant is the wire value; a renumbering of ResourceType would
-    // silently repoint every caller's decode table, so spot-check both ends of
-    // the range actually used.
-    if ResourceType::Channel as u16 != 1 || ResourceType::NetSocket as u16 != 25 {
-        serial_println!("[cap]   FAIL: ResourceType discriminants moved");
+    // The discriminant is the wire value, and lane B mirrors these numbers by
+    // hand in `posix/src/sys_capability.rs`, where no compiler here can see
+    // them.  Two *different* mistakes have to be caught, and it is worth being
+    // precise about which pin catches which — an earlier version of this
+    // comment claimed the `ResourceLimit` pin caught an append, which it does
+    // not: appending a variant leaves `ResourceLimit` at 29 and this check
+    // passes unchanged.
+    //
+    // 1. **Renumbering or insertion** — someone slots a variant into the middle
+    //    of the enum, shifting every later discriminant and silently repointing
+    //    lane B's decode table by one.  Caught by the four value pins below:
+    //    the first variant, two interior anchors, and the last.
+    if ResourceType::Channel as u16 != 1
+        || ResourceType::NetSocket as u16 != 25
+        || ResourceType::SystemClock as u16 != 27
+        || ResourceType::ResourceLimit as u16 != 29
+    {
+        serial_println!(
+            "[cap]   FAIL: ResourceType discriminants moved — a variant was inserted \
+             rather than appended, so every later wire value shifted. Lane B's \
+             hand-mirrored table in posix/src/sys_capability.rs is now off by one \
+             and must be corrected; file a request."
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // 2. **Appending** — a genuinely new type at the end.  None of the pins
+    //    above move, so they cannot see it.  `LAST` can: `ResourceType::
+    //    discriminant()`'s exhaustive match is a compile error on append, and
+    //    it directs whoever hit it to bump `LAST` first (see its doc comment,
+    //    step 1).  Pinning `LAST` here catches the case where they satisfied
+    //    that compile error by adding the variant to the or-pattern and stopped
+    //    — which compiles clean, and leaves `LAST` naming the second-to-last
+    //    type.
+    //
+    //    It is runtime rather than a `const` assert to match the four checks
+    //    around it, all of which are equally const-foldable and all of which
+    //    are runtime on purpose: this function's output line is the boot log's
+    //    *evidence* that the wire ABI was verified on this build, and an
+    //    assertion that fires at compile time leaves no such record.
+    //
+    //    It restates a constant, which is normally the wrong shape for a test.
+    //    It earns the exception because the value is not ours — it is the
+    //    wire's, and the other copy of it lives in a tree this build cannot
+    //    compile, so there is nothing to derive it from.
+    if ResourceType::LAST != 29 {
+        serial_println!(
+            "[cap]   FAIL: ResourceType::LAST is {}, pinned at 29 — a new resource type \
+             was appended. That is fine, but the wire ABI just grew: bump the pin here, \
+             and file a request so lane B adds it to posix/src/sys_capability.rs. Until \
+             they do, userspace decodes the new type as unknown.",
+            ResourceType::LAST
+        );
         return Err(KernelError::InternalError);
     }
 

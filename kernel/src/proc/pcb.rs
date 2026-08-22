@@ -17,6 +17,7 @@
 //! 4. Process runs until all threads exit or it's killed.
 //! 5. `destroy()` — reclaim address space, capability table, notify parent.
 
+use super::linux_fd;
 use crate::cap::{self, CapTable, ResourceType, Rights};
 use crate::error::{KernelError, KernelResult};
 use crate::mm::vma::{Vma, VmaKind};
@@ -2375,10 +2376,14 @@ pub const RLIM_INFINITY: u64 = u64::MAX;
 ///
 /// Values mirror typical Linux distro defaults where they matter for
 /// program startup (RLIMIT_STACK == 8 MiB so glibc sizes the main
-/// stack correctly; RLIMIT_NOFILE == 1024; RLIMIT_CORE == 0 so we
-/// don't pretend to support core dumps).  Everything else is
-/// `RLIM_INFINITY` because nothing in the kernel imposes a real
-/// limit on those resources today.
+/// stack correctly; RLIMIT_CORE == 0 so we don't pretend to support
+/// core dumps).  Everything else is `RLIM_INFINITY` because nothing in
+/// the kernel imposes a real limit on those resources today.
+///
+/// `RLIMIT_NOFILE` is the exception to "mirror the distro default": it
+/// is the one entry in this table the kernel genuinely enforces, so it
+/// reports [`linux_fd::MAX_FDS`] rather than Linux's customary 1024.
+/// See its row below.
 pub const DEFAULT_RLIMITS: [(u64, u64); 16] = [
     // 0  RLIMIT_CPU:        CPU seconds.  No limiter today.
     (RLIM_INFINITY, RLIM_INFINITY),
@@ -2394,11 +2399,22 @@ pub const DEFAULT_RLIMITS: [(u64, u64); 16] = [
     (RLIM_INFINITY, RLIM_INFINITY),
     // 6  RLIMIT_NPROC:      per-uid process count.  No tracker.
     (RLIM_INFINITY, RLIM_INFINITY),
-    // 7  RLIMIT_NOFILE:     per-process open-fd limit.  1024 matches
-    //                      most Linux distros; programs that select()
-    //                      on bare fd numbers rely on this fitting in
-    //                      FD_SETSIZE.
-    (1024, 4096),
+    // 7  RLIMIT_NOFILE:     per-process open-fd limit.  Both halves are
+    //                      the fd table's real capacity, and are derived
+    //                      from it rather than written out, because when
+    //                      they were written out they drifted: this row
+    //                      said `(1024, 4096)` against a 256-slot table,
+    //                      so `getrlimit` promised sixteen times as many
+    //                      descriptors as `open` could ever hand out.
+    //                      `linux_fd_install` enforces the *soft* limit
+    //                      and `FdTable` enforces the table bound, so 256
+    //                      is what a program actually gets; this is now
+    //                      the same number rather than a flattering one.
+    //                      Raising the ceiling is a coordinated kernel +
+    //                      libc change (`posix/src/fdtable.rs` has its own
+    //                      256-slot table and a 1 MiB path buffer sized
+    //                      from it) — see known-issues.md.
+    (linux_fd::MAX_FDS_U64, linux_fd::MAX_FDS_U64),
     // 8  RLIMIT_MEMLOCK:    mlock()'d memory.  No tracker.
     (RLIM_INFINITY, RLIM_INFINITY),
     // 9  RLIMIT_AS:         address-space size.  No tracker.
@@ -2422,6 +2438,15 @@ pub const DEFAULT_RLIMITS: [(u64, u64); 16] = [
 /// the syscall layer with `EINVAL`.
 pub const NUM_RLIMITS: u32 = 16;
 
+/// Index of `RLIMIT_NOFILE` in [`DEFAULT_RLIMITS`] and the per-process
+/// `rlimits` array.
+///
+/// Named because it is the one resource with a *structural* ceiling — see
+/// [`set_rlimit`] — and because the bare `7` was already open-coded in
+/// [`linux_fd_install`]'s enforcement path, where an off-by-one would
+/// silently enforce the wrong resource's limit on every `open`.
+pub const RLIMIT_NOFILE: u32 = 7;
+
 // Compile-time invariant: `NUM_RLIMITS` is the bound checked by
 // `get_rlimit`/`set_rlimit` before they index `DEFAULT_RLIMITS` and the
 // per-process `rlimits` array (e.g. `p.rlimits[resource as usize]`).  The
@@ -2432,6 +2457,53 @@ pub const NUM_RLIMITS: u32 = 16;
 // would turn those indexed accesses into runtime out-of-bounds panics (a DoS
 // in this kernel's threat model) instead of a build failure.
 const _: () = assert!(DEFAULT_RLIMITS.len() == NUM_RLIMITS as usize);
+const _: () = assert!(RLIMIT_NOFILE < NUM_RLIMITS);
+
+// The `RLIMIT_NOFILE` row must *be* the fd table's capacity, not merely have
+// been equal to it on the day it was written.  It is written as
+// `linux_fd::MAX_FDS_U64` above, so this assert is trivially true today —
+// which is the point: it fails the build the moment someone replaces that
+// with a literal, which is exactly how the row came to say `(1024, 4096)`
+// against a 256-slot table in the first place.
+//
+// The `#[allow]`s on this and the two items below are not the usual "this
+// index happens to be in bounds" hand-wave: these are *const* items, and
+// `clippy::indexing_slicing`/`arithmetic_side_effects` warn about runtime
+// panics and wrapping.  Neither is reachable at runtime, because none of this
+// exists at runtime — a const-evaluated index past the end, or an overflowing
+// `+=`, is a hard compile error.  The lints' own desired outcome (turn a
+// latent panic into a build failure) is already guaranteed here by
+// construction.
+#[allow(clippy::indexing_slicing)]
+const _: () = assert!(DEFAULT_RLIMITS[RLIMIT_NOFILE as usize].0 == linux_fd::MAX_FDS_U64);
+#[allow(clippy::indexing_slicing)]
+const _: () = assert!(DEFAULT_RLIMITS[RLIMIT_NOFILE as usize].1 == linux_fd::MAX_FDS_U64);
+
+/// Every default must satisfy the `rlim_cur <= rlim_max` invariant that
+/// [`set_rlimit`] enforces on every write.
+///
+/// A row that violated it would put a fresh process into a state no
+/// `setrlimit` call could have produced — and one that `set_rlimit` would
+/// then refuse to *correct*, since the correcting call is itself checked
+/// against the same rule.
+///
+/// Only ever called from the `const _` below, so the indexing and the counter
+/// increment are const-evaluated — see the note above the `RLIMIT_NOFILE`
+/// asserts for why that makes the suppressed lints inapplicable rather than
+/// merely inconvenient.
+#[allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
+const fn rlimit_defaults_are_ordered() -> bool {
+    let mut i = 0;
+    while i < DEFAULT_RLIMITS.len() {
+        let (cur, max) = DEFAULT_RLIMITS[i];
+        if cur > max {
+            return false;
+        }
+        i += 1;
+    }
+    true
+}
+const _: () = assert!(rlimit_defaults_are_ordered());
 
 /// Read the current `(rlim_cur, rlim_max)` for `pid`'s `resource`.
 ///
@@ -2456,9 +2528,36 @@ pub fn get_rlimit(pid: ProcessId, resource: u32) -> Option<(u64, u64)> {
 ///     equivalent, so unprivileged callers can only lower the hard
 ///     limit.
 ///
+/// …plus one this kernel enforces that Linux does not:
+///   - `RLIMIT_NOFILE`'s hard limit may never exceed
+///     [`linux_fd::MAX_FDS_U64`] (else `PermissionDenied`).
+///
+/// That third rule is **absolute**, not merely a consequence of the
+/// second.  Today it is redundant, because the default hard limit *is*
+/// `MAX_FDS` and rule two forbids raises outright — but the whole point
+/// of rule two is that it is expected to be relaxed once
+/// `CAP_SYS_RESOURCE` exists as a real capability (a `ResourceLimit`
+/// resource type landed on 2026-08-21 for exactly that purpose).  When
+/// it is relaxed, every other resource can honestly be raised, and
+/// `RLIMIT_NOFILE` cannot: the fd table is a fixed
+/// `[Option<FdEntry>; MAX_FDS]` array inside the PCB, so a larger limit
+/// would be a promise no privilege can make the kernel keep.  Writing the
+/// ceiling down here, rather than leaving it to be rediscovered at the
+/// point rule two is loosened, is the difference between a limit that
+/// stays true and one that quietly becomes a lie again.
+///
+/// This is the single choke point for *both* ABIs — the native
+/// `SYS_RLIMIT_SET` and the Linux shim's `prlimit64`/`setrlimit` all end
+/// up here — so the ceiling cannot be enforced on one path and missed on
+/// the other.
+///
 /// `RLIM_INFINITY` (`u64::MAX`) is treated as "no limit"; setting a
 /// finite value when the old hard limit was infinity is permitted
-/// (it's a lowering operation, not a raise).
+/// (it's a lowering operation, not a raise).  For `RLIMIT_NOFILE`,
+/// `RLIM_INFINITY` is itself above the ceiling and is therefore refused —
+/// deliberately: `linux_fd_install` reads `RLIM_INFINITY` as "skip the
+/// check", which for this one resource would mean skipping the only
+/// check standing between a program and `EMFILE` surprises.
 ///
 /// # Errors
 ///
@@ -2466,13 +2565,16 @@ pub fn get_rlimit(pid: ProcessId, resource: u32) -> Option<(u64, u64)> {
 /// - [`KernelError::InvalidArgument`] if `resource >= NUM_RLIMITS` or
 ///   `new_cur > new_max`.
 /// - [`KernelError::PermissionDenied`] if `new_max` exceeds the
-///   existing hard limit.
+///   existing hard limit, or exceeds `MAX_FDS` for `RLIMIT_NOFILE`.
 pub fn set_rlimit(pid: ProcessId, resource: u32, new_cur: u64, new_max: u64) -> KernelResult<()> {
     if resource >= NUM_RLIMITS {
         return Err(KernelError::InvalidArgument);
     }
     if new_cur > new_max {
         return Err(KernelError::InvalidArgument);
+    }
+    if resource == RLIMIT_NOFILE && new_max > linux_fd::MAX_FDS_U64 {
+        return Err(KernelError::PermissionDenied);
     }
     let mut table = PROCESS_TABLE.lock();
     let proc = table.get_mut(&pid).ok_or(KernelError::NoSuchProcess)?;
@@ -4617,6 +4719,72 @@ pub fn list_vmas(pid: ProcessId) -> Option<Vec<Vma>> {
     table.get(&pid).map(|proc| proc.vmas.clone())
 }
 
+/// Where a user virtual address falls in a process's address space.
+///
+/// Returned by [`classify_user_addr`].  Deliberately `Copy` and free of any
+/// heap allocation so it can be produced from a fault handler.
+#[derive(Debug, Clone, Copy)]
+pub enum UserAddrClass {
+    /// The address lies inside a live mapping.
+    InVma(Vma),
+    /// The address lies in a hole, bracketed by the nearest mappings on
+    /// either side (either may be `None` at the ends of the address space).
+    ///
+    /// This is the interesting case for a control-flow hijack: the *gap* is
+    /// what tells you whether a wild jump landed in a region that used to be
+    /// something (a freed thread stack sits between two live thread stacks)
+    /// or in address space that was never mapped at all.
+    Hole {
+        /// Nearest mapping ending at or below `addr`.
+        below: Option<Vma>,
+        /// Nearest mapping starting above `addr`.
+        above: Option<Vma>,
+    },
+    /// No live record for the pid.
+    NoProcess,
+    /// The process table was locked by someone else.  A diagnostic must never
+    /// block on it, so this is reported rather than waited for.
+    TableBusy,
+}
+
+/// Classify `addr` against `pid`'s VMA list without allocating or blocking.
+///
+/// Written for use from the page-fault / exception path, where
+/// [`list_vmas`] is unusable twice over: it takes the process-table lock
+/// unconditionally (a fault raised *while that lock is held* would deadlock
+/// the machine rather than print a diagnostic) and it clones a `Vec` (a heap
+/// allocation on the path that reports heap corruption).  This uses
+/// `try_lock`, copies out at most three `Vma` values, and reports
+/// [`UserAddrClass::TableBusy`] rather than waiting.
+///
+/// The VMA list is kept sorted by `start`, so the scan below is a single
+/// forward pass that stops as soon as it is past `addr`.
+#[must_use]
+pub fn classify_user_addr(pid: ProcessId, addr: u64) -> UserAddrClass {
+    let Some(table) = PROCESS_TABLE.try_lock() else {
+        return UserAddrClass::TableBusy;
+    };
+    let Some(proc) = table.get(&pid) else {
+        return UserAddrClass::NoProcess;
+    };
+    let mut below: Option<Vma> = None;
+    for vma in &proc.vmas {
+        if vma.contains(addr) {
+            return UserAddrClass::InVma(*vma);
+        }
+        if vma.end <= addr {
+            below = Some(*vma);
+        } else {
+            // Sorted by start, so this is the first mapping above `addr`.
+            return UserAddrClass::Hole {
+                below,
+                above: Some(*vma),
+            };
+        }
+    }
+    UserAddrClass::Hole { below, above: None }
+}
+
 /// Atomically find the lowest free gap of `size` bytes inside
 /// `[region_start, region_end)` of `pid`'s address space **and** register a
 /// VMA of the given `kind`/`flags` covering `[base, base + size)`, returning
@@ -6415,8 +6583,8 @@ pub fn linux_fd_lookup(pid: ProcessId, fd: i32) -> Option<super::linux_fd::FdEnt
 /// Install `entry` at the lowest free fd >= `min_fd`.
 ///
 /// Enforces `RLIMIT_NOFILE`: if the lowest free fd would be `>=` the
-/// process's current soft limit (`rlim_cur` for resource index 7,
-/// `RLIMIT_NOFILE`), returns `TooManyOpenFiles` rather than installing.
+/// process's current soft limit (`rlim_cur` for [`RLIMIT_NOFILE`]),
+/// returns `TooManyOpenFiles` rather than installing.
 /// This is the central choke point — every Linux-ABI open / pipe /
 /// dup / accept install path goes through here, so enforcing here
 /// catches them all uniformly.
@@ -6443,7 +6611,7 @@ pub fn linux_fd_install(
     let proc = table.get_mut(&pid).ok_or(KernelError::NoSuchProcess)?;
     // Snapshot RLIMIT_NOFILE soft limit before borrowing the fd table
     // mutably (fd table lives inside `proc`).
-    let nofile_soft = proc.rlimits[7].0;
+    let nofile_soft = proc.rlimits[RLIMIT_NOFILE as usize].0;
     let fd_table = proc
         .linux_fd_table
         .as_mut()
@@ -6892,7 +7060,108 @@ pub fn self_test() -> KernelResult<()> {
     test_reserve_unmapped_area()?;
     test_reset_linux_state_for_exec()?;
     test_prot_none()?;
+    test_rlimits()?;
 
+    Ok(())
+}
+
+/// Test: per-process resource limits — the defaults are the limits the
+/// kernel actually enforces, and `RLIMIT_NOFILE`'s hard limit is capped at
+/// the fd table's real capacity.
+///
+/// The property being guarded is not "`set_rlimit` returns errors": it is
+/// that `getrlimit` never promises more than `open` can deliver.  Before
+/// this test existed, [`DEFAULT_RLIMITS`] advertised `RLIMIT_NOFILE` as
+/// `(1024, 4096)` against a 256-slot table — so a program that sized its
+/// descriptor pool from `getrlimit`, which is the entire reason the call
+/// exists, was told it could hold sixteen times as many files as it could,
+/// and met `EMFILE` at 256 with a limit that said 4096.
+///
+/// Step 4 is the one that will still be doing work in a year.  The
+/// hard-limit ceiling in [`set_rlimit`] is redundant *today* — no caller
+/// can raise any hard limit at all — so it would be easy to delete as dead
+/// code when `CAP_SYS_RESOURCE` arrives and raises become legal for every
+/// other resource.  This asserts it independently of the general rule, so
+/// deleting it turns red rather than quiet.
+fn test_rlimits() -> KernelResult<()> {
+    fn fail(msg: &str) -> KernelResult<()> {
+        serial_println!("[proc]   FAIL: rlimits: {}", msg);
+        Err(KernelError::InternalError)
+    }
+
+    let pid = create("rlimit-test", 0);
+
+    // (1) A fresh process starts from the compiled-in defaults.
+    let Some((cur, max)) = get_rlimit(pid, RLIMIT_NOFILE) else {
+        destroy(pid);
+        return fail("get_rlimit(RLIMIT_NOFILE) on a live process returned None");
+    };
+    if cur != linux_fd::MAX_FDS_U64 || max != linux_fd::MAX_FDS_U64 {
+        destroy(pid);
+        return fail("RLIMIT_NOFILE default is not the fd table's real capacity");
+    }
+
+    // (2) Out-of-range resources are rejected on both sides rather than
+    //     indexing past the array.
+    if get_rlimit(pid, NUM_RLIMITS).is_some() {
+        destroy(pid);
+        return fail("get_rlimit accepted a resource >= NUM_RLIMITS");
+    }
+    if set_rlimit(pid, NUM_RLIMITS, 0, 0) != Err(KernelError::InvalidArgument) {
+        destroy(pid);
+        return fail("set_rlimit accepted a resource >= NUM_RLIMITS");
+    }
+
+    // (3) cur > max is invalid for every resource, checked before privilege.
+    if set_rlimit(pid, RLIMIT_NOFILE, 200, 100) != Err(KernelError::InvalidArgument) {
+        destroy(pid);
+        return fail("set_rlimit accepted rlim_cur > rlim_max");
+    }
+
+    // (4) The NOFILE ceiling is absolute.  `RLIM_INFINITY` is the case that
+    //     matters most: `linux_fd_install` reads it as "skip the check", so
+    //     accepting it here would disable the only thing standing between a
+    //     program and an EMFILE it was told could not happen.
+    if set_rlimit(pid, RLIMIT_NOFILE, 0, RLIM_INFINITY) != Err(KernelError::PermissionDenied) {
+        destroy(pid);
+        return fail("set_rlimit accepted RLIM_INFINITY for RLIMIT_NOFILE");
+    }
+    let over = linux_fd::MAX_FDS_U64.saturating_add(1);
+    if set_rlimit(pid, RLIMIT_NOFILE, 0, over) != Err(KernelError::PermissionDenied) {
+        destroy(pid);
+        return fail("set_rlimit accepted a NOFILE hard limit above MAX_FDS");
+    }
+
+    // (5) Lowering works, and is observable.  Then lowering the hard limit
+    //     is one-way: raising it back is refused even to its own default.
+    if let Err(e) = set_rlimit(pid, RLIMIT_NOFILE, 64, 64) {
+        destroy(pid);
+        serial_println!("[proc]   (lowering NOFILE gave {:?})", e);
+        return fail("set_rlimit refused a lowering of RLIMIT_NOFILE");
+    }
+    if get_rlimit(pid, RLIMIT_NOFILE) != Some((64, 64)) {
+        destroy(pid);
+        return fail("the lowered RLIMIT_NOFILE did not read back");
+    }
+    if set_rlimit(pid, RLIMIT_NOFILE, 64, linux_fd::MAX_FDS_U64)
+        != Err(KernelError::PermissionDenied)
+    {
+        destroy(pid);
+        return fail("a lowered hard limit was raised again");
+    }
+
+    // (6) An unknown pid is NoSuchProcess, not a panic and not a silent
+    //     success.  Checked after the argument gates, matching `set_rlimit`'s
+    //     documented order.
+    destroy(pid);
+    if set_rlimit(pid, RLIMIT_NOFILE, 0, 0) != Err(KernelError::NoSuchProcess) {
+        return fail("set_rlimit on a destroyed pid did not report NoSuchProcess");
+    }
+    if get_rlimit(pid, RLIMIT_NOFILE).is_some() {
+        return fail("get_rlimit answered for a destroyed pid");
+    }
+
+    serial_println!("[proc]   Resource limits (RLIMIT_NOFILE ceiling is absolute): OK");
     Ok(())
 }
 

@@ -110,6 +110,19 @@ struct DrmClient {
     /// the fd readable while it is non-empty.  Shared across `dup`'d fds,
     /// matching how Linux queues events on the `struct drm_file`.
     events: VecDeque<Vec<u8>>,
+    /// virtio-gpu render resources created through this fd, in creation order.
+    ///
+    /// Resource ids are *device*-scoped, not fd-scoped, so without this list
+    /// any render-node client could name — and destroy, or transfer into —
+    /// another client's resource simply by guessing its id.  That is exactly
+    /// the ambient authority the design spec forbids, so every render ioctl
+    /// that takes a resource id checks it against the calling fd's list first.
+    /// Linux gets the same property structurally, by keying GEM handles per
+    /// `struct drm_file`; we keep a list because the id is the ABI here.
+    ///
+    /// The final [`close`] destroys whatever is left, so a client that exits
+    /// without unref'ing cannot strand guest frames.
+    resources: Vec<u32>,
 }
 
 impl DrmClient {
@@ -120,6 +133,7 @@ impl DrmClient {
             client_caps: 0,
             refcount: 1,
             events: VecDeque::new(),
+            resources: Vec::new(),
         }
     }
 }
@@ -197,14 +211,98 @@ pub fn dup(handle: DrmCardHandle) -> KernelResult<DrmCardHandle> {
 /// Only the final [`close`] (refcount → 0) removes the instance.  A
 /// double-close is harmless: the saturating decrement floors at 0 and an
 /// unknown handle is simply ignored.
+///
+/// The final close also destroys any virtio-gpu render resources the client
+/// still owns, so an exiting or crashing client cannot strand guest frames.
 pub fn close(handle: DrmCardHandle) {
+    let mut orphans: Vec<u32> = Vec::new();
     let mut table = DRM_CARD_TABLE.lock();
     if let Some(client) = table.get_mut(&handle.id()) {
         client.refcount = client.refcount.saturating_sub(1);
         if client.refcount == 0 {
-            table.remove(&handle.id());
+            if let Some(mut client) = table.remove(&handle.id()) {
+                orphans = core::mem::take(&mut client.resources);
+            }
         }
     }
+    // Released before touching the GPU driver: DRM_CARD_TABLE is a leaf lock
+    // and `resource_unref` takes both of the driver's locks.
+    drop(table);
+    for id in orphans {
+        // Best effort: the client is gone, so there is nobody left to report
+        // a teardown failure to.  `resource_unref` frees the guest frames even
+        // when the host command fails, which is the part that matters here.
+        let _ = crate::virtio::gpu::resource_unref(id);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// virtio-gpu render resource ownership
+// ---------------------------------------------------------------------------
+
+/// Upper bound on render resources one fd may hold at once.
+///
+/// Each resource pins guest frames until it is unref'd, so an unbounded list
+/// is an unprivileged memory-exhaustion path: a render node is openable by any
+/// process that can reach `/dev/dri/renderD128`.  The cap is generous compared
+/// with what a real client needs (a compositor holds a handful of buffers per
+/// surface) and small enough that the worst case is bounded well below the
+/// frame allocator's reserve.
+const MAX_CLIENT_RESOURCES: usize = 256;
+
+/// Record that `resource` was created by `handle`.
+///
+/// # Errors
+///
+/// [`KernelError::InvalidHandle`] if the instance is stale,
+/// [`KernelError::ResourceExhausted`] at [`MAX_CLIENT_RESOURCES`], and
+/// [`KernelError::OutOfMemory`] if the list cannot grow.  On any error the
+/// caller still owns `resource` and must destroy it — otherwise the resource
+/// would be live on the host with no fd able to name it.
+pub fn add_resource(handle: DrmCardHandle, resource: u32) -> KernelResult<()> {
+    let mut table = DRM_CARD_TABLE.lock();
+    let client = table
+        .get_mut(&handle.id())
+        .ok_or(KernelError::InvalidHandle)?;
+    if client.resources.len() >= MAX_CLIENT_RESOURCES {
+        return Err(KernelError::ResourceExhausted);
+    }
+    client
+        .resources
+        .try_reserve(1)
+        .map_err(|_| KernelError::OutOfMemory)?;
+    client.resources.push(resource);
+    Ok(())
+}
+
+/// Does `handle` own `resource`?
+///
+/// Every render ioctl that names a resource id must pass this before acting:
+/// resource ids are device-scoped, so this check is the whole of the isolation
+/// between two render-node clients.
+#[must_use]
+pub fn owns_resource(handle: DrmCardHandle, resource: u32) -> bool {
+    DRM_CARD_TABLE
+        .lock()
+        .get(&handle.id())
+        .is_some_and(|c| c.resources.contains(&resource))
+}
+
+/// Drop `resource` from `handle`'s ownership list.
+///
+/// Returns `true` if it was there — i.e. if the caller was entitled to destroy
+/// it.  A `false` return means the ioctl must not proceed to unref, because
+/// the resource belongs to a different client (or to nobody).
+pub fn remove_resource(handle: DrmCardHandle, resource: u32) -> bool {
+    let mut table = DRM_CARD_TABLE.lock();
+    let Some(client) = table.get_mut(&handle.id()) else {
+        return false;
+    };
+    let Some(pos) = client.resources.iter().position(|r| *r == resource) else {
+        return false;
+    };
+    client.resources.swap_remove(pos);
+    true
 }
 
 /// Does this handle refer to a live client instance?

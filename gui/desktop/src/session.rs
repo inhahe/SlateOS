@@ -66,7 +66,7 @@ use guitk::render::RenderTree;
 use oswindow::{ConnectionError, ConnectionTransport as Transport, Error, EventLoop, Layer, Spec};
 
 use crate::wallpaper::WallpaperManager;
-use crate::{DesktopShell, ShellAction, WindowRequest};
+use crate::{DesktopShell, ShellAction, ShellRequest, WindowRequest};
 
 /// One window the shell draws on, and where it sits on screen.
 ///
@@ -347,8 +347,21 @@ impl<T: Transport> ShellSession<T> {
             // Alt-Tab last: it is modal, and while it is up it belongs over
             // whatever was already open rather than under it.
             for part in [
+                // The overview first, because it is the only part that covers
+                // the whole screen and dims what is behind it: anything drawn
+                // under it would be dimmed twice and read as a smudge. It is
+                // mutually exclusive with the rest in practice (`dismiss_popups`
+                // closes it, and opening it closes them), so like the three
+                // below this ordering states an invariant rather than resolves
+                // a case that arises.
+                self.shell.render_overview(),
                 self.shell.render_start_menu(),
                 self.shell.render_calendar(),
+                // Over the menus, under Alt-Tab: opening the tiling overlay
+                // dismisses them (`toggle_zone_overlay`), so the order between
+                // the three above is a statement of the invariant rather than a
+                // case that arises.
+                self.shell.render_zone_overlay(),
                 self.shell.render_alt_tab(),
             ]
             .into_iter()
@@ -369,7 +382,11 @@ impl<T: Transport> ShellSession<T> {
     /// (`close_start_menu`), so a `power_menu_open` term here could only ever
     /// be redundant — or, if that invariant broke, could hide the break.
     fn popups_open(&self) -> bool {
-        self.shell.start_menu_open || self.shell.calendar.visible || self.shell.alt_tab_active
+        self.shell.start_menu_open
+            || self.shell.calendar.visible
+            || self.shell.alt_tab_active
+            || self.shell.snap.is_overlay_visible()
+            || self.shell.overview.visible
     }
 
     /// Handle everything waiting, without blocking. Reports whether anything
@@ -396,7 +413,12 @@ impl<T: Transport> ShellSession<T> {
         let latest = self.events.desktop_revision();
         if latest != self.revision {
             self.revision = latest;
-            self.shell.apply_window_list(self.events.desktop_windows());
+            // Whole, not just the windows: which desktop is showing arrives
+            // in the same frame, and a shell that read the two separately
+            // could read them from different frames.
+            if let Some(list) = self.events.desktop() {
+                self.shell.apply_window_list(list);
+            }
             self.dirty = true;
             worked = true;
         }
@@ -419,11 +441,24 @@ impl<T: Transport> ShellSession<T> {
             // Block only when there was nothing to do: waiting after a burst
             // would add a frame of latency to the next one for nothing.
             if !self.pump()? {
-                self.events.connection().wait()?;
+                // `EventLoop::wait`, not `Connection::wait`. The connection
+                // knows nothing about wake-ups, so parking there would park
+                // straight past every deadline the shell registered — and the
+                // only symptom would be an animation that stops.
+                self.events.wait()?;
             }
         }
         self.running = false;
         Ok(())
+    }
+
+    /// The event loop underneath.
+    ///
+    /// Public so a shell can register frame-clock wake-ups
+    /// ([`EventLoop::wake_after`]) for whatever it is animating. Everything
+    /// else the session needs from the loop it does itself.
+    pub const fn events_mut(&mut self) -> &mut EventLoop<T> {
+        &mut self.events
     }
 
     /// Stop [`run`](Self::run) at the end of the current batch.
@@ -510,9 +545,18 @@ impl<T: Transport> ShellSession<T> {
     /// repaint is unconditional because the shell has drawn something that
     /// depends on the answer — a pressed button, a closed switcher — even when
     /// the answer turns out to be no.
-    fn request(&mut self, request: WindowRequest) -> Result<(), Error<T>> {
+    fn request(&mut self, request: ShellRequest) -> Result<(), Error<T>> {
         self.dirty = true;
-        match self.events.control_window(request.window.0, request.action) {
+        let sent = match request {
+            ShellRequest::Window(WindowRequest { window, action }) => {
+                self.events.control_window(window.0, action)
+            }
+            ShellRequest::SwitchDesktop { desktop } => self.events.switch_desktop(desktop),
+            ShellRequest::MoveWindowToDesktop { window, desktop } => {
+                self.events.move_window_to_desktop(window.0, desktop)
+            }
+        };
+        match sent {
             Ok(()) => {}
             // A refusal means the window went away between the list the
             // button was drawn from and the click. That is an ordinary

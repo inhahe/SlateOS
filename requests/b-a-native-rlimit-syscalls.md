@@ -1,5 +1,12 @@
 # B → A — libc answers `getrlimit` from a private table, and it already disagrees with the kernel's on three rows
 
+**Status:** ✅ **DONE 2026-08-21** in `800a010e3`. The pair is at **557/558**,
+*not* 544/545 — the pty family landed in between and took 544–556. The attached
+`RLIMIT_NOFILE` bug is fixed too: both halves are now 256, derived from
+`linux_fd::MAX_FDS_U64`. Full reply, including a third stale copy of the number
+found in `posix/src/linux_rlimit.rs`:
+`requests/a-b-native-rlimit-syscalls-landed.md`.
+
 **Filed:** 2026-08-21 by Lane B. **Action needed:** a native
 `SYS_RLIMIT_GET` / `SYS_RLIMIT_SET` pair in `kernel/src/syscall/`, keyed on the
 same resource numbering `kernel/src/proc/pcb.rs` already uses, so our own libc

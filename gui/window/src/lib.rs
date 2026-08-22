@@ -71,6 +71,7 @@
 //! ```
 
 use std::collections::VecDeque;
+use std::time::{Duration, Instant};
 
 use guiremote::client::{ClientError, Connection, Transport};
 use guiremote::control::{CursorShape, DisplayInfo, RequestBody, ResponseBody, WindowSpec};
@@ -81,7 +82,7 @@ pub use guiremote::control::{
 };
 /// What a shell learns about the windows it does not own. See
 /// [`EventLoop::watch_desktop`].
-pub use guiremote::window_list::WindowInfo;
+pub use guiremote::window_list::{WindowInfo, WindowList};
 // An addressed event, as it travels. Applications never build one — they
 // receive `(window, Event)` pairs from the loop — but anything driving an
 // application synthetically does, which is what [`testing`] is for.
@@ -585,6 +586,30 @@ impl WindowBuilder {
 // Event loop
 // ---------------------------------------------------------------------------
 
+/// A wake-up the loop owes one window: when to stop parking, and where the
+/// interval it will report as `elapsed_ms` began.
+///
+/// One-shot. An animation re-arms from its own handler, which makes *stopping*
+/// the default and *continuing* the deliberate act — the property that keeps an
+/// idle desktop asleep. A repeating timer would invert it, and a forgotten
+/// cancel would then cost a wake-up every frame for ever.
+struct Wakeup {
+    /// The window that asked.
+    window: u64,
+    /// When the loop should stop parking and deliver the tick.
+    deadline: Instant,
+    /// The start of the interval `elapsed_ms` will measure.
+    ///
+    /// Carried forward from the previous tick when a handler re-arms, so the
+    /// time the handler itself spent lands inside the *next* frame's delta
+    /// rather than vanishing. This matters more than it looks: every consumer
+    /// in the tree accumulates `elapsed_ms` (`benchmark` adds it to a progress
+    /// total, `credmanager` adds it to a clock), so a delta that omits the
+    /// handler's own cost does not merely run slow — it drifts from the wall
+    /// clock without bound.
+    since: Instant,
+}
+
 /// One connection, every window on it, and the loop that drives them.
 pub struct EventLoop<T: Transport> {
     conn: Connection<T>,
@@ -599,7 +624,22 @@ pub struct EventLoop<T: Transport> {
     /// flight — the second is ordinary and the first is a bug, and neither is
     /// visible if the events simply vanish.
     unrouted: u64,
+    /// Wake-ups not yet due, unordered. Empty on an idle desktop, which is why
+    /// an idle desktop still parks for ever and burns nothing.
+    wakeups: Vec<Wakeup>,
+    /// For each window that has been ticked but has not yet re-armed, when
+    /// that tick was delivered. Consumed by the next [`EventLoop::wake_at`]
+    /// for that window, and discarded if none arrives.
+    ticked: Vec<(u64, Instant)>,
 }
+
+/// How far ahead [`EventLoop::wake_after`] will let a delay reach.
+///
+/// `Instant + Duration` panics on overflow, and no wake-up is worth taking a
+/// process down for. A day is indistinguishable from "never" to anything with
+/// an animation to run, and finite enough that a nonsense delay shows up as a
+/// wake-up that never comes rather than as a crash.
+const FURTHEST_WAKE: Duration = Duration::from_hours(24);
 
 impl<T: Transport> EventLoop<T> {
     /// Take over a transport. No traffic happens until something asks for it.
@@ -615,6 +655,8 @@ impl<T: Transport> EventLoop<T> {
             pending: VecDeque::new(),
             running: false,
             unrouted: 0,
+            wakeups: Vec::new(),
+            ticked: Vec::new(),
         }
     }
 
@@ -633,7 +675,9 @@ impl<T: Transport> EventLoop<T> {
         match self.conn.round_trip(RequestBody::GetDisplayInfo)? {
             ResponseBody::Display(info) => Ok(info),
             ResponseBody::Error { message } => Err(ClientError::Refused(message)),
-            ResponseBody::Ok | ResponseBody::WindowCreated { .. } => Err(ClientError::Mismatched),
+            ResponseBody::Ok
+            | ResponseBody::WindowCreated { .. }
+            | ResponseBody::WorkArea { .. } => Err(ClientError::Mismatched),
         }
     }
 
@@ -730,6 +774,37 @@ impl<T: Transport> EventLoop<T> {
         self.conn.shell_control(window, action)
     }
 
+    /// Show a different virtual desktop.
+    ///
+    /// The other half of [`watch_desktop`](Self::watch_desktop) again, and for
+    /// shells only: this hides and shows windows belonging to every client on
+    /// the display. The compositor decides which window gets the keyboard
+    /// afterwards, and the answer arrives in the next window list — read
+    /// [`current_desktop`](Self::current_desktop) rather than assuming this
+    /// succeeded.
+    ///
+    /// The compositor enforces no upper bound. *How many* desktops exist is a
+    /// user preference, and belongs to the shell that holds the preference.
+    ///
+    /// # Errors
+    ///
+    /// As [`Connection::confirm`].
+    pub fn switch_desktop(&mut self, desktop: u32) -> Result<(), Error<T>> {
+        self.conn.switch_workspace(desktop)
+    }
+
+    /// File a window on a different virtual desktop.
+    ///
+    /// `window` is an id from [`desktop_windows`](Self::desktop_windows). If
+    /// `desktop` is the one showing the window appears; if not, it vanishes.
+    ///
+    /// # Errors
+    ///
+    /// As [`Connection::confirm`].
+    pub fn move_window_to_desktop(&mut self, window: u64, desktop: u32) -> Result<(), Error<T>> {
+        self.conn.set_window_workspace(window, desktop)
+    }
+
     /// Tell the compositor the user's appearance settings have changed on disk.
     ///
     /// For the one application that edits them — Settings — to call *after* it
@@ -767,6 +842,35 @@ impl<T: Transport> EventLoop<T> {
     #[must_use]
     pub fn desktop_windows(&self) -> &[WindowInfo] {
         self.conn.window_list().unwrap_or(&[])
+    }
+
+    /// The last desktop window list whole — the windows *and* the desktop
+    /// showing — or `None` before one has arrived.
+    ///
+    /// For a shell that needs both, which is any shell drawing a taskbar:
+    /// taking them from two calls invites taking them from two different frames.
+    #[must_use]
+    pub const fn desktop(&self) -> Option<&WindowList> {
+        self.conn.desktop()
+    }
+
+    /// Which virtual desktop the screen is showing, as of the last list.
+    ///
+    /// `None` before the first list arrives. Compare it against
+    /// [`WindowInfo::workspace`] to tell which of
+    /// [`desktop_windows`](Self::desktop_windows) the user can actually see —
+    /// but only for windows in [`Layer::Normal`], because a window outside that
+    /// band (a taskbar, a menu, a lock screen) is on every desktop and its
+    /// stored number means nothing.
+    ///
+    /// **Read this every time; do not remember it.** The compositor changes
+    /// desktops on its own account — activating a window that is filed
+    /// elsewhere is a switch — so a shell that kept its own copy would sooner
+    /// or later list one desktop's windows while the screen showed another's,
+    /// which is the bug this field exists to end.
+    #[must_use]
+    pub fn current_desktop(&self) -> Option<u32> {
+        self.conn.current_workspace()
     }
 
     /// How many desktop window lists have arrived.
@@ -809,7 +913,170 @@ impl<T: Transport> EventLoop<T> {
     pub fn close(&mut self, window: u64) -> Result<(), Error<T>> {
         let result = self.conn.confirm(RequestBody::DestroyWindow { window });
         self.windows.retain(|w| w.id != window);
+        // A destroyed window must not keep the loop awake. Left behind, its
+        // wake-up would fire for ever into `unrouted` and hold the process at a
+        // frame rate for a window nobody can see.
+        self.cancel_wake(window);
         result
+    }
+
+    // -- The frame clock ----------------------------------------------------
+    //
+    // `Event::Tick` has been in the shared vocabulary for months, and fifty
+    // `Event::Tick { elapsed_ms } =>` arms across the toolkit and the
+    // applications were waiting on one. Nothing ever constructed one: the
+    // compositor does not send them and, until this, the loop did not
+    // synthesise them, so every one of those arms was dead code its author had
+    // no way to notice was dead. The mechanism at either end already existed —
+    // the event type below, and the bounded park in
+    // `Transport::set_wait_timeout` — and only the producer in the middle was
+    // missing. See `known-issues.md` → `TD-C-THE-SHELL-HAS-NO-FRAME-CLOCK`.
+    //
+    // This is deliberately *not* a fixed-rate frame timer: a shell that wakes
+    // sixty times a second to discover it has nothing to draw is the polling
+    // bug in a different place. It is also deliberately *local* rather than a
+    // compositor frame callback — the wire can already carry a `Tick`, so a
+    // vsync-locked version stays open for anything that must be in step with
+    // the display, but routing every blinking caret through a socket round
+    // trip to read a clock this process already has would put the compositor
+    // in the middle of all of them.
+
+    /// Ask to be woken once, at `deadline`, with an [`Event::Tick`].
+    ///
+    /// One-shot: an animation re-arms from its own handler. Arming a window
+    /// that already has a wake-up replaces it rather than adding a second, so
+    /// a handler that re-arms unconditionally cannot accumulate timers.
+    ///
+    /// A deadline already in the past fires on the next [`Self::poll`], which
+    /// is how a caller says "as soon as you can" — but a handler that arms an
+    /// already-past deadline every time turns the loop into a spin, so ask for
+    /// the interval you actually want.
+    pub fn wake_at(&mut self, window: u64, deadline: Instant) {
+        self.arm(window, deadline, Instant::now());
+    }
+
+    /// [`Self::wake_at`] with the clock passed in, so that a cold start's
+    /// reference point is synthetic in tests too. See [`Self::due_at`].
+    fn arm(&mut self, window: u64, deadline: Instant, now: Instant) {
+        // Consuming the last tick's instant is what makes the deltas partition
+        // wall time rather than merely approximate it; see `Wakeup::since`.
+        let since = self.take_ticked(window).unwrap_or(now);
+        if let Some(w) = self.wakeups.iter_mut().find(|w| w.window == window) {
+            w.deadline = deadline;
+            w.since = since;
+        } else {
+            self.wakeups.push(Wakeup {
+                window,
+                deadline,
+                since,
+            });
+        }
+    }
+
+    /// Ask to be woken once, `delay` from now. The usual way to arm the next
+    /// animation frame from inside the handler for the current one.
+    pub fn wake_after(&mut self, window: u64, delay: Duration) {
+        let now = Instant::now();
+        // Clamped before the addition, not after: see `FURTHEST_WAKE`.
+        let deadline = now.checked_add(delay.min(FURTHEST_WAKE)).unwrap_or(now);
+        self.wake_at(window, deadline);
+    }
+
+    /// Withdraw a window's wake-up, if it has one. Idempotent.
+    ///
+    /// This is how an animation stops. It also drops the reference point the
+    /// next delta would have measured from, so restarting later reports the
+    /// length of the first new frame rather than the length of the pause.
+    pub fn cancel_wake(&mut self, window: u64) {
+        self.wakeups.retain(|w| w.window != window);
+        self.ticked.retain(|(id, _)| *id != window);
+    }
+
+    /// Whether a window is waiting on a wake-up.
+    #[must_use]
+    pub fn is_waking(&self, window: u64) -> bool {
+        self.wakeups.iter().any(|w| w.window == window)
+    }
+
+    /// The nearest pending deadline, if any. `None` means nothing is animating
+    /// and the loop may park indefinitely.
+    #[must_use]
+    pub fn next_wakeup(&self) -> Option<Instant> {
+        self.wakeups.iter().map(|w| w.deadline).min()
+    }
+
+    /// Take the moment a window was last ticked, if it has not re-armed since.
+    fn take_ticked(&mut self, window: u64) -> Option<Instant> {
+        let i = self.ticked.iter().position(|(id, _)| *id == window)?;
+        Some(self.ticked.swap_remove(i).1)
+    }
+
+    /// Remove every wake-up due at or before `now` and return the ticks they
+    /// owe, earliest deadline first.
+    ///
+    /// `now` is a parameter rather than a call to [`Instant::now`] so that the
+    /// ordering, the one-shot expiry and the elapsed arithmetic are testable
+    /// against a synthetic clock instead of by sleeping. A test that has to
+    /// sleep to observe a rule is a test that will be flaky about it.
+    fn due_at(&mut self, now: Instant) -> Vec<InputEvent> {
+        // A window that was ticked and did not re-arm has stopped animating;
+        // its reference point must not survive to become the delta of some
+        // later, unrelated animation. Cleared here rather than at delivery
+        // because the handler that would re-arm runs in between — and `poll`
+        // only reaches this point once the previous batch is fully dispatched,
+        // so by now every such handler has had its chance.
+        self.ticked
+            .retain(|(id, _)| self.wakeups.iter().any(|w| w.window == *id));
+
+        let (mut due, keep): (Vec<_>, Vec<_>) = std::mem::take(&mut self.wakeups)
+            .into_iter()
+            .partition(|w| w.deadline <= now);
+        self.wakeups = keep;
+        // Deterministic order when several are due in the same pass: the
+        // window that should have been woken first is woken first.
+        due.sort_by_key(|w| w.deadline);
+
+        due.into_iter()
+            .map(|w| {
+                let elapsed = now.saturating_duration_since(w.since);
+                // Saturating rather than wrapping: a delta that does not fit
+                // in a `u64` of milliseconds is half a billion years, and
+                // reporting the largest possible interval is at least
+                // monotone, whereas wrapping would report nearly none.
+                let elapsed_ms = u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX);
+                self.ticked.retain(|(id, _)| *id != w.window);
+                self.ticked.push((w.window, now));
+                InputEvent::new(w.window, Event::Tick { elapsed_ms })
+            })
+            .collect()
+    }
+
+    /// Park until input arrives or the nearest wake-up comes due.
+    ///
+    /// The counterpart to [`Self::poll`], and the reason a caller driving the
+    /// loop by hand should use this rather than reaching through
+    /// [`Self::connection`] to [`Connection::wait`]: the connection knows
+    /// nothing about wake-ups, so a caller that parks there parks past every
+    /// deadline it registered and the animation simply stops.
+    ///
+    /// # Errors
+    ///
+    /// As [`Connection::wait`], plus whatever the transport reports if it
+    /// refuses the bound.
+    pub fn wait(&mut self) -> Result<(), Error<T>> {
+        let timeout = self.next_wakeup().map(|deadline| {
+            // Never zero. A zero read timeout means "no timeout" to the
+            // platform — the exact opposite of a deadline that has already
+            // passed — which is why the socket layer refuses one outright.
+            // One millisecond is the shortest bound it can express and it
+            // rounds the right way: too early is a wasted pass, too late is a
+            // missed frame.
+            deadline
+                .saturating_duration_since(Instant::now())
+                .max(Duration::from_millis(1))
+        });
+        self.conn.set_wait_timeout(timeout)?;
+        self.conn.wait()
     }
 
     /// Read whatever is available and take the next event, if any.
@@ -824,6 +1091,11 @@ impl<T: Transport> EventLoop<T> {
         if self.pending.is_empty() {
             self.conn.pump()?;
             self.pending.extend(self.conn.drain_events());
+            // Ticks are synthesised only once the previous batch has been
+            // fully handled, so that a handler's re-arm is already in place
+            // before the clock is consulted again. See `due_at`.
+            let due = self.due_at(Instant::now());
+            self.pending.extend(due);
         }
         while let Some(ev) = self.pending.pop_front() {
             let Some(window) = self.windows.iter_mut().find(|w| w.id == ev.window) else {
@@ -870,7 +1142,7 @@ impl<T: Transport> EventLoop<T> {
             // Only block when there was nothing to do. Waiting after a burst
             // would add a frame of latency to the next one for no benefit.
             if !dispatched && self.running {
-                self.conn.wait()?;
+                self.wait()?;
             }
         }
         self.running = false;
@@ -967,6 +1239,7 @@ pub mod testing {
     use std::cell::RefCell;
     use std::collections::VecDeque;
     use std::rc::Rc;
+    use std::time::Duration;
 
     use guiremote::control::{
         DisplayInfo, Request, RequestBody, Response, ResponseBody, decode_requests,
@@ -1139,8 +1412,24 @@ pub mod testing {
         ///
         /// As [`Self::send_input`].
         pub fn send_window_list(&mut self, windows: &[WindowInfo]) {
+            self.send_window_list_showing(0, windows);
+        }
+
+        /// As [`Self::send_window_list`], naming the desktop the screen is
+        /// showing.
+        ///
+        /// A separate entry point rather than a parameter on the first because
+        /// almost every test in this file cares about the windows and not the
+        /// desktop, and a `0` threaded through all of them would say the
+        /// desktop number mattered there when it does not.
+        ///
+        /// # Panics
+        ///
+        /// As [`Self::send_input`].
+        pub fn send_window_list_showing(&mut self, showing: u32, windows: &[WindowInfo]) {
+            let list = guiremote::window_list::WindowList::new(showing, windows.to_vec());
             self.pipe
-                .write(&guiremote::encode_window_list(windows))
+                .write(&guiremote::encode_window_list(&list))
                 .unwrap();
         }
 
@@ -1189,6 +1478,17 @@ pub mod testing {
     pub struct TestConnection {
         pub pipe: Pipe,
         pub server: Rc<RefCell<TestDesktop>>,
+        /// Every bound the loop above has asked this transport to park within,
+        /// in order.
+        ///
+        /// Recorded rather than acted on — a turn of the compositor takes no
+        /// time, so there is nothing here to time out. What it makes testable
+        /// is the question that matters to anything driving the loop by hand:
+        /// did the park go through [`EventLoop::wait`], which knows about
+        /// wake-ups, or through [`Connection::wait`], which does not? The
+        /// second parks past every registered deadline, and the only visible
+        /// symptom is an animation that stops.
+        pub asked: Vec<Option<Duration>>,
     }
 
     impl Transport for TestConnection {
@@ -1210,6 +1510,11 @@ pub mod testing {
             self.server.borrow_mut().turn();
             Ok(())
         }
+
+        fn set_wait_timeout(&mut self, timeout: Option<Duration>) -> Result<(), Self::Error> {
+            self.asked.push(timeout);
+            Ok(())
+        }
     }
 
     /// A loop wired to a compositor that answers when the client waits.
@@ -1223,6 +1528,7 @@ pub mod testing {
         let transport = TestConnection {
             pipe: client_end,
             server: Rc::clone(&server),
+            asked: Vec::new(),
         };
         (EventLoop::new(transport), server)
     }
@@ -1236,6 +1542,9 @@ mod tests {
         clippy::panic,
         clippy::indexing_slicing
     )]
+
+    use std::cell::RefCell;
+    use std::rc::Rc;
 
     use super::testing::{TestConnection, desktop as wired};
     use super::*;
@@ -1700,6 +2009,17 @@ mod tests {
                 minimized: false,
                 maximized: false,
                 focused: false,
+                // Stored and meaningless: a `Background` window is on every
+                // desktop, so nothing should ever compare this against the one
+                // showing. It is here to be carried, not obeyed.
+                workspace: 0,
+                // Negative, because the fixture's contract is that no field
+                // matches the other window's and a sign is a field a codec can
+                // lose on its own.
+                x: -100,
+                y: -50,
+                width: 1920,
+                height: 1080,
             },
             WindowInfo {
                 id: 9,
@@ -1710,6 +2030,11 @@ mod tests {
                 minimized: true,
                 maximized: true,
                 focused: true,
+                workspace: 3,
+                x: 64,
+                y: 32,
+                width: 800,
+                height: 600,
             },
         ]
     }
@@ -1791,6 +2116,39 @@ mod tests {
     }
 
     #[test]
+    fn the_desktop_being_shown_comes_from_the_compositor_and_not_from_memory() {
+        // A shell must not keep its own idea of which desktop is up. The
+        // compositor switches on its own account -- activating a window filed
+        // elsewhere is a switch -- so the number arrives with every list, and
+        // a later list saying something different is the truth.
+        let (mut events, server) = wired();
+        events.watch_desktop(true).unwrap();
+        assert_eq!(
+            events.current_desktop(),
+            None,
+            "a client that has been told nothing should not claim to be on desktop 0"
+        );
+
+        server
+            .borrow_mut()
+            .send_window_list_showing(3, &two_desktop_windows());
+        assert!(events.poll().unwrap().is_none());
+        assert_eq!(events.current_desktop(), Some(3));
+        assert_eq!(
+            events.desktop_windows()[1].workspace,
+            3,
+            "the window's own desktop travels with it, not just the one showing"
+        );
+
+        // The switch the shell did not ask for.
+        server
+            .borrow_mut()
+            .send_window_list_showing(0, &two_desktop_windows());
+        assert!(events.poll().unwrap().is_none());
+        assert_eq!(events.current_desktop(), Some(0));
+    }
+
+    #[test]
     fn a_later_list_replaces_the_earlier_one_rather_than_adding_to_it() {
         // Each list is the whole desktop, so appending would leave a window
         // that has closed visible in a taskbar forever.
@@ -1849,5 +2207,282 @@ mod tests {
             .send_input(&[InputEvent::new(mine, Event::FocusIn)]);
         let (w, _) = events.poll().unwrap().expect("an event");
         assert_eq!(w, mine);
+    }
+
+    // ── The frame clock ─────────────────────────────────────────────────
+    //
+    // Every rule below is checked against a *synthetic* clock, by passing
+    // the instant in rather than sleeping until it arrives. None of these
+    // rules is about the accuracy of the real clock, and a test that sleeps
+    // to observe a deadline is a test that will eventually be flaky about
+    // one. The one thing that genuinely needs a real clock — that a bounded
+    // park actually comes back — is proved in `guiremote::socket`, which is
+    // where the parking is.
+
+    fn ms(n: u64) -> Duration {
+        Duration::from_millis(n)
+    }
+
+    /// The `elapsed_ms` a tick carries, or a failure naming what came instead.
+    fn tick_ms(fired: &[InputEvent]) -> u64 {
+        match fired.first().map(|e| &e.event) {
+            Some(&Event::Tick { elapsed_ms }) => elapsed_ms,
+            other => panic!("expected a tick, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_idle_loop_has_no_deadline() {
+        let (events, _server) = wired();
+        assert_eq!(
+            events.next_wakeup(),
+            None,
+            "nothing is animating, so nothing should bound the park"
+        );
+    }
+
+    #[test]
+    fn a_wake_up_fires_once_and_is_then_spent() {
+        // One-shot is the design, not an omission: an animation re-arms from
+        // its own handler, which makes *stopping* the default and continuing
+        // the deliberate act. A repeating timer would invert that, and a
+        // forgotten cancel would cost a wake-up every frame for ever.
+        let (mut events, _server) = wired();
+        let t0 = Instant::now();
+        events.arm(7, t0 + ms(16), t0);
+        assert!(events.is_waking(7));
+
+        let fired = events.due_at(t0 + ms(16));
+        assert_eq!(fired.len(), 1);
+        assert_eq!(fired[0].window, 7);
+        assert!(!events.is_waking(7), "the wake-up should be spent");
+        assert!(
+            events.due_at(t0 + ms(1000)).is_empty(),
+            "and must not fire a second time"
+        );
+    }
+
+    #[test]
+    fn a_deadline_not_yet_reached_does_not_fire() {
+        let (mut events, _server) = wired();
+        let t0 = Instant::now();
+        events.arm(7, t0 + ms(16), t0);
+        assert!(events.due_at(t0 + ms(15)).is_empty());
+        assert_eq!(events.next_wakeup(), Some(t0 + ms(16)));
+    }
+
+    #[test]
+    fn arming_a_window_twice_replaces_rather_than_accumulates() {
+        // A handler that re-arms unconditionally must not grow a second timer
+        // on every frame.
+        let (mut events, _server) = wired();
+        let t0 = Instant::now();
+        events.arm(7, t0 + ms(16), t0);
+        events.arm(7, t0 + ms(50), t0);
+        assert_eq!(events.next_wakeup(), Some(t0 + ms(50)));
+        assert_eq!(events.due_at(t0 + ms(50)).len(), 1);
+    }
+
+    #[test]
+    fn several_deadlines_due_at_once_fire_earliest_first() {
+        let (mut events, _server) = wired();
+        let t0 = Instant::now();
+        events.arm(3, t0 + ms(30), t0);
+        events.arm(1, t0 + ms(10), t0);
+        events.arm(2, t0 + ms(20), t0);
+        let order: Vec<u64> = events
+            .due_at(t0 + ms(40))
+            .iter()
+            .map(|e| e.window)
+            .collect();
+        assert_eq!(order, vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn the_tick_reports_the_time_that_passed_not_the_time_that_was_asked_for() {
+        // `elapsed_ms` is measured. A loop that echoed back the interval the
+        // caller requested would tell an animation it is running at its
+        // nominal rate no matter how far behind it had actually fallen.
+        let (mut events, _server) = wired();
+        let t0 = Instant::now();
+        events.arm(7, t0 + ms(16), t0);
+        assert_eq!(tick_ms(&events.due_at(t0 + ms(25))), 25);
+    }
+
+    #[test]
+    fn the_deltas_of_a_running_animation_partition_the_time_it_ran_for() {
+        // The handler's own cost lands inside the *next* frame's delta rather
+        // than vanishing between them. Every consumer in the tree accumulates
+        // `elapsed_ms` — `benchmark` into a progress total, `credmanager` into
+        // a clock — so a delta that dropped the handler's time would not
+        // merely run slow, it would drift from the wall clock without bound.
+        let (mut events, _server) = wired();
+        let t0 = Instant::now();
+        events.arm(7, t0 + ms(16), t0);
+
+        let first = events.due_at(t0 + ms(20));
+        // The handler runs, spending 5 ms of its own, and re-arms.
+        events.arm(7, t0 + ms(41), t0 + ms(25));
+        let second = events.due_at(t0 + ms(45));
+
+        assert_eq!(
+            tick_ms(&first) + tick_ms(&second),
+            45,
+            "the deltas should cover every millisecond from t0 to t0+45"
+        );
+    }
+
+    #[test]
+    fn an_animation_that_stopped_does_not_report_the_pause_when_it_starts_again() {
+        // The reference point is dropped once a tick goes unanswered, so a
+        // restarted animation's first delta is the length of that frame and
+        // not the length of the time nobody was animating. Without this, a
+        // paused game would resume by advancing every object by the pause.
+        let (mut events, _server) = wired();
+        let t0 = Instant::now();
+        events.arm(7, t0 + ms(16), t0);
+        events.due_at(t0 + ms(16));
+        // The handler does not re-arm; the next look at the clock notices.
+        assert!(events.due_at(t0 + ms(17)).is_empty());
+
+        events.arm(7, t0 + ms(10_016), t0 + ms(10_000));
+        assert_eq!(tick_ms(&events.due_at(t0 + ms(10_016))), 16);
+    }
+
+    #[test]
+    fn cancelling_a_wake_up_stops_that_window_and_no_other() {
+        let (mut events, _server) = wired();
+        let t0 = Instant::now();
+        events.arm(1, t0 + ms(16), t0);
+        events.arm(2, t0 + ms(16), t0);
+        events.cancel_wake(1);
+        let fired = events.due_at(t0 + ms(16));
+        assert_eq!(fired.len(), 1);
+        assert_eq!(fired[0].window, 2);
+    }
+
+    #[test]
+    fn closing_a_window_withdraws_its_wake_up() {
+        // Left behind it would hold the process at a frame rate for a window
+        // nobody can see, and every tick it produced would land in `unrouted`.
+        let (mut events, _server) = wired();
+        let id = open(&mut events, "A");
+        events.wake_after(id, ms(16));
+        assert!(events.is_waking(id));
+        events.close(id).unwrap();
+        assert!(!events.is_waking(id));
+        assert_eq!(events.next_wakeup(), None);
+    }
+
+    #[test]
+    fn a_tick_reaches_the_application_through_the_ordinary_event_path() {
+        // Not a side channel: the tick is an `InputEvent` in the same queue as
+        // a keystroke, which is why the fifty `Event::Tick { elapsed_ms } =>`
+        // arms already written across the toolkit and the applications start
+        // receiving one without any of them changing.
+        let (mut events, _server) = wired();
+        let id = open(&mut events, "A");
+        events.wake_after(id, Duration::ZERO);
+        let (w, ev) = events.poll().unwrap().expect("a tick was due");
+        assert_eq!(w, id);
+        assert!(matches!(ev, Event::Tick { .. }), "got {ev:?}");
+    }
+
+    #[test]
+    fn a_tick_for_a_window_this_loop_does_not_own_is_counted_not_delivered() {
+        let (mut events, _server) = wired();
+        events.wake_after(4242, Duration::ZERO);
+        assert!(events.poll().unwrap().is_none());
+        assert_eq!(events.unrouted_events(), 1);
+    }
+
+    /// Every bound the loop asked its transport for, in order. Shared with the
+    /// test rather than read back off the loop, because `run` consumes the
+    /// transport for the length of the call.
+    type Asked = Rc<RefCell<Vec<Option<Duration>>>>;
+
+    /// A transport that records the bound the loop asks for and then reports
+    /// the connection closed, so `run` makes exactly one pass.
+    struct Recorder {
+        asked: Asked,
+        open: bool,
+    }
+
+    impl Transport for Recorder {
+        type Error = std::convert::Infallible;
+
+        fn read(&mut self, _buf: &mut Vec<u8>) -> Result<usize, Self::Error> {
+            Ok(0)
+        }
+
+        fn write(&mut self, _bytes: &[u8]) -> Result<(), Self::Error> {
+            Ok(())
+        }
+
+        fn is_open(&self) -> bool {
+            self.open
+        }
+
+        fn wait(&mut self) -> Result<(), Self::Error> {
+            self.open = false;
+            Ok(())
+        }
+
+        fn set_wait_timeout(&mut self, timeout: Option<Duration>) -> Result<(), Self::Error> {
+            self.asked.borrow_mut().push(timeout);
+            Ok(())
+        }
+    }
+
+    fn one_park() -> (EventLoop<Recorder>, Asked) {
+        let asked = Rc::new(RefCell::new(Vec::new()));
+        let transport = Recorder {
+            asked: Rc::clone(&asked),
+            open: true,
+        };
+        (EventLoop::new(transport), asked)
+    }
+
+    #[test]
+    fn an_idle_loop_parks_with_no_bound_at_all() {
+        // The property that keeps an idle desktop asleep. A frame clock that
+        // cost a wake-up per frame whether or not anything was animating would
+        // be `TD-COMPOSITOR-POLLS-INSTEAD-OF-WAITING` in a second place.
+        let (mut events, asked) = one_park();
+        events.run(|_, _, _| EventResponse::Continue).unwrap();
+        assert_eq!(*asked.borrow(), vec![None]);
+    }
+
+    #[test]
+    fn a_registered_wake_up_bounds_the_park() {
+        // The other half of the same property — and the reason this could be
+        // built at all: `Transport::set_wait_timeout` already existed, and
+        // nothing above it had ever called it.
+        let (mut events, asked) = one_park();
+        events.wake_after(1, ms(50));
+        events.run(|_, _, _| EventResponse::Continue).unwrap();
+        let bound = asked.borrow()[0].expect("the park should have been bounded");
+        assert!(bound <= ms(50), "asked for {bound:?}, past the deadline");
+        assert!(
+            bound > Duration::ZERO,
+            "a zero bound reads as 'no timeout' to the platform, which is the opposite"
+        );
+    }
+
+    #[test]
+    fn a_deadline_already_past_still_bounds_the_park_by_something_nonzero() {
+        // The park is bounded from a second reading of the clock, so a
+        // deadline that expired in between yields a negative remainder. Zero
+        // is the one value that must never reach the socket layer: it means
+        // "never time out" there, so the loop would sleep through the very
+        // frame it woke early for.
+        let (mut events, asked) = one_park();
+        let past = Instant::now()
+            .checked_sub(ms(500))
+            .unwrap_or_else(Instant::now);
+        events.wake_at(1, past);
+        events.wait().unwrap();
+        let bound = asked.borrow()[0].expect("the park should have been bounded");
+        assert!(bound > Duration::ZERO, "a zero bound reached the transport");
     }
 }

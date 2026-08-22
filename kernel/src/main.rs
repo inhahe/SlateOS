@@ -1304,6 +1304,17 @@ extern "C" fn kernel_main() -> ! {
             // No-op without xHCI hardware (common in QEMU unless -device qemu-xhci).
             xhci::init(boot_info.hhdm_offset);
 
+            // Start fetching USB HID reports on a timer rather than only when
+            // somebody is already blocked on a console read.
+            //
+            // Must follow xhci::init (it checks for a controller) and
+            // hrtimer::init (it schedules against it); both are above.  Placed
+            // immediately after the controller comes up so that everything
+            // later in boot — including the self-tests — runs with the same
+            // input path real hardware will use, rather than with a keyboard
+            // that only exists while something is reading it.
+            keyboard::start_usb_hid_poller();
+
             // Step 20e-2: Add disk-backed swap alongside zram.
             // Multi-device swap: zram (priority 100) handles most evictions with
             // zero I/O latency; disk (priority 0) catches overflow when zram is full.
@@ -2983,6 +2994,16 @@ extern "C" fn kernel_main() -> ! {
         );
     }
 
+    // Ring-3 regression test for the 2D render-resource round trip
+    // (CREATE/MAP/mmap/TRANSFER_TO_HOST/WAIT/INFO/GEM_CLOSE). Skips cleanly
+    // when no DRM device is bound.
+    if let Err(e) = proc::spawn::self_test_linux_virtgpu_resource() {
+        serial_println!(
+            "WARNING: virtio-gpu render-resource (ring 3) self-test failed: {:?}",
+            e
+        );
+    }
+
     {
         #[inline(never)]
         fn case() {
@@ -3209,6 +3230,20 @@ extern "C" fn kernel_main() -> ! {
                     "WARNING: GNU bash on SlateOS libc self-test failed: {:?}",
                     e
                 );
+            }
+
+            // CPython 3.12.3 on OUR libc.a — the widest consumer the library has
+            // (478 external symbols resolved, against bash's far smaller share).
+            // Deliberately AFTER bash: bash is the cheaper, older, better
+            // understood rung, so if our libc has regressed it should say so
+            // first. Unlike every other rung here, merely *starting* is most of
+            // the test — CPython must import `encodings` out of a 20 MiB zip
+            // before it can decode a path, so a pass means Py_Initialize drove
+            // real ext4 seeks. No-op without rootfs.ext4 / /bin/python3 (built
+            // by scripts/cpython-spike/). See
+            // requests/b-a-cpython-path-z-self-test.md.
+            if let Err(e) = proc::spawn::self_test_cpython_on_slateos_libc() {
+                serial_println!("WARNING: CPython on SlateOS libc self-test failed: {:?}", e);
             }
 
             // pkgconf 2.3.0, the second real-world C program linked against OUR libc.a.
@@ -5660,6 +5695,13 @@ extern "C" fn kernel_main() -> ! {
     // Virtio-GPU self-test.
     virtio::gpu::self_test();
 
+    // Virtio-GPU render-node resource manager self-test (the driver half of
+    // the virtgpu render ioctls).
+    if let Err(e) = virtio::gpu::resource_self_test() {
+        serial_println!("FATAL: virtio-gpu render-resource self-test failed: {}", e);
+        cpu::halt_loop();
+    }
+
     // Audio mixer self-test.
     audio_mixer::self_test();
 
@@ -6265,6 +6307,39 @@ extern "C" fn kernel_main() -> ! {
         (cap::ResourceType::Socket, 0, cap::Rights::ALL),
         // Process management: spawn and manage children.
         (cap::ResourceType::Process, 0, cap::Rights::ALL),
+        // The three objects §312's capability projection derives the
+        // remaining privileged POSIX operations from (§269 for the object
+        // design, §350 for the projection).  All are
+        // class-wide (`resource_id == 0`): a token nobody holds is
+        // indistinguishable from leaving the operation denied, which is the
+        // outcome the operator rejected in Q48.
+        //
+        // `TRANSFER` is included even though **nothing reads that bit today** —
+        // a child's capabilities come from an explicit list its spawner builds,
+        // not from narrowing the parent's table, so there is no delegation path
+        // for it to gate.  It is here because init's whole role for these three
+        // is to hand narrowed copies down (a time daemon gets the clock, a web
+        // server gets its port), so when that path exists init must already be
+        // allowed to use it; the alternative is a delegation that silently
+        // fails for PID 1 and gets debugged from scratch.  If the bit ever
+        // acquires a *different* meaning, this grant must be revisited.
+        (
+            cap::ResourceType::SystemClock,
+            0,
+            cap::Rights::WRITE.union(cap::Rights::TRANSFER),
+        ),
+        (
+            cap::ResourceType::PrivilegedPort,
+            0,
+            cap::Rights::WRITE.union(cap::Rights::TRANSFER),
+        ),
+        (
+            cap::ResourceType::ResourceLimit,
+            0,
+            cap::Rights::WRITE
+                .union(cap::Rights::MEMORY_LOCK)
+                .union(cap::Rights::TRANSFER),
+        ),
     ];
     let spawn_opts = proc::spawn::SpawnOptions {
         name: "init",

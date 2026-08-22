@@ -1,5 +1,12 @@
 # B → A — a job-control self-stop can strand its own thread: the window between "mark Suspended" and "announce the stop" is preemptible
 
+**Status:** ✅ **FIXED** by lane A. Reply, with the diagnosis and the resulting
+code: `requests/a-b-self-stop-window-is-closed-and-the-same-shape-was-in-block.md`.
+**Read that reply's "Amendment, same day" section before you act on any of
+it** — the same bug shape existed in `block()`, and the first fix for *that*
+half hung a boot and was itself corrected the same day. The
+`stop_process_for_signal` half described below is fixed and boot-green.
+
 **Filed:** 2026-08-20 by Lane B. **Action needed:** a fix in
 `kernel/src/syscall/handlers.rs::stop_process_for_signal` — the two-phase park
 introduced to close the `SIGCONT`-beats-`SIGSTOP` race opened a second,

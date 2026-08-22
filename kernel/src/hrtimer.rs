@@ -6,9 +6,12 @@
 //!
 //! ## Design
 //!
-//! Each CPU maintains a sorted list of pending timers (min-heap by
-//! absolute expiry time).  The APIC timer ISR checks for expired
-//! timers on every tick.  When timers are pending with deadlines
+//! Each CPU maintains a **binary min-heap** of pending timers keyed on
+//! `(absolute expiry, arming id)`, over a slab of slots that handles index
+//! directly — so arming and expiring are O(log n) and cancelling is O(1)
+//! lookup plus an O(log n) fixup.  (It was a sorted `Vec` until 2026-08-21;
+//! see [`CpuTimerState`] for what that cost and why it mattered here in
+//! particular.)  The APIC timer ISR checks for expired timers on every tick.  When timers are pending with deadlines
 //! between regular ticks, the APIC is reprogrammed in one-shot mode
 //! to fire at the next deadline — giving sub-10ms resolution.
 //!
@@ -59,10 +62,14 @@ const MAX_TIMERS_PER_CPU: usize = 256;
 
 /// Hard ceiling on the per-CPU timer queue.
 ///
-/// A backstop against unbounded growth, not an operating limit.  The list is
-/// a sorted `Vec` with O(n) insert, so this also bounds the worst-case time
-/// spent under the per-CPU lock with interrupts disabled.  See `todo.txt`
-/// (`hrtimer: replace the sorted Vec`) for the structural fix.
+/// A backstop against unbounded growth, not an operating limit.
+///
+/// It used to do double duty as a latency bound, because insertion was an
+/// O(n) `memmove` under the lock with interrupts disabled.  That is no longer
+/// true — every operation is now O(log n) or better, so at this ceiling the
+/// worst case is 12 comparisons rather than a 160 KiB move.  The ceiling is
+/// kept purely as the leak detector it also always was: crossing it means a
+/// caller is arming timers it never cancels.
 const MAX_TIMERS_HARD_CEILING: usize = 4096;
 
 /// Maximum CPUs supported.
@@ -83,12 +90,26 @@ const MAX_CPUS: usize = 16;
 ///
 /// `cpu == usize::MAX` marks a handle for a timer that was never inserted
 /// (refused at the hard ceiling); cancelling it is a no-op.
+///
+/// The handle also carries the *slot* the entry occupies and the slot's
+/// generation at the time of arming.  That pair is what makes [`cancel()`]
+/// O(1) instead of a linear search for a matching id: the slot is a direct
+/// index, and the generation distinguishes "my timer is still there" from
+/// "my timer went away and something else was handed the same slot".  Without
+/// the generation a stale handle would cancel an innocent stranger's timer —
+/// a manufactured lost wakeup, which is the failure mode
+/// `BUG-HRTIMER-EVICTS-AN-ARMED-TIMER` already cost us one boot's worth of.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct HrTimerHandle {
-    /// Globally unique timer id.
+    /// Globally unique timer id.  Monotonic; also the heap's tie-breaker.
     id: u64,
     /// Index of the per-CPU list holding the entry, or `usize::MAX` if none.
     cpu: usize,
+    /// Index into that CPU's slot slab.  Meaningless when `cpu == usize::MAX`.
+    slot: u32,
+    /// The slot's generation when this handle was minted.  A mismatch means
+    /// the timer has already fired or been cancelled and the slot recycled.
+    generation: u32,
 }
 
 impl HrTimerHandle {
@@ -103,38 +124,289 @@ impl HrTimerHandle {
     }
 }
 
-/// A pending high-resolution timer.
+/// Sentinel for "this slot is not in the heap" / "end of the free list".
+const NIL: u32 = u32::MAX;
+
+/// The payload half of a pending timer: everything that does *not* order it.
+///
+/// Lives in a slab (`CpuTimerState::slots`) that is indexed directly by the
+/// handle, which is what makes cancellation O(1).  Deliberately does **not**
+/// hold `expiry_ns`: the expiry lives in the heap node and only there, so a
+/// re-armed repeating timer cannot end up with two disagreeing deadlines.
 #[derive(Clone, Copy)]
-struct TimerEntry {
-    /// Absolute expiry time in nanoseconds (from HPET epoch).
-    expiry_ns: u64,
+struct TimerSlot {
     /// Callback function.
     callback: fn(u64),
     /// Argument passed to callback.
     arg: u64,
-    /// Unique ID for cancellation.
-    id: u64,
     /// Whether this timer repeats (0 = one-shot, >0 = interval in ns).
     interval_ns: u64,
+    /// Globally unique id, echoed into handles, ktrace and the hang dumps.
+    id: u64,
+    /// Bumped every time the slot is released.  A handle whose generation no
+    /// longer matches is stale and must be refused.
+    generation: u32,
+    /// This slot's index in `heap`, or [`NIL`] when the slot is free.
+    /// Maintained by every sift; it is the heap's inverse map.
+    heap_pos: u32,
+    /// Next free slot when this one is free, else [`NIL`].
+    next_free: u32,
+}
+
+/// The ordering half: what the binary min-heap array actually holds.
+///
+/// Keeping the key *in* the heap array rather than behind a slot index is
+/// deliberate — a sift does O(log n) comparisons, and this way they are
+/// sequential reads of one array instead of that many random probes into the
+/// slab.
+#[derive(Clone, Copy)]
+struct HeapNode {
+    /// Absolute expiry time in nanoseconds (from HPET epoch).
+    expiry_ns: u64,
+    /// The arming id.  Breaks ties **FIFO**: ids come from one monotonic
+    /// counter, so among equal deadlines the timer armed first fires first.
+    /// A plain binary heap is not stable, and without this a timer could be
+    /// passed over indefinitely by a stream of arrivals sharing its deadline.
+    id: u64,
+    /// Which slot in the slab this node orders.
+    slot: u32,
+}
+
+impl HeapNode {
+    /// Total order on `(expiry_ns, id)`.  `true` when `self` must fire first.
+    #[inline]
+    const fn precedes(&self, other: &Self) -> bool {
+        if self.expiry_ns != other.expiry_ns {
+            self.expiry_ns < other.expiry_ns
+        } else {
+            self.id < other.id
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
 // Per-CPU timer state
 // ---------------------------------------------------------------------------
 
-/// Per-CPU timer heap (min-heap sorted by expiry_ns).
+/// Per-CPU pending-timer structure: a binary min-heap over a slot slab.
 ///
-/// Using a simple sorted Vec rather than a proper BinaryHeap because
-/// we need cancel-by-ID (requires scanning) and the number of active
-/// timers per CPU is typically small (< 64).
+/// **This was a sorted `Vec` until 2026-08-21.**  That gave O(1) peek but made
+/// every other operation a `memmove`: insert shifted the tail, `remove(0)` on
+/// each expiry shifted everything, and cancel scanned for the id and then
+/// shifted again.  All three ran under the per-CPU lock *with interrupts
+/// disabled*, and at [`MAX_TIMERS_HARD_CEILING`] the worst case was a 160 KiB
+/// move — inside the window that `process_expired()` needs in order to run at
+/// all.  The cancel path is the hottest wait path in the kernel, so the old
+/// shape could delay the very APIC tick that drains the queue.
+///
+/// Now:
+///
+/// | Operation | Before | Now |
+/// |---|---|---|
+/// | `schedule` | O(n) scan + O(n) move | O(log n) sift |
+/// | `process_expired` (per timer) | O(n) move | O(log n) sift |
+/// | `cancel` | O(n) scan + O(n) move | O(1) lookup + O(log n) sift |
+/// | `next_expiry_ns` | O(1) | O(1) |
+///
+/// Both `Vec`s still grow on demand rather than being statically sized to the
+/// ceiling — 16 CPUs × 4096 slots of static storage would be megabytes of
+/// always-resident memory to serve a queue that is normally shorter than 64.
 struct CpuTimerState {
-    /// Pending timers sorted by expiry (earliest first).
-    timers: Vec<TimerEntry>,
+    /// Slot slab.  Indices are stable for a slot's whole lifetime, which is
+    /// what handles point at.  Never shrinks; freed slots go on `free_head`.
+    slots: Vec<TimerSlot>,
+    /// Head of the intrusive free list threaded through `TimerSlot::next_free`.
+    free_head: u32,
+    /// Binary min-heap of live entries, ordered by [`HeapNode::precedes`].
+    /// `heap.len()` is the number of pending timers.
+    heap: Vec<HeapNode>,
 }
 
 impl CpuTimerState {
     const fn new() -> Self {
-        Self { timers: Vec::new() }
+        Self {
+            slots: Vec::new(),
+            free_head: NIL,
+            heap: Vec::new(),
+        }
+    }
+
+    /// Number of pending timers.
+    fn len(&self) -> usize {
+        self.heap.len()
+    }
+
+    /// Move the node at `pos` towards the root until the heap property holds.
+    /// Returns the index it came to rest at.
+    fn sift_up(&mut self, mut pos: usize) -> usize {
+        while pos > 0 {
+            // `saturating_sub` is exact here — the loop condition is `pos > 0`
+            // — and satisfies `clippy::arithmetic_side_effects` without an
+            // allow, which would have to be re-justified every time this loop
+            // is touched.
+            let parent = pos.saturating_sub(1) / 2;
+            let (Some(&here), Some(&up)) = (self.heap.get(pos), self.heap.get(parent)) else {
+                break;
+            };
+            if !here.precedes(&up) {
+                break;
+            }
+            self.heap_swap(pos, parent);
+            pos = parent;
+        }
+        pos
+    }
+
+    /// Move the node at `pos` towards the leaves until the heap property holds.
+    fn sift_down(&mut self, mut pos: usize) {
+        let n = self.heap.len();
+        loop {
+            // Saturating rather than plain arithmetic, and it changes nothing:
+            // `pos < n <= MAX_TIMERS_HARD_CEILING`, so these cannot overflow —
+            // and if they somehow did, `usize::MAX >= n` sends both through the
+            // bounds checks below and out of the loop, which is the same answer
+            // a leaf would give.
+            let left = pos.saturating_mul(2).saturating_add(1);
+            if left >= n {
+                break;
+            }
+            let right = left.saturating_add(1);
+            let mut best = left;
+            if right < n {
+                let (Some(l), Some(r)) = (self.heap.get(left), self.heap.get(right)) else {
+                    break;
+                };
+                if r.precedes(l) {
+                    best = right;
+                }
+            }
+            let (Some(&here), Some(&child)) = (self.heap.get(pos), self.heap.get(best)) else {
+                break;
+            };
+            if !child.precedes(&here) {
+                break;
+            }
+            self.heap_swap(pos, best);
+            pos = best;
+        }
+    }
+
+    /// Swap two heap positions, keeping each slot's `heap_pos` in step.
+    ///
+    /// Every movement of a node goes through here.  That is the invariant the
+    /// whole design rests on — if a single sift forgot to update `heap_pos`,
+    /// `cancel` would silently remove the wrong timer, and the symptom would
+    /// be a lost wakeup somewhere else entirely.
+    fn heap_swap(&mut self, a: usize, b: usize) {
+        if a == b {
+            return;
+        }
+        let (Some(&na), Some(&nb)) = (self.heap.get(a), self.heap.get(b)) else {
+            return;
+        };
+        if let Some(dst) = self.heap.get_mut(a) {
+            *dst = nb;
+        }
+        if let Some(dst) = self.heap.get_mut(b) {
+            *dst = na;
+        }
+        if let Some(s) = self.slots.get_mut(nb.slot as usize) {
+            s.heap_pos = a as u32;
+        }
+        if let Some(s) = self.slots.get_mut(na.slot as usize) {
+            s.heap_pos = b as u32;
+        }
+    }
+
+    /// Push a node onto the heap and record where it landed.
+    fn heap_push(&mut self, node: HeapNode) {
+        let slot = node.slot as usize;
+        self.heap.push(node);
+        let last = self.heap.len().saturating_sub(1);
+        if let Some(s) = self.slots.get_mut(slot) {
+            s.heap_pos = last as u32;
+        }
+        self.sift_up(last);
+    }
+
+    /// Remove the node at `pos`, restoring the heap property.
+    ///
+    /// Returns the removed node.  The last element is moved into the hole and
+    /// then sifted **both ways**: it came from the deepest level, so it is
+    /// usually too large for the hole (sift down) — but when the hole is on a
+    /// different branch it can also be too small (sift up).  Only doing one of
+    /// the two is the classic way to corrupt a heap-with-arbitrary-removal,
+    /// and it survives casual testing because the common case is sift-down.
+    fn heap_remove_at(&mut self, pos: usize) -> Option<HeapNode> {
+        let n = self.heap.len();
+        if pos >= n {
+            return None;
+        }
+        let removed = *self.heap.get(pos)?;
+        if let Some(s) = self.slots.get_mut(removed.slot as usize) {
+            s.heap_pos = NIL;
+        }
+        // Exact: the `pos >= n` guard above means `n >= 1`.
+        let last = n.saturating_sub(1);
+        if pos == last {
+            self.heap.pop();
+            return Some(removed);
+        }
+        // Move the tail node into the hole, then re-place it.
+        let tail = *self.heap.get(last)?;
+        if let Some(dst) = self.heap.get_mut(pos) {
+            *dst = tail;
+        }
+        self.heap.pop();
+        if let Some(s) = self.slots.get_mut(tail.slot as usize) {
+            s.heap_pos = pos as u32;
+        }
+        let rested = self.sift_up(pos);
+        if rested == pos {
+            self.sift_down(pos);
+        }
+        Some(removed)
+    }
+
+    /// Take a slot from the free list, or append a new one.
+    fn alloc_slot(&mut self, slot: TimerSlot) -> Option<u32> {
+        if self.free_head != NIL {
+            let idx = self.free_head;
+            let cell = self.slots.get_mut(idx as usize)?;
+            self.free_head = cell.next_free;
+            // Preserve the generation across reuse — it is the only thing
+            // stopping a stale handle from matching a recycled slot.
+            let generation = cell.generation;
+            *cell = TimerSlot {
+                generation,
+                next_free: NIL,
+                heap_pos: NIL,
+                ..slot
+            };
+            return Some(idx);
+        }
+        let idx = u32::try_from(self.slots.len()).ok()?;
+        if idx == NIL {
+            return None;
+        }
+        self.slots.push(TimerSlot {
+            generation: 0,
+            next_free: NIL,
+            heap_pos: NIL,
+            ..slot
+        });
+        Some(idx)
+    }
+
+    /// Return a slot to the free list, invalidating every handle to it.
+    fn free_slot(&mut self, idx: u32) {
+        let head = self.free_head;
+        if let Some(cell) = self.slots.get_mut(idx as usize) {
+            cell.generation = cell.generation.wrapping_add(1);
+            cell.heap_pos = NIL;
+            cell.next_free = head;
+            self.free_head = idx;
+        }
     }
 }
 
@@ -319,13 +591,29 @@ pub fn cancel(handle: HrTimerHandle) -> bool {
 
     let found = crate::cpu::without_interrupts(|| {
         let mut state = list.lock();
-        if let Some(pos) = state.timers.iter().position(|t| t.id == handle.id) {
-            state.timers.remove(pos);
-            TOTAL_CANCELLED.fetch_add(1, Ordering::Relaxed);
-            ring_push(&LAST_CANCELLED_IDS, &LAST_CANCELLED_POS, handle.id);
-            return true;
+        // O(1): the handle names the slot outright.  The generation check is
+        // what makes that safe — a handle for a timer that already fired
+        // points at a slot which may since have been handed to someone else,
+        // and cancelling *their* timer would be a lost wakeup we manufactured.
+        let Some(slot) = state.slots.get(handle.slot as usize) else {
+            return false;
+        };
+        if slot.generation != handle.generation || slot.heap_pos == NIL {
+            return false;
         }
-        false
+        // Defence in depth: the id is redundant with (slot, generation), so a
+        // disagreement means the slab and the handle have diverged in a way
+        // this module's invariants say cannot happen.  Refuse rather than
+        // remove something we cannot identify.
+        if slot.id != handle.id {
+            return false;
+        }
+        let pos = slot.heap_pos as usize;
+        state.heap_remove_at(pos);
+        state.free_slot(handle.slot);
+        TOTAL_CANCELLED.fetch_add(1, Ordering::Relaxed);
+        ring_push(&LAST_CANCELLED_IDS, &LAST_CANCELLED_POS, handle.id);
+        true
     });
 
     if found {
@@ -343,7 +631,7 @@ pub fn cancel(handle: HrTimerHandle) -> bool {
 pub fn pending_count() -> usize {
     crate::cpu::without_interrupts(|| {
         let cpu = crate::smp::current_cpu_index();
-        CPU_TIMERS[cpu].lock().timers.len()
+        CPU_TIMERS[cpu].lock().len()
     })
 }
 
@@ -369,7 +657,8 @@ pub fn next_expiry_ns() -> Option<u64> {
     crate::cpu::without_interrupts(|| {
         let cpu = crate::smp::current_cpu_index();
         let state = CPU_TIMERS[cpu].lock();
-        state.timers.first().map(|t| t.expiry_ns)
+        // The heap root is the minimum by construction — still O(1).
+        state.heap.first().map(|n| n.expiry_ns)
     })
 }
 
@@ -404,19 +693,29 @@ pub fn dump_pending() {
         crate::cpu::without_interrupts(|| {
             let state = CPU_TIMERS[i].lock();
             serial_println!(
-                "[hrtimer]   cpu{}: {} pending (now_ns={})",
+                "[hrtimer]   cpu{}: {} pending (now_ns={}); listed in HEAP order, not \
+                 deadline order — only the first line is guaranteed to be the soonest",
                 i,
-                state.timers.len(),
+                state.len(),
                 now
             );
-            for t in state.timers.iter().take(16) {
+            // Heap order, deliberately: sorting a copy here would allocate on
+            // a path that exists to diagnose hangs, and the two questions this
+            // dump answers ("is my id still queued?" and "is anything
+            // overdue?") are both order-independent.  Element 0 is still the
+            // minimum, which is the one line that wants to be first.
+            for node in state.heap.iter().take(16) {
+                let (arg, interval_ns) = state
+                    .slots
+                    .get(node.slot as usize)
+                    .map_or((0, 0), |s| (s.arg, s.interval_ns));
                 serial_println!(
                     "[hrtimer]     id={} expiry_ns={} arg={} interval_ns={} ({})",
-                    t.id,
-                    t.expiry_ns,
-                    t.arg,
-                    t.interval_ns,
-                    if now >= t.expiry_ns {
+                    node.id,
+                    node.expiry_ns,
+                    arg,
+                    interval_ns,
+                    if now >= node.expiry_ns {
                         "OVERDUE - the ISR scan is not draining"
                     } else {
                         "pending"
@@ -454,6 +753,9 @@ pub fn process_expired() -> u32 {
     let cpu = crate::smp::current_cpu_index();
     let now = now_ns();
     let mut fired = 0u32;
+    // Re-arms of repeating timers.  Counted into `TOTAL_SCHEDULED` below —
+    // see the comment at the re-arm site for why the tripwire depends on it.
+    let mut rearmed = 0u32;
 
     // Collect expired timers while holding the lock, then fire them
     // after releasing it (callbacks might schedule new timers).
@@ -467,35 +769,60 @@ pub fn process_expired() -> u32 {
     crate::cpu::without_interrupts(|| {
         let mut state = CPU_TIMERS[cpu].lock();
 
-        // Since the list is sorted, scan from the front until we find
-        // a timer that hasn't expired yet.
-        while !state.timers.is_empty() && fire_count < 16 {
-            if state.timers[0].expiry_ns <= now {
-                let entry = state.timers.remove(0);
-                to_fire[fire_count] = Some((
-                    entry.callback,
-                    entry.arg,
-                    entry.interval_ns,
-                    entry.id,
-                ));
-
-                // If repeating, re-insert with the next expiry.
-                if entry.interval_ns > 0 {
-                    let next_expiry = now.saturating_add(entry.interval_ns);
-                    let new_entry = TimerEntry {
-                        expiry_ns: next_expiry,
-                        callback: entry.callback,
-                        arg: entry.arg,
-                        id: entry.id,
-                        interval_ns: entry.interval_ns,
-                    };
-                    insert_sorted(&mut state.timers, new_entry);
-                }
-
-                fire_count = fire_count.saturating_add(1);
-            } else {
-                break; // Remaining timers are in the future.
+        // The heap root is the earliest deadline, so one peek decides whether
+        // there is any work at all — and popping it is O(log n) rather than
+        // the O(n) `remove(0)` this loop used to do on *every* expiry.
+        while fire_count < 16 {
+            let Some(&root) = state.heap.first() else {
+                break;
+            };
+            if root.expiry_ns > now {
+                break; // Everything else is later still.
             }
+            let Some(slot) = state.slots.get(root.slot as usize).copied() else {
+                // Unreachable given the invariants; drop the node rather than
+                // spin on a root we cannot resolve.
+                state.heap_remove_at(0);
+                break;
+            };
+            state.heap_remove_at(0);
+
+            if let Some(cell) = to_fire.get_mut(fire_count) {
+                *cell = Some((slot.callback, slot.arg, slot.interval_ns, slot.id));
+            }
+
+            if slot.interval_ns > 0 {
+                // Repeating: re-arm in place.  The slot is kept — and with it
+                // the id and every handle that names it — so a caller holding
+                // a handle to a periodic timer can still cancel it after it
+                // has fired, which is the whole point of a periodic handle.
+                let next_expiry = now.saturating_add(slot.interval_ns);
+                state.heap_push(HeapNode {
+                    expiry_ns: next_expiry,
+                    id: slot.id,
+                    slot: root.slot,
+                });
+                // A re-arm *is* an arming, and must be counted as one, or the
+                // `scheduled - fired - cancelled - pending` tripwire in the
+                // self-test is structurally dead: a repeating timer bumps
+                // `fired` on every tick while bumping `scheduled` only once, so
+                // after a few seconds `fired` exceeds `scheduled` permanently
+                // and the `saturating_sub` chain floors the difference at 0 no
+                // matter how many wakeups are being destroyed.  (Boot logs
+                // before this fix read `scheduled=388, fired=75833` — a 195x
+                // gap, and a tripwire that could never trip.)  With re-arms
+                // counted, each firing of a repeating timer is preceded by
+                // exactly one arming, so the two are commensurable again.
+                rearmed = rearmed.saturating_add(1);
+            } else {
+                // One-shot: the slot dies here.  Freeing it bumps the
+                // generation, which is what makes a later `cancel()` on this
+                // handle answer "already fired" instead of reaching into
+                // whatever timer inherits the slot next.
+                state.free_slot(root.slot);
+            }
+
+            fire_count = fire_count.saturating_add(1);
         }
     });
 
@@ -531,6 +858,10 @@ pub fn process_expired() -> u32 {
         }
     }
 
+    if rearmed > 0 {
+        TOTAL_SCHEDULED.fetch_add(u64::from(rearmed), Ordering::Relaxed);
+    }
+
     if fired > 0 {
         TOTAL_FIRED.fetch_add(u64::from(fired), Ordering::Relaxed);
 
@@ -550,15 +881,6 @@ pub fn process_expired() -> u32 {
 // Internal helpers
 // ---------------------------------------------------------------------------
 
-/// Insert a timer into the sorted list (by expiry_ns, earliest first).
-fn insert_sorted(timers: &mut Vec<TimerEntry>, entry: TimerEntry) {
-    let pos = timers
-        .iter()
-        .position(|t| t.expiry_ns > entry.expiry_ns)
-        .unwrap_or(timers.len());
-    timers.insert(pos, entry);
-}
-
 /// Schedule a timer with an absolute expiry time.
 ///
 /// Disables interrupts while holding the per-CPU timer lock to prevent
@@ -576,6 +898,9 @@ fn schedule_absolute(
     // the handle can name it; `cancel` then needs exactly one lock.  Stays
     // `usize::MAX` (= "nowhere") if the request is refused below.
     let mut sched_cpu = usize::MAX;
+    // Where the entry landed in the slab, captured for the handle.
+    let mut sched_slot = NIL;
+    let mut sched_generation = 0u32;
 
     // SAFETY: Must disable interrupts before taking the per-CPU timer lock.
     // The APIC timer ISR calls process_expired() which also takes this lock.
@@ -584,21 +909,13 @@ fn schedule_absolute(
     crate::cpu::without_interrupts(|| {
         let cpu = crate::smp::current_cpu_index();
 
-        let entry = TimerEntry {
-            expiry_ns,
-            callback,
-            arg,
-            id,
-            interval_ns,
-        };
-
         let mut state = CPU_TIMERS[cpu].lock();
 
         // Soft threshold: past this the queue is deeper than any healthy
         // workload needs, which means something is arming timers it never
         // cancels.  Say so, but keep accepting — refusing here would break the
         // caller, and the caller is the victim, not the culprit.
-        if state.timers.len() == MAX_TIMERS_PER_CPU {
+        if state.len() == MAX_TIMERS_PER_CPU {
             over_soft_limit = true;
         }
 
@@ -613,13 +930,38 @@ fn schedule_absolute(
         // caller that is actually asking, and the caller can at least be
         // diagnosed from the message below.  See `known-issues.md` →
         // `BUG-HRTIMER-EVICTS-AN-ARMED-TIMER`.
-        if state.timers.len() >= MAX_TIMERS_HARD_CEILING {
+        if state.len() >= MAX_TIMERS_HARD_CEILING {
             refused = true;
             return;
         }
 
-        insert_sorted(&mut state.timers, entry);
+        let Some(slot_idx) = state.alloc_slot(TimerSlot {
+            callback,
+            arg,
+            interval_ns,
+            id,
+            // Overwritten by `alloc_slot`, which owns these three fields.
+            generation: 0,
+            heap_pos: NIL,
+            next_free: NIL,
+        }) else {
+            // The slab could not grow (allocation failure, or 2^32 slots).
+            // Treat it exactly as the hard ceiling: refuse loudly rather than
+            // hand back a handle for a timer that will never fire.
+            refused = true;
+            return;
+        };
+        sched_generation = state
+            .slots
+            .get(slot_idx as usize)
+            .map_or(0, |s| s.generation);
+        state.heap_push(HeapNode {
+            expiry_ns,
+            id,
+            slot: slot_idx,
+        });
         sched_cpu = cpu;
+        sched_slot = slot_idx;
         TOTAL_SCHEDULED.fetch_add(1, Ordering::Relaxed);
     });
 
@@ -654,6 +996,8 @@ fn schedule_absolute(
         return HrTimerHandle {
             id,
             cpu: usize::MAX,
+            slot: NIL,
+            generation: 0,
         };
     }
 
@@ -668,6 +1012,8 @@ fn schedule_absolute(
     HrTimerHandle {
         id,
         cpu: sched_cpu,
+        slot: sched_slot,
+        generation: sched_generation,
     }
 }
 
@@ -865,7 +1211,243 @@ pub fn self_test() {
     });
     serial_println!("[hrtimer]   Repeating timer: OK (fired once, re-scheduled, cancelled)");
 
-    // Test 6: Statistics.
+    // -----------------------------------------------------------------
+    // Tests 6-9: the heap itself.
+    //
+    // Tests 1-5 above all passed against the sorted `Vec` this replaced, and
+    // would pass against almost any container — none of them can observe a
+    // *mis-ordering*, because the only multi-timer case (Test 4) sums its
+    // arguments, and a sum is order-independent.  A binary heap fails
+    // differently from a sorted list: it fails by dispatching in the wrong
+    // order, and by corrupting itself when an element is removed from the
+    // middle (which `cancel` does).  These four tests exist for exactly those
+    // two failure modes.
+    //
+    // All of them run under `without_interrupts` for the same reason Tests 2-5
+    // do: the APIC ISR also drains this queue, and a tick landing mid-check
+    // would make the drain non-deterministic.  Ambient timers armed by
+    // userspace daemons are still present in the heap and may be interleaved
+    // with ours; that is harmless, because `seq_cb` only ever records its own
+    // arguments and the assertions are about the relative order of ours.
+    // -----------------------------------------------------------------
+    static ORDER: [AtomicU64; 32] = [const { AtomicU64::new(0) }; 32];
+    static ORDER_N: AtomicUsize = AtomicUsize::new(0);
+    fn seq_cb(arg: u64) {
+        let i = ORDER_N.fetch_add(1, Ordering::Relaxed);
+        if let Some(cell) = ORDER.get(i) {
+            cell.store(arg, Ordering::Relaxed);
+        }
+    }
+    /// Drain until `want` of our timers have fired, or we run out of patience.
+    /// `process_expired` fires at most 16 per call and ambient timers share
+    /// that budget, so a single call is not enough to be sure.
+    fn drain_for(want: usize) -> usize {
+        for _ in 0..16 {
+            if ORDER_N.load(Ordering::Relaxed) >= want {
+                break;
+            }
+            process_expired();
+        }
+        ORDER_N.load(Ordering::Relaxed)
+    }
+
+    // Test 6: dispatch order is deadline order, whatever the arrival order.
+    //
+    // Twelve distinct deadlines, all already in the past so one drain takes
+    // them all, armed in a deliberately adversarial permutation: it starts
+    // with the largest (so the very first insert must later sift all the way
+    // down), ends with the smallest, and reverses two runs in the middle.
+    // Arming in ascending order would exercise no sift at all, which is how a
+    // broken `sift_up` survives a naive test.
+    const PERM: [u64; 12] = [11, 3, 7, 0, 9, 1, 10, 4, 8, 2, 6, 5];
+    crate::cpu::without_interrupts(|| {
+        process_expired(); // Clear ambient expiries so they do not eat the budget.
+        ORDER_N.store(0, Ordering::Relaxed);
+        let base = now_ns().saturating_sub(1_000_000);
+        for &k in &PERM {
+            // arg == k == rank, so the fire log should read 0,1,2,...,11.
+            let _h = schedule_absolute(base.saturating_add(k), 0, seq_cb, k);
+        }
+        let n = drain_for(PERM.len());
+        assert_eq!(
+            n,
+            PERM.len(),
+            "heap drained {} of {} timers — some never fired",
+            n,
+            PERM.len()
+        );
+        for (i, cell) in ORDER.iter().take(PERM.len()).enumerate() {
+            let got = cell.load(Ordering::Relaxed);
+            assert_eq!(
+                got, i as u64,
+                "timers fired out of deadline order: position {} holds {}, expected {}",
+                i, got, i
+            );
+        }
+    });
+    serial_println!("[hrtimer]   Heap order: OK (12 timers armed shuffled, fired sorted)");
+
+    // Test 7: equal deadlines fire in arming order (FIFO).
+    //
+    // A binary heap is not a stable structure, so this is a property the
+    // `(expiry, id)` key buys deliberately rather than one that comes for
+    // free.  It matters: without it, a timer sharing its deadline with a
+    // steady stream of new arrivals can be passed over indefinitely.
+    crate::cpu::without_interrupts(|| {
+        process_expired();
+        ORDER_N.store(0, Ordering::Relaxed);
+        let same = now_ns().saturating_sub(1_000_000);
+        for k in 0..6u64 {
+            let _h = schedule_absolute(same, 0, seq_cb, k);
+        }
+        let n = drain_for(6);
+        assert_eq!(n, 6, "tie-break test drained {} of 6", n);
+        for (i, cell) in ORDER.iter().take(6).enumerate() {
+            let got = cell.load(Ordering::Relaxed);
+            assert_eq!(
+                got, i as u64,
+                "equal deadlines did not fire FIFO: position {} holds {}, expected {}",
+                i, got, i
+            );
+        }
+    });
+    serial_println!("[hrtimer]   Equal-deadline FIFO: OK (6 timers, one deadline)");
+
+    // Test 8: cancelling from the middle leaves the heap intact.
+    //
+    // This is the test the whole rewrite hangs on.  `heap_remove_at` moves the
+    // tail node into the hole and must then sift it **both** ways; doing only
+    // the usual sift-down leaves a heap that still looks plausible and still
+    // pops *a* minimum, just not always the right one.  Cancelling a scattered
+    // subset and then demanding that the survivors come out sorted is what
+    // makes that visible.  Nine armed, four cancelled from positions that are
+    // neither the root nor the tail.
+    crate::cpu::without_interrupts(|| {
+        process_expired();
+        ORDER_N.store(0, Ordering::Relaxed);
+        let base = now_ns().saturating_sub(1_000_000);
+        // Arm 0..9 with shuffled deadlines, keeping every handle.
+        const SHUF: [u64; 9] = [4, 0, 8, 2, 6, 1, 7, 3, 5];
+        let mut handles = [None; 9];
+        for (slot, &k) in handles.iter_mut().zip(SHUF.iter()) {
+            *slot = Some(schedule_absolute(base.saturating_add(k), 0, seq_cb, k));
+        }
+        // Cancel ranks 1, 3, 6 and 7 — interior deadlines, and by construction
+        // they sit at assorted depths rather than all at the fringe.
+        let mut cancelled = 0usize;
+        for (slot, &k) in handles.iter().zip(SHUF.iter()) {
+            if matches!(k, 1 | 3 | 6 | 7) {
+                if let Some(h) = *slot {
+                    assert!(cancel(h), "cancel() refused a live handle for rank {}", k);
+                    cancelled = cancelled.saturating_add(1);
+                }
+            }
+        }
+        assert_eq!(cancelled, 4, "expected to cancel 4, cancelled {}", cancelled);
+        let n = drain_for(5);
+        assert_eq!(
+            n, 5,
+            "after cancelling 4 of 9, {} fired — expected exactly 5",
+            n
+        );
+        // The survivors, in deadline order.
+        const SURVIVORS: [u64; 5] = [0, 2, 4, 5, 8];
+        for (i, cell) in ORDER.iter().take(5).enumerate() {
+            let got = cell.load(Ordering::Relaxed);
+            let want = SURVIVORS.get(i).copied().unwrap_or(u64::MAX);
+            assert_eq!(
+                got, want,
+                "heap corrupted by interior cancel: position {} holds {}, expected {}",
+                i, got, want
+            );
+        }
+    });
+    serial_println!("[hrtimer]   Interior cancel: OK (9 armed, 4 cancelled, 5 fired sorted)");
+
+    // Test 9: a handle to a fired timer cannot cancel its successor.
+    //
+    // Slots are recycled, so the handle of a one-shot that has already fired
+    // names a slot that may now belong to somebody else.  The generation
+    // counter is the only thing standing between that and a silently stolen
+    // wakeup — the exact shape of `BUG-HRTIMER-EVICTS-AN-ARMED-TIMER`, which
+    // is why this is asserted rather than assumed.
+    crate::cpu::without_interrupts(|| {
+        process_expired();
+        ORDER_N.store(0, Ordering::Relaxed);
+        // Arm and fire a one-shot, freeing its slot.
+        let stale = schedule_absolute(now_ns().saturating_sub(1000), 0, seq_cb, 77);
+        let n = drain_for(1);
+        assert_eq!(n, 1, "stale-handle setup: victim timer did not fire");
+        // Whatever we arm next is very likely handed the slot just freed.
+        let victim = schedule_absolute(now_ns().saturating_add(60_000_000_000), 0, seq_cb, 88);
+        let base_pending = pending_count();
+        assert!(
+            !cancel(stale),
+            "a handle for an already-fired timer reported a successful cancel"
+        );
+        assert_eq!(
+            pending_count(),
+            base_pending,
+            "the stale handle removed something — the generation check did not hold"
+        );
+        assert!(cancel(victim), "the live handle could no longer cancel");
+    });
+    serial_println!("[hrtimer]   Stale-handle rejection: OK (recycled slot not stolen)");
+
+    // Test 10: a repeating timer's re-arms are counted as armings.
+    //
+    // This is the accounting property that the tripwire in Test 11 rests on,
+    // and until 2026-08-21 it did not hold: `process_expired` re-armed a
+    // repeating timer without incrementing `TOTAL_SCHEDULED`, so `fired`
+    // outran `scheduled` without bound (boot logs read `scheduled=388,
+    // fired=75833`) and the tripwire's `saturating_sub` chain floored at 0
+    // forever.  A guard that reads 0 on a healthy boot *and* on a broken one
+    // is not a guard — so pin the invariant that keeps it alive, rather than
+    // trusting the next reader of `process_expired` to notice.
+    static ACCT_COUNT: AtomicU64 = AtomicU64::new(0);
+    fn acct_cb(_arg: u64) {
+        ACCT_COUNT.fetch_add(1, Ordering::Relaxed);
+    }
+    const ACCT_FIRES: u64 = 5;
+    ACCT_COUNT.store(0, Ordering::Relaxed);
+    crate::cpu::without_interrupts(|| {
+        let s0 = scheduled_count();
+        // 1us interval, so five firings cost ~5us of spinning with interrupts
+        // off — not the ~5ms that Test 5's 1ms interval would cost.
+        let h = schedule_repeating(0, 1_000, acct_cb, 0);
+        // Bounded so a broken re-arm path cannot hang the boot: the loop exits
+        // as soon as the count is reached, and 100k drains is orders of
+        // magnitude more headroom than ~5us of deadlines needs.
+        for _ in 0..100_000u32 {
+            if ACCT_COUNT.load(Ordering::Relaxed) >= ACCT_FIRES {
+                break;
+            }
+            process_expired();
+        }
+        let fires = ACCT_COUNT.load(Ordering::Relaxed);
+        cancel(h);
+        assert!(
+            fires >= ACCT_FIRES,
+            "repeating timer stopped re-arming after {fires} firing(s)"
+        );
+        // One arming for the initial `schedule_repeating`, plus one per re-arm.
+        // Ambient timers can only push this delta *up*, never down, so `>=` is
+        // exact in the direction that matters: with the re-arm counter missing
+        // the delta is 1, and this fails.
+        let delta = scheduled_count().saturating_sub(s0);
+        assert!(
+            delta >= fires.saturating_add(1),
+            "`scheduled` grew by {delta} across {fires} firings of a repeating timer — \
+             re-arms are not being counted as armings, which silently disables the \
+             accounting tripwire below"
+        );
+    });
+    serial_println!(
+        "[hrtimer]   Re-arm accounting: OK ({}+ re-arms counted as armings)",
+        ACCT_FIRES
+    );
+
+    // Test 11: Statistics.
     let sched = scheduled_count();
     let cancelled_n = TOTAL_CANCELLED.load(Ordering::Relaxed);
     let fired_n = fired_count();
@@ -875,6 +1457,14 @@ pub fn self_test() {
     // were armed and then neither fired, were cancelled, nor are still
     // waiting.  Under the old eviction policy that number was the tally of
     // silently destroyed wakeups; it must now be 0.
+    //
+    // This only means anything because `scheduled` counts a repeating timer's
+    // re-arms as well as its first arming (see `process_expired`).  It did not
+    // until 2026-08-21, and until then the subtraction was dead: `fired` grew
+    // once per tick per repeating timer while `scheduled` stood still, so the
+    // `saturating_sub` floored the result at 0 on every boot regardless of how
+    // many wakeups were being lost.  If you ever "simplify" the re-arm counter
+    // away, delete this check too rather than leave a tripwire that cannot fire.
     let unaccounted = sched
         .saturating_sub(fired_n)
         .saturating_sub(cancelled_n)

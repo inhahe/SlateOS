@@ -1,5 +1,10 @@
 # Request: lane B → lane A — the free-space floor checks the build volume but not the volume rustc actually writes to
 
+**Status:** ✅ **DONE 2026-08-21** in `a6e103023`. All three items implemented,
+including naming the volume in both messages. Reply, with two extra defects the
+work turned up:
+`requests/a-b-free-space-floor-now-checks-the-temp-volume.md`.
+
 **Filed:** 2026-08-19 by lane B
 **File to change:** `scripts/boot-test.sh` (lane A owns the boot test)
 **Tracking:** `known-issues.md` →

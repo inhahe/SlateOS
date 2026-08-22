@@ -194,6 +194,22 @@ pub struct DrmSetClientCap {
     pub value: u64,
 }
 
+/// `struct drm_gem_close` (GEM_CLOSE) — release a buffer-object handle.
+/// 8 bytes: `__u32 handle` + `__u32 pad`.
+///
+/// This is how a DRM client destroys *any* buffer object it created through a
+/// driver-specific ioctl — there is deliberately no per-driver "destroy"
+/// counterpart to `DRM_IOCTL_VIRTGPU_RESOURCE_CREATE`, because in Linux every
+/// such object is a GEM object and GEM handles are closed here.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct DrmGemClose {
+    /// Handle of the object to release.
+    pub handle: u32,
+    /// Padding to 8 bytes (must be 0).
+    pub pad: u32,
+}
+
 /// `struct drm_set_version` (SET_VERSION) — negotiate the DRM
 /// interface/driver version with the kernel.  16 bytes: four `int`s.
 #[repr(C)]
@@ -224,6 +240,9 @@ pub const DRM_IOCTL_GET_UNIQUE: u32 = iowr::<DrmUnique>(0x01);
 pub const DRM_IOCTL_GET_MAGIC: u32 = ior::<DrmAuth>(0x02);
 /// `DRM_IOCTL_SET_VERSION` — negotiate the interface/driver version.
 pub const DRM_IOCTL_SET_VERSION: u32 = iowr::<DrmSetVersion>(0x07);
+/// `DRM_IOCTL_GEM_CLOSE` — release a buffer-object handle.  `DRM_RENDER_ALLOW`
+/// in Linux, so it is valid on a render node as well as a primary node.
+pub const DRM_IOCTL_GEM_CLOSE: u32 = iow::<DrmGemClose>(0x09);
 /// `DRM_IOCTL_GET_CAP` — query a device capability value.
 pub const DRM_IOCTL_GET_CAP: u32 = iowr::<DrmGetCap>(0x0c);
 /// `DRM_IOCTL_SET_CLIENT_CAP` — opt into a client-side behaviour change.
@@ -1067,6 +1086,11 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         DRM_IOCTL_SET_VERSION == 0xC010_6407,
         "DRM_IOCTL_SET_VERSION enc {:#x}",
         DRM_IOCTL_SET_VERSION
+    );
+    check!(
+        DRM_IOCTL_GEM_CLOSE == 0x4008_6409,
+        "DRM_IOCTL_GEM_CLOSE enc {:#x}",
+        DRM_IOCTL_GEM_CLOSE
     );
     check!(
         DRM_IOCTL_GET_CAP == 0xC010_640C,

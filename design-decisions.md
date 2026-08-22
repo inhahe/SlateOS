@@ -31456,6 +31456,158 @@ the arrangement in which the two directions get to disagree without any test
 noticing. `a_surface_at_the_screens_origin_is_translated_the_same_way_as_any_
 other` exists to keep the branch from coming back.
 
+## §268 — A virtio-gpu render resource is not a GEM object, because the two disagree about how wide a row is
+
+**Date:** 2026-08-21
+**Decided by:** Claude (autonomous)
+
+**In short:** The graphics card can hold images for a program to draw into.
+There were already two ways to ask for one — the old "dumb buffer" path and the
+newer "render resource" path that lane C's compositor wants — and it was
+tempting to make the second reuse the first's machinery, since that would have
+supplied memory allocation, lifetime and `mmap` for free. It cannot: the two
+disagree about how many bytes a row of pixels occupies, and the disagreement is
+silent. An image whose width is not a multiple of 16 pixels would come out
+skewed — each row shifted a little further sideways than the last — with no
+error anywhere. So render resources get their own allocation and their own
+table, and only the *`mmap` token space* is shared.
+
+### The concrete conflict
+
+`PixelFormat::pitch(width)` — the dumb-buffer/GEM sizing function — pads each
+row out to a 64-byte boundary, which is standard practice and what the display
+hardware wants. So `Xrgb8888.pitch(100)` is **448**, not 400.
+
+`VIRTIO_GPU_CMD_TRANSFER_TO_HOST_2D`, the command that ships a render
+resource's pixels to the host, **carries no stride field at all**. The host
+computes the row start itself, as `width * bytes_per_pixel`. There is nowhere to
+tell it about padding.
+
+A GEM-backed render resource would therefore hand the host a buffer laid out at
+448 bytes per row while the host read it at 400. Every row after the first would
+be misaligned by a growing multiple of 48 bytes. Nothing would report an error:
+the transfer succeeds, the sizes are plausible, the picture is wrong. Widths
+that *are* a multiple of 16 (which includes every screen resolution anyone would
+test with first) work perfectly, so this would have survived a long time.
+
+### What was given up
+
+Real duplication. `GemObject` already has: frame allocation and freeing,
+per-object refcounting, a handle table, `mmap` offset issuance, and teardown on
+process exit. The resource manager reimplements the first four. That is roughly
+150 lines that exist twice, and a second lifetime scheme to keep correct.
+
+The alternative — teach `TRANSFER_TO_HOST_2D` to un-pad, by issuing one transfer
+per row — was considered and rejected on cost: a 1080p resource would become
+1080 separate device commands, each with its own descriptor and response, on
+what is meant to be the fast path.
+
+### What is shared, and why that part is safe
+
+The **`mmap` fake-offset space** is shared, via an explicit `Mappable` enum with
+a `Gem` and a `VirtgpuResource` variant. The tempting alternative was a second
+parallel `offset_for_virtgpu`/`lookup_virtgpu` pair, which would have been a
+smaller diff and touched no existing call site. Rejected: `mmap`'s offset
+argument is one number space as far as userspace is concerned, and two
+allocators handing out numbers from it independently will eventually hand out
+the same one — at which point an `mmap` returns *somebody else's buffer*. The
+enum makes that unrepresentable, and `dumb_mmap`'s self-test now asserts that a
+GEM handle and a resource id with the same numeric value do not alias.
+
+### If this turns out wrong
+
+The signal would be a second consumer wanting a render resource that *is* also a
+scanout buffer (a compositor mapping one image both as a render target and as
+something the display controller reads). That needs one object with two layouts,
+which neither design gives you. The fix then is not to merge the two paths but
+to add an explicit re-layout step between them — which is cheap to add later and
+would have been invisible if the layouts had been silently conflated now.
+
+## §269 — Three separate capability types for the clock, reserved ports and rlimits — and why `mlock` gets its own right bit
+
+**Date:** 2026-08-21
+**Decided by:** Claude (autonomous). The surrounding policy — that privileged
+POSIX operations are *projected* from real capabilities rather than refused
+outright — was the operator's (Q48 answer B); what is decided here is only the
+shape of the objects that projection reads.
+
+**In short:** Linux programs ask for a handful of powers that a plain user is
+not supposed to have: setting the wall clock, listening on a low-numbered
+network port such as 80, raising their own resource limits, and pinning memory
+so it can never be swapped out. Our system does not have a "root" that simply
+owns all of those; it has tokens, and you can only do a thing if you hold the
+token for it. Up to now there were no tokens for these four powers, so the
+translation layer had nothing to check and had to just say no. This adds three
+token types (clock, reserved port, resource limits) and one extra permission
+bit (may pin memory), and grants them to the first process at boot so it has
+something to hand down.
+
+### Why three types and not one "privileged operation" type
+
+A single `PrivilegedOp` type with the specific power encoded in its
+`resource_id` would have been a smaller change, and the numbers would have been
+easier to extend later without touching the enum. It was rejected because the
+`resource_id` field is the only place a capability can be *narrowed*, and these
+three narrow along completely different axes:
+
+| Type | What `resource_id` means | The narrowing that matters |
+|---|---|---|
+| `SystemClock` | reserved, always 0 | none — there is one clock |
+| `PrivilegedPort` | a port number, or 0 for all | "may bind 443, and nothing else" |
+| `ResourceLimit` | a target PID, or 0 for all | "may raise its own limits, not other processes'" |
+
+Collapsing them means one field carrying three incompatible meanings, and every
+check site having to know which meaning applies before it can read the number.
+The narrowings above are the entire point of having capabilities here rather
+than a boolean; a design that makes them awkward to express is the wrong one
+even though it has fewer moving parts.
+
+Port 0 is safe as the class-wide wildcard because port 0 is "pick one for me" in
+the sockets API and is never itself a bindable address, so the two readings
+cannot collide.
+
+### Why `mlock` is its own right bit rather than `WRITE`
+
+`ResourceLimit` with `Rights::WRITE` means "may raise a limit". Locking memory
+past the quota looks superficially like the same thing — both defeat a bound the
+system set — so folding it into `WRITE` was tempting and would have cost no new
+bit.
+
+Rejected because the two failure modes are not comparable. Raising your own
+file-descriptor limit costs a few kilobytes of kernel bookkeeping. `mlock`ing
+past the quota takes *physical* memory permanently out of circulation for every
+other process on the machine, and that is precisely what the quota exists to
+bound. Under one bit, "this daemon may raise its own fd limit" silently also
+means "this daemon may pin all of RAM". Bit 19 (`MEMORY_LOCK`) keeps the
+expensive power separately grantable. The cost is one more bit out of 64 and one
+more thing for a grant site to remember.
+
+### The `TRANSFER` right is granted to init even though nothing reads it
+
+Lane B asked directly whether the delegation path reads `Rights::TRANSFER` at
+the grant or at the transfer. The answer, checked rather than assumed, is
+**neither: nothing in the kernel reads that bit at all today.** A child's
+capabilities come from an explicit list its spawner builds
+(`SpawnOptions::capabilities`), not from narrowing the parent's table, so there
+is no delegation step for the bit to gate.
+
+It is granted anyway. Init's whole role for these three objects is to hand
+narrowed copies down — a time daemon gets the clock, a web server gets its one
+port — so when that path is built, init must already be permitted to use it. The
+alternative is a delegation that fails for PID 1 specifically and gets debugged
+from scratch by whoever adds it. The grant site says plainly in a comment that
+the bit is currently inert, so nobody reads enforcement into it that does not
+exist; if `TRANSFER` ever acquires a *different* meaning, that comment is the
+thing that must be revisited.
+
+### The ABI pin was widened, not just extended
+
+`test_cap_entry_info_abi` pinned the discriminants of the first and a middle
+variant. It now also pins the **last** one (`ResourceLimit = 29`), because
+appending a variant without updating the pin is exactly the change that would
+otherwise go unnoticed — and lane B mirrors these numbers by hand in
+`posix/src/sys_capability.rs`, where no compiler ties the two copies together.
+
 ---
 
 ## §348 — A libc function that gnulib also defines must own its archive member, and the guard now asserts that instead of guessing which callers matter
@@ -31891,6 +32043,7 @@ action encoding is a deliberate constraint that adding one has to reckon with.
 `gui/remote`'s control encoding. At that point either wire it up or delete it —
 the one outcome to avoid is a third year of tested, unreachable geometry.
 
+---
 
 ## §350 — The clock, the privileged ports and the resource limits each get a real kernel object, rather than staying permanently denied
 
@@ -32793,3 +32946,2206 @@ tell a character test from a byte test.
 **Revisit if:** glibc's table ever diverges from this rule on an *assigned*
 character — `scripts/printable-audit.py` is what would report it, and the answer
 then would be to look at what moved before changing anything.
+## 507. The zone *shapes* move into the protocol crate; the shell keeps only the chooser, and pulls its work area on use
+
+**Date:** 2026-08-21
+**Decided by:** Claude (autonomous) — lane C
+
+**In short:** The desktop has a "snap layouts" feature — press Super+Z and a
+grid of rectangles appears over the screen; click one and the window you were
+using jumps to fill it. Until now the grid was a picture and nothing more: the
+shell drew it, worked out which rectangle you clicked, and then had nowhere to
+send that. It cannot move windows — only the compositor (the program that
+actually owns the screen) can. The question was what the shell should send.
+The answer taken is that it sends a *name* ("zone 3 of the three-column
+layout"), never a rectangle, and that the table saying what zone 3 *is* lives
+in the crate both programs already share, so neither can hold a different idea
+of it. Two smaller calls come with it: the layout menu is not shown until you
+reach for it, and the shell re-measures the screen at every gesture rather than
+being told when it changes.
+
+### The decision that `snap.rs`'s module doc points at: where the shapes live
+
+`SnapLayoutPreset` and the `SnapZone`s it builds over a `WorkArea` moved from
+`gui/desktop/src/snap.rs` into `gui/remote/src/zones.rs` — the *protocol* crate
+(`guiremote`), the one that already defines every message the shell and the
+compositor exchange — and are re-exported from `snap.rs` so shell code reads
+unchanged.
+
+They had to move somewhere: a named zone means nothing unless both ends compute
+the same rectangle for it, and the two ends are two crates. The three homes
+considered:
+
+| Home | *What changes* |
+|---|---|
+| Stay in `gui/desktop` | the compositor would depend on the desktop shell to resolve a message the shell sent it — a dependency backwards through the protocol |
+| A new crate, `gui/zones` | one more crate in the workspace, whose only two users are the two that already share `guiremote` |
+| **`guiremote` (taken)** | the layout tables sit beside the wire verb that names them, and version together by construction |
+
+The deciding argument is that a zone table *is* protocol. `SnapSlot` encodes
+`(preset, index)` in one byte because `ShellControlAction`'s encoding is one
+byte per action; the index ranges that make that encoding work (`first_slot`,
+`from_index`) and the geometry the index refers to are the same fact stated
+twice, and the one place they cannot drift apart is the same file. A separate
+crate would have been defensible, but it buys isolation that nothing wants —
+neither user exists without `guiremote` — at the price of a third place to look.
+
+**Against:** `guiremote` is meant to be small, and it now carries ~500 lines of
+tiling geometry that is not, strictly, a message format. Accepted: the
+alternative is a crate that would exist only to avoid that appearance.
+
+### The layout picker is summoned, not shown with the overlay
+
+The chooser could have opened with the layout menu already up — one gesture
+instead of two. It does not, and the reason is arithmetic rather than taste.
+The picker is a 340×284 panel centred on the top of the work area; on a
+1000×800 screen the work area is 1000×760 and the panel occupies x 330..670,
+y 20..304. SixGrid's top-middle zone has its centre at (500, 190) — *inside*
+the panel. Always-up, a click aimed at the middle of a drawn zone would select
+a layout instead of placing the window, and every layout with an odd number of
+top-row zones has the same collision.
+
+*What changes:* the panel appears when the cursor reaches the top edge band
+(the existing `is_in_picker_trigger`, 16 px), and goes away when it leaves both
+band and panel. Choosing a layout does not close the chooser, because choosing
+a layout is not choosing a zone.
+
+### The work area is pulled on use, not pushed on change
+
+`SnapManager` holds the rectangle it tiles. Keeping it current could be done by
+notifying it whenever the screen or the taskbar changes, or by re-reading it at
+the top of every gesture. The second was taken.
+
+`screen_width`, `taskbar_height` and `appearance` are all *public fields* that
+anything may assign, and `work_area()` derives from all three. A push scheme is
+therefore only correct while every writer remembers to call the notifier — and
+the failure is silent: zones drawn against a screen size that no longer exists,
+with the window placed exactly where the stale rectangle says. `sync_snap_area()`
+re-seeds instead, at the top of `handle_press`, of the motion path, and of
+`toggle_zone_overlay`, guarded on inequality because `set_work_area` rebuilds
+the layout and would otherwise clear the hover on every mouse move.
+
+*Cost:* three float comparisons per gesture, against a correctness property
+that cannot be broken by adding a call site. `the_chooser_tiles_the_work_area_
+and_not_the_screen` pins it by moving the taskbar and asserting the zones
+follow at the next gesture.
+
+### If this is never revisited
+
+Nothing degrades. The one thing to watch is the reverse of the first decision:
+if a third program ever needs zone geometry *without* speaking the shell
+protocol, `guiremote` becomes the wrong home and `gui/zones` becomes right.
+Nothing on the roadmap implies such a program.
+
+---
+
+## 508. Edge-drag tiling lives in the compositor; the shell's copy was deleted rather than connected
+
+**Date:** 2026-08-21
+**Decided by:** Claude (autonomous) — lane C
+
+**In short:** Dragging a window to the edge of the screen and letting go should
+tile it — half the screen on the left or right edge, full screen at the top, a
+quarter in each corner. Two programs could have implemented that gesture: the
+shell (the taskbar-and-desktop program) or the compositor (the program that owns
+the screen and the mouse). The shell already had the arithmetic written, but no
+way to know a drag was even happening — the compositor moves windows by itself
+and tells nobody. The choice was between teaching the compositor to narrate
+every mouse move to the shell, or moving the ~200 lines of arithmetic into the
+compositor and deleting the shell's copy. The second was taken. The shell's
+version was then deleted outright rather than left in place as a spare, because
+it had already quietly gone wrong in a way nothing noticed.
+
+### Why the compositor and not the shell
+
+The gesture has three moments — the drag starts, the cursor moves, the button is
+released — and the middle one is the problem. A preview rectangle has to follow
+the cursor at pointer rate, and the user is looking directly at it. Under the
+shell design each of those frames is a round trip: compositor sees the motion →
+sends it over the socket → shell computes an intent → sends back an overlay
+request → compositor draws. Under the compositor design it is a function call
+against state the compositor already holds.
+
+| Option | *What changes* |
+|---|---|
+| Shell owns it (the original plan in `known-issues.md`) | the preview lags the cursor by one socket round trip, on the one gesture where lag is most visible; `gui/remote` grows a per-motion notification whose only consumer is this feature |
+| **Compositor owns it (taken)** | the preview tracks the cursor exactly as the dragged window does, because it is computed in the same event handler; no protocol change at all |
+
+Three facts settled it beyond the latency argument:
+
+1. **The compositor already holds everything the decision needs** — the drag
+   grab (`DragState`), the window geometry, and `display_manager.virtual_bounds()`,
+   which is the *only* place the screen arrangement is known. The shell would
+   have had to be told all three.
+2. **The rules were already shared.** Stage 1 put `edge_at` / `drop_at` /
+   `EdgeDrop` in `gui/remote/src/zones.rs` beside the `SnapSlot` table they
+   resolve against (§507's home), so "the compositor owns the gesture" does not
+   mean "the compositor owns a private copy of the rules." Either program can
+   still read them; only one acts on them.
+3. **The drop routes through the tiling that already existed** —
+   `maximize_window` and `snap_window_to_zone` — so the fixed-size-window
+   refusal, the restore-rectangle bookkeeping and the `WindowResized`
+   notification all apply to an edge drop without being restated. A shell-side
+   implementation would have sent a `ShellControlAction` that lands in the same
+   two functions anyway, one round trip later.
+
+The counter-argument, which is real: **policy in the compositor is policy the
+user cannot replace.** Swapping the shell for a different one leaves edge-drag
+behaving exactly as before. That is accepted here because the *layouts* remain
+the shell's to choose (Super+Z, §507) and only the edge gesture is fixed — and
+because a compositor that cannot answer "where does this window go" without
+asking another process is a compositor that cannot function when that process
+is not running.
+
+### Why the shell's copy was deleted rather than kept
+
+`gui/desktop/src/snap.rs` had `SnapEdge`, `detect_edge`, `edge_to_default_snap`,
+`edge_snap_hit` and `action_for_edge` — tested, public, and called by nothing.
+`known-issues.md` had argued for keeping them, on the grounds that re-deriving
+the thresholds later would be strictly worse.
+
+That argument did not survive contact with the code. **The shell's copy had
+already drifted:** `edge_to_default_snap` mapped a drop against the *top* edge
+to the **left half**, where the rules that shipped maximize. Its tests were
+green throughout, because they only asserted that the result named a zone that
+exists. So the "spare copy" was not a safety net — it was a second, wrong answer
+that the test suite endorsed, waiting for someone to wire it up.
+
+| Option | *What changes* |
+|---|---|
+| Keep it as reference | 498 lines of tested, uncallable, already-wrong code stay in the tree, and the next reader has two answers to choose between |
+| **Delete it (taken)** | one implementation, in one place, that the compositor actually runs |
+
+The replacement tests are strictly stronger for the same reason the old ones
+were weak: they compare the returned rectangle against the layout's own zone
+rather than checking that a name resolves, so the top-edge drift could not
+recur silently.
+
+### If this is never revisited
+
+Nothing degrades. The condition that would reopen it is a second shell, or a
+user-configurable edge-gesture policy — at which point the *action* (not the
+geometry) would need to become a value the shell can set, and the natural shape
+is a per-edge table the compositor reads at startup rather than a per-motion
+notification. That is a much smaller protocol addition than the one rejected
+here, and it keeps the preview local either way.
+
+## 509. A tiling drop follows the monitor under the *pointer*, not the one under the window
+
+**Date:** 2026-08-21
+**Decided by:** Claude (autonomous) — lane C
+
+**In short:** When you drag a window to the edge of a screen and let go, the
+compositor tiles it. On a desktop with two monitors it has to decide *which*
+monitor "the edge of the screen" meant. The window and the mouse pointer are not
+always on the same one — while the window is crossing the join between the two
+screens it is on both, and if you grabbed a wide window near the right-hand end
+of its title bar the window trails a long way behind your mouse. The choice was
+whether to answer from where the pointer is or from where the window is. It
+answers from the pointer, and the highlight outline you see while dragging is
+drawn from the same answer, so what you are shown is always what you get.
+
+**The situation.** `Compositor::drop_intent` runs on every mouse-move during a
+window drag. It asks `guiremote::zones::drop_at(x, y, area)` whether the pointer
+has entered one of the screen-edge bands, and if so what tiling that band means
+(maximize at the top, halves at the sides, quarters in the corners). It needs a
+`WorkArea` to ask against. Then, on mouse-up, `finish_drag` has to actually place
+the window — and it needs a work area too.
+
+Before the per-monitor fix (`known-issues.md`
+`TD-C-TILING-MEASURED-EVERY-MONITOR-AT-ONCE`) this was not a question, because
+there was exactly one work area: the union of every display. Once the work area
+became per-monitor, both "which monitor" and "does the release re-decide"
+became real questions with different answers.
+
+**Decision 1 — the pointer's monitor, not the window's.**
+
+| Option | *What changes:* |
+|---|---|
+| **The pointer's monitor** (chosen) | dragging a window into the top band of your second monitor maximizes it on the second monitor, whatever the window is currently overlapping |
+| The window's monitor (largest intersection) | the same gesture can maximize it back onto the *first* monitor — the one you just dragged it off — because the window's body has not caught up with your mouse |
+
+The pointer wins for one reason: the edge band that fired is a band *of a
+specific monitor*, and the pointer is the thing that entered it. Choosing the
+window's monitor means the gesture's trigger and the gesture's effect are read
+off two different objects, which is exactly how a user ends up watching a
+highlight on screen two and getting a window on screen one.
+
+The two answers coincide for the ordinary case — a move drag carries the window
+with the pointer — which is precisely why this was worth pinning down with a
+test rather than leaving to whichever lookup a future edit happened to reach
+for. They diverge in two configurations, both reachable without trying:
+
+- **At the seam.** A window crossing the join is on both monitors, and the one
+  holding the larger part is not the one being aimed at. Covered by
+  `the_interior_seam_is_two_edges_and_not_a_middle`.
+- **With a large grab offset.** Grab a 900 px window two-thirds along its title
+  bar and it sits ~600 px to the left of the pointer for the whole drag; the
+  pointer can be well inside monitor two's top band while the window is still
+  wholly on monitor one. Covered by
+  `a_drop_tiles_the_monitor_the_pointer_is_over_even_when_the_window_is_not`.
+
+**Decision 2 — the work area travels with the intent instead of being looked up
+twice.**
+
+| Option | *What changes:* |
+|---|---|
+| **`DropIntent` carries the `WorkArea`** (chosen) | the release places the window in the identical rectangle the outline was drawn in — it is not possible to write a version where they differ |
+| Re-resolve at release from the pointer | the same rectangle in practice, but the guarantee is an invariant two call sites must agree on rather than a fact about the type |
+| Re-resolve at release from the window | the bug decision 1 rejects, re-entering by the back door |
+
+Carrying the area costs one `WorkArea` (four floats) in a struct that already
+exists and lives for the length of a drag. In exchange, "the preview does not
+lie" stops being something a test checks and becomes something the code cannot
+express otherwise. That is the whole argument, and it is the reason
+`maximize_window` and `snap_window_to_zone` were split into public forms (which
+resolve the window's monitor — right for a keyboard shortcut or a menu item,
+where there is no pointer gesture to speak of) and private `_within` forms
+taking an explicit area, which the drop uses.
+
+The third option is not hypothetical: `finish_drag` originally called the public
+`maximize_window`, and the reintroduction sweep found that reverting to it was
+caught by **no test at all** until the large-grab-offset fixture above was
+written. A guarantee no test can fail is not a guarantee.
+
+**Cost accepted.** There is one arguable case on the other side: a user who
+drags a window mostly onto monitor two but whose pointer is still, at the moment
+of release, back over the seam on monitor one gets monitor one. That is correct
+under decision 1 and might momentarily surprise. It is also self-correcting —
+the preview outline is showing monitor one at that instant, so the user sees the
+answer before committing to it — which is exactly the property decision 2 buys.
+
+**If this is never revisited.** Nothing degrades. The reopening condition is a
+tiling gesture that is *not* pointer-driven — a keyboard "snap left" that acts
+on a window the pointer is nowhere near, or a touch/pen drag where the contact
+point and the intended target differ by design. Those want the public forms
+(window's monitor) and already have them; what would need rethinking is only a
+gesture that has a pointer *and* wants to ignore it, which no current input path
+does.
+
+## 510. A panel reserves screen edge space by naming its own window, and a greedy claim is clamped rather than refused
+
+**Date:** 2026-08-21
+**Decided by:** Claude (autonomous) — lane C
+
+**In short:** A taskbar needs a way to tell the compositor "keep the bottom 40
+pixels of this screen for me, and stop tiled windows from filling into it."
+Without that, every window you maximize or snap slides its bottom edge under the
+bar. The question was how the taskbar should say *which screen* it means, and
+what should happen when a program asks for more of the screen than it ought to
+have. The answers chosen: it names the screen by naming its own window (whatever
+screen that window is on is the screen it means), and an excessive request is
+quietly cut down to a third of the screen instead of being refused.
+
+### The problem
+
+`TD-C-COMPOSITOR-TILES-UNDER-THE-TASKBAR`. Every tiling route in the compositor
+divided the whole monitor, including the strip a panel occupies. There was no
+protocol for a client to reserve that strip — the standing art is X11's
+`_NET_WM_STRUT_PARTIAL` and Wayland's `zwlr_layer_shell` exclusive zone, and
+`gui/remote` had neither.
+
+### Decision 1 — the wlr exclusive zone shape, not `_NET_WM_STRUT_PARTIAL`
+
+| | `_NET_WM_STRUT_PARTIAL` (X11) | exclusive zone (wlr) — **chosen** |
+|---|---|---|
+| Shape | twelve numbers: four thicknesses plus a start and an end offset for each | one number: a thickness, on a surface already attached to an output |
+| Naming the output | offsets are measured along the *virtual desktop*, so the output is implied by arithmetic | the surface is on an output; nothing to imply |
+| Two panels on one edge | side-by-side spans, each declaring the segment it occupies | thicknesses add |
+| *What changes:* | a panel could claim "the left 300 px of the bottom edge" and leave the rest usable | a panel claims a full-width band; two panels on one edge stack |
+
+`_NET_WM_STRUT_PARTIAL`'s extra ten numbers exist for one case: two panels
+sharing an edge side by side. That case is rare, the encoding for it is the part
+of the protocol implementations get wrong (the offsets are in virtual-desktop
+coordinates, which nearly every panel and every window manager has at some point
+disagreed about), and getting it wrong produces a work area that is subtly wrong
+rather than obviously broken. A full-width band is what a taskbar actually is.
+
+**Cost accepted:** a half-width dock on the same edge as a taskbar reserves a
+full-width band, wasting the pixels beside it. If that ever matters the answer
+is a second request that takes a span, not retrofitting spans onto this one.
+
+### Decision 2 — the reservation names the panel's own window
+
+The protocol has no output ids, so "which monitor" had to be expressed some
+other way.
+
+| Option | *What changes:* |
+|---|---|
+| Add output ids to the protocol | a panel asks for output 1's bottom edge; a stale id after a hotplug is a new failure mode, and the compositor needs a side table keyed by output to know when to drop the claim |
+| Name a rectangle | a panel describes the strip; the compositor has to work out which monitor that is anyway, and two panels can describe overlapping strips |
+| **Name the panel's own window** (chosen) | a panel asks for the bottom edge "of the screen I am on"; the claim lives on the window |
+
+Naming the window answers three questions with one field. *Which monitor:* the
+one the window most overlaps, via the same `work_bounds_for` every other path
+uses, so tiling and reserving can never disagree about where a pixel is. *Who
+may ask:* the existing `link.resolve(window)` ownership check, unchanged. *For
+how long:* the window's lifetime — a panel that crashes cannot leave a permanent
+strip carved out of the desktop, because destroying the window destroys the
+claim. A side table would have needed explicit cleanup on destroy, on hide, on
+move, and on hotplug: four places to forget.
+
+**Cost accepted:** a panel must have a window before it can reserve, which rules
+out a "reserve space first, map into it second" startup order. Panels do not
+work that way — they know their own height before they know anything about the
+screen.
+
+### Decision 3 — a greedy claim is clamped to a third per edge, not refused
+
+| Option | *What changes:* |
+|---|---|
+| Refuse a claim over the threshold | a panel that mismeasured its height gets an error it probably does not handle, and reserves nothing — so it draws over tiled windows instead |
+| **Clamp to `MAX_RESERVED_FRACTION` = 1/3** (chosen) | the same panel gets a third of the screen and an answer that says so; the desktop is cramped but usable and the panel can be seen and fixed |
+| No bound at all | a client asking for the full height leaves a zero work area: every tiled window collapses to nothing, with no visible cause and no window left to fix it from |
+
+The realistic failure this guards against is not malice but arithmetic — a font
+that measured larger than expected, a scale factor applied twice. Clamping keeps
+the machine usable in that case; refusing does not, because the client that got
+the number wrong is also the client that will not handle the error.
+
+A third **per edge** rather than a bound on the total, so that two opposing
+panels can take two thirds between them and a third always survives: one rule
+applied four times, with the total following from it rather than being a second
+rule to keep consistent.
+
+### Decision 4 — zero is the release, and the reply carries the work area
+
+`size == 0` releases the reservation. There is deliberately no separate release
+request: a panel has one code path for "how much do I need" (it sends the
+number, which is sometimes zero) and the compositor has one place to re-tile
+from. A second request would have been a second place for the two to fall out of
+step, and the state it would manage — "reserved nothing" — is already
+representable.
+
+The reply is `WorkArea`, not `Ok`. A panel needs the resulting rectangle to
+place itself, and after decision 3 the granted amount need not be the requested
+amount. Answering with the area also makes the honest thing the easy thing: the
+area accounts for *other* panels on the same monitor, which the caller could not
+have derived from its own request. A follow-up query instead of a reply would be
+answerable differently by an intervening hotplug.
+
+### Decision 5 — a hidden or minimized panel reserves nothing
+
+A strip is kept clear so that what sits in it stays visible. Nothing is sitting
+in it while the panel is off screen, so holding the strip would shrink the
+desktop with no visible cause — precisely the confusing failure decision 3
+exists to bound. An auto-hiding taskbar therefore gets the tiling behaviour it
+wants for free: hide the window, the desktop grows.
+
+**Cost accepted:** a panel that hides and shows rapidly re-tiles every tiled
+window on its monitor each time. Re-tiling is arithmetic over a short list, and
+the alternative — a hysteresis timer — is state that can be wrong.
+
+### If this is never revisited
+
+The shape that would force a rethink is a panel that is **not** a full-width
+band on **one** monitor: a dock spanning two screens, or two docks sharing an
+edge side by side. Both are expressible as extensions (a span-taking request; a
+claim naming several windows) rather than as a change to this one, because the
+thickness-per-edge model composes by addition and addition does not have to be
+undone to be extended.
+
+## 511. The compositor's scanout is split in three, so that the two-thirds that can be wrong is testable on a machine with no graphics card
+
+**Date:** 2026-08-21
+**Decided by:** Claude (autonomous)
+
+**In short:** The compositor can now put pixels on a real screen. Talking to a
+graphics card means sending it several dozen precisely-shaped requests in a
+precise order, and almost every way to get that wrong produces a black screen
+rather than an error message. None of it can be run on the Windows machine this
+tree is developed on, so the obvious way to write it — one file of `unsafe` code
+that talks to the card — would have been a few hundred lines that nobody could
+execute until SlateOS booted on hardware. It is instead split into a part that
+knows the request *shapes*, a part that knows the *conversation*, and a
+fifty-line part that actually calls the kernel. The first two run here, against
+a fake card, and are covered by 57 tests. Only the third is unrunnable.
+
+### What was decided
+
+`gui/compositor/src/present/drm.rs` and its two submodules implement `Present`
+for SlateOS by driving the kernel's Linux-compatible DRM/KMS ioctls. Four
+decisions inside it had real alternatives.
+
+**(a) The wire structs are hand-written byte encoders, not `#[repr(C)]`
+structs.** `uapi.rs` builds each ioctl payload with a `Writer<N>` that appends
+little-endian fields into a fixed-size array, and parses replies with a matching
+`Reader<N>`.
+
+*The alternative* is the usual one: declare `#[repr(C)] struct DrmModeCardRes {
+… }` and hand the kernel `&mut res as *mut _`. It is shorter and it is what
+every DRM binding in existence does.
+
+*Why not.* The kernel encodes `sizeof(struct)` into the ioctl request number —
+`(request >> 16) & 0x3FFF` — and refuses anything else. With `#[repr(C)]` the
+layout is the compiler's opinion, and a padding or alignment disagreement is
+discovered on hardware, as a rejected ioctl, with nothing pointing at the field
+that moved. With explicit encoders the layout is *data*, and a test asserts that
+each struct's encoded length equals the size its own request constant declares —
+so the constant proves the layout, on Windows, at `cargo test` time. That test
+found nothing, which is the point: it is now impossible for it to find something
+later without saying exactly what.
+
+The cost is real: ~930 lines of mechanical field-shuffling, and a field added in
+the wrong place in *both* the writer and the reader would be self-consistent and
+wrong. The size assertions do not catch a transposition of two same-width
+adjacent fields. That is the residual risk and it is accepted, because the
+alternative's residual risk is the same transposition plus every alignment
+question.
+
+**(b) The syscall layer is a trait with two methods, and the protocol never
+forms a pointer.** `KmsSys::ioctl(request, payload, arrays)` and
+`KmsSys::map(offset, len)` are the entire surface between the conversation and
+the machine. Everything above them is ordinary safe Rust that runs anywhere.
+
+The hard part is that DRM's enumeration ioctls carry `u64` fields holding
+*addresses of userspace arrays* the kernel fills in — so a naive trait would
+have to pass raw pointers, and a fake card cannot honour a pointer it did not
+create. The seam is `OutArray { ptr_at, buf }`: a buffer named by the *byte
+offset within the payload* of the pointer field that should point at it. The
+real implementation writes an address there; the fake matches on the offset and
+copies into the buffer directly. Only ~50 lines — the `asm!("syscall")` block,
+`open`, `close`, `mmap`, `munmap` — are `#[cfg(target_os = "linux")]`.
+
+*The alternative* was to gate the whole module on the target and test nothing.
+*Why not* is the arithmetic: of the ten defects later reintroduced to prove the
+tests, nine live above the seam. Gating the module would have left nine
+unrunnable bugs and saved the indirection of one trait.
+
+Those ~50 lines are still not *executed* anywhere, but they are compiled and
+clippy-clean under `--target x86_64-unknown-linux-gnu`, which is an installed
+rustup target — so they are checked source rather than hopeful source.
+
+**(c) The front buffer index advances only on a flip the kernel accepted, and
+`EBUSY`/`EAGAIN`/`EINTR` drop the frame instead of closing the display.**
+
+A page flip can be refused because the previous one has not retired. Treating
+that as an error would take the desktop down whenever a monitor was slow — under
+load, which is exactly when a desktop must not vanish. Treating it as success
+would be worse: the two buffers would get permanently out of step and every
+subsequent frame would be composed into the buffer currently being scanned out,
+producing visible tearing forever after one moment of contention.
+
+So a refused flip is a dropped frame and the *same* back buffer is used again.
+Any other errno — `ENODEV`, a card unbound — closes the display, and
+`Present::is_open` returns false, which stops `Server::run_with` in the same way
+a closed Win32 window does.
+
+*The alternative* is to retry the flip in a loop until it lands. *Why not:* it
+converts a contended display into a busy-wait inside the compositor's frame
+loop, which is a worse failure than the dropped frame it avoids, and the next
+composed frame is fresher than the one being retried anyway.
+
+**(d) The compositor is not constructed until the display's mode is known.**
+`main()` previously built the `Compositor` and then chose where to put its
+frames. It now binds the socket, then calls a per-platform `run()` which finds a
+display *first* and builds the compositor at whatever size that display turns
+out to be.
+
+This is forced by the hardware: the kernel implements no `SETCRTC`, so the mode
+the firmware lit at boot is the mode we get (`known-issues.md` →
+`TD-COMPOSITOR-CANNOT-CHANGE-MODE`). A compositor built at a size the display is
+not running would compose frames that cannot be shown.
+
+The visible consequence is an asymmetry in `--size`: it sets the window size
+under the Win32 harness, and on SlateOS it is *reported as ignored*, naming the
+mode the display is actually running. Printing that rather than silently
+overriding it is the decision — a flag that is quietly disobeyed is worse than
+one that explains itself, and the explanation is the only place a user would
+learn that the mode is fixed.
+
+### How this is known to work
+
+The fake card is deliberately hostile rather than accommodating. On every call
+it re-checks the payload's length against the size the request number declares,
+rejects `ADDFB2` unless the six load-bearing zero fields are zero, rejects a
+`PAGE_FLIP` naming an unknown CRTC or framebuffer, and panics outright on any
+ioctl the SlateOS kernel does not implement. It models **two** CRTCs and lists a
+*disconnected* connector first, because both of the two subtlest bugs in this
+area — reading `possible_crtcs` as a mask over CRTC ids rather than over array
+indices, and taking `connectors[0]` — are invisible against a one-CRTC card with
+one monitor.
+
+A permissive fake would let the protocol drift and still report green, which
+would make the 34 tests worse than none: they would be a reason to believe
+something untrue.
+
+Each of the 34 was then proved to be a regression test rather than a
+description, by reintroducing the defect it names — via the guarded reversible
+patcher, one at a time — and confirming a deterministic failure that names the
+test back. All ten reintroductions failed loudly; the count-clamp one aborted
+the process with a 292 GB allocation failure, which is precisely the denial of
+service the clamp exists to prevent.
+
+## 269. hrtimer uses a binary min-heap over a slot slab, not a bare `BinaryHeap` with lazy cancellation
+
+**Date:** 2026-08-21
+**Decided by:** Claude (autonomous)
+
+**In short:** Each CPU's list of pending timers ("wake me in 3 milliseconds")
+used to be kept in deadline order in a plain array, so inserting a timer or
+removing one meant shuffling every later entry along — and that shuffle happened
+with the CPU's interrupts switched off, where it delays everything on the
+machine. It is now a *heap*: a tree kept in an array, where the earliest
+deadline is always at the top and any single change touches only about a dozen
+entries instead of thousands. The choice recorded here is not "use a heap" —
+that part is obvious — but *which* heap, because the obvious one has a defect
+that shows up only under a workload that cancels timers more often than it lets
+them fire.
+
+**The obvious design, and why it was rejected.** `todo.txt` had sketched the
+textbook answer: a `BinaryHeap<Reverse<TimerEntry>>` plus **lazy cancellation**
+(cancel just records the id in a set of dead ids; when an entry is popped, look
+it up and skip it if it is dead). The reasoning was that a heap has no cheap
+remove-by-id, which is true of a *bare* heap: to remove a specific element you
+must first find it, and finding it is a linear scan — the very cost the heap was
+meant to remove.
+
+Lazy cancellation trades that away for an unbounded one. A cancelled timer stays
+in the heap until its deadline arrives, so a workload that arms a long timeout
+and cancels it early — which is what *every* successful I/O operation with a
+timeout does — accumulates dead entries at exactly the rate it succeeds. Under
+that load the heap grows without bound, the "n" in O(log n) is the count of
+mostly-dead entries, and the `MAX_TIMERS_HARD_CEILING` that exists to refuse
+rather than to silently evict starts refusing *live* timers because dead ones
+filled the queue. The failure is workload-shaped and invisible on a quiet boot,
+which is the worst combination.
+
+**What was built instead.** Timers live in a slab of slots with a free list. The
+heap holds `{expiry_ns, id, slot}` nodes, and each slot stores **its own current
+heap position**, maintained by the same swap that every sift already performs.
+So the premise "a heap has no cheap remove-by-id" is simply not true of a heap
+whose elements know where they are: cancel is an O(1) index into the slab
+followed by an O(log n) sift. No tombstones, no dead-id set, no growth.
+
+| | bare heap + lazy cancel | heap + slot slab (chosen) |
+|---|---|---|
+| cancel cost | O(1) to mark | O(1) index + O(log n) sift |
+| dead entries | grow with the cancel rate | none, ever |
+| worst-case `n` | armed + all cancelled-not-yet-expired | armed only |
+| extra memory | a set of dead ids | one `u32` per slot |
+| failure mode | ceiling refuses live timers under a cancel-heavy load | — |
+
+The cost is that the slab must be kept honest, which is where the next two
+decisions come from.
+
+**Handles carry `(slot, generation)`, and freeing a slot bumps the generation.**
+A direct index is only safe if a stale handle cannot use it. Without the
+generation, cancelling through a handle whose timer had already fired would
+evict whichever timer was later given the recycled slot — a live timer
+destroyed, its waiter left waiting forever. That is not a hypothetical: it is
+`BUG-HRTIMER-EVICTS-AN-ARMED-TIMER` from earlier the same week, arriving by a
+different route. Lazy cancellation would not have had this exposure, and that is
+the one genuine advantage it holds; a 32-bit generation per slot closes it for a
+`u32` of memory and one comparison. The handle's id is compared too, as defence
+in depth.
+
+**The ordering key is `(expiry_ns, id)`, not `expiry_ns`.** A binary heap is
+**not stable**: among elements that compare equal, which one comes out first is
+whatever the sifting happened to do. The sorted array it replaced *was* stable,
+so this is a behaviour that would have been silently lost. It matters because
+equal deadlines are common — millisecond-granularity timeouts armed in a burst
+land on the same nanosecond far more often than intuition suggests — and an
+unstable heap can pass over one such timer indefinitely as new ones sharing its
+deadline arrive. Ids are monotonic, so ordering on them second restores FIFO
+among equal deadlines at the cost of one extra comparison taken only on a tie.
+
+**`heap_remove_at` sifts both ways, and this is the subtle one.** Removing an
+interior element moves the tail into the hole. The usual case needs a sift-down.
+But the tail came from a *different branch* of the tree, so it can be smaller
+than the hole's parent and need a sift-**up** instead. Doing only the sift-down
+leaves a structure that still looks like a heap and still pops *a* minimum — just
+not always the right one, and only when a cancel happened to hit the wrong
+branch. Test 8 exists specifically for this: it arms nine timers in a shuffled
+order, cancels four interior ranks, and requires the five survivors in deadline
+order.
+
+**Not chosen: a timer wheel.** Linux uses a hashed timer wheel for coarse
+timeouts and a red-black tree for hrtimers, and the wheel gives O(1) rather than
+O(log n) insertion. It was rejected because the wheel's O(1) is amortised over a
+cascade step whose cost is bursty and lands in the timer ISR, and because a
+wheel quantises deadlines to its bucket width — which is precisely the property
+a *high-resolution* timer must not have. The rbtree half of Linux's design is
+the closer analogue, and a heap is that with a better constant factor and no
+allocation per node.
+
+**Not chosen: sizing both `Vec`s statically to the hard ceiling.** 16 CPUs x
+4096 slots is megabytes permanently resident to serve a queue that normally
+holds under 64 entries. They grow on demand instead; the ceiling still refuses
+beyond 4096, which is what bounds the memory.
+
+## 512. A display resize re-derives everything placed by a rule, and rescues only what the user could no longer reach
+
+**Date:** 2026-08-21
+**Decided by:** Claude (autonomous)
+
+**In short:** When the screen resolution changes, the desktop has to be put back
+in order. A maximised window remembers the *rectangle* it was given, not the
+fact that it was maximised, so on a smaller screen it keeps its old oversized
+rectangle with its close button in pixels that no longer exist. The question is
+how much of the desktop a resize is allowed to rearrange. The answer taken here:
+rearrange everything the compositor itself placed, and of the windows the *user*
+placed, move only the ones that ended up completely off the screen — and those
+by the smallest amount that brings them back.
+
+**Context.** `Compositor::resize_display` resized the framebuffer, updated the
+primary display's dimensions and marked the screen fully damaged. It did nothing
+else, which left four separate failures:
+
+1. **A maximised or snapped window kept the old screen's rectangle.** This is the
+   same fact `retile_for_work_area_change` already exists to handle when a
+   taskbar appears or changes height — its own doc says it: *"A window that is
+   maximized or snapped holds a rectangle, not the rule that produced it."* A
+   mode switch is that problem at its largest.
+2. **A fullscreen window kept the old framebuffer's dimensions**, because
+   `set_fullscreen` sizes from `self.backend.size()` at the moment it is called
+   and nothing re-asserts it afterwards.
+3. **Re-tiling would have shrunk a fullscreen window**, because
+   `retile_for_work_area_change` matches `maximized || snapped` and `maximized`
+   stays set underneath fullscreen. A game whose window was maximised before it
+   went fullscreen would visibly pull away from the screen edges when a taskbar
+   appeared behind it, permanently — and, having stopped being exactly
+   display-sized, would silently lose the direct-scanout bypass.
+4. **A window near the old bottom-right corner ended up entirely off the new
+   screen**, with no title bar on it to drag it back by and no pointer position
+   that exists. The pointer itself had the same problem: it is not derived from
+   anything, so a screen that shrinks under it leaves it at a coordinate the
+   display no longer has, invisible and hit-testing against nothing, until the
+   user moves the mouse.
+
+**Decision.** `resize_display` runs four passes in a fixed order: re-tile,
+re-fit fullscreen, rescue stranded windows, clamp the pointer. Three questions
+had real answers on both sides.
+
+**(a) How much is a resize allowed to move?** The alternative — re-flow the
+whole desktop, the way a tiling window manager would — was rejected. A user who
+dragged a window somewhere chose that spot; a resolution change is not a request
+to undo that choice, and a desktop that scrambles itself every time a projector
+is plugged in is worse than one that leaves a window half off an edge. So the
+rescue test is *no part of the frame intersects the new bounds*, which is
+deliberately as strict as it can be: a window hanging half off the edge is still
+visible and still has a title bar to grab, so it stands; a window with nothing
+at all on screen cannot be dragged, cannot be clicked, and is gone until the
+display is made large again. Only the second is a rescue rather than a
+re-layout. The cost of the strictness is a genuine one — a window whose title
+bar is off the *top* is unreachable while three pixels of its bottom edge remain
+on screen, and this does not rescue it. That is a smaller, separable bug about
+title-bar reachability rather than about resizing, and pretending to fix it here
+would have meant moving windows their owners can see.
+
+**(b) Where does a window too big for the new screen go?** `pulled_onto` pins the
+top-left rather than centring or pinning any other corner. It cannot make an
+oversized rectangle fit — it never changes the size — so it has to choose which
+part falls off, and the top-left is where the title bar is. Any other anchor
+pushes the title bar off the top or left edge and leaves the window exactly as
+ungrabbable as it started, which defeats the entire point of the rescue.
+
+**(c) Does fullscreen outrank maximised?** Yes, and the re-tile now excludes
+fullscreen windows outright. Fullscreen is defined against the whole *scanout
+surface*, which is what earns it the direct-scanout bypass; the work area is the
+screen minus the panels, which is a different rectangle by definition. The
+`maximized` flag is deliberately left *set* rather than cleared, so that leaving
+fullscreen still finds a tiling state to fall back to — the exclusion is in the
+filter, not in the state.
+
+**Also decided:** the pointer is clamped to the *virtual* bounds (the union of
+all displays) rather than to the resized monitor, because the pointer crosses
+monitors and clamping it to the primary would teleport it off a second screen
+that a resize of the first did not touch. And the rescue drops the
+`WindowNotFound` from `move_window` rather than propagating it: every id came
+from a list built two statements earlier, so it is unreachable, and a caller
+adopting a new display mode has no useful answer to "one window declined to
+move" and must not abandon the rest of the resize over it.
+
+**Consequences.** `Compositor` is now genuinely resizable after construction,
+which was the missing half of `TD-COMPOSITOR-CANNOT-CHANGE-MODE`; the kernel
+half (`DRM_IOCTL_MODE_SETCRTC`) is filed to lane A as
+`requests/c-a-drm-setcrtc.md`, which was held back until a caller existed. The
+same `pulled_onto` helper is the right fix for the neighbouring
+un-maximise/un-fullscreen case, where a stored `restore_rect` can point off the
+current display — that is a separate change, because it also has to cover a
+monitor being unplugged, which `resize_display` never sees.
+
+**Verification.** 12 tests, each proved to be a regression test by reintroducing
+the defect it names — via the guarded reversible patcher, one at a time — and
+confirming a deterministic failure that names the test back. Eleven
+reintroductions were needed to cover them, including two whose only purpose is
+to prove the *negative* tests: that a window still on screen is not moved, and
+that a pointer already on screen is not teleported. A guard nobody can break is
+not a guard.
+
+## 513. A window is never placed where it cannot be reached, and "reachable" is a question about the whole desktop
+
+**Date:** 2026-08-21
+**Decided by:** Claude (autonomous)
+
+**In short:** §512 stopped a *resize* from leaving a window off the screen. It
+did not stop the two other ways that happens: un-maximising a window puts it
+back at the rectangle it had before it was maximised, and if the screen changed
+size in between, that rectangle may be nowhere. §512 also, on its own, contained
+a bug of exactly the kind it existed to prevent — with two monitors it asked
+"is this window on the screen that just resized?", so shrinking the first
+monitor dragged every window off the second one and onto the first.
+
+**Context.** A window has two saved rectangles: `restore_rect`, written when it
+is maximised or snapped, and `fs_restore_rect`, written when it goes fullscreen.
+Both are recorded against the desktop *as it was at that moment*, and both are
+**consumed** by the restore — `take()`n out of the window. So a bad restore has
+no second chance: after it, nothing in the compositor knows the window was ever
+anywhere else. `resize_display`'s rescue does not help, because it runs at resize
+time, when the window is still maximised and therefore not stranded at all; what
+is stranded is a rectangle in a field.
+
+Three reachable failures:
+
+1. Maximise a window near the bottom-right, change resolution downward,
+   un-maximise. The window lands entirely off the screen. This is the ordinary
+   "I plugged in a projector" sequence.
+2. The same with fullscreen — worse in practice, because a game is exactly the
+   sort of program that changes the resolution while it is fullscreen.
+3. Two monitors, resize the first. Every window on the second is yanked onto the
+   first, because `bring_stranded_windows_back` tested against the bounds of the
+   display that changed rather than against the desktop.
+
+**Decision.** One helper, `kept_reachable(frame, desktop, fallback)`, used by all
+three sites: the frame is returned unchanged if any part of it falls on
+`desktop`, and otherwise pulled onto `fallback` by `pulled_onto`.
+
+**Why two rectangles rather than one.** The two questions are genuinely
+different, and collapsing them is precisely what caused failure 3. *Can the user
+see this window?* is asked of the whole virtual desktop — a window on the second
+monitor is not stranded because the first shrank. *Where does a window nobody can
+see go?* has to name a screen that actually exists, and the union of several
+monitors is not necessarily one: an L-shaped arrangement has a hole in its
+bounding box, and a window dropped in the hole is as lost as it was. So the test
+is against the union and the destination is a single real screen.
+
+**Which screen is the fallback.** For the resize rescue it is the display that
+just changed — a screen known to exist, and the one most likely to have stranded
+the window. For a restore it is the display the window is on *right now*, which
+is well-defined precisely because a window being restored is currently maximised
+or fullscreen and therefore demonstrably covering a real monitor. The alternative
+— always the primary — is simpler and wrong: un-maximising a window on the second
+monitor would teleport it to the first, which is the same class of bug as failure
+3, just triggered by a different action.
+
+**Strictness is unchanged from §512**, deliberately: *no part of the frame on any
+screen*. A restore rectangle hanging off an edge is still visible and still has a
+title bar to grab, so it is used exactly as saved. That rule now has its own test
+and its own reintroduction, because it is the rule most likely to be "improved"
+later into a tidy-everything-up pass.
+
+**A supporting change:** `Window::frame_rect` is now the special case of a new
+`frame_rect_for_client(client)`. Every reachability question is a question about
+the *decorated* box — it is the title bar that must be on screen to be grabbed —
+but the saved rectangles are client geometry, and they belong to a window that is
+not currently at them. `frame_rect` cannot answer that; the general form can, and
+stating the inset arithmetic once keeps it the exact inverse of
+`client_geometry_for_frame`.
+
+**Verification.** 8 new tests, 8 reintroductions. Four of the tests have a
+reintroduction that breaks them and nothing else: the multi-monitor evacuation,
+the fullscreen restore, the hanging-off-an-edge guard, and the fallback-screen
+choice. Three of the remaining are broken only by `restoreframeisclient` — a
+marker that also breaks five *pre-existing* restore tests, so those three are
+additional coverage of an invariant that was already guarded rather than the sole
+guard on a new one. That is stated rather than glossed: a test whose only proof
+is a marker that breaks eight tests has not been shown to be load-bearing, and
+pretending otherwise is how a suite fills up with tests nobody can delete because
+nobody knows what they cover.
+
+## 514. The composited surface *is* the virtual desktop; a monitor is a viewport onto it, and fullscreen covers one monitor rather than the surface
+
+**Date:** 2026-08-21
+**Decided by:** Claude (autonomous)
+
+**In short:** SlateOS's compositor already believed it could drive two monitors —
+it kept a list of them, gave each an offset, and would happily place a window on
+the second one. Nothing ever appeared there. The picture the compositor draws
+into (the *scanout surface* — one big rectangle of pixels that the graphics card
+reads out to the screen) was still the size of the first monitor alone, so every
+window on the second screen was drawn past the end of it and thrown away. This
+entry records the fix and the arrangement it commits to: **one picture covering
+every monitor, with each monitor copying out its own rectangle of it.** The
+alternative — one picture per monitor — is rejected below.
+
+**Context: two rectangles that were allowed to disagree.** `DisplayManager`
+tracks a list of `Display`s, each with an offset and a size, and answers
+`virtual_bounds()` — the union of them, the whole desktop. `Compositor` draws
+into `self.backend`, a framebuffer with its own width and height. Nothing tied
+the two together. `add_display` extended the desktop and left the framebuffer
+alone; `resize_display` resized the framebuffer from the *primary* monitor's new
+size and so cut off every other monitor. A window at x = 900 on a second screen
+starting at x = 800 was clipped away entirely by an 800-wide surface, and the
+model reported it as visible on screen 2 the whole time. This is the worst shape
+a bug can have: the system's own description of itself is confidently wrong.
+
+Two consequences fell out of the same crack:
+
+* **Fullscreen sized itself from the framebuffer.** `set_fullscreen` read
+  `self.backend.size()`. On one monitor at the origin that is the monitor, which
+  is why it went unnoticed for as long as it did. On two, a window fullscreened
+  on the second monitor jumped to the first and spanned both — while
+  `maximize_window`, one line away in the same file, asked `work_bounds_for` and
+  correctly stayed put. Two commands a user thinks of as the same gesture
+  disagreed about which monitor they act on.
+* **The fullscreen re-fit after a mode change moved every fullscreen window.**
+  `refit_fullscreen_windows(width, height)` took the resized framebuffer's
+  dimensions and applied them to all of them, so changing the resolution of one
+  screen dragged a game that was fullscreen on another onto it and told its
+  client it was now a size it is not.
+
+**Decision.** The scanout surface is exactly the virtual desktop's bounding box,
+maintained as an invariant by the only two functions that can change either:
+`resize_display` and a new `attach_display`. Both compute the *prospective*
+desktop first, resize the surface, and only then adopt the new arrangement — so
+a surface that cannot be allocated leaves the display list exactly as it was.
+Fullscreen and the fullscreen re-fit both resolve against the window's own
+monitor via `work_bounds_for`, the same function `maximize_window` uses; the two
+now differ only in that maximising yields the panels their reserved strips and
+fullscreen covers them.
+
+**The alternative: one composed frame per monitor.** Each head gets its own
+buffer at its own size, and the compositor runs its whole pipeline once per head
+with that head's origin subtracted.
+
+| | one frame for the desktop (chosen) | one frame per head |
+|---|---|---|
+| a window straddling the seam | one rectangle in one buffer; nothing special happens | composited twice, clipped differently each time; the two halves can tear against each other |
+| the compositing pipeline | never learns what a head is | every rectangle, every damage region and every blit grows a head parameter |
+| per-head scale factor / rotation | **not possible** — one surface has one pixel grid | natural: each head composites at its own scale |
+| an L-shaped or vertically-offset arrangement | composites a gap that is scanned out nowhere | costs nothing |
+| memory | one buffer, bounding-box sized | N buffers, exactly sized |
+| damage tracking | one region, already implemented | one region per head, and a window moving between heads dirties both |
+
+The gap is the honest cost and it is bounded by the arrangement the user chose —
+two 1920x1080 screens offset vertically by 200 px waste 1920x200 of clear per
+frame, which is a `memset`, not per-window work. Per-head scaling is the real
+limitation, and it is deferred rather than denied: it is a change to the scanout
+and the input mapping, not to this decision, because a scaled head can blit
+through a filter on the way out. Against that, the per-head design pays on every
+frame of every window, forever, for a capability that only matters when the two
+monitors have different pixel densities.
+
+The deciding argument is which shape makes the *wrong* answer impossible. With
+one desktop-sized surface, "is this window visible?" has one answer, computed in
+one place, in one coordinate system — the virtual desktop's. That is the
+coordinate system the input events, the window rectangles, the snap zones and
+the panel reservations are already in. Adding a second one, per head, would give
+every existing test a chance to be right about the wrong space.
+
+**The surface's origin is the desktop's origin**, so a display at a negative
+offset would be unaddressable. Nothing produces one — `add_display` only ever
+places to the right of what is already there — and `resize_scanout_surface`
+takes `right()`/`bottom()` rather than `width`/`height` precisely because those
+are the extent that has to exist and they agree with the size only while the
+origin is where it is documented to be. If dragging monitors into arbitrary
+positions is ever added, that is the line that has to change: the surface would
+need to be sized from the bounding box and every window rectangle offset by its
+origin.
+
+**The direct-scanout bypass is now, correctly, a single-head optimisation.** It
+hands one client's buffer to the scanout entire, so on a two-headed desktop it
+would put the game's pixels on the *other* monitor in place of the desktop. The
+guard that prevents this is the pre-existing "the window must cover the whole
+framebuffer" test, which a one-monitor fullscreen window no longer satisfies —
+so the fix costs nothing and the test that pins it
+(`the_direct_scanout_bypass_declines_a_second_monitor`) exists to record that the
+guard is load-bearing rather than incidentally true.
+
+**A latent defect found on the way, and fixed here.** `Rect::union` and
+`Rect::intersect` computed their far edges as `self.x + self.width as i32`.
+`u32::MAX as i32` is `-1`, so a rectangle wider than 2^31 put its right edge to
+the *left* of its own origin: the union of an over-wide rectangle with a normal
+one came out **narrower than either input**, and the intersection of one with
+anything came out empty. `Rect::right()` and `Rect::bottom()` had already been
+written to saturate instead, with a doc comment explaining this exact hazard, and
+the two functions simply did not use them. They do now. This was not theoretical
+— it was found because `a_surface_that_cannot_be_allocated_leaves_the_arrangement_alone`
+passed a `u32::MAX`-wide display and the surface allocation *succeeded*, at
+800x768, because the union had shrunk.
+
+**Verification.** 10 new tests, each proved to be a regression test by
+reintroducing the defect it names through the guarded patcher and confirming a
+deterministic failure that names it back: `fullscreenisframebuffer`,
+`refitallfullscreen`, `surfaceisprimary`, `resizesurfaceisdisplay`,
+`rectunioncast`, `rectintersectcast`, plus the pre-existing
+`resizenofullscreen`. Five markers from §512 (`resizenoretile`,
+`resizenofullscreen`, `resizenoresizeevent`, `resizenorescue`,
+`resizenopointer`) were repaired against the refactor, since a marker that no
+longer applies is a proof that has quietly stopped being run.
+
+**Addendum, 2026-08-21 — the eleventh test.** Closing
+`TD-C-FULLSCREEN-IGNORES-WHICH-MONITOR-AND-WHAT-IS-RESERVED` (which this entry
+had in fact already fixed) turned up one property from its own checklist with no
+test behind it: that fullscreen resolves the monitor's **bounds** where maximize
+resolves its **work area**. Every fullscreen test here ran on a screen with
+nothing reserved, and on such a screen `work_bounds_for` and `work_area_for`
+return the same rectangle — so routing `set_fullscreen` through `work_area_for`,
+which is the tidy-up an unwary reader would make since every *other* tiling path
+does exactly that, passed all 427 of them while leaving a band of taskbar across
+the bottom of every full-screen video. `fullscreen_covers_the_taskbar_that_maximize_stops_at`
+asserts both halves in one test — maximize stops at `screen.bottom() - 40`, then
+the same window fullscreened covers the whole 800x600 — so the contrast cannot
+decay into a tautology if the fixture ever loses its reservation. Proved by the
+marker `fullscreenspareasthetaskbar`, and it failed **alone**, which is the
+evidence that the gap was real rather than incidentally covered elsewhere.
+
+One new test — `leaving_fullscreen_on_the_second_monitor_stays_on_it` — is
+**additional coverage rather than the sole guard on a new invariant**: the
+fullscreen round trip is lossless whether fullscreen sizes from the monitor or
+from the framebuffer, so it survives every marker above. It is kept because it
+pins the interaction between §513's restore-reachability rule and multiple
+monitors, but it is recorded here as what it is, for the same reason §513
+recorded three of its own.
+
+**What this does not do.** The scanout still drives one head: `DrmScanout` picks
+one CRTC and one connector, so the second monitor is modelled, composited and
+then not scanned out. That is the next commit — a `Head` per CRTC, each with its
+own buffer pair and its own source rectangle in this one frame — and it is now a
+mechanical follow-on rather than a redesign, which is the point of doing the
+model first.
+
+## 515. A CRTC drives at most one monitor, each monitor copies out its own rectangle of the one composited frame, and a monitor that fails is dropped rather than fatal
+
+**Date:** 2026-08-21
+**Decided by:** Claude (autonomous)
+
+**In short:** §514 taught the compositor that a second monitor exists; this
+entry makes one actually light up. Before it, the code that hands finished
+pictures to the graphics card (the *scanout*) picked a single monitor, drove
+it, and ignored every other one plugged in — so the desktop was composited at
+the full two-screen width and only the left screen ever showed anything. Now
+every connected monitor gets its own pair of buffers and its own flip, and each
+one copies out the part of the desktop it occupies. Three rules make that work,
+and each is recorded below because each had a plausible alternative.
+
+**Context.** `DrmScanout::new` walked the card's connectors, stopped at the
+first one it could drive, and built one buffer pair for it. `size()` — which is
+what the binary builds the compositor at — was that one monitor's mode. §514
+had already fixed the model above it, so the *combination* was worse than
+either half alone: with §514 in place and this not, `main.rs` would compose a
+desktop the width of one screen while `DisplayManager` believed there were two.
+
+**Decision, in three parts.**
+
+**1. One frame, a viewport per head.** `Present::show` still takes a single
+buffer — the whole desktop — and each head blits the rectangle at its own
+`(x, y)`. This is §514's decision arriving at the other end of the pipeline and
+it is what keeps `Present` a three-method trait: adding a second monitor
+changed no signature. The arithmetic that makes it true is four lines in
+`blit`, which is a free function precisely so it can be tested without a
+graphics card.
+
+**2. Heads are laid out left to right in enumeration order — the same rule the
+compositor already used, not a rule communicated to it.** `DrmScanout::new`
+places each head to the right of the last; `DisplayManager::add_display` does
+exactly the same with the displays `main.rs` attaches in the order `heads()`
+returns them. So the two agree *by construction* rather than by protocol.
+
+The alternative was to make the scanout authoritative: pass each head's offset
+into `attach_display` and have the compositor honour it. That is more general —
+it is what a future "drag your monitors into any arrangement" feature needs —
+and it was rejected for now because §514's surface-origin invariant (the
+surface's pixel (0,0) is the desktop's (0,0)) does not yet permit a display at
+a negative offset. Publishing an offset the compositor cannot honour would be a
+worse lie than not publishing one. `main.rs` therefore cross-checks
+`compositor.frame_size()` against `screen.size()` and warns loudly if they ever
+disagree, which is the guard that turns "agree by construction" from an
+assumption into something observable.
+
+**3. A CRTC drives at most one connector.** A CRTC (the hardware that reads a
+framebuffer out to a cable) scans out one framebuffer at a time. The
+pre-existing `resolve_crtc` preferred the CRTC a connector was already bound to
+at boot, and on a machine where the firmware left two connectors sharing one,
+that returned the same CRTC twice. The result would not be a second monitor
+lighting up: it would be the *first* monitor's picture being replaced by the
+second's, alternating every frame. So `choose_displays` now carries a `taken`
+list, and a connector it cannot find a free CRTC for is declined.
+
+Declining is the interesting half. The alternatives were to fail the whole
+setup (one unroutable monitor blanks a working one — plainly wrong) or to share
+the CRTC anyway and let the driver sort it out (it cannot). Declining leaves
+one working monitor instead of two broken ones, and the number of heads is then
+bounded by the card's CRTC count — a tighter and more meaningful bound than any
+constant this module could have picked, and the hardware's own limit on how
+many pictures it can scan out at once.
+
+**A failing monitor is dropped, not fatal.** This is the third place the "one
+head" assumption was load-bearing, and the least obvious. The single-head code
+closed the display on the first real flip error, which is correct when there is
+one screen and catastrophic when there are two: unplugging a DisplayPort cable
+would have blanked the *other* monitor and exited the display server. Now:
+
+* a head whose **first** flip fails never enters the layout, so the desktop is
+  sized as if it were not there and the surviving heads shift left to fill the
+  gap;
+* a head whose flips start failing **mid-session** is marked dead and stops
+  being drawn on, while the others carry on at their existing offsets — the
+  layout deliberately does *not* re-flow, because the compositor's idea of the
+  desktop has not changed and a scanout that silently moved the remaining
+  monitor would put every window on the wrong screen;
+* `is_open()` is false only when no head is left, which is when
+  `Server::run_with` should exit.
+
+Either way the head **stays in the vector**, holding its two dumb buffers and
+two framebuffer ids, so `Drop` still gives them back. Removing it on failure
+was the obvious implementation and leaks four kernel objects for the life of
+the process — which matters because this type does not own the card and a
+second scanout can share it.
+
+**A monitor whose *buffers* will not allocate is declined on the same terms.**
+This was caught reviewing the diff above rather than by a test, and it is worth
+recording because the first draft got it wrong in a way that reads as correct:
+a head that could not *flip* was declined, but a head that could not *allocate*
+returned `Err` from `new()` and so blanked the monitor next to it that had
+allocated fine. That is the same wrong answer sharing a CRTC gives, arrived at
+from the other direction. `new()` now records the first such failure and
+carries on, returning it only when **no** head was built — so a card on which
+nothing works still reports why rather than reporting "no display".
+
+The half-allocated head is the sharper edge. A head is all-or-nothing (it
+cannot flip with one buffer), so when the second `CREATE_DUMB` fails the first
+buffer is owned by nobody: the head never reaches `DrmScanout::heads`, which is
+what `Drop` walks. It has to be handed back at the point of failure or its
+framebuffer id and GEM handle leak for the life of the process. Hence
+`make_head`, whose entire reason to exist is that failure path, and
+`release_buffer`, extracted so the constructor's teardown and `Drop`'s cannot
+drift apart — including the ordering rule that `RMFB` precedes `DESTROY_DUMB`,
+because the other order asks the kernel to free an object a framebuffer still
+points at.
+
+**Keeping a dead head costs an index space, so the per-head accessors are keyed
+on the connector id.** This falls straight out of the decision above and is the
+one place it bites. Because a dead head stays in `self.heads` so `Drop` can give
+its buffers back, but `heads()` reports only the live ones, a *position* means
+two different things depending on which of the two you got it from. A caller
+doing the obvious thing — `for (i, h) in scanout.heads().iter().enumerate()`,
+then passing `i` back to ask that head's pitch — reads the wrong monitor the
+moment one dies, and reads it silently. So `pitch_for(connector_id)` and
+`scanned_out_for(connector_id)` replaced `pitch_of(i)`/`scanned_out_on(i)`: a
+connector id is the same in both worlds, is already carried by `HeadInfo`, and
+answers "nothing" rather than "the neighbour" for a monitor that has gone.
+
+The single-head accessors (`crtc_id`, `connector_id`, `pitch`, `scanned_out`)
+are the same bug in miniature — they read position zero, which after a failure
+is the corpse. They now resolve through one `first_live()` helper, which exists
+in the singular so the four cannot drift apart. The alternative — dropping dead
+heads from the vector so the two index spaces coincide — is the leak this entry
+already rejected.
+
+**Verification.** 18 new tests. 17 were proved to be regression tests by
+reintroducing the defect each names through the guarded patcher and confirming
+a deterministic failure that names it back, with the file verified restored
+byte-for-byte after each: `firstconnectoronly`, `sharedcrtcbitmask`,
+`sharedcrtcbound`, `headblitsfromorigin`, `blitrowignoresorigin`,
+`headpitchisfirst`, `onedeadheadkillsall`, `dropdeadhead`,
+`blitclipsatviewport`, `allocfailurefatal`, `partialheadleaks`,
+`deadheadisstillthefirst`, `deadheadstillreadable`.
+
+The last two needed a capability the fake card did not have: its failure queue
+matched only its front entry, so "fail the *second* monitor's allocation" was
+inexpressible — the first monitor's ioctls sat in front of it. `fail_nth`
+injects at a *counted* occurrence instead, which is what lets a test say "the
+fourth `CREATE_DUMB`" and mean the second head's second buffer. Without it
+`partialheadleaks` could not have been proved at all, and an untestable leak is
+one that comes back.
+
+Two of those markers are worth naming for what they catch that nothing else
+did. `headpitchisfirst` — writing every head at the *first* head's row stride —
+is invisible on any pair of monitors whose widths pad to the same pitch, which
+is why the fake card's two heads are 1024 wide (4096 bytes, unpadded) and 1366
+wide (5464, padded to 5504). `sharedcrtcbound` is reachable only through
+`resolve_crtc`'s early return, so a test that exercises only the bitmask path
+would have passed while the boot-bound path handed the same CRTC out twice.
+
+The eighteenth — `a_viewport_starting_past_the_end_of_the_frame_copies_nothing`
+— **survives every marker above and is recorded as additional coverage rather
+than the sole guard on an invariant**, for the same reason §513 and §514
+recorded theirs. It is double-guarded: the copy width saturates to zero *and*
+the row read goes through `src.get()`, whose absence is already pinned by
+`a_frame_shorter_than_it_claims_to_be_does_not_take_the_display_server_down`. It
+is kept because it pins the documented contract for a monitor the composited
+desktop does not reach, which is a real state during a resize.
+
+**What this does not do.** Per-head scale factor and rotation remain out of
+reach, for the reason §514 gives: one surface has one pixel grid. Monitors can
+only be arranged in a row, because the surface's origin is the desktop's
+origin. And there is still no `SETCRTC` in the kernel, so each monitor runs at
+the mode it came up in — `TD-COMPOSITOR-CANNOT-CHANGE-MODE`. None of these are
+newly true; they are §514's deferred costs, now paid at both ends of the
+pipeline instead of one.
+
+## 516. A monitor leaving is a monitor arriving in reverse, but the order is inverted and the survivors do not move
+
+**Decided by:** Claude (autonomous)
+
+**In short:** unplugging one of two monitors used to do nothing to the desktop's
+model of itself. The surviving screen kept working, but the compositor still
+believed the departed monitor was there, still composited a rectangle of frame
+that nothing copied out, and still left windows sitting on it — including
+maximised ones, which have no title bar edge on any surviving screen to drag
+back by, so they were gone until the session was. `detach_display` is the
+missing half. It removes the display, shrinks the composited surface, and lets
+the existing re-layout machinery put everything back on a screen that exists.
+
+**The order is the reverse of `attach_display`'s, and that is the decision.**
+Attaching allocates the larger surface *first* and adopts the display only if
+that succeeded, because a desktop wider than its framebuffer has a monitor with
+no pixels behind it (§514). Detaching adopts first and shrinks after. The
+asymmetry is not an oversight: the monitor is already physically gone, so
+refusing to acknowledge it — which is what propagating a failed shrink would
+do — leaves the model describing a screen that does not exist, and *that* is the
+bug being fixed. A surface that stays too large still covers the smaller
+desktop completely. A failed shrink wastes memory; it cannot draw anything
+wrong. The failure path does still have work to do, though, and it is not
+nothing: the over-large surface holds the departed monitor's last frame, so the
+full clear the successful path performs has to be repeated by hand or that
+picture stays on screen.
+
+**The survivors keep the offsets they already had.** Take the leftmost of two
+monitors away and the other one stays at x = 800: the virtual desktop starts
+part-way along, and the space the departed screen occupied remains in the
+bounding box as a hole that is composited and scanned out nowhere. Re-flowing
+them leftwards is plainly the tidier arrangement, and it is deliberately not
+done.
+
+The reason is that there are two layouts, not one. `DisplayManager` holds the
+compositor's, `DrmScanout` holds the scanout's, and they agree only because both
+lay monitors out left-to-right in enumeration order — agreement by construction
+rather than by protocol, which is what let §515's multi-head scanout land
+without a single trait signature changing. §515 also decided that a head which
+*fails* mid-session does not re-flow the others, because a monitor going dark
+must not drag its neighbours' pictures sideways. So the scanout will not
+re-flow, which means the compositor must not either: a re-flow on one side alone
+puts every window on the wrong screen, silently, with both sides internally
+consistent. One of the two has to be the authority and it is the one holding the
+framebuffers.
+
+*The alternative considered and rejected:* re-flow both sides together, since a
+*detach* — unlike a mid-session flip failure — is a deliberate act we drive from
+one place and could sequence. It would cost every window on every monitor to the
+right of the departed one being displaced by its width, which is a far more
+visible event than a hole, and it would make the two layouts agree only while
+the detach path is the *only* way a head disappears. It is not: a flip failure
+still marks a head dead without telling anyone. Two rules that must be kept in
+step are worse than one rule applied twice.
+
+**Nothing new re-places the stranded windows.** With the display removed,
+`display_for` answers *primary* for any window that no longer overlaps a real
+monitor, so `relayout_for_desktop_change` — written for §512's resize case and
+untouched here — does the whole job: the re-tile picks up maximised and snapped
+windows, `refit_fullscreen_windows` re-fits fullscreen ones and tells their
+clients, `bring_stranded_windows_back` rescues hand-placed ones, and
+`pull_pointer_onto_the_desktop` retrieves the cursor. That the removal case
+needed no new pass is a consequence of §513 having defined "reachable" against
+the whole virtual desktop rather than against one screen.
+
+**What it is aimed at is the primary, not the desktop.** For two monitors those
+are the same rectangle and the choice looks arbitrary. For three they are not:
+take the *middle* monitor away and the desktop's bounding box spans the hole, so
+it is not any monitor's bounds — and the re-tile's "windows on the screen that
+changed" filter, which compares against a monitor's bounds, then matches nothing
+at all and leaves a maximised window in the gap. That is the no-title-bar
+failure again, reached by a different route.
+`a_window_maximised_on_a_monitor_taken_from_the_middle_comes_back` is the only
+test that separates the two, and it exists because the distinction is invisible
+in every two-monitor case.
+
+**Detaching the last monitor is refused.** A desktop with no monitors has
+zero-sized virtual bounds, no primary to fall back to, and every window stranded
+with nowhere to be rescued to; `pull_pointer_onto_the_desktop` already carries
+an explicit guard against the malformed clamp such an arrangement produces.
+There is no arrangement to adopt, so the display is kept and the caller told. A
+display server whose only screen has been unplugged has nothing useful left to do
+either way, and keeping a screen it cannot paint on is strictly better than
+adopting a desktop it cannot describe.
+
+**What this does not do yet: notice.** Nothing calls `detach_display` — that is
+the *detect* half of `TD-COMPOSITOR-IGNORES-MONITOR-HOTPLUG`, which needs
+`DrmScanout` to re-probe its connectors and a seam through `Present` to report
+what changed. It is deliberately a separate change: the model half is testable on
+a machine with no graphics card, and pairing it with the DRM half would have made
+one commit whose interesting half could only be exercised by the other.
+
+**Verification.** 10 new tests, each proved a regression test by reintroducing
+the defect it names through the guarded patcher and confirming a deterministic
+failure that names it back: `detachnopromote`, `detachreflows`,
+`detachwrongdisplay`, `detachlastmonitor`, `detachnoshrink`, `detachnorelayout`
+(which proves four at once — the four re-layout passes have one call site
+between them) and `detachhomeisdesktop`. Compositor 449 + 18 green, clippy and
+fmt clean.
+
+## 517. Monitor hotplug is a polled whole-set reconciliation keyed on the connector id
+
+**Decided by:** Claude (autonomous)
+
+**In short:** the compositor could add a monitor (§514) and drop one (§516), and
+the scanout could drive several at once (§515) — but nothing ever *noticed* that
+a cable had moved. Both halves had to be told by hand. Plug a second monitor in
+after boot and it stayed dark for the life of the session; unplug one and the
+desktop kept a screen-sized hole full of windows nobody could reach. This
+section is the wiring that joins the two: once a second the compositor asks the
+graphics card which monitors are actually attached, and changes its arrangement
+to match. Three terms recur below. A *connector* is one physical socket on the
+card (a particular HDMI or DisplayPort jack); its *connector id* is the small
+number the kernel gives that socket, stable for as long as the machine is up. A
+*CRTC* is the card's scanout engine — the thing that reads pixels out of memory
+and drives a cable — and there are fewer of them than sockets. A *head* is our
+name for one live connector-plus-CRTC pair.
+
+**The answer is polled, not pushed.** The card can raise a hotplug event, and
+using it would be the obvious design: the kernel already knows the instant a
+cable moves, so why ask? Because a pushed message describes a *difference*, and
+a difference is only meaningful against the state the sender believed the
+receiver had. Drop one, mis-order two, or fail to apply one because a CRTC was
+momentarily busy, and every later message is being applied to an arrangement
+that is not the one it was computed for — and nothing ever notices, because
+there is no point at which the two sides compare totals. A poll returns the
+*whole set*. Asking twice gives the same answer, a tick that fails is simply
+retried a second later, and `reconcile_monitors` computes the difference itself,
+at the moment it acts, against the arrangement it is actually holding. The cost
+is the reason polling is not free: reading a connector's state with
+`count_modes == 0` makes the kernel re-probe it, which is real DDC traffic down
+the cable and tens of milliseconds per head — far more than a frame. So the
+probe is rate-limited to once a second (`PROBE_INTERVAL`, overridable via
+`set_probe_interval`, which the tests set to zero), and `monitors()` returns the
+cached head list on every other call. One second of blackness on a screen that
+was just plugged in is not perceptible as a fault; a frame that misses vsync
+because it stopped to talk to a monitor is.
+
+**`None` and an empty list are different answers.** `Present::monitors` returns
+`Option<Vec<MonitorInfo>>`, and the two negative cases mean opposite things.
+`None` is *no opinion*: a headless test recorder or a host window has no
+connectors to enumerate and no business overruling whatever displays the
+compositor was configured with. `Some(vec![])` is a card that had monitors and
+has none left. Both are declined today, and — this is worth stating plainly
+rather than glossing — they are declined by two separate guards with *identical*
+observable behaviour, so no test can currently tell them apart. The empty case
+is declined because detaching every display to match would leave a compositor
+with a zero-sized desktop and no surface to composite into; a machine whose last
+monitor is unplugged is expected to end its session, not to keep running as a
+zero-by-zero desktop. Keeping the distinction in the type costs nothing and
+means the day one of them wants to behave differently, the information is still
+there.
+
+**Reconciled by connector id, and only by connector id.** The compositor's
+`Display::id` is set to the connector id of the socket the monitor is plugged
+into, which is what makes the two sets comparable at all — hence
+`Compositor::rename_display`, which exists solely so the first display, created
+before any connector is known, can be renamed from `0` to its real connector id
+at startup. Get that wrong and the failure is not subtle: a first screen still
+called `0` is simultaneously a display no connector claims *and* a connector no
+display claims, so every tick detaches it and attaches a duplicate, once a
+second, for ever.
+
+Sizes are compared nowhere. A monitor whose *mode* changed under a live
+connector is deliberately left alone: the id still matches, so reconciliation
+sees nothing to do. Doing otherwise would mean detaching and re-attaching, which
+would destroy that screen's window arrangement and move the monitor to the right
+end of the row — a spectacularly destructive way to change a resolution.
+Changing a mode in place is `TD-COMPOSITOR-CANNOT-CHANGE-MODE` and stays out of
+scope.
+
+**Removals happen before additions, on both sides.** Peak resource use is then
+the *smaller* of the two arrangements rather than their union, which matters
+because a CRTC is exclusive: a monitor moved from one socket to another needs
+the old head to give its CRTC back before the new one can take it. The scanout's
+re-probe does the same in the same order, for the same reason, and a test builds
+exactly that case — two sockets that share one CRTC, cable moved between them.
+
+**A retired head is destroyed, not merely marked dead.** Everywhere else in the
+scanout a head that fails is left in place with `alive = false`, keeping its
+buffers until `Drop`. That is affordable because a head fails at most once. A
+*polled* probe is different in kind: a cable working loose can retire and
+re-adopt a head every second for hours, and a head list that grows once per plug
+event is a leak with a physical trigger. So `reprobe` is the one place that
+reaps — it removes dead heads from the list and releases their framebuffers back
+to the card immediately, bounding the list by the number of monitors rather than
+by the number of times somebody wiggled a cable.
+
+**The survivors still do not move — now on the scanout side too.** §516 decided
+that detaching a display does not re-flow the remaining ones, and the same rule
+had to be re-established inside `DrmScanout`, where the existing `lay_out_heads`
+*does* re-flow and is called only from `new()`. `resize_to_heads` is its
+non-moving sibling: it recomputes the framebuffer's bounding box from the live
+heads without touching any head's position. Both sides now place an arriving
+monitor at the right edge of the ones already present and neither ever moves
+one, so the compositor's layout and the scanout's agree pixel-for-pixel by
+construction, with no protocol between them. That agreement is also why
+`MonitorInfo` carries no position: a position that travelled would be a second
+source of truth for something both sides already derive identically.
+
+**What this does not do.** It does not change a mode under a live connector (see
+above). It does not read EDID, so a monitor is identified by the socket it is in
+and not by which monitor it is — move two monitors' cables to each other's
+sockets and each takes on the other's place in the row. And it remembers
+nothing: unplug a monitor and plug it back in and it returns at the right-hand
+end, not where it was. All three want an identity that outlives a cable, which
+is a larger design than this one.
+
+**Verification.** Sixteen new tests, every one proved a regression test by
+reintroducing the defect it names and confirming a deterministic failure that
+names it back, with the source restored byte-for-byte (SHA-256) afterwards.
+Nineteen markers, because several defects are only reachable in combination:
+the seam's six (`seamadoptsanyreply`, `seamemptyisarrangement`, `seamnoreconcile`,
+`seamsizeisidentity`, `seamreattachesknown`, `seamnewmonitorisprimary`), the
+re-probe's nine (`probenever`, `probeeverytime`, `probereportsindex`,
+`probearrivesatorigin`, `probereflows`, `probekeepsdeparted`, `probeadoptsfirst`,
+`probekeepsdarkhead`, `probefailureisempty`), and the connector-id naming's four
+(`renamenoop`, `renamedemotes`, `renamecollides`, `renamewrongdisplay`).
+`seamadoptsanyreply` removes the `None` guard and the empty guard together,
+because as noted above a defect that removes only one of them is not
+distinguishable from one that removes the other.
+
+One of these tests had to be strengthened before it was honest.
+`an_empty_monitor_list_is_not_an_arrangement_to_adopt` originally used a single
+display, and passed with the empty-list guard deleted — `detach_display` refuses
+to remove the last monitor, so the desktop survived a missing guard by accident.
+With two displays the guard is the only thing standing between an empty reply
+and a half-dismantled desktop, and the test fails as it should. Compositor 465
+tests green; clippy clean on `x86_64-pc-windows-gnu` (`--all-targets`) and on
+`x86_64-unknown-linux-gnu` (`--bins`, which is the only way the Linux-only arm
+of `main.rs` is compiled at all); fmt clean.
+
+## 518. A virtual desktop is a number on a window that the compositor reads, not a filter the taskbar applies
+
+**Decided by:** Claude (autonomous)
+
+**In short:** the desktop had four "virtual desktops" — four separate screenfuls
+of windows you switch between with a button on the taskbar — and switching one
+changed nothing except which buttons the taskbar drew. The windows of the
+desktop you left stayed on the glass, kept swallowing clicks, and could no
+longer be reached from the taskbar, because the taskbar was now showing a
+different desktop's list. That is worse than not having the feature at all: it
+takes windows away from the user and gives back no way to get them. This
+section decides that the *compositor* — the program that decides which pixels
+are on the screen — is the thing that has to know about desktops, and that the
+taskbar's job is only to ask it.
+
+**Two ways to do it, and only one of them is safe.** The shell (the taskbar and
+its menus) already knew which desktop each window was filed on; it just had no
+power to act on it. So the cheap fix is to keep the filing where it is and give
+the shell a new request — "hide that window" — that it sends for each window
+belonging to a desktop being left. The cost is not the request count. It is
+that such a verb necessarily lets *any* shell hide *any* client's window, which
+is precisely the ambient authority (power you have merely by being who you are,
+rather than by holding a token for it) that the whole `ShellControl` design
+exists to refuse. A window's visibility would become something a program other
+than its owner can take away, permanently, with no record of who did it. The
+alternative — the compositor holds each window's desktop number — needs a wire
+field and two new verbs, and in exchange the shell's power stays exactly what
+it already was: it can ask which desktop is showing and ask for a different one.
+It cannot reach into a window. That is the one chosen.
+
+There is a second, quieter reason. Once the compositor holds the number, a
+switch is *one* recomposite computed from a consistent picture. With the shell
+driving it, a switch is N requests that arrive one at a time, and the desktop is
+briefly a mixture of two of them — every intermediate state visible, and a
+failure halfway through leaving a permanent mixture that nothing detects.
+
+**One predicate, not twelve spellings.** Before this, "on screen" was written
+out by hand as `visible && !minimized` at twelve places: the panel-reservation
+scan, the direct-scanout candidate, focusing, hit-testing against the client
+area, hit-testing against the decorated frame, the cursor-shape lookup, the
+opaque-occluder test, the full-scene draw, the damage draw, the per-window draw,
+the screen-capture stream, and the topmost-window focus search. A *third* reason
+a window is not on screen, added to twelve sites independently, is exactly how a
+window ends up invisible but still clickable — which is the bug being fixed
+here, so repeating its shape would have been perverse. All twelve now call
+`Window::is_showing(current_workspace)`. The next reason a window is hidden goes
+in one place, and there are six markers below (`wsoccludesanyway`,
+`wshittestsanyway`, `wsrenderallanyway`, `wsrenderdamagedanyway`,
+`wsrenderwindowanyway`, `wsscanoutanyway`) that exist purely to prove a
+*partially* converted compositor is caught — because the half-converted state is
+the one that ships by accident.
+
+**The layer is the stickiness rule.** A window outside `Layer::Normal` — the
+wallpaper below everything, the taskbar and panels above it — is on every
+desktop. This is not a special case bolted on; it is the same distinction the
+shell already draws when it leaves non-`Normal` windows out of its taskbar.
+Those surfaces are furniture belonging to the *screen*, not documents belonging
+to a desktop. The alternative, a `sticky` flag someone has to remember to set,
+has an obvious failure mode: a taskbar that vanishes on a switch takes with it
+the only control that could switch back. Reusing `Layer` means the property
+cannot be forgotten, because it is a consequence of what the surface already
+declared itself to be.
+
+**The compositor owns *which* desktop shows; the shell owns *how many* there
+are.** The compositor deliberately has no idea that four is the number, and
+`switch_workspace` has no upper bound to check against. A count is a user
+preference and belongs to whatever is offering the user the choice; a second
+copy in the compositor would be a second answer, and the two would drift the
+first time the preference changed. What the compositor owns is the part that
+decides pixels.
+
+**Activating follows the window; it does not drag it here.** Clicking a taskbar
+button for a window on another desktop switches to that desktop. The other
+reading — bring the window to me — is defensible and some desktops do it, but it
+is not undoable by the same gesture that caused it: switching moves exactly one
+thing (which desktop is showing) and switching back restores it, whereas
+dragging rearranges the desktops themselves and leaves the user to notice the
+damage and repair it by hand. The rule extends to `activate_window` generally:
+un-minimizing and switching desktop are the same act — undo whatever is hiding
+this window — done in one call, because a shell should not have to know *which*
+kind of hiding it is undoing.
+
+**Hiding is only hiding.** A window on a desktop that is not showing is not
+minimized, not unmapped, not moved, and its client is not told. The temptation
+is to reuse minimize, since the machinery exists — but minimize is a *user's*
+statement about a window, one they can see in the taskbar and undo; borrowing it
+for a switch would silently overwrite that statement, and the windows would come
+back from the other desktop minimized. From the client's side nothing has
+happened that it could act on: the user looked away. The test named
+`a_window_comes_back_from_another_desktop_exactly_as_it_was_left` is what holds
+this line, and it fails the moment the switch is implemented by minimizing.
+
+**Focus follows the screen.** A window nobody can see must not hold the
+keyboard — that is every keystroke disappearing into a window the user cannot
+find. Both `switch_workspace` and `set_window_workspace` therefore check whether
+the focused window is still showing, and if it is not, drop focus, tell the
+client it lost focus, and hand the keyboard to the topmost window that *is*
+showing — or to nothing at all, on an empty desktop. `focus_window` itself now
+refuses a window that is not showing, for the same reason it already refused a
+minimized one.
+
+**A window's desktop is not in its spec.** A new window is put on whichever
+desktop is showing, and a client cannot ask for another. Choosing which desktop
+a program appears on is the user's business, and a client that could pick would
+be able to open a window somewhere the user is not looking — which is either a
+window that seems not to have opened, or a place to hide one.
+
+**An assignment aimed at a panel is stored and ignored, not refused.** Setting a
+non-`Normal` window's desktop succeeds, records the number, and changes nothing
+about what is drawn. Refusing it would make every shell that moves "all of my
+windows" first work out which of them are furniture — pushing the stickiness
+rule out of the compositor and into every caller, which is the opposite of the
+point.
+
+**What this does not do.** The compositor holds no per-desktop state beyond the
+number on each window: no per-desktop wallpaper, no per-desktop window
+arrangement, no memory of which window was focused on a desktop you return to
+(focus goes to the topmost showing window, which is usually but not always the
+same thing). Nothing yet moves a window to a desktop by dragging it. And the
+number is not persisted across a compositor restart. All of those want a
+per-desktop record rather than a per-window number, which is a larger design
+than this one.
+
+### The wire: a desktop number per window, *and* one in the header
+
+The window list (`WLST`) went to version 2 and gained two things: a `showing`
+field in the header, and a `workspace` on every window. Only the second is
+obviously needed, and the first looks redundant — a shell could infer which
+desktop is up by finding a `Layer::Normal` window that is `visible`. It cannot,
+for two reasons, and both of them are ordinary rather than exotic:
+
+- **An empty desktop has no window to infer it from.** Switch to a desktop
+  nobody has opened anything on and the list is either empty or entirely windows
+  filed elsewhere. A taskbar that has to guess would show the previous desktop's
+  number until the user opened something.
+- **The compositor switches desktops on its own account.** Activating a window
+  that is filed elsewhere *is* a switch (see "Activating follows the window"
+  above), so a shell that remembered the number it last asked for would list one
+  desktop's windows over another desktop's screen — which is a smaller version of
+  the very bug being fixed. Both `Connection::current_workspace` and
+  `EventLoop::current_desktop` are documented "read this, do not remember it",
+  and both return `Option` so that "not told yet" cannot be confused with
+  "desktop 0".
+
+The field order was chosen to leave the existing decoder tests' byte offsets
+alone: `workspace` goes *after* the state byte, so `state_at = HEADER + 8 + 8 + 1`
+and `layer_at = HEADER + 8 + 8` still name the fields they were written for.
+That is not laziness — those tests exist to catch a field being written in the
+wrong place, and rewriting their arithmetic in the same change that moves the
+fields would have disarmed them for exactly one commit.
+
+### Two new request verbs, not a new `ShellControlAction`
+
+`ShellControlAction` is a byte in a `(window, action)` pair, and the obvious
+cheap move was to add `SwitchDesktop(n)` to it. It does not fit, twice over:
+
+- **A switch names no window.** Sending it against an arbitrary window makes the
+  wire lie about what the request is aimed at, and leaves "which window?"
+  unanswerable on an empty desktop — the one case that most needs to work.
+- **`ShellControlAction` has no room.** Its `ZONE_BYTE_BASE = 7` opens an
+  unbounded tail for zone slots, so there is no free byte to take.
+
+So `RequestBody` gained `SwitchWorkspace { workspace }` (tag `0x12`) and
+`SetWindowWorkspace { window, workspace }` (tag `0x13`), both behind
+`require_shell()` — the same seam as reading the window list, for the same
+reason: they act on windows the sender does not own. (`require_shell()` still
+refuses nobody; it is a named place for a capability check that needs kernel
+attestation. See §495 and `TD-C-ANY-CLIENT-CAN-READ-EVERY-WINDOW-TITLE`.)
+
+### The shell asks; it no longer decides
+
+This is the half that made the compositor's new knowledge reach a screen.
+`DesktopShell` kept three pieces of state that were now second copies:
+`current_desktop`, a per-window `desktop`, and the arithmetic that moved them.
+All three are gone in the sense that mattered — the fields remain, but nothing
+writes them except `apply_window_list`, which takes the whole `WindowList` and
+copies the compositor's answers in.
+
+- `switch_desktop` and `move_window_to_desktop` became `&self` and return a
+  `ShellRequest` instead of mutating. They used to assign `current_desktop` and
+  return an `Activate` for the topmost window on the desktop being arrived at,
+  which was as far as a virtual desktop ever got: the taskbar relabelled itself,
+  the windows of the desktop being left stayed on screen, and the window it
+  raised was raised *over* them.
+- `HotkeyOutcome::requests` and `ShellAction::Control` carry `ShellRequest`
+  rather than `WindowRequest`. One shape for everything the shell asks for,
+  because the alternative is two shapes and two places to forget a verb.
+- What the shell kept is the *count* of desktops, which is the only bound either
+  side enforces, and the per-window icon, which the compositor has never heard
+  of.
+
+The cost of not being optimistic is one round trip before the taskbar changes.
+That is the right trade even ignoring correctness: the alternative shows the new
+desktop's buttons over the old desktop's windows for a frame, which is the
+original bug in miniature and would be indistinguishable from it if the request
+were ever refused.
+
+### Verification
+
+The whole point of the exercise is that a test which passes is not yet evidence.
+Every test named below was proved by putting its defect back with
+`D:/tmp/reintro.py` — a guarded, reversible one-string patcher that refuses to
+apply unless the string occurs exactly once, and verifies the file is restored
+byte-for-byte by SHA-256 afterwards. `git checkout` was never used, because it
+would discard unrelated uncommitted work.
+
+**Two tests were passing for the wrong reason, and both were found this way
+rather than by reading.**
+
+- `a_window_on_another_virtual_desktop_does_not_occlude_the_one_in_front_of_you`
+  survived a deliberately broken occlusion cull, because `Buffer::is_opaque()`
+  is a question about the pixel *format* and not about the bytes: an
+  `Argb8888` buffer full of `0xFF` alpha is not an occluder, so the hidden
+  window could never have occluded anything whether the cull worked or not.
+- Then *that* fix was still not enough, and the reason was subtler:
+  `focus_window` ends by calling `raise_within_layer`. Moving a window to
+  another desktop hands the keyboard to the window below it, so the focus
+  handoff *reorders the stack* — the window left showing climbs above the one
+  just hidden. A hidden window at the bottom of the stack can neither occlude
+  nor overpaint, so both the occlusion test and the damage-path test were
+  exercising nothing. `stack_with_a_hidden_window_on_top` fixes it by giving the
+  handoff a third window elsewhere on screen to land on, which is also the
+  ordinary arrangement rather than a contrivance.
+
+**Some guards are deliberately redundant, and single markers cannot prove them.**
+The full-scene pass culls a hidden window and the per-window draw refuses it
+again, so a defect at exactly one of those sites is invisible. Three of the
+stage-1 markers therefore only fire in combination:
+
+| Markers | Tests that fail |
+|---|---|
+| `wsrenderallanyway` + `wsrenderwindowanyway` | `…is_not_drawn`, `…does_not_occlude…` |
+| `wsrenderdamagedanyway` + `wsrenderwindowanyway` | `the_damage_path_does_not_repaint_a_window_from_another_desktop` |
+
+That redundancy is kept rather than removed: two passes that each independently
+refuse to draw a hidden window is the correct belt-and-braces for the one thing
+this whole section exists to guarantee. The price is that proving it needs
+combinations, and the markers record that price honestly.
+
+**Sixteen stage-2 markers, and the prover rebuilt all four crates for each one.**
+That is slow — the whole GUI stack per marker — and it is the only honest way to
+watch a defect in `guiremote` surface as a failure in `desktop`. It did: the two
+encoder markers each fail tests in three different crates, which a per-crate
+prover would have scored as a `guiremote` problem and stopped there.
+
+| Marker — what it puts back | Tests that fail |
+|---|---|
+| `wl2noheader` — the header's desktop is never written | `an_empty_desktop_still_says_which_desktop_it_is`, `a_window_keeps_its_own_desktop_number_when_it_is_not_the_one_showing`, `the_desktop_being_shown_comes_from_the_compositor_and_not_from_memory`, `the_list_says_which_desktop_is_showing_after_a_switch_the_shell_did_not_ask_for` |
+| `wl2nowindowdesktop` — a window's own desktop is dropped | `a_shell_moves_a_window_to_another_desktop_and_the_list_says_so`, `a_window_keeps_its_own_desktop_number…`, `the_desktop_being_shown…` |
+| `wl2shortheader` — the header is measured four bytes short | *no stage-2 test; see below* |
+| `ctlswapworkspaceverbs` — the two verbs decode to each other | `both_workspace_requests_survive_the_wire`, `switching_to_the_last_desktop_a_u32_can_name_is_not_clamped`, `switching_desktop_off_the_wire_reaches_the_compositor`, `a_shell_moves_a_window…`, `the_list_says_which_desktop_is_showing…` |
+| `compnoshowing` — the compositor always reports desktop 0 showing | `the_list_says_which_desktop_is_showing_after_a_switch_the_shell_did_not_ask_for` |
+| `compnowindowdesktop` — every window is reported on desktop 0 | `a_shell_moves_a_window_to_another_desktop_and_the_list_says_so` |
+| `wireswitchdropped` — a switch is answered yes and discarded | `switching_desktop_off_the_wire_reaches_the_compositor` |
+| `wiremovedropped` — a move is answered yes and discarded | `a_shell_moves_a_window…`, `the_list_says_which_desktop_is_showing…` |
+| `clientforgetsshowing` — the client remembers 0 rather than reading | `the_desktop_being_shown_comes_from_the_compositor_and_not_from_memory` |
+| `shellkeepsitsown` — the shell ignores the header | `desktop_navigation_stops_at_both_ends`, `the_desktop_indicator_counts_from_one`, `a_window_is_only_visible_on_its_own_desktop`, `switching_desktop_names_no_window` |
+| `shelllocalwindowdesktop` — a window's desktop is shell-local again | `a_window_list_is_what_says_which_desktop_a_window_is_on`, `a_window_is_only_visible_on_its_own_desktop`, `switching_desktop_names_no_window`, `super_d_minimizes_everything_on_the_current_desktop`, `a_retitle_reaches_the_button_without_disturbing_shell_local_state` |
+| `shellnodesktopbound` — switching walks past the last desktop | `a_desktop_that_does_not_exist_is_not_asked_for` |
+| `shellnomovebound` — a window is filed on a desktop that does not exist | `a_window_cannot_be_moved_to_a_desktop_that_does_not_exist` |
+| `winguessesdesktopzero` — the client answers 0 before it has been told | `the_desktop_being_shown_comes_from_the_compositor_and_not_from_memory` |
+| `shellnextunderflows` — `num_desktops - 1` on a shell with no desktops | `a_shell_with_no_desktops_does_not_underflow` |
+| `shellprevunderflows` — `current_desktop - 1` at desktop 0 | `a_shell_with_no_desktops_does_not_underflow`, `desktop_navigation_stops_at_both_ends` |
+
+**`wl2shortheader` fails no stage-2 test, and that is the field-order decision
+working.** It fails `a_layer_this_build_does_not_know_is_refused` and
+`a_state_bit_with_no_meaning_is_refused_rather_than_ignored` instead — tests written for
+something else entirely. `workspace` was put *after* the state byte precisely so
+that `state_at = HEADER + 8 + 8 + 1` and `layer_at = HEADER + 8 + 8` kept naming
+the fields they were written for; the reward for not rewriting their arithmetic
+is that they still catch a mismeasured header. A marker proved only by older
+tests is a weaker claim than one proved by its own, and it is recorded as the
+weaker claim rather than folded into the count.
+
+**The last two markers exist because the coverage table found a hole.** Running
+the first fourteen left `a_shell_with_no_desktops_does_not_underflow` with no
+marker at all — every bound-check defect it might have caught was already caught
+by a *named* test elsewhere, so the underflow test was passing without ever being
+the reason anything failed. The defect it actually guards is written down in
+`next_desktop`'s own doc comment — the obvious right-edge test,
+`current_desktop < num_desktops - 1`, underflows because `num_desktops` is a
+public field that nothing clamps and may be `0`. Putting that back, and the
+matching `current_desktop - 1` on the left edge, is what makes the doc comment
+checkable rather than merely asserted.
+
+**One marker was refused by the tooling, correctly.** `shellkeepsitsown` was
+first written as a *deletion* — replace the assignment with nothing — and
+`reintro.py` declines an empty side on purpose: with nothing to search for, the
+restore step cannot tell a file that had the anchor from one that never did, so
+the byte-for-byte guarantee would be vacuous. Rewritten to replace the
+assignment with an inert `let _ = list.current_workspace;`, which drops the
+effect and keeps the shape. All six guarded files were verified byte-identical
+to baseline after every run.
+
+3193 tests across `guiremote`, `oswindow`, `compositor` and `desktop`; clippy
+clean on `x86_64-pc-windows-gnu` (`--all-targets`) and on
+`x86_64-unknown-linux-gnu` (`--bins`, the only way the Linux-only arm of the
+compositor's `main.rs` is compiled at all); fmt clean.
+
+## 519. The window list reports each window's rectangle; nothing lets a shell set one
+
+**Decided by:** Claude (autonomous) — flagged to the operator before starting; see
+"Flagged, and proceeded on the default" below.
+
+**In short:** SlateOS has an "overview" screen — the Exposé-style view that shrinks
+every open window to a thumbnail so you can pick one — and 1856 lines of code for
+it that nothing calls. It was never wired up because it *cannot* be: drawing a
+thumbnail in proportion to the real window needs the real window's size, and the
+list of windows the desktop shell receives did not carry one. So the window-list
+frame now carries each window's position and size. The shell can read a
+rectangle; it still has no way to set one.
+
+### The problem
+
+`gui/desktop/src/overview.rs` builds its grid of thumbnails through
+`compute_grid_layout`, which calls `fit_aspect(thumb.width, thumb.height, …)`.
+With no geometry available every thumbnail is zero by zero, and `fit_aspect`
+returns `(0.0, 0.0)` for zero input — so the grid would be a screen full of
+rectangles that rasterise to no pixels and match no click. That is precisely the
+failure `Hit::WindowContent` had before §506 deleted it: a feature that looks
+present in the code and is absent on the screen. It is why the overview was
+demoted from `[x]` to `[-]` in the roadmap and filed as
+`TD-C-THE-OVERVIEW-SCREEN-IS-1856-LINES-NOBODY-CALLS`.
+
+So the question was never "should the overview have geometry". It was "should the
+shell be told rectangles at all".
+
+### Why this is not a reversal of §506
+
+§506 *deleted* per-window geometry from the shell's own window list, which reads
+like a flat contradiction of this section. It is worth being exact about why it
+is not.
+
+What §506 removed was geometry the shell **wrote and then acted on**: the shell
+kept its own rectangles, decided where a window belonged, and the compositor
+followed. Two copies of one truth with the shell's copy authoritative — so every
+drift between them was a window in the wrong place, and the shell was a window
+manager rather than a client of one.
+
+What version 3 adds is geometry that is:
+
+- **read-only.** No verb in `ShellControl` accepts a rectangle. A snap names a
+  *named edge* (§505), a maximize names nothing, a move-to-desktop names a
+  number. There is deliberately no `SetWindowRect`, and adding one would be a
+  separate decision that this section does not make.
+- **replaced wholesale by every list.** The shell accumulates no copy that can
+  drift; each `WLST` frame supersedes the last one entirely.
+- **read off the compositor's own `Window` at the instant the list is built**
+  (`w.x`, `w.y`, `w.width`, `w.height`), not out of a cache.
+
+The distinction is *report* versus *accept*. A client that can see where the
+windows are can draw a picture of the desktop. A client that can move them by
+naming coordinates is the thing §506 refused. Only the second is authority.
+
+### Alternatives considered
+
+**(1) Uniform thumbnails — no geometry on the wire.** Draw every window as the
+same box. *Against:* an overview whose tiles are all one size and carry no
+picture is a list of window titles, and the taskbar is already a list of window
+titles. The feature would exist and be pointless, which is worse than not having
+it — it costs the same screen and teaches the user that the overview shows less
+than the thing it covers up.
+
+**(2) A separate "overview" request returning geometry only when asked.** *For:*
+keeps the common `WLST` frame smaller, and makes the extra reporting explicit and
+opt-in. *Against:* it is a second source of truth for the same windows arriving at
+a different instant, so the overview would routinely draw a window where it was
+one frame ago. And the saving is not real: 16 bytes per window against a title
+that is typically 20–60.
+
+**(3) Geometry, reported, in the list that already exists — chosen.** One list,
+one instant, one truth. The cost is 16 bytes per window and a version bump.
+
+### The wire
+
+Four fields per window, placed **after** the state byte and the workspace, so
+that the existing decoder tests' byte arithmetic (`state_at = HEADER + 8 + 8 + 1`)
+keeps naming the fields it was written for:
+
+```
+x       : i32    top-left in desktop coordinates
+y       : i32
+width   : u32    outer size, decorations included
+height  : u32
+```
+
+`x` and `y` are **signed**, which is the one non-obvious choice here. The desktop
+origin is the primary monitor's top-left corner, so a monitor arranged to its
+left occupies negative x across its whole width. Narrowing that to unsigned turns
+x = −1920 into 4 293 047 296 — not a clipped window but one two million pixels
+off-screen, which draws as nothing and reads to the user as "that application
+closed".
+
+`WINDOW_LIST_VERSION` goes 2 → 3, and a v2 shell reading a v3 frame is refused
+rather than allowed to short-read, on the same reasoning the 1 → 2 bump used: a
+shell that saw zero-by-zero windows would look like an empty desktop rather than
+like a decoding error, and an empty desktop is a state that legitimately happens.
+
+`write_i32` and `Reader::read_i32` were hoisted out of `control.rs` into `lib.rs`
+and `reader.rs`, because two codecs now need them, and two spellings of one
+scalar is how the two ends of a wire come to disagree about it.
+
+### Verification
+
+Seven markers, applied one at a time through the guarded reversible patcher and
+reverted with a byte-for-byte SHA-256 check, each run against all four GUI
+crates:
+
+| Marker | The defect put back | New tests that failed |
+|---|---|---|
+| `wl3swapxy` | decoder reads y before x | negative-origin, not-interchangeable, extremes |
+| `wl3swapsize` | decoder reads height before width | not-interchangeable, extremes |
+| `wl3xunsigned` | encoder writes `unsigned_abs()` — "a position cannot be negative" | negative-origin |
+| `wl3decodedropsgeometry` | bytes consumed, rectangle discarded (v3 frame, v2 struct) | negative-origin, not-interchangeable, extremes |
+| `wl3newinventsasize` | an unplaced window given a plausible default size | nobody-placed |
+| `i32signmagnitude` | the shared `write_i32` as sign-magnitude, not two's complement | negative-origin |
+| `compnogeometry` | the compositor reports a rectangle it never filled in | reports-where-it-is, moves-in-the-next-list |
+
+Every marker was caught, and every one of the six new tests was failed by at
+least one marker. Three results are worth recording as *weaker* than the table
+makes them look, because a proof round is only useful if what it did not prove
+is written down too:
+
+- **`i32signmagnitude` did not fail the extremes test, and the comment inside
+  that test was wrong about why it would.** The comment claimed `i32::MIN` was
+  the witness against sign-magnitude. It is the opposite: `i32::MIN` is the one
+  negative value where the two encodings agree, because
+  `i32::MIN.unsigned_abs()` is `0x8000_0000`, which is already the sign bit and
+  nothing else. The ordinary negative in the other test is what catches it. The
+  comment has been corrected to say so, and to say that the reintroduction run
+  is what settled it. This is exactly the class of error the exercise exists to
+  find — a test whose *stated* reason for existing is not the reason it passes.
+- **`i32signmagnitude` also failed four `control.rs` tests**, including
+  `a_negative_position_is_not_read_as_a_huge_one` and
+  `a_reserve_reply_carries_a_signed_origin_so_a_left_hand_monitor_survives`.
+  That is the hoist working as intended: the two codecs really do share one
+  scalar, and a defect in it surfaces on both wires rather than on one.
+- **`moving_a_window_moves_it_in_the_next_window_list` is proved by the same
+  single marker as its neighbour.** Its distinct claim — that the list is
+  rebuilt per call rather than cached at window creation — has no marker of its
+  own, because a stale cache cannot be expressed as a one-string replacement in
+  a function that has no cache to make stale. It is honest additional coverage
+  against a defect that does not exist yet, not a proved regression test for one
+  that did.
+
+### Flagged, and proceeded on the default
+
+This rests on a reading of §506 — report versus accept — and the operator may
+read it differently. The question was put before the work began: *if you would
+rather the shell never see rectangles at all, say so and I will stop; the
+fallback is alternative (1), uniform boxes, which makes the overview a list,
+which is what the taskbar already is.* No objection came back, and the change is
+small and wholly revertible — one version bump, four fields, no new verb — so it
+proceeded on the default. If the operator prefers (1), the reversal is this
+commit backed out and the overview left filed as dead code.
+
+## 520. The overview is a fullscreen modal that takes input before the shell does, and one layout pass answers both "where is it drawn" and "what did I click"
+
+**Date:** 2026-08-22
+**Decided by:** Claude (autonomous)
+
+**In short:** The desktop has an Exposé screen — press a key, see a card for
+every open window, click one to switch to it. It was written months ago,
+complete and tested, and nothing ever showed it (`known-issues.md`,
+`TD-C-THE-OVERVIEW-SCREEN-IS-1856-LINES-NOBODY-CALLS`). §519 put each window's
+rectangle on the wire, which was the missing ingredient; this entry is about the
+four choices made in connecting it up. The short version of all four: while the
+overview is on screen it is the only thing on screen, it works out where
+everything goes exactly once, and two features that could not possibly work were
+deleted rather than kept.
+
+### 1. One layout pass, shared by drawing and hit-testing
+
+`overview::overview_layout(state, config, screen_w, screen_h) -> Vec<ThumbnailLayout>`
+is the single answer to "where does each card go". `render_overview` draws those
+rectangles; `DesktopShell::press_on_overview` hit-tests the same ones. Neither
+works the layout out for itself.
+
+*Alternative rejected:* let each side compute what it needs, which is how the
+module was written — the grid maths lived inline in `render_overview`, and
+`on_mouse_click` took `screen_w`/`screen_h` so it could redo the parts it
+needed. That is cheap, and it is wrong in a specific way: the two computations
+drift, and the symptom is that a click selects the window *next to* the one that
+was lit. The snap overlay already made this call for the same reason —
+`render_zone_overlay`'s doc says "what is lit and what a press would place are
+the same answer to the same question" — and there is no argument for the
+overview being different.
+
+*Cost:* the hit-test path recomputes the layout on every press rather than
+caching it. That is a few dozen rectangle divisions once per click, against a
+class of bug that is invisible in every unit test and obvious to every user.
+Caching would reintroduce the same hazard in a third form — a cache that is
+stale rather than a computation that disagrees — so it was not done.
+
+### 2. Modal: presses before `hit_test`, keys before the shortcut table
+
+`DesktopShell::handle_press` routes to `press_on_overview` **before**
+`sync_snap_area()` and `hit_test`. `handle_hotkey` routes to `key_on_overview`
+**before** `DesktopAction::for_chord`. Both orderings are load-bearing:
+
+| Without it | What the user sees |
+|---|---|
+| press routed after `hit_test` | Clicking the bottom strip presses a taskbar button, through an opaque fullscreen overlay |
+| keys routed after the chord table | Typing `d` into the search box runs Show Desktop |
+
+*Alternative rejected:* leave the overview as one more thing `hit_test` knows
+about, ranked above the taskbar. That is the right shape for the start menu and
+the calendar, which are *panels* — they occupy a rectangle, and everything
+outside it still belongs to whoever was there. The overview is not a panel; it
+covers the screen and dims it. A hit-test that has to be told "…and this one
+covers everything" is expressing modality in the vocabulary of layering, which
+works right up until something is added above it.
+
+*The exception that proves it is modal, not deaf:* the chord that opened it
+still reaches the table, so `Super+Tab` closes it. `key_on_overview` checks
+`for_chord(...) == Some(ToggleOverview)` first and hands that one case back. A
+toggle you can only press once is not a toggle, and a user who does not remember
+which chord they hit is otherwise left looking at a screen they cannot dismiss —
+which is also why `dismiss_popups` closes it, so `Esc` works even from a state
+the key handler did not anticipate.
+
+### 3. The "+" add-desktop button: deleted, not documented
+
+The overview drew a "+" in the bottom-right corner and returned
+`OverviewAction::AddDesktop` when it was clicked. Nothing could act on it:
+`DesktopShell::num_desktops` is fixed at construction and is the only bound
+either side enforces (§518). Making the desktop count mutable is a real decision
+with a real design behind it, and it is not this task.
+
+*Alternative rejected:* keep the button, wire it to a no-op, note it in
+`todo.txt`. That is precisely the defect this whole task exists to remove, one
+button large — a control that draws, hit-tests and reaches nothing. Shipping a
+fresh instance of a bug while fixing the old one is not a trade worth making for
+a corner glyph.
+
+It was also, incidentally, the only thing in the overview positioned
+independently of the layout pass — placed relative to the bottom-right corner
+rather than taken from `layouts` — and therefore the only thing that could be
+drawn in one place and clicked in another. Deleting it let `on_mouse_click` drop
+its `screen_w`/`screen_h` parameters, which is decision 1 becoming true of the
+whole module rather than most of it.
+
+### 4. The open animation: deleted, because it had never run and could not
+
+`OverviewState` carried `animation_progress: f32`, stepped by `tick_animation`,
+and `show()` set it to `0.0`. Every draw path began
+`if progress <= 0.0 { return }`. **There is no clock in the shell.**
+`oswindow::EventLoop::run` blocks in `Connection::wait()` when there is no input,
+and `wait` takes no timeout; there is no timer, no deadline and no frame callback
+anywhere in the stack. So `tick_animation` had no caller and could not have one,
+progress never left zero, and the first genuinely working build of this feature
+drew a blank, un-clickable, fullscreen overlay.
+
+*Alternative rejected:* keep the field, initialise it to `1.0`, step it if a
+clock ever appears. That reads like prudence and is not. It preserves the
+*possibility* of a fade at the cost of a live branch on the drawing path with
+exactly one correct value, and leaves the next reader to discover for themselves
+that `tick_animation` is unreachable. The animation is not deferred polish — with
+no clock it is a feature that cannot exist, and code that cannot run is not an
+asset.
+
+*What was kept:* the reasoning, in a comment where the function was, pointing at
+`known-issues.md` → `TD-C-THE-SHELL-HAS-NO-FRAME-CLOCK`. That entry is the real
+finding here and is much larger than one fade: `gui/desktop/src/animations.rs` is
+1036 lines with six `tick()` methods and **no caller anywhere in the tree**, for
+the same reason. The fade comes back when there is a clock to run it from.
+
+### What made this findable
+
+Every test in `overview.rs` drove the module directly, and all of them passed
+against an overlay that rendered nothing. That is not a gap in the tests'
+coverage of the module — it is the module's own tests being unable, in principle,
+to ask whether anything calls it. Both defects found here surfaced within an hour
+of something real being plugged in, and neither was visible before. See §519's
+closing note and `TD-C-VIRTUAL-DESKTOPS-HIDE-NOTHING` for the same shape twice
+more.
+
+### Verification
+
+Eleven defects reintroduced one at a time into the real tree with
+`D:/tmp/reintro.py`, each reverted afterwards and every touched file re-checked
+byte-for-byte by SHA-256 (`restored: True`). A test that does not fail against
+the marker naming its own defect is not a regression test for it, whatever it is
+called.
+
+| Marker | Defect put back | Tests that failed |
+|---|---|---|
+| `shellnooverviewrefresh` | the window list refreshes the taskbar but not the overview | 6 |
+| `overviewdropsgeometry` | the projection files a zero rectangle, as before §519 | 2 |
+| `overviewlanesfromwindows` | lanes derived from the windows that exist, so an empty desktop vanishes | 1 |
+| `overviewkeepsstalehover` | a hover outlives the window it named | 1 |
+| `overviewpressfallsthrough` | presses reach `hit_test` from behind the overlay | 2 |
+| `overviewkeysfallthrough` | keys reach the shortcut table before the search box | 1 |
+| `overviewtogglenotreentrant` | the opening chord arrives as a bare `Tab` and no longer closes it | 1 |
+| `overviewclickrelayout` | hit-testing computes its own layout, against a transposed screen | 1 |
+| `overviewsurvivesdismiss` | `dismiss_popups` clears everything except the fullscreen overlay | 1 |
+| `overviewneedsasecondstep` | drawing gated on state `show()` clears — the animation defect, respelled | 3 |
+| `overviewaddsdesktopbutton` | the "+" glyph comes back | 1 |
+
+**One marker caught nothing on the first run, and the test was the thing at
+fault.** `overviewclickrelayout` transposes width and height inside the hit-test
+path, and `a_click_selects_the_window_whose_card_is_under_it` — the test written
+specifically to guard decision 1 — passed against it unchanged. The reason is
+worth recording, because it generalises: the test asked `overview_layout` where
+the middle card was and then clicked there. Transposing the screen inside that
+function moved the question and the answer together, so the assertion held just
+as well against a layout with no relationship to what was on the glass. A test
+that recomputes the layout it is checking cannot fail when the layout is wrong,
+however precisely its name states the property.
+
+It now reads the click coordinate back out of the **render tree** —
+`render_thumbnail_card` emits a card's background `FillRect` immediately before
+the `Text` holding its title, so the drawn geometry is recoverable from the
+output — and asks the question the user asks: I clicked the middle of the card I
+can see, did that select the window whose title is written on it? It fails
+against the marker now. *This is the second time on this task that a passing test
+turned out to be answering a question nobody asks; the first was the whole
+module.*
+
+**Three tests are honest additional coverage, not proved regression tests:**
+
+- `a_query_matching_no_title_matches_no_window` — guards the `app_name` deletion.
+  No stage-2 marker touches search, because search is internal to the overview
+  and the seam being wired is the one around it.
+- `escape_leaves_the_overview` — survives every marker because **two independent
+  paths close it**: `key_on_overview` turns `Esc` into `OverviewAction::Close`,
+  and `dismiss_popups` hides it regardless. That redundancy is deliberate (see
+  decision 2), so no single marker can break it, and a marker that broke both at
+  once would be testing my patch rather than the code.
+- `the_bottom_right_corner_is_not_a_button` — the click region **cannot be
+  reintroduced** without restoring the `screen_w`/`screen_h` parameters that
+  decision 3 deleted from `on_mouse_click`, which is a signature change across
+  every call site. That unrepresentability is a stronger guarantee than the test:
+  you cannot write this bug back without the compiler making you change the
+  function's contract first. (`nothing_draws_an_add_desktop_button` guards the
+  *drawing* half and is proved, by `overviewaddsdesktopbutton`.)
+
+## 521. The frame clock is a local, one-shot deadline on the loop's own park — not a compositor callback, not a fixed-rate timer
+
+**Date:** 2026-08-22
+**Decided by:** Claude (autonomous)
+
+**In short:** Nothing on the desktop could move by itself. A menu could not
+slide open, a caret could not blink, a progress spinner could not spin — not
+because that code was missing, but because there was no heartbeat to step it
+with. The shell woke only when the user did something. This adds the heartbeat:
+a window can ask the event loop to wake it once, at a time it names, and gets
+an `Event::Tick` carrying how long really passed. The four choices below are
+about *where* the heartbeat comes from, *how often* it beats, *who stops it*,
+and *what number* the tick carries.
+
+### What was actually missing
+
+The surprising part, and the reason this entry exists at all: **neither end of
+the mechanism was missing.** The bounded wait already existed —
+`Socket::set_wait_timeout(Option<Duration>)` (`gui/remote/src/socket.rs`)
+capped `park()`'s `set_read_timeout`, refused a zero duration with an
+explanation, and its own doc comment named the use case: *"Only useful to a
+client that has something to do on a timer — an animation, a blinking caret"*.
+The event already existed too — `guitk::event::Event::Tick { elapsed_ms }` is in
+the shared vocabulary, `gui/remote/src/input.rs` encodes and decodes it on the
+wire in both directions, and **50 references to it exist across the toolkit and
+the applications**: `modal.rs` (three), `grid.rs`, `asteroids`, `breakout`,
+`dots`, `benchmark`, `diskimager`, `credmanager` and more all had an
+`Event::Tick { elapsed_ms } =>` arm ready to receive one.
+
+A tree-wide search for anything that *constructed* one outside a test found
+nothing. So this was a **missing producer in the middle**, with a working
+consumer vocabulary on one side and a working bounded wait on the other, and no
+line of code joining them. Every one of those 50 arms was dead code its author
+had no way to notice was dead, because `handle_event(Event::Tick { elapsed_ms: 16 })`
+written by hand in a unit test passes perfectly. See `known-issues.md` →
+`TD-C-THE-SHELL-HAS-NO-FRAME-CLOCK`, and §520's closing note for the same shape
+one task earlier.
+
+### 1. The tick is synthesised locally, not requested from the compositor
+
+`EventLoop` reads its own clock, bounds its own park, and constructs the
+`Event::Tick` itself. The compositor is not involved and does not know an
+animation is running.
+
+*Alternative rejected:* a compositor frame callback — the client asks for a
+frame, the compositor answers at vsync, the client draws. This is what Wayland
+does and it is genuinely better for one thing: an animation that must be *in
+step with the display* cannot be, from a local clock. That option stays open —
+the wire can already carry a `Tick` in both directions, so adding
+`RequestBody::RequestFrame` later is additive and breaks nothing.
+
+*Why not now:* it would put the compositor in the middle of every blinking caret
+on the desktop. A text field asking "wake me in 500 ms" would become a socket
+round trip, a scheduling decision in another process, and a wake-up of the
+compositor — to obtain a number the asking process could have read from its own
+clock. The cost is paid per animation per frame, by every client, including the
+ones whose animation has nothing to do with the display's refresh.
+
+### 2. Wake-ups are one-shot, so an animation re-arms every frame
+
+`wake_at(window, deadline)` fires exactly once. An animation that wants a next
+frame calls `wake_after` again from inside its own tick handler.
+
+*Alternative rejected:* a repeating interval timer — `every(window, 16ms)`,
+cancelled when the animation ends. Fewer calls, and it reads more naturally.
+
+*Why not:* it inverts the default. With a repeating timer, *continuing* is free
+and *stopping* is the thing you must remember; a handler that returns early, an
+animation that finishes on a branch nobody tested, a window torn down by a path
+that forgets to cancel — each leaves a timer waking the process sixty times a
+second for ever, and none of them looks like a bug in code review. One-shot
+makes stopping the default and continuing the deliberate act, which is exactly
+the property that keeps an idle desktop idle. The cost is one extra call per
+frame in the handler that is already running.
+
+*Corollary made explicit:* arming a window that already has a wake-up
+**replaces** it rather than adding a second, so a handler that re-arms
+unconditionally cannot accumulate timers. And `close()` cancels — a destroyed
+window's wake-up would otherwise hold the process at a frame rate for a window
+nobody can see, with every tick landing in `unrouted`.
+
+### 3. Not a fixed-rate frame timer
+
+With no wake-ups registered, `next_wakeup()` is `None`, the park is unbounded,
+and the loop blocks for ever exactly as before. Nothing beats unless something
+asked.
+
+*Alternative rejected:* run the loop at 60 Hz and deliver a tick every pass,
+letting each window decide whether it has anything to do. That is how most game
+loops are written and it makes the API smaller — no `wake_at`, no `cancel_wake`.
+
+*Why not:* a shell that wakes sixty times a second to discover it has nothing to
+draw is `TD-COMPOSITOR-POLLS-INSTEAD-OF-WAITING` in a different place. That
+entry is already filed as debt against the compositor; introducing the same
+tradeoff, resolved the same wrong way, in the client library one directory over
+would be building the bug we are tracking.
+
+### 4. `elapsed_ms` is measured, and it partitions wall time
+
+The tick carries `now − since`, where `since` is the moment of the *previous
+tick for that window* — carried across the handler that re-armed — not the
+moment the wake-up was armed, and not the interval that was requested.
+
+*Alternative rejected (a): report the requested interval.* Simplest, and wrong
+in a way that hides itself: an animation would be told it is running at its
+nominal rate no matter how far behind it had actually fallen, so the symptom of
+a slow frame becomes a slow animation rather than a dropped one — visible to the
+user, invisible to every measurement.
+
+*Alternative rejected (b): measure from the moment of arming.* This is the
+tempting one, and it looks right. It loses the time the handler itself spent:
+arm for 16 ms, handler takes 4 ms, every tick reports 16 while 20 ms of wall
+time passed. That matters more than 25% because **every consumer in the tree
+accumulates `elapsed_ms`** — `benchmark` adds it to a progress total,
+`credmanager` adds it to a clock, `login` steps a timeout with it. A delta that
+omits the handler does not merely run slow; it drifts from the wall clock
+without bound, and a clock built that way loses minutes per hour.
+
+*The exception that is not an inconsistency:* when an animation **stops** — a
+tick is delivered and the handler does not re-arm — the reference point is
+dropped. Restarting later reports the length of the first new frame, not the
+length of the pause. Without that, a paused game would resume by advancing every
+object by however long it was paused. The rule is therefore "partition the time
+the animation was *running*", which is what a consumer accumulating dt actually
+wants, and cancelling is the explicit way to say so.
+
+### The trait default is sound, not lax
+
+`Transport::set_wait_timeout` defaults to `Ok(())`. That looks like a transport
+may ignore a deadline it was given, but the default `wait()` returns
+immediately, and a wait that never blocks trivially returns within any bound.
+The obligation is the one `wait` already carries: a transport that really blocks
+must implement this too. `Socket`'s inherent method became the trait
+impl, unchanged.
+
+### What made this testable without sleeping
+
+The policy — expiry, ordering, the elapsed arithmetic, the dropped reference
+point — lives in `EventLoop::due_at(&mut self, now: Instant)`, and `wake_at`'s
+cold-start reference comes from a private `arm(window, deadline, now)`. Both
+take the clock as a parameter, so every rule above is checked against synthetic
+instants derived from one `Instant::now()` base. A test that has to sleep to
+observe a deadline is a test that will eventually be flaky about it, and a
+flaky timing test is worse than none: it trains its reader to re-run rather than
+to look.
+
+The one thing a synthetic clock cannot check — that the park really is bounded
+and really is a park — is proved in `guiremote::socket` against a live, silent
+peer, with a lower bound as well as an upper one, so a `wait` that ignored the
+timeout by returning at once fails just as a `wait` that ignored it by blocking
+would.
+
+### Verification: every test was proved to be a regression test
+
+Seventeen tests were added. A test named after a defect is not evidence it
+catches that defect — the standing doctrine here (see §520) is that **a test
+which does not fail against a marker naming its own defect is not a regression
+test for it, whatever it is called.** So each defect was put *back* into the
+real tree, one at a time, the affected crates' suites were run, and the defect
+was taken straight back out. Each patch was guarded twice: the string being
+replaced had to occur exactly once, and the reversal had to restore the file
+byte for byte (SHA-256 against a baseline taken before the first patch).
+
+| Defect reintroduced | Tests that failed |
+|---|---|
+| the bounded wait exists, `Event::Tick` exists, nothing joins them | `a_tick_reaches_the_application_through_the_ordinary_event_path`, `a_tick_for_a_window_this_loop_does_not_own_is_counted_not_delivered` |
+| wake-ups repeat instead of being one-shot | `a_wake_up_fires_once_and_is_then_spent`, `an_animation_that_stopped_does_not_report_the_pause_when_it_starts_again` |
+| `elapsed_ms` reports the interval asked for, not the one that passed | `the_tick_reports_the_time_that_passed_not_the_time_that_was_asked_for`, `the_deltas_of_a_running_animation_partition_the_time_it_ran_for` |
+| the reference point is not carried across the handler | `the_deltas_of_a_running_animation_partition_the_time_it_ran_for` |
+| the reference point outlives the animation it belonged to | `an_animation_that_stopped_does_not_report_the_pause_when_it_starts_again` |
+| every deadline is due, always | `a_deadline_not_yet_reached_does_not_fire`, `a_registered_wake_up_bounds_the_park`, `the_shell_s_park_is_bounded_by_a_wake_up_it_registered` |
+| arming twice grows a second timer rather than replacing the first | `arming_a_window_twice_replaces_rather_than_accumulates` |
+| several deadlines due at once fire in registration order | `several_deadlines_due_at_once_fire_earliest_first` |
+| cancelling one window's wake-up cancels everybody's | `cancelling_a_wake_up_stops_that_window_and_no_other` |
+| the park is never bounded — the defect this whole entry is about | `an_idle_loop_parks_with_no_bound_at_all`, `a_registered_wake_up_bounds_the_park`, `a_deadline_already_past_still_bounds_the_park_by_something_nonzero`, `the_shell_s_park_is_bounded_by_a_wake_up_it_registered` |
+| a deadline already past yields a **zero** bound, which the platform reads as "never time out" | `a_deadline_already_past_still_bounds_the_park_by_something_nonzero` |
+| a destroyed window keeps its wake-up | `closing_a_window_withdraws_its_wake_up` |
+| the socket stores a token bound instead of the one it was given | `a_bounded_wait_parks_for_the_bound_and_then_comes_back` |
+| the shell parks through the connection, past every deadline it registered | `the_shell_s_park_is_bounded_by_a_wake_up_it_registered` |
+
+Fourteen defects, sixteen of the seventeen tests earned. **`an_idle_loop_has_no_deadline`
+is recorded honestly as additional coverage, not as a regression test** — no
+marker made it fail. It asserts that a loop nobody armed reports no deadline,
+which is the *absence* of a behaviour; the defect that would break it is the
+park-level one, and `an_idle_loop_parks_with_no_bound_at_all` is the test that
+actually catches that.
+
+Two of the markers were worth the exercise on their own. `shellparksunbounded`
+is not hypothetical: `ShellSession::run` really did call `Connection::wait`
+rather than `EventLoop::wait`, so the frame clock would have worked everywhere
+except in the shell — the one place this entry exists for — and the only symptom
+would have been an animation that stops. It was found by grepping for the bypass
+*because* the marker list demanded one, and fixing it is why `EventLoop::wait`
+is public and `ShellSession::events_mut` exists. And `everydeadlineisdue` shows
+why "does it fire?" is not enough on its own: a wake-up that is always due still
+delivers ticks, still animates, and only fails the *negative* tests.
+
+*Note on the tool, for whoever writes the next one.* The reversal lives in a
+`finally`, which covers an exception but not the process being killed — a run
+that was interrupted mid-marker left the defect in `lib.rs`, where it looks
+exactly like a hand edit. The prover now heals that on startup: a marker whose
+bad side is present exactly once and whose good side is absent is unambiguously
+one that was left applied, so no journal file is needed. A prover that damages
+the tree when interrupted is worse than no prover.

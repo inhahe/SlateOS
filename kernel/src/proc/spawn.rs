@@ -20477,6 +20477,117 @@ pub fn self_test_linux_virtgpu_getparam() -> KernelResult<()> {
     Ok(())
 }
 
+/// Ring-3 regression test for the **virtio-gpu 2D render-resource round trip**
+/// on `/dev/dri/renderD128`.
+///
+/// The harness spawns [`elf::build_linux_virtgpu_resource_test_elf`], a
+/// self-contained Linux-ABI payload that walks the whole path a real render
+/// client walks: `RESOURCE_CREATE` (64×64 B8G8R8A8) → `MAP` → `mmap` → write
+/// and read back the first and last dword of the guest backing →
+/// `TRANSFER_TO_HOST` → `WAIT` → `RESOURCE_INFO` → `GEM_CLOSE`, then asserts
+/// the closed handle no longer resolves *and* that the still-live mapping
+/// keeps reading back.
+///
+/// Those last two assertions are the reason this test exists rather than
+/// stopping at "the ioctls return 0". They pin the two opposite ways a destroy
+/// path gets lifetime wrong: leaving the fd's ownership record behind (a
+/// handle that outlives its resource, which the next `RESOURCE_CREATE` could
+/// alias), or freeing the backing frames while userspace still has them
+/// mapped (which hands a live page to the next allocation). Neither is visible
+/// from the kernel-side `virtio::gpu::resource_self_test`, because neither
+/// involves a second address space.
+///
+/// Exit sentinels are per-stage — `0xE1` open, `0xE2` RESOURCE_CREATE, `0xE3`
+/// zero handle, `0xE4` stride, `0xE5` size, `0xE6` MAP, `0xE7` mmap, `0xE8`/
+/// `0xE9` the mapping's first/last dword, `0xEA` TRANSFER_TO_HOST, `0xEB`
+/// WAIT, `0xEC` RESOURCE_INFO, `0xED` info size, `0xEE` GEM_CLOSE, `0xEF` the
+/// closed handle still resolved, `0xF0` the mapping died with the handle.
+///
+/// If no DRM device is bound (a build/boot without `-device virtio-gpu-pci`),
+/// there is nothing to open, so the test is **skipped** (returns `Ok`) rather
+/// than reported as a failure.
+pub fn self_test_linux_virtgpu_resource() -> KernelResult<()> {
+    const MAX_YIELDS: usize = 256;
+
+    if crate::drm::device_count() == 0 {
+        serial_println!(
+            "[spawn] Skipping virtio-gpu render-resource (ring 3) test — no DRM device bound."
+        );
+        return Ok(());
+    }
+
+    serial_println!(
+        "[spawn] Running virtio-gpu render-resource round trip (ring 3, /dev/dri/renderD128)..."
+    );
+
+    let exe_elf = elf::build_linux_virtgpu_resource_test_elf();
+    let argv: &[&[u8]] = &[b"spawn-test-linux-virtgpu-resource"];
+    let envp: &[&[u8]] = &[b"PATH=/bin"];
+    // Like GETPARAM, the render node needs no capability to open, and the
+    // resource ioctls are gated on fd ownership rather than on a capability.
+    let options = SpawnOptions {
+        name: "spawn-test-linux-virtgpu-resource",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &[],
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: None,
+        cwd: None,
+        uid_gid: None,
+    };
+
+    let result = match spawn_process(&exe_elf, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            serial_println!("[spawn]   FAIL: virtgpu-resource spawn returned {:?}", e);
+            return Err(e);
+        }
+    };
+
+    for _ in 0..MAX_YIELDS {
+        crate::sched::yield_now();
+        if pcb::state(result.pid) == Some(pcb::ProcessState::Zombie) {
+            break;
+        }
+    }
+
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+
+    thread::on_thread_exit(result.task_id);
+    pcb::destroy(result.pid);
+
+    if state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: virtgpu-resource (ring 3) — process not a zombie after {} yields, \
+             got {:?}",
+            MAX_YIELDS,
+            state
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    if exit_code != Some(0) {
+        serial_println!(
+            "[spawn]   FAIL: virtgpu-resource (ring 3) — expected exit 0, got {:?} (225=open, \
+             226=RESOURCE_CREATE, 227=zero handle, 228=stride, 229=size, 230=MAP, 231=mmap, \
+             232/233=mapping pattern, 234=TRANSFER_TO_HOST, 235=WAIT, 236=RESOURCE_INFO, \
+             237=info size, 238=GEM_CLOSE, 239=closed handle still resolved, 240=mapping died \
+             with the handle)",
+            exit_code
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    serial_println!(
+        "[spawn]   virtio-gpu render resource (ring 3: CREATE/MAP/mmap/TRANSFER_TO_HOST/WAIT/\
+         INFO/GEM_CLOSE round trip, close-while-mapped survives): OK"
+    );
+    Ok(())
+}
+
 /// Ring-3 regression test for **`fallocate(2)` mode 0 (posix_fallocate
 /// grow)** (Linux #285) against the writable memfs root.
 ///
@@ -23644,6 +23755,288 @@ pub fn self_test_bash_on_slateos_libc() -> KernelResult<()> {
         Err(e) => {
             serial_println!(
                 "[spawn]   FAIL: reading bash's output file back failed: {:?}",
+                e
+            );
+            Err(KernelError::InternalError)
+        }
+    }
+}
+
+/// **CPython 3.12.3**, cross-compiled from source and linked against **our own
+/// `libc.a`**, starts, imports from a zipped standard library, and writes the
+/// result of five separate checks to a file.
+///
+/// This is the widest single consumer our libc has: CPython references **478**
+/// external libc symbols and our sysroot defines all 478.  bash — the previous
+/// widest — resolves far fewer.  It is also the first program on the image for
+/// which *starting at all* is a meaningful test: CPython cannot decode a
+/// filesystem path until it has imported the `encodings` package, which is not
+/// frozen into the binary, so `Py_Initialize` must successfully open and read
+/// members out of a 20 MiB zip archive before `main()` runs a line of user code.
+///
+/// Filed as `requests/b-a-cpython-path-z-self-test.md`.
+///
+/// # Two departures from the request, both deliberate
+///
+/// **1. The stdlib zip is read in place from `/mnt`, not staged to `/`.**  The
+/// request offered this as an option to avoid pushing 31 MiB through the kernel
+/// heap, and it is the better choice for a second reason it did not claim: `/`
+/// is a RAM-backed filesystem, so staging the archive there would move every
+/// read *off* ext4 and test nothing about the driver.  Left on `/mnt`, the
+/// ~496 KiB the run actually reads — one 66 KiB central-directory read at the
+/// very end of a 20 MiB file, then ~22 members scattered through it — are real
+/// ext4 seeks and short reads.  That is precisely the path the request wanted
+/// exercised, and the failure mode it predicted (a seek near EOF, not bulk
+/// throughput) is only reachable this way.  `PYTHONHOME` therefore names
+/// `/mnt/usr/local` rather than `/usr/local`.
+///
+/// **2. The file capability grants `METADATA`, which the request's sketch did
+/// not.**  `python-slateos.elf` is linked against our `libc.a`, so it speaks the
+/// **native** syscall ABI, and native `sys_fs_stat` is gated on
+/// `Rights::METADATA` while the Linux-ABI stat path checks nothing.  `zipimport`
+/// stats the archive before reading it.  Granting only `READ | WRITE` would
+/// reproduce, exactly, the bug that took two rounds to clear out of the two
+/// `make` rungs — see `known-issues.md`
+/// `FIXED-A-PATH-Z-REAL-MAKE-STAT-OF-MAKEFILE-RETURNS-EACCES`, and Q56 in
+/// `open-questions.md` for why the ABI asymmetry exists at all.
+///
+/// # Why each expected line, rather than a bare "it ran"
+///
+/// | Line | What it proves the previous line does not |
+/// |---|---|
+/// | `3.12.3` | `Py_Initialize` completed — i.e. `init_fs_encoding` found `encodings` **in the zip**. Most of the test. |
+/// | `zip` | `json` came *out of the archive*, not a directory that happened to exist. Stops a future run passing because somebody unpacked it. |
+/// | `b'slateos'` | A C extension (`binascii`, via `base64`) ran, so the static-extension build really compiled in rather than leaving a `.so` we cannot load. |
+/// | `{'a': [1, 2, 3]}` | The C `_json` parser ran and the dict/list allocators behaved. |
+/// | `(7, 42)` | `_struct` round-tripped, exercising CPython's layout assumptions about our target. |
+/// | `SLATE_PYTHON_OK` | The file was written to completion and closed through our libc. |
+///
+/// Writing to a file rather than stdout is deliberate, and matches the bash
+/// rung: it checks what CPython *produced*, not what survived the serial
+/// console.
+///
+/// No-op (returns `Ok(())`) when the rootfs, the interpreter or the archive is
+/// absent, so a checkout that has never run `scripts/cpython-spike/` still boots
+/// green.
+///
+/// # Errors
+///
+/// Returns [`KernelError::InternalError`] if CPython exits non-zero or the file
+/// it wrote does not match; [`KernelError::TimedOut`] if it never reaches
+/// `Zombie`; propagates spawn failure.
+pub fn self_test_cpython_on_slateos_libc() -> KernelResult<()> {
+    const EXPECT_EXIT: i32 = 0;
+    const EXPECT_OUT: &[u8] =
+        b"3.12.3\nzip\nb'slateos'\n{'a': [1, 2, 3]}\n(7, 42)\nSLATE_PYTHON_OK\n";
+
+    const SRC_PY: &str = "/mnt/bin/python3";
+    const DST_PY: &str = "/bin/python3";
+    // Read in place — see departure (1) in the doc comment above.
+    const SRC_ZIP: &str = "/mnt/usr/local/lib/python312.zip";
+    const OUT_PATH: &str = "/py-out.txt";
+
+    // 8x bash's budget.  CPython's startup is a different order of work: it
+    // builds the type system, unmarshals frozen modules, reads the zip's
+    // central directory and imports out of it before user code runs.
+    //
+    // MEASURED 2026-08-21, first run: **1 yield**.  Do NOT read that as "the
+    // work was cheap" and do NOT tighten the budget to match it — the number
+    // measures scheduler interleaving, not the child's cost.  With only the
+    // parent and the child runnable, one `yield_now()` did not return until the
+    // child had exited, so the entire run — ~8,200 lines of serial output, the
+    // whole of `Py_Initialize`, and every ext4 read — landed inside a single
+    // iteration.  The counter can therefore only ever report a *lower* bound on
+    // the interleaving, and it says nothing at all about I/O.  It jumps the
+    // moment anything else is runnable (another rung's leftover task, an SMP
+    // sibling, a blocking read that hands the parent back the CPU), which is
+    // exactly when the budget has to be there.  A first measurement of the read
+    // path needs a clock, not this loop — see the request's premise, which this
+    // result corrects.
+    const MAX_YIELDS: usize = 8_388_608;
+
+    if pathz_missing(
+        "CPython 3.12.3 linked against OUR libc.a (ring 3)",
+        &[SRC_PY, SRC_ZIP],
+    ) {
+        return Ok(());
+    }
+
+    serial_println!("[spawn] Running CPython 3.12.3 linked against OUR libc.a (ring 3) test...");
+
+    let _ = crate::fs::Vfs::mkdir_all("/bin");
+    // Static, self-contained: no ld.so and no libc.so to stage alongside it.
+    // Only the 11 MiB interpreter is copied; the 20 MiB archive stays on ext4.
+    match crate::fs::Vfs::read_file(SRC_PY) {
+        Ok(bytes) => {
+            serial_println!(
+                "[spawn]   cpython: staging {} bytes -> {}",
+                bytes.len(),
+                DST_PY
+            );
+            if let Err(e) = crate::fs::Vfs::write_file(DST_PY, &bytes) {
+                serial_println!(
+                    "[spawn]   cpython: SKIP (staging {} -> {} failed: {:?})",
+                    SRC_PY,
+                    DST_PY,
+                    e
+                );
+                return Ok(());
+            }
+        }
+        Err(e) => {
+            serial_println!("[spawn]   cpython: SKIP (reading {} failed: {:?})", SRC_PY, e);
+            return Ok(());
+        }
+    }
+
+    let exe_elf = match crate::fs::Vfs::read_file(DST_PY) {
+        Ok(b) => b,
+        Err(e) => {
+            serial_println!("[spawn]   cpython: SKIP (re-read {} failed: {:?})", DST_PY, e);
+            return Ok(());
+        }
+    };
+
+    // Clear any stale output so a read-back can only succeed if THIS run
+    // wrote it.
+    let _ = crate::fs::Vfs::remove(OUT_PATH);
+
+    let argv: &[&[u8]] = &[
+        b"/bin/python3",
+        b"-c",
+        // Deliberately flat: every statement is at column 0, so the program
+        // carries no indentation into a Rust line-continued literal (where a
+        // trailing `\` eats the newline *and* the following indent, which is
+        // exactly the kind of whitespace bug that is invisible in review).
+        // `open`/`close` rather than `with` is what buys that.
+        b"import sys, json, struct, base64, zipimport\n\
+          f = open('/py-out.txt', 'w')\n\
+          p = lambda s: print(s, file=f)\n\
+          p('.'.join(map(str, sys.version_info[:3])))\n\
+          p('zip' if '.zip' in json.__file__ else json.__file__)\n\
+          p(repr(base64.b64decode(base64.b64encode(b'slateos'))))\n\
+          p(json.loads('{\"a\": [1, 2, 3]}'))\n\
+          p(struct.unpack('<HH', struct.pack('<HH', 7, 42)))\n\
+          p('SLATE_PYTHON_OK')\n\
+          f.close()\n",
+    ];
+    let envp: &[&[u8]] = &[
+        // MANDATORY, and pointed at /mnt because the archive is read in place.
+        // Without it the interpreter looks in a compiled-in prefix that does
+        // not exist here and dies inside `init_fs_encoding`.  Do NOT "fix" such
+        // a failure with `-E`: that tells CPython to ignore the environment,
+        // which discards PYTHONHOME and guarantees the very failure it looks
+        // like it should cure.
+        b"PYTHONHOME=/mnt/usr/local",
+        b"PATH=/bin",
+        b"LANG=C",
+    ];
+    // METADATA: see departure (2) in the doc comment. zipimport stats the
+    // archive, and this binary speaks the native ABI where stat is gated.
+    let caps = [(
+        ResourceType::File,
+        1u64,
+        Rights::READ | Rights::WRITE | Rights::METADATA,
+    )];
+    let options = SpawnOptions {
+        name: "spawn-test-cpython",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &caps,
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: Some(DST_PY.as_bytes()),
+        cwd: None,
+        uid_gid: None,
+    };
+
+    let result = match spawn_process(&exe_elf, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            serial_println!(
+                "[spawn]   FAIL: cpython spawn returned {:?} — our ELF loader could not \
+                 start an 11 MiB static binary linked against our own libc",
+                e
+            );
+            return Err(e);
+        }
+    };
+
+    let mut reaped = false;
+    // Recorded rather than discarded: the request asked for the real figure,
+    // because this is the first measurement of our ext4 read path under a
+    // workload that seeks.
+    let mut yields_used = MAX_YIELDS;
+    for i in 0..MAX_YIELDS {
+        if pcb::state(result.pid) == Some(pcb::ProcessState::Zombie) {
+            reaped = true;
+            yields_used = i;
+            break;
+        }
+        crate::sched::yield_now();
+    }
+
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+    let written = crate::fs::Vfs::read_file(OUT_PATH);
+
+    thread::on_thread_exit(result.task_id);
+    pcb::destroy(result.pid);
+    let _ = crate::fs::Vfs::remove(OUT_PATH);
+
+    if !reaped || state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: cpython did not exit within {} yields (state={:?}). Before \
+             assuming a hang, RAISE THE BUDGET AND RETRY: startup reads ~496 KiB across \
+             ~22 zip members plus one 66 KiB central-directory read near EOF, so a slow \
+             seek path looks identical to a deadlock from here.",
+            MAX_YIELDS,
+            state
+        );
+        return Err(KernelError::TimedOut);
+    }
+
+    if exit_code != Some(EXPECT_EXIT) {
+        serial_println!(
+            "[spawn]   FAIL: cpython exit code={:?}, expected {} (a fatal \
+             `init_fs_encoding` error means the archive was not found — check \
+             PYTHONHOME and that {} exists)",
+            exit_code,
+            EXPECT_EXIT,
+            SRC_ZIP
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    match written {
+        Ok(bytes) if bytes.as_slice() == EXPECT_OUT => {
+            serial_println!(
+                "[spawn]   CPython 3.12.3 on our own libc.a (ring 3: 11 MiB static ELF, \
+                 no glibc and no ld.so; Py_Initialize imported `encodings` from a 20 MiB \
+                 zip read in place off ext4, then json/_json, base64/binascii and _struct \
+                 all ran against posix/src; read back {} bytes == expected, exit {}): OK \
+                 [{} yields used of {} budgeted]",
+                bytes.len(),
+                EXPECT_EXIT,
+                yields_used,
+                MAX_YIELDS
+            );
+            Ok(())
+        }
+        Ok(bytes) => {
+            serial_println!(
+                "[spawn]   FAIL: cpython wrote {} bytes {:?}, expected {:?} — a libc \
+                 function that returns plausibly rather than correctly is the usual cause",
+                bytes.len(),
+                bytes.as_slice(),
+                EXPECT_OUT
+            );
+            Err(KernelError::InternalError)
+        }
+        Err(e) => {
+            serial_println!(
+                "[spawn]   FAIL: reading cpython's output file back failed: {:?}",
                 e
             );
             Err(KernelError::InternalError)
@@ -29086,7 +29479,27 @@ int main(void){\n\
     // --- run make: it builds /cap-prog by invoking tcc per the Makefile ----
     let argv: &[&[u8]] = &[b"make", b"-f", b"/cap.mk", b"all"];
     let envp: &[&[u8]] = &[b"PATH=/bin", b"LANG=C", b"SHELL=/bin/sh"];
-    let caps = [(ResourceType::File, 1u64, Rights::READ | Rights::WRITE)];
+    // METADATA, for the same reason as `self_test_linux_real_glibc_make` — see
+    // the ABI note in that function's doc comment.  `/bin/make` is not the
+    // Debian glibc binary this test's name implies: `create-ext4-rootfs.sh`
+    // overwrites it with `build/spike/make-slateos.elf`, which speaks the
+    // *native* ABI, and native `sys_fs_stat` is gated on `METADATA` while the
+    // Linux-ABI stat path checks nothing.  Without it, `stat("/cap.mk")`
+    // returns EACCES, make maps any failed stat to "does not exist", and the
+    // symptom surfaces as `No rule to make target '/cap.mk'` — naming neither
+    // stat nor permissions.
+    //
+    // `0153b147c` fixed that in the sibling test and missed this one, because
+    // the two are 1600 lines apart and only the sibling was in the failing
+    // report.  These are the *only* two tests that run `make`; both now grant
+    // it.  (This is a symptom of Q56 in `open-questions.md`: the same operation
+    // needs a capability under one ABI and nothing under the other, so every
+    // launch site has to remember which door its binary comes in by.)
+    let caps = [(
+        ResourceType::File,
+        1u64,
+        Rights::READ | Rights::WRITE | Rights::METADATA,
+    )];
     let options = SpawnOptions {
         name: "spawn-test-make-cc",
         parent: 0,

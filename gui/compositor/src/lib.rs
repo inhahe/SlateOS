@@ -105,10 +105,23 @@ pub use guiremote::control::Layer;
 // building that request must be able to name it.
 pub use guiremote::control::ShellControlAction;
 use guiremote::control::WindowSpec;
+// Re-exported for the same reason as `WindowInfo` below: `Window::reserved_edge`
+// holds one and `reserve_edge` takes one, and a panel that has to reach past the
+// compositor to name the edge it is anchored to is naming a different type from
+// the one it is talking to. The rules that go with it — how strips add up and
+// how far a client may push — live in `guiremote::reserve`, so that a panel and
+// the compositor cannot disagree about what a reservation means.
+pub use guiremote::reserve::PanelEdge;
+use guiremote::reserve::ReservedEdges;
 use guiremote::scene::{SceneFrame, SceneSession, WindowSnapshot};
 // Same reason: `window_list` returns these, and a shell reading one should not
 // have to reach past the compositor to name what it got.
-pub use guiremote::window_list::WindowInfo;
+pub use guiremote::window_list::{WindowInfo, WindowList};
+// Same reason again: `Window::snapped` can hold one, and `snap_window_to_zone`
+// takes one. The type belongs to the protocol crate because both ends have to
+// agree on which rectangle a slot names — see `guiremote::zones`.
+use guiremote::zones::{EdgeDrop, SnapZone, WorkArea};
+pub use guiremote::zones::{SnapLayoutPreset, SnapSlot};
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -244,6 +257,13 @@ pub enum CompositorError {
     StreamNotFound(u64),
     /// A resize was asked of a window the client declared non-resizable.
     NotResizable(WindowId),
+    /// A snap layout produced no rectangle for the zone that was requested.
+    ///
+    /// Not reachable through [`SnapSlot`], which cannot be built naming a zone
+    /// its layout does not have. It exists because the alternative to reporting
+    /// the failure is inventing a rectangle, and a window silently placed
+    /// *somewhere* is a worse outcome than a request that visibly failed.
+    ZoneNotInLayout(WindowId),
 }
 
 impl std::fmt::Display for CompositorError {
@@ -271,6 +291,9 @@ impl std::fmt::Display for CompositorError {
             ),
             Self::StreamNotFound(id) => write!(f, "stream session not found: {}", id),
             Self::NotResizable(id) => write!(f, "window is not resizable: {}", id.raw()),
+            Self::ZoneNotInLayout(id) => {
+                write!(f, "snap layout has no such zone: {}", id.raw())
+            }
         }
     }
 }
@@ -386,17 +409,17 @@ impl Rect {
     }
 
     /// Compute the intersection of two rectangles. Returns None if they don't overlap.
+    ///
+    /// The far edges come from [`right`](Self::right) and
+    /// [`bottom`](Self::bottom) rather than being recomputed here, because those
+    /// two saturate a width above `i32::MAX` instead of casting it — and `as
+    /// i32` on such a width yields a *negative* number, so the far edge lands
+    /// left of the near one and a gigantic rectangle intersects to nothing.
     pub fn intersect(&self, other: &Rect) -> Option<Rect> {
         let x1 = self.x.max(other.x);
         let y1 = self.y.max(other.y);
-        let x2 = self
-            .x
-            .saturating_add(self.width as i32)
-            .min(other.x.saturating_add(other.width as i32));
-        let y2 = self
-            .y
-            .saturating_add(self.height as i32)
-            .min(other.y.saturating_add(other.height as i32));
+        let x2 = self.right().min(other.right());
+        let y2 = self.bottom().min(other.bottom());
 
         if x2 > x1 && y2 > y1 {
             Some(Rect::new(x1, y1, span(x1, x2), span(y1, y2)))
@@ -406,17 +429,16 @@ impl Rect {
     }
 
     /// Compute the bounding box that contains both rectangles.
+    ///
+    /// Same reasoning as [`intersect`](Self::intersect), and it bites harder
+    /// here: with `as i32`, unioning an over-wide rectangle produced a bounding
+    /// box *smaller* than either input, so a caller sizing a buffer from the
+    /// union would have believed an impossible desktop fitted.
     pub fn union(&self, other: &Rect) -> Rect {
         let x1 = self.x.min(other.x);
         let y1 = self.y.min(other.y);
-        let x2 = self
-            .x
-            .saturating_add(self.width as i32)
-            .max(other.x.saturating_add(other.width as i32));
-        let y2 = self
-            .y
-            .saturating_add(self.height as i32)
-            .max(other.y.saturating_add(other.height as i32));
+        let x2 = self.right().max(other.right());
+        let y2 = self.bottom().max(other.bottom());
 
         Rect::new(x1, y1, span(x1, x2), span(y1, y2))
     }
@@ -531,6 +553,203 @@ pub enum InputEvent {
 }
 
 // ---------------------------------------------------------------------------
+// Snap-zone geometry
+// ---------------------------------------------------------------------------
+
+/// The compositor's own bounds, described the way `guiremote::zones` wants them.
+///
+/// The conversion is a widening, not a narrowing: display coordinates are in
+/// the low tens of thousands at most, comfortably inside the 24-bit range where
+/// `f32` represents every integer exactly, so no coordinate is disturbed by the
+/// round trip through floating point.
+#[allow(
+    clippy::cast_precision_loss,
+    reason = "display coordinates are far inside f32's exact-integer range"
+)]
+fn work_area_of(bounds: Rect) -> WorkArea {
+    WorkArea::new(
+        bounds.x as f32,
+        bounds.y as f32,
+        bounds.width as f32,
+        bounds.height as f32,
+    )
+}
+
+/// What letting go of a dragged window would do, **and on which monitor**.
+///
+/// The work area travels with the intent rather than being looked up again at
+/// the release, because the two lookups need not agree. The preview is drawn
+/// from the monitor under the pointer; the window is dragged along with the
+/// pointer but not necessarily *onto* the same monitor — it straddles the seam
+/// while crossing it, and it lags the pointer by however far along its title bar
+/// it was grabbed. A release that re-derived the area from the window would then
+/// tile it on the wrong screen, after showing an outline on the right one.
+/// Carrying the area makes that divergence unrepresentable rather than merely
+/// tested against.
+///
+/// It is also what the preview's damage bookkeeping needs: a preview whose
+/// monitor changed has to be painted over where it *was*, and the outgoing
+/// rectangle cannot be recovered from the drop alone.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct DropIntent {
+    /// What the drop means — maximize, or a named zone.
+    drop: EdgeDrop,
+    /// The monitor's work area the drop was aimed at, which the release resolves
+    /// `drop` against.
+    area: WorkArea,
+}
+
+/// A work area back in whole pixels.
+///
+/// The inverse of [`work_area_of`] for any area that came from one, since every
+/// coordinate a display produces survives the round trip through `f32` exactly.
+/// It exists because the tiling operations divide between two vocabularies:
+/// `guiremote::zones` speaks `WorkArea`, and the compositor's own geometry —
+/// `client_geometry_for_frame`, `Rect::intersect` — speaks `Rect`.
+fn work_rect(area: WorkArea) -> Rect {
+    let (x, y) = (round_px(area.x), round_px(area.y));
+    Rect::new(
+        x,
+        y,
+        u32::try_from(round_px(area.right()).saturating_sub(x)).unwrap_or(0),
+        u32::try_from(round_px(area.bottom()).saturating_sub(y)).unwrap_or(0),
+    )
+}
+
+/// `rect` moved by the smallest amount that puts it inside `bounds`.
+///
+/// The size is never changed, so a rectangle too large to fit cannot be made to
+/// fit; it is pinned at the top-left corner instead. That choice is not
+/// arbitrary — for a window frame the top-left is where the title bar is, and
+/// any other anchor would push the title bar off the top or left edge and leave
+/// the window exactly as ungrabbable as it started.
+fn pulled_onto(rect: Rect, bounds: Rect) -> Rect {
+    let last_x = bounds
+        .right()
+        .saturating_sub(i32::try_from(rect.width).unwrap_or(i32::MAX))
+        .max(bounds.x);
+    let last_y = bounds
+        .bottom()
+        .saturating_sub(i32::try_from(rect.height).unwrap_or(i32::MAX))
+        .max(bounds.y);
+    Rect::new(
+        rect.x.clamp(bounds.x, last_x),
+        rect.y.clamp(bounds.y, last_y),
+        rect.width,
+        rect.height,
+    )
+}
+
+/// A window frame placed so that some of it is on a screen: `frame` unchanged if
+/// any part of it already falls on `desktop`, and otherwise pulled onto
+/// `fallback`.
+///
+/// Two rectangles rather than one because the questions are different. *Can the
+/// user see this window?* is asked of the whole virtual desktop — a window
+/// sitting happily on the second monitor is not stranded merely because the
+/// first one shrank, and yanking it across would be the more visible bug. *Where
+/// should a window nobody can see go?* has to name one screen that actually
+/// exists, and the union of several monitors is not necessarily one: an
+/// L-shaped arrangement has a hole in its bounding box, and a window placed in
+/// the hole is exactly as lost as it was before.
+///
+/// The intersection test is strict — *no part of the frame is on any screen* —
+/// on purpose. A window hanging half off an edge is still visible and still has
+/// a title bar to grab, so its owner's choice of position stands; only a window
+/// with nothing on screen at all has no title bar, cannot be dragged, and cannot
+/// be reached with the pointer.
+fn kept_reachable(frame: Rect, desktop: Rect, fallback: Rect) -> Rect {
+    if frame.intersect(&desktop).is_some() {
+        frame
+    } else {
+        pulled_onto(frame, fallback)
+    }
+}
+
+/// One zone edge, rounded to a whole pixel.
+///
+/// The clamp is what makes the cast safe rather than merely likely to be: the
+/// value handed to `as` is already inside `i32`'s range, so there is nothing to
+/// truncate. A `NaN` cannot arise from a finite work area, and if one somehow
+/// did, Rust's float-to-int casts saturate rather than invoke undefined
+/// behaviour — it would become `0`, a wrong pixel but never a wild one.
+#[allow(
+    clippy::cast_possible_truncation,
+    reason = "clamped into i32's range before the cast"
+)]
+fn round_px(v: f32) -> i32 {
+    v.round().clamp(i32::MIN as f32, i32::MAX as f32) as i32
+}
+
+/// How much of the desktop shows through the drop preview.
+///
+/// A wash rather than an opaque pane: the preview covers whatever the user is
+/// about to tile over, and hiding it would mean choosing a destination without
+/// being able to see what is already there.
+const PREVIEW_FILL_OPACITY: f32 = 0.25;
+
+/// How thick the drop preview's border is.
+const PREVIEW_BORDER_PX: u32 = 2;
+
+/// The four bands making up a `thickness`-pixel border just inside `rect`.
+///
+/// Returned as rectangles rather than drawn, so a caller can paint them
+/// however it likes — and so the four are guaranteed **disjoint**: the top and
+/// bottom bands span the full width and the side bands fill only what is left
+/// between them. Overlapping them would draw the corners twice, which for the
+/// translucent preview would leave four visibly darker squares.
+///
+/// Degenerate rectangles are handled by construction rather than rejected, and
+/// the two bands on an axis are sized in turn rather than symmetrically: the
+/// far band gets only what the near one left. A rect shorter than twice the
+/// thickness would otherwise produce a top and a bottom band that *overlap* in
+/// the middle — the same double-blend the disjointness is there to prevent,
+/// showing up on exactly the small rectangles where it is most visible. So a
+/// three-pixel-tall rect with a two-pixel border yields bands of two and one,
+/// and a two-pixel-tall one a single band covering it with an empty partner.
+fn rect_outline(rect: Rect, thickness: u32) -> [Rect; 4] {
+    let top_h = thickness.min(rect.height);
+    let bottom_h = thickness.min(rect.height.saturating_sub(top_h));
+    let left_w = thickness.min(rect.width);
+    let right_w = thickness.min(rect.width.saturating_sub(left_w));
+    let inner_h = rect.height.saturating_sub(top_h).saturating_sub(bottom_h);
+    let offset = |base: i32, by: u32| base.saturating_add(i32::try_from(by).unwrap_or(i32::MAX));
+    let inner_y = offset(rect.y, top_h);
+    [
+        Rect::new(rect.x, rect.y, rect.width, top_h),
+        Rect::new(
+            rect.x,
+            offset(rect.y, rect.height.saturating_sub(bottom_h)),
+            rect.width,
+            bottom_h,
+        ),
+        Rect::new(rect.x, inner_y, left_w, inner_h),
+        Rect::new(
+            offset(rect.x, rect.width.saturating_sub(right_w)),
+            inner_y,
+            right_w,
+            inner_h,
+        ),
+    ]
+}
+
+/// A zone's rectangle in the compositor's whole-pixel coordinates.
+///
+/// Each of the four *edges* is rounded, and the extents are then derived from
+/// the rounded edges. Rounding the origin and the size independently is the
+/// obvious alternative and it tiles badly: two zones that share a boundary
+/// would round it twice, once as one zone's right edge and once as the other's
+/// left, and the two answers can differ — which shows up as a one-pixel column
+/// that either belongs to both windows or to neither.
+fn zone_rect(zone: SnapZone) -> Rect {
+    let left = round_px(zone.x);
+    let top = round_px(zone.y);
+    let right = round_px(zone.x + zone.width);
+    let bottom = round_px(zone.y + zone.height);
+    Rect::new(left, top, span(left, right), span(top, bottom))
+}
+
+// ---------------------------------------------------------------------------
 // Window
 // ---------------------------------------------------------------------------
 
@@ -548,6 +767,29 @@ pub enum SnapEdge {
     Left,
     /// The right half.
     Right,
+}
+
+/// What a snapped window is snapped *to*.
+///
+/// Two ways of asking for a tiled position, kept as separate variants because
+/// they resolve to genuinely different rectangles rather than being two names
+/// for one. [`Half`](Self::Half) splits the display at its midpoint with no
+/// gutter, so two windows on opposite halves meet with no visible seam — that
+/// is what the keyboard shortcut has always done. [`Zone`](Self::Zone) is one
+/// cell of a named layout offered by the shell's zone picker, and every cell of
+/// a layout is inset by [`guiremote::zones::ZONE_GAP`] so the tiled windows
+/// read as separate panes. Folding `Half` into `Zone(TwoEqualHalves, 0 | 1)`
+/// would look like a simplification and would in fact hand every keyboard snap
+/// a six-pixel gutter it never asked for.
+///
+/// Like [`SnapEdge`], and for the same reason spelled out there, this stores
+/// the *request* and never the rectangle the request currently resolves to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum SnapTarget {
+    /// One half of the display, with no gutter between the halves.
+    Half(SnapEdge),
+    /// One cell of a named multi-window layout, inset by the zone gap.
+    Zone(SnapSlot),
 }
 
 /// A managed window in the compositor.
@@ -601,15 +843,34 @@ pub struct Window {
     pub fs_restore_rect: Option<Rect>,
     /// Position and size before maximizing *or snapping* (for restore).
     pub restore_rect: Option<Rect>,
-    /// Which half of the work area this window is snapped to, if any.
+    /// The strip along a monitor edge this window has reserved for itself, if
+    /// any: a taskbar or dock keeping tiled windows out of the pixels it sits
+    /// in. `None` for the overwhelming majority of windows, which are not
+    /// panels.
+    ///
+    /// **Stored on the window rather than in a table beside it** for the same
+    /// reason [`SnapTarget`] is: the two questions a reservation raises are
+    /// *which monitor* and *for how long*, and a window already answers both.
+    /// The monitor is the one it overlaps most, by the same rule everything
+    /// else uses; the lifetime is the window's own, so a panel that is
+    /// destroyed or whose client hangs up releases its claim with no bookkeeping
+    /// that could be forgotten. A separate `HashMap<WindowId, _>` would be a
+    /// second lifetime to keep in step with this one, and the failure mode of
+    /// getting it wrong is a permanent strip of unusable desktop with nothing
+    /// left on screen to release it from.
+    ///
+    /// Counted only while the window is visible and not minimized — see
+    /// [`Compositor::reserved_on`].
+    pub reserved_edge: Option<(PanelEdge, u32)>,
+    /// What this window is snapped to, if anything.
     ///
     /// A separate state from [`maximized`](Self::maximized) rather than a
     /// second flag beside it, because the three are mutually exclusive and a
     /// pair of booleans can represent a window that is both — which
     /// [`restore_window`](Compositor::restore_window) would then have to pick
     /// between. `Option` makes the illegal state unrepresentable and gives
-    /// "snapped, and to which side" one answer instead of two.
-    pub snapped: Option<SnapEdge>,
+    /// "snapped, and to where" one answer instead of two.
+    pub snapped: Option<SnapTarget>,
     /// Whether the window needs to be redrawn.
     pub dirty: bool,
     /// Whether the compositor draws a title bar and borders for this window.
@@ -656,6 +917,21 @@ pub struct Window {
     /// 1.0 until the compositor first refreshes it, which is what makes this
     /// field invisible on a single 96dpi display.
     pub scale_factor: f32,
+    /// Which virtual desktop this window belongs to.
+    ///
+    /// Meaningful only for [`Layer::Normal`] windows: see
+    /// [`Window::is_showing`]. A window is created on whichever workspace was
+    /// being shown at the time, which is where a window that just opened
+    /// belongs.
+    ///
+    /// **Held here rather than in the shell** because the shell cannot act on
+    /// it: hiding a window it does not own would need a verb that lets any
+    /// shell hide any client's window, which is exactly the ambient authority
+    /// the `ShellControl` design exists to avoid. The compositor already owns
+    /// every other reason a window is not on screen (`visible`, `minimized`),
+    /// and a switch is then one recomposite rather than N requests. See
+    /// `design-decisions.md` §518.
+    pub workspace: u32,
 }
 
 /// Scale a decoration dimension to physical pixels, never rounding a visible
@@ -713,6 +989,7 @@ impl Window {
             fullscreen: false,
             fs_restore_rect: None,
             restore_rect: None,
+            reserved_edge: None,
             snapped: None,
             dirty: true,
             decorations: spec.decorations,
@@ -727,7 +1004,35 @@ impl Window {
             // default is the one that leaves geometry exactly as it was before
             // this field existed.
             scale_factor: 1.0,
+            // Overwritten by `create_window_from_spec` with the workspace being
+            // shown. A `Window` on its own has no way to know which that is,
+            // and 0 is the workspace a compositor that never switches stays on.
+            workspace: 0,
         }
+    }
+
+    /// Whether this window is on screen right now.
+    ///
+    /// The one predicate for "the user can see this and click on it", which
+    /// every render pass, every hit test and every occlusion cull asks instead
+    /// of spelling the conditions out. It was three separate spellings of
+    /// `visible && !minimized` across twelve call sites before workspaces
+    /// existed; adding a third reason a window is hidden to twelve places
+    /// independently is how a window ends up invisible but still taking clicks.
+    ///
+    /// **A window outside [`Layer::Normal`] is on every workspace.** The
+    /// wallpaper and the shell's chrome — taskbar, start menu, the switcher
+    /// overlay — are furniture belonging to the *screen*, not documents
+    /// belonging to a desktop, and a taskbar that vanished when you switched
+    /// desktop would take the only means of switching back with it. Using the
+    /// layer for this rather than a separate `sticky` flag keeps it a property
+    /// of what a surface *is*: the same distinction the shell already makes
+    /// when it drops non-`Normal` windows from its taskbar.
+    #[must_use]
+    pub const fn is_showing(&self, current_workspace: u32) -> bool {
+        self.visible
+            && !self.minimized
+            && (!matches!(self.layer, Layer::Normal) || self.workspace == current_workspace)
     }
 
     /// Whether this window is drawn with a frame right now.
@@ -799,12 +1104,26 @@ impl Window {
     /// A box that four functions each recompute is a box that will be drawn in
     /// one place and hit-tested in another.
     pub fn frame_rect(&self) -> Rect {
+        self.frame_rect_for_client(self.client_rect())
+    }
+
+    /// The frame box a *given* client rectangle would have on this window — the
+    /// inverse of [`client_geometry_for_frame`](Self::client_geometry_for_frame),
+    /// and the general form of [`frame_rect`](Self::frame_rect).
+    ///
+    /// Needed because a saved rectangle is stored as client geometry
+    /// (`restore_rect`, `fs_restore_rect`) while every question about whether a
+    /// window can be *reached* is a question about its decorated box: it is the
+    /// title bar, not the client area, that has to be on screen to be grabbed.
+    /// Asking that of a window that is not currently at the rectangle in
+    /// question is the whole point, so it cannot be `frame_rect`.
+    pub fn frame_rect_for_client(&self, client: Rect) -> Rect {
         let (top, side, bottom) = self.frame_insets();
         Rect::new(
-            self.x.saturating_sub(side as i32),
-            self.y.saturating_sub(top as i32),
-            self.width.saturating_add(side.saturating_mul(2)),
-            self.height.saturating_add(top).saturating_add(bottom),
+            client.x.saturating_sub(side as i32),
+            client.y.saturating_sub(top as i32),
+            client.width.saturating_add(side.saturating_mul(2)),
+            client.height.saturating_add(top).saturating_add(bottom),
         )
     }
 
@@ -2205,8 +2524,67 @@ impl DisplayManager {
         self.displays.push(display);
     }
 
+    /// Remove the display with `id`, answering it, or `None` if no display has
+    /// that id.
+    ///
+    /// **The survivors keep the offsets they already had.** Removing the
+    /// leftmost of two monitors therefore leaves the other one at its old `x`,
+    /// so the virtual desktop starts part-way along and the space the departed
+    /// screen occupied stays in the bounding box as a hole that is composited
+    /// and scanned out nowhere. Re-flowing them leftwards is the tidier
+    /// arrangement and is deliberately not done: the *scanout* does not re-flow
+    /// its surviving heads when one dies (design-decisions.md §515), because a
+    /// head that fails mid-session must not drag the other monitors' pictures
+    /// sideways, and these two layouts have to agree pixel for pixel or every
+    /// window is drawn on the wrong screen. One of them has to be the authority
+    /// and it is the one holding the framebuffers.
+    ///
+    /// If the display removed was the primary, the first survivor is promoted.
+    /// Nothing tolerates a primary-less arrangement: [`Self::primary`] is the
+    /// fallback for every "which monitor is this?" question, and an arrangement
+    /// with monitors but no primary answers `None` to all of them.
+    ///
+    /// Prefer [`Compositor::detach_display`], which also resizes the scanout
+    /// surface and re-places the windows the departed monitor was holding.
+    pub fn remove_display(&mut self, id: u32) -> Option<Display> {
+        let index = self.displays.iter().position(|d| d.id == id)?;
+        let removed = self.displays.remove(index);
+        if removed.primary {
+            if let Some(first) = self.displays.first_mut() {
+                first.primary = true;
+            }
+        }
+        Some(removed)
+    }
+
     /// Get the total virtual desktop bounds (union of all displays).
     pub fn virtual_bounds(&self) -> Rect {
+        self.bounds_folded(|d| d.bounds())
+    }
+
+    /// The virtual desktop bounds that *would* result from the display at
+    /// `index` being `width` by `height`.
+    ///
+    /// Asked before the change is made rather than after, because the scanout
+    /// surface has to be reallocated to match and that allocation can fail. A
+    /// compositor that had already adopted the new arrangement when it found
+    /// out would be describing a desktop it cannot paint; asking first means a
+    /// failed mode change leaves everything exactly as it was.
+    ///
+    /// An `index` that names no display answers the current bounds, which is
+    /// the truthful answer to "what would change?" — nothing.
+    pub fn virtual_bounds_if_resized(&self, index: usize, width: u32, height: u32) -> Rect {
+        self.bounds_folded(|d| {
+            if self.displays.get(index).is_some_and(|t| t.id == d.id) {
+                Rect::new(d.offset_x, d.offset_y, width, height)
+            } else {
+                d.bounds()
+            }
+        })
+    }
+
+    /// The union of every display's rectangle, each mapped through `f` first.
+    fn bounds_folded(&self, f: impl Fn(&Display) -> Rect) -> Rect {
         // Taken from the iterator rather than by `[0]` after an `is_empty()`
         // guard: the guard and the index are two statements that have to agree
         // about the same fact, and only one of them is checked by the compiler.
@@ -2214,9 +2592,7 @@ impl DisplayManager {
         let Some(first) = rest.next() else {
             return Rect::new(0, 0, 0, 0);
         };
-        rest.fold(first.bounds(), |bounds, display| {
-            bounds.union(&display.bounds())
-        })
+        rest.fold(f(first), |bounds, display| bounds.union(&f(display)))
     }
 
     /// Get all displays.
@@ -2417,6 +2793,34 @@ pub enum CompositorRequest {
         window_id: WindowId,
         action: ShellControlAction,
     },
+    /// Reserve a strip along an edge of the monitor a panel window is on, so
+    /// that tiling stops short of it. Answered with
+    /// [`CompositorResponse::WorkArea`].
+    ///
+    /// Named against the *panel's own* window, so unlike
+    /// [`ShellControl`](Self::ShellControl) it is resolved against the sender's
+    /// windows in the ordinary way. It is nonetheless privileged, because its
+    /// effect lands on everybody else's tiling rather than on the window it
+    /// names — see [`guiremote::control::RequestBody::ReserveEdge`].
+    ReserveEdge {
+        window_id: WindowId,
+        edge: PanelEdge,
+        size: u32,
+    },
+    /// Show a different virtual desktop. Answered with
+    /// [`CompositorResponse::Ok`].
+    ///
+    /// Names no window -- which is why it could not be a
+    /// [`ShellControlAction`], every one of which is a verb aimed at one. It is
+    /// privileged for the plainest possible reason: it changes what every
+    /// client on the machine is showing.
+    SwitchWorkspace { workspace: u32 },
+    /// File a window on a virtual desktop. Answered with
+    /// [`CompositorResponse::Ok`].
+    ///
+    /// Like [`ShellControl`](Self::ShellControl) it names somebody else's
+    /// window and is therefore not resolved against the sender's own.
+    SetWindowWorkspace { window_id: WindowId, workspace: u32 },
 }
 
 /// Responses from the compositor to clients.
@@ -2439,6 +2843,15 @@ pub enum CompositorResponse {
     StreamStarted { stream_id: u64 },
     /// An encoded draw-command stream frame (see [`stream`] wire format).
     StreamFrame { data: Vec<u8> },
+    /// The usable rectangle left on a monitor after every reservation on it,
+    /// in whole pixels and in virtual-desktop coordinates. Answer to
+    /// [`CompositorRequest::ReserveEdge`].
+    WorkArea {
+        x: i32,
+        y: i32,
+        width: u32,
+        height: u32,
+    },
 }
 
 /// Notifications sent from the compositor to clients (events).
@@ -3956,6 +4369,14 @@ pub struct Compositor {
     cursor_shape: CursorShape,
     /// Active drag operation (if any).
     drag: Option<DragState>,
+    /// Where the window being dragged would land if the user let go now.
+    ///
+    /// Kept rather than recomputed each frame because the *change* is what has
+    /// to be damaged: an outline that moved has to be painted over where it
+    /// was, and nothing else in the frame knows it was ever there. Its only
+    /// writer is [`set_drag_preview`](Compositor::set_drag_preview), which is
+    /// what pairs the two rectangles with the damage they need.
+    drag_preview: Option<DropIntent>,
     /// The previous left-press on a title bar, for recognising a double-click.
     ///
     /// The window is part of it, not just the time: two quick clicks on two
@@ -4017,6 +4438,14 @@ pub struct Compositor {
     stream_sessions: BTreeMap<u64, SceneSession>,
     /// Monotonic allocator for stream session ids.
     next_stream_id: u64,
+    /// Which virtual desktop is being shown.
+    ///
+    /// The compositor deliberately has no idea how many there are: a count is a
+    /// user preference, it belongs to whatever is offering the user the choice,
+    /// and a second copy of it here would be a second answer to drift from the
+    /// shell's. What the compositor owns is which one is *showing*, because
+    /// that is the part that decides pixels.
+    current_workspace: u32,
 }
 
 impl Compositor {
@@ -4038,6 +4467,7 @@ impl Compositor {
             cursor_y: height as i32 / 2,
             cursor_shape: CursorShape::Arrow,
             drag: None,
+            drag_preview: None,
             last_title_press: None,
             double_click_interval: Duration::from_millis(DEFAULT_DOUBLE_CLICK_MS),
             render_engine: RenderEngine::new(),
@@ -4054,6 +4484,7 @@ impl Compositor {
             scanout: Scanout::Composited,
             stream_sessions: BTreeMap::new(),
             next_stream_id: 1,
+            current_workspace: 0,
         })
     }
 
@@ -4181,6 +4612,12 @@ impl Compositor {
         let (w, h) = window.clamp_size(window.width, window.height);
         window.width = w;
         window.height = h;
+        // The desktop the user is looking at, which is where a window that just
+        // opened belongs. A client cannot ask for a workspace in its spec on
+        // purpose: choosing which desktop a program appears on is the user's,
+        // and a client that could pick would be able to open a window somewhere
+        // the user is not looking.
+        window.workspace = self.current_workspace;
         let id = window.id;
 
         self.windows.push(window);
@@ -4204,6 +4641,15 @@ impl Compositor {
 
         // Mark the old area as damaged before removing.
         self.damage_window(window_id);
+
+        // A drag on a window that no longer exists has nothing left to move,
+        // and its drop preview would go on offering to tile a window the user
+        // just closed. Cancelled here rather than tolerated downstream because
+        // the preview is drawn from this state every frame.
+        if self.drag.as_ref().is_some_and(|d| d.window_id == window_id) {
+            self.drag = None;
+            self.set_drag_preview(None);
+        }
 
         let closed_layer = self.layer_of(window_id);
         self.windows.remove(idx);
@@ -4307,11 +4753,39 @@ impl Compositor {
         Ok(())
     }
 
-    /// Maximize a window to fill the display.
+    /// Maximize a window to fill the monitor it is on.
     ///
     /// Refused for a window the client declared non-resizable: maximising is a
     /// resize, and a window that said it only works at one size means it.
+    ///
+    /// # Errors
+    ///
+    /// [`CompositorError::WindowNotFound`] if the window does not exist, and
+    /// [`CompositorError::NotResizable`] if the client declared it fixed-size.
     pub fn maximize_window(&mut self, window_id: WindowId) -> CompositorResult<()> {
+        let bounds = self
+            .work_area_of_window(window_id)
+            .ok_or(CompositorError::WindowNotFound(window_id))?;
+        self.maximize_window_within(window_id, work_rect(bounds))
+    }
+
+    /// Maximize a window into a work area chosen by the caller.
+    ///
+    /// Split out for the edge drop, which must use the monitor **the pointer is
+    /// over** rather than the one that holds the larger part of the window. A
+    /// move drag carries the window with the pointer, so usually those are the
+    /// same monitor — but a window grabbed far along a wide title bar trails
+    /// the pointer by that offset and can still be wholly on the monitor it
+    /// came from at the moment the pointer reaches a band on the next one.
+    /// Re-deriving the area from the window there would fill the monitor the
+    /// user dragged it *off*. It is also what makes the preview honest, since
+    /// the release resolves the very area the outline was drawn from rather
+    /// than a second opinion about it. See [`Compositor::drop_intent`].
+    fn maximize_window_within(
+        &mut self,
+        window_id: WindowId,
+        display_bounds: Rect,
+    ) -> CompositorResult<()> {
         if !self
             .window_ref(window_id)
             .ok_or(CompositorError::WindowNotFound(window_id))?
@@ -4321,8 +4795,6 @@ impl Compositor {
         }
 
         self.damage_window(window_id);
-
-        let display_bounds = self.display_manager.virtual_bounds();
 
         let (final_w, final_h) = {
             let window = self
@@ -4388,6 +4860,314 @@ impl Compositor {
     /// maximize, then snap, then restore returns to where the window was before
     /// any of it, not to the full-screen rectangle it had in between.
     pub fn snap_window(&mut self, window_id: WindowId, edge: SnapEdge) -> CompositorResult<()> {
+        let bounds = work_rect(
+            self.work_area_of_window(window_id)
+                .ok_or(CompositorError::WindowNotFound(window_id))?,
+        );
+        self.snap_window_within(window_id, edge, bounds)
+    }
+
+    /// Snap a window to one half of a work area chosen by the caller.
+    ///
+    /// Split out for [`retile_for_work_area_change`](Self::retile_for_work_area_change),
+    /// which must halve the monitor whose reservation changed rather than
+    /// whichever one the window is found on part-way through being moved. The
+    /// same reasoning as [`maximize_window_within`](Self::maximize_window_within);
+    /// see that method.
+    fn snap_window_within(
+        &mut self,
+        window_id: WindowId,
+        edge: SnapEdge,
+        bounds: Rect,
+    ) -> CompositorResult<()> {
+        // Halve by splitting at the midpoint rather than by giving each side
+        // `width / 2`: on an odd width the latter leaves a one-pixel column
+        // belonging to neither half, which is a permanently visible seam down
+        // the middle of the screen.
+        let mid = bounds.width / 2;
+        let half = match edge {
+            SnapEdge::Left => Rect::new(bounds.x, bounds.y, mid, bounds.height),
+            SnapEdge::Right => Rect::new(
+                bounds
+                    .x
+                    .saturating_add(i32::try_from(mid).unwrap_or(i32::MAX)),
+                bounds.y,
+                bounds.width.saturating_sub(mid),
+                bounds.height,
+            ),
+        };
+
+        self.place_snapped(window_id, half, SnapTarget::Half(edge))
+    }
+
+    /// Tile a window into one cell of a named multi-window layout.
+    ///
+    /// The shell names *which zone of which layout* and never a rectangle; the
+    /// rectangle is worked out here, from the compositor's own display bounds,
+    /// for [`snap_window`](Self::snap_window)'s reason. `guiremote::zones` is
+    /// where the arithmetic lives so that the picker the user aimed at and the
+    /// placement they got are computed from one definition rather than two
+    /// copies of it.
+    ///
+    /// Everything else — the non-resizable refusal, replacing rather than
+    /// stacking on a previous maximize or snap, keeping the *original*
+    /// `restore_rect` — matches [`snap_window`](Self::snap_window) exactly,
+    /// because both go through the same placement step.
+    ///
+    /// # Errors
+    ///
+    /// [`CompositorError::WindowNotFound`] if the window does not exist,
+    /// [`CompositorError::NotResizable`] if the client declared it fixed-size,
+    /// and [`CompositorError::ZoneNotInLayout`] if the layout yielded no
+    /// rectangle for the slot — which a well-formed [`SnapSlot`] cannot cause.
+    pub fn snap_window_to_zone(
+        &mut self,
+        window_id: WindowId,
+        slot: SnapSlot,
+    ) -> CompositorResult<()> {
+        let area = self
+            .work_area_of_window(window_id)
+            .ok_or(CompositorError::WindowNotFound(window_id))?;
+        self.snap_window_to_zone_within(window_id, slot, area)
+    }
+
+    /// Tile a window into a zone of a work area chosen by the caller.
+    ///
+    /// Split out for [`maximize_window_within`](Self::maximize_window_within)'s
+    /// reason: an edge drop resolves the slot against the monitor the pointer
+    /// is over, which is the monitor the preview was drawn on.
+    fn snap_window_to_zone_within(
+        &mut self,
+        window_id: WindowId,
+        slot: SnapSlot,
+        area: WorkArea,
+    ) -> CompositorResult<()> {
+        let zone = slot
+            .rect(area)
+            .ok_or(CompositorError::ZoneNotInLayout(window_id))?;
+
+        self.place_snapped(window_id, zone_rect(zone), SnapTarget::Zone(slot))
+    }
+
+    /// The pixels a tiled window may occupy: **one monitor's**, not the whole
+    /// virtual desktop's.
+    ///
+    /// Which monitor is decided by `rect` — the display it overlaps most, by
+    /// [`DisplayManager::display_for`]'s rule — so a caller passes the frame of
+    /// the window being tiled, or a one-pixel rect at the cursor for a gesture
+    /// that has not settled on a window's monitor yet.
+    ///
+    /// **The union of every display is the wrong answer, and used to be the
+    /// one given here.** Maximizing a window on the second of two monitors made
+    /// it as wide as both and moved it onto the first; snapping it left gave it
+    /// the whole first monitor plus a strip of the second. Nothing caught it
+    /// because a one-monitor desktop cannot tell the two readings apart, which
+    /// is what every test had. `virtual_bounds()` survives below only as the
+    /// answer for a compositor with no displays connected at all, where it is
+    /// the empty rectangle and there is nothing better to say.
+    ///
+    /// Derived on every call rather than cached, because it is a function of
+    /// the display arrangement — which a monitor being unplugged changes with
+    /// no notice to anything here. A cached copy would be one hotplug away
+    /// from tiling a screen that no longer exists, and would do it silently.
+    ///
+    /// These are the monitor's *whole* bounds. What a tiled window may actually
+    /// have is [`work_area_for`](Self::work_area_for), which is this minus the
+    /// strips any panel on the monitor has reserved.
+    fn work_bounds_for(&self, rect: Rect) -> Rect {
+        self.display_manager
+            .display_for(&rect)
+            .map_or_else(|| self.display_manager.virtual_bounds(), Display::bounds)
+    }
+
+    /// The usable part of the monitor `rect` is on: its bounds, minus the strips
+    /// panels have reserved along its edges.
+    ///
+    /// **This, not [`work_bounds_for`](Self::work_bounds_for), is what tiling
+    /// divides up.** A window snapped to the left half used to fill exactly half
+    /// the monitor including the rows the taskbar occupied, so its bottom — a
+    /// status line, the last row of a list, a scrollbar's arrow — was covered by
+    /// the bar. Subtracting here fixes maximize, both half-snaps, every zone
+    /// slot and the edge-drag drop at once, because all of them resolve their
+    /// rectangle from a [`WorkArea`] and this is where every one of those comes
+    /// from.
+    ///
+    /// Derived on every call rather than cached, so a taskbar that changes
+    /// height or moves to another edge is followed with no invalidation step to
+    /// forget. Already-tiled windows are a separate matter — they hold a
+    /// rectangle, not a rule — and are re-placed by
+    /// [`retile_for_work_area_change`](Self::retile_for_work_area_change).
+    fn work_area_for(&self, rect: Rect) -> WorkArea {
+        let bounds = self.work_bounds_for(rect);
+        self.reserved_on(bounds).apply(work_area_of(bounds))
+    }
+
+    /// Everything reserved along the edges of the monitor with these bounds.
+    ///
+    /// A hidden or minimized panel reserves nothing. A strip is kept clear so
+    /// that what sits in it stays visible, and nothing is sitting in it while
+    /// the window is not on screen — so counting it would shrink the desktop
+    /// with no visible cause, which is precisely the confusing failure the
+    /// clamp in [`ReservedEdges::apply`] exists to bound.
+    ///
+    /// O(windows) per call rather than a maintained total. The alternative is a
+    /// per-monitor sum updated on every reservation *and* every window move,
+    /// hide, destroy and display hotplug — five places to forget — to save a
+    /// walk over a list that is short by construction and is already walked on
+    /// every frame.
+    fn reserved_on(&self, bounds: Rect) -> ReservedEdges {
+        let mut reserved = ReservedEdges::none();
+        for window in &self.windows {
+            let Some((edge, size)) = window.reserved_edge else {
+                continue;
+            };
+            if size == 0 || !window.is_showing(self.current_workspace) {
+                continue;
+            }
+            if self.work_bounds_for(window.frame_rect()) == bounds {
+                reserved.add(edge, size);
+            }
+        }
+        reserved
+    }
+
+    /// Reserve a strip along one edge of the monitor `window_id` is on, and
+    /// answer with the work area that leaves.
+    ///
+    /// This is what a taskbar or dock calls so that tiled windows stop short of
+    /// it. `size` is a thickness in pixels; zero releases a reservation made
+    /// earlier. A second call for the same window **replaces** its previous
+    /// claim rather than adding to it — a panel that changes height sends the
+    /// new number and nothing else — while claims from *different* windows on
+    /// the same edge add up. See `guiremote::reserve` for why that, and not
+    /// X11's side-by-side spans.
+    ///
+    /// The area returned is what was actually granted, which may be less than
+    /// was asked for: a claim is clamped to
+    /// [`MAX_RESERVED_FRACTION`](guiremote::reserve::MAX_RESERVED_FRACTION) of
+    /// the monitor so that no client can shrink everyone's tiling to nothing.
+    /// It also accounts for *other* panels on the same monitor, which is the
+    /// honest answer to "where may I put myself" and is not derivable from the
+    /// caller's own request.
+    ///
+    /// Windows already tiled on the affected monitor are re-placed, because a
+    /// tiled window holds a rectangle rather than a rule — see
+    /// [`retile_for_work_area_change`](Self::retile_for_work_area_change).
+    ///
+    /// # Errors
+    ///
+    /// [`CompositorError::WindowNotFound`] if the window does not exist.
+    pub fn reserve_edge(
+        &mut self,
+        window_id: WindowId,
+        edge: PanelEdge,
+        size: u32,
+    ) -> CompositorResult<WorkArea> {
+        // Read before the write: the monitor is the one the panel is on *now*,
+        // and a release has to re-tile the monitor it is giving pixels back to
+        // rather than whichever one a later lookup happens to find.
+        let bounds = self.work_bounds_for(
+            self.window_ref(window_id)
+                .ok_or(CompositorError::WindowNotFound(window_id))?
+                .frame_rect(),
+        );
+
+        let before = self.work_area_for(bounds);
+        self.window_mut(window_id)
+            .ok_or(CompositorError::WindowNotFound(window_id))?
+            .reserved_edge = (size > 0).then_some((edge, size));
+        let after = self.work_area_for(bounds);
+
+        if after != before {
+            self.retile_for_work_area_change(bounds);
+        }
+        Ok(after)
+    }
+
+    /// Re-place every tiled window on the monitor whose work area just changed.
+    ///
+    /// A window that is maximized or snapped holds a *rectangle*, not the rule
+    /// that produced it, so a taskbar appearing or growing leaves every
+    /// already-tiled window exactly where it was — underneath the bar, which is
+    /// the bug the reservation existed to prevent. Re-running the same request
+    /// against the new area is the whole fix, and it works because
+    /// [`SnapTarget`] and `maximized` store what was *asked for*.
+    ///
+    /// Errors from the re-place are dropped deliberately: the only ones
+    /// reachable are `WindowNotFound` for a window taken from this very list a
+    /// moment ago, and `NotResizable` for a window that could not have been
+    /// snapped in the first place. Neither is something the caller — a panel
+    /// asking for pixels — can act on, and failing its reservation because some
+    /// unrelated window declined to move would be the wrong answer to both.
+    fn retile_for_work_area_change(&mut self, bounds: Rect) {
+        let affected: Vec<(WindowId, Option<SnapTarget>)> = self
+            .windows
+            .iter()
+            // A fullscreen window is excluded even when `maximized` is also
+            // set, which it is for anything maximised before it went
+            // fullscreen. Fullscreen is defined against the whole scanout
+            // surface and outranks both tiling states while it lasts, so
+            // re-tiling one replaces the display-sized geometry that earns it
+            // the direct-scanout bypass with a work-area rectangle: a game
+            // visibly shrinking away from the screen edges because a taskbar
+            // appeared behind it, and never growing back, since nothing
+            // re-asserts fullscreen afterwards on this path.
+            //
+            // `maximized` is deliberately left set rather than cleared, so that
+            // leaving fullscreen still finds a tiling state to fall back to.
+            .filter(|w| !w.fullscreen)
+            .filter(|w| w.maximized || w.snapped.is_some())
+            .filter(|w| self.work_bounds_for(w.frame_rect()) == bounds)
+            .map(|w| (w.id, w.snapped))
+            .collect();
+
+        for (id, target) in affected {
+            // Deliberately the `_within` forms against `bounds`. The public
+            // forms would re-derive the monitor from the window, and today they
+            // would agree — the filter above only kept windows already on
+            // `bounds` — so this is not fixing an observable bug. It is
+            // refusing to *depend* on that agreement: this loop moves the very
+            // windows the re-derivation would measure, so the public forms
+            // would make each re-place correct only because of the order the
+            // ones before it happened to leave the list in. `bounds` was read
+            // once, before any of it, and cannot drift.
+            let area = self.work_area_for(bounds);
+            let outcome = match target {
+                None => self.maximize_window_within(id, work_rect(area)),
+                Some(SnapTarget::Zone(slot)) => self.snap_window_to_zone_within(id, slot, area),
+                Some(SnapTarget::Half(edge)) => self.snap_window_within(id, edge, work_rect(area)),
+            };
+            drop(outcome);
+        }
+    }
+
+    /// The work area of the monitor the pointer is over.
+    ///
+    /// A one-pixel rectangle rather than a separate lookup, so that "which
+    /// monitor is this point on" and "which monitor is this window on" cannot
+    /// answer differently about the same pixel.
+    fn work_area_at(&self, x: i32, y: i32) -> WorkArea {
+        self.work_area_for(Rect::new(x, y, 1, 1))
+    }
+
+    /// The work area of the monitor a window is on, or `None` if it is gone.
+    fn work_area_of_window(&self, window_id: WindowId) -> Option<WorkArea> {
+        Some(self.work_area_for(self.window_ref(window_id)?.frame_rect()))
+    }
+
+    /// Move a window into an already-resolved tile rectangle.
+    ///
+    /// The shared tail of [`snap_window`](Self::snap_window) and
+    /// [`snap_window_to_zone`](Self::snap_window_to_zone). The two differ only
+    /// in how they arrive at `rect` and what they record in `snapped`; the
+    /// bookkeeping below is subtle enough — see the `restore_rect` comment —
+    /// that having it in one place rather than two is the point of the split.
+    fn place_snapped(
+        &mut self,
+        window_id: WindowId,
+        rect: Rect,
+        target: SnapTarget,
+    ) -> CompositorResult<()> {
         if !self
             .window_ref(window_id)
             .ok_or(CompositorError::WindowNotFound(window_id))?
@@ -4397,22 +5177,6 @@ impl Compositor {
         }
 
         self.damage_window(window_id);
-
-        let bounds = self.display_manager.virtual_bounds();
-        // Halve by splitting at the midpoint rather than by giving each side
-        // `width / 2`: on an odd width the latter leaves a one-pixel column
-        // belonging to neither half, which is a permanently visible seam down
-        // the middle of the screen.
-        let mid = bounds.width / 2;
-        let half = match edge {
-            SnapEdge::Left => Rect::new(bounds.x, bounds.y, mid, bounds.height),
-            SnapEdge::Right => Rect::new(
-                bounds.x.saturating_add(i32::try_from(mid).unwrap_or(i32::MAX)),
-                bounds.y,
-                bounds.width.saturating_sub(mid),
-                bounds.height,
-            ),
-        };
 
         let (final_w, final_h) = {
             let window = self
@@ -4429,9 +5193,9 @@ impl Compositor {
             }
 
             window.maximized = false;
-            window.snapped = Some(edge);
+            window.snapped = Some(target);
 
-            let (x, y, fit_w, fit_h) = window.client_geometry_for_frame(half);
+            let (x, y, fit_w, fit_h) = window.client_geometry_for_frame(rect);
             window.x = x;
             window.y = y;
             let (w, h) = window.clamp_size(fit_w, fit_h);
@@ -4455,8 +5219,28 @@ impl Compositor {
     }
 
     /// Restore a window from minimized, maximized or snapped state.
+    ///
+    /// The saved rectangle is a rectangle on the desktop *as it was when the
+    /// window was tiled*, and the desktop may not be that shape any more — a
+    /// resolution change is the obvious way, and it does not help that
+    /// [`resize_display`](Self::resize_display) rescues stranded windows, since
+    /// a maximised window is not stranded and its saved rectangle is not where
+    /// it is. Restoring it verbatim would drop the window somewhere the user
+    /// cannot see, click or drag it, and there is no second chance: the saved
+    /// rectangle is consumed by the restore, so nothing afterwards knows the
+    /// window was ever anywhere else.
     pub fn restore_window(&mut self, window_id: WindowId) -> CompositorResult<()> {
         self.damage_window(window_id);
+
+        // Read before the window is borrowed mutably. `home` is deliberately the
+        // display the window is on *now*: it is currently tiled, so it is
+        // demonstrably on a real screen, and un-maximising a window on the
+        // second monitor must not move it to the first.
+        let Some(frame_now) = self.window_ref(window_id).map(Window::frame_rect) else {
+            return Err(CompositorError::WindowNotFound(window_id));
+        };
+        let desktop = self.display_manager.virtual_bounds();
+        let home = self.work_bounds_for(frame_now);
 
         let window = self
             .window_mut(window_id)
@@ -4476,8 +5260,12 @@ impl Compositor {
             window.maximized = false;
             window.snapped = None;
             if let Some(restore) = window.restore_rect.take() {
-                window.x = restore.x;
-                window.y = restore.y;
+                // After the flags are cleared, so that the frame insets are the
+                // ones the restored window will actually have.
+                let placed = kept_reachable(window.frame_rect_for_client(restore), desktop, home);
+                let (x, y, _, _) = window.client_geometry_for_frame(placed);
+                window.x = x;
+                window.y = y;
                 window.width = restore.width;
                 window.height = restore.height;
             }
@@ -4498,9 +5286,24 @@ impl Compositor {
     /// Enter or leave true fullscreen for a window.
     ///
     /// Entering saves the window's geometry, removes decorations, and resizes
-    /// the client area to cover the entire display. Leaving restores the saved
-    /// geometry. A fullscreen window with an opaque, display-sized shared
-    /// buffer is eligible for direct-scanout bypass (see [`compose_frame`]).
+    /// the client area to cover **the monitor the window is on** — not the
+    /// framebuffer, which on a multi-head desktop is the union of every monitor
+    /// and belongs to no one screen. This is the same question
+    /// [`maximize_window`](Self::maximize_window) asks, answered by the same
+    /// [`work_bounds_for`](Self::work_bounds_for), and the two differ only in
+    /// that maximising yields the panels their reserved strips and fullscreen
+    /// covers them.
+    ///
+    /// Leaving restores the saved geometry — subject to it still being
+    /// somewhere the user can reach, for the reason given on
+    /// [`restore_window`](Self::restore_window): a game left fullscreen across a
+    /// resolution change would otherwise be put back at a rectangle on a screen
+    /// that no longer exists, and the saved rectangle is consumed on the way
+    /// out, so nothing afterwards could recover it. A fullscreen window with an
+    /// opaque, display-sized shared buffer is eligible for direct-scanout
+    /// bypass (see [`compose_frame`]) — which, correctly, means only a window
+    /// fullscreen on a *single-head* desktop, since covering one monitor of
+    /// several does not cover the scanout surface.
     ///
     /// [`compose_frame`]: Compositor::compose_frame
     ///
@@ -4510,7 +5313,15 @@ impl Compositor {
     pub fn set_fullscreen(&mut self, window_id: WindowId, enable: bool) -> CompositorResult<()> {
         self.damage_window(window_id);
 
-        let (fb_w, fb_h) = self.backend.size();
+        // The monitor the window is on, read before the mutable borrow. It
+        // answers both of this function's questions: which screen a window
+        // going fullscreen should cover, and — as in `restore_window` — which
+        // screen one coming back out falls back to if its saved rectangle is
+        // no longer anywhere reachable.
+        let screen = self
+            .window_ref(window_id)
+            .map(|w| self.work_bounds_for(w.frame_rect()));
+        let desktop = self.display_manager.virtual_bounds();
 
         let resized = {
             let window = self
@@ -4522,19 +5333,38 @@ impl Compositor {
                     window.fs_restore_rect =
                         Some(Rect::new(window.x, window.y, window.width, window.height));
                 }
+                // The monitor, not the framebuffer. With one screen at the
+                // origin those are the same rectangle, which is why this went
+                // unnoticed; with two, sizing from the framebuffer made a
+                // window fullscreened on the second monitor jump to the first
+                // and span both, while `maximize_window` — one screen's work
+                // area, via the same `work_bounds_for` — stayed put. Two
+                // commands a user thinks of as the same gesture disagreeing
+                // about which monitor they act on is not a defensible split.
+                let bounds = screen.unwrap_or(desktop);
                 window.fullscreen = true;
-                window.x = 0;
-                window.y = 0;
-                window.width = fb_w;
-                window.height = fb_h;
+                window.x = bounds.x;
+                window.y = bounds.y;
+                window.width = bounds.width;
+                window.height = bounds.height;
                 window.dirty = true;
-                Some((fb_w, fb_h))
+                Some((bounds.width, bounds.height))
             } else if window.fullscreen {
                 window.fullscreen = false;
                 let restored = window.fs_restore_rect.take();
                 if let Some(r) = restored {
-                    window.x = r.x;
-                    window.y = r.y;
+                    // After `fullscreen` is cleared, so the insets are the ones
+                    // the restored window will have -- a fullscreen window is
+                    // undecorated, and measuring its frame while it still is
+                    // would be measuring the wrong box.
+                    let placed = kept_reachable(
+                        window.frame_rect_for_client(r),
+                        desktop,
+                        screen.unwrap_or(desktop),
+                    );
+                    let (x, y, _, _) = window.client_geometry_for_frame(placed);
+                    window.x = x;
+                    window.y = y;
                     window.width = r.width;
                     window.height = r.height;
                 }
@@ -4576,11 +5406,21 @@ impl Compositor {
     /// client's buffer pixels directly — no per-frame blit, no occluded windows
     /// drawn. A buffer smaller/larger than the display is rejected (a partial
     /// buffer would leave the rest of the screen stale), preserving correctness.
+    ///
+    /// **The framebuffer, deliberately, and not the window's own monitor.** On a
+    /// multi-head desktop the scanout surface is the union of every screen, so a
+    /// window fullscreen on one of them does not cover it and is declined here —
+    /// which is the right answer, because the bypass hands the client's buffer
+    /// to *every* head, and the second monitor would show the game's pixels
+    /// instead of the desktop. The bypass is therefore a single-head
+    /// optimisation, and the test that makes it one is this one rather than an
+    /// explicit head count: with one screen at the origin the two rectangles are
+    /// equal and nothing changes.
     fn direct_scanout_window(&self) -> Option<WindowId> {
         // Topmost visible window in z-order (z_stack top == last).
         let &top = self.z_stack.iter().rev().find(|&&id| {
             self.window_ref(id)
-                .is_some_and(|w| w.visible && !w.minimized)
+                .is_some_and(|w| w.is_showing(self.current_workspace))
         })?;
 
         let win = self.window_ref(top)?;
@@ -4625,9 +5465,15 @@ impl Compositor {
                 .push_back(EventNotification::FocusLost { window_id: old_id });
         }
 
-        // Focus the new window.
+        // Focus the new window — unless it is not on screen. A minimized
+        // window and a window on another workspace are refused for the same
+        // reason: the keyboard would be going somewhere the user cannot see,
+        // and no amount of typing would reveal where. `activate_window` is the
+        // verb that means "make it reachable *and* focus it", and it undoes
+        // both kinds of hiding before calling this.
+        let workspace = self.current_workspace;
         if let Some(win) = self.window_mut(window_id)
-            && !win.minimized
+            && win.is_showing(workspace)
         {
             win.focused = true;
             win.dirty = true;
@@ -4644,16 +5490,24 @@ impl Compositor {
         }
     }
 
-    /// Bring a window to the user: un-minimize it if it is minimized, then
-    /// focus and raise it within its band.
+    /// Bring a window to the user: un-minimize it and switch to its workspace
+    /// if either is hiding it, then focus and raise it within its band.
     ///
     /// What a taskbar button and an Alt-Tab switcher do, and the reason it is
     /// one operation rather than two: [`focus_window`](Self::focus_window)
-    /// deliberately refuses a minimized window — a window nobody can see must
-    /// not hold the keyboard — so un-minimizing has to come *first*. A caller
-    /// issuing the two separately would be depending on that order without
-    /// anything stating it, and would silently do nothing to a minimized
-    /// window if it got them the wrong way round.
+    /// deliberately refuses a window that is not on screen — a window nobody
+    /// can see must not hold the keyboard — so the un-hiding has to come
+    /// *first*. A caller issuing the two separately would be depending on that
+    /// order without anything stating it, and would silently do nothing to a
+    /// hidden window if it got them the wrong way round.
+    ///
+    /// **It follows the window to another virtual desktop rather than dragging
+    /// the window to this one.** Activating is a request to *see* a particular
+    /// window, and the two ways to grant it differ in what happens to
+    /// everything else: switching moves one thing (which desktop is showing)
+    /// and is undone by switching back, whereas moving the window rearranges
+    /// the desktops themselves and leaves the user to notice and repair it.
+    /// This is also what every desktop that has workspaces does.
     ///
     /// Distinct from [`restore_window`](Self::restore_window), which also
     /// un-*maximizes*. A taskbar button on a minimized-while-maximized window
@@ -4669,14 +5523,111 @@ impl Compositor {
         let window = self
             .window_mut(window_id)
             .ok_or(CompositorError::WindowNotFound(window_id))?;
+        let (layer, workspace) = (window.layer, window.workspace);
         if window.minimized {
             window.minimized = false;
             window.visible = true;
             window.dirty = true;
             self.full_recomposite = true;
         }
+        if matches!(layer, Layer::Normal) {
+            self.switch_workspace(workspace);
+        }
         self.damage_window(window_id);
         self.focus_window(window_id);
+        Ok(())
+    }
+
+    /// Which virtual desktop is being shown.
+    #[must_use]
+    pub const fn current_workspace(&self) -> u32 {
+        self.current_workspace
+    }
+
+    /// Show a different virtual desktop.
+    ///
+    /// Every [`Layer::Normal`] window assigned elsewhere stops being drawn,
+    /// stops taking clicks and stops being an occluder in the same instant,
+    /// because all three read [`Window::is_showing`]. Nothing else about a
+    /// window changes: it is not minimized, not unmapped, not moved, and its
+    /// client is not told, because from the client's point of view nothing has
+    /// happened that it could act on — the user looked away.
+    ///
+    /// Focus follows the screen. A window on the desktop being left cannot keep
+    /// the keyboard (that is a window nobody can see swallowing every
+    /// keystroke), so focus moves to the topmost window that *is* showing, and
+    /// to nothing at all on an empty desktop.
+    ///
+    /// A no-op when the named workspace is already the one showing, so a shell
+    /// re-asserting its state costs nothing. There is no upper bound to check
+    /// against: see [`Compositor::current_workspace`]'s field.
+    pub fn switch_workspace(&mut self, workspace: u32) {
+        if workspace == self.current_workspace {
+            return;
+        }
+        self.current_workspace = workspace;
+        // Every window on both desktops changes, and none of them is dirty in
+        // the damage sense — no window moved. Only a full recomposite repaints
+        // the desktop the departing windows were standing on.
+        self.full_recomposite = true;
+        if let Some(focused) = self.focused_window
+            && !self
+                .window_ref(focused)
+                .is_some_and(|w| w.is_showing(workspace))
+        {
+            if let Some(win) = self.window_mut(focused) {
+                win.focused = false;
+                win.dirty = true;
+            }
+            self.focused_window = None;
+            self.pending_notifications
+                .push_back(EventNotification::FocusLost { window_id: focused });
+            self.focus_topmost_visible();
+        }
+    }
+
+    /// Put a window on a virtual desktop.
+    ///
+    /// Takes effect immediately: moving the focused window off the desktop
+    /// being shown hides it, and the keyboard goes to whatever is left, by the
+    /// same rule [`switch_workspace`](Self::switch_workspace) follows.
+    ///
+    /// Accepted but meaningless for a window outside [`Layer::Normal`] — the
+    /// assignment is stored and [`Window::is_showing`] ignores it, so a taskbar
+    /// stays on every desktop no matter what it is told. Refusing it would make
+    /// a shell that moves "all its windows" have to know which of them are
+    /// furniture.
+    ///
+    /// # Errors
+    ///
+    /// [`CompositorError::WindowNotFound`] if the window does not exist, which
+    /// for a shell acting on a snapshot is an ordinary race.
+    pub fn set_window_workspace(
+        &mut self,
+        window_id: WindowId,
+        workspace: u32,
+    ) -> CompositorResult<()> {
+        let showing = self.current_workspace;
+        let window = self
+            .window_mut(window_id)
+            .ok_or(CompositorError::WindowNotFound(window_id))?;
+        if window.workspace == workspace {
+            return Ok(());
+        }
+        window.workspace = workspace;
+        window.dirty = true;
+        let vanished = !window.is_showing(showing);
+        self.full_recomposite = true;
+        self.damage_window(window_id);
+        if vanished && self.focused_window == Some(window_id) {
+            if let Some(win) = self.window_mut(window_id) {
+                win.focused = false;
+            }
+            self.focused_window = None;
+            self.pending_notifications
+                .push_back(EventNotification::FocusLost { window_id });
+            self.focus_topmost_visible();
+        }
         Ok(())
     }
 
@@ -4915,6 +5866,12 @@ impl Compositor {
                     start_x.saturating_add(dx),
                     start_y.saturating_add(dy),
                 );
+                // Asked for every motion event and answered locally: the whole
+                // reason this decision is the compositor's rather than the
+                // shell's is that a round trip here would put network latency
+                // inside the one part of the gesture the user watches.
+                let preview = self.drop_intent(&drag, x, y);
+                self.set_drag_preview(preview);
                 return;
             }
 
@@ -4958,13 +5915,154 @@ impl Compositor {
         }
     }
 
+    /// What a drag means at the moment the pointer reaches `(x, y)`, or `None`
+    /// if letting go there would just leave the window where it was dropped.
+    ///
+    /// The drag-time preview and the release both ask this, so the outline the
+    /// user is shown cannot promise a placement the drop does not make.
+    ///
+    /// Two things stop it from firing on gestures that are not edge drags:
+    ///
+    /// - **Only a move.** A resize drag reaching an edge is a user sizing a
+    ///   window against that edge by hand. Snapping it would overrule a size
+    ///   they had just finished choosing, and would do it at the exact moment
+    ///   they let go, when it is too late to aim differently.
+    /// - **Only after the pointer has moved.** A press and a release in the
+    ///   same pixel is a click. Without this, clicking the title bar of a
+    ///   window already sitting against the left edge — anywhere in that
+    ///   title bar's leftmost few columns — would tile it, from a gesture the
+    ///   user would describe as "I clicked on it".
+    #[allow(
+        clippy::cast_precision_loss,
+        reason = "display coordinates are far inside f32's exact-integer range"
+    )]
+    fn drop_intent(&self, drag: &DragState, x: i32, y: i32) -> Option<DropIntent> {
+        if drag.mode != DragMode::MoveWindow {
+            return None;
+        }
+        if (x, y) == (drag.start_mouse.x, drag.start_mouse.y) {
+            return None;
+        }
+        // The monitor under the *pointer*, not under the window. A move drag
+        // carries the window along with the pointer, so for an ordinary grab
+        // near the left end of a title bar the two agree — but not always:
+        //   - at the interior seam the window straddles both monitors, and
+        //     which one holds the larger part is not the one being aimed at;
+        //   - a window grabbed far along a wide title bar trails the pointer
+        //     by that offset, so it can still be wholly on the monitor it
+        //     came from when the pointer has reached a band on the next one.
+        // In both cases aiming at a band on screen two must mean screen two,
+        // because screen two is the one the preview outline was drawn on.
+        // Proved by `a_drop_tiles_the_monitor_the_pointer_is_over_even_when_
+        // the_window_is_not` and `the_interior_seam_is_two_edges_and_not_a_
+        // middle`.
+        let area = self.work_area_at(x, y);
+        let drop = guiremote::zones::drop_at(x as f32, y as f32, area)?;
+        Some(DropIntent { drop, area })
+    }
+
+    /// The rectangle a drop would place the window's *frame* in.
+    ///
+    /// The same rectangle the drop itself lands in, because the release
+    /// resolves the slot against the very [`WorkArea`] carried here rather than
+    /// deriving a second one — see [`DropIntent`]. Asserted by
+    /// `an_edge_drop_lands_in_the_rectangle_the_drop_promised`.
+    fn preview_rect(&self, intent: DropIntent) -> Option<Rect> {
+        intent.drop.rect(intent.area).map(zone_rect)
+    }
+
+    /// Show, move or take down the drop preview.
+    ///
+    /// Both the outgoing and the incoming rectangle are damaged, because the
+    /// outline is the only thing in the frame that knows where it used to be:
+    /// nothing else would repaint the pixels it is leaving, and a preview that
+    /// moved would smear a trail of half-drawn outlines across the desktop.
+    ///
+    /// Guarded on inequality so that the common case — a drag whose pointer is
+    /// nowhere near an edge, moving from one nothing to the same nothing — adds
+    /// no damage at all.
+    fn set_drag_preview(&mut self, next: Option<DropIntent>) {
+        if self.drag_preview == next {
+            return;
+        }
+        for intent in [self.drag_preview, next].into_iter().flatten() {
+            if let Some(rect) = self.preview_rect(intent) {
+                self.damage.add(rect);
+            }
+        }
+        self.drag_preview = next;
+    }
+
+    /// Draw the outline of where the dragged window would land.
+    ///
+    /// A translucent wash under a solid border, in the same colour as a focused
+    /// window's frame: the preview is saying "the window you are holding goes
+    /// here", so it is drawn in the colour that already means "this one is
+    /// yours". Taking the colour from the theme rather than a constant is what
+    /// makes it follow the user's accent instead of being a second opinion
+    /// about what the desktop looks like.
+    fn render_drag_preview(&mut self) {
+        let Some(intent) = self.drag_preview else {
+            return;
+        };
+        let Some(rect) = self.preview_rect(intent) else {
+            return;
+        };
+        let color = self.theme.border_focused;
+        self.backend.fill_rect(rect, color, PREVIEW_FILL_OPACITY);
+        for band in rect_outline(rect, PREVIEW_BORDER_PX) {
+            self.backend.fill_rect(band, color, 1.0);
+        }
+    }
+
+    /// Apply whatever letting go at `(x, y)` means to a drag that is ending.
+    ///
+    /// Routed through [`maximize_window`](Self::maximize_window) and
+    /// [`snap_window_to_zone`](Self::snap_window_to_zone) rather than placing
+    /// the rectangle directly, so an edge drop inherits everything a tiling
+    /// operation already has to get right: refusing a window the client
+    /// declared fixed-size, recording where to restore to without letting a
+    /// second snap overwrite the first one's answer, and telling the client it
+    /// was resized. Placing the rectangle here would be a third copy of that
+    /// bookkeeping, and the one nobody would think to update.
+    fn finish_drag(&mut self, drag: &DragState, x: i32, y: i32) {
+        // Down first, and unconditionally: the drag is over either way, and a
+        // preview left standing would outlive the gesture that explains it.
+        self.set_drag_preview(None);
+        // Errors are dropped because none of them is actionable at a mouse
+        // release: a non-resizable window declining to be tiled is the correct
+        // outcome of the gesture, and a window that vanished mid-drag has
+        // nothing left to place.
+        // The `_within` forms, so that the release places the window in the
+        // work area the preview was drawn from. The public forms would look the
+        // area up again from the window, which is still on the monitor it was
+        // dragged away from.
+        match self.drop_intent(drag, x, y) {
+            Some(DropIntent {
+                drop: EdgeDrop::Maximize,
+                area,
+            }) => {
+                let _ = self.maximize_window_within(drag.window_id, work_rect(area));
+            }
+            Some(DropIntent {
+                drop: EdgeDrop::Zone(slot),
+                area,
+            }) => {
+                let _ = self.snap_window_to_zone_within(drag.window_id, slot, area);
+            }
+            None => {}
+        }
+    }
+
     fn handle_mouse_button(&mut self, button: MouseButton, pressed: bool, x: i32, y: i32) {
         self.cursor_x = x;
         self.cursor_y = y;
 
         // Release ends any active drag.
         if !pressed && button == MouseButton::Left {
-            self.drag = None;
+            if let Some(drag) = self.drag.take() {
+                self.finish_drag(&drag, x, y);
+            }
             return;
         }
 
@@ -5168,8 +6266,7 @@ impl Compositor {
         // Iterate z_stack from top to bottom.
         for &window_id in self.z_stack.iter().rev() {
             if let Some(win) = self.window_ref(window_id)
-                && win.visible
-                && !win.minimized
+                && win.is_showing(self.current_workspace)
                 && win.client_rect().contains(x, y)
             {
                 return Some(window_id);
@@ -5182,8 +6279,7 @@ impl Compositor {
     fn window_at_with_decorations(&self, x: i32, y: i32) -> Option<WindowId> {
         for &window_id in self.z_stack.iter().rev() {
             if let Some(win) = self.window_ref(window_id)
-                && win.visible
-                && !win.minimized
+                && win.is_showing(self.current_workspace)
                 && win.outer_rect().contains(x, y)
             {
                 return Some(window_id);
@@ -5256,7 +6352,7 @@ impl Compositor {
             let Some(win) = self.window_ref(window_id) else {
                 continue;
             };
-            if !win.visible || win.minimized {
+            if !win.is_showing(self.current_workspace) {
                 continue;
             }
             if let Some(mode) = self.detect_border_drag(win, x, y) {
@@ -5367,6 +6463,18 @@ impl Compositor {
             return false;
         }
 
+        // A frame carrying a drop preview is composited whole. The preview is a
+        // *translucent* wash, so painting it over a partial frame would blend
+        // it onto pixels that already carry last frame's copy of it, darkening
+        // a little more every frame until it is opaque. Confining it to the
+        // damage region instead would need a multi-rectangle frame clip the
+        // render target does not have. This costs a full recomposite only
+        // while the pointer is inside an edge band mid-drag, which is a
+        // fraction of a second at a time.
+        if self.drag_preview.is_some() {
+            self.full_recomposite = true;
+        }
+
         // Check if there's anything to composite.
         if !self.full_recomposite && !self.damage.has_damage() {
             return false;
@@ -5410,6 +6518,11 @@ impl Compositor {
             self.render_damaged_windows(&damaged_rects);
             self.damage.clear();
         }
+
+        // After the windows and over them: the preview says where the window
+        // is going, and a preview drawn under the windows it is about to
+        // rearrange would be hidden by exactly the ones it is talking about.
+        self.render_drag_preview();
 
         // Swap buffers.
         self.backend.present();
@@ -5459,7 +6572,7 @@ impl Compositor {
     fn opaque_cover_rects(&self) -> Vec<Rect> {
         self.windows
             .iter()
-            .filter_map(Self::window_opaque_cover)
+            .filter_map(|win| Self::window_opaque_cover(win, self.current_workspace))
             .collect()
     }
 
@@ -5470,8 +6583,8 @@ impl Compositor {
     /// and the inter-window cull in [`render_all_windows`](Self::render_all_windows),
     /// so the two can never disagree about what counts as opaque — a window
     /// treated as an occluder by one and not the other would leave a hole.
-    fn window_opaque_cover(win: &Window) -> Option<Rect> {
-        if !win.visible || win.minimized || win.opacity < 1.0 {
+    fn window_opaque_cover(win: &Window, current_workspace: u32) -> Option<Rect> {
+        if !win.is_showing(current_workspace) || win.opacity < 1.0 {
             return None;
         }
         if let Some(buf) = win.buffer.as_ref() {
@@ -5599,14 +6712,17 @@ impl Compositor {
         // `first_command_covers_client` walks a command list).
         let covers: Vec<Option<Rect>> = z_stack_copy
             .iter()
-            .map(|&id| self.window_ref(id).and_then(Self::window_opaque_cover))
+            .map(|&id| {
+                self.window_ref(id)
+                    .and_then(|win| Self::window_opaque_cover(win, self.current_workspace))
+            })
             .collect();
 
         for (idx, &window_id) in z_stack_copy.iter().enumerate() {
             let Some(win) = self.window_ref(window_id) else {
                 continue;
             };
-            if !win.visible || win.minimized {
+            if !win.is_showing(self.current_workspace) {
                 continue;
             }
             let extent = Self::window_drawn_extent(win);
@@ -5647,7 +6763,7 @@ impl Compositor {
         let z_stack_copy: Vec<WindowId> = self.z_stack.clone();
         for &window_id in &z_stack_copy {
             if let Some(win) = self.window_ref(window_id) {
-                if !win.visible || win.minimized {
+                if !win.is_showing(self.current_workspace) {
                     continue;
                 }
                 let outer = win.outer_rect();
@@ -5703,7 +6819,7 @@ impl Compositor {
     fn render_window(&mut self, window_id: WindowId) {
         // Gather window data we need (avoiding borrow conflicts with self).
         let win_data = match self.window_ref(window_id) {
-            Some(win) if win.visible && !win.minimized => (
+            Some(win) if win.is_showing(self.current_workspace) => (
                 win.x,
                 win.y,
                 win.width,
@@ -6199,6 +7315,9 @@ impl Compositor {
                     ShellControlAction::Close => self.request_close(window_id),
                     ShellControlAction::SnapLeft => self.snap_window(window_id, SnapEdge::Left),
                     ShellControlAction::SnapRight => self.snap_window(window_id, SnapEdge::Right),
+                    ShellControlAction::SnapToZone(slot) => {
+                        self.snap_window_to_zone(window_id, slot)
+                    }
                 };
                 match result {
                     Ok(()) => CompositorResponse::Ok,
@@ -6207,6 +7326,37 @@ impl Compositor {
                     },
                 }
             }
+            CompositorRequest::ReserveEdge {
+                window_id,
+                edge,
+                size,
+            } => match self.reserve_edge(window_id, edge, size) {
+                Ok(area) => {
+                    let rect = work_rect(area);
+                    CompositorResponse::WorkArea {
+                        x: rect.x,
+                        y: rect.y,
+                        width: rect.width,
+                        height: rect.height,
+                    }
+                }
+                Err(e) => CompositorResponse::Error {
+                    message: e.to_string(),
+                },
+            },
+            CompositorRequest::SwitchWorkspace { workspace } => {
+                self.switch_workspace(workspace);
+                CompositorResponse::Ok
+            }
+            CompositorRequest::SetWindowWorkspace {
+                window_id,
+                workspace,
+            } => match self.set_window_workspace(window_id, workspace) {
+                Ok(()) => CompositorResponse::Ok,
+                Err(e) => CompositorResponse::Error {
+                    message: e.to_string(),
+                },
+            },
             CompositorRequest::StreamStart => {
                 let stream_id = self.start_stream();
                 CompositorResponse::StreamStarted { stream_id }
@@ -6269,18 +7419,389 @@ impl Compositor {
     // -----------------------------------------------------------------------
 
     /// Handle a display resolution change.
+    ///
+    /// Everything on the desktop that was placed *by a rule* is re-derived
+    /// against the new size, because a window stores the rectangle its rule
+    /// produced and not the rule itself — the same fact that makes
+    /// [`retile_for_work_area_change`](Self::retile_for_work_area_change)
+    /// necessary when a taskbar changes height. A mode switch is that problem
+    /// at its largest, and this used to do none of it: a maximised window kept
+    /// its 1920-wide rectangle on a 1280-wide screen, with its right-hand third
+    /// in pixels that no longer existed and its close button among them; a
+    /// fullscreen client kept the old framebuffer's dimensions; and a window
+    /// that happened to be sitting near the old bottom-right corner was left
+    /// entirely off the new screen with no title bar on it to drag it back by.
+    ///
+    /// What is deliberately *not* re-derived is a window the user placed
+    /// themselves and can still reach. A resize is not permission to re-lay-out
+    /// the desktop, so only windows that would otherwise be unrecoverable are
+    /// moved, and only by the smallest amount that recovers them.
+    ///
+    /// It is the **primary** display that is resized, and the scanout surface
+    /// then follows the whole virtual desktop rather than that one screen —
+    /// see [`resize_scanout_surface`](Self::resize_scanout_surface). On a
+    /// one-monitor desktop those are the same rectangle, which is why this
+    /// took a bare width and height for as long as there was only ever one.
+    ///
+    /// # Errors
+    ///
+    /// Whatever the backend's `resize` returns — an allocation failure for the
+    /// new surface. Nothing else has been touched at that point, so the
+    /// compositor carries on drawing the size it already had rather than
+    /// half-adopting one it cannot paint.
     pub fn resize_display(&mut self, width: u32, height: u32) -> CompositorResult<()> {
-        self.backend.resize(width, height)?;
+        // Asked before anything is mutated, so that a surface which cannot be
+        // allocated leaves the display arrangement alone. `displays[0]` is the
+        // primary by construction: `DisplayManager::new` creates it, and
+        // `add_display` only ever appends beside it.
+        let desktop = self
+            .display_manager
+            .virtual_bounds_if_resized(0, width, height);
+        self.resize_scanout_surface(desktop)?;
 
-        // Update the primary display.
-        if let Some(display) = self.display_manager.displays.first_mut() {
-            display.width = width;
-            display.height = height;
+        let Some(display) = self.display_manager.displays.first_mut() else {
+            return Ok(());
+        };
+        display.width = width;
+        display.height = height;
+        let bounds = display.bounds();
+
+        self.relayout_for_desktop_change(bounds);
+        Ok(())
+    }
+
+    /// Add a monitor to the desktop, placed to the right of the ones already
+    /// there, and grow the scanout surface to cover it.
+    ///
+    /// The counterpart of [`resize_display`](Self::resize_display) for the
+    /// other way a desktop changes shape, and the reason
+    /// [`DisplayManager::add_display`] is not simply exposed: adding a display
+    /// enlarges the virtual desktop, and a virtual desktop larger than the
+    /// surface it is composited into is one whose second monitor has no pixels
+    /// behind it. Every window placed there would be drawn into a framebuffer
+    /// that ends before it starts and clipped away entirely — the model would
+    /// say the window was on the second screen and nothing would ever appear.
+    ///
+    /// # Errors
+    ///
+    /// As [`resize_display`](Self::resize_display): an allocation failure for
+    /// the enlarged surface, with the display *not* added, so that the
+    /// arrangement and the surface cannot come apart.
+    pub fn attach_display(&mut self, display: Display) -> CompositorResult<()> {
+        let mut manager = DisplayManager {
+            displays: self.display_manager.displays.clone(),
+        };
+        manager.add_display(display);
+        let desktop = manager.virtual_bounds();
+        self.resize_scanout_surface(desktop)?;
+
+        // Only now, when the surface it needs is known to exist.
+        let bounds = manager
+            .displays
+            .last()
+            .map_or_else(|| Rect::new(0, 0, 0, 0), Display::bounds);
+        self.display_manager = manager;
+        self.relayout_for_desktop_change(bounds);
+        Ok(())
+    }
+
+    /// Give the display currently known as `from` the identity `to`.
+    ///
+    /// A compositor is built at a size before anything has told it *which*
+    /// screen that size belongs to, so [`DisplayManager::new`] invents the id
+    /// `0` for it. The scanout keys everything on the connector id — that is
+    /// what [`Present::monitors`](present::Present::monitors) reports and what
+    /// `Server::reconcile_monitors` matches the two sets on — so a desktop whose
+    /// first screen is still called `0` has one monitor the reconciliation
+    /// cannot recognise: it sees a connector it does not know (and attaches a
+    /// second display for the *same* physical screen) and a display no connector
+    /// claims (and detaches it). Both, once a second, for ever.
+    ///
+    /// So this exists to be called exactly once, at startup, by whoever knows
+    /// what the first screen is actually plugged into. It is not a general
+    /// renumbering facility: a display's id is the key windows are resolved
+    /// against, and changing it under a running desktop is a different and much
+    /// larger operation.
+    ///
+    /// # Errors
+    ///
+    /// [`CompositorError::DisplayError`] if no display is called `from`, or if
+    /// one is already called `to` — two displays sharing an id would make
+    /// [`DisplayManager::remove_display`] and every reconciliation ambiguous,
+    /// silently, in a way that shows up as the wrong monitor going dark.
+    pub fn rename_display(&mut self, from: u32, to: u32) -> CompositorResult<()> {
+        if from == to {
+            return Ok(());
+        }
+        if self.display_manager.displays.iter().any(|d| d.id == to) {
+            return Err(CompositorError::DisplayError(format!(
+                "cannot rename display {from} to {to}: a display already has that id"
+            )));
+        }
+        let Some(display) = self
+            .display_manager
+            .displays
+            .iter_mut()
+            .find(|d| d.id == from)
+        else {
+            return Err(CompositorError::DisplayError(format!(
+                "cannot rename display {from}: no display has that id"
+            )));
+        };
+        display.id = to;
+        Ok(())
+    }
+
+    /// Take a monitor off the desktop, shrink the scanout surface to what is
+    /// left, and re-place everything the departed screen was holding.
+    ///
+    /// The mirror of [`attach_display`](Self::attach_display), and the half of
+    /// monitor hotplug that does the work: a head that stops flipping is already
+    /// dropped by the scanout, which keeps the *other* monitors alive, but until
+    /// this is called the compositor still lists the display, still resolves
+    /// windows onto it, and still composites a rectangle of frame that nothing
+    /// copies out. A window maximised there is on a screen that no longer
+    /// exists — visible nowhere, and unreachable, because a maximised window has
+    /// no title bar edge left on any surviving monitor to drag it back by.
+    ///
+    /// Everything that re-places those windows is
+    /// [`relayout_for_desktop_change`](Self::relayout_for_desktop_change),
+    /// unchanged: with the display gone, `display_for` answers *primary* for any
+    /// window that no longer overlaps a real monitor, so a maximised or snapped
+    /// one is re-tiled onto the primary by the first pass, a fullscreen one is
+    /// re-fitted by the second, a hand-placed one is rescued by the third and
+    /// the pointer is pulled back by the fourth. That the removal case needed no
+    /// new pass is a consequence of the rescue having been written against the
+    /// virtual desktop rather than against one screen.
+    ///
+    /// **The order is the reverse of `attach_display`'s, on purpose.** Attaching
+    /// allocates the larger surface *first* and adopts the display only if that
+    /// succeeded, because a desktop wider than its framebuffer has a monitor
+    /// with no pixels behind it. Detaching adopts first and shrinks after,
+    /// because the monitor is already physically gone: refusing to acknowledge
+    /// that would leave the model describing a screen that does not exist, which
+    /// is the bug, whereas a surface that stays too large still covers the
+    /// desktop completely. A failed shrink wastes memory; it cannot draw
+    /// anything wrong.
+    ///
+    /// # Errors
+    ///
+    /// [`CompositorError::DisplayError`] if `id` names no attached display, or
+    /// if it names the last one. A desktop with no monitors has zero-sized
+    /// virtual bounds, no primary to fall back to, and every window on it
+    /// stranded with nowhere to be rescued to; there is no arrangement to adopt,
+    /// so the last monitor is kept and the caller told. A display server whose
+    /// only screen has been unplugged has nothing useful left to do either way.
+    pub fn detach_display(&mut self, id: u32) -> CompositorResult<()> {
+        if self.display_manager.displays.len() <= 1 {
+            return Err(CompositorError::DisplayError(format!(
+                "cannot detach display {id}: it is the only monitor left"
+            )));
+        }
+        if self.display_manager.remove_display(id).is_none() {
+            return Err(CompositorError::DisplayError(format!(
+                "cannot detach display {id}: no display has that id"
+            )));
         }
 
+        let desktop = self.display_manager.virtual_bounds();
+        if self.resize_scanout_surface(desktop).is_err() {
+            // Handled rather than propagated, for the reason in the doc comment
+            // above: the arrangement has already changed and cannot be put back.
+            // The surface keeps the size it had, which still covers the smaller
+            // desktop, but it also still holds the departed monitor's last
+            // frame, so the full clear the successful path would have done has
+            // to happen here too or that picture stays on screen.
+            let (width, height) = self.backend.size();
+            self.full_recomposite = true;
+            self.damage.mark_full(width, height);
+        }
+
+        // The screen a stranded window is put on has to be one that exists, and
+        // after a removal the only one guaranteed to is the primary — which
+        // `remove_display` has just promoted if the departed monitor was it.
+        let home = self
+            .display_manager
+            .primary()
+            .map_or(desktop, Display::bounds);
+        self.relayout_for_desktop_change(home);
+        Ok(())
+    }
+
+    /// Grow or shrink the composited surface to hold `desktop`.
+    ///
+    /// **The surface is the virtual desktop, not one monitor.** A second
+    /// monitor is a second *viewport* onto one composed frame rather than a
+    /// second frame: windows straddling the seam are one rectangle in one
+    /// buffer and each head copies out its own part, so nothing in the
+    /// compositing pipeline has to learn what a head is. What does learn it is
+    /// the scanout, which owns a buffer pair per head and blits each head's
+    /// rectangle out of this frame.
+    ///
+    /// The cost, stated plainly: a monitor arrangement whose bounding box is
+    /// larger than the monitors themselves — an L-shape, or two screens offset
+    /// vertically — composites the gap and scans it out nowhere. That is
+    /// bounded by the arrangement the user chose and is paid in a clear, not in
+    /// per-window work.
+    ///
+    /// The surface's pixel (0, 0) is the virtual desktop's (0, 0), so a display
+    /// at a negative offset would be unaddressable. Nothing produces one:
+    /// [`DisplayManager::add_display`] only ever places to the right of what is
+    /// already there. `right()`/`bottom()` rather than `width`/`height` for the
+    /// same reason — they are the extent that has to exist, and they agree with
+    /// the size only while the origin is where it is documented to be.
+    fn resize_scanout_surface(&mut self, desktop: Rect) -> CompositorResult<()> {
+        let width = u32::try_from(desktop.right().max(0)).unwrap_or(u32::MAX);
+        let height = u32::try_from(desktop.bottom().max(0)).unwrap_or(u32::MAX);
+        self.backend.resize(width, height)?;
         self.full_recomposite = true;
         self.damage.mark_full(width, height);
         Ok(())
+    }
+
+    /// Put the desktop back in order after one monitor changed shape or arrived.
+    ///
+    /// `changed` is that monitor's new bounds — the one whose tiled windows must
+    /// be re-derived, and the screen a window that ends up nowhere is put on.
+    ///
+    /// The first two passes cannot fight over a window that is both maximised
+    /// and fullscreen — the re-tile excludes fullscreen outright — so their
+    /// order is free. The rescue must follow both, because a window placed by
+    /// either rule is by definition not stranded and asking before they have run
+    /// would move one that was about to be re-placed anyway.
+    fn relayout_for_desktop_change(&mut self, changed: Rect) {
+        self.retile_for_work_area_change(changed);
+        self.refit_fullscreen_windows();
+        self.bring_stranded_windows_back(changed);
+        self.pull_pointer_onto_the_desktop();
+    }
+
+    /// Re-fit every fullscreen window to the monitor it is on, after one of them
+    /// changed size.
+    ///
+    /// Fullscreen is defined against a whole *monitor* rather than against a
+    /// work area — covering the panels is the point, and it is what makes such
+    /// a window eligible for the direct-scanout bypass in
+    /// [`compose_frame`](Self::compose_frame) on a single-head desktop — so it
+    /// is re-derived here rather than by the re-tile, which divides up work
+    /// areas and would hand it back the taskbar's leftovers.
+    ///
+    /// Each window is re-fitted to *its own* screen, resolved the same way
+    /// [`set_fullscreen`] resolves it, rather than all of them to the one that
+    /// changed. Handing the second monitor's dimensions to a game fullscreen on
+    /// the first is the same class of error as sizing it from the framebuffer,
+    /// and every fullscreen window whose screen did not move falls out as a
+    /// no-op rather than needing to be excluded.
+    ///
+    /// The client is told, for the same reason [`set_fullscreen`] tells it: its
+    /// surface is now a different size, and it is the only party that can
+    /// redraw at it.
+    ///
+    /// [`set_fullscreen`]: Self::set_fullscreen
+    fn refit_fullscreen_windows(&mut self) {
+        let affected: Vec<(WindowId, Rect)> = self
+            .windows
+            .iter()
+            .filter(|w| w.fullscreen)
+            .map(|w| (w.id, self.work_bounds_for(w.frame_rect())))
+            // Nothing to say to a client whose surface did not move or change
+            // size — a spurious `WindowResized` is a repaint it did not need.
+            // This is also what keeps a mode change on one monitor silent for
+            // the fullscreen windows on all the others.
+            .filter(|&(id, screen)| {
+                self.window_ref(id)
+                    .is_some_and(|w| w.client_rect() != screen)
+            })
+            .collect();
+
+        for (window_id, screen) in affected {
+            self.damage_window(window_id);
+            if let Some(window) = self.window_mut(window_id) {
+                window.x = screen.x;
+                window.y = screen.y;
+                window.width = screen.width;
+                window.height = screen.height;
+                window.dirty = true;
+            }
+            self.damage_window(window_id);
+            self.pending_notifications
+                .push_back(EventNotification::WindowResized {
+                    window_id,
+                    width: screen.width,
+                    height: screen.height,
+                });
+        }
+    }
+
+    /// Move back any window the new display size left entirely off the desktop.
+    ///
+    /// *Stranded* is judged against the whole virtual desktop and not against
+    /// `bounds`, so that shrinking one monitor does not evacuate the others: a
+    /// window living on the second screen is untouched by a mode change on the
+    /// first, and dragging it across would be a far more visible bug than the
+    /// one being fixed. `bounds` — the display that just changed — is only the
+    /// place a genuinely stranded window is put, because it is a screen that is
+    /// known to exist and is the one most likely to have stranded it.
+    ///
+    /// Tiled and fullscreen windows are excluded because their geometry was
+    /// already re-derived from the new size by the two passes before this one: a
+    /// window that follows a rule cannot be stranded by the rule moving.
+    ///
+    /// See [`kept_reachable`] for why the intersection test is as strict as it
+    /// is.
+    fn bring_stranded_windows_back(&mut self, bounds: Rect) {
+        let desktop = self.display_manager.virtual_bounds();
+        let moves: Vec<(WindowId, i32, i32)> = self
+            .windows
+            .iter()
+            .filter(|w| !w.fullscreen && !w.maximized && w.snapped.is_none())
+            .map(|w| (w, kept_reachable(w.frame_rect(), desktop, bounds)))
+            .filter(|&(w, placed)| placed != w.frame_rect())
+            .map(|(w, placed)| {
+                // Through the frame rather than the client area: it is the
+                // decorated box that has to land on screen, and `pulled_onto`
+                // pins its top-left — where the title bar is — when it is too
+                // large to fit.
+                let (x, y, _, _) = w.client_geometry_for_frame(placed);
+                (w.id, x, y)
+            })
+            .collect();
+
+        for (window_id, x, y) in moves {
+            // `WindowNotFound` is unreachable: every id came from the list above
+            // and nothing between there and here removes a window. Dropped
+            // rather than propagated because a caller adopting a new display
+            // mode has no answer to "one window declined to move" and must not
+            // abandon the rest of the resize over it.
+            drop(self.move_window(window_id, x, y));
+        }
+    }
+
+    /// Bring the pointer inside the desktop it may have just fallen off.
+    ///
+    /// The cursor position is not derived from anything — it is whatever the
+    /// last motion event said — so a screen that shrinks under it leaves it at a
+    /// coordinate the display no longer has: an invisible pointer that
+    /// hit-tests against nothing, and stays that way until the user moves the
+    /// mouse and the input source volunteers a fresh position.
+    ///
+    /// Clamped to the *virtual* bounds rather than to one monitor because the
+    /// pointer crosses monitors and the desktop is their union; clamping it to
+    /// the primary would teleport it off a second screen that a resize of the
+    /// first did not touch.
+    fn pull_pointer_onto_the_desktop(&mut self) {
+        let bounds = self.display_manager.virtual_bounds();
+        if bounds.width == 0 || bounds.height == 0 {
+            // No desktop to be on. The clamp below would also be malformed —
+            // its lower bound would exceed its upper — which panics.
+            return;
+        }
+        self.cursor_x = self
+            .cursor_x
+            .clamp(bounds.x, bounds.right().saturating_sub(1));
+        self.cursor_y = self
+            .cursor_y
+            .clamp(bounds.y, bounds.bottom().saturating_sub(1));
     }
 
     /// Get the display manager.
@@ -6429,25 +7950,44 @@ impl Compositor {
     ///
     /// Ordered by `z_stack` rather than by creation, so consecutive entries are
     /// neighbours on screen and the last one is the topmost window.
+    ///
+    /// Windows on other virtual desktops are in it, carrying their own desktop
+    /// number, and the list says which desktop is showing. Leaving them out
+    /// would be the original bug back in a new place: a switcher that could only
+    /// offer this desktop's windows makes the others unreachable.
     #[must_use]
-    pub fn window_list(&self) -> Vec<WindowInfo> {
-        self.z_stack
-            .iter()
-            .filter_map(|&id| self.window_ref(id))
-            .map(|w| WindowInfo {
-                id: w.id.raw(),
-                pid: w.client_pid,
-                layer: w.layer,
-                title: w.title.clone(),
-                visible: w.visible,
-                minimized: w.minimized,
-                maximized: w.maximized,
-                // From the window's own flag rather than from
-                // `self.focused_window`, so the list cannot disagree with the
-                // window it describes if the two ever drift apart.
-                focused: w.focused,
-            })
-            .collect()
+    pub fn window_list(&self) -> WindowList {
+        WindowList::new(
+            self.current_workspace,
+            self.z_stack
+                .iter()
+                .filter_map(|&id| self.window_ref(id))
+                .map(|w| WindowInfo {
+                    id: w.id.raw(),
+                    pid: w.client_pid,
+                    layer: w.layer,
+                    title: w.title.clone(),
+                    visible: w.visible,
+                    minimized: w.minimized,
+                    maximized: w.maximized,
+                    // From the window's own flag rather than from
+                    // `self.focused_window`, so the list cannot disagree with
+                    // the window it describes if the two ever drift apart.
+                    focused: w.focused,
+                    workspace: w.workspace,
+                    // Reported, never accepted back. Nothing in `ShellControl`
+                    // takes a rectangle — a snap names an edge (§505) and a
+                    // maximize names nothing — so this is something a shell
+                    // draws with, not something it can move a window by. That
+                    // is the whole difference between this and the per-window
+                    // geometry §506 deleted from the shell's own list.
+                    x: w.x,
+                    y: w.y,
+                    width: w.width,
+                    height: w.height,
+                })
+                .collect(),
+        )
     }
 
     /// Update z_order fields on all windows based on their position in z_stack.
@@ -6474,7 +8014,7 @@ impl Compositor {
         let mut snaps: Vec<WindowSnapshot<'_>> = Vec::with_capacity(self.z_stack.len());
         for &id in &self.z_stack {
             if let Some(win) = self.window_ref(id) {
-                if !win.visible || win.minimized {
+                if !win.is_showing(self.current_workspace) {
                     continue;
                 }
                 snaps.push(WindowSnapshot {
@@ -6534,7 +8074,7 @@ impl Compositor {
     fn focus_topmost_visible(&mut self) {
         let topmost = self.z_stack.iter().rev().copied().find(|&id| {
             self.window_ref(id)
-                .is_some_and(|w| w.visible && !w.minimized)
+                .is_some_and(|w| w.is_showing(self.current_workspace))
         });
 
         if let Some(id) = topmost {
@@ -7683,7 +9223,11 @@ mod tests {
         let win = comp.window_ref(id).expect("window");
         assert!(!win.minimized, "still minimized");
         assert!(win.visible, "un-minimized but still hidden");
-        assert_eq!(comp.focused_window, Some(id), "un-minimized but not focused");
+        assert_eq!(
+            comp.focused_window,
+            Some(id),
+            "un-minimized but not focused"
+        );
     }
 
     /// A taskbar button must give a window back exactly as the user left it.
@@ -7767,9 +9311,9 @@ mod tests {
             "a shell close destroyed the window outright"
         );
         assert!(
-            comp.pending_notifications
-                .iter()
-                .any(|n| matches!(n, EventNotification::WindowClose { window_id } if *window_id == id)),
+            comp.pending_notifications.iter().any(
+                |n| matches!(n, EventNotification::WindowClose { window_id } if *window_id == id)
+            ),
             "the client was never told to close"
         );
     }
@@ -7837,7 +9381,7 @@ mod tests {
         ));
         assert_eq!(
             comp.window_ref(id).expect("window").snapped,
-            Some(SnapEdge::Left),
+            Some(SnapTarget::Half(SnapEdge::Left)),
             "SnapLeft"
         );
 
@@ -7847,7 +9391,7 @@ mod tests {
         ));
         assert_eq!(
             comp.window_ref(id).expect("window").snapped,
-            Some(SnapEdge::Right),
+            Some(SnapTarget::Half(SnapEdge::Right)),
             "SnapRight"
         );
         assert!(matches!(
@@ -7887,7 +9431,8 @@ mod tests {
         let right = comp.create_window_from_spec(&spec, 1);
 
         comp.snap_window(left, SnapEdge::Left).expect("snap left");
-        comp.snap_window(right, SnapEdge::Right).expect("snap right");
+        comp.snap_window(right, SnapEdge::Right)
+            .expect("snap right");
 
         let l = comp.window_ref(left).expect("left");
         let r = comp.window_ref(right).expect("right");
@@ -8037,6 +9582,266 @@ mod tests {
                     if *window_id == id && *w == width && *h == height
             )),
             "the client was never told the snap resized it"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Zone snapping
+    // -----------------------------------------------------------------------
+
+    /// An undecorated window, so that its client rectangle *is* its frame and a
+    /// placement assertion can be made against the zone rectangle directly
+    /// rather than through the decoration insets.
+    fn with_one_bare_window(width: u32, height: u32) -> (Compositor, WindowId) {
+        let mut comp = Compositor::new(width, height, 60).expect("compositor");
+        let mut spec = WindowSpec::new("Bare", 200, 150);
+        spec.position = Some((100, 100));
+        spec.decorations = false;
+        let id = comp.create_window_from_spec(&spec, 1);
+        (comp, id)
+    }
+
+    /// The window lands in the rectangle the shell's picker drew for that zone.
+    ///
+    /// This is the one assertion the whole arrangement exists for. The user
+    /// aims at a rectangle painted on screen by the shell; the compositor,
+    /// which never saw that painting, has to place the window in the *same*
+    /// rectangle. Both sides get there through `guiremote::zones`, and this
+    /// test computes the expected rectangle the way a shell would — from the
+    /// display bounds, through the shared code — rather than restating the
+    /// arithmetic, which would only prove the restatement matches itself.
+    #[test]
+    fn a_zone_snapped_window_lands_in_the_rectangle_the_picker_drew() {
+        let (mut comp, id) = with_one_bare_window(801, 601);
+        let bounds = comp.display_manager.virtual_bounds();
+
+        for slot in SnapSlot::all() {
+            let drawn = zone_rect(slot.rect(work_area_of(bounds)).expect("zone"));
+
+            comp.snap_window_to_zone(id, slot).expect("snap to zone");
+
+            let w = comp.window_ref(id).expect("window");
+            assert_eq!(
+                Rect::new(w.x, w.y, w.width, w.height),
+                drawn,
+                "zone {} of {:?} was drawn in one place and filled in another",
+                slot.zone(),
+                slot.preset()
+            );
+        }
+
+        // A guard on the loop above: if `all` ever yielded nothing, every
+        // assertion in it would vacuously pass.
+        assert_eq!(SnapSlot::all().count(), usize::from(SnapSlot::COUNT));
+    }
+
+    /// What is stored is the slot, not the rectangle it currently resolves to.
+    ///
+    /// The same rule [`SnapEdge`] documents, for the same reason: a stored
+    /// rectangle is silently wrong the moment the display changes size, and
+    /// there is no later moment at which it would be noticed.
+    #[test]
+    fn a_zone_snapped_window_records_the_slot_and_not_its_geometry() {
+        let (mut comp, id) = with_one_window();
+        let slot = SnapSlot::new(SnapLayoutPreset::SixGrid, 4).expect("slot");
+
+        comp.snap_window_to_zone(id, slot).expect("snap to zone");
+
+        assert_eq!(
+            comp.window_ref(id).expect("window").snapped,
+            Some(SnapTarget::Zone(slot))
+        );
+    }
+
+    /// Zone snapping is a departure from the window's own geometry in exactly
+    /// the sense maximizing and half-snapping are, so it goes through the same
+    /// `restore_rect` bookkeeping and is undone by the same `restore_window`.
+    ///
+    /// The mixed sequence is the point: each transition is a chance to
+    /// overwrite `restore_rect` with geometry the window only has because of
+    /// the previous one, and a zone snap that skipped the check would leave the
+    /// window unable ever to get back to its original size.
+    #[test]
+    fn zone_snapping_restores_to_the_windows_own_geometry() {
+        let (mut comp, id) = with_one_window();
+        let before = {
+            let w = comp.window_ref(id).expect("window");
+            Rect::new(w.x, w.y, w.width, w.height)
+        };
+
+        comp.maximize_window(id).expect("maximize");
+        comp.snap_window_to_zone(
+            id,
+            SnapSlot::new(SnapLayoutPreset::FourQuadrants, 2).expect("slot"),
+        )
+        .expect("snap to zone");
+        assert_ne!(
+            Rect::new(
+                comp.window_ref(id).expect("window").x,
+                comp.window_ref(id).expect("window").y,
+                comp.window_ref(id).expect("window").width,
+                comp.window_ref(id).expect("window").height,
+            ),
+            before,
+            "the zone snap moved nothing, so the restore proves nothing"
+        );
+        comp.snap_window(id, SnapEdge::Left).expect("snap left");
+        comp.snap_window_to_zone(
+            id,
+            SnapSlot::new(SnapLayoutPreset::ThreeColumns, 1).expect("slot"),
+        )
+        .expect("snap to zone again");
+
+        comp.restore_window(id).expect("restore");
+
+        let w = comp.window_ref(id).expect("window");
+        assert_eq!(Rect::new(w.x, w.y, w.width, w.height), before);
+        assert_eq!(w.snapped, None);
+    }
+
+    /// Zone snapping and maximizing are alternatives, not stages — the same
+    /// mutual exclusion half-snapping already keeps.
+    #[test]
+    fn a_window_is_never_zone_snapped_and_maximized_at_once() {
+        let (mut comp, id) = with_one_window();
+        let slot = SnapSlot::new(SnapLayoutPreset::ThreeLeftTwoRight, 0).expect("slot");
+
+        comp.maximize_window(id).expect("maximize");
+        comp.snap_window_to_zone(id, slot).expect("snap to zone");
+        assert!(
+            !comp.window_ref(id).expect("window").maximized,
+            "zone-snapping a maximized window left it recorded as maximized too"
+        );
+
+        comp.maximize_window(id).expect("maximize again");
+        assert_eq!(
+            comp.window_ref(id).expect("window").snapped,
+            None,
+            "maximizing a zone-snapped window left it recorded as snapped too"
+        );
+    }
+
+    /// A fixed-size window refuses a zone snap for the reason it refuses every
+    /// other tile: tiling it is a resize it said it cannot take.
+    #[test]
+    fn a_non_resizable_window_refuses_to_be_zone_snapped() {
+        let mut comp = Compositor::new(800, 600, 60).expect("compositor");
+        let mut spec = WindowSpec::new("Fixed", 200, 150);
+        spec.position = Some((100, 100));
+        spec.resizable = false;
+        let id = comp.create_window_from_spec(&spec, 1);
+        let before = {
+            let w = comp.window_ref(id).expect("window");
+            Rect::new(w.x, w.y, w.width, w.height)
+        };
+
+        assert!(matches!(
+            comp.snap_window_to_zone(
+                id,
+                SnapSlot::new(SnapLayoutPreset::TwoThirdsRight, 1).expect("slot")
+            ),
+            Err(CompositorError::NotResizable(_))
+        ));
+        let w = comp.window_ref(id).expect("window");
+        assert_eq!(Rect::new(w.x, w.y, w.width, w.height), before);
+        assert_eq!(w.snapped, None);
+    }
+
+    /// The shell's request reaches the window, end to end: a `SnapToZone`
+    /// arriving as a request moves the window and is answered `Ok`.
+    ///
+    /// Distinct from calling `snap_window_to_zone` directly — this is what
+    /// proves the new wire verb is actually dispatched rather than merely
+    /// decodable.
+    #[test]
+    fn the_snap_to_zone_request_reaches_the_window() {
+        let (mut comp, id) = with_one_bare_window(800, 600);
+        let slot = SnapSlot::new(SnapLayoutPreset::FourQuadrants, 3).expect("slot");
+        let expected = zone_rect(
+            slot.rect(work_area_of(comp.display_manager.virtual_bounds()))
+                .expect("zone"),
+        );
+
+        let response = comp.handle_request(CompositorRequest::ShellControl {
+            window_id: id,
+            action: ShellControlAction::SnapToZone(slot),
+        });
+
+        assert!(matches!(response, CompositorResponse::Ok));
+        let w = comp.window_ref(id).expect("window");
+        assert_eq!(Rect::new(w.x, w.y, w.width, w.height), expected);
+        assert_eq!(w.snapped, Some(SnapTarget::Zone(slot)));
+    }
+
+    /// Zones that share an edge round to the *same* pixel, so the tiled windows
+    /// neither overlap by a column nor leave one bare.
+    ///
+    /// Rounding each zone's origin and its size independently is the obvious
+    /// way to get from the layout's `f32` rectangles to whole pixels, and it is
+    /// wrong: a boundary at 666.67 becomes an origin of 667 for the zone on its
+    /// right while the zone on its left still ends at 333 + 333 = 666, and the
+    /// column at x = 666 belongs to nobody. Deriving the extents from rounded
+    /// *edges* is what closes it.
+    ///
+    /// A work area too short for the zone gap is used because that is the case
+    /// in which the layout drops the gap — and a dropped gap is the only time
+    /// two zones share an edge at all.
+    #[test]
+    fn zones_that_share_an_edge_round_to_the_same_pixel() {
+        // 1000 / 3 is 333.33: every interior boundary is fractional.
+        let area = WorkArea::new(0.0, 0.0, 1000.0, 4.0);
+        let rects: Vec<Rect> = (0..3)
+            .map(|z| {
+                let slot = SnapSlot::new(SnapLayoutPreset::ThreeColumns, z).expect("slot");
+                zone_rect(slot.rect(area).expect("zone"))
+            })
+            .collect();
+
+        assert_eq!(rects.len(), 3);
+        assert_eq!(rects[0].x, 0, "the first column starts at the left edge");
+        for pair in rects.windows(2) {
+            let (left, right) = (pair[0], pair[1]);
+            assert_eq!(
+                left.x
+                    .saturating_add(i32::try_from(left.width).expect("small")),
+                right.x,
+                "a gap or an overlap between columns {left:?} and {right:?}"
+            );
+        }
+        let last = rects[2];
+        assert_eq!(
+            last.x
+                .saturating_add(i32::try_from(last.width).expect("small")),
+            1000,
+            "the last column must reach the right edge"
+        );
+    }
+
+    /// A layout resolves against whatever display it is asked about, because
+    /// the slot names no pixels. Snapping to the same slot on a differently
+    /// sized display must land somewhere different.
+    #[test]
+    fn a_zone_is_resolved_against_the_display_it_is_snapped_on() {
+        let slot = SnapSlot::new(SnapLayoutPreset::TwoThirdsLeft, 1).expect("slot");
+
+        let (mut small, small_id) = with_one_bare_window(800, 600);
+        small.snap_window_to_zone(small_id, slot).expect("snap");
+        let on_small = {
+            let w = small.window_ref(small_id).expect("window");
+            Rect::new(w.x, w.y, w.width, w.height)
+        };
+
+        let (mut large, large_id) = with_one_bare_window(1920, 1080);
+        large.snap_window_to_zone(large_id, slot).expect("snap");
+        let on_large = {
+            let w = large.window_ref(large_id).expect("window");
+            Rect::new(w.x, w.y, w.width, w.height)
+        };
+
+        assert_ne!(
+            on_small, on_large,
+            "the slot resolved to one rectangle on two different displays, \
+             which means a rectangle got stored somewhere it should not have"
         );
     }
 
@@ -10351,8 +12156,8 @@ mod tests {
         if let Some(d) = comp.display_manager.displays.first_mut() {
             d.scale_factor = left_scale;
         }
-        comp.display_manager
-            .add_display(Display::new(1, 800, 600, 60, right_scale, false));
+        comp.attach_display(Display::new(1, 800, 600, 60, right_scale, false))
+            .expect("attach");
         comp
     }
 
@@ -12069,5 +13874,2734 @@ mod tests {
                 );
             }
         });
+    }
+
+    // ---- drag a window to an edge and let go ------------------------------
+    //
+    // The compositor decides this, not the shell. It already holds the drag
+    // grab, the window geometry and the display bounds, so a shell would have
+    // to be sent the pointer position on every motion event to answer a
+    // question the compositor can answer locally -- putting a socket round trip
+    // inside the highlight, which is the part of the gesture the user watches.
+
+    /// Drag `id` by its title bar until the pointer reaches `(to_x, to_y)`,
+    /// then let go: the whole gesture, in the order a user performs it.
+    fn drag_title_bar_to(comp: &mut Compositor, id: WindowId, to_x: i32, to_y: i32) {
+        let bar = comp
+            .window_ref(id)
+            .expect("window")
+            .title_bar_rect()
+            .expect("a decorated window has a title bar");
+        let from_x = bar.x + 10;
+        let from_y = bar.y + bar.height as i32 / 2;
+        comp.handle_mouse_button(MouseButton::Left, true, from_x, from_y);
+        assert!(comp.drag.is_some(), "the title-bar press started no drag");
+        comp.handle_mouse_move(to_x, to_y);
+        comp.handle_mouse_button(MouseButton::Left, false, to_x, to_y);
+        assert!(comp.drag.is_none(), "the release left the drag running");
+    }
+
+    fn snapped_to(comp: &Compositor, id: WindowId) -> Option<SnapTarget> {
+        comp.window_ref(id).expect("window").snapped
+    }
+
+    /// The slot an edge drop is expected to land in.
+    fn slot(preset: SnapLayoutPreset, zone: u8) -> SnapSlot {
+        SnapSlot::new(preset, zone).expect("a zone the preset has")
+    }
+
+    #[test]
+    fn dropping_a_window_at_an_edge_tiles_it_on_that_side() {
+        // Every snapping edge and corner, driven end to end through the real
+        // input path. Checking `snapped` rather than the rectangle is
+        // deliberate: the stored value is the *intent*, and it is what survives
+        // a resolution change, so a drop that produced the right pixels while
+        // recording the wrong slot would still be wrong.
+        let cases = [
+            (
+                "left",
+                (2, 300),
+                SnapTarget::Zone(slot(SnapLayoutPreset::TwoEqualHalves, 0)),
+            ),
+            (
+                "right",
+                (797, 300),
+                SnapTarget::Zone(slot(SnapLayoutPreset::TwoEqualHalves, 1)),
+            ),
+            (
+                "top-left",
+                (2, 2),
+                SnapTarget::Zone(slot(SnapLayoutPreset::FourQuadrants, 0)),
+            ),
+            (
+                "top-right",
+                (797, 2),
+                SnapTarget::Zone(slot(SnapLayoutPreset::FourQuadrants, 1)),
+            ),
+            (
+                "bottom-left",
+                (2, 597),
+                SnapTarget::Zone(slot(SnapLayoutPreset::FourQuadrants, 2)),
+            ),
+            (
+                "bottom-right",
+                (797, 597),
+                SnapTarget::Zone(slot(SnapLayoutPreset::FourQuadrants, 3)),
+            ),
+        ];
+        for (name, (x, y), want) in cases {
+            let (mut comp, id) = with_one_window();
+            drag_title_bar_to(&mut comp, id, x, y);
+            assert_eq!(
+                snapped_to(&comp, id),
+                Some(want),
+                "dropping at the {name} edge"
+            );
+        }
+    }
+
+    #[test]
+    fn dropping_a_window_at_the_top_maximizes_it() {
+        // The one edge that is not a zone. It goes through `maximize_window`,
+        // so `maximized` is set and `snapped` is not -- the two are
+        // alternatives, and a window that claimed both would be restored twice.
+        let (mut comp, id) = with_one_window();
+        drag_title_bar_to(&mut comp, id, 400, 2);
+        assert!(maximized(&comp, id), "the top edge did not maximize");
+        assert_eq!(snapped_to(&comp, id), None);
+    }
+
+    #[test]
+    fn dropping_a_window_at_the_bottom_leaves_it_where_it_was_dropped() {
+        // The bottom edge deliberately means nothing: no preset is a
+        // bottom-half strip, and inventing one would make the gesture mean
+        // something different from the top edge's mirror image.
+        let (mut comp, id) = with_one_window();
+        drag_title_bar_to(&mut comp, id, 400, 597);
+        assert_eq!(snapped_to(&comp, id), None);
+        assert!(!maximized(&comp, id));
+        let win = comp.window_ref(id).expect("window");
+        assert_eq!(
+            (win.width, win.height),
+            (200, 150),
+            "a drop that snaps nothing must not resize anything either"
+        );
+    }
+
+    #[test]
+    fn a_drag_that_ends_in_open_desktop_only_moves_the_window() {
+        let (mut comp, id) = with_one_window();
+        drag_title_bar_to(&mut comp, id, 400, 300);
+        assert_eq!(snapped_to(&comp, id), None);
+        assert!(!maximized(&comp, id));
+        let win = comp.window_ref(id).expect("window");
+        assert_eq!((win.width, win.height), (200, 150));
+        assert_ne!(
+            (win.x, win.y),
+            (100, 100),
+            "the drag should still have moved the window"
+        );
+    }
+
+    #[test]
+    fn clicking_the_title_bar_of_a_window_at_the_edge_does_not_tile_it() {
+        // The gesture that makes a movement test necessary. This window's title
+        // bar starts at x = 0, so a press in its leftmost columns is inside the
+        // left edge band from the very first event -- and a click is a press
+        // and a release at the same point with no drag between them.
+        let mut comp = Compositor::new(800, 600, 60).expect("compositor");
+        comp.set_double_click_ms(2000);
+        let mut spec = WindowSpec::new("At the edge", 200, 150);
+        spec.position = Some((0, 300));
+        let id = comp.create_window_from_spec(&spec, 1);
+
+        let bar = comp
+            .window_ref(id)
+            .expect("window")
+            .title_bar_rect()
+            .expect("title bar");
+        let (x, y) = (bar.x + 2, bar.y + 2);
+        assert!(
+            guiremote::zones::edge_at(x as f32, y as f32, comp.work_area_at(x, y)).is_some(),
+            "the test's own press point is not in an edge band, so it proves nothing"
+        );
+        comp.handle_mouse_button(MouseButton::Left, true, x, y);
+        comp.handle_mouse_button(MouseButton::Left, false, x, y);
+
+        assert_eq!(snapped_to(&comp, id), None, "a click tiled the window");
+        assert!(!maximized(&comp, id));
+    }
+
+    #[test]
+    fn a_resize_drag_that_ends_at_an_edge_does_not_tile() {
+        // Dragging the left border to the left edge of the screen is how a user
+        // sizes a window against that edge by hand. Snapping on release would
+        // overrule the size they had just finished choosing, at the one moment
+        // it is too late to aim differently.
+        let (mut comp, id) = with_one_window();
+        let (grab_x, grab_y) = (99, 175);
+        comp.handle_mouse_button(MouseButton::Left, true, grab_x, grab_y);
+        assert_eq!(
+            comp.drag.as_ref().map(|d| d.mode),
+            Some(DragMode::ResizeLeft),
+            "the test grabbed something other than the left border"
+        );
+        comp.handle_mouse_move(2, grab_y);
+        comp.handle_mouse_button(MouseButton::Left, false, 2, grab_y);
+
+        assert_eq!(
+            snapped_to(&comp, id),
+            None,
+            "a resize drag tiled the window"
+        );
+        assert!(!maximized(&comp, id));
+        let win = comp.window_ref(id).expect("window");
+        // 3, not 2: the *left border* follows the pointer and the border is
+        // one pixel outside the client area, which is what the grab point
+        // 99 -- rather than 100 -- reflects.
+        assert_eq!(win.x, 3, "the resize itself should still have happened");
+    }
+
+    #[test]
+    fn an_edge_drop_lands_in_the_rectangle_the_drop_promised() {
+        // The preview drawn during the drag is `EdgeDrop::rect`; the placement
+        // is whatever `maximize_window` or `snap_window_to_zone` works out for
+        // itself. They are separate pieces of arithmetic, so a preview that
+        // lies is a real possibility -- this is what rules it out.
+        let cases = [
+            ("a corner", (797, 2)),
+            ("an edge", (2, 300)),
+            ("the top", (400, 2)),
+        ];
+        for (name, (x, y)) in cases {
+            let (mut comp, id) = with_one_window();
+            let area = comp.work_area_at(x, y);
+            let promised = guiremote::zones::drop_at(x as f32, y as f32, area)
+                .unwrap_or_else(|| panic!("{name} should snap"))
+                .rect(area)
+                .expect("resolves");
+            drag_title_bar_to(&mut comp, id, x, y);
+            assert_eq!(
+                comp.window_ref(id).expect("window").frame_rect(),
+                zone_rect(promised),
+                "dropping at {name} placed the frame somewhere other than the preview"
+            );
+        }
+    }
+
+    #[test]
+    fn a_window_the_client_declared_fixed_size_is_not_tiled_by_a_drop() {
+        // Tiling is a resize, and a window that said it works at one size means
+        // it. The refusal comes from `place_snapped` rather than from anything
+        // here, which is the point of routing the drop through it.
+        let mut comp = Compositor::new(800, 600, 60).expect("compositor");
+        comp.set_double_click_ms(2000);
+        let mut spec = WindowSpec::new("Fixed", 200, 150);
+        spec.position = Some((100, 100));
+        spec.resizable = false;
+        let id = comp.create_window_from_spec(&spec, 1);
+        drag_title_bar_to(&mut comp, id, 2, 300);
+        assert_eq!(snapped_to(&comp, id), None);
+        let win = comp.window_ref(id).expect("window");
+        assert_eq!((win.width, win.height), (200, 150));
+    }
+
+    #[test]
+    fn a_dropped_window_remembers_the_size_it_had_before_the_drag() {
+        // Routing through `place_snapped` is what earns this: the restore
+        // rectangle is recorded by the same code that records it for a keyboard
+        // snap, so an edge drop is undoable in exactly the way every other
+        // tiling operation is.
+        let (mut comp, id) = with_one_window();
+        drag_title_bar_to(&mut comp, id, 2, 300);
+        assert!(snapped_to(&comp, id).is_some());
+        comp.restore_window(id).expect("restore");
+        let win = comp.window_ref(id).expect("window");
+        assert_eq!((win.width, win.height), (200, 150));
+        assert_eq!(win.snapped, None);
+    }
+
+    #[test]
+    fn re_tiling_an_already_tiled_window_still_restores_to_its_own_size() {
+        // Two drops in a row. The second must not record the first one's
+        // half-screen geometry as the place to come back to.
+        let (mut comp, id) = with_one_window();
+        drag_title_bar_to(&mut comp, id, 2, 300);
+        // Two title-bar presses on one window inside the double-click interval
+        // are a double click, which maximizes rather than dragging. A press on
+        // the desktop between them is what says the user went somewhere else
+        // and came back -- the same thing that stops a real user's two slow
+        // drags from being read as one fast double click.
+        comp.handle_mouse_button(MouseButton::Left, true, 700, 300);
+        comp.handle_mouse_button(MouseButton::Left, false, 700, 300);
+        drag_title_bar_to(&mut comp, id, 797, 300);
+        assert_eq!(
+            snapped_to(&comp, id),
+            Some(SnapTarget::Zone(slot(SnapLayoutPreset::TwoEqualHalves, 1)))
+        );
+        comp.restore_window(id).expect("restore");
+        let win = comp.window_ref(id).expect("window");
+        assert_eq!((win.width, win.height), (200, 150));
+    }
+
+    // ---- the preview drawn while the drag is still in flight ---------------
+    //
+    // A drop that only announces itself once the button is up asks the user to
+    // aim at something invisible. The preview is the aiming aid, and because
+    // it is a translucent wash over the desktop it is also the one piece of
+    // this feature that can be wrong *by accumulation* rather than by
+    // placement -- hence the frame-over-frame tests below alongside the
+    // ordinary state ones.
+
+    /// Press `id`'s title bar and drag the pointer to `(to_x, to_y)` **without
+    /// letting go**: the drag is still running when this returns, which is the
+    /// only moment a preview exists.
+    fn drag_title_bar_toward(comp: &mut Compositor, id: WindowId, to_x: i32, to_y: i32) {
+        let bar = comp
+            .window_ref(id)
+            .expect("window")
+            .title_bar_rect()
+            .expect("a decorated window has a title bar");
+        let from_x = bar.x + 10;
+        let from_y = bar.y + bar.height as i32 / 2;
+        comp.handle_mouse_button(MouseButton::Left, true, from_x, from_y);
+        assert!(comp.drag.is_some(), "the title-bar press started no drag");
+        comp.handle_mouse_move(to_x, to_y);
+    }
+
+    /// `with_one_window`, but with a frame budget of zero.
+    ///
+    /// `compose_frame` declines when it is too soon for another frame, and two
+    /// synchronous calls are microseconds apart -- so at 60 Hz a test that
+    /// composites twice and compares would be comparing one frame with itself
+    /// and passing for it. `frame_interval_for` divides 1 MHz by the refresh
+    /// rate, so any rate above that lands on a zero-length interval and every
+    /// call composites.
+    fn with_one_unthrottled_window() -> (Compositor, WindowId) {
+        let mut comp = Compositor::new(800, 600, 2_000_000).expect("compositor");
+        comp.set_double_click_ms(2000);
+        let mut spec = WindowSpec::new("Resizable", 200, 150);
+        spec.position = Some((100, 100));
+        let id = comp.create_window_from_spec(&spec, 1);
+        (comp, id)
+    }
+
+    /// The rectangle the compositor is currently offering to drop into.
+    fn previewed_rect(comp: &Compositor) -> Rect {
+        let drop = comp.drag_preview.expect("a preview is up");
+        comp.preview_rect(drop).expect("the preview drop resolves")
+    }
+
+    fn presented_pixel(comp: &Compositor, x: i32, y: i32) -> u32 {
+        let (w, _) = comp.backend.size();
+        comp.backend.presented_pixels()
+            [Framebuffer::pixel_index(w as usize, x as usize, y as usize)]
+    }
+
+    #[test]
+    fn the_four_border_bands_of_a_preview_never_overlap() {
+        // The bands are painted opaquely over a translucent wash, so an
+        // overlap is not merely overdraw: the shared pixels take the border
+        // colour twice and come out as four darker corner squares. The sizes
+        // below are chosen to include the ones where the naive symmetric
+        // formula breaks -- anything shorter or narrower than twice the
+        // thickness, where a top and a bottom band of full thickness would
+        // meet in the middle.
+        let cases = [
+            (400u32, 600u32, 2u32),
+            (400, 600, 0),
+            (5, 5, 2),
+            (4, 4, 2),
+            (3, 3, 2),
+            (2, 2, 2),
+            (1, 1, 2),
+            (0, 0, 2),
+            (1, 600, 2),
+            (600, 1, 2),
+        ];
+        for (width, height, thickness) in cases {
+            let rect = Rect::new(17, 23, width, height);
+            let bands = rect_outline(rect, thickness);
+            for (i, a) in bands.iter().enumerate() {
+                for b in bands.iter().skip(i + 1) {
+                    assert_eq!(
+                        a.intersect(b),
+                        None,
+                        "{width}x{height} at thickness {thickness}: {a:?} and {b:?} overlap"
+                    );
+                }
+                assert!(
+                    a.intersect(&rect) == Some(*a) || a.width == 0 || a.height == 0,
+                    "{width}x{height} at thickness {thickness}: {a:?} reaches outside {rect:?}"
+                );
+            }
+            // ...and together they are the ring, not some of it: the area they
+            // cover is what is left after knocking the hole out of the middle.
+            let painted: u32 = bands.iter().map(|b| b.width.saturating_mul(b.height)).sum();
+            let side = thickness.min(width);
+            let cap = thickness.min(height);
+            let hole = width
+                .saturating_sub(side)
+                .saturating_sub(thickness.min(width.saturating_sub(side)))
+                .saturating_mul(
+                    height
+                        .saturating_sub(cap)
+                        .saturating_sub(thickness.min(height.saturating_sub(cap))),
+                );
+            assert_eq!(
+                painted,
+                width.saturating_mul(height) - hole,
+                "{width}x{height} at thickness {thickness}: the bands leave a gap in the ring"
+            );
+        }
+    }
+
+    #[test]
+    fn dragging_into_an_edge_band_raises_a_preview_and_leaving_takes_it_down() {
+        // The preview has to track the pointer in both directions. One that
+        // only ever appears would follow a user who changed their mind all the
+        // way back into open desktop, promising a tiling that will not happen.
+        let (mut comp, id) = with_one_unthrottled_window();
+        drag_title_bar_toward(&mut comp, id, 400, 300);
+        assert_eq!(
+            comp.drag_preview, None,
+            "the middle of the desktop offered to tile"
+        );
+        comp.handle_mouse_move(2, 300);
+        assert_eq!(
+            comp.drag_preview.map(|i| i.drop),
+            guiremote::zones::drop_at(2.0, 300.0, comp.work_area_at(2, 300)),
+            "the left edge raised something other than the left edge's drop"
+        );
+        comp.handle_mouse_move(400, 300);
+        assert_eq!(
+            comp.drag_preview, None,
+            "the pointer left the band and the preview stayed"
+        );
+    }
+
+    #[test]
+    fn the_preview_promises_the_rectangle_the_drop_delivers() {
+        // Stronger than comparing the drop's rectangle against the placement:
+        // this reads the rectangle out of the live preview state, so a preview
+        // that resolves its drop against a different work area than the drop
+        // does -- the two calls are in different methods -- is visible here and
+        // nowhere else.
+        let cases = [
+            ("a corner", (797, 2)),
+            ("an edge", (2, 300)),
+            ("the top", (400, 2)),
+        ];
+        for (name, (x, y)) in cases {
+            let (mut comp, id) = with_one_unthrottled_window();
+            drag_title_bar_toward(&mut comp, id, x, y);
+            assert!(comp.drag_preview.is_some(), "{name} raised no preview");
+            let promised = previewed_rect(&comp);
+            comp.handle_mouse_button(MouseButton::Left, false, x, y);
+            assert_eq!(
+                comp.window_ref(id).expect("window").frame_rect(),
+                promised,
+                "the preview at {name} showed one rectangle and the drop used another"
+            );
+        }
+    }
+
+    #[test]
+    fn letting_go_takes_the_preview_down() {
+        let (mut comp, id) = with_one_unthrottled_window();
+        drag_title_bar_toward(&mut comp, id, 2, 300);
+        assert!(comp.drag_preview.is_some(), "no preview to take down");
+        comp.handle_mouse_button(MouseButton::Left, false, 2, 300);
+        assert_eq!(
+            comp.drag_preview, None,
+            "the preview outlived the drag it belonged to"
+        );
+    }
+
+    #[test]
+    fn closing_the_dragged_window_takes_the_preview_down() {
+        // A client may destroy its window at any moment, including in the
+        // middle of a drag of it. Without this the compositor would go on
+        // offering to tile a window that no longer exists, and the offer would
+        // never come down because the release that would cancel it belongs to
+        // a drag whose window is gone.
+        let (mut comp, id) = with_one_unthrottled_window();
+        drag_title_bar_toward(&mut comp, id, 2, 300);
+        assert!(comp.drag_preview.is_some(), "no preview to take down");
+        comp.destroy_window(id).expect("destroy");
+        assert!(
+            comp.drag.is_none(),
+            "a drag went on running against a destroyed window"
+        );
+        assert_eq!(
+            comp.drag_preview, None,
+            "the desktop is still offering to tile a window that is gone"
+        );
+    }
+
+    #[test]
+    fn a_resize_drag_raises_no_preview() {
+        // The mirror of `a_resize_drag_that_ends_at_an_edge_does_not_tile`, at
+        // the other end of the gesture: a preview that appeared during a resize
+        // would be a promise the release then refuses to keep.
+        let (mut comp, _id) = with_one_unthrottled_window();
+        comp.handle_mouse_button(MouseButton::Left, true, 99, 175);
+        assert_eq!(
+            comp.drag.as_ref().map(|d| d.mode),
+            Some(DragMode::ResizeLeft),
+            "the test grabbed something other than the left border"
+        );
+        comp.handle_mouse_move(2, 175);
+        assert_eq!(
+            comp.drag_preview, None,
+            "sizing a window against the left edge offered to tile it"
+        );
+    }
+
+    #[test]
+    fn the_preview_paints_its_own_rectangle_and_nothing_outside_it() {
+        // Two composites of the same scene, one with the preview up and one
+        // without. Every pixel outside the preview's rectangle has to match,
+        // and at least one inside it has to differ -- the second half is what
+        // stops the first from passing on a preview that draws nothing at all.
+        //
+        // The comparison is deliberately not "every pixel inside differs":
+        // the preview is a wash of `border_focused` and the focused window's
+        // own border is already that colour, so the pixels where it lands on
+        // the border are entitled to come out unchanged.
+        let scene = |preview: bool| {
+            let (mut comp, _) = with_one_unthrottled_window();
+            if preview {
+                let area = comp.work_area_at(2, 300);
+                let drop = guiremote::zones::drop_at(2.0, 300.0, area);
+                comp.set_drag_preview(drop.map(|drop| DropIntent { drop, area }));
+            }
+            assert!(comp.compose_frame(), "the frame was refused");
+            comp.backend.presented_pixels().to_vec()
+        };
+        let (with, without) = (scene(true), scene(false));
+
+        let area = Compositor::new(800, 600, 60)
+            .expect("compositor")
+            .work_area_at(2, 300);
+        let rect = zone_rect(
+            guiremote::zones::drop_at(2.0, 300.0, area)
+                .expect("the left edge snaps")
+                .rect(area)
+                .expect("resolves"),
+        );
+        let mut differed_inside = 0u32;
+        for (i, (a, b)) in without.iter().zip(&with).enumerate() {
+            let (x, y) = ((i % 800) as i32, (i / 800) as i32);
+            if rect.contains(x, y) {
+                differed_inside += u32::from(a != b);
+            } else {
+                assert_eq!(
+                    a, b,
+                    "the preview repainted ({x}, {y}), which is outside its own rectangle"
+                );
+            }
+        }
+        assert!(
+            differed_inside > 0,
+            "the preview changed nothing inside its own rectangle -- it was not drawn"
+        );
+    }
+
+    #[test]
+    fn a_preview_held_in_one_place_does_not_deepen_frame_by_frame() {
+        // The preview is a translucent wash. Painted over a *partial* frame it
+        // blends onto pixels that already carry the previous frame's copy of
+        // itself, so it darkens a little every frame until it is opaque -- and
+        // a drag rests in one edge band for hundreds of frames, which is
+        // exactly long enough for a user to watch it happen. The fix is to
+        // composite whole whenever a preview is up.
+        //
+        // The pointer moves a pixel between frames so the frames are not
+        // trivially identical: without that there is no partial frame for the
+        // wash to compound over and the test could not fail.
+        let (mut comp, id) = with_one_unthrottled_window();
+        drag_title_bar_toward(&mut comp, id, 2, 300);
+        let rect = previewed_rect(&comp);
+        // Inside the preview and clear of the dragged window, so nothing but
+        // the preview itself can be responsible for the pixel.
+        let (px, py) = (rect.x + rect.width as i32 / 2, rect.bottom() - 4);
+        assert!(
+            !comp
+                .window_ref(id)
+                .expect("window")
+                .frame_rect()
+                .contains(px, py),
+            "the probe pixel is under the dragged window, so it proves nothing"
+        );
+        assert!(comp.compose_frame(), "the first frame was refused");
+        let first = presented_pixel(&comp, px, py);
+        for step in 1..=4 {
+            comp.handle_mouse_move(2 + step, 300);
+            assert_eq!(previewed_rect(&comp), rect, "the preview moved");
+            assert!(comp.compose_frame(), "frame {step} was refused");
+            assert_eq!(
+                presented_pixel(&comp, px, py),
+                first,
+                "the preview is a different colour on frame {step} than on the first, \
+                 which is it blending over its own previous copy"
+            );
+        }
+    }
+
+    #[test]
+    fn taking_the_preview_down_damages_the_ground_it_covered() {
+        // The frame that *has* a preview is composited whole, but the frame
+        // after it is not -- so the rectangle the preview vacated is repainted
+        // only if something marks it dirty, and nothing else will: no window
+        // moved there and the desktop under it never changed. Without this the
+        // preview stays burned into the screen after the pointer leaves the
+        // band, until something unrelated happens to repaint that half.
+        let (mut comp, id) = with_one_unthrottled_window();
+        drag_title_bar_toward(&mut comp, id, 2, 300);
+        let covered = previewed_rect(&comp);
+        assert!(comp.compose_frame(), "the preview frame was refused");
+        assert!(
+            !comp.damage.has_damage(),
+            "compositing left damage behind, so the check below would pass on it"
+        );
+        comp.handle_mouse_move(400, 300);
+        assert_eq!(comp.drag_preview, None, "the preview did not come down");
+        assert!(
+            comp.damage
+                .rects()
+                .iter()
+                .any(|r| r.intersect(&covered) == Some(covered)),
+            "the preview came down without marking the {covered:?} it had covered, \
+             and the frame that takes it down is not composited whole"
+        );
+    }
+
+    // ---- tiling divides one monitor, not the whole virtual desktop ----
+
+    /// Two side-by-side monitors, with a window on whichever one is asked for.
+    ///
+    /// 800x600 primary and a 1024x768 secondary, which
+    /// [`DisplayManager::add_display`] places immediately to its right — so the
+    /// seam is at x = 800 and the virtual desktop is 1824 wide, a width no
+    /// single monitor has. The window is placed 100px inside the monitor named,
+    /// well clear of the seam, so `display_for`'s largest-overlap rule cannot
+    /// answer the other one by accident.
+    ///
+    /// Returns both monitors' bounds, because every assertion below is of the
+    /// form "this landed on that monitor and not on the union of both".
+    fn two_monitors(window_on: usize) -> (Compositor, WindowId, [Rect; 2]) {
+        let mut comp = Compositor::new(800, 600, 2_000_000).expect("compositor");
+        comp.attach_display(Display::new(1, 1024, 768, 60, 1.0, false))
+            .expect("attach");
+        let screens = [
+            comp.display_manager.displays()[0].bounds(),
+            comp.display_manager.displays()[1].bounds(),
+        ];
+        let home = screens[window_on];
+        let mut spec = WindowSpec::new("Over there", 200, 150);
+        spec.position = Some((home.x + 100, home.y + 100));
+        let id = comp.create_window_from_spec(&spec, 1);
+        (comp, id, screens)
+    }
+
+    #[test]
+    fn maximizing_fills_the_windows_own_monitor_and_not_every_monitor() {
+        // The bug this pins: `maximize_window` measured the *union* of every
+        // display, so a window on the second monitor was made 1824px wide and
+        // moved to x=0 -- onto the first monitor, spanning both. A one-monitor
+        // desktop cannot tell that reading from the right one, which is why
+        // every test had one.
+        let (mut comp, id, screens) = two_monitors(1);
+        comp.maximize_window(id).expect("maximize");
+        let got = comp.window_ref(id).expect("window").frame_rect();
+        assert_eq!(
+            (got.x, got.width),
+            (screens[1].x, screens[1].width),
+            "maximize did not fill the window's own monitor"
+        );
+        assert!(
+            got.intersect(&screens[0]).is_none(),
+            "the maximized window spilled onto the other monitor"
+        );
+    }
+
+    #[test]
+    fn snapping_takes_half_of_the_windows_own_monitor() {
+        for (edge, want_x) in [(SnapEdge::Left, 0), (SnapEdge::Right, 512)] {
+            let (mut comp, id, screens) = two_monitors(1);
+            comp.snap_window(id, edge).expect("snap");
+            let got = comp.window_ref(id).expect("window").frame_rect();
+            assert_eq!(
+                (got.x, got.width),
+                (screens[1].x + want_x, screens[1].width / 2),
+                "{edge:?} did not take half of the window's own monitor"
+            );
+        }
+    }
+
+    #[test]
+    fn a_zone_snap_resolves_against_the_windows_own_monitor() {
+        // The leftmost zone of the three-column layout: a third of one monitor,
+        // not a third of the desktop.
+        let (mut comp, id, screens) = two_monitors(1);
+        let target = slot(SnapLayoutPreset::ThreeColumns, 0);
+        comp.snap_window_to_zone(id, target).expect("snap to zone");
+        let want = zone_rect(
+            target
+                .rect(work_area_of(screens[1]))
+                .expect("the preset has a zone 0"),
+        );
+        assert_eq!(
+            comp.window_ref(id).expect("window").frame_rect(),
+            want,
+            "the zone was resolved against something other than the window's monitor"
+        );
+    }
+
+    #[test]
+    fn an_edge_drop_uses_the_monitor_the_pointer_is_over() {
+        // Drag a window that lives on the *first* monitor to the *second*
+        // monitor's left edge. At the moment of release the window is still
+        // mostly on the first -- so a release that re-derived the work area
+        // from the window would tile it on the screen it was dragged away
+        // from, after showing an outline on the screen it was dragged to.
+        let (mut comp, id, screens) = two_monitors(0);
+        let aim = (screens[1].x + 2, screens[1].y + 300);
+        drag_title_bar_to(&mut comp, id, aim.0, aim.1);
+        assert_eq!(
+            comp.window_ref(id).expect("window").frame_rect(),
+            edge_drop_rect(aim.0, aim.1, screens[1]),
+            "the drop tiled against a monitor other than the one aimed at"
+        );
+    }
+
+    /// Where a drop at `(x, y)` belongs if `screen` is the monitor it is aimed
+    /// at — computed from `guiremote::zones` rather than by halving the width,
+    /// because a zone rectangle carries the layout's gap and a hand-computed
+    /// half does not.
+    #[allow(
+        clippy::cast_precision_loss,
+        reason = "test coordinates are far inside f32's exact-integer range"
+    )]
+    fn edge_drop_rect(x: i32, y: i32, screen: Rect) -> Rect {
+        let area = work_area_of(screen);
+        match guiremote::zones::drop_at(x as f32, y as f32, area)
+            .expect("the aim point is in an edge band")
+        {
+            EdgeDrop::Maximize => screen,
+            EdgeDrop::Zone(slot) => zone_rect(slot.rect(area).expect("the slot resolves")),
+        }
+    }
+
+    #[test]
+    fn a_drop_tiles_the_monitor_the_pointer_is_over_even_when_the_window_is_not() {
+        // The case the tests above cannot reach. A move drag carries the window
+        // along under the pointer, so for an ordinary grab near the *left* end
+        // of the title bar the window and the pointer are on the same monitor
+        // by the time the pointer reaches an edge band, and "which of the two
+        // decides the monitor" makes no difference.
+        //
+        // Grab a wide window a long way along its title bar and the two come
+        // apart: the window trails 600px behind the pointer, so when the
+        // pointer is 100px into the second monitor the window is still mostly
+        // on the first. That is the only configuration in which a release that
+        // re-derived the work area from the window tiles a different screen
+        // from the one whose outline the user was watching.
+        let mut comp = Compositor::new(800, 600, 2_000_000).expect("compositor");
+        comp.attach_display(Display::new(1, 1024, 768, 60, 1.0, false))
+            .expect("attach");
+        let screens = [
+            comp.display_manager.displays()[0].bounds(),
+            comp.display_manager.displays()[1].bounds(),
+        ];
+        let mut spec = WindowSpec::new("Wide", 900, 150);
+        spec.position = Some((20, 100));
+        let id = comp.create_window_from_spec(&spec, 1);
+
+        let bar = comp
+            .window_ref(id)
+            .expect("window")
+            .title_bar_rect()
+            .expect("a decorated window has a title bar");
+        // Two thirds along, well clear of the buttons at the right-hand end.
+        let grab = bar.x + (bar.width as i32 * 2) / 3;
+        let grab_y = bar.y + bar.height as i32 / 2;
+        comp.handle_mouse_button(MouseButton::Left, true, grab, grab_y);
+        assert!(comp.drag.is_some(), "the title-bar press started no drag");
+
+        // The top band of the second monitor, clear of both its corners, so
+        // the drop means Maximize rather than a quarter zone.
+        let (aim_x, aim_y) = (screens[1].x + 100, screens[1].y + 2);
+        comp.handle_mouse_move(aim_x, aim_y);
+
+        let dragged = comp.window_ref(id).expect("window").frame_rect();
+        let on_first = dragged.intersect(&screens[0]).map_or(0, |r| r.width);
+        let on_second = dragged.intersect(&screens[1]).map_or(0, |r| r.width);
+        assert!(
+            on_first > on_second,
+            "the fixture failed to separate the two: the window is already \
+             mostly on the monitor the pointer is over ({on_first} vs {on_second})"
+        );
+        assert_eq!(
+            previewed_rect(&comp),
+            screens[1],
+            "the outline promised something other than the pointer's monitor"
+        );
+
+        comp.handle_mouse_button(MouseButton::Left, false, aim_x, aim_y);
+        assert_eq!(
+            comp.window_ref(id).expect("window").frame_rect(),
+            screens[1],
+            "the drop filled a different monitor from the one the outline promised"
+        );
+    }
+
+    #[test]
+    fn the_preview_crosses_the_seam_with_the_pointer() {
+        // The other half of the test above: what the user is *shown* while the
+        // pointer is over the second monitor. Two aims that are the same edge
+        // of two different screens, so a preview computed against the union
+        // would answer the same rectangle for both.
+        let (mut comp, id, screens) = two_monitors(0);
+        drag_title_bar_toward(&mut comp, id, screens[1].x + 2, 300);
+        let on_second = previewed_rect(&comp);
+        comp.handle_mouse_move(screens[0].x + 2, 300);
+        let on_first = previewed_rect(&comp);
+        assert_eq!(
+            on_second,
+            edge_drop_rect(screens[1].x + 2, 300, screens[1]),
+            "the preview on the second monitor was not that monitor's left half"
+        );
+        assert_eq!(
+            on_first,
+            edge_drop_rect(screens[0].x + 2, 300, screens[0]),
+            "the preview on the first monitor was not that monitor's left half"
+        );
+        assert_ne!(
+            on_first, on_second,
+            "the two monitors' left halves came out as the same rectangle"
+        );
+    }
+
+    #[test]
+    fn the_interior_seam_is_two_edges_and_not_a_middle() {
+        // Between two monitors there is no "middle of the desktop": the last
+        // column of the left screen is that screen's *right* edge and the first
+        // column of the right screen is that screen's *left* edge. Against the
+        // union both points were interior and neither tiled anything.
+        // A fresh compositor per case rather than a restore between them: two
+        // synchronous drags of the same title bar fall inside the double-click
+        // interval, so the second press would be read as a double-click and
+        // maximize the window instead of starting a drag.
+        let seam = two_monitors(0).2;
+        for (name, at, screen) in [
+            ("the left screen's right edge", seam[0].right() - 2, 0),
+            ("the right screen's left edge", seam[1].x + 2, 1),
+        ] {
+            let (mut comp, id, screens) = two_monitors(0);
+            drag_title_bar_to(&mut comp, id, at, 300);
+            let want = edge_drop_rect(at, 300, screens[screen]);
+            assert_eq!(
+                comp.window_ref(id).expect("window").frame_rect(),
+                want,
+                "a drop at {name} did not tile against it"
+            );
+            assert!(
+                want.intersect(&screens[1 - screen]).is_none(),
+                "a drop at {name} reached across the seam"
+            );
+        }
+    }
+
+    #[test]
+    fn a_work_area_survives_the_round_trip_back_to_pixels() {
+        // `work_rect` is the inverse of `work_area_of`, and the drop path
+        // relies on it: the release maximizes into `work_rect(intent.area)`,
+        // so a lossy conversion would put a maximized window a pixel off the
+        // rectangle its own preview promised.
+        for bounds in [
+            Rect::new(0, 0, 800, 600),
+            Rect::new(800, 0, 1024, 768),
+            Rect::new(-1920, -120, 1920, 1080),
+            Rect::new(0, 0, 0, 0),
+        ] {
+            assert_eq!(
+                work_rect(work_area_of(bounds)),
+                bounds,
+                "the work area of {bounds:?} did not come back as itself"
+            );
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Edge reservations -- TD-C-COMPOSITOR-TILES-UNDER-THE-TASKBAR
+    // -----------------------------------------------------------------------
+
+    /// A panel window sitting in the bottom `height` pixels of `screen`.
+    ///
+    /// Placed where a real taskbar would be rather than anywhere on the
+    /// monitor, because `reserved_on` finds it by asking which monitor it
+    /// overlaps most: a panel parked in the corner of the wrong screen would
+    /// reserve out of that one, and a test that placed it carelessly would pass
+    /// for the wrong reason.
+    fn add_panel(comp: &mut Compositor, screen: Rect, height: u32) -> WindowId {
+        let mut spec = WindowSpec::new("Taskbar", screen.width, height);
+        spec.decorations = false;
+        spec.position = Some((
+            screen.x,
+            screen.y + i32::try_from(screen.height.saturating_sub(height)).unwrap_or(0),
+        ));
+        comp.create_window_from_spec(&spec, 99)
+    }
+
+    #[test]
+    fn a_maximized_window_stops_at_the_taskbar_instead_of_going_under_it() {
+        // The bug: every tiling path divided the *whole* monitor, so the bottom
+        // 40 rows of a maximized window were behind the bar. Nothing in the
+        // compositor knew a panel existed to leave room for.
+        let mut comp = Compositor::new(800, 600, 2_000_000).expect("compositor");
+        let screen = comp.display_manager.displays()[0].bounds();
+        let panel = add_panel(&mut comp, screen, 40);
+
+        let mut spec = WindowSpec::new("App", 200, 150);
+        spec.position = Some((50, 50));
+        let app = comp.create_window_from_spec(&spec, 1);
+
+        comp.maximize_window(app).expect("maximize");
+        assert_eq!(
+            comp.window_ref(app).expect("window").frame_rect().bottom(),
+            screen.bottom(),
+            "without a reservation, maximizing should still reach the screen edge"
+        );
+
+        comp.reserve_edge(panel, PanelEdge::Bottom, 40)
+            .expect("reserve");
+        comp.maximize_window(app).expect("maximize again");
+        let framed = comp.window_ref(app).expect("window").frame_rect();
+        assert_eq!(
+            framed.bottom(),
+            screen.bottom() - 40,
+            "the maximized window still reaches under the taskbar"
+        );
+        assert_eq!(framed.y, screen.y, "the top of the screen was lost too");
+        assert_eq!(framed.width, screen.width, "the width changed as well");
+    }
+
+    #[test]
+    fn a_reservation_answers_with_the_area_it_left() {
+        let mut comp = Compositor::new(800, 600, 2_000_000).expect("compositor");
+        let screen = comp.display_manager.displays()[0].bounds();
+        let panel = add_panel(&mut comp, screen, 40);
+        let area = comp
+            .reserve_edge(panel, PanelEdge::Bottom, 40)
+            .expect("reserve");
+        assert_eq!(
+            work_rect(area),
+            Rect::new(screen.x, screen.y, screen.width, screen.height - 40),
+            "the reply did not describe the area the reservation actually left"
+        );
+    }
+
+    #[test]
+    fn releasing_a_reservation_gives_the_strip_back() {
+        let mut comp = Compositor::new(800, 600, 2_000_000).expect("compositor");
+        let screen = comp.display_manager.displays()[0].bounds();
+        let panel = add_panel(&mut comp, screen, 40);
+
+        let mut spec = WindowSpec::new("App", 200, 150);
+        spec.position = Some((50, 50));
+        let app = comp.create_window_from_spec(&spec, 1);
+
+        comp.reserve_edge(panel, PanelEdge::Bottom, 40)
+            .expect("reserve");
+        comp.maximize_window(app).expect("maximize");
+        // Zero is the release: there is deliberately no second request for it,
+        // so that a panel has one code path to "how much do I need" rather than
+        // two, and the compositor one place to re-tile from.
+        let area = comp
+            .reserve_edge(panel, PanelEdge::Bottom, 0)
+            .expect("release");
+        assert_eq!(
+            work_rect(area),
+            screen,
+            "releasing did not give the whole monitor back"
+        );
+        assert_eq!(
+            comp.window_ref(app).expect("window").frame_rect().bottom(),
+            screen.bottom(),
+            "the already-maximized window was not re-grown into the freed strip"
+        );
+    }
+
+    #[test]
+    fn a_second_reservation_from_one_panel_replaces_rather_than_adds() {
+        // A taskbar that grew from 40 to 56 sends 56, not 16. If the two added,
+        // a panel that changed height a few times would eat the desktop.
+        let mut comp = Compositor::new(800, 600, 2_000_000).expect("compositor");
+        let screen = comp.display_manager.displays()[0].bounds();
+        let panel = add_panel(&mut comp, screen, 40);
+        comp.reserve_edge(panel, PanelEdge::Bottom, 40)
+            .expect("reserve");
+        let area = comp
+            .reserve_edge(panel, PanelEdge::Bottom, 56)
+            .expect("re-reserve");
+        assert_eq!(
+            work_rect(area).height,
+            screen.height - 56,
+            "two reservations from one panel added up instead of replacing"
+        );
+    }
+
+    #[test]
+    fn two_panels_on_one_monitor_both_get_their_strip() {
+        let mut comp = Compositor::new(800, 600, 2_000_000).expect("compositor");
+        let screen = comp.display_manager.displays()[0].bounds();
+        let bar = add_panel(&mut comp, screen, 40);
+
+        let mut spec = WindowSpec::new("Menu bar", screen.width, 24);
+        spec.decorations = false;
+        spec.position = Some((screen.x, screen.y));
+        let menu = comp.create_window_from_spec(&spec, 98);
+
+        comp.reserve_edge(bar, PanelEdge::Bottom, 40).expect("bar");
+        let area = comp.reserve_edge(menu, PanelEdge::Top, 24).expect("menu");
+        assert_eq!(
+            work_rect(area),
+            Rect::new(screen.x, screen.y + 24, screen.width, screen.height - 64),
+            "the two panels did not each get their own strip"
+        );
+    }
+
+    #[test]
+    fn a_panel_reserves_only_out_of_its_own_monitor() {
+        // The multi-monitor half of the same question the union-of-displays bug
+        // asked: a taskbar on the second screen must not shrink tiling on the
+        // first.
+        let (mut comp, app, screens) = two_monitors(0);
+        let panel = add_panel(&mut comp, screens[1], 40);
+
+        // Maximized *before* the reservation as well as after, because the two
+        // ask different questions. Before: does the re-tile leave alone the
+        // windows on the monitor that did not change? After: does a fresh
+        // tiling on the first monitor measure the first monitor?
+        comp.maximize_window(app).expect("maximize");
+        comp.reserve_edge(panel, PanelEdge::Bottom, 40)
+            .expect("reserve");
+        assert_eq!(
+            comp.window_ref(app).expect("window").frame_rect(),
+            screens[0],
+            "the second monitor's panel re-tiled a window on the first"
+        );
+
+        comp.maximize_window(app).expect("maximize again");
+        assert_eq!(
+            comp.window_ref(app).expect("window").frame_rect(),
+            screens[0],
+            "a panel on the second monitor shrank tiling on the first"
+        );
+        assert_eq!(
+            work_rect(comp.work_area_for(screens[1])).height,
+            screens[1].height - 40,
+            "the panel did not reserve out of its own monitor either"
+        );
+    }
+
+    #[test]
+    fn a_hidden_panel_reserves_nothing() {
+        // A strip is kept clear so what sits in it stays visible. Nothing is
+        // sitting in it while the panel is hidden, so holding the strip would
+        // shrink the desktop with nothing on screen to explain why.
+        let mut comp = Compositor::new(800, 600, 2_000_000).expect("compositor");
+        let screen = comp.display_manager.displays()[0].bounds();
+        let panel = add_panel(&mut comp, screen, 40);
+        comp.reserve_edge(panel, PanelEdge::Bottom, 40)
+            .expect("reserve");
+        assert_eq!(
+            work_rect(comp.work_area_for(screen)).height,
+            screen.height - 40
+        );
+
+        comp.set_visible(panel, false).expect("hide");
+        assert_eq!(
+            work_rect(comp.work_area_for(screen)),
+            screen,
+            "a hidden panel kept its strip"
+        );
+        comp.set_visible(panel, true).expect("show");
+        assert_eq!(
+            work_rect(comp.work_area_for(screen)).height,
+            screen.height - 40,
+            "showing the panel again did not take its strip back"
+        );
+    }
+
+    #[test]
+    fn destroying_a_panel_releases_its_reservation() {
+        // The reason the claim lives on the window rather than in a table: a
+        // panel that crashes must not carve a permanent strip out of the
+        // desktop with nothing left on screen to release it.
+        let mut comp = Compositor::new(800, 600, 2_000_000).expect("compositor");
+        let screen = comp.display_manager.displays()[0].bounds();
+        let panel = add_panel(&mut comp, screen, 40);
+        comp.reserve_edge(panel, PanelEdge::Bottom, 40)
+            .expect("reserve");
+        comp.destroy_window(panel).expect("destroy");
+        assert_eq!(
+            work_rect(comp.work_area_for(screen)),
+            screen,
+            "a destroyed panel's strip outlived it"
+        );
+    }
+
+    #[test]
+    fn a_greedy_reservation_is_clamped_rather_than_erasing_the_desktop() {
+        let mut comp = Compositor::new(800, 600, 2_000_000).expect("compositor");
+        let screen = comp.display_manager.displays()[0].bounds();
+        let panel = add_panel(&mut comp, screen, 40);
+        let area = comp
+            .reserve_edge(panel, PanelEdge::Bottom, 100_000)
+            .expect("reserve");
+        assert!(
+            area.height > 0.0,
+            "a client asking for the whole screen left no work area at all"
+        );
+        let kept = work_area_of(screen).height * (1.0 - guiremote::reserve::MAX_RESERVED_FRACTION);
+        assert!(
+            (area.height - kept).abs() < 1.0,
+            "the clamp left {} of {}, not two thirds",
+            area.height,
+            screen.height
+        );
+    }
+
+    #[test]
+    fn every_tiling_route_respects_the_reservation_and_not_just_maximize() {
+        // The point of putting the subtraction in `work_area_for`: the half
+        // snap, each zone slot and the edge drop all resolve from a `WorkArea`,
+        // so one place fixes all of them. Walking each route is what proves the
+        // funnel is real rather than assumed.
+        let mut comp = Compositor::new(800, 600, 2_000_000).expect("compositor");
+        comp.set_double_click_ms(2000);
+        let screen = comp.display_manager.displays()[0].bounds();
+        let panel = add_panel(&mut comp, screen, 40);
+        comp.reserve_edge(panel, PanelEdge::Bottom, 40)
+            .expect("reserve");
+        let usable = screen.bottom() - 40;
+
+        let mut spec = WindowSpec::new("App", 200, 150);
+        spec.position = Some((50, 50));
+        let app = comp.create_window_from_spec(&spec, 1);
+
+        comp.snap_window(app, SnapEdge::Left).expect("snap left");
+        assert_eq!(
+            comp.window_ref(app).expect("window").frame_rect().bottom(),
+            usable,
+            "a half snap still reached under the taskbar"
+        );
+
+        let zone = slot(SnapLayoutPreset::TwoEqualHalves, 1);
+        comp.snap_window_to_zone(app, zone).expect("snap to zone");
+        assert!(
+            comp.window_ref(app).expect("window").frame_rect().bottom() <= usable,
+            "a zone snap still reached under the taskbar"
+        );
+
+        // And the drop preview, which is drawn from the same area.
+        comp.restore_window(app).expect("restore");
+        let bar = comp
+            .window_ref(app)
+            .expect("window")
+            .title_bar_rect()
+            .expect("the app is decorated");
+        comp.handle_mouse_button(MouseButton::Left, true, bar.x + 10, bar.y + 5);
+        comp.handle_mouse_move(2, 300);
+        let previewed = previewed_rect(&comp);
+        assert!(
+            previewed.bottom() <= usable,
+            "the edge-drop preview promised {previewed:?}, which reaches under the taskbar"
+        );
+        comp.handle_mouse_button(MouseButton::Left, false, 2, 300);
+        assert_eq!(
+            comp.window_ref(app).expect("window").frame_rect(),
+            previewed,
+            "the drop did not land where the preview promised"
+        );
+    }
+
+    #[test]
+    fn a_taskbar_appearing_re_tiles_the_windows_that_are_already_tiled() {
+        // A tiled window holds a *rectangle*, not the rule that produced it, so
+        // a panel appearing after the tiling leaves every such window exactly
+        // where it was -- underneath the bar, which is the bug the reservation
+        // exists to prevent.
+        let mut comp = Compositor::new(800, 600, 2_000_000).expect("compositor");
+        let screen = comp.display_manager.displays()[0].bounds();
+        let panel = add_panel(&mut comp, screen, 40);
+
+        let mut spec = WindowSpec::new("Maxed", 200, 150);
+        spec.position = Some((50, 50));
+        let maxed = comp.create_window_from_spec(&spec, 1);
+        let mut spec = WindowSpec::new("Halved", 200, 150);
+        spec.position = Some((60, 60));
+        let halved = comp.create_window_from_spec(&spec, 1);
+        let mut spec = WindowSpec::new("Zoned", 200, 150);
+        spec.position = Some((70, 70));
+        let zoned = comp.create_window_from_spec(&spec, 1);
+        let mut spec = WindowSpec::new("Loose", 200, 150);
+        spec.position = Some((80, 400));
+        let loose = comp.create_window_from_spec(&spec, 1);
+
+        comp.maximize_window(maxed).expect("maximize");
+        comp.snap_window(halved, SnapEdge::Left).expect("snap");
+        comp.snap_window_to_zone(zoned, slot(SnapLayoutPreset::TwoEqualHalves, 1))
+            .expect("zone");
+        let loose_before = comp.window_ref(loose).expect("window").frame_rect();
+
+        comp.reserve_edge(panel, PanelEdge::Bottom, 40)
+            .expect("reserve");
+
+        let usable = screen.bottom() - 40;
+        for (id, what) in [
+            (maxed, "maximized"),
+            (halved, "half-snapped"),
+            (zoned, "zoned"),
+        ] {
+            assert!(
+                comp.window_ref(id).expect("window").frame_rect().bottom() <= usable,
+                "the already-{what} window was not re-placed and still reaches under the bar"
+            );
+        }
+        assert_eq!(
+            comp.window_ref(loose).expect("window").frame_rect(),
+            loose_before,
+            "an untiled window was moved by a reservation it has nothing to do with"
+        );
+    }
+
+    #[test]
+    fn re_tiling_for_a_reservation_keeps_the_restore_rectangle() {
+        // The re-place goes back through `maximize_window_within`, which records
+        // `restore_rect` only for a window that was not already tiled. If that
+        // guard were missed, a taskbar appearing would overwrite every tiled
+        // window's memory of where it came from with the tile it is sitting in.
+        let mut comp = Compositor::new(800, 600, 2_000_000).expect("compositor");
+        let screen = comp.display_manager.displays()[0].bounds();
+        let panel = add_panel(&mut comp, screen, 40);
+
+        let mut spec = WindowSpec::new("App", 200, 150);
+        spec.position = Some((50, 50));
+        let app = comp.create_window_from_spec(&spec, 1);
+        let home = comp.window_ref(app).expect("window").frame_rect();
+
+        comp.maximize_window(app).expect("maximize");
+        comp.reserve_edge(panel, PanelEdge::Bottom, 40)
+            .expect("reserve");
+        comp.restore_window(app).expect("restore");
+        assert_eq!(
+            comp.window_ref(app).expect("window").frame_rect(),
+            home,
+            "the reservation's re-tile overwrote where the window came from"
+        );
+    }
+
+    #[test]
+    fn reserving_against_a_window_that_is_gone_is_an_error_and_not_a_panic() {
+        let mut comp = Compositor::new(800, 600, 2_000_000).expect("compositor");
+        let screen = comp.display_manager.displays()[0].bounds();
+        let panel = add_panel(&mut comp, screen, 40);
+        comp.destroy_window(panel).expect("destroy");
+        assert!(
+            comp.reserve_edge(panel, PanelEdge::Bottom, 40).is_err(),
+            "reserving against a destroyed window succeeded"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Display resolution changes -- TD-C-COMPOSITOR-CANNOT-CHANGE-MODE
+    // -----------------------------------------------------------------------
+
+    /// An ordinary decorated application window at a chosen place and size.
+    fn app_at(comp: &mut Compositor, x: i32, y: i32, width: u32, height: u32) -> WindowId {
+        let mut spec = WindowSpec::new("App", width, height);
+        spec.position = Some((x, y));
+        comp.create_window_from_spec(&spec, 1)
+    }
+
+    #[test]
+    fn a_maximised_window_follows_the_display_to_its_new_size() {
+        // A tiled window holds the *rectangle* its rule produced and not the
+        // rule, so a mode switch left it exactly where it was. On a screen that
+        // shrank, the right-hand third of the window was in pixels that no
+        // longer existed; on one that grew, a band of bare desktop ran down two
+        // sides of a window still claiming to be maximised.
+        for &(width, height) in &[(1280_u32, 1024_u32), (2560, 1440)] {
+            let mut comp = Compositor::new(1920, 1080, 60).expect("compositor");
+            let id = app_at(&mut comp, 40, 40, 200, 150);
+            comp.maximize_window(id).expect("maximize");
+            comp.resize_display(width, height).expect("resize");
+            assert_eq!(
+                comp.window_ref(id).expect("window").frame_rect(),
+                Rect::new(0, 0, width, height),
+                "a maximised window did not follow the display to {width}x{height}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_half_snapped_window_follows_the_display_to_its_new_size() {
+        // Maximise and snap are separate rules with separate stored rectangles,
+        // so proving one followed says nothing about the other.
+        let mut comp = Compositor::new(1920, 1080, 60).expect("compositor");
+        let id = app_at(&mut comp, 40, 40, 200, 150);
+        comp.snap_window(id, SnapEdge::Left).expect("snap");
+        comp.resize_display(1280, 1024).expect("resize");
+        assert_eq!(
+            comp.window_ref(id).expect("window").frame_rect(),
+            Rect::new(0, 0, 640, 1024),
+            "a left-snapped window kept half of the *old* screen"
+        );
+    }
+
+    #[test]
+    fn a_resize_re_tiles_around_the_taskbar_rather_than_over_it() {
+        // The re-tile has to go through `work_area_for`, not straight to the
+        // display bounds: a maximised window that filled the new screen exactly
+        // would be a window drawn underneath the taskbar, which is the bug
+        // reservations exist to prevent.
+        let mut comp = Compositor::new(1920, 1080, 60).expect("compositor");
+        let screen = comp.display_manager.displays()[0].bounds();
+        let panel = add_panel(&mut comp, screen, 40);
+        comp.reserve_edge(panel, PanelEdge::Bottom, 40)
+            .expect("reserve");
+        let app = app_at(&mut comp, 40, 40, 200, 150);
+        comp.maximize_window(app).expect("maximize");
+
+        comp.resize_display(1280, 1024).expect("resize");
+        assert_eq!(
+            comp.window_ref(app).expect("window").frame_rect(),
+            Rect::new(0, 0, 1280, 1024 - 40),
+            "the re-tile ignored the strip the taskbar had reserved"
+        );
+    }
+
+    #[test]
+    fn a_fullscreen_window_follows_the_display_to_its_new_size() {
+        // `set_fullscreen` sizes the window from the framebuffer, so a
+        // fullscreen game kept the *old* framebuffer's dimensions across a mode
+        // switch: letterboxed on a screen that grew, and spilling off the
+        // bottom-right on one that shrank.
+        let mut comp = Compositor::new(1920, 1080, 60).expect("compositor");
+        let id = app_at(&mut comp, 40, 40, 200, 150);
+        comp.set_fullscreen(id, true).expect("fullscreen");
+        comp.pending_notifications.clear();
+
+        comp.resize_display(1280, 1024).expect("resize");
+        assert_eq!(
+            comp.window_ref(id).expect("window").client_rect(),
+            Rect::new(0, 0, 1280, 1024),
+            "a fullscreen window kept the old display's size"
+        );
+        assert!(
+            comp.pending_notifications.iter().any(|n| matches!(
+                n,
+                EventNotification::WindowResized {
+                    window_id,
+                    width: 1280,
+                    height: 1024,
+                } if *window_id == id
+            )),
+            "the client was never told its fullscreen surface had changed size"
+        );
+    }
+
+    /// A window that is fullscreen *and* still carries the `maximized` state
+    /// underneath it, which is what `set_fullscreen` leaves behind for anything
+    /// maximised first.
+    fn fullscreen_game_over_a_taskbar(comp: &mut Compositor) -> WindowId {
+        let screen = comp.display_manager.displays()[0].bounds();
+        let panel = add_panel(comp, screen, 40);
+        comp.reserve_edge(panel, PanelEdge::Bottom, 40)
+            .expect("reserve");
+        let game = app_at(comp, 40, 40, 200, 150);
+        comp.maximize_window(game).expect("maximize");
+        comp.set_fullscreen(game, true).expect("fullscreen");
+        game
+    }
+
+    #[test]
+    fn a_taskbar_appearing_does_not_shrink_a_fullscreen_window() {
+        // The re-tile hunts for `maximized || snapped`, and a fullscreen window
+        // maximised beforehand matches. Handing it the taskbar's leftovers
+        // shrinks a game away from the screen edges with nothing on this path
+        // to re-assert fullscreen afterwards, and silently disqualifies it from
+        // the direct-scanout bypass, which needs a display-sized surface.
+        let mut comp = Compositor::new(1920, 1080, 60).expect("compositor");
+        let game = fullscreen_game_over_a_taskbar(&mut comp);
+        let full = comp.window_ref(game).expect("window").client_rect();
+
+        let second = add_panel(&mut comp, Rect::new(0, 0, 1920, 1080), 60);
+        comp.reserve_edge(second, PanelEdge::Top, 60)
+            .expect("reserve");
+        assert_eq!(
+            comp.window_ref(game).expect("window").client_rect(),
+            full,
+            "a panel's reservation took the screen away from a fullscreen window"
+        );
+    }
+
+    #[test]
+    fn a_fullscreen_window_outranks_the_maximised_state_underneath_it() {
+        // Same collision, reached through the resize instead: whatever order
+        // the re-tile and the re-fit run in, the answer for a window that is
+        // both has to be the whole new screen and not the work area.
+        let mut comp = Compositor::new(1920, 1080, 60).expect("compositor");
+        let game = fullscreen_game_over_a_taskbar(&mut comp);
+
+        comp.resize_display(1280, 1024).expect("resize");
+        assert_eq!(
+            comp.window_ref(game).expect("window").client_rect(),
+            Rect::new(0, 0, 1280, 1024),
+            "the re-tile took the whole screen away from a fullscreen window"
+        );
+    }
+
+    #[test]
+    fn a_window_stranded_off_the_new_screen_is_brought_back() {
+        // The window is not merely inconvenient to reach: with no pixel of its
+        // title bar on the screen there is nothing left to drag it back by, so
+        // without this it is lost until the display is made large again.
+        let mut comp = Compositor::new(1920, 1080, 60).expect("compositor");
+        let id = app_at(&mut comp, 1500, 900, 300, 150);
+        comp.resize_display(800, 600).expect("resize");
+
+        let frame = comp.window_ref(id).expect("window").frame_rect();
+        assert!(
+            frame.intersect(&Rect::new(0, 0, 800, 600)).is_some(),
+            "a window stranded by the shrink was left off the screen at {frame:?}"
+        );
+        assert_eq!(
+            (frame.x, frame.y),
+            (
+                800 - i32::try_from(frame.width).expect("frame width"),
+                600 - i32::try_from(frame.height).expect("frame height"),
+            ),
+            "the rescue moved the window further than it had to"
+        );
+    }
+
+    #[test]
+    fn a_window_still_on_the_new_screen_is_left_exactly_where_it_was() {
+        // The rescue must be a rescue and not a re-layout: a window the user
+        // can still see and still grab keeps the position they put it in, even
+        // if part of it now hangs off the edge.
+        let mut comp = Compositor::new(1920, 1080, 60).expect("compositor");
+        let near = app_at(&mut comp, 10, 10, 300, 150);
+        let straddling = app_at(&mut comp, 700, 500, 300, 150);
+        let before = (
+            comp.window_ref(near).expect("window").frame_rect(),
+            comp.window_ref(straddling).expect("window").frame_rect(),
+        );
+
+        comp.resize_display(800, 600).expect("resize");
+        assert_eq!(
+            (
+                comp.window_ref(near).expect("window").frame_rect(),
+                comp.window_ref(straddling).expect("window").frame_rect(),
+            ),
+            before,
+            "the resize moved a window that was still reachable"
+        );
+    }
+
+    #[test]
+    fn a_window_larger_than_the_new_screen_keeps_its_title_bar_reachable() {
+        // Pulling the frame fully inside is impossible here, so the clamp has
+        // to prefer the top-left: a bottom-right anchor would put the title bar
+        // above the top edge and leave the window as unreachable as it started.
+        let mut comp = Compositor::new(1920, 1080, 60).expect("compositor");
+        let id = app_at(&mut comp, 1500, 900, 1200, 900);
+        comp.resize_display(800, 600).expect("resize");
+
+        let win = comp.window_ref(id).expect("window");
+        let bar = win.title_bar_rect().expect("decorated");
+        assert_eq!(
+            (win.frame_rect().x, win.frame_rect().y),
+            (0, 0),
+            "an oversized window was not pinned to the top-left corner"
+        );
+        assert!(
+            bar.intersect(&Rect::new(0, 0, 800, 600))
+                .is_some_and(|seen| seen.height == bar.height),
+            "the whole title bar has to be on screen to be grabbed"
+        );
+    }
+
+    #[test]
+    fn the_pointer_is_brought_inside_a_display_that_shrank() {
+        // The cursor is drawn at this position and every hit test starts from
+        // it, so a pointer left at a coordinate the screen no longer has is an
+        // invisible pointer that reports hovering over nothing.
+        let mut comp = Compositor::new(1920, 1080, 60).expect("compositor");
+        comp.handle_input(InputEvent::MouseMove { x: 1900, y: 1000 });
+        comp.resize_display(800, 600).expect("resize");
+        assert_eq!(
+            comp.cursor_position(),
+            (799, 599),
+            "the pointer was left outside the new display"
+        );
+    }
+
+    #[test]
+    fn a_pointer_already_on_the_new_screen_is_not_moved() {
+        let mut comp = Compositor::new(1920, 1080, 60).expect("compositor");
+        comp.handle_input(InputEvent::MouseMove { x: 100, y: 200 });
+        comp.resize_display(800, 600).expect("resize");
+        assert_eq!(comp.cursor_position(), (100, 200), "the pointer was moved");
+    }
+
+    // -----------------------------------------------------------------------
+    // Reachability: a window is never placed where it cannot be reached
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn resizing_one_monitor_does_not_evacuate_the_other() {
+        // `two_monitors(1)` puts an 800x600 primary at the origin, a 1024x768
+        // second screen flush to its right, and the window comfortably inside
+        // the second one -- nowhere near the first.
+        let (mut comp, id, _) = two_monitors(1);
+        let before = comp.window_ref(id).expect("window").frame_rect();
+
+        comp.resize_display(400, 300).expect("resize");
+
+        assert_eq!(
+            comp.window_ref(id).expect("window").frame_rect(),
+            before,
+            "a window on the second monitor was dragged onto the first \
+             because the first was resized"
+        );
+    }
+
+    #[test]
+    fn un_maximising_after_a_shrink_leaves_the_window_reachable() {
+        let mut comp = Compositor::new(1920, 1080, 60).expect("compositor");
+        // Near the old bottom-right corner, so the saved rectangle is off the
+        // new screen entirely.
+        let id = app_at(&mut comp, 1500, 900, 300, 150);
+        comp.maximize_window(id).expect("maximize");
+        comp.resize_display(800, 600).expect("resize");
+
+        comp.restore_window(id).expect("restore");
+
+        let frame = comp.window_ref(id).expect("window").frame_rect();
+        assert!(
+            frame.intersect(&Rect::new(0, 0, 800, 600)).is_some(),
+            "un-maximising put the window back at a rectangle that is \
+             entirely off the screen: {frame:?}"
+        );
+    }
+
+    #[test]
+    fn leaving_fullscreen_after_a_shrink_leaves_the_window_reachable() {
+        let mut comp = Compositor::new(1920, 1080, 60).expect("compositor");
+        let id = app_at(&mut comp, 1500, 900, 300, 150);
+        comp.set_fullscreen(id, true).expect("fullscreen");
+        comp.resize_display(800, 600).expect("resize");
+
+        comp.set_fullscreen(id, false).expect("leave fullscreen");
+
+        let frame = comp.window_ref(id).expect("window").frame_rect();
+        assert!(
+            frame.intersect(&Rect::new(0, 0, 800, 600)).is_some(),
+            "leaving fullscreen put the window back at a rectangle that is \
+             entirely off the screen: {frame:?}"
+        );
+    }
+
+    #[test]
+    fn a_restored_window_keeps_its_own_size_and_moves_the_least_it_can() {
+        let mut comp = Compositor::new(1920, 1080, 60).expect("compositor");
+        let id = app_at(&mut comp, 1500, 900, 300, 150);
+        comp.maximize_window(id).expect("maximize");
+        comp.resize_display(800, 600).expect("resize");
+        comp.restore_window(id).expect("restore");
+
+        let frame = comp.window_ref(id).expect("window").frame_rect();
+        // The rescue never resizes, and it moves by the minimum, so a frame
+        // that was off the bottom-right corner lands against that corner at
+        // exactly its original size.
+        assert_eq!(
+            (frame.width, frame.height),
+            (302, 181),
+            "the restored window was resized rather than moved"
+        );
+        assert_eq!(
+            (frame.x, frame.y),
+            (
+                800 - i32::try_from(frame.width).expect("frame width"),
+                600 - i32::try_from(frame.height).expect("frame height"),
+            ),
+            "the restored window was moved further than it had to be"
+        );
+    }
+
+    #[test]
+    fn a_restore_rectangle_still_on_the_screen_is_used_exactly() {
+        let mut comp = Compositor::new(1920, 1080, 60).expect("compositor");
+        let id = app_at(&mut comp, 40, 60, 300, 150);
+        let before = comp.window_ref(id).expect("window").frame_rect();
+        comp.maximize_window(id).expect("maximize");
+        comp.resize_display(800, 600).expect("resize");
+
+        comp.restore_window(id).expect("restore");
+
+        assert_eq!(
+            comp.window_ref(id).expect("window").frame_rect(),
+            before,
+            "a restore rectangle that was still perfectly reachable was moved"
+        );
+    }
+
+    #[test]
+    fn a_restore_rectangle_hanging_off_an_edge_is_still_used_exactly() {
+        let mut comp = Compositor::new(1920, 1080, 60).expect("compositor");
+        // Straddles both the right and the bottom edge of the *new* screen, so
+        // it is partly visible and partly not.
+        let id = app_at(&mut comp, 700, 500, 300, 150);
+        let before = comp.window_ref(id).expect("window").frame_rect();
+        comp.maximize_window(id).expect("maximize");
+        comp.resize_display(800, 600).expect("resize");
+
+        comp.restore_window(id).expect("restore");
+
+        assert_eq!(
+            comp.window_ref(id).expect("window").frame_rect(),
+            before,
+            "a window that was still partly on screen -- and still had a title \
+             bar to grab -- was tidied onto it anyway"
+        );
+    }
+
+    #[test]
+    fn a_window_restored_on_the_second_monitor_stays_on_it() {
+        let (mut comp, id, _) = two_monitors(1);
+        let before = comp.window_ref(id).expect("window").frame_rect();
+        comp.maximize_window(id).expect("maximize");
+
+        comp.restore_window(id).expect("restore");
+
+        assert_eq!(
+            comp.window_ref(id).expect("window").frame_rect(),
+            before,
+            "restoring a window maximised on the second monitor moved it"
+        );
+    }
+
+    #[test]
+    fn a_window_rescued_on_restore_lands_on_its_own_monitor() {
+        let (mut comp, id, screens) = two_monitors(1);
+        comp.maximize_window(id).expect("maximize");
+        // A saved rectangle that is nowhere on the desktop. In practice that is
+        // a resolution change between the maximise and the restore; it is
+        // written directly here because a two-monitor `resize_display` can only
+        // shrink the *primary*, and it is a window maximised on the second
+        // screen that tells the two candidate fallbacks apart.
+        comp.window_mut(id).expect("window").restore_rect = Some(Rect::new(9000, 9000, 200, 150));
+
+        comp.restore_window(id).expect("restore");
+
+        let frame = comp.window_ref(id).expect("window").frame_rect();
+        assert!(
+            frame.intersect(&screens[1]).is_some(),
+            "a window maximised on the second monitor was rescued onto the \
+             first: {frame:?}"
+        );
+    }
+
+    // ---- the composited surface is the virtual desktop ----
+
+    #[test]
+    fn attaching_a_monitor_grows_the_surface_to_cover_it() {
+        // `DisplayManager::add_display` enlarges the virtual desktop, and for
+        // as long as that was reachable on its own it enlarged it past the
+        // framebuffer everything is composited into. A window on the second
+        // monitor was then drawn into pixels beyond the end of the surface and
+        // clipped away in full: the model said the window was on the second
+        // screen and nothing would ever appear there.
+        let mut comp = Compositor::new(800, 600, 60).expect("compositor");
+        assert_eq!(comp.frame_size(), (800, 600));
+        comp.attach_display(Display::new(1, 1024, 768, 60, 1.0, false))
+            .expect("attach");
+        let desktop = comp.display_manager.virtual_bounds();
+        assert_eq!(
+            comp.frame_size(),
+            (1824, 768),
+            "the surface does not cover the {desktop:?} it is supposed to hold"
+        );
+    }
+
+    #[test]
+    fn resizing_one_monitor_does_not_shrink_the_surface_off_the_other() {
+        // The surface follows the *desktop*, and the desktop is the union.
+        // Sizing it from the display that changed instead cuts the second
+        // monitor's pixels off at the first monitor's new width -- which on a
+        // shrink is most of them.
+        let (mut comp, _, _) = two_monitors(1);
+        comp.resize_display(400, 300).expect("resize");
+        assert_eq!(
+            comp.frame_size(),
+            (1824, 768),
+            "shrinking the first monitor took the second monitor's pixels with it"
+        );
+    }
+
+    #[test]
+    fn a_surface_that_cannot_be_allocated_leaves_the_arrangement_alone() {
+        // The surface and the display arrangement have to agree, so the
+        // allocation is attempted *first*: a compositor that had already
+        // adopted a desktop it turned out it could not paint would describe a
+        // monitor whose pixels do not exist, which is the very failure the
+        // surface-follows-the-desktop rule exists to prevent.
+        let mut comp = Compositor::new(800, 600, 60).expect("compositor");
+        let before = comp.display_manager.displays().len();
+        // Beyond `MAX_DIMENSION`, so the backend refuses it.
+        let refused = comp.attach_display(Display::new(1, u32::MAX, 768, 60, 1.0, false));
+        assert!(
+            refused.is_err(),
+            "the backend accepted an impossible surface"
+        );
+        assert_eq!(
+            comp.display_manager.displays().len(),
+            before,
+            "the display was added even though its pixels could not be"
+        );
+        assert_eq!(comp.frame_size(), (800, 600), "the surface changed anyway");
+    }
+
+    // ---- fullscreen covers one monitor, not the whole scanout surface ----
+
+    #[test]
+    fn fullscreen_fills_the_windows_own_monitor_and_not_every_monitor() {
+        // The exact bug `maximizing_fills_the_windows_own_monitor_and_not_every_monitor`
+        // pins, in the one command that still had it: `set_fullscreen` sized
+        // the window from `backend.size()` -- the whole scanout surface -- and
+        // put it at (0, 0). So fullscreening a video on the second monitor
+        // moved it to the first and stretched it across both, while
+        // *maximising* the same window stayed put. The two are the same gesture
+        // to a user.
+        let (mut comp, id, screens) = two_monitors(1);
+        comp.set_fullscreen(id, true).expect("fullscreen");
+        assert_eq!(
+            comp.window_ref(id).expect("window").client_rect(),
+            screens[1],
+            "fullscreen did not fill the window's own monitor"
+        );
+    }
+
+    #[test]
+    fn a_fullscreen_window_is_told_its_own_monitors_size() {
+        // The client is the only party that can redraw at the new size, and it
+        // is told by `WindowResized`. Reporting the framebuffer's dimensions
+        // would have a game on the 1024x768 second monitor allocate a
+        // 1824x768 surface -- the failure mode is a correctly-placed window
+        // full of a wrongly-scaled picture, which is harder to attribute than
+        // a window in the wrong place.
+        let (mut comp, id, screens) = two_monitors(1);
+        comp.pending_notifications.clear();
+        comp.set_fullscreen(id, true).expect("fullscreen");
+        assert!(
+            comp.pending_notifications.iter().any(|n| matches!(
+                n,
+                EventNotification::WindowResized { window_id, width, height }
+                    if *window_id == id
+                        && *width == screens[1].width
+                        && *height == screens[1].height
+            )),
+            "the client was told a size that is not its monitor's: {:?}",
+            comp.pending_notifications
+        );
+    }
+
+    #[test]
+    fn leaving_fullscreen_on_the_second_monitor_stays_on_it() {
+        // The way in was wrong, so the way out could not be checked before
+        // this: the window was never on the second monitor to come back to it.
+        let (mut comp, id, screens) = two_monitors(1);
+        let before = comp.window_ref(id).expect("window").frame_rect();
+        comp.set_fullscreen(id, true).expect("fullscreen");
+        comp.set_fullscreen(id, false).expect("leave");
+        assert_eq!(
+            comp.window_ref(id).expect("window").frame_rect(),
+            before,
+            "a window fullscreened and un-fullscreened on the second monitor \
+             did not come back to where it was"
+        );
+        assert!(
+            before.intersect(&screens[1]).is_some(),
+            "the fixture put the window somewhere other than the second \
+             monitor, so this proves nothing"
+        );
+    }
+
+    #[test]
+    fn fullscreen_covers_the_taskbar_that_maximize_stops_at() {
+        // Fullscreen and maximize resolve the *same* monitor and must then ask
+        // it two different questions. `maximize_window` wants the work area, so
+        // it stops above a reserved strip; `set_fullscreen` wants the bounds, so
+        // it covers it. Routing fullscreen through `work_area_for` -- the
+        // obvious tidy-up, since every other tiling path uses it, and the two
+        // helpers differ by one word at the call site -- would leave a 40-pixel
+        // band of taskbar across the bottom of every full-screen video, which is
+        // the one thing fullscreen exists to prevent. On a screen with nothing
+        // reserved the two helpers agree, so only a reservation can tell them
+        // apart, and every other fullscreen test here has an empty work area.
+        let mut comp = Compositor::new(800, 600, 2_000_000).expect("compositor");
+        let screen = comp.display_manager.displays()[0].bounds();
+        let panel = add_panel(&mut comp, screen, 40);
+        comp.reserve_edge(panel, PanelEdge::Bottom, 40)
+            .expect("reserve");
+        let app = app_at(&mut comp, 50, 50, 200, 150);
+
+        comp.maximize_window(app).expect("maximize");
+        assert_eq!(
+            comp.window_ref(app).expect("window").frame_rect().bottom(),
+            screen.bottom() - 40,
+            "maximize walked under the taskbar, so the contrast below proves \
+             nothing about fullscreen"
+        );
+
+        comp.set_fullscreen(app, true).expect("fullscreen");
+        assert_eq!(
+            comp.window_ref(app).expect("window").client_rect(),
+            screen,
+            "fullscreen left the reserved strip uncovered"
+        );
+    }
+
+    #[test]
+    fn resizing_one_monitor_leaves_a_fullscreen_window_on_the_other_alone() {
+        // `refit_fullscreen_windows` used to take the resized framebuffer's
+        // width and height and apply them to *every* fullscreen window. With
+        // one screen that is right by construction; with two it moved a game
+        // fullscreen on the second monitor onto the first and sent its client
+        // a `WindowResized` for a size it does not have.
+        let (mut comp, id, screens) = two_monitors(1);
+        comp.set_fullscreen(id, true).expect("fullscreen");
+        comp.pending_notifications.clear();
+
+        comp.resize_display(400, 300).expect("resize");
+
+        assert_eq!(
+            comp.window_ref(id).expect("window").client_rect(),
+            screens[1],
+            "a mode change on the first monitor moved a window fullscreen on \
+             the second"
+        );
+        assert!(
+            !comp.pending_notifications.iter().any(
+                |n| matches!(n, EventNotification::WindowResized { window_id, .. }
+                    if *window_id == id)
+            ),
+            "the client was told its surface had changed size when it had not"
+        );
+    }
+
+    #[test]
+    fn a_fullscreen_window_on_the_resized_monitor_still_follows_it() {
+        // The other half of the pair above: making the re-fit per-monitor must
+        // not stop it re-fitting the windows that genuinely are on the monitor
+        // that changed.
+        let (mut comp, id, _) = two_monitors(0);
+        comp.set_fullscreen(id, true).expect("fullscreen");
+        comp.pending_notifications.clear();
+
+        comp.resize_display(400, 300).expect("resize");
+
+        assert_eq!(
+            comp.window_ref(id).expect("window").client_rect(),
+            Rect::new(0, 0, 400, 300),
+            "a fullscreen window kept its old monitor's size across a mode change"
+        );
+        assert!(
+            comp.pending_notifications.iter().any(|n| matches!(
+                n,
+                EventNotification::WindowResized {
+                    window_id,
+                    width: 400,
+                    height: 300,
+                } if *window_id == id
+            )),
+            "the client was never told its fullscreen surface had changed size"
+        );
+    }
+
+    #[test]
+    fn the_direct_scanout_bypass_declines_a_second_monitor() {
+        // The bypass hands one client's buffer to the scanout surface entire.
+        // On a two-headed desktop that surface spans both monitors, so taking
+        // it for a window that covers only one would put the game's pixels on
+        // the other screen in place of the desktop. The guard is that the
+        // window must cover the whole framebuffer, which a one-monitor
+        // fullscreen window no longer does -- this pins that the guard is
+        // actually load-bearing rather than incidentally true.
+        let (mut comp, id, screens) = two_monitors(0);
+        comp.set_fullscreen(id, true).expect("fullscreen");
+        let (w, h) = (screens[0].width, screens[0].height);
+        let bytes = solid_buffer_bytes(w, h, 0xFF00_FF00);
+        comp.attach_buffer(id, 1, w, h, w * 4, BufferFormat::Argb8888, &bytes)
+            .expect("attach");
+        assert_eq!(
+            comp.direct_scanout_window(),
+            None,
+            "the bypass took a window that covers one monitor of two"
+        );
+    }
+
+    // ---- a monitor leaving is a monitor arriving, in reverse ----
+
+    #[test]
+    fn detaching_a_monitor_shrinks_the_desktop_and_the_surface() {
+        let (mut comp, _, screens) = two_monitors(1);
+        assert_eq!(
+            comp.frame_size(),
+            (1824, 768),
+            "the fixture is not two-headed"
+        );
+
+        comp.detach_display(1).expect("detach");
+
+        assert_eq!(comp.display_manager.displays().len(), 1);
+        assert_eq!(
+            comp.display_manager.virtual_bounds(),
+            screens[0],
+            "the desktop still spans the monitor that left"
+        );
+        assert_eq!(
+            comp.frame_size(),
+            (800, 600),
+            "the surface still holds a rectangle nothing scans out"
+        );
+    }
+
+    #[test]
+    fn a_window_maximised_on_the_departed_monitor_comes_back() {
+        // The worst case of the lot, and the reason this is not merely untidy: a
+        // maximised window has no title bar edge sticking out anywhere, so if it
+        // is left on a screen that no longer exists there is nothing on any
+        // surviving monitor to drag it back by. It is gone until the session is.
+        let (mut comp, id, screens) = two_monitors(1);
+        comp.maximize_window(id).expect("maximize");
+        assert!(
+            comp.window_ref(id).expect("window").frame_rect().x >= screens[1].x,
+            "the fixture did not maximise the window onto the second monitor"
+        );
+
+        comp.detach_display(1).expect("detach");
+
+        let framed = comp.window_ref(id).expect("window").frame_rect();
+        assert_eq!(
+            framed,
+            work_rect(comp.work_area_for(screens[0])),
+            "a maximised window was left on the monitor that was unplugged"
+        );
+    }
+
+    #[test]
+    fn a_hand_placed_window_on_the_departed_monitor_is_rescued() {
+        // Not re-laid-out -- the user put it there -- but it does have to end up
+        // somewhere reachable, which is the same rule a shrinking mode change
+        // already follows.
+        let (mut comp, id, screens) = two_monitors(1);
+        comp.detach_display(1).expect("detach");
+        let framed = comp.window_ref(id).expect("window").frame_rect();
+        assert!(
+            framed.intersect(&screens[0]).is_some(),
+            "a window on the unplugged monitor was left off the desktop: {framed:?}"
+        );
+    }
+
+    #[test]
+    fn a_fullscreen_window_on_the_departed_monitor_is_refitted_and_the_client_told() {
+        let (mut comp, id, screens) = two_monitors(1);
+        comp.set_fullscreen(id, true).expect("fullscreen");
+        comp.pending_notifications.clear();
+
+        comp.detach_display(1).expect("detach");
+
+        assert_eq!(
+            comp.window_ref(id).expect("window").client_rect(),
+            screens[0],
+            "a fullscreen window kept the size of the monitor that left"
+        );
+        assert!(
+            comp.pending_notifications.iter().any(|n| matches!(
+                n,
+                EventNotification::WindowResized { window_id, width: 800, height: 600 }
+                    if *window_id == id
+            )),
+            "the client was never told its surface had changed size: {:?}",
+            comp.pending_notifications
+        );
+    }
+
+    #[test]
+    fn the_pointer_does_not_stay_on_a_monitor_that_left() {
+        // The cursor position is not derived from anything -- it is whatever the
+        // last motion event said -- so nothing brings it back on its own, and an
+        // invisible pointer hit-tests against nothing until the user moves the
+        // mouse and the input source volunteers a fresh position.
+        let (mut comp, _, screens) = two_monitors(0);
+        comp.handle_mouse_move(1500, 400);
+        comp.detach_display(1).expect("detach");
+        let (x, y) = comp.cursor_position();
+        assert!(
+            screens[0].contains(x, y),
+            "the pointer was left at ({x}, {y}), which is on the monitor that was \
+             unplugged"
+        );
+    }
+
+    #[test]
+    fn detaching_the_primary_promotes_a_survivor() {
+        // Every "which monitor is this?" question falls back to the primary, so
+        // an arrangement with monitors but no primary answers `None` to all of
+        // them -- a desktop that has screens and cannot say which one anything
+        // is on.
+        let (mut comp, _, screens) = two_monitors(1);
+        comp.detach_display(0).expect("detach");
+        let primary = comp.display_manager.primary().expect("no primary left");
+        assert_eq!(primary.id, 1, "the wrong display was promoted");
+        assert_eq!(
+            primary.bounds(),
+            screens[1],
+            "promoting the survivor also moved it"
+        );
+    }
+
+    #[test]
+    fn the_survivors_of_a_detach_keep_the_offsets_they_had() {
+        // The scanout does not re-flow its surviving heads when one dies
+        // (design-decisions.md §515), so this must not either: the two layouts
+        // are the same arrangement seen from two sides, and a re-flow on one
+        // side alone puts every window on the wrong screen. The visible cost is
+        // the hole -- the desktop starts at x = 800 and the surface keeps its
+        // full 1824 width with the left 800 columns scanned out nowhere -- and
+        // it is the cheaper of the two wrong answers.
+        let (mut comp, id, screens) = two_monitors(1);
+        let before = comp.window_ref(id).expect("window").frame_rect();
+
+        comp.detach_display(0).expect("detach");
+
+        assert_eq!(
+            comp.display_manager.displays()[0].bounds(),
+            screens[1],
+            "the surviving monitor slid left to fill the gap"
+        );
+        assert_eq!(
+            comp.display_manager.virtual_bounds(),
+            screens[1],
+            "the desktop is not the one monitor that is left"
+        );
+        assert_eq!(
+            comp.frame_size(),
+            (1824, 768),
+            "the surface no longer reaches the monitor's right edge"
+        );
+        assert_eq!(
+            comp.window_ref(id).expect("window").frame_rect(),
+            before,
+            "a window on the surviving monitor was moved by the other one leaving"
+        );
+    }
+
+    #[test]
+    fn a_window_maximised_on_a_monitor_taken_from_the_middle_comes_back() {
+        // Three monitors is where "the screen a stranded window is put on" stops
+        // being a synonym for "the desktop". Take the middle one away and the
+        // desktop is still the bounding box of the other two -- a rectangle
+        // spanning the hole, and one that is not any monitor's bounds. Passing
+        // *that* to the re-layout makes the re-tile's "windows on the screen
+        // that changed" filter match nothing at all, so a maximised window is
+        // silently left on the monitor that was unplugged: exactly the failure
+        // with no title bar to recover from, reached by a different route. The
+        // primary is a real screen and is the answer.
+        let mut comp = Compositor::new(800, 600, 2_000_000).expect("compositor");
+        comp.attach_display(Display::new(1, 640, 480, 60, 1.0, false))
+            .expect("attach middle");
+        comp.attach_display(Display::new(2, 1024, 768, 60, 1.0, false))
+            .expect("attach right");
+        let middle = comp.display_manager.displays()[1].bounds();
+        let mut spec = WindowSpec::new("In the middle", 200, 150);
+        spec.position = Some((middle.x + 100, middle.y + 100));
+        let id = comp.create_window_from_spec(&spec, 1);
+        comp.maximize_window(id).expect("maximize");
+
+        comp.detach_display(1).expect("detach");
+
+        let framed = comp.window_ref(id).expect("window").frame_rect();
+        assert_eq!(
+            framed.intersect(&middle),
+            None,
+            "a maximised window was left in the hole the middle monitor left: \
+             {framed:?}"
+        );
+        assert_eq!(
+            framed,
+            work_rect(comp.work_area_for(comp.display_manager.displays()[0].bounds())),
+            "the window did not come back to a monitor that exists"
+        );
+    }
+
+    #[test]
+    fn detaching_the_last_monitor_is_refused() {
+        // Not an arrangement: zero-sized virtual bounds, no primary to fall back
+        // to, and every window stranded with nowhere to be rescued to. Keeping
+        // the screen the compositor cannot paint on is strictly better than
+        // adopting a desktop it cannot describe.
+        let mut comp = Compositor::new(800, 600, 2_000_000).expect("compositor");
+        assert!(
+            comp.detach_display(0).is_err(),
+            "the only monitor was detached"
+        );
+        assert_eq!(
+            comp.display_manager.displays().len(),
+            1,
+            "the display went away even though the call failed"
+        );
+        assert_eq!(comp.frame_size(), (800, 600), "the surface went away too");
+    }
+
+    #[test]
+    fn detaching_a_display_that_is_not_there_is_an_error_and_not_a_panic() {
+        let (mut comp, _, _) = two_monitors(0);
+        assert!(
+            comp.detach_display(99).is_err(),
+            "a display that was never attached was detached anyway"
+        );
+        assert_eq!(
+            comp.display_manager.displays().len(),
+            2,
+            "a failed detach took a monitor with it"
+        );
+    }
+
+    // ---- the first screen has to be told what it is plugged into ----
+
+    #[test]
+    fn the_first_screen_can_be_told_which_connector_it_is() {
+        // `DisplayManager::new` invents the id 0 for the screen the compositor
+        // is built at, because nothing has told it what that screen is yet. On
+        // a real card the key is the connector id, and the hotplug
+        // reconciliation matches the two sets on it -- so a desktop whose first
+        // screen is still called 0 has one connector the card reports that the
+        // compositor does not recognise (and attaches a duplicate display for)
+        // and one display no connector claims (and detaches). Both, once a
+        // second, for ever.
+        let mut comp = Compositor::new(800, 600, 2_000_000).expect("compositor");
+        comp.rename_display(0, 31).expect("rename");
+        assert_eq!(comp.display_manager.displays()[0].id, 31);
+        assert!(
+            comp.display_manager.displays()[0].primary,
+            "renaming the screen demoted it"
+        );
+        assert_eq!(
+            comp.display_manager.remove_display(31).map(|d| d.id),
+            Some(31),
+            "and it answers to the new name"
+        );
+    }
+
+    #[test]
+    fn a_screen_cannot_be_renamed_onto_a_name_another_screen_has() {
+        // Two displays sharing an id is not a cosmetic problem: `display_for`,
+        // `remove_display` and every reconciliation resolve by id and would
+        // silently pick whichever came first, so the wrong monitor goes dark.
+        let (mut comp, _, _) = two_monitors(0);
+        assert!(
+            comp.rename_display(0, 1).is_err(),
+            "two displays were given the same id"
+        );
+        let ids: Vec<u32> = comp
+            .display_manager
+            .displays()
+            .iter()
+            .map(|d| d.id)
+            .collect();
+        assert_eq!(ids, vec![0, 1], "a refused rename changed something anyway");
+    }
+
+    #[test]
+    fn renaming_a_screen_that_is_not_there_is_an_error_and_not_a_panic() {
+        let mut comp = Compositor::new(800, 600, 2_000_000).expect("compositor");
+        assert!(comp.rename_display(99, 31).is_err());
+        assert_eq!(
+            comp.display_manager.displays()[0].id,
+            0,
+            "a failed rename renamed something else"
+        );
+    }
+
+    // ---- a virtual desktop the compositor can actually show ----
+
+    /// A compositor whose vsync gate is open.
+    ///
+    /// `should_compose` refuses a frame within one refresh interval of the
+    /// last, so at 60 Hz a test that composites twice in a row is told "nothing
+    /// was drawn" by the *clock* rather than by the scene -- which would make
+    /// "the switch repainted nothing" pass for entirely the wrong reason. A
+    /// refresh rate this high rounds the interval to zero.
+    fn ungated_compositor(width: u32, height: u32) -> Compositor {
+        Compositor::new(width, height, 2_000_000).expect("compositor")
+    }
+
+    /// A window filled edge to edge with one opaque colour, so a test can ask
+    /// whether it is on screen by looking at the pixel under it.
+    ///
+    /// A shared buffer rather than a render tree because a buffer covers the
+    /// whole client area with known bytes and takes part in the occlusion cull
+    /// as an opaque occluder -- which is the half of "is it showing" that a
+    /// hit test cannot see.
+    ///
+    /// **`Xrgb8888`, and that is load-bearing.** `Buffer::is_opaque` is a
+    /// question about the *format*, not about the bytes: an `Argb8888` buffer
+    /// full of 0xFF alpha is still not an occluder, because the compositor will
+    /// not scan a client's pixels to find out. Written the obvious way with
+    /// `Argb8888`, `window_opaque_cover` returned `None` for every window here
+    /// and the occlusion test passed without ever reaching the cull it names.
+    fn painted_window(
+        comp: &mut Compositor,
+        layer: Layer,
+        rect: Rect,
+        colour: u32,
+    ) -> (WindowId, i32, i32) {
+        let mut spec = WindowSpec::new("Painted", rect.width, rect.height);
+        spec.position = Some((rect.x, rect.y));
+        spec.decorations = false;
+        spec.layer = layer;
+        let id = comp.create_window_from_spec(&spec, 1);
+        let bytes = solid_buffer_bytes(rect.width, rect.height, colour);
+        comp.attach_buffer(
+            id,
+            u64::from(rect.width),
+            rect.width,
+            rect.height,
+            rect.width.saturating_mul(4),
+            BufferFormat::Xrgb8888,
+            &bytes,
+        )
+        .expect("attach buffer");
+        let win = comp.window_ref(id).expect("window");
+        let client = win.client_rect();
+        (id, client.x + 1, client.y + 1)
+    }
+
+    fn pixel_at(comp: &Compositor, x: i32, y: i32) -> u32 {
+        let (w, _) = comp.backend.size();
+        let index = usize::try_from(y).expect("y") * usize::try_from(w).expect("w")
+            + usize::try_from(x).expect("x");
+        comp.backend.presented_pixels()[index]
+    }
+
+    /// Build a stack in which a window belonging to *another* desktop sits
+    /// **above** a window on the desktop being shown, and return the lower
+    /// window's id together with a point inside it.
+    ///
+    /// **The obvious way to write this does not produce that stack.** Creating
+    /// two overlapping windows and moving the upper one away with
+    /// `set_window_workspace` leaves the hidden window at the *bottom*: handing
+    /// the keyboard on raises the window it lands on (`focus_window` calls
+    /// `raise_within_layer`), so the window left showing climbs over the one
+    /// just hidden. A hidden window underneath everything can neither occlude
+    /// nor overpaint, and both tests below passed against a deliberately broken
+    /// cull for exactly that reason — they never reached the code they name.
+    ///
+    /// A third window on the showing desktop is what fixes it: the focus
+    /// handoff raises *that* one, and the window from the other desktop keeps
+    /// its place above the one the test looks at. That is also the ordinary
+    /// case rather than a contrivance — open something on desktop 2, switch
+    /// back to desktop 1, and the desktop-2 window is still stacked above
+    /// everything except the window you landed on.
+    fn stack_with_a_hidden_window_on_top(
+        comp: &mut Compositor,
+        colour: u32,
+    ) -> (WindowId, i32, i32) {
+        let (lower, x, y) = painted_window(comp, Layer::Normal, Rect::new(20, 20, 60, 60), colour);
+        // Elsewhere on screen, so its only role is to be the focus target.
+        painted_window(comp, Layer::Normal, Rect::new(200, 20, 60, 60), 0xFF00_FF00);
+        comp.switch_workspace(1);
+        painted_window(
+            comp,
+            Layer::Normal,
+            Rect::new(20, 20, 60, 60),
+            HIDDEN_COLOUR,
+        );
+        comp.switch_workspace(0);
+        (lower, x, y)
+    }
+
+    /// The colour of the window that is on the desktop the user is *not*
+    /// looking at — so a failure message can say which window won.
+    const HIDDEN_COLOUR: u32 = 0xFF99_8877;
+
+    #[test]
+    fn a_window_on_another_virtual_desktop_is_not_drawn() {
+        // The defect this whole feature exists to fix: switching desktop used
+        // to change which windows the *taskbar listed* and nothing else, so the
+        // window you just left stayed on screen, kept taking clicks, and was no
+        // longer reachable from the taskbar -- worse than not having virtual
+        // desktops at all.
+        let mut comp = ungated_compositor(400, 300);
+        let colour = 0xFF11_2233;
+        let (_, x, y) = painted_window(&mut comp, Layer::Normal, Rect::new(20, 20, 40, 40), colour);
+        assert!(comp.compose_frame(), "nothing was drawn");
+        assert_eq!(
+            pixel_at(&comp, x, y),
+            colour,
+            "the window was never on screen"
+        );
+
+        comp.switch_workspace(1);
+        assert!(comp.compose_frame(), "switching desktop repainted nothing");
+        assert_ne!(
+            pixel_at(&comp, x, y),
+            colour,
+            "the window of the desktop we left is still on screen"
+        );
+
+        comp.switch_workspace(0);
+        assert!(comp.compose_frame(), "switching back repainted nothing");
+        assert_eq!(
+            pixel_at(&comp, x, y),
+            colour,
+            "the window did not come back with its desktop"
+        );
+    }
+
+    #[test]
+    fn a_window_on_another_virtual_desktop_does_not_take_clicks() {
+        // Drawing and hit testing are separate passes over the same stack, and
+        // a window that is invisible but still clickable is the worse of the
+        // two failures: the user aims at what they can see and something they
+        // cannot see answers.
+        let mut comp = ungated_compositor(400, 300);
+        let (id, x, y) = painted_window(
+            &mut comp,
+            Layer::Normal,
+            Rect::new(20, 20, 40, 40),
+            0xFF11_2233,
+        );
+        assert_eq!(comp.window_at(x, y), Some(id), "the window was never hit");
+        assert_eq!(
+            comp.window_at_with_decorations(x, y),
+            Some(id),
+            "the window's frame was never hit"
+        );
+
+        comp.switch_workspace(1);
+        assert_eq!(
+            comp.window_at(x, y),
+            None,
+            "a window on another desktop swallowed a click"
+        );
+        assert_eq!(
+            comp.window_at_with_decorations(x, y),
+            None,
+            "a window on another desktop swallowed a click on its frame"
+        );
+    }
+
+    #[test]
+    fn a_window_on_another_virtual_desktop_does_not_occlude_the_one_in_front_of_you() {
+        // The occlusion cull decides what *not* to draw by asking which
+        // rectangles are opaquely covered. A hidden window left in that answer
+        // is the most confusing possible symptom: the window you are looking at
+        // is genuinely on this desktop and genuinely mapped, and a rectangular
+        // hole appears in it where something on another desktop used to be.
+        let mut comp = ungated_compositor(400, 300);
+        let under = 0xFF11_2233;
+        let (_, x, y) = stack_with_a_hidden_window_on_top(&mut comp, under);
+
+        assert!(comp.compose_frame(), "nothing was drawn");
+        assert_eq!(
+            pixel_at(&comp, x, y),
+            under,
+            "the window in front of the user was culled away by one on another desktop"
+        );
+    }
+
+    #[test]
+    fn the_taskbar_is_on_every_virtual_desktop() {
+        // A taskbar that vanished on a switch would take the only means of
+        // switching back with it. Layer is the property that says so: the
+        // wallpaper and the shell's chrome belong to the screen, not to a
+        // desktop.
+        let mut comp = ungated_compositor(400, 300);
+        let colour = 0xFF44_5566;
+        let (bar, x, y) = painted_window(
+            &mut comp,
+            Layer::Overlay,
+            Rect::new(0, 270, 400, 30),
+            colour,
+        );
+        comp.switch_workspace(3);
+        assert!(comp.compose_frame(), "nothing was drawn");
+        assert_eq!(
+            pixel_at(&comp, x, y),
+            colour,
+            "the taskbar went away with the desktop it was created on"
+        );
+        assert_eq!(
+            comp.window_at(x, y),
+            Some(bar),
+            "the taskbar is drawn but no longer takes clicks"
+        );
+    }
+
+    #[test]
+    fn an_assignment_a_panel_ignores_is_stored_rather_than_refused() {
+        // A shell moving "all its windows" must not have to know which of them
+        // are furniture. The assignment is taken and remembered; `is_showing`
+        // is what ignores it.
+        let mut comp = ungated_compositor(400, 300);
+        let (bar, x, y) = painted_window(
+            &mut comp,
+            Layer::Overlay,
+            Rect::new(0, 270, 400, 30),
+            0xFF44_5566,
+        );
+        comp.set_window_workspace(bar, 2).expect("move");
+        assert_eq!(
+            comp.window_ref(bar).expect("window").workspace,
+            2,
+            "the assignment was dropped instead of stored"
+        );
+        assert_eq!(
+            comp.window_at(x, y),
+            Some(bar),
+            "a panel told it was on desktop 2 left desktop 0"
+        );
+    }
+
+    #[test]
+    fn switching_desktop_takes_the_keyboard_off_the_window_it_hides() {
+        // A window nobody can see must not hold the keyboard: every keystroke
+        // would go somewhere the user cannot find, and nothing on screen would
+        // say where.
+        let mut comp = ungated_compositor(400, 300);
+        let first = comp.create_window("First".to_string(), 100, 80, 1);
+        comp.switch_workspace(1);
+        let second = comp.create_window("Second".to_string(), 100, 80, 1);
+        assert_eq!(
+            comp.focused_window,
+            Some(second),
+            "the new window is focused"
+        );
+
+        comp.switch_workspace(0);
+        assert_eq!(
+            comp.focused_window,
+            Some(first),
+            "the keyboard did not follow the screen"
+        );
+        assert!(
+            !comp.window_ref(second).expect("window").focused,
+            "a window on another desktop still believes it has the keyboard"
+        );
+    }
+
+    #[test]
+    fn switching_to_an_empty_desktop_focuses_nothing() {
+        // Not "keeps the last window focused", which is the tempting shortcut:
+        // an empty desktop genuinely has nothing to type into, and saying so is
+        // what stops keystrokes reaching a window on a desktop nobody is
+        // looking at.
+        let mut comp = ungated_compositor(400, 300);
+        let id = comp.create_window("Only".to_string(), 100, 80, 1);
+        assert_eq!(comp.focused_window, Some(id));
+        comp.switch_workspace(1);
+        assert_eq!(
+            comp.focused_window, None,
+            "an empty desktop kept the keyboard on a window it does not have"
+        );
+    }
+
+    #[test]
+    fn moving_the_focused_window_away_hands_the_keyboard_on() {
+        // The other way a focused window can leave the screen. It goes through
+        // the same rule as a switch rather than a second one, because two rules
+        // for "what has the keyboard now" is how the two answers drift.
+        let mut comp = ungated_compositor(400, 300);
+        let staying = comp.create_window("Staying".to_string(), 100, 80, 1);
+        let leaving = comp.create_window("Leaving".to_string(), 100, 80, 1);
+        assert_eq!(comp.focused_window, Some(leaving));
+        comp.set_window_workspace(leaving, 1).expect("move");
+        assert_eq!(
+            comp.focused_window,
+            Some(staying),
+            "the keyboard stayed on a window that left the desktop"
+        );
+    }
+
+    #[test]
+    fn a_window_opens_on_the_desktop_the_user_is_looking_at() {
+        // Not on desktop 0, which is what a `Default`-derived field would give
+        // it: a program started from the desktop you are on must appear on the
+        // desktop you are on. A client cannot name a workspace in its spec at
+        // all -- see `create_window_from_spec`.
+        let mut comp = ungated_compositor(400, 300);
+        comp.switch_workspace(2);
+        let id = comp.create_window("New".to_string(), 100, 80, 1);
+        assert_eq!(
+            comp.window_ref(id).expect("window").workspace,
+            2,
+            "a window opened on a desktop the user was not looking at"
+        );
+        assert_eq!(
+            comp.focused_window,
+            Some(id),
+            "a window opened on this desktop did not get the keyboard"
+        );
+    }
+
+    #[test]
+    fn activating_a_window_on_another_desktop_goes_to_it_rather_than_dragging_it_here() {
+        // Activating is a request to *see* a particular window. Switching moves
+        // one thing and is undone by switching back; dragging the window here
+        // rearranges the desktops themselves and leaves the user to notice.
+        let mut comp = ungated_compositor(400, 300);
+        let away = comp.create_window("Away".to_string(), 100, 80, 1);
+        comp.switch_workspace(1);
+        comp.create_window("Here".to_string(), 100, 80, 1);
+
+        comp.activate_window(away).expect("activate");
+        assert_eq!(
+            comp.current_workspace(),
+            0,
+            "activating a window elsewhere did not follow it"
+        );
+        assert_eq!(
+            comp.window_ref(away).expect("window").workspace,
+            0,
+            "the window was dragged to the current desktop instead"
+        );
+        assert_eq!(
+            comp.focused_window,
+            Some(away),
+            "followed the window but did not focus it"
+        );
+    }
+
+    #[test]
+    fn a_window_the_user_cannot_see_is_not_handed_the_whole_screen() {
+        // The direct-scanout bypass hands one window's buffer straight to the
+        // display. A fullscreen window on another desktop passing that test
+        // would put the desktop you left back on screen in its entirety, with
+        // nothing else composited over it at all.
+        let mut comp = ungated_compositor(64, 48);
+        let mut spec = WindowSpec::new("Game", 64, 48);
+        spec.position = Some((0, 0));
+        spec.decorations = false;
+        let id = comp.create_window_from_spec(&spec, 1);
+        comp.set_fullscreen(id, true).expect("fullscreen");
+        let bytes = solid_buffer_bytes(64, 48, 0xFF00_FF00);
+        comp.attach_buffer(id, 7, 64, 48, 256, BufferFormat::Argb8888, &bytes)
+            .expect("attach");
+        assert_eq!(
+            comp.direct_scanout_window(),
+            Some(id),
+            "the bypass never took this window"
+        );
+
+        comp.switch_workspace(1);
+        assert_eq!(
+            comp.direct_scanout_window(),
+            None,
+            "a window on another desktop was scanned out over the one in front of the user"
+        );
+    }
+
+    #[test]
+    fn a_window_on_another_desktop_is_still_in_the_window_list() {
+        // The list is what a taskbar is built from, and a taskbar has to be
+        // able to show the other desktops' windows -- that is how the user
+        // finds them again. Hiding is a compositing decision, not a reason to
+        // deny the window exists.
+        let mut comp = ungated_compositor(400, 300);
+        let id = comp.create_window("Away".to_string(), 100, 80, 1);
+        comp.switch_workspace(1);
+        assert!(
+            comp.window_list().windows.iter().any(|w| w.id == id.raw()),
+            "a window on another desktop disappeared from the window list"
+        );
+    }
+
+    #[test]
+    fn the_window_list_reports_where_each_window_actually_is() {
+        // An overview draws thumbnails in proportion to the real windows, so
+        // the rectangle in the list has to be the window's own -- not a
+        // placeholder, and not the previous frame's. A list that reported
+        // zero-by-zero would draw an empty desktop over a full one, which reads
+        // as "nothing is running" rather than as a bug.
+        let mut comp = ungated_compositor(1920, 1080);
+        let id = comp.create_window("Placed".to_string(), 640, 480, 1);
+        comp.move_window(id, -100, 250).expect("move");
+
+        let list = comp.window_list();
+        let w = list
+            .windows
+            .iter()
+            .find(|w| w.id == id.raw())
+            .expect("the window is listed");
+        let real = comp.window_ref(id).expect("window");
+        assert_eq!(
+            (w.x, w.y, w.width, w.height),
+            (real.x, real.y, real.width, real.height),
+            "the list's rectangle is not the window's"
+        );
+        // Stated separately from the equality above, because that one would
+        // still hold if both sides were zero. The move must be visible.
+        assert_eq!((w.x, w.y), (-100, 250));
+    }
+
+    #[test]
+    fn moving_a_window_moves_it_in_the_next_window_list() {
+        // The list is rebuilt per call rather than cached, and this is the test
+        // that says so: a cache that filled once at creation would pass every
+        // other geometry assertion here and go stale the instant a user dragged
+        // a window.
+        let mut comp = ungated_compositor(1920, 1080);
+        let id = comp.create_window("Dragged".to_string(), 300, 200, 1);
+        comp.move_window(id, 10, 20).expect("move");
+        let before = comp.window_list();
+        comp.move_window(id, 700, 400).expect("move again");
+        let after = comp.window_list();
+
+        let pos = |list: &WindowList| {
+            let w = list
+                .windows
+                .iter()
+                .find(|w| w.id == id.raw())
+                .expect("listed");
+            (w.x, w.y)
+        };
+        assert_eq!(pos(&before), (10, 20));
+        assert_eq!(pos(&after), (700, 400), "the list did not follow the move");
+    }
+
+    #[test]
+    fn a_window_comes_back_from_another_desktop_exactly_as_it_was_left() {
+        // Hiding must be *only* hiding. Minimizing or unmapping the departing
+        // windows would be visible on the way back -- a maximized window that
+        // came back restored, a client told to redraw for a switch it has no
+        // business hearing about.
+        let mut comp = ungated_compositor(400, 300);
+        let id = comp.create_window("Kept".to_string(), 100, 80, 1);
+        comp.maximize_window(id).expect("maximize");
+        let before = comp.window_ref(id).expect("window").clone();
+
+        comp.switch_workspace(1);
+        let hidden = comp.window_ref(id).expect("window");
+        assert!(!hidden.minimized, "hiding a desktop minimized its windows");
+        assert!(hidden.visible, "hiding a desktop unmapped its windows");
+
+        comp.switch_workspace(0);
+        let after = comp.window_ref(id).expect("window");
+        assert_eq!(
+            (after.x, after.y, after.width, after.height, after.maximized),
+            (
+                before.x,
+                before.y,
+                before.width,
+                before.height,
+                before.maximized
+            ),
+            "the window came back changed"
+        );
+    }
+
+    #[test]
+    fn switching_to_the_desktop_already_showing_is_not_a_repaint() {
+        // A shell re-asserting its state on every frame is a normal thing for a
+        // shell to do. If that forced a full recomposite the desktop would
+        // repaint entirely, every frame, for ever.
+        let mut comp = ungated_compositor(400, 300);
+        comp.create_window("Any".to_string(), 100, 80, 1);
+        assert!(comp.compose_frame(), "nothing was drawn");
+        comp.switch_workspace(comp.current_workspace());
+        assert!(
+            !comp.full_recomposite,
+            "re-asserting the current desktop asked for a full repaint"
+        );
+        assert!(
+            !comp.compose_frame(),
+            "re-asserting the current desktop redrew the frame"
+        );
+    }
+
+    #[test]
+    fn the_damage_path_does_not_repaint_a_window_from_another_desktop() {
+        // A switch asks for a full recomposite, so every other test in this
+        // section goes through `render_all_windows` and never reaches the
+        // *damage* pass -- which is a second, independent walk of the same z
+        // stack, with its own copy of the "is it showing" question. A window
+        // moving on the desktop you are looking at is what drives it, and a
+        // window from another desktop overlapping the damaged rectangle is what
+        // it would wrongly repaint.
+        let mut comp = ungated_compositor(400, 300);
+        let under = 0xFF11_2233;
+        let (here, x, y) = stack_with_a_hidden_window_on_top(&mut comp, under);
+        assert!(comp.compose_frame(), "nothing was drawn");
+        assert!(
+            !comp.full_recomposite,
+            "the first frame left a full recomposite pending, so the damage pass would be skipped"
+        );
+
+        comp.damage_window(here);
+        assert!(comp.compose_frame(), "a damaged window redrew nothing");
+        assert_eq!(
+            pixel_at(&comp, x, y),
+            under,
+            "the damage pass repainted a window belonging to another desktop"
+        );
+    }
+
+    // ---- a rectangle wider than i32 is wide, not negative ----
+
+    #[test]
+    fn unioning_an_over_wide_rect_does_not_shrink_the_bounding_box() {
+        // `union` used to compute its far edge as `x + width as i32`. A width
+        // above `i32::MAX` casts to a negative number, so the bounding box came
+        // out *smaller* than the rectangle it was supposed to contain -- and
+        // the caller that noticed was `attach_display`, which sized the scanout
+        // surface from the union and so accepted a desktop no framebuffer could
+        // hold. `right()` already saturated correctly; `union` now uses it.
+        let sane = Rect::new(0, 0, 800, 600);
+        let huge = Rect::new(0, 0, u32::MAX, 600);
+        let bounds = sane.union(&huge);
+        assert!(
+            bounds.width >= sane.width,
+            "the union of a rectangle with a wider one came out narrower than \
+             the first: {bounds:?}"
+        );
+        assert_eq!(
+            bounds.width, 2_147_483_647,
+            "an over-wide rectangle should pin the bounding box at the widest \
+             representable one, not wrap"
+        );
+    }
+
+    #[test]
+    fn intersecting_an_over_wide_rect_does_not_come_back_empty() {
+        // The same cast in `intersect` put the far edge left of the near one,
+        // so a rectangle that contains everything intersected to nothing --
+        // which would silently clip away every window on such a display.
+        let huge = Rect::new(0, 0, u32::MAX, u32::MAX);
+        let window = Rect::new(100, 100, 200, 150);
+        assert_eq!(
+            huge.intersect(&window),
+            Some(window),
+            "a rectangle inside an over-wide one was reported as not \
+             overlapping it"
+        );
     }
 }

@@ -567,6 +567,25 @@ Roadmap:
         extend the consecutive-clean streak.
   - [ ] Then, and only then, §263's second half: enable the iGPU in firmware,
         move the monitor cable, and write the Intel driver against the chip.
+- ~~`[A]` **CPython 3.12.3 ring-3 Path-Z rung**~~ — **done 2026-08-21**,
+  fulfilling `requests/b-a-cpython-path-z-self-test.md`.
+  `self_test_cpython_on_slateos_libc()` in `kernel/src/proc/spawn.rs`.
+  **CPython has now actually run on SlateOS** — previously it had only been
+  *linked* (roadmap line ~664 said "still not run"). Exit 0, all six expected
+  lines byte-exact, zero faults and zero `EACCES` anywhere in the run's ~8,200
+  lines of serial output. Two deliberate departures from the request, both
+  recorded in the function's doc comment: the 20 MiB stdlib zip is read **in
+  place from `/mnt`** rather than staged (`/` is RAM-backed, so staging would
+  have moved every read *off* ext4 and tested nothing about the driver), and
+  the file capability grants **`METADATA`** (the request's sketch omitted it;
+  `zipimport` stats the archive, this binary speaks the *native* ABI, and
+  native `sys_fs_stat` is gated on `METADATA` — copying the sketch verbatim
+  would have reproduced the `make` EACCES bug that took two rounds to clear).
+  The request asked for the yield count as "a first measurement of our ext4
+  read path"; **it is not one, and the comment now says so.** The run reported
+  **1 yield** — a single `yield_now()` did not return until the child had
+  exited, so the counter measures scheduler interleaving, not I/O, and must not
+  be used to tighten the budget. Measuring the read path needs a clock.
 - ~~`[A]` Ada/SPARK FFI bridge for kernel-space drivers~~ (line ~1206) —
   **done 2026-08-16.** Cross-GNAT via Alire, ZFP runtime, prebuilt `.o` +
   stamp so the toolchain is not a build prerequisite (`design-decisions.md`
@@ -606,11 +625,25 @@ Known-issues (open, kernel-owned):
   can no longer let the child run the glibc clone entry with an unseeded `%fs`.
   Corroborated by a 20/20 clean soak. (defect 2 fixed 2026-08-13 `315a7e0ca`.)
 - `B-PTHREAD-TEARDOWN-PF` — kernel `#PF` @ 0x97 during clone-thread teardown.
-  **Blocked on a repro**: 20 boots produced zero occurrences (vs. the stale
+  ~~**Blocked on a repro**~~: 20 boots produced zero occurrences (vs. the stale
   1-in-5 historical rate), and the recorded mechanism does not fit the capture
   (assumed a write, but error=0x0 is a read — RIP was likely mis-attributed to
   the nearest preceding symbol). A bytes-at-RIP dump is now emitted on kernel
   `#PF` (`5431facbd`) so the next occurrence settles it.
+  **Update 2026-08-21 — it recurred, in ring 3, and none of that fired.** The
+  capture was `RIP == CR2 == 0x6000066370`, `CS=0x23` — a control-flow hijack
+  into an address holding no code, i.e. the same *shape* as the historical
+  ring-0 capture but on the other side of the privilege boundary, where all the
+  instrumentation added above was absent. It produced three lines. RSP was
+  intact, which is what makes a single wild write into the task's **kernel**
+  stack the unifying hypothesis for both manifestations: hit the saved kernel
+  return address and you get the ring-0 jump into `.data`; hit the saved user
+  RIP in the same stack's interrupt frame and you get this one. The ring-3
+  diagnostics entry in §2.x closes that asymmetry, so the next occurrence is a
+  two-way decision rather than another round of inference — a user-stack scan
+  showing plausible frames means the corruption is in the kernel interrupt
+  frame (hunt the writer), garbage or the hijack value on the stack means
+  glibc/TLS teardown (hunt the freed object). Full writeup in `known-issues.md`.
 - `B-FORKEXEC-BOOT-HANG` — intermittent hang at the glibc fork+exec self-test
 - ~~`B-KASAN-INSTRUMENTED-BOOT-WEDGES-MID-PRINT-ON-A-PAGE-FAULT`~~ — **NOT A
   KERNEL BUG, closed 2026-08-19.** The "wedge" was never real: the instrumented
@@ -674,9 +707,18 @@ Roadmap:
   `/usr/local/lib/python312.zip` (20,498,464, `ZIP_STORED`), staged together
   and never separately — an interpreter without its stdlib dies inside
   `init_fs_encoding` before `main()`. See design-decisions.md §344.
-  **Still not run on SlateOS**; the ring-3 rung lives in lane A's tree and is
+  ~~**Still not run on SlateOS**~~; the ring-3 rung lives in lane A's tree and is
   requested in `requests/b-a-cpython-path-z-self-test.md`. A real pty layer
   remains ahead.
+  **It runs now — 2026-08-21, lane A** (this line is A correcting a status of
+  B's that A's own work falsified; the rung is A's, the libc under it is B's).
+  `self_test_cpython_on_slateos_libc()` passes in the boot test: exit 0, six
+  byte-exact output lines, no fault and no `EACCES`. `Py_Initialize` imported
+  `encodings` out of the 20 MiB archive read **in place off ext4** before user
+  code ran, so 478 symbols' worth of `posix/src` is now exercised by its widest
+  consumer at runtime rather than only at link time. See lane A's roadmap entry
+  (line ~570) for the two departures from the request. A real pty layer is
+  still what stands between this and an interactive interpreter.
   **coreutils half measured and closed 2026-08-21:** all **107** binaries of
   GNU coreutils 9.5, unmodified, link against our `libc.a` with zero missing
   symbols and zero duplicates (`scripts/coreutils-spike/README.md`). The first
@@ -1436,6 +1478,8 @@ _Define scheduler trait interface first, implement one scheduler behind it._
   - [x] Process attach/detach with refcount tracking
   - [x] SYS_NS_CREATE (290) through SYS_NS_QUERY (295)
   - [x] 6 self-tests: create/destroy, bind, hide, path boundary, clone, attach/detach
+- [x] Resource-limit syscalls (`SYS_RLIMIT_GET` 557 / `SYS_RLIMIT_SET` 558, 2026-08-21): the native ABI had no way to reach a process's `rlimits`, so libc answered `getrlimit`/`setrlimit` from a private `static mut` table of its own (`posix/src/resource.rs`) that the kernel never read. Same shape as the foreground-process-group bug (§113) and the `termios` bug that produced 541/542 — and, as in both, the two copies had *already* diverged on three of sixteen resources before anyone looked. `arg0` is a pid (`0` = self), `arg1` a resource `0..=15`, `arg2` a 16-byte `[rlim_cur, rlim_max]` LE buffer identical to Linux's `struct rlimit64`. Both land in `pcb::get_rlimit`/`pcb::set_rlimit`, which is also where the Linux shim's `prlimit64` lands, so the ABIs cannot drift again by construction. A foreign pid is `PermissionDenied` **whether or not it exists** — distinguishing them would make `getrlimit` a process-existence oracle. Fulfils `requests/b-a-native-rlimit-syscalls.md`; reply in `requests/a-b-native-rlimit-syscalls-landed.md`
+- [x] `RLIMIT_NOFILE` stopped lying (2026-08-21): `pcb::DEFAULT_RLIMITS` advertised `(1024, 4096)` against a `linux_fd::MAX_FDS = 256` table, so `getrlimit` promised sixteen times the descriptors `open` could hand out and a program that sized its pool from it met `EMFILE` at 256. Now derived from `MAX_FDS_U64` rather than restated, with `const _: () = assert!` guards that fail the build if a literal is written there again, and an **absolute** ceiling in `set_rlimit` so the limit survives the day `CAP_SYS_RESOURCE` makes hard-limit raises legal for everything else. `pcb::self_test::test_rlimits` asserts the ceiling separately from the general no-raise rule so deleting it as dead code turns the boot red. Remaining question — 256 is low for a real build, and raising it is a two-lane change (libc has its own 256-slot table plus a 1 MiB path buffer sized from it) — is `known-issues.md` → `A-FD-TABLE-CAPACITY-IS-256-AND-THAT-IS-NOW-THE-ADVERTISED-LIMIT`
 
 ### 1.5 Capability / security model
 - [x] Per-process capability table (unforgeable handles to kernel objects)
@@ -1513,6 +1557,7 @@ _Define scheduler trait interface first, implement one scheduler behind it._
     inherited; vfork aliases fork).
 - [x] exec equivalent
 - [x] Hardware exception → language-level exception (SEH-style, not Unix signals)
+  - [x] `[A]` Ring-3 fatal-fault diagnostics (2026-08-21) — a fatal *user* fault now reports as much as a fatal *kernel* one. Until this, `kill_userspace_task_with_info` printed only the vector, the faulting address and the segment registers, while the ring-0 path had a bytes-at-RIP dump, a stack scan and symbolisation; the 2026-08-21 recurrence of `B-PTHREAD-TEARDOWN-PF` landed in ring 3, so five weeks of waiting for a repro bought three lines that could not answer "what is mapped at the address we jumped to?". Added: `describe_user_addr` (PTE flags via `translate_flags` + the owning VMA, or — for a hole — both bracketing VMAs and the gap sizes) applied to RIP, RSP and the faulting address; a 16-byte bytes-at-RIP dump; and `dump_user_stack`, the ring-3 counterpart of `backtrace::dump_stack_scan`, which flags slots pointing into mapped executable user pages as return-address candidates. Backed by a new `pcb::classify_user_addr` that is deliberately `try_lock`-based and allocation-free — `list_vmas` is unusable on this path twice over, since it takes the process-table lock unconditionally (a fault raised while that lock is held would deadlock instead of printing) and clones a `Vec` (a heap allocation on the very path that reports heap corruption). Every read is preceded by a page-table check on that exact address, so the diagnostic cannot itself fault. **Mistake worth keeping:** the first version killed the boot it was added on with `error = 0x1` (present, read, kernel) — SMAP means a ring-0 read of a user page needs STAC/CLAC, so both read sites now go through `smep_smap::with_user_access`, with a `// SAFETY:` comment saying why it is required rather than defensive. Exercised on every boot by the deliberate exception self-tests, so it cannot rot unnoticed the way the ring-0 dump did.
 - [x] Structured shutdown via IPC message, not Unix signals
 - [x] Process credential / capability management
 - [x] File descriptor inheritance across spawn (SYS_PROCESS_SPAWN_EX / SYS_PROCESS_GET_INITIAL_FDS)
@@ -1578,6 +1623,7 @@ _Depends on: Phase 1 complete. Goal: boot to a shell prompt._
   - [x] USB HID class driver: config descriptor parsing, SET_CONFIGURATION, SET_PROTOCOL (boot), SET_IDLE, interrupt endpoint detection
   - [x] USB HID interrupt transfer polling (poll_keyboard/poll_mouse via event ring)
   - [x] USB HID keycode-to-scancode translation (HID_TO_SCANCODE table, handle_usb_hid_report integration with keyboard ring buffer)
+  - [x] USB HID *periodic* polling — 8 ms hrtimer (`keyboard::start_usb_hid_poller`) drives the endpoint from the APIC timer ISR via `xhci::try_poll_keyboard`, so keystrokes arrive without a reader blocked. Until 2026-08-21 polling only happened inside a console read, so type-ahead and non-blocking input were impossible on USB (PS/2 was fine via IRQ 1, and QEMU defaults to PS/2, which is why it went unseen). Fixes `known-issues.md` → `A-USB-KEYSTROKES-ARE-ONLY-FETCHED-WHILE-SOMEBODY-IS-BLOCKED-READING`; unblocks half of `BUG-CONSOLE-READ-UNINTERRUPTIBLE` stage 2 (the wake side is still open)
 - [x] Framebuffer / basic display (UEFI GOP framebuffer initially)
   - [x] 8x16 VGA bitmap font, framebuffer text console (160x50 @ 1280x800)
 - [x] Storage (NVMe, AHCI/SATA)
@@ -1609,7 +1655,9 @@ _Depends on: Phase 1 complete. Goal: boot to a shell prompt._
 - [x] Timer (HPET, APIC timer)
   - [x] Local APIC timer (calibrated via PIT, 100 Hz periodic, preemptive scheduling)
   - [x] HPET (High Precision Event Timer): ACPI table discovery, MMIO mapping, 100 MHz monotonic counter, ticks_to_ns conversion, self-test
-  - [x] High-resolution timers (hrtimer): per-CPU sorted timer lists, nanosecond scheduling via HPET, repeating timers, cancel API, process_expired() from APIC ISR
+  - [x] High-resolution timers (hrtimer): per-CPU ~~sorted timer lists~~ **binary min-heaps over a slot slab (2026-08-21, lane A)**, nanosecond scheduling via HPET, repeating timers, cancel API, process_expired() from APIC ISR
+  - [x] `[A]` hrtimer O(log n) queue — replaced the per-CPU sorted `Vec` with a binary min-heap over a slot slab, because CLAUDE.md forbids linear scans in event dispatch outright and every operation on the old queue ran linear *under the queue lock with interrupts disabled* (a ~160 KiB memmove at the hard ceiling). `schedule` and `process_expired` are now O(log n); `cancel` is an O(1) slot lookup plus an O(log n) sift, since each slot records its own heap position rather than being searched for. Three details are load-bearing and are not the textbook heap: the ordering key is `(expiry_ns, id)` and not `expiry_ns` alone (a binary heap is **not** stable, so a bare-deadline key lets a timer be passed over indefinitely by arrivals sharing its deadline — monotonic ids restore FIFO); `heap_remove_at` sifts **both** ways (moving the tail into the hole usually needs sift-down, but on a different branch it can need sift-up, and doing only the sift-down leaves a plausible-looking heap that pops *a* minimum, just not the right one); and handles carry `(slot, generation)` so a stale handle cannot evict whichever timer inherited its recycled slot — the exact shape of `BUG-HRTIMER-EVICTS-AN-ARMED-TIMER`. Repeating timers re-arm **in place**, keeping slot and id, so a periodic handle stays cancellable across firings. Four new self-tests, because Tests 1–5 all passed against the `Vec` and *cannot* observe a mis-ordering (the only multi-timer case sums its arguments, and a sum is order-independent). **Incidental find, fixed in the same pass:** the `scheduled - fired - cancelled - pending` tripwire added by the eviction-bug fix could never have fired — `TOTAL_FIRED` counted every firing of a repeating timer while `TOTAL_SCHEDULED` counted only its first arming, so `fired` permanently outran `scheduled` (boots read `scheduled=388, fired=75833`) and the `saturating_sub` chain floored the result at 0 on a healthy boot *and* on a broken one. Re-arms are now counted as armings, and Test 10 pins that invariant so the guard cannot be silently disabled again. See `known-issues.md`.
+  - [x] `[A]` ktimer accounting conservation (2026-08-21) — the same counter asymmetry hrtimer had: a periodic timer's re-arm bumped `TIMERS_FIRED` but not `TIMERS_SCHEDULED`, so the self-test printed `scheduled=5, fired=8`. Nothing was false yet (ktimer had no tripwire over those counters), but adding one later would have inherited a guard that could never fire. Re-arms are now counted, and the self-test asserts `scheduled >= fired + cancelled` — a check the pre-fix numbers **would have failed**, which is the only evidence worth having that a guard is live. Phrased as a comparison rather than a `saturating_sub` (that is precisely how hrtimer's guard died), and it samples `fired`/`cancelled` before `scheduled` so a concurrent expiry on another CPU biases the check safe.
   - [x] hrtimer IRQ safety: all CPU_TIMERS lock acquisitions wrapped in without_interrupts() to prevent ISR deadlock
   - [x] Scheduler integration: sleep_ns() for nanosecond-precision task sleep (hrtimer-backed, tick-based fallback for >100ms)
   - [x] Deferred wake queue: 32-slot lock-free retry mechanism for ISR-context try_wake failures, drained by schedule_inner + softirq + idle loop
@@ -6021,7 +6069,7 @@ _Depends on: Phase 2 (drivers, filesystem, basic userspace). Goal: boot to a gra
 - [x] Window *control* (ask the compositor to focus/minimize/maximize/restore/tile/close) — placement and geometry are the compositor's, and the shell keeps no copy; see §506
 - [x] Taskbar rendering (start button, window buttons, system tray, clock, desktop indicator)
 - [x] Start menu (application list, power options)
-- [x] Virtual desktops (4, with Ctrl+Super+Arrow switching)
+- [x] Virtual desktops (4, with Ctrl+Super+Arrow switching) — the compositor holds each window's desktop number and does the hiding; the shell asks for a switch and reads the answer back out of the window list. Closes `TD-C-VIRTUAL-DESKTOPS-HIDE-NOTHING`, which was the same feature filtering the taskbar and unmapping nothing; see §518
 - [x] Alt+Tab window switcher with overlay
 - [x] Keyboard shortcuts (Alt+F4, Super, Super+D, Super+Arrows, Ctrl+Super+Arrows)
 - [x] Theme system (Catppuccin Mocha default palette)
@@ -6060,10 +6108,10 @@ _Depends on: Phase 2 (drivers, filesystem, basic userspace). Goal: boot to a gra
 - [x] Resource monitor widget (resmon.rs: compact/expanded sparklines, CPU/memory/disk/network tracking, 64-sample circular buffers, bar graphs)
 - [x] Global hotkey manager (hotkeys.rs: HotkeyRegistry, 22 action types, 20+ default bindings, conflict detection, config persistence, settings panel)
 - [x] Animation system (animations.rs: 9 easing functions, window open/close/minimize/snap animations, desktop slide transitions, color interpolation, fade overlays, reduced-motion support)
-- [x] Snap zones (snap.rs: 7 layout presets, edge/corner detection, zone picker popup, snap history for restore-on-unsnap)
+- [x] Snap zones (snap.rs: 7 layout presets, edge/corner detection, zone picker popup) — **reachable since 2026-08-21.** This was ticked while the geometry was a library with no caller; it is now wired end to end: Super+Z opens the chooser, a press on a zone sends `ShellControlAction::SnapToZone(slot)`, and the compositor resolves the slot against its own display bounds (`gui/remote/src/zones.rs` `SnapSlot`, `gui/compositor` `snap_window_to_zone`). Snap *history* moved to the compositor, which is the only party that knows where a window was. **Edge-drag-and-drop closed the same day:** dragging a window to an edge or corner now shows a translucent preview of where it will land and tiles it on release, implemented in the compositor — which holds the drag grab and so answers on every motion event with no round trip — against the shared rules in `gui/remote/src/zones.rs` (`edge_at`, `drop_at`). The shell's own uncallable copy of those rules was deleted (498 lines out of `gui/desktop/src/snap.rs`); it had already drifted, mapping a top-edge drop to the left half. Only the picker is the shell's now — see `design-decisions.md` §508. The remaining tiling gap is that the tiled rectangle is the whole screen *including* the taskbar strip: `known-issues.md` `TD-C-COMPOSITOR-TILES-UNDER-THE-TASKBAR`, which needs a reserved-area request in the protocol.
 - [x] Clipboard history viewer (clipboard_viewer.rs: Super+V popup, format filters, search, pin support, size/age display)
 - [x] Window peek preview (window_peek.rs: taskbar hover thumbnails, close buttons, fade animation, multi-window layout)
-- [x] Virtual desktop overview (overview.rs: Exposé/Mission Control grid layout, search, lane view, keyboard/mouse nav, animations)
+- [x] Virtual desktop overview (overview.rs: Exposé/Mission Control grid layout, search, lane view, keyboard/mouse nav) — **reachable as of 2026-08-22.** `Super+Tab` opens it, `Esc` closes it, and while it is up it is modal: presses route to it before `hit_test` and keys before the shortcut table, so a click on the taskbar strip cannot reach the taskbar through an opaque fullscreen overlay and typing `d` into the search box cannot run Show Desktop. `OverviewState::apply_window_list` is driven from the same statement that refreshes the taskbar, so the two cannot disagree about which desktop is showing; the thumbnails carry each window's real rectangle, which is what `WLST` v3 was for (§519). Drawing and hit-testing share one `overview_layout` call (§520). Two dead sub-features were **deleted** rather than wired: the “+” add-desktop button, which asked for something no verb in the system can do (the desktop count is fixed at construction, §518), and the open animation, which had never run and could not — the shell has no clock at all, now filed as `TD-C-THE-SHELL-HAS-NO-FRAME-CLOCK`. Live thumbnail *images* remain out of scope and need a compositor verb that does not exist (a scaled read of another client's buffer, a capability question of the same shape as `TD-C-ANY-CLIENT-CAN-READ-EVERY-WINDOW-TITLE`); titled proportional rectangles are a usable Exposé without it. `TD-C-THE-OVERVIEW-SCREEN-IS-1856-LINES-NOBODY-CALLS` resolved.
 - [x] Display settings and color calibration (display_settings.rs: night light, gamma curves, color profiles, test patterns, per-display config)
 - [x] About dialog (about.rs: system info with overview/hardware/software/licenses tabs, uptime/memory formatting)
 - [x] User account management (user_accounts.rs: admin/standard/guest types, avatars, login options, activity log, user switching)

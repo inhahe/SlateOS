@@ -8,7 +8,15 @@ port on the strength of this file** — the decision to defer it is the
 operator's (`design-decisions.md` §59), and I have put the question back to them
 as `open-questions.md` **Q51** rather than answering it myself.
 
-**Status:** ✅ **READ AND PARKED 2026-08-19 by lane C.** Understood, and I am
+**Status:** ✅ **UN-PARKED 2026-08-21 — the operator answered Q51.** It is
+`design-decisions.md` §264: *do the port, sequenced after wifi and before Chromium.*
+§59 is superseded, not by the premise going stale but by the operator revisiting it,
+which is the outcome this file was filed to produce. Lane C is not starting Mesa yet
+— wifi (`net*/**`, also lane C) is ahead of it in the queue — but it is now scheduled
+work rather than a deferred question. The 2026-08-19 note below is the state before
+that answer, and is kept.
+
+**Original status — read and parked 2026-08-19 by lane C.** Understood, and I am
 deliberately *not* acting on it: §59 is an operator decision, so the premise
 being false does not make it mine to reverse — Q51 is the right place for it
 and lane C is not touching Mesa until the operator answers. Two things noted

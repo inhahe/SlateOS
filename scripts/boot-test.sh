@@ -1235,10 +1235,22 @@ HOST_LOAD="unknown"
 # `cargo clean`, and losing an uncommitted file costs the work.
 MIN_FREE_GB="${BOOT_TEST_MIN_FREE_GB:-20}"
 
+# The same floor, for the volume the *toolchain* writes its scratch to, which
+# on this machine is not the volume the tree is on.
+#
+# Empty means "a quarter of MIN_FREE_GB", resolved after arg parsing so that
+# --min-free-gb= moves both.  Deliberately much lower than the tree's floor:
+# 20 GiB is sized against one full rebuild of all four worktrees, and scratch
+# is nowhere near that, so a guard that refused to build on a machine with 15
+# GiB of temp free would be a worse bug than the one it fixes.
+MIN_FREE_TEMP_GB="${BOOT_TEST_MIN_FREE_TEMP_GB:-}"
+
 # Opt-in: when the floor trips, run scripts/reclaim-space.py and retry once
 # instead of refusing outright.  Off by default because freeing space deletes
 # another tree's build output, and a run should not do that merely because it
-# happened to be the one that noticed.  See check_free_space.
+# happened to be the one that noticed.  See check_tree_free_space.  It applies
+# to the tree's volume only: the toolchain's scratch volume is checked too, but
+# never reclaimed -- see check_temp_free_space for why.
 RECLAIM_SPACE="${BOOT_TEST_RECLAIM_SPACE:-0}"
 
 # Opt-in: when a git-ignored prerequisite is missing, run
@@ -1291,6 +1303,7 @@ for arg in "$@"; do
         --hard-lockup-watchdog) HARD_LOCKUP_WATCHDOG=1 ;;
         --host-load=*) HOST_LOAD="${arg#*=}" ;;
         --min-free-gb=*) MIN_FREE_GB="${arg#*=}" ;;
+        --min-free-temp-gb=*) MIN_FREE_TEMP_GB="${arg#*=}" ;;
         --reclaim-space) RECLAIM_SPACE=1 ;;
         --bootstrap) BOOTSTRAP=1 ;;
         # --usb-image boots the same bytes a flash drive would hold.
@@ -1334,7 +1347,44 @@ for arg in "$@"; do
     esac
 done
 
+# A quarter of the tree's floor, unless the caller named one.  Resolved here
+# rather than at the assignment above so that --min-free-gb=N moves both, which
+# is what someone raising or lowering "the floor" means.  A quarter because the
+# scratch volume holds only in-flight temporaries, not the target/ trees the
+# tree's floor is sized for.
+#
+# Both floors are rejected outright if they are not numbers, rather than being
+# coerced or left to fail later.  `[ "$avail_gb" -lt twenty ]` prints "integer
+# expression expected" to stderr and evaluates *false*, and `set -e` does not
+# catch it because it sits in an `if` -- so a typo'd --min-free-gb= would
+# silently switch the guard off while the run looked entirely normal.  That is
+# precisely the ok/unknown conflation the three-outcome rule below exists to
+# stop, so it must not be reintroduced by the floor itself.
+for _floor_var in MIN_FREE_GB MIN_FREE_TEMP_GB; do
+    eval "_floor_val=\$$_floor_var"
+    case "$_floor_val" in
+        # Empty MIN_FREE_TEMP_GB is the documented "use the default" value and
+        # is resolved just below; empty MIN_FREE_GB is not, it has a default.
+        '') [ "$_floor_var" = "MIN_FREE_TEMP_GB" ] && continue ;;
+        *[!0-9]*) ;;
+        *) continue ;;
+    esac
+    echo "ERROR: $_floor_var must be a whole number of GiB (got '$_floor_val')." >&2
+    echo "Set it with --min-free-gb=N / --min-free-temp-gb=N, or the matching" >&2
+    echo "BOOT_TEST_* variable.  0 disables that floor." >&2
+    exit 1
+done
+unset _floor_var _floor_val
+
+if [ -z "$MIN_FREE_TEMP_GB" ]; then
+    MIN_FREE_TEMP_GB=$((MIN_FREE_GB / 4))
+fi
+
 # Free-space floor (Q47 option C).  See MIN_FREE_GB above for why.
+#
+# Two volumes can run a build out of room: the one holding the tree, and the
+# one the toolchain writes scratch to.  They are usually the same and often
+# are not; check_free_space checks both.
 #
 # Reports one of three outcomes and never conflates them, because "the check
 # could not run" reads exactly like "the check passed" if you let it:
@@ -1347,24 +1397,160 @@ done
 # test on every machine.  But it says so, rather than printing nothing and
 # letting a silent skip pass for a clean bill of health.
 #
-# Split out from check_free_space so the floor can be re-tested after a reclaim
-# without duplicating the parsing or recursing back into the refusal path.
-# Prints the free space in GiB and returns 0; prints nothing and returns 1 if
-# df could not produce a number.
+# Split out from check_tree_free_space so the floor can be re-tested after a
+# reclaim without duplicating the parsing or recursing back into the refusal
+# path, and so the temp volume can be measured with the same code.  Takes the
+# directory to measure, defaulting to the tree.  Prints the free space in GiB
+# and returns 0; prints nothing and returns 1 if df could not produce a number.
 measure_free_gb() {
     # -P forces POSIX single-line output: without it a long filesystem name
     # wraps onto its own line and $4 is then the wrong column.
+    local target="${1:-$PROJECT_ROOT}"
     local avail_kib
-    avail_kib="$(df -Pk "$PROJECT_ROOT" 2>/dev/null | awk 'NR==2 {print $4}')"
+    avail_kib="$(df -Pk "$target" 2>/dev/null | awk 'NR==2 {print $4}')"
     case "$avail_kib" in
         ''|*[!0-9]*) return 1 ;;
     esac
     echo $((avail_kib / 1024 / 1024))
 }
 
-check_free_space() {
+# Identify the volume behind a directory, as "<filesystem> <mount point>".
+#
+# Both columns, because neither alone is a reliable identity: under MSYS the
+# filesystem column is the drive letter (`D:`) and the mount point is a
+# synthetic `/d`, while on Linux the filesystem is a device node and the mount
+# point is the meaningful half.  Comparing the pair is right on both.
+# Prints nothing and returns 1 if df gave no usable row.
+volume_id_for() {
+    local id
+    id="$(df -Pk "$1" 2>/dev/null | awk 'NR==2 {print $1" "$6}')"
+    case "$id" in
+        ''|' ') return 1 ;;
+    esac
+    printf '%s\n' "$id"
+}
+
+# The directory the toolchain will use for scratch.
+#
+# rustc/LLVM temporaries, the linker's intermediates and cargo's last-use
+# database all land here.  POSIX order: TMPDIR, then TMP, then TEMP, then
+# /tmp.  A Windows-shaped value (`C:\Users\...`) is converted with cygpath when
+# one is available, because df cannot read a backslash path.
+resolve_temp_dir() {
+    # ${x:-} on every one of them: this script runs under `set -u`, and all
+    # three are genuinely unset on a bare Linux shell, so a bare $TMPDIR here
+    # aborts the whole run with "unbound variable" before anything is built.
+    local d
+    for d in "${TMPDIR:-}" "${TMP:-}" "${TEMP:-}"; do
+        [ -n "$d" ] || continue
+        case "$d" in
+            [A-Za-z]:[\\/]*)
+                if command -v cygpath >/dev/null 2>&1; then
+                    d="$(cygpath -u "$d" 2>/dev/null || printf '%s' "$d")"
+                fi
+                ;;
+        esac
+        [ -d "$d" ] && { printf '%s\n' "$d"; return 0; }
+    done
+    printf '/tmp\n'
+}
+
+# Second volume: the toolchain's scratch space.  Same ok/refuse/unknown
+# trichotomy as the tree's floor, folded into the same reporting rather than
+# run as a parallel path.
+#
+# Filed by lane B 2026-08-19 (requests/b-a-free-space-floor-does-not-check-the-
+# compiler-s-temp-volume.md) after a run printed
+#
+#     Free space OK: 47 GiB on the build volume
+#     ...
+#     rustc-LLVM ERROR: out of memory
+#
+# with C: -- not the build volume -- at zero bytes free.  That message is the
+# reason this is worth a check rather than being left to fail on its own: "out
+# of memory" sends you to RAM, to parallelism, to a runaway build, anywhere
+# except the disk, which the run has just finished certifying.  The same
+# condition reached a host-target crate as "No space left on device", so the
+# diagnosis you get depends on which crate happens to hit it first.
+#
+# No reclaim here, deliberately, and not merely as scope.  reclaim-space.py
+# deletes build output under this project's worktrees; the temp volume is the
+# operator's system drive, holding VM images and installed software that this
+# script has no business forming an opinion about.  Checking is safe; reclaiming
+# there is not.
+check_temp_free_space() {
+    local phase="$1"
+    [ "$MIN_FREE_TEMP_GB" = "0" ] && return 0
+
+    local tmpdir tmp_vol root_vol
+    tmpdir="$(resolve_temp_dir)"
+
+    if ! tmp_vol="$(volume_id_for "$tmpdir")"; then
+        echo "WARNING: could not identify the volume behind the toolchain's temp" \
+             "directory ($tmpdir); the ${MIN_FREE_TEMP_GB} GiB scratch floor is" \
+             "NOT being enforced for this run." >&2
+        return 0
+    fi
+
+    # The single-volume machine is the common case and must not print two lines
+    # that look like two checks -- the point of naming the volume at all is that
+    # the reader can tell which one a number refers to.
+    if root_vol="$(volume_id_for "$PROJECT_ROOT")" && [ "$tmp_vol" = "$root_vol" ]; then
+        if [ "$MIN_FREE_GB" = "0" ]; then
+            echo "WARNING: the toolchain's temp directory ($tmpdir) is on the build" \
+                 "volume ${tmp_vol%% *}, whose floor is disabled; the" \
+                 "${MIN_FREE_TEMP_GB} GiB scratch floor is NOT being enforced" \
+                 "for this run." >&2
+        else
+            echo "Toolchain temp ($tmpdir) is on the build volume ${tmp_vol%% *}; the build-volume floor covers it."
+        fi
+        return 0
+    fi
+
+    local tmp_gb
+    if ! tmp_gb="$(measure_free_gb "$tmpdir")"; then
+        echo "WARNING: could not measure free space on $tmpdir (df gave no usable" \
+             "number); the ${MIN_FREE_TEMP_GB} GiB scratch floor is NOT being" \
+             "enforced for this run." >&2
+        return 0
+    fi
+
+    if [ "$tmp_gb" -lt "$MIN_FREE_TEMP_GB" ]; then
+        echo "" >&2
+        echo "ERROR: only ${tmp_gb} GiB free on ${tmp_vol%% *}, which is where the toolchain" >&2
+        echo "writes its scratch files ($tmpdir); the floor for that volume is" >&2
+        echo "${MIN_FREE_TEMP_GB} GiB (${phase})." >&2
+        echo "" >&2
+        echo "This is a different volume from the tree, which was checked separately and is" >&2
+        echo "fine.  Refusing anyway: rustc reports this condition as" >&2
+        echo "  rustc-LLVM ERROR: out of memory" >&2
+        echo "which costs far more to diagnose than it costs to refuse here." >&2
+        echo "" >&2
+        echo "reclaim-space.py is NOT the remedy for this one -- it only knows about build" >&2
+        echo "output under this project's worktrees, and nothing it can delete lives on" >&2
+        echo "${tmp_vol%% *}.  Free space there by hand, or point the toolchain elsewhere:" >&2
+        echo "    TMPDIR=/d/tmp ./scripts/boot-test.sh" >&2
+        echo "" >&2
+        echo "To override for one run:  --min-free-temp-gb=N   (or" >&2
+        echo "BOOT_TEST_MIN_FREE_TEMP_GB=N, 0 disables just this check)." >&2
+        exit 1
+    fi
+    echo "Toolchain temp OK: ${tmp_gb} GiB on ${tmp_vol%% *} ($tmpdir, floor ${MIN_FREE_TEMP_GB} GiB, ${phase})."
+}
+
+check_tree_free_space() {
     local phase="$1"
     [ "$MIN_FREE_GB" = "0" ] && return 0
+
+    # Name the volume rather than saying "the build volume".  Lane B's report
+    # turned on a run that printed "47 GiB on the build volume" while a
+    # *different* volume was at zero, so an unnamed number is exactly the part
+    # that misleads.  Falls back to the old wording if df cannot name it.
+    local vol_label="the build volume"
+    local root_vol
+    if root_vol="$(volume_id_for "$PROJECT_ROOT")"; then
+        vol_label="${root_vol%% *}"
+    fi
 
     local avail_gb
     if ! avail_gb="$(measure_free_gb)"; then
@@ -1413,7 +1599,7 @@ check_free_space() {
             fi
         fi
         echo "" >&2
-        echo "ERROR: only ${avail_gb} GiB free on the build volume; the floor is ${MIN_FREE_GB} GiB (${phase})." >&2
+        echo "ERROR: only ${avail_gb} GiB free on ${vol_label}, which holds the tree; the floor is ${MIN_FREE_GB} GiB (${phase})." >&2
         echo "" >&2
         echo "Refusing to continue rather than risk a disk-full build.  On 2026-08-15 this" >&2
         echo "volume hit zero bytes free and a half-written edit truncated a kernel source" >&2
@@ -1435,7 +1621,19 @@ check_free_space() {
         echo "To override for one run:  --min-free-gb=N   (or BOOT_TEST_MIN_FREE_GB=N, 0 disables)" >&2
         exit 1
     fi
-    echo "Free space OK: ${avail_gb} GiB on the build volume (floor ${MIN_FREE_GB} GiB, ${phase})."
+    echo "Free space OK: ${avail_gb} GiB on ${vol_label} (floor ${MIN_FREE_GB} GiB, ${phase})."
+}
+
+# Both volumes a build can run out of room on.
+#
+# A wrapper rather than a call at the tail of check_tree_free_space, because
+# that body returns early on three separate paths -- floor disabled, df
+# unreadable, floor cleared by a reclaim -- and a check that quietly does not
+# run on two of them is worse than no check at all: it reads as coverage.
+check_free_space() {
+    local phase="$1"
+    check_tree_free_space "$phase"
+    check_temp_free_space "$phase"
 }
 
 # Validated here rather than passed through, so a typo ("--host-load=quiet")
@@ -1897,6 +2095,14 @@ record_boot_outcome() {
     if [ -n "$why" ]; then
         args+=(--experiment "$why")
     fi
+    # Absent, not zero, when the run did not build: --no-build and --no-stage
+    # skip Step 1 entirely, and recording 0 there would drag every median down
+    # while looking like an implausibly fast build rather than like a run that
+    # never built.  A missing field is a question the reader can answer; a wrong
+    # one is not.
+    if [ -n "${BUILD_SECONDS:-}" ]; then
+        args+=(--build-seconds "$BUILD_SECONDS")
+    fi
     if [ -n "${QEMU_START_EPOCH:-}" ]; then
         local wall=$(( ${QEMU_END_EPOCH:-$(date +%s)} - QEMU_START_EPOCH ))
         if [ "$wall" -ge 0 ]; then
@@ -2084,7 +2290,7 @@ check_prerequisites() {
                 # should see it happen.
                 #
                 # Its exit status is deliberately not tested, for the same
-                # reason check_free_space ignores reclaim-space.py's: a run that
+                # reason check_tree_free_space ignores reclaim-space.py's: a run that
                 # could not provision *everything* may well have provisioned
                 # everything that blocks a build.  bootstrap-worktree.sh exits
                 # non-zero when only `rootfs.ext4` is missing, and that alone
@@ -2146,8 +2352,26 @@ if [ "$NO_BUILD" -eq 0 ]; then
     if ! command -v "$CARGO" &>/dev/null; then
         CARGO="/c/Users/${USER:-${USERNAME:-$(whoami)}}/.cargo/bin/cargo.exe"
     fi
+    # Timed, and recorded in bench/boot-history.jsonl alongside the QEMU window.
+    #
+    # WHY THIS MATTERS BEYOND CURIOSITY.  open-questions.md Q46 asks whether the
+    # non-bench boot test should build release rather than debug, and its whole
+    # tradeoff is "slower build, faster boot".  We have always measured the boot
+    # half precisely -- wall_seconds and marker_seconds, hundreds of records --
+    # and the build half not at all, so one side of that comparison was an
+    # assertion and the other was evidence.  A cost claim nobody measures is a
+    # cost claim that cannot be checked, and it had gone unmeasured for the
+    # entire life of the question.
+    #
+    # `date +%s` rather than SECONDS: SECONDS counts since the shell started,
+    # which includes the prerequisite and free-space checks, and those are not
+    # part of what a profile choice makes slower.
+    BUILD_START_EPOCH="$(date +%s)"
     (cd "$PROJECT_ROOT" && "$CARGO" build ${CARGO_PROFILE_ARGS[@]+"${CARGO_PROFILE_ARGS[@]}"})
-    echo "Build OK ($BENCH_PROFILE profile)."
+    BUILD_SECONDS=$(( $(date +%s) - BUILD_START_EPOCH ))
+    # Said out loud as well as recorded: a lane deciding Q46 by feel should see
+    # the number on the run in front of them, not only in the history file.
+    echo "Build OK ($BENCH_PROFILE profile, ${BUILD_SECONDS}s)."
 fi
 
 if [ "$NO_STAGE" -eq 0 ] && [ ! -f "$KERNEL_BIN" ]; then

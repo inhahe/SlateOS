@@ -10267,6 +10267,104 @@ boots cannot separate "cured" from "rarer", and silently closing it would throw
 away the instrumentation's value. Keep at WATCH; if a repro appears, the new
 bytes-at-RIP dump plus the existing stack scan should close it in one capture.
 
+**Update 2026-08-21 — IT RECURRED, and in a form nobody had allowed for: the
+hijack was in *ring 3*, so none of the instrumentation fired.** The
+`spawn-test-glibc-pthread` process (pid 310; main thread task 277, workers
+278–281) faulted during exactly the documented window — siblings 279, 280 and
+281 had just printed `[sched] Task N exiting` — with:
+
+```
+[exception] User page fault (task 278) at 0x6000066370, addr=0x6000066370 (not-present, read) — trying SEH
+[exception] Killing task 278 — Page Fault (#PF) at 0x6000066370 (ring 3)
+  CS=0x23 RFLAGS=0x10246 RSP=0x6000a15e68 SS=0x1b
+[spawn]   FAIL: real glibc pthread — exit code=Some(-8), expected 13
+```
+
+`RIP == CR2` again, so it is the same *shape* — a control-flow hijack, execution
+sent to an address that holds no code — but `CS=0x23` means it happened at
+**CPL 3**, not in the kernel. Every previous capture was ring 0. The whole
+2026-08-14a bytes-at-RIP dump and the `dump_stack_scan` call it was added
+alongside live on the *kernel* fatal path (`idt.rs`, after the
+`error & 4 == 0` branch); a ring-3 fault never reaches them. So the capture
+this entry had been waiting five weeks for arrived and produced three lines.
+
+**Not caused by the change it surfaced under.** It appeared on the boot
+validating the hrtimer min-heap rewrite (`520634ccc`), and the immediately
+following boot on the same source was clean — the usual pattern for this
+defect, and consistent with the historical ~1/5 rate. A heap-vs-sorted-list
+change in the timer queue also has no mechanism to corrupt a user code pointer:
+its failure modes are a lost or mis-ordered wakeup, which hang, not jump.
+
+**What the capture does and does not say.** `0x6000066370` is *below* every
+mapping the log records for pid 310 — the first `mmap` was `0x6000212000`, and
+the four 8 MiB thread stacks run upward from `0x6000216000`. Thread 278's own
+stack was `0x6000216000..0x6000a1a000` and `RSP = 0x6000a15e68` sits ~16.8 KiB
+below its top, i.e. **the stack pointer was perfectly sane while RIP was
+garbage.** That is the one genuinely new fact, and it is worth more than it
+looks:
+
+- If the *user* stack is intact and only RIP is wrong, the corrupted value was
+  most likely not read from the user stack at all — which points away from
+  "glibc scribbled on its own frame" and toward **the saved user RIP in the
+  kernel's interrupt frame**, restored by `IRETQ` on the way back to ring 3.
+- And that unifies the two manifestations. A single wild write into a task's
+  **kernel stack** explains both: land on the saved *kernel* return address and
+  you get the 2026-07-15 ring-0 jump into `.data`; land on the saved *user* RIP
+  in the same stack's interrupt frame and you get this ring-3 jump into a hole.
+  The historical hijack value was `&CURRENT_TASK_IDS[0]`, a kernel data address
+  — a plausible spill, and a value that could only have got onto a stack by
+  being written there. Two different victims, one class of writer.
+
+This is a hypothesis, not a conclusion: the capture cannot yet distinguish it
+from a user-side corruption that happened to leave the stack pointer valid.
+
+**Action taken 2026-08-21: the ring-3 fatal path now reports as much as the
+ring-0 one** (`idt.rs`, `kill_userspace_task_with_info`). It classifies RIP, the
+fault address and RSP against the process's VMA list via a new allocation-free
+`pcb::classify_user_addr` (`try_lock`, copies out at most three `Vma`s, and
+reports "table busy" rather than waiting — a diagnostic must never be the thing
+that deadlocks the machine), naming the *hole* an address falls into and the
+mappings bracketing it; dumps the bytes at RIP; and raw-scans 16 quadwords of
+the user stack, flagging every value that points into a mapped executable user
+page. Each read is preceded by a page-table check on that exact address so the
+report cannot itself fault.
+
+**That turns the next repro into a decision rather than another inference
+round**, because the two hypotheses above predict opposite outputs:
+
+| | user stack scan shows | verdict |
+|---|---|---|
+| kernel-stack wild write | plausible frames, executable-looking return candidates | the corruption is in the *kernel* interrupt frame; hunt the writer |
+| user-side corruption | garbage, or the hijack value visible on the stack | glibc/TLS teardown; hunt the freed object |
+
+The classification of `0x6000066370` also settles, in one line, whether that
+address is a freed thread stack, the `brk` heap, or address space that was never
+mapped — three different bugs that the old two-line report could not tell apart.
+The instrumentation is exercised on every boot, because the exception self-tests
+deliberately kill ring-3 tasks (`0x4000000000`-family faults), so it cannot rot
+unnoticed the way the ring-0 dump did.
+
+**A mistake made adding it, recorded because the next person will make it too:
+the first version killed the boot it was added on.** Reading user memory from
+ring 0 is not merely a pointer dereference on this kernel — SMAP is enabled, so
+a bare kernel read of a user page faults, and the boot died with
+
+```
+EXCEPTION: Page Fault (#PF) at 0xffffffff821936b8, address=0x4000000002, error=0x1
+Cause: present, read, kernel
+FATAL: Unrecoverable kernel page fault. Halting.
+```
+
+Note the shape of that: **`present`** — the page *was* mapped and the read
+faulted anyway, which is exactly what makes SMAP easy to misdiagnose as a bad
+address. Both read sites now go through `crate::smep_smap::with_user_access`
+(STAC/CLAC), each with a `// SAFETY:` comment saying the wrapper is **required**
+rather than defensive, so that nobody later "simplifies" it away. The general
+point is the one the diagnostic's own design already concedes: a fault handler
+is the worst possible place to discover that your code can fault, and only a
+boot test finds it — this would have shipped clean under a "it compiles and
+clippy is quiet" standard.
+
 ### B-FORKEXEC-BOOT-HANG. Intermittent silent boot hang at the glibc `fork()`+`execl()`+`waitpid()` self-test — WATCH (rare, non-fatal to a re-run) 2026-07-15
 
 **Symptom (1 occurrence, 2026-07-15):** During
@@ -31949,6 +32047,11 @@ cost of a mismatch is small.
   keyboard or mouse driver feeding `Compositor::handle_input`, so outside a test
   that injects them, `route_input` has nothing to route.
 
+  *(Update 2026-08-21: scanout is done — `TD-COMPOSITOR-HAS-NO-SCANOUT` is
+  closed and `gui/compositor/src/present/drm.rs` page-flips composited frames
+  onto a real display. The input half of that sentence still stands, and is now
+  its own entry: `TD-COMPOSITOR-HAS-NO-LOCAL-INPUT`.)*
+
 **Severity.** High as a *blocker* — it is the single gap between "142 app
 crates" and "an OS with any usable application at all". Low as a *defect*:
 nothing that exists is wrong, it is only unreachable, so the fix is additive
@@ -31962,6 +32065,10 @@ from it. This entry stays open for the remaining 137 apps, none of which is
 wired yet, and because a window whose pixels never reach a screen is not yet a
 usable desktop — `TD-COMPOSITOR-HAS-NO-SCANOUT` is now the last link in the
 chain from an app's `RenderTree` to a photon.
+
+*(Update 2026-08-21: that last link is closed. The chain from a `RenderTree` to
+a photon is complete on SlateOS. This entry stays open for the remaining 137
+unwired applications, which is now the only thing it is about.)*
 
 
 **One of the 137 now has something specific it cannot call (2026-08-21).**
@@ -32203,7 +32310,7 @@ polling shape is the kind of thing that gets copied into the next server
 written in this tree if nobody has written down that it was a constraint of
 the standard library rather than a preference.
 
-## TD-COMPOSITOR-HAS-NO-SCANOUT (lane C, 2026-08-17)
+## TD-COMPOSITOR-HAS-NO-SCANOUT (lane C, 2026-08-17) - **fixed 2026-08-21**
 
 > **Read the Status note at the end of this entry first.** The description
 > below is the state *before* the `Present` trait and the Win32 host window
@@ -32289,6 +32396,575 @@ nothing else in this crate changing, which is the argument for the trait having
 been worth defining before the driver exists. This entry therefore stays open,
 and the sentence in `TD-NO-APP-CONNECTS-TO-THE-COMPOSITOR` calling this the last
 link to a photon stays true of SlateOS, not of the harness.
+
+**Status 2026-08-21: (1) is done. This entry is CLOSED.**
+
+**In short:** the compositor now puts its frames on a real SlateOS screen. It
+opens the graphics card, asks it which monitor is plugged in and what resolution
+that monitor is already running, gets two chunks of video memory it can write
+pixels into, and tells the card to display them alternately. The chain from an
+application's window to a photon is complete.
+
+`gui/compositor/src/present/drm.rs` implements `Present` as `DrmScanout`, the
+third implementor beside `Headless` and the Win32 harness, and — as this entry
+predicted — **nothing else in the crate changed**: `Server::run_with` drives it
+unmodified. The binary's `run()` gained a `#[cfg(target_os = "linux")]` arm
+(`x86_64-slateos` reports `target_os = "linux"`) that opens `/dev/dri/card0` and
+falls back to headless with a printed reason if there is no display.
+
+The pipeline it drives is Linux's, because our kernel implements Linux's DRM
+ioctls: `GETRESOURCES` → `GETCONNECTOR` → `GETENCODER` → `CREATE_DUMB` →
+`MAP_DUMB` → `mmap` → `ADDFB2` → `PAGE_FLIP`. Two dumb buffers are allocated at
+the connected display's preferred mode, mapped, and page-flipped alternately;
+the front index advances only on a flip the kernel accepted, so a refused flip
+drops a frame instead of putting the pair permanently out of step.
+
+**The three things that were not obvious**, recorded because each is a defect
+that would have shipped:
+
+* **`SETCRTC` is absent from this kernel and is not needed.** The first reading
+  of `kernel/src/drm/` said scanout was blocked on lane A adding it. Reading
+  `DrmDevice::page_flip` and all three backends showed otherwise: the flip
+  validates the CRTC id, the fb id and its GEM object, all three backends ignore
+  `crtc_id`, and the ATI backend self-modesets inside the flip. Driving the mode
+  the firmware already lit needs no `SETCRTC`. No cross-lane request was filed,
+  because the premise was false. What it *does* cost is the ability to change
+  resolution — see `TD-COMPOSITOR-CANNOT-CHANGE-MODE` below.
+* **Pitch is not width × 4.** Dumb buffers are 64-byte aligned, so a 1366-wide
+  screen has a 5504-byte pitch, not 5464. Every row copy and the `ADDFB2`
+  registration use the driver's returned pitch. Getting this wrong skews every
+  row after the first, and is invisible at any width divisible by 16.
+* **`possible_crtcs` is a bitmask over the CRTC array *index*, not over CRTC
+  ids.** This hides completely on a single-CRTC machine, where index 0 and the
+  only id both make bit 0 look right — which is why the test fake models two.
+
+**How it is tested without hardware.** The protocol half is not `cfg`-gated and
+runs on the development machine against a strict in-memory fake card; only the
+~50 lines of raw `syscall` mechanism are target-only, and those are compiled and
+linted via `--target x86_64-unknown-linux-gnu`. 57 tests: 23 pinning the wire
+structs against the `_IOC`-encoded sizes in the request numbers, 34 driving the
+scanout end to end. The fake is deliberately hostile — it re-checks every
+payload's length against the size its request number declares, rejects `ADDFB2`
+unless the load-bearing zero fields are zero, and panics on any ioctl the kernel
+does not implement — because a permissive fake lets the protocol drift and still
+reports green. All 34 were then proved to be regression tests by reintroducing
+the ten defects they name, one at a time, and confirming a deterministic failure
+that names the test back. Design rationale: `design-decisions.md` §511.
+
+**What this closed and what it did not.** It closed *scanout*. It did not close
+input: `DrmScanout` inherits the default `Present::input`, which returns nothing,
+because the kernel exposes no evdev-style device — see
+`TD-COMPOSITOR-HAS-NO-LOCAL-INPUT`. A SlateOS desktop now draws and cannot be
+typed at, which is the exact mirror of where the Win32 harness started.
+
+## TD-COMPOSITOR-CANNOT-CHANGE-MODE (lane C, 2026-08-21)
+
+**In short:** on SlateOS the desktop runs at whatever resolution the monitor was
+already using when the machine booted, and nothing can change it. There is no
+"Display settings → Resolution" that can work. This is a missing kernel feature,
+not a compositor bug.
+
+**What.** `DrmScanout::new` reads the connected display's preferred mode and
+builds the compositor at that size. It never sets a mode, because
+`kernel/src/drm/` implements no `DRM_IOCTL_MODE_SETCRTC`. `PAGE_FLIP` works
+without it — the CRTC is already scanning out the mode the firmware programmed —
+so this is a limitation rather than a blocker, but it means the mode we get is
+the mode we keep. The compositor binary reports `--size` as ignored on this path
+rather than silently obeying it, since obeying it would compose frames the
+display cannot show.
+
+**What is missing:** `SETCRTC` in lane A's `kernel/src/drm/`, a re-allocation of
+the pair of dumb buffers at the new mode's size in `DrmScanout`, and the call
+that sequences the two.
+
+**Severity.** Low. A display running its own native mode is the right default,
+and it is what the user is already looking at. This bites only when the native
+mode is wrong for the user (a projector, a scaled-down mode for performance, a
+panel whose EDID lies).
+
+**Update 2026-08-21 — the compositor half is done.** What this entry used to
+call "a second, separate piece of work" — `Compositor::new` takes a size and
+everything downstream assumes it for its lifetime — is finished.
+`Compositor::resize_display` now re-derives, against the new size, everything
+that was placed *by a rule* rather than by the user: maximised and snapped
+windows are re-tiled through the work area (so they land above a taskbar, not
+under it), fullscreen windows are re-fitted to the new framebuffer and told
+about it, any window the shrink left entirely off-screen is pulled back by the
+smallest movement that recovers it, and the pointer is clamped onto the virtual
+desktop. A window the user placed themselves and can still reach is left exactly
+where it was — a resize is not permission to re-lay-out the desktop. 12 tests,
+each proved a regression test by reintroducing the defect it names. Rationale
+and the four separate failures it fixes: `design-decisions.md` §512.
+
+**Filed to lane A?** Yes —
+`requests/c-a-drm-setcrtc-and-a-page-flip-that-refuses-a-mismatched-framebuffer.md`
+(2026-08-21). It was deliberately *not* filed before now: a `SETCRTC` with no
+caller is worse than none, and the caller needed compositor resize first. Resize
+has landed, so the caller exists. That request also carries a second, separate
+bug found while writing it — see `BUG-DRM-PAGE-FLIP-ACCEPTS-A-MISMATCHED-FB`
+below.
+
+## BUG-DRM-PAGE-FLIP-ACCEPTS-A-MISMATCHED-FB (found by lane C 2026-08-21; lives in lane A's tree)
+
+**In short:** the kernel lets a program hand the graphics card a picture that is
+the wrong size for the screen, and then each of the three supported cards does
+something *different* with it — one quietly changes the resolution, one quietly
+crops the picture, and both then report the old resolution when asked. The same
+sequence of calls therefore produces a different result on different hardware,
+and the program that made them cannot tell which happened.
+
+**Where.** `DrmDevice::page_flip` (`kernel/src/drm/mod.rs:385`), reached from
+`drm_card_ioctl_mode_page_flip` (`kernel/src/syscall/linux.rs:11125`). It checks
+that the CRTC id, the framebuffer id and the backing GEM object *exist*, and
+nothing else. Linux's `drm_mode_page_flip_ioctl` compares the framebuffer's
+dimensions against the CRTC's current mode and returns `EINVAL`; we do not.
+
+**The three divergent behaviours:**
+
+* **ATI** silently performs a full mode-set. `ati/backend.rs:409` does
+  `timing::lookup(fb.width, fb.height, 60)` and applies the result if it differs
+  from `self.mode`. A page flip changes the resolution.
+* **virtio-gpu** silently crops. `drm/driver.rs:500` computes
+  `copy_h = fb.height.min(self.height)` and
+  `copy_w_bytes = fb.width.min(self.width) * bpp`, so an oversized framebuffer
+  loses its right and bottom edges and an undersized one leaves stale pixels
+  around itself. The display never changes size.
+* **`GETCRTC` lies afterwards on both.** ATI updates its own private
+  `self.mode` (`backend.rs:415`), but nothing writes `dev.crtcs[i].mode`, so the
+  DRM object model keeps reporting the boot mode after the hardware has been
+  reprogrammed.
+
+**Severity.** Medium, and latent. No current client triggers it — the
+compositor's `DrmScanout` builds its buffers from the connector's preferred mode
+and has only ever flipped matching-size framebuffers, so the check would have
+been a no-op for every flip we have issued. It becomes live the moment anything
+tries to change resolution, which is precisely what
+`TD-COMPOSITOR-CANNOT-CHANGE-MODE` is about; and it is the sort of defect that,
+left alone, gets *depended on* — a client that discovers ATI's implicit mode-set
+will use it, and then be silently cropped in QEMU.
+
+**Proper fix.** `EINVAL` in `DrmDevice::page_flip` when the framebuffer's size
+differs from the CRTC's mode, so all three backends inherit one answer. Keeping
+ATI's implicit mode-set as a deliberate SlateOS extension is also defensible —
+but then it must be the documented behaviour of *all three* backends, virtio-gpu
+must grow it, and `dev.crtcs[i].mode` must be updated when it fires. The one
+option that is not tenable is the present one, where the answer depends on which
+card is fitted.
+
+**Not lane C's to fix** — `kernel/**` is lane A's. Filed as Ask 2 of
+`requests/c-a-drm-setcrtc-and-a-page-flip-that-refuses-a-mismatched-framebuffer.md`.
+
+## TD-COMPOSITOR-PICKS-CARD0 (lane C, 2026-08-21) - **(1) and (2) fixed 2026-08-21; (3) open**
+
+**Status 2026-08-21: the screen no longer stays black, and there is now a way to
+tell it otherwise. What remains open is only item (3) below — real multi-GPU
+*preference*, as opposed to finding a card that works at all.**
+
+`DrmScanout::card0()` is gone. In its place:
+
+* `DrmScanout::open(wanted: Option<u32>)` and, under it, the generic
+  `open_display<C: CardSource>(source, wanted)` in
+  `gui/compositor/src/present/drm.rs`. With `None` it tries `card0..card15` and
+  keeps the first that is not `NoConnectedDisplay`; with `Some(n)` it opens that
+  card and only that card, reporting its failure rather than quietly falling
+  back — a `--card 1` that silently gives card 0 is worse than an error, because
+  the wrong monitor lights and the flag appears to have been ignored.
+* `--card N` / `--card=N` on the compositor, and `$SLATE_DRM_CARD` for the
+  service definition that starts it at boot. The flag is a hard error when it
+  names something out of range; the variable is a **warning and then ignored**,
+  because an inherited variable may be years stale and must not be able to keep
+  the desktop from starting. That asymmetry is deliberate and is tested.
+* Three failure kinds are now kept apart in the report: "nothing is plugged into
+  any card" (`NoConnectedDisplay`), "there is no such card" (`ENOENT`, which is
+  the ordinary end of the list and never becomes the reported error), and a real
+  failure such as `EACCES`. When several cards fail, the **first** real failure
+  is reported — the last would always be `ENOENT` on `/dev/dri/card15`, true and
+  useless. A card that fails for a real reason does not stop the search, so a
+  broken first card cannot keep a working second one dark.
+* `sys::CardPath` builds `/dev/dri/cardN\0` without allocating, and
+  `sys::CardSource` is the seam that makes all of the above testable on a
+  machine with no graphics card at all — the same trick `KmsSys` plays for the
+  ioctls. 13 tests in `present/drm/tests.rs` plus 8 in `main.rs`; every one was
+  proved to fail with the defect it names put back (reintroduction markers
+  `drmcardzero`, `drmenoentreal`, `drmlasterror`, `drmdarkreal`,
+  `drmnamedfallback`, `drmkeeplooking`, `drmpathshort`, `drmpathonedigit`,
+  `carddefaultzero`, `cardboundoff`, `cardenvunbounded`, `cardenvnotrim`).
+
+**What is still open — item (3).** The search answers "which card *can* I
+drive?", not "which card *should* I drive?". On a laptop where both the
+integrated and the discrete GPU have a display attached, the first that works
+wins, and that may be the power-hungry one. Real policy needs information DRM
+does not hand over cheaply (which adapter is physically wired to the internal
+panel, which is on battery-friendly silicon), so it is deferred until there is
+hardware to test it on. It is not blocking anything: `--card` covers the case by
+hand, and QEMU presents one card.
+
+The original entry follows, unchanged.
+
+**In short:** on a machine with two graphics cards the compositor always uses the
+first one, and if a monitor is plugged into the second one the screen stays
+black. There is no way to tell it otherwise.
+
+**What.** `DrmScanout::card0()` opens `/dev/dri/card0` and nothing else. A
+laptop with integrated graphics plus a discrete GPU has `card0` and `card1`, and
+which one is which is not stable across boots. There is no `--card` flag, no
+enumeration of `/dev/dri/*`, and no policy for choosing.
+
+**The proper fix**, in the order the cost rises: (1) a `--card N` flag or
+`SLATE_DRM_CARD` variable, which is minutes and makes the machine usable by
+hand; (2) enumerate `card0..card15` and take the first with a connected
+connector, which makes the common case automatic — `DrmScanout::new` already
+returns `NoConnectedDisplay` distinguishably, so the loop is exactly "try each,
+keep the first that is not that error"; (3) actual multi-GPU policy (prefer the
+discrete one, or the one the monitor is physically wired to), which needs
+information DRM does not hand over cheaply.
+
+**Severity.** Low today — QEMU presents one card — and it rises the moment this
+runs on real hardware. Do (1) and (2) together before any bare-metal bring-up.
+
+## TD-COMPOSITOR-DRIVES-ONE-HEAD (lane C, 2026-08-21) — ✅ RESOLVED 2026-08-21
+
+**In short:** with two monitors plugged in, one shows the desktop and the other
+stays dark. Not a bug in what exists — the second screen was never implemented.
+*(Both halves are now done; see the two updates at the end. The original
+diagnosis below turned out to be half wrong, and is kept for that reason.)*
+
+**What.** `choose_display` returns the *first* connected connector that has a
+usable mode and a CRTC that can reach it, and `DrmScanout` owns exactly one
+CRTC, one connector and one pair of buffers. Every later connector is skipped.
+
+**Why it is not a small fix.** The scanout side is genuinely easy: loop over the
+connectors, allocate a buffer pair per head, flip each. The hard half is
+upstream — `Compositor` composes *one* frame at *one* size, and a second monitor
+is not a second copy of that frame but a second viewport onto one desktop with
+its own resolution, its own position in a virtual screen, and windows that can
+straddle the boundary. `DisplayManager` (in `gui/compositor/src/lib.rs`, not a
+`display.rs` — an earlier revision of this entry named a file that does not
+exist) already models multiple displays, modes and refresh rates faithfully; it
+is the compositing pipeline that assumes one.
+
+**Severity.** Low as a defect, medium as a missing feature. Multi-monitor is
+table stakes for a desktop OS, but a one-headed desktop is fully usable and
+nothing about the current design has to be unwound to add the second — the
+per-head state is already a struct.
+
+**Update 2026-08-21 — the compositor half is done, and it was not a missing
+feature but a live bug.** The claim above that the model "already models
+multiple displays faithfully" was wrong. `DisplayManager::add_display` extended
+the virtual desktop and *nothing extended the surface being composited into*, so
+a window placed on the second monitor was drawn past the end of the framebuffer
+and clipped away entirely — while the model went on reporting it as visible on
+screen 2. Two more followed from the same crack: `set_fullscreen` sized from
+`backend.size()` rather than from the window's own monitor (so fullscreening on
+the second screen jumped the window to the first and spanned both, disagreeing
+with `maximize_window` one line away), and `refit_fullscreen_windows` applied the
+resized framebuffer's dimensions to *every* fullscreen window (so a mode change
+on one monitor dragged the games on all the others onto it).
+
+Fixed by making the scanout surface exactly the virtual desktop's bounding box,
+as an invariant of the only two functions that can change either
+(`resize_display` and a new `attach_display`, both of which allocate before they
+adopt, so a surface that cannot be allocated leaves the arrangement alone), and
+by resolving fullscreen against `work_bounds_for` like maximise does. Rationale
+and the rejected per-head-frame alternative: `design-decisions.md` §514. 10 new
+tests, each proved by defect reintroduction.
+
+A latent `Rect` defect fell out of that work and is fixed in the same change:
+`union` and `intersect` computed far edges with `self.width as i32`, so a
+rectangle wider than 2^31 unioned to a bounding box *narrower than either input*
+and intersected with anything to nothing. They now use the already-saturating
+`right()`/`bottom()`.
+
+**Update 2026-08-21 (2) — RESOLVED; the scanout half is done too.**
+`DrmScanout` now holds a `Vec<Head>`, one per connected connector that has a
+usable mode and a CRTC no earlier connector claimed, each with its own buffer
+pair and its own page flip. `blit` takes a `Viewport` — pitch, size and the
+head's `(src_x, src_y)` within the composited frame — so each monitor copies out
+its own rectangle of the one desktop-sized picture, and `Present` did not gain a
+method or a parameter. `main.rs` builds the compositor at head 0 and declares
+the rest with `attach_display`, then cross-checks `frame_size()` against
+`screen.size()` and warns if they disagree.
+
+Three things that were latent in the single-head code and became defects the
+moment there were two, all fixed here:
+
+* **CRTC exclusivity.** `resolve_crtc`'s preference for the CRTC a connector was
+  already bound to at boot would hand the same one to two connectors, which does
+  not light the second monitor — it replaces the first monitor's picture with
+  the second's, every frame. `choose_displays` now carries a `taken` list and
+  declines a connector it cannot give a free CRTC to.
+* **A flip failure closed the whole display.** Unplugging one monitor
+  mid-session would have blanked the other and exited the display server. A
+  failing head is now marked dead individually; `is_open()` goes false only when
+  none is left.
+* **The destination row stride.** Writing every head at the first head's pitch
+  skews any monitor whose width pads differently — invisible on one head, and on
+  two whose widths happen to pad alike.
+* **An allocation failure was fatal, and a partial one leaked.** A head whose
+  flip failed was declined, but a head whose *buffers* would not allocate
+  returned `Err` from `new()` and blanked the monitor next to it that had
+  allocated fine. Worse, when the second of a head's two `CREATE_DUMB`s failed,
+  the first buffer was owned by nobody — the head never reaches
+  `DrmScanout::heads`, which is what `Drop` walks — so its framebuffer id and
+  GEM handle leaked for the life of the process. `make_head` now releases the
+  orphan at the point of failure and `new()` declines the head, returning an
+  error only when no head was built at all.
+* **The per-head accessors indexed a different list from the one `heads()`
+  reports.** Dead heads stay in the vector so `Drop` can return their buffers,
+  but `heads()` filters them out, so a caller enumerating `heads()` and passing
+  the loop index back to `pitch_of(i)` read the wrong monitor once one died.
+  They are now keyed on the connector id — `pitch_for` / `scanned_out_for` —
+  and the single-head accessors (`crtc_id`, `connector_id`, `pitch`,
+  `scanned_out`) resolve through one `first_live()` helper instead of reading
+  position zero, which after a failure is the head that just went away.
+
+A head that fails stays in the vector so `Drop` still returns its two dumb
+buffers and two framebuffer ids; dropping it would leak four kernel objects,
+which matters because this type does not own the card. Rationale, and the
+rejected alternatives for each of the three rules: `design-decisions.md` §515.
+18 new tests, 17 proved by defect reintroduction and the eighteenth recorded
+there as additional coverage.
+
+**What remains, and is filed elsewhere.** Per-head scale factor and rotation are
+not possible under the one-surface arrangement (`design-decisions.md` §514) and
+monitors can only be arranged in a row, because the surface's origin is the
+desktop's origin. Each monitor runs at the mode it came up in —
+`TD-COMPOSITOR-CANNOT-CHANGE-MODE`. Hotplug of a monitor *after* startup is not
+handled: heads are enumerated once in `DrmScanout::new`, so plugging a screen in
+does nothing until the display server restarts. That last one is new debt and is
+filed below as `TD-COMPOSITOR-IGNORES-MONITOR-HOTPLUG` — since resolved, on
+2026-08-21, by the polled re-probe in `design-decisions.md` §517.
+
+## TD-COMPOSITOR-IGNORES-MONITOR-HOTPLUG (lane C, 2026-08-21) — RESOLVED 2026-08-21
+
+**Resolution.** Both halves and the seam between them are done, in four commits;
+`design-decisions.md` §517 records the reasoning and §516 the detach half.
+
+- `773455e29` — *the seam.* `Present::monitors() -> Option<Vec<MonitorInfo>>`
+  (default `None`, meaning "no opinion" — a headless recorder or a host window
+  has no connectors to enumerate) and `Server::reconcile_monitors`, called at the
+  top of `run_with`'s loop. It is a **poll of the whole set**, not a pushed
+  difference: asking twice gives the same answer, a tick that fails is retried a
+  second later, and the difference is computed against the arrangement actually
+  held rather than the one a sender assumed. Removals run before additions, so
+  peak surface is the smaller arrangement and a moved cable's CRTC is free before
+  the new head asks for it.
+- `382ae7a64` — *detect.* `DrmScanout::reprobe` re-reads `GETCONNECTOR` for every
+  connector and diffs against the head list, rate-limited to `PROBE_INTERVAL`
+  (1 s, `set_probe_interval` for tests) because a `count_modes == 0` probe makes
+  the kernel do real DDC traffic — tens of ms, far more than a frame.
+  `resize_to_heads` recomputes the framebuffer bounding box *without* moving any
+  head, unlike the pre-existing `lay_out_heads`, keeping §515/§516's "survivors
+  do not move" true on the scanout side too. This is also the one place that
+  *reaps*: a retired head is removed and its buffers released rather than left
+  `alive = false`, because a polled probe can retire a head every second for
+  hours and a head list that grows per plug event is a leak with a physical
+  trigger.
+- `842026285` — *the shared key.* `Compositor::rename_display` plus `main.rs`
+  naming every `Display` after its **connector id** instead of its enumeration
+  index, and passing each head's real refresh rate instead of a hardcoded
+  constant. This was the last item the original entry listed as outstanding, and
+  it is load-bearing: a first screen still called `0` is both a display no
+  connector claims and a connector no display claims, so reconciliation would
+  detach it and attach a duplicate once a second, for ever.
+
+Sixteen tests, every one proved a regression test by reintroducing the defect it
+names and confirming a deterministic failure that names it back, source restored
+byte-for-byte afterwards. Nineteen markers: `seamadoptsanyreply`,
+`seamemptyisarrangement`, `seamnoreconcile`, `seamsizeisidentity`,
+`seamreattachesknown`, `seamnewmonitorisprimary`; `probenever`,
+`probeeverytime`, `probereportsindex`, `probearrivesatorigin`, `probereflows`,
+`probekeepsdeparted`, `probeadoptsfirst`, `probekeepsdarkhead`,
+`probefailureisempty`; `renamenoop`, `renamedemotes`, `renamecollides`,
+`renamewrongdisplay`. One test had to be strengthened before it was honest —
+`an_empty_monitor_list_is_not_an_arrangement_to_adopt` used one display and
+passed with its guard deleted, because `detach_display` refuses the last monitor
+anyway; with two displays the guard is the only thing holding the desktop
+together. Compositor 465 green, clippy clean on `x86_64-pc-windows-gnu`
+(`--all-targets`) and `x86_64-unknown-linux-gnu` (`--bins`, the only build that
+compiles the Linux arm of `main.rs` at all), fmt clean.
+
+**What is deliberately still out of scope,** and filed elsewhere: a **mode
+change** under a live connector is ignored, because reconciliation compares ids
+and never sizes — detaching and re-attaching to resize would destroy that
+screen's window arrangement and move the monitor to the end of the row
+(`TD-COMPOSITOR-CANNOT-CHANGE-MODE`). **EDID is not read**, so a monitor is
+identified by the socket it is in and not by which monitor it is; swap two
+cables and each takes the other's place in the row. And **nothing is
+remembered**: unplug a monitor and plug it back in and it returns at the
+right-hand end rather than where it was. All three want an identity that
+outlives a cable, which is a larger design than this one.
+
+<details><summary>Original entry (describes pre-<code>773455e29</code> code)</summary>
+
+**In short:** plugging a second monitor in while the desktop is running does
+nothing — it stays dark until the display server is restarted. Unplugging one
+works, in the sense that the remaining screen keeps going, but the desktop does
+not shrink back and windows stranded on the departed monitor stay stranded.
+
+**What.** `DrmScanout::new` enumerates connectors once and builds the head list
+from that. Nothing re-reads `GETCONNECTOR` afterwards, so a connector that
+becomes `CONNECTED` later is never noticed. On the way out, a head whose flips
+start failing is marked dead (`head.alive = false`) and stops being drawn on,
+which keeps the *other* monitors alive — but the composited frame keeps its
+size, `Compositor` is never told the display went away, and so
+`DisplayManager` still lists it, `work_bounds_for` still resolves to it, and a
+window maximised there is on a screen that no longer exists.
+
+**Where.** `gui/compositor/src/present/drm.rs` — `DrmScanout::new`,
+`lay_out_heads`, and the `Err(_)` arm of `Present::show`.
+
+**What the proper fix looks like.** Two halves, and the second is the load-
+bearing one:
+
+1. *Detect.* DRM signals hotplug with a uevent on a netlink socket, which
+   SlateOS's kernel does not expose. The portable fallback is to re-probe every
+   connector periodically (a `GETCONNECTOR` per connector per second is cheap)
+   and diff against the head list. Polling is the right first implementation
+   here because it needs nothing from lane A.
+2. *Propagate.* A head appearing or disappearing has to reach `Compositor` as
+   an `attach_display` / a new `detach_display`, which must re-run
+   `relayout_for_desktop_change` so the surface is resized, fullscreen windows
+   are re-fitted and stranded windows are rescued — the machinery §512 and §513
+   built, which already does exactly this for a *resize* and has never been
+   asked to do it for a removal. `detach_display` does not exist yet and is the
+   real work: it is `attach_display` in reverse, and it must decide what happens
+   to a window whose only monitor left, which `bring_stranded_windows_back`
+   already answers for the resize case.
+
+Note that `Present` currently has no way to tell its caller anything except
+"still open", so the seam for (2) has to be added: either a method that returns
+the head list and is polled by `Server::run_with`, or the same
+`Present::input`-shaped channel that `TD-COMPOSITOR-HAS-NO-LOCAL-INPUT` needs.
+Doing both through one mechanism is probably right and is a reason to do them
+together.
+
+**Severity.** Low. It costs a restart, on hardware SlateOS does not yet run on
+(QEMU presents one card), and nothing is corrupted — the surviving monitors
+keep a correct picture. It rises to medium alongside any real bare-metal
+bring-up, and it is the obvious next thing after
+`TD-COMPOSITOR-DRIVES-ONE-HEAD`.
+
+**Update 2026-08-21 — half (2), *propagate*, is done.**
+`Compositor::detach_display` exists (lib.rs, beside `attach_display`) with
+`DisplayManager::remove_display` under it, and design-decisions.md §516 records
+why it is not simply `attach_display` run backwards: it adopts the removal
+*first* and shrinks the surface after, because the monitor is already gone and a
+surface that stays too large still covers the desktop; and the surviving
+monitors keep the offsets they had, because §515 already decided the scanout
+will not re-flow its surviving heads and the two layouts have to agree pixel for
+pixel. Everything that re-places the stranded windows turned out to be §512's
+existing `relayout_for_desktop_change` — no new pass was needed, which is what
+§513's "reachable is a question about the whole desktop" bought. 10 tests, all
+proved by reintro markers (`detachnopromote`, `detachreflows`,
+`detachwrongdisplay`, `detachlastmonitor`, `detachnoshrink`, `detachnorelayout`,
+`detachhomeisdesktop`).
+
+**What is left is half (1), *detect*, and the seam.** Nothing calls
+`detach_display` yet, and nothing calls `attach_display` after startup either,
+so the observable behaviour is unchanged: hotplug is still ignored. What remains
+is (a) `DrmScanout` re-probing `GETCONNECTOR` periodically and diffing against
+its head list, and (b) a way for it to tell `Server::run_with` what changed —
+which is still the seam this entry describes, and still probably wants to be the
+same mechanism `TD-COMPOSITOR-HAS-NO-LOCAL-INPUT` needs. One further thing the
+wiring must fix: `main.rs` builds each `Display` with `id = <enumeration
+index>`, but `detach_display` names a display by id and the stable key on the
+scanout side is the **connector id** (§515), so the two have to be made the same
+number before a detach can name the right screen.
+
+</details>
+
+## TD-COMPOSITOR-HAS-NO-LOCAL-INPUT (lane C, 2026-08-21)
+
+**In short:** on SlateOS the desktop draws correctly and the keyboard and mouse
+do nothing. Frames go out; nothing comes back in.
+
+**What.** `DrmScanout` implements `Present::show` and inherits the default
+`Present::input`, which returns an empty `Vec`. `Compositor::handle_input` and
+`route_input` are complete and correct and have no source on this platform, so
+they are reachable only from tests and from the Win32 harness — which is exactly
+the state `TD-COMPOSITOR-HAS-NO-SCANOUT` described for the output half before it
+was closed, now surviving in the input half alone.
+
+**What is missing.** A device to read. The kernel has a PS/2 and USB keyboard
+path for the console, but exposes nothing an unprivileged display server can
+open and poll for scancodes and mouse deltas — no `/dev/input/event*`, no
+equivalent. Wiring this needs (a) lane A to expose a readable device or an IPC
+endpoint carrying input events, then (b) a `DrmInput` here that translates its
+reports into `InputEvent`s, most likely alongside `DrmScanout` rather than
+inside it, since the card and the keyboard are different devices.
+
+**Severity.** High as a *blocker*: an OS whose desktop cannot be typed at is not
+a desktop. Low as a *defect*: everything that exists is right, `keymap.rs`
+already turns scan-code-set-1 into characters, and the fix is additive.
+
+**Filed to lane A?** Not yet. Do it once the shape of (a) is worth asking for —
+"expose input somehow" is not a request lane A can act on. Determine first
+whether the kernel's existing keyboard path can be given a second consumer, or
+whether this wants a new device; that reading is lane C's to do before filing.
+
+**Update 2026-08-21 — that reading is done, and it is now filed:**
+`requests/c-a-userspace-cannot-read-the-keyboard-or-the-mouse-at-all.md`. What
+the drivers turned out to say:
+
+* **The mouse has no userspace door of any kind.** `kernel/src/mouse.rs` keeps a
+  128-entry lock-free ring of `MouseEvent { buttons, dx, dy, dz }` and exposes
+  `try_read_event()`/`read_event()` to *kernel* callers only. Nothing under
+  `kernel/src/syscall/` or `kernel/src/fs/` reads it; the only matches for
+  "mouse" there are accessibility *settings* (`mouse_keys`, `mouse_speed`). So
+  the pointer cannot move, as opposed to moving badly.
+* **The keyboard's existing consumer cannot be reused, because the information
+  is destroyed before the queue.** `handle_scancode`
+  (`kernel/src/keyboard.rs:289`) computes `(extended, code, pressed)`, uses
+  `pressed` to update the modifier statics, and then keeps only the ASCII
+  character — for the keys that have one. `SYS_CONSOLE_TRY_READ_CHAR` therefore
+  hands back a `u8`: no release events, no keycode, nothing for F-keys, arrows,
+  Home/Insert or the keypad. Giving it "a second consumer" would hand that
+  consumer the same lossy `u8`. The raw push has to happen inside the ISR, which
+  is lane A's tree.
+* **The ask is Linux `struct input_event` on `/dev/input/event0`/`event1`**, with
+  `EV_KEY`/`EV_REL`/`EV_SYN`, `BTN_LEFT`-style button codes, and `O_NONBLOCK`.
+  Every other kernel door this compositor uses is the Linux one — the scanout
+  path issues real `open`/`ioctl`/`mmap` numbers on purpose — and input is also
+  where every future port (SDL, GTK, Chromium, an X server) will look first.
+  The request explicitly offers to own the set-1 → Linux-keycode table in lane C
+  if that is what makes the kernel half small enough to land.
+
+**No interim is being built, deliberately.** Driving the compositor from
+`SYS_CONSOLE_TRY_READ_CHAR` would give typing and nothing else, and would need
+its own event synthesis, focus rules and tests — all of which get deleted when
+the real device lands. That is exactly the band-aid accumulation `CLAUDE.md`
+names. This entry stays open and honest instead.
+
+## TD-COMPOSITOR-COPIES-EVERY-FRAME-TWICE (lane C, 2026-08-21)
+
+**In short:** every frame the desktop draws is copied one extra time on its way
+to the screen. It is correct, just wasteful — and the waste grows with screen
+size, so it matters most on the big displays where it is least affordable.
+
+**What.** `Compositor::compose_frame` blends into its own back buffer, and then
+`DrmScanout::show` copies that whole buffer into the mapped scanout buffer,
+row by row at the driver's pitch. At 4K that is ~33 MB moved per frame, ~2 GB/s
+at 60 Hz, for a copy that produces no pixels.
+
+**The proper fix.** Compose *directly into* the mapped scanout buffer. The
+compositor already owns a back/front pair, and so does the scanout — they are
+the same pair, duplicated. The obstacle is that `Compositor` allocates its
+buffers as `Vec<u32>` at construction and hands out `&[u32]`, whereas the
+scanout's are kernel-mapped `&mut [u8]` at a pitch that is not `width * 4`.
+Reconciling them means `Compositor` composing into a caller-supplied buffer with
+a caller-supplied stride, which is a real refactor of the rasteriser's
+addressing and touches every draw path.
+
+**Also blocked on `TD-NO-WRITE-COMBINING`.** Composing into the mapped buffer is
+only a win if that memory is write-combining. Blending *reads* the destination,
+and reads from uncached video memory are catastrophically slow — an order of
+magnitude worse than the copy this replaces. Do not attempt this optimisation
+until write-combining is confirmed on the mapping.
+
+**Severity.** Low now — nothing is measured yet and QEMU is not where this is
+judged. Revisit when there is a frame-time budget to hold, and measure before
+touching the rasteriser.
 
 ## TD-GUI-CRATES-OPT-OUT-OF-THE-WORKSPACE-LINTS (lane C, 2026-08-17) - **fixed**
 
@@ -46827,6 +47503,43 @@ gates that check it are metadata *reads*, and the two metadata *writes* are
 gated on `WRITE` — was a contributing cause of the misdiagnosis and has been
 corrected to describe the bit the code implements.
 
+**The fix reached one of two tests; completed 2026-08-21 in `e066c8990`.**
+`0153b147c` fixed `self_test_linux_real_glibc_make` and left
+`self_test_linux_real_glibc_make_cc` (same file, ~1600 lines later) still
+granting `READ | WRITE`, so `make: stat: /cap.mk: Permission denied` kept
+failing that rung of the boot test for a day. The reason is worth naming
+because it will recur: the *report* named one test, and the report was treated
+as the extent of the bug. It was not — it was the extent of what lane B
+happened to be running. The habit that catches this is to grep for the
+*mechanism* (`ResourceType::File` grants that omit `METADATA` in a native-ABI
+launch) rather than to fix the symptom that was reported. These are the only
+two tests in the tree that run `make` (`grep 'b"make"' spawn.rs` — two hits);
+both now grant `METADATA`.
+
+Running that mechanism-grep to its end is *not* cheap, which is the honest
+caveat: `Rights::READ | Rights::WRITE` without `METADATA` matches ~85 sites in
+`spawn.rs` alone, and the overwhelming majority are Linux-ABI tests that
+correctly need nothing. Only a native-ABI binary that stats is affected, and
+there is no grep that separates those two populations — which is precisely why
+Q56 exists. What bounds the live damage is the boot test rather than the grep:
+it exercises every one of those launch sites, so any other instance would
+already be failing a rung with a `stat`/`Permission denied` symptom. As of
+`e066c8990` none does.
+
+**The fix worked, and the rung still fails — for a different reason.** Worth
+recording precisely, because "still red after the fix" reads like a failed fix
+and this was not one. Before, `make-drives-tcc` died at `make: stat: /cap.mk:
+Permission denied` without parsing anything. After, make parses the makefile
+and gets as far as running `/bin/tcc -c /cap-a.c -o /cap-a.o` — then the child
+faults at `rip=0x10315d4, addr=0x8, exit code=Some(-8)`. That triple is
+*byte-identical* to the one its sibling `self_test_linux_real_glibc_make` hits,
+i.e. lane B's `BUG-POSIX-SPAWN-FILE-ACTIONS-IS-4624-BYTES-IN-AN-80-BYTE-SLOT`.
+So the boot's failure *count* did not drop, but the number of distinct causes
+went from two to one: both `make` rungs now fail in the same place, in lane B's
+tree, and nothing lane A owns is implicated. A fix that converges two symptoms
+onto one known cause is progress even though the tally is unchanged — and the
+tally is why it would have been easy to record this as "no effect."
+
 **What it exposed and did not fix:** the same operation requires a capability
 under the native ABI and nothing at all under the Linux one. Put to the operator
 as **Q56** in `open-questions.md` rather than decided, because closing it means
@@ -49054,10 +49767,10 @@ Still open, and both now stated in the crate doc: the geometry half of the old
 private window manager (`add_window`, `focus_window`, `minimize_window`,
 `maximize_window`, `restore_window`, `toggle_maximize`, `remove_window`,
 `snap_window`, `snap_window_to_zone`, `take_window_id`) has no caller outside
-the demo and the tests and should go; and `TD-C-VIRTUAL-DESKTOPS-HIDE-NOTHING`
-below, which this work made visible.
+the demo and the tests and should go. `TD-C-VIRTUAL-DESKTOPS-HIDE-NOTHING`
+below was also made visible by this work, and is now resolved.
 
-## TD-C-VIRTUAL-DESKTOPS-HIDE-NOTHING (lane C, 2026-08-21)
+## TD-C-VIRTUAL-DESKTOPS-HIDE-NOTHING (lane C, 2026-08-21) — RESOLVED 2026-08-21 (see the final note)
 
 **What:** switching virtual desktop changes which windows the *taskbar lists*
 and nothing else. On a live session the windows of the desktop you just left
@@ -49096,6 +49809,49 @@ incomplete, not wrong-when-used.
 **If never fixed:** the virtual-desktop shortcuts and the desktop indicator are
 worse than absent — they promise a switch and deliver a taskbar that disagrees
 with the screen.
+
+**RESOLVED 2026-08-21, by option (a) — the compositor learned what a virtual
+desktop is.** Two commits, and the fork above was decided the way the entry
+itself predicted, for the reason it gave: option (b) needed a
+hide-any-window-you-do-not-own verb, and that is the ambient authority the
+whole `ShellControl` design exists to refuse. Full reasoning in
+`design-decisions.md` section 518.
+
+| Stage | Commit | What landed |
+|---|---|---|
+| 1 | `a86ff739` | The compositor holds it. `Window::workspace`, `Compositor::current_workspace`, `switch_workspace`, `set_window_workspace`; one `shows_on_current_workspace` predicate consulted by the full-scene pass, the per-window draw, the damage path, hit testing, focus and activation. `Layer` is the stickiness rule — a window outside `Layer::Normal` is on every desktop, so panels and menus never vanish. |
+| 2 | `ed8d5eea2` | It reaches a screen. `WLST` went to version 2 with a `showing` field in the header and a `workspace` on every window; `RequestBody::SwitchWorkspace` (`0x12`) and `SetWindowWorkspace` (`0x13`) behind `require_shell()`; `Connection`/`EventLoop` accessors that return `Option` so "not told yet" cannot be read as "desktop 0"; and a `DesktopShell` that asks instead of deciding. |
+
+**The shell's three second copies are gone.** `current_desktop` and the
+per-window `desktop` are still fields, but nothing writes them except
+`apply_window_list`, which takes the whole `WindowList` and copies the
+compositor's answers in. `switch_desktop` and `move_window_to_desktop` became
+`&self` and return a `ShellRequest` — a new enum, because a desktop switch
+names no window at all and so could not honestly be carried in
+`ShellControlAction`'s `(window, action)` pair. The cost is one round trip
+before the taskbar relabels; the alternative draws the new desktop's buttons
+over the old desktop's windows for a frame, which is this bug in miniature.
+
+**Two stage-1 tests were passing for the wrong reason, and reintroducing the
+defects is what found them** — not reading.
+`a_window_on_another_virtual_desktop_does_not_occlude_the_one_in_front_of_you`
+survived a deliberately broken occlusion cull because `Buffer::is_opaque()` is
+a question about the pixel *format*, so an `Argb8888` buffer full of opaque
+alpha is not an occluder and the hidden window could never have occluded
+anything either way. Fixing that was still not enough: `focus_window` ends in
+`raise_within_layer`, so moving a window elsewhere hands the keyboard to the
+window below it and *reorders the stack* — the window left showing climbs above
+the one just hidden, and a hidden window at the bottom can neither occlude nor
+overpaint. `stack_with_a_hidden_window_on_top` gives the focus handoff a third
+window to land on, which is the ordinary arrangement rather than a contrivance.
+
+**Still open, and named in section 518 as what this deliberately does not do:**
+no per-desktop wallpaper, no per-desktop window arrangement, no memory of which
+window was focused on a desktop you return to, no drag-a-window-to-a-desktop,
+and the number is not persisted across a compositor restart. All of those want
+a per-desktop record rather than a per-window number. The desktop *count* is
+still fixed at `DesktopShell` construction, which is what blocks the overview
+screen's "add a desktop" — see `TD-C-THE-OVERVIEW-SCREEN-IS-1856-LINES-NOBODY-CALLS`.
 
 ## TD-C-ANY-CLIENT-CAN-READ-EVERY-WINDOW-TITLE
 
@@ -50444,6 +51200,46 @@ and `TOTAL_REFUSED` is now reported by the self-test alongside a
 `scheduled - fired - cancelled - pending` tripwire that would have made the
 original bug visible on the first boot that hit it.
 
+**Correction, 2026-08-21 (lane A): that last claim was false — the tripwire
+could never have fired.** `TOTAL_FIRED` counted every firing of a repeating
+timer, but `TOTAL_SCHEDULED` counted only its *first* arming, so within a
+second or two of boot `fired` permanently exceeded `scheduled` and the
+`saturating_sub` chain floored the difference at 0 no matter how many wakeups
+were being destroyed. The boot logs said so plainly and nobody read them:
+`scheduled=388, fired=75833` — a 195x gap that is arithmetically impossible if
+the two counters measure the same events. A guard that reports 0 on a healthy
+boot and 0 on a broken one is not a guard; it is a green light wired to nothing,
+and it sat in the tree as the designated detector for the very bug it was
+written to catch. Fixed by counting each re-arm in `process_expired` into
+`TOTAL_SCHEDULED`, which makes the two counters commensurable: every firing of
+a repeating timer is now preceded by exactly one arming. The self-test carries
+a comment forbidding the "simplification" that would undo it.
+
+**The general lesson, which is not about timers.** A derived quantity that is
+clamped at one end (`saturating_sub`, `max(0, …)`, an unsigned subtraction) can
+be *structurally* incapable of reporting a fault, and it will look completely
+healthy while being so. When adding a tripwire, check that its two inputs count
+the same events — and prefer to prove it by making the tripwire fire once on
+purpose rather than by reading the code.
+
+**The same asymmetry was latent in `ktimer`, and was fixed in the same pass
+(2026-08-21, lane A).** `ktimer::process_expirations` re-armed a periodic timer
+without touching `TIMERS_SCHEDULED` while `TIMERS_FIRED` counted every firing,
+so its self-test printed `scheduled=5, fired=8` — three wakeups apparently
+conjured from nowhere. Nothing was *false* there yet, because ktimer had no
+tripwire over those counters; the danger was that adding one later would have
+inherited a guard that could never fire, exactly as hrtimer's did. Re-arms are
+now counted, and the self-test carries the conservation check
+`scheduled >= fired + cancelled`, which the pre-fix numbers **would have
+failed** — that failure is the only evidence worth having that the guard can
+fire at all. Two details of that check are deliberate and are commented at the
+site: it is phrased as a **comparison, not a clamped subtraction** (a
+`saturating_sub` would have reproduced hrtimer's failure mode verbatim), and it
+samples `fired`/`cancelled` *before* `scheduled` — a firing increments
+`scheduled` (the re-arm) before `fired` (the workqueue submit), so reading the
+consequence first and the cause last makes a concurrent expiry on another CPU
+bias the check safe rather than manufacture a spurious failure.
+
 ### Not fixed, and deliberately so
 
 - **`IRQ 10` storming at ~500 kHz.** IRQ 10 is a shared level-triggered PCI
@@ -50457,9 +51253,20 @@ original bug visible on the first boot that hit it.
   passenger here, not the driver. Needs its own investigation: identify which
   of the five unhandled devices asserts, and either give it a stub handler that
   acks or mask it at the PCI command register.
-- **`hrtimer`'s sorted `Vec`.** O(n) insert under a lock with interrupts
+- ~~**`hrtimer`'s sorted `Vec`.** O(n) insert under a lock with interrupts
   disabled. At the new ceiling that is a 160 KiB memmove worst case. Logged in
-  `todo.txt`; wants a real min-heap with lazy cancel-by-id, or a timer wheel.
+  `todo.txt`; wants a real min-heap with lazy cancel-by-id, or a timer wheel.~~
+  **FIXED 2026-08-21 (lane A, commit `520634ccc`).** Replaced by a binary
+  min-heap over a slot slab: `schedule` and `process_expired` are O(log n),
+  `cancel` is an O(1) slot lookup plus an O(log n) sift (handles carry
+  `(slot, generation)`, so a stale handle cannot evict the timer that inherited
+  a recycled slot). The heap key is `(expiry_ns, id)` rather than `expiry_ns`
+  alone, because a binary heap is not stable and a bare-deadline key lets a
+  timer be passed over indefinitely by arrivals sharing its deadline. Four new
+  self-tests (heap order under a shuffled permutation, equal-deadline FIFO,
+  interior cancel, stale-handle rejection) — the five pre-existing ones all
+  passed against the `Vec` and *cannot* observe a mis-ordering, since the only
+  multi-timer case sums its arguments and a sum is order-independent.
 
 ---
 
@@ -50914,7 +51721,10 @@ what `tty::backend_read_char` / `backend_read_char_timeout` and
 predicted below, `canonical_read`/`raw_read` needed no edit: the four-state
 `Input` enum already carried `Interrupted` through to `ConsoleRead::Interrupted`.
 
-**The proper fix, corrected — and why the original one below is wrong.** The
+**The proper fix, corrected — and why the original one below is wrong.**
+(Historical: step 1 of the two below has since been done — see the ✅ on it.
+The paragraph is kept as written because it is the reasoning that identified
+the ordering, and the ordering still holds.) The
 text under "The proper fix" says to replace the `HLT` spin with
 `park_interruptible` plus a wake from the IRQ 1 handler. **That would make a
 USB keyboard dead.** USB HID keys are not interrupt-driven here at all: they
@@ -50927,13 +51737,27 @@ nothing about xHCI.
 
 So stage 2 is two changes, in order:
 
-1. **Move USB HID polling out of the read path** into a driver-owned periodic
-   task (a timer callback, or a workqueue item re-armed on the tick), so
-   keystrokes are noticed whether or not anybody is blocked reading. This also
-   fixes a *separate* latent bug that the current arrangement hides: **USB
-   keystrokes are only ever polled while some task is inside a console read.**
-   A USB key pressed while the system is busy elsewhere is not buffered, it is
-   simply never fetched from the ring until the next read comes along.
+1. ✅ **DONE 2026-08-21.** **Move USB HID polling out of the read path** into a
+   driver-owned periodic task (a timer callback, or a workqueue item re-armed
+   on the tick), so keystrokes are noticed whether or not anybody is blocked
+   reading. This also fixes a *separate* latent bug that the current
+   arrangement hides: **USB keystrokes are only ever polled while some task is
+   inside a console read.** A USB key pressed while the system is busy
+   elsewhere is not buffered, it is simply never fetched from the ring until
+   the next read comes along.
+
+   *Done as the timer-callback variant:* `keyboard::start_usb_hid_poller()`
+   arms an 8 ms hrtimer (the endpoint's own advertised interval — QEMU reports
+   `interval=7`, which xHCI encodes as 2^6 × 125 µs) whose callback drains the
+   endpoint from the APIC timer ISR via the new `xhci::try_poll_keyboard`.
+   Details, including why the ISR path must `try_lock` rather than `lock`, are
+   in `A-USB-KEYSTROKES-ARE-ONLY-FETCHED-WHILE-SOMEBODY-IS-BLOCKED-READING`.
+
+   **Read the paragraph below before treating this as unblocking step 2**: what
+   was removed is the "a parked reader stops polling and the keyboard dies"
+   objection. The poller still wakes nobody, so step 2's wake side is
+   untouched — a parked reader would now sleep through a keystroke that *was*
+   successfully captured, which is a better failure but still a hang.
 2. **Then** convert the loop to a real park: a waiter set on the scancode
    queue, `park_interruptible`, and a wake from both the PS/2 IRQ and the new
    HID poll task. The wake must use the ISR-safe idiom — `sched::try_wake(tid)`
@@ -51911,7 +52735,7 @@ files mid-test.
 
 ---
 
-## TD-C-ZONE-SNAPPING-HAS-NO-PATH-TO-A-WINDOW (lane C, 2026-08-21)
+## TD-C-ZONE-SNAPPING-HAS-NO-PATH-TO-A-WINDOW (lane C, 2026-08-21) — RESOLVED 2026-08-21
 
 **In short:** The desktop shell contains a complete, tested implementation of
 multi-window tiling layouts — halves, thirds, quadrants, a six-cell grid —
@@ -51954,11 +52778,36 @@ keeping it.
 1. Extend `ShellControlAction` with a zone verb — `SnapToZone { preset, zone }`
    or equivalent — in `gui/remote` (lane C).
 2. Teach `gui/compositor`'s `snap_window` to resolve a preset + zone index into
-   a rectangle against its own display bounds, reusing `snap.rs`'s arithmetic
-   rather than restating it. The compositor is the only party that knows the
-   bounds, so the *rectangle* must be computed there; `snap.rs` should be
-   factored so the layout math is callable from both (lane C owns both trees).
-3. Wire the shell's zone picker (`snap.rs`'s overlay/picker render trees) to
+   a rectangle against its own display bounds. The compositor is the only party
+   that knows the bounds, so the *rectangle* must be computed there.
+
+   **The layout arithmetic has to move somewhere both crates can see it, and
+   where is an open fork.** The compositor needs it to place the window; the
+   shell needs it too, because its zone picker draws the zones the user aims
+   at — so it cannot simply be handed to the compositor and deleted from the
+   shell. `gui/compositor` does not depend on `gui/desktop` and must not start
+   to (the dependency runs the other way round conceptually, and nothing in the
+   tree depends on `desktop` today, which is a property worth keeping). The two
+   candidates:
+   - **Into `gui/remote`**, beside `Layer`, `WindowInfo` and `CursorShape` —
+     the crate that already holds the vocabulary both ends share. Fits the
+     existing pattern, no new crate. Against: `gui/remote` is a *protocol*
+     crate, and `SnapZone` carries a `String` label and returns a `Vec`, which
+     is heavier than anything else in there.
+   - **A new `gui/zones` crate.** Honest about what it is, keeps the protocol
+     crate to protocol. Against: ~300 lines of arithmetic is thin for a crate,
+     and it adds a node to the graph for one caller on each side.
+
+   Resolve this *before* writing the compositor half — picking wrong means
+   moving the code twice.
+3. Design the wire verb against `ShellControlAction`'s one-byte-per-action
+   rule (`gui/remote/src/control.rs:307`, `as_byte`/`from_byte`). The 22
+   distinct (preset, zone) pairs across the seven presets all fit in the unused
+   byte space above 6, so the rule can be kept exactly rather than bent: the
+   byte still fully determines the action, and no reader or writer of the frame
+   grows a special case. A `SnapToZone { preset, zone }` with a separately
+   encoded payload would be the thing the enum's doc explicitly warns against.
+4. Wire the shell's zone picker (`snap.rs`'s overlay/picker render trees) to
    emit that request from `handle_mouse`/`handle_hotkey`, and drop the
    snap-history bookkeeping from the shell — restoring a snapped window is
    already the compositor's (`restoring_a_snapped_window_returns_it_to_where_it_was`).
@@ -51969,9 +52818,143 @@ invites the next reader to assume the feature exists because the tests are
 green. `design.txt` does not mandate zone presets, so this is a feature the
 project chose to build and has not yet connected, not a spec violation.
 
+**RESOLVED 2026-08-21.** All four steps done, in three commits:
+
+| Step | Commit | What landed |
+|---|---|---|
+| 1, 3 | `d17ef6149` | `SnapSlot` (`gui/remote/src/zones.rs`) and the `SnapToZone` wire verb. The one-byte rule is **kept, not bent**: the 22 (preset, zone) pairs occupy bytes above the existing actions, so the byte still fully determines the action. |
+| 2 | `d04192fc5` | The compositor's `SnapTarget` / `snap_window_to_zone` / `place_snapped` / `zone_rect`, resolving a slot against `display_manager.virtual_bounds()` — the bounds only it has. |
+| 4 | `7d138bb51` | Super+Z opens the chooser; a press on a zone emits `ShellControlAction::SnapToZone(slot)` for the window focused now. The snap history is gone from the shell, as the step said. |
+
+**The open fork in step 2 was resolved into `gui/remote`**, not a new
+`gui/zones` crate — see `design-decisions.md` §507 for the argument (a zone
+table *is* protocol: `SnapSlot`'s index ranges and the geometry those indices
+name are the same fact stated twice, and the one place they cannot drift is the
+same file). The `String` label objection was answered by the type carrying a
+`&'static str`.
+
+Eight new tests in `gui/desktop/src/pointer_tests.rs`, each proved to bite by
+reintroducing the defect it names (twelve defects, twelve deterministic
+failures naming the test back): hit-test order, work-area staleness, the
+empty-desktop guard, the zone id, the focused window, the dismissal, the
+visibility gate, the hover, the thumbnail grid, and all three close paths.
+
+**What did not land with it:** the *other* way desktops offer this — drag a
+window to an edge and drop — still has no drag to fire on. See
+`TD-C-EDGE-DRAG-TILING-HAS-NO-DRAG-TO-FIRE-ON` below.
+
 ---
 
-## A-USB-KEYSTROKES-ARE-ONLY-FETCHED-WHILE-SOMEBODY-IS-BLOCKED-READING — 2026-08-21 — lane A — OPEN
+## TD-C-EDGE-DRAG-TILING-HAS-NO-DRAG-TO-FIRE-ON (lane C, 2026-08-21) — RESOLVED 2026-08-21
+
+**In short:** There are two ways every desktop lets you tile a window: press a
+keyboard shortcut and pick a slot from a menu, or drag the window to the edge
+of the screen and let go. The first now works (Super+Z). The second does not,
+and not because the tiling is missing — the code that says "a drop against the
+left edge means the left half" is written and tested. What is missing is anyone
+to tell the shell that a drag is happening. The shell never sees a window being
+moved; the compositor does that by itself and does not mention it.
+
+**Where.** `gui/desktop/src/snap.rs`: `SnapManager::action_for_edge(x, y)`
+turns a cursor position near an edge or corner into the
+`ShellControlAction` that drop should send, and `edge_snap_hit` is the other
+half — the overlay preview drawn while the cursor is there. Both are public,
+both are covered by the module's own tests
+(`an_edge_drop_asks_for_the_tile_that_edge_means`,
+`an_edge_drop_ignores_the_layout_the_picker_has_selected`), and **neither has a
+caller anywhere in the tree.**
+
+The reason is structural, not an oversight: the shell has no window dragging at
+all. `grep` for a drag-start/drag-move/drag-end in `gui/desktop` finds nothing,
+because interactive moves are the compositor's — it owns the pointer grab and
+the window geometry, and `gui/remote`'s event stream carries no "the user is
+moving window N, the pointer is at (x, y)" message for the shell to hook.
+
+**Why it was kept rather than deleted.** It is the correct half of a gesture
+whose other half is a protocol addition in the same lane's tree. Deleting it
+would mean re-deriving the edge/corner thresholds and the deliberate rule that
+an edge drop ignores the layout the picker has selected (dragging left means
+*the left half*, whatever grid is chosen — see `design-decisions.md`), which is
+exactly the "re-writing it later would be strictly worse" argument that §506
+already made about `snap.rs` as a whole.
+
+**The fix as originally proposed — and why it was rejected.** The plan above
+was to teach `gui/remote`'s event stream a "the user is moving window N, the
+pointer is at (x, y)" notification, so the shell could keep its two functions
+and drive them from the compositor's grab. That was written before anyone
+counted what it costs: it puts a **socket round trip inside the part of the
+gesture the user is watching.** The preview has to follow the cursor at pointer
+rate, and every frame of it would be compositor → shell → compositor. The
+compositor already holds the grab, the geometry and the display bounds; it can
+answer the same question locally in a function call. The shell's copy was
+therefore **deleted, not connected** — see `design-decisions.md` §508.
+
+**RESOLVED 2026-08-21.** Four commits, each proved by reintroducing every
+defect its tests name and confirming a deterministic failure that names the
+test back (39 defects, 39 failures):
+
+| Stage | Commit | What landed |
+|---|---|---|
+| 1 | `63bf975ba` | The rules moved into the protocol crate: `ScreenEdge` (8 variants; the compositor's own 2-variant `SnapEdge` already had the name), `edge_at`, `drop_at` and `EdgeDrop` in `gui/remote/src/zones.rs`, beside the `SnapSlot` table they resolve against. 10 tests, 12 defects, 214 guiremote tests green. |
+| 2 | `5baa11864` | The compositor acts on a drop: `drop_intent` off the live `DragState`, routed through the existing `maximize_window` / `snap_window_to_zone` so the fixed-size refusal, the restore rectangle and the `WindowResized` notification all still apply. 10 tests, 7 defects, 290 green. |
+| 3 | `3aa6e8b43` | The preview: a translucent wash plus a border, damaged up and down as the intent changes, torn down on release and on destroy. Included a real bug fix — `rect_outline`'s four bands **overlapped** on rectangles shorter than twice the border, double-blending exactly the small previews where it shows most. 9 tests, 10 defects, 299 green. |
+| 4 | `9771783c4` | The shell's copy deleted — 498 lines out of `gui/desktop/src/snap.rs` (`SnapEdge`, `detect_edge`, `EdgeSnap`, `edge_to_default_snap`, `edge_snap_hit`, `action_for_edge` and their tests), module docs in `snap.rs` and `lib.rs` repointed at `guiremote::zones::drop_at`. |
+
+**The deleted code had already drifted**, which is the argument against keeping
+a second opinion around: the shell's `edge_to_default_snap` mapped a drop
+against the **top** edge to the *left half*, where the surviving rules maximize.
+Nothing caught it, because the shell's tests only asserted that the result named
+a zone that exists. The replacements in `guiremote` compare the returned
+rectangle against the layout's own zone, so the same drift cannot recur silently.
+
+**Point 3 of the old plan — should the full zone overlay appear during a drag,
+as FancyZones does? — was not carried forward as an open question.** What
+shipped shows the single rectangle the drop will produce, which is what the
+Windows and GNOME edge gestures show; the grid overlay is a *different* feature
+(drag-into-a-grid, not drag-to-an-edge) and would be a new roadmap item, not an
+unanswered fork in this one.
+
+
+---
+
+## A-USB-KEYSTROKES-ARE-ONLY-FETCHED-WHILE-SOMEBODY-IS-BLOCKED-READING — 2026-08-21 — lane A — FIXED 2026-08-21
+
+**Fixed** the same day it was filed, by items 1 and 2 of "The proper fix" below.
+`keyboard::start_usb_hid_poller()` arms an 8 ms hrtimer whose callback drains
+the HID endpoint from the APIC timer ISR, so a USB keystroke now reaches the
+input ring whether or not anybody is reading. The read paths poll inline only
+as a fallback, gated on `USB_HID_POLLER_ARMED` — which records whether the
+timer *runs*, not whether it was requested, because `hrtimer` refuses to
+schedule past a per-CPU ceiling and hands back a handle that never fires.
+
+Confirmed on the boot rig, which attaches `-device qemu-xhci -device usb-kbd`:
+
+```
+[xhci] Configured keyboard on slot 1 (EP1 IN, 8 bytes, interval=7)
+[keyboard] USB HID poller armed (8 ms period)
+[keyboard]   USB HID poller: armed (xhci present, keyboard present): OK
+```
+
+`interval=7` is the device's own answer and it matches: xHCI encodes the
+interval as 2^(n-1) × 125 µs, so 7 is exactly the 8 ms the poller uses. The
+period is not a guess.
+
+The ISR calls `xhci::try_poll_keyboard`, a new `try_lock` variant. That is a
+correctness requirement, not a tuning choice: `XHCI.lock()` from the timer ISR
+deadlocks outright, because the code the interrupt preempted may hold that
+same lock **on the same CPU**, and a spinlock cannot be re-entered by the
+interrupt that stopped its owner from releasing it. A contended tick skips, and
+loses nothing — the ring is drained per *report*, not per tick, so whatever a
+skipped tick left behind is still there 8 ms later.
+
+A regression test (`keyboard::usb_hid_poller_self_test`) asserts the property
+whose absence *was* the bug — that a poller exists whenever there is a keyboard
+to poll — rather than reading a character, which is what let the defect hide:
+a blocking read polls the device itself, so any test that merely read a byte
+passed both before and after.
+
+**Item 3 is a separate piece of work and is NOT done.** See the note at the end
+of this entry.
 
 **In short:** On a machine whose keyboard is USB (which is every modern machine
 — PS/2 is a legacy port), the kernel never notices a keystroke on its own. It
@@ -52045,6 +53028,25 @@ USB hardware — and stage 2 of the interruptible-read fix stays blocked
 indefinitely. It gets more expensive with time, not less: every consumer written
 against `try_read_char()` in the meantime is written against a function that
 cannot do what its name says on the hardware we are about to start booting on.
+
+**What item 3 still needs (read this before attempting stage 2).** This fix
+removed the objection quoted in item 3 — a parked reader no longer takes the
+USB keyboard down with it, because the poller runs regardless. But stage 2 is
+**still not safe to do**, for a *different* reason that this entry originally
+folded into the same sentence:
+
+> the poller pushes into the ring and wakes nobody.
+
+So a genuinely parked reader would now sleep straight through its own
+keystroke. That is a strictly better failure than the old one — the keystroke
+is captured rather than never fetched — but it is still a hang. Stage 2 needs
+`push_char` to wake the waiting reader, with the ISR-safe idiom recorded above
+(`sched::try_wake`, falling back to `sched::defer_wake`; **not**
+`WaitQueue::try_wake_one`, which drops the wake on a lost `try_lock`).
+
+Check `keyboard::usb_hid_poller_armed()` rather than assuming it: the poller
+does not arm on a machine with no xHCI controller, and on such a machine the
+`HLT` spin is still the only thing that looks at the ring.
 
 ## B-THE-STALENESS-GATE-PRINTS-THE-WRONG-REMEDY-WHEN-THE-STALE-SIDE-IS-LIBC — 2026-08-21 — lane B — OPEN
 
@@ -52188,6 +53190,143 @@ net CLAUDE.md describes. Every crate added under `userspace/` without the line
 makes the ratio worse, so the honest read is that this gets slowly worse rather
 than staying flat.
 
+
+---
+
+## Every boot-time median in `bench/boot-history.jsonl` pooled debug and release boots (lane A)
+
+**Status: FIXED 2026-08-21** — `scripts/boot-history.py`, `population_of()`.
+Awaiting a boot test on `main` before archiving.
+
+**In short:** The boot test prints a table of "how long does a boot take",
+grouped so that builds which run at different speeds are never averaged
+together. The grouping had two of the three factors that change the speed, and
+was missing the third — which build profile was compiled. Release boots ~2.7×
+faster than debug, and 100 of the 243 recorded boots were release, so the
+printed medians were blends of two populations rather than measurements of
+either. The fix adds the missing factor. **If you quoted a boot-time median
+from this file before 2026-08-21, re-check it.**
+
+**Where it lived.** `population_of()` returned
+`f"{sanitizer_of(rec)} on {accel_of(rec)}"` — sanitizer × accelerator. The
+`profile` field was recorded in every row and used by nothing.
+
+**Why it went unnoticed for the life of the file.** `report_wall()`'s docstring
+is an unusually careful argument *for* partitioning, written after a real
+incident in which two WHPX boots shifted the TCG median. It states the
+principle exactly right — "a wall time is a property of the pair… neither
+factor makes the other irrelevant" — and then enumerates two factors. Naming a
+partition is not the same as checking it covers every factor that moves the
+number, and the axis it omitted is the largest one after KASAN.
+
+The pooled figures were also *plausible*, which is what let them survive. The
+largest population read **155 boots, median 331 s**. That is a 95/60 mixture of
+a 382 s population and a 130 s one — a duration no build on this host has ever
+taken, but not an obviously silly one.
+
+**Measured impact, from the file itself on 2026-08-21:**
+
+| Population | Was printed | Actually is |
+|---|---|---|
+| `none on QEMU TCG` | 53 boots, median **370 s** | debug: 38 boots, **395 s** · release: 15 boots, **144 s** |
+| `none on unknown accel` | 12 boots, median **121 s** | debug: 3 boots, **327 s** · release: 9 boots, **119 s** |
+| `unknown on unknown accel` | 155 boots, median **331 s** | debug: 95 boots, **382 s** · release: 60 boots, **130 s** |
+
+The second row is the worst: the pooled median is within 2% of the *release*
+figure, so anyone asking "what does a boot of this tree cost" got the release
+answer under a label that never said release, off by 2.7× for a debug run.
+
+**Consequences beyond the table.** `open-questions.md` Q46 turns on exactly
+this comparison — it asks whether the non-bench boot test should build release,
+and prices it as "slower build, faster boot". Its supporting numbers (142 s
+release vs 615 s debug) came from a hand-measured bench pair rather than from
+this file, which is fortunate, because the file could not have answered it.
+
+**The fix.** `population_of()` is now the *triple*
+`profile/sanitizer on accelerator`, with `profile_of()` as the third twin of
+`sanitizer_of`/`accel_of` — collapsing key-absent and key-null to
+`unknown profile`, and never guessing `debug` merely because that is the
+recorder's argparse default. Six tests cover it, including one built from the
+real 95/60 shape above. Two stale quotes of the 370 s figure in
+`bare-metal-boot.md` were corrected to 395 s in the same change.
+
+**Related gap closed at the same time.** Build time was never recorded at all,
+so Q46's "slower build" half had no evidence anywhere. Step 1 of
+`scripts/boot-test.sh` is now timed into a `build_seconds` field, reported as
+`build time by profile`, and absent (not zero) for `--no-build` runs.
+
+---
+
+## The release kernel does not assemble at `codegen-units` > 1 — `codegen-units = 1` is load-bearing, not a tuning knob
+
+**Lane A · found 2026-08-21 · Status: OPEN (does not affect any shipped or
+tested build; blocks one option that would otherwise be attractive)**
+
+**In short:** the kernel is built with a setting that tells the compiler
+"produce one big chunk of machine code rather than sixteen small ones". That
+setting was there for speed of the *finished* kernel. It turns out the kernel
+also fails to build without it — so it cannot be relaxed to make builds
+faster, which is a thing we would otherwise want to do, because the one-chunk
+setting is what makes a release rebuild take 594 s instead of 42 s.
+
+**Reproduction** (from `os-lane-a`, ~174 s to fail):
+
+```bash
+touch kernel/src/main.rs
+cargo build --release --config 'profile.release.package.kernel.codegen-units=16'
+```
+
+```
+error: <inline asm>:142:5: expected absolute expression
+.if (664b-663b) > (662b-661b)
+    ^
+error: could not compile `kernel` (bin "kernel")
+```
+
+The variable is cleanly isolated: the identical tree, toolchain and command at
+`codegen-units = 1` builds in 594 s and boots to `BOOT_OK` (run 4 of the Q46
+series, same commit `8b481b0f2`). Only the codegen-unit count differs.
+
+**Where it lives.** `kernel/src/alternatives.rs:262` — the assembly-time guard
+inside `alternative_site!`, which refuses to build a replacement sequence
+longer than the site it patches over. The macro is expanded from inside
+`global_asm!` in the `isr_stub_no_error!` / `isr_stub_with_error!` macros
+(`kernel/src/idt.rs:681,735,825`), once per exception vector, so a crate build
+contains many expansions. The numeric local labels (`661:`…`664:`) are the
+Linux `ALTERNATIVE` convention and are deliberately reused across expansions;
+`661`/`662` bracket the site in `.text`, `663`/`664` bracket the replacement in
+a `.pushsection .altinstr_replacement`.
+
+**What is not yet known** — and this is the honest gap in this entry: *why*
+splitting the crate into several codegen units makes one of those label
+differences non-absolute. Each expansion is a single `concat!` string, so a
+site and its record cannot be separated from each other, and both label pairs
+are within one section each. The error names `<inline asm>:142`, which is
+several expansions deep into a concatenated blob, so the assembler is seeing
+multiple stubs in one unit and failing on one of them rather than on the first.
+
+**The proper fix** is to find that out before changing anything: build with
+`--emit=asm` at `codegen-units=16`, locate line 142 of the offending blob, and
+establish which expansion breaks and what precedes it. Only then decide between
+(a) making the macro robust across codegen units — e.g. deriving the lengths
+without a cross-section subtraction, or emitting the guard into the same
+section as the labels it measures — and (b) recording `codegen-units = 1` in
+`Cargo.toml` as a *correctness* requirement with a comment pointing here, so
+the next person to treat it as a performance knob is stopped at the comment
+rather than at a 174 s build failure. Do not "fix" it by deleting the `.if`
+guard: an oversized replacement silently shreds the instruction after the patch
+site, which is exactly the failure the guard exists to make loud.
+
+**Why it is filed rather than fixed now.** Nothing built or tested today is
+affected — every kernel build in the tree, debug and release, is
+`codegen-units = 1` (debug via `[profile.dev]`, which never sets it and so gets
+the incremental default; release via `[profile.release.package.kernel]`). The
+practical cost is that it removes an option from `open-questions.md` Q46: the
+14× release-rebuild penalty measured today (42 s → 594 s for a kernel-only
+edit) is largely the single codegen unit, and "build release but with 16 units"
+would have been the obvious way to buy release-only bug coverage without the
+penalty. That option is unavailable until this is understood, and Q46's write-up
+now says so.
 
 ## TD-B-DIG-TRACE-EXITS-ZERO-WHEN-THE-TRACE-GOT-NOWHERE (lane B, 2026-08-21)
 
@@ -52957,3 +54096,761 @@ diagnostics, which GNU does not wrap.
 **The proper fix is all three, measured against the harness** — `calc-diff.sh`
 already covers them, so the work is done when it reports 0 differed rather than
 when the three changes are written.
+---
+
+## TD-C-COMPOSITOR-TILES-UNDER-THE-TASKBAR (lane C, 2026-08-21) — MOSTLY RESOLVED 2026-08-21, step 4 blocked
+
+**In short:** When you tile a window — drag it to the left edge, or press
+Super+Left, or pick a slot from the Super+Z chooser — it *used to* be made to
+fill exactly half (or a third, or a quarter) of the *entire screen*, including
+the strip at the bottom where the taskbar lives, so the bottom of a tiled window
+slid underneath the taskbar and whatever was down there — a status line, a
+scrollbar's bottom arrow, the last row of a list — was covered up. The
+compositor now has an edge-reservation ("strut") request and subtracts what is
+reserved from every tiling route, so as soon as something *makes* a
+reservation the problem is gone. Nothing makes one yet, because the shell is
+still not a compositor client — that is the one piece left, and it is blocked
+on `TD-NO-APP-CONNECTS-TO-THE-COMPOSITOR`.
+
+**Status of the four steps below:** 1, 2 and 3 are **done** (2026-08-21). Step 4
+is blocked, and until it lands a running system still tiles under the bar
+because the reservation is never requested.
+
+**Where it was.** `gui/compositor/src/lib.rs` `Compositor::snap_area()`, since
+deleted, which was one line:
+
+```rust
+fn snap_area(&self) -> WorkArea {
+    work_area_of(self.display_manager.virtual_bounds())
+}
+```
+
+`virtual_bounds()` is the full display arrangement, and `work_area_of` only
+converts the type — it subtracted nothing. Every tiling route funnelled through
+here (`snap_window`, `snap_window_to_zone`, and the `drop_at` edge-drag path),
+so the defect was uniform rather than per-gesture, and the method was already
+commented as the one place a fix lands. (That single funnel was replaced in
+`TD-C-TILING-MEASURED-EVERY-MONITOR-AT-ONCE` by the per-monitor family
+`work_bounds_for` / `work_area_for` / `work_area_at` / `work_area_of_window`,
+which kept the funnel property — and it is `work_area_for`, still the one
+place, that now does the subtracting.)
+
+**Where it is now.** `gui/remote/src/reserve.rs` holds the shared rules
+(`PanelEdge`, `ReservedEdges`, `MAX_RESERVED_FRACTION`, the clamp);
+`RequestBody::ReserveEdge` / `ResponseBody::WorkArea` (tags `0x11` / `0x05`)
+carry it over the wire; `Window::reserved_edge` stores one claim per window and
+`Compositor::{reserved_on, reserve_edge, retile_for_work_area_change}` apply
+it. `gui/compositor/src/wire.rs` resolves ownership and then `require_shell`.
+
+**Why it is like this.** The compositor has no concept of a *strut* — a client
+declaring "reserve N pixels along this edge for me, and keep everyone else out
+of it." X11 has `_NET_WM_STRUT_PARTIAL`, Wayland has `zwlr_layer_shell`'s
+exclusive zone; `gui/remote`'s protocol has neither. The shell does know the
+number — `Shell::taskbar_height` (`gui/desktop/src/lib.rs:648`, default 40
+logical px, scaled by `taskbar_height_px()`) — and `icons.rs` already subtracts
+it for desktop-icon layout. But it has no way to *tell* the compositor, and in
+fact does not connect to it at all yet (`TD-NO-APP-CONNECTS-TO-THE-COMPOSITOR`).
+So the one component that knows the answer and the one component that needs it
+have no channel between them.
+
+**The proper fix** — in the order the pieces have to exist:
+
+1. **[x] done.** Add a reserved-area request to `gui/remote`: a client asks for
+   `n` pixels along one edge of one output, and the compositor answers with the
+   work area that leaves. Model it on `zwlr_layer_shell`'s exclusive zone, not
+   on `_NET_WM_STRUT_PARTIAL` — the X11 form encodes start/end offsets along the
+   edge, which exists to support multiple panels sharing one edge and is the
+   part of that protocol everyone gets wrong. Reject a reservation larger than
+   some fraction of the output (a client asking for 100% of the screen must not
+   be able to shrink the work area to nothing).
+   → `RequestBody::ReserveEdge { window, edge, size }` answered with
+   `ResponseBody::WorkArea`. It names an *output* by naming the panel's **own
+   window** — the protocol has no output ids, and a window answers "which
+   monitor" and "for how long" at once. `size == 0` is the release, so there is
+   no second request to keep in step. A greedy claim is **clamped** to
+   `MAX_RESERVED_FRACTION` (a third) per edge rather than rejected: the
+   realistic failure is a panel that mismeasured its own height, and a
+   third-of-screen taskbar is recoverable while a zero work area is not.
+   See `design-decisions.md` §510.
+2. **[x] done.** Track the reservations per output in the compositor and make
+   the tiling area come back as bounds minus them. Because it is derived on
+   every call rather than cached, nothing else needs to change for tiled windows
+   to follow a taskbar that moves or changes height — but *already-tiled*
+   windows will need re-placing when the work area changes, the same way they
+   are re-placed on a display hotplug.
+   → `Compositor::reserved_on` sums the claims of the visible, non-minimized
+   panels whose own monitor is the one being asked about, and `work_area_for`
+   applies them. Re-placement is `retile_for_work_area_change`, and it works
+   because `maximized` and `SnapTarget` store the *request* rather than the
+   rectangle: re-running the same request against the new area is the whole fix.
+3. **[x] done.** Gate the request on a capability. Any client being able to
+   carve a strip out of every other client's tiling is
+   `TD-C-ANY-CLIENT-CAN-READ-EVERY-WINDOW-TITLE` in a more damaging form, and
+   this one is worth getting right the first time rather than adding the check
+   afterwards.
+   → `wire.rs` runs `link.resolve(window)?` **then** `link.require_shell()?`, in
+   that order so a non-shell learns nothing about which window ids exist. Note
+   that `require_shell` is itself still only as strong as
+   `TD-C-ANY-CLIENT-CAN-READ-EVERY-WINDOW-TITLE` leaves it — the check is in the
+   right place, but what it checks is a self-declared role, not a
+   kernel-attested capability. Closing that closes this too; there is no second
+   gate to add here.
+4. **[ ] blocked.** Have the shell make the reservation for its taskbar — which
+   requires the shell to be a compositor client, i.e.
+   `TD-NO-APP-CONNECTS-TO-THE-COMPOSITOR` first. Until then steps 1–3 are
+   tested but unreachable in a running system: the shell knows the number
+   (`Shell::taskbar_height`, `gui/desktop/src/lib.rs`, default 40 logical px)
+   and the compositor now knows the request, and nothing yet joins them up.
+
+**Related but not the same:** maximizing had the identical problem through the
+identical method, and so did the "restore rectangle" bookkeeping that remembers
+where a window was before it was tiled. Both are fixed by the same subtraction;
+there was no second place to patch. `re_tiling_for_a_reservation_keeps_the_
+restore_rectangle` is the test that holds the restore-rectangle half of that
+down.
+
+**Also still under the bar: `set_fullscreen`.** See
+`TD-C-FULLSCREEN-IGNORES-WHICH-MONITOR-AND-WHAT-IS-RESERVED` — it does not go
+through `work_area_for` at all, and *should* ignore reservations (fullscreen
+covers the taskbar on purpose) but should not ignore which monitor it is on.
+
+**If never fixed** (i.e. if step 4 never lands): a cosmetic-but-constant
+annoyance — the bottom ~40 px of every tiled window is obscured — and no data
+loss or crash. It does not get worse with time. It *will* look like a regression
+the day the shell first draws on a real screen next to the compositor, because
+today nothing composites the two together and so nobody has seen it happen.
+
+**Proved, not assumed.** 21 defects were reintroduced one at a time into the
+finished code (the guarded reversible patcher, not `git checkout`) and each
+produced a deterministic failure naming it back; every one of the 31 new tests
+is named by at least one of them. The full map is in the sweep, but the ones
+worth knowing about:
+
+| Defect put back | Named by |
+|---|---|
+| nothing subtracts the strip (the original bug) | 9 tests |
+| a hidden panel keeps its strip | `a_hidden_panel_reserves_nothing` |
+| a panel reserves out of every monitor *but* its own | 9 tests |
+| zero is a 1 px minimum rather than a release | `releasing_a_reservation_gives_the_strip_back` |
+| the re-tile guard inverted | 2 tests |
+| the re-tile forgets which monitor changed | `a_panel_reserves_only_out_of_its_own_monitor` |
+| the re-tile overwrites the restore rectangle | 2 tests |
+| claims wrap instead of saturating | `a_sum_that_overflows_clamps_rather_than_wrapping_back_to_nothing` |
+| nothing clamps a greedy claim | 3 tests |
+| a missing window panics instead of erroring | `reserving_against_a_window_that_is_gone_is_an_error_and_not_a_panic` |
+| the thickness written narrower than it is read | 3 tests |
+| the reply's origin written unsigned | `a_reserve_reply_carries_a_signed_origin_so_a_left_hand_monitor_survives` |
+
+One test has **no** single-string defect that names it —
+`destroying_a_panel_releases_its_reservation`. That is not a coverage gap but a
+consequence of the design: the claim lives in `Window::reserved_edge`, so
+destroying the window destroys the claim structurally, and no one-line edit can
+undo that. What it guards against is a *future refactor* to a side table
+(`HashMap<WindowId, _>`), which would leak a permanent strip whenever a panel
+crashed. Keep the test; it is the reason not to make that refactor.
+
+## TD-C-TILING-MEASURED-EVERY-MONITOR-AT-ONCE (lane C, 2026-08-21) — RESOLVED 2026-08-21
+
+**What was wrong.** Every tiling operation in the compositor — maximize, the
+`SnapEdge` half-screen snap, the `SnapSlot` zone snap, and the edge-drag drop
+that had just been built on top of them — measured itself against the *union of
+all connected displays* rather than against the monitor the window was on. The
+one place it was decided was:
+
+```rust
+fn snap_area(&self) -> WorkArea {
+    work_area_of(self.display_manager.virtual_bounds())
+}
+```
+
+`virtual_bounds()` is the bounding box of every `Display`, which is the correct
+answer for "how big is the desktop" and the wrong one for "how big may this
+window get". On a two-monitor desktop of an 800x600 primary and a 1024x768
+secondary to its right, maximizing a window sitting on the *second* monitor
+moved it to `x = 0` and made it 1824 px wide — it filled both screens and its
+title bar landed on the one the user was not using. Snapping it left gave it the
+whole first monitor plus a 112 px strip of the second.
+
+**Why nothing caught it.** A single-monitor compositor cannot tell the two
+readings apart: with one display, `virtual_bounds()` *is* that display's bounds.
+Every existing tiling test built a one-display `Compositor::new(800, 600, …)`,
+so all of them agreed with the buggy code and would have agreed with any correct
+one. `DisplayManager::display_for(&Rect)` — largest-intersection lookup with a
+primary-display fallback — had existed the whole time and was used by the
+per-monitor DPI scaling path; the tiling paths simply never called it. This is
+the failure mode where the fixture, not the assertion, is what is missing.
+
+**The fix** (commit below). `snap_area()` is gone. In its place:
+
+| Method | Answers |
+| `work_bounds_for(rect)` | the bounds of the display holding most of `rect`, falling back to `virtual_bounds()` only when *no* display is connected |
+| `work_area_for(rect)` | the same as a `WorkArea` |
+| `work_area_at(x, y)` | the work area of the monitor under a point |
+| `work_area_of_window(id)` | the work area of the monitor under a window's frame |
+| `work_rect(area)` (free fn) | the inverse of `work_area_of`, so a work area can go back to whole pixels |
+
+`maximize_window` and `snap_window_to_zone` each split into a public form that
+resolves the window's own monitor and a private `_within` form taking a
+caller-chosen area. The edge drop uses the `_within` forms, because the drop
+must follow the monitor **under the pointer** — see `design-decisions.md` §509 —
+and `DropIntent` now carries the `WorkArea` the preview was drawn against so
+that preview and drop cannot disagree.
+
+**Coverage added** — eight tests, and every one of them fails against the old
+code, checked by reintroducing each defect individually:
+`maximizing_fills_the_windows_own_monitor_and_not_every_monitor`,
+`snapping_takes_half_of_the_windows_own_monitor`,
+`a_zone_snap_resolves_against_the_windows_own_monitor`,
+`an_edge_drop_uses_the_monitor_the_pointer_is_over`,
+`the_preview_crosses_the_seam_with_the_pointer`,
+`the_interior_seam_is_two_edges_and_not_a_middle`,
+`a_drop_tiles_the_monitor_the_pointer_is_over_even_when_the_window_is_not`,
+`a_work_area_survives_the_round_trip_back_to_pixels`. The shared `two_monitors`
+fixture is the thing that was missing; prefer it over `Compositor::new` for any
+future geometry test, since a one-display compositor cannot distinguish "this
+screen" from "all screens".
+
+Two traps that cost time and are worth knowing before writing the ninth such
+test: (1) a zone rectangle carries the layout's gap, so a hand-computed "half of
+1024" (512) is not the number a drop produces (509) — derive expectations from
+`guiremote::zones` itself, which is what the `edge_drop_rect` helper does; and
+(2) two synchronous drags of the same title bar fall inside the default
+double-click interval, so the second press is read as a maximize and starts no
+drag — use a fresh compositor per case or `set_double_click_ms(2000)`.
+
+**What remains.** The work area is still the *whole* of the correct monitor,
+including the strip the taskbar occupies — that is
+`TD-C-COMPOSITOR-TILES-UNDER-THE-TASKBAR`, still open, and `work_bounds_for` is
+now the single place its fix has to land.
+
+*(Update 2026-08-21: that is now done — `work_area_for` subtracts what panels
+have reserved. See the entry above.)*
+
+---
+
+## A-FD-TABLE-CAPACITY-IS-256-AND-THAT-IS-NOW-THE-ADVERTISED-LIMIT (lane A)
+**Status:** OPEN — 2026-08-21
+
+**In short.** A program can have at most 256 files open at once. Until today
+the kernel *told* programs they could have 4096, which was a lie that produced
+"too many open files" errors at 256 with a limit that read 4096. The lie is
+fixed — `getrlimit(RLIMIT_NOFILE)` now honestly reports 256. What is left is
+the underlying number: 256 is low for a real build (`make -j`, a compiler with
+many headers open, a shell with several pipelines) and raising it is a change
+in two lanes at once, not one.
+
+**Where it lives.**
+
+| | |
+|---|---|
+| kernel fd table | `kernel/src/proc/linux_fd.rs:57` — `MAX_FDS = 256`, `[Option<FdEntry>; MAX_FDS]` per PCB (8 KiB) |
+| kernel advertised limit | `kernel/src/proc/pcb.rs` `DEFAULT_RLIMITS[RLIMIT_NOFILE]`, now derived from `MAX_FDS_U64` |
+| kernel enforcement | `pcb::linux_fd_install` (soft limit) and `FdTable::install_lowest_from` (array bound) |
+| libc fd table | `posix/src/fdtable.rs:73` — its own `MAX_FDS = 256`, **plus** a `MAX_FDS × FD_PATH_MAX` = 1 MiB static path buffer sized from it (`fdtable.rs:569`) |
+
+**Why it is not just a constant to bump.** Three numbers have to move together
+and two of them are in lane B's tree. Raising the kernel alone puts the two fd
+tables out of sync in the *opposite* direction from the bug just fixed — libc
+would refuse fd 300 that the kernel happily installed. Raising both takes libc's
+static path buffer from 1 MiB to 4 MiB at 1024 slots, which is a real cost in a
+`static mut` that every process carries. The honest options are (a) bump both
+and pay the 4 MiB, (b) make libc's path buffer sparse/heap-backed first and then
+bump both, or (c) leave it and treat 256 as the platform's answer. This is a
+`requests/a-b-*.md` and a decision, not an edit.
+
+**What was fixed today, so this is not confused with it.** `DEFAULT_RLIMITS`
+said `(1024, 4096)` against the 256-slot table. It now reads
+`(linux_fd::MAX_FDS_U64, linux_fd::MAX_FDS_U64)`, derived rather than restated,
+with `const _: () = assert!` guards that fail the build if anyone writes a
+literal there again — which is how it drifted in the first place. `set_rlimit`
+additionally caps `RLIMIT_NOFILE`'s hard limit at `MAX_FDS` *unconditionally*,
+so the ceiling survives the day `CAP_SYS_RESOURCE` makes hard-limit raises legal
+for every other resource. Covered by `pcb::self_test::test_rlimits`.
+
+**How you would notice.** A ported program that opens many files fails with
+`EMFILE` at 256 — but now with a `getrlimit` that agrees, so the program can
+size its pool correctly or report the real limit instead of being surprised.
+That is the whole difference between this entry and the bug it replaces.
+
+**Found** 2026-08-21 by lane A while implementing `SYS_RLIMIT_GET`/`SYS_RLIMIT_SET`
+(`requests/b-a-native-rlimit-syscalls.md`), whose filer had spotted the
+contradiction and asked which of the two numbers should move.
+---
+
+## TD-C-FULLSCREEN-IGNORES-WHICH-MONITOR-AND-WHAT-IS-RESERVED (lane C, 2026-08-21) — RESOLVED 2026-08-21
+
+**Resolution.** Already fixed by `c85729f62` (design-decisions.md §514), which
+landed between this entry being written and being picked up — the entry below
+describes code that no longer exists. `set_fullscreen` reads
+`self.work_bounds_for(w.frame_rect())` and sizes from *that* (lib.rs ~5216), and
+`work_bounds_for` returns `Display::bounds` — the monitor, not its work area —
+which is exactly what step 1 asks for. Step 2's blocker was resolved in the same
+commit and recorded in §514: the direct-scanout bypass is deliberately a
+single-head optimisation, and the guard that makes it so is the pre-existing
+"the window must cover the whole framebuffer" test, which a one-monitor
+fullscreen window no longer satisfies. `the_direct_scanout_bypass_declines_a_second_monitor`
+(lib.rs ~15366) pins that the guard is load-bearing rather than incidentally
+true.
+
+Step 3's checklist had two of its three tests —
+`fullscreen_fills_the_windows_own_monitor_and_not_every_monitor` and
+`leaving_fullscreen_on_the_second_monitor_stays_on_it`. The third, the contrast
+against a reservation, was genuinely missing and is now
+`fullscreen_covers_the_taskbar_that_maximize_stops_at`: it maximizes a window
+over a 40-row bottom reservation and asserts it stops at `screen.bottom() - 40`,
+then fullscreens the *same* window and asserts it covers the whole 800x600. The
+gap mattered — with nothing reserved the two helpers return the same rectangle,
+so swapping `work_bounds_for` for `work_area_for` in `set_fullscreen` passed all
+427 other tests while leaving a strip of taskbar across every full-screen video.
+Proved by the reintro marker `fullscreenspareasthetaskbar`, which fails that one
+test and no other. Compositor 428 + 18 green.
+
+<details><summary>Original entry (describes pre-<code>c85729f62</code> code)</summary>
+
+
+**In short:** Putting a window fullscreen always makes it fill the *first*
+monitor, starting at the top-left corner of the whole desktop — no matter which
+monitor the window was actually on. On a single-monitor machine you cannot tell.
+On two monitors, a video you fullscreen on the right-hand screen jumps to the
+left-hand one and covers whatever was there. Nothing crashes and Escape still
+puts it back where it came from; it just goes to the wrong screen.
+
+**Where.** `gui/compositor/src/lib.rs` `Compositor::set_fullscreen`:
+
+```rust
+let (fb_w, fb_h) = self.backend.size();
+…
+window.x = 0;
+window.y = 0;
+window.width = fb_w;
+window.height = fb_h;
+```
+
+`backend.size()` is the framebuffer — one screen's worth — and `(0, 0)` is the
+origin of the *virtual desktop*, so the two do not even describe the same
+rectangle once a second monitor exists. This is the same family as
+`TD-C-TILING-MEASURED-EVERY-MONITOR-AT-ONCE` (now resolved), but it was
+deliberately left out of that fix: fullscreen is the one path that must **not**
+go through `work_area_for`, because a fullscreen window is *supposed* to cover
+the taskbar. It needs the monitor's bounds, not the monitor's work area, so it
+wants a different call and got skipped rather than half-converted.
+
+**Why it was deferred rather than fixed with the rest.** Changing what
+fullscreen resolves to interacts with **direct scanout** — the optimisation
+where a fullscreen window is handed to the display controller as the scanout
+buffer instead of being composited. Eligibility for that is currently phrased in
+terms of the window matching the framebuffer exactly, which is the very
+expression this change would invalidate. Making fullscreen per-monitor without
+first deciding what direct scanout means on a multi-head arrangement (scan out
+on the window's own monitor only? disable it entirely when more than one head is
+active?) would silently either break the optimisation or, worse, keep it enabled
+while it is no longer correct. That is a decision, not a typo.
+
+**The proper fix.**
+
+1. Resolve the monitor the way everything else now does:
+   `self.work_bounds_for(window.frame_rect())` — the monitor with the largest
+   intersection, primary as the fallback — and use *those* bounds, not
+   `backend.size()` and not `work_area_for` (see above).
+2. Re-state direct-scanout eligibility against that monitor's bounds rather than
+   against the framebuffer, and decide explicitly what it does when more than
+   one head is active. Record the decision in `design-decisions.md`.
+3. Add the tests the tiling fix's fixtures make easy: fullscreen on the second
+   monitor stays on the second monitor; fullscreen ignores a reservation (the
+   taskbar *is* covered) where maximize honours it; unfullscreen restores to the
+   original rectangle on the original monitor.
+
+**Reproduce.** With the existing `two_monitors(1)` fixture, `set_fullscreen` a
+window on `screens[1]` and read its `frame_rect()`: it comes back at
+`screens[0]`'s origin with the framebuffer's size.
+
+**If never fixed:** harmless on one monitor, which is every configuration
+tested today. On two it is a visible misfeature the first time anyone
+fullscreens anything on the secondary screen. It does not corrupt state — the
+restore rectangle is captured before the move, so leaving fullscreen still
+returns the window to where it was — and it does not get worse with time.
+
+</details>
+
+## B-AUTH-DAEMON-RATE-LIMIT-TESTS-RACE-A-ONE-SECOND-WINDOW (lane B, filed by lane C 2026-08-21) — OPEN, filed as a request
+
+**In short:** four userspace daemons test their password rate limiter by making
+four wrong guesses and asserting the fifth is refused. The refusal lasts exactly
+one *real* second, and the four guesses each run a real password hash, so on a
+loaded machine the window is already over by the time the fifth guess happens
+and the test fails. Observed once in a lane-C full-workspace run.
+
+**Where it lives:** `userspace/sshd/src/main.rs` (observed),
+`userspace/ftpd/src/main.rs`, `userspace/doas/src/main.rs`,
+`userspace/logind/src/main.rs` — all four build the authenticator with the real
+clock. `userspace/authlib/src/lib.rs` ~line 520 is the window
+(`now < last_failure_secs + delay_for(failures)`; `delay_for(4) == 1`).
+
+**Reproduce:** `cargo test --workspace --target x86_64-pc-windows-gnu` under
+load. Green in isolation (`sshd` 140/140). Observed:
+`sshd/src/main.rs:4902: expected a rate limit, got Rejected`.
+
+**Proper fix:** pin the clock, as `authlib`'s own copy of the same test already
+does — `Authenticator::with_clock(...)` over an `AtomicU64` the test steps
+deliberately. This also strengthens the assertions: a frozen clock lets them
+check `RateLimited { retry_after_secs: 1 }` at a known instant instead of
+`matches!(.., RateLimited { .. })` at whatever instant the scheduler provided.
+
+**Why it matters more than a flake:** the failing direction is noisy but the
+*passing* direction is quietly weak. A pass proves only "refused within a second
+of the fourth failure", which a mis-computed delay would also satisfy. The tests
+are worth less than their names claim even when green.
+
+**Not lane C's tree.** Filed as
+`requests/c-b-auth-daemon-rate-limit-tests-race-a-one-second-window.md` with the
+full diagnosis. Distinct from the resolved
+`B-FTPD-SSHD-AUTH-TESTS-SHARE-TEMP-FILES-AND-FLAKE` — that was shared temp
+files and lane B's `ScratchDir` fix holds; this is wall-clock timing.
+
+
+---
+
+## TD-C-THE-OVERVIEW-SCREEN-IS-1856-LINES-NOBODY-CALLS (lane C, 2026-08-21) — RESOLVED 2026-08-22
+
+**In short:** The desktop has a finished Expose / Mission-Control screen —
+thumbnails of every window, one lane per virtual desktop, arrow-key navigation,
+type-to-search, click to switch. It is 1856 lines, it is tested, and *nothing in
+the operating system ever shows it*. There is no key that opens it, no code that
+fills it with real windows, and no code that acts on what the user clicks.
+
+**Where:** `gui/desktop/src/overview.rs`, declared `pub mod overview;` at
+`gui/desktop/src/lib.rs:109`. A search of the whole tree for `OverviewState`,
+`DesktopLane` and `overview::` matches exactly one file — `overview.rs` itself.
+Its only constructors of `DesktopLane` are its own `sample_lanes()` fixture and
+three tests.
+
+**How it looks:** it does not look like anything. That is the defect. A user
+cannot reach it; a developer reading `roadmap.md` would tick the feature off.
+
+**Why it was not noticed sooner:** the module is *good* — 15 public items with
+doc comments, a grid layout, a lane layout, a full render pass and a keyboard
+model, all covered by tests that pass. Every test drives the module directly, so
+"is this wired to anything?" is a question none of them can ask. This is the
+same failure mode as `TD-C-VIRTUAL-DESKTOPS-HIDE-NOTHING` — a self-consistent
+component whose tests prove it correct with respect to inputs no one supplies.
+
+**Three things are missing, and they are not the same size.**
+
+1. *A data source. The wire change it needed is now done (`WLST` v3,
+   design-decisions.md §519); the projection is not.* `WindowThumbnail` wants
+   `window_id`, `desktop_id`, `title`, focus, minimized and a rectangle. All of
+   those are now on `guiremote::window_list::WindowInfo`, with
+   `DesktopLane::is_current` being the header's `current_workspace`. The
+   rectangle was the blocker and is why this entry originally said the wire had
+   to change first: `compute_grid_layout` calls
+   `fit_aspect(thumb.width, thumb.height, …)`, and `fit_aspect` returns
+   `(0.0, 0.0)` for a zero input, so a projection written against the v2 list
+   would have given every thumbnail a zero-by-zero rectangle — nothing drawn,
+   and `on_mouse_click` hit-testing against nothing. That is the exact failure
+   `Hit::WindowContent` had before §506 deleted it, for the exact same reason: a
+   rectangle nobody supplies. Uniform boxes were rejected as the substitute — an
+   Exposé whose thumbnails do not have their windows' proportions is a list,
+   which is the taskbar. What remains is the projection itself: a
+   `DesktopShell` → `OverviewState` function driven by the same `WindowList`
+   that `apply_window_list` already takes, so the overview cannot disagree with
+   the taskbar about which desktop is showing.
+   The *thumbnail image* is separately absent and is the part that should stay
+   absent for now: the module lays out rectangles and draws titles, and never
+   asks the compositor for window contents. Live thumbnails need a verb that
+   does not exist (a scaled read of another client's buffer) and is a capability
+   question of the same shape as `TD-C-ANY-CLIENT-CAN-READ-EVERY-WINDOW-TITLE` —
+   only worse, because a title is text and a thumbnail is the screen. Titled
+   proportional rectangles are a usable Exposé without it.
+2. *An output path.* `OverviewAction` is a fourth spelling of verbs the shell
+   already has: `SwitchToWindow(u64)` is `ShellControlAction::Activate`,
+   `SwitchToDesktop(u32)` is `ShellRequest::SwitchDesktop`, `CloseWindow(u64)`
+   is `ShellControlAction::Close`. Wiring should *delete* those three variants
+   and return `Option<ShellRequest>`, exactly as the zone-snapping work deleted
+   the shell's second copy of the edge rules (see
+   `TD-C-EDGE-DRAG-TILING-HAS-NO-DRAG-TO-FIRE-ON`, resolved). A second spelling
+   is a second thing to drift.
+   `OverviewAction::AddDesktop` has no counterpart and cannot get one today:
+   `DesktopShell::num_desktops` is fixed at construction and is the only bound
+   either side enforces (design-decisions.md §518). Making the desktop count
+   mutable is a real decision, not a wiring detail.
+3. *A field nothing in the system can fill.* `WindowThumbnail::app_name` is
+   rendered as a second label under each title (`overview.rs:757`) and is one of
+   the two things type-to-search matches (`overview.rs:183`). Nothing in the
+   shell knows it. `guiremote::window_list::WindowInfo` carries `id`, `pid`,
+   `layer`, `title`, four state bits, a desktop number and (as of `WLST` v3) a
+   rectangle — no application identity; a tree-wide search finds `app_name` only
+   in `context_ext.rs`, `focus_assist.rs` and `notif_pane.rs`, all of which are
+   given the string by whoever registers with them, and none of which is
+   reachable from a window id. Only the three test fixtures inside `overview.rs`
+   ever set it, always to the literal `"app"`, which is exactly why the tests do
+   not notice. A projection written today would have to pass the empty string,
+   and then the overview would render a blank line under every title and
+   type-to-search would silently match half of what its doc comment promises.
+   The honest fix is to *delete* the field rather than invent a value for it:
+   an application's name is a property of the program, which means it comes from
+   the package/desktop-entry metadata keyed by executable, and the compositor
+   would have to learn an app identity per window before the wire could carry
+   one. Until that exists, a titled rectangle is the whole of what the shell
+   knows. (Deleting it also removes the second search key, so `update_search`'s
+   doc comment has to stop promising it.)
+
+**Proper fix:** (a) a `DesktopShell` → `OverviewState` projection driven by the
+same `WindowList` `apply_window_list` already takes, so the overview cannot
+disagree with the taskbar about which desktop is showing; (b) `OverviewAction`
+collapsed into `Option<ShellRequest>` with the three duplicate variants deleted;
+(c) a hotkey in `handle_hotkey` to open it and `Esc` to close; (d) thumbnails
+left as titled rectangles until the compositor can serve window contents under a
+capability, with the module doc saying so rather than implying pictures;
+(e) `app_name` deleted from `WindowThumbnail` and `ThumbnailLayout`, and
+`update_search` reduced to matching titles, until an application identity exists
+to put there.
+
+**If never fixed:** 1856 lines of dead weight that reads as a shipped feature.
+The concrete cost is not the disk space — it is that the next person to want an
+Expose screen finds this one, believes it works, and wires a data source to an
+action enum that has since drifted from the shell's.
+
+**RESOLVED 2026-08-22, in two stages.** Stage 1 (commit `7438f13ff`) put each
+window's rectangle on the `WLST` wire at v3, which was the blocker named in
+point 1; see `design-decisions.md` §519. Stage 2 connected the overview to it;
+see §520. Every lettered step of the proper fix above is done:
+
+- **(a) the projection** — `OverviewState::apply_window_list(list, num_desktops)`
+  is called from the same `DesktopShell::apply_window_list` that refreshes the
+  taskbar, from the one statement, so the two cannot disagree about which
+  desktop is showing. Lanes come from `num_desktops`, not from the windows that
+  happen to exist, so an empty desktop still has a lane — the screen whose job
+  is to show you where everything is must show the empty places too.
+- **(b) the output path** — `SwitchToWindow`, `SwitchToDesktop` and
+  `CloseWindow` are deleted; `OverviewAction::Request(ShellRequest)` carries the
+  shell's own vocabulary, and `DesktopShell::act_on_overview` is the only thing
+  that reads it.
+- **(c) the hotkey** — `Super+Tab` opens it (`DesktopAction::ToggleOverview`),
+  `Esc` closes it, and while it is up it is *modal*: `handle_press` routes to
+  `press_on_overview` before `hit_test`, and `handle_hotkey` routes to
+  `key_on_overview` before the shortcut table. Both orderings are load-bearing
+  and both are guarded by a reintroduction marker — see §520's Verification
+  table. Without the first, a click on the strip the taskbar occupies reaches
+  the taskbar from behind an opaque fullscreen overlay; without the second,
+  typing `d` into the search box runs Show Desktop.
+- **(d) thumbnails stay titled rectangles** — the module doc says so, and says
+  why (a scaled read of another client's buffer is a capability question of the
+  same shape as `TD-C-ANY-CLIENT-CAN-READ-EVERY-WINDOW-TITLE`, only worse).
+- **(e) `app_name` deleted** from `WindowThumbnail` and `ThumbnailLayout`;
+  `update_search` matches titles and its doc comment no longer promises more.
+  This was not cosmetic: the empty string a projection would have had to pass
+  is a substring of *every* query, so search would have silently returned the
+  whole desktop. The test that used to prove the field worked
+  (`test_search_filters_by_app_name`) proved it against a fixture that set
+  `"app"` by hand, which is exactly why nothing noticed.
+
+**`AddDesktop` is resolved by deletion, not by making the desktop count
+mutable.** The entry above called that "a real decision, not a wiring detail",
+and it still is — but the "+" button did not have to wait for it. A control
+that asks for something no verb in the system can do is the *same defect this
+whole entry is about*, one button large: it draws, it hit-tests, and it reaches
+nothing. It is gone, and with it `on_mouse_click`'s `screen_w`/`screen_h`
+parameters, since it was the only thing in the overview placed independently of
+the layout pass and therefore the only thing that could be drawn in one place
+and clicked in another. Two tests were inverted to keep it deleted
+(`nothing_draws_an_add_desktop_button`, `the_bottom_right_corner_is_not_a_button`).
+If the desktop count ever becomes mutable, the button comes back with a verb
+behind it.
+
+**Wiring it up exposed a second dead feature, now filed separately.** The
+overview's open animation had never run and could not: see
+`TD-C-THE-SHELL-HAS-NO-FRAME-CLOCK`. Because every draw path began
+`if progress <= 0.0 { return }` and `show()` set it to `0.0`, the first working
+build of this feature drew a blank, un-clickable overlay. That is worth
+recording as the general lesson of this entry: a component tested only against
+its own inputs can be wrong in a way no amount of its own tests can see, and
+the failure surfaces the moment — and only the moment — something real is
+plugged into it.
+
+
+## TD-C-THE-SHELL-HAS-NO-FRAME-CLOCK (lane C, 2026-08-22) — RESOLVED 2026-08-22
+
+**In short:** Nothing on the desktop can move by itself. A menu cannot slide
+open, a window cannot fade, a progress spinner cannot spin — not because the
+code for those is missing, but because there is no heartbeat to step it with.
+The shell only wakes up when the user does something; if nobody touches the
+keyboard or mouse it goes to sleep in the middle of any animation and stays
+there. Roughly a thousand lines of animation code exist and none of it has ever
+run.
+
+**Where.** `gui/window/src/lib.rs:914`, `EventLoop::run`:
+
+```rust
+while self.running && self.conn.is_open() {
+    let mut dispatched = false;
+    while let Some((window, event)) = self.poll()? { ... }
+    if !dispatched && self.running {
+        self.conn.wait()?;      // blocks until a byte arrives on the socket
+    }
+}
+```
+
+`Connection::wait` (`gui/remote/src/socket.rs:373`) blocks on socket
+readability and takes no timeout. There is no timer, no deadline, no frame
+callback and no "wake me in 16 ms" anywhere in `oswindow`'s API surface, so a
+loop with no input pending simply stops. That is the correct design for an
+*event-driven* client — it burns no CPU on an idle desktop, which is exactly
+what a polling loop would get wrong (compare `TD-COMPOSITOR-POLLS-INSTEAD-OF-WAITING`,
+which is the same tradeoff resolved the other way and filed as debt for it).
+What is missing is the second wake-up source, not the blocking.
+
+**What it costs today, in order of size.**
+
+1. **`gui/desktop/src/animations.rs` is 1036 lines with no caller.** Six
+   `tick()` methods, a `tick_render`, easing curves, an animated-rect
+   interpolator and a per-window batch stepper — and a tree-wide search for
+   `animations::` outside the module itself returns nothing. `session.rs` and
+   `lib.rs` call no `tick` of any kind. This is the same defect as
+   `TD-C-THE-OVERVIEW-SCREEN-IS-1856-LINES-NOBODY-CALLS`, a module larger than
+   half of that one, and it is *not* fixable by wiring: there is nothing to
+   wire it to.
+2. **The overview's open fade was deleted rather than shipped broken.**
+   `OverviewState` had an `animation_progress: f32` stepped by `tick_animation`,
+   `show()` set it to `0.0`, and every draw path began
+   `if progress <= 0.0 { return }`. With no clock, the first genuinely working
+   build of the overview drew **a blank, un-clickable, fullscreen overlay** —
+   the feature not working, not a missing polish detail. Keeping the field to
+   preserve the *possibility* of a fade would have meant shipping the blank
+   version in order to protect an animation that does not exist. It is gone;
+   see `design-decisions.md` §520.
+3. **Anything else with a `tick(dt)` is in the same position** —
+   `notif_pane.rs:600` (slide-in), `login_screen.rs:419` — and is currently
+   saved only by not gating its rendering on progress the way the overview did.
+   They render at their final state, which looks like a missing animation
+   rather than a missing feature. That is luck, not design: the next module
+   that writes the obvious `if progress <= 0.0 { return }` reproduces defect 2.
+
+The `tick`s that take an explicit `now_ms` and are driven by an *event* rather
+than a frame — `osd.rs:249`, `power.rs:601`, `a11y.rs:664` — are fine and are
+not part of this entry. The distinction is whether the caller has a reason to
+call at all when nothing happened.
+
+**Corrected 2026-08-22 — the gap is higher up than first written.** This entry
+originally proposed adding a `wait_until(deadline)` at the socket layer. That
+was wrong: **`SocketTransport` already has one.** `set_wait_timeout(Option<Duration>)`
+(`gui/remote/src/socket.rs:204`) caps how long `park()` blocks, by way of
+`set_read_timeout`, and it already refuses a zero duration with an explanation.
+Its own doc comment even names the use case — *"Only useful to a client that has
+something to do on a timer — an animation, a blinking caret"*. Nothing above it
+has ever called it.
+
+**And the event type already exists too.** `guitk::event::Event::Tick { elapsed_ms }`
+is in the shared vocabulary, `gui/remote/src/input.rs` encodes and decodes it on
+the wire in both directions, and **50 references to it exist across the toolkit
+and the applications** — `modal.rs` (three), `grid.rs`, `asteroids`, `breakout`,
+`dots`, `benchmark`, `diskimager`, `credmanager` and more all have a
+`Event::Tick { elapsed_ms } =>` arm ready to receive one. A tree-wide search for
+anything that *constructs* one outside a test finds nothing. The compositor
+never sends a `Tick`; `EventLoop` never synthesises one.
+
+So this is not a missing mechanism at either end. It is a **missing producer in
+the middle**, with a working consumer vocabulary on one side and a working
+bounded wait on the other, and no line of code joining them. That makes it
+markedly cheaper to fix than first assessed, and markedly worse to leave: every
+one of those 50 arms is dead code that its author had no way to notice was dead,
+because a `handle_event(Event::Tick { elapsed_ms: 16 })` written by hand in a
+unit test passes perfectly.
+
+**Proper fix:** `EventLoop` synthesises the tick locally.
+
+1. `Transport` grows `set_wait_timeout(Option<Duration>)`, defaulting to
+   `Ok(())`. The default is sound rather than lax: the default `wait()` returns
+   immediately, and a wait that never blocks trivially honours any bound. The
+   rule is the same one `wait` already states — every transport that really
+   blocks must implement it. `SocketTransport`'s inherent method becomes the
+   trait impl.
+2. `EventLoop` grows `wake_at(window, Instant)` / `wake_after(window, Duration)`
+   and `cancel_wake(window)`. Wake-ups are **one-shot**, so an animation re-arms
+   from its own handler: that makes stopping the default and continuing the
+   deliberate act, which is what keeps an idle desktop idle.
+3. `run` computes the nearest pending deadline each pass, bounds the wait to it,
+   and delivers `Event::Tick { elapsed_ms }` — measured, not assumed — to each
+   window whose deadline has passed. With no registrations it blocks for ever
+   and burns nothing, exactly as now.
+
+This is deliberately **not** a fixed-rate frame timer. A shell that wakes 60
+times a second to discover it has nothing to draw is
+`TD-COMPOSITOR-POLLS-INSTEAD-OF-WAITING` in a different place.
+
+It is also deliberately **local**, not a compositor frame callback. The wire can
+already carry a `Tick`, so a compositor-driven, vsync-locked version remains
+open later for anything that needs to be in step with the display; but routing
+every animation frame through a socket round trip to get a timer the client can
+read from its own clock would put the compositor in the middle of every blinking
+caret on the desktop.
+
+Rendering also has to become re-entrant from the loop rather than from an input
+event, which is the part that touches `session.rs`: `paint_chrome` is called
+today only in response to something the user did.
+
+**Owned by lane C** — `gui/window` and `gui/remote` are both in lane C's tree,
+so no cross-lane request is needed.
+
+**If never fixed:** no visual transition on the desktop can ever work, and the
+1036 lines of `animations.rs` stay dead. It gets slowly worse rather than
+staying still: each new module that writes an animation writes it against an
+API that cannot run, and every one of them will pass its own unit tests,
+because a `tick(dt)` called directly by a test advances exactly as designed.
+That is the trap — the tests are not wrong, they are just answering a question
+nobody in production asks.
+
+---
+
+**RESOLVED 2026-08-22.** `EventLoop` now synthesises the tick locally, exactly
+as the three-step fix above proposed. See `design-decisions.md` §521 for the
+four choices behind it (local vs. compositor, one-shot vs. repeating, on-demand
+vs. fixed-rate, measured vs. assumed `elapsed_ms`) and for the verification.
+
+**What shipped.**
+
+- `Transport::set_wait_timeout(Option<Duration>)` (`gui/remote/src/client.rs`),
+  defaulting to `Ok(())`; `Connection::set_wait_timeout` forwards it. `Socket`'s
+  inherent method became the trait impl, unchanged. (This entry called the type
+  `SocketTransport` above — it is actually named `Socket`, aliased to `Link` in
+  `oswindow`.)
+- `EventLoop::wake_at(window, Instant)`, `wake_after(window, Duration)`,
+  `cancel_wake(window)`, `is_waking(window)`, `next_wakeup()`
+  (`gui/window/src/lib.rs`). One-shot; arming twice replaces rather than
+  accumulates; `close()` cancels.
+- `EventLoop::wait()` — now public — bounds the park by the nearest deadline,
+  floored at 1 ms so an already-past deadline never reaches the socket as a zero
+  timeout (which the platform reads as *never* time out, the exact opposite).
+  With nothing armed the bound is `None` and the loop blocks for ever, burning
+  nothing, exactly as before.
+- `poll()` mixes the due ticks into the ordinary pending queue, so a manual loop
+  driver gets them too, not just `run()`. `elapsed_ms` is measured from the
+  previous tick for that window, carried across the handler that re-armed, and
+  dropped when an animation stops so a restart does not report the pause.
+- `ShellSession` now parks through `EventLoop::wait` rather than
+  `Connection::wait`, and exposes `events_mut()` so a shell can register its own
+  wake-ups. **This was a real bypass, not a precaution**: without it the frame
+  clock would have worked everywhere except in the shell, and the only symptom
+  would have been an animation that stops.
+
+Seventeen tests added across `oswindow`, `guiremote` and `desktop`; fourteen
+defects were reintroduced one at a time into the real tree to prove sixteen of
+them fail against the defect they name, with every touched file verified
+restored byte-for-byte. `an_idle_loop_has_no_deadline` is recorded as additional
+coverage rather than a regression test — no marker made it fail. Full table in
+`design-decisions.md` §521.
+
+**What this does NOT close.**
+
+1. **`gui/desktop/src/animations.rs` still has no caller.** Cost 1 above is
+   unchanged: the 1036 lines are still dead. They are now dead for a fixable
+   reason — there is something to wire them to — rather than an unfixable one.
+   That wiring is the next task, and it is where the fix is actually cashed in;
+   until then this entry has built a heartbeat nothing listens to.
+2. **Rendering is still driven from input, not from the loop.** `paint_chrome`
+   is called in response to something the user did. An animation stepped by a
+   tick must be able to repaint from the tick, which is the re-entrancy note in
+   the fix above and is part of task 1, not of this one.
+3. **Nothing is vsync-locked.** Deliberate — see §521 §1. An animation that must
+   be in step with the display still cannot be; the wire can already carry a
+   `Tick`, so a compositor frame callback remains additive later.
+

@@ -137,10 +137,20 @@ pub fn cleanup_handles(handles: &[(ResourceType, u64)]) {
                 let _ = crate::fs::handle::close(handle_raw);
             }
             // No cleanup needed for these types — they're either
-            // permission tokens (PortIo, DeviceIrq, IoScheduler, NetRaw) or
-            // managed by other subsystems (Socket, Service, Namespace).
+            // permission tokens (PortIo, DeviceIrq, IoScheduler, NetRaw,
+            // SystemClock, PrivilegedPort, ResourceLimit) or managed by other
+            // subsystems (Socket, Service, Namespace).
             // NetRaw's exclusive NIC claim is released lazily by
             // `net::raw::is_claimed` when it observes the owner has died.
+            //
+            // SystemClock/PrivilegedPort/ResourceLimit name no per-open kernel
+            // object at all: they exist only as entries in a capability table,
+            // which is torn down wholesale with the process.  They can only
+            // reach this match because it is exhaustive over `ResourceType`,
+            // never because such a handle was registered — and that
+            // exhaustiveness is deliberately kept (no `_` arm) so the next
+            // resource type that *does* own something cannot be added without
+            // this cleanup path being considered.
             ResourceType::Process
             | ResourceType::Thread
             | ResourceType::PortIo
@@ -149,6 +159,9 @@ pub fn cleanup_handles(handles: &[(ResourceType, u64)]) {
             | ResourceType::IoScheduler
             | ResourceType::Service
             | ResourceType::NetRaw
+            | ResourceType::SystemClock
+            | ResourceType::PrivilegedPort
+            | ResourceType::ResourceLimit
             | ResourceType::Namespace => {}
         }
     }

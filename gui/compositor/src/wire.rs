@@ -261,9 +261,11 @@ impl ClientLink {
     /// The single place the compositor asks "is this connection a shell?".
     ///
     /// **It does not currently check anything, and saying so is the point.**
-    /// Two requests are a shell's and not an application's — reading the whole
-    /// desktop's window list, and acting on windows the sender does not own —
-    /// and the honest gate for them does not exist yet: the answer has to come
+    /// A handful of requests are a shell's and not an application's — reading
+    /// the whole desktop's window list, acting on windows the sender does not
+    /// own, reserving a panel edge, showing a different virtual desktop and
+    /// filing a window on one — and the honest gate for them does not exist
+    /// yet: the answer has to come
     /// from a capability the kernel attests at connection accept, and kernel
     /// channel IPC does not yet carry one to the compositor. A check written
     /// against a value the *client* supplies would not be a gate but the
@@ -275,7 +277,8 @@ impl ClientLink {
     /// and routed through **one** function, so the day the capability arrives
     /// the fix is a body here rather than a hunt for every place that should
     /// have asked. That was already the shape of the recorded proper fix when
-    /// there was one such request; this keeps it true now that there are two.
+    /// there was one such request, and every one added since has gone through
+    /// here rather than growing a check of its own.
     ///
     /// Returns the refusal to send, so a caller writes `link.require_shell()?`
     /// exactly as it writes `link.resolve(window)?`.
@@ -380,6 +383,39 @@ fn to_compositor_request(
                 action,
             }
         }
+        // The only request that is **both** resolved against the sender's own
+        // windows *and* privileged, and it needs both for different reasons.
+        // `resolve` because the window named is the panel's own and a client
+        // reserving out of somebody else's window would be nonsense — the
+        // monitor and the lifetime are read off it. `require_shell` because the
+        // *effect* lands on every other client: an unprivileged program could
+        // take a third of each edge and leave the whole desktop unable to tile.
+        // Ownership is checked first, so a program that is not a shell learns
+        // nothing about which window ids exist that it did not already know.
+        RequestBody::ReserveEdge { window, edge, size } => {
+            let window_id = link.resolve(window)?;
+            link.require_shell()?;
+            CompositorRequest::ReserveEdge {
+                window_id,
+                edge,
+                size,
+            }
+        }
+        // Privileged and unresolved, for the two halves of the same reason as
+        // `ShellControl`: a switch names no window at all, and filing a window
+        // on a desktop is a thing done to somebody else's window by definition
+        // -- a client may not choose which desktop its own window opens on.
+        RequestBody::SwitchWorkspace { workspace } => {
+            link.require_shell()?;
+            CompositorRequest::SwitchWorkspace { workspace }
+        }
+        RequestBody::SetWindowWorkspace { window, workspace } => {
+            link.require_shell()?;
+            CompositorRequest::SetWindowWorkspace {
+                window_id: WindowId::from_raw(window),
+                workspace,
+            }
+        }
     })
 }
 
@@ -409,6 +445,17 @@ fn to_response_body(response: CompositorResponse) -> ResponseBody {
             refresh_rate,
             scale_factor,
         }),
+        CompositorResponse::WorkArea {
+            x,
+            y,
+            width,
+            height,
+        } => ResponseBody::WorkArea {
+            x,
+            y,
+            width,
+            height,
+        },
         CompositorResponse::StreamStarted { .. } | CompositorResponse::StreamFrame { .. } => {
             ResponseBody::Error {
                 message: "stream responses have no client-facing wire form".to_string(),
@@ -618,8 +665,8 @@ impl Compositor {
         // Reuses one buffer across ticks rather than allocating a fresh Vec for
         // a frame that is usually discarded as unchanged.
         self.window_list_scratch.clear();
-        let windows = self.window_list();
-        encode_window_list_into(&mut self.window_list_scratch, &windows);
+        let list = self.window_list();
+        encode_window_list_into(&mut self.window_list_scratch, &list);
 
         if link.window_list_sent == self.window_list_scratch {
             return false;
@@ -663,7 +710,7 @@ mod tests {
         CursorShape, Layer, Request, RequestBody, ShellControlAction, WindowSpec, decode_responses,
     };
     use guiremote::input::decode_input_frame;
-    use guiremote::window_list::WindowInfo;
+    use guiremote::window_list::{WindowInfo, WindowList};
     use guiremote::{InputEvent, encode_requests, encode_submit};
     use guitk::color::Color;
     use guitk::event::Event;
@@ -1044,13 +1091,13 @@ mod tests {
 
     /// Every window-list frame in a byte stream, ignoring the input frames and
     /// replies interleaved with them.
-    fn window_lists(bytes: &[u8]) -> Vec<Vec<WindowInfo>> {
+    fn window_lists(bytes: &[u8]) -> Vec<WindowList> {
         let mut lists = Vec::new();
         let mut at = 0usize;
         while at < bytes.len() {
             let (frame, used) = guiremote::decode_any(&bytes[at..]).expect("decodes");
-            if let Frame::WindowList(windows) = frame {
-                lists.push(windows);
+            if let Frame::WindowList(list) = frame {
+                lists.push(list);
             }
             at += used;
         }
@@ -1058,12 +1105,22 @@ mod tests {
         lists
     }
 
-    /// Route everything pending to `link` and return the window lists sent.
-    fn pump_lists(comp: &mut Compositor, link: &mut ClientLink) -> Vec<Vec<WindowInfo>> {
+    /// Route everything pending to `link` and return the window lists sent,
+    /// header and all.
+    fn pump_full_lists(comp: &mut Compositor, link: &mut ClientLink) -> Vec<WindowList> {
         comp.route_input(link);
         comp.route_window_list(link);
         let bytes = link.take_outgoing();
         window_lists(&bytes)
+    }
+
+    /// The same, reduced to just the windows -- what most of these tests are
+    /// asking about, and the shape they were written against.
+    fn pump_lists(comp: &mut Compositor, link: &mut ClientLink) -> Vec<Vec<WindowInfo>> {
+        pump_full_lists(comp, link)
+            .into_iter()
+            .map(|l| l.windows)
+            .collect()
     }
 
     /// Open a window in a named stacking band over `link`.
@@ -1287,6 +1344,128 @@ mod tests {
     }
 
     #[test]
+    fn a_shell_moves_a_window_to_another_desktop_and_the_list_says_so() {
+        // The two halves of virtual desktops as a *shell* meets them: the
+        // request that files a window elsewhere, and the field in the list that
+        // is the only way to find out where it went. Without the second, a
+        // taskbar has to remember what it asked for, and it will be wrong the
+        // first time anything else moves a window.
+        let (mut comp, mut shell) = wired();
+        exchange(
+            &mut comp,
+            &mut shell,
+            vec![RequestBody::SubscribeWindowList { subscribe: true }],
+        );
+        let mut app = ClientLink::new(99);
+        let theirs = open_in(&mut comp, &mut app, "Editor", Layer::Normal);
+        let list = pump_full_lists(&mut comp, &mut shell).remove(0);
+        assert_eq!(list.current_workspace, 0);
+        assert_eq!(
+            list.windows[0].workspace, 0,
+            "a new window did not open on the desktop the user is looking at"
+        );
+
+        let responses = exchange(
+            &mut comp,
+            &mut shell,
+            vec![RequestBody::SetWindowWorkspace {
+                window: theirs,
+                workspace: 2,
+            }],
+        );
+        assert!(
+            matches!(responses[0].body, ResponseBody::Ok),
+            "a shell was refused a window it was just told about: {:?}",
+            responses[0].body
+        );
+
+        let list = pump_full_lists(&mut comp, &mut shell).remove(0);
+        assert_eq!(
+            list.current_workspace, 0,
+            "moving a window away moved the user with it"
+        );
+        assert_eq!(
+            list.windows[0].workspace, 2,
+            "the compositor said Ok and the list still files it here"
+        );
+        assert!(
+            list.windows[0].visible,
+            "a window on another desktop was reported as unmapped -- hiding is only hiding"
+        );
+    }
+
+    #[test]
+    fn the_list_says_which_desktop_is_showing_after_a_switch_the_shell_did_not_ask_for() {
+        // The reason the showing desktop is a field rather than something a
+        // shell tracks itself. Activating a window that is filed elsewhere is a
+        // *switch*, decided by the compositor; a shell that remembered its own
+        // last request would now list desktop 0's windows over desktop 2's
+        // screen -- a taskbar disagreeing with the glass, which is the bug
+        // virtual desktops were built to remove.
+        let (mut comp, mut shell) = wired();
+        exchange(
+            &mut comp,
+            &mut shell,
+            vec![RequestBody::SubscribeWindowList { subscribe: true }],
+        );
+        let mut app = ClientLink::new(99);
+        let theirs = open_in(&mut comp, &mut app, "Editor", Layer::Normal);
+        exchange(
+            &mut comp,
+            &mut shell,
+            vec![RequestBody::SetWindowWorkspace {
+                window: theirs,
+                workspace: 2,
+            }],
+        );
+        let _ = pump_full_lists(&mut comp, &mut shell);
+
+        // The taskbar button for a window the user cannot see.
+        let responses = exchange(
+            &mut comp,
+            &mut shell,
+            vec![RequestBody::ShellControl {
+                window: theirs,
+                action: ShellControlAction::Activate,
+            }],
+        );
+        assert!(matches!(responses[0].body, ResponseBody::Ok));
+
+        let list = pump_full_lists(&mut comp, &mut shell).remove(0);
+        assert_eq!(
+            list.current_workspace, 2,
+            "activating a window elsewhere did not take the user to it"
+        );
+        assert!(list.windows[0].focused, "it arrived without the keyboard");
+    }
+
+    #[test]
+    fn switching_desktop_off_the_wire_reaches_the_compositor() {
+        // A switch changes what *every* client on the machine is showing, so it
+        // goes through `require_shell` -- which today refuses nobody, and says
+        // so at length. What this can assert is the other half: that the
+        // request is routed rather than dropped, and that the compositor's own
+        // idea of the showing desktop actually moved.
+        let (mut comp, mut shell) = wired();
+        exchange(
+            &mut comp,
+            &mut shell,
+            vec![RequestBody::SubscribeWindowList { subscribe: true }],
+        );
+        let responses = exchange(
+            &mut comp,
+            &mut shell,
+            vec![RequestBody::SwitchWorkspace { workspace: 3 }],
+        );
+        assert!(
+            matches!(responses[0].body, ResponseBody::Ok),
+            "a shell was refused a switch: {:?}",
+            responses[0].body
+        );
+        assert_eq!(comp.current_workspace(), 3);
+    }
+
+    #[test]
     fn closing_the_last_window_sends_an_empty_list_rather_than_nothing() {
         // "Nothing to report" and "there is nothing left" are different, and a
         // shell told the first when the second happened leaves a taskbar button
@@ -1428,9 +1607,9 @@ mod tests {
         // which end it is, and a silent no-op would leave that to be found later
         // as a taskbar that never updates.
         let (mut comp, mut link) = wired();
-        link.receive(&guiremote::window_list::encode_window_list(&[
-            WindowInfo::new(1, 2, "Forged"),
-        ]));
+        link.receive(&guiremote::window_list::encode_window_list(
+            &guiremote::WindowList::new(0, vec![WindowInfo::new(1, 2, "Forged")]),
+        ));
         assert_eq!(
             comp.serve(&mut link),
             Err(WireError::WrongDirection("window list"))

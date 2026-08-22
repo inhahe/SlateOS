@@ -443,6 +443,85 @@ impl Server {
         self.run_with(compositor, &mut Headless)
     }
 
+    /// Bring the compositor's set of monitors into line with the display's.
+    ///
+    /// The *propagate* half of monitor hotplug. [`Present::monitors`] reports
+    /// what the scanout is actually driving; the compositor holds the
+    /// arrangement that places windows and answers "which screen is this on?".
+    /// Nothing else joins the two, so without this a monitor plugged in stays
+    /// dark and one unplugged keeps windows on a screen that is gone.
+    ///
+    /// Reconciled **by id**, and only by id — the sizes and offsets are not
+    /// compared. A monitor whose *mode* changed under a live connector is
+    /// `TD-COMPOSITOR-CANNOT-CHANGE-MODE` and is a different problem with a
+    /// different fix ([`Compositor::resize_display`]); treating it here by
+    /// detaching and re-attaching would destroy the window arrangement on that
+    /// screen to achieve a resize the compositor can already do in place.
+    ///
+    /// **Removals before additions**, for two reasons that point the same way:
+    /// the peak surface size over the operation is the smaller one rather than
+    /// the union, and a monitor swapped for another in the same slot does not
+    /// transiently need the framebuffer for both.
+    ///
+    /// Failures are reported and dropped rather than propagated. A monitor the
+    /// compositor cannot paint for is worse than one it does not know about —
+    /// the scanout would go on copying out a rectangle of frame that was never
+    /// composed — but the alternative to carrying on is bringing the whole
+    /// display server down because a screen was plugged in, and the poll is
+    /// idempotent, so the next tick tries again.
+    fn reconcile_monitors<P: Present>(compositor: &mut Compositor, present: &mut P) {
+        let Some(monitors) = present.monitors() else {
+            return;
+        };
+        if monitors.is_empty() {
+            // Not an arrangement — see `Present::monitors`. A display with no
+            // monitors left is expected to close, and detaching every display to
+            // match would leave a compositor with a zero-sized desktop.
+            return;
+        }
+
+        let departed: Vec<u32> = compositor
+            .display_manager()
+            .displays()
+            .iter()
+            .map(|d| d.id)
+            .filter(|id| !monitors.iter().any(|m| m.id == *id))
+            .collect();
+        for id in departed {
+            if let Err(e) = compositor.detach_display(id) {
+                eprintln!("compositor: monitor {id} was unplugged and cannot be dropped: {e}");
+            }
+        }
+
+        for monitor in &monitors {
+            if compositor
+                .display_manager()
+                .displays()
+                .iter()
+                .any(|d| d.id == monitor.id)
+            {
+                continue;
+            }
+            // Never primary: an arriving monitor joins a desktop that already
+            // has one, and promoting it would move every rule-placed window on
+            // the machine because a screen was plugged in.
+            let display = Display::new(
+                monitor.id,
+                monitor.width,
+                monitor.height,
+                monitor.refresh_hz,
+                1.0,
+                false,
+            );
+            if let Err(e) = compositor.attach_display(display) {
+                eprintln!(
+                    "compositor: monitor {} was plugged in and cannot be composited for ({e}); it will stay dark",
+                    monitor.id
+                );
+            }
+        }
+    }
+
     /// Serve clients and composite for ever, onto `present`.
     ///
     /// The loop, in order: take whatever the user did and give it to the
@@ -450,6 +529,9 @@ impl Server {
     /// reflected in the events those clients are told about *this* frame, not
     /// next), composite, and show the result. Input first is the whole reason
     /// the ordering is written down here rather than left to look arbitrary.
+    ///
+    /// Monitors are reconciled before any of it, so that a frame is never
+    /// composed for an arrangement the display has already stopped driving.
     ///
     /// Returns when the display goes away — a closed host window — which is a
     /// normal end and not an error. A [`Headless`] display never goes away, so
@@ -470,6 +552,7 @@ impl Server {
             .map_or(Duration::from_micros(16_667), Display::frame_interval);
         while present.is_open() {
             let began = Instant::now();
+            Self::reconcile_monitors(compositor, present);
             for event in present.input() {
                 compositor.handle_input(event);
             }
@@ -508,7 +591,7 @@ mod tests {
 
     use super::*;
     use crate::InputEvent;
-    use crate::present::Recording;
+    use crate::present::{MonitorInfo, Recording};
 
     /// A server on a kernel-chosen port, and a compositor for it to drive.
     ///
@@ -873,5 +956,181 @@ mod tests {
             std::thread::sleep(Duration::from_millis(1));
         }
         panic!("the client was never told about the keystroke");
+    }
+
+    // ---- a monitor plugged in or unplugged reaches the compositor ----
+
+    fn monitor(id: u32, width: u32, height: u32) -> MonitorInfo {
+        MonitorInfo {
+            id,
+            width,
+            height,
+            refresh_hz: 60,
+        }
+    }
+
+    #[test]
+    fn a_display_with_no_opinion_about_monitors_leaves_the_arrangement_alone() {
+        // The default, and what every test written before hotplug relies on: a
+        // host window and a headless server have no connectors to enumerate, and
+        // a reconciliation that treated "I do not know" as "there are none"
+        // would tear down the desktop of every one of them.
+        let (mut server, mut compositor, _addr) = server();
+        compositor
+            .attach_display(Display::new(7, 1024, 768, 60, 1.0, false))
+            .expect("attach");
+        let before: Vec<u32> = compositor
+            .display_manager()
+            .displays()
+            .iter()
+            .map(|d| d.id)
+            .collect();
+
+        let mut screen = Recording::closing_after(3);
+        assert_eq!(screen.monitors, None, "the default is no opinion");
+        server.run_with(&mut compositor, &mut screen).expect("run");
+
+        let after: Vec<u32> = compositor
+            .display_manager()
+            .displays()
+            .iter()
+            .map(|d| d.id)
+            .collect();
+        assert_eq!(
+            after, before,
+            "a display with no opinion changed the desktop"
+        );
+    }
+
+    #[test]
+    fn a_monitor_plugged_in_joins_the_desktop() {
+        // The bug this closes: `DrmScanout::new` enumerates connectors once, so
+        // a screen plugged in afterwards stayed dark until the display server
+        // was restarted. Nothing here knew a connector could change.
+        let (mut server, mut compositor, _addr) = server();
+        assert_eq!(compositor.frame_size(), (1920, 1080));
+
+        let mut screen = Recording::closing_after(3);
+        screen.monitors = Some(vec![monitor(0, 1920, 1080), monitor(31, 1024, 768)]);
+        server.run_with(&mut compositor, &mut screen).expect("run");
+
+        let displays = compositor.display_manager().displays();
+        assert_eq!(displays.len(), 2, "the new monitor never arrived");
+        assert_eq!(displays[1].id, 31, "it arrived under the wrong identity");
+        assert_eq!((displays[1].width, displays[1].height), (1024, 768));
+        assert!(
+            !displays[1].primary,
+            "an arriving monitor took over as primary"
+        );
+        assert_eq!(
+            compositor.frame_size(),
+            (2944, 1080),
+            "the composited surface does not reach the new monitor, so it would \
+             scan out pixels that were never composed"
+        );
+    }
+
+    #[test]
+    fn a_monitor_unplugged_leaves_the_desktop_and_takes_its_windows_with_it() {
+        let (mut server, mut compositor, _addr) = server();
+        compositor
+            .attach_display(Display::new(31, 1024, 768, 60, 1.0, false))
+            .expect("attach");
+        let window = compositor.create_window("Over there".to_owned(), 400, 300, 1);
+        compositor.move_window(window, 2000, 100).expect("move");
+        compositor.maximize_window(window).expect("maximize");
+
+        let mut screen = Recording::closing_after(3);
+        screen.monitors = Some(vec![monitor(0, 1920, 1080)]);
+        server.run_with(&mut compositor, &mut screen).expect("run");
+
+        assert_eq!(
+            compositor.display_manager().displays().len(),
+            1,
+            "the unplugged monitor is still on the desktop"
+        );
+        assert_eq!(compositor.frame_size(), (1920, 1080));
+        let framed = compositor.window_ref(window).expect("window").frame_rect();
+        assert!(
+            framed.x < 1920,
+            "a maximised window was left on the monitor that was unplugged, \
+             where it has no title bar on any surviving screen to be dragged \
+             back by: {framed:?}"
+        );
+    }
+
+    #[test]
+    fn a_monitor_that_only_changed_mode_is_not_torn_down_and_rebuilt() {
+        // Reconciliation is by id and only by id. A connector still plugged in
+        // but running a different mode is TD-COMPOSITOR-CANNOT-CHANGE-MODE, and
+        // detaching and re-attaching it to achieve the resize would throw away
+        // the window arrangement on that screen -- and, because `add_display`
+        // appends on the right, move the monitor itself to the end of the row.
+        let (mut server, mut compositor, _addr) = server();
+        compositor
+            .attach_display(Display::new(31, 1024, 768, 60, 1.0, false))
+            .expect("attach");
+
+        let mut screen = Recording::closing_after(3);
+        screen.monitors = Some(vec![monitor(0, 1920, 1080), monitor(31, 640, 480)]);
+        server.run_with(&mut compositor, &mut screen).expect("run");
+
+        let displays = compositor.display_manager().displays();
+        assert_eq!(
+            displays.len(),
+            2,
+            "the monitor was detached over a mode change"
+        );
+        assert_eq!(
+            (displays[1].width, displays[1].height),
+            (1024, 768),
+            "the mode change was applied here, where it would have destroyed the \
+             screen's window arrangement to do it"
+        );
+    }
+
+    #[test]
+    fn an_empty_monitor_list_is_not_an_arrangement_to_adopt() {
+        // A display that has lost every monitor is expected to close, and
+        // `is_open` is what says so. Reconciling to nothing would leave a
+        // compositor with a zero-sized desktop and every window on no screen.
+        //
+        // Two monitors, deliberately. With one, `detach_display` refuses the
+        // last one anyway and the desktop survives a missing guard by accident
+        // -- which would make this test agree with a broken reconciliation.
+        let (mut server, mut compositor, _addr) = server();
+        compositor
+            .attach_display(Display::new(31, 1024, 768, 60, 1.0, false))
+            .expect("attach");
+
+        let mut screen = Recording::closing_after(3);
+        screen.monitors = Some(Vec::new());
+        server.run_with(&mut compositor, &mut screen).expect("run");
+        assert_eq!(
+            compositor.display_manager().displays().len(),
+            2,
+            "the desktop was reconciled down towards no monitors at all"
+        );
+        assert_eq!(compositor.frame_size(), (2944, 1080));
+    }
+
+    #[test]
+    fn reconciling_the_same_set_twice_changes_nothing_the_second_time() {
+        // The whole reason the poll reports a set rather than a list of changes:
+        // asking twice has to give the same answer, so a tick that failed or was
+        // skipped is simply retried. A reconciliation that acted on the *reply*
+        // rather than on the difference would re-attach the same monitor on
+        // every one of the sixty ticks a second this runs at.
+        let (mut server, mut compositor, _addr) = server();
+        let mut screen = Recording::closing_after(8);
+        screen.monitors = Some(vec![monitor(0, 1920, 1080), monitor(31, 1024, 768)]);
+        server.run_with(&mut compositor, &mut screen).expect("run");
+        assert_eq!(
+            compositor.display_manager().displays().len(),
+            2,
+            "eight ticks of the same two monitors produced something other than \
+             two monitors"
+        );
+        assert_eq!(compositor.frame_size(), (2944, 1080));
     }
 }

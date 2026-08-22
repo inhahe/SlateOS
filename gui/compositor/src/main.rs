@@ -14,14 +14,26 @@
 //!
 //! ## Where the frame goes
 //!
-//! On Windows this opens a host window and draws into it, so a person can see
-//! the desktop the compositor composites and type at it — see
-//! [`compositor::present::host`]. That is a **development harness**, not the
-//! target: the target is a SlateOS display driver, which is
-//! `known-issues.md` → `TD-COMPOSITOR-HAS-NO-SCANOUT` and will be another
-//! `impl Present` with nothing else here changing. Everywhere else, and under
-//! `--headless`, the composited frame is produced and dropped, which is right
-//! for a display server whose clients are all remote.
+//! On SlateOS this opens `/dev/dri/card0`, reads the mode **each** attached
+//! display is already running, and page-flips composited frames onto every one
+//! of them — see [`compositor::present::drm`]. That is the target. The
+//! compositor is built at the first monitor's size and told about the rest with
+//! `attach_display`, which grows the composited frame to the bounding box of the
+//! lot; each monitor then scans out its own rectangle of that one frame. On
+//! Windows it opens a host
+//! window and draws into it instead, so a person can see the desktop the
+//! compositor composites and type at it — see [`compositor::present::host`];
+//! that is a **development harness**. Everywhere else, and under `--headless`,
+//! the composited frame is produced and dropped, which is right for a display
+//! server whose clients are all remote.
+//!
+//! One asymmetry follows from the hardware and is not an oversight: with a host
+//! window the size is ours to pick, so `--size` sets it; with a real display the
+//! size is the display's, because the kernel has no `SETCRTC` and the mode
+//! cannot be changed (`known-issues.md` → `TD-COMPOSITOR-CANNOT-CHANGE-MODE`).
+//! `--size` is therefore reported as ignored rather than silently obeyed. This
+//! is also why the compositor is not constructed until `run` has found a
+//! display: until then nobody knows how big it should be.
 
 use compositor::{Compositor, Server};
 
@@ -31,12 +43,23 @@ use compositor::{Compositor, Server};
 /// *client* area does not fit on a 1920x1080 screen once a title bar and a
 /// taskbar have taken their share, and a harness whose bottom edge is off the
 /// display is a harness that hides exactly the thing it exists to show.
+///
+/// Only the host-window harness has a size of its own to choose. On SlateOS the
+/// display's own mode decides the size and this constant would be a lie, so it
+/// is not compiled there.
+#[cfg(windows)]
 const WINDOWED_SIZE: (u32, u32) = (1280, 800);
 
 /// The default size when nothing will be looked at.
 const HEADLESS_SIZE: (u32, u32) = (1920, 1080);
 
-/// The refresh rate to composite at.
+/// The refresh rate to composite at when nothing has a real one to report — a
+/// headless server, or a host window whose paint rate is the desktop's business
+/// and not ours.
+///
+/// On a real screen the monitor's own reported rate is used instead: a 144Hz
+/// panel paced at 60 wastes two frames in three, and a 30Hz projector paced at
+/// 60 is asked for frames it cannot show.
 const REFRESH_HZ: u32 = 60;
 
 /// What the command line asked for.
@@ -48,20 +71,31 @@ struct Options {
     headless: bool,
     /// The framebuffer size, if one was given.
     size: Option<(u32, u32)>,
+    /// Which `/dev/dri/cardN` to drive, if the user named one.
+    ///
+    /// `None` means "search": try each card and take the first with a display.
+    /// Naming one is not merely a shortcut — it is the only way to reach a card
+    /// that has no display attached but is the one the user wants, and the only
+    /// way to override a search that picked the wrong head on a machine with
+    /// two GPUs and a monitor on each.
+    card: Option<u32>,
     /// Whether to print usage and stop.
     help: bool,
 }
 
 /// What to print for `--help`, and on a usage error.
 const USAGE: &str = "\
-usage: compositor [ADDRESS] [--headless] [--size WxH]
+usage: compositor [ADDRESS] [--headless] [--size WxH] [--card N]
 
   ADDRESS       host:port to listen on. Defaults to $SLATE_DISPLAY, then to
                 127.0.0.1:7373.
   --headless    composite without opening a window. The default off Windows,
                 and correct for a display server whose clients are all remote.
   --size WxH    framebuffer size in pixels. Defaults to 1280x800 windowed,
-                1920x1080 headless.
+                1920x1080 headless. Ignored on a real display, whose own mode
+                decides the size.
+  --card N      drive /dev/dri/cardN. By default every card is tried and the
+                first with a display attached is used. Also $SLATE_DRM_CARD.
   --            stop reading options; the next argument is the address.";
 
 /// Parse a `WxH` size.
@@ -83,6 +117,72 @@ fn parse_size(text: &str) -> Result<(u32, u32), String> {
         return Err(format!("a {width}x{height} display has no pixels"));
     }
     Ok((width, height))
+}
+
+/// Parse a `/dev/dri/cardN` index.
+///
+/// Bounded by the same limit the search uses, so `--card 99` is rejected here —
+/// with a message naming the argument — rather than becoming an `open` of a
+/// path that cannot exist and a report about `ENOENT`.
+fn parse_card(text: &str) -> Result<u32, String> {
+    let index: u32 = text
+        .parse()
+        .map_err(|_| format!("`{text}` is not a card number"))?;
+    if index >= compositor::present::drm::sys::MAX_CARDS {
+        return Err(format!(
+            "card {index} is out of range; only /dev/dri/card0..card{} are searched",
+            compositor::present::drm::sys::MAX_CARDS.saturating_sub(1)
+        ));
+    }
+    Ok(index)
+}
+
+/// The card index in `$SLATE_DRM_CARD`, if it holds a usable one.
+///
+/// This exists because the process that starts the compositor at boot is a
+/// service definition, not a person at a shell: changing which card the
+/// desktop comes up on should not require editing and reinstalling a unit
+/// file when an environment variable will do.
+///
+/// A malformed value is a warning and is then ignored, where the same text
+/// passed as `--card` would be a hard error. The asymmetry is deliberate. An
+/// argument is typed by whoever is running the program right now, so failing
+/// loudly puts the message in front of exactly the person who can fix it. An
+/// environment variable is inherited — it may have been set months ago, by
+/// something else entirely, for a machine that has since had its graphics
+/// card changed — and a stale one must not be able to keep the desktop from
+/// starting. Ignoring it falls back to searching every card, which is the
+/// behaviour of an unset variable and is very likely what was wanted.
+///
+/// An empty value counts as unset and says nothing, because `SLATE_DRM_CARD=`
+/// is how a wrapper script clears an inherited setting.
+#[cfg(target_os = "linux")]
+fn card_from_env() -> Option<u32> {
+    card_from_value(std::env::var("SLATE_DRM_CARD").ok().as_deref())
+}
+
+/// The card index a `$SLATE_DRM_CARD` value asks for, warning about a bad one.
+///
+/// Split from [`card_from_env`] so the decisions are testable without touching
+/// the process environment, which is global and — since Rust 2024 — `unsafe` to
+/// write from a test that runs beside other threads.
+///
+/// Only the Linux arm of `run` consults the variable, so on a host build this
+/// exists solely for its tests — the *decisions* are worth testing everywhere
+/// the tests can run, which is the machine the tree is written on.
+#[cfg(any(target_os = "linux", test))]
+fn card_from_value(raw: Option<&str>) -> Option<u32> {
+    let text = raw?.trim();
+    if text.is_empty() {
+        return None;
+    }
+    match parse_card(text) {
+        Ok(index) => Some(index),
+        Err(why) => {
+            eprintln!("compositor: ignoring $SLATE_DRM_CARD: {why}");
+            None
+        }
+    }
 }
 
 /// Read the command line. `args` excludes the program name.
@@ -112,6 +212,15 @@ fn parse_args<I: IntoIterator<Item = String>>(args: I) -> Result<Options, String
             }
             other if other.starts_with("--size=") => {
                 out.size = Some(parse_size(other.trim_start_matches("--size="))?);
+            }
+            "--card" => {
+                let value = args
+                    .next()
+                    .ok_or_else(|| "--card needs a number, as in `--card 1`".to_owned())?;
+                out.card = Some(parse_card(&value)?);
+            }
+            other if other.starts_with("--card=") => {
+                out.card = Some(parse_card(other.trim_start_matches("--card="))?);
             }
             other if other.starts_with('-') && other.len() > 1 => {
                 return Err(format!("unknown option `{other}`"));
@@ -150,7 +259,7 @@ fn main() {
         return;
     }
 
-    let addr = match options.addr {
+    let addr = match options.addr.clone() {
         Some(explicit) => explicit,
         None => match guiremote::socket::display_addr() {
             Ok(a) => a,
@@ -160,28 +269,6 @@ fn main() {
             }
         },
     };
-
-    let (width, height) = options.size.unwrap_or(if options.headless {
-        HEADLESS_SIZE
-    } else {
-        WINDOWED_SIZE
-    });
-
-    let mut compositor = match Compositor::new(width, height, REFRESH_HZ) {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("compositor: failed to initialize: {e}");
-            std::process::exit(1);
-        }
-    };
-
-    // The user's window-corner and drop-shadow choices. Read here rather than
-    // in `Compositor::new` so that the library's *constructor* has no opinion
-    // about `$HOME` and its tests do not depend on the machine running them.
-    // The same call a `ReloadAppearance` request makes later, so that startup
-    // and reload cannot come to disagree about where the settings live or what
-    // a missing file means — which on a fresh install is simply the defaults.
-    compositor.reload_appearance();
 
     let mut server = match Server::bind(&addr) {
         Ok(s) => s,
@@ -196,70 +283,191 @@ fn main() {
         }
     };
 
-    eprintln!("compositor: initialized ({width}x{height} @ {REFRESH_HZ}Hz)");
     match server.local_addr() {
         Ok(bound) => eprintln!("compositor: listening on {bound}"),
         Err(e) => eprintln!("compositor: listening, but cannot name the address: {e}"),
     }
 
-    let outcome = run(
-        &mut server,
-        &mut compositor,
-        options.headless,
-        width,
-        height,
-    );
-    if let Err(e) = outcome {
+    if let Err(e) = run(&mut server, &options) {
         eprintln!("compositor: the listening socket failed: {e}");
         std::process::exit(1);
     }
 }
 
-/// Serve, onto a host window where there can be one.
+/// Build the compositor at a given size, or die saying why.
 ///
-/// Split out of `main` so that the `#[cfg]` is in one small place rather than
-/// wrapped around the whole of startup: the argument parsing, the bind and the
-/// diagnostics are identical on every platform and should not be compiled
-/// twice.
-#[cfg(windows)]
-fn run(
-    server: &mut Server,
-    compositor: &mut Compositor,
-    headless: bool,
-    width: u32,
-    height: u32,
-) -> std::io::Result<()> {
-    if headless {
-        return server.run(compositor);
+/// Separated from `run` because every platform needs it and none of them needs
+/// it *first*: the size is not known until the display is, which on a real
+/// screen means after the card has been opened and its mode read.
+fn make_compositor(width: u32, height: u32, refresh_hz: u32) -> Compositor {
+    let mut compositor = match Compositor::new(width, height, refresh_hz) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("compositor: failed to initialize: {e}");
+            std::process::exit(1);
+        }
+    };
+    // The user's window-corner and drop-shadow choices. Read here rather than
+    // in `Compositor::new` so that the library's *constructor* has no opinion
+    // about `$HOME` and its tests do not depend on the machine running them.
+    // The same call a `ReloadAppearance` request makes later, so that startup
+    // and reload cannot come to disagree about where the settings live or what
+    // a missing file means — which on a fresh install is simply the defaults.
+    compositor.reload_appearance();
+    eprintln!("compositor: initialized ({width}x{height} @ {refresh_hz}Hz)");
+    compositor
+}
+
+/// Serve with no display, at whatever size was asked for.
+fn run_headless(server: &mut Server, options: &Options) -> std::io::Result<()> {
+    let (width, height) = options.size.unwrap_or(HEADLESS_SIZE);
+    let mut compositor = make_compositor(width, height, REFRESH_HZ);
+    server.run(&mut compositor)
+}
+
+/// Serve, scanning out on the machine's own display.
+///
+/// The size is the display's and not the caller's: there is no `SETCRTC` in
+/// this kernel, so `--size` cannot change what the monitor is running at, and
+/// building the compositor at anything else would put a picture in the corner
+/// of the screen with a border round it.
+#[cfg(target_os = "linux")]
+fn run(server: &mut Server, options: &Options) -> std::io::Result<()> {
+    use compositor::Display;
+    use compositor::present::drm::DrmScanout;
+
+    if options.headless {
+        return run_headless(server, options);
     }
+    let card = options.card.or_else(card_from_env);
+    match DrmScanout::open(card) {
+        Ok(mut screen) => {
+            let (width, height) = screen.size();
+            if let Some(asked) = options.size {
+                if asked != (width, height) {
+                    eprintln!(
+                        "compositor: ignoring --size {}x{}; the display is running at \
+                         {width}x{height} and its mode cannot be changed",
+                        asked.0, asked.1
+                    );
+                }
+            }
+            let heads = screen.heads();
+            for head in &heads {
+                eprintln!(
+                    "compositor: scanning out on connector {} via CRTC {} \
+                     ({}x{} at +{}+{}, {}Hz)",
+                    head.connector_id,
+                    head.crtc_id,
+                    head.width,
+                    head.height,
+                    head.x,
+                    head.y,
+                    head.refresh_hz
+                );
+            }
+            // Built at the *first* monitor and then told about the rest, rather
+            // than built at the bounding box: `attach_display` places each new
+            // monitor to the right of the ones already there, which is the same
+            // rule `DrmScanout::new` used to lay the heads out, so the two
+            // arrive at the same arrangement. Building at the bounding box and
+            // then attaching would grow it a second time.
+            let first = heads.first();
+            let (first_w, first_h) = first.map_or((width, height), |h| (h.width, h.height));
+            let mut compositor =
+                make_compositor(first_w, first_h, first.map_or(REFRESH_HZ, |h| h.refresh_hz));
+            // The compositor invented the id 0 for the screen it was built at,
+            // before anything had told it which screen that was. Every monitor
+            // on the desktop has to be named by its connector, because that is
+            // the key `Server::reconcile_monitors` matches the compositor's
+            // arrangement against the card's head list on -- and a first screen
+            // still called 0 is a connector the reconciliation does not
+            // recognise *and* a display no connector claims, so it would attach
+            // a duplicate and detach the original, once a second, for ever.
+            if let Some(head) = first {
+                if let Err(e) = compositor.rename_display(0, head.connector_id) {
+                    eprintln!(
+                        "compositor: cannot name the first screen after connector {} ({e}); \
+                         monitors plugged in or out will not be noticed",
+                        head.connector_id
+                    );
+                }
+            }
+            for head in heads.iter().skip(1) {
+                let display = Display::new(
+                    head.connector_id,
+                    head.width,
+                    head.height,
+                    head.refresh_hz,
+                    1.0,
+                    false,
+                );
+                if let Err(e) = compositor.attach_display(display) {
+                    // A monitor the compositor cannot paint for is worse than
+                    // one it does not know about: the scanout would go on
+                    // copying a rectangle of the frame that was never composed.
+                    // Say so, and carry on with the screens that did fit.
+                    eprintln!(
+                        "compositor: cannot composite for connector {} ({e}); it \
+                         will show whatever the desktop has at +{}+{}",
+                        head.connector_id, head.x, head.y
+                    );
+                }
+            }
+            let composed = compositor.frame_size();
+            if composed != (width, height) {
+                eprintln!(
+                    "compositor: warning - the desktop is {}x{} but the monitors \
+                     span {width}x{height}; part of a screen will not be painted",
+                    composed.0, composed.1
+                );
+            }
+            server.run_with(&mut compositor, &mut screen)
+        }
+        Err(e) => {
+            // No card, nothing plugged in, or no permission. Serving remote
+            // clients is still entirely useful, so this is a warning and not an
+            // exit — the same judgement the Windows arm makes about a missing
+            // window station.
+            eprintln!("compositor: no display ({e}); compositing headless");
+            run_headless(server, options)
+        }
+    }
+}
+
+/// Serve, onto a host window.
+///
+/// A development harness: this is how a person looks at the desktop on the
+/// machine the tree is written on. See [`compositor::present::host`].
+#[cfg(windows)]
+fn run(server: &mut Server, options: &Options) -> std::io::Result<()> {
+    if options.headless {
+        return run_headless(server, options);
+    }
+    let (width, height) = options.size.unwrap_or(WINDOWED_SIZE);
+    let mut compositor = make_compositor(width, height, REFRESH_HZ);
     match compositor::present::host::Window::new("SlateOS", width, height) {
         Ok(mut window) => {
             eprintln!("compositor: showing the desktop in a host window; close it to stop");
-            server.run_with(compositor, &mut window)
+            server.run_with(&mut compositor, &mut window)
         }
         Err(e) => {
             // A missing window station — a service, or a session with no
             // desktop. Serving remote clients is still entirely useful, so
             // this is a warning and not an exit.
             eprintln!("compositor: no host window ({e}); compositing headless");
-            server.run(compositor)
+            server.run(&mut compositor)
         }
     }
 }
 
-/// Serve. There is no window to open on this platform.
-#[cfg(not(windows))]
-fn run(
-    server: &mut Server,
-    compositor: &mut Compositor,
-    headless: bool,
-    _width: u32,
-    _height: u32,
-) -> std::io::Result<()> {
-    if !headless {
-        eprintln!("compositor: this build has no way to open a window; compositing headless");
+/// Serve. There is no display this build knows how to drive.
+#[cfg(not(any(windows, target_os = "linux")))]
+fn run(server: &mut Server, options: &Options) -> std::io::Result<()> {
+    if !options.headless {
+        eprintln!("compositor: this build has no way to open a display; compositing headless");
     }
-    server.run(compositor)
+    run_headless(server, options)
 }
 
 #[cfg(test)]
@@ -275,7 +483,7 @@ mod tests {
         clippy::arithmetic_side_effects
     )]
 
-    use super::{Options, parse_args, parse_size};
+    use super::{Options, card_from_value, parse_args, parse_card, parse_size};
 
     fn parse(args: &[&str]) -> Result<Options, String> {
         parse_args(args.iter().map(|s| (*s).to_owned()))
@@ -350,5 +558,68 @@ mod tests {
     fn the_last_address_wins_so_a_wrapper_script_can_append_one() {
         let parsed = parse(&["127.0.0.1:1", "127.0.0.1:2"]).unwrap();
         assert_eq!(parsed.addr.as_deref(), Some("127.0.0.1:2"));
+    }
+
+    #[test]
+    fn a_card_can_be_written_either_way_round() {
+        assert_eq!(parse(&["--card", "1"]).unwrap().card, Some(1));
+        assert_eq!(parse(&["--card=1"]).unwrap().card, Some(1));
+    }
+
+    #[test]
+    fn no_card_argument_means_search_rather_than_card_zero() {
+        // `Some(0)` and `None` are different instructions — the first pins the
+        // display to card 0, which is exactly the behaviour `--card` exists to
+        // escape. A default of `Some(0)` would make the flag do nothing.
+        assert_eq!(parse(&[]).unwrap().card, None);
+    }
+
+    #[test]
+    fn a_card_that_no_search_would_reach_is_refused_at_the_argument() {
+        // Otherwise the report is `ENOENT` on a path nobody typed, which reads
+        // like a missing device rather than a number out of range.
+        let err = parse(&["--card", "99"]).unwrap_err();
+        assert!(err.contains("out of range"), "{err}");
+        assert!(parse(&["--card", "-1"]).is_err());
+        assert!(parse(&["--card", "one"]).is_err());
+    }
+
+    #[test]
+    fn a_card_with_no_value_after_it_says_so() {
+        assert!(parse(&["--card"]).unwrap_err().contains("--card"));
+    }
+
+    #[test]
+    fn the_highest_searched_card_is_accepted_and_the_next_one_is_not() {
+        // The boundary the flag and the search have to agree on: off by one
+        // either way is a card that can be named but never opened, or one that
+        // is opened by the search but rejected when named.
+        let last = compositor::present::drm::sys::MAX_CARDS - 1;
+        assert_eq!(parse_card(&last.to_string()).unwrap(), last);
+        assert!(parse_card(&compositor::present::drm::sys::MAX_CARDS.to_string()).is_err());
+    }
+
+    #[test]
+    fn an_unset_or_empty_environment_variable_leaves_the_search_alone() {
+        assert_eq!(card_from_value(None), None);
+        // `SLATE_DRM_CARD=` is how a wrapper clears an inherited setting.
+        assert_eq!(card_from_value(Some("")), None);
+        assert_eq!(card_from_value(Some("  ")), None);
+    }
+
+    #[test]
+    fn a_good_environment_variable_names_a_card_and_tolerates_stray_space() {
+        assert_eq!(card_from_value(Some("1")), Some(1));
+        // A value out of a YAML unit file can easily carry a trailing newline.
+        assert_eq!(card_from_value(Some(" 2\n")), Some(2));
+    }
+
+    #[test]
+    fn a_bad_environment_variable_is_ignored_rather_than_stopping_the_desktop() {
+        // Deliberately unlike `--card`, which is a hard error. An argument is
+        // typed by whoever is present to fix it; a variable is inherited and
+        // may be years stale, and must not be able to keep the screen dark.
+        assert_eq!(card_from_value(Some("nonsense")), None);
+        assert_eq!(card_from_value(Some("99")), None);
     }
 }

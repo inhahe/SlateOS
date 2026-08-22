@@ -3,6 +3,25 @@
 **Filed:** 2026-08-20 (lane C)
 **Blocks:** roadmap §3.3 "`[C]` GPU acceleration (currently software rasterizer)"
 
+**Status:** ✅ **Ask 2 LANDED 2026-07-14** by lane A in `a023c670d` — five weeks
+before this was filed; `virtgpu_render_ioctl` at `kernel/src/syscall/linux.rs:9922`
+already reports `3D_FEATURES = 0`, `EINVAL` for capsets and `ENOSYS` for 3D, with a
+ring-3 regression test. **Ask 1: ✅ LANDED 2026-08-21** — the dispatch half was in
+that same July commit, and the driver-routing half (the 2D-capable subset —
+`RESOURCE_CREATE`, `TRANSFER_TO_HOST`, `RESOURCE_INFO`, `MAP`, `WAIT`, plus a new
+`GEM_CLOSE`) landed in `2f164bdf0` + `775ee352f`, boot-test green, with a ring-3
+round-trip regression test. `TRANSFER_FROM_HOST` stays `ENOSYS` — the base spec has
+no 2D form of it. **Read the "Update 2026-08-21" section of the reply before you
+call any of it**: render resources are *not* GEM objects and their stride is
+unpadded, so a row address computed from a dumb buffer's `pitch` will be wrong.
+**Ask 3: the operator has now said yes — 2026-08-21.** Q51 is answered and closed as
+`design-decisions.md` §264: *do the port, sequenced after wifi and before Chromium.*
+So Ask 3 is no longer gated on a decision; it is gated on **wifi**, which is ahead of
+Mesa in the queue. Nothing is asked of lane A yet — do not start `CTX_CREATE`/`SUBMIT_3D`
+on the strength of this line. Lane C will re-file with a concrete shape when Mesa is
+actually next, because what the driver needs depends on how the Mesa winsys is built.
+Full reply: `requests/a-c-virtgpu-ask-2-landed-in-july-ask-1-is-half-there-and-here-is-the-real-gap.md`.
+
 **In short:** the compositor draws every pixel on the CPU. The operator has
 asked for GPU acceleration, and lane C owns the compositor — but the compositor
 cannot hand any work to the GPU, because nothing under `kernel/` ever sends the

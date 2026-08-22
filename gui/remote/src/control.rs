@@ -56,7 +56,11 @@
 //! bits, oversized counts and non-UTF-8 strings are all [`DecodeError`]s
 //! naming what was wrong.
 
-use crate::{DecodeError, Reader, capacity_hint, write_f32, write_string, write_u32, write_u64};
+use crate::reserve::PanelEdge;
+use crate::zones::SnapSlot;
+use crate::{
+    DecodeError, Reader, capacity_hint, write_f32, write_i32, write_string, write_u32, write_u64,
+};
 
 /// Request-frame magic: `b"CREQ"` (client → compositor).
 pub const REQUEST_MAGIC: [u8; 4] = *b"CREQ";
@@ -240,8 +244,9 @@ impl Layer {
 ///
 /// The actions are the ones a shell surface actually offers: a taskbar button
 /// (activate, minimise), its context menu (maximise, restore, close), an
-/// Alt-Tab switcher (activate), and the keyboard shortcuts that tile a window
-/// to one half of the screen (snap left/right).
+/// Alt-Tab switcher (activate), the keyboard shortcuts that tile a window to
+/// one half of the screen (snap left/right), and the zone picker that tiles it
+/// into one cell of a named layout ([`SnapToZone`](Self::SnapToZone)).
 ///
 /// Deliberately not move/resize: placing windows is the compositor's, and a
 /// shell that could move any window would be a second window manager — the
@@ -283,18 +288,51 @@ pub enum ShellControlAction {
     SnapLeft,
     /// Fill the right half of the work area.
     SnapRight,
+    /// Fill one cell of a named multi-window layout.
+    ///
+    /// `SnapLeft`/`SnapRight` are the two-window case a keyboard shortcut can
+    /// reach; this is what the zone picker offers — thirds, quadrants, a
+    /// six-cell grid. The rule the rest of this enum keeps is kept here too:
+    /// the slot names *which zone of which layout*, never a rectangle. The
+    /// compositor resolves it against its own work area with
+    /// [`SnapSlot::rect`], and it is the only party that could, since the shell
+    /// is never told what the display bounds are.
+    ///
+    /// The payload does not break the one-byte-per-action encoding either. A
+    /// [`SnapSlot`] is one of exactly [`SnapSlot::COUNT`] values, so it is
+    /// folded into the same byte as the action rather than encoded beside it —
+    /// [`as_byte`](Self::as_byte) still determines the whole action, and no
+    /// reader or writer of a frame grows a case for a nested field. That is the
+    /// distinction the `SnapLeft`/`SnapRight` note above is drawing: what was
+    /// rejected there was not a payload as such, it was a *separately encoded*
+    /// one.
+    SnapToZone(SnapSlot),
 }
 
 impl ShellControlAction {
-    /// Every action there is.
+    /// The first wire byte used by [`SnapToZone`](Self::SnapToZone).
+    ///
+    /// The zoneless actions take 0..=6 and the slots run end to end from here,
+    /// so the whole enum still fits one byte with room to spare. **Wire
+    /// format**: inserting a zoneless action rather than appending one would
+    /// slide every slot onto a different byte.
+    const ZONE_BYTE_BASE: u8 = 7;
+
+    /// Every action that names no zone.
     ///
     /// Exists so that the codec tests iterate the actions rather than a
     /// hand-written list of them: the list they used to hold was the kind that
     /// goes stale silently, leaving a newly-added action with no test that it
-    /// survives the wire at all. Adding a variant now breaks the compile of
-    /// `all_really_is_every_action` until it is added here too, and the fixed
-    /// array length breaks it again if it is added without being counted.
-    pub const ALL: [Self; 7] = [
+    /// survives the wire at all. Adding a variant breaks the compile of
+    /// `all_really_is_every_action` until it is named there, and the fixed
+    /// array length breaks it again if it is added here without being counted.
+    ///
+    /// The zone-tiling actions are excluded because there are
+    /// [`SnapSlot::COUNT`] of them and they are *generated* —
+    /// [`SnapSlot::all`] is their list, and listing them again here would be
+    /// the stale hand-written list this array exists to avoid. The tests below
+    /// iterate both together.
+    pub const ZONELESS: [Self; 7] = [
         Self::Activate,
         Self::Minimize,
         Self::Restore,
@@ -305,6 +343,11 @@ impl ShellControlAction {
     ];
 
     /// The wire byte for this action.
+    ///
+    /// The `saturating_add` cannot saturate: the largest slot index is
+    /// [`SnapSlot::COUNT`] − 1 = 21, so the largest byte is 28. It is written
+    /// that way so the function stays total and `const` without an unreachable
+    /// panicking branch.
     #[must_use]
     pub const fn as_byte(self) -> u8 {
         match self {
@@ -315,6 +358,7 @@ impl ShellControlAction {
             Self::Close => 4,
             Self::SnapLeft => 5,
             Self::SnapRight => 6,
+            Self::SnapToZone(slot) => Self::ZONE_BYTE_BASE.saturating_add(slot.index()),
         }
     }
 
@@ -323,7 +367,10 @@ impl ShellControlAction {
     /// `None` rather than a default, for [`Layer::from_byte`]'s reason and one
     /// of its own: the actions are not interchangeable, and guessing would let
     /// a peer speaking a later protocol have a window minimised when it asked
-    /// for something else.
+    /// for something else. A byte in the zone range but past the last slot is
+    /// refused for the same reason — a peer that knows a layout we do not
+    /// should be told so, not have its window tiled into whichever zone we
+    /// happened to round down to.
     #[must_use]
     pub const fn from_byte(b: u8) -> Option<Self> {
         match b {
@@ -334,7 +381,11 @@ impl ShellControlAction {
             4 => Some(Self::Close),
             5 => Some(Self::SnapLeft),
             6 => Some(Self::SnapRight),
-            _ => None,
+            // Cannot underflow: the arms above cover everything below the base.
+            _ => match SnapSlot::from_index(b.saturating_sub(Self::ZONE_BYTE_BASE)) {
+                Some(slot) => Some(Self::SnapToZone(slot)),
+                None => None,
+            },
         }
     }
 }
@@ -545,6 +596,89 @@ pub enum RequestBody {
         window: u64,
         action: ShellControlAction,
     },
+    /// Reserve `size` pixels along one edge of a monitor for a panel, so that
+    /// tiled and maximized windows stop short of it instead of sliding beneath.
+    ///
+    /// The window named is the panel's *own* — a taskbar reserving the strip it
+    /// sits in — and it answers two questions at once that would otherwise need
+    /// asking separately: **which monitor** (the one that window is on, by the
+    /// same largest-overlap rule everything else uses) and **for how long**
+    /// (until that window is destroyed, hidden, or hangs up). Tying the claim to
+    /// a window is what stops a crashed panel carving a permanent strip out of
+    /// the desktop with nothing left on screen to release it.
+    ///
+    /// A `size` of zero releases. A second reservation for the same window
+    /// replaces the first rather than adding to it, so a panel that changes
+    /// height sends the new number and does not have to release the old one.
+    /// Reservations from *different* windows on the same edge do add — see
+    /// [`crate::reserve`] for why that, and not X11's side-by-side spans.
+    ///
+    /// Answered with [`ResponseBody::WorkArea`]: what the caller actually got,
+    /// which need not be what it asked for, because a claim is clamped to
+    /// [`MAX_RESERVED_FRACTION`](crate::reserve::MAX_RESERVED_FRACTION) of the
+    /// monitor. Returning the area rather than `Ok` is deliberate — a panel
+    /// needs the number to place itself, and a client that had to ask again in a
+    /// second request could be told something different by an intervening
+    /// hotplug.
+    ///
+    /// **Privileged**, via `ClientLink::require_shell` in the compositor: this
+    /// request shrinks the tiling of every *other* client on the machine, so an
+    /// unprivileged one could take a third of each edge and make snapping
+    /// useless desktop-wide. See that function for why the gate does not yet
+    /// answer.
+    ReserveEdge {
+        window: u64,
+        edge: PanelEdge,
+        size: u32,
+    },
+    /// Show a different virtual desktop.
+    ///
+    /// The compositor holds each window's desktop number and decides from it
+    /// what is on screen; this is how a shell asks for a different one. One
+    /// request produces one recomposite computed from a consistent picture --
+    /// which is why the alternative design, where the shell hides each of the
+    /// departing windows in turn, was refused: that is N requests arriving one
+    /// at a time, with every intermediate mixture of two desktops visible on
+    /// the glass, and a failure halfway through leaving a permanent one.
+    ///
+    /// **There is no upper bound.** How many desktops there are is a user
+    /// preference and belongs to whatever is offering the user the choice; a
+    /// second copy of the number in the compositor would be a second answer,
+    /// and the two would drift the first time the preference changed. What the
+    /// compositor owns is the part that decides pixels.
+    ///
+    /// Switching to the desktop already showing is not an error and is not a
+    /// repaint.
+    ///
+    /// **Privileged**, via `ClientLink::require_shell`: this changes what every
+    /// other client on the machine is showing.
+    ///
+    /// Answered with [`ResponseBody::Ok`].
+    SwitchWorkspace { workspace: u32 },
+    /// File a window on a virtual desktop -- "move that window to desktop 3".
+    ///
+    /// Names somebody else's window, like [`ShellControl`](Self::ShellControl),
+    /// and for the same reason: moving a window between desktops is a shell's
+    /// job, and no client may choose the desktop its own window opens on. A new
+    /// window goes on whichever desktop is showing, because a client that could
+    /// pick would be able to open a window somewhere the user is not looking --
+    /// either a window that seems not to have opened, or a place to hide one.
+    ///
+    /// Aimed at a window outside [`Layer::Normal`], this **succeeds, records
+    /// the number, and changes nothing about what is drawn**. Panels and the
+    /// wallpaper are on every desktop. Refusing would make every shell that
+    /// moves "all of my windows" first work out which of them are furniture,
+    /// pushing the stickiness rule out of the compositor and into every caller.
+    ///
+    /// If this hides the window holding the keyboard, focus goes to the topmost
+    /// window that is still showing, or to nothing at all.
+    ///
+    /// **Privileged**, via `ClientLink::require_shell`.
+    ///
+    /// Answered with [`ResponseBody::Ok`], or an error if there is no such
+    /// window -- an ordinary race against a window that closed between the
+    /// snapshot and the click.
+    SetWindowWorkspace { window: u64, workspace: u32 },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -566,6 +700,9 @@ enum RequestTag {
     SubscribeWindowList = 0x0E,
     ReloadAppearance = 0x0F,
     ShellControl = 0x10,
+    ReserveEdge = 0x11,
+    SwitchWorkspace = 0x12,
+    SetWindowWorkspace = 0x13,
 }
 
 impl RequestTag {
@@ -587,6 +724,9 @@ impl RequestTag {
             0x0E => Self::SubscribeWindowList,
             0x0F => Self::ReloadAppearance,
             0x10 => Self::ShellControl,
+            0x11 => Self::ReserveEdge,
+            0x12 => Self::SwitchWorkspace,
+            0x13 => Self::SetWindowWorkspace,
             _ => return None,
         })
     }
@@ -629,6 +769,26 @@ pub enum ResponseBody {
     Error { message: String },
     /// Answer to [`RequestBody::GetDisplayInfo`].
     Display(DisplayInfo),
+    /// Answer to [`RequestBody::ReserveEdge`]: the usable rectangle that is left
+    /// on the panel's monitor once every reservation on it has been taken out —
+    /// including, but not only, the caller's own.
+    ///
+    /// In **virtual-desktop coordinates**, not relative to the monitor, so that
+    /// a panel on the second screen gets an origin it can pass straight back to
+    /// [`RequestBody::Move`] rather than one it has to add an offset to that
+    /// this protocol never told it. Signed origin for the same reason: a monitor
+    /// arranged to the left of the primary starts at a negative x.
+    ///
+    /// Whole pixels rather than the `f32` of [`WorkArea`](crate::zones::WorkArea)
+    /// because a window can only be placed at a whole pixel; the fractional form
+    /// exists for the zone arithmetic that divides an area up, which is not what
+    /// a client does with this.
+    WorkArea {
+        x: i32,
+        y: i32,
+        width: u32,
+        height: u32,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -638,6 +798,7 @@ enum ResponseTag {
     Ok = 0x02,
     Error = 0x03,
     Display = 0x04,
+    WorkArea = 0x05,
 }
 
 impl ResponseTag {
@@ -647,6 +808,7 @@ impl ResponseTag {
             0x02 => Self::Ok,
             0x03 => Self::Error,
             0x04 => Self::Display,
+            0x05 => Self::WorkArea,
             _ => return None,
         })
     }
@@ -699,10 +861,6 @@ fn write_header(out: &mut Vec<u8>, magic: [u8; 4], count: usize) {
     // assembled four billion messages gets a rejected frame, not a downed
     // compositor.
     write_u32(out, u32::try_from(count).unwrap_or(u32::MAX));
-}
-
-fn write_i32(out: &mut Vec<u8>, v: i32) {
-    write_u32(out, v.cast_unsigned());
 }
 
 fn write_optional_point(out: &mut Vec<u8>, p: Option<(i32, i32)>) {
@@ -810,6 +968,21 @@ fn encode_request_body(out: &mut Vec<u8>, body: &RequestBody) {
             write_u64(out, *window);
             out.push(action.as_byte());
         }
+        RequestBody::ReserveEdge { window, edge, size } => {
+            out.push(RequestTag::ReserveEdge as u8);
+            write_u64(out, *window);
+            out.push(edge.as_byte());
+            write_u32(out, *size);
+        }
+        RequestBody::SwitchWorkspace { workspace } => {
+            out.push(RequestTag::SwitchWorkspace as u8);
+            write_u32(out, *workspace);
+        }
+        RequestBody::SetWindowWorkspace { window, workspace } => {
+            out.push(RequestTag::SetWindowWorkspace as u8);
+            write_u64(out, *window);
+            write_u32(out, *workspace);
+        }
     }
 }
 
@@ -830,6 +1003,18 @@ fn encode_response_body(out: &mut Vec<u8>, body: &ResponseBody) {
             write_u32(out, info.height);
             write_u32(out, info.refresh_rate);
             write_f32(out, info.scale_factor);
+        }
+        ResponseBody::WorkArea {
+            x,
+            y,
+            width,
+            height,
+        } => {
+            out.push(ResponseTag::WorkArea as u8);
+            write_i32(out, *x);
+            write_i32(out, *y);
+            write_u32(out, *width);
+            write_u32(out, *height);
         }
     }
 }
@@ -904,10 +1089,6 @@ fn read_header(input: &[u8], magic: [u8; 4]) -> Result<(Reader<'_>, u32), Decode
     Ok((r, n))
 }
 
-fn read_i32(r: &mut Reader<'_>) -> Result<i32, DecodeError> {
-    Ok(r.read_u32()?.cast_signed())
-}
-
 fn read_bool(r: &mut Reader<'_>) -> Result<bool, DecodeError> {
     // Any non-zero byte is true rather than an error: this is a boolean, and
     // there is no encoder in this crate that can produce a 2. Rejecting it
@@ -917,8 +1098,8 @@ fn read_bool(r: &mut Reader<'_>) -> Result<bool, DecodeError> {
 
 fn read_optional_point(r: &mut Reader<'_>) -> Result<Option<(i32, i32)>, DecodeError> {
     if read_bool(r)? {
-        let x = read_i32(r)?;
-        let y = read_i32(r)?;
+        let x = r.read_i32()?;
+        let y = r.read_i32()?;
         Ok(Some((x, y)))
     } else {
         Ok(None)
@@ -976,8 +1157,8 @@ fn decode_request_body(r: &mut Reader<'_>) -> Result<RequestBody, DecodeError> {
         }
         RequestTag::Move => {
             let window = r.read_u64()?;
-            let x = read_i32(r)?;
-            let y = read_i32(r)?;
+            let x = r.read_i32()?;
+            let y = r.read_i32()?;
             RequestBody::Move { window, x, y }
         }
         RequestTag::Resize => {
@@ -1038,8 +1219,27 @@ fn decode_request_body(r: &mut Reader<'_>) -> Result<RequestBody, DecodeError> {
             let b = r.read_u8()?;
             RequestBody::ShellControl {
                 window,
-                action: ShellControlAction::from_byte(b)
-                    .ok_or(DecodeError::BadShellAction(b))?,
+                action: ShellControlAction::from_byte(b).ok_or(DecodeError::BadShellAction(b))?,
+            }
+        }
+        RequestTag::ReserveEdge => {
+            let window = r.read_u64()?;
+            let b = r.read_u8()?;
+            let edge = PanelEdge::from_byte(b).ok_or(DecodeError::BadTag(b))?;
+            RequestBody::ReserveEdge {
+                window,
+                edge,
+                size: r.read_u32()?,
+            }
+        }
+        RequestTag::SwitchWorkspace => RequestBody::SwitchWorkspace {
+            workspace: r.read_u32()?,
+        },
+        RequestTag::SetWindowWorkspace => {
+            let window = r.read_u64()?;
+            RequestBody::SetWindowWorkspace {
+                window,
+                workspace: r.read_u32()?,
             }
         }
     })
@@ -1067,6 +1267,18 @@ fn decode_response_body(r: &mut Reader<'_>) -> Result<ResponseBody, DecodeError>
                 refresh_rate,
                 scale_factor,
             })
+        }
+        ResponseTag::WorkArea => {
+            let x = r.read_i32()?;
+            let y = r.read_i32()?;
+            let width = r.read_u32()?;
+            let height = r.read_u32()?;
+            ResponseBody::WorkArea {
+                x,
+                y,
+                width,
+                height,
+            }
         }
     })
 }
@@ -1196,22 +1408,36 @@ mod tests {
         assert_eq!(round_trip_requests(&reqs), reqs);
     }
 
+    /// Every action there is: the seven that name no zone, and one per
+    /// [`SnapSlot`].
+    ///
+    /// A helper rather than a constant because the zone-tiling actions are
+    /// generated from `SnapSlot::all` — a hand-written list of the other 22
+    /// would be exactly the list that goes stale silently, which is what
+    /// `ZONELESS` exists to avoid rather than to duplicate.
+    fn every_action() -> Vec<ShellControlAction> {
+        ShellControlAction::ZONELESS
+            .into_iter()
+            .chain(SnapSlot::all().map(ShellControlAction::SnapToZone))
+            .collect()
+    }
+
     /// Every action, not a sample: the action is one byte and an encoder that
     /// wrote a constant would round-trip whichever one the sample happened to
-    /// pick. Listing them also makes adding a sixth action fail here until it
+    /// pick. Listing them also makes adding an eighth action fail here until it
     /// is added to the list, which is the point of an exhaustive test.
-    /// `ALL` is what every other test here iterates, so it being complete is a
-    /// precondition of all of them rather than a nicety.
+    /// `every_action` is what every other test here iterates, so it being
+    /// complete is a precondition of all of them rather than a nicety.
     ///
     /// The `match` is the mechanism: it is exhaustive, so adding a variant to
     /// the enum stops this file compiling until the variant is named here, and
-    /// the arm then leads the reader to `ALL`. The length assertion catches the
-    /// other half — a variant named in the match and in `ALL` but not counted
-    /// in `ALL`'s fixed length is a compile error, and one that is somehow
-    /// neither fails here.
+    /// the arm then leads the reader to `ZONELESS`. The length assertion
+    /// catches the other half — a variant named in the match and in `ZONELESS`
+    /// but not counted in its fixed length is a compile error, and one that is
+    /// somehow neither fails here.
     #[test]
     fn all_really_is_every_action() {
-        for action in ShellControlAction::ALL {
+        for action in every_action() {
             match action {
                 ShellControlAction::Activate
                 | ShellControlAction::Minimize
@@ -1219,24 +1445,29 @@ mod tests {
                 | ShellControlAction::Maximize
                 | ShellControlAction::Close
                 | ShellControlAction::SnapLeft
-                | ShellControlAction::SnapRight => {}
+                | ShellControlAction::SnapRight
+                | ShellControlAction::SnapToZone(_) => {}
             }
         }
 
-        // Every byte the decoder accepts names an action that is in `ALL`, and
-        // there are exactly as many of them. A variant reachable from the wire
-        // but missing from `ALL` would be one no test above ever exercises.
-        let decodable: Vec<ShellControlAction> =
-            (0..=u8::MAX).filter_map(ShellControlAction::from_byte).collect();
-        assert_eq!(decodable.len(), ShellControlAction::ALL.len());
+        // Every byte the decoder accepts names an action the tests above
+        // exercise, and there are exactly as many of them. A variant reachable
+        // from the wire but missing from the list would be one nothing covers.
+        let decodable: Vec<ShellControlAction> = (0..=u8::MAX)
+            .filter_map(ShellControlAction::from_byte)
+            .collect();
+        assert_eq!(decodable.len(), every_action().len());
         for action in decodable {
-            assert!(ShellControlAction::ALL.contains(&action));
+            assert!(
+                every_action().contains(&action),
+                "{action:?} is unreachable"
+            );
         }
     }
 
     #[test]
     fn every_shell_control_action_survives_the_wire() {
-        let actions = ShellControlAction::ALL;
+        let actions = every_action();
         let reqs: Vec<Request> = actions
             .iter()
             .enumerate()
@@ -1255,6 +1486,69 @@ mod tests {
         seen.sort_unstable();
         seen.dedup();
         assert_eq!(seen.len(), actions.len(), "two actions share a wire byte");
+    }
+
+    #[test]
+    fn a_zone_tiling_action_still_costs_exactly_one_byte() {
+        // The property the whole `SnapSlot` design exists to preserve. If the
+        // slot were encoded beside the action rather than folded into it, a
+        // zone request would be longer than every other shell-control request
+        // and every reader of the frame would need to know which.
+        let plain = encode_requests(&[Request::new(
+            1,
+            RequestBody::ShellControl {
+                window: 7,
+                action: ShellControlAction::Maximize,
+            },
+        )]);
+        for slot in SnapSlot::all() {
+            let zoned = encode_requests(&[Request::new(
+                1,
+                RequestBody::ShellControl {
+                    window: 7,
+                    action: ShellControlAction::SnapToZone(slot),
+                },
+            )]);
+            assert_eq!(
+                zoned.len(),
+                plain.len(),
+                "{slot:?} encodes to {} bytes where a zoneless action takes {}",
+                zoned.len(),
+                plain.len()
+            );
+        }
+    }
+
+    #[test]
+    fn a_byte_past_the_last_zone_is_refused_rather_than_rounded_down() {
+        // A peer that knows a layout we do not must be told so. Silently
+        // decoding its byte as the nearest zone we *do* have would tile the
+        // user's window into a rectangle nobody asked for, which is worse than
+        // the request failing.
+        let last = ShellControlAction::ZONE_BYTE_BASE + SnapSlot::COUNT - 1;
+        assert!(ShellControlAction::from_byte(last).is_some());
+        for b in (last + 1)..=u8::MAX {
+            assert_eq!(
+                ShellControlAction::from_byte(b),
+                None,
+                "byte {b} decoded to something"
+            );
+        }
+    }
+
+    #[test]
+    fn the_zoneless_actions_keep_the_bytes_they_always_had() {
+        // Wire format, and the one thing in this file that a refactor could
+        // change without any other test noticing: renumbering the zoneless
+        // actions to make room for the zone range would leave both ends
+        // self-consistent and silently incompatible with every build before it.
+        assert_eq!(ShellControlAction::Activate.as_byte(), 0);
+        assert_eq!(ShellControlAction::Minimize.as_byte(), 1);
+        assert_eq!(ShellControlAction::Restore.as_byte(), 2);
+        assert_eq!(ShellControlAction::Maximize.as_byte(), 3);
+        assert_eq!(ShellControlAction::Close.as_byte(), 4);
+        assert_eq!(ShellControlAction::SnapLeft.as_byte(), 5);
+        assert_eq!(ShellControlAction::SnapRight.as_byte(), 6);
     }
 
     /// An action byte this decoder does not know is refused, not guessed at.
@@ -1587,5 +1881,120 @@ mod tests {
         assert!(s.decorations);
         assert!(!s.transparent);
         assert_eq!(s.position, None, "placement is the compositor's job");
+    }
+
+    #[test]
+    fn every_panel_edge_survives_the_wire_with_its_thickness() {
+        let reqs: Vec<Request> = [
+            PanelEdge::Left,
+            PanelEdge::Right,
+            PanelEdge::Top,
+            PanelEdge::Bottom,
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(i, edge)| {
+            Request::new(
+                u32::try_from(i).expect("small"),
+                RequestBody::ReserveEdge {
+                    window: 9,
+                    edge,
+                    size: 40 + u32::try_from(i).expect("small"),
+                },
+            )
+        })
+        .collect();
+        assert_eq!(round_trip_requests(&reqs), reqs);
+    }
+
+    #[test]
+    fn a_release_is_a_reservation_of_zero_and_not_a_second_request() {
+        // The idiom the protocol relies on instead of a `ReleaseEdge` tag: a
+        // client that had to send a different request to release would have a
+        // second code path to the same state, and the compositor a second
+        // place to forget to re-tile.
+        let req = Request::new(
+            3,
+            RequestBody::ReserveEdge {
+                window: 9,
+                edge: PanelEdge::Bottom,
+                size: 0,
+            },
+        );
+        assert_eq!(round_trip_requests(std::slice::from_ref(&req)), vec![req]);
+    }
+
+    #[test]
+    fn a_reserve_reply_carries_a_signed_origin_so_a_left_hand_monitor_survives() {
+        // A monitor arranged to the left of the primary starts at a negative x.
+        // An unsigned origin would decode it as two billion and put the panel
+        // somewhere no display reaches.
+        let resp = Response::new(
+            4,
+            ResponseBody::WorkArea {
+                x: -1920,
+                y: -12,
+                width: 1920,
+                height: 1040,
+            },
+        );
+        assert_eq!(
+            round_trip_responses(std::slice::from_ref(&resp)),
+            vec![resp]
+        );
+    }
+
+    #[test]
+    fn a_reserve_edge_byte_that_names_no_edge_is_rejected_rather_than_defaulted() {
+        // Hand-built because no encoder will produce it: tag, seq, window, a
+        // bad edge byte, size.
+        let mut bytes = encode_requests(&[Request::new(
+            1,
+            RequestBody::ReserveEdge {
+                window: 9,
+                edge: PanelEdge::Bottom,
+                size: 40,
+            },
+        )]);
+        let edge_at = bytes.len() - 5;
+        assert_eq!(bytes[edge_at], PanelEdge::Bottom.as_byte());
+        bytes[edge_at] = 0xFE;
+        assert!(
+            decode_requests(&bytes).is_err(),
+            "an edge byte naming nothing decoded to an edge anyway"
+        );
+    }
+
+    #[test]
+    fn both_workspace_requests_survive_the_wire() {
+        // Two requests one byte apart in tag and both carrying a u32 last: a
+        // decoder that read `SetWindowWorkspace` for `SwitchWorkspace` would
+        // take the desktop number as a window id and move a window nobody
+        // named, so they are round-tripped together rather than separately.
+        let reqs = vec![
+            Request::new(1, RequestBody::SwitchWorkspace { workspace: 3 }),
+            Request::new(
+                2,
+                RequestBody::SetWindowWorkspace {
+                    window: 77,
+                    workspace: 3,
+                },
+            ),
+        ];
+        assert_eq!(round_trip_requests(&reqs), reqs);
+    }
+
+    #[test]
+    fn switching_to_the_last_desktop_a_u32_can_name_is_not_clamped() {
+        // The compositor deliberately holds no idea of how many desktops there
+        // are -- that is the shell's preference -- so the wire must carry the
+        // whole range rather than a small field someone sized by guessing.
+        let req = Request::new(
+            9,
+            RequestBody::SwitchWorkspace {
+                workspace: u32::MAX,
+            },
+        );
+        assert_eq!(round_trip_requests(std::slice::from_ref(&req)), vec![req]);
     }
 }

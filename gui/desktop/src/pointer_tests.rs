@@ -21,10 +21,11 @@
 use crate::calendar;
 use crate::datetime_settings::AdditionalClock;
 use crate::launcher::{self, Category};
+use crate::snap;
 use crate::{
     DesktopShell, Hit, Key, KeyEvent, Layer, ManagedWindow, Modifiers, MouseButton, MouseEvent,
-    MouseEventKind, Rect, START_MENU_ROW_HEIGHT, ShellAction, ShellControlAction, TextRole,
-    WindowId, WindowInfo, WindowRequest, WindowState, click, scroll, scroll_rows,
+    MouseEventKind, Rect, START_MENU_ROW_HEIGHT, ShellAction, ShellControlAction, ShellRequest,
+    TextRole, WindowId, WindowInfo, WindowList, WindowState, click, scroll, scroll_rows,
 };
 use appearance::{AppearanceSettings, WindowCorners};
 use guitk::render::{RenderCommand, RenderTree};
@@ -33,6 +34,16 @@ use guitk::wheel;
 
 fn shell() -> DesktopShell {
     DesktopShell::new(1000, 800)
+}
+
+/// A window list on the desktop the user is looking at.
+///
+/// Almost every test in this file is about a click landing somewhere, and none
+/// is about virtual desktops — so they all say desktop 0 and mean "the one
+/// showing". The tests that *are* about desktops build the list themselves,
+/// with numbers that differ, which is the only way the difference can matter.
+fn here(windows: &[WindowInfo]) -> WindowList {
+    WindowList::new(0, windows.to_vec())
 }
 
 /// The centre of a rectangle — where a user aiming at a control clicks.
@@ -90,7 +101,7 @@ fn open(shell: &mut DesktopShell, title: &str) -> WindowId {
     let mut fresh = app(id, title);
     fresh.focused = true;
     list.push(fresh);
-    shell.apply_window_list(&list);
+    shell.apply_window_list(&here(&list));
     WindowId(id)
 }
 
@@ -104,7 +115,7 @@ fn minimize(shell: &mut DesktopShell, id: WindowId) {
             info.focused = false;
         }
     }
-    shell.apply_window_list(&list);
+    shell.apply_window_list(&here(&list));
 }
 
 // ---- the start menu -------------------------------------------------------
@@ -616,7 +627,7 @@ fn a_taskbar_button_asks_to_activate_an_unfocused_window_and_to_minimize_a_focus
     let first = shell.taskbar_button_rect(0);
     assert_eq!(
         click_at(&mut shell, first),
-        ShellAction::Control(WindowRequest::new(a, ShellControlAction::Activate)),
+        ShellAction::Control(ShellRequest::window(a, ShellControlAction::Activate)),
         "the button of an unfocused window must summon it"
     );
 
@@ -637,7 +648,7 @@ fn a_taskbar_button_asks_to_activate_an_unfocused_window_and_to_minimize_a_focus
     let button = shell.taskbar_button_rect(index);
     assert_eq!(
         click_at(&mut shell, button),
-        ShellAction::Control(WindowRequest::new(b, ShellControlAction::Minimize)),
+        ShellAction::Control(ShellRequest::window(b, ShellControlAction::Minimize)),
         "the button of the focused window must put it away"
     );
     assert_eq!(
@@ -655,7 +666,7 @@ fn a_taskbar_button_whose_window_has_gone_swallows_the_click() {
     let mut shell = shell();
     open(&mut shell, "A");
     let button = shell.taskbar_button_rect(0);
-    shell.apply_window_list(&[]);
+    shell.apply_window_list(&here(&[]));
 
     assert_eq!(click_at(&mut shell, button), ShellAction::Consumed);
 }
@@ -672,12 +683,12 @@ fn the_window_list_replaces_what_the_shell_believed_rather_than_adding_to_it() {
     // appears in no later list — the point being missed otherwise. Seeding with
     // `add_window` gives the stale window id 1, which the next list happens to
     // reuse and therefore overwrites, so a shell that merged would pass anyway.
-    shell.apply_window_list(&[app(9, "closed since")]);
+    shell.apply_window_list(&here(&[app(9, "closed since")]));
     assert!(shell.windows.contains_key(&WindowId(9)));
 
     let mut second = app(2, "Editor");
     second.focused = true;
-    shell.apply_window_list(&[app(1, "Terminal"), second]);
+    shell.apply_window_list(&here(&[app(1, "Terminal"), second]));
 
     assert!(
         !shell.windows.contains_key(&WindowId(9)),
@@ -712,7 +723,7 @@ fn the_taskbar_leaves_out_every_surface_that_is_not_an_application_window() {
     let mut bar = app(2, "Taskbar");
     bar.layer = Layer::Overlay;
 
-    shell.apply_window_list(&[wallpaper, app(3, "Editor"), bar]);
+    shell.apply_window_list(&here(&[wallpaper, app(3, "Editor"), bar]));
 
     let ids: Vec<WindowId> = shell.visible_windows().iter().map(|w| w.id).collect();
     assert_eq!(ids, [WindowId(3)], "the shell listed its own surfaces");
@@ -729,7 +740,7 @@ fn a_minimized_window_keeps_its_button_and_an_unmapped_one_does_not() {
     let mut hidden = app(2, "Unmapped");
     hidden.visible = false;
 
-    shell.apply_window_list(&[away, hidden, app(3, "Ordinary")]);
+    shell.apply_window_list(&here(&[away, hidden, app(3, "Ordinary")]));
 
     assert_eq!(shell.windows[&WindowId(1)].state, WindowState::Minimized);
     assert!(
@@ -750,19 +761,24 @@ fn a_retitle_reaches_the_button_without_disturbing_shell_local_state() {
     // a window that is already known must be updated in place, not rebuilt,
     // because the shell holds per-window state the compositor knows nothing
     // about and cannot send back.
+    //
+    // The virtual desktop used to be on that list and is not any more: it is
+    // the compositor's field now, arrives with every window, and a shell that
+    // preserved its own copy across an update would be preserving a stale one.
     let mut shell = shell();
-    shell.apply_window_list(&[app(1, "untitled")]);
+    shell.apply_window_list(&here(&[app(1, "untitled")]));
     shell.windows.get_mut(&WindowId(1)).unwrap().icon_id = 42;
-    shell.windows.get_mut(&WindowId(1)).unwrap().desktop = 3;
 
-    shell.apply_window_list(&[app(1, "notes.txt — saved")]);
+    let mut retitled = app(1, "notes.txt — saved");
+    retitled.workspace = 3;
+    shell.apply_window_list(&here(&[retitled]));
 
     let win = &shell.windows[&WindowId(1)];
     assert_eq!(win.title, "notes.txt — saved");
     assert_eq!(win.icon_id, 42, "the icon was rebuilt from nothing");
     assert_eq!(
         win.desktop, 3,
-        "a retitle moved the window to another virtual desktop"
+        "the desktop the compositor named was ignored in favour of a local copy"
     );
 }
 
@@ -775,10 +791,10 @@ fn an_empty_desktop_leaves_nothing_focused() {
     let mut shell = shell();
     let mut only = app(1, "Editor");
     only.focused = true;
-    shell.apply_window_list(&[only]);
+    shell.apply_window_list(&here(&[only]));
     assert_eq!(shell.focused_window, Some(WindowId(1)));
 
-    shell.apply_window_list(&[]);
+    shell.apply_window_list(&here(&[]));
     assert_eq!(shell.focused_window, None);
     assert!(shell.windows.is_empty());
 }
@@ -792,13 +808,13 @@ fn the_window_list_is_the_only_thing_that_grows_the_shells_idea_of_the_desktop()
     let mut shell = shell();
     let mut focused = app(1, "Editor");
     focused.focused = true;
-    shell.apply_window_list(&[focused]);
+    shell.apply_window_list(&here(&[focused]));
 
     let button = shell.taskbar_button_rect(0);
     let action = click_at(&mut shell, button);
     assert_eq!(
         action,
-        ShellAction::Control(WindowRequest::new(
+        ShellAction::Control(ShellRequest::window(
             WindowId(1),
             ShellControlAction::Minimize
         ))
@@ -811,7 +827,7 @@ fn the_window_list_is_the_only_thing_that_grows_the_shells_idea_of_the_desktop()
     // The compositor did as it was asked and said so.
     let mut away = app(1, "Editor");
     away.minimized = true;
-    shell.apply_window_list(&[away]);
+    shell.apply_window_list(&here(&[away]));
     assert!(shell.visible_windows().is_empty());
     assert_eq!(shell.focused_window, None);
 }
@@ -1261,7 +1277,7 @@ fn a_double_click_is_the_same_event_to_this_shell_as_a_single_one() {
     let (x, y) = centre(shell.taskbar_button_rect(0));
     assert_eq!(
         shell.handle_mouse(&doubled(x, y)),
-        ShellAction::Control(WindowRequest::new(a, ShellControlAction::Activate)),
+        ShellAction::Control(ShellRequest::window(a, ShellControlAction::Activate)),
         "double-click on a taskbar button asked for nothing"
     );
 
@@ -1627,5 +1643,291 @@ fn every_drawn_string_follows_the_users_font_size() {
             (large - small * 2.0).abs() < 0.01,
             "a draw call ignored the font size: {small} did not become {large}"
         );
+    }
+}
+
+// ---- the zone-tiling chooser ----------------------------------------------
+
+/// Super+Z, the chord that opens the chooser.
+fn zone_key() -> KeyEvent {
+    KeyEvent {
+        key: Key::Z,
+        pressed: true,
+        modifiers: Modifiers {
+            super_key: true,
+            ..Modifiers::default()
+        },
+        text: None,
+    }
+}
+
+/// A 1000x800 shell with one focused window, the chooser open over it, and
+/// `preset` selected.
+fn chooser(preset: snap::SnapLayoutPreset) -> (DesktopShell, WindowId) {
+    let mut shell = shell();
+    let id = open(&mut shell, "Editor");
+    assert!(shell.handle_hotkey(&zone_key()).consumed);
+    assert!(shell.snap.is_overlay_visible(), "Super+Z did not open it");
+    shell.snap.set_layout(preset);
+    (shell, id)
+}
+
+/// Where the chooser drew each zone of the selected layout: id and centre.
+fn drawn_zones(shell: &DesktopShell) -> Vec<(snap::ZoneId, f32, f32)> {
+    shell
+        .snap
+        .layout()
+        .zones
+        .iter()
+        .map(|zone| {
+            let (cx, cy) = zone.center();
+            (zone.id, cx, cy)
+        })
+        .collect()
+}
+
+fn motion(x: f32, y: f32) -> MouseEvent {
+    MouseEvent {
+        x,
+        y,
+        kind: MouseEventKind::Move,
+    }
+}
+
+/// The whole point of the feature, end to end: a click on a drawn zone becomes
+/// a request naming that zone, aimed at the focused window.
+///
+/// Every zone of every layout the picker offers, clicked at the centre of the
+/// rectangle the overlay actually drew -- so a click can only pass by landing
+/// where the user sees the zone, and the hit test and the renderer cannot drift
+/// apart without this failing.
+///
+/// What it replaced: the shell used to *compute the snapped rectangle* and
+/// return it to a caller with nothing to do with it. The shell moves no
+/// windows, so the numbers were returned and dropped while the window stayed
+/// where it was, and no assertion about the returned numbers could tell.
+#[test]
+fn clicking_a_zone_asks_for_the_focused_window_to_be_tiled_into_it() {
+    for &preset in snap::SnapLayoutPreset::all() {
+        let (probe, _) = chooser(preset);
+        let zones = drawn_zones(&probe);
+        assert_eq!(
+            zones.len(),
+            preset.zone_count() as usize,
+            "{preset:?} drew a different number of zones than it claims"
+        );
+
+        for (zone_id, cx, cy) in zones {
+            let (mut shell, id) = chooser(preset);
+            let slot = snap::SnapSlot::new(preset, u8::try_from(zone_id).unwrap())
+                .expect("every drawn zone must name a slot");
+            assert_eq!(
+                shell.handle_mouse(&click(cx, cy)),
+                ShellAction::Control(ShellRequest::window(
+                    id,
+                    ShellControlAction::SnapToZone(slot)
+                )),
+                "clicking zone {zone_id} of {preset:?} at ({cx}, {cy})"
+            );
+            assert!(
+                !shell.snap.is_overlay_visible(),
+                "the chooser stayed up after the choice was made"
+            );
+        }
+    }
+}
+
+/// The chooser places the window the user is looking at, not the one that was
+/// focused when the layout was last changed.
+#[test]
+fn the_tiled_window_is_whichever_one_is_focused_now() {
+    let (mut shell, first) = chooser(snap::SnapLayoutPreset::TwoEqualHalves);
+    let second = open(&mut shell, "Terminal");
+    assert_ne!(first, second);
+    assert_eq!(shell.focused_window, Some(second));
+
+    let (_, cx, cy) = drawn_zones(&shell)[0];
+    match shell.handle_mouse(&click(cx, cy)) {
+        ShellAction::Control(ShellRequest::Window(request)) => {
+            assert_eq!(request.window, second);
+        }
+        other => panic!("expected a request for the focused window, got {other:?}"),
+    }
+}
+
+/// With nothing focused there is nothing to place, so the chord does not put a
+/// chooser on screen whose every zone would decline the click. It still claims
+/// the key: a shortcut that sometimes types a `z` is worse than one that
+/// sometimes does nothing.
+#[test]
+fn the_chooser_does_not_open_over_an_empty_desktop() {
+    let mut shell = shell();
+    assert_eq!(shell.focused_window, None);
+    assert!(shell.handle_hotkey(&zone_key()).consumed);
+    assert!(!shell.snap.is_overlay_visible());
+    assert!(shell.render_zone_overlay().is_none());
+}
+
+/// Super+Z is a toggle, Escape closes the chooser like every other popup, and a
+/// press on the scrim abandons the choice without asking for anything.
+#[test]
+fn the_chooser_closes_the_ways_a_popup_closes() {
+    let (mut shell, _) = chooser(snap::SnapLayoutPreset::FourQuadrants);
+    assert!(shell.handle_hotkey(&zone_key()).consumed);
+    assert!(!shell.snap.is_overlay_visible(), "Super+Z did not toggle");
+
+    let (mut shell, _) = chooser(snap::SnapLayoutPreset::FourQuadrants);
+    let escape = KeyEvent {
+        key: Key::Escape,
+        pressed: true,
+        modifiers: Modifiers::default(),
+        text: None,
+    };
+    assert!(shell.handle_hotkey(&escape).consumed);
+    assert!(!shell.snap.is_overlay_visible(), "Escape did not close it");
+
+    // The gutter between two zones is the overlay's own space: it is inside the
+    // work area and inside no zone, which is exactly what `SnapOverlay` means.
+    let (mut shell, _) = chooser(snap::SnapLayoutPreset::FourQuadrants);
+    let area = shell.snap.work_area();
+    let (x, y) = (area.x + area.width / 2.0, area.y + area.height / 2.0);
+    assert_eq!(shell.hit_test(x, y), Hit::SnapOverlay);
+    assert_eq!(shell.handle_mouse(&click(x, y)), ShellAction::Consumed);
+    assert!(!shell.snap.is_overlay_visible());
+}
+
+/// The chooser is drawn only while it is open, and what it draws follows the
+/// layout the picker has selected.
+#[test]
+fn the_chooser_draws_the_layout_it_will_place_into() {
+    let mut shell = shell();
+    open(&mut shell, "Editor");
+    assert!(shell.render_zone_overlay().is_none(), "drawn while closed");
+
+    assert!(shell.handle_hotkey(&zone_key()).consumed);
+    shell
+        .snap
+        .set_layout(snap::SnapLayoutPreset::TwoEqualHalves);
+    let halves = shell.render_zone_overlay().expect("open, so drawn");
+    shell.snap.set_layout(snap::SnapLayoutPreset::SixGrid);
+    let grid = shell.render_zone_overlay().expect("still open");
+    assert!(
+        grid.commands.len() > halves.commands.len(),
+        "six zones did not draw more than two"
+    );
+}
+
+/// Hovering a zone lights it, and what is lit is what a press would place: the
+/// highlight and the hit test are one answer, not two.
+#[test]
+fn the_lit_zone_is_the_one_a_press_would_place_into() {
+    const PRESET: snap::SnapLayoutPreset = snap::SnapLayoutPreset::ThreeColumns;
+
+    let (unlit, _) = chooser(PRESET);
+    assert_eq!(unlit.snap.hovered_zone(), None);
+    let plain = unlit
+        .render_zone_overlay()
+        .expect("open, so drawn")
+        .commands
+        .len();
+
+    for (zone_id, cx, cy) in drawn_zones(&unlit) {
+        let (mut shell, id) = chooser(PRESET);
+        assert_eq!(
+            shell.handle_mouse(&motion(cx, cy)),
+            ShellAction::Consumed,
+            "motion over the chooser reached a window"
+        );
+        assert_eq!(shell.snap.hovered_zone(), Some(zone_id));
+        assert!(
+            shell.render_zone_overlay().expect("open").commands.len() > plain,
+            "the hovered zone drew no highlight"
+        );
+
+        let slot = snap::SnapSlot::new(PRESET, u8::try_from(zone_id).unwrap()).unwrap();
+        assert_eq!(
+            shell.handle_mouse(&click(cx, cy)),
+            ShellAction::Control(ShellRequest::window(
+                id,
+                ShellControlAction::SnapToZone(slot)
+            )),
+            "the zone that was lit is not the zone the press placed into"
+        );
+    }
+}
+
+/// The layout picker rises from the top band of the *work area* and is clicked
+/// against the same rectangle it is drawn from -- so every thumbnail selects
+/// the preset it shows, and a press on the panel never places a window.
+#[test]
+fn each_thumbnail_selects_the_layout_it_pictures() {
+    let summon = |shell: &DesktopShell| {
+        let area = shell.snap.work_area();
+        motion(area.x + area.width / 2.0, area.y + 1.0)
+    };
+
+    let (mut shell, _) = chooser(snap::SnapLayoutPreset::TwoEqualHalves);
+    assert!(!shell.snap.is_picker_visible(), "up before it was summoned");
+    let band = summon(&shell);
+    shell.handle_mouse(&band);
+    assert!(
+        shell.snap.is_picker_visible(),
+        "the top band did not summon the picker"
+    );
+    let (px, py, w, h) = shell.snap.picker_rect();
+    assert_eq!(
+        shell.hit_test(px + w / 2.0, py + h / 2.0),
+        Hit::SnapPicker,
+        "the panel does not claim its own middle"
+    );
+
+    for &preset in snap::SnapLayoutPreset::all() {
+        let (mut shell, _) = chooser(snap::SnapLayoutPreset::TwoEqualHalves);
+        let band = summon(&shell);
+        shell.handle_mouse(&band);
+        let (tx, ty, size) = shell
+            .snap
+            .thumbnail_rect(preset)
+            .expect("every preset has a thumbnail");
+        assert_eq!(
+            shell.handle_mouse(&click(tx + size / 2.0, ty + size / 2.0)),
+            ShellAction::Consumed,
+            "a press on the picker asked the compositor for something"
+        );
+        assert_eq!(
+            shell.snap.active_preset(),
+            preset,
+            "the thumbnail selected a different layout than it pictures"
+        );
+        assert!(
+            shell.snap.is_overlay_visible(),
+            "choosing a layout closed the chooser it was chosen in"
+        );
+    }
+}
+
+/// The zones follow the taskbar. A chooser measured against the whole screen
+/// would draw its bottom row under the bar, and place a window there.
+#[test]
+fn the_chooser_tiles_the_work_area_and_not_the_screen() {
+    let (mut shell, _) = chooser(snap::SnapLayoutPreset::SixGrid);
+    let bar = shell.taskbar_rect();
+    assert_eq!(shell.snap.work_area().bottom(), bar.y);
+    for zone in &shell.snap.layout().zones {
+        assert!(
+            zone.y + zone.height <= bar.y,
+            "zone {} runs under the taskbar",
+            zone.id
+        );
+    }
+
+    // And they follow it when it moves: a taller bar is a shorter work area,
+    // re-derived at the next gesture rather than cached from the last one.
+    shell.taskbar_height = 120;
+    let taller = shell.taskbar_rect();
+    shell.handle_mouse(&motion(10.0, 10.0));
+    assert_eq!(shell.snap.work_area().bottom(), taller.y);
+    for zone in &shell.snap.layout().zones {
+        assert!(zone.y + zone.height <= taller.y);
     }
 }

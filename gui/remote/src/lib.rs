@@ -23,6 +23,11 @@
 //!   name it, move it, ask about the display. Neither of the two streaming
 //!   directions can bring a window into existence in the first place.
 //!
+//! Alongside them, [`zones`] holds a *shared definition* rather than a frame
+//! format: the snap layouts, so that a shell asking for "zone 3 of the six-cell
+//! grid" and the compositor placing the window there agree on which rectangle
+//! that is.
+//!
 //! Each direction has its own frame magic, so a frame sent the wrong way over a
 //! duplex transport fails on its first four bytes instead of decoding into
 //! plausible nonsense.
@@ -109,9 +114,18 @@ pub use submit::{
 
 pub mod window_list;
 pub use window_list::{
-    MAX_WINDOWS_PER_LIST, WINDOW_LIST_MAGIC, WINDOW_LIST_VERSION, WindowInfo, decode_window_list,
-    encode_window_list, encode_window_list_into, try_decode_window_list,
+    MAX_WINDOWS_PER_LIST, WINDOW_LIST_MAGIC, WINDOW_LIST_VERSION, WindowInfo, WindowList,
+    decode_window_list, encode_window_list, encode_window_list_into, try_decode_window_list,
 };
+
+pub mod zones;
+pub use zones::{
+    EDGE_THRESHOLD, EdgeDrop, ScreenEdge, SnapLayout, SnapLayoutPreset, SnapSlot, SnapZone,
+    WorkArea, ZONE_GAP, ZoneId, drop_at, drop_at_edge, edge_at,
+};
+
+pub mod reserve;
+pub use reserve::{MAX_RESERVED_FRACTION, PanelEdge, ReservedEdges};
 
 pub mod frame;
 pub use frame::{Frame, decode_any, try_decode_any};
@@ -772,6 +786,18 @@ fn write_f32(out: &mut Vec<u8>, v: f32) {
 
 fn write_u32(out: &mut Vec<u8>, v: u32) {
     out.extend_from_slice(&v.to_le_bytes());
+}
+
+/// A signed 32-bit scalar, as the same four little-endian bytes a `u32` would
+/// occupy. Two's complement, so the pair round-trips every `i32` including
+/// negatives — which a window position genuinely is on a desktop whose origin
+/// is not the leftmost monitor's corner.
+///
+/// Lives here rather than beside its first caller because two codecs now need
+/// it, and two spellings of a scalar is how the two ends of a wire come to
+/// disagree about one.
+fn write_i32(out: &mut Vec<u8>, v: i32) {
+    write_u32(out, v.cast_unsigned());
 }
 
 fn write_u64(out: &mut Vec<u8>, v: u64) {

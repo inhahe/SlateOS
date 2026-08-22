@@ -753,6 +753,10 @@ class _Args:
     label = ""
     profile = "debug"
     wall_seconds = None
+    # None is the ordinary case: a --no-build/--no-stage run never enters Step 1
+    # and boot-test.sh omits the flag, so the key must stay out of the record
+    # rather than land as a 0 that reads like an instant build.
+    build_seconds = None
     # Empty, as argparse leaves them when boot-test.sh does not pass them, so
     # build_record() takes the git fallback -- which is the path these tests
     # were written against.
@@ -872,8 +876,8 @@ def test_experiment_wall_times_do_not_move_the_median(bh):
     pops = bh.wall_populations(records)
     check("only one population, and the probe is not in it",
           {k: sorted(v) for k, v in pops.items()},
-          {f"{bh.sanitizer_of(_rec('PASS'))} on {bh._ACCEL_UNKNOWN}":
-           [120.0, 120.0]})
+          {f"{bh.profile_of(_rec('PASS'))}/{bh.sanitizer_of(_rec('PASS'))}"
+           f" on {bh._ACCEL_UNKNOWN}": [120.0, 120.0]})
 
 
 def test_unvalidated_fingerprint_reports_no_streak(bh):
@@ -1048,10 +1052,11 @@ def test_wall_times_are_never_averaged_across_builds(bh):
     # The keys are the (build, accelerator) pair. Spelled out from the two
     # constants rather than built with `population_of`, so this asserts the
     # partition instead of restating the code that produces it.
-    plain = f"none on {bh._ACCEL_UNKNOWN}"
-    kasan = f"kasan-instrumented on {bh._ACCEL_UNKNOWN}"
+    plain = f"{bh._PROFILE_UNKNOWN}/none on {bh._ACCEL_UNKNOWN}"
+    kasan = f"{bh._PROFILE_UNKNOWN}/kasan-instrumented on {bh._ACCEL_UNKNOWN}"
     check("three populations kept apart", sorted(pops), sorted(
-        [plain, kasan, f"{bh._SAN_UNKNOWN} on {bh._ACCEL_UNKNOWN}"]))
+        [plain, kasan,
+         f"{bh._PROFILE_UNKNOWN}/{bh._SAN_UNKNOWN} on {bh._ACCEL_UNKNOWN}"]))
     check("uninstrumented median", bh._median(pops[plain]), 330.0)
     check("instrumented median", bh._median(pops[kasan]), 1100.0)
 
@@ -1063,8 +1068,103 @@ def test_wall_populations_ignore_rows_without_a_duration(bh):
                {"verdict": "PASS", "sanitizer": "none", "wall_seconds": None},
                {"verdict": "PASS", "sanitizer": "none", "wall_seconds": 300.0}]
     check("only the row with a duration counts",
-          bh.wall_populations(records)[f"none on {bh._ACCEL_UNKNOWN}"],
+          bh.wall_populations(records)[
+              f"{bh._PROFILE_UNKNOWN}/none on {bh._ACCEL_UNKNOWN}"],
           [300.0])
+
+
+def test_build_populations_split_by_profile_not_by_accelerator(bh):
+    """Build time is a fact about the host compiler, not about the emulator.
+
+    Folding the accelerator into this key -- which is right for wall time and
+    wrong here -- would split each profile into populations that differ in
+    nothing, shrinking every sample for no gain. These four records are two
+    profiles across two accelerators and must come out as exactly two groups.
+    """
+    records = [
+        {"verdict": "PASS", "sanitizer": "none", "profile": "debug",
+         "build_seconds": 100.0, "accelerator": "QEMU TCG"},
+        {"verdict": "PASS", "sanitizer": "none", "profile": "debug",
+         "build_seconds": 140.0, "accelerator": "Hyper-V/WHPX"},
+        {"verdict": "PASS", "sanitizer": "none", "profile": "release",
+         "build_seconds": 600.0, "accelerator": "QEMU TCG"},
+        {"verdict": "PASS", "sanitizer": "none", "profile": "release",
+         "build_seconds": 700.0, "accelerator": "Hyper-V/WHPX"},
+    ]
+    pops = bh.build_populations(records)
+    check("two populations, one per profile", sorted(pops), ["debug", "release"])
+    check("debug median", bh._median(pops["debug"]), 120.0)
+    check("release median", bh._median(pops["release"]), 650.0)
+
+
+def test_build_populations_keep_kasan_apart(bh):
+    """KASAN instruments every memory access, so it is a different build cost
+    and not a slow instance of the same one."""
+    records = [
+        {"verdict": "PASS", "sanitizer": "none", "profile": "debug",
+         "build_seconds": 100.0},
+        {"verdict": "PASS", "sanitizer": "kasan-instrumented",
+         "profile": "debug", "build_seconds": 400.0},
+    ]
+    check("split by sanitizer as well as profile",
+          sorted(bh.build_populations(records)), ["debug", "debug + KASAN"])
+
+
+def test_build_populations_ignore_runs_that_did_not_build(bh):
+    """A --no-build run has no `build_seconds` at all, and must not be counted
+    as a zero-second build -- that would understate every profile's cost while
+    looking like an implausibly fast compile rather than like an absent one."""
+    records = [{"verdict": "PASS", "profile": "debug"},
+               {"verdict": "PASS", "profile": "debug", "build_seconds": None},
+               {"verdict": "PASS", "profile": "debug", "build_seconds": 90.0}]
+    check("only the row that built counts",
+          bh.build_populations(records)["debug"], [90.0])
+
+
+def test_build_populations_skip_experiments(bh):
+    """Same rule as everywhere else in this file: a probe is not a boot of the
+    tree, and its build is not a build of the tree either."""
+    records = [
+        {"verdict": "PASS", "profile": "debug", "build_seconds": 90.0},
+        {"verdict": "PASS", "profile": "debug", "build_seconds": 9000.0,
+         "experiment": "hand-patched Cargo.toml"},
+    ]
+    check("the probe's build is excluded",
+          bh.build_populations(records)["debug"], [90.0])
+
+
+def test_report_prints_build_time_and_warns_about_the_mixture(bh):
+    import contextlib
+    import io
+    records = [
+        {"verdict": "PASS", "sanitizer": "none", "profile": "debug",
+         "wall_seconds": 330.0, "build_seconds": 3.0},
+        {"verdict": "PASS", "sanitizer": "none", "profile": "debug",
+         "wall_seconds": 340.0, "build_seconds": 900.0},
+    ]
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        bh.report(records, None)
+    out = buf.getvalue()
+    check_true("build time is reported at all", "build time by profile" in out)
+    check_true("the range spans no-op to cold", "3-900s" in out)
+    # The caveat is load-bearing, not decoration: a median over a mixture of
+    # cold, incremental and no-op rebuilds describes no build anyone waits for,
+    # so a reader who takes it at face value is worse off than before.
+    check_true("and the reader is told to read the range",
+               "read the range" in out)
+
+
+def test_report_omits_build_section_when_nothing_built(bh):
+    """Printing an empty section would suggest the data exists and is boring;
+    every record predating --build-seconds lacks the field entirely."""
+    import contextlib
+    import io
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        bh.report([{"verdict": "PASS", "wall_seconds": 330.0}], None)
+    check("no build section without build data",
+          "build time by profile" in buf.getvalue(), False)
 
 
 def test_report_prints_each_build_separately_and_no_combined_figure(bh):
@@ -1093,9 +1193,15 @@ def test_report_names_the_build_of_the_run_it_just_recorded(bh):
     import io
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
-        bh.report([], {"verdict": "PASS", "sanitizer": "kasan-instrumented"})
+        bh.report([], {"verdict": "PASS", "profile": "debug",
+                       "sanitizer": "kasan-instrumented"})
+    # Asserted as the whole label, not a substring of it: this line's entire
+    # job is to say which population the run just recorded belongs to, so it
+    # has to name every axis the population is partitioned on.  A test that
+    # only checked the sanitizer would have gone on passing through the day
+    # the profile axis was missing from it.
     check_true("current run's build is printed",
-               "build: kasan-instrumented" in buf.getvalue())
+               "build: debug/kasan-instrumented" in buf.getvalue())
 
 
 # --------------------------------------------------------------------------
@@ -1208,20 +1314,73 @@ def test_accel_of_groups_the_two_ways_of_not_knowing(bh):
           "QEMU TCG")
 
 
-def test_population_is_the_pair_not_either_half(bh):
-    """Two boots that agree on the build and differ on the accelerator are two
-    populations, and so are two that agree on the accelerator and differ on the
-    build. Either half alone merges a pair that differs by ~1.4x or ~3.4x."""
-    tcg_plain = {"sanitizer": "none", "accel": "QEMU TCG"}
-    whpx_plain = {"sanitizer": "none", "accel": "Hyper-V/WHPX"}
-    tcg_kasan = {"sanitizer": "kasan-instrumented", "accel": "QEMU TCG"}
+def test_population_is_the_triple_not_any_subset(bh):
+    """Change any one of the three factors and you have a different population.
+
+    Each pairing below merges boots that differ by a measured multiple on this
+    host: profile ~2.7x, sanitizer ~3.4x, accelerator ~1.4x. Dropping any axis
+    presents one of those mixtures as a measurement.
+    """
+    tcg_plain = {"profile": "debug", "sanitizer": "none", "accel": "QEMU TCG"}
+    whpx_plain = {"profile": "debug", "sanitizer": "none",
+                  "accel": "Hyper-V/WHPX"}
+    tcg_kasan = {"profile": "debug", "sanitizer": "kasan-instrumented",
+                 "accel": "QEMU TCG"}
+    tcg_release = {"profile": "release", "sanitizer": "none",
+                   "accel": "QEMU TCG"}
     check("same build, different accelerator -> different populations",
           bh.population_of(tcg_plain) == bh.population_of(whpx_plain), False)
-    check("same accelerator, different build -> different populations",
+    check("same accelerator, different sanitizer -> different populations",
           bh.population_of(tcg_plain) == bh.population_of(tcg_kasan), False)
-    check_true("and both halves are named in the label a human reads",
-               "none" in bh.population_of(tcg_plain)
+    check("same everything else, different profile -> different populations",
+          bh.population_of(tcg_plain) == bh.population_of(tcg_release), False)
+    check_true("and all three factors are named in the label a human reads",
+               "debug" in bh.population_of(tcg_plain)
+               and "none" in bh.population_of(tcg_plain)
                and "QEMU TCG" in bh.population_of(tcg_plain))
+
+
+def test_a_release_boot_does_not_move_the_debug_median(bh):
+    """The defect this axis was added for, with the file's own real numbers.
+
+    100 of the 243 records in bench/boot-history.jsonl were release boots
+    pooled with the debug ones. The largest population printed "155 boot(s),
+    median 331s" -- the median of a 95/60 mixture of a 382s population and a
+    130s one, and therefore a duration no build on this host has ever taken.
+    The numbers below are that shape in miniature.
+    """
+    def rec(profile, wall):
+        return {"verdict": "PASS", "profile": profile, "sanitizer": "none",
+                "accel": "QEMU TCG", "wall_seconds": wall}
+
+    records = [rec("debug", 380.0), rec("debug", 390.0), rec("debug", 400.0),
+               rec("release", 130.0), rec("release", 140.0)]
+    pops = bh.wall_populations(records)
+    debug = "debug/none on QEMU TCG"
+    release = "release/none on QEMU TCG"
+    check("two populations, not one", sorted(pops), [debug, release])
+    check("the debug median is a debug boot", bh._median(pops[debug]), 390.0)
+    check("the release median is a release boot",
+          bh._median(pops[release]), 135.0)
+    # 380 is the pooled median of all five -- close enough to the debug figure
+    # to look plausible, which is exactly what made this survive unnoticed.
+    check("and no population reports the pooled figure",
+          any(bh._median(v) == 380.0 for v in pops.values()), False)
+
+
+def test_profile_of_groups_the_two_ways_of_not_knowing(bh):
+    """The third twin of accel_of/sanitizer_of, and it must not guess `debug`
+    just because that is the recorder's argparse default -- folding
+    does-not-say into the larger population is how a mixture becomes a
+    measurement."""
+    absent = {"verdict": "PASS"}
+    null = {"verdict": "PASS", "profile": None}
+    check("absent key groups as unknown",
+          bh.profile_of(absent), bh.profile_of(null))
+    check("and never as debug",
+          bh.profile_of(absent) == "debug", False)
+    check("a named profile groups as itself",
+          bh.profile_of({"profile": "release"}), "release")
 
 
 def test_an_untagged_whpx_boot_does_not_move_the_tcg_median(bh):
@@ -1238,22 +1397,22 @@ def test_an_untagged_whpx_boot_does_not_move_the_tcg_median(bh):
     ~20% off both real ones, which is twice CLAUDE.md's regression threshold.
     """
     records = [
-        {"verdict": "PASS", "sanitizer": "none", "accel": "QEMU TCG",
-         "wall_seconds": 118.0},
-        {"verdict": "PASS", "sanitizer": "none", "accel": "QEMU TCG",
-         "wall_seconds": 122.0},
-        {"verdict": "PASS", "sanitizer": "none", "accel": "Hyper-V/WHPX",
-         "wall_seconds": 168.0},
-        {"verdict": "PASS", "sanitizer": "none", "accel": "Hyper-V/WHPX",
-         "wall_seconds": 186.0},
+        {"verdict": "PASS", "profile": "debug", "sanitizer": "none",
+         "accel": "QEMU TCG", "wall_seconds": 118.0},
+        {"verdict": "PASS", "profile": "debug", "sanitizer": "none",
+         "accel": "QEMU TCG", "wall_seconds": 122.0},
+        {"verdict": "PASS", "profile": "debug", "sanitizer": "none",
+         "accel": "Hyper-V/WHPX", "wall_seconds": 168.0},
+        {"verdict": "PASS", "profile": "debug", "sanitizer": "none",
+         "accel": "Hyper-V/WHPX", "wall_seconds": 186.0},
     ]
+    tcg = "debug/none on QEMU TCG"
+    whpx = "debug/none on Hyper-V/WHPX"
     pops = bh.wall_populations(records)
     check("the two accelerators are two populations", sorted(pops),
-          ["none on Hyper-V/WHPX", "none on QEMU TCG"])
-    check("TCG median is the TCG boots'", bh._median(pops["none on QEMU TCG"]),
-          120.0)
-    check("WHPX median is the WHPX boots'",
-          bh._median(pops["none on Hyper-V/WHPX"]), 177.0)
+          sorted([whpx, tcg]))
+    check("TCG median is the TCG boots'", bh._median(pops[tcg]), 120.0)
+    check("WHPX median is the WHPX boots'", bh._median(pops[whpx]), 177.0)
     check("and no population holds the pooled figure",
           any(bh._median(v) == 144.0 for v in pops.values()), False)
 
@@ -1262,22 +1421,22 @@ def test_report_prints_the_accelerator_beside_the_build(bh):
     import contextlib
     import io
     records = [
-        {"verdict": "PASS", "sanitizer": "none", "accel": "QEMU TCG",
-         "wall_seconds": 120.0},
-        {"verdict": "PASS", "sanitizer": "none", "accel": "Hyper-V/WHPX",
-         "wall_seconds": 177.0},
+        {"verdict": "PASS", "profile": "debug", "sanitizer": "none",
+         "accel": "QEMU TCG", "wall_seconds": 120.0},
+        {"verdict": "PASS", "profile": "debug", "sanitizer": "none",
+         "accel": "Hyper-V/WHPX", "wall_seconds": 177.0},
     ]
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
-        bh.report(records, {"verdict": "PASS", "sanitizer": "none",
-                            "accel": "Hyper-V/WHPX"})
+        bh.report(records, {"verdict": "PASS", "profile": "debug",
+                            "sanitizer": "none", "accel": "Hyper-V/WHPX"})
     out = buf.getvalue()
     check_true("TCG population reported", "120s" in out)
     check_true("WHPX population reported", "177s" in out)
     check_true("the legend names the accelerator too",
                "accelerator" in out)
-    check_true("and the current run is labelled with its own pair",
-               "build: none on Hyper-V/WHPX" in out)
+    check_true("and the current run is labelled with its own triple",
+               "build: debug/none on Hyper-V/WHPX" in out)
     # 148.5 is the mean of the two: the figure the old grouping produced, and
     # one no boot on this host has ever taken.
     check("no figure pooled across accelerators", "148" in out, False)

@@ -56,6 +56,25 @@ use crate::error::{KernelError, KernelResult};
 /// Maximum number of open Linux fds per process.
 pub const MAX_FDS: usize = 256;
 
+/// [`MAX_FDS`] as a `u64`, for the `rlim_t`-typed paths that must agree
+/// with it.
+///
+/// Exists so `RLIMIT_NOFILE` can be **derived** from the real table
+/// capacity instead of restated as a literal beside it.  It was restated,
+/// and the two numbers drifted: `pcb::DEFAULT_RLIMITS[7]` advertised
+/// `(1024, 4096)` — 4× the soft limit and 16× the hard limit that the fd
+/// table can actually hold — so `getrlimit(RLIMIT_NOFILE)` promised a
+/// program 4096 descriptors and `open()` started failing with `EMFILE` at
+/// 256.  A limit that is not the enforced limit is worse than no limit,
+/// because software sizes its pools from it.
+pub const MAX_FDS_U64: u64 = MAX_FDS as u64;
+
+// The cast above is exact on every target this kernel builds for (`usize`
+// is 64 bits).  Asserting the round trip turns a hypothetical narrowing
+// into a build failure rather than a silently-wrong `RLIMIT_NOFILE`.
+#[allow(clippy::cast_possible_truncation)]
+const _: () = assert!(MAX_FDS_U64 as usize == MAX_FDS);
+
 /// Linux fd 0 / 1 / 2 reserved for stdin / stdout / stderr.
 pub const STDIN_FD: i32 = 0;
 pub const STDOUT_FD: i32 = 1;

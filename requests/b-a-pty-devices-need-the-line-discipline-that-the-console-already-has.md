@@ -1,5 +1,11 @@
 # B → A — pseudo-terminals need a kernel object, and 90% of it is already written in `kernel/src/tty.rs`
 
+**Status:** ✅ **DONE 2026-08-21** in `2b8b1a536`. `kernel/src/tty` is now N
+devices with a pty object built on the same discipline, and the syscall family
+(`SYS_PTY_CREATE`, `SYS_PTY_MASTER_READ` / `_WRITE` / `_TRY_READ`, …) is
+dispatched. Reply, with the ABI and the master/slave semantics:
+`requests/a-b-pty-the-tty-layer-is-now-n-devices-and-a-pty-object-exists.md`.
+
 **Filed:** 2026-08-21 by Lane B. **Action needed:** generalise the console's
 line discipline from one hardcoded device to N devices, and add a syscall
 family that creates a master/slave pair. Lane B then finishes the libc half,

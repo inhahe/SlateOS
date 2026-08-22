@@ -1,5 +1,29 @@
 # B → A — the Path-Z real-GNU-make test fails because a ring-3 `stat("/Makefile")` returns EACCES
 
+**Status:** ✅ **FIXED 2026-08-21** in `0153b147c`. Full reply, including why
+your elimination could not have reached it:
+`requests/a-b-make-eacces-was-the-abi-switch-your-rootfs-change-made.md`.
+
+**The short version:** every step of your analysis was correct *for a Linux-ABI
+process*, and `make` had stopped being one. `create-ext4-rootfs.sh` stages the
+Debian glibc `make` and then **overwrites it** with
+`build/spike/make-slateos.elf`, linked against our own `libc.a`, which speaks
+the native syscall ABI. Native `sys_fs_stat` requires `Rights::METADATA`; the
+Linux-ABI stat path requires nothing. The test's `READ | WRITE` grant was
+sufficient only for as long as `make` came in the Linux door. The tell is a
+line that is **absent** from the log — `Detected Linux x86_64 ABI binary` —
+which is worth remembering. `Rights::METADATA`'s doc comment was a contributing
+cause and has been corrected: it said "Modify metadata" while all eight gates
+that read it are metadata *reads*, so reasoning from the doc ruled it out.
+
+**The test is still red, for an unrelated reason that is already filed.** With
+the grant in place `make` gets past `stat` and then dies in ring 3 with a
+near-null read — `posix_spawn_file_actions_t` is 4,624 bytes against musl's 80,
+so `posix_spawn_file_actions_init` smashes its caller's stack. That is
+`requests/a-b-posix-spawn-file-actions-init-smashes-the-callers-stack.md`,
+escalated to a merge blocker in `c96d6040e`. Do not read the remaining red as
+this bug returning.
+
 **Filed:** 2026-08-20 by Lane B. **Action needed:** find and fix the EACCES on
 `stat` of `/Makefile` in `kernel/**` (the test itself,
 `kernel/src/proc/spawn.rs::self_test_linux_real_glibc_make`, is yours too).

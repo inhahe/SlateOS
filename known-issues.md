@@ -50319,6 +50319,207 @@ Do **not** do part 2 without part 1 — threading a struct whose light variant
 does not exist yet just relocates the hardcoding into the struct's
 constructor.
 
+**What the sweep does not prove, learned at module 3.** The membership sweep
+finds a *leftover constant*. It does not find a *wrong role*, and cannot: a
+role is a member of both palettes, so converting a colour to the wrong one
+passes in light mode exactly as it passes in dark. Measured rather than
+assumed — harness defect EE swapped an icon label from `on_wallpaper` to
+`text` and the sweep reported green.
+
+The practical consequence for the remaining modules: **any colour that must
+*not* follow the mode needs its own test.** The sweep covers "was this
+converted at all"; nothing covers "was it converted to the right thing" except
+an assertion someone writes. The pattern is
+`an_icon_label_does_not_change_colour_with_the_mode` — render twice, filter the
+commands that carry the colour in question, and assert the two renders agree.
+Candidates: anything drawn on the wallpaper, on a video surface, on a
+thumbnail, or on any other content the palette does not own.
+
+**Part 2 progress. 6 of 49 modules converted.**
+
+- [x] `security_dialog.rs` — 29 constants, done 2026-08-22. The method above
+  survived contact: the sweep lives in `gui/desktop/src/palette_check.rs` as
+  `assert_drawn_from(&Palette, &[RenderCommand], derived, what)`, backed by a
+  new public `Palette::roles()` so the light-mode membership set is the palette
+  itself rather than a second hand-written list. Four self-tests prove the
+  sweep rejects what it exists to find, and harness defects V/W/X in
+  `scripts/reintro-palette.py` prove it end-to-end on this module.
+  - **The state matrix is the load-bearing part, not the assertion.** A
+    leftover constant is only caught if the sweep renders the state that draws
+    it. This module needed four risk levels × expanded/collapsed ×
+    remember on/off × 1-or-2 queued × five hover targets = 160 renders per
+    mode. Defect W hides behind the details disclosure and defect X behind a
+    hover, so a one-render sweep would have passed both. Budget the same care
+    per module: enumerate the branches of `render` that *select* a colour, not
+    the ones that move geometry.
+  - `derived` was empty here — the dialog computes no colours. Modules using
+    `emphasized` or `Color::lerp` will have to declare theirs.
+  - Three `CRUST` sites became `readable_on(risk.color(p))`,
+    `readable_on(color)` and `p.on_accent()`. These are exactly the sites the
+    sweep is blind to (see the `readable_on` wrinkle above), so they were
+    decided by reading rather than by test — the standing cost of that hole.
+- [x] `run_dialog.rs` — 16 constants, done 2026-08-22. Harness defects Y/Z/AA.
+  - **The blue constants are the judgement, and there were four of them.**
+    `INPUT_BORDER_FOCUS`, the input's selection fill, the selected suggestion's
+    label and `BUTTON_PRIMARY` were all `0x89B4FA`. All four mean "this is
+    where you are, this is what will happen if you press Enter", which is the
+    accent's job, so all four became `p.accent` — and `BUTTON_PRIMARY_TEXT`
+    (Mocha `base`, drawn on that blue) became `p.on_accent()`, because a pale
+    Latte accent needs dark text and a deep Mocha one needs light. The error
+    message stayed `p.red`: it is categorical, and on a Red desktop an error
+    that matched the OK button would be unreadable as an error.
+  - **The `readable_on` hole bit here for the first time.** `INPUT_BG` was
+    `0x11111B` — Mocha `crust`, which is also what `readable_on` answers for a
+    light fill, so the sweep must allow it and cannot tell a converted site
+    from an unconverted one. It became `p.crust` by reading the code. Expect
+    this in every module with a recessed well or a dark inset; those sites are
+    reviewed, not tested, and that is worth knowing before trusting a green
+    sweep as complete coverage.
+  - The autocomplete dropdown's selected row stayed `p.surface0` rather than
+    becoming `p.highlight_fill()`. `highlight_fill` is the right *role* for a
+    hovered item, but swapping it in changes what the dialog looks like, and
+    this task is a conversion — a redesign hidden inside a 549-substitution
+    edit is a redesign nobody reviewed.
+- [x] `icons.rs` — 16 constants plus 2 written inline, done 2026-08-22.
+  Harness defects BB/CC/DD/EE/FF.
+  - **Two of the eighteen were not in the `theme` block at all.** The drag
+    ghost's fill and its glyph tint were `Color::rgba(137, 180, 250, 30)` and
+    an alpha'd copy of the icon hue, written at the call site. Grep for
+    `Color::rgba`/`Color::from_hex` in every module *after* emptying its theme
+    block; the 549 count is of named constants and undercounts.
+  - **Six mapped straight onto `Palette`'s helpers**, alpha for alpha:
+    selection fill/border → `selection_fill`/`selection_border`, rubber-band
+    fill/border → `hint_fill`/`hint_border`, drop target → `drop_target`,
+    label shadow → `text_shadow`. Those helpers were written *from* these
+    values; this is the copy going home. The selection now follows the user's
+    accent, which the hardcoded blue never could.
+  - **The nine icon-type hues stay categorical** — folder yellow, recycle bin
+    red, executable peach. A Red desktop that painted every shortcut and the
+    recycle bin the same colour would be worse than one that ignored the
+    setting.
+  - **New in `appearance`: `Palette::on_wallpaper()` and `on_wallpaper_dim()`,
+    pale in both modes.** An icon label lands on an arbitrary photograph under
+    a black shadow, so its legibility cannot come from the palette — the same
+    argument that already makes `text_shadow` black in both modes (§525
+    decision 3). `p.text` would be dark on Latte, and dark text under a black
+    shadow is legible against nothing. Also new: `LIGHT_EXTREME` and
+    `DARK_EXTREME`, the two answers `readable_on` gives, named so that
+    `on_wallpaper` can share the endpoint without borrowing `LIGHT_BASE`'s
+    meaning.
+  - **The sweep's blind spot showed up here** — see the paragraph above this
+    list. `icons.rs` therefore carries a second test,
+    `an_icon_label_does_not_change_colour_with_the_mode`.
+- [x] `notif_pane.rs` — 15 constants plus 1 written inline, done 2026-08-22.
+  Harness defects GG/HH/II/JJ/KK.
+  - **The wrong-role lesson from `icons.rs` was applied up front rather than
+    discovered again.** This module has a categorical axis of its own — four
+    notification priorities — so it was converted *with* the second test
+    (`a_notification_priority_does_not_follow_the_accent`) instead of waiting
+    for a defect to prove the sweep could not see one. The shape differs from
+    `icons.rs`'s: there the invariant was "does not follow the **mode**" and
+    the test renders light and dark; here it is "does not follow the
+    **accent**", so the test renders the same mode twice with two different
+    accents and compares. Defect KK confirms the split — it is caught by the
+    accent test and *not* by the sweep, which is the second independent
+    measurement of that hole.
+    - The test also asserts the *negative*: that something in the same render
+      did move with the accent (the quick-settings toggle pill). Without that
+      half, a bug which made the whole pane ignore the accent would satisfy
+      "the priorities did not move" and the test would pass while measuring
+      nothing.
+  - **Six sites were `BLUE` meaning "interactive", and all six became
+    `p.accent`** — the unread badge, "Clear all", "Back", a toggle that is on,
+    a slider's filled portion, and the settings link. The text drawn on the
+    first two became `readable_on(...)` of what it sits on rather than the
+    fixed near-black `CRUST` it was, because with a user-chosen accent
+    underneath there is no longer one legible answer. Same judgement as
+    `run_dialog.rs`'s four blues.
+  - **A pre-existing inconsistency, recorded rather than silently fixed:** the
+    quick-settings toggle paints "on" in blue and the per-app toggle paints
+    "on" in green, for the same meaning. Converted faithfully (`p.accent` and
+    `p.green`), because unifying them is a design change and this task is a
+    conversion. Worth revisiting when the shell gets a real control style.
+  - **`PANE_BG` stayed `p.base` rather than becoming `p.panel_bg()`.** The
+    helper is arguably the right role for a slide-out panel and would pick up
+    the user's transparency setting, but it changes what the pane looks like.
+    Same reasoning that kept `p.surface0` in `run_dialog.rs`; noted here as a
+    candidate for the pass that comes *after* all 49 are converted.
+  - **The inline constant was an animated one**, which is why the theme-block
+    grep would have missed it twice over: `Color::rgba(0, 0, 0, (60.0 * vis)
+    as u8)`, the scrim behind the pane faded in with the slide. It now derives
+    from `p.scrim()` and scales the *role's* alpha by `vis`, so the fade
+    survives. Note that the sweep cannot see this one either — it allows black
+    at any alpha, by design, because that is how a scrim and a shadow are
+    spelled — so no defect is offered for it. A module whose only remaining
+    hardcoded colour is black is a module the sweep will call clean.
+- [x] `device_settings.rs` — 15 constants plus 1 written inline, done
+  2026-08-22. Harness defects LL/MM/NN.
+  - **First module where the constants were not in a `mod theme`** but bare
+    `const`s at file scope. Nothing about the method changes, but the survey
+    step does: grep for `Color::from_hex`/`Color::rgba` across the *whole*
+    file rather than looking for a block to empty. This module's sixteenth
+    colour — `Color::rgba(243, 139, 168, 30)`, the wash behind the
+    driver-problem banner — is exactly what a block-shaped survey misses, and
+    defect LL is it.
+  - **The sweep needed no `derived` declaration for that wash**, which is
+    worth knowing before reaching for one. `palette_check` compares roles on
+    **RGB only** — alpha is how a role becomes a panel, a wash or a hover — so
+    a translucent `p.red` is still `p.red`, and a translucent *Mocha* red in a
+    Latte render is still not a Latte role. `derived` is for colours whose
+    *hue* is computed (a `lerp`, an `emphasized`), not for alpha.
+  - **`DriverStatus::Updating` is the sharpest instance yet of the
+    categorical/accent question**, because it is *blue* — the default accent —
+    and so reads as an obvious `p.accent`. It is not: it is one of five fixed
+    badge states, and following the accent would move it while `Loaded`,
+    `NotFound`, `Error` and `Disabled` stayed put. Defect NN reintroduces
+    exactly that mistake and is caught only by the accent test, never by the
+    sweep. Expect this trap in every module with a blue *state*: check whether
+    the colour has siblings before assuming a blue is the accent.
+  - Two things here genuinely are the accent: the active tab's label, and a
+    settings toggle in its enabled position. The four overview figures
+    (Connected / Total / Problems / Removable) are not — they are one row of
+    categorical hues written as a table.
+  - The content well behind the tabs was `CRUST`, the `readable_on` hole
+    again; `p.crust` by reading. Text on the driver badges and on the eject
+    button became `readable_on(...)` of what they sit on.
+- [x] `window_rules.rs` — 14 constants, done 2026-08-22. Harness defects
+  OO/PP/QQ/RR/SS/TT.
+  - **A third naming shape: `const MOCHA_BASE`, `MOCHA_SURFACE0`, … at file
+    scope.** After `mod theme { … }` (`notif_pane.rs`) and bare `const NAME`
+    (`device_settings.rs`), the survey now has to expect at least three. The
+    conclusion is the same one the inline literals already forced: the only
+    reliable survey is a whole-file grep for `Color::from_hex`/`Color::rgba`,
+    not a search for a block to empty.
+  - **The row-of-cells shape makes the categorical/accent question decidable
+    rather than a matter of taste.** Each cell of a rule row is coloured by
+    what it means — priority red/yellow/`subtext1`, action-count
+    green/`overlay0`, status green/red, match-expression blue — and they are
+    *siblings in one row*. The blue is the `device_settings.rs` trap again
+    (blue is the default accent, so it reads like an accent site), and the
+    siblings are what settle it: moving one member of a categorical row while
+    the rest stay put is the bug, not the feature. Defect SS reintroduces
+    exactly that and is caught only by the accent test.
+  - **The module's two genuine accent sites are in different views from its
+    green confirm button**, which surfaced a pre-existing inconsistency worth
+    recording rather than fixing: the list view's primary action ("+ Add Rule")
+    was blue and became `p.accent`; the editor's primary action ("Save") is
+    green and stayed `p.green`. Green is the one hue no accent resolves to, so
+    reading Save as an accent site would have changed its colour under the
+    *default* accent — which no faithful conversion does. The two never appear
+    on screen together, which is presumably how the inconsistency survived.
+    Same disposition as `notif_pane.rs`'s blue/green toggles: converted
+    faithfully, noted for the pass that comes after all 49.
+  - **Both "does not follow the accent" tests here carry their negative half,
+    and defect TT is the proof it is needed.** TT freezes the selected
+    match-type chip on blue — nothing moves with the accent any more, so the
+    equality half of the test passes; only the `assert_ne!` on the chip catches
+    it. A "does not follow X" test without a negative half certifies a module
+    that ignores X entirely.
+  - The status badge's wash (`Color::rgba(status_color.r, …, 51)`) needed no
+    `derived` declaration, for the reason recorded under `device_settings.rs`:
+    the sweep compares roles on RGB alone. Defect RR replaces it with Mocha
+    green's channels at the same alpha and the light sweep still names it.
+
 **Trigger:** this is not blocked on anything. It is sequenced after the shell
 event loop (`TD-C-THE-SHELL-CAN-DRAW-ITSELF-AND-NOBODY-CAN-ASK-IT-TO`) only
 because a shell that cannot be driven cannot demonstrate a theme change

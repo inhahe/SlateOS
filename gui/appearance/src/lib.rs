@@ -741,6 +741,23 @@ impl AppearanceSettings {
 // Window decoration colours
 // ============================================================================
 
+/// The pale end of the two answers [`readable_on`] can give.
+///
+/// Equal to [`LIGHT_BASE`] and to nothing else on purpose — it is a separate
+/// constant because it means a different thing. `LIGHT_BASE` is the Latte
+/// palette's page; this is "as pale as this desktop ever goes", the value you
+/// want when the background is not a palette surface at all. If Latte's base
+/// were ever retuned, this must not follow it.
+pub const LIGHT_EXTREME: Color = Color::from_hex(0xEFF1F5);
+
+/// The dark end of the two answers [`readable_on`] can give.
+///
+/// Shares its value with Mocha [`CRUST`], and that coincidence has a cost
+/// worth knowing about: the shell's conversion sweep must allow this value in
+/// a *light* render, which means it cannot tell a deliberate dark extreme from
+/// a leftover `CRUST` constant. See `gui/desktop/src/palette_check.rs`.
+pub const DARK_EXTREME: Color = Color::from_hex(0x11111B);
+
 /// Black-ish or white-ish, whichever can be read on `bg`.
 ///
 /// The endpoints are the palettes' own extremes rather than pure `#000`/`#fff`
@@ -757,9 +774,9 @@ impl AppearanceSettings {
 pub fn readable_on(bg: Color) -> Color {
     let luma = 0.299 * f32::from(bg.r) + 0.587 * f32::from(bg.g) + 0.114 * f32::from(bg.b);
     if luma > 140.0 {
-        Color::from_hex(0x11111B)
+        DARK_EXTREME
     } else {
-        Color::from_hex(0xEFF1F5)
+        LIGHT_EXTREME
     }
 }
 
@@ -1005,6 +1022,50 @@ impl Palette {
         }
     }
 
+    /// Every field of this palette, paired with its name.
+    ///
+    /// Public rather than test-only because two different sweeps need it and
+    /// the alternative is two hand-written lists that must be kept in step —
+    /// which is the shape of the bug this whole crate exists to remove. The
+    /// second caller is the shell's conversion sweep, which asserts that a
+    /// module's render output is drawn from the palette it was handed and
+    /// nothing else; a colour constant left behind in a converted module is a
+    /// Mocha value, so it is absent from the *light* palette's roles and the
+    /// sweep names it. See known-issues.md
+    /// `TD-C-FORTY-NINE-SHELL-MODULES-CARRY-THEIR-OWN-COPY-OF-THE-PALETTE`.
+    ///
+    /// Written out by hand, and deliberately so: the point of the sweeps that
+    /// consume this is that a field added later is *not* silently skipped, and
+    /// a macro or a reflection trick would skip it for exactly the same reason
+    /// the renderer would. The array's length is part of the signature so that
+    /// adding a field without adding it here fails to compile.
+    #[must_use]
+    pub fn roles(&self) -> [(&'static str, Color); 21] {
+        [
+            ("crust", self.crust),
+            ("mantle", self.mantle),
+            ("base", self.base),
+            ("surface0", self.surface0),
+            ("surface1", self.surface1),
+            ("surface2", self.surface2),
+            ("overlay0", self.overlay0),
+            ("subtext0", self.subtext0),
+            ("subtext1", self.subtext1),
+            ("text", self.text),
+            ("red", self.red),
+            ("green", self.green),
+            ("yellow", self.yellow),
+            ("peach", self.peach),
+            ("blue", self.blue),
+            ("lavender", self.lavender),
+            ("mauve", self.mauve),
+            ("sapphire", self.sapphire),
+            ("teal", self.teal),
+            ("sky", self.sky),
+            ("accent", self.accent),
+        ]
+    }
+
     /// Text that can be read on [`accent`](Self::accent).
     ///
     /// The accent is the one colour in the palette whose brightness the user
@@ -1072,6 +1133,36 @@ impl Palette {
     #[must_use]
     pub fn text_shadow(&self) -> Color {
         Color::rgba(0, 0, 0, 180)
+    }
+
+    /// Text drawn straight onto the wallpaper — a desktop icon's label.
+    ///
+    /// The companion to [`text_shadow`](Self::text_shadow), and pale in *both*
+    /// modes for the same reason that one is black in both: this text does not
+    /// land on the palette, it lands on whatever photograph the user chose. A
+    /// label that followed the mode would be dark on Latte, and dark text
+    /// under a black shadow is not legible on anything — the shadow stops
+    /// being a floor and becomes a smudge. Pale-on-black-shadow survives a
+    /// light wallpaper and a dark one, which is the whole job.
+    ///
+    /// This is why the icon layer does not read [`text`](Self::text): the
+    /// wallpaper is not a surface this crate knows the colour of, so the one
+    /// safe choice is the same one at every setting. Compare
+    /// [`scrim`](Self::scrim) — same argument, same conclusion (§525 decision
+    /// 3).
+    #[must_use]
+    pub fn on_wallpaper(&self) -> Color {
+        LIGHT_EXTREME
+    }
+
+    /// A wallpaper label that is *not* the one being pointed at.
+    ///
+    /// Dimmed with alpha rather than with a darker colour, because darkening
+    /// toward the wallpaper is exactly the move that fails on a dark
+    /// wallpaper. Alpha lets the shadow keep doing the work.
+    #[must_use]
+    pub fn on_wallpaper_dim(&self) -> Color {
+        with_alpha(LIGHT_EXTREME, 200)
     }
 
     /// The interior of a committed selection, or of a snap zone at rest.
@@ -2338,34 +2429,15 @@ mod tests {
     /// Every field of the palette, paired with its name, for the sweeps that
     /// have to cover all of them rather than a sample.
     ///
-    /// Written out rather than derived because the point of several of these
-    /// tests is that a field added later is *not* silently skipped, and a
-    /// macro or a reflection trick would skip it for exactly the same reason
-    /// the renderer would.
+    /// Delegates to [`Palette::roles`] rather than keeping a second list.
+    /// It was a second list until the shell's conversion sweep needed the
+    /// same enumeration from outside this crate — at which point two
+    /// hand-written lists of the same fields would have been exactly the
+    /// keep-them-in-step arrangement this crate exists to abolish, and the
+    /// one that would have gone stale is this one, because it is the copy
+    /// nothing outside the file can see.
     fn roles(p: &Palette) -> [(&'static str, Color); 21] {
-        [
-            ("crust", p.crust),
-            ("mantle", p.mantle),
-            ("base", p.base),
-            ("surface0", p.surface0),
-            ("surface1", p.surface1),
-            ("surface2", p.surface2),
-            ("overlay0", p.overlay0),
-            ("subtext0", p.subtext0),
-            ("subtext1", p.subtext1),
-            ("text", p.text),
-            ("blue", p.blue),
-            ("green", p.green),
-            ("red", p.red),
-            ("yellow", p.yellow),
-            ("peach", p.peach),
-            ("lavender", p.lavender),
-            ("mauve", p.mauve),
-            ("sapphire", p.sapphire),
-            ("teal", p.teal),
-            ("sky", p.sky),
-            ("accent", p.accent),
-        ]
+        p.roles()
     }
 
     #[test]
@@ -2678,6 +2750,48 @@ mod tests {
                  an arbitrary wallpaper, not on a known surface"
             );
         }
+    }
+
+    /// A wallpaper label stays pale in Latte, and is legible over its own
+    /// shadow in both modes.
+    ///
+    /// The trap this exists to stop is the obvious one: someone converting a
+    /// module off its constants sees a label colour, reaches for `p.text`, and
+    /// a Light desktop gets dark labels under a black shadow — which is
+    /// illegible against every wallpaper rather than merely some of them. The
+    /// first assertion is what makes `on_wallpaper` different from `text`; the
+    /// second is why it has to be.
+    #[test]
+    fn a_label_on_the_wallpaper_does_not_follow_the_mode() {
+        let dark = Palette::for_mode(false);
+        let light = Palette::for_mode(true);
+        assert_eq!(
+            (light.on_wallpaper(), light.on_wallpaper_dim()),
+            (dark.on_wallpaper(), dark.on_wallpaper_dim()),
+            "a wallpaper label flipped with the mode; the wallpaper did not"
+        );
+        // Whereas `text` — the role it must not be confused with — does flip.
+        assert_ne!(
+            light.text, dark.text,
+            "if `text` stopped flipping, `on_wallpaper` is no longer distinct \
+             and this test proves nothing"
+        );
+        for p in [&dark, &light] {
+            for (name, c) in [
+                ("on_wallpaper", p.on_wallpaper()),
+                ("on_wallpaper_dim", p.on_wallpaper_dim()),
+            ] {
+                // Legible against the shadow that is drawn under it, which is
+                // the only background either colour is guaranteed to meet.
+                let backdrop = p.text_shadow().over(Color::from_hex(0x808080));
+                assert!(
+                    contrast(c.over(backdrop), backdrop) > 3.0,
+                    "{name} is not legible over its own shadow"
+                );
+            }
+        }
+        // The dim one is dimmer, or the selected/unselected cue is gone.
+        assert!(dark.on_wallpaper_dim().a < dark.on_wallpaper().a);
     }
 
     #[test]

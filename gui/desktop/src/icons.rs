@@ -10,7 +10,7 @@
 //! icon_layer.populate_defaults();
 //!
 //! // Each frame:
-//! let commands = icon_layer.render();
+//! let commands = icon_layer.render(&palette);
 //!
 //! // Forward mouse/key events:
 //! icon_layer.handle_mouse_down(x, y, button, modifiers);
@@ -20,6 +20,7 @@
 //! icon_layer.handle_double_click(x, y);
 //! ```
 
+use appearance::Palette;
 use core::num::NonZeroU32;
 use guitk::color::Color;
 use guitk::idseq::IdSeq;
@@ -28,36 +29,35 @@ use guitk::style::CornerRadii;
 use guitk::text;
 
 // ============================================================================
-// Theme — Catppuccin Mocha palette
+// Colour
 // ============================================================================
-
-mod theme {
-    use guitk::color::Color;
-
-    pub const TEXT: Color = Color::from_hex(0xCDD6F4);
-    pub const SUBTEXT0: Color = Color::from_hex(0xA6ADC8);
-    pub const BLUE: Color = Color::from_hex(0x89B4FA);
-    pub const SAPPHIRE: Color = Color::from_hex(0x74C7EC);
-    pub const GREEN: Color = Color::from_hex(0xA6E3A1);
-    pub const YELLOW: Color = Color::from_hex(0xF9E2AF);
-    pub const PEACH: Color = Color::from_hex(0xFAB387);
-    pub const MAUVE: Color = Color::from_hex(0xCBA6F7);
-    pub const RED: Color = Color::from_hex(0xF38BA8);
-    pub const OVERLAY0: Color = Color::from_hex(0x6C7086);
-
-    /// Selection highlight (translucent blue).
-    pub const SELECTION_BG: Color = Color::rgba(137, 180, 250, 50);
-    /// Selection border.
-    pub const SELECTION_BORDER: Color = Color::rgba(137, 180, 250, 150);
-    /// Rubber-band selection fill.
-    pub const RUBBERBAND_FILL: Color = Color::rgba(137, 180, 250, 30);
-    /// Rubber-band selection border.
-    pub const RUBBERBAND_BORDER: Color = Color::rgba(137, 180, 250, 120);
-    /// Drop target highlight.
-    pub const DROP_TARGET: Color = Color::rgba(166, 227, 161, 60);
-    /// Icon label shadow for readability.
-    pub const LABEL_SHADOW: Color = Color::rgba(0, 0, 0, 180);
-}
+//
+// Sixteen `const … : Color` used to live here, all Catppuccin Mocha, which is
+// why the desktop's icon layer stayed dark on a Light desktop. They are gone;
+// `render` takes the `&Palette` the shell resolved. See known-issues.md
+// `TD-C-FORTY-NINE-SHELL-MODULES-CARRY-THEIR-OWN-COPY-OF-THE-PALETTE`.
+//
+// Three groups, and only the third needed a decision:
+//
+// - **The six translucent ones** — selection fill and border, rubber-band fill
+//   and border, drop target, label shadow — mapped onto `Palette`'s helpers
+//   alpha for alpha (`selection_fill`, `selection_border`, `hint_fill`,
+//   `hint_border`, `drop_target`, `text_shadow`). They were written from those
+//   helpers' values in the first place; this is the copy going back where it
+//   came from, and the selection ones now follow the user's accent, which the
+//   hardcoded blue never could.
+// - **The nine icon-type hues** stay categorical. A folder is yellow, the
+//   recycle bin is red, an executable is peach — that is a legend the user
+//   reads, so it must not collapse toward whatever accent they picked. A Red
+//   desktop that painted the recycle bin and every shortcut the same colour
+//   would be worse than one that ignored the setting.
+// - **The labels do not follow the mode at all**, and that is the one real
+//   decision here. They are drawn on the *wallpaper* — an arbitrary
+//   photograph, not a palette surface — under a black shadow that exists to
+//   make them legible against it. `p.text` would be dark on Latte, and dark
+//   text under a black shadow is legible against nothing. So they read
+//   `p.on_wallpaper()` / `p.on_wallpaper_dim()`, which are pale in both modes
+//   for exactly the reason `text_shadow` is black in both.
 
 // ============================================================================
 // Constants
@@ -120,18 +120,22 @@ impl IconType {
         }
     }
 
-    /// Color accent for the icon type (used for the glyph background).
-    fn color(self) -> Color {
+    /// The hue that means this icon's type, in `p`'s mode.
+    ///
+    /// Categorical, not accented: these nine are a legend the user reads,
+    /// so they stay nine distinguishable colours whatever the desktop is
+    /// themed around.
+    fn color(self, p: &Palette) -> Color {
         match self {
-            Self::Folder => theme::YELLOW,
-            Self::File => theme::TEXT,
-            Self::Shortcut => theme::SAPPHIRE,
-            Self::Drive => theme::OVERLAY0,
-            Self::RecycleBin => theme::RED,
-            Self::Computer => theme::BLUE,
-            Self::Document => theme::GREEN,
-            Self::Image => theme::MAUVE,
-            Self::Executable => theme::PEACH,
+            Self::Folder => p.yellow,
+            Self::File => p.text,
+            Self::Shortcut => p.sapphire,
+            Self::Drive => p.overlay0,
+            Self::RecycleBin => p.red,
+            Self::Computer => p.blue,
+            Self::Document => p.green,
+            Self::Image => p.mauve,
+            Self::Executable => p.peach,
         }
     }
 }
@@ -881,12 +885,12 @@ impl DesktopIconLayer {
     // ======================================================================
 
     /// Produce render commands for the entire icon layer.
-    pub fn render(&self) -> Vec<RenderCommand> {
+    pub fn render(&self, p: &Palette) -> Vec<RenderCommand> {
         let mut cmds: Vec<RenderCommand> = Vec::new();
 
         // Render each icon.
         for icon in &self.icons {
-            self.render_icon(icon, &mut cmds);
+            self.render_icon(p, icon, &mut cmds);
         }
 
         // Render drag ghosts (translucent copies at drag position).
@@ -912,7 +916,12 @@ impl DesktopIconLayer {
                         y: ghost_y,
                         width: self.grid.cell_width() as f32,
                         height: self.grid.cell_height() as f32,
-                        color: Color::rgba(137, 180, 250, 30),
+                        // Not in the deleted `theme` block — this one was
+                        // written inline, which is how a hardcoded palette
+                        // spreads: the same blue at the same alpha as
+                        // `hint_fill`, out of reach of anything that could
+                        // have renamed it.
+                        color: p.hint_fill(),
                         corner_radii: CornerRadii::all(4.0),
                     });
 
@@ -923,12 +932,10 @@ impl DesktopIconLayer {
                         x: glyph_x,
                         y: glyph_y,
                         text: icon.icon_type.glyph().to_string(),
-                        color: Color::rgba(
-                            icon.icon_type.color().r,
-                            icon.icon_type.color().g,
-                            icon.icon_type.color().b,
-                            120,
-                        ),
+                        color: {
+                            let c = icon.icon_type.color(p);
+                            Color::rgba(c.r, c.g, c.b, 120)
+                        },
                         font_size: ICON_GLYPH_SIZE,
                         font_weight: FontWeightHint::Regular,
                         max_width: None,
@@ -948,7 +955,7 @@ impl DesktopIconLayer {
                     y: snap_y as f32,
                     width: self.grid.cell_width() as f32,
                     height: self.grid.cell_height() as f32,
-                    color: theme::DROP_TARGET,
+                    color: p.drop_target(),
                     line_width: 2.0,
                     corner_radii: CornerRadii::all(4.0),
                 });
@@ -973,7 +980,7 @@ impl DesktopIconLayer {
                 y: ry,
                 width: rw,
                 height: rh,
-                color: theme::RUBBERBAND_FILL,
+                color: p.hint_fill(),
                 corner_radii: CornerRadii::ZERO,
             });
             cmds.push(RenderCommand::StrokeRect {
@@ -981,7 +988,7 @@ impl DesktopIconLayer {
                 y: ry,
                 width: rw,
                 height: rh,
-                color: theme::RUBBERBAND_BORDER,
+                color: p.hint_border(),
                 line_width: 1.0,
                 corner_radii: CornerRadii::ZERO,
             });
@@ -991,7 +998,7 @@ impl DesktopIconLayer {
     }
 
     /// Render a single icon into the command list.
-    fn render_icon(&self, icon: &DesktopIcon, cmds: &mut Vec<RenderCommand>) {
+    fn render_icon(&self, p: &Palette, icon: &DesktopIcon, cmds: &mut Vec<RenderCommand>) {
         let ix = icon.x as f32;
         let iy = icon.y as f32;
         let cw = self.grid.cell_width() as f32;
@@ -1004,7 +1011,7 @@ impl DesktopIconLayer {
                 y: iy,
                 width: cw,
                 height: ch,
-                color: theme::SELECTION_BG,
+                color: p.selection_fill(),
                 corner_radii: CornerRadii::all(4.0),
             });
             cmds.push(RenderCommand::StrokeRect {
@@ -1012,7 +1019,7 @@ impl DesktopIconLayer {
                 y: iy,
                 width: cw,
                 height: ch,
-                color: theme::SELECTION_BORDER,
+                color: p.selection_border(),
                 line_width: 1.0,
                 corner_radii: CornerRadii::all(4.0),
             });
@@ -1026,7 +1033,7 @@ impl DesktopIconLayer {
             x: glyph_x,
             y: glyph_y,
             text: icon.icon_type.glyph().to_string(),
-            color: icon.icon_type.color(),
+            color: icon.icon_type.color(p),
             font_size: ICON_GLYPH_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: None,
@@ -1045,7 +1052,7 @@ impl DesktopIconLayer {
                 x: ix + 1.0,
                 y: ly + 1.0,
                 text: line.clone(),
-                color: theme::LABEL_SHADOW,
+                color: p.text_shadow(),
                 font_size: LABEL_FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(LABEL_MAX_WIDTH),
@@ -1058,9 +1065,9 @@ impl DesktopIconLayer {
                 y: ly,
                 text: line.clone(),
                 color: if icon.selected {
-                    theme::TEXT
+                    p.on_wallpaper()
                 } else {
-                    theme::SUBTEXT0
+                    p.on_wallpaper_dim()
                 },
                 font_size: LABEL_FONT_SIZE,
                 font_weight: if icon.selected {
@@ -1186,6 +1193,7 @@ mod tests {
     )]
 
     use super::*;
+    use crate::palette_check;
 
     // ------------------------------------------------------------------
     // Grid snapping tests
@@ -1770,12 +1778,14 @@ mod tests {
         let mut layer = DesktopIconLayer::new(1920, 1080, 40);
         layer.populate_defaults();
 
-        let cmds = layer.render();
-        // Each icon produces: glyph text + label shadow + label text (minimum).
-        // Selected icons also get highlight rect + border.
-        assert!(!cmds.is_empty());
-        // At least 3 commands per icon (glyph + shadow + text) * 4 icons = 12.
-        assert!(cmds.len() >= 12);
+        for light in [false, true] {
+            let cmds = layer.render(&Palette::for_mode(light));
+            // Each icon produces: glyph text + label shadow + label text
+            // (minimum). Selected icons also get highlight rect + border.
+            assert!(!cmds.is_empty());
+            // At least 3 commands per icon (glyph + shadow + text) * 4 icons.
+            assert!(cmds.len() >= 12);
+        }
     }
 
     #[test]
@@ -1790,11 +1800,168 @@ mod tests {
         );
         layer.select_single(id);
 
-        let cmds = layer.render();
-        // First command for a selected icon should be the selection FillRect.
-        let has_fill = cmds.iter().any(
-            |c| matches!(c, RenderCommand::FillRect { color, .. } if *color == theme::SELECTION_BG),
+        for light in [false, true] {
+            let p = Palette::for_mode(light);
+            let cmds = layer.render(&p);
+            // First command for a selected icon should be the selection
+            // FillRect. Comparing against `p.selection_fill()` rather than a
+            // literal is what makes this survive the accent moving: the
+            // highlight is the user's accent at a wash alpha now, not a fixed
+            // blue.
+            let has_fill = cmds.iter().any(
+                |c| matches!(c, RenderCommand::FillRect { color, .. } if *color == p.selection_fill()),
+            );
+            assert!(has_fill, "Selected icon should have a selection highlight");
+        }
+    }
+
+    /// An icon's label is the same colour in both modes, because the wallpaper
+    /// is.
+    ///
+    /// This exists because the conversion sweep below *cannot* catch the
+    /// mistake it guards. The sweep finds a Mocha constant left behind in a
+    /// light render; a label wrongly converted to `p.text` is not a leftover
+    /// constant but a wrong role, and a wrong role is a member of both
+    /// palettes, so it passes the sweep in both modes. Measured, not assumed:
+    /// harness defect EE in `scripts/reintro-palette.py` swapped
+    /// `on_wallpaper`/`on_wallpaper_dim` for `text`/`subtext0` and the sweep
+    /// reported green.
+    ///
+    /// So this asserts the property directly at the call site. A label lands on
+    /// an arbitrary photograph under a black shadow — the shadow is the only
+    /// background it is guaranteed to have — which is why it must stay pale
+    /// whatever the desktop's mode is. `appearance`'s
+    /// `a_label_on_the_wallpaper_does_not_follow_the_mode` makes the same
+    /// assertion about the palette method; this one makes it about the module
+    /// that has to remember to call it.
+    #[test]
+    fn an_icon_label_does_not_change_colour_with_the_mode() {
+        let mut layer = DesktopIconLayer::new(1920, 1080, 40);
+        let id = layer.add_icon(
+            "Selected",
+            IconType::File,
+            IconAction::OpenPath("/s".into()),
+            0,
+            0,
         );
-        assert!(has_fill, "Selected icon should have a selection highlight");
+        layer.add_icon(
+            "Unselected",
+            IconType::Folder,
+            IconAction::OpenPath("/u".into()),
+            80,
+            0,
+        );
+        layer.select_single(id);
+
+        // The glyphs are Text commands too, and they *do* follow the mode
+        // (`p.text` for a plain file), so match on the label strings rather
+        // than on the command kind.
+        let labels_of = |light: bool| -> Vec<(String, Color)> {
+            layer
+                .render(&Palette::for_mode(light))
+                .into_iter()
+                .filter_map(|c| match c {
+                    RenderCommand::Text { text, color, .. }
+                        if text == "Selected" || text == "Unselected" =>
+                    {
+                        Some((text, color))
+                    }
+                    _ => None,
+                })
+                .collect()
+        };
+        let dark = labels_of(false);
+        let light = labels_of(true);
+        assert!(
+            !dark.is_empty(),
+            "no label was drawn, so this test asserts nothing"
+        );
+        assert_eq!(
+            dark, light,
+            "an icon label changed colour with the mode; the wallpaper it is \
+             drawn on did not, and the black shadow under it did not either — \
+             a dark label there is legible against nothing. Use \
+             `Palette::on_wallpaper`, not `Palette::text`."
+        );
+    }
+
+    /// Every colour the icon layer draws comes from the palette it was handed.
+    ///
+    /// See `security_dialog`'s equivalent for the reasoning. The states below
+    /// exist because three of this module's colours are only reachable from an
+    /// in-progress gesture: the rubber-band pair needs a marquee being dragged,
+    /// and the drop-target outline needs icons mid-drag. A sweep of a resting
+    /// desktop would cover nine of the sixteen deleted constants and quietly
+    /// certify the other seven.
+    ///
+    /// `derived` is empty. `on_wallpaper_dim` is the accent-free pale extreme
+    /// at alpha 200, and the sweep compares roles on RGB only, so it lands on
+    /// the `readable_on` endpoint it is built from.
+    #[test]
+    fn every_colour_the_icon_layer_draws_comes_from_its_palette() {
+        // One of each icon type, so all nine categorical hues are emitted.
+        let types = [
+            IconType::Folder,
+            IconType::File,
+            IconType::Shortcut,
+            IconType::Drive,
+            IconType::RecycleBin,
+            IconType::Computer,
+            IconType::Document,
+            IconType::Image,
+            IconType::Executable,
+        ];
+        for light in [false, true] {
+            let p = Palette::for_mode(light);
+            for gesture in 0..3 {
+                let mut layer = DesktopIconLayer::new(1920, 1080, 40);
+                let mut first = None;
+                for (i, ty) in types.into_iter().enumerate() {
+                    let id = layer.add_icon(
+                        &format!("Icon {i}"),
+                        ty,
+                        IconAction::OpenPath(format!("/i{i}")),
+                        (i as i32) * 80,
+                        0,
+                    );
+                    if first.is_none() {
+                        first = Some(id);
+                    }
+                }
+                match gesture {
+                    // At rest, with one icon selected: selection fill/border.
+                    0 => {
+                        if let Some(id) = first {
+                            layer.select_single(id);
+                        }
+                    }
+                    // Drawing a marquee: rubber-band fill and border.
+                    1 => {
+                        layer.interaction = InteractionState::RubberBand {
+                            start_x: 10.0,
+                            start_y: 10.0,
+                            current_x: 400.0,
+                            current_y: 300.0,
+                        };
+                    }
+                    // Dragging the selection: the drop-target outline.
+                    _ => {
+                        if let Some(id) = first {
+                            layer.select_single(id);
+                            layer.interaction = InteractionState::Dragging {
+                                start_x: 10.0,
+                                start_y: 10.0,
+                                current_x: 200.0,
+                                current_y: 200.0,
+                                originals: vec![(id, 0, 0)],
+                            };
+                        }
+                    }
+                }
+                let cmds = layer.render(&p);
+                assert!(!cmds.is_empty());
+                palette_check::assert_drawn_from(&p, &cmds, &[], "icons");
+            }
+        }
     }
 }

@@ -49930,7 +49930,44 @@ the feature is not near enough to specify an interface against.
 program the user runs, silently and continuously. The desktop works; the
 privacy property a user would assume it has is simply absent.
 
-## TD-C-FORTY-NINE-SHELL-MODULES-CARRY-THEIR-OWN-COPY-OF-THE-PALETTE
+## TD-C-FORTY-NINE-SHELL-MODULES-CARRY-THEIR-OWN-COPY-OF-THE-PALETTE — PART 1 DONE 2026-08-22, PART 2 OPEN
+
+**Status, 2026-08-22.** Part 1 below is **done**: `appearance::Palette` exists,
+carries the light ladder as well as the dark one, and `DecorationColors` and
+`DesktopTheme` are rewritten to read roles out of it instead of repeating its
+values. Part 2 — threading `&Palette` through the 49 modules and deleting the
+549 constants — is **still open**, and is now unblocked in the sense the entry
+originally meant: the type it needed to thread exists.
+
+Three things worth carrying forward from doing part 1:
+
+- **The "33 distinct values" figure below was wrong**, and low. The survey that
+  part 1 started from counted **91 distinct constant names** across the 549
+  declarations, collapsing to **18 roles** (10 rungs of the surface/text ladder
+  plus 8 named hues) once composites and near-duplicates were resolved. The
+  original 33 appears to have counted values rather than names and to have
+  missed the modules that spell the same role differently.
+- **Two names carried genuinely conflicting values,** so part 2 cannot be a
+  blind substitution of role for name. `BASE` is opaque in 26 modules and
+  `rgba(30, 30, 46, 240)` in 2 — the translucent ones are panels, and become
+  `Palette::panel_bg()`. `SHADOW` is declared at three different alphas
+  (100/120/160) plus a separate `LABEL_SHADOW` at 180; the first three are one
+  role at 120 (`shadow()`), and `LABEL_SHADOW` stays separate as
+  `text_shadow()` because its job is legibility over an arbitrary wallpaper
+  rather than elevation over a known surface.
+- **Catppuccin's own Latte `subtext0` is not legible enough to ship.** It
+  measures 4.37:1 on the Latte base, under the 4.5:1 body-text floor, while
+  Mocha's counterpart is 7.37:1. `LIGHT_SUBTEXT0` is therefore `#686B80`, not
+  upstream's `#6C6F85` — see design-decisions §525.
+
+Part 1 is proved by `scripts/reintro-palette.py`, which reintroduces 19
+defects one at a time and confirms each is caught by the test that names it.
+That harness found a real latent defect while doing so (defect Q): the first
+version of `DecorationColors::from_settings` built its frame from
+`Palette::for_mode` and painted the accent on afterwards, so a frame was
+always assembled from a palette carrying the *default* accent. Fixed by
+`from_palette(&Palette)` being the single body, with the mode path and the
+settings path each passing the palette they mean.
 
 **In short:** The desktop has a settings page where the user picks light or
 dark mode, an accent colour, and how transparent panels should be. Almost
@@ -49970,7 +50007,7 @@ anything.
 
 **Proper fix, in two parts — the second is the easy one:**
 
-1. **`gui/appearance` cannot currently answer the question.** It resolves
+1. **[DONE 2026-08-22] `gui/appearance` cannot currently answer the question.** It resolves
    *accents* for both schemes (`color` / `color_light`) but the base, surface,
    overlay and text colours exist only as the hardcoded dark values. Nothing in
    the tree knows what a window background is in light mode. So the fix starts
@@ -49979,9 +50016,11 @@ anything.
    `TransparencyLevel` (Catppuccin Latte for light, Mocha for dark, which is
    what the existing constants already are). Until that type exists there is
    nothing to thread.
-2. Then thread `&Palette` through the render functions of the 49 modules and
-   delete the 549 constants. Mechanical, large, and safe: a module that no
-   longer declares a colour cannot disagree about one.
+2. **[OPEN]** Then thread `&Palette` through the render functions of the 49
+   modules and delete the 549 constants. Mechanical, large, and safe: a module
+   that no longer declares a colour cannot disagree about one. Read the three
+   findings at the top of this entry first — `BASE` and `SHADOW` each mean two
+   different things depending on the module, so this is not a blind rename.
 
 Do **not** do part 2 without part 1 — threading a struct whose light variant
 does not exist yet just relocates the hardcoding into the struct's
@@ -49999,6 +50038,72 @@ defect observed from the settings end.
 picks Light gets a desktop that is light in five places and dark in every
 other, which reads as a broken theme rather than an unimplemented one — worse
 than having no setting at all.
+---
+
+### TD-C-THE-TOOLKIT-HOLDS-A-THIRD-COPY-OF-THE-PALETTE-AND-DISAGREES-WITH-ITSELF-ABOUT-IT — 2026-08-22 — OPEN
+
+**In short.** Widgets (buttons, text fields, scrollbars — the controls apps are
+built from) get their colours from `gui/toolkit`, which keeps its own
+hand-written table of the same Catppuccin values the shell was keeping 549
+copies of. That is a third copy, after the shell's and `gui/appearance`'s. It
+is not currently *wrong* on screen, but it is already drifting in the one way
+that matters: the comments in it name roles that do not match the values beside
+them, so the next person to edit it by role will pick the wrong hex.
+
+**Where:** `gui/toolkit/src/theme.rs` — `Theme::catppuccin_mocha` (~:190) and
+`Theme::catppuccin_latte` (:232). The Latte table is the clearer case:
+
+| Line | Value | Comment says | Latte actually calls it |
+|---|---|---|---|
+| :238 | `0xE6E9EF` | `Surface0` | `mantle` |
+| :239 | `0xDCE0E8` | `Surface1 (Crust)` | `crust` |
+| :258 | `0xBCC0CC` | `Surface2` | `surface1` |
+| :260 | `0xCCD0DA` | `Surface1` | `surface0` |
+| :262 | `0xE6E9EF` | `Surface0 (Mantle)` | `mantle` |
+
+Two comments (`:239`, `:262`) name *two* roles for one value, which is a
+comment author noticing the disagreement and recording both rather than
+resolving it. The ladder is shifted by one rung throughout, so "Surface1"
+means three different colours in this one function.
+
+**The concrete defect inside it:** `:243` `text_secondary: 0x6C6F85`. That is
+upstream Latte `subtext0`, and it measures **4.37:1** on `background`
+(`0xEFF1F5`) — under the 4.5:1 WCAG floor for body text, which is what
+secondary label text is. `gui/appearance` rejected exactly this value when the
+light palette was built and uses `0x686B80` (4.64:1) instead; see
+design-decisions §525. So the toolkit currently ships a light theme whose
+secondary text is measurably illegible, and the crate next door already knows
+the right answer.
+
+**Reproduce:** compute the WCAG contrast of `0x6C6F85` against `0xEFF1F5`
+(relative luminance, `(L1+0.05)/(L2+0.05)`) — 4.37. Or read `:238`–`:239`
+against Catppuccin Latte's published palette and note the roles named in the
+comments are not the roles the values are.
+
+**Why it shipped:** the toolkit predates `appearance::Palette` and could not
+have depended on it — and it still has a genuine reason to keep a type of its
+own, because `Theme` carries widget-level roles (`primary_hover`,
+`scrollbar_track`, `border_focus`) that are not palette roles and should not
+become them. What it does not need is its own *values*.
+
+**Proper fix:** keep `Theme` as the widget-role type, and derive both
+constructors from `appearance::Palette` — `catppuccin_latte()` becomes
+`Theme::from_palette(&Palette::for_mode(true))`, mapping each widget role onto
+a palette role once, the same shape `DesktopTheme::from_palette` now has. That
+deletes the hand-written hex, makes the ladder-off-by-one impossible to write,
+and makes the legibility fix propagate rather than needing to be applied twice.
+The dependency direction is right: `appearance` is below `toolkit` and already
+in its graph.
+
+**Trigger:** best done as part 2 of
+`TD-C-FORTY-NINE-SHELL-MODULES-CARRY-THEIR-OWN-COPY-OF-THE-PALETTE` or
+immediately after it, while the mapping is fresh. Not urgent on its own, with
+one exception: the `text_secondary` contrast is a shipped accessibility defect
+and can be fixed on its own in one line without waiting for the refactor.
+
+**If never fixed:** a user on the light theme reads secondary labels at 4.37:1,
+and the next edit to the toolkit's ladder lands one rung off because the
+comments say it should.
 ---
 
 ### B-THE-NATIVE-LIBC-AND-THE-LINUX-ABI-DISAGREE-ABOUT-WHAT-EXISTS, AND LIBC'S DOC COMMENTS EXPLAIN IT WITH A REASON THAT STOPPED BEING TRUE — 2026-08-21 — OPEN

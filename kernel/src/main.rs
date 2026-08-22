@@ -1455,43 +1455,25 @@ extern "C" fn kernel_main() -> ! {
             // Must happen before self-tests so all VFS operations are captured.
             fs::journal::init();
 
-            // --- Disk-backed filesystem self-tests ---
-            // These exercise the on-disk FAT root (and its buffer-cache / journal /
-            // recycle-bin layers), so they only run when a real FAT filesystem
-            // mounted.  On a diskless (in-memory root) boot they are skipped; the
-            // virtual-filesystem self-tests below still run unconditionally.
+            // --- FAT root self-test ---
+            //
+            // This block once held eight self-tests and was described as "the
+            // disk-backed filesystem self-tests"; `fat_ok` means "the FAT root
+            // mounted", and seven of the eight did not depend on that.  Because
+            // the boot test boots on an in-memory root, `fat_ok` is false there
+            // and those seven had never run in CI even once -- which is how a
+            // data-loss-class `rename` bug in memfs and a deterministic bug in
+            // the change-notification suite both stayed invisible for as long
+            // as they did.  See known-issues.md, "Seven of the eight boot
+            // self-tests behind `if fat_ok` do not need a FAT root".
+            //
+            // The other seven now live in the unconditional block below, each
+            // deciding for itself whether its own precondition holds.  What is
+            // left here is the one call the gate was ever right about, plus the
+            // cache flush that pairs with its writes.
             if fat_ok {
                 if let Err(e) = fs::fat::self_test() {
                     serial_println!("WARNING: FAT self-test failed: {:?}", e);
-                }
-                // io_ring file handle test (requires mounted /tmp).
-                if let Err(e) = ipc::io_ring::self_test_fh() {
-                    serial_println!("WARNING: io_ring file handle self-test failed: {:?}", e);
-                }
-                // Buffer cache self-test (validates caching, write-back, LRU).
-                if let Err(e) = fs::cache::self_test() {
-                    serial_println!("WARNING: Buffer cache self-test failed: {:?}", e);
-                }
-                // Recycle bin self-test (trash, list, restore, empty).
-                if let Err(e) = fs::trash::self_test() {
-                    serial_println!("WARNING: Recycle bin self-test failed: {:?}", e);
-                }
-                // Change notification self-test (watch, emit, read, close).
-                if let Err(e) = fs::notify::self_test() {
-                    serial_println!("WARNING: Change notification self-test failed: {:?}", e);
-                }
-                // Change journal self-test (persistent change tracking).
-                if let Err(e) = fs::journal::self_test() {
-                    serial_println!("WARNING: Change journal self-test failed: {:?}", e);
-                }
-                // ext4 self-test (reads directory listing and files if mounted).
-                if let Err(e) = fs::ext4::self_test() {
-                    serial_println!("WARNING: ext4 self-test failed: {:?}", e);
-                }
-                // VFS-level self-test (symlinks, cross-mount resolution) — relies on
-                // the FAT root for cross-mount cases.
-                if let Err(e) = fs::vfs::self_test() {
-                    serial_println!("WARNING: VFS self-test failed: {:?}", e);
                 }
                 // Flush buffer cache to disk so data survives power loss / QEMU kill.
                 if let Err(e) = fs::cache::flush_all() {
@@ -1513,6 +1495,124 @@ extern "C" fn kernel_main() -> ! {
             // Path-Z boot too, where the sparse fastpy ELFs on /mnt/tests are loaded.
             if let Err(e) = fs::ext4::self_test_pure() {
                 serial_println!("WARNING: ext4 pure self-test failed: {:?}", e);
+            }
+            // Full ext4 self-test: eight per-module unit suites (ondisk, superblock,
+            // io, balloc, journal, fsck, driver, vfs_impl) followed by integration
+            // tests against a mounted ext4.
+            //
+            // This sat under `if fat_ok` until 2026-08-22, which was simply the wrong
+            // condition: `fat_ok` says the *FAT root* mounted, and nothing in here
+            // touches the FAT root.  Phase 0 does no I/O at all, and Phase 1 works
+            // entirely off whatever path ext4 is mounted at, returning early with a
+            // "no ext4 mounted" note when there is none.  The gate therefore bought
+            // no safety and cost the whole tier: the boot test boots a diskless root
+            // with ext4 mounted rw at /mnt, so `fat_ok` was false and these eight
+            // suites had never once run in CI, on an image they could have tested all
+            // along.  Phase 1 writes a scratch file into the ext4 mount, which is
+            // discarded — the boot test attaches rootfs.ext4 with `snapshot=on`.
+            if let Err(e) = fs::ext4::self_test() {
+                serial_println!("WARNING: ext4 self-test failed: {:?}", e);
+            }
+            // Phase 1 above creates and removes a scratch file on the ext4 mount, so
+            // it leaves dirty blocks in the buffer cache.  The flush that used to
+            // follow it lives in the `fat_ok` block, which has already run by now and
+            // is skipped entirely on a diskless root — so flush here rather than rely
+            // on it.  `flush_all` is global (it walks every dirty entry, whatever the
+            // device), which is exactly what is wanted: without this, a power loss
+            // right after the self-test could leave a half-written `_ext4_xattr_test`
+            // in an image the test believes it cleaned up.
+            if let Err(e) = fs::cache::flush_all() {
+                serial_println!(
+                    "WARNING: Buffer cache flush after ext4 self-test failed: {:?}",
+                    e
+                );
+            }
+            // io_ring's file-handle path: registering a file handle with a ring
+            // and driving read/write SQEs through it.
+            //
+            // This was inside `if fat_ok` too, and had never run in CI for the
+            // same reason.  What it actually needs is `/tmp`, which is memfs and
+            // is mounted unconditionally on every boot path — nothing about it
+            // touches the FAT root.  It also already decides for itself: with no
+            // filesystem to work with it prints "SKIPPED (no FS)" and returns
+            // Ok, which is the tell that the outer gate was never load-bearing
+            // for it.
+            if let Err(e) = ipc::io_ring::self_test_fh() {
+                serial_println!("WARNING: io_ring file handle self-test failed: {:?}", e);
+            }
+            // Buffer cache: hit/miss accounting, write-back, flush, read-ahead.
+            //
+            // Third of the calls `if fat_ok` was skipping.  Moving it needed
+            // more than a change of scope: it ran against `"vda"`, writing
+            // sector 100 and sectors 200..205, on the stated reasoning that
+            // those were "unlikely to contain important data".  On this boot
+            // path `vda` is the disk swap backend (`base_sector = 0`, 512 slots
+            // × 32 sectors), so every one of those LBAs is live swap and the
+            // test would have corrupted a swapped-out page.  It now registers
+            // its own RAM disk, which makes it both harmless and independent of
+            // how the machine booted — nothing it checks was ever
+            // device-specific.
+            if let Err(e) = fs::cache::self_test() {
+                serial_println!("WARNING: Buffer cache self-test failed: {:?}", e);
+            }
+            // VFS: path validation, normalisation, and symlink resolution both
+            // within a mount and across one.
+            //
+            // Fourth of the calls `if fat_ok` was skipping.  The comment on it
+            // said the cross-mount cases "rely on the FAT root", but what they
+            // actually do is create a symlink at "/" pointing into /tmp — which
+            // works off whatever "/" happens to be, and needs only that it be
+            // writable.  It already self-skips when nothing is mounted and
+            // branches on `has_tmp` for the symlink cases, so like the others it
+            // had been written to decide for itself all along.
+            if let Err(e) = fs::vfs::self_test() {
+                serial_println!("WARNING: VFS self-test failed: {:?}", e);
+            }
+            // Recycle bin self-test (trash, list, restore, empty), plus the
+            // index's escaping of filenames containing its own delimiters.
+            //
+            // Fifth of the calls `if fat_ok` was skipping, and the first of the
+            // three that genuinely needed a precondition rather than none at
+            // all: it writes the test file, the `_TRASH` directory and the index
+            // to "/".  But "the FAT root mounted" was never that precondition —
+            // the requirement is only that "/" be *writable*, which is true on
+            // every current boot path including the diskless memfs root CI uses.
+            // The honest fix is the one taken here: the suite now probes for
+            // that itself and skips cleanly if it fails, so it needs no gate and
+            // cannot be stranded by one again.
+            if let Err(e) = fs::trash::self_test() {
+                serial_println!("WARNING: Recycle bin self-test failed: {:?}", e);
+            }
+            // Change notification self-test: `path_matches` subtree boundaries,
+            // watch create/emit/read/close, queue overflow, and the end-to-end
+            // VFS and file-handle hooks that emit ACCESS / OPEN / CLOSE_*.
+            //
+            // Sixth of the calls `if fat_ok` was skipping, and the one the gate
+            // cost the most: only the last two of its ten sections touch a file
+            // at all — the boundary-matching regression guard, the overflow
+            // detection and the watch-cleanup checks are pure in-memory work
+            // that never needed a disk, let alone a FAT one.  The two that do
+            // write (an ACCESS probe and an open/close probe at "/") now sit
+            // behind the same writable-root probe the recycle bin uses, so a
+            // read-only root costs those two sections and nothing else.
+            if let Err(e) = fs::notify::self_test() {
+                serial_println!("WARNING: Change notification self-test failed: {:?}", e);
+            }
+            // Change journal self-test (persistent change tracking).
+            //
+            // Last of the seven, and the one with the least claim to the gate:
+            // everything it checks is in-memory bookkeeping and JSON
+            // round-tripping except a single flush-to-disk at the end, which
+            // needs only that "/" be writable and now probes for exactly that.
+            //
+            // Its assertions were hardened in the same change.  The journal is
+            // a *shared* append-only log — `journal::record` is called from
+            // every real VFS create/write/delete/rename — so counting entries
+            // over it was safe only while the gate kept this suite away from a
+            // live filesystem.  Its probe paths now carry a marker and its
+            // counts filter to them.
+            if let Err(e) = fs::journal::self_test() {
+                serial_println!("WARNING: Change journal self-test failed: {:?}", e);
             }
             // Path predicates: subtree matching and the `confine_under` jail
             // guard.  Pure (constants only, no disk), so it runs on every boot

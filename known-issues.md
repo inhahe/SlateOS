@@ -50335,7 +50335,7 @@ commands that carry the colour in question, and assert the two renders agree.
 Candidates: anything drawn on the wallpaper, on a video surface, on a
 thumbnail, or on any other content the palette does not own.
 
-**Part 2 progress. 15 of 49 modules converted.**
+**Part 2 progress. 19 of 49 modules converted.**
 
 - [x] `security_dialog.rs` — 29 constants, done 2026-08-22. The method above
   survived contact: the sweep lives in `gui/desktop/src/palette_check.rs` as
@@ -50946,6 +50946,271 @@ thumbnail, or on any other content the palette does not own.
     the label alone carries the state, so it is `p.accent` directly and *does*
     move between accents (defect TTTTT). Two adjacent modules, two different
     correct answers; the shape of the widget decides, not the word "tab".
+- [x] `network_settings.rs` — 14 constants, done 2026-08-22. Harness defects
+  JJJJJJ–KKKKKKK (twenty-eight), and the first module whose conversion turned
+  up **two user-visible bugs that had nothing to do with colour**.
+  - **A picker that painted both of its options at the same place.** The DNS
+    mode row looped over `[Automatic, Manual]` and never advanced `x`, so
+    "Automatic" was drawn and then covered outright by "Manual". The option
+    existed in the state, the type system and the click handler, and could not
+    be seen or chosen. `draw_check`'s "drawn and never seen" rule is what
+    surfaced it — but only by the accident that the overlap was *exact*;
+    `draw_check` exempts partial overlap deliberately, so a one-pixel offset
+    would have hidden it. That is why the module also has a direct layout test
+    (`no_picker_segment_hides_another_or_leaves_the_row`) rather than leaning
+    on the erase sweep. **A generic invariant catching a specific bug is luck,
+    not coverage; write the specific test anyway.**
+  - **A picker that offered four of six variants.** The proxy type row listed
+    `None/Http/Socks5/Auto`, omitting `Https` and `Socks4` — both of which
+    `ProxyType` defines and `ProxyConfig::validate` accepts. A user already on
+    HTTPS saw a picker with *nothing* highlighted, and any touch could only
+    move them off a setting they could never get back to. It also sized its
+    segments as `(width - 12) / n` and then spaced them `btn_w + 4` apart,
+    which is self-consistent at exactly one `n`; at four it already ran ~4px
+    past the row's right edge and at six it would have run ~20px past. Both
+    pickers now go through one `segment_bounds(x, width, i, n)` helper that
+    takes the `n - 1` gaps out of the total *before* dividing. Two open-coded
+    copies of one layout had drifted in two different directions, which is the
+    same defect class as the 549 palette constants, one layer down.
+  - **Eight accent sites, split into eight assertions, and four of them are
+    loops.** Active tab label; the status tab's four quick toggles; both
+    segmented pickers; the DoH toggle; the proxy auth toggle; the three
+    firewall option toggles; "+ Add rule". The per-site rule from
+    `backup_settings` holds: n sites ⇒ n negative assertions, because one
+    `assert_ne!` over their union passes while any single site still moves.
+    Note that three of the eight are `if *enabled { p.accent }` on a `40x20`
+    pill and are geometrically identical to each other; they are separated by
+    which tab renders them, which is the only handle there is.
+  - **Five categorical scales, not four.** Connection state, Wi-Fi security
+    strength, signal quality, firewall action — and the firewall
+    enabled/disabled dot, which is easy to miss because it is a bare
+    green/red rather than a `.color()` method. The blue-state trap did *not*
+    appear here: none of the four scales uses blue, which is worth recording
+    because four consecutive modules had it and the pattern was starting to
+    look universal.
+  - **`p.crust` on a categorical badge is right only by coincidence, again —
+    and the coincidence is now understood.** The firewall action badge drew
+    its label in `CRUST`. Mocha's green/red/yellow are pale (dark text reads)
+    and Latte's are deep (light text reads), and `crust` flips lightness with
+    the mode alongside them, so a fixed `p.crust` stays legible on all six
+    values by accident of which two palettes we ship. It became
+    `readable_on(rule.action.color(p))` — not `p.on_accent()`, because the
+    fill under it is categorical, not the accent. Defect BBBBBBB puts
+    `p.crust` back and fails in light mode only. This is the third module with
+    this shape (`notification_settings`, `backup_settings`); the rule is now:
+    **any near-black or near-white drawn on a role that flips lightness
+    between modes must be `readable_on(that role)`, never a literal.**
+  - **The extractor collision arrived on schedule, and was a false negative.**
+    `segment_fills` matched every `height: 32.0` fill narrower than the row —
+    which is a picker segment *and* the active tab's own pill, since a padded
+    text width passes any width bound a segment passes. As in
+    `backup_settings`, the damage would not have been a spurious failure but a
+    silent one: the same pattern is subtracted in
+    `colors_apart_from_the_controls`, so the tab pill's colour would have
+    vanished from the frozen-union check. Fixed with a `y > 100.0` bound, the
+    tab strip being the only thing drawn above the content well. **Third
+    consecutive module with a geometric collision.** Treat the grep-and-count
+    step as mandatory, not as diligence.
+  - The half-alpha disabled-rule wash (`Color::rgba(49, 50, 68, 128)`) is the
+    same "alpha wash whose RGB is a role" as `backup_settings`, and the
+    content well is the same structural `readable_on` membership hole; both
+    have their own tests (`a_disabled_rule_is_the_enabled_row_made_translucent`
+    and `the_panels_own_surfaces_come_from_the_palette`) for the reasons
+    recorded above. Defect KKKKKK is the second confirmed case of a defect the
+    membership sweep is *obliged* to accept.
+  - **Deliberate non-change:** the switch knob is `p.text` on a `p.accent`
+    pill (~1.35:1 in Mocha). The correct fix is `readable_on(toggle_bg)`, but
+    the pattern is desktop-wide across all 49 modules and fixing it in one
+    would make the desktop inconsistent with itself. Tracked separately as
+    `TD-C-SWITCH-KNOBS-ARE-LOW-CONTRAST-ON-THE-ON-PILL`, to be done as one
+    sweep once the threading lands.
+- [x] `startup_settings.rs` — 13 constants, done 2026-08-22. Harness defects
+  LLLLLLL–OOOOOOOO (thirty).
+  - **A hardcoded hex has no role until someone assigns one.** The per-entry
+    enable switch and the three boot-tab toggles were a hardcoded `GREEN`,
+    which made this the only settings panel in the shell whose switches did
+    not follow the accent. Mapping them to `p.green` would have been *just as
+    much of a choice* as mapping them to `p.accent`; there is no "leave it
+    alone" option, because the literal names a colour and not a role. This is
+    the general rule for the remaining 32 modules: a conversion that meets a
+    literal must decide what the literal *meant*, and "keep the same pixels"
+    is one answer among several rather than the neutral one. They became
+    `p.accent`, which is what the other sixteen converted modules already say,
+    and which within this module also demotes a real collision: the apps list
+    draws the enable switch and the impact badge on the same row and the impact
+    scale's lowest rung is green, so a green switch sat beside a green "None"
+    badge on every stock install. Following the accent moves that from
+    "always" to "only for a user who picks Green".
+  - **Five variants over four colours, on purpose.** `StartupImpact::color`
+    paints `None` and `Low` the same green: the badge is a three-band traffic
+    light (fine / slow / bad, plus grey for a reading that does not exist yet)
+    laid over a finer-grained label. Distinctness is therefore a claim about
+    the **bands, not the variants** — walking the five pairwise would fail on
+    correct code. There is a separate test
+    (`the_impact_light_has_fewer_bands_than_the_impact_label`) whose only job
+    is to stop a future reader "fixing" the shared arm, and defect KKKKKKKK
+    splits it to prove that test is load-bearing.
+  - **A scale hidden inside a render call cannot be tested.** The last-boot
+    reading's green/yellow/red ladder was three arms of an `if` buried in a
+    `RenderCommand::Text`, unreachable from a test without rendering the whole
+    tab and hunting for a formatted string. It is now `boot_time_color(ms, p)`
+    with a boundary test at 9 999 / 10 000 / 29 999 / 30 000. **Extracting a
+    measurement scale to a named function is part of the conversion, not a
+    detour**: the conversion's whole claim is that these colours are roles
+    chosen by a rule, and a rule nobody can call is a rule nobody can check.
+  - **The impact badge's label was genuinely wrong, not merely fragile.** It
+    was a hardcoded near-black on the badge's own fill. On the four coloured
+    arms that is the usual coincidence — Mocha's green/yellow/red are pale, so
+    dark text reads — but `NotMeasured` fills the badge with `overlay0`, a mid
+    grey, where near-black is poor contrast in dark mode and no better in
+    light. And `NotMeasured` is not an exotic state: `StartupEntry::new` starts
+    every entry there, so it is what a freshly-added app shows. Now
+    `readable_on(impact_color)`. Fourth module with the `p.crust`-on-a-
+    categorical-fill shape, and the first where the coincidence had already
+    failed rather than merely being unmaintained.
+  - **Three accent *sites*, five accent *controls*.** The boot tab's three
+    switches are three rendered pills but one call site (`render_toggle_row`),
+    so they are one `assert_ne!` with a length check beside it; the tab pill
+    and the per-entry switch are the other two. The per-site rule is about
+    **source sites**, not rendered instances — a loop cannot disagree with
+    itself, so splitting it would prove nothing that the count does not.
+  - **The extractor collision was in the label text, not the geometry.** For
+    the first time in four modules the `FillRect` dimensions were all distinct
+    (grepped: one `height: 32.0`, one `36.0` wide, one `40.0` wide, and the two
+    `74.0`-wide badges separated by height). The trap was elsewhere: the
+    module's *title* is the string `"Startup Apps"` and so is one of its *tab
+    labels*, so the `button(cmds, label)` helper the last three modules used —
+    "the last fill before this text" — would have returned the backdrop and the
+    title, silently. The tab strip is keyed on geometry instead (`y: 72.0`
+    pills, `y: 80.0` labels). **Generalisation: an extractor keyed on a string
+    is exactly as much of a guess as one keyed on geometry, and needs the same
+    grep-and-count before it is trusted.**
+  - **The frozen union deliberately *keeps* the `on_accent()` tab label**,
+    unlike `network_settings`, which excluded it. Both accents the test uses
+    are pale, so `readable_on` answers the same near-black for both and a
+    correct label is frozen between them — which means a label wrongly painted
+    with the accent itself is caught there as well as by the legibility test
+    (defect DDDDDDDD proves both). The cost is a dependency on the two accents
+    sharing a lightness band, which is written down at the exclusion list.
+  - The high-impact banner is the same "alpha wash whose RGB is a role"
+    (`Color::rgba(RED.r, RED.g, RED.b, 40)`) as `backup_settings` and
+    `network_settings`, with its own test for the same reason: the membership
+    sweep compares RGB and ignores alpha by design.
+  - **Deliberate non-change:** the switch knobs stay `p.text`, per
+    `TD-C-SWITCH-KNOBS-ARE-LOW-CONTRAST-ON-THE-ON-PILL`.
+- [x] `datetime_settings.rs` — 13 constants, done 2026-08-22. Harness defects
+  AAAAAAAAA–YYYYYYYYYY (fifty-one).
+  - **Pin an accent site by equality with the accent, never by inequality with
+    the literal it used to be.** Every module since `run_dialog` had written
+    `assert_ne!(pill, appearance::BLUE, "kept its hardcoded blue")` beside the
+    equality check, as a second belt. Here that assertion **failed on correct
+    code**, and it was right to: the test loops over a set of accents, the set
+    contains blue, and a correctly-converted pill on a blue-accented desktop
+    *is* `0x89B4FA`. The inequality was never a real check — it was an
+    assertion that the user had not chosen blue. `assert_eq!(site, accent)` run
+    over seven accents is strictly stronger (no fixed value satisfies all
+    seven) and cannot false-positive, so the `assert_ne!` half was deleted
+    outright rather than special-cased. **Generalisation for the remaining 31
+    modules: an assertion whose truth depends on which accent the user picked
+    is a bug in the test, not a safeguard.**
+  - **Geometry can collide *across* tabs rather than within one.** Sixteen
+    modules of grep-and-count had trained the check "are any two `FillRect`
+    dimensions equal *in this file*". They were, twice, and both pairs were
+    invisible to that question because the two members are never drawn
+    together: a full-width `height: 36.0` fill is a timezone row on the
+    Timezone tab **and** the sync-status card on the Sync tab, and a
+    `font_size: 10.0` text is the DST badge on one **and** the "Hidden" mark on
+    the other. A shape is only unambiguous once you know which tab drew it, so
+    every extractor here takes a render already scoped to a named tab and says
+    so in its doc comment. The grep must be per-render-path, not per-file.
+  - **A zone row carries two independent kinds of "current", and nothing
+    asserted they differed.** The keyboard cursor (`surface1`, a raised
+    surface) says *where you are looking*; the machine's configured zone (now
+    `p.accent`) says *what is in force*. Painting both the same would lose the
+    distinction silently, and no membership sweep can see it because both are
+    palette roles. `the_zone_you_are_looking_at_is_not_the_zone_in_force`
+    parks the cursor on a row that is not the configured one and asserts the
+    two rows disagree; defect `KKKKKKKKK` collapses them to prove it.
+  - **The clock-face judgement resolved a disagreement the module already had
+    with itself.** The main readout on the DateTime tab was `TEXT`; the
+    additional-clock readout on the Clocks tab was `BLUE` — the same kind of
+    value, two colours, with nothing written down to justify the split. A
+    displayed time is a **measurement**: it is neither a position nor an
+    invitation (so not the accent) nor a category (so not a fixed hue). Both
+    are now `p.text`, and the emphasis the world clock needs is already carried
+    by its weight and size. **Where two sites in one module contradict each
+    other, the conversion is the moment to resolve it** — "keep the same
+    pixels" cannot be applied to both sites at once, so the neutral option does
+    not exist.
+  - **`SAFE_ACCENTS` must exclude the hues the module freezes.** This panel has
+    two frozen scales (`NtpStatus::color`'s four sync states, and the DST
+    badge) using green/yellow/red/overlay0. An accent sweep that included those
+    hues would let a wrongly-accented site coincide with its frozen neighbour
+    on exactly the accent that matters. The set is the seven that collide with
+    nothing here: blue, peach, mauve, teal, pink, sapphire, sky.
+  - **Deliberate non-change:** the switch knob stays `p.text`, per
+    `TD-C-SWITCH-KNOBS-ARE-LOW-CONTRAST-ON-THE-ON-PILL`.
+- [x] `touchpad.rs` — 12 constants, done 2026-08-22. Harness defects
+  AAAAAAAAAAA–RRRRRRRRRRRR (forty-four).
+  - **The slider rule, set here for the remaining thirty modules.** This is the
+    first converted module with a slider, so it had to decide what a slider's
+    three parts are and write it down rather than leave the next module to
+    re-derive it: **the track is a recessed surface (`p.surface1`); the fill and
+    the knob are both the accent.** The reasoning is the same one that governs
+    every other accent site — the accent marks *position and invitation* — and a
+    slider is the one control that carries both at once: between them the fill
+    and the knob say where the value currently sits and where you would take
+    hold of it. The track is neither; it is the space the value moves through.
+  - **The erase check found a real production defect, not a test bug.**
+    `render_slider_label` pushed the filled-portion `FillRect` unconditionally,
+    so a slider resting on its floor (`pointer_speed = 0.1` against a `0.1..3.0`
+    range) emitted a `0 × 4` rectangle — a command the compositor has to carry
+    and cannot draw, on every frame, for as long as the value stays there. Now
+    guarded by `if fill_w > 0.0`. **This is the second time
+    `assert_nothing_is_drawn_and_never_seen` has paid for itself on a module
+    that was not suspected of having anything wrong with it**, which is the
+    argument for running it on every module rather than only where a zero
+    dimension looks plausible.
+  - **Geometry collides three ways now, and this module has two of them.**
+    Module 18 added *across tabs*; this one adds *within one render path* and
+    *across widget kinds sharing a helper*. `12.0 × 12.0` is both the status
+    light and a slider knob, and both are drawn on the General section — the
+    extractors separate them by x (`x < PX + 100.0` vs `x > PX + 100.0`), not by
+    size. Worse, `text: label.to_string(), font_size: 12.0, color: p.text`
+    appears identically in `render_toggle`, `render_slider_label` and
+    `render_choice`, because all three helpers draw their label the same way;
+    each harness defect for those sites needs a distinct *forward* anchor
+    (`// Toggle track.`, `// Slider track.`, the choice well's `x: x + 250.0`).
+    **A shared helper is a geometry collision generator: n callers, one shape.**
+  - **The extractor that keys on x alone is not safe either.** `gesture_columns`
+    first keyed the fingers column on `x == x0 && font_size == 12.0` — which
+    also matches the pinch *choice control's* label, drawn below the table at
+    the same x and size. The colour assertion passed (both are `p.text`); only
+    the row-count arithmetic failed. Fixed by deriving the row count from the
+    two columns that have no such collision and truncating, which is documented
+    in the extractor as relying on the table being drawn before the pinch
+    control. **A test that gets the right answer for the wrong reason is a test
+    that will get the wrong answer later.**
+  - **A reported value is body text.** Extending module 18's clock-face
+    judgement to three more sites: the gesture table's finger count (was
+    `LAVENDER`), its action column (was `BLUE`), and every choice control's
+    current value (was `BLUE`). None is a position, an invitation or a
+    category — each is a value being *reported*, and a reported value follows
+    neither the accent nor a categorical hue. All are `p.text`; the emphasis the
+    finger count needs is already carried by its weight, and the three gesture
+    columns are told apart by their headings and their x-positions, **which is
+    what a table is.**
+  - **The reset button's label was wrong, not merely fragile** — the fifth
+    module with the `crust`-on-a-categorical-fill shape and the second where the
+    coincidence had already broken. It was Mocha `base`, a near-black chosen to
+    read on Mocha's *pale* red. On Latte the fill and that label are both pale
+    and the button says nothing. It is `readable_on(p.red)` now, and
+    `the_reset_buttons_label_can_be_read_on_the_button` asserts both equality
+    with `readable_on(fill)` **and** that the two modes disagree — a label
+    identical in both modes is this bug returning.
+  - **Deliberate non-change:** the toggle knob stays `p.text` on the accent
+    track, per `TD-C-SWITCH-KNOBS-ARE-LOW-CONTRAST-ON-THE-ON-PILL`. Changing it
+    here would be a second change hiding inside this one.
 
 **Trigger:** this is not blocked on anything. It is sequenced after the shell
 event loop (`TD-C-THE-SHELL-CAN-DRAW-ITSELF-AND-NOBODY-CAN-ASK-IT-TO`) only
@@ -50959,6 +51224,58 @@ defect observed from the settings end.
 picks Light gets a desktop that is light in five places and dark in every
 other, which reads as a broken theme rather than an unimplemented one — worse
 than having no setting at all.
+---
+
+### TD-C-SWITCH-KNOBS-ARE-LOW-CONTRAST-ON-THE-ON-PILL — 2026-08-22 — OPEN
+
+**In short.** Every on/off switch in the desktop settings panels draws a small
+round knob on a coloured pill. When the switch is **on**, the pill is the
+user's accent colour and the knob is drawn in the ordinary text colour — which
+on the stock dark theme is a light grey on a light blue, about **1.35:1**
+contrast. (Contrast ratio: how far apart two colours are in lightness; 1:1 is
+invisible, and readable text wants 4.5:1.) The knob is the part that tells you
+*which side the switch is on*, so a user glancing at a settings page cannot
+reliably tell an enabled row from a disabled one without reading the label.
+The question is not what the fix is — it is `readable_on(pill)`, the same
+helper already used for button labels — but that the wrong pattern is copied
+into all 49 shell modules, so it has to be fixed in all of them at once or the
+desktop ends up inconsistent with itself.
+
+**Where:** every `toggle_bg` / `*_toggle_bg` / `auth_bg` site in
+`gui/desktop/src/*_settings.rs` and friends. The shape is always:
+
+```rust
+let toggle_bg = if enabled { p.accent } else { p.surface2 };
+// ... pill filled with toggle_bg ...
+// ... knob filled with p.text        <-- this is the bug
+```
+
+`network_settings.rs` alone has four such sites; the pattern recurs in every
+settings panel that has a switch. The correct expression is
+`appearance::readable_on(toggle_bg)`, which yields near-black on a pale accent
+and near-white on a deep one, exactly as it already does for `p.on_accent()`
+on button labels.
+
+**Why it was not fixed when it was found.** It was noticed during the
+`network_settings.rs` palette conversion (module 16 of 49). Changing it there
+and nowhere else would have left one settings panel whose switches look
+different from every other panel's — a visible inconsistency introduced by a
+conversion that is supposed to be behaviour-preserving. A redesign hidden
+inside a mechanical substitution is a redesign nobody reviewed. It waits for
+`TD-C-FORTY-NINE-SHELL-MODULES-CARRY-THEIR-OWN-COPY-OF-THE-PALETTE` part 2 to
+finish, at which point every switch is reachable from one grep and the change
+is one sweep with one test.
+
+**Trigger:** when part 2 of the 49-module palette conversion is complete. Do
+it as a single commit across all modules, with a shared test asserting that
+every switch knob equals `readable_on` of the pill under it in both modes and
+under every selectable accent.
+
+**If never fixed:** the switches stay legible-but-mushy on the stock dark
+theme and get worse on a pale accent (Yellow, Peach, Rosewater), where knob
+and pill converge further. Nothing breaks; the settings pages are just harder
+to read at a glance than they should be, and the defect is duplicated once
+more every time a new panel is written.
 ---
 
 ### TD-C-THE-TOOLKIT-HOLDS-A-THIRD-COPY-OF-THE-PALETTE-AND-DISAGREES-WITH-ITSELF-ABOUT-IT — 2026-08-22 — OPEN
@@ -61567,6 +61884,396 @@ self-tests were left alone.
 Noticed while converting `tty/mod.rs`, whose `self_test()` is a good example:
 74 assert sites, called unconditionally at boot, covering things as ordinary as
 whether `VERASE` is 127.
+
+---
+
+## Seven of the eight boot self-tests behind `if fat_ok` do not need a FAT root (lane A)
+
+**Status:** FIXED 2026-08-22 — all seven, one commit and one boot test each, as
+planned below. `if fat_ok` now guards only `fat::self_test` and the cache flush
+that pairs with its writes, which is the one thing it was ever right about.
+
+Two of the seven paid for the whole exercise on their own:
+
+- Un-gating `vfs::self_test` failed on its very first CI run with
+  `AlreadyExists`, surfacing a real data-loss-class bug in memfs's `rename` that
+  had been invisible for as long as the gate had been there. See *"memfs
+  `rename` refused to replace an existing destination"* below.
+- Un-gating `notify::self_test` failed on its very first CI run with
+  `coalescing expected 1 event, got 2` — a deterministic bug *in the suite
+  itself*, which had never run in CI even once and so had never been observed to
+  fail. See *"`notify::self_test` asserted absolute event counts on a shared
+  root watch"* below.
+
+That is the pattern worth naming: a gate that stops a test from running does not
+keep the test correct, it only keeps it *unobserved*. Both bugs were present the
+whole time; un-gating is what made them events rather than latent facts.
+
+A third, `journal::self_test`, showed the same hazard before it could bite. The
+journal is a shared append-only log written by every real VFS mutation, and its
+checks counted entries over it; the boot that un-gated it reported `Start cursor:
+191`, i.e. 191 unrelated entries already recorded by the time the suite began. It
+was hardened in the same commit rather than un-gated as-is — see *"`journal::
+self_test` counted entries in a log the whole kernel writes to"* below. The
+general lesson, which cost two boot tests to learn: **a suite written under a
+gate tends to assume the quiet world the gate gave it.** When un-gating one,
+check its assertions for that assumption instead of only checking that it passes
+once.
+
+**In short:** The kernel runs a batch of filesystem self-tests at boot, but only
+if it managed to mount a real FAT disk as the main drive. The automated boot
+test does not use a FAT disk — it boots with an in-memory main drive — so that
+whole batch has been skipped on every automated run, silently. Almost none of
+those tests actually care about FAT; they were simply put inside the same `if`.
+The result is that eight test suites for the ext4 filesystem had never run in
+the automated test even once, on a disk that was sitting right there, mounted
+and writable, the entire time.
+
+### Evidence
+
+The boot test's serial log says both halves of it plainly:
+
+```
+[vfs] Mounted memfs filesystem at '/' (rw)      <- root is memfs, so fat_ok == false
+[vfs] Mounted ext4 filesystem at '/mnt' (rw)    <- ...but ext4 IS mounted, rw
+```
+
+and `grep '\[ext4\] Phase 0'` over a full 43,450-line log returns nothing.
+
+### What each entry in the block actually requires
+
+`fat_ok` means "the **FAT root** mounted". Measured against that, only the
+first row is correctly gated:
+
+| Call | Actually depends on | Self-skips if absent? |
+|---|---|---|
+| `fs::fat::self_test` | the FAT root — **correctly gated** | — |
+| `fs::ext4::self_test` | an ext4 mount (Phase 1); Phase 0 is pure | yes — "No ext4 filesystem mounted" |
+| `ipc::io_ring::self_test_fh` | `/tmp`, which is memfs, mounted unconditionally | yes — "SKIPPED (no FS)" |
+| `fs::cache::self_test` | block device `vda` | yes — "No device 'vda' — skipping" |
+| `fs::vfs::self_test` | any mounts; adapts via `has_tmp` | yes — "No mounts — skipping" |
+| `fs::trash::self_test` | a **writable root** (memfs is `rw`) | no — propagates with `?` |
+| `fs::notify::self_test` | a writable root (`/ACCESS_PROBE.TXT`) | no — propagates with `?` |
+| `fs::journal::self_test` | a writable root (`/_JOURNAL`) | mostly — `stat` is matched |
+
+Four of the seven already contain exactly the right guard *inside themselves*,
+which is the tell: `fat_ok` was never load-bearing for them, because each one
+had already been written to decide for itself.
+
+### Fixed so far
+
+`fs::ext4::self_test()` moved to the unconditional block (`kernel/src/main.rs`),
+which puts eight per-module suites — `ondisk`, `superblock`, `io`, `balloc`,
+`journal`, `fsck`, `driver`, `vfs_impl` — into CI for the first time, along with
+the integration phase against `/mnt`. Phase 1 writes a scratch file to the ext4
+mount; that is safe in the boot test because `rootfs.ext4` is attached with
+`snapshot=on`, and a `flush_all()` was added after it so the dirty blocks it
+leaves are not stranded (the flush it used to sit in front of is inside the
+`fat_ok` block and no longer runs after it).
+
+### The proper fix for the rest
+
+Move each remaining call out of the `fat_ok` block, **one commit at a time with
+a boot test between**, so that a newly-surfaced failure is attributable to the
+suite that surfaced it rather than to a batch of six. Order by risk: the
+self-skipping ones (`io_ring`, `cache`, `vfs`) are unconditionally safe and can
+go first; `trash`/`notify`/`journal` need a writable root, which memfs provides
+on every current boot path but which nothing checks — if a read-only-root path
+is ever added they will emit a `WARNING:` line rather than skip, and the honest
+fix there is to give them the same internal self-skip the other four already
+have, not to invent a new gate.
+
+### Why this matters beyond the missing coverage
+
+This is the harness-level form of a pattern already recorded in this file: the
+tests that run are the ones somebody needed while debugging, and an entire tier
+next to them sits behind a condition that was never re-examined. A gate that
+names one thing (`fat_ok`) while guarding eight is not a gate, it is a place
+things got appended to.
+
+---
+
+## memfs `rename` refused to replace an existing destination (lane A)
+
+**Status:** FIXED 2026-08-22 (`kernel/src/fs/memfs.rs`). Two further bugs found
+in the same function are fixed with it; the ext4 equivalents of both are still
+**OPEN** — see the next entry.
+
+**In short:** Renaming a file onto a name that already exists is supposed to
+replace it — that is how every editor, config writer and database saves a file
+safely: write a temporary file, then rename it over the real one, so a crash
+leaves either the whole old file or the whole new one and never half of each.
+The in-memory filesystem refused to do it, failing instead with "already
+exists". `/tmp` is always that filesystem, and in the automated boot test so is
+`/`, which means the safe-save pattern simply did not work there.
+
+### Evidence
+
+Surfaced the first time `fs::vfs::self_test()` ran in CI (it had been behind the
+`fat_ok` gate — see the entry above):
+
+```
+[vfs]   --- atomic write ---
+WARNING: VFS self-test failed: AlreadyExists
+```
+
+`Vfs::atomic_write` (`kernel/src/fs/vfs.rs`) writes `.tmp_atomic_<n>` beside the
+target, syncs, then `rename`s it over the target. Step 3 could never succeed
+against an existing file on memfs.
+
+### Root cause
+
+`MemFs::rename` checked `to_children.contains_key(to_name)` and returned
+`AlreadyExists` — that is `RENAME_NOREPLACE` semantics baked into the plain
+operation. Both other filesystems already got this right: ext4
+(`fs/ext4/vfs_impl.rs:529`, *"POSIX rename semantics: if the destination already
+exists and is a regular file, replace it"*) and FAT (`fs/fat.rs:3802`, the same
+comment) unlink the destination first. memfs was the sole outlier.
+
+Note that no caller lost the no-replace behaviour: the VFS implements that flag
+itself. `Vfs::rename_inner` stats the destination under the *same* per-mount lock
+it then renames under, which is both where `Vfs::rename_noreplace` gets its
+`AlreadyExists` and why that check is TOCTOU-free. A filesystem hardcoding the
+refusal only removed the caller's ability to ask for the other behaviour.
+
+### Two more bugs in the same function, fixed alongside
+
+Both were latent because the `AlreadyExists` check happened to reject the first
+one before it could do damage, and nothing exercised the second:
+
+1. **Renaming an entry onto itself destroyed it.** `rename(x, x)` should be a
+   no-op success (POSIX). The function detaches the source and re-inserts it at
+   the destination — which, once replacement is allowed, means removing `x` and
+   then inserting it back under the same key. Correct only by luck of ordering;
+   now short-circuited explicitly before anything is detached.
+2. **Moving a directory into its own subtree destroyed the subtree.** `/a` ->
+   `/a/b/c` detached `/a` from its parent first, then walked to `/a/b` to insert
+   it — a path that had just gone with it — so the walk failed `NotFound` and the
+   owned node was dropped on the floor, taking the entire subtree with it. Now
+   rejected with `InvalidArgument` (POSIX EINVAL) before the detach.
+
+### Regression test
+
+`fs::vfs::self_test()` gained a *"rename (replace semantics)"* section directly
+ahead of the atomic-write one, covering all four behaviours: replace an existing
+destination, self-rename is a no-op that keeps the content, a directory
+destination is refused with `IsADirectory`, and a rejected into-own-subtree move
+leaves the subtree intact.
+
+---
+
+## ext4 `rename` has the same self-rename and subtree bugs memfs just had (lane A)
+
+**Status:** FIXED 2026-08-22 (`kernel/src/fs/ext4/vfs_impl.rs`), both bugs, along
+the lines sketched under "The proper fix" below. Verified in CI against the live
+`/mnt` ext4 mount — see "Regression test" at the end of this entry.
+
+**In short:** Renaming an ext4 file onto its own name — `rename("a", "a")`, which
+POSIX says must quietly do nothing — instead deletes the file's contents. And
+moving a directory inside itself is not checked for at all. Neither is reachable
+from the boot test today, but both are reachable from userspace.
+
+### Bug 1: `rename(x, x)` frees the file
+
+The replace path resolves the destination and, finding it exists, unlinks it:
+
+```rust
+let dest_inode = self.driver.read_inode(dest_ino)?;
+dest_inode.i_links_count = dest_inode.i_links_count.saturating_sub(1);
+if dest_inode.i_links_count == 0 {
+    self.driver.free_inode_data(dest_ino, &dest_inode)?;   // <- the file's blocks
+    self.driver.free_inode_number(dest_ino, false)?;       // <- the inode itself
+}
+```
+
+When `from` and `to` are the same path, `dest_ino == src_ino`, so this frees the
+*source's* data and inode. Execution then continues to `add_dir_entry(...,
+src_ino, dst_name, ...)` at line 579, re-adding a directory entry that now points
+at a freed inode, and `remove_dir_entry` at 589 removes the entry it just added
+(same name, same parent). Net effect: contents gone, inode freed, directory entry
+dangling or absent.
+
+### Bug 2: no into-own-subtree check
+
+`rename("/a", "/a/b/c")` is not rejected. ext4 adds the destination entry before
+removing the source one, so it does not lose the subtree the way memfs did, but
+it produces an unreachable directory cycle — `/a` becomes its own ancestor, which
+`fsck` will report and which can hang any naive tree walk.
+
+### The proper fix
+
+Mirror what `MemFs::rename` now does, before either the unlink or the
+`add_dir_entry`:
+
+1. If `src_ino == dest_ino`, return `Ok(())` — that catches `rename(x, x)`
+   through any spelling of the two paths, including hard links to the same
+   inode, which is exactly what POSIX specifies (*"if the two names refer to the
+   same existing file, rename() shall return successfully and perform no other
+   action"*) and is stronger than memfs's string comparison.
+2. Walk `dst_parent_ino` up through `..` and refuse with `InvalidArgument` if
+   `src_ino` is encountered — only needed when the source is a directory.
+
+Extend the ext4 `vfs_impl` self-test with the same four cases the VFS self-test
+now covers for memfs.
+
+### Regression test
+
+`fs::ext4::self_test()` Phase 1 gained a *"rename semantics"* section, which runs
+against the live `/mnt` ext4 mount in every boot test. Six cases:
+
+| # | Case | Expected |
+|---|---|---|
+| 1 | rename over an existing file | replaces it, source gone |
+| 2 | `rename(x, x)` | no-op, content intact |
+| 3 | rename between two hard links to one inode | no-op, **both** names survive |
+| 4 | rename onto a directory | `IsADirectory` |
+| 5 | move a directory into its own subtree | `InvalidArgument`, tree intact |
+| 6 | move a directory to a *different* parent | succeeds |
+
+Case 3 is the one that justifies comparing inode numbers rather than path
+strings: two different paths, one file. memfs's equivalent check is a string
+comparison and would miss it — memfs has no hard links, so there it cannot
+arise, but the ext4 form is the one POSIX actually specifies.
+
+Case 6 exists to keep the fix from being over-broad: the loop check added for
+case 5 walks `..` upwards, and an ordinary cross-parent directory move is
+exactly the traffic it has to let through. A check that rejected case 5 by
+rejecting all directory moves would pass every other test here.
+
+## `notify::self_test` asserted absolute event counts on a shared root watch (lane A)
+
+**Status:** FIXED 2026-08-22 (lane A). Found by un-gating the suite — see
+*"Seven of the eight boot self-tests behind `if fat_ok`"* above.
+
+**In short:** A "watch" is a subscription that collects notifications about
+files changing. The change-notification self-test opened one watch on the whole
+root directory, then ran ten separate checks against it, each one asserting an
+exact number of notifications. That only works if nothing else ever puts a
+notification into that queue. Two things do. One check deliberately fires a
+notification that a *later* check then miscounted, which broke the test the
+first time it was ever run in CI. And now that the suite runs on a live
+filesystem, any other part of the kernel writing a file at the root would land
+in the same queue and break it at random.
+
+### Evidence
+
+The first CI boot that ran this suite (it had been skipped on every previous
+automated run by the `fat_ok` gate):
+
+```
+[notify]   Event mask filtering verified ✓
+[notify]   FAIL: coalescing expected 1 event, got 2
+WARNING: Change notification self-test failed: InternalError
+```
+
+### Root cause — two independent defects
+
+**1. The suite leaked events into itself (deterministic).** The mask-filtering
+section creates a `CREATE`-only watch and emits a `MetadataChanged` to prove
+that watch ignores it. It does — but the event *also* matches `watch_id`, the
+shared `/` + `ALL_CHANGES` watch, and only the `CREATE`-only watch was drained.
+The coalescing section three lines later emits three identical `Modified`
+events, expects them to coalesce to exactly 1, and read 2: its own event plus
+the stray `MetadataChanged`. Nothing about this depended on the environment; it
+would have failed on a FAT root too. It had simply never run.
+
+**2. Absolute counts over a watch on the live root (latent, would flake).**
+Every assertion in the suite was of the form `events.len() != N`, taken over a
+watch that matches *everything* happening at `/`. That is safe only while the
+suite is quarantined from a real filesystem — which is exactly what the gate was
+doing. Un-gating it puts the suite on the same memfs root the rest of the kernel
+is using, so a concurrent write at `/` from any other task becomes a spurious
+failure. Fixing only defect 1 would have left a test that passes today and flakes
+later, which is worse than one that fails immediately.
+
+### Fix
+
+- All synthetic probe paths moved into a private namespace, `/NOTIFY_ST_*`, and
+  a `read_probe_events()` helper filters every count-asserting read to that
+  prefix. Foreign traffic at `/` can no longer be counted. This is the same
+  design `interest_gate_self_test()` already used (delta-correct against a
+  captured baseline) and for the same reason.
+- The mask-filtering section now drains the shared watch immediately after the
+  emit that pollutes it, at the section that created the leftover rather than
+  leaving it for whichever section next asserts a total.
+- The overflow check deliberately keeps reading *unfiltered*: the overflow
+  marker carries an empty path, so the namespace filter would drop the very
+  event under test. It is safe unfiltered because it asserts only that the
+  marker comes first — `read_events` always prepends it — and takes no total.
+
+### Why the namespace filter alone was not enough
+
+The obvious fix is the filter, and it is wrong on its own: the stray
+`MetadataChanged` is emitted on a path the suite owns, so it matches
+`/NOTIFY_ST_` and is still counted. The two defects need the two separate fixes.
+This is worth remembering — a filter that catches foreign contamination does
+nothing about a suite contaminating itself.
+
+## `journal::self_test` counted entries in a log the whole kernel writes to (lane A)
+
+**Status:** FIXED 2026-08-22 (lane A), in the same commit that un-gated the
+suite — see *"Seven of the eight boot self-tests behind `if fat_ok`"* above.
+Unlike the `notify` case, this one was fixed *before* it produced a failure.
+
+**In short:** The change journal is a single running list of "what changed on
+disk", and every file the kernel creates, writes, deletes or renames adds a line
+to it. The journal's self-test recorded four changes of its own and then checked
+the list contained exactly those. That only holds if nothing else writes a file
+while the test runs. Nothing else did, as long as the test was skipped on the
+automated boot; the moment it was allowed to run there, the list already had 191
+entries in it from ordinary boot activity.
+
+### Evidence
+
+The first boot that ran the un-gated suite:
+
+```
+[journal] Running self-test...
+[journal]   Start cursor: 191      <- 191 entries already recorded, by the rest of the kernel
+```
+
+and `grep -rn "journal::record" kernel/src` shows why: `fs/vfs.rs` records on
+create, write, delete, rename, truncate and more. The suite is one writer among
+many, not the only one.
+
+### Root cause
+
+Three assertions assumed sole ownership of the log:
+
+1. `entries.len() < 4` followed by `&entries[entries.len() - 4..]` — tolerant of
+   foreign entries *before* its four, but not of one landing *between* them.
+2. `if cursor() != before` — "recording internal metadata consumed no sequence
+   number". A concurrent VFS write legitimately consumes one, so this is a false
+   failure waiting for the first bit of real traffic.
+3. `entries.len() != 1` after recording `/_JOURNAL.bak` — any foreign entry in
+   the same window breaks it.
+
+### Fix
+
+- Probe paths carry a `JOURNAL_ST_` marker and the counting assertions filter to
+  it via `probe_entries_since()`. The marker is matched as a **substring, not a
+  prefix**, because one case deliberately records a path beginning with
+  `JOURNAL_FILE` (`/_JOURNAL_ST_NEARMISS.bak`) to prove the internal-metadata
+  exclusion is an exact match rather than a prefix rule. Moving that path under
+  a prefix of its own would have deleted the case's meaning.
+- Assertion 1 tightened from `>= 4` to **exactly 4**, which filtering makes both
+  meaningful and safe.
+- Assertion 2 restated. "The cursor did not move" is only true on a quiet
+  filesystem; "every seq consumed since `before` is accounted for by an entry we
+  can see" (`cursor() == before + all_entries.len()`) is robust to foreign
+  traffic *and strictly stronger* — a record that burns a sequence number
+  without producing a visible entry is exactly the bug under test, no matter who
+  made it. Note this deliberately reads the log **unfiltered**: the invariant is
+  about the whole log, and filtering would break it.
+
+### Why this is worth its own entry
+
+The fix for the `notify` sibling was a filter. Here a filter alone would have
+been wrong: assertion 2 is a statement about global state and cannot be filtered
+without becoming vacuous. Two suites, the same root cause, two different correct
+fixes — the question to ask is not "how do I ignore other writers" but "what is
+this assertion actually claiming, and is that claim still true when the system
+is busy".
 
 ## TD-B-COREUTILS-PRINT-THE-HOSTS-ERROR-TEXT (lane B, 2026-08-22) — OPEN
 

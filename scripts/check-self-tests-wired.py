@@ -29,8 +29,8 @@ There are two entirely different ways a self-test gets run in this kernel, and
 lumping them together produces a failure message that is factually wrong for
 most of what it lists:
 
-  boot    reachable from `main.rs` -- runs on every boot test, in CI. This is
-          what "tested" is supposed to mean.
+  boot    reachable from `main.rs` -- *can* run on a boot test. Read the next
+          section before treating this as "tested": reachable is not reached.
   manual  reachable only from `kshell.rs` -- an interactive `test` subcommand
           of the kernel shell (`taskbar test`, `http test`, ...). A human can
           run it; the boot test never does. Not dead code, but not coverage
@@ -42,6 +42,26 @@ Only `dead` fails the build. `manual` is reported as a count (and in full under
 `--list-manual`) because it is a real but different gap, and burying a
 one-line-fix `dead` entry in a list of hundreds of `manual` ones is how a guard
 stops being read.
+
+## The fourth answer: `boot` does not mean "ran"
+
+`boot` says a call *exists* in `main.rs`, not that control ever reaches it. A
+call inside `if fat_ok { ... }` is reachable from `main.rs` and was counted here
+as coverage for a year -- while never executing once in CI, because the boot
+test mounts a memfs root and `fat_ok` is false. Seven suites sat behind that one
+condition; searching a full 43,450-line serial log for "[ext4] Phase 0" returned
+nothing.
+
+So every `main.rs` call site inside a conditional is now reported separately
+(`--list-gated`), with the conditions it sits under. This is deliberately *not*
+a failure and deliberately *not* a verdict: a gate can be perfectly benign --
+`acpi::self_test` is called from both arms of an `if`/`else` and therefore
+always runs -- and this check cannot reason about that. It tells you where to
+look; the serial log tells you what happened. Of the 12 sites it flags today,
+5 do run and 7 do not.
+
+Cross-checking is the point. "Is it wired up" is a question about source, and
+source cannot answer "did it run" -- only the log can.
 
 ## What "reachable" means here
 
@@ -235,11 +255,145 @@ def reachable_from(roots, mentions, defs):
     return out
 
 
+# --- "Could run" is not "did run" ----------------------------------------
+#
+# `reachable_from(main.rs)` answers whether a call *exists*, not whether it is
+# *reached*. A call inside `if fat_ok { ... }` is reachable from main.rs and so
+# gets counted as boot coverage -- yet on a boot path where the condition is
+# false it never executes, and nothing says so. That is not hypothetical: eight
+# ext4 suites sat inside `if fat_ok` and had never once run in CI, because the
+# boot test boots a memfs root and mounts ext4 at /mnt instead. This guard
+# cheerfully counted all eight as "run at boot" the whole time. See
+# known-issues.md, "Seven of the eight boot self-tests behind `if fat_ok`".
+#
+# Finding these needs no Rust parser -- only main.rs's block structure, which
+# is brace-counted below. The one thing brace counting cannot survive is a
+# brace inside a string or a comment, and main.rs is thick with
+# `serial_println!("... {:?}", e)`, so those are blanked first. If the blanking
+# is ever wrong the depth will not return to zero at EOF, and this reports that
+# it could not analyse the file rather than reporting a wrong answer: a
+# silently mis-parsed gate list is worse than no gate list.
+
+COND_OPEN = re.compile(r"^(?:\}[ \t]*)*(else[ \t]+if|else|if|match|while|for)\b")
+RAW_STR = re.compile(r"r(#*)\"")
+CHAR_LIT = re.compile(r"'(?:\\.|[^\\'])'")
+
+
+def strip_code(line, in_block):
+    """Blank string literals and comments, preserving length and brace counts.
+
+    Characters are replaced by spaces rather than deleted so that anything
+    matched against the result still lines up with the original text.
+    """
+    out, i, n = [], 0, len(line)
+    while i < n:
+        if in_block:
+            if line.startswith("*/", i):
+                in_block, i = False, i + 2
+                out.append("  ")
+            else:
+                out.append(" ")
+                i += 1
+            continue
+        if line.startswith("//", i):
+            out.append(" " * (n - i))
+            break
+        if line.startswith("/*", i):
+            in_block, i = True, i + 2
+            out.append("  ")
+            continue
+        m = RAW_STR.match(line, i)
+        if m:
+            close = '"' + "#" * len(m.group(1))
+            end = line.find(close, m.end())
+            stop = n if end < 0 else end + len(close)
+            out.append(" " * (stop - i))
+            i = stop
+            continue
+        if line[i] == '"':
+            j = i + 1
+            while j < n:
+                if line[j] == "\\":
+                    j += 2
+                    continue
+                if line[j] == '"':
+                    j += 1
+                    break
+                j += 1
+            out.append(" " * (j - i))
+            i = j
+            continue
+        if line[i] == "'":
+            m = CHAR_LIT.match(line, i)
+            if m:                      # a char literal; a bare `'a` is a lifetime
+                out.append(" " * (m.end() - i))
+                i = m.end()
+                continue
+        out.append(line[i])
+        i += 1
+    return "".join(out), in_block
+
+
+def calls_on(text, defs, by_qualified, by_bare, rel):
+    """Symbols named by this one line, using the same spellings as elsewhere."""
+    hit = set()
+    for m in QUAL.finditer(text):
+        for sym in by_qualified.get((m.group(1), m.group(2)), ()):
+            hit.add(sym)
+    if not DECL.search(text):          # a definition is not a call
+        for m in BARE.finditer(text):
+            for sym in by_bare.get(m.group(1), ()):
+                if defs[sym][0] == rel:
+                    hit.add(sym)
+    return hit
+
+
+def find_gated_calls(src, defs, by_qualified, by_bare, rel):
+    """Self-test calls in `src` that sit inside a conditional block.
+
+    Returns (findings, ok). `ok` is False when brace depth did not return to
+    zero, meaning the result must not be trusted.
+
+    A call in an `if`'s *condition* -- `if let Err(e) = foo::self_test()` -- is
+    not gated by that `if`: it runs in order to decide the branch. So calls on a
+    line are attributed to the scopes already open *before* that line, and the
+    scope the line itself opens is pushed afterwards.
+    """
+    stack, depth, findings, in_block = [], 0, [], False
+    for lineno, raw in enumerate(src.split("\n"), 1):
+        code, in_block = strip_code(raw, in_block)
+        stripped = code.strip()
+
+        # Leading `}` close scopes before anything on this line is attributed.
+        lead = 0
+        for ch in stripped:
+            if ch == "}":
+                lead += 1
+            elif not ch.isspace():
+                break
+        depth -= lead
+        while stack and depth <= stack[-1][0]:
+            stack.pop()
+
+        syms = calls_on(code, defs, by_qualified, by_bare, rel)
+        if syms and stack:
+            findings.append((lineno, raw.strip(), sorted(syms), list(stack)))
+
+        m = COND_OPEN.match(stripped)
+        if m and stripped.endswith("{"):
+            stack.append((depth, m.group(1), stripped, lineno))
+        depth += code.count("{") - code.count("}") + lead
+
+    return findings, (depth == 0 and not stack)
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--root", default=None, help="kernel source root")
     ap.add_argument("--list-manual", action="store_true",
                     help="also list the kshell-only self-tests, not just count them")
+    ap.add_argument("--list-gated", action="store_true",
+                    help="also list the main.rs calls that sit inside a conditional")
     ap.add_argument("--quiet", action="store_true", help="only print failures")
     args = ap.parse_args()
 
@@ -270,6 +424,9 @@ def main():
     manual_roots = [r for r in MANUAL_ROOTS if r in files]
     manual = reachable_from(manual_roots, mentions, defs) - boot
 
+    gated, gated_ok = find_gated_calls(
+        files[BOOT_ROOT], defs, by_qualified, by_bare, BOOT_ROOT)
+
     dead, allowed = [], []
     for sym in sorted(defs):
         if sym in boot or sym in manual:
@@ -299,6 +456,37 @@ def main():
                 print("  %-46s %s" % (sym, defs[sym][0]))
         else:
             print("Re-run with --list-manual to see them.")
+
+    if not gated_ok and not args.quiet:
+        print("")
+        print("NOTE: could not brace-match %s, so the conditional-call check "
+              "was skipped." % BOOT_ROOT)
+        print("This means a string or comment defeated the blanking pass, not "
+              "that the")
+        print("file is malformed -- but a mis-parsed answer would be worse "
+              "than none.")
+    elif gated and not args.quiet:
+        print("")
+        print("NOTE: %d self-test call site(s) in %s sit inside a conditional, "
+              "so whether" % (len(gated), BOOT_ROOT))
+        print("they run depends on the boot path.  Being reachable from %s is "
+              "not the" % BOOT_ROOT)
+        print("same as being reached: a suite behind a condition that is false "
+              "in CI has")
+        print("never run, however green the boot test looks.  Check each "
+              "against the")
+        print("serial log before citing it as coverage.")
+        if args.list_gated:
+            print("")
+            for lineno, text, syms, stack in gated:
+                conds = " > ".join("%s (line %d)" % (fr[2].rstrip(" {"), fr[3])
+                                   for fr in stack)
+                print("  %s:%d" % (BOOT_ROOT, lineno))
+                print("      call:  %s" % text)
+                print("      under: %s" % conds)
+                print("      tests: %s" % ", ".join(syms))
+        else:
+            print("Re-run with --list-gated to see them.")
 
     if dead:
         print("")

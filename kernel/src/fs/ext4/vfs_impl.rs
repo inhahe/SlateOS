@@ -15,7 +15,7 @@ use crate::fs::path::{Path, PathBuf};
 use crate::fs::vfs::{DirEntry, EntryType, FileAttr, FileMeta, FileSystem, FsInfo};
 
 use super::driver::Ext4Driver;
-use super::ondisk::{file_type, inode_flags};
+use super::ondisk::{EXT4_ROOT_INO, file_type, inode_flags};
 
 // ---------------------------------------------------------------------------
 // FileSystem implementation
@@ -526,9 +526,46 @@ impl FileSystem for Ext4Fs {
             _ => super::ondisk::dir_type::UNKNOWN,
         };
 
+        // Split source and destination into parent + name.  Hoisted above the
+        // destination unlink below because the loop check needs the destination
+        // parent's inode number *before* anything is modified; the parent
+        // inodes themselves are still read at their point of use, since the
+        // unlink writes to them.
+        let (src_parent_path, src_name) = split_parent_name(from)?;
+        let (dst_parent_path, dst_name) = split_parent_name(to)?;
+
+        let src_parent_ino = self.driver.resolve_path(src_parent_path)?;
+        let dst_parent_ino = self.driver.resolve_path(dst_parent_path)?;
+
+        // Moving a directory into its own subtree (`/a` -> `/a/b/c`) would make
+        // it its own ancestor. Unlike memfs, which lost the whole subtree doing
+        // this, ext4 adds the destination entry before removing the source one
+        // and so keeps the data — but it splices the tree into a cycle that
+        // fsck reports and that hangs any naive tree walk. POSIX calls this
+        // EINVAL. Checked before the unlink, so a rejected rename changes
+        // nothing on disk.
+        if src_mode == file_type::S_IFDIR && self.is_at_or_below(src_ino, dst_parent_ino)? {
+            return Err(KernelError::InvalidArgument);
+        }
+
         // POSIX rename semantics: if the destination already exists and is a
         // regular file, replace it.  If it's a directory, return error.
         if let Ok(dest_ino) = self.driver.resolve_path_no_follow(to) {
+            // Renaming an entry onto itself is a no-op success — POSIX: "if the
+            // two names refer to the same existing file, rename() shall return
+            // successfully and perform no other action". Comparing inode
+            // numbers rather than path strings catches every spelling of it,
+            // including two hard links to the same file.
+            //
+            // This is not a nicety. Without it `dest_ino == src_ino`, so the
+            // unlink below drops the *source's* link count to 0 and frees its
+            // data blocks and its inode; execution then falls through to
+            // `add_dir_entry` and re-links the freed inode, and to
+            // `remove_dir_entry` on the entry it just added. `rename(x, x)`
+            // silently destroyed the file.
+            if dest_ino == src_ino {
+                return Ok(());
+            }
             let dest_inode = self.driver.read_inode(dest_ino)?;
             let dest_mode = dest_inode.i_mode & file_type::S_IFMT;
             if dest_mode == file_type::S_IFDIR {
@@ -565,13 +602,6 @@ impl FileSystem for Ext4Fs {
             self.driver.write_superblock()?;
             self.driver.write_group_descs()?;
         }
-
-        // Split source and destination into parent + name.
-        let (src_parent_path, src_name) = split_parent_name(from)?;
-        let (dst_parent_path, dst_name) = split_parent_name(to)?;
-
-        let src_parent_ino = self.driver.resolve_path(src_parent_path)?;
-        let dst_parent_ino = self.driver.resolve_path(dst_parent_path)?;
 
         // Add the entry in the destination directory first (safer: if this
         // fails, the source is still intact).
@@ -1316,6 +1346,41 @@ impl FileSystem for Ext4Fs {
 }
 
 impl Ext4Fs {
+    /// Is `candidate` the directory `ancestor` itself, or one nested inside it?
+    ///
+    /// Walks `candidate` upwards through its `..` entries to the root. Used by
+    /// `rename` to reject moving a directory into its own subtree, which would
+    /// splice the tree into an unreachable cycle.
+    ///
+    /// The walk is bounded. A `..` chain that is *already* cyclic — a corrupt
+    /// image, or damage left by an earlier unchecked rename — must not hang the
+    /// caller, so after `MAX_DEPTH` hops the walk gives up and answers `true`.
+    /// Erring that way refuses the rename, which is the safe answer for a tree
+    /// we have just established we cannot reason about.
+    fn is_at_or_below(&mut self, ancestor: u32, candidate: u32) -> KernelResult<bool> {
+        /// Far deeper than any real directory nesting, but finite.
+        const MAX_DEPTH: usize = 4096;
+
+        let mut cur = candidate;
+        for _ in 0..MAX_DEPTH {
+            if cur == ancestor {
+                return Ok(true);
+            }
+            if cur == EXT4_ROOT_INO {
+                return Ok(false);
+            }
+            let inode = self.driver.read_inode(cur)?;
+            let parent = self.driver.dir_lookup(&inode, cur, Path::new(".."))?;
+            // A directory that is its own parent without being the root is a
+            // corrupt image; stop rather than spin all the way to MAX_DEPTH.
+            if parent == cur {
+                return Ok(true);
+            }
+            cur = parent;
+        }
+        Ok(true)
+    }
+
     /// Shared body for [`link`]/[`link_no_follow`]: create a new directory
     /// entry (`new_path`) referencing an already-resolved inode.  The follow
     /// vs no-follow distinction lives entirely in how `existing_ino` was

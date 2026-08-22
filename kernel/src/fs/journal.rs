@@ -644,6 +644,36 @@ fn json_extract_str(json: &str, prefix: &str) -> Option<String> {
 // Self-test
 // ---------------------------------------------------------------------------
 
+/// Marker embedded in every path [`self_test`] records, and the only paths its
+/// assertions count.
+///
+/// The journal is a *shared* append-only log: [`record`] is called from every
+/// real VFS create/write/delete/rename (see `fs::vfs`), not just from this
+/// suite. Asserting absolute counts over it was safe only while the `fat_ok`
+/// gate kept the suite off a live root — the same trap `notify::self_test` fell
+/// into the first time it ran in CI (see known-issues.md). Any concurrent file
+/// operation would otherwise land between this suite's own records and turn a
+/// correct journal into a failed boot.
+///
+/// Matched as a *substring* rather than a prefix so that the near-miss path
+/// below can still begin with `JOURNAL_FILE` — being a near-miss is the whole
+/// point of that case, so it cannot be moved under a prefix of its own.
+const PROBE_MARKER: &[u8] = b"JOURNAL_ST_";
+
+/// True when `path` is one this suite recorded itself.
+fn is_probe_path(path: &Path) -> bool {
+    let bytes = path.as_bytes();
+    bytes.len() >= PROBE_MARKER.len() && bytes.windows(PROBE_MARKER.len()).any(|w| w == PROBE_MARKER)
+}
+
+/// Entries recorded since `since_seq` by this suite, ignoring the rest of the
+/// kernel's filesystem traffic.
+fn probe_entries_since(since_seq: u64) -> Vec<JournalEntry> {
+    let (mut entries, _) = read_since(since_seq);
+    entries.retain(|e| is_probe_path(e.path.as_path()));
+    entries
+}
+
 /// Self-test: verify journal record, read, and persistence.
 #[allow(clippy::arithmetic_side_effects)]
 pub fn self_test() -> KernelResult<()> {
@@ -657,29 +687,27 @@ pub fn self_test() -> KernelResult<()> {
     crate::serial_println!("[journal]   Start cursor: {}", start_seq);
 
     // Record some test events.
-    record(JournalEventType::Created, "/TEST_JOURNAL.TXT");
-    record(JournalEventType::Modified, "/TEST_JOURNAL.TXT");
-    record_rename("/TEST_JOURNAL.TXT", "/TEST_JOURNAL_NEW.TXT");
-    record(JournalEventType::Deleted, "/TEST_JOURNAL_NEW.TXT");
+    record(JournalEventType::Created, "/JOURNAL_ST_TEST.TXT");
+    record(JournalEventType::Modified, "/JOURNAL_ST_TEST.TXT");
+    record_rename("/JOURNAL_ST_TEST.TXT", "/JOURNAL_ST_TEST_NEW.TXT");
+    record(JournalEventType::Deleted, "/JOURNAL_ST_TEST_NEW.TXT");
 
-    // Read back events since our start position.
-    let (entries, current) = read_since(start_seq);
-    crate::serial_println!(
-        "[journal]   Read {} entries (current seq: {})",
-        entries.len(),
-        current
-    );
+    // Read back events since our start position.  Filtered to this suite's own
+    // paths: a concurrent VFS operation anywhere in the kernel also records
+    // here, and could otherwise land in the middle of the four below.
+    let entries = probe_entries_since(start_seq);
+    crate::serial_println!("[journal]   Read {} own entries", entries.len());
 
-    if entries.len() < 4 {
+    if entries.len() != 4 {
         crate::serial_println!(
-            "[journal]   FAILED: expected at least 4 entries, got {}",
+            "[journal]   FAILED: expected exactly 4 own entries, got {}",
             entries.len()
         );
         return Err(KernelError::IoError);
     }
 
     // Verify the events are in order and have the right types.
-    let last_four = &entries[entries.len() - 4..];
+    let last_four = &entries[..];
     if last_four[0].event_type != JournalEventType::Created
         || last_four[1].event_type != JournalEventType::Modified
         || last_four[2].event_type != JournalEventType::Renamed
@@ -698,7 +726,7 @@ pub fn self_test() -> KernelResult<()> {
     }
 
     // Verify rename has old_path.
-    if last_four[2].old_path.as_deref() != Some(Path::new("/TEST_JOURNAL.TXT")) {
+    if last_four[2].old_path.as_deref() != Some(Path::new("/JOURNAL_ST_TEST.TXT")) {
         crate::serial_println!(
             "[journal]   FAILED: rename old_path wrong: {:?}",
             last_four[2].old_path
@@ -725,26 +753,44 @@ pub fn self_test() -> KernelResult<()> {
         // A rename *away from* an internal file is equally invisible: it is
         // how the flush path would spell a replace-by-rename.
         record_rename(JOURNAL_FILE, JOURNAL_FILE);
-        let (entries, _) = read_since(before);
-        if !entries.is_empty() {
+        let (all_entries, _) = read_since(before);
+        let reported: Vec<&JournalEntry> = all_entries
+            .iter()
+            .filter(|e| is_internal_metadata(e.path.as_path()))
+            .collect();
+        if !reported.is_empty() {
             crate::serial_println!(
                 "[journal]   FAILED: {} internal-metadata event(s) reported, first {:?}",
-                entries.len(),
-                entries.first().map(|e| e.path.clone())
+                reported.len(),
+                reported.first().map(|e| e.path.clone())
             );
             return Err(KernelError::IoError);
         }
-        if cursor() != before {
-            crate::serial_println!("[journal]   FAILED: internal metadata consumed a seq");
+        // Internal metadata must consume no sequence number at all.  Stated as
+        // "the cursor did not move" this was only true on a quiet filesystem --
+        // a concurrent VFS write legitimately consumes one.  Stated as "every
+        // seq consumed since `before` is accounted for by an entry we can see",
+        // it is both robust to that traffic and strictly stronger: a record
+        // that burned a seq without producing a visible entry is exactly the
+        // bug this checks for, whoever made it.
+        if cursor() != before.wrapping_add(all_entries.len() as u64) {
+            crate::serial_println!(
+                "[journal]   FAILED: {} seq(s) consumed but {} entries visible",
+                cursor().wrapping_sub(before),
+                all_entries.len()
+            );
             return Err(KernelError::IoError);
         }
         // A path that merely *starts* like one is a real user file and must
         // still be reported -- the exclusion is exact, not a prefix rule.
-        record(JournalEventType::Created, "/_JOURNAL.bak");
-        let (entries, _) = read_since(before);
+        // (It carries the probe marker too, so `probe_entries_since` sees it;
+        // that is why the marker is matched as a substring rather than a
+        // prefix -- this path has to keep starting with `JOURNAL_FILE`.)
+        record(JournalEventType::Created, "/_JOURNAL_ST_NEARMISS.bak");
+        let entries = probe_entries_since(before);
         if entries.len() != 1 {
             crate::serial_println!(
-                "[journal]   FAILED: /_JOURNAL.bak is a user file, got {} entries",
+                "[journal]   FAILED: /_JOURNAL_ST_NEARMISS.bak is a user file, got {} entries",
                 entries.len()
             );
             return Err(KernelError::IoError);
@@ -828,18 +874,34 @@ pub fn self_test() -> KernelResult<()> {
     }
 
     // Flush to disk and verify the file exists.
-    flush()?;
-    match crate::fs::Vfs::stat(JOURNAL_FILE) {
-        Ok(stat) => {
-            crate::serial_println!("[journal]   Flushed to disk: {} bytes", stat.size);
+    //
+    // This is the only part of the suite that touches a filesystem at all --
+    // everything above is in-memory bookkeeping and pure JSON round-tripping --
+    // so it is the only part with a precondition: `flush()` writes
+    // `JOURNAL_FILE` at the root, which requires the root to be *writable*.
+    // A probe write rather than a mount-flag check because that is the real
+    // precondition: it accounts for a read-only mount, a quota, a file tag and
+    // anything else that could stand between here and a successful write.
+    let probe = "/_journal_writable_probe";
+    if crate::fs::Vfs::write_file(probe, b"").is_ok() {
+        // Absence is the expected end state, so a failure here is nothing to
+        // report.
+        let _ = crate::fs::Vfs::remove(probe);
+        flush()?;
+        match crate::fs::Vfs::stat(JOURNAL_FILE) {
+            Ok(stat) => {
+                crate::serial_println!("[journal]   Flushed to disk: {} bytes", stat.size);
+            }
+            Err(e) => {
+                crate::serial_println!(
+                    "[journal]   FAILED: journal file not found after flush: {:?}",
+                    e
+                );
+                return Err(e);
+            }
         }
-        Err(e) => {
-            crate::serial_println!(
-                "[journal]   FAILED: journal file not found after flush: {:?}",
-                e
-            );
-            return Err(e);
-        }
+    } else {
+        crate::serial_println!("[journal]   Root is not writable — skipping flush-to-disk.");
     }
 
     // Report stats.

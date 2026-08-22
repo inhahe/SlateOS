@@ -1468,10 +1468,10 @@ extern "C" fn kernel_main() -> ! {
                 // /tmp, not a FAT root.  See the unconditional block below.)
                 // (the buffer-cache self-test is NOT here either — it now brings
                 // its own scratch device.  See the unconditional block below.)
-                // Recycle bin self-test (trash, list, restore, empty).
-                if let Err(e) = fs::trash::self_test() {
-                    serial_println!("WARNING: Recycle bin self-test failed: {:?}", e);
-                }
+                // (the recycle-bin self-test is NOT here either — it now probes
+                // whether "/" is writable and skips itself if not, which is the
+                // precondition it actually has.  See the unconditional block
+                // below.)
                 // Change notification self-test (watch, emit, read, close).
                 if let Err(e) = fs::notify::self_test() {
                     serial_println!("WARNING: Change notification self-test failed: {:?}", e);
@@ -1576,6 +1576,21 @@ extern "C" fn kernel_main() -> ! {
             // had been written to decide for itself all along.
             if let Err(e) = fs::vfs::self_test() {
                 serial_println!("WARNING: VFS self-test failed: {:?}", e);
+            }
+            // Recycle bin self-test (trash, list, restore, empty), plus the
+            // index's escaping of filenames containing its own delimiters.
+            //
+            // Fifth of the calls `if fat_ok` was skipping, and the first of the
+            // three that genuinely needed a precondition rather than none at
+            // all: it writes the test file, the `_TRASH` directory and the index
+            // to "/".  But "the FAT root mounted" was never that precondition —
+            // the requirement is only that "/" be *writable*, which is true on
+            // every current boot path including the diskless memfs root CI uses.
+            // The honest fix is the one taken here: the suite now probes for
+            // that itself and skips cleanly if it fails, so it needs no gate and
+            // cannot be stranded by one again.
+            if let Err(e) = fs::trash::self_test() {
+                serial_println!("WARNING: Recycle bin self-test failed: {:?}", e);
             }
             // Path predicates: subtree matching and the `confine_under` jail
             // guard.  Pure (constants only, no disk), so it runs on every boot

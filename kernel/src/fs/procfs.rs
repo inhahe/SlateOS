@@ -638,11 +638,33 @@ const TASK_FILES: &[&str] = &["comm", "schedstat", "stat", "status"];
 // kernel subsystems and format the result as human-readable text.
 // ---------------------------------------------------------------------------
 
-/// `/proc/version` — kernel version and build info.
+/// `/proc/version` — kernel version and build info, in Linux's banner format.
+///
+/// Linux builds this from `struct utsname` (`fs/proc/version.c` →
+/// `linux_proc_banner`):
+///
+/// ```text
+/// %s version %s (COMPILE_BY@COMPILE_HOST) (COMPILER) %s\n
+///  ^sysname     ^release                              ^version
+/// ```
+///
+/// The shape matters, not just the values. This file used to read
+/// `"MintOS kernel 0.1.0 (Rust, x86_64, 16 KiB pages)"`, which matched neither
+/// Linux's banner nor the `osrelease` two directories away — so the regex every
+/// version sniffer uses, `Linux version (\S+)`, found nothing, and a caller that
+/// falls back to positional parsing (our own `userspace/lsmod` takes the third
+/// whitespace token, which is where Linux puts the release) got `0.1.0` instead
+/// of the release string that clears glibc's start-up gate.
+///
+/// Fields come from [`crate::uname`], so this cannot drift from `uname(2)`.
 fn gen_version() -> Vec<u8> {
-    // Keep this consistent with any future version syscall.
-    let text = "MintOS kernel 0.1.0 (Rust, x86_64, 16 KiB pages)\n".to_string();
-    text.into_bytes()
+    format!(
+        "{} version {} (slateos@slateos) (rustc) {}\n",
+        crate::uname::SYSNAME,
+        crate::uname::RELEASE,
+        crate::uname::VERSION,
+    )
+    .into_bytes()
 }
 
 /// `/proc/uptime` — system uptime and total idle time, Linux format.
@@ -14362,10 +14384,12 @@ fn boot_id() -> &'static str {
 /// is stable for the boot.  An unknown path is `NotFound`.
 fn gen_sys(rel: &str) -> KernelResult<Vec<u8>> {
     let text: String = match rel {
-        // The uname(2) surface — must stay byte-consistent with sys_uname.
-        "kernel/ostype" => String::from("Linux\n"),
-        "kernel/osrelease" => String::from("6.6.0-slateos\n"),
-        "kernel/version" => String::from("#1 SMP\n"),
+        // The uname(2) surface.  Byte-consistency with `sys_uname` is not
+        // maintained by hand any more — all four publishers read the one
+        // definition in `crate::uname`.
+        "kernel/ostype" => format!("{}\n", crate::uname::SYSNAME),
+        "kernel/osrelease" => format!("{}\n", crate::uname::RELEASE),
+        "kernel/version" => format!("{}\n", crate::uname::VERSION),
         "kernel/hostname" => {
             crate::fs::nameservice::init_defaults();
             format!("{}\n", crate::fs::nameservice::get_hostname())
@@ -17457,14 +17481,20 @@ pub fn self_test() -> KernelResult<()> {
         }
 
         // 5. Values: uname-surface consistency + parseable ceilings.
+        // Compared against `crate::uname` rather than against literals: a
+        // literal here is a fourth copy of the string, and the fourth copy is
+        // exactly what this check exists to prevent.  (The stronger
+        // cross-generator comparison — procfs against sysfs, bytes against
+        // bytes — lives in `sysfs::self_test`.)
         let osrelease = fs.read_file(Path::new("/sys/kernel/osrelease"))?;
-        if core::str::from_utf8(&osrelease).ok() != Some("6.6.0-slateos\n") {
+        if core::str::from_utf8(&osrelease).ok() != Some(&format!("{}\n", crate::uname::RELEASE)[..])
+        {
             serial_println!("[procfs]   FAIL: osrelease = {:?}", osrelease);
             return Err(KernelError::InternalError);
         }
         let ostype = fs.read_file(Path::new("/sys/kernel/ostype"))?;
-        if core::str::from_utf8(&ostype).ok() != Some("Linux\n") {
-            serial_println!("[procfs]   FAIL: ostype != \"Linux\"");
+        if core::str::from_utf8(&ostype).ok() != Some(&format!("{}\n", crate::uname::SYSNAME)[..]) {
+            serial_println!("[procfs]   FAIL: ostype = {:?}", ostype);
             return Err(KernelError::InternalError);
         }
         let nr_open = core::str::from_utf8(&fs.read_file(Path::new("/sys/fs/nr_open"))?)

@@ -93191,13 +93191,20 @@ fn cmd_version() {
 
 /// `uname [-asnrvmo]` — print system information.
 ///
+/// Every field comes from [`crate::uname`], the same definition `uname(2)`
+/// reads, so this shell and a ring-3 `uname` cannot print different answers.
+/// The `-v` field used to append the RTC date, which made two boots of one
+/// kernel disagree; it now matches `uname(2)`'s `version` exactly.
+///
 /// Flags:
-/// - `-s`: kernel name ("MintOS")
+/// - `-s`: kernel name (`Linux` — the ABI personality, see [`crate::uname`])
 /// - `-n`: network hostname
-/// - `-r`: kernel release ("0.1.0")
-/// - `-v`: kernel version string (includes build date from RTC)
-/// - `-m`: machine hardware name ("x86_64")
-/// - `-o`: operating system ("MintOS")
+/// - `-r`: kernel release (`6.6.0-slateos`)
+/// - `-v`: kernel version string (`#1 SMP`)
+/// - `-m`: machine hardware name (`x86_64`)
+/// - `-o`: operating system (`SlateOS` — the product, not the ABI; this is the
+///   distinction GNU draws when `uname -s` says `Linux` and `-o` says
+///   `GNU/Linux`, and it is the one field where the product name belongs)
 /// - `-a`: all of the above
 /// - No flags: same as `-s`
 fn cmd_uname(args: &str) {
@@ -93252,28 +93259,22 @@ fn cmd_uname(args: &str) {
     let mut parts: alloc::vec::Vec<alloc::string::String> = alloc::vec::Vec::new();
 
     if show_s {
-        parts.push(alloc::string::String::from("MintOS"));
+        parts.push(alloc::string::String::from(crate::uname::SYSNAME));
     }
     if show_n {
         parts.push(crate::fs::sysfs::get_hostname());
     }
     if show_r {
-        parts.push(alloc::string::String::from("0.1.0"));
+        parts.push(alloc::string::String::from(crate::uname::RELEASE));
     }
     if show_v {
-        let dt = crate::rtc::read_datetime();
-        parts.push(alloc::format!(
-            "#1 SMP {:04}-{:02}-{:02}",
-            dt.year,
-            dt.month,
-            dt.day
-        ));
+        parts.push(alloc::string::String::from(crate::uname::VERSION));
     }
     if show_m {
-        parts.push(alloc::string::String::from("x86_64"));
+        parts.push(alloc::string::String::from(crate::uname::MACHINE));
     }
     if show_o {
-        parts.push(alloc::string::String::from("MintOS"));
+        parts.push(alloc::string::String::from(crate::uname::OPERATING_SYSTEM));
     }
 
     let line: alloc::string::String = parts.join(" ");

@@ -17878,7 +17878,7 @@ pub fn self_test_fastpy_slateos_pos() -> KernelResult<()> {
 ///
 /// The harness grants a File capability, spawns the utility, and asserts it
 /// becomes a `Zombie` and exits 0.  The printed report — including the
-/// `/proc/version` string `"MintOS kernel 0.1.0 …"` — is mirrored to serial via
+/// `/proc/version` banner `"Linux version 6.6.0-slateos …"` — is mirrored to serial via
 /// `SYS_CONSOLE_WRITE`, so the boot harness can grep for it.
 pub fn self_test_fastpy_slateos_sysinfo() -> KernelResult<()> {
     let fastpy_sysinfo_elf = match load_test_elf("fastpy-sysinfo") {

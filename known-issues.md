@@ -57133,11 +57133,18 @@ nice nohup patch ps readlink realpath renice rm rmdir sed sh sha256sum sleep
 stat strings tar tee time_cmd touch tty which xargs yes
 ```
 
-**Burn-down progress.** Converted so far: `rm` (2026-08-22, see the section at
-the end of this entry). The live count is whatever `python
+**Burn-down progress.** Converted so far: `rm`, `mv` (both 2026-08-22, see the
+sections at the end of this entry). The live count is whatever `python
 scripts/argv-utf8.py --check` prints; the baseline shrinks by one line per
 conversion and never grows, so this paragraph cannot silently go stale in the
 dangerous direction — if it disagrees with the tool, the tool is right.
+
+**Every conversion so far has uncovered unrelated bugs in the `main` it
+replaced** — three in `rm`, four in `mv`, none of them about UTF-8 and all of
+them in code that no test touched. That is the argument for converting these
+files properly rather than mechanically swapping `env::args()` for
+`env::args_os()`: the defect is a marker for *untested `main`*, and the panic
+is only the part of that a checker can see.
 
 `env`, `kill`, `hostname` and `uname` were on this list and were fixed the same
 day, which is why they are absent above. `stat`, `chmod`, `chown` and `tar`
@@ -57322,6 +57329,87 @@ as WTF-8, `to_str()` returns `None`, and `env::args()` panics on it — the same
 pass here, so the fix is genuinely covered on the machine the work is done on.
 **Every remaining conversion should carry the same pair**; a `#[cfg(unix)]`-only
 regression test for this defect is a test that never runs.
+
+### `mv` converted, and the four further bugs the rewrite uncovered (2026-08-22)
+
+Same shape as `rm`: `env::args_os()`, a byte-wise option loop over
+`coreutils::getopt`, `OsString` operands carried to `fs::rename`. Gate count
+50 → 49; baseline shrunk in the same commit. 38 tests, up from 12, and the
+move path — which had **no tests at all** — now has fourteen.
+
+Also `cfg(unix)`+`cfg(windows)` twins of the non-UTF-8 regression test, per the
+rule established for `rm` above, and the binary was compiled for the *real*
+target (`cd userspace && cargo +nightly build -p coreutils --bin mv`) because
+the target is `unix` and the development host is not — so the `#[cfg(unix)]`
+half of the source is never compiled by `cargo test` here. That step belongs to
+every remaining conversion; without it a typo in a `#[cfg(unix)]` arm is
+invisible until it breaks the boot test for all three lanes. (The `+nightly` is
+load-bearing and undocumented outside lane C's
+`TD-C-A-ZONE-BUILD-FAILS-UNLESS-YOU-KNOW-TO-SAY-NIGHTLY` below; a plain `cargo
+build` in a zone fails with a message naming a flag `CLAUDE.md` tells you not
+to pass.)
+
+**The four bugs**, in the lines the rewrite replaced:
+
+1. **`--` was not an end-of-options marker.** `mv -- -foo bar` answered
+   `unknown option: --`, so a file whose name begins with a dash could not be
+   moved at all.
+2. **`-f` suppressed the diagnostic but not the failure.** The `-f` branch
+   skipped the `eprintln!` and *still* set the exit status to 1, so `mv -f a b`
+   on a failure printed nothing and exited non-zero: the caller was told
+   something went wrong and given no way to find out what. `-f` has never meant
+   that anywhere. In GNU `mv` it suppresses the *prompt* that `-i` would raise
+   before overwriting; this `mv` never prompts, so `-f` is now accepted and
+   inert — which is exactly GNU's behaviour in the absence of `-i`, and is why
+   it now records no flag at all.
+3. **A source ending in `..` moved something the user never named.** The target
+   was `dest.join(src.file_name().unwrap_or_default())`, and `Path::file_name`
+   is `None` when the last component is `..` — so `unwrap_or_default()` gave an
+   *empty* name, `dest.join("")` collapsed back to `dest` itself, and
+   `mv a/.. dst` asked the kernel to rename `a`'s **parent directory** onto
+   `dst`. If `dst` was an empty directory that succeeds: the user asks to move
+   something *into* `dst` and instead the directory they were standing in is
+   moved *onto* it. Reachable from an ordinary glob (`mv */.. dst`). Now
+   refused with a diagnostic, with a test asserting the parent is still there.
+4. **The cross-filesystem fallback silently turned a symlink into a copy of its
+   target.** When `rename` fails with `EXDEV` (the kernel refusing to rename
+   across a filesystem boundary), `mv` must copy and then unlink. The fallback
+   used `fs::copy`, which *follows* symlinks — so moving a symlink across a
+   boundary read the file it pointed at, wrote those bytes at the destination
+   as an ordinary file, and deleted the link. A symlink went in and a full copy
+   came out, with no message. It now recreates the link with `symlink(2)` and
+   only then unlinks. A *dangling* symlink hit the same path and failed with
+   `No such file or directory` naming the link — which reads as "the link is
+   missing" when the link was right there.
+
+   The fallback is also no longer entered for *every* rename failure, only for
+   a genuine cross-device one (`EXDEV` / `ERROR_NOT_SAME_DEVICE`, checked by
+   errno first and `ErrorKind::CrossesDevices` second — errno first because our
+   own target's libstd may not map the variant yet, and a rename that *is*
+   cross-device must not become a hard failure because a classification is
+   missing). Previously `mv nonexistent dst` failed `rename`, fell through to
+   `fs::copy`, and reported the *copy's* error, which happened to read the same
+   but need not have.
+
+**What `mv` still does not do:**
+
+- **Moving a directory across a filesystem boundary.** It reports that this is
+  not implemented rather than attempting a partial job. Doing it properly needs
+  a recursive copy preserving modes, symlinks and hard links; doing it badly
+  loses data quietly, which is why the honest error is the interim answer. This
+  was already the old behaviour and is unchanged.
+- **Twelve GNU options**, all rejected by name rather than ignored: `-b` /
+  `--backup`, `-i` / `--interactive`, `-n` / `--no-clobber`, `-t` /
+  `--target-directory`, `-T` / `--no-target-directory`, `-u` / `--update`,
+  `-v` / `--verbose`, `-S` / `--suffix`, `-Z` / `--context`, `--debug`,
+  `--exchange`, `--strip-trailing-slashes`. Silently ignoring `-n` would
+  overwrite a file the user asked to be left alone, and ignoring `-i` would
+  skip a confirmation they asked for; for this utility both mistakes are
+  unrecoverable, and an error costs only a retype. All twelve stay in the
+  long-option table so abbreviation resolution keeps working — there are tests
+  that `--v` is ambiguous between `--verbose` and `--version`, and `--n`
+  between `--no-clobber` and `--no-target-directory`, and those are the tests
+  that fail if someone prunes the table to what is actually handled.
 
 ---
 

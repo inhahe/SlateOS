@@ -39,7 +39,6 @@ userspace/coreutils/src/bin/md5sum.rs:argv-as-string
 userspace/coreutils/src/bin/mkdir.rs:argv-as-string
 userspace/coreutils/src/bin/mkfifo.rs:argv-as-string
 userspace/coreutils/src/bin/more.rs:argv-as-string
-userspace/coreutils/src/bin/mv.rs:argv-as-string
 userspace/coreutils/src/bin/nice.rs:argv-as-string
 userspace/coreutils/src/bin/nohup.rs:argv-as-string
 userspace/coreutils/src/bin/patch.rs:argv-as-string

@@ -54477,14 +54477,24 @@ it: `self_test_linux_real_glibc_make` must go green, and a smaller in-kernel
 test should assert directly that a child of `SYS_PROCESS_SPAWN` holds a `File`
 capability.
 
-### Until it is fixed
+### What it cost while it was open, and the one thing to take from it
 
-Two boot self-tests are red on every branch (`real make`, `make-drives-tcc`),
-so the whole boot test scores `SELFTEST_FAIL` and cannot be used as a
-pass/fail gate — you have to read the failure list and compare it against the
-known three. That is the actual cost: a red suite that everyone learns to
-ignore. It does not block lane B's userland work, and it is not a regression
-from any recent lane-B change (see the timeline note below).
+Two boot self-tests were red on every branch (`real make`, `make-drives-tcc`),
+so the whole boot test scored `SELFTEST_FAIL` and could not be used as a
+pass/fail gate: you had to read the failure list and compare it against the
+known three. That is the real cost of a bug like this — not the broken
+feature, but a red suite that everyone learns to skim. Boot cycle 12
+(`c58efa00d`) is the first `BOOT_OK` with both rungs green, so the gate works
+again.
+
+The lesson worth keeping is not about capabilities. It is that **when one
+operation has two implementations, the invariant is that they agree, and
+nothing in the type system checks it.** `fork_create` and `spawn_process` both
+create a process; each was individually documented, individually correct-
+looking, and neither doc mentioned the other. The divergence was invisible
+until a program exercised both paths in one run and only one of them worked.
+Wherever a second constructor for an existing kind of object gets added, the
+question to ask is which invariants of the first one it silently opted out of.
 
 
 ## BUG-FASTPY-MINISHELL-EXITS-0-WITHOUT-FORKING (lane B)

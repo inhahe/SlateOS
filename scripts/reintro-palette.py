@@ -2,11 +2,14 @@
 """Prove the `Palette` tests are regression tests, one defect at a time.
 
 The third of these harnesses (after `reintro-mouse-page.py` and
-`reintro-reload-input.py`), covering part 1 of
-`TD-C-FORTY-NINE-SHELL-MODULES-CARRY-THEIR-OWN-COPY-OF-THE-PALETTE`: the
-resolved `Palette` type in `gui/appearance`, and the two consumers rewritten to
-read roles out of it instead of repeating its values — `DecorationColors` and
-`DesktopTheme`.
+`reintro-reload-input.py`), covering
+`TD-C-FORTY-NINE-SHELL-MODULES-CARRY-THEIR-OWN-COPY-OF-THE-PALETTE`. Part 1 is
+defects A–U: the resolved `Palette` type in `gui/appearance`, and the two
+consumers rewritten to read roles out of it instead of repeating its values —
+`DecorationColors` and `DesktopTheme`. Part 2 begins at defect V, and is a
+different question: not "is the palette right?" but "did the conversion of a
+module off its own colour constants actually finish?" Those defects put one
+constant back and check that the module's two-mode sweep names it.
 
 A palette is unusually easy to test *vacuously*. Almost any assertion about a
 colour is satisfiable by the colour that is already there, so a suite can look
@@ -46,6 +49,11 @@ TARGET = "x86_64-pc-windows-gnu"
 
 APP = "gui/appearance/src/lib.rs"
 DESK = "gui/desktop/src/lib.rs"
+SEC = "gui/desktop/src/security_dialog.rs"
+RUN = "gui/desktop/src/run_dialog.rs"
+ICON = "gui/desktop/src/icons.rs"
+NOTIF = "gui/desktop/src/notif_pane.rs"
+DEV = "gui/desktop/src/device_settings.rs"
 
 # (name, file, [(old, new), ...], [packages], [tests expected to fail])
 DEFECTS = [
@@ -234,6 +242,263 @@ DEFECTS = [
         ["desktop"],
         ["every_surface_of_the_theme_is_a_role_out_of_the_shared_palette"],
     ),
+    # --- part 2: a module converted off its own constants ---
+    #
+    # V, W and X are all the *same* defect — one `const … : Color` that the
+    # conversion missed — placed at three different depths, because that is the
+    # only failure mode a 549-substitution mechanical edit actually has. What
+    # they measure is not whether the sweep can spot a wrong colour (its own
+    # unit test does that) but whether the *states the sweep renders* reach the
+    # line the constant was left on. A sweep that renders one dialog in one
+    # mode would catch V, miss W entirely, and miss X unless it happened to
+    # hover the right button.
+    (
+        "V: the critical risk hue is left as this module's own Mocha red",
+        SEC,
+        [("            Self::Critical => p.red,",
+          "            Self::Critical => guitk::Color::from_hex(0xF38BA8),")],
+        ["desktop"],
+        ["every_colour_the_dialog_draws_comes_from_its_palette"],
+    ),
+    (
+        # Behind the details disclosure, so only an expanded render sees it.
+        "W: the details panel keeps its own Mocha mantle",
+        SEC,
+        [("                height: panel_h,\n"
+          "                color: p.mantle,",
+          "                height: panel_h,\n"
+          "                color: guitk::Color::from_hex(0x181825),")],
+        ["desktop"],
+        ["every_colour_the_dialog_draws_comes_from_its_palette"],
+    ),
+    (
+        # Only drawn while the pointer is over Allow: a state the sweep has to
+        # set up deliberately, and the reason it iterates `hovers` at all.
+        "X: the hovered Allow button keeps its own Mocha green",
+        SEC,
+        [("        let allow_bg = if self.hovered_button == Some(ButtonId::Allow) {\n"
+          "            p.green",
+          "        let allow_bg = if self.hovered_button == Some(ButtonId::Allow) {\n"
+          "            guitk::Color::from_hex(0xA6E3A1)")],
+        ["desktop"],
+        ["every_colour_the_dialog_draws_comes_from_its_palette"],
+    ),
+    # `run_dialog.rs`, 16 constants. Same three depths, plus the one thing this
+    # module has that `security_dialog` did not: a label drawn *on* the accent.
+    #
+    # Not a defect, and it is important that it is not: this module's INPUT_BG
+    # was Mocha `crust` = 0x11111B, and that is also what `readable_on` answers
+    # for a light fill, so the sweep must allow it and therefore cannot see a
+    # leftover one. It became `p.crust` by reading the code, not by testing it.
+    # That is the documented hole (see the harness docstring for the rule, and
+    # known-issues.md for the reasoning); a defect asserting it goes uncaught
+    # would only encode the hole as if it were a result.
+    (
+        "Y: the run box's focus border is left as this module's own Mocha blue",
+        RUN,
+        [("            color: p.accent,\n"
+          "            line_width: 1.0,\n"
+          "            corner_radii: CornerRadii::all(4.0),",
+          "            color: guitk::color::Color::from_hex(0x89B4FA),\n"
+          "            line_width: 1.0,\n"
+          "            corner_radii: CornerRadii::all(4.0),")],
+        ["desktop"],
+        ["every_colour_the_dialog_draws_comes_from_its_palette"],
+    ),
+    (
+        # Only drawn when the query matched something.
+        "Z: the autocomplete dropdown keeps its own Mocha mantle",
+        RUN,
+        [("                color: p.mantle,", "                color: guitk::color::Color::from_hex(0x181825),")],
+        ["desktop"],
+        ["every_colour_the_dialog_draws_comes_from_its_palette"],
+    ),
+    (
+        # The OK button's label. Mocha `base` on a blue fill was fine while
+        # every desktop was Mocha; on Latte the accent is pale and the label
+        # has to go dark by computation, not by constant.
+        "AA: the OK button's label is left as this module's own Mocha base",
+        RUN,
+        [("        let fg = if primary { p.on_accent() } else { p.text };",
+          "        let fg = if primary { guitk::color::Color::from_hex(0x1E1E2E) } else { p.text };")],
+        ["desktop"],
+        ["every_colour_the_dialog_draws_comes_from_its_palette"],
+    ),
+    # `icons.rs`, 16 constants + 2 written inline. Its sweep is the first that
+    # had to *drive a gesture* to reach a colour at all, so the defects below
+    # are placed to measure that specifically: BB is visible on a resting
+    # desktop, CC needs a marquee being dragged, DD needs icons mid-drag. A
+    # sweep of a still desktop would report green on two of the three.
+    (
+        "BB: the recycle bin keeps this module's own Mocha red",
+        ICON,
+        [("            Self::RecycleBin => p.red,",
+          "            Self::RecycleBin => Color::from_hex(0xF38BA8),")],
+        ["desktop"],
+        ["every_colour_the_icon_layer_draws_comes_from_its_palette"],
+    ),
+    (
+        "CC: the rubber-band outline keeps its own hardcoded blue",
+        ICON,
+        [("                color: p.hint_border(),",
+          "                color: Color::rgba(137, 180, 250, 120),")],
+        ["desktop"],
+        ["every_colour_the_icon_layer_draws_comes_from_its_palette"],
+    ),
+    (
+        # The ghost under a dragged icon. This one was never in the `theme`
+        # block — it was written inline at the call site, which is how a
+        # hardcoded palette spreads past the place you would think to look.
+        "DD: the drag ghost keeps the inline blue it was written with",
+        ICON,
+        [("                        color: p.hint_fill(),",
+          "                        color: Color::rgba(137, 180, 250, 30),")],
+        ["desktop"],
+        ["every_colour_the_icon_layer_draws_comes_from_its_palette"],
+    ),
+    (
+        # The trap `Palette::on_wallpaper` exists to stop: a converter reaches
+        # for the obvious role and a Light desktop gets dark labels under a
+        # black shadow.
+        #
+        # This one went UNCAUGHT on its first run, and the reason is the most
+        # useful thing this harness has said about part 2: the membership sweep
+        # finds *leftover constants*, and a wrong role is not one. `p.text` is
+        # a member of both palettes, so it passes the sweep in light mode
+        # exactly as it passes in dark. The sweep is not a proof that a module
+        # was converted *correctly* — only that it was converted at all.
+        #
+        # The answer was not to weaken the defect but to add the assertion the
+        # sweep structurally cannot make:
+        # `an_icon_label_does_not_change_colour_with_the_mode`, which renders
+        # twice and compares the label commands. Any module whose colour must
+        # NOT follow the mode needs its own such test; do not assume the sweep
+        # covers it.
+        "EE: an icon label is converted to `text` instead of `on_wallpaper`",
+        ICON,
+        [("                color: if icon.selected {\n"
+          "                    p.on_wallpaper()\n"
+          "                } else {\n"
+          "                    p.on_wallpaper_dim()\n"
+          "                },",
+          "                color: if icon.selected { p.text } else { p.subtext0 },")],
+        ["desktop"],
+        ["an_icon_label_does_not_change_colour_with_the_mode"],
+    ),
+    (
+        "FF: `on_wallpaper` is made to follow the mode after all",
+        APP,
+        [("    pub fn on_wallpaper(&self) -> Color {\n        LIGHT_EXTREME",
+          "    pub fn on_wallpaper(&self) -> Color {\n        self.text")],
+        ["appearance"],
+        ["a_label_on_the_wallpaper_does_not_follow_the_mode"],
+    ),
+    (
+        # The pane's own background, drawn on every frame it is open. The
+        # cheapest possible miss, and the one a sweep must obviously catch.
+        "GG: the notification pane keeps its own Mocha base",
+        NOTIF,
+        [("            height: screen_height,\n            color: p.base,",
+          "            height: screen_height,\n"
+          "            color: Color::from_hex(0x1E1E2E),")],
+        ["desktop"],
+        ["every_colour_the_pane_draws_comes_from_its_palette"],
+    ),
+    (
+        # Only drawn while the pointer is over a card. If `wound_pane`'s
+        # `hovered` axis were dropped the sweep would still pass, and this
+        # constant would ship.
+        "HH: the dismiss button, which only exists on hover, keeps Mocha surface2",
+        NOTIF,
+        [("                height: DISMISS_BTN_SIZE,\n                color: p.surface2,",
+          "                height: DISMISS_BTN_SIZE,\n"
+          "                color: Color::from_hex(0x585B70),")],
+        ["desktop"],
+        ["every_colour_the_pane_draws_comes_from_its_palette"],
+    ),
+    (
+        # Only drawn on the per-app settings page, behind the "Settings" link.
+        "II: the per-app enabled pill, behind the settings view, keeps Mocha green",
+        NOTIF,
+        [("            let pill_bg = if app.enabled { p.green } else { p.surface2 };",
+          "            let pill_bg = if app.enabled {\n"
+          "                Color::from_hex(0xA6E3A1)\n"
+          "            } else {\n"
+          "                p.surface2\n"
+          "            };")],
+        ["desktop"],
+        ["every_colour_the_pane_draws_comes_from_its_palette"],
+    ),
+    (
+        # Only drawn when there is nothing to draw. A state matrix that only
+        # ever renders a populated pane never reaches this line at all.
+        "JJ: the empty-list caption, drawn only when there are no notifications",
+        NOTIF,
+        [('                text: "No notifications".to_string(),\n'
+          "                color: p.overlay0,",
+          '                text: "No notifications".to_string(),\n'
+          "                color: Color::from_hex(0x6C7086),")],
+        ["desktop"],
+        ["every_colour_the_pane_draws_comes_from_its_palette"],
+    ),
+    (
+        # The part-2 lesson from defect EE, applied to this module. A priority
+        # painted in the user's accent is a *wrong role*, not a leftover
+        # constant: `p.accent` is a member of both palettes, so the two-mode
+        # sweep passes it in light exactly as in dark. Only a test that renders
+        # with two different accents and compares can see it, which is why
+        # `a_notification_priority_does_not_follow_the_accent` exists.
+        #
+        # Expect this one to be caught by the accent test and NOT by the sweep.
+        "KK: an urgent notification is painted in the accent instead of red",
+        NOTIF,
+        [("            Self::Urgent => p.red,", "            Self::Urgent => p.accent,")],
+        ["desktop"],
+        ["a_notification_priority_does_not_follow_the_accent"],
+    ),
+    (
+        # The colour that was never a constant. `Color::rgba(243, 139, 168, 30)`
+        # is Mocha red's channels written out at the call site, so emptying the
+        # block of `const`s at the top of the file would have left it behind.
+        # The sweep still names it, because it compares roles on RGB alone and
+        # Mocha red is not a member of Latte at any alpha.
+        "LL: the driver-problem banner keeps its inline wash of Mocha red",
+        DEV,
+        [("                color: {\n"
+          "                    // A wash of the same red the banner's text is in. Written\n"
+          "                    // as `Color::rgba(243, 139, 168, 30)` at this call site\n"
+          "                    // before the conversion -- a hardcoded palette value that\n"
+          "                    // was never in the block of constants, and so would have\n"
+          "                    // survived a survey that only emptied that block.\n"
+          "                    let c = p.red;\n"
+          "                    Color::rgba(c.r, c.g, c.b, 30)\n"
+          "                },",
+          "                color: Color::rgba(243, 139, 168, 30),")],
+        ["desktop"],
+        ["every_colour_the_panel_draws_comes_from_its_palette"],
+    ),
+    (
+        # Only drawn on the safe-remove tab, and only when something is
+        # removable. Two axes of the state matrix have to line up for the sweep
+        # to reach this line at all.
+        "MM: the eject button, on one tab and only when there is something to eject",
+        DEV,
+        [("                    color: p.peach,", "                    color: Color::from_hex(0xFAB387),")],
+        ["desktop"],
+        ["every_colour_the_panel_draws_comes_from_its_palette"],
+    ),
+    (
+        # The trap this module's second test exists for. `DriverStatus::Updating`
+        # is blue, and blue is the default accent, so `p.accent` looks like the
+        # obvious role -- but it is one of five fixed badge states, and following
+        # the accent would move it while its four siblings stayed put. A role is
+        # a member of both palettes, so the membership sweep cannot see this.
+        "NN: the `Updating` driver badge is made to follow the accent",
+        DEV,
+        [("            Self::Updating => p.blue,", "            Self::Updating => p.accent,")],
+        ["desktop"],
+        ["a_device_status_does_not_follow_the_accent"],
+    ),
 ]
 
 
@@ -275,7 +540,9 @@ def main():
     verdicts = []
     try:
         for name, path, edits, pkgs, expect in DEFECTS:
-            if only and name[0] not in only:
+            # Split on the colon rather than taking `name[0]`: the labels ran
+            # past Z, so `"AA"[0]` would select defect A as well.
+            if only and name.split(":", 1)[0] not in only:
                 continue
             text = snap[path].decode("utf-8")
             ok = True

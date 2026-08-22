@@ -17,7 +17,7 @@
 //! run_dialog.handle_mouse_event(&mouse_event);
 //!
 //! // Each frame, if visible:
-//! let commands = run_dialog.render();
+//! let commands = run_dialog.render(&palette);
 //!
 //! // Drain events to act on:
 //! for event in run_dialog.drain_events() {
@@ -30,6 +30,7 @@
 //! }
 //! ```
 
+use appearance::Palette;
 use guitk::event::{EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
@@ -42,29 +43,31 @@ use guitk::text::TextCursor;
 use guitk::textfind::fuzzy_score;
 
 // ============================================================================
-// Theme — Catppuccin Mocha palette
+// Colour
 // ============================================================================
-
-mod theme {
-    use guitk::color::Color;
-
-    pub const BASE: Color = Color::from_hex(0x1E1E2E);
-    pub const SURFACE1: Color = Color::from_hex(0x45475A);
-    pub const SURFACE2: Color = Color::from_hex(0x585B70);
-    pub const TEXT: Color = Color::from_hex(0xCDD6F4);
-    pub const SUBTEXT0: Color = Color::from_hex(0xA6ADC8);
-    pub const BLUE: Color = Color::from_hex(0x89B4FA);
-    pub const RED: Color = Color::from_hex(0xF38BA8);
-    pub const SHADOW: Color = Color::rgba(0, 0, 0, 120);
-    pub const INPUT_BG: Color = Color::from_hex(0x11111B);
-    pub const INPUT_BORDER_FOCUS: Color = Color::from_hex(0x89B4FA);
-    pub const BUTTON_BG: Color = Color::from_hex(0x45475A);
-    pub const BUTTON_HOVER: Color = Color::from_hex(0x585B70);
-    pub const BUTTON_PRIMARY: Color = Color::from_hex(0x89B4FA);
-    pub const BUTTON_PRIMARY_TEXT: Color = Color::from_hex(0x1E1E2E);
-    pub const AUTOCOMPLETE_BG: Color = Color::from_hex(0x181825);
-    pub const AUTOCOMPLETE_HOVER: Color = Color::from_hex(0x313244);
-}
+//
+// This module used to declare sixteen `const … : Color` of its own, all
+// Catppuccin Mocha, which is why a Light desktop drew a dark Run box. They are
+// gone; `render` takes the `&Palette` the shell resolved and reads roles out
+// of it. See known-issues.md
+// `TD-C-FORTY-NINE-SHELL-MODULES-CARRY-THEIR-OWN-COPY-OF-THE-PALETTE`.
+//
+// Two of the sixteen needed a decision rather than a lookup, both of them
+// blue:
+//
+// - The **focus border, the selection highlight and the selected suggestion**
+//   were `BLUE`. They are all "this is where you are typing", which is the
+//   thing a user who picked a Red desktop expects to be red — so they read
+//   `p.accent`, not `p.blue`.
+// - The **OK button** was `BUTTON_PRIMARY` = the same blue, with
+//   `BUTTON_PRIMARY_TEXT` = Mocha `base` on top. It is the default action, so
+//   it too follows the accent, and its label becomes `p.on_accent()` rather
+//   than a fixed dark value — a pale Latte accent needs dark text and a deep
+//   Mocha one needs light, which is exactly what `on_accent` answers.
+//
+// The error message stays `p.red`: "this command does not exist" means the
+// same thing on every desktop, and a Red-themed user must not get an error
+// that is indistinguishable from the OK button.
 
 // ============================================================================
 // Constants
@@ -671,7 +674,7 @@ impl RunDialog {
     // ========================================================================
 
     /// Render the dialog to a list of render commands.
-    pub fn render(&self) -> Vec<RenderCommand> {
+    pub fn render(&self, p: &Palette) -> Vec<RenderCommand> {
         if !self.visible {
             return Vec::new();
         }
@@ -690,7 +693,7 @@ impl RunDialog {
             offset_y: 4.0,
             blur: 16.0,
             spread: 2.0,
-            color: theme::SHADOW,
+            color: p.shadow(),
             corner_radii: CornerRadii::all(DIALOG_RADIUS),
         });
 
@@ -700,7 +703,7 @@ impl RunDialog {
             y,
             width: DIALOG_WIDTH,
             height: DIALOG_HEIGHT,
-            color: theme::BASE,
+            color: p.base,
             corner_radii: CornerRadii::all(DIALOG_RADIUS),
         });
 
@@ -710,7 +713,7 @@ impl RunDialog {
             y,
             width: DIALOG_WIDTH,
             height: DIALOG_HEIGHT,
-            color: theme::SURFACE2,
+            color: p.surface2,
             line_width: 1.0,
             corner_radii: CornerRadii::all(DIALOG_RADIUS),
         });
@@ -720,7 +723,7 @@ impl RunDialog {
             x: x + PADDING,
             y: y + PADDING,
             text: "Run".to_string(),
-            color: theme::TEXT,
+            color: p.text,
             font_size: TITLE_FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: None,
@@ -734,7 +737,7 @@ impl RunDialog {
             text: "Type the name of a program, folder, or document, and the \
                    OS will open it for you."
                 .to_string(),
-            color: theme::SUBTEXT0,
+            color: p.subtext0,
             font_size: BODY_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: Some(DIALOG_WIDTH - PADDING * 2.0),
@@ -746,7 +749,7 @@ impl RunDialog {
             x: x + PADDING,
             y: y + INPUT_Y_OFFSET + 6.0,
             text: "Open:".to_string(),
-            color: theme::TEXT,
+            color: p.text,
             font_size: BODY_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: None,
@@ -762,7 +765,7 @@ impl RunDialog {
             y: y + INPUT_Y_OFFSET,
             width: input_w,
             height: INPUT_HEIGHT,
-            color: theme::INPUT_BG,
+            color: p.crust,
             corner_radii: CornerRadii::all(4.0),
         });
 
@@ -772,7 +775,7 @@ impl RunDialog {
             y: y + INPUT_Y_OFFSET,
             width: input_w,
             height: INPUT_HEIGHT,
-            color: theme::INPUT_BORDER_FOCUS,
+            color: p.accent,
             line_width: 1.0,
             corner_radii: CornerRadii::all(4.0),
         });
@@ -792,7 +795,7 @@ impl RunDialog {
                 y: y + INPUT_Y_OFFSET + 3.0,
                 width: sel_width,
                 height: INPUT_HEIGHT - 6.0,
-                color: theme::BLUE,
+                color: p.accent,
                 corner_radii: CornerRadii::all(2.0),
             });
         }
@@ -802,7 +805,7 @@ impl RunDialog {
             x: input_x + 4.0,
             y: y + INPUT_Y_OFFSET + 7.0,
             text: self.input.text.clone(),
-            color: theme::TEXT,
+            color: p.text,
             font_size: INPUT_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: Some(input_w - 8.0),
@@ -817,7 +820,7 @@ impl RunDialog {
             y1: y + INPUT_Y_OFFSET + 4.0,
             x2: input_x + 4.0 + cursor_px,
             y2: y + INPUT_Y_OFFSET + INPUT_HEIGHT - 4.0,
-            color: theme::TEXT,
+            color: p.text,
             width: 1.0,
         });
 
@@ -827,7 +830,7 @@ impl RunDialog {
                 x: input_x,
                 y: y + INPUT_Y_OFFSET + INPUT_HEIGHT + 2.0,
                 text: err.clone(),
-                color: theme::RED,
+                color: p.red,
                 font_size: 11.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(input_w),
@@ -846,7 +849,7 @@ impl RunDialog {
                 y: dropdown_y,
                 width: input_w,
                 height: dropdown_h,
-                color: theme::AUTOCOMPLETE_BG,
+                color: p.mantle,
                 corner_radii: CornerRadii::all(4.0),
             });
 
@@ -855,7 +858,7 @@ impl RunDialog {
                 y: dropdown_y,
                 width: input_w,
                 height: dropdown_h,
-                color: theme::SURFACE1,
+                color: p.surface1,
                 line_width: 1.0,
                 corner_radii: CornerRadii::all(4.0),
             });
@@ -870,7 +873,7 @@ impl RunDialog {
                         y: row_y,
                         width: input_w - 2.0,
                         height: AUTOCOMPLETE_ROW_HEIGHT,
-                        color: theme::AUTOCOMPLETE_HOVER,
+                        color: p.surface0,
                         corner_radii: CornerRadii::ZERO,
                     });
                 }
@@ -879,11 +882,7 @@ impl RunDialog {
                     x: dropdown_x + 8.0,
                     y: row_y + 6.0,
                     text: suggestion.text.clone(),
-                    color: if is_selected {
-                        theme::BLUE
-                    } else {
-                        theme::TEXT
-                    },
+                    color: if is_selected { p.accent } else { p.text },
                     font_size: INPUT_FONT_SIZE,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(input_w - 16.0),
@@ -895,6 +894,7 @@ impl RunDialog {
         // Buttons row.
         let button_y = y + DIALOG_HEIGHT - PADDING - BUTTON_HEIGHT;
         self.render_button(
+            p,
             &mut cmds,
             "OK",
             x + DIALOG_WIDTH - PADDING - BUTTON_WIDTH,
@@ -903,6 +903,7 @@ impl RunDialog {
             true,
         );
         self.render_button(
+            p,
             &mut cmds,
             "Cancel",
             x + DIALOG_WIDTH - PADDING - BUTTON_WIDTH * 2.0 - BUTTON_SPACING,
@@ -911,6 +912,7 @@ impl RunDialog {
             false,
         );
         self.render_button(
+            p,
             &mut cmds,
             "Browse...",
             x + DIALOG_WIDTH - PADDING - BUTTON_WIDTH * 3.0 - BUTTON_SPACING * 2.0,
@@ -928,6 +930,7 @@ impl RunDialog {
 
     fn render_button(
         &self,
+        p: &Palette,
         cmds: &mut Vec<RenderCommand>,
         label: &str,
         bx: f32,
@@ -937,17 +940,13 @@ impl RunDialog {
     ) {
         let hovered = self.hovered_button == Some(id);
         let bg = if primary {
-            theme::BUTTON_PRIMARY
+            p.accent
         } else if hovered {
-            theme::BUTTON_HOVER
+            p.surface2
         } else {
-            theme::BUTTON_BG
+            p.surface1
         };
-        let fg = if primary {
-            theme::BUTTON_PRIMARY_TEXT
-        } else {
-            theme::TEXT
-        };
+        let fg = if primary { p.on_accent() } else { p.text };
 
         cmds.push(RenderCommand::FillRect {
             x: bx,
@@ -1231,6 +1230,7 @@ mod tests {
     )]
 
     use super::*;
+    use crate::palette_check;
 
     fn make_key(key: Key, ctrl: bool, shift: bool, text: Option<char>) -> KeyEvent {
         KeyEvent {
@@ -1721,16 +1721,84 @@ mod tests {
     #[test]
     fn test_render_empty_when_hidden() {
         let dialog = RunDialog::new();
-        let cmds = dialog.render();
-        assert!(cmds.is_empty());
+        for light in [false, true] {
+            assert!(dialog.render(&Palette::for_mode(light)).is_empty());
+        }
     }
 
     #[test]
     fn test_render_nonempty_when_visible() {
         let mut dialog = RunDialog::new();
         dialog.show();
-        let cmds = dialog.render();
-        assert!(!cmds.is_empty());
+        for light in [false, true] {
+            assert!(!dialog.render(&Palette::for_mode(light)).is_empty());
+        }
+    }
+
+    /// Every colour this dialog draws comes from the palette it was handed.
+    ///
+    /// See `security_dialog`'s equivalent for why the light arm is the arm
+    /// that does the work: the sixteen constants deleted from this module were
+    /// all Catppuccin Mocha, so one left behind is a value the Latte palette
+    /// does not contain, and
+    /// [`palette_check::assert_drawn_from`](crate::palette_check::assert_drawn_from)
+    /// names it.
+    ///
+    /// The states below are chosen because each one *selects a colour* no
+    /// other state reaches — an error message is the only red, a drawn
+    /// selection the only accent fill in the input, a highlighted suggestion
+    /// the only `surface0`, and the OK button's `on_accent` label is drawn
+    /// whatever the pointer is doing while Cancel's and Browse's hover
+    /// treatment is not. Geometry-only variation is deliberately absent; it
+    /// would multiply the run time without reaching a single new line.
+    #[test]
+    fn every_colour_the_dialog_draws_comes_from_its_palette() {
+        for light in [false, true] {
+            let p = Palette::for_mode(light);
+            for error in [false, true] {
+                for autocomplete in [false, true] {
+                    for selected_suggestion in [false, true] {
+                        for text_selection in [false, true] {
+                            for hovered in [
+                                None,
+                                Some(ButtonId::Ok),
+                                Some(ButtonId::Cancel),
+                                Some(ButtonId::Browse),
+                            ] {
+                                let mut dialog = RunDialog::new();
+                                dialog.show();
+                                dialog.input.set_text("fi");
+                                if text_selection {
+                                    dialog.input.select_all();
+                                }
+                                if error {
+                                    dialog.error_message = Some("not found".into());
+                                }
+                                if autocomplete {
+                                    dialog.suggestions = vec![
+                                        Suggestion {
+                                            text: "firefox".into(),
+                                            score: 10,
+                                        },
+                                        Suggestion {
+                                            text: "files".into(),
+                                            score: 5,
+                                        },
+                                    ];
+                                    dialog.show_autocomplete = true;
+                                    dialog.suggestion_index =
+                                        if selected_suggestion { Some(0) } else { None };
+                                }
+                                dialog.hovered_button = hovered;
+                                let cmds = dialog.render(&p);
+                                assert!(!cmds.is_empty());
+                                palette_check::assert_drawn_from(&p, &cmds, &[], "run_dialog");
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 
     #[test]

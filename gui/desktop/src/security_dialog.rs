@@ -62,6 +62,7 @@
 //! }
 //! ```
 
+use appearance::{Palette, readable_on};
 #[cfg(test)]
 use guitk::event::Modifiers;
 use guitk::event::{Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
@@ -71,42 +72,28 @@ use guitk::text;
 use guitk::text::TextCursor;
 
 // ============================================================================
-// Theme — Catppuccin Mocha palette
+// Colour
 // ============================================================================
-
-mod theme {
-    use guitk::color::Color;
-
-    pub const BASE: Color = Color::from_hex(0x1E1E2E);
-    pub const MANTLE: Color = Color::from_hex(0x181825);
-    pub const CRUST: Color = Color::from_hex(0x11111B);
-    pub const SURFACE0: Color = Color::from_hex(0x313244);
-    pub const SURFACE1: Color = Color::from_hex(0x45475A);
-    pub const SURFACE2: Color = Color::from_hex(0x585B70);
-    pub const TEXT: Color = Color::from_hex(0xCDD6F4);
-    pub const SUBTEXT0: Color = Color::from_hex(0xA6ADC8);
-    pub const SUBTEXT1: Color = Color::from_hex(0xBAC2DE);
-    pub const OVERLAY0: Color = Color::from_hex(0x6C7086);
-    pub const BLUE: Color = Color::from_hex(0x89B4FA);
-    pub const RED: Color = Color::from_hex(0xF38BA8);
-    pub const GREEN: Color = Color::from_hex(0xA6E3A1);
-    pub const YELLOW: Color = Color::from_hex(0xF9E2AF);
-    pub const SHADOW: Color = Color::rgba(0, 0, 0, 160);
-    pub const DIMMER: Color = Color::rgba(0, 0, 0, 120);
-    pub const SHIELD_BG: Color = Color::from_hex(0x313244);
-    pub const RISK_LOW: Color = Color::from_hex(0xA6E3A1);
-    pub const RISK_MEDIUM: Color = Color::from_hex(0xF9E2AF);
-    pub const RISK_HIGH: Color = Color::from_hex(0xFAB387);
-    pub const RISK_CRITICAL: Color = Color::from_hex(0xF38BA8);
-    pub const BUTTON_BG: Color = Color::from_hex(0x45475A);
-    pub const BUTTON_HOVER: Color = Color::from_hex(0x585B70);
-    pub const ALLOW_BUTTON: Color = Color::from_hex(0xA6E3A1);
-    pub const ALLOW_TEXT: Color = Color::from_hex(0x1E1E2E);
-    pub const DENY_BUTTON: Color = Color::from_hex(0xF38BA8);
-    pub const DENY_TEXT: Color = Color::from_hex(0x1E1E2E);
-    pub const DETAILS_BG: Color = Color::from_hex(0x181825);
-    pub const DETAILS_BORDER: Color = Color::from_hex(0x45475A);
-}
+//
+// The 29 Catppuccin Mocha constants that used to live here are gone. Every
+// colour below is a role read out of the `&Palette` the caller supplies, so
+// this dialog follows the user's light/dark, accent and transparency choices
+// instead of agreeing with the dark theme by coincidence. See known-issues.md
+// TD-C-FORTY-NINE-SHELL-MODULES-CARRY-THEIR-OWN-COPY-OF-THE-PALETTE.
+//
+// Three of the 29 needed judgement rather than substitution, and all three
+// were the same shape: text drawn *on* a coloured fill, declared as `CRUST`
+// because near-black reads on a pale Mocha green. Translating those to
+// `p.crust` would have compiled and would have been wrong — Latte's surfaces
+// are pale, so in light mode the Allow button's label would have been dark
+// text on a dark fill, in the one dialog where the user is being asked to
+// make a security decision. They are `readable_on()` of whatever they sit on.
+//
+// The risk hues stay categorical: `p.green`/`p.yellow`/`p.peach`/`p.red` are
+// what Low/Medium/High/Critical mean, and a user who themes their desktop red
+// must not get a dialog that calls every risk level Critical. The two places
+// that *do* follow the accent are the hovered details link and the checked
+// checkbox, which are controls rather than meanings.
 
 // ============================================================================
 // Constants
@@ -284,12 +271,19 @@ impl RiskLevel {
         }
     }
 
-    fn color(self) -> guitk::Color {
+    /// The hue that means this risk level, in `p`'s mode.
+    ///
+    /// Categorical, not accented: these four are a scale the user reads, so
+    /// they must stay four distinguishable colours whatever the desktop is
+    /// themed around. Taking `&Palette` rather than reading the module's own
+    /// constants is what makes them follow light/dark — a green that is legible
+    /// on Mocha's `base` is not the green to draw on Latte's.
+    fn color(self, p: &Palette) -> guitk::Color {
         match self {
-            Self::Low => theme::RISK_LOW,
-            Self::Medium => theme::RISK_MEDIUM,
-            Self::High => theme::RISK_HIGH,
-            Self::Critical => theme::RISK_CRITICAL,
+            Self::Low => p.green,
+            Self::Medium => p.yellow,
+            Self::High => p.peach,
+            Self::Critical => p.red,
         }
     }
 
@@ -785,7 +779,7 @@ impl SecurityDialog {
     /// 6. Remember checkbox
     /// 7. Allow / Deny / Deny All buttons
     /// 8. Queue counter (if multiple pending)
-    pub fn render(&self) -> Vec<RenderCommand> {
+    pub fn render(&self, p: &Palette) -> Vec<RenderCommand> {
         if !self.visible {
             return Vec::new();
         }
@@ -807,7 +801,7 @@ impl SecurityDialog {
             y: 0.0,
             width: self.screen_width,
             height: self.screen_height,
-            color: theme::DIMMER,
+            color: p.scrim(),
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -821,7 +815,7 @@ impl SecurityDialog {
             offset_y: 4.0,
             blur: 24.0,
             spread: 0.0,
-            color: theme::SHADOW,
+            color: p.shadow(),
             corner_radii: CornerRadii::all(DIALOG_RADIUS),
         });
 
@@ -831,7 +825,7 @@ impl SecurityDialog {
             y: dy,
             width: dw,
             height: dh,
-            color: theme::BASE,
+            color: p.base,
             corner_radii: CornerRadii::all(DIALOG_RADIUS),
         });
 
@@ -841,19 +835,19 @@ impl SecurityDialog {
             y: dy,
             width: dw,
             height: dh,
-            color: theme::SURFACE1,
+            color: p.surface1,
             line_width: 1.0,
             corner_radii: CornerRadii::all(DIALOG_RADIUS),
         });
 
         // --- Header section with colored accent bar ---
-        let accent_color = risk.color();
+        let accent_color = risk.color(p);
         cmds.push(RenderCommand::FillRect {
             x: dx,
             y: dy,
             width: dw,
             height: HEADER_HEIGHT,
-            color: theme::MANTLE,
+            color: p.mantle,
             corner_radii: CornerRadii {
                 top_left: DIALOG_RADIUS,
                 top_right: DIALOG_RADIUS,
@@ -881,6 +875,7 @@ impl SecurityDialog {
         let shield_x = dx + PADDING;
         let shield_y = dy + (HEADER_HEIGHT - SHIELD_SIZE) / 2.0 + 1.0;
         self.render_shield_icon(
+            p,
             &mut cmds,
             shield_x,
             shield_y,
@@ -894,7 +889,7 @@ impl SecurityDialog {
             y: dy + 14.0,
             text: "Security Permission Request".into(),
             font_size: TITLE_FONT_SIZE,
-            color: theme::TEXT,
+            color: p.text,
             font_weight: FontWeightHint::Bold,
             max_width: Some(dw - SHIELD_SIZE - PADDING * 3.0),
             overflow: TextOverflow::Ellipsis,
@@ -911,7 +906,7 @@ impl SecurityDialog {
             y: dy + 34.0,
             text: subtitle,
             font_size: SUBTITLE_FONT_SIZE,
-            color: theme::SUBTEXT0,
+            color: p.subtext0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(dw - SHIELD_SIZE - PADDING * 3.0),
             overflow: TextOverflow::Ellipsis,
@@ -929,7 +924,7 @@ impl SecurityDialog {
             y: body_y,
             width: badge_width,
             height: 22.0,
-            color: risk.color(),
+            color: risk.color(p),
             corner_radii: CornerRadii::all(4.0),
         });
         cmds.push(RenderCommand::Text {
@@ -937,7 +932,7 @@ impl SecurityDialog {
             y: body_y + 4.0,
             text: risk_label.into(),
             font_size: SMALL_FONT_SIZE,
-            color: theme::CRUST,
+            color: readable_on(risk.color(p)),
             font_weight: FontWeightHint::Bold,
             max_width: Some(badge_width),
             overflow: TextOverflow::Ellipsis,
@@ -949,7 +944,7 @@ impl SecurityDialog {
             y: body_y + 4.0,
             text: risk.description().into(),
             font_size: SMALL_FONT_SIZE,
-            color: theme::SUBTEXT0,
+            color: p.subtext0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(dw - PADDING * 2.0 - badge_width - 10.0),
             overflow: TextOverflow::Ellipsis,
@@ -960,6 +955,7 @@ impl SecurityDialog {
 
         // Process info row
         self.render_detail_row(
+            p,
             &mut cmds,
             dx + PADDING,
             row_y,
@@ -970,6 +966,7 @@ impl SecurityDialog {
 
         // Resource type row
         self.render_detail_row(
+            p,
             &mut cmds,
             dx + PADDING,
             row_y + DETAIL_ROW_HEIGHT,
@@ -981,6 +978,7 @@ impl SecurityDialog {
         // Rights row
         let rights_str = request.rights.labels().join(", ");
         self.render_detail_row(
+            p,
             &mut cmds,
             dx + PADDING,
             row_y + DETAIL_ROW_HEIGHT * 2.0,
@@ -996,6 +994,7 @@ impl SecurityDialog {
             truncate_str(&request.reason, MAX_REASON_DISPLAY).to_string()
         };
         self.render_detail_row(
+            p,
             &mut cmds,
             dx + PADDING,
             row_y + DETAIL_ROW_HEIGHT * 3.0,
@@ -1012,9 +1011,9 @@ impl SecurityDialog {
             "Show details"
         };
         let details_color = if self.hovered_button == Some(ButtonId::Details) {
-            theme::BLUE
+            p.accent
         } else {
-            theme::SUBTEXT0
+            p.subtext0
         };
         cmds.push(RenderCommand::Text {
             x: dx + PADDING,
@@ -1038,7 +1037,7 @@ impl SecurityDialog {
                 y: panel_y,
                 width: panel_w,
                 height: panel_h,
-                color: theme::DETAILS_BG,
+                color: p.mantle,
                 corner_radii: CornerRadii::all(DETAIL_PANEL_RADIUS),
             });
             cmds.push(RenderCommand::StrokeRect {
@@ -1046,7 +1045,7 @@ impl SecurityDialog {
                 y: panel_y,
                 width: panel_w,
                 height: panel_h,
-                color: theme::DETAILS_BORDER,
+                color: p.surface1,
                 line_width: 1.0,
                 corner_radii: CornerRadii::all(DETAIL_PANEL_RADIUS),
             });
@@ -1060,7 +1059,7 @@ impl SecurityDialog {
                 y: ty,
                 text: format!("Request ID: {}", request.id),
                 font_size: DETAIL_FONT_SIZE,
-                color: theme::OVERLAY0,
+                color: p.overlay0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(panel_w - dp * 2.0),
                 overflow: TextOverflow::Ellipsis,
@@ -1071,9 +1070,9 @@ impl SecurityDialog {
             let elapsed_secs = self.current_time_ms.saturating_sub(request.created_at_ms) / 1000;
             let timeout_remaining = 30_u64.saturating_sub(elapsed_secs);
             let time_color = if timeout_remaining <= TIMEOUT_WARN_SECS {
-                theme::YELLOW
+                p.yellow
             } else {
-                theme::OVERLAY0
+                p.overlay0
             };
             cmds.push(RenderCommand::Text {
                 x: dx + PADDING + dp,
@@ -1093,7 +1092,7 @@ impl SecurityDialog {
                 y: ty,
                 text: format!("Rights bitmask: 0x{:04X}", request.rights.0),
                 font_size: DETAIL_FONT_SIZE,
-                color: theme::OVERLAY0,
+                color: p.overlay0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(panel_w - dp * 2.0),
                 overflow: TextOverflow::Ellipsis,
@@ -1106,7 +1105,7 @@ impl SecurityDialog {
                 y: ty,
                 text: "Keys: A=Allow  D=Deny  Ctrl+D=Deny All  Space=Details  R=Remember".into(),
                 font_size: DETAIL_FONT_SIZE,
-                color: theme::OVERLAY0,
+                color: p.overlay0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(panel_w - dp * 2.0),
                 overflow: TextOverflow::Ellipsis,
@@ -1116,6 +1115,7 @@ impl SecurityDialog {
         // --- Remember checkbox ---
         let checkbox_y = dy + dh - PADDING - BUTTON_HEIGHT - 28.0;
         self.render_checkbox(
+            p,
             &mut cmds,
             dx + PADDING,
             checkbox_y,
@@ -1129,9 +1129,9 @@ impl SecurityDialog {
         // Deny All (only when queue > 1)
         if self.queue.len() > 1 {
             let deny_all_color = if self.hovered_button == Some(ButtonId::DenyAll) {
-                theme::BUTTON_HOVER
+                p.surface2
             } else {
-                theme::BUTTON_BG
+                p.surface1
             };
             self.render_button(
                 &mut cmds,
@@ -1140,21 +1140,21 @@ impl SecurityDialog {
                 90.0,
                 &format!("Deny All ({})", self.queue.len()),
                 deny_all_color,
-                theme::RED,
+                p.red,
             );
         }
 
         // Deny button
         let deny_x = dx + dw - PADDING - BUTTON_WIDTH * 2.0 - BUTTON_SPACING;
         let deny_bg = if self.hovered_button == Some(ButtonId::Deny) {
-            theme::DENY_BUTTON
+            p.red
         } else {
-            theme::BUTTON_BG
+            p.surface1
         };
         let deny_fg = if self.hovered_button == Some(ButtonId::Deny) {
-            theme::DENY_TEXT
+            readable_on(p.red)
         } else {
-            theme::RED
+            p.red
         };
         self.render_button(
             &mut cmds,
@@ -1169,14 +1169,14 @@ impl SecurityDialog {
         // Allow button
         let allow_x = dx + dw - PADDING - BUTTON_WIDTH;
         let allow_bg = if self.hovered_button == Some(ButtonId::Allow) {
-            theme::ALLOW_BUTTON
+            p.green
         } else {
-            theme::BUTTON_BG
+            p.surface1
         };
         let allow_fg = if self.hovered_button == Some(ButtonId::Allow) {
-            theme::ALLOW_TEXT
+            readable_on(p.green)
         } else {
-            theme::GREEN
+            p.green
         };
         self.render_button(
             &mut cmds,
@@ -1196,7 +1196,7 @@ impl SecurityDialog {
                 y: dy + dh - PADDING - BUTTON_HEIGHT - 28.0 + 3.0,
                 text: indicator,
                 font_size: SMALL_FONT_SIZE,
-                color: theme::OVERLAY0,
+                color: p.overlay0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(120.0),
                 overflow: TextOverflow::Ellipsis,
@@ -1213,6 +1213,7 @@ impl SecurityDialog {
     /// Render a shield icon with a letter inside it.
     fn render_shield_icon(
         &self,
+        p: &Palette,
         cmds: &mut Vec<RenderCommand>,
         x: f32,
         y: f32,
@@ -1225,7 +1226,7 @@ impl SecurityDialog {
             y,
             width: SHIELD_SIZE,
             height: SHIELD_SIZE,
-            color: theme::SHIELD_BG,
+            color: p.surface0,
             corner_radii: CornerRadii::all(8.0),
         });
 
@@ -1256,7 +1257,7 @@ impl SecurityDialog {
             y: y + SHIELD_SIZE / 2.0 - 8.0,
             text: letter.to_string(),
             font_size: 14.0,
-            color: theme::CRUST,
+            color: readable_on(color),
             font_weight: FontWeightHint::Bold,
             max_width: Some(SHIELD_SIZE),
             overflow: TextOverflow::Ellipsis,
@@ -1266,6 +1267,7 @@ impl SecurityDialog {
     /// Render a detail row (label + value).
     fn render_detail_row(
         &self,
+        p: &Palette,
         cmds: &mut Vec<RenderCommand>,
         x: f32,
         y: f32,
@@ -1279,7 +1281,7 @@ impl SecurityDialog {
             y: y + 2.0,
             text: label.into(),
             font_size: BODY_FONT_SIZE,
-            color: theme::SUBTEXT0,
+            color: p.subtext0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(label_width),
             overflow: TextOverflow::Ellipsis,
@@ -1289,7 +1291,7 @@ impl SecurityDialog {
             y: y + 2.0,
             text: value.into(),
             font_size: BODY_FONT_SIZE,
-            color: theme::TEXT,
+            color: p.text,
             font_weight: FontWeightHint::Regular,
             max_width: Some(width - label_width),
             overflow: TextOverflow::Ellipsis,
@@ -1333,6 +1335,7 @@ impl SecurityDialog {
     /// Render a checkbox with label.
     fn render_checkbox(
         &self,
+        p: &Palette,
         cmds: &mut Vec<RenderCommand>,
         x: f32,
         y: f32,
@@ -1347,11 +1350,7 @@ impl SecurityDialog {
             y: y + 1.0,
             width: box_size,
             height: box_size,
-            color: if checked {
-                theme::BLUE
-            } else {
-                theme::SURFACE0
-            },
+            color: if checked { p.accent } else { p.surface0 },
             corner_radii: CornerRadii::all(3.0),
         });
 
@@ -1361,11 +1360,7 @@ impl SecurityDialog {
             y: y + 1.0,
             width: box_size,
             height: box_size,
-            color: if checked {
-                theme::BLUE
-            } else {
-                theme::SURFACE2
-            },
+            color: if checked { p.accent } else { p.surface2 },
             line_width: 1.0,
             corner_radii: CornerRadii::all(3.0),
         });
@@ -1377,7 +1372,7 @@ impl SecurityDialog {
                 y: y + 1.0,
                 text: "✓".into(),
                 font_size: 12.0,
-                color: theme::CRUST,
+                color: p.on_accent(),
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(box_size),
                 overflow: TextOverflow::Ellipsis,
@@ -1390,7 +1385,7 @@ impl SecurityDialog {
             y: y + 2.0,
             text: label.into(),
             font_size: DETAIL_FONT_SIZE,
-            color: theme::SUBTEXT1,
+            color: p.subtext1,
             font_weight: FontWeightHint::Regular,
             max_width: Some(200.0),
             overflow: TextOverflow::Ellipsis,
@@ -1444,6 +1439,7 @@ mod tests {
     )]
 
     use super::*;
+    use crate::palette_check;
 
     // --- button and badge measurement ---
 
@@ -1484,6 +1480,73 @@ mod tests {
             rights: Rights(Rights::READ.0 | Rights::WRITE.0),
             reason: "Need file access for saving document".into(),
             created_at_ms: 1000,
+        }
+    }
+
+    // --- the conversion sweep ---
+
+    /// Every colour this dialog draws comes from the palette it was handed.
+    ///
+    /// This module used to carry 29 `const … : Color` of its own, all of them
+    /// Catppuccin Mocha values. Deleting them is a mechanical edit across
+    /// dozens of call sites, and the way such an edit fails is that one
+    /// substitution is missed — which still compiles and still draws the right
+    /// colour in dark mode, so nothing notices.
+    ///
+    /// The *light* render notices. A missed constant is a Mocha value, Latte
+    /// does not contain it, and [`palette_check::assert_drawn_from`] names it
+    /// with the command index and the mode. That is why the loop below runs
+    /// both modes rather than just the default one: the dark arm is the arm
+    /// that cannot fail this way, so it is the arm that proves nothing.
+    ///
+    /// `derived` is empty because this dialog computes no colours — every
+    /// value it emits is a role, a `readable_on` endpoint, or black. If a
+    /// future change introduces an [`appearance::emphasized`] or a `lerp`, it
+    /// has to be declared here, which is the point: a colour that is in no
+    /// palette must be *claimed* by someone.
+    #[test]
+    fn every_colour_the_dialog_draws_comes_from_its_palette() {
+        // One entry per branch of `render` that can pick a different colour:
+        // the four risk hues, the details panel, the checkbox's checked arm,
+        // each hover highlight, and the "Deny All" button that only exists
+        // when more than one request is queued.
+        let resources = [
+            ResourceType::Timer,  // Low    -> green
+            ResourceType::File,   // Medium -> yellow
+            ResourceType::Socket, // High   -> peach
+            ResourceType::PortIo, // Critical -> red
+        ];
+        let hovers = [
+            None,
+            Some(ButtonId::Allow),
+            Some(ButtonId::Deny),
+            Some(ButtonId::Details),
+            Some(ButtonId::DenyAll),
+        ];
+        for light in [false, true] {
+            let p = Palette::for_mode(light);
+            for resource in resources {
+                for expanded in [false, true] {
+                    for remember in [false, true] {
+                        for queued in [1_usize, 2] {
+                            for hovered in hovers {
+                                let mut dialog = SecurityDialog::new();
+                                for i in 0..queued {
+                                    let mut req = sample_request(i as u64 + 1);
+                                    req.resource_type = resource;
+                                    dialog.push_request(req);
+                                }
+                                dialog.details_expanded = expanded;
+                                dialog.remember = remember;
+                                dialog.hovered_button = hovered;
+                                let cmds = dialog.render(&p);
+                                assert!(!cmds.is_empty());
+                                palette_check::assert_drawn_from(&p, &cmds, &[], "security_dialog");
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -1671,23 +1734,27 @@ mod tests {
     #[test]
     fn test_render_hidden_returns_empty() {
         let dialog = SecurityDialog::new();
-        assert!(dialog.render().is_empty());
+        for light in [false, true] {
+            assert!(dialog.render(&Palette::for_mode(light)).is_empty());
+        }
     }
 
     #[test]
     fn test_render_visible_returns_commands() {
         let mut dialog = SecurityDialog::new();
         dialog.push_request(sample_request(1));
-        let cmds = dialog.render();
-        // Should have: dimmer + shadow + bg + border + header bg + accent line +
-        //   shield bg + shield border + shield inner + shield letter +
-        //   title + subtitle + risk badge + risk text + 4 detail rows (8 texts) +
-        //   details link + checkbox (3 parts) + deny button (2 parts) + allow button (2 parts)
-        assert!(
-            cmds.len() >= 20,
-            "Expected at least 20 render commands, got {}",
-            cmds.len()
-        );
+        for light in [false, true] {
+            let cmds = dialog.render(&Palette::for_mode(light));
+            // Should have: dimmer + shadow + bg + border + header bg + accent line +
+            //   shield bg + shield border + shield inner + shield letter +
+            //   title + subtitle + risk badge + risk text + 4 detail rows (8 texts) +
+            //   details link + checkbox (3 parts) + deny button (2 parts) + allow button (2 parts)
+            assert!(
+                cmds.len() >= 20,
+                "Expected at least 20 render commands, got {}",
+                cmds.len()
+            );
+        }
     }
 
     #[test]
@@ -1696,17 +1763,21 @@ mod tests {
         dialog.push_request(sample_request(1));
         dialog.set_current_time(5000);
 
-        let cmds_collapsed = dialog.render();
-        dialog.details_expanded = true;
-        let cmds_expanded = dialog.render();
+        for light in [false, true] {
+            let p = Palette::for_mode(light);
+            dialog.details_expanded = false;
+            let cmds_collapsed = dialog.render(&p);
+            dialog.details_expanded = true;
+            let cmds_expanded = dialog.render(&p);
 
-        // Expanded should have more commands (the details panel + its contents)
-        assert!(
-            cmds_expanded.len() > cmds_collapsed.len(),
-            "Expanded {} should be > collapsed {}",
-            cmds_expanded.len(),
-            cmds_collapsed.len()
-        );
+            // Expanded should have more commands (the details panel + its contents)
+            assert!(
+                cmds_expanded.len() > cmds_collapsed.len(),
+                "Expanded {} should be > collapsed {}",
+                cmds_expanded.len(),
+                cmds_collapsed.len()
+            );
+        }
     }
 
     #[test]
@@ -1903,8 +1974,10 @@ mod tests {
             created_at_ms: 0,
         });
         // Should render without panic (reason shown as "(no reason provided)")
-        let cmds = dialog.render();
-        assert!(!cmds.is_empty());
+        for light in [false, true] {
+            let cmds = dialog.render(&Palette::for_mode(light));
+            assert!(!cmds.is_empty());
+        }
     }
 
     #[test]

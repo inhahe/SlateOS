@@ -17,7 +17,7 @@
 //!
 //! // Each frame:
 //! pane.tick(dt);
-//! let commands = pane.render(screen_width, screen_height);
+//! let commands = pane.render(&palette, screen_width, screen_height);
 //!
 //! // Drain events to act on:
 //! for event in pane.drain_events() {
@@ -30,6 +30,7 @@
 //! }
 //! ```
 
+use appearance::{Palette, readable_on};
 use guitk::color::Color;
 use guitk::event::{EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use guitk::idseq::IdSeq;
@@ -39,28 +40,37 @@ use guitk::text;
 use guitk::wheel;
 
 // ============================================================================
-// Theme — Catppuccin Mocha palette
+// Colour
 // ============================================================================
-
-mod theme {
-    use guitk::color::Color;
-
-    pub const CRUST: Color = Color::from_hex(0x11111B);
-    pub const SURFACE1: Color = Color::from_hex(0x45475A);
-    pub const SURFACE2: Color = Color::from_hex(0x585B70);
-    pub const TEXT: Color = Color::from_hex(0xCDD6F4);
-    pub const SUBTEXT0: Color = Color::from_hex(0xA6ADC8);
-    pub const SUBTEXT1: Color = Color::from_hex(0xBAC2DE);
-    pub const OVERLAY0: Color = Color::from_hex(0x6C7086);
-    pub const BLUE: Color = Color::from_hex(0x89B4FA);
-    pub const RED: Color = Color::from_hex(0xF38BA8);
-    pub const PEACH: Color = Color::from_hex(0xFAB387);
-    pub const GREEN: Color = Color::from_hex(0xA6E3A1);
-    pub const SHADOW: Color = Color::rgba(0, 0, 0, 120);
-    pub const PANE_BG: Color = Color::from_hex(0x1E1E2E);
-    pub const CARD_BG: Color = Color::from_hex(0x313244);
-    pub const HOVER_BG: Color = Color::from_hex(0x45475A);
-}
+//
+// The pane used to keep fifteen `const`s of its own here, every one of them a
+// Catppuccin Mocha value spelled out a second time. They are gone: the caller
+// passes a resolved [`Palette`] and every colour below is a role on it, so the
+// pane follows the user's mode and accent instead of a copy of one theme that
+// could only ever be dark. See known-issues.md
+// TD-C-FORTY-NINE-SHELL-MODULES-CARRY-THEIR-OWN-COPY-OF-THE-PALETTE.
+//
+// Two of the substitutions are decisions rather than lookups.
+//
+// **A notification's priority is categorical, and stays a fixed hue.** Low,
+// Normal, High and Urgent are four *kinds*, not four intensities of the user's
+// accent, and a user who picks a pink accent has not asked for urgent
+// notifications to stop being red. So `NotifPriority::accent_color` reads
+// `p.overlay0` / `p.blue` / `p.peach` / `p.red` — palette roles, so they still
+// change with the mode, but not with the accent. The rule of thumb is the one
+// the security dialog's risk levels are converted under: *would a user who
+// changed their accent expect this to move?*
+//
+// **Everything that means "this is the interactive thing" becomes the accent.**
+// The unread badge, "Clear all", "Back", a toggle that is on, the filled part of
+// a slider and the settings link were all `BLUE` — Mocha's accent by another
+// name — and they are `p.accent` now, so they all move together when the user
+// picks a different one.
+//
+// The text drawn *on* those two — the count inside the unread badge, the label
+// inside the priority badge — is `readable_on(...)` of whatever it sits on
+// rather than a fixed near-black, because with a user-chosen accent underneath
+// there is no longer one answer that is legible.
 
 // ============================================================================
 // Constants
@@ -236,12 +246,12 @@ impl NotifPriority {
         }
     }
 
-    fn accent_color(self) -> Color {
+    fn accent_color(self, p: &Palette) -> Color {
         match self {
-            Self::Low => theme::OVERLAY0,
-            Self::Normal => theme::BLUE,
-            Self::High => theme::PEACH,
-            Self::Urgent => theme::RED,
+            Self::Low => p.overlay0,
+            Self::Normal => p.blue,
+            Self::High => p.peach,
+            Self::Urgent => p.red,
         }
     }
 }
@@ -972,7 +982,7 @@ impl NotificationPane {
     // The render body builds up its command list incrementally with helper
     // calls between pushes; vec![...] would require relocating all of those.
     #[allow(clippy::vec_init_then_push)]
-    pub fn render(&self, screen_width: f32, screen_height: f32) -> Vec<RenderCommand> {
+    pub fn render(&self, p: &Palette, screen_width: f32, screen_height: f32) -> Vec<RenderCommand> {
         if !self.state.is_visible() {
             return Vec::new();
         }
@@ -987,7 +997,14 @@ impl NotificationPane {
             y: 0.0,
             width: screen_width,
             height: screen_height,
-            color: Color::rgba(0, 0, 0, (60.0 * vis) as u8),
+            color: {
+                // Not a surface but an absence of light, so it is black in
+                // both modes -- the scrim role already says that. The slide
+                // fades it in, so its alpha is the role's scaled by how far
+                // the pane has come out.
+                let s = p.scrim();
+                Color::rgba(s.r, s.g, s.b, (f32::from(s.a) * vis) as u8)
+            },
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -1001,7 +1018,7 @@ impl NotificationPane {
             offset_y: 0.0,
             blur: 16.0,
             spread: 0.0,
-            color: theme::SHADOW,
+            color: p.shadow(),
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -1011,7 +1028,7 @@ impl NotificationPane {
             y: 0.0,
             width: PANE_WIDTH,
             height: screen_height,
-            color: theme::PANE_BG,
+            color: p.base,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -1030,8 +1047,8 @@ impl NotificationPane {
         // Render sections. The offsets come from the same helpers the hit
         // tests use, rather than from adding up what each renderer reports
         // having drawn -- that is how the two drifted 76 px apart.
-        self.render_header(&mut cmds, PANE_PADDING);
-        self.render_quick_settings(&mut cmds, Self::qs_start_y());
+        self.render_header(p, &mut cmds, PANE_PADDING);
+        self.render_quick_settings(p, &mut cmds, Self::qs_start_y());
 
         // Separator, centred in the gap above the list.
         let y = Self::list_start_y();
@@ -1040,14 +1057,14 @@ impl NotificationPane {
             y1: y - QS_SEPARATOR_HEIGHT / 2.0,
             x2: PANE_WIDTH - PANE_PADDING,
             y2: y - QS_SEPARATOR_HEIGHT / 2.0,
-            color: theme::SURFACE1,
+            color: p.surface1,
             width: 1.0,
         });
 
         if self.show_settings {
-            self.render_app_settings(&mut cmds, y, screen_height - y);
+            self.render_app_settings(p, &mut cmds, y, screen_height - y);
         } else {
-            self.render_notifications(&mut cmds, y, screen_height - y);
+            self.render_notifications(p, &mut cmds, y, screen_height - y);
         }
 
         cmds.push(RenderCommand::PopTranslate);
@@ -1056,7 +1073,7 @@ impl NotificationPane {
         cmds
     }
 
-    fn render_header(&self, cmds: &mut Vec<RenderCommand>, y: f32) -> f32 {
+    fn render_header(&self, p: &Palette, cmds: &mut Vec<RenderCommand>, y: f32) -> f32 {
         // Title.
         let title = if self.show_settings {
             "Notification Settings"
@@ -1067,7 +1084,7 @@ impl NotificationPane {
             x: PANE_PADDING,
             y: y + 4.0,
             text: title.to_string(),
-            color: theme::TEXT,
+            color: p.text,
             font_size: 16.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(200.0),
@@ -1087,14 +1104,14 @@ impl NotificationPane {
                 y: y + 4.0,
                 width: 24.0,
                 height: 18.0,
-                color: theme::BLUE,
+                color: p.accent,
                 corner_radii: CornerRadii::all(9.0),
             });
             cmds.push(RenderCommand::Text {
                 x: PANE_PADDING + 126.0,
                 y: y + 6.0,
                 text: badge_text,
-                color: theme::CRUST,
+                color: readable_on(p.accent),
                 font_size: 11.0,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(20.0),
@@ -1109,7 +1126,7 @@ impl NotificationPane {
                 x: clear_x,
                 y: y + 6.0,
                 text: "Clear all".to_string(),
-                color: theme::BLUE,
+                color: p.accent,
                 font_size: 12.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(60.0),
@@ -1122,7 +1139,7 @@ impl NotificationPane {
                 x: gear_x,
                 y: y + 6.0,
                 text: "Settings".to_string(),
-                color: theme::SUBTEXT0,
+                color: p.subtext0,
                 font_size: 12.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(60.0),
@@ -1135,7 +1152,7 @@ impl NotificationPane {
                 x: back_x,
                 y: y + 6.0,
                 text: "Back".to_string(),
-                color: theme::BLUE,
+                color: p.accent,
                 font_size: 12.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(40.0),
@@ -1154,13 +1171,18 @@ impl NotificationPane {
     /// height is derived from those same helpers and is checked against
     /// `QUICK_SETTINGS_HEIGHT` — declared independently from the raw
     /// constants — by `the_quick_settings_block_is_as_tall_as_what_it_draws`.
-    fn render_quick_settings(&self, cmds: &mut Vec<RenderCommand>, start_y: f32) -> f32 {
+    fn render_quick_settings(
+        &self,
+        p: &Palette,
+        cmds: &mut Vec<RenderCommand>,
+        start_y: f32,
+    ) -> f32 {
         // Section title.
         cmds.push(RenderCommand::Text {
             x: PANE_PADDING,
             y: start_y,
             text: "Quick Settings".to_string(),
-            color: theme::SUBTEXT0,
+            color: p.subtext0,
             font_size: 11.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(120.0),
@@ -1171,6 +1193,7 @@ impl NotificationPane {
         for (idx, qs) in QuickSetting::all().iter().enumerate() {
             let enabled = self.quick_settings.get(*qs);
             self.render_toggle_row(
+                p,
                 cmds,
                 PANE_PADDING,
                 start_y + Self::qs_toggle_top(idx),
@@ -1181,6 +1204,7 @@ impl NotificationPane {
 
         // Volume slider.
         self.render_slider_row(
+            p,
             cmds,
             PANE_PADDING,
             start_y + Self::qs_slider_top(0),
@@ -1190,6 +1214,7 @@ impl NotificationPane {
 
         // Brightness slider.
         self.render_slider_row(
+            p,
             cmds,
             PANE_PADDING,
             start_y + Self::qs_slider_top(1),
@@ -1202,6 +1227,7 @@ impl NotificationPane {
 
     fn render_toggle_row(
         &self,
+        p: &Palette,
         cmds: &mut Vec<RenderCommand>,
         x: f32,
         y: f32,
@@ -1213,7 +1239,7 @@ impl NotificationPane {
             x,
             y: y + 8.0,
             text: label.to_string(),
-            color: theme::TEXT,
+            color: p.text,
             font_size: 13.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(180.0),
@@ -1222,11 +1248,7 @@ impl NotificationPane {
 
         // Toggle pill.
         let pill_x = PANE_WIDTH - PANE_PADDING - TOGGLE_WIDTH - PANE_PADDING;
-        let pill_bg = if enabled {
-            theme::BLUE
-        } else {
-            theme::SURFACE2
-        };
+        let pill_bg = if enabled { p.accent } else { p.surface2 };
         cmds.push(RenderCommand::FillRect {
             x: pill_x,
             y: y + 6.0,
@@ -1248,13 +1270,14 @@ impl NotificationPane {
             y: y + 8.0,
             width: knob_radius * 2.0,
             height: knob_radius * 2.0,
-            color: theme::TEXT,
+            color: p.text,
             corner_radii: CornerRadii::all(knob_radius),
         });
     }
 
     fn render_slider_row(
         &self,
+        p: &Palette,
         cmds: &mut Vec<RenderCommand>,
         x: f32,
         y: f32,
@@ -1266,7 +1289,7 @@ impl NotificationPane {
             x,
             y: y + 8.0,
             text: format!("{label}  {value}%"),
-            color: theme::TEXT,
+            color: p.text,
             font_size: 13.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(180.0),
@@ -1281,7 +1304,7 @@ impl NotificationPane {
             y: track_y,
             width: SLIDER_WIDTH,
             height: SLIDER_HEIGHT,
-            color: theme::SURFACE2,
+            color: p.surface2,
             corner_radii: CornerRadii::all(SLIDER_HEIGHT / 2.0),
         });
 
@@ -1292,7 +1315,7 @@ impl NotificationPane {
             y: track_y,
             width: filled_width,
             height: SLIDER_HEIGHT,
-            color: theme::BLUE,
+            color: p.accent,
             corner_radii: CornerRadii::all(SLIDER_HEIGHT / 2.0),
         });
 
@@ -1303,13 +1326,14 @@ impl NotificationPane {
             y: track_y - 3.0,
             width: 12.0,
             height: 12.0,
-            color: theme::TEXT,
+            color: p.text,
             corner_radii: CornerRadii::all(6.0),
         });
     }
 
     fn render_notifications(
         &self,
+        p: &Palette,
         cmds: &mut Vec<RenderCommand>,
         start_y: f32,
         available_height: f32,
@@ -1327,7 +1351,7 @@ impl NotificationPane {
                 x: PANE_WIDTH / 2.0 - 80.0,
                 y: start_y + 60.0,
                 text: "No notifications".to_string(),
-                color: theme::OVERLAY0,
+                color: p.overlay0,
                 font_size: 14.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(160.0),
@@ -1356,7 +1380,7 @@ impl NotificationPane {
                         x: PANE_PADDING,
                         y: header_y + 6.0,
                         text: group.label().to_string(),
-                        color: theme::SUBTEXT0,
+                        color: p.subtext0,
                         font_size: 11.0,
                         font_weight: FontWeightHint::Bold,
                         max_width: Some(100.0),
@@ -1374,7 +1398,7 @@ impl NotificationPane {
                 break;
             }
 
-            self.render_notification_card(cmds, idx, notif, PANE_PADDING, y);
+            self.render_notification_card(p, cmds, idx, notif, PANE_PADDING, y);
         }
 
         cmds.push(RenderCommand::PopClip);
@@ -1382,6 +1406,7 @@ impl NotificationPane {
 
     fn render_notification_card(
         &self,
+        p: &Palette,
         cmds: &mut Vec<RenderCommand>,
         idx: usize,
         notif: &Notification,
@@ -1390,11 +1415,7 @@ impl NotificationPane {
     ) {
         let card_width = Self::card_width();
         let is_hovered = self.hovered_notif == Some(idx);
-        let bg = if is_hovered {
-            theme::HOVER_BG
-        } else {
-            theme::CARD_BG
-        };
+        let bg = if is_hovered { p.surface1 } else { p.surface0 };
 
         // Card background.
         cmds.push(RenderCommand::FillRect {
@@ -1413,7 +1434,7 @@ impl NotificationPane {
                 y: y + 4.0,
                 width: 3.0,
                 height: NOTIF_CARD_HEIGHT - 8.0,
-                color: notif.priority.accent_color(),
+                color: notif.priority.accent_color(p),
                 corner_radii: CornerRadii::all(1.5),
             });
         }
@@ -1423,7 +1444,7 @@ impl NotificationPane {
             x: x + 12.0,
             y: y + 8.0,
             text: notif.app_name.clone(),
-            color: theme::SUBTEXT0,
+            color: p.subtext0,
             font_size: 11.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(card_width - 50.0),
@@ -1436,7 +1457,7 @@ impl NotificationPane {
             x: x + card_width - 60.0,
             y: y + 8.0,
             text: time_str,
-            color: theme::OVERLAY0,
+            color: p.overlay0,
             font_size: 10.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(55.0),
@@ -1448,7 +1469,7 @@ impl NotificationPane {
             x: x + 12.0,
             y: y + 26.0,
             text: notif.title.clone(),
-            color: theme::TEXT,
+            color: p.text,
             font_size: 13.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(card_width - 40.0),
@@ -1467,7 +1488,7 @@ impl NotificationPane {
                 BODY_FONT_SIZE,
                 FontWeightHint::Regular,
             ),
-            color: theme::SUBTEXT1,
+            color: p.subtext1,
             font_size: BODY_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: Some(card_width - BODY_INSET),
@@ -1483,7 +1504,7 @@ impl NotificationPane {
                 y: btn_y,
                 width: DISMISS_BTN_SIZE,
                 height: DISMISS_BTN_SIZE,
-                color: theme::SURFACE2,
+                color: p.surface2,
                 corner_radii: CornerRadii::all(DISMISS_BTN_SIZE / 2.0),
             });
             // "X" glyph.
@@ -1491,7 +1512,7 @@ impl NotificationPane {
                 x: btn_x + 5.0,
                 y: btn_y + 2.0,
                 text: "x".to_string(),
-                color: theme::TEXT,
+                color: p.text,
                 font_size: 12.0,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
@@ -1502,6 +1523,7 @@ impl NotificationPane {
 
     fn render_app_settings(
         &self,
+        p: &Palette,
         cmds: &mut Vec<RenderCommand>,
         start_y: f32,
         available_height: f32,
@@ -1518,7 +1540,7 @@ impl NotificationPane {
             x: PANE_PADDING,
             y: start_y,
             text: "Per-App Settings".to_string(),
-            color: theme::SUBTEXT0,
+            color: p.subtext0,
             font_size: 11.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(150.0),
@@ -1542,7 +1564,7 @@ impl NotificationPane {
                 y,
                 width: card_width,
                 height: APP_CARD_HEIGHT,
-                color: theme::CARD_BG,
+                color: p.surface0,
                 corner_radii: CornerRadii::all(CARD_RADIUS),
             });
 
@@ -1551,7 +1573,7 @@ impl NotificationPane {
                 x: PANE_PADDING + 12.0,
                 y: y + 10.0,
                 text: app.app_name.clone(),
-                color: theme::TEXT,
+                color: p.text,
                 font_size: 13.0,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(200.0),
@@ -1559,7 +1581,7 @@ impl NotificationPane {
             });
 
             // Priority badge.
-            let prio_color = app.priority.accent_color();
+            let prio_color = app.priority.accent_color(p);
             cmds.push(RenderCommand::FillRect {
                 x: PANE_PADDING + 12.0,
                 y: y + 32.0,
@@ -1572,7 +1594,7 @@ impl NotificationPane {
                 x: PANE_PADDING + 16.0,
                 y: y + 34.0,
                 text: app.priority.label().to_string(),
-                color: theme::CRUST,
+                color: readable_on(prio_color),
                 font_size: 10.0,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(45.0),
@@ -1581,11 +1603,7 @@ impl NotificationPane {
 
             // Enabled toggle.
             let (pill_x, pill_y, pill_w, pill_h) = Self::app_toggle_rect(y);
-            let pill_bg = if app.enabled {
-                theme::GREEN
-            } else {
-                theme::SURFACE2
-            };
+            let pill_bg = if app.enabled { p.green } else { p.surface2 };
             cmds.push(RenderCommand::FillRect {
                 x: pill_x,
                 y: pill_y,
@@ -1610,7 +1628,7 @@ impl NotificationPane {
                 x: PANE_PADDING + 12.0,
                 y: y + 60.0,
                 text: status_parts.join(" | "),
-                color: theme::OVERLAY0,
+                color: p.overlay0,
                 font_size: 11.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(card_width - 30.0),
@@ -1625,7 +1643,7 @@ impl NotificationPane {
                 x: PANE_PADDING,
                 y: start_y + Self::app_card_top(self.app_settings.len()) + 12.0,
                 text: "Open full notification settings...".to_string(),
-                color: theme::BLUE,
+                color: p.accent,
                 font_size: 12.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(250.0),
@@ -1862,6 +1880,7 @@ mod tests {
     #![allow(clippy::float_cmp)]
 
     use super::*;
+    use crate::palette_check;
 
     fn make_notif(app: &str, title: &str, ts: u64) -> Notification {
         Notification {
@@ -1933,9 +1952,20 @@ mod tests {
     /// catch the renderer and the hit test disagreeing — they would both be
     /// wrong together and the test would still pass. Only the drawn output is
     /// independent evidence.
+    /// The palette the tests below render against.
+    ///
+    /// They are about *where* the pane paints and *what shape*, not what
+    /// colour, so they pick one mode and stay in it. The tests that are
+    /// about colour --- `every_colour_the_pane_draws_comes_from_its_palette`
+    /// and `a_notification_priority_does_not_follow_the_accent` --- render
+    /// both modes, which is the whole point of them.
+    fn test_palette() -> Palette {
+        Palette::for_mode(false)
+    }
+
     fn painted_card_tops(pane: &NotificationPane) -> Vec<f32> {
         let card_width = PANE_WIDTH - 2.0 * PANE_PADDING;
-        pane.render(SCREEN_W, TEST_SCREEN_H)
+        pane.render(&test_palette(), SCREEN_W, TEST_SCREEN_H)
             .iter()
             .filter_map(|cmd| match cmd {
                 RenderCommand::FillRect {
@@ -2040,7 +2070,7 @@ mod tests {
         let mut pane = NotificationPane::new();
         pane.state = PaneState::Visible;
         let mut cmds = Vec::new();
-        let drawn = pane.render_quick_settings(&mut cmds, 0.0);
+        let drawn = pane.render_quick_settings(&test_palette(), &mut cmds, 0.0);
         assert_eq!(
             drawn, QUICK_SETTINGS_HEIGHT,
             "the constant the hit test uses must be what the renderer draws"
@@ -2061,7 +2091,7 @@ mod tests {
     /// paints six pixels down.
     fn painted_toggle_tops(pane: &NotificationPane) -> Vec<f32> {
         let mut cmds = Vec::new();
-        pane.render_quick_settings(&mut cmds, 0.0);
+        pane.render_quick_settings(&test_palette(), &mut cmds, 0.0);
         cmds.iter()
             .filter_map(|cmd| match cmd {
                 RenderCommand::FillRect {
@@ -2076,8 +2106,9 @@ mod tests {
     /// each paints fourteen pixels down. The filled portion and the thumb are
     /// excluded by colour, so a slider at 100% is not counted twice.
     fn painted_slider_tops(pane: &NotificationPane) -> Vec<f32> {
+        let p = test_palette();
         let mut cmds = Vec::new();
-        pane.render_quick_settings(&mut cmds, 0.0);
+        pane.render_quick_settings(&p, &mut cmds, 0.0);
         cmds.iter()
             .filter_map(|cmd| match cmd {
                 RenderCommand::FillRect {
@@ -2086,10 +2117,7 @@ mod tests {
                     height,
                     color,
                     ..
-                } if *width == SLIDER_WIDTH
-                    && *height == SLIDER_HEIGHT
-                    && *color == theme::SURFACE2 =>
-                {
+                } if *width == SLIDER_WIDTH && *height == SLIDER_HEIGHT && *color == p.surface2 => {
                     Some(*y - 14.0)
                 }
                 _ => None,
@@ -2286,7 +2314,7 @@ mod tests {
     /// command list by shape alone picks up nine rectangles for four cards.
     /// The caption is the boundary between the two.
     fn app_settings_commands(pane: &NotificationPane) -> Vec<RenderCommand> {
-        let cmds = pane.render(SCREEN_W, TEST_SCREEN_H);
+        let cmds = pane.render(&test_palette(), SCREEN_W, TEST_SCREEN_H);
         let start = cmds
             .iter()
             .position(
@@ -3009,7 +3037,7 @@ mod tests {
     #[test]
     fn render_returns_empty_when_hidden() {
         let pane = NotificationPane::new();
-        let cmds = pane.render(1920.0, 1080.0);
+        let cmds = pane.render(&test_palette(), 1920.0, 1080.0);
         assert!(cmds.is_empty());
     }
 
@@ -3018,7 +3046,7 @@ mod tests {
         let mut pane = NotificationPane::new();
         pane.state = PaneState::Visible;
         pane.push_notification(make_notif("Test", "Hello", 100));
-        let cmds = pane.render(1920.0, 1080.0);
+        let cmds = pane.render(&test_palette(), 1920.0, 1080.0);
         assert!(!cmds.is_empty());
     }
 
@@ -3082,11 +3110,12 @@ mod tests {
         notif.body = body.to_string();
         pane.push_notification(notif);
         pane.state = PaneState::Visible;
-        pane.render(1920.0, 1080.0)
+        pane.render(&test_palette(), 1920.0, 1080.0)
     }
 
     /// The body previews drawn by `pane_showing_body`: `(text, max_width)`.
     fn body_previews(cmds: &[RenderCommand]) -> Vec<(String, f32)> {
+        let p = test_palette();
         cmds.iter()
             .filter_map(|c| match c {
                 RenderCommand::Text {
@@ -3096,9 +3125,7 @@ mod tests {
                     overflow: TextOverflow::Ellipsis,
                     color,
                     ..
-                } if (*font_size - BODY_FONT_SIZE).abs() < f32::EPSILON
-                    && *color == theme::SUBTEXT1 =>
-                {
+                } if (*font_size - BODY_FONT_SIZE).abs() < f32::EPSILON && *color == p.subtext1 => {
                     Some((text.clone(), *w))
                 }
                 _ => None,
@@ -3161,6 +3188,186 @@ mod tests {
         assert!(
             previews[0].0.len() < body.len(),
             "expected the body to be shortened"
+        );
+    }
+    // ========================================================================
+    // Colour
+    // ========================================================================
+
+    /// A pane wound into one particular state, for the colour sweeps below.
+    ///
+    /// Every knob that changes *which* colours get drawn is a parameter: a
+    /// leftover constant is only caught if the sweep renders the state that
+    /// draws it, and half of this module's colours are behind something — the
+    /// dismiss button behind a hover, the per-app pill behind the settings
+    /// view, the "No notifications" caption behind an empty list.
+    fn wound_pane(
+        priority: NotifPriority,
+        show_settings: bool,
+        read: bool,
+        hovered: bool,
+        enabled: bool,
+        empty: bool,
+    ) -> NotificationPane {
+        let mut pane = NotificationPane::new();
+        pane.state = PaneState::Visible;
+        pane.show_settings = show_settings;
+        if !empty {
+            let mut notif = make_notif("Mail", "A title", 1_000);
+            notif.priority = priority;
+            notif.read = read;
+            pane.push_notification(notif);
+            for app in &mut pane.app_settings {
+                app.priority = priority;
+                app.enabled = enabled;
+            }
+            if hovered {
+                pane.hovered_notif = Some(0);
+            }
+        }
+        pane.current_time = 1_000;
+        pane.set_screen_height(TEST_SCREEN_H);
+        pane
+    }
+
+    /// Every colour the pane paints is a role on the palette it was handed.
+    ///
+    /// Rendered in *both* modes, and it is the light render that does the work:
+    /// the fifteen constants deleted from this module were Catppuccin Mocha
+    /// values, none of which appear in Latte, so one left behind names itself.
+    ///
+    /// What this cannot see is a colour converted to the *wrong* role — a role
+    /// is a member of both palettes and passes in light exactly as in dark.
+    /// That is what the test below it is for.
+    #[test]
+    fn every_colour_the_pane_draws_comes_from_its_palette() {
+        let priorities = [
+            NotifPriority::Low,
+            NotifPriority::Normal,
+            NotifPriority::High,
+            NotifPriority::Urgent,
+        ];
+        for light in [false, true] {
+            let p = Palette::for_mode(light);
+            for priority in priorities {
+                for show_settings in [false, true] {
+                    for read in [false, true] {
+                        for hovered in [false, true] {
+                            for enabled in [false, true] {
+                                for empty in [false, true] {
+                                    let pane = wound_pane(
+                                        priority,
+                                        show_settings,
+                                        read,
+                                        hovered,
+                                        enabled,
+                                        empty,
+                                    );
+                                    let cmds = pane.render(&p, SCREEN_W, TEST_SCREEN_H);
+                                    assert!(!cmds.is_empty(), "a visible pane draws something");
+                                    palette_check::assert_drawn_from(&p, &cmds, &[], "notif_pane");
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Mid-slide, where the scrim is the palette's at a fraction of its
+        // alpha rather than at full strength. The sweep accepts black at any
+        // alpha, so what is being checked here is that the *colour* is still
+        // the scrim's and not something mixed by hand.
+        for light in [false, true] {
+            let p = Palette::for_mode(light);
+            for progress in [0.0_f32, 0.25, 0.5, 1.0] {
+                for state in [PaneState::SlideIn(progress), PaneState::SlideOut(progress)] {
+                    let mut pane =
+                        wound_pane(NotifPriority::Urgent, false, false, false, true, false);
+                    pane.state = state;
+                    let cmds = pane.render(&p, SCREEN_W, TEST_SCREEN_H);
+                    palette_check::assert_drawn_from(&p, &cmds, &[], "notif_pane mid-slide");
+                }
+            }
+        }
+    }
+
+    /// A notification's priority is a *kind*, not an intensity of the user's
+    /// accent, so changing the accent must not repaint it.
+    ///
+    /// This is the assertion the sweep above structurally cannot make. Both
+    /// `p.accent` and `p.red` are members of the palette, so a priority bar
+    /// wrongly painted in the accent passes the sweep in either mode; only
+    /// rendering twice with two *different accents* and comparing tells them
+    /// apart. Low is excluded from the "differs" half because `overlay0` is a
+    /// grey that no accent preset equals, which would make the check vacuous
+    /// in the other direction — it is still checked for stability.
+    #[test]
+    fn a_notification_priority_does_not_follow_the_accent() {
+        // The bar and the badge are the two places a priority is painted; both
+        // are `FillRect`s three and fifty pixels wide respectively.
+        let painted_priorities = |accent: Color| -> Vec<Color> {
+            let mut p = Palette::for_mode(false);
+            p.accent = accent;
+            let mut out = Vec::new();
+            for show_settings in [false, true] {
+                for priority in [
+                    NotifPriority::Low,
+                    NotifPriority::Normal,
+                    NotifPriority::High,
+                    NotifPriority::Urgent,
+                ] {
+                    let pane = wound_pane(priority, show_settings, false, false, true, false);
+                    for cmd in pane.render(&p, SCREEN_W, TEST_SCREEN_H) {
+                        if let RenderCommand::FillRect { width, color, .. } = cmd
+                            && (width == 3.0 || width == 50.0)
+                        {
+                            out.push(color);
+                        }
+                    }
+                }
+            }
+            out
+        };
+
+        let default_accent = Palette::for_mode(false).blue;
+        let other_accent = Palette::for_mode(false).mauve;
+        assert_ne!(
+            default_accent, other_accent,
+            "the two accents must differ or this test proves nothing"
+        );
+
+        let with_blue = painted_priorities(default_accent);
+        let with_mauve = painted_priorities(other_accent);
+        assert!(
+            !with_blue.is_empty(),
+            "no priority-coloured rectangle was found to check"
+        );
+        assert_eq!(
+            with_blue, with_mauve,
+            "a priority colour moved when the accent did"
+        );
+
+        // And the accent-following parts *did* move, so the comparison above
+        // is not passing because the two renders are identical everywhere.
+        let accented = |accent: Color| -> Vec<Color> {
+            let mut p = Palette::for_mode(false);
+            p.accent = accent;
+            let pane = wound_pane(NotifPriority::Normal, false, false, false, true, false);
+            pane.render(&p, SCREEN_W, TEST_SCREEN_H)
+                .into_iter()
+                .filter_map(|c| match c {
+                    RenderCommand::FillRect { width, color, .. } if width == TOGGLE_WIDTH => {
+                        Some(color)
+                    }
+                    _ => None,
+                })
+                .collect()
+        };
+        assert_ne!(
+            accented(default_accent),
+            accented(other_accent),
+            "nothing followed the accent, so this test cannot be measuring anything"
         );
     }
 }

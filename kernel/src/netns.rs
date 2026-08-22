@@ -230,39 +230,50 @@ impl NetNsTable {
 
 static TABLE: Mutex<Option<NetNsTable>> = Mutex::new(None);
 
-/// Check if the network namespace subsystem has been initialized.
+/// Check if the network namespace subsystem is usable.
 ///
-/// The `net` module calls this before syncing interface configuration
-/// to the root namespace, because `net::init()` runs before `netns::init()`
-/// at boot time.
+/// Always true: the accessors below build the table on first use, so there is
+/// no window in which a namespace call is unsafe.  Retained because callers in
+/// `net` used it to dodge the panic the accessors used to raise, and it is
+/// cheaper to keep the predicate honest than to have those call sites guess.
 #[must_use]
 pub fn is_initialized() -> bool {
-    TABLE.lock().is_some()
+    true
 }
 
 /// Initialize the network namespace subsystem.
+///
+/// Idempotent, and not a precondition for using the rest of the module.  It
+/// must not *replace* an existing table: `net::init()` runs before this at
+/// boot and pushes the root interface config in via `configure_interface`, so
+/// overwriting here would silently discard that config.  All this does is
+/// force the lazy construction to happen at a known point, and log it.
 pub fn init() {
     let mut table = TABLE.lock();
-    *table = Some(NetNsTable::new());
+    let _ = table.get_or_insert_with(NetNsTable::new);
     serial_println!("[netns] Initialized ({} max namespaces)", MAX_NAMESPACES);
 }
 
+// The `Option` in `TABLE` is an initialization-order artifact, not a state any
+// caller should be able to observe: `Mutex::new` needs a const initializer and
+// `NetNsTable::new()` is not const.  Constructing on first use rather than
+// unwrapping keeps that artifact invisible -- a caller that runs before
+// `init()` gets the correct table instead of panicking the kernel, so the
+// ordering hazard cannot become a DoS.
 fn with_table<F, R>(f: F) -> R
 where
     F: FnOnce(&mut NetNsTable) -> R,
 {
     let mut guard = TABLE.lock();
-    let table = guard.as_mut().expect("[netns] not initialized");
-    f(table)
+    f(guard.get_or_insert_with(NetNsTable::new))
 }
 
 fn with_table_ref<F, R>(f: F) -> R
 where
     F: FnOnce(&NetNsTable) -> R,
 {
-    let guard = TABLE.lock();
-    let table = guard.as_ref().expect("[netns] not initialized");
-    f(table)
+    let mut guard = TABLE.lock();
+    f(guard.get_or_insert_with(NetNsTable::new))
 }
 
 // ---------------------------------------------------------------------------

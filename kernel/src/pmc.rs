@@ -214,8 +214,12 @@ pub fn start(counter: u8) -> bool {
     // SAFETY: PMU v2+ supports global control; v1 may not have this MSR,
     // but writing it on v1 is a no-op on most CPUs (the PERFEVTSELx EN
     // bit alone controls counting on v1).
-    let features = cpu::features().unwrap();
-    if features.pmu_version >= 2 {
+    //
+    // `is_some_and` rather than an unwrap: `is_available()` above already
+    // proved this is `Some`, so the `None` arm is dead -- but writing it as a
+    // panic makes a future caller that reorders those two lines fatal instead
+    // of merely wrong, and v1 semantics make `false` the right dead-arm value.
+    if cpu::features().is_some_and(|f| f.pmu_version >= 2) {
         unsafe {
             let ctrl = cpu::rdmsr(MSR_PERF_GLOBAL_CTRL);
             cpu::wrmsr(MSR_PERF_GLOBAL_CTRL, ctrl | (1u64 << counter));
@@ -261,7 +265,12 @@ pub fn read(counter: u8) -> u64 {
     let raw = unsafe { cpu::rdmsr(pmc_msr) };
 
     // Mask to the actual counter width to avoid sign-extension artifacts.
-    let width = cpu::features().unwrap().pmu_counter_width;
+    //
+    // The `None` arm is dead -- `is_available()` above already proved this is
+    // `Some` -- but 64 is the right value for it regardless: it means "do not
+    // mask", so an unknown width returns the raw MSR rather than a reading
+    // silently truncated to zero (which is what a `0` default would do here).
+    let width = cpu::features().map_or(64, |f| f.pmu_counter_width);
     if width >= 64 {
         raw
     } else {

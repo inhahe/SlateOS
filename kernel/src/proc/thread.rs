@@ -686,6 +686,27 @@ pub fn on_thread_exit(task_id: TaskId) -> Option<ProcessId> {
     // thread's address space.
     super::thread_clone::on_thread_exit_hook(task_id);
 
+    // Sever this thread from the process address space, *before* anything
+    // below can publish the process as a reapable zombie.
+    //
+    // `pcb::destroy` frees the process PML4 page, and its safety contract is
+    // "no CPU has this PML4 loaded in CR3".  Nothing established that: the
+    // zombie transition in `pcb::remove_thread` below both prints
+    // "now zombie" and wakes the reaper, while this very task is still
+    // running kernel code on the doomed page tables — and still has them
+    // recorded in its `Task`, so `schedule_inner` would reload the freed
+    // frame into CR3 on the way back in to finish exiting.  A reaper that
+    // preempts that window kills the machine with no panic and no fault
+    // report, because the tables mapping the fault handler are gone.  See
+    // `B-FORKEXEC-BOOT-HANG` and `sched::detach_address_space`, which is the
+    // analogue of Linux's `exit_mm()` → `switch_mm(&init_mm)`.
+    //
+    // This must come *after* `on_thread_exit_hook`, which is the last thing
+    // in the exit path that touches this thread's user memory (the ctid
+    // zero-write, the robust-list and PI-futex walks) and therefore the last
+    // thing that needs its address space to be the live one.
+    sched::detach_address_space(task_id);
+
     // Release a thread parked in `join(task_id)`.
     //
     // This lives here — the *universal* thread-death hook — rather than
@@ -1135,7 +1156,119 @@ pub fn self_test() -> KernelResult<()> {
     test_detached_exit_not_retained()?;
     test_killed_thread_does_not_join_normally()?;
     test_kill_thread_cleans_up()?;
+    test_exit_detaches_address_space()?;
 
+    Ok(())
+}
+
+/// Test 11: a thread stops referencing its process address space *before*
+/// the process is published as a reapable zombie.
+///
+/// Regression test for `B-FORKEXEC-BOOT-HANG` — a use-after-free of page
+/// tables.  [`pcb::destroy`] frees the process PML4 page outright and its
+/// safety contract is "no CPU has this PML4 loaded in CR3"; nothing
+/// established that.  The zombie transition happens *inside*
+/// [`on_thread_exit`], which runs on the dying thread itself and wakes the
+/// reaper — so a reaper could free the page tables while the dying thread
+/// was still executing kernel code on them, and while its `Task` still
+/// recorded them for the next CR3 reload.  The result is a machine that
+/// stops with no panic and no fault report, because the tables mapping the
+/// fault handler have been freed.
+///
+/// The invariant this pins is the one `destroy` actually needs: **at the
+/// instant the process becomes `Zombie`, no task still names its PML4.**
+///
+/// The victim is spawned *suspended* and never admitted, so it cannot have
+/// run, cannot be mid-exit on another CPU, and cannot race the assertions —
+/// which makes the test deterministic rather than dependent on hitting the
+/// narrow preemption window that made the original bug intermittent.
+fn test_exit_detaches_address_space() -> KernelResult<()> {
+    use core::sync::atomic::AtomicU64;
+
+    let pid = pcb::create("thread-test-as-detach", 0);
+
+    let Some(pml4) = pcb::get_pml4(pid) else {
+        serial_println!("[thread]   FAIL: new process has no PML4 to detach from");
+        pcb::destroy(pid);
+        return Err(KernelError::InternalError);
+    };
+    if pml4 == 0 {
+        // `pcb::create` falls back to the kernel address space when the
+        // PML4 allocation fails.  There is then nothing to detach and
+        // nothing that could be freed underneath a runner, so the test has
+        // no subject — say so rather than passing vacuously.
+        serial_println!(
+            "[thread]   SKIP: address-space detach — process fell back to the kernel PML4 \
+             (allocation failure), so there is no per-process page table to detach from"
+        );
+        pcb::destroy(pid);
+        return Ok(());
+    }
+
+    let counter = AtomicU64::new(0);
+    let counter_ptr = &counter as *const AtomicU64 as u64;
+
+    // Suspended: registered with the process (so its exit will zombify it)
+    // but never runnable, hence never able to touch `counter` after this
+    // stack frame goes away.
+    let task_id = spawn_suspended_with_tls(
+        pid,
+        b"as-detach-victim",
+        sched::task::DEFAULT_PRIORITY,
+        test_thread_entry,
+        counter_ptr,
+        0,
+        0,
+    )?;
+
+    let cleanup = |tid: TaskId, pid: ProcessId| {
+        sched::kill_task(tid);
+        pcb::destroy(pid);
+    };
+
+    // Precondition: the task really is running in the process address
+    // space, so a detach is something the test can distinguish.
+    if sched::task_pml4(task_id) != Some(pml4) {
+        serial_println!(
+            "[thread]   FAIL: task {} should start out on the process PML4 {:#x}, got {:?}",
+            task_id,
+            pml4,
+            sched::task_pml4(task_id)
+        );
+        cleanup(task_id, pid);
+        return Err(KernelError::InternalError);
+    }
+
+    // The last thread exits: this both detaches the address space and
+    // publishes the zombie.  Order is the whole point.
+    on_thread_exit(task_id);
+
+    if pcb::state(pid) != Some(ProcessState::Zombie) {
+        serial_println!(
+            "[thread]   FAIL: process should be Zombie after its last thread exits, got {:?}",
+            pcb::state(pid)
+        );
+        cleanup(task_id, pid);
+        return Err(KernelError::InternalError);
+    }
+
+    match sched::task_pml4(task_id) {
+        Some(0) => {}
+        other => {
+            serial_println!(
+                "[thread]   FAIL: task {} still names PML4 {:?} after its process zombified — \
+                 a reaper calling pcb::destroy would free page tables the scheduler will \
+                 reload into CR3 (B-FORKEXEC-BOOT-HANG)",
+                task_id,
+                other
+            );
+            cleanup(task_id, pid);
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    cleanup(task_id, pid);
+    serial_println!("[thread]   Exit detaches the process address space before zombie: OK");
     Ok(())
 }
 

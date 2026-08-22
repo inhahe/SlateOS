@@ -1656,6 +1656,98 @@ pub fn yield_now() {
     schedule_inner(true, SwitchKind::Voluntary);
 }
 
+/// The PML4 physical address a task's context switch will load into CR3,
+/// or `Some(0)` for a task running in the kernel address space.
+///
+/// Returns `None` if no such task exists.  Exists so the address-space
+/// detach performed at thread exit is *observable* — a regression test can
+/// assert that a zombied process is referenced by no task before anything
+/// frees its page tables.  See [`detach_address_space`].
+#[must_use]
+pub fn task_pml4(task_id: TaskId) -> Option<u64> {
+    SCHED.lock().tasks.get(&task_id).map(|t| t.pml4_phys)
+}
+
+/// Detach a dying task from its process address space, moving it onto the
+/// kernel PML4.
+///
+/// # Why this exists
+///
+/// `pcb::destroy` frees a process's PML4 page outright, and its safety
+/// contract is "no CPU has this PML4 loaded in CR3".  Nothing used to
+/// establish that.  A process is published as `Zombie` by
+/// `proc::thread::on_thread_exit`, which runs *on the dying task itself*
+/// and then wakes the reaper — while that task is still executing kernel
+/// code on the doomed page tables and still has `pml4_phys` recorded in
+/// its `Task`.  A reaper that preempts the window between the zombie
+/// announcement and the final `schedule_inner` can free the PML4 out from
+/// under a running CPU; when the dying task is switched back in to finish
+/// exiting, [`schedule_inner`] reloads that freed frame into CR3.  The
+/// machine then dies silently — no panic, no fault we can report, because
+/// the page tables describing the fault handler are gone.  That is
+/// `B-FORKEXEC-BOOT-HANG`.
+///
+/// This is Linux's `exit_mm()` → `switch_mm(&init_mm)` step: sever the
+/// dying thread from the address space *before* anyone can observe the
+/// process as reapable.  The kernel half (PML4 entries 256-511) is cloned
+/// into every process PML4 from the kernel one, so the running kernel
+/// stack, code and heap are mapped identically either side of the switch.
+///
+/// Both halves of the detach matter and neither is sufficient alone:
+///
+/// * clearing `Task::pml4_phys` stops the *next* switch-in from restoring
+///   a freed frame into CR3;
+/// * writing CR3 now stops the *current* execution from depending on it.
+///
+/// Clearing the field also keeps `schedule_inner`'s `old_pml4 != new_pml4`
+/// short-circuit honest: the recorded value and the live CR3 agree.
+///
+/// Only the *current* task's CR3 can be rewritten (CR3 is per-CPU and we
+/// can only write our own), so for a task that is not the caller this
+/// clears the recorded PML4 only.  That is still correct and still
+/// valuable: such a task has already been marked `Dead` by `kill_task`
+/// before `on_thread_exit` runs, so it will never be switched in again —
+/// and if the scheduler is ever changed such that it could be, it will
+/// come back on the kernel address space rather than a freed one.
+///
+/// Returns `true` if the task was found and had a process address space
+/// to detach from.  Idempotent: a second call is a no-op.
+pub fn detach_address_space(task_id: TaskId) -> bool {
+    let detached = {
+        let mut state = SCHED.lock();
+        match state.tasks.get_mut(&task_id) {
+            Some(task) if task.pml4_phys != 0 => {
+                task.pml4_phys = 0;
+                true
+            }
+            _ => false,
+        }
+    };
+
+    // Rewriting CR3 is only meaningful — and only possible — for the task
+    // executing this code.  Done outside the SCHED lock: `write_cr3` flushes
+    // the TLB, and holding the scheduler lock across it would put a TLB
+    // flush inside the kernel's hottest critical section for no reason.
+    if detached && task_id == load_current_task() {
+        let kernel_pml4 = KERNEL_PML4.load(Ordering::Acquire);
+        // A zero here would mean `sched::init` never ran, which cannot be
+        // true if a task is exiting; guard anyway rather than load CR3 with
+        // a null pointer and triple-fault.
+        if kernel_pml4 != 0 && crate::mm::page_table::active_pml4_phys() != kernel_pml4 {
+            // SAFETY: `kernel_pml4` is the PML4 that was active when
+            // `sched::init` ran, i.e. the one the kernel booted on.  Every
+            // process PML4 clones its kernel half from it, so the code and
+            // stack executing right now are mapped at the same addresses
+            // through it.  We only ever touch our own CPU's CR3.
+            unsafe {
+                crate::mm::page_table::write_cr3(kernel_pml4);
+            }
+        }
+    }
+
+    detached
+}
+
 /// Mark the current task as dead and yield to the next task.
 ///
 /// Called by `task_finished` (the context trampoline) when a task's
@@ -1663,6 +1755,13 @@ pub fn yield_now() {
 /// queue.
 pub fn task_exit() {
     let current_id = load_current_task();
+
+    // Backstop for the address-space detach that `proc::thread::on_thread_exit`
+    // performs before it publishes the zombie.  Kernel tasks and any exit path
+    // that bypasses `on_thread_exit` land here instead; for everything else
+    // this is the idempotent second call and does nothing.
+    detach_address_space(current_id);
+
     TASKS_EXITED.fetch_add(1, Ordering::Relaxed);
     crate::ktrace::record(
         crate::ktrace::Category::Sched,

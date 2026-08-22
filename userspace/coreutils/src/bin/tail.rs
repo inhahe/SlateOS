@@ -2051,8 +2051,8 @@ mod tests {
         assert_eq!(operands(&["--follow", "name"]), vec!["name"]);
         assert_eq!(
             body(&fail(&["--follow=x"])),
-            "invalid argument 'x' for '--follow'\n\
-             Valid arguments are:\n  - 'descriptor'\n  - 'name'"
+            "invalid argument ‘x’ for ‘--follow’\n\
+             Valid arguments are:\n  - ‘descriptor’\n  - ‘name’"
         );
     }
 
@@ -2086,7 +2086,7 @@ mod tests {
         );
         // `-c2n`: the whole rest of the cluster is `c`'s argument, so the `n`
         // is part of the number and the number is bad.
-        assert_eq!(body(&fail(&["-c2n"])), "invalid number of bytes: '2n'");
+        assert_eq!(body(&fail(&["-c2n"])), "invalid number of bytes: ‘2n’");
     }
 
     // ---------------------------------------------------- the obsolete form ---
@@ -2188,13 +2188,13 @@ mod tests {
     fn the_obsolete_number_reports_overflow_against_the_whole_word() {
         assert_eq!(
             body(&fail(&["-99999999999999999999999"])),
-            "invalid number: '-99999999999999999999999': \
+            "invalid number: ‘-99999999999999999999999’: \
              Numerical result out of range"
         );
         // The ×512 can overflow on its own, with the same sentence.
         assert_eq!(
             body(&fail(&["-99999999999999999999b"])),
-            "invalid number: '-99999999999999999999b': \
+            "invalid number: ‘-99999999999999999999b’: \
              Numerical result out of range"
         );
     }
@@ -2214,7 +2214,7 @@ mod tests {
         // A bare suffix means one of it …
         assert_eq!(parse(&["-c", "K"]).n_units, 1024);
         // … but only when it is the very first byte.
-        assert_eq!(body(&fail(&["-c", " K"])), "invalid number of bytes: ' K'");
+        assert_eq!(body(&fail(&["-c", " K"])), "invalid number of bytes: ‘ K’");
         // Leading whitespace and a leading `+` are `strtoumax`'s to skip.
         assert_eq!(parse(&["-n", " 3"]).n_units, 3);
         assert_eq!(parse(&["-n", "+3"]).n_units, 3);
@@ -2224,29 +2224,31 @@ mod tests {
     #[test]
     fn a_bad_count_is_quoted_the_way_gnulib_quotes_it() {
         // `quote()`, whose escaping is C's and not the shell's — the two agree
-        // on everything without a quote or a backslash in it.
+        // on everything without a backslash in it. A straight `'` inside the
+        // value is *not* escaped, because the curly marks around it can never
+        // be mistaken for it; only glibc's straight-marked style has to escape.
         assert_eq!(
             body(&fail(&["-n", "a'b"])),
-            "invalid number of lines: 'a\\'b'"
+            "invalid number of lines: ‘a'b’"
         );
         assert_eq!(
             body(&fail(&["-n", "a\\b"])),
-            "invalid number of lines: 'a\\\\b'"
+            "invalid number of lines: ‘a\\\\b’"
         );
-        assert_eq!(body(&fail(&["-c", "x"])), "invalid number of bytes: 'x'");
+        assert_eq!(body(&fail(&["-c", "x"])), "invalid number of bytes: ‘x’");
         // The sign is stripped for `-` and kept for `+`, so the same bad text
         // is echoed back two different ways.
-        assert_eq!(body(&fail(&["-n", "-x"])), "invalid number of lines: 'x'");
-        assert_eq!(body(&fail(&["-n", "+x"])), "invalid number of lines: '+x'");
+        assert_eq!(body(&fail(&["-n", "-x"])), "invalid number of lines: ‘x’");
+        assert_eq!(body(&fail(&["-n", "+x"])), "invalid number of lines: ‘+x’");
         assert_eq!(
             body(&fail(&["-n", "99999999999999999999"])),
-            "invalid number of lines: '99999999999999999999': \
+            "invalid number of lines: ‘99999999999999999999’: \
              Value too large for defined data type"
         );
         // A bad suffix outranks an overflow.
         assert_eq!(
             body(&fail(&["-n", "99999999999999999999x"])),
-            "invalid number of lines: '99999999999999999999x'"
+            "invalid number of lines: ‘99999999999999999999x’"
         );
     }
 
@@ -2263,17 +2265,17 @@ mod tests {
     fn pid_and_max_unchanged_take_no_suffix_and_have_their_own_wording() {
         assert_eq!(parse(&["--pid=7", "-f"]).pid, Some(7));
         assert_eq!(parse(&["--max-unchanged-stats=3"]).max_unchanged, 3);
-        assert_eq!(body(&fail(&["--pid=5k"])), "invalid PID: '5k'");
-        assert_eq!(body(&fail(&["--pid=x"])), "invalid PID: 'x'");
+        assert_eq!(body(&fail(&["--pid=5k"])), "invalid PID: ‘5k’");
+        assert_eq!(body(&fail(&["--pid=x"])), "invalid PID: ‘x’");
         // Above INT_MAX is the overflow wording, not the invalid one.
         assert_eq!(
             body(&fail(&["--pid=2147483648"])),
-            "invalid PID: '2147483648': Value too large for defined data type"
+            "invalid PID: ‘2147483648’: Value too large for defined data type"
         );
         assert_eq!(parse(&["--pid=2147483647", "-f"]).pid, Some(PID_MAX));
         assert_eq!(
             body(&fail(&["--max-unchanged-stats=x"])),
-            "invalid maximum number of unchanged stats between opens: 'x'"
+            "invalid maximum number of unchanged stats between opens: ‘x’"
         );
     }
 
@@ -2287,16 +2289,16 @@ mod tests {
         // own parser — which is why there is a hand-written one.
         assert_eq!(parse(&["-s", "0x1.8p3"]).sleep_interval, 12.0);
         assert_eq!(parse(&["-s", "0x10"]).sleep_interval, 16.0);
-        assert_eq!(body(&fail(&["-s", "x"])), "invalid number of seconds: 'x'");
+        assert_eq!(body(&fail(&["-s", "x"])), "invalid number of seconds: ‘x’");
         assert_eq!(
             body(&fail(&["-s", "-1"])),
-            "invalid number of seconds: '-1'"
+            "invalid number of seconds: ‘-1’"
         );
         // NaN parses and is then rejected by `0 <= s`, every comparison
         // against it being false.
         assert_eq!(
             body(&fail(&["-s", "nan"])),
-            "invalid number of seconds: 'nan'"
+            "invalid number of seconds: ‘nan’"
         );
         // Infinity is not rejected: it is not negative.
         assert!(parse(&["-s", "inf"]).sleep_interval.is_infinite());

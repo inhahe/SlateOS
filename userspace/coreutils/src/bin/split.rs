@@ -150,7 +150,7 @@
 
 use coreutils::errmsg::strerror;
 use coreutils::getopt::{self, Program, Takes};
-use coreutils::quote::{os_bytes, quote, quotef_os};
+use coreutils::quote::{os_bytes, quote, quoteaf, quoteaf_os, quotef_os};
 use coreutils::shell::shell;
 use coreutils::xnum::{self, Status};
 use std::ffi::{OsStr, OsString};
@@ -191,10 +191,7 @@ struct Fail {
 
 impl Fail {
     fn new(message: String) -> Self {
-        Fail {
-            message,
-            status: 1,
-        }
+        Fail { message, status: 1 }
     }
 }
 
@@ -228,10 +225,7 @@ impl Kind {
     /// Whether the number of pieces is known before the input is read, which
     /// is what lets the suffix be pre-sized instead of grown.
     const fn is_chunked(self) -> bool {
-        matches!(
-            self,
-            Kind::ChunkBytes | Kind::ChunkLines | Kind::RoundRobin
-        )
+        matches!(self, Kind::ChunkBytes | Kind::ChunkLines | Kind::RoundRobin)
     }
 }
 
@@ -612,8 +606,7 @@ fn short_options(
                     }
                     b'l' => {
                         set_mode(state, Kind::Lines)?;
-                        state.options.units =
-                            parse_units(&value, None, "invalid number of lines")?;
+                        state.options.units = parse_units(&value, None, "invalid number of lines")?;
                     }
                     b'n' => parse_number(&value, state)?,
                     _ => set_separator(state, &value)?,
@@ -719,8 +712,8 @@ fn parse_units(text: &[u8], suffixes: Option<&[u8]>, what: &str) -> Result<u64, 
 /// `-a N`.
 ///
 /// Upstream routes this through `xdectoumax`, whose out-of-range branch adds a
-/// `strerror` tail — so `-a -1` is `invalid suffix length: '-1': Numerical
-/// result out of range` while `-a x` is `invalid suffix length: 'x'` with no
+/// `strerror` tail — so `-a -1` is `invalid suffix length: ‘-1’: Numerical
+/// result out of range` while `-a x` is `invalid suffix length: ‘x’` with no
 /// tail. The difference is that a leading `-` reaches C's `strtoumax`, which
 /// wraps it into a huge value that then fails the range check, where `x` never
 /// becomes a number at all. Our `xstrtoumax` refuses the sign earlier (which
@@ -764,12 +757,12 @@ fn parse_suffix_length(text: &[u8]) -> Result<usize, Fail> {
 ///
 /// | argument | message | because |
 /// |---|---|---|
-/// | `x/3` | `invalid number of chunks: 'x/3'` | no digits at all, so it never became a `K/N` |
-/// | `/3` | `invalid number of chunks: '/3'` | likewise |
-/// | `2/x` | `invalid number of chunks: 'x'` | `2` converted, so `x` is the N that failed |
-/// | `3/` | `invalid number of chunks: ''` | the N is the empty string |
-/// | `2/3/4` | `invalid number of chunks: '3/4'` | only one `K/` is recognised |
-/// | `0/3` | `invalid chunk number: '0'` | K converted but is outside `1..=N` |
+/// | `x/3` | `invalid number of chunks: ‘x/3’` | no digits at all, so it never became a `K/N` |
+/// | `/3` | `invalid number of chunks: ‘/3’` | likewise |
+/// | `2/x` | `invalid number of chunks: ‘x’` | `2` converted, so `x` is the N that failed |
+/// | `3/` | `invalid number of chunks: ‘’` | the N is the empty string |
+/// | `2/3/4` | `invalid number of chunks: ‘3/4’` | only one `K/` is recognised |
+/// | `0/3` | `invalid chunk number: ‘0’` | K converted but is outside `1..=N` |
 ///
 /// Splitting on the first `/` and reporting each half would get the first two
 /// rows wrong, which is why the end-pointer model is reproduced rather than
@@ -793,15 +786,15 @@ fn parse_number(text: &[u8], state: &mut Parsed) -> Result<(), Fail> {
     };
     set_mode(state, kind)?;
 
-    let bad_chunks =
-        |what: &[u8]| Fail::new(format!("invalid number of chunks: {}", quote(what)));
+    let bad_chunks = |what: &[u8]| Fail::new(format!("invalid number of chunks: {}", quote(what)));
 
     let scan = scan_decimal(rest);
     let (count_text, piece) = match scan {
         // A number followed by `/`: the K/N form.
-        Some((value, end)) if rest.get(end) == Some(&b'/') => {
-            (rest.get(end.saturating_add(1)..).unwrap_or_default(), Some(value))
-        }
+        Some((value, end)) if rest.get(end) == Some(&b'/') => (
+            rest.get(end.saturating_add(1)..).unwrap_or_default(),
+            Some(value),
+        ),
         // A number and nothing else, or something that never converted: either
         // way the whole argument is the N being reported on.
         _ => (rest, None),
@@ -815,7 +808,12 @@ fn parse_number(text: &[u8], state: &mut Parsed) -> Result<(), Fail> {
         && (k == 0 || k > count)
     {
         let shown = rest
-            .get(..rest.len().saturating_sub(count_text.len()).saturating_sub(1))
+            .get(
+                ..rest
+                    .len()
+                    .saturating_sub(count_text.len())
+                    .saturating_sub(1),
+            )
             .unwrap_or_default();
         return Err(Fail::new(format!("invalid chunk number: {}", quote(shown))));
     }
@@ -893,10 +891,7 @@ impl Namer {
     fn render(&self) -> Vec<u8> {
         let marker = self.alphabet.last().copied().unwrap_or(b'z');
         let mut out = self.prefix.clone();
-        out.resize(
-            out.len().saturating_add(self.markers),
-            marker,
-        );
+        out.resize(out.len().saturating_add(self.markers), marker);
         for &digit in &self.body {
             out.push(self.alphabet.get(digit).copied().unwrap_or(marker));
         }
@@ -1061,7 +1056,14 @@ impl Emitter<'_> {
     fn write_file(&self, name: &[u8], data: &[u8]) -> Result<(), Fail> {
         let path = os_from_bytes(name);
         if self.options.verbose {
-            println!("creating file {}", quote(name));
+            // `quoteaf`, not `quote`: GNU spells this
+            // `fprintf (stdout, _("creating file %s\n"), quoteaf (name))`, and
+            // `quoteaf` is the shell-escape-always style, whose marks are
+            // straight in every locale. Measured against GNU split 9.4 under
+            // `LC_ALL=C.UTF-8`, which prints `creating file 'xaa'`. This read
+            // `quote` — curly since §351 — until the harness moved off its `C`
+            // reference, where the two styles are indistinguishable.
+            println!("creating file {}", quoteaf(name));
         }
         // GNU names the output file bare and lets the errno finish the
         // sentence — `split: nosuchdir/aa: No such file or directory`.
@@ -1202,9 +1204,7 @@ fn chunk_byte_pieces(data: &[u8], count: u64) -> Vec<(usize, usize)> {
     let mut start = 0usize;
     let mut index = 1u128;
     while index <= count {
-        let end = index
-            .saturating_mul(share)
-            .saturating_add(index.min(extra));
+        let end = index.saturating_mul(share).saturating_add(index.min(extra));
         let end = usize::try_from(end).unwrap_or(data.len()).min(data.len());
         let end = end.max(start);
         pieces.push((start, end));
@@ -1312,10 +1312,15 @@ fn read_input(file: &OsString) -> Result<Vec<u8>, Fail> {
             .map_err(|e| Fail::new(format!("read error: {}", strerror(&e))))?;
         return Ok(data);
     }
+    // `quoteaf_os`, not `quote_os`: upstream is
+    // `error (EXIT_FAILURE, errno, _("cannot open %s for reading"), quoteaf (infile))`,
+    // and `quoteaf` is shell-escape-always, whose marks stay straight in every
+    // locale. Measured, GNU split 9.4, `LC_ALL=C.UTF-8`:
+    // `split: cannot open 'nosuch' for reading: No such file or directory`.
     let mut handle = File::open(file).map_err(|e| {
         Fail::new(format!(
             "cannot open {} for reading: {}",
-            quote(&arg_bytes(file)),
+            quoteaf_os(file),
             strerror(&e)
         ))
     })?;
@@ -1328,9 +1333,7 @@ fn read_input(file: &OsString) -> Result<Vec<u8>, Fail> {
 fn run(options: &Options, file: &OsString, prefix: &OsString) -> Result<(), Fail> {
     if options.piece.is_some() && options.filter.is_some() {
         return Err(SPLIT
-            .usage_referring(
-                "--filter does not process a chunk extracted to stdout".to_string(),
-            )
+            .usage_referring("--filter does not process a chunk extracted to stdout".to_string())
             .into());
     }
     let (width, start, widen) = suffix_plan(options)?;
@@ -1535,7 +1538,7 @@ mod tests {
     #[test]
     fn zero_bytes_is_refused_without_an_errno_tail() {
         let e = parse(&["-b", "0"]).unwrap_err();
-        assert_eq!(e.message, "invalid number of bytes: '0'");
+        assert_eq!(e.message, "invalid number of bytes: ‘0’");
     }
 
     #[test]
@@ -1547,7 +1550,7 @@ mod tests {
     #[test]
     fn lines_take_no_multiplier_suffix() {
         let e = parse(&["-l", "1k"]).unwrap_err();
-        assert_eq!(e.message, "invalid number of lines: '1k'");
+        assert_eq!(e.message, "invalid number of lines: ‘1k’");
     }
 
     #[test]
@@ -1559,18 +1562,18 @@ mod tests {
     #[test]
     fn line_bytes_borrows_the_lines_diagnostic() {
         let e = parse(&["-C", "0"]).unwrap_err();
-        assert_eq!(e.message, "invalid number of lines: '0'");
+        assert_eq!(e.message, "invalid number of lines: ‘0’");
     }
 
     #[test]
     fn chunks_report_the_whole_argument_when_nothing_converted() {
         assert_eq!(
             parse(&["-n", "x/3"]).unwrap_err().message,
-            "invalid number of chunks: 'x/3'"
+            "invalid number of chunks: ‘x/3’"
         );
         assert_eq!(
             parse(&["-n", "/3"]).unwrap_err().message,
-            "invalid number of chunks: '/3'"
+            "invalid number of chunks: ‘/3’"
         );
     }
 
@@ -1578,11 +1581,11 @@ mod tests {
     fn chunks_report_only_the_count_when_the_k_converted() {
         assert_eq!(
             parse(&["-n", "2/x"]).unwrap_err().message,
-            "invalid number of chunks: 'x'"
+            "invalid number of chunks: ‘x’"
         );
         assert_eq!(
             parse(&["-n", "3/"]).unwrap_err().message,
-            "invalid number of chunks: ''"
+            "invalid number of chunks: ‘’"
         );
     }
 
@@ -1590,7 +1593,7 @@ mod tests {
     fn only_one_slash_pair_is_recognised() {
         assert_eq!(
             parse(&["-n", "2/3/4"]).unwrap_err().message,
-            "invalid number of chunks: '3/4'"
+            "invalid number of chunks: ‘3/4’"
         );
     }
 
@@ -1598,15 +1601,15 @@ mod tests {
     fn a_chunk_number_outside_the_count_is_its_own_message() {
         assert_eq!(
             parse(&["-n", "0/3"]).unwrap_err().message,
-            "invalid chunk number: '0'"
+            "invalid chunk number: ‘0’"
         );
         assert_eq!(
             parse(&["-n", "4/3"]).unwrap_err().message,
-            "invalid chunk number: '4'"
+            "invalid chunk number: ‘4’"
         );
         assert_eq!(
             parse(&["-n", "l/0/3"]).unwrap_err().message,
-            "invalid chunk number: '0'"
+            "invalid chunk number: ‘0’"
         );
     }
 
@@ -1614,7 +1617,7 @@ mod tests {
     fn chunks_take_no_multiplier_suffix() {
         assert_eq!(
             parse(&["-n", "2k"]).unwrap_err().message,
-            "invalid number of chunks: '2k'"
+            "invalid number of chunks: ‘2k’"
         );
     }
 
@@ -1628,11 +1631,11 @@ mod tests {
     fn a_negative_suffix_length_is_out_of_range_not_unparsable() {
         assert_eq!(
             parse(&["-a", "-1"]).unwrap_err().message,
-            "invalid suffix length: '-1': Numerical result out of range"
+            "invalid suffix length: ‘-1’: Numerical result out of range"
         );
         assert_eq!(
             parse(&["-a", "x"]).unwrap_err().message,
-            "invalid suffix length: 'x'"
+            "invalid suffix length: ‘x’"
         );
     }
 
@@ -1640,9 +1643,10 @@ mod tests {
     fn a_start_value_too_wide_for_the_suffix_is_its_own_message() {
         let options = parse(&["-a", "1", "--numeric-suffixes=95"]).unwrap();
         let e = suffix_plan(&options).unwrap_err();
-        assert!(e
-            .message
-            .starts_with("numerical suffix start value is too large for the suffix length"));
+        assert!(
+            e.message
+                .starts_with("numerical suffix start value is too large for the suffix length")
+        );
     }
 
     #[test]
@@ -1656,7 +1660,7 @@ mod tests {
     fn a_separator_must_be_one_character() {
         assert_eq!(
             parse(&["-t", "xy"]).unwrap_err().message,
-            "multi-character separator 'xy'"
+            "multi-character separator ‘xy’"
         );
         assert_eq!(
             parse(&["-t", ""]).unwrap_err().message,
@@ -1681,17 +1685,19 @@ mod tests {
     #[test]
     fn an_additional_suffix_may_not_contain_a_slash() {
         let e = parse(&["--additional-suffix=/x"]).unwrap_err();
-        assert!(e
-            .message
-            .starts_with("invalid suffix '/x', contains directory separator"));
+        assert!(
+            e.message
+                .starts_with("invalid suffix ‘/x’, contains directory separator")
+        );
     }
 
     #[test]
     fn a_bad_start_value_is_reported_with_the_value_first() {
         let e = parse(&["--numeric-suffixes=abc"]).unwrap_err();
-        assert!(e
-            .message
-            .starts_with("'abc': invalid start value for numerical suffix"));
+        assert!(
+            e.message
+                .starts_with("‘abc’: invalid start value for numerical suffix")
+        );
     }
 
     #[test]
@@ -1703,7 +1709,7 @@ mod tests {
     #[test]
     fn an_extra_operand_is_refused() {
         let e = parse(&["f", "y", "extra"]).unwrap_err();
-        assert!(e.message.starts_with("extra operand 'extra'"));
+        assert!(e.message.starts_with("extra operand ‘extra’"));
     }
 
     #[test]
@@ -1790,7 +1796,10 @@ mod tests {
     #[test]
     fn chunk_bytes_give_the_remainder_to_the_first_pieces() {
         let data = b"abcdefghij";
-        assert_eq!(shown(data, &chunk_byte_pieces(data, 3)), ["abcd", "efg", "hij"]);
+        assert_eq!(
+            shown(data, &chunk_byte_pieces(data, 3)),
+            ["abcd", "efg", "hij"]
+        );
         assert_eq!(
             shown(data, &chunk_byte_pieces(data, 4)),
             ["abc", "def", "gh", "ij"]

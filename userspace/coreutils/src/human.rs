@@ -175,7 +175,11 @@ impl Residue {
 /// where the *format* needs 80-bit fidelity (`printf %La`), not the arithmetic.
 #[must_use]
 pub fn human_readable(n: u64, opts: Opts, from_block_size: u64, to_block_size: u64) -> String {
-    let base: u64 = if opts.has(Opts::BASE_1024) { 1024 } else { 1000 };
+    let base: u64 = if opts.has(Opts::BASE_1024) {
+        1024
+    } else {
+        1000
+    };
 
     // The two exact cases, in upstream's order. Anything else falls through to
     // the floating path below.
@@ -195,13 +199,21 @@ pub fn human_readable(n: u64, opts: Opts, from_block_size: u64, to_block_size: u
         let r10 = (n % divisor).saturating_mul(10);
         let r2 = (r10 % divisor).saturating_mul(2);
         let residue = if r2 < divisor {
-            if r2 > 0 { Residue::BelowHalf } else { Residue::Exact }
+            if r2 > 0 {
+                Residue::BelowHalf
+            } else {
+                Residue::Exact
+            }
         } else if divisor < r2 {
             Residue::AboveHalf
         } else {
             Residue::Half
         };
-        Some((n / divisor, u32::try_from(r10 / divisor).unwrap_or(0), residue))
+        Some((
+            n / divisor,
+            u32::try_from(r10 / divisor).unwrap_or(0),
+            residue,
+        ))
     } else {
         None
     };
@@ -289,7 +301,11 @@ fn integer_path(
                 tenths = u32::try_from(r10 / base).unwrap_or(0);
                 let carried = r2.saturating_add(u64::from(residue.value()));
                 residue = if r2 < base {
-                    if carried != 0 { Residue::BelowHalf } else { Residue::Exact }
+                    if carried != 0 {
+                        Residue::BelowHalf
+                    } else {
+                        Residue::Exact
+                    }
                 } else if base < carried {
                     Residue::AboveHalf
                 } else {
@@ -349,10 +365,7 @@ fn integer_path(
     };
     if bump {
         amt = amt.saturating_add(1);
-        if opts.has(Opts::AUTOSCALE)
-            && amt == base
-            && exponent.is_some_and(|e| e < EXPONENT_MAX)
-        {
+        if opts.has(Opts::AUTOSCALE) && amt == base && exponent.is_some_and(|e| e < EXPONENT_MAX) {
             exponent = exponent.map(|e| e + 1);
             if !opts.has(Opts::SUPPRESS_POINT_ZERO) {
                 fraction = ".0".to_string();
@@ -408,9 +421,7 @@ fn floating_path(
     // base-1024 term is there because a 1024-scaled value can reach four
     // integer digits where a 1000-scaled one cannot.
     let extra = usize::from(!opts.has(Opts::BASE_1024));
-    if 1 + 2 + extra < text.len()
-        || (opts.has(Opts::SUPPRESS_POINT_ZERO) && text.ends_with('0'))
-    {
+    if 1 + 2 + extra < text.len() || (opts.has(Opts::SUPPRESS_POINT_ZERO) && text.ends_with('0')) {
         text = format_fixed(adjust(style, damt * 10.0) / 10.0, 0);
     }
     (text, Some(e))

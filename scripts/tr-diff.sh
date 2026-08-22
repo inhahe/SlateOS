@@ -17,14 +17,15 @@
 # → `TD-COREUTILS-GETOPT-DIAGNOSTICS-USE-THE-WRONG-SHAPE`, and the identical
 # note at the top of `cut-diff.sh`, `head-diff.sh` and `wc-diff.sh`.
 #
-# ## Why the locale barely matters here, and where it does
+# ## Why the locale barely matters here
 #
 # GNU `tr` is byte-oriented — it has no multibyte mode, and `[:alpha:]` was
 # measured to expand to the same 52 ASCII bytes under `C` and under `C.UTF-8`.
-# So the locale is `C.UTF-8` for consistency with the other harnesses, and the
-# only cases referenced under `LC_ALL=C` are the ones whose sole difference is
-# which quote marks gnulib puts round the offending text. See
-# `open-questions.md` → B-Q2.
+# So `C.UTF-8` throughout, which since §351 is also the setting the quote marks
+# agree in: ours are U+2018/U+2019 in every locale and GNU's are those under any
+# UTF-8 one. The diagnostics used to be referenced under `LC_ALL=C` because ours
+# stayed ASCII (`open-questions.md` → B-Q2, since answered); `C` is now the
+# setting in which the reference would be wrong.
 set -u
 
 # Our tr is a native Windows binary, so MSYS would rewrite an argument that
@@ -33,9 +34,6 @@ export MSYS2_ARG_CONV_EXCL='*'
 
 OURS=${OURS:-"target/x86_64-pc-windows-gnu/debug/tr.exe"}
 GNU=${GNU:-"wsl -e env LC_ALL=C.UTF-8 tr"}
-# The same reference under the C locale, for the cases whose only difference is
-# which quote marks gnulib chooses.
-GNU_C=${GNU_C:-"wsl -e env LC_ALL=C tr"}
 export LC_ALL=${LC_ALL:-C.UTF-8}
 
 pass=0; fail=0; xfail=0; xpass=0
@@ -114,11 +112,6 @@ run_in() {
 # before a byte is read.
 run_case() { [ "$HAVE_GNU" = yes ] || return 0; compare - "$GNU" "$@"; report "tr $*"; }
 
-# The diagnostics that echo the offending text back, referenced under `LC_ALL=C`
-# so the quote marks are ASCII on both sides. Under a UTF-8 locale gnulib
-# switches to U+2018/U+2019 and ours does not — one open question, not one per
-# case. See B-Q2.
-run_ascii() { [ "$HAVE_GNU" = yes ] || return 0; compare - "$GNU_C" "$@"; report "tr $* [C]"; }
 
 xfail_case() {
   [ "$HAVE_GNU" = yes ] || return 0
@@ -314,11 +307,11 @@ run_in 'abcdefghijklm\n' 'a-m' '[x*010]y'
 run_in 'abcdefghijklm\n' 'a-m' '[x* 010]y'
 run_in 'abcdefghijklm\n' 'a-m' '[x* 08]y'
 # ... and the same rule makes `08` an invalid octal number rather than eight.
-run_ascii a '[x*08]'
-run_ascii a '[x*+ 1]'
-run_ascii a '[x* ]'
-run_ascii a '[x*-1]'
-run_ascii a '[x*1x]'
+run_case a '[x*08]'
+run_case a '[x*+ 1]'
+run_case a '[x* ]'
+run_case a '[x*-1]'
+run_case a '[x*1x]'
 
 # --- an escaped byte aborts the repeat scan ----------------------------------
 # `find_bracketed_repeat` gives up at the first escaped byte of any kind, rather
@@ -395,38 +388,38 @@ run_case
 run_case -d
 run_case -s
 run_case -c
-run_ascii abc
-run_ascii -ds abc
-run_ascii -s abc def ghi
+run_case abc
+run_case -ds abc
+run_case -s abc def ghi
 # The excess operand named is the first one past what the *mode* allows, not
 # simply the third — deleting without squeezing allows one set — and the
 # explanatory second line is dropped once more than one operand is excess.
-run_ascii -d abc def
-run_ascii abc def ghi
-run_ascii abc def ghi jkl
-run_ascii -d abc def ghi
-run_ascii -d abc def ghi jkl
-run_ascii -ds abc def ghi
-run_ascii -dc abc def ghi
-run_ascii -t abc def ghi
+run_case -d abc def
+run_case abc def ghi
+run_case abc def ghi jkl
+run_case -d abc def ghi
+run_case -d abc def ghi jkl
+run_case -ds abc def ghi
+run_case -dc abc def ghi
+run_case -t abc def ghi
 
 # --- set diagnostics ----------------------------------------------------------
-run_ascii 'z-a' 'x'
-run_ascii -d 'z-a'
-run_ascii '\143-\141' 'x'
-run_ascii -d '[:nosuch:]'
-run_ascii -d '[::]'
-run_ascii -d '[=ab=]'
-run_ascii 'a' '[x*y]'
-run_ascii 'a' '[x*-1]'
-run_ascii 'a' '[x*]'
-run_ascii '[x*]' 'a'
-run_ascii 'abc' ''
-run_ascii 'a' '[:digit:]'
-run_ascii 'a-z' '[:space:]'
-run_ascii 'a' '[=x=]'
-run_ascii 'a[:lower:]' 'bc[:upper:]'
-run_ascii '[:lower:]a' '[:upper:]bc'
+run_case 'z-a' 'x'
+run_case -d 'z-a'
+run_case '\143-\141' 'x'
+run_case -d '[:nosuch:]'
+run_case -d '[::]'
+run_case -d '[=ab=]'
+run_case 'a' '[x*y]'
+run_case 'a' '[x*-1]'
+run_case 'a' '[x*]'
+run_case '[x*]' 'a'
+run_case 'abc' ''
+run_case 'a' '[:digit:]'
+run_case 'a-z' '[:space:]'
+run_case 'a' '[=x=]'
+run_case 'a[:lower:]' 'bc[:upper:]'
+run_case '[:lower:]a' '[:upper:]bc'
 # The alignment is by expanded offset, so this one is legal and that one is not.
 run_in 'ab\n' 'a-b[:lower:]' 'cd[:upper:]'
 
@@ -444,21 +437,21 @@ run_in 'ab\n' 'a-b[:lower:]' 'cd[:upper:]'
 # Neither renderer escapes `'` or `\`, which is what makes the composed cases
 # above differ from the bare ones. None of this shows on printable input, so
 # every case here is deliberately unprintable.
-run_ascii '\377-\376' x
-run_ascii '\012-\011' x
-run_ascii '\177-\176' x
-run_ascii '\140-\047' x
-run_ascii '\041-\040' x
-run_ascii -d '[=\n\t=]'
-run_ascii -d '[=\a\b\v\f\r\177=]'
-run_ascii -d '[==]'
-run_ascii -d '[=\377\001=]'
-run_ascii -d '[:no\377such:]'
-run_ascii -d '[:a\nb:]'
-run_ascii -d "[:a'b:]"
-run_ascii a "[x*a'b]"
-run_ascii a '[x*a\nb]'
-run_ascii a '[x*\377]'
+run_case '\377-\376' x
+run_case '\012-\011' x
+run_case '\177-\176' x
+run_case '\140-\047' x
+run_case '\041-\040' x
+run_case -d '[=\n\t=]'
+run_case -d '[=\a\b\v\f\r\177=]'
+run_case -d '[==]'
+run_case -d '[=\377\001=]'
+run_case -d '[:no\377such:]'
+run_case -d '[:a\nb:]'
+run_case -d "[:a'b:]"
+run_case a "[x*a'b]"
+run_case a '[x*a\nb]'
+run_case a '[x*\377]'
 
 # --- the octal escape that is too large --------------------------------------
 # GNU neither truncates nor refuses: it backs off to two digits and warns,
@@ -468,11 +461,11 @@ run_in 'a b\n' '\400' 'X'
 run_in 'a b\n' -d '\777'
 
 # --- option diagnostics -------------------------------------------------------
-run_ascii -x a b
-run_ascii --nosuch a b
-run_ascii --del a b
-run_ascii --=x a b
-run_ascii -d -x a
+run_case -x a b
+run_case --nosuch a b
+run_case --del a b
+run_case --=x a b
+run_case -d -x a
 # `--` ends the options, so a set may start with a hyphen.
 run_in 'a-b\n' -d -- '-'
 run_in 'a-b\n' -- '-' 'x'
@@ -499,8 +492,8 @@ run_in 'abc\n' -c -d ''
 run_in 'abc\n' '' x
 run_in 'abc\n' -t a ''
 run_in 'abc\n' -ct 'a-z' ''
-run_ascii a ''
-run_ascii -c '' ''
+run_case a ''
+run_case -c '' ''
 # `-t` where it has no effect: GNU documents it as significant only when
 # translating, and accepts it silently everywhere else.
 run_in 'aaabbb\n' -td a
@@ -520,12 +513,12 @@ run_in 'abc\n' -c '\000-\176' '[x*]'
 run_in 'abcdef\n' 'a-f' '[x*1]y'
 run_in 'abcdef\n' 'a-f' '[x*6]'
 run_in 'abcdef\n' 'a-f' '[x*7]'
-run_ascii 'a' '[x*99999999999999999999]'
-run_ascii 'a' '[x*4294967296]'
-run_ascii 'a' '[x* 1]'
-run_ascii 'a' '[x*+1]'
-run_ascii 'a' '[x*08]'
-run_ascii 'a' '[x*1x]'
+run_case 'a' '[x*99999999999999999999]'
+run_case 'a' '[x*4294967296]'
+run_case 'a' '[x* 1]'
+run_case 'a' '[x*+1]'
+run_case 'a' '[x*08]'
+run_case 'a' '[x*1x]'
 # Unterminated brackets, every shape, all of which fall back to literal bytes.
 run_in 'a[:alpha\n' -d '[:alpha:'
 run_in 'a[=x\n' -d '[=x'
@@ -547,32 +540,32 @@ run_in 'a[b\n' -d '\[b'
 run_in 'a[:b\n' -d '\[:b'
 run_in 'a*b\n' -d '[a\*]'
 # A class next to a hyphen is not a range endpoint.
-run_ascii '[:digit:]-x' 'y'
+run_case '[:digit:]-x' 'y'
 run_in 'a-9\n' -d '[:digit:]-'
 # Duplicate bytes in SET1 under truncation.
 run_in 'abc\n' -t 'aab' 'xy'
 run_in 'abc\n' 'aab' 'xy'
 # High-byte ranges, forward and reversed.
 run_in '\376\377\n' '\376-\377' 'XY'
-run_ascii '\377-\376' 'XY'
-run_ascii -d '\377-\376'
+run_case '\377-\376' 'XY'
+run_case -d '\377-\376'
 # A NUL in every position it can occupy.
 run_in 'a\000b\000\000c\n' -s '\000'
 run_in 'a\000b\n' -d '\000a'
 run_in 'a\000b\n' '\000ab' 'XYZ'
 run_in 'abc\n' 'abc' '\000\000\000'
 # Long options that take no argument still refuse one.
-run_ascii --complement=x a b
-run_ascii --delete=x a
-run_ascii --squeeze-repeats=x a
-run_ascii --truncate-set1=x a b
-run_ascii --help=x
-run_ascii --version=x
+run_case --complement=x a b
+run_case --delete=x a
+run_case --squeeze-repeats=x a
+run_case --truncate-set1=x a b
+run_case --help=x
+run_case --version=x
 # An ambiguous prefix lists its candidates in GNU's declaration order.
-run_ascii --c a b
-run_ascii --s a b
-run_ascii --t a b
-run_ascii --de a
+run_case --c a b
+run_case --s a b
+run_case --t a b
+run_case --de a
 # `--v` is not ambiguous — it is `--version`, whose output is *meant* to differ.
 # It is checked below as an xfail plus a `selfsame`, not here.
 

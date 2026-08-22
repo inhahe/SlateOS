@@ -30,11 +30,14 @@
 # `TD-COREUTILS-GETOPT-DIAGNOSTICS-USE-THE-WRONG-SHAPE`, and the identical
 # note at the top of `csplit-diff.sh`, `od-diff.sh` and `wc-diff.sh`.
 #
-# ## Why LC_ALL=C
+# ## Why LC_ALL=C.UTF-8
 #
-# The diagnostics quote the offending argument back at the caller through
-# gnulib's quoting, which picks its quote marks from the locale. `C` keeps
-# those ASCII on both sides, which sidesteps B-Q2 the same way od-diff.sh does.
+# The diagnostics quote the offending argument back at the caller through gnulib's
+# `quote()`, which picks its quote marks from the locale. Since §351 ours
+# prints U+2018/U+2019 in every locale, and GNU prints those under a UTF-8
+# locale and ASCII under `C` — so `C.UTF-8` is the setting the two agree in.
+# This file ran under `C` for the mirror-image of that reason until B-Q2 was
+# answered; nothing else here reads the locale.
 set -u
 
 # Our split is a native Windows binary, so MSYS would rewrite an argument that
@@ -43,7 +46,7 @@ set -u
 export MSYS2_ARG_CONV_EXCL='*'
 
 OURS=${OURS:-"target/x86_64-pc-windows-gnu/debug/split.exe"}
-export LC_ALL=${LC_ALL:-C}
+export LC_ALL=${LC_ALL:-C.UTF-8}
 
 pass=0; fail=0; xfail=0; xpass=0
 
@@ -60,7 +63,7 @@ cd "$fixtures" >/dev/null || exit 1
 # files, GNU has none" — which looks like a total divergence rather than a
 # broken harness.
 printf '1\n2\n' > .probe
-if wsl -e env LC_ALL=C split -l 1 .probe .p >/dev/null 2>&1 && [ -f .paa ]; then
+if wsl -e env LC_ALL=C.UTF-8 split -l 1 .probe .p >/dev/null 2>&1 && [ -f .paa ]; then
   HAVE_GNU=yes
 else
   HAVE_GNU=no
@@ -105,13 +108,24 @@ for i in $(seq 1 700); do printf 'z'; done > wide.txt
 # --- machinery ----------------------------------------------------------------
 
 run_ours() { ( cd "$1" && "$OURS_ABS" "${@:2}" ); }
-run_gnu()  { ( cd "$1" && wsl -e env LC_ALL=C split "${@:2}" ); }
+run_gnu()  { ( cd "$1" && wsl -e env LC_ALL=C.UTF-8 split "${@:2}" ); }
 
 # Every file the run left behind, in name order, with its contents.
+#
+# A glob, not `for f in $(ls | sort)`: an unquoted command substitution is
+# word-split on IFS, so a name containing a space arrives in pieces and one
+# ending in a space loses it. `split --additional-suffix=' x'` is enough to
+# reach that, and the failure mode is silent -- the manifest reads a file that
+# does not exist and prints nothing for it, scoring a harness bug as a
+# divergence. Same fix, and same reason, as `csplit-diff.sh`, where a case
+# actually landed on it.
 manifest() {
   local dir=$1 f
   ( cd "$dir" || return 0
-    for f in $(ls | grep -v '^in\.txt$' | sort); do
+    for f in *; do
+      # `*` with no matches expands to itself; `in.txt` is the input we copied
+      # in, not something the run produced.
+      case $f in '*') [ -e "$f" ] || continue ;; in.txt) continue ;; esac
       printf '  %s: %s\n' "$f" "$(od -An -c < "$f" | tr -s ' \n' ' ')"
     done )
 }

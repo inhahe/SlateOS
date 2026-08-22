@@ -60,7 +60,7 @@
 //!
 //! ```text
 //! $ seq 20 | csplit - 3 '{*}'      $ seq 20 | csplit - /5/ '{*}'
-//! csplit: '3': line number out          8
+//! csplit: ‘3’: line number out          8
 //!         of range on repetition 6      25
 //! …counts…                              18
 //! $ echo $?                         $ echo $?
@@ -105,7 +105,7 @@
 //! ```text
 //! $ seq 20 | csplit - 21
 //! 51
-//! csplit: '21': line number out of range
+//! csplit: ‘21’: line number out of range
 //! $ echo $?
 //! 1
 //! ```
@@ -407,7 +407,7 @@ fn short_options(
     Ok(())
 }
 
-/// `-n`'s argument. Measured: `csplit f -n abc 4` says `invalid number: 'abc'`
+/// `-n`'s argument. Measured: `csplit f -n abc 4` says `invalid number: ‘abc’`
 /// with no `Try '… --help'` referral.
 fn parse_digits(value: &[u8]) -> Result<usize, getopt::Error> {
     let text = std::str::from_utf8(value).ok();
@@ -439,7 +439,7 @@ enum Repeat {
 struct Control {
     kind: Kind,
     /// The argument as typed, quoted back in this pattern's diagnostics. GNU
-    /// echoes the original text — `'/5/+100': line number out of range` — not
+    /// echoes the original text — `‘/5/+100’: line number out of range` — not
     /// the parsed pieces, so it has to be kept.
     arg: Vec<u8>,
     repeat: Repeat,
@@ -531,17 +531,23 @@ fn line_control(bytes: &[u8], last_line: &mut u64) -> Result<Control, Fail> {
         )));
     }
     if value < *last_line {
+        // `quote()`, so the marks follow §351 and are curly. Measured against
+        // GNU csplit 9.4 under `LC_ALL=C.UTF-8`, which prints
+        // `line number ‘2’ is smaller than preceding line number, 4`. This read
+        // `'{}'` until the harness moved off its `C` reference and caught it —
+        // straight marks agree with GNU only in the locale we no longer use.
         return Err(Fail::fatal(format!(
-            "line number '{}' is smaller than preceding line number, {}",
-            String::from_utf8_lossy(bytes),
+            "line number {} is smaller than preceding line number, {}",
+            quote(bytes),
             *last_line
         )));
     }
     if value == *last_line {
         // A warning, not an error: GNU carries on and writes the empty piece.
+        // Curly for the same measured reason as the error just above.
         eprintln!(
-            "csplit: warning: line number '{}' is the same as preceding line number",
-            String::from_utf8_lossy(bytes)
+            "csplit: warning: line number {} is the same as preceding line number",
+            quote(bytes)
         );
     }
     *last_line = value;
@@ -573,8 +579,12 @@ fn extract_regexp(bytes: &[u8], skip: bool) -> Result<Control, Fail> {
     let offset = if tail.is_empty() {
         0i64
     } else {
-        parse_offset(tail)
-            .ok_or_else(|| Fail::fatal(format!("{}: integer expected after delimiter", quote(bytes))))?
+        parse_offset(tail).ok_or_else(|| {
+            Fail::fatal(format!(
+                "{}: integer expected after delimiter",
+                quote(bytes)
+            ))
+        })?
     };
 
     // Basic regular expressions: `csplit` is specified in terms of `ed`'s, the
@@ -632,7 +642,9 @@ fn parse_repeat_count(bytes: &[u8]) -> Result<Repeat, Fail> {
         .filter(|t| !t.is_empty() && t.bytes().all(|b| b.is_ascii_digit()))
         .and_then(|t| t.parse::<u64>().ok())
         .ok_or_else(|| {
-            let truncated = bytes.get(..bytes.len().saturating_sub(1)).unwrap_or_default();
+            let truncated = bytes
+                .get(..bytes.len().saturating_sub(1))
+                .unwrap_or_default();
             Fail::fatal(format!(
                 "{}}}: integer required between '{{' and '}}'",
                 quote(truncated)
@@ -680,9 +692,8 @@ impl Sink {
         // the "cannot open ... for writing" phrasing it uses for the *input*.
         // Measured, not assumed; the two openings really are worded
         // differently.
-        let file = File::create(&name).map_err(|e| {
-            Fail::fatal(format!("{}: {}", quotef_os(&name), strerror(&e)))
-        })?;
+        let file = File::create(&name)
+            .map_err(|e| Fail::fatal(format!("{}: {}", quotef_os(&name), strerror(&e))))?;
         self.open = Some((name, file, 0));
         Ok(())
     }
@@ -745,8 +756,6 @@ struct SuffixFormat {
     flag_minus: bool,
     flag_zero: bool,
     flag_hash: bool,
-    flag_plus: bool,
-    flag_space: bool,
     width: usize,
     precision: Option<usize>,
     conv: u8,
@@ -765,12 +774,20 @@ impl SuffixFormat {
         while let Some(&c) = format.get(i) {
             i = i.saturating_add(1);
             if c != b'%' {
-                if spec.is_some() { tail.push(c) } else { head.push(c) }
+                if spec.is_some() {
+                    tail.push(c)
+                } else {
+                    head.push(c)
+                }
                 continue;
             }
             if format.get(i) == Some(&b'%') {
                 i = i.saturating_add(1);
-                if spec.is_some() { tail.push(b'%') } else { head.push(b'%') }
+                if spec.is_some() {
+                    tail.push(b'%')
+                } else {
+                    head.push(b'%')
+                }
                 continue;
             }
             if spec.is_some() {
@@ -800,19 +817,25 @@ impl SuffixFormat {
             flag_minus: false,
             flag_zero: false,
             flag_hash: false,
-            flag_plus: false,
-            flag_space: false,
             width: 0,
             precision: None,
             conv: b'd',
         };
+        // The flag set is `-`, `0`, `#` and `'` — deliberately *not* printf's
+        // full set. csplit's suffix names a file, so a leading `+` or space
+        // would be a character in a filename rather than a sign column, and
+        // GNU does not take them: measured, `csplit -b '%+d'` and `-b '% d'`
+        // both fail with `invalid conversion specifier in suffix: +` / `: `,
+        // which is GNU's parser stopping at the flag and reading it as the
+        // conversion. We accepted both and produced files called `+0`, `+1` —
+        // valid-looking output for a command line GNU rejects, which is the
+        // worst shape a divergence can take. See `known-issues.md`
+        // → BUG-CSPLIT-ACCEPTS-TWO-SUFFIX-FLAGS-GNU-REJECTS.
         while let Some(&c) = format.get(i) {
             match c {
                 b'-' => spec.flag_minus = true,
                 b'0' => spec.flag_zero = true,
                 b'#' => spec.flag_hash = true,
-                b'+' => spec.flag_plus = true,
-                b' ' => spec.flag_space = true,
                 // Accepted and ignored, as glibc's thousands-grouping flag is
                 // in the C locale.
                 b'\'' => {}
@@ -871,14 +894,9 @@ impl SuffixFormat {
             b'X' => format!("{value:X}"),
             _ => format!("{value}"),
         };
+        // No sign column: `+` and space are not flags here (see `parse_spec`),
+        // and the values are section indices, which are never negative.
         let mut body = String::new();
-        if matches!(self.conv, b'd' | b'i') {
-            if self.flag_plus {
-                body.push('+');
-            } else if self.flag_space {
-                body.push(' ');
-            }
-        }
         if self.flag_hash {
             match self.conv {
                 b'x' if value != 0 => body.push_str("0x"),
@@ -905,7 +923,8 @@ impl SuffixFormat {
                 b' ',
             );
         } else if self.flag_zero && self.precision.is_none() {
-            // Zero padding goes after any sign or `0x`, not before it.
+            // Zero padding goes after a `#` prefix (`0x`/`0X`/`0`), not before
+            // it: `%#08x` of 255 is `0x0000ff`, not `000000xff`.
             let split = body.len().saturating_sub(digits.len());
             out.extend_from_slice(body.get(..split).unwrap_or_default().as_bytes());
             out.resize(
@@ -1063,7 +1082,15 @@ fn split(
         };
         let mut repetition: u64 = 0;
         loop {
-            let step = apply(options, control, repetition, lines, sink, &mut emit, &mut search)?;
+            let step = apply(
+                options,
+                control,
+                repetition,
+                lines,
+                sink,
+                &mut emit,
+                &mut search,
+            )?;
             if step == Step::Finished {
                 // `{*}` ran out. GNU exits 0 from inside the loop, which skips
                 // the trailing piece — for a skip pattern that means no output
@@ -1348,6 +1375,40 @@ mod tests {
         );
     }
 
+    /// The flag set is GNU's, not printf's: `+` and a space are rejected.
+    ///
+    /// GNU's parser stops at an unknown flag and reads that byte as the
+    /// conversion specifier, so both come back through the *invalid
+    /// conversion* sentence rather than an "unknown flag" one — including the
+    /// space, which prints as itself and leaves the message ending in a
+    /// trailing blank. All measured against GNU 9.4 under `LC_ALL=C.UTF-8`.
+    ///
+    /// We used to accept both, so `csplit -b '%+d'` quietly wrote files named
+    /// `+0` and `+1` for a command line GNU refuses. See `known-issues.md`
+    /// → BUG-CSPLIT-ACCEPTS-TWO-SUFFIX-FLAGS-GNU-REJECTS.
+    #[test]
+    fn the_suffix_flag_set_is_gnus_and_not_printfs() {
+        assert_eq!(
+            SuffixFormat::parse(b"%+d").err().unwrap().message,
+            "invalid conversion specifier in suffix: +"
+        );
+        assert_eq!(
+            SuffixFormat::parse(b"% d").err().unwrap().message,
+            "invalid conversion specifier in suffix:  "
+        );
+        assert_eq!(
+            SuffixFormat::parse(b"% 5d").err().unwrap().message,
+            "invalid conversion specifier in suffix:  "
+        );
+        // The four GNU does take still work, which is the half a parser with
+        // no flags at all would fail. `'` is accepted and ignored, as the
+        // thousands separator is empty in this locale.
+        assert_eq!(sink(2, Some("%-5d")).name(3), OsString::from("xx3    "));
+        assert_eq!(sink(2, Some("%05d")).name(3), OsString::from("xx00003"));
+        assert_eq!(sink(2, Some("%#o")).name(8), OsString::from("xx010"));
+        assert_eq!(sink(2, Some("%'d")).name(3), OsString::from("xx3"));
+    }
+
     // ---------------- pattern parsing ----------------
 
     #[test]
@@ -1355,7 +1416,10 @@ mod tests {
         let e = parse_patterns(&os(&["4", "2"])).err().unwrap();
         assert_eq!(
             e.message,
-            "line number '2' is smaller than preceding line number, 4"
+            // Curly: this is `quote()`, measured against GNU 9.4 under
+            // `LC_ALL=C.UTF-8`. Contrast `zero_is_refused_unquoted` below,
+            // where GNU quotes the number not at all.
+            "line number ‘2’ is smaller than preceding line number, 4"
         );
     }
 
@@ -1371,15 +1435,19 @@ mod tests {
         // Not "no preceding pattern": GNU looks ahead for `{`, so a leading one
         // reaches the integer branch.
         let e = parse_patterns(&os(&["{3}"])).err().unwrap();
-        assert_eq!(e.message, "'{3}': invalid pattern");
+        assert_eq!(e.message, "‘{3}’: invalid pattern");
     }
 
     #[test]
     fn repeat_count_diagnostics_reproduce_gnus_quoting() {
         let e = parse_patterns(&os(&["4", "{x}"])).err().unwrap();
-        assert_eq!(e.message, "'{x'}: integer required between '{' and '}'");
+        // Only the echoed-back argument goes through `quote()`, so only it is
+        // curly. The braces on the right are csplit's own, spelled straight
+        // into the format string, and the `}` immediately after `‘{x’` is the
+        // one GNU prints separately because it NUL-terminated there.
+        assert_eq!(e.message, "‘{x’}: integer required between '{' and '}'");
         let e = parse_patterns(&os(&["4", "{1"])).err().unwrap();
-        assert_eq!(e.message, "'{1': '}' is required in repeat count");
+        assert_eq!(e.message, "‘{1’: '}' is required in repeat count");
     }
 
     #[test]
@@ -1391,7 +1459,7 @@ mod tests {
     #[test]
     fn offset_must_be_an_integer() {
         let e = parse_patterns(&os(&["/5/xyz"])).err().unwrap();
-        assert_eq!(e.message, "'/5/xyz': integer expected after delimiter");
+        assert_eq!(e.message, "‘/5/xyz’: integer expected after delimiter");
     }
 
     #[test]
@@ -1437,7 +1505,10 @@ mod tests {
         // The bug this replaces: `BufRead::lines` dropped the distinction and
         // every piece was re-terminated, so `csplit nonl 2` reported 3 bytes
         // where GNU reports 3 and wrote 4.
-        assert_eq!(split_lines(b"x\ny\nz"), vec![&b"x\n"[..], &b"y\n"[..], &b"z"[..]]);
+        assert_eq!(
+            split_lines(b"x\ny\nz"),
+            vec![&b"x\n"[..], &b"y\n"[..], &b"z"[..]]
+        );
         assert_eq!(split_lines(b""), Vec::<&[u8]>::new());
         assert_eq!(split_lines(b"\n"), vec![&b"\n"[..]]);
     }
@@ -1465,7 +1536,7 @@ mod tests {
     #[test]
     fn digits_must_be_a_number() {
         let e = parse_digits(b"abc").err().unwrap();
-        assert_eq!(e.sentence, "invalid number: 'abc'");
+        assert_eq!(e.sentence, "invalid number: ‘abc’");
         assert_eq!(e.referral, None);
     }
 
@@ -1474,7 +1545,7 @@ mod tests {
         let e = parse_args(&os(&[])).err().unwrap();
         assert_eq!(e.sentence, "missing operand");
         let e = parse_args(&os(&["f"])).err().unwrap();
-        assert_eq!(e.sentence, "missing operand after 'f'");
+        assert_eq!(e.sentence, "missing operand after ‘f’");
     }
 
     #[test]

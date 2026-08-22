@@ -31,10 +31,12 @@
 #
 # `--help` and `--version`, whose text is ours rather than the GNU project's.
 #
-# The locale is `C.UTF-8`, with the diagnostics that pass an argument through
-# gnulib's `quote()` referenced under `LC_ALL=C` so the quote marks are ASCII on
-# both sides — which is every tab-stop diagnostic and every getopt one. See
-# `open-questions.md` → B-Q2.
+# The locale is `C.UTF-8` throughout, including for the diagnostics that pass
+# an argument through gnulib's `quote()`. Those used to be referenced under
+# `LC_ALL=C`, because that was the only locale in which GNU's quote marks were
+# ASCII like ours; §351 made ours U+2018/U+2019 in every locale, which is what
+# GNU prints under any UTF-8 locale, so `C` is now the setting in which the
+# reference would be wrong.
 set -u
 
 # Our expand is a native Windows binary, so MSYS would rewrite an argument that
@@ -150,11 +152,6 @@ report() {
 }
 
 run_case()  { [ "$HAVE_GNU" = yes ] || return 0; compare - C.UTF-8 "$@"; report "expand $*"; }
-# The diagnostics that pass an argument through gnulib's `quote()`. Under a
-# UTF-8 locale gnulib switches to U+2018/U+2019 and ours does not — one open
-# question, not one per case. See B-Q2. Every diagnostic `expand` can print
-# quotes something, so every error case here is `run_ascii`.
-run_ascii() { [ "$HAVE_GNU" = yes ] || return 0; compare - C "$@"; report "expand $* [C]"; }
 run_stdin() {
   [ "$HAVE_GNU" = yes ] || return 0
   local input="$1"; shift
@@ -319,97 +316,97 @@ run_stdin 'a\xff\tb\n'
 # --- operands that cannot be opened ------------------------------------------
 # The run continues and the status is 1 at the end, so the good file is still
 # converted.
-run_ascii nosuch.txt
-run_ascii plain.txt nosuch.txt
-run_ascii nosuch.txt plain.txt
-run_ascii nosuch.txt nosuch2.txt
-run_ascii -t3 plain.txt nosuch.txt plain.txt
+run_case nosuch.txt
+run_case plain.txt nosuch.txt
+run_case nosuch.txt plain.txt
+run_case nosuch.txt nosuch2.txt
+run_case -t3 plain.txt nosuch.txt plain.txt
 
 # --- tab-stop diagnostics ----------------------------------------------------
-run_ascii -t 0 plain.txt
-run_ascii -t0 plain.txt
-run_ascii -0 plain.txt
-run_ascii -t 0,4 plain.txt
-run_ascii -t 4,0 plain.txt
-run_ascii -t 4,4 plain.txt
-run_ascii -t 4,2 plain.txt
-run_ascii -t 4 -t 2 plain.txt
-run_ascii -t 4 -t 4 plain.txt
-run_ascii -t x plain.txt
-run_ascii -t oops plain.txt
-run_ascii -t 4,5x plain.txt
-run_ascii -t 1x2 plain.txt
-run_ascii -t '4;5' plain.txt
-run_ascii -t -- plain.txt
-run_ascii -t=4 plain.txt
-run_ascii --tabs=x plain.txt
+run_case -t 0 plain.txt
+run_case -t0 plain.txt
+run_case -0 plain.txt
+run_case -t 0,4 plain.txt
+run_case -t 4,0 plain.txt
+run_case -t 4,4 plain.txt
+run_case -t 4,2 plain.txt
+run_case -t 4 -t 2 plain.txt
+run_case -t 4 -t 4 plain.txt
+run_case -t x plain.txt
+run_case -t oops plain.txt
+run_case -t 4,5x plain.txt
+run_case -t 1x2 plain.txt
+run_case -t '4;5' plain.txt
+run_case -t -- plain.txt
+run_case -t=4 plain.txt
+run_case --tabs=x plain.txt
 # `/` and `+` misplaced. The parse continues after one of these, so `1/2/3`
 # reports twice — and the message quotes the *rest* of the argument, not the
 # character.
-run_ascii -t 1/2 plain.txt
-run_ascii -t 1/2/3 plain.txt
-run_ascii -t 1+2 plain.txt
-run_ascii -t 1+2+3 plain.txt
-run_ascii -t 1/2+3 plain.txt
+run_case -t 1/2 plain.txt
+run_case -t 1/2/3 plain.txt
+run_case -t 1+2 plain.txt
+run_case -t 1+2+3 plain.txt
+run_case -t 1/2+3 plain.txt
 # Two prefixes of the same kind in one list, which is the "only allowed with the
 # last value" pair.
-run_ascii -t /2,/4 plain.txt
-run_ascii -t +2,+4 plain.txt
-run_ascii -t /2 -t /4 plain.txt
-run_ascii -t +2 -t +4 plain.txt
+run_case -t /2,/4 plain.txt
+run_case -t +2,+4 plain.txt
+run_case -t /2 -t /4 plain.txt
+run_case -t +2 -t +4 plain.txt
 # One of each, which is caught at the end rather than during the parse.
-run_ascii -t /2,+4 plain.txt
-run_ascii -t +2,/4 plain.txt
-run_ascii -t 1,/2,+4 plain.txt
+run_case -t /2,+4 plain.txt
+run_case -t +2,/4 plain.txt
+run_case -t 1,/2,+4 plain.txt
 # Overflow. The whole digit run is named, including the digits that had already
 # been accumulated, and the rest of it is skipped so one number gives one
 # message.
-run_ascii -t 99999999999999999999999 plain.txt
-run_ascii -t 18446744073709551616 plain.txt
+run_case -t 99999999999999999999999 plain.txt
+run_case -t 18446744073709551616 plain.txt
 # The largest *accepted* value, reached only through a case that fails before
 # any conversion happens. A bare `-t 18446744073709551615` is valid, and both
 # implementations honour it: one tab becomes 2**64-1 spaces, written at about
 # 11 MB/s forever. An earlier revision of this file had exactly that case and
 # it wedged the run. Pairing it with a descending stop makes `finalize` refuse
 # the list, which is the only part of it worth testing.
-run_ascii -t 18446744073709551615,4 plain.txt
-run_ascii -t 99999999999999999999999,4 plain.txt
-run_ascii -t 4,99999999999999999999999x plain.txt
-run_ascii -99999999999999999999999 plain.txt
+run_case -t 18446744073709551615,4 plain.txt
+run_case -t 99999999999999999999999,4 plain.txt
+run_case -t 4,99999999999999999999999x plain.txt
+run_case -99999999999999999999999 plain.txt
 
 # --- getopt diagnostics ------------------------------------------------------
-run_ascii -q plain.txt
-run_ascii -iq plain.txt
-run_ascii -qi plain.txt
-run_ascii -t plain.txt
-run_ascii -it
-run_ascii --tabs
-run_ascii --zz plain.txt
-run_ascii --initial=4 plain.txt
-run_ascii --help=x plain.txt
-run_ascii --version=x plain.txt
-run_ascii --=x plain.txt
-run_ascii -- -q
+run_case -q plain.txt
+run_case -iq plain.txt
+run_case -qi plain.txt
+run_case -t plain.txt
+run_case -it
+run_case --tabs
+run_case --zz plain.txt
+run_case --initial=4 plain.txt
+run_case --help=x plain.txt
+run_case --version=x plain.txt
+run_case --=x plain.txt
+run_case -- -q
 # A tab-stop diagnostic exits where it is found, so which of two errors gets
 # reported depends only on argv order.
-run_ascii -t x -q plain.txt
-run_ascii -q -t x plain.txt
-run_ascii -t 0 -q plain.txt
-run_ascii -q -t 0 plain.txt
+run_case -t x -q plain.txt
+run_case -q -t x plain.txt
+run_case -t 0 -q plain.txt
+run_case -q -t 0 plain.txt
 # Abbreviations, which the shipped parser did not accept at all.
 run_case --in plain.txt
 run_case --ta=3 plain.txt
 run_case --tab=3 plain.txt
 run_case --i plain.txt
-run_ascii --t=3 plain.txt
-run_ascii --ini=3 plain.txt
+run_case --t=3 plain.txt
+run_case --ini=3 plain.txt
 
 # --- operands and options interleave -----------------------------------------
 run_case plain.txt -t3
 run_case plain.txt -i leading.txt
 run_case -t3 plain.txt -i
-run_ascii -- -t3
-run_ascii plain.txt -- -t3
+run_case -- -t3
+run_case plain.txt -- -t3
 
 # --- differ on purpose -------------------------------------------------------
 # On SlateOS, and on any POSIX host, opening a directory succeeds and the *read*

@@ -1045,15 +1045,15 @@ mod tests {
     #[test]
     fn operands_are_counted_exactly() {
         assert_eq!(refuse(&[]), "missing operand");
-        assert_eq!(refuse(&["A"]), "missing operand after 'A'");
-        assert_eq!(refuse(&["-z", "A"]), "missing operand after 'A'");
-        assert_eq!(refuse(&["A", "-z"]), "missing operand after 'A'");
+        assert_eq!(refuse(&["A"]), "missing operand after ‘A’");
+        assert_eq!(refuse(&["-z", "A"]), "missing operand after ‘A’");
+        assert_eq!(refuse(&["A", "-z"]), "missing operand after ‘A’");
         assert_eq!(
             refuse(&["--output-delimiter", ":", "A"]),
-            "missing operand after 'A'"
+            "missing operand after ‘A’"
         );
-        assert_eq!(refuse(&["A", "B", "C"]), "extra operand 'C'");
-        assert_eq!(refuse(&["A", "B", "C", "D"]), "extra operand 'C'");
+        assert_eq!(refuse(&["A", "B", "C"]), "extra operand ‘C’");
+        assert_eq!(refuse(&["A", "B", "C", "D"]), "extra operand ‘C’");
     }
 
     #[test]

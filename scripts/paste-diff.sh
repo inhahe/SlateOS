@@ -44,9 +44,12 @@
 # harness would also mean bypassing `compare`'s redirections, so the case lives
 # in `known-issues.md` rather than here.
 #
-# The locale is `C.UTF-8`, with the diagnostics that pass an argument through
-# gnulib's quoting referenced under `LC_ALL=C` so the quote marks are ASCII on
-# both sides. See `open-questions.md` → B-Q2.
+# The locale is `C.UTF-8` throughout, including for the diagnostics that pass
+# an argument through gnulib's `quote()`. Those used to be referenced under
+# `LC_ALL=C`, because that was the only locale in which GNU's quote marks were
+# ASCII like ours; §351 made ours U+2018/U+2019 in every locale, which is what
+# GNU prints under any UTF-8 locale, so `C` is now the setting in which the
+# reference would be wrong.
 set -u
 
 # Our paste is a native Windows binary, so MSYS would rewrite an argument that
@@ -162,11 +165,6 @@ report() {
 }
 
 run_case()  { [ "$HAVE_GNU" = yes ] || return 0; compare - C.UTF-8 "$@"; report "paste $*"; }
-# The diagnostics that pass an argument through gnulib's quoting. Under a UTF-8
-# locale gnulib switches to U+2018/U+2019 and ours does not — one open question,
-# not one per case. See B-Q2. Every diagnostic `paste` can print quotes
-# something, so every error case here is `run_ascii`.
-run_ascii() { [ "$HAVE_GNU" = yes ] || return 0; compare - C "$@"; report "paste $* [C]"; }
 run_stdin() {
   [ "$HAVE_GNU" = yes ] || return 0
   local input="$1"; shift
@@ -326,52 +324,52 @@ run_stdin 'p\nq\n' -- -
 # --- operands that cannot be opened ------------------------------------------
 # Parallel is fatal at the first bad operand and prints nothing at all; serial
 # names every one and keeps going. Both orders of good and bad, both ways.
-run_ascii nosuch.txt
-run_ascii a.txt nosuch.txt
-run_ascii nosuch.txt a.txt
-run_ascii a.txt nosuch.txt b.txt
-run_ascii nosuch.txt nosuch2.txt
-run_ascii -s nosuch.txt
-run_ascii -s a.txt nosuch.txt
-run_ascii -s nosuch.txt a.txt
-run_ascii -s a.txt nosuch.txt b.txt
-run_ascii -s nosuch.txt nosuch2.txt
-run_ascii -s nosuch.txt a.txt nosuch2.txt
+run_case nosuch.txt
+run_case a.txt nosuch.txt
+run_case nosuch.txt a.txt
+run_case a.txt nosuch.txt b.txt
+run_case nosuch.txt nosuch2.txt
+run_case -s nosuch.txt
+run_case -s a.txt nosuch.txt
+run_case -s nosuch.txt a.txt
+run_case -s a.txt nosuch.txt b.txt
+run_case -s nosuch.txt nosuch2.txt
+run_case -s nosuch.txt a.txt nosuch2.txt
 
 # --- the delimiter diagnostic -------------------------------------------------
 # A list ending in an odd number of backslashes is fatal, and the argument is
 # quoted in `c_maybe` style — the raw argument, before collapsing, with the
 # quotes off unless some byte forces them on.
-run_ascii -d '\' a.txt
-run_ascii -d 'a\' a.txt
-run_ascii -d '\\\' a.txt
-run_ascii -d ',\' a.txt
-run_ascii -d '\t\' a.txt
-run_ascii --delimiters='x\' a.txt
-run_ascii -s -d 'a\' a.txt
+run_case -d '\' a.txt
+run_case -d 'a\' a.txt
+run_case -d '\\\' a.txt
+run_case -d ',\' a.txt
+run_case -d '\t\' a.txt
+run_case --delimiters='x\' a.txt
+run_case -s -d 'a\' a.txt
 # It is raised after the whole command line is read, so a later `-d` rescues an
 # earlier bad one and a getopt error anywhere preempts it…
 run_case -d 'a\' -d , a.txt b.txt
-run_ascii -d 'a\' -Q a.txt
-run_ascii -Q -d 'a\' a.txt
+run_case -d 'a\' -Q a.txt
+run_case -Q -d 'a\' a.txt
 # …but it comes before the files are opened, so a missing operand loses to it.
-run_ascii -d '\' nosuch.txt
-run_ascii -s -d '\' nosuch.txt
+run_case -d '\' nosuch.txt
+run_case -s -d '\' nosuch.txt
 
 # --- getopt diagnostics ------------------------------------------------------
-run_ascii -Q a.txt
-run_ascii -sQ a.txt
-run_ascii -Qs a.txt
-run_ascii -d
-run_ascii -sd
-run_ascii --delimiters
-run_ascii --nope a.txt
-run_ascii --serial=x a.txt
-run_ascii --zero-terminated=x a.txt
-run_ascii --help=x a.txt
-run_ascii --version=x a.txt
-run_ascii --=x a.txt
-run_ascii -- -Q
+run_case -Q a.txt
+run_case -sQ a.txt
+run_case -Qs a.txt
+run_case -d
+run_case -sd
+run_case --delimiters
+run_case --nope a.txt
+run_case --serial=x a.txt
+run_case --zero-terminated=x a.txt
+run_case --help=x a.txt
+run_case --version=x a.txt
+run_case --=x a.txt
+run_case -- -Q
 # Abbreviations, which the shipped parser did not accept at all. No two long
 # options share a first letter, so every one of them abbreviates to one letter.
 run_case --s a.txt b.txt
@@ -386,8 +384,8 @@ run_case a.txt -d , b.txt
 run_case -s a.txt -d , b.txt
 run_case -- a.txt b.txt
 run_case -s -- a.txt
-run_ascii -- -d
-run_ascii a.txt -- -d
+run_case -- -d
+run_case a.txt -- -d
 
 # --- differ on purpose -------------------------------------------------------
 # On SlateOS, and on any POSIX host, opening a directory succeeds and the *read*

@@ -75,6 +75,7 @@ use std::io::Write as _;
 use std::process;
 
 use bignum::BigInt;
+use coreutils::quote::quote;
 use ere::ch::{Ch, chars};
 
 /// An operand, an operator, and a result: all bytes.
@@ -123,8 +124,8 @@ fn main() {
     };
     if let Some(extra) = p.peek() {
         die(&format!(
-            "syntax error: unexpected argument '{}'",
-            String::from_utf8_lossy(extra)
+            "syntax error: unexpected argument {}",
+            quote(extra)
         ));
     }
 
@@ -261,20 +262,21 @@ impl<'a> Parser<'a> {
         Some(a)
     }
 
-    /// The argument just consumed, for "missing argument after 'X'".
-    fn previous(&self) -> String {
-        let prev = self
-            .pos
+    /// The argument just consumed, for "missing argument after ‘X’".
+    ///
+    /// Bytes, not a `String`: an argument is whatever the shell handed us and
+    /// need not be UTF-8, and `quote` is what renders it for a diagnostic.
+    fn previous(&self) -> &[u8] {
+        self.pos
             .checked_sub(1)
             .and_then(|i| self.args.get(i))
-            .map_or(&b""[..], Vec::as_slice);
-        String::from_utf8_lossy(prev).into_owned()
+            .map_or(&b""[..], Vec::as_slice)
     }
 
     fn missing(&self) -> Fail {
         Fail(format!(
-            "syntax error: missing argument after '{}'",
-            self.previous()
+            "syntax error: missing argument after {}",
+            quote(self.previous())
         ))
     }
 
@@ -398,14 +400,21 @@ impl<'a> Parser<'a> {
         if self.eat(b"(") {
             let inner = self.or()?;
             if !self.eat(b")") {
+                // Two mark styles in one message, and both are GNU's: the
+                // `')'` expr *expected* is spelled straight into its own
+                // format string, while the argument it *found* goes through
+                // `quote()` and so follows the locale. Measured against GNU
+                // expr 9.4 under `LC_ALL=C.UTF-8`:
+                //   expr '(' 1 ']'  ->  expecting ')' instead of ‘]’
+                //   expr '(' 1      ->  expecting ')' after ‘1’
                 return Err(match self.peek() {
                     Some(a) => Fail(format!(
-                        "syntax error: expecting ')' instead of '{}'",
-                        String::from_utf8_lossy(a)
+                        "syntax error: expecting ')' instead of {}",
+                        quote(a)
                     )),
                     None => Fail(format!(
-                        "syntax error: expecting ')' after '{}'",
-                        self.previous()
+                        "syntax error: expecting ')' after {}",
+                        quote(self.previous())
                     )),
                 });
             }
@@ -447,6 +456,11 @@ impl<'a> Parser<'a> {
         // ":" followed by a stray argument, not an operator missing a left
         // side.
         if self.peek().is_some_and(|a| a.as_slice() == b")") {
+            // Straight marks, and not an oversight: this message names no
+            // argument, so nothing goes through `quote()` — the `)` is
+            // spelled into GNU's own format string and stays straight in
+            // every locale. Contrast `unexpected argument ‘)’`, which is
+            // the same character reported through `quote()`.
             return Err(Fail("syntax error: unexpected ')'".to_string()));
         }
         match self.take() {
@@ -876,36 +890,42 @@ mod tests {
     fn a_missing_operand_names_what_it_follows() {
         assert_eq!(
             eval_err(&["1", "+"]),
-            "syntax error: missing argument after '+'"
+            "syntax error: missing argument after ‘+’"
         );
         assert_eq!(
             eval_err(&["length"]),
-            "syntax error: missing argument after 'length'"
+            "syntax error: missing argument after ‘length’"
         );
         assert_eq!(
             eval_err(&["substr", "abc", "1"]),
-            "syntax error: missing argument after '1'"
+            "syntax error: missing argument after ‘1’"
         );
         assert_eq!(
             eval_err(&["abc", ":"]),
-            "syntax error: missing argument after ':'"
+            "syntax error: missing argument after ‘:’"
         );
     }
 
     #[test]
     fn an_unclosed_group_names_what_it_expected_after() {
+        // Both mark styles, in one message each: the `')'` is expr's own,
+        // straight; the argument is `quote()`d, curly. Measured against GNU
+        // expr 9.4.
         assert_eq!(
             eval_err(&["(", "1"]),
-            "syntax error: expecting ')' after '1'"
+            "syntax error: expecting ')' after ‘1’"
         );
         assert_eq!(
             eval_err(&["(", "1", "]"]),
-            "syntax error: expecting ')' instead of ']'"
+            "syntax error: expecting ')' instead of ‘]’"
         );
     }
 
     #[test]
     fn a_stray_close_paren_is_reported_where_it_is_found() {
+        // No argument is named here, so nothing is `quote()`d and the whole
+        // message is straight — unlike `unexpected argument ‘)’`, which
+        // reports the same character through `quote()` and so is curly.
         assert_eq!(eval_err(&[")"]), "syntax error: unexpected ')'");
         assert_eq!(eval_err(&["length", ")"]), "syntax error: unexpected ')'");
     }

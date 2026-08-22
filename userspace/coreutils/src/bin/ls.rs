@@ -6,7 +6,7 @@
 //!   -h  human-readable sizes (K, M, G) in long format
 //!   -1  one entry per line (default when output is not a terminal)
 
-use coreutils::human::{human_readable, Opts};
+use coreutils::human::{Opts, human_readable};
 use coreutils::quote::quoteaf_os;
 use std::env;
 use std::fs;
@@ -201,8 +201,12 @@ fn show_entry_long(out: &mut impl Write, name: &str, path: &Path, opts: &Options
 /// That is a layout question about `ls`, not a rendering question about
 /// `human`, so it is left alone here rather than half-changed.
 fn human_size(bytes: u64) -> String {
-    let rendered =
-        human_readable(bytes, Opts::AUTOSCALE | Opts::CEILING | Opts::SI | Opts::BASE_1024, 1, 1);
+    let rendered = human_readable(
+        bytes,
+        Opts::AUTOSCALE | Opts::CEILING | Opts::SI | Opts::BASE_1024,
+        1,
+        1,
+    );
     format!("{rendered:>6}")
 }
 

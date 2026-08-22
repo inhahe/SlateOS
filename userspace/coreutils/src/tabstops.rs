@@ -471,19 +471,19 @@ mod tests {
     fn the_four_parse_diagnostics() {
         assert_eq!(
             errors("1/2"),
-            vec!["'/' specifier not at start of number: '/2'"]
+            vec!["'/' specifier not at start of number: ‘/2’"]
         );
         assert_eq!(
             errors("1x2"),
-            vec!["tab size contains invalid character(s): 'x2'"]
+            vec!["tab size contains invalid character(s): ‘x2’"]
         );
         assert_eq!(
             errors("4,5x"),
-            vec!["tab size contains invalid character(s): 'x'"]
+            vec!["tab size contains invalid character(s): ‘x’"]
         );
         assert_eq!(
             errors("99999999999999999999"),
-            vec!["tab stop is too large '99999999999999999999'"]
+            vec!["tab stop is too large ‘99999999999999999999’"]
         );
     }
 
@@ -494,15 +494,15 @@ mod tests {
         assert_eq!(
             errors("1/2/3"),
             vec![
-                "'/' specifier not at start of number: '/2/3'",
-                "'/' specifier not at start of number: '/3'",
+                "'/' specifier not at start of number: ‘/2/3’",
+                "'/' specifier not at start of number: ‘/3’",
             ]
         );
         assert_eq!(
             errors("1+2+3"),
             vec![
-                "'+' specifier not at start of number: '+2+3'",
-                "'+' specifier not at start of number: '+3'",
+                "'+' specifier not at start of number: ‘+2+3’",
+                "'+' specifier not at start of number: ‘+3’",
             ]
         );
         // One message per oversized number, because the rest of the digit run
@@ -510,14 +510,14 @@ mod tests {
         assert_eq!(
             errors("99999999999999999999,99999999999999999999"),
             vec![
-                "tab stop is too large '99999999999999999999'",
-                "tab stop is too large '99999999999999999999'",
+                "tab stop is too large ‘99999999999999999999’",
+                "tab stop is too large ‘99999999999999999999’",
             ]
         );
         // The invalid character wins over anything that would follow it.
         assert_eq!(
             errors("1x/2"),
-            vec!["tab size contains invalid character(s): 'x/2'"]
+            vec!["tab size contains invalid character(s): ‘x/2’"]
         );
     }
 
@@ -587,7 +587,7 @@ mod tests {
         assert_eq!(
             t.parse(b"1\xff"),
             Err(vec![
-                "tab size contains invalid character(s): '\\377'".to_string()
+                "tab size contains invalid character(s): ‘\\377’".to_string()
             ])
         );
     }

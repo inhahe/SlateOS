@@ -975,10 +975,13 @@ mod tests {
         let err = |args: &[&str]| fail(args).sentence;
         assert!(err(&["-q"]).starts_with("invalid option -- 'q'"));
         assert_eq!(err(&["-t", ""]), "empty tab");
-        assert_eq!(err(&["-t", "ab"]), "multi-character tab 'ab'");
+        assert_eq!(err(&["-t", "ab"]), "multi-character tab ‘ab’");
         assert_eq!(err(&["-t:", "-t;"]), "incompatible tabs");
         assert_eq!(
             err(&["-c", "a", "b"]),
+            // Straight: both `extra operand` messages route through
+            // `quoteaf`, which §351 keeps straight in every locale, unlike
+            // the `multi-character tab ‘ab’` above which uses `quote`.
             "extra operand 'b' not allowed with -c"
         );
         assert!(err(&["-k"]).contains("requires an argument"));
@@ -1109,26 +1112,25 @@ mod tests {
     /// many there are.
     #[test]
     fn an_ambiguous_option_argument_is_a_different_sentence_from_an_invalid_one() {
-        let valid = "\nValid arguments are:\n  - 'quiet', 'silent'\n  - 'diagnose-first'";
+        let valid = "\nValid arguments are:\n  - ‘quiet’, ‘silent’\n  - ‘diagnose-first’";
         assert_eq!(
             fail_msg(&["--check=bogus"]),
-            format!("invalid argument 'bogus' for '--check'{valid}")
+            format!("invalid argument ‘bogus’ for ‘--check’{valid}")
         );
         // The empty string is a prefix of all three words, which disagree.
         assert_eq!(
             fail_msg(&["--check="]),
-            format!("ambiguous argument '' for '--check'{valid}")
+            format!("ambiguous argument ‘’ for ‘--check’{valid}")
         );
         // `quiet` and `silent` share a value, so they share a line in the list
         // above — and a prefix matching only those two would *not* be
         // ambiguous, because there would be nothing to disambiguate. `--sort`
         // has no two words with one value, so every word gets its own line.
-        assert!(fail_msg(&["--sort="]).contains("  - 'month'\n  - 'numeric'\n"));
-        // A word that is not valid UTF-8 cannot prefix any of these ASCII
-        // words, so it takes the invalid-argument path rather than erroring.
-        assert!(
-            fail_msg(&["--sort=\u{e9}"]).starts_with(r"invalid argument '\303\251' for '--sort'")
-        );
+        assert!(fail_msg(&["--sort="]).contains("  - ‘month’\n  - ‘numeric’\n"));
+        // A multi-byte word cannot prefix any of these ASCII words, so it takes
+        // the invalid-argument path — and reaches the message as itself, since
+        // `quote()` escapes what does not decode rather than what is not ASCII.
+        assert!(fail_msg(&["--sort=\u{e9}"]).starts_with("invalid argument ‘é’ for ‘--sort’"));
     }
 
     #[test]

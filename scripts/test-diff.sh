@@ -4,9 +4,10 @@
 # ## Why this harness batches, when the other twenty-eight do not
 #
 # The established shape in this tree is one reference invocation per case:
-# `wsl -e env LC_ALL=C <util> …`, compared against one native run. That costs a
-# WSL process launch per case — roughly a second and a half on this host — which
-# is affordable at `csplit`'s 76 cases and already unpleasant at `split`'s 210.
+# `wsl -e env LC_ALL=C.UTF-8 <util> …`, compared against one native run. That
+# costs a WSL process launch per case — roughly a second and a half on this host
+# — which is affordable at `csplit`'s 76 cases and already unpleasant at
+# `split`'s 210.
 #
 # `test` needs many more cases than either. Its behaviour is not defined by a
 # list of options but by a *grammar*, and the grammar's rules interact: what
@@ -49,10 +50,14 @@
 # `split-diff.sh`, `csplit-diff.sh`, `od-diff.sh` and `wc-diff.sh`; see
 # `known-issues.md` → `TD-COREUTILS-GETOPT-DIAGNOSTICS-USE-THE-WRONG-SHAPE`.
 #
-# ## Why LC_ALL=C
+# ## Why LC_ALL=C.UTF-8
 #
-# The diagnostics quote the offending argument through gnulib's quoting, which
-# picks its quote marks from the locale. `C` keeps them ASCII on both sides.
+# The diagnostics quote the offending argument back at the caller through gnulib's
+# `quote()`, which picks its quote marks from the locale. Since §351 ours
+# prints U+2018/U+2019 in every locale, and GNU prints those under a UTF-8
+# locale and ASCII under `C` — so `C.UTF-8` is the setting the two agree in.
+# This file ran under `C` for the mirror-image of that reason until B-Q2 was
+# answered; nothing else here reads the locale.
 set -u
 
 # Our `test` is a native Windows binary, so MSYS would rewrite any argument that
@@ -60,7 +65,7 @@ set -u
 export MSYS2_ARG_CONV_EXCL='*'
 
 OURS=${OURS:-"target/x86_64-pc-windows-gnu/debug/test.exe"}
-export LC_ALL=${LC_ALL:-C}
+export LC_ALL=${LC_ALL:-C.UTF-8}
 
 US=$'\x1f'   # joins the arguments of one case
 RS=$'\x1e'   # ends one case's record in the results
@@ -77,7 +82,7 @@ cd "$work" >/dev/null || exit 1
 # silently ran somewhere else would report every file as absent — which looks
 # like a divergence in the file tests rather than like a broken harness.
 : > .probe
-if wsl -e env LC_ALL=C test -f .probe >/dev/null 2>&1; then
+if wsl -e env LC_ALL=C.UTF-8 test -f .probe >/dev/null 2>&1; then
   HAVE_GNU=yes
 else
   HAVE_GNU=no
@@ -433,7 +438,7 @@ if [ "$HAVE_GNU" = yes ]; then
   # /usr/bin/test there; bash's builtin would be a different implementation and
   # is deliberately not what is compared. Its diagnostics are prefixed with
   # that same path, which is what $PROG strips.
-  wsl -e env LC_ALL=C BIN=/usr/bin/test PROG=/usr/bin/test \
+  wsl -e env LC_ALL=C.UTF-8 BIN=/usr/bin/test PROG=/usr/bin/test \
       bash -c "$runner_body" < "$cases" > "$work/gnu.out" 2>/dev/null
 
   # Flatten both RS-delimited result streams to one record per line, then join

@@ -21,6 +21,10 @@ fn main() {
     std::process::exit(1);
 }
 
+// `quote` is not `cfg(unix)`-gated because `parse_owner_group` is not: the
+// pure helpers are compiled everywhere so they can be unit-tested on the
+// host, and they are what report a bad `OWNER[:GROUP]`.
+use coreutils::quote::quote;
 #[cfg(unix)]
 use coreutils::quote::quotef_os;
 #[cfg(unix)]
@@ -86,21 +90,30 @@ fn parse_owner_group(spec: &str) -> Result<(Option<u32>, Option<u32>), String> {
             None
         } else {
             Some(owner_str.parse::<u32>().map_err(|_| {
-                format!("invalid user: '{owner_str}' (only numeric UIDs supported)")
+                format!(
+                    "invalid user: {} (only numeric UIDs supported)",
+                    quote(owner_str.as_bytes())
+                )
             })?)
         };
         let gid = if group_str.is_empty() {
             None
         } else {
             Some(group_str.parse::<u32>().map_err(|_| {
-                format!("invalid group: '{group_str}' (only numeric GIDs supported)")
+                format!(
+                    "invalid group: {} (only numeric GIDs supported)",
+                    quote(group_str.as_bytes())
+                )
             })?)
         };
         Ok((uid, gid))
     } else {
-        let uid = spec
-            .parse::<u32>()
-            .map_err(|_| format!("invalid user: '{spec}' (only numeric UIDs supported)"))?;
+        let uid = spec.parse::<u32>().map_err(|_| {
+            format!(
+                "invalid user: {} (only numeric UIDs supported)",
+                quote(spec.as_bytes())
+            )
+        })?;
         Ok((Some(uid), None))
     }
 }

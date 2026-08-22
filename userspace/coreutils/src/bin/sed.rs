@@ -2038,16 +2038,17 @@ mod tests {
         let mut inp = Input {
             paths: Vec::new(),
             next_path: 0,
-            cur: Some(Box::new(BufReader::new(io::Cursor::new(
-                line.into_bytes(),
-            )))),
+            cur: Some(Box::new(BufReader::new(io::Cursor::new(line.into_bytes())))),
             peeked: None,
             sep: b'\n',
             had_error: false,
         };
         let (status, _) = run_one(&compiled, &mut inp, &mut sink, false, b'\n');
         assert_eq!(status, Some(4), "a declined search must fail the run");
-        assert!(sink.is_empty(), "nothing may be printed on a declined search");
+        assert!(
+            sink.is_empty(),
+            "nothing may be printed on a declined search"
+        );
     }
 
     #[test]

@@ -90,11 +90,19 @@ compare() {
   o_out=$(od -An -c <"$o_bin"); g_out=$(od -An -c <"$g_bin")
   rm -f "$o_bin" "$g_bin"
 
-  local o_loud=no g_loud=no
-  [ -s "$o_err" ] && o_loud=yes
-  [ -s "$g_err" ] && g_loud=yes
+  # stderr is compared as *text*, not merely for emptiness. It used to be the
+  # latter, and what that cost showed up on 2026-08-21: our `wc` reached for
+  # gnulib's `quote()` where upstream reaches for `quoteaf` in `cannot open %s
+  # for reading`, and it printed the host's errno string where the rest of our
+  # coreutils prints `errmsg::strerror`'s. Two wrong diagnostics, and this
+  # harness called both of them a pass. A test that only asks *whether* a
+  # program complained certifies the wording as unmeasured while looking like
+  # coverage.
+  local o_err_text g_err_text
+  o_err_text=$(od -An -c <"$o_err"); g_err_text=$(od -An -c <"$g_err")
 
-  if [ "$o_out" = "$g_out" ] && [ "$o_rc" = "$g_rc" ] && [ "$o_loud" = "$g_loud" ]; then
+  if [ "$o_out" = "$g_out" ] && [ "$o_rc" = "$g_rc" ] &&
+     [ "$o_err_text" = "$g_err_text" ]; then
     AGREED=yes
   else
     AGREED=no
@@ -313,6 +321,13 @@ run_getopt() {
   return 0
 }
 
+# Currently called nowhere: the last three xfails, the U+2018/U+2019 quotation
+# marks, became passes when `design-decisions.md` §351 was implemented. Kept
+# anyway, and deliberately. It is not dead weight but the mechanism that made
+# that cleanup happen on time: an xfail that starts agreeing reports XPASS with
+# its own now-stale reason quoted back, so a divergence we stop having cannot
+# sit here being asserted forever. The next genuine one wants this, and
+# rewriting it under deadline is how a harness ends up without the XPASS half.
 xfail_getopt() {
   [ "$HAVE_GNU" = yes ] || return 0
   local reason="$1"; shift
@@ -346,20 +361,20 @@ run_getopt --version=x
 # `argmatch` is a different sentence from getopt's, with a different status:
 # `--total=zzz` exits 1 even for a utility whose bad-option status is 2.
 #
-# These three differ on purpose, in the *quotation marks* and nothing else. GNU's
-# `quote()` — the style used for option arguments, and only that style — asks
-# the locale's charset and emits U+2018/U+2019 when it is UTF-8, so under this
-# harness's `C.UTF-8` the reference prints `invalid argument ‘zzz’` where we
-# print `'zzz'`. `quotef` and `quoteaf`, which render *file names*, do not do
-# this and agree with us in every locale, so the divergence is confined to the
-# option-argument sentence. Whether SlateOS should follow GNU here is a
-# user-visible policy question and is queued for the operator: see
-# `open-questions.md` -> "Should diagnostics use the Unicode quotation marks
-# GNU uses in a UTF-8 locale?".
-Q=quote-marks-under-a-utf8-locale
-xfail_getopt "$Q" --total=zzz
-xfail_getopt "$Q" --total=
-xfail_getopt "$Q" --total=a
+# These three used to differ, in the *quotation marks* and nothing else, and
+# were carried here as `quote-marks-under-a-utf8-locale` xfails. They pass now.
+# GNU's `quote()` — the style used for option arguments, and only that style —
+# asks the locale's charset and emits U+2018/U+2019 when it is UTF-8, so under
+# this harness's `C.UTF-8` the reference prints `invalid argument ‘zzz’`; we
+# printed `'zzz'`. `design-decisions.md` §351 settled that we follow GNU, on
+# the grounds that SlateOS has no non-UTF-8 locale to have the other behaviour
+# for, and `quote()` now emits the curly marks too. `quotef` and `quoteaf`,
+# which render *file names*, were correct throughout and are untouched — they
+# keep the straight marks in every locale, which is GNU's behaviour and is what
+# keeps a file name pasteable back into a shell.
+run_getopt --total=zzz
+run_getopt --total=
+run_getopt --total=a
 
 # wc's own usage error. It is the one that keeps the `Try 'wc --help'` referral,
 # because upstream calls `error (0, ...)` and then `usage (EXIT_FAILURE)` rather

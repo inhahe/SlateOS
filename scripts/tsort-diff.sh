@@ -15,16 +15,18 @@
 # Run `OURS=/usr/bin/tsort ./scripts/tsort-diff.sh` to confirm the harness still
 # discriminates: it should report dozens of differences, not zero.
 #
-# ## Why the whole harness runs under `LC_ALL=C`
+# ## Why the whole harness runs under `LC_ALL=C.UTF-8`
 #
-# Not for the reason `comm-diff.sh` and `join-diff.sh` need it. `tsort` sorts
-# its items with `strcmp`, never `strcoll`, so the locale changes nothing about
-# what it computes and a `C.UTF-8` section would measure nothing. `C` is here
-# only for the diagnostics that pass a file name or an operand through gnulib's
-# quoting, which under a UTF-8 locale reaches for U+2018/U+2019 where ours
-# stays ASCII (`open-questions.md` → B-Q2). The last section re-runs the
-# ordering cases under `C.UTF-8` anyway, to record that the *output* really is
-# locale-independent rather than merely assumed to be.
+# Not for the reason `comm-diff.sh` and `join-diff.sh` keep a `C` section.
+# `tsort` sorts its items with `strcmp`, never `strcoll`, so the locale changes
+# nothing about what it computes and either setting would serve for the ordering
+# cases. What decides it is the diagnostics: they pass a file name or an operand
+# through gnulib's `quote()`, and since §351 ours prints U+2018/U+2019 in every
+# locale — which is what GNU prints under a UTF-8 locale and not what it prints
+# under `C`. This file used to run under `C` for the mirror-image of that reason,
+# back when ours stayed ASCII (`open-questions.md` → B-Q2, since answered). The
+# last section re-runs the ordering cases under `C` anyway, to record that the
+# *output* really is locale-independent rather than merely assumed to be.
 #
 # ## Why `od -An -c`
 #
@@ -56,7 +58,7 @@ set -u
 export MSYS2_ARG_CONV_EXCL='*'
 
 OURS=${OURS:-"target/x86_64-pc-windows-gnu/debug/tsort.exe"}
-export LC_ALL=${LC_ALL:-C}
+export LC_ALL=${LC_ALL:-C.UTF-8}
 
 pass=0; fail=0; xfail=0; xpass=0
 
@@ -212,20 +214,17 @@ report() {
   return 0
 }
 
-run_case()  { [ "$HAVE_GNU" = yes ] || return 0; compare - C "$@"; report "tsort $*"; }
-# The diagnostics that pass an argument through gnulib's quoting. They are
-# already under `C` here — see the header — so this is a label, not a locale
-# change: it marks the rows whose agreement would be at issue under B-Q2 if the
-# rest of the harness ever moved to `C.UTF-8`.
-run_ascii() { [ "$HAVE_GNU" = yes ] || return 0; compare - C "$@"; report "tsort $* [C]"; }
-# The same case under a UTF-8 locale. Unlike `comm`'s and `join`'s, this is not
-# measuring a divergence: it is the evidence that there is none to measure,
-# because `tsort` never calls `strcoll`.
-run_utf8()  { [ "$HAVE_GNU" = yes ] || return 0; compare - C.UTF-8 "$@"; report "tsort $* [C.UTF-8]"; }
+run_case()  { [ "$HAVE_GNU" = yes ] || return 0; compare - C.UTF-8 "$@"; report "tsort $*"; }
+# The same case under `C`. Unlike `comm`'s and `join`'s second locale, this is
+# not measuring a divergence: it is the evidence that there is none to measure,
+# because `tsort` never calls `strcoll`. Only the ordering cases belong here —
+# a diagnostic run under `C` would report GNU's ASCII marks against our curly
+# ones and fail for a reason that has nothing to do with ordering.
+run_c()     { [ "$HAVE_GNU" = yes ] || return 0; compare - C "$@"; report "tsort $* [C]"; }
 run_stdin() {
   [ "$HAVE_GNU" = yes ] || return 0
   local input="$1"; shift
-  compare "$input" C "$@"
+  compare "$input" C.UTF-8 "$@"
   report "printf '$input' | tsort $*"
 }
 # A case we expect to differ, with the reason. Counted separately so that a case
@@ -234,7 +233,7 @@ run_stdin() {
 xfail_case() {
   [ "$HAVE_GNU" = yes ] || return 0
   local why="$1"; shift
-  compare - C "$@"
+  compare - C.UTF-8 "$@"
   if [ "$AGREED" = yes ]; then
     xpass=$((xpass+1)); printf 'XPASS tsort %s  (expected to differ: %s)\n' "$*" "$why"
   else
@@ -285,16 +284,16 @@ run_case nulonly.txt
 # --- cycles -------------------------------------------------------------------
 # Both the standard output — which still lists every item — and the standard
 # error list, whose order is the backward walk's rather than the input's.
-run_ascii cyc2.txt
-run_ascii cyc3.txt
-run_ascii cycrev.txt
-run_ascii cyc2x.txt
-run_ascii cyctail.txt
-run_ascii cycshare.txt
+run_case cyc2.txt
+run_case cyc3.txt
+run_case cycrev.txt
+run_case cyc2x.txt
+run_case cyctail.txt
+run_case cycshare.txt
 
 # --- odd token counts ---------------------------------------------------------
-run_ascii odd.txt
-run_ascii solo.txt
+run_case odd.txt
+run_case solo.txt
 
 # --- standard input -----------------------------------------------------------
 # The default operand, the explicit `-`, and the fact that both are named `-` in
@@ -314,65 +313,66 @@ run_stdin 'a\0b c\n'
 run_stdin 'a b\nb c\nc a\nx y\n'
 
 # --- operands -----------------------------------------------------------------
-run_ascii one.txt one.txt
-run_ascii one.txt one.txt one.txt
-run_ascii chain.txt diamond.txt
-run_ascii one.txt -
-run_ascii - one.txt
-run_ascii - -
+run_case one.txt one.txt
+run_case one.txt one.txt one.txt
+run_case chain.txt diamond.txt
+run_case one.txt -
+run_case - one.txt
+run_case - -
 # `--` ends the options, and everything after it is an operand — including a
 # spelling that would otherwise be an option.
 run_case -- one.txt
 run_case --
-run_ascii -- --help
-run_ascii -- -
-run_ascii -- -x
-run_ascii one.txt -- one.txt
-run_ascii -- one.txt -x
-run_ascii one.txt -- --version
+run_case -- --help
+run_case -- -
+run_case -- -x
+run_case one.txt -- one.txt
+run_case -- one.txt -x
+run_case one.txt -- --version
 # An operand that will not open, and one that opens and will not read.
-run_ascii nosuch.txt
-run_ascii ''
+run_case nosuch.txt
+run_case ''
 xfail_case 'a directory operand cannot be opened on a Windows host' subdir
 
 # --- getopt -------------------------------------------------------------------
 # There are no short options at all, so every short spelling is an error —
 # including `-h`, which is the one a reader would guess exists.
-run_ascii -h
-run_ascii -x
-run_ascii -0
-run_ascii -qz
-run_ascii -h one.txt
-run_ascii one.txt -h
-run_ascii --nope
-run_ascii --nope one.txt
-run_ascii --helpp
-run_ascii --=x
-run_ascii --help=x
-run_ascii --hel=x
-run_ascii --version=x
-run_ascii --ver=x
+run_case -h
+run_case -x
+run_case -0
+run_case -qz
+run_case -h one.txt
+run_case one.txt -h
+run_case --nope
+run_case --nope one.txt
+run_case --helpp
+run_case --=x
+run_case --help=x
+run_case --hel=x
+run_case --version=x
+run_case --ver=x
 # Options permute past an operand, because gnulib passes an option string with
 # no leading `+`.
-run_ascii one.txt --nope
+run_case one.txt --nope
 # There is exactly one `getopt_long` call, so whichever option comes first is
 # the only one ever looked at. `--version -x` prints the version and `-x
 # --version` refuses; an implementation that scanned the whole line would report
 # the bad option in both.
-run_ascii -x --nope
-run_ascii -x --version
-run_ascii --nope --help
+run_case -x --nope
+run_case -x --version
+run_case --nope --help
 
 # --- the locale changes nothing -----------------------------------------------
-# `tsort` sorts with `strcmp`, so these must agree byte for byte with their `C`
-# counterparts above. A row that differed here would mean GNU had grown a
-# collation this file does not model.
-run_utf8 case.txt
-run_utf8 high.txt
-run_utf8 prefix.txt
-run_utf8 diamond.txt
-run_utf8 succ.txt
-run_utf8 long.txt
+# `tsort` sorts with `strcmp`, so these must agree byte for byte with their
+# `C.UTF-8` counterparts above. A row that differed here would mean GNU had
+# grown a collation this file does not model. Only ordering cases: a diagnostic
+# would differ under `C` for a reason that is about quote marks, not order.
+run_c case.txt
+run_c high.txt
+run_c prefix.txt
+run_c diamond.txt
+run_c succ.txt
+run_c long.txt
 
 # --- differ on purpose --------------------------------------------------------
 xfail_case 'our --help omits the GNU project ancillary block' --help

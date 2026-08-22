@@ -54,7 +54,10 @@
 //! and the same fix, as the sweep that put every *file* name in a diagnostic
 //! through `quote`.
 
-use crate::quote::quote;
+// Both, and the difference is load-bearing: `quote` is gnulib's locale-aware
+// style (curly under UTF-8) and belongs only to `bad_argument`; `quote_glibc`
+// is glibc's straight-marked one and belongs to every other diagnostic here.
+use crate::quote::{quote, quote_glibc};
 
 /// What a long option does with a value, matching `getopt_long`'s three cases.
 ///
@@ -159,14 +162,23 @@ fn sentence(program: Program, body: &str) -> Error {
 }
 
 /// Render an option name — a byte string — as glibc would if glibc escaped.
+///
+/// **Straight marks, not [`quote`]'s curly ones.** Every diagnostic in this
+/// file except [`bad_argument`]'s is glibc's rather than gnulib's, and glibc
+/// spells the quotes into its format strings instead of asking the locale, so
+/// these stay `'--key'` under a UTF-8 locale where an argmatch message has
+/// become `‘quiet’`. Measured: `sort --key` and `sort --sort=zzz` disagree in
+/// exactly this way. See `quote::quote_glibc`.
 fn named(name: &[u8]) -> String {
-    quote(name)
+    quote_glibc(name)
 }
 
 /// Render a resolved long option, which is a table entry and so always plain
 /// ASCII. It is quoted anyway rather than relying on that staying true.
+///
+/// Straight marks, for the same reason as [`named`].
 fn named_long(resolved: &str) -> String {
-    quote(format!("--{resolved}").as_bytes())
+    quote_glibc(format!("--{resolved}").as_bytes())
 }
 
 /// A utility's name and usage status, bound once so that every diagnostic it
@@ -399,11 +411,28 @@ impl Program {
 
 /// `argmatch`'s two diagnostics, which differ only in that first word.
 ///
+/// **The only pair here that gnulib writes rather than glibc**, and so the only
+/// pair whose quotes follow the locale. Measured under `LC_ALL=C.UTF-8`:
+///
+/// ```text
+/// $ sort --check=
+/// sort: ambiguous argument ‘’ for ‘--check’
+/// Valid arguments are:
+///   - ‘quiet’, ‘silent’
+///   - ‘diagnose-first’
+/// Try 'sort --help' for more information.
+/// ```
+///
+/// Note the last line: the referral comes from coreutils' own `usage()`, which
+/// spells its quotes literally, so it stays straight in the middle of a message
+/// whose other four lines have gone curly. That is GNU's output, not an
+/// inconsistency of ours.
+///
 /// The "Valid arguments are" list is generated from the same table the match
 /// used rather than written out beside it, because the two must agree and a
 /// hand-written copy is what drifts. Runs of words sharing a value are joined
 /// onto one line, which is both gnulib's rendering and the reason it is worth
-/// generating: `'quiet', 'silent'` on one line *is* the statement that they
+/// generating: `‘quiet’, ‘silent’` on one line *is* the statement that they
 /// mean the same thing, and it is the same fact the matcher uses to decide that
 /// a prefix hitting both is not ambiguous.
 fn bad_argument<T: PartialEq>(
@@ -433,9 +462,14 @@ fn bad_argument<T: PartialEq>(
         ..sentence(
             program,
             &format!(
+                // `quote`, not `named`: this is the one diagnostic in this file
+                // that gnulib writes rather than glibc, so it is the one that
+                // follows the locale into curly marks. Measured under
+                // `LC_ALL=C.UTF-8`: `sort: invalid argument ‘zzz’ for ‘--sort’`
+                // against `sort: option '--key' requires an argument`.
                 "{what} argument {} for {}\nValid arguments are:\n{}",
-                named(given),
-                named(option.as_bytes()),
+                quote(given),
+                quote(option.as_bytes()),
                 lines.join("\n")
             ),
         )
@@ -579,8 +613,8 @@ mod tests {
         let err = SORT.argmatch(b"", "--check", CHECK_WORDS).unwrap_err();
         assert_eq!(
             without_referral(&err),
-            "ambiguous argument '' for '--check'\nValid arguments are:\n  \
-             - 'quiet', 'silent'\n  - 'diagnose-first'"
+            "ambiguous argument ‘’ for ‘--check’\nValid arguments are:\n  \
+             - ‘quiet’, ‘silent’\n  - ‘diagnose-first’"
         );
         // A prefix matching only the two synonyms is *not* ambiguous: there is
         // nothing for the user to disambiguate. This is the case a
@@ -594,16 +628,26 @@ mod tests {
     fn an_invalid_argument_is_a_different_word_from_an_ambiguous_one() {
         let err = SORT.argmatch(b"bogus", "--check", CHECK_WORDS).unwrap_err();
         assert!(
-            without_referral(&err).starts_with("invalid argument 'bogus' for '--check'"),
+            without_referral(&err).starts_with("invalid argument ‘bogus’ for ‘--check’"),
             "{err}"
         );
-        // Not UTF-8: cannot prefix any of these ASCII words, so it takes the
-        // no-match path rather than erroring differently.
+        // A multi-byte character cannot prefix any of these ASCII words, so it
+        // takes the no-match path rather than erroring differently — and it
+        // reaches the message *as itself*, because `quote()` escapes what does
+        // not decode, not what is not ASCII. Measured: GNU 9.4 under
+        // `LC_ALL=C.UTF-8` prints `‘é’` here too (`tests/quotearg-gnu.txt`).
         let err = SORT
-            .argmatch(b"\xc3\xa9", "--check", CHECK_WORDS)
+            .argmatch("é".as_bytes(), "--check", CHECK_WORDS)
             .unwrap_err();
         assert!(
-            without_referral(&err).starts_with(r"invalid argument '\303\251' for '--check'"),
+            without_referral(&err).starts_with("invalid argument ‘é’ for ‘--check’"),
+            "{err}"
+        );
+        // A byte that decodes to nothing still escapes, which is the half of
+        // the rule the character above no longer covers.
+        let err = SORT.argmatch(b"\xff", "--check", CHECK_WORDS).unwrap_err();
+        assert!(
+            without_referral(&err).starts_with(r"invalid argument ‘\377’ for ‘--check’"),
             "{err}"
         );
     }
@@ -616,14 +660,14 @@ mod tests {
         let err = SORT.argmatch(b"bogus", "--check", CHECK_WORDS).unwrap_err();
         assert!(
             err.sentence
-                .contains("  - 'quiet', 'silent'\n  - 'diagnose-first'"),
+                .contains("  - ‘quiet’, ‘silent’\n  - ‘diagnose-first’"),
             "{err:?}"
         );
         // All-distinct values put every word on its own line.
         let distinct: &[(&str, u8)] = &[("month", 0), ("numeric", 1)];
         let err = SORT.argmatch(b"x", "--sort", distinct).unwrap_err();
         assert!(
-            err.sentence.contains("  - 'month'\n  - 'numeric'"),
+            err.sentence.contains("  - ‘month’\n  - ‘numeric’"),
             "{err:?}"
         );
     }

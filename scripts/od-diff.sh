@@ -16,14 +16,20 @@
 # `known-issues.md` → `TD-COREUTILS-GETOPT-DIAGNOSTICS-USE-THE-WRONG-SHAPE`,
 # and the identical note at the top of `tr-diff.sh` and `wc-diff.sh`.
 #
-# ## Why `LC_ALL=C` throughout, unlike the other harnesses
+# ## Why `LC_ALL=C` for the dumps and `C.UTF-8` for the diagnostics
 #
 # `od` asks `isprint` about individual *bytes* — for `-t c`, for `-a`, and for
 # the `z` trailer — and it reads `localeconv()->decimal_point` to size a float
 # column. Both are locale answers about a byte stream that has no encoding, so
-# `C` is the only setting under which the question is well posed. The
-# diagnostics that echo the offending text back therefore also come out with
-# ASCII quote marks on both sides, which happens to sidestep B-Q2 entirely.
+# `C` is the only setting under which the question is well posed.
+#
+# A run that rejects its own arguments asks neither question: it formats no byte
+# and sizes no column. What it does do is echo the offending text back through
+# gnulib's `quote()`, and since §351 ours prints U+2018/U+2019 in every locale —
+# which is what GNU prints under a UTF-8 locale and not what it prints under
+# `C`. So those rows go through `run_diag` at `C.UTF-8`. This file used to be
+# `C` throughout, and the header used to record that as sidestepping B-Q2; the
+# answer to B-Q2 is what turned the sidestep into a wrong reference.
 set -u
 
 # Our od is a native Windows binary, so MSYS would rewrite an argument that
@@ -32,6 +38,7 @@ export MSYS2_ARG_CONV_EXCL='*'
 
 OURS=${OURS:-"target/x86_64-pc-windows-gnu/debug/od.exe"}
 GNU=${GNU:-"wsl -e env LC_ALL=C od"}
+GNU_UTF8=${GNU_UTF8:-"wsl -e env LC_ALL=C.UTF-8 od"}
 export LC_ALL=${LC_ALL:-C}
 
 pass=0; fail=0; xfail=0; xpass=0
@@ -164,6 +171,15 @@ report() {
 
 # A case whose operands name files, or which needs no input at all.
 run_case() { [ "$HAVE_GNU" = yes ] || return 0; compare - "$GNU" "$@"; report "od $*"; }
+
+# A case that gets as far as a diagnostic and no further, referenced under
+# `C.UTF-8` rather than the `C` everything else here needs. The header's reason
+# for `C` is about `isprint` and `localeconv`, and a run that rejects its own
+# arguments reaches neither — it never formats a byte and never sizes a float
+# column. What it does reach is §351, which made our `quote()` print
+# U+2018/U+2019 in every locale; GNU prints those under a UTF-8 locale and ASCII
+# under `C`, so `C` is the setting in which the reference would now be wrong.
+run_diag() { [ "$HAVE_GNU" = yes ] || return 0; compare - "$GNU_UTF8" "$@"; report "od $* [C.UTF-8]"; }
 
 # A case fed through stdin from a fixture file.
 run_in() {
@@ -396,26 +412,26 @@ run_case -A
 run_case -A q all256.bin
 run_case -A '' all256.bin
 run_case -t
-run_case -t q all256.bin
-run_case -t d3 all256.bin
-run_case -t d16 all256.bin
-run_case -t f2 all256.bin
-run_case -t f32 all256.bin
-run_case -t 'd99999999999999999999' all256.bin
+run_diag -t q all256.bin
+run_diag -t d3 all256.bin
+run_diag -t d16 all256.bin
+run_diag -t f2 all256.bin
+run_diag -t f32 all256.bin
+run_diag -t 'd99999999999999999999' all256.bin
 run_case -t '' all256.bin
-run_case -t q -t w all256.bin
+run_diag -t q -t w all256.bin
 run_case -j
-run_case -j x all256.bin
-run_case -j 1Q all256.bin
-run_case -N x all256.bin
+run_diag -j x all256.bin
+run_diag -j 1Q all256.bin
+run_diag -N x all256.bin
 run_case -j 18446744073709551615 -N 18446744073709551615 all256.bin
-run_case -S x all256.bin
+run_diag -S x all256.bin
 run_case -S 3 -t x1 all256.bin
-run_case --endian=middle all256.bin
-run_case --endian all256.bin
-run_case --endian=
-run_case --traditional all256.bin 16 32 48
-run_case --traditional text.txt all256.bin
+run_diag --endian=middle all256.bin
+run_diag --endian all256.bin
+run_diag --endian=
+run_diag --traditional all256.bin 16 32 48
+run_diag --traditional text.txt all256.bin
 run_case nosuchfile
 run_case nosuchfile text.txt
 run_case text.txt nosuchfile

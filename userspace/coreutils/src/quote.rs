@@ -23,7 +23,7 @@
 //!
 //! ## The styles, and which to use
 //!
-//! Three of these are the ones nearly every diagnostic reaches for, and the
+//! Four of these are the ones nearly every diagnostic reaches for, and the
 //! difference between them is visible enough that matching it matters — a test
 //! or a script that reads our diagnostic next to GNU's should see the same
 //! bytes.
@@ -32,10 +32,60 @@
 //! |---|---|---|---|---|---|
 //! | [`quotef`] | `quotef` | a name that **ends the message** | `abc` | `'a b'` | `"a'b"` |
 //! | [`quoteaf`] | `quoteaf` | a name **inside a sentence** | `'abc'` | `'a b'` | `"a'b"` |
-//! | [`quote`] | `quote` | **option arguments**, and anything else | `'abc'` | `'a b'` | `'a\'b'` |
+//! | [`quote`] | `quote` | **option arguments**, and anything else | `‘abc’` | `‘a b’` | `‘a'b’` |
+//! | [`quote_glibc`] | — (glibc inlines `'%s'`) | **option names**, in getopt's own errors | `'abc'` | `'a b'` | `'a\'b'` |
 //!
-//! The fourth, [`quote_c_maybe_colon`], is a C-string rendering rather than a
-//! shell one, and is rare: `paste` uses it for its delimiter list and `ls`
+//! Only the third row has curly marks, and that is not a typo: of GNU's three
+//! *gnulib* styles exactly one moves with the locale's character set, and it is
+//! that one. File names — the text most likely to be pasted back into a shell
+//! or matched by a script — keep the straight marks in every locale. See
+//! `design-decisions.md` §351.
+//!
+//! ## The fourth row is not gnulib's, and that is the whole point
+//!
+//! The first three come from gnulib's `quotearg.c`. The fourth comes from
+//! **glibc**, whose `getopt_long` writes its own diagnostics with the quotes
+//! spelled out in the format string:
+//!
+//! ```c
+//! fprintf (stderr, _("%s: unrecognized option '%s'\n"), argv[0], argv[optind]);
+//! ```
+//!
+//! Nothing there consults the locale, so those messages keep straight marks
+//! even where `quote()` has gone curly — and a single GNU command line can
+//! print one of each:
+//!
+//! ```text
+//! $ LC_ALL=C.UTF-8 sort --key             # glibc getopt
+//! sort: option '--key' requires an argument
+//! $ LC_ALL=C.UTF-8 sort --sort=zzz        # gnulib argmatch
+//! sort: invalid argument ‘zzz’ for ‘--sort’
+//! ```
+//!
+//! Before §351 both families rendered identically, so routing them through one
+//! function was invisible; the moment [`quote`] went curly it became six wrong
+//! diagnostics. [`quote_glibc`] exists so the distinction is written down in
+//! the type system rather than remembered.
+//!
+//! **glibc is not the only source of a straight mark, and "which library wrote
+//! it" is therefore not the test.** gnulib's own `xstrtol-error.c` spells its
+//! quotes into the format string exactly as glibc's `getopt_long` does, so the
+//! diagnostic an option-taking caller prints for a bad number is straight while
+//! the one a *quantity*-taking caller prints for the same bad number is curly.
+//! Measured, GNU 9.4, `LC_ALL=C.UTF-8`:
+//!
+//! ```text
+//! $ od -j x f      ->  od: invalid -j argument 'x'
+//! $ sort -S x f    ->  sort: invalid -S argument 'x'
+//! $ head -n x f    ->  head: invalid number of lines: ‘x’
+//! $ split -b x f   ->  split: invalid number of bytes: ‘x’
+//! ```
+//!
+//! Both pairs reject the same argument for the same reason. See
+//! [`crate::xnum::strtol_fatal`], which is the straight one.
+//!
+//! The last style, [`quote_c_maybe_colon`], is a C-string rendering rather than
+//! a shell one, and is rare: `paste` uses it for its delimiter list and `ls`
 //! offers it as `--quoting-style=c-maybe`. See its own documentation.
 //!
 //! The first two produce a shell word: what they print can be pasted back into
@@ -57,14 +107,14 @@
 //! [`quote`] always quotes, and escapes in C rather than shell style; it is for
 //! text that was never a shell word to begin with, where the quotes are
 //! punctuation marking where the quoted thing starts and stops. That is why
-//! `sort: invalid argument 'bogus' for '--sort'` uses it.
+//! `sort: invalid argument ‘bogus’ for ‘--sort’` uses it.
 //!
 //! ## Where the rules come from
 //!
 //! Every table and every branch below was **measured**, not recalled: see
 //! `scripts/quote-probe.py`, which drives GNU `sort` and `head` over every
 //! byte in every position that turns out to matter and records what came out.
-//! The result is `tests/quotearg-gnu.txt`, 8333 rows, and `tests/quotearg.rs`
+//! The result is `tests/quotearg-gnu.txt`, 8719 rows, and `tests/quotearg.rs`
 //! asserts this module reproduces all of them.
 //!
 //! That method is the whole point. Reading gnulib's `quotearg.c` and
@@ -97,9 +147,157 @@ const DQ_SAFE: &[u8] = b" %'+,-.0123456789:@ABCDEFGHIJKLMNOPQRSTUVWXYZ]_\
 /// pins it: `~a'z` comes out `"~a'z"` while `a'z~` comes out `'a'\''z~'`.
 const DQ_SAFE_FIRST_ONLY: &[u8] = b"#~";
 
-/// Whether a byte prints as itself in the C locale.
-const fn printable(b: u8) -> bool {
-    b >= 0x20 && b < 0x7f
+/// One step of reading a byte string that is *usually* UTF-8: either a
+/// character, or a byte that begins no valid sequence.
+///
+/// Every escaping loop below walks these rather than bytes. That is the whole
+/// difference between rendering `é` as `é` and rendering it as `\303\251`, and
+/// it is not a cosmetic one — a name a user typed is text, and a diagnostic
+/// that spells it back in octal is a diagnostic that cannot be matched against
+/// the name it is about.
+#[derive(Clone, Copy)]
+enum Piece {
+    /// A character, and how many bytes its encoding occupied.
+    Char(char, usize),
+    /// A byte at a position where UTF-8 does not decode. Always rendered as an
+    /// escape: there is no character to print, so there is nothing else it
+    /// *could* be rendered as without inventing one.
+    Byte(u8),
+}
+
+impl Piece {
+    /// How far past this piece the next one starts.
+    const fn len(self) -> usize {
+        match self {
+            Self::Char(_, n) => n,
+            Self::Byte(_) => 1,
+        }
+    }
+
+    /// Whether this piece can appear in a rendering as itself.
+    fn printable(self) -> bool {
+        match self {
+            Self::Char(c, _) => printable_char(c),
+            Self::Byte(_) => false,
+        }
+    }
+}
+
+/// Whether a character prints as itself.
+///
+/// This is the rule `design-decisions.md` §101/§104 already settled for osh's
+/// `%q`, extended by exactly two code points; §357 records the extension. In
+/// full: a character is printable unless it is a Unicode **control** (`Cc` —
+/// the C0 range, DEL, and the C1 range `U+0080..=U+009F`) or one of the two
+/// **line/paragraph separators** `U+2028`/`U+2029`.
+///
+/// ## Why not a real `iswprint` table
+///
+/// glibc's `iswprint` under `C.UTF-8` is 709 ranges derived from that
+/// release's `UnicodeData.txt`, and copying it would mean carrying a table
+/// that drifts every Unicode release — where "drift" means a name that
+/// rendered one way last year renders another way this year for no reason the
+/// user did anything about. Measured by `scripts/printable-audit.py` over all
+/// 1,112,064 code points, the rule above agrees with glibc 2.39's table on
+/// every **assigned** character without exception; the 824,718 it disagrees on
+/// are precisely the **unassigned** ones (`Cn`, e.g. `U+0378`), which glibc
+/// escapes and we print. That is the one deliberate divergence, and
+/// `tests/quotearg.rs` and `tests/c_maybe.rs` assert it *stays* a divergence so
+/// the reason cannot go quietly stale.
+///
+/// ## Why the two separators are added
+///
+/// `Zl`/`Zp` is a set of exactly two characters, so naming them costs nothing
+/// and needs no table. They are added because a terminal, a log reader, and
+/// most `2>&1 | grep` pipelines treat U+2028 as ending a line — which is
+/// precisely the line-forgery this module exists to prevent, arriving in a
+/// character that is not `Cc`. Escaping them is not merely matching glibc; it
+/// would be right even if glibc printed them.
+///
+/// Note this makes coreutils stricter than osh, whose `needs_ansi_c_quote`
+/// (§101) leaves U+2028 raw. The two are allowed to differ: osh is quoting
+/// *for re-execution by a shell*, where a separator is an ordinary character,
+/// and coreutils is quoting *for a human reading a line-oriented stream*.
+fn printable_char(c: char) -> bool {
+    !c.is_control() && c != '\u{2028}' && c != '\u{2029}'
+}
+
+/// The piece beginning at byte `i`, or `None` at the end of the string.
+fn piece_at(s: &[u8], i: usize) -> Option<Piece> {
+    let rest = s.get(i..)?;
+    let &first = rest.first()?;
+    // Four bytes is the longest a UTF-8 character can be, so a window that
+    // size can never cut a valid one short -- which is what lets the decode
+    // below be a plain `from_utf8` rather than a hand-rolled state machine.
+    let head = rest.get(..rest.len().min(4)).unwrap_or(rest);
+    let valid = match std::str::from_utf8(head) {
+        Ok(t) => t,
+        Err(e) => {
+            // `valid_up_to() == 0` is the interesting case: the string does
+            // not decode *here*, so this byte is a `Byte` piece and the next
+            // attempt starts one byte along. Anything else means the window
+            // held a character followed by trouble, and the character is ours.
+            let n = e.valid_up_to();
+            if n == 0 {
+                return Some(Piece::Byte(first));
+            }
+            head.get(..n)
+                .and_then(|v| std::str::from_utf8(v).ok())
+                .unwrap_or("")
+        }
+    };
+    Some(match valid.chars().next() {
+        Some(c) => Piece::Char(c, c.len_utf8()),
+        None => Piece::Byte(first),
+    })
+}
+
+/// Every piece of `s`, each with the byte offset it starts at.
+///
+/// The offset is not decoration: [`bare_ok`] needs "is this the first?" and
+/// [`c_always`] needs to look at the byte after a NUL.
+fn pieces(s: &[u8]) -> impl Iterator<Item = (usize, Piece)> + '_ {
+    let mut i = 0usize;
+    std::iter::from_fn(move || {
+        let p = piece_at(s, i)?;
+        let at = i;
+        i = i.saturating_add(p.len());
+        Some((at, p))
+    })
+}
+
+/// Escape a whole piece: one C escape per byte of it.
+///
+/// Per *byte*, not per character, even when the piece is a character. That is
+/// what GNU does — `U+0080` comes out `\302\200`, its two UTF-8 bytes — and it
+/// is the only rendering that round-trips, since the reader of a `$'...'` word
+/// is a shell decoding bytes.
+fn escape_piece(p: Piece, out: &mut String) {
+    match p {
+        Piece::Byte(b) => c_escape(b, out),
+        Piece::Char(c, _) => {
+            let mut buf = [0u8; 4];
+            for &b in c.encode_utf8(&mut buf).as_bytes() {
+                c_escape(b, out);
+            }
+        }
+    }
+}
+
+/// `name` rendered as itself, if every piece is a character `ok` accepts.
+///
+/// `None` says at least one piece was not, which is the signal to fall through
+/// to a quoted form. A `Piece::Byte` is never accepted, so a `Some` result is
+/// also a proof that `name` was valid UTF-8.
+fn all_bare(name: &[u8], ok: impl Fn(usize, Piece) -> bool) -> Option<String> {
+    let mut out = String::with_capacity(name.len());
+    for (i, p) in pieces(name) {
+        match p {
+            Piece::Char(c, _) if ok(i, p) => out.push(c),
+            _ => return None,
+        }
+    }
+    Some(out)
 }
 
 /// The C escape for a byte that does not print: the named one where there is
@@ -117,13 +315,7 @@ fn c_escape(b: u8, out: &mut String) {
         0x0c => 'f',
         0x0d => 'r',
         _ => {
-            // Three octal digits, most significant first. Written out rather
-            // than formatted so this stays allocation-free and obviously
-            // total.
-            out.push('\\');
-            out.push((b'0' + (b >> 6)) as char);
-            out.push((b'0' + ((b >> 3) & 7)) as char);
-            out.push((b'0' + (b & 7)) as char);
+            octal_escape(b, out);
             return;
         }
     };
@@ -131,7 +323,107 @@ fn c_escape(b: u8, out: &mut String) {
     out.push(named);
 }
 
-/// Render `arg` the way GNU's `quote()` does: always inside `'...'`, with C
+/// A byte as `\` and three octal digits, most significant first.
+///
+/// Always three, never fewer: `\1` followed by a literal `2` would read back
+/// as `\12`, so a shortened escape can change the string it decodes to.
+///
+/// Written out rather than formatted so this stays allocation-free and
+/// obviously total — `b >> 6` is at most 3, so every digit is in range by
+/// construction and there is nothing to check.
+fn octal_escape(b: u8, out: &mut String) {
+    out.push('\\');
+    out.push((b'0' + (b >> 6)) as char);
+    out.push((b'0' + ((b >> 3) & 7)) as char);
+    out.push((b'0' + (b & 7)) as char);
+}
+
+/// The marks [`quote`] wraps its argument in: U+2018 and U+2019, the curly
+/// typographic pair.
+///
+/// GNU picks these from the locale's character set — straight `'...'` where it
+/// is ASCII, curly `‘...’` where it is UTF-8. We have no ASCII branch on
+/// purpose: `design-decisions.md` §351, resting on Q38, settles that the string
+/// layer here is UTF-8 full stop, so a branch on a locale that cannot occur
+/// would be dead code that looks load-bearing.
+///
+/// Note these are the *only* place a non-ASCII byte enters a rendering from
+/// this module. [`quotef`] and [`quoteaf`] keep straight marks in every locale
+/// — that is GNU's behaviour, measured, and it is what keeps a file name
+/// something you can paste back into a shell.
+const LEFT_QUOTE: char = '\u{2018}';
+const RIGHT_QUOTE: char = '\u{2019}';
+
+/// The first character of `text`, and how many bytes it occupied.
+///
+/// `None` where `text` is empty or begins with a byte that starts no valid
+/// UTF-8 sequence — which the caller must handle, because the byte is real and
+/// something has to be done with it.
+///
+/// This is exported rather than private because `printf`'s `'x` character
+/// constant asks exactly this question, and a second decoder written for it
+/// would be a second place for "what is a character here?" to be answered.
+/// Measured, GNU 9.4 under `LC_ALL=C.UTF-8`: `printf %d "'é"` prints `233`,
+/// the code point — not `195`, its first byte.
+///
+/// ```
+/// use coreutils::quote::first_char;
+/// assert_eq!(first_char(b"abc"), Some(('a', 1)));
+/// assert_eq!(first_char("é".as_bytes()), Some(('é', 2)));
+/// assert_eq!(first_char("😀".as_bytes()), Some(('😀', 4)));
+/// assert_eq!(first_char(b"\xff"), None);
+/// assert_eq!(first_char(b""), None);
+/// ```
+#[must_use]
+pub fn first_char(text: &[u8]) -> Option<(char, usize)> {
+    match piece_at(text, 0)? {
+        Piece::Char(c, n) => Some((c, n)),
+        Piece::Byte(_) => None,
+    }
+}
+
+/// Render `text` with every printable character as itself and everything else
+/// as one **three-digit octal escape per byte** — no quote marks, and no named
+/// escapes.
+///
+/// This is for a diagnostic that has already punctuated the untrusted text some
+/// other way, so adding marks would double them up. `printf`'s two are the
+/// motivating case: `%q: invalid conversion specification` puts the directive
+/// where the reader can see it is a directive, and the character-constant
+/// warning is followed by a colon.
+///
+/// The escapes are octal even where a named one exists, which is the one place
+/// this differs from every other style here. It is deliberate: this rendering
+/// is read by a person, not parsed by a shell, and `\012` next to `\302\200`
+/// reads as one uniform mechanism where `\n` next to `\302\200` reads as two.
+///
+/// ```
+/// use coreutils::quote::escape_unprintable;
+/// assert_eq!(escape_unprintable(b"abc"), "abc");
+/// assert_eq!(escape_unprintable(b"a\nb"), r"a\012b");
+/// assert_eq!(escape_unprintable("é".as_bytes()), "é");
+/// assert_eq!(escape_unprintable(b"\xff"), r"\377");
+/// assert_eq!(escape_unprintable("\u{2028}".as_bytes()), r"\342\200\250");
+/// ```
+#[must_use]
+pub fn escape_unprintable(text: &[u8]) -> String {
+    let mut out = String::with_capacity(text.len());
+    for (_, p) in pieces(text) {
+        match p {
+            Piece::Char(c, _) if printable_char(c) => out.push(c),
+            Piece::Byte(b) => octal_escape(b, &mut out),
+            Piece::Char(c, _) => {
+                let mut buf = [0u8; 4];
+                for &b in c.encode_utf8(&mut buf).as_bytes() {
+                    octal_escape(b, &mut out);
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Render `arg` the way GNU's `quote()` does: always inside `‘...’`, with C
 /// escapes.
 ///
 /// This is for text that is not a file name — an option's argument, a word
@@ -139,28 +431,113 @@ fn c_escape(b: u8, out: &mut String) {
 /// are always present because their job here is to mark where the quoted thing
 /// starts and stops, which a bare word does not do.
 ///
-/// The result is always printable ASCII, whatever `arg` held.
+/// **An ASCII `'` is not escaped**, which is the part most likely to be
+/// misremembered: it needed escaping when it *was* the delimiter, and now that
+/// the delimiter is `’` it cannot be confused with one, so GNU leaves it bare.
+/// A backslash is still doubled, because it still introduces the escapes.
+///
+/// **The closing mark `’` *is* escaped**, for the reason the ASCII `'` is not:
+/// a `’` inside the quoted text would be indistinguishable from the end of it.
+/// The opening `‘` is left bare, because nothing is looking for one. Both are
+/// measured; see the fixture rows for `\xe2\x80\x98` and `\xe2\x80\x99`.
+///
+/// The result is UTF-8, and printable apart from the marks themselves. A
+/// character that [`printable_char`] rejects, and every byte that is not valid
+/// UTF-8 at all, comes back as one three-digit octal escape *per byte*.
 ///
 /// ```
 /// use coreutils::quote::quote;
-/// assert_eq!(quote(b"bogus"), "'bogus'");
-/// assert_eq!(quote(b"a b"), "'a b'");
-/// assert_eq!(quote(b"it's"), r"'it\'s'");
-/// assert_eq!(quote(b"a\tb"), r"'a\tb'");
-/// assert_eq!(quote(b"\xff"), r"'\377'");
+/// assert_eq!(quote(b"bogus"), "\u{2018}bogus\u{2019}");
+/// assert_eq!(quote(b"a b"), "\u{2018}a b\u{2019}");
+/// assert_eq!(quote(b"it's"), "\u{2018}it's\u{2019}");
+/// assert_eq!(quote(b"a\\b"), "\u{2018}a\\\\b\u{2019}");
+/// assert_eq!(quote(b"a\tb"), "\u{2018}a\\tb\u{2019}");
+/// assert_eq!(quote(b"\xff"), "\u{2018}\\377\u{2019}");
+/// // A character prints as itself; the closing mark is escaped first.
+/// assert_eq!(quote("é".as_bytes()), "\u{2018}é\u{2019}");
+/// assert_eq!(quote("’".as_bytes()), "\u{2018}\\\u{2019}\u{2019}");
 /// ```
 #[must_use]
 pub fn quote(arg: &[u8]) -> String {
+    // Six bytes of delimiter, not two: each curly mark is three bytes of UTF-8.
+    let mut out = String::with_capacity(arg.len().saturating_add(6));
+    out.push(LEFT_QUOTE);
+    for (_, p) in pieces(arg) {
+        match p {
+            Piece::Char('\\', _) => out.push_str("\\\\"),
+            Piece::Char(RIGHT_QUOTE, _) => {
+                out.push('\\');
+                out.push(RIGHT_QUOTE);
+            }
+            Piece::Char(c, _) if printable_char(c) => out.push(c),
+            other => escape_piece(other, &mut out),
+        }
+    }
+    out.push(RIGHT_QUOTE);
+    out
+}
+
+/// Render `arg` inside straight `'...'`, the way **glibc's `getopt_long`**
+/// spells its own diagnostics — plus the C escaping glibc omits.
+///
+/// This is [`quote`]'s straight-marked sibling, and it exists because the two
+/// families of GNU diagnostic quote differently. gnulib's `quote()` follows the
+/// locale's character set and goes curly under UTF-8; glibc's getopt writes
+/// `'%s'` into the format string and so never does. Use this one for the text
+/// glibc names — a short option's letter, a long option's spelling, an
+/// unrecognized argument as typed — and [`quote`] for everything else. See this
+/// module's header for the worked example where one command line prints both.
+///
+/// ## Where this deliberately differs from glibc
+///
+/// glibc performs **no escaping whatever**, which is not a style choice we can
+/// copy: it is the line-forging bug described at the top of this module, live
+/// in the C library. Measured, under `LC_ALL=C.UTF-8`:
+///
+/// ```text
+/// $ wc --no$'\n'pe
+/// wc: unrecognized option '--no
+/// pe'
+/// ```
+///
+/// Two lines, the second of which the user chose. A `'` fares no better —
+/// `wc -\'` prints `invalid option -- '''`, where the marks can no longer be
+/// told from the content. So this function escapes: a byte that does not print
+/// becomes a C escape, and the `'` that *is* the delimiter here becomes `\'`.
+/// For every ordinary option name — which is to say every one that is not an
+/// attack — the two agree byte for byte, and that is the case the comparison
+/// with GNU actually rests on.
+///
+/// This is not the same rule as [`quote`], which leaves `'` bare precisely
+/// because `’` has taken over as its delimiter. The escaping follows the
+/// delimiter, and the delimiters differ.
+///
+/// The result is always printable, and ASCII except where `arg` itself held a
+/// printable character that was not — an option spelled `--café` keeps its
+/// `é`, exactly as glibc would print it.
+///
+/// ```
+/// use coreutils::quote::quote_glibc;
+/// assert_eq!(quote_glibc(b"--key"), "'--key'");
+/// assert_eq!(quote_glibc(b"x"), "'x'");
+/// assert_eq!(quote_glibc(b"it's"), r"'it\'s'");
+/// assert_eq!(quote_glibc(b"a\\b"), r"'a\\b'");
+/// assert_eq!(quote_glibc(b"a\tb"), r"'a\tb'");
+/// assert_eq!(quote_glibc(b"\xff"), r"'\377'");
+/// assert_eq!(quote_glibc("--café".as_bytes()), "'--café'");
+/// ```
+#[must_use]
+pub fn quote_glibc(arg: &[u8]) -> String {
     let mut out = String::with_capacity(arg.len().saturating_add(2));
     out.push('\'');
-    for &b in arg {
-        if b == b'\\' || b == b'\'' {
-            out.push('\\');
-            out.push(b as char);
-        } else if printable(b) {
-            out.push(b as char);
-        } else {
-            c_escape(b, &mut out);
+    for (_, p) in pieces(arg) {
+        match p {
+            Piece::Char(c @ ('\\' | '\''), _) => {
+                out.push('\\');
+                out.push(c);
+            }
+            Piece::Char(c, _) if printable_char(c) => out.push(c),
+            other => escape_piece(other, &mut out),
         }
     }
     out.push('\'');
@@ -176,11 +553,10 @@ pub fn quote(arg: &[u8]) -> String {
 /// `$`, a `` ` `` and even a backslash are all left bare here, because none of
 /// them means anything to a C compiler outside quotes.
 ///
-/// The only bytes that pull the quotes back on are the ones a C literal could
-/// not hold as itself: `"`, and anything unprintable — which in the C locale
-/// is everything below `0x20` plus `0x7f` and up. Once the quotes are on,
-/// *everything* is escaped C-style, including the backslash that was bare a
-/// moment earlier.
+/// The only things that pull the quotes back on are the ones a C literal could
+/// not hold as itself: `"`, anything [`printable_char`] rejects, and any byte
+/// that is not valid UTF-8. Once the quotes are on, *everything* is escaped
+/// C-style, including the backslash that was bare a moment earlier.
 ///
 /// ```
 /// use coreutils::quote::quote_c_maybe;
@@ -189,6 +565,8 @@ pub fn quote(arg: &[u8]) -> String {
 /// assert_eq!(quote_c_maybe(br#"a"b\"#), r#""a\"b\\""#);
 /// assert_eq!(quote_c_maybe(b"a\tb"), r#""a\tb""#);
 /// assert_eq!(quote_c_maybe(b"a:b"), "a:b");
+/// // Measured: `ls --quoting-style=c-maybe` leaves a character bare.
+/// assert_eq!(quote_c_maybe("aéz".as_bytes()), "aéz");
 /// ```
 #[must_use]
 pub fn quote_c_maybe(text: &[u8]) -> String {
@@ -219,16 +597,20 @@ pub fn quote_c_maybe_colon(text: &[u8]) -> String {
 ///
 /// gnulib expresses "maybe" by rendering optimistically and restarting from
 /// scratch the moment it meets a byte it cannot render bare (`goto
-/// force_outer_quoting_style`). The two-pass shape below is the same thing
-/// said forwards: decide first, then render once. It can be, because the
-/// optimistic pass emits every byte unchanged, so its output is the input and
-/// there is nothing to keep from it.
+/// force_outer_quoting_style`). [`all_bare`] is the same thing said forwards:
+/// it builds the optimistic rendering and hands back `None` instead of a
+/// half-built one, which it can because that rendering is just the text.
 fn c_maybe(text: &[u8], quote_these_too: &[u8]) -> String {
-    let bare = |b: u8| b != b'"' && printable(b) && !quote_these_too.contains(&b);
-    if text.iter().all(|&b| bare(b)) {
-        return text.iter().map(|&b| b as char).collect();
-    }
-    c_always(text)
+    let bare = |_i: usize, p: Piece| match p {
+        // `quote_these_too` is a set of ASCII bytes, so a non-ASCII character
+        // can never be in it -- and asking `c as u8` of one would be wrong,
+        // not merely useless.
+        Piece::Char(c, _) => {
+            c != '"' && printable_char(c) && !(c.is_ascii() && quote_these_too.contains(&(c as u8)))
+        }
+        Piece::Byte(_) => false,
+    };
+    all_bare(text, bare).unwrap_or_else(|| c_always(text))
 }
 
 /// The forced pass: gnulib's `c_quoting_style` with the outer quotes present.
@@ -240,13 +622,13 @@ fn c_maybe(text: &[u8], quote_these_too: &[u8]) -> String {
 fn c_always(text: &[u8]) -> String {
     let mut out = String::with_capacity(text.len().saturating_add(2));
     out.push('"');
-    for (i, &b) in text.iter().enumerate() {
-        match b {
-            b'"' | b'\\' => {
+    for (i, p) in pieces(text) {
+        match p {
+            Piece::Char(c @ ('"' | '\\'), _) => {
                 out.push('\\');
-                out.push(b as char);
+                out.push(c);
             }
-            0 => {
+            Piece::Char('\0', _) => {
                 // `\0` is padded to `\000` before a digit, because `\0` then
                 // `7` would read back as the single byte `\07`.
                 out.push_str("\\0");
@@ -257,8 +639,8 @@ fn c_always(text: &[u8]) -> String {
                     out.push_str("00");
                 }
             }
-            _ if printable(b) => out.push(b as char),
-            _ => c_escape(b, &mut out),
+            Piece::Char(c, _) if printable_char(c) => out.push(c),
+            other => escape_piece(other, &mut out),
         }
     }
     out.push('"');
@@ -273,7 +655,10 @@ fn c_always(text: &[u8]) -> String {
 /// specially — a space, a metacharacter, a control byte — is quoted or
 /// escaped, which is what stops a name from forging a line of its own.
 ///
-/// The result is always printable ASCII, whatever `name` held.
+/// The result is always printable, whatever `name` held — every piece
+/// [`printable_char`] rejects, and every byte that is not valid UTF-8, becomes
+/// a visible escape. It is *not* always ASCII: a name that was text comes back
+/// as that text, which is the point. A name that was not comes back in octal.
 ///
 /// ```
 /// use coreutils::quote::quotef;
@@ -282,6 +667,9 @@ fn c_always(text: &[u8]) -> String {
 /// assert_eq!(quotef(b"it's"), "\"it's\"");
 /// assert_eq!(quotef(b"two\nlines"), r"'two'$'\n''lines'");
 /// assert_eq!(quotef(b""), "''");
+/// // A character is a character; a byte that decodes to none is octal.
+/// assert_eq!(quotef("café.txt".as_bytes()), "café.txt");
+/// assert_eq!(quotef(b"caf\xe9.txt"), r"'caf'$'\351''.txt'");
 /// ```
 #[must_use]
 pub fn quotef(name: &[u8]) -> String {
@@ -323,40 +711,59 @@ pub fn quoteaf(name: &[u8]) -> String {
 /// difference between them: gnulib calls it "elide outer quotes", and it is a
 /// property of the sentence the name is going into, not of the name.
 fn render(name: &[u8], allow_bare: bool) -> String {
-    if allow_bare && !name.is_empty() && name.iter().enumerate().all(|(i, &b)| bare_ok(name, i, b))
-    {
+    if allow_bare && !name.is_empty() {
         // Safe as it stands. This is the overwhelmingly common case and the
         // reason `quotef` exists rather than everything using `quote`.
-        return name.iter().map(|&b| b as char).collect();
+        if let Some(bare) = all_bare(name, |i, p| bare_ok(name, i, p)) {
+            return bare;
+        }
     }
+    // A `'` is a single byte in valid UTF-8 and can be no part of a multi-byte
+    // sequence, so looking for one bytewise is exact.
     if !name.is_empty()
         && name.contains(&b'\'')
-        && name.iter().enumerate().all(|(i, &b)| dq_ok(i, b))
+        && let Some(inner) = all_bare(name, dq_ok)
     {
         // A name holding a single quote reads far better wrapped in double
         // quotes than spliced with '\'' at every occurrence.
-        let mut out = String::with_capacity(name.len().saturating_add(2));
+        let mut out = String::with_capacity(inner.len().saturating_add(2));
         out.push('"');
-        out.extend(name.iter().map(|&b| b as char));
+        out.push_str(&inner);
         out.push('"');
         return out;
     }
     shell_escape(name)
 }
 
-fn bare_ok(name: &[u8], i: usize, b: u8) -> bool {
+/// Whether a piece needs no shell quoting at all, at offset `i` of `name`.
+///
+/// The tables it consults are ASCII, and deliberately: every character a shell
+/// gives meaning to is ASCII, so a printable character above it is an ordinary
+/// one and goes bare. Measured — GNU's `quotef` prints `é` as `é`.
+fn bare_ok(name: &[u8], i: usize, p: Piece) -> bool {
+    let Piece::Char(c, _) = p else { return false };
+    if !c.is_ascii() {
+        return printable_char(c);
+    }
+    let b = c as u8;
     if SAFE_UNLESS_ALONE.contains(&b) {
         return name.len() > 1;
     }
     SAFE.contains(&b) || (i > 0 && SAFE_NOT_FIRST.contains(&b))
 }
 
-fn dq_ok(i: usize, b: u8) -> bool {
+/// Whether a piece may sit inside the `"..."` form, at offset `i`.
+fn dq_ok(i: usize, p: Piece) -> bool {
+    let Piece::Char(c, _) = p else { return false };
+    if !c.is_ascii() {
+        return printable_char(c);
+    }
+    let b = c as u8;
     DQ_SAFE.contains(&b) || (i == 0 && DQ_SAFE_FIRST_ONLY.contains(&b))
 }
 
-/// The general form: a run of literal bytes inside `'...'`, a `'` spliced as
-/// `'\''`, and a run of unprintable bytes inside `$'...'`.
+/// The general form: a run of literal text inside `'...'`, a `'` spliced as
+/// `'\''`, and a run of unprintable pieces inside `$'...'`.
 fn shell_escape(name: &[u8]) -> String {
     let mut out = String::with_capacity(name.len().saturating_mul(2).saturating_add(2));
 
@@ -367,8 +774,12 @@ fn shell_escape(name: &[u8]) -> String {
     // which is the difference between a comparison being a check and being a
     // source of noise. 163 of the fixture's rows depend on it; do not "fix" it
     // without regenerating `tests/quotearg-gnu.txt` and finding it gone.
+    //
+    // "Ends unprintable" is a fact about the last *piece*, not the last byte:
+    // a name ending in `é` ends in a printable character whose final byte
+    // (`0xa9`) is not one on its own.
     if name.contains(&b'\'')
-        && name.last().is_some_and(|&b| !printable(b))
+        && pieces(name).last().is_some_and(|(_, p)| !p.printable())
         && name.first() != Some(&b'\'')
     {
         out.push_str("''");
@@ -376,38 +787,41 @@ fn shell_escape(name: &[u8]) -> String {
 
     out.push('\'');
     let mut open = true;
-    let mut i = 0usize;
-    while let Some(&b) = name.get(i) {
-        if b == b'\'' {
-            // Close, escape the quote outside any quoting, reopen.
-            if open {
-                out.push('\'');
-            }
-            out.push_str("\\''");
-            open = true;
-            i = i.saturating_add(1);
-        } else if printable(b) {
-            if !open {
-                out.push('\'');
+    let mut it = pieces(name).peekable();
+    while let Some((_, p)) = it.next() {
+        match p {
+            Piece::Char('\'', _) => {
+                // Close, escape the quote outside any quoting, reopen.
+                if open {
+                    out.push('\'');
+                }
+                out.push_str("\\''");
                 open = true;
             }
-            out.push(b as char);
-            i = i.saturating_add(1);
-        } else {
-            // A whole run of unprintable bytes shares one `$'...'`.
-            if open {
-                out.push('\'');
-            }
-            out.push_str("$'");
-            while let Some(&b) = name.get(i) {
-                if printable(b) {
-                    break;
+            Piece::Char(c, _) if printable_char(c) => {
+                if !open {
+                    out.push('\'');
+                    open = true;
                 }
-                c_escape(b, &mut out);
-                i = i.saturating_add(1);
+                out.push(c);
             }
-            out.push('\'');
-            open = false;
+            other => {
+                // A whole run of unprintable pieces shares one `$'...'`.
+                if open {
+                    out.push('\'');
+                }
+                out.push_str("$'");
+                escape_piece(other, &mut out);
+                while let Some(&(_, q)) = it.peek() {
+                    if q.printable() {
+                        break;
+                    }
+                    escape_piece(q, &mut out);
+                    it.next();
+                }
+                out.push('\'');
+                open = false;
+            }
         }
     }
     if open {
@@ -473,7 +887,7 @@ pub fn quoteaf_os<S: AsRef<std::ffi::OsStr>>(s: S) -> String {
 ///
 /// ```
 /// use coreutils::quote::quote_os;
-/// assert_eq!(quote_os("--sort"), "'--sort'");
+/// assert_eq!(quote_os("--sort"), "‘--sort’");
 /// ```
 #[must_use]
 pub fn quote_os<S: AsRef<std::ffi::OsStr>>(s: S) -> String {
@@ -534,16 +948,62 @@ mod tests {
         );
     }
 
+    /// Whether a byte is printable ASCII.
+    ///
+    /// This is *not* the module's rule — that one is [`printable_char`] and is
+    /// about characters. It is the property several tests below assert of a
+    /// whole rendering, in the one case where the two coincide: an input built
+    /// from single bytes, in which every high byte decodes to nothing and so
+    /// comes back as octal.
+    const fn printable_ascii(b: u8) -> bool {
+        b >= 0x20 && b < 0x7f
+    }
+
+    /// The shapes the byte sweeps below use. None of them can put two high
+    /// bytes together, so no input they build is ever valid UTF-8 above ASCII
+    /// — which is exactly what makes "the rendering is ASCII" the right
+    /// assertion for them, and why the multi-byte cases live in the fixture
+    /// (`tests/quotearg.rs`) rather than here.
+    fn byte_shapes(b: u8) -> [Vec<u8>; 3] {
+        [vec![b], vec![b'a', b, b'z'], vec![b, b'\'']]
+    }
+
     #[test]
-    fn every_rendering_is_printable_ascii() {
+    fn every_rendering_of_a_lone_byte_is_printable_ascii() {
+        // `quote` is deliberately absent: since §351 its delimiters are U+2018
+        // and U+2019, so it is the one style that is *not* ASCII. Its contents
+        // still are, which is what the next test checks — the distinction
+        // matters, because "printable ASCII" is what makes a rendering safe to
+        // paste into a terminal, and only the marks give that up.
         for b in 0u8..=255 {
-            for shape in [vec![b], vec![b'a', b, b'z'], vec![b, b'\'']] {
-                for rendered in [quotef(&shape), quote(&shape)] {
+            for shape in byte_shapes(b) {
+                for rendered in [quotef(&shape), quoteaf(&shape), quote_glibc(&shape)] {
                     assert!(
-                        rendered.bytes().all(printable),
+                        rendered.bytes().all(printable_ascii),
                         "{b:#04x} rendered as {rendered:?}"
                     );
                 }
+            }
+        }
+    }
+
+    #[test]
+    fn quotes_contents_are_printable_ascii_even_though_its_marks_are_not() {
+        // The marks are the *only* non-ASCII this module emits for an input
+        // that held no character of its own. Strip them and what is left must
+        // still be safe, or an unprintable byte could reach the terminal
+        // between them.
+        for b in 0u8..=255 {
+            for shape in byte_shapes(b) {
+                let rendered = quote(&shape);
+                let inner = rendered
+                    .strip_prefix(LEFT_QUOTE)
+                    .and_then(|t| t.strip_suffix(RIGHT_QUOTE))
+                    .unwrap_or_else(|| panic!("{b:#04x} lost its marks: {rendered:?}"));
+                assert!(
+                    inner.bytes().all(printable_ascii),
+                    "{b:#04x} rendered as {rendered:?}"
+                );
             }
         }
     }
@@ -570,8 +1030,11 @@ mod tests {
     #[test]
     fn octal_escapes_are_always_three_digits() {
         // \1 followed by a literal 2 would read back as \12, a different byte.
-        assert_eq!(quote(b"\x01" as &[u8]), r"'\001'");
-        assert_eq!(quote(b"\x01" as &[u8]).len(), 6);
+        assert_eq!(quote(b"\x01" as &[u8]), "\u{2018}\\001\u{2019}");
+        // Ten bytes, not six: four for the escape, three for each curly mark.
+        assert_eq!(quote(b"\x01" as &[u8]).len(), 10);
+        assert_eq!(quote_glibc(b"\x01" as &[u8]), r"'\001'");
+        assert_eq!(quote_glibc(b"\x01" as &[u8]).len(), 6);
         assert_eq!(quotef(b"\x012"), r"''$'\001''2'");
     }
 
@@ -579,7 +1042,9 @@ mod tests {
     fn the_empty_string_is_a_pair_of_quotes_in_every_style() {
         assert_eq!(quotef(b""), "''");
         assert_eq!(quoteaf(b""), "''");
-        assert_eq!(quote(b""), "''");
+        assert_eq!(quote_glibc(b""), "''");
+        // The one style whose pair is not two ASCII bytes.
+        assert_eq!(quote(b""), "\u{2018}\u{2019}");
     }
 
     #[test]
@@ -600,12 +1065,131 @@ mod tests {
     #[test]
     fn c_maybe_forces_quotes_for_exactly_the_unrenderable_bytes() {
         // Measured set, from `scripts/c-maybe-probe.py`: a `"` (which would
-        // close the literal) and anything the C locale calls unprintable.
+        // close the literal) and anything unprintable. A *lone* byte above
+        // 0x7f decodes to no character at all, so the old ASCII-shaped
+        // expectation is still the right one here — see
+        // `c_maybe_leaves_a_character_bare_but_not_a_stray_byte` for the case
+        // where the two rules part company.
         for b in 1u8..=255 {
             let forced = quote_c_maybe(&[b]).starts_with('"');
             let expected = b == b'"' || !(0x20..0x7f).contains(&b);
             assert_eq!(forced, expected, "byte {b:#04x} -> {}", quote_c_maybe(&[b]));
         }
+    }
+
+    /// Measured: `LC_ALL=C.UTF-8 ls -1 --quoting-style=c-maybe` on real files
+    /// with these names, GNU coreutils 9.4.
+    ///
+    /// There is no fixture for this style — `quote-probe.py` drives `sort` and
+    /// `head`, neither of which offers it — so the expectations are written out
+    /// with the command that produced them beside them.
+    #[test]
+    fn c_maybe_leaves_a_character_bare_but_not_a_stray_byte() {
+        // Bare: the character prints, so a C literal can hold it as itself.
+        assert_eq!(quote_c_maybe("aéz".as_bytes()), "aéz");
+        assert_eq!(quote_c_maybe("é".as_bytes()), "é");
+        assert_eq!(quote_c_maybe("βé".as_bytes()), "βé");
+        // Quoted: one octal escape per byte of the encoding, not per character.
+        assert_eq!(quote_c_maybe("\u{80}".as_bytes()), r#""\302\200""#);
+        assert_eq!(quote_c_maybe("\u{2028}".as_bytes()), r#""\342\200\250""#);
+        assert_eq!(quote_c_maybe(b"\xff"), r#""\377""#);
+        // A byte that decodes to nothing drags the whole name into quotes,
+        // where the characters around it are still themselves.
+        assert_eq!(quote_c_maybe("é".as_bytes()), "é");
+        assert_eq!(quote_c_maybe(b"\xc3"), r#""\303""#);
+        assert_eq!(
+            quote_c_maybe("a\u{2028}é".as_bytes()),
+            "\"a\\342\\200\\250é\""
+        );
+    }
+
+    /// The printability rule, against glibc's `iswprint` under `C.UTF-8`.
+    ///
+    /// Every character here was measured — the table was enumerated out of
+    /// glibc 2.39 — and each is a different reason to be near the boundary:
+    /// a letter, a combining mark, a no-break space, a soft hyphen, a
+    /// zero-width space, a byte-order mark, a private-use code point, a CJK
+    /// ideograph, the C1 range, DEL, and the two separators.
+    #[test]
+    fn printable_char_agrees_with_glibc_except_where_it_means_to() {
+        for c in [
+            '\u{00a0}', '\u{00ad}', '\u{00e9}', '\u{0301}', '\u{200b}', '\u{feff}', '\u{e000}',
+            '\u{4e00}', 'a', ' ',
+        ] {
+            assert!(printable_char(c), "U+{:04X} should print", u32::from(c));
+        }
+        for c in [
+            '\u{007f}', '\u{0080}', '\u{009f}', '\u{2028}', '\u{2029}', '\0', '\n',
+        ] {
+            assert!(!printable_char(c), "U+{:04X} should not", u32::from(c));
+        }
+        // The one deliberate divergence: unassigned (`Cn`). glibc escapes it,
+        // we print it, because the alternative is a Unicode assignment table
+        // that changes what a diagnostic looks like every release. See §357,
+        // and `tests/quotearg.rs`, which asserts this keeps differing.
+        assert!(printable_char('\u{0378}'));
+    }
+
+    #[test]
+    fn a_character_survives_every_style_that_can_carry_one() {
+        // The bug this replaced: every one of these came back as octal.
+        assert_eq!(quotef("café.txt".as_bytes()), "café.txt");
+        assert_eq!(quoteaf("café.txt".as_bytes()), "'café.txt'");
+        assert_eq!(quote("café.txt".as_bytes()), "\u{2018}café.txt\u{2019}");
+        assert_eq!(quote_glibc("--café".as_bytes()), "'--café'");
+        assert_eq!(quote_c_maybe("café.txt".as_bytes()), "café.txt");
+        // ...and the closing mark, which `quote` must escape or lose track of
+        // where its own quoting ends.
+        assert_eq!(
+            quote("a\u{2019}b".as_bytes()),
+            "\u{2018}a\\\u{2019}b\u{2019}"
+        );
+        // The opening one is not escaped: nothing is looking for one.
+        assert_eq!(quote("a\u{2018}b".as_bytes()), "\u{2018}a\u{2018}b\u{2019}");
+    }
+
+    #[test]
+    fn a_separator_cannot_forge_a_line_either() {
+        // U+2028 is not a `Cc` control, so a rule that only escaped controls
+        // would let it through — and a terminal, a log reader and most
+        // `2>&1 | grep` pipelines all treat it as ending a line. That is the
+        // module's whole premise arriving in a character rather than a byte.
+        for text in ["a\u{2028}b", "a\u{2029}b"] {
+            let name = text.as_bytes();
+            assert!(!quotef(name).contains(text), "{text:?} survived quotef");
+            assert!(!quote(name).contains(text), "{text:?} survived quote");
+            assert!(
+                !quote_c_maybe(name).contains(text),
+                "{text:?} survived c-maybe"
+            );
+        }
+        assert_eq!(quotef("a\u{2028}b".as_bytes()), r"'a'$'\342\200\250''b'");
+    }
+
+    #[test]
+    fn an_undecodable_byte_beside_a_character_escapes_only_itself() {
+        // The decoder's real job: `\xff` is not part of `é`, and `\xc3` is not
+        // the start of one when a `z` follows it.
+        assert_eq!(
+            quotef(
+                "aéb"
+                    .as_bytes()
+                    .iter()
+                    .chain(b"\xffc")
+                    .copied()
+                    .collect::<Vec<_>>()
+                    .as_slice()
+            ),
+            r"'aéb'$'\377''c'"
+        );
+        assert_eq!(quotef(b"\xc3z"), r"''$'\303''z'");
+        assert_eq!(quotef(b"\xc3"), r"''$'\303'");
+        // Overlong, surrogate and out-of-range sequences decode to nothing, so
+        // every byte of them is escaped separately — but they still share one
+        // `$'...'`, because the run is a run of *unprintable pieces*.
+        assert_eq!(quotef(b"\xc0\xaf"), r"''$'\300\257'");
+        assert_eq!(quotef(b"\xed\xa0\x80"), r"''$'\355\240\200'");
+        assert_eq!(quotef(b"\xf4\x90\x80\x80"), r"''$'\364\220\200\200'");
     }
 
     #[test]
@@ -628,7 +1212,7 @@ mod tests {
         assert_eq!(quote_c_maybe(b"a\x007b"), r#""a\0007b""#);
         // Which is *not* the rule the shell styles use: `quote` pads every
         // octal escape to three digits unconditionally.
-        assert_eq!(quote(b"a\0" as &[u8]), r"'a\000'");
+        assert_eq!(quote(b"a\0" as &[u8]), "\u{2018}a\\000\u{2019}");
         // A `/` is nothing special to a C literal.
         assert_eq!(quote_c_maybe(b"a/b"), "a/b");
         assert_eq!(quote_c_maybe(b"a/\tb"), r#""a/\tb""#);
@@ -646,6 +1230,69 @@ mod tests {
         assert_eq!(quote_c_maybe(b"\xff"), r#""\377""#);
         assert_eq!(quote_c_maybe(b"\x7f"), r#""\177""#);
         assert_eq!(quote_c_maybe(b"a\"b"), "\"a\\\"b\"");
+    }
+
+    /// The two families, side by side, in the shapes GNU actually prints.
+    ///
+    /// Every expectation here was measured under `LC_ALL=C.UTF-8` against real
+    /// GNU coreutils, not recalled — the command that produced each is in the
+    /// comment beside it. This test is the one that would have caught the
+    /// original bug: before §351 both families rendered identically, so a call
+    /// site using the wrong one was invisible until `quote` went curly.
+    #[test]
+    fn the_two_families_disagree_about_their_marks() {
+        // gnulib — follows the locale's character set, so curly here.
+        // $ sort --sort=zzz   -> invalid argument ‘zzz’ for ‘--sort’
+        assert_eq!(quote(b"zzz"), "\u{2018}zzz\u{2019}");
+        // $ head -c zzz       -> invalid number of bytes: ‘zzz’
+        assert_eq!(quote(b"--sort"), "\u{2018}--sort\u{2019}");
+
+        // glibc — spells its quotes into the C format string, so straight,
+        // always, in every locale.
+        // $ wc -Z             -> invalid option -- 'Z'
+        assert_eq!(quote_glibc(b"Z"), "'Z'");
+        // $ sort --key        -> option '--key' requires an argument
+        assert_eq!(quote_glibc(b"--key"), "'--key'");
+        // $ sort --r          -> ... possibilities: '--random-sort' ...
+        assert_eq!(quote_glibc(b"--random-sort"), "'--random-sort'");
+
+        // The two never agree on a mark, which is the whole distinction.
+        for text in [&b"x"[..], b"--key", b"", b"a b"] {
+            assert_ne!(quote(text), quote_glibc(text), "{text:?}");
+        }
+    }
+
+    /// Where `quote_glibc` knowingly departs from glibc, and why.
+    ///
+    /// glibc escapes nothing at all, which is not a style we can copy: it is a
+    /// live line-forging bug. Measured, `wc --no$'\n'pe` really does print two
+    /// lines, the second of which the user chose.
+    #[test]
+    fn quote_glibc_escapes_where_glibc_would_forge_a_line() {
+        // The attack glibc is open to. Ours cannot span lines.
+        let forged = b"--no\npe";
+        assert_eq!(quote_glibc(forged), r"'--no\npe'");
+        assert!(!quote_glibc(forged).contains('\n'));
+        assert_eq!(quote_glibc(forged).lines().count(), 1);
+
+        // glibc prints `invalid option -- '''` for a quote, where the marks
+        // cannot be told from the content. Ours escapes it, because here the
+        // `'` *is* the delimiter.
+        assert_eq!(quote_glibc(b"'"), r"'\''");
+        // Which is the opposite of `quote`, whose delimiter is `’` — there a
+        // bare `'` is unambiguous, so GNU leaves it alone and so do we.
+        assert_eq!(quote(b"'"), "\u{2018}'\u{2019}");
+
+        // For every ordinary option name the two agree byte for byte, and that
+        // is the case the comparison against GNU actually rests on.
+        for name in [&b"x"[..], b"--key", b"--random-sort", b"Z", b"0"] {
+            let rendered = quote_glibc(name);
+            assert_eq!(
+                rendered,
+                format!("'{}'", String::from_utf8_lossy(name)),
+                "{name:?} should need no escaping"
+            );
+        }
     }
 
     #[test]

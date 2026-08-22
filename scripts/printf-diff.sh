@@ -30,15 +30,29 @@
 # needs this more than seq did: its first argument is a format string, and the
 # formats worth testing are precisely the ones made of awkward bytes.
 #
-# ## Why `LC_ALL=C`
+# ## Why `LC_ALL=C.UTF-8`
 #
-# Two of printf's answers are locale-dependent. `%f` takes its decimal point
-# from `LC_NUMERIC`, so under a comma-decimal locale GNU prints `1,500000`;
-# and gnulib's `quote()`, which wraps the offending argument in every numeric
-# diagnostic, prints U+2018/U+2019 under a UTF-8 locale and ASCII apostrophes
-# under C. `extfloat` and `coreutils::quote` implement the C locale, which is
-# what the OS's own printf will run under. Pinning both sides to `C` measures
-# that claim instead of the development host's environment.
+# Three of printf's answers are locale-dependent, and this file used to pin `C`
+# because two of them were implemented for `C`. Both have since moved, so `C`
+# is now the setting in which the *reference* would be wrong:
+#
+#   * gnulib's `quote()` wraps the offending argument in every numeric
+#     diagnostic. It prints U+2018/U+2019 under a UTF-8 locale and ASCII
+#     apostrophes under `C`; since §351 ours prints the curly pair in every
+#     locale, which is the UTF-8 answer.
+#   * `\uXXXX` is converted to the locale's charset, so `\u00e9` is two bytes
+#     under a UTF-8 locale and comes back out as the literal text `\u00E9`
+#     under `C`, where the charset is ASCII and the conversion fails. Ours
+#     implemented the `C` branch until the same reasoning that produced §351
+#     was applied to it: Q38 settled that SlateOS has no non-UTF-8 locale, so
+#     an ASCII-charset branch implements a configuration that cannot occur.
+#   * `%f` takes its decimal point from `LC_NUMERIC`, so under a comma-decimal
+#     locale GNU prints `1,500000`. This one does *not* move: `C.UTF-8` has the
+#     same `LC_NUMERIC` as `C`, so `extfloat`'s `.` is right in both and the
+#     flip cannot have hidden a change here.
+#
+# Pinning both sides to `C.UTF-8` measures those claims instead of the
+# development host's environment.
 #
 # ## `--help` and `--version` are not cases
 #
@@ -83,7 +97,7 @@ GNU=${GNU:-printf}
 # argument that looks like a path -- turning the format `[%05.2f]` or the
 # argument `/` into something with a drive letter in it.
 export MSYS2_ARG_CONV_EXCL='*'
-export LC_ALL=C
+export LC_ALL=C.UTF-8
 
 # Built every run, not just when the binary is missing. `cargo build` is a
 # no-op on an unchanged tree, so the only thing the "is it there?" version
@@ -114,7 +128,7 @@ echo "running GNU's, in WSL..."
 wsl -e bash -c 'mkdir -p /tmp/printfdiff && cat > /tmp/printfdiff/probe.sh' \
   < scripts/printf-probe.sh || exit 1
 wsl -e bash -c 'cat > /tmp/printfdiff/cases' < "$WORK/cases" || exit 1
-wsl -e bash -c "cd /tmp/printfdiff && LC_ALL=C bash probe.sh '$GNU' cases" \
+wsl -e bash -c "cd /tmp/printfdiff && LC_ALL=C.UTF-8 bash probe.sh '$GNU' cases" \
   > "$WORK/theirs" || exit 1
 
 if [ "$FLIP" = 1 ]; then

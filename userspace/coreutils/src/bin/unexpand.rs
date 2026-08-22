@@ -1016,7 +1016,7 @@ mod tests {
     fn the_tab_stop_diagnostics_carry_no_referral() {
         assert_eq!(
             refusal(&["-t", "x"]),
-            "tab size contains invalid character(s): 'x'"
+            "tab size contains invalid character(s): ‘x’"
         );
         assert_eq!(refusal(&["-t", "0"]), "tab size cannot be 0");
         assert_eq!(refusal(&["-t", "4,2"]), "tab sizes must be ascending");

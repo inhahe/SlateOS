@@ -32032,6 +32032,107 @@ which is the correct order to do it in. Three `xfail` cases in
 `scripts/wc-diff.sh` marked `quote-marks-under-a-utf8-locale` become passes and
 lose their annotation.
 
+**Implemented 2026-08-21**, exactly as scoped above. Three things the
+implementation turned up that the decision did not anticipate:
+
+- **The ASCII `'` stops being escaped.** It was escaped only because it *was*
+  the delimiter; against a `’` delimiter it cannot be mistaken for one, and GNU
+  leaves it bare. So `it's` renders `‘it's’`, not `‘it\'s’`. The backslash is
+  still doubled, since it still introduces the escapes. Measured, not inferred.
+- **The change is provably confined to `quote`.** Regenerating the fixture
+  under `C.UTF-8` moved 2781 of its 8333 rows, and *every one of them* is a
+  `quote` row: zero `quotef`, zero `quoteaf`. That is the table above turned
+  into an assertion, and it is what made the change safe to do wholesale rather
+  than utility by utility.
+- **A latent bug fell out: six diagnostics were quoting through the wrong
+  library.** This is the one worth reading. GNU does not have one family of
+  quoted diagnostic, it has two, and only one of them follows the locale:
+
+  | Written by | Reached via | Under `C.UTF-8` |
+  |---|---|---|
+  | gnulib `quotearg.c` | `quote()` — argmatch, `xdectoumax`, every "invalid N" | `invalid argument ‘zzz’ for ‘--sort’` — **curly** |
+  | glibc `getopt_long` | `'%s'` spelled into the C format string | `unrecognized option '--nope'` — **straight** |
+
+  glibc never consults the locale, so one command line can print one of each:
+  `sort --key` gives `option '--key' requires an argument` while `sort
+  --sort=zzz` gives `invalid argument ‘zzz’ for ‘--sort’`. Our `getopt.rs`
+  routed *both* families through `quote()`, which was invisible while `quote()`
+  was straight and became six wrong messages the moment it went curly —
+  `invalid option`, `option requires an argument` (short), `unrecognized
+  option`, `requires an argument` (long), `doesn't allow an argument`, and the
+  ambiguous-prefix list. Fixed by splitting out `quote::quote_glibc`, so the
+  two families are distinguished by which function a call site names rather
+  than by anyone remembering. Note the fixture could not have caught this: it
+  measures quoting *styles* against `sort`/`head`, and glibc's inline quotes
+  are not a style.
+
+  A footnote worth keeping, because it looks like a bug of ours and is not:
+  `sort --check=` prints four curly lines and then `Try 'sort --help' for more
+  information.` in straight marks, because the referral comes from coreutils'
+  own `usage()`, which also spells its quotes literally. Mixed marks inside a
+  single message is GNU's real output.
+
+- **And a *third* family, which the two-family table above does not cover:
+  gnulib's own `quotef`/`quoteaf`.** Those are `shell_escape` styles, not
+  `locale_quoting_style`, so they stay straight in every locale — the table
+  entry §351 already had. What the implementation turned up is that *which*
+  family a given message uses is a per-utility fact of upstream's source, not
+  something derivable from the message text. Measured against GNU 9.4 under
+  `LC_ALL=C.UTF-8`:
+
+  | Command | Prints |
+  |---|---|
+  | `uniq a b c`, `tr a b c`, `comm a b c`, `split a b c`, `tsort a b`, `seq 1 2 3 4` | `extra operand ‘c’` — curly |
+  | `join A B C` | `extra operand 'C'` — **straight** |
+  | `sort -c a b` | `extra operand 'b' not allowed with -c` — **straight** |
+  | `wc --files0-from=f w1`, `sort --files0-from=f w1` | `extra operand 'w1'` — **straight** |
+  | `join A -z` | `missing operand after ‘-z’` — curly |
+
+  Same six words, two different families, and join prints one of each depending
+  on which operand is wrong. So a migration that rewrites test expectations by
+  matching message *text* will over-reach across utilities, and did: it
+  curlified join's and sort's, which are `quoteaf`. Both were caught by the
+  test suite and reverted. `wc`'s was the reverse — a genuine bug of ours,
+  since our `wc` reached for `quote()` where upstream reaches for `quoteaf` —
+  and is fixed here, bringing the wrong-family count from six to seven.
+
+- **A *fifth* family, and the one that breaks the mental model the other four
+  fit into.** The obvious rule after the table above is "gnulib quotes curly,
+  glibc quotes straight, except the shell-escape styles". That rule is wrong,
+  because gnulib's own `xstrtol-error.c` spells `'%s'` into its format string
+  exactly the way glibc's `getopt_long` does — no `quote()` call, no locale, and
+  **no escaping of any kind** (`od -j $'\xff'` emits the raw 0xFF byte; a tab
+  passes through as a tab). So *which library wrote the message* is not the
+  test either. Measured, GNU 9.4, `LC_ALL=C.UTF-8`:
+
+  | Command | Prints | Via |
+  |---|---|---|
+  | `od -j x f`, `od -N x f`, `od -S x f`, `sort -S x f` | `invalid -j argument 'x'` — **straight** | `xstrtol-error.c` |
+  | `od -j 1Q f` | `-j argument '1Q' too large` — **straight** | same |
+  | `head -n x f`, `tail -n x f`, `split -b x f`, `fold -w x f` | `invalid number of lines: ‘x’` — **curly** | `xdectoumax` → `quote()` |
+
+  Both halves reject the same argument for the same reason and differ only in
+  which upstream helper the caller happened to reach for. Ours routed the
+  `xstrtol-error` shape through `quote()`, so `od -j x` and `sort -S x` printed
+  curly where GNU prints straight — sixteen wrong rows in `od-diff.sh` and six
+  in `sort-diff.sh`, all of them invisible until those harnesses moved off
+  their `LC_ALL=C` reference. Fixed by routing `xnum::strtol_fatal` through
+  `quote_glibc`, which brings the wrong-family count from seven to eight. The
+  standing lesson is in `quote.rs`'s module doc: the family is a fact about
+  upstream's source at each call site, and the only way to know it is to
+  measure that call site.
+
+**What it deliberately did not fix:** the *contents* between the marks are
+still rendered ASCII-only, so `café` comes out `‘caf\303\251’` where GNU prints
+`‘café’`. That is a separate defect in a separate helper — `printable`, a
+*byte* test where GNU uses a *character* test — and it affects all three
+styles, not just this one, so folding it in here would have widened a scoped
+decision into an unscoped one. It is logged as
+`BUG-QUOTE-ESCAPES-VALID-MULTI-BYTE-CHARACTERS` in `known-issues.md` with the
+measurements, along with the reason the 8333-row fixture cannot catch it: the
+probe's corpus is built from single bytes and from an alphabet whose high bytes
+never form a valid UTF-8 sequence, so no row exercises a multi-byte character.
+
 **No fallback for non-UTF-8 locales is implemented, on purpose.** GNU needs the
 ASCII branch because it runs where `LC_ALL=C` is real; we decided in Q38 that it
 is not real here. Adding a branch on a locale that cannot occur would be dead
@@ -32470,3 +32571,225 @@ Two smaller findings from the same pass:
 revision, which would make its identity expressible in git and reopen C as a way
 to keep the binaries; or if the cold rebuild grows past the boot test itself, at
 which point the fixture set — not the storage policy — is what wants trimming.
+
+
+## §356 — `printf`'s `\uXXXX` encodes as UTF-8, for the same reason §351's quote marks are curly
+
+**Date:** 2026-08-21
+**Decided by:** Claude (autonomous) — applying the premise the operator settled
+in §351/Q38 to a second helper that had branched on the same locale.
+
+**In short:** `printf '\u00e9'` is supposed to print `é`. Ours printed the seven
+literal characters `\u00E9` instead, because it was implementing what GNU does
+on an ASCII-only system — where the character does not exist so the escape is
+written back unchanged. SlateOS is never an ASCII-only system, so that branch
+was implementing a machine that cannot exist. It now prints `é`, which is what
+every modern system prints.
+
+**Related:** §351 (diagnostics quote with the curly marks), Q38 (osh's string
+layer is UTF-8, full stop). This is the same premise a third time.
+
+### Why this is not a new decision so much as a missed one
+
+GNU's `\uXXXX` goes through gnulib's `unicode_to_mb`: encode the code point as
+UTF-8, then `iconv` it to the locale's charset, and if that fails hand it to a
+callback that writes the escape back. Under `C` the charset is ASCII, so the
+conversion succeeds for exactly the code points below U+0080 and fails for
+every other one. Measured, GNU printf 9.4:
+
+| | `LC_ALL=C` | `LC_ALL=C.UTF-8` |
+|---|---|---|
+| `printf '\u00e9'` | `\u00E9` — seven bytes | `\303\251` — the character |
+| `printf '\u20ac'` | `\u20AC` | `\342\202\254` |
+| `printf '\U0001F600'` | `\U0001F600` | `\360\237\230\200` |
+| `printf '\U00110000'` | `\U00110000` | `\U00110000` — no encoding exists |
+
+Our `print_unicode_char` implemented the left-hand column, and said so in its
+doc comment: *"In the C locale the charset is ASCII, so the conversion succeeds
+for exactly the code points below 0x80."* That was an accurate description of
+the wrong locale. §351 had already answered the general question — Q38 settled
+that there is no non-UTF-8 locale on this target, so a branch on an ASCII
+charset is dead code that looks load-bearing — but §351 was scoped to
+diagnostics, and this is stdout, so nothing swept it up.
+
+It was found by the harness migration that followed §351: `printf-diff.sh` had
+pinned `LC_ALL=C` on the strength of a header paragraph saying *"`extfloat` and
+`coreutils::quote` implement the C locale, which is what the OS's own printf
+will run under."* Half of that sentence stopped being true at §351, and moving
+the reference to `C.UTF-8` to fix the other half is what exposed this.
+
+### What changes, exactly
+
+- U+0000–U+007F: one byte. **Unchanged** — `\u0001` was and is the byte 0x01,
+  and `\u0000` was and is a NUL.
+- U+0080–U+10FFFF: the UTF-8 encoding, one to four bytes. **This is the
+  change.** Includes the non-characters U+FFFE and U+FFFF, which glibc's iconv
+  encodes rather than refusing — measured, not assumed.
+- Above U+10FFFF: `\U%08X`, the escape written back. **Unchanged in spelling**,
+  though it used to be reached by everything above U+007F and is now reached
+  only here.
+- Surrogates: still a fatal `invalid universal character name \ud800`, refused
+  before the encoder is consulted, which is upstream's order too.
+
+gnulib's failure callback also has a `\u%04X` arm for code points below
+U+10000. It is unreachable under a UTF-8 charset — every such code point
+encodes — so it is not written out, per §351's "no dead code that looks
+load-bearing".
+
+### The argument against, and why it does not hold
+
+The literal-passthrough behaviour is *predictable*: `printf '\u00e9' | wc -c`
+answers 7 on every machine, where the new behaviour makes it depend on the
+charset. That is a real property and it is the wrong one to want, because it is
+predictable in the way a broken clock is: it is the answer for a configuration
+this OS does not have, and a script that relied on it would break the moment it
+was run on the Linux it was written against.
+
+**Revisit if:** SlateOS ever gains a non-UTF-8 locale — the same trigger §351
+carries, and it would restore the same branch in both places.
+
+### Where it lands
+
+`userspace/coreutils/src/bin/printf.rs` → `print_unicode_char`, with
+`universal_character_names_encode_as_utf8` and
+`a_code_point_beyond_utf8_writes_the_escape_back` pinning both arms.
+`scripts/printf-diff.sh` moves to `LC_ALL=C.UTF-8` and
+`scripts/printf-cases.py` gains one case per arm of the encoder — before this,
+every code point above U+007F came out as its own literal text, so no case
+could tell the arms apart.
+
+## §357 — "Printable" is a one-line rule, not a copy of glibc's Unicode table
+
+**Date:** 2026-08-21
+**Decided by:** Claude (autonomous) — extending §101/§104's existing rule by two
+code points, and measuring the result against glibc rather than asserting it.
+
+**In short:** When a coreutils program mentions a file name in an error message,
+it hides characters that would garble the terminal — a raw newline could forge a
+whole fake line of output. It has to decide which characters are safe to show.
+GNU asks the C library, which answers from a big table of every character
+Unicode has ever assigned; that table changes with each Unicode release, so the
+same file name can print differently after a system update. We answer with a
+one-line rule instead — show anything that is not a *control* character and not
+one of the two characters that mean "line break" — which never changes. Checked
+against the C library's table over all 1.1 million characters, the two answers
+are **identical for every character that exists**; they differ only on code
+points Unicode has not assigned to anything, where no font can draw a shape
+anyway.
+
+**Related:** §101/§104 (osh's `%q` uses the same rule, minus the two-code-point
+extension), §351 (diagnostics quote with the curly marks), §356 (`printf`'s
+`\u`), Q38 (osh's string layer is UTF-8, full stop). This is that premise a
+fourth time.
+
+### The problem this closed
+
+`quote.rs` escaped *bytes*, with the predicate
+
+```rust
+const fn printable(b: u8) -> bool { b >= 0x20 && b < 0x7f }
+```
+
+so every byte of a multi-byte character was unprintable by construction. A file
+named `café` was reported as `‘caf\303\251’`. That is
+`BUG-QUOTE-ESCAPES-VALID-MULTI-BYTE-CHARACTERS`, and it was not a small
+cosmetic wart: a user whose language is not English saw every diagnostic about
+every one of their files rendered in octal. The fix is to escape *characters*,
+which forces the question this section answers — which characters?
+
+### The rule
+
+A character prints as itself unless it is
+
+* a Unicode **control** (`Cc`): the C0 range, DEL, and the C1 range
+  `U+0080..=U+009F`; or
+* one of the two **line/paragraph separators**, `U+2028` and `U+2029`.
+
+A sequence of bytes that decodes to no character is never printable and is
+escaped byte by byte, which is what keeps the answer defined for the arbitrary
+bytes a SlateOS path may hold.
+
+### Why not just copy `iswprint`
+
+GNU asks glibc's `iswprint`. Under `C.UTF-8` that is 709 ranges generated from
+the `UnicodeData.txt` of whichever glibc release you happen to have. Copying it
+would mean:
+
+* **carrying a table that drifts.** Unicode assigns thousands of code points per
+  release. A name that printed as itself last year prints in octal this year, or
+  the reverse, for no reason the user did anything about — and our table and the
+  host's would drift *apart*, so the same name would render differently
+  depending on which one you asked.
+* **contradicting §101 for no gain.** §104 already declined to model a libc
+  printability table for osh's `%q`, on the grounds that "there is no single
+  table to copy". Adding one here would leave the two halves of the same
+  userland answering the same question from different sources.
+
+### The claim that makes the one-liner safe, and how it is checked
+
+The reason the short rule is not a compromise is empirical:
+
+    $ wsl -e python3 scripts/printable-audit.py
+    unicodedata 15.0.0
+    824718 code points diverge:
+       824718  Cn (ours-only prints it)  e.g. U+0378, U+0379, U+0380, U+0381
+
+Every one of the 1,112,064 code points was compared against glibc 2.39's own
+`iswprint`. The divergence is **exactly** the unassigned ones — not "mostly",
+not "except for a handful": no assigned character diverges at all. An
+unassigned code point is one no font can draw and no standard has given a
+meaning, so neither answer to it is wrong, and ours is the one that needs no
+table.
+
+That is a claim which could rot, so it is not left as prose. `scripts/`
+`printable-audit.py` exits non-zero if a *non*-`Cn` code point ever diverges,
+and both fixture tests (`tests/quotearg.rs`, `tests/c_maybe.rs`) carry an
+`EXPECTED_DIVERGENCE` list that fails **in both directions**: a listed character
+that no fixture row exercises is a claim with no evidence behind it, and one
+whose rows have started *agreeing* with GNU is a recorded reason that has gone
+stale. A note that has quietly stopped being true is worse than a difference,
+because it trains the next reader to trust it.
+
+### Why the two separators are added, and why osh keeps them
+
+`Zl`/`Zp` is a set of exactly two characters, so naming them costs nothing and
+needs no table. glibc happens to escape them too, but that is not the reason:
+a terminal, a log reader and most `2>&1 | grep` pipelines treat U+2028 as ending
+a line, which is precisely the line-forgery this module exists to prevent —
+arriving in a character that is not `Cc`. Escaping them would be right even if
+glibc printed them.
+
+This makes **coreutils stricter than osh**, whose `needs_ansi_c_quote` (§101)
+leaves U+2028 raw, and the two are allowed to differ because they are quoting
+for different readers:
+
+| | osh `%q` / `@Q` | coreutils `quote()` |
+|---|---|---|
+| Quoting for | re-execution by a shell | a human reading a line-oriented stream |
+| A separator is | an ordinary character the shell will pass through | a line break that can forge output |
+| So U+2028 is | left raw | escaped |
+
+### Alternatives weighed
+
+| Option | Why not |
+|---|---|
+| Copy glibc's 709 ranges | A table that drifts with Unicode, disagrees with the host's copy, and contradicts §104. |
+| Call the host's `iswprint` | There is no host: this is the OS. SlateOS's own libc would need the table anyway, so this only moves the problem. |
+| Printable = "not `Cc`", with no separator exception | Leaves the line-forgery hole open in the one module whose whole purpose is closing it. |
+| Printable = "not `C*` and not `Z*`" (all controls, formats, separators) | Escapes ordinary text: a plain space is `Zs`, and `Cf` covers the bidi and joining marks that Arabic, Hebrew and Devanagari names legitimately contain. Measured, glibc prints those. |
+
+### Where it lands
+
+`userspace/coreutils/src/quote.rs` → `printable_char`, and the `Piece`
+enum/`pieces` iterator that made every escaping loop character-wise rather than
+byte-wise. `first_char` and `escape_unprintable` are exported so `printf.rs`
+answers the same question from the same place rather than keeping its own copy.
+Fixtures were re-measured under `C.UTF-8` by `scripts/quote-probe.py` (8,719
+rows) and `scripts/c-maybe-probe.py` (1,828 rows), both widened with whole
+multi-byte characters chosen to straddle every edge of "printable" —
+before that, every high byte in either corpus was a lone one, so no row could
+tell a character test from a byte test.
+
+**Revisit if:** glibc's table ever diverges from this rule on an *assigned*
+character — `scripts/printable-audit.py` is what would report it, and the answer
+then would be to look at what moved before changing anything.

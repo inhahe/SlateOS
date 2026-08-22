@@ -232,7 +232,18 @@ fn parse_args(raw: &[Str]) -> Result<Option<Args>, String> {
                         }
                     }
                 }
-                other => return Err(format!("unknown option -{}", other as char)),
+                // `other` is a byte, not a character. `other as char` mapped
+                // 0xC3 to `Ã`, so `awk -é` named an option nobody typed --
+                // the same trap `sort`'s option loop documents avoiding. One
+                // octal escape per byte is what this loop can honestly say,
+                // because it walks bytes: it has no way to know whether the
+                // byte after it belongs to the same character or is the next
+                // flag in a bundle. (The lexer's `shown_char` *can* know, and
+                // so names the whole character -- see `lex.rs`.)
+                other => {
+                    let shown = coreutils::quote::escape_unprintable(&[other]);
+                    return Err(format!("unknown option -{shown}"));
+                }
             }
         }
     }
@@ -314,4 +325,44 @@ fn die_usage(msg: &str) -> ! {
     eprintln!("awk: {msg}");
     eprintln!("{USAGE}");
     process::exit(1)
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::panic)]
+mod tests {
+    use super::*;
+
+    /// The refusal `parse_args` gives for `argv`, or a panic if it accepted it.
+    ///
+    /// Written as a `match` rather than `unwrap_err` so that `Args` need not
+    /// derive `Debug` purely to satisfy that method's bound on the `Ok` type —
+    /// a test should not widen a production type's API to be writable.
+    fn err(argv: &[&[u8]]) -> String {
+        let raw: Vec<Str> = argv.iter().map(|a| a.to_vec()).collect();
+        match parse_args(&raw) {
+            Err(message) => message,
+            Ok(_) => panic!("expected these arguments to be refused: {argv:?}"),
+        }
+    }
+
+    /// An unknown option byte is escaped, not cast to a `char`.
+    ///
+    /// `other as char` interpreted the byte as a code point, so the first byte
+    /// of `é` (0xC3) came back as `Ã` — a letter that is not on the command
+    /// line and not on the keyboard the user typed it with. `sort`'s option
+    /// loop carries a comment about this exact trap; awk's had the bug.
+    #[test]
+    fn an_unknown_option_byte_is_escaped_rather_than_cast_to_a_character() {
+        // `-é` is two bytes, both of them unknown options. The loop stops at
+        // the first and escapes it; it does not reach for the second, because
+        // walking bytes it cannot tell a continuation byte from the next flag
+        // in a bundle. `lex.rs`'s `shown_char` has the whole program text and
+        // so can, and does, name the character instead.
+        assert_eq!(err(&["-é".as_bytes()]), r"unknown option -\303");
+        assert_eq!(err(&[b"-\xff"]), r"unknown option -\377");
+        assert_eq!(err(&[b"-\x01"]), r"unknown option -\001");
+        // ASCII is unchanged, which is every option anyone actually mistypes.
+        assert_eq!(err(&[b"-q"]), "unknown option -q");
+        assert_eq!(err(&[b"-@"]), "unknown option -@");
+    }
 }

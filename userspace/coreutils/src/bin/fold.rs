@@ -28,7 +28,7 @@
 //! * **`-w bogus` silently became `-w 80`.** `parse().unwrap_or(80)` turns a
 //!   typo into plausible, wrong output and a success status.
 //! * **`-w 0` was defined here as "don't wrap".** GNU refuses it: the floor is
-//!   1, and the message is `invalid number of columns: '0': Numerical result
+//!   1, and the message is `invalid number of columns: ‘0’: Numerical result
 //!   out of range`.
 //! * **Every exit was 0** — `main` returned `()`, every write was `let _ = …` —
 //!   so a missing file, a read error and a full disk all reported success.
@@ -771,8 +771,8 @@ mod tests {
     fn a_digit_cluster_that_is_not_a_number_is_reported_whole() {
         // The digit's argument is recovered from the digit onwards, so the
         // whole cluster is what gets quoted back.
-        assert_eq!(refuse(&["-1,2"]), "invalid number of columns: '1,2'");
-        assert_eq!(refuse(&["-1x"]), "invalid number of columns: '1x'");
+        assert_eq!(refuse(&["-1,2"]), "invalid number of columns: ‘1,2’");
+        assert_eq!(refuse(&["-1x"]), "invalid number of columns: ‘1x’");
         // …and a digit after another option still starts its own number.
         assert_eq!(text(&["-s2"], "abcd\n"), "ab\ncd\n");
     }
@@ -781,17 +781,17 @@ mod tests {
     fn the_width_diagnostics() {
         assert_eq!(
             refuse(&["-w", "0"]),
-            "invalid number of columns: '0': Numerical result out of range"
+            "invalid number of columns: ‘0’: Numerical result out of range"
         );
         assert_eq!(
             refuse(&["-w", "bogus"]),
-            "invalid number of columns: 'bogus'"
+            "invalid number of columns: ‘bogus’"
         );
-        assert_eq!(refuse(&["-w", "1K"]), "invalid number of columns: '1K'");
-        assert_eq!(refuse(&["-w", "-3"]), "invalid number of columns: '-3'");
+        assert_eq!(refuse(&["-w", "1K"]), "invalid number of columns: ‘1K’");
+        assert_eq!(refuse(&["-w", "-3"]), "invalid number of columns: ‘-3’");
         assert_eq!(
             refuse(&["-w", "18446744073709551607"]),
-            "invalid number of columns: '18446744073709551607': \
+            "invalid number of columns: ‘18446744073709551607’: \
              Value too large for defined data type"
         );
     }
@@ -802,7 +802,7 @@ mod tests {
         // never reached — while the other order reports `-Z`.
         assert_eq!(
             refuse(&["-w", "0", "-Z"]),
-            "invalid number of columns: '0': Numerical result out of range"
+            "invalid number of columns: ‘0’: Numerical result out of range"
         );
         assert_eq!(refuse(&["-Z", "-w", "0"]), "invalid option -- 'Z'");
     }

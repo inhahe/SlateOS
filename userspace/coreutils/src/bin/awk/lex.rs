@@ -384,8 +384,11 @@ impl<'a> Lexer<'a> {
                     b'?' => Tok::Question,
                     b':' => Tok::Colon,
                     b'|' => Tok::Pipe,
-                    other => {
-                        let shown = shown_byte(other);
+                    _ => {
+                        // `at` is the token's first byte and nothing has
+                        // advanced past it yet, so the rest of the program
+                        // starts with the whole offending character.
+                        let shown = shown_char(self.src.get(at..).unwrap_or_default());
                         return Err(format!("syntax error at `{shown}'"));
                     }
                 }
@@ -566,12 +569,24 @@ impl<'a> Lexer<'a> {
     }
 }
 
-fn shown_byte(b: u8) -> String {
-    if b.is_ascii_graphic() || b == b' ' {
-        char::from(b).to_string()
-    } else {
-        format!("\\{b:03o}")
-    }
+/// How the offending character is named in a syntax error.
+///
+/// Takes the *rest of the program text* rather than one byte, because the
+/// answer is a character and a character can be several bytes. Our awk counts
+/// characters everywhere else — `length`, `substr`, `index` and `toupper` all
+/// diverge from gawk-in-the-C-locale for exactly that reason, and
+/// `scripts/awk-diff.sh` records each divergence as deliberate — so naming the
+/// *lead byte* here would be the one place it changed its mind, and would
+/// report `\303` for a program whose stray character is `é`.
+///
+/// Bytes that decode to no character still show as one octal escape each, and
+/// so does a character that is not printable: this defers the whole question
+/// to `design-decisions.md` §357 rather than keeping a second opinion about
+/// it. For every input the old byte-wise version could see — ASCII graphic,
+/// space, control, or a byte that does not decode — the answer is unchanged.
+fn shown_char(rest: &[u8]) -> String {
+    let width = coreutils::quote::first_char(rest).map_or(1, |(_, n)| n);
+    coreutils::quote::escape_unprintable(rest.get(..width).unwrap_or(rest))
 }
 
 #[cfg(test)]
@@ -711,5 +726,30 @@ mod tests {
     fn an_unterminated_literal_is_an_error_not_a_guess() {
         assert!(Lexer::new(b"\"abc").tokens().is_err());
         assert!(Lexer::new(b"/abc").tokens().is_err());
+    }
+
+    /// The stray character is named as a *character*, which is the same rule
+    /// this awk applies to `length`, `substr` and `index`. Before this, a
+    /// program containing `é` was reported as `syntax error at `\303'` — the
+    /// lead byte, which is not something the user typed.
+    #[test]
+    fn a_stray_character_is_named_whole_not_by_its_lead_byte() {
+        let err = |src: &[u8]| Lexer::new(src).tokens().unwrap_err();
+        assert_eq!(err("BEGIN { é }".as_bytes()), "syntax error at `é'");
+        assert_eq!(err("BEGIN { € }".as_bytes()), "syntax error at `€'");
+        assert_eq!(err("BEGIN { 😀 }".as_bytes()), "syntax error at `😀'");
+        // A byte that decodes to nothing still gets one octal escape, and only
+        // its own: the `z` after it is a token, not part of the escape.
+        assert_eq!(err(b"BEGIN { \xff }"), r"syntax error at `\377'");
+        assert_eq!(err(b"BEGIN { \xc3z }"), r"syntax error at `\303'");
+        // Every answer the byte-wise version used to give is unchanged.
+        assert_eq!(err(b"BEGIN { @ }"), "syntax error at `@'");
+        assert_eq!(err(b"BEGIN { \x01 }"), r"syntax error at `\001'");
+        // A character that decodes but is not printable is escaped per byte,
+        // exactly as `design-decisions.md` §357 requires.
+        assert_eq!(
+            err("BEGIN { \u{0080} }".as_bytes()),
+            r"syntax error at `\302\200'"
+        );
     }
 }

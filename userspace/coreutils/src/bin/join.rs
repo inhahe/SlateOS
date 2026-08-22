@@ -49,7 +49,7 @@
 //!
 //! ```text
 //! $ join -o 1.1 A B C
-//! join: invalid file number in field spec: 'A'
+//! join: invalid file number in field spec: ‘A’
 //! ```
 //!
 //! reports `A` — the name that was never an operand at all — rather than
@@ -1164,6 +1164,10 @@ impl Parse {
                 .unwrap_or_default();
             match pending {
                 Status::MustBeOperand => {
+                    // `quoteaf`, not `quote`: GNU join spells this one with
+                    // the always-quote flavour, which §351 keeps straight in
+                    // every locale. So it stays `'C'` where the `quote()`
+                    // family went curly.
                     return Err(JOIN.usage_referring(format!("extra operand {}", quoteaf_os(name))));
                 }
                 Status::MightBeJ1Arg => {
@@ -1834,7 +1838,7 @@ mod tests {
         // And it is compatible with a literal newline, which is the same value.
         assert_eq!(settings(&["-t", "", "-t", "\n", "A", "B"]).tab, Some(b'\n'));
         assert_eq!(settings(&["-t", "\\0", "A", "B"]).tab, Some(0));
-        assert_eq!(refuse(&["-t", "xy", "A", "B"]), "multi-character tab 'xy'");
+        assert_eq!(refuse(&["-t", "xy", "A", "B"]), "multi-character tab ‘xy’");
         assert_eq!(refuse(&["-t:", "-t,", "A", "B"]), "incompatible tabs");
     }
 
@@ -1888,7 +1892,10 @@ mod tests {
         // because nothing is permuted.
         assert_eq!(
             refuse(&["A", "-z"]),
-            "missing operand after '-z'\nTry 'join --help' for more information."
+            // Curly, unlike `extra operand` above: this one goes through
+            // `quote()`, which follows the locale, while `extra operand` uses
+            // `quoteaf_os` and stays straight in every locale.
+            "missing operand after ‘-z’\nTry 'join --help' for more information."
         );
     }
 
@@ -1972,7 +1979,7 @@ mod tests {
         // measured behaviour of `join -o 1.1 A B C`.
         assert_eq!(
             refuse(&["-o", "1.1", "A", "B", "C"]),
-            "invalid file number in field spec: 'A'"
+            "invalid file number in field spec: ‘A’"
         );
     }
 
@@ -1994,7 +2001,7 @@ mod tests {
         assert_eq!(settings(&["-o", "1.1\t2.2", "A", "B"]).outlist.len(), 2);
         assert_eq!(
             refuse(&["-o", "1.1,", "A", "B"]),
-            "invalid file number in field spec: ''"
+            "invalid file number in field spec: ‘’"
         );
     }
 
@@ -2002,17 +2009,17 @@ mod tests {
     fn a_field_spec_names_a_file_and_a_field() {
         assert_eq!(
             refuse(&["-o", "3.1", "A", "B"]),
-            "invalid file number in field spec: '3.1'"
+            "invalid file number in field spec: ‘3.1’"
         );
         assert_eq!(
             refuse(&["-o", "0.1", "A", "B"]),
-            "invalid field specifier: '0.1'"
+            "invalid field specifier: ‘0.1’"
         );
         assert_eq!(
             refuse(&["-o", "1", "A", "B"]),
-            "invalid field specifier: '1'"
+            "invalid field specifier: ‘1’"
         );
-        assert_eq!(refuse(&["-o", "1.", "A", "B"]), "invalid field number: ''");
+        assert_eq!(refuse(&["-o", "1.", "A", "B"]), "invalid field number: ‘’");
     }
 
     #[test]
@@ -2031,9 +2038,9 @@ mod tests {
 
     #[test]
     fn a_file_number_must_be_one_or_two() {
-        assert_eq!(refuse(&["-a", "3", "A", "B"]), "invalid field number: '3'");
-        assert_eq!(refuse(&["-v", "0", "A", "B"]), "invalid field number: '0'");
-        assert_eq!(refuse(&["-a", "", "A", "B"]), "invalid field number: ''");
+        assert_eq!(refuse(&["-a", "3", "A", "B"]), "invalid field number: ‘3’");
+        assert_eq!(refuse(&["-v", "0", "A", "B"]), "invalid field number: ‘0’");
+        assert_eq!(refuse(&["-a", "", "A", "B"]), "invalid field number: ‘’");
     }
 
     #[test]

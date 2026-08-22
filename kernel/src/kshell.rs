@@ -85393,8 +85393,17 @@ fn cmd_gpu(args: &str) {
                 crate::console_println!("  Status:     active");
                 crate::console_println!("  Resolution: {}x{}", w, h);
                 crate::console_println!("  Format:     B8G8R8A8 (32-bit)");
-                if let Some(addr) = crate::virtio::gpu::framebuffer_addr() {
-                    crate::console_println!("  FB addr:    {:#x}", addr);
+                if let Some(addr) = crate::virtio::gpu::first_frame_addr() {
+                    // Reported as a frame *count* plus the first frame, not as
+                    // "FB addr": the scanout is a list of unrelated 16 KiB
+                    // frames, and printing a single base address is what
+                    // invited the flat-buffer arithmetic behind
+                    // B-VIRTIO-GPU-FLAT-SCANOUT-WILD-WRITE.
+                    crate::console_println!(
+                        "  FB frames:  {} (first at {:#x})",
+                        crate::virtio::gpu::scanout_frame_count(),
+                        addr
+                    );
                 }
             } else {
                 crate::console_println!("Virtio-GPU: not present");

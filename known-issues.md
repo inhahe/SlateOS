@@ -32346,6 +32346,35 @@ has landed, so the caller exists. That request also carries a second, separate
 bug found while writing it — see `BUG-DRM-PAGE-FLIP-ACCEPTS-A-MISMATCHED-FB`
 below.
 
+**Update 2026-08-21 — the kernel half is done too (lane A).**
+`DRM_IOCTL_MODE_SETCRTC` exists: `DrmDevice::set_crtc` in `kernel/src/drm/mod.rs`
+validates the requested mode against the connector's advertised list, checks the
+connector is routable to that CRTC through its encoder, checks the framebuffer
+covers `mode + (x, y)`, dispatches `set_mode` to the backend, and updates
+`crtc.active`, `crtc.mode` and the primary plane's `fb`/`src_*`/`dst_*` only
+after the backend reports success. `fb_id == 0` with no connectors is the
+supported "turn this CRTC off" form and succeeds rather than returning `EINVAL`.
+The ioctl is wired at `kernel/src/syscall/linux.rs` and is refused with `EACCES`
+on a render node, since programming a display timing is modeset authority.
+
+Two caveats for the compositor half:
+
+* **Only the mode the backend already has is accepted on `limine-fb` and
+  `virtio-gpu`.** Both return `EINVAL` for any other mode — Limine cannot retime
+  a framebuffer the bootloader programmed, and virtio-gpu creates its scanout
+  resource once at probe and never replaces it (see
+  `TD-DRM-VIRTIO-GPU-CANNOT-RETIME` below). So "Display settings → Resolution"
+  becomes genuinely possible on the ATI backend now, and remains impossible in
+  QEMU until virtio-gpu grows a resource-recreate path. It fails loudly in both
+  cases, which is the change that matters: the compositor can now *tell*.
+* **The buffer re-allocation is still lane C's.** `SETCRTC` refuses a
+  framebuffer smaller than the mode, so `DrmScanout` must allocate the new pair
+  of dumb buffers at the new size *before* the `SETCRTC` that adopts them, not
+  after.
+
+Details and the reasoning: `design-decisions.md` §270. Reply request filed as
+`requests/a-c-drm-setcrtc-has-landed-and-page-flip-is-now-strict.md`.
+
 ## BUG-DRM-PAGE-FLIP-ACCEPTS-A-MISMATCHED-FB (found by lane C 2026-08-21; lives in lane A's tree)
 
 **In short:** the kernel lets a program hand the graphics card a picture that is
@@ -32395,6 +32424,106 @@ card is fitted.
 
 **Not lane C's to fix** — `kernel/**` is lane A's. Filed as Ask 2 of
 `requests/c-a-drm-setcrtc-and-a-page-flip-that-refuses-a-mismatched-framebuffer.md`.
+
+**FIXED 2026-08-21 (lane A).** `DrmDevice::page_flip` now resolves the CRTC,
+requires it to have a programmed mode, and returns `InvalidArgument` when
+`fb.width != mode.hdisplay || fb.height != mode.vdisplay` — before any backend
+is reached, so all three inherit the one answer. ATI's implicit mode-set was
+removed and replaced by a real `set_mode`; virtio-gpu's crop is now unreachable
+for a mismatch because the mismatch never gets that far. Lane C's "the answer
+depends on which card is fitted" is closed: the answer is `EINVAL` on all of
+them. The option debate is recorded in `design-decisions.md` §270.
+
+Three further object-model lies in the same area were found and fixed while
+here, none of which lane C had reported:
+
+* **`plane.fb` was never written by `page_flip`** — only by the atomic path — so
+  `GETPLANE` reported `fb_id = 0` forever on the legacy path. It is now updated
+  on every successful flip and mode-set.
+* **`fb_destroy` left dangling plane references.** A plane kept naming a
+  destroyed framebuffer id, and `fb_create` reuses ids, so a plane could appear
+  bound to an unrelated buffer it had never seen. `fb_destroy` now unbinds every
+  plane that names the id. (Linux's `drm_framebuffer_remove` also disables the
+  CRTC; ours deliberately does not — see the doc comment for why.)
+* **`atomic_commit` wrote `crtc.mode` without programming any hardware.** That
+  was merely inaccurate before; it became dangerous the moment `page_flip`
+  started trusting `crtc.mode` for its size check, because a fabricated mode
+  would wave through a buffer the display engine reads with a different stride.
+  Mode changes in the atomic path now route through `set_crtc`, so a mode the
+  hardware refuses fails the commit instead of being recorded as fact.
+
+**Regression test.** `drm::self_test()` item 11, "Mode-set and page-flip
+discipline", runs on every boot: nine sub-tests covering an unadvertised mode,
+an enable with no framebuffer, an enable with no connectors, a disable that also
+names a framebuffer, an undersized framebuffer, an unknown connector, a real
+mode-set followed by verifying `crtc.mode` and `plane.fb` describe it, a
+matching flip against a mismatched one, and a disable after which a flip is
+refused. Every assertion fails if the old behaviour is reintroduced.
+
+## TD-DRM-VIRTIO-GPU-CANNOT-RETIME (lane A, 2026-08-21)
+
+**In short:** in a virtual machine, SlateOS cannot change the screen resolution.
+It now says so with an error instead of quietly showing a cropped picture, which
+is the important half — but the resolution still cannot actually be changed.
+
+**Where.** `VirtioGpuBackend::set_mode`, `kernel/src/drm/driver.rs`. It returns
+`InvalidArgument` unless `mode.hdisplay == self.width && mode.vdisplay ==
+self.height`.
+
+**Why.** The scanout resource is created once during probe, sized from
+`GET_DISPLAY_INFO`, and never replaced. Everything downstream — the transfer
+rectangle, the flush region, the pitch — is derived from that one size.
+
+**Proper fix.** A resource-recreate path: `RESOURCE_CREATE_2D` at the new size,
+`RESOURCE_ATTACH_BACKING`, `SET_SCANOUT` to point the scanout at it, then
+release the old resource — with the old one kept alive until the new one is
+scanning out, so a failure half-way leaves a working display rather than a
+black one. `set_mode` is the entry point that gains it and nothing else has to
+change; the object-model bookkeeping in `DrmDevice::set_crtc` is already
+backend-agnostic.
+
+**Severity.** Low, and it only became visible today. Before `SETCRTC` existed
+there was no way to ask for a different mode at all, so nothing could be
+refused. This is the honest report of a limitation that was previously hidden
+behind a silent crop.
+
+## TD-DRM-ATOMIC-ACTIVE-IS-COSMETIC (lane A, 2026-08-21)
+
+**In short:** the newer of the two ways to configure a display has a
+"turn this screen on/off" switch that does not actually turn anything off. It
+updates the kernel's record and nothing else, so a program that flips it sees
+the record change but the monitor keeps showing the same picture.
+
+**Where.** `atomic_commit` in `kernel/src/drm/atomic.rs`: the `cs.active` arm
+sets `crtc.active` on the object and never calls the backend. Two code comments
+point at this entry by name.
+
+**Why it was left this way rather than half-fixed.** Making it real was
+attempted and deliberately backed out. Turning a CRTC off has to be reversible,
+and turning it back on means re-programming a display timing — which needs a
+framebuffer that a bare `active: true` commit does not carry. The atomic
+self-test (Test 8) deactivates and then reactivates the *primary* CRTC during
+boot, with `mode: None` in both commits. A real disable there would clear
+`crtc.mode`, leave the CRTC untimed after the supposed reactivation, and end the
+boot on a black screen when the compositor's first `page_flip` was refused for
+having no mode. Trading a harmless inaccuracy for a boot failure is not a fix.
+
+For the same reason `DrmDevice::page_flip` deliberately does **not** require
+`crtc.active` — only `crtc.mode`. A cosmetic bit must not be able to gate a real
+operation.
+
+**Proper fix.** Give `CrtcState` a way to express "off, and here is what to
+restore when you come back": either the commit carries the framebuffer for the
+re-enable, or the backend caches the last programmed timing and `active: true`
+means "re-apply it". Then `active: false` calls `disable_crtc`, `active: true`
+calls `set_mode`, and Test 8 is rewritten to supply a framebuffer on the way
+back up. Also worth doing at the same time: real DPMS, which is the same
+mechanism.
+
+**Severity.** Low. Nothing in the tree currently sets `active` expecting
+hardware to respond; the atomic path's only real user is the compositor, which
+uses the mode and plane fields. It becomes wrong the moment a client tries to
+blank a screen for power saving.
 
 ## TD-COMPOSITOR-PICKS-CARD0 (lane C, 2026-08-21) - **(1) and (2) fixed 2026-08-21; (3) open**
 
@@ -53506,3 +53635,181 @@ are worth less than their names claim even when green.
 full diagnosis. Distinct from the resolved
 `B-FTPD-SSHD-AUTH-TESTS-SHARE-TEMP-FILES-AND-FLAKE` — that was shared temp
 files and lane B's `ScratchDir` fix holds; this is wall-clock timing.
+
+## B-VIRTIO-GPU-FLAT-SCANOUT-WILD-WRITE (lane A, 2026-08-21) — FIXED 2026-08-21
+
+**In short:** the virtio-gpu display driver stores the screen's pixels in 250
+separate 16 KiB chunks scattered around RAM, but the code that copied a picture
+onto the screen assumed those chunks were one continuous 4 MiB block. So it
+wrote the first 16 KiB into the screen and the remaining ~4 MiB straight over
+whatever else the kernel happened to have put next in memory. It is fixed, and
+it is very likely the cause of the intermittent heap corruption that has been
+chased since July under the name **B-KNULLJUMP**.
+
+### What was wrong
+
+`virtio::gpu` builds the scanout out of frames taken one at a time from the
+buddy allocator:
+
+```rust
+let frames_needed = fb_bytes.div_ceil(FRAME_SIZE);
+for i in 0..frames_needed {
+    let f = frame::alloc_frame()?;   // <- unrelated frames, in allocation order
+    fb_frames.push(f);
+}
+```
+
+There is no contiguity request anywhere in that loop, so `fb_frames` is a list
+of 250 physically unrelated frames at 1280×800.
+
+`framebuffer_addr()` returned `fb_frames.first()?.addr() + hhdm` — the base of
+**one** of those frames — and both blit paths in `kernel/src/drm/driver.rs`
+then did flat-buffer arithmetic on it:
+
+```rust
+let dst_base = crate::virtio::gpu::framebuffer_addr()?;   // first frame only
+let dst_row  = dst_base + (row * dst_pitch) as u64;       // rows 0..800
+copy_nonoverlapping(src_virt as *const u8, dst_row as *mut u8, to_copy);
+```
+
+Rows 0–3 land in the framebuffer. Rows 4–799 land in the ~4 MiB of physical
+memory that follows the first frame, which is other GEM frames, kernel heap
+slabs, page-cache pages — whatever the allocator placed there.
+
+`VirtioGpuBackend::flush_region` had the identical defect, plus two of its own:
+`copy_w_bytes` was never clamped to the destination's right edge, and a source
+row crossing a GEM frame boundary silently lost its tail (`page_flip` handled
+exactly *one* such crossing, which is enough only while a row is ≤ 16 KiB).
+
+`set_pixel` in the same file has always done it correctly —
+`frame_idx = offset / FRAME_SIZE`, then `fb_frames.get(frame_idx)` — so the
+right idiom was sitting twenty lines below the accessor that made the wrong one
+easy.
+
+### How it was found, and why it stayed hidden
+
+Nothing at boot ever called `VirtioGpuBackend::page_flip`. The kernel console
+draws through `set_pixel`, which is correct; the compositor's path had not run
+by the time the DRM self-test does. The `SETCRTC`/`page_flip` self-test added
+on 2026-08-21 (`drm::self_test` item 11) performs a *real* mode-set and a real
+full-surface flip on the primary display — making it the first full-surface
+virtio-gpu blit in the boot — and the boot then panicked, deterministically,
+about 300 serial lines later:
+
+```
+panicked at alloc/src/collections/btree/navigate.rs:231:55:
+unsafe precondition(s) violated: hint::unreachable_unchecked must never be reached
+  kmain -> kernel_main -> oom::self_test -> oom::handle_oom
+        -> mm::pressure::notify -> mm::page_cache::shrink
+        -> BTreeMap Iter::next -> next_unchecked -> init_front
+```
+
+`navigate.rs:231` is the `LazyLeafHandle::Root(_) => unreachable_unchecked()`
+arm of `init_front`: reaching it means the page-cache `BTreeMap`'s own nodes no
+longer agree with each other. That is a corrupted heap, and the ~4 MiB of pixel
+data sprayed over it a moment earlier is where it came from.
+
+Two properties made the diagnosis solid rather than plausible:
+
+* **It was deterministic across two different binaries.** Two builds that
+  differed by an unrelated fix panicked at the same serial line (39337/39338)
+  and the identical relative stack offset. Layout luck does not do that.
+* **Gating item 11 off — and changing nothing else — made the boot green.**
+  `[oom] Self-test PASSED`, `BOOT_OK`. That is what turned "my change is
+  implicated" into "this code path is the trigger".
+
+### The fix
+
+The accessor was the trap, so the accessor is what went away. Patching the two
+callers would have left the next one to make the same mistake — and two of the
+three existing callers already had.
+
+* `framebuffer_addr()` → **`first_frame_addr()`**, documented as "only the
+  first `FRAME_SIZE` bytes belong to the framebuffer", kept solely for a
+  bounded read inside frame 0 and for printing an address to a human.
+* New **`with_scanout(|sc| …)`** lends a `ScanoutMem` view under the device
+  lock. Its `write_at(dst_offset, src, len)` walks `fb_frames`, splits the copy
+  at every frame boundary, and **clamps to the end of the buffer** — bytes past
+  the end are discarded, so a caller with wrong arithmetic now draws a wrong
+  picture instead of corrupting the kernel. It returns the byte count actually
+  written, which is what the regression test asserts on.
+* New `blit_run()` in `drm/driver.rs` walks the *source* GEM frame list in the
+  same general way, so neither side is assumed flat and a row may cross any
+  number of boundaries on either.
+* `flush_region` additionally clamps the run to the right edge of both
+  surfaces.
+* `kshell`'s `gpu status` now prints the frame *count* alongside the first
+  frame's address, because printing one bare base address is what invited the
+  arithmetic in the first place.
+
+### Regression test
+
+`virtio::gpu::self_test` now writes a marker through `write_at` at the offset
+of the **last** pixel and reads it back with `read_pixel`'s frame walk. Under
+the old flat-buffer arithmetic those four bytes would land ~4 MiB past frame 0,
+in someone else's memory, and the read-back would find zeros. It also asserts
+that a `write_at` starting at `sc.len()` writes **0** bytes.
+
+### Relationship to B-KNULLJUMP
+
+Not proven identical, and this entry does not close B-KNULLJUMP. But
+B-KNULLJUMP is an intermittent, hard-to-reproduce corruption of kernel heap
+structures, and this is a multi-megabyte wild write in the display path that
+fires whenever a full-surface virtio-gpu flip happens — which is exactly the
+compositor's steady state. Anyone re-opening B-KNULLJUMP should first check
+whether it still reproduces on a tree containing this fix.
+
+## TD-A-SYMBOLIZE-PY-RESOLVES-CODE-ADDRESSES-TO-DATA-SYMBOLS (lane A, 2026-08-21) — OPEN
+
+**In short:** `scripts/symbolize.py` is the tool for turning the hex addresses
+in a kernel panic back into function names. Given a valid return address it
+sometimes answers with the name of a *variable* instead of a function — e.g.
+`kernel::KERNEL_BOOT_STACK+0xcc323 [b]` for an address that is plainly inside
+`.text`. The answer is confidently wrong rather than absent, which is worse: it
+sends whoever is reading a crash down the wrong subsystem.
+
+**Where:** `scripts/symbolize.py`. Observed while symbolizing the panic in
+`B-VIRTIO-GPU-FLAT-SCANOUT-WILD-WRITE` against the matching unstripped ELF.
+Two of thirteen frames came back as `.bss`/`.rodata` symbols
+(`KERNEL_BOOT_STACK`, `font::FONT_DATA`) with offsets in the hundreds of KiB.
+
+**Cause:** it appears to take the nearest preceding symbol of *any* type rather
+than filtering to `t`/`T` (text). A `.bss` object that happens to sit at a
+lower address than the queried text address then wins the nearest-preceding
+search.
+
+**Proper fix:** filter the symbol table to `t`/`T` before the bisect, and
+reject a hit whose offset lies past the symbol's recorded size (`llvm-nm
+--print-size` provides it) rather than reporting it anyway. Printing
+`?? (no symbol covers this address)` is a correct answer; naming a variable is
+not. A ~40-line replacement doing exactly this was written ad hoc during the
+diagnosis above and produced a coherent 13-frame stack where `symbolize.py` did
+not; it was deleted as scratch rather than left as a second tool, because the
+right outcome is one working symbolizer.
+
+**Also worth knowing:** `llvm-symbolizer` is **not** present in the
+`nightly-x86_64-pc-windows-gnu` toolchain's `bin/`, so the obvious fallback is
+not available. And `awk`'s `strtonum` silently yields nothing for 64-bit kernel
+addresses (they exceed double precision) — use Python for any address
+arithmetic in these scripts.
+
+## TD-A-QUARANTINE-SELF-TEST-PRINTS-AN-INDISTINGUISHABLE-CORRUPTION-REPORT (lane A, 2026-08-21) — OPEN
+
+**In short:** the memory-corruption detector runs a self-test at boot that
+deliberately corrupts its own scratch buffer to prove the detector works. The
+report it prints when it finds that deliberate corruption is worded and
+formatted exactly like a real one — `*** CORRUPTION ***` with an address — so
+anyone grepping a serial log for corruption finds a false positive every boot.
+
+**Where:** `kernel/src/mm/quarantine.rs`, the self-test path. Cost about an
+hour during the `B-VIRTIO-GPU-FLAT-SCANOUT-WILD-WRITE` diagnosis: the reported
+slot was inside `KERNEL_BOOT_STACK`, which looked like the allocator had handed
+out a slot inside the live boot stack — a spectacular bug, and not a real one.
+The giveaway is only in the surrounding lines (`scan_all (corrupted): OK (1
+found)` before it, `Self-test PASSED` after).
+
+**Proper fix:** the self-test should pass a flag that makes the report print
+under a distinct, obviously-synthetic prefix — `[quarantine] (self-test)
+expected corruption at …` — so the real string `*** CORRUPTION ***` appears in
+a log only when something is actually wrong. A log line that means two
+different things is not a diagnostic.

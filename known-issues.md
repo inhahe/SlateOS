@@ -63762,3 +63762,74 @@ operation uses:
 permission checking, or any task that claims POSIX ACL support is done.
 Until then, `getfacl`/`setfacl` should be understood as a database editor
 for a database nothing reads.
+
+---
+
+## TD-A-SELFTESTS-NOT-IDEMPOTENT — the never-run self-tests panic on their *second* run, and that is why they can't just be switched on
+
+**Lane A. Found 2026-08-23, while wiring modules up under
+TD-A-FS-SELFTESTS-NEVER-RUN.**
+
+TD-A-FS-SELFTESTS-NEVER-RUN predicted that "a substantial number will fail
+or panic on first run". That is true, but it understates the shape of the
+problem and mis-states when it bites. The dominant failure is not a first
+run — it is the *second*. Every one of these suites has, by construction,
+only ever been run once in its life, so nothing ever exercised the case of
+running it against state a previous run left behind.
+
+**The pattern.** A module keeps `static STATE: Mutex<Option<State>>`, with
+an `init_defaults()` that returns early when the state already exists and a
+`with_state()` that does **not** lazily initialise. The suite then:
+
+1. calls `init_defaults()` — a no-op on the second run,
+2. asserts the table is empty (or in its seeded shape),
+3. creates fixtures, and
+4. never removes them.
+
+Run once, it passes. Run twice, step 2 fails against step 3's leftovers and
+the assertion panics — which in the kernel is not a red test, it is a dead
+machine. Each of these is reachable from a `kshell` subcommand, so this is
+a user-typeable kernel panic, not merely a testing inconvenience.
+
+**Found in three consecutive modules while converting them for §261** — it
+was not a coincidence in any of them, and all three are now fixed:
+
+| Module | Second-run failure | Fixed in |
+|---|---|---|
+| `fs::netshare` | test 1 `assert!(list_shares().is_empty())` — `id1` was never unmounted | `c5db19b8a` |
+| `fs::filevault` | test 1 `assert_eq!(list_vaults().len(), 0)` — the created vault was never deleted; test 8's exact counter assertions could not hold twice either | `c150f1b29` |
+| `fs::diskencrypt` | test 9 `start_encryption(1, …)` — run 1 leaves volume 1 `Unlocked`, and it only accepts `Unencrypted` | `59bd8befc` |
+
+`fs::fileshare` was a near miss of a different flavour: it *does* reset at
+entry, so it survives a second run, but it left `sharing_enabled = true`
+and the hostname set to `"fileserver"` in the live table. Wiring it into
+boot as it stood would have made `fileshare show` report sharing switched
+on and the machine renamed, without the user having asked for either.
+
+**The two fixes, and when to use which:**
+
+- *Reset at both ends* — `*STATE.lock() = None; init_defaults();` on entry
+  and `*STATE.lock() = None;` on exit. Correct when the module has no lazy
+  init, so `None` is exactly the state a fresh boot has. This is what
+  `fs::inodestat` already did and documented, and what `filevault`,
+  `diskencrypt` and `fileshare` now do.
+- *Baseline-relative + full cleanup* — capture the row count on entry,
+  state every count relative to it, and assert on exit that the table was
+  restored. Correct when the module may legitimately hold live rows the
+  suite must not destroy. This is what `netshare` now does.
+
+Prefer the second where the module could plausibly be in use, because the
+first is a data-destroying operation dressed up as a test.
+
+**Reproduce:** run any such suite's shell subcommand twice, e.g.
+`dencrypt test` then `dencrypt test`.
+
+**The proper fix** is to apply one of the two shapes above to every
+state-holding suite in the ~250 still-manual-only set, as each is wired up
+under TD-A-FS-SELFTESTS-NEVER-RUN — checking specifically for (a) an
+opening emptiness/shape assertion, (b) fixtures that are never removed, and
+(c) exact assertions on cumulative counters, which cannot hold on a second
+run even when the rows are cleaned up. Doing this *at wiring time* is
+essential rather than optional: a non-idempotent suite that has been wired
+into boot will pass the boot test (a fresh boot runs it exactly once) and
+still panic the kernel the first time a user types the subcommand.

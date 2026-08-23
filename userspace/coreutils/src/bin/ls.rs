@@ -57,11 +57,12 @@
 #![cfg_attr(not(unix), allow(dead_code))]
 
 use charwidth::char_width;
+use coreutils::errmsg::strerror;
 use coreutils::fnmatch::{Flags, fnmatch};
 use coreutils::getopt::{self, Opt, Program, Takes};
 use coreutils::human::{Opts, default_block_size, human_readable};
 use coreutils::pathname::{base_len, last_component, last_component_offset};
-use coreutils::quote::{Mb, Style, next_mb, os_bytes, quote};
+use coreutils::quote::{Mb, Style, next_mb, os_bytes, quote, quoteaf};
 use coreutils::vercmp::version;
 use coreutils::xnum::{self, Status, strtol_fatal};
 use modechange::{S_IFBLK, S_IFCHR, S_IFDIR, S_IFIFO, S_IFLNK, S_IFMT, S_IFREG, S_IFSOCK};
@@ -3182,6 +3183,254 @@ fn print_current_files(
     }
 }
 
+// ------------------------------------------------------ reading the files ---
+
+/// The filesystem, behind a trait so that the walk can be tested without one.
+///
+/// The methods are named for the calls upstream makes, and they are the only
+/// four it makes: `ls` opens no file. `stat_for_mode` is not separate because
+/// it is [`Tree::stat`] — upstream distinguishes them only to ask `statx` for
+/// fewer fields.
+trait Tree {
+    fn stat(&self, path: &[u8]) -> std::io::Result<Stat>;
+    fn lstat(&self, path: &[u8]) -> std::io::Result<Stat>;
+    fn read_link(&self, path: &[u8]) -> std::io::Result<Vec<u8>>;
+    /// One directory's entries, in the order the filesystem gives them.
+    fn read_dir(&self, path: &[u8]) -> std::io::Result<Vec<Entry>>;
+}
+
+/// One `readdir` result: `(name, type, inode)`.
+///
+/// The type is `d_type`, which is [`FileType::Unknown`] on a filesystem that
+/// does not supply one; the inode is `d_ino`, which is [`NOT_AN_INODE_NUMBER`]
+/// when unavailable. Both are what decide whether a `stat` happens at all, so
+/// both are carried rather than resolved by the reader.
+type Entry = (Vec<u8>, FileType, u64);
+
+/// `NOT_AN_INODE_NUMBER`: the value `ls` treats as "there is no inode here",
+/// printed as `?` by [`format_inode`].
+///
+/// Zero rather than a sentinel because no filesystem uses inode 0, and because
+/// a field that starts zeroed is then already "unknown".
+const NOT_AN_INODE_NUMBER: u64 = 0;
+
+/// Everything the walk accumulates that is not the output: the files of the
+/// directory being read, the column widths they imply, and the two flags that
+/// are set once and read everywhere.
+#[derive(Default)]
+struct Cwd {
+    files: Vec<FileInfo>,
+    widths: Widths,
+    /// GNU's `cwd_some_quoted`: whether *any* name in this directory came out
+    /// quoted, which decides whether the unquoted ones are padded to line their
+    /// opening quotes up. It is per-directory and is cleared with the files.
+    some_quoted: bool,
+}
+
+/// The exit status, which `ls` raises but never lowers.
+///
+/// The two failures are distinct: a file named on the command line that cannot
+/// be reached is `2`, the same status as a bad option, while one found inside a
+/// directory is `1`. Upstream's `set_exit_status (command_line_arg)`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+struct Exit(u8);
+
+impl Exit {
+    fn fail(&mut self, command_line_arg: bool) {
+        self.0 = self.0.max(if command_line_arg { 2 } else { 1 });
+    }
+}
+
+/// GNU's `gobble_file`: read one file into the listing, and widen every column
+/// it turns out to need.
+///
+/// Returns the file's block count, which the caller adds to the `total` line.
+/// A file that was not stated contributes zero — not because its blocks are
+/// zero but because they are unknown, and upstream's `blocks` local is only
+/// assigned inside the stat branch.
+///
+/// Three of its rules are visible in output and none is guessable:
+///
+/// * **A command-line argument that cannot be stated is dropped**, where one
+///   found inside a directory is kept and printed with `?` in every column.
+///   `ls nosuch` lists nothing at all; a dangling symlink inside a listed
+///   directory still gets a row.
+/// * **The inode column is widened outside the stat branch**, so `ls -i`
+///   widens it from what `readdir` supplied without stating anything — but a
+///   file whose stat *failed* returned before reaching it, so a `?` widens
+///   nothing.
+/// * **`f.quoted` is measured once for the name and then reused for the link
+///   target**, and a link target that needs quoting resets it to "not
+///   measured" rather than to "quoted". That keeps the target off
+///   `cwd_some_quoted`: a target is not in the name column and cannot affect
+///   its alignment.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "upstream's five parameters plus the four pieces of global state this port threads explicitly"
+)]
+fn gobble_file(
+    tree: &dyn Tree,
+    cfg: &Config,
+    names: &Names,
+    cwd: &mut Cwd,
+    status: &mut Exit,
+    err: &mut dyn Write,
+    name: &[u8],
+    kind: FileType,
+    inode: u64,
+    command_line_arg: bool,
+    dirname: &[u8],
+) -> u64 {
+    let mut f = FileInfo {
+        name: name.to_vec(),
+        filetype: kind,
+        stat: Stat {
+            ino: inode,
+            btime: Ts::UNKNOWN,
+            ..Stat::default()
+        },
+        quoted: None,
+        ..FileInfo::default()
+    };
+
+    // Only `--quoting-style`s with outer quotes ask this, and only until the
+    // first quoted name answers it: once one name is quoted the padding is
+    // settled for the whole directory.
+    if !cwd.some_quoted && cfg.align_variable_outer_quotes {
+        let quoted = needs_quoting(cfg.quoting_style, &cfg.filename_extra, name);
+        f.quoted = Some(quoted);
+        if quoted {
+            cwd.some_quoted = true;
+        }
+    }
+
+    let mut blocks = 0u64;
+
+    if needs_stat(cfg, kind, inode != NOT_AN_INODE_NUMBER, command_line_arg) {
+        // The name to reach the file by, which is the printed name only at the
+        // top level.
+        let full_name = full_name_for(dirname, name);
+        f.full_name.clone_from(&full_name);
+
+        // Which of `stat` and `lstat` runs. `-H` and
+        // `--dereference-command-line-symlink-to-dir` both start with `stat`
+        // and fall back to `lstat`, but on different conditions.
+        //
+        // Upstream also keeps a `do_deref` out of this, to tell `getfilecon`
+        // which link to label. There is no `getfilecon` here — `-Z` prints `?`
+        // for every file — so the flag has no consumer and is not carried.
+        let result = match cfg.dereference {
+            Deref::Always => tree.stat(&full_name),
+            Deref::CommandLineArguments | Deref::CommandLineSymlinkToDir if command_line_arg => {
+                let first = tree.stat(&full_name);
+                let need_lstat = match &first {
+                    // `ENOENT` or `ELOOP` from a *stat* means the link is
+                    // broken or circular, and a broken link is still a row.
+                    Err(e) => is_enoent_or_eloop(e),
+                    Ok(st) => st.mode & S_IFMT != S_IFDIR,
+                };
+                if cfg.dereference == Deref::CommandLineArguments || !need_lstat {
+                    first
+                } else {
+                    tree.lstat(&full_name)
+                }
+            }
+            _ => tree.lstat(&full_name),
+        };
+
+        let stat = match result {
+            Ok(stat) => stat,
+            Err(error) => {
+                let _ = writeln!(
+                    err,
+                    "ls: cannot access {}: {}",
+                    quoteaf(&full_name),
+                    strerror(&error)
+                );
+                status.fail(command_line_arg);
+                if command_line_arg {
+                    // An operand that cannot be reached leaves no row at all.
+                    return 0;
+                }
+                cwd.files.push(f);
+                return 0;
+            }
+        };
+        f.stat = stat;
+        f.stat_ok = true;
+
+        if f.stat.mode & S_IFMT == S_IFLNK && (cfg.format == Format::Long || cfg.check_symlink_mode)
+        {
+            match tree.read_link(&full_name) {
+                Ok(target) => f.linkname = Some(target),
+                Err(error) => {
+                    let _ = writeln!(
+                        err,
+                        "ls: cannot read symbolic link {}: {}",
+                        quoteaf(&full_name),
+                        strerror(&error)
+                    );
+                    status.fail(command_line_arg);
+                }
+            }
+
+            // "Not measured" and not "quoted": the target takes the slower
+            // quoting path without joining `cwd_some_quoted`, because the
+            // target is not what the name column aligns.
+            if let Some(target) = &f.linkname
+                && f.quoted == Some(false)
+                && needs_quoting(cfg.quoting_style, &cfg.filename_extra, target)
+            {
+                f.quoted = None;
+            }
+
+            // The target is followed only when something will show what it is:
+            // an indicator that distinguishes types, or a sort that groups
+            // directories. `-p` is below the threshold and does not follow.
+            if f.linkname.is_some()
+                && (Indicator::FileType <= cfg.indicator_style || cfg.check_symlink_mode)
+                && let Ok(target_stat) = tree.stat(&full_name)
+            {
+                f.link_ok = true;
+                f.link_mode = target_stat.mode;
+            }
+        }
+
+        // The printed type now comes from the stat and not from `readdir`. A
+        // directory named on the command line becomes `arg_directory`, which
+        // is what later moves it out of the listing and into its own heading —
+        // unless `-d` asked for it to stay.
+        f.filetype = if f.stat.mode & S_IFMT == S_IFLNK {
+            FileType::SymbolicLink
+        } else if f.stat.mode & S_IFMT == S_IFDIR {
+            if command_line_arg && !cfg.immediate_dirs {
+                FileType::ArgDirectory
+            } else {
+                FileType::Directory
+            }
+        } else {
+            FileType::Normal
+        };
+
+        blocks = f.stat.blocks;
+        cwd.widths.observe_stated(cfg, names, &f, blocks);
+    }
+
+    cwd.widths.observe_inode(cfg, &f);
+    cwd.files.push(f);
+    blocks
+}
+
+/// Whether an error is one of the two `stat` failures that mean "this may still
+/// be a symlink worth showing": the target does not exist, or the chain of
+/// links is circular.
+///
+/// `ErrorKind::FilesystemLoop` is unstable, so `ELOOP` is matched by its raw
+/// number. Both are Linux's; SlateOS uses the same values.
+fn is_enoent_or_eloop(error: &std::io::Error) -> bool {
+    error.kind() == std::io::ErrorKind::NotFound || error.raw_os_error() == Some(40)
+}
+
 fn main() -> ExitCode {
     ExitCode::SUCCESS
 }
@@ -5072,5 +5321,438 @@ mod tests {
         // `max_idx` caps the search, not the answer: with one name there is one
         // column however wide the screen is.
         assert_eq!(calculate_columns(&cfg(200), &[3], true).0, 1);
+    }
+
+    // ------------------------------------------------------ reading the files ---
+
+    /// A filesystem made of three maps: what `lstat` answers, where a symlink
+    /// points, and what a directory holds. `stat` is `lstat` after following
+    /// the links, which is the only thing the real one does that the maps do
+    /// not say directly.
+    #[derive(Default)]
+    struct FakeTree {
+        lstats: std::collections::HashMap<Vec<u8>, Stat>,
+        targets: std::collections::HashMap<Vec<u8>, Vec<u8>>,
+        dirs: std::collections::HashMap<Vec<u8>, Vec<Entry>>,
+    }
+
+    fn enoent() -> std::io::Error {
+        std::io::Error::from(std::io::ErrorKind::NotFound)
+    }
+
+    impl FakeTree {
+        fn file(mut self, path: &str, stat: Stat) -> Self {
+            self.lstats.insert(path.as_bytes().to_vec(), stat);
+            self
+        }
+
+        /// A symlink: an `lstat` that reports one, and a target to follow.
+        fn link(mut self, path: &str, target: &str) -> Self {
+            self.lstats.insert(
+                path.as_bytes().to_vec(),
+                Stat {
+                    mode: S_IFLNK | 0o777,
+                    nlink: 1,
+                    size: target.len() as i64,
+                    ino: 100,
+                    ..Stat::default()
+                },
+            );
+            self.targets
+                .insert(path.as_bytes().to_vec(), target.as_bytes().to_vec());
+            self
+        }
+    }
+
+    impl Tree for FakeTree {
+        fn lstat(&self, path: &[u8]) -> std::io::Result<Stat> {
+            self.lstats.get(path).copied().ok_or_else(enoent)
+        }
+
+        fn stat(&self, path: &[u8]) -> std::io::Result<Stat> {
+            let mut at = path.to_vec();
+            for _ in 0..8 {
+                match self.targets.get(&at) {
+                    Some(target) => at.clone_from(target),
+                    None => break,
+                }
+            }
+            self.lstats.get(&at).copied().ok_or_else(enoent)
+        }
+
+        fn read_link(&self, path: &[u8]) -> std::io::Result<Vec<u8>> {
+            self.targets.get(path).cloned().ok_or_else(enoent)
+        }
+
+        fn read_dir(&self, path: &[u8]) -> std::io::Result<Vec<Entry>> {
+            self.dirs.get(path).cloned().ok_or_else(enoent)
+        }
+    }
+
+    /// One `gobble_file` call, with the diagnostics captured.
+    struct Gobbled {
+        cwd: Cwd,
+        status: Exit,
+        err: String,
+        blocks: u64,
+    }
+
+    fn gobble(
+        tree: &dyn Tree,
+        cfg: &Config,
+        name: &str,
+        kind: FileType,
+        inode: u64,
+        command_line_arg: bool,
+        dirname: &str,
+    ) -> Gobbled {
+        let mut cwd = Cwd::default();
+        let mut status = Exit::default();
+        let mut err = Vec::new();
+        let blocks = gobble_file(
+            tree,
+            cfg,
+            &inhahe(),
+            &mut cwd,
+            &mut status,
+            &mut err,
+            name.as_bytes(),
+            kind,
+            inode,
+            command_line_arg,
+            dirname.as_bytes(),
+        );
+        Gobbled {
+            cwd,
+            status,
+            err: String::from_utf8_lossy(&err).into_owned(),
+            blocks,
+        }
+    }
+
+    /// `ls` in long format, which is the setting that makes every column and
+    /// therefore every `stat` happen.
+    fn stating_cfg() -> Config {
+        Config {
+            format_needs_stat: true,
+            ..long_cfg()
+        }
+    }
+
+    /// A file that cannot be reached is dropped when it was named on the
+    /// command line and kept when it was found inside a directory — and the two
+    /// take *different exit statuses*, 2 and 1. Measured, GNU ls 9.5, on a
+    /// directory holding a dangling link and one real file:
+    ///
+    /// ```text
+    /// $ ls nosuch                 status 2, no output at all
+    /// $ ls -L -l .                status 1
+    ///   total 0
+    ///   l????????? ? ?      ?      ? ? dangle
+    ///   -rw-r--r-- 1 inhahe inhahe 0 T real
+    /// ```
+    ///
+    /// Both print `ls: cannot access 'x': No such file or directory`, and both
+    /// name the file without a `./` — a `dirname` of exactly `.` contributes
+    /// nothing to the path a diagnostic quotes.
+    #[test]
+    fn a_stat_that_failed_drops_an_operand_and_keeps_a_directory_entry() {
+        let tree = FakeTree::default();
+        let cfg = stating_cfg();
+
+        let operand = gobble(&tree, &cfg, "nosuch", FileType::Unknown, 0, true, "");
+        assert!(operand.cwd.files.is_empty(), "an operand leaves no row");
+        assert_eq!(operand.status, Exit(2));
+        assert_eq!(
+            operand.err,
+            "ls: cannot access 'nosuch': No such file or directory\n"
+        );
+
+        let entry = gobble(&tree, &cfg, "dangle", FileType::SymbolicLink, 7, false, ".");
+        assert_eq!(entry.cwd.files.len(), 1, "an entry keeps its row");
+        let f = entry.cwd.files.first().unwrap();
+        assert!(!f.stat_ok);
+        // The type `readdir` gave survives, which is what puts the `l` at the
+        // front of `l?????????`.
+        assert_eq!(f.filetype, FileType::SymbolicLink);
+        assert_eq!(entry.status, Exit(1));
+        assert_eq!(
+            entry.err,
+            "ls: cannot access 'dangle': No such file or directory\n"
+        );
+        assert_eq!(entry.blocks, 0, "unknown blocks are not counted as zero");
+        // And it widened nothing: the accumulation is after the early return.
+        assert_eq!(entry.cwd.widths, Widths::default());
+    }
+
+    /// `ls -i` prints the inode `readdir` supplied and never stats for it, so
+    /// the column is widened outside the stat branch — which is also why a file
+    /// whose stat *failed* does not widen it, having returned before reaching
+    /// the accumulation. Measured, GNU ls 9.5:
+    ///
+    /// ```text
+    /// $ ls -i .
+    /// 636259 dangle
+    /// 636260 real
+    /// ```
+    ///
+    /// with no `stat` at all: `-i` alone needs neither the type nor the mode.
+    #[test]
+    fn an_inode_from_readdir_widens_its_column_with_nothing_stated() {
+        let tree = FakeTree::default();
+        let cfg = Config {
+            print_inode: true,
+            ..Config::default()
+        };
+
+        let got = gobble(
+            &tree,
+            &cfg,
+            "dangle",
+            FileType::SymbolicLink,
+            636_259,
+            false,
+            ".",
+        );
+        assert_eq!(got.cwd.widths.inode, 6);
+        assert!(
+            !got.cwd.files.first().unwrap().stat_ok,
+            "nothing was stated: the empty tree would have failed"
+        );
+        assert_eq!(got.status, Exit(0), "and so nothing failed either");
+        assert!(got.err.is_empty());
+    }
+
+    /// A symlink's target is read for `-l`, and the `f->quoted` that was
+    /// measured for the *name* is then reused to decide whether the target
+    /// needs the slow path. A target that needs quoting resets it to "not
+    /// measured" rather than to "quoted", and leaves `cwd_some_quoted` alone:
+    /// the target is not in the name column, so it cannot change what that
+    /// column aligns to.
+    #[test]
+    fn a_link_target_that_needs_quoting_unmeasures_the_name_without_aligning_it() {
+        let tree = FakeTree::default().link("plain", "with space");
+        let cfg = Config {
+            quoting_style: Style::Shell,
+            align_variable_outer_quotes: true,
+            ..stating_cfg()
+        };
+
+        let got = gobble(&tree, &cfg, "plain", FileType::SymbolicLink, 0, false, "");
+        let f = got.cwd.files.first().unwrap();
+        assert_eq!(f.linkname.as_deref(), Some(b"with space".as_slice()));
+        assert_eq!(
+            f.quoted, None,
+            "the name was measured as unquoted, then unmeasured by the target"
+        );
+        assert!(
+            !got.cwd.some_quoted,
+            "a target never joins the directory's alignment"
+        );
+
+        // A target that needs no quoting leaves the measurement standing.
+        let tame = FakeTree::default().link("plain", "tame");
+        let got = gobble(&tame, &cfg, "plain", FileType::SymbolicLink, 0, false, "");
+        assert_eq!(got.cwd.files.first().unwrap().quoted, Some(false));
+
+        // Whereas a *name* that needs quoting does join it, and is what makes
+        // every later name in the directory take the slow path.
+        let odd = FakeTree::default().link("with space", "tame");
+        let got = gobble(
+            &odd,
+            &cfg,
+            "with space",
+            FileType::SymbolicLink,
+            0,
+            false,
+            "",
+        );
+        assert_eq!(got.cwd.files.first().unwrap().quoted, Some(true));
+        assert!(got.cwd.some_quoted);
+    }
+
+    /// The target is followed only when an indicator could tell the types
+    /// apart. `-p` marks directories and nothing else, so it is *below* the
+    /// threshold and does not follow; `--file-type` and `-F` are at or above it
+    /// and do.
+    #[test]
+    fn a_target_is_followed_only_for_an_indicator_that_distinguishes_types() {
+        let tree = FakeTree::default().link("l", "d").file(
+            "d",
+            Stat {
+                mode: S_IFDIR | 0o755,
+                nlink: 2,
+                ..Stat::default()
+            },
+        );
+        let followed = |indicator: Indicator| {
+            let cfg = Config {
+                indicator_style: indicator,
+                ..stating_cfg()
+            };
+            let got = gobble(&tree, &cfg, "l", FileType::SymbolicLink, 0, false, "");
+            let f = got.cwd.files.first().unwrap();
+            (f.link_ok, f.link_mode)
+        };
+        assert_eq!(followed(Indicator::None), (false, 0));
+        assert_eq!(followed(Indicator::Slash), (false, 0));
+        assert_eq!(followed(Indicator::FileType), (true, S_IFDIR | 0o755));
+        assert_eq!(followed(Indicator::Classify), (true, S_IFDIR | 0o755));
+
+        // `--group-directories-first` follows it too, by a different route: it
+        // needs the target's mode to know which group the link belongs in.
+        let cfg = Config {
+            check_symlink_mode: true,
+            ..stating_cfg()
+        };
+        let got = gobble(&tree, &cfg, "l", FileType::SymbolicLink, 0, false, "");
+        assert!(got.cwd.files.first().unwrap().link_ok);
+    }
+
+    /// A directory named on the command line becomes `arg_directory`, which is
+    /// what later moves it out of the listing and into a heading of its own.
+    /// `-d` is the option that stops it, and it stops it here rather than at
+    /// the point of printing — which is why `ls -d dir` gives a row and `ls
+    /// dir` gives a heading.
+    #[test]
+    fn a_directory_operand_becomes_a_heading_unless_d_asked_for_a_row() {
+        let tree = FakeTree::default().file(
+            "d",
+            Stat {
+                mode: S_IFDIR | 0o755,
+                nlink: 2,
+                blocks: 8,
+                ..Stat::default()
+            },
+        );
+        let kind = |cfg: &Config, command_line_arg: bool| {
+            gobble(&tree, cfg, "d", FileType::Unknown, 0, command_line_arg, "")
+                .cwd
+                .files
+                .first()
+                .unwrap()
+                .filetype
+        };
+        let cfg = stating_cfg();
+        assert_eq!(kind(&cfg, true), FileType::ArgDirectory);
+        assert_eq!(kind(&cfg, false), FileType::Directory);
+
+        let immediate = Config {
+            immediate_dirs: true,
+            ..cfg
+        };
+        assert_eq!(kind(&immediate, true), FileType::Directory);
+    }
+
+    /// `-L` makes every stat a `stat`, so a dangling link fails where an
+    /// `lstat` would have succeeded; `-H` does the same but only for operands.
+    /// `--dereference-command-line-symlink-to-dir` starts with a `stat` too and
+    /// falls back to `lstat` when the target turns out not to be a directory —
+    /// so a link to a *file* prints as a link and a link to a directory prints
+    /// as the directory.
+    ///
+    /// The fallback is also taken on `ENOENT` and `ELOOP`, which is the whole
+    /// difference between the last two on a dangling link. Measured, GNU ls
+    /// 9.5, with `dangle -> nowhere`, `tofile -> f` and `todir -> d`:
+    ///
+    /// ```text
+    /// $ ls -l -H dangle                        status 2, cannot access 'dangle'
+    /// $ ls -l -L dangle                        status 2, cannot access 'dangle'
+    /// $ ls -l --dereference-…-to-dir dangle    status 0, lrwxrwxrwx … dangle -> nowhere
+    /// $ ls -l --dereference-…-to-dir tofile    status 0, lrwxrwxrwx … tofile -> f
+    /// $ ls -l --dereference-…-to-dir todir     status 0, total 0   (it became the heading)
+    /// $ ls -l -H tofile                        status 0, -rw-r--r-- … tofile
+    /// ```
+    #[test]
+    fn the_four_dereference_modes_differ_in_which_link_gets_stated() {
+        let tree = FakeTree::default()
+            .link("tofile", "f")
+            .link("todir", "d")
+            .link("dangle", "nowhere")
+            .file(
+                "f",
+                Stat {
+                    mode: S_IFREG | 0o644,
+                    nlink: 1,
+                    ..Stat::default()
+                },
+            )
+            .file(
+                "d",
+                Stat {
+                    mode: S_IFDIR | 0o755,
+                    nlink: 2,
+                    ..Stat::default()
+                },
+            );
+        let kind = |deref: Deref, name: &str, command_line_arg: bool| {
+            let cfg = Config {
+                dereference: deref,
+                ..stating_cfg()
+            };
+            let got = gobble(
+                &tree,
+                &cfg,
+                name,
+                FileType::Unknown,
+                0,
+                command_line_arg,
+                "",
+            );
+            got.cwd
+                .files
+                .first()
+                .map(|f| (f.stat_ok, f.filetype))
+                .unwrap_or((false, FileType::Unknown))
+        };
+
+        // `-L`: the target decides, and a dangling one is not reachable at all.
+        assert_eq!(
+            kind(Deref::Always, "tofile", false),
+            (true, FileType::Normal)
+        );
+        assert_eq!(
+            kind(Deref::Always, "todir", false),
+            (true, FileType::Directory)
+        );
+        assert_eq!(
+            kind(Deref::Always, "dangle", true),
+            (false, FileType::Unknown),
+            "an unreachable operand leaves no row"
+        );
+
+        // `-H`: the same, but only for an operand.
+        assert_eq!(
+            kind(Deref::CommandLineArguments, "tofile", true),
+            (true, FileType::Normal)
+        );
+        assert_eq!(
+            kind(Deref::CommandLineArguments, "tofile", false),
+            (true, FileType::SymbolicLink)
+        );
+
+        // `--dereference-command-line-symlink-to-dir`: a link to a directory is
+        // the directory, a link to anything else stays a link.
+        assert_eq!(
+            kind(Deref::CommandLineSymlinkToDir, "todir", true),
+            (true, FileType::ArgDirectory)
+        );
+        assert_eq!(
+            kind(Deref::CommandLineSymlinkToDir, "tofile", true),
+            (true, FileType::SymbolicLink)
+        );
+        // And a dangling one falls back to the `lstat`, which succeeds — so it
+        // is listed rather than reported.
+        assert_eq!(
+            kind(Deref::CommandLineSymlinkToDir, "dangle", true),
+            (true, FileType::SymbolicLink)
+        );
+
+        // `--dereference-command-line` has no such fallback: a dangling operand
+        // is an error under it.
+        assert_eq!(
+            kind(Deref::CommandLineArguments, "dangle", true),
+            (false, FileType::Unknown)
+        );
     }
 }

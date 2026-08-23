@@ -11,7 +11,7 @@
 # Do NOT raise a number, and do NOT add a file, to turn a red `--check`
 # green: that is the defect being recorded, not an exception to it.
 #
-# 1752 sites across 776 files.
+# 1714 sites across 775 files.
 
 init/servicebus/src/main.rs:4
 userspace/abduco-cli/src/main.rs:5
@@ -538,7 +538,6 @@ userspace/psql-cli/src/main.rs:2
 userspace/pstree/src/main.rs:1
 userspace/pueue/src/main.rs:2
 userspace/pulsar-cli/src/main.rs:1
-userspace/pulseaudio/src/main.rs:38
 userspace/pulumi-cli/src/main.rs:2
 userspace/pulumi/src/main.rs:1
 userspace/puppet-cli/src/main.rs:3

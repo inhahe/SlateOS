@@ -8413,6 +8413,12 @@ DEFECTS = [
         ["desktop"],
         [
             'a_background_with_no_colour_of_its_own_takes_the_theme',
+            # Undeclared when this was written, and the reason earns the line:
+            # Latte `base` *is* `LIGHT_EXTREME`, which is what
+            # `on_wallpaper()` answers in both modes. A background that
+            # resolves to `base` is therefore counted as a seventh piece of
+            # wallpaper ink by a test that is not looking at the background.
+            'exactly_seven_things_in_the_full_render_sit_on_the_background',
         ],
     ),
     (
@@ -8481,7 +8487,11 @@ DEFECTS = [
         [
             'the_clock_and_the_status_lines_are_wallpaper_ink',
             'every_colour_in_the_password_entry_is_in_the_role_it_claims',
-            'exactly_seven_things_in_the_full_render_sit_on_the_background',
+            # Not the counting test, which was declared here and did not fire:
+            # the shadow is still black at 180 and still drawn once per
+            # floating text, so the count is unchanged. Only the position
+            # assertion inside `floating_text` sees this, which is the whole
+            # reason that helper checks the offset rather than just the pair.
         ],
     ),
     (
@@ -9200,12 +9210,19 @@ DEFECTS = [
             'every_colour_in_the_user_list_is_in_the_role_it_claims',
             'every_colour_in_the_password_entry_is_in_the_role_it_claims',
             'every_colour_in_the_bar_and_the_power_menu_is_in_the_role_it_claims',
-            'the_clock_and_the_status_lines_are_wallpaper_ink',
             'a_background_with_no_colour_of_its_own_takes_the_theme',
             'exactly_two_things_in_the_password_panel_carry_the_accent',
             'the_sign_in_label_follows_the_accent_it_sits_on',
             'none_of_the_eleven_deleted_constants_is_still_drawn',
-            'exactly_seven_things_in_the_full_render_sit_on_the_background',
+            # The two wallpaper-ink tests were declared here and did not fire,
+            # which is the sharpest measurement this module produced. Nine
+            # tests see a render that threw its palette away; those two cannot,
+            # because every colour they check is mode-independent *by
+            # construction*: `on_wallpaper()` is the constant `LIGHT_EXTREME`,
+            # `on_wallpaper_dim()` is that at alpha 200, and `text_shadow()` is
+            # black. A module that ignores the palette still draws all three
+            # correctly. Those tests earn their keep against the role-versus-
+            # wallpaper confusion — Kx33, Ox33, Dx34, Vx34, Xx34 — not this.
         ],
     ),
     (

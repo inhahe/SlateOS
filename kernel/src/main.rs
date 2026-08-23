@@ -5402,6 +5402,14 @@ extern "C" fn kernel_main() -> ! {
             if let Err(e) = fs::openwith::self_test() {
                 serial_println!("WARNING: open-with self-test failed: {:?}", e);
             }
+            // partmgr was reachable only from a `kshell` subcommand, so its
+            // suite had never run in the boot test (TD-A-FS-SELFTESTS-NEVER-RUN).
+            // Unlike the others in this sweep it was already idempotent --
+            // it clears the table at both ends -- and it touches no real
+            // disk: `register_disk` only records what a caller tells it.
+            if let Err(e) = fs::partmgr::self_test() {
+                serial_println!("WARNING: partmgr self-test failed: {:?}", e);
+            }
             if let Err(e) = fs::policy::self_test() {
                 serial_println!("WARNING: fs policy self-test failed: {:?}", e);
             }

@@ -27152,7 +27152,7 @@ fn cmd_partmgr(args: &str) {
                         if p.mount_point.is_empty() {
                             String::new()
                         } else {
-                            alloc::format!(" → {}", p.mount_point)
+                            alloc::format!(" → {}", p.mount_point.display())
                         }
                     );
                 }

@@ -6694,7 +6694,7 @@ fn gen_partmgr() -> Vec<u8> {
                 if p.mount_point.is_empty() {
                     String::new()
                 } else {
-                    alloc::format!(" → {}", p.mount_point)
+                    alloc::format!(" → {}", p.mount_point.display())
                 }
             ));
         }

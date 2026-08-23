@@ -394,7 +394,10 @@ impl Engine {
             return Some(c);
         }
         // Search by name or id prefix.
-        self.containers.values().find(|&c| c.name == id_or_name || c.id.starts_with(id_or_name)).map(|v| v as _)
+        self.containers
+            .values()
+            .find(|&c| c.name == id_or_name || c.id.starts_with(id_or_name))
+            .map(|v| v as _)
     }
 
     fn find_container_mut(&mut self, id_or_name: &str) -> Option<&mut Container> {
@@ -496,20 +499,15 @@ impl Engine {
         let key = self
             .containers
             .iter()
-            .find(|(k, c)| {
-                *k == id_or_name
-                    || c.name == id_or_name
-                    || c.id.starts_with(id_or_name)
-            })
+            .find(|(k, c)| *k == id_or_name || c.name == id_or_name || c.id.starts_with(id_or_name))
             .map(|(k, _)| k.clone());
         let key = key.ok_or_else(|| format!("no such container: {}", id_or_name))?;
         let status = self.containers.get(&key).map(|c| c.status);
         if let Some(ContainerStatus::Running) = status
-            && !force {
-                return Err(String::from(
-                    "container is running, use --force to remove",
-                ));
-            }
+            && !force
+        {
+            return Err(String::from("container is running, use --force to remove"));
+        }
         self.containers.remove(&key);
         Ok(())
     }
@@ -540,9 +538,14 @@ impl Engine {
         if let Some(img) = self.images.get(id_or_name) {
             return Some(img);
         }
-        self.images.values().find(|&img| img.repository == id_or_name
-                || img.full_name() == id_or_name
-                || img.id.starts_with(id_or_name)).map(|v| v as _)
+        self.images
+            .values()
+            .find(|&img| {
+                img.repository == id_or_name
+                    || img.full_name() == id_or_name
+                    || img.id.starts_with(id_or_name)
+            })
+            .map(|v| v as _)
     }
 
     fn pull_image(&mut self, name: &str) -> String {
@@ -615,7 +618,12 @@ impl Engine {
 
     // -- Network operations ---------------------------------------------------
 
-    fn create_network(&mut self, name: &str, subnet: Option<&str>, gateway: Option<&str>) -> String {
+    fn create_network(
+        &mut self,
+        name: &str,
+        subnet: Option<&str>,
+        gateway: Option<&str>,
+    ) -> String {
         let mut net = Network::new(name);
         if let Some(s) = subnet {
             net.subnet = s.to_string();
@@ -656,7 +664,10 @@ impl Engine {
         if let Some(p) = self.pods.get(id_or_name) {
             return Some(p);
         }
-        self.pods.values().find(|&p| p.name == id_or_name || p.id.starts_with(id_or_name)).map(|v| v as _)
+        self.pods
+            .values()
+            .find(|&p| p.name == id_or_name || p.id.starts_with(id_or_name))
+            .map(|v| v as _)
     }
 
     fn find_pod_mut(&mut self, id_or_name: &str) -> Option<&mut Pod> {
@@ -691,11 +702,7 @@ impl Engine {
         let key = self
             .pods
             .iter()
-            .find(|(k, p)| {
-                *k == id_or_name
-                    || p.name == id_or_name
-                    || p.id.starts_with(id_or_name)
-            })
+            .find(|(k, p)| *k == id_or_name || p.name == id_or_name || p.id.starts_with(id_or_name))
             .map(|(k, _)| k.clone());
         let key = key.ok_or_else(|| format!("no such pod: {}", id_or_name))?;
         self.pods.remove(&key);
@@ -777,7 +784,10 @@ impl BuildahEngine {
         if let Some(c) = self.containers.get(id_or_name) {
             return Some(c);
         }
-        self.containers.values().find(|&c| c.name == id_or_name || c.id.starts_with(id_or_name)).map(|v| v as _)
+        self.containers
+            .values()
+            .find(|&c| c.name == id_or_name || c.id.starts_with(id_or_name))
+            .map(|v| v as _)
     }
 
     fn find_container_mut(&mut self, id_or_name: &str) -> Option<&mut BuildahContainer> {
@@ -830,12 +840,7 @@ impl BuildahEngine {
         Ok(ret)
     }
 
-    fn config_container(
-        &mut self,
-        id_or_name: &str,
-        key: &str,
-        value: &str,
-    ) -> Result<(), String> {
+    fn config_container(&mut self, id_or_name: &str, key: &str, value: &str) -> Result<(), String> {
         let c = self
             .find_container_mut(id_or_name)
             .ok_or_else(|| format!("no such container: {}", id_or_name))?;
@@ -855,11 +860,7 @@ impl BuildahEngine {
         let key = self
             .containers
             .iter()
-            .find(|(k, c)| {
-                *k == id_or_name
-                    || c.name == id_or_name
-                    || c.id.starts_with(id_or_name)
-            })
+            .find(|(k, c)| *k == id_or_name || c.name == id_or_name || c.id.starts_with(id_or_name))
             .map(|(k, _)| k.clone());
         let key = key.ok_or_else(|| format!("no such container: {}", id_or_name))?;
         self.containers.remove(&key);
@@ -921,18 +922,20 @@ struct InspectResult {
 impl InspectResult {
     fn from_ref(r: &ImageRef) -> Self {
         let (name, tag) = if let Some(idx) = r.reference.find(':') {
-            (r.reference[..idx].to_string(), r.reference[idx + 1..].to_string())
+            (
+                r.reference[..idx].to_string(),
+                r.reference[idx + 1..].to_string(),
+            )
         } else {
             (r.reference.clone(), String::from("latest"))
         };
         Self {
             name,
             tag,
-            digest: String::from("sha256:abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890"),
-            layers: vec![
-                String::from("sha256:aaa111"),
-                String::from("sha256:bbb222"),
-            ],
+            digest: String::from(
+                "sha256:abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890",
+            ),
+            layers: vec![String::from("sha256:aaa111"), String::from("sha256:bbb222")],
             created: Timestamp::now(),
             architecture: String::from("amd64"),
             os: String::from("linux"),
@@ -1084,9 +1087,10 @@ fn cmd_podman_run(args: &[String]) -> i32 {
             "-p" | "--publish" => {
                 i += 1;
                 if i < args.len()
-                    && let Some(pm) = PortMapping::parse(&args[i]) {
-                        ports.push(pm);
-                    }
+                    && let Some(pm) = PortMapping::parse(&args[i])
+                {
+                    ports.push(pm);
+                }
             }
             _ => {
                 if image.is_empty() {
@@ -1845,14 +1849,8 @@ fn cmd_podman_generate(args: &[String]) -> i32 {
             println!();
             println!("[Service]");
             println!("Restart=on-failure");
-            println!(
-                "ExecStart=/usr/bin/podman start {}",
-                container
-            );
-            println!(
-                "ExecStop=/usr/bin/podman stop -t 10 {}",
-                container
-            );
+            println!("ExecStart=/usr/bin/podman start {}", container);
+            println!("ExecStop=/usr/bin/podman stop -t 10 {}", container);
             println!("Type=forking");
             println!();
             println!("[Install]");
@@ -2052,7 +2050,8 @@ fn cmd_buildah_config(args: &[String]) -> i32 {
     }
     // Find the container name (last non-flag arg).
     let container = args
-        .iter().rfind(|a| !a.starts_with('-'))
+        .iter()
+        .rfind(|a| !a.starts_with('-'))
         .cloned()
         .unwrap_or_default();
     if container.is_empty() {
@@ -2212,7 +2211,11 @@ fn cmd_skopeo_copy(args: &[String]) -> i32 {
             return 1;
         }
     };
-    println!("Copying {} -> {}", src_ref.display_name(), dst_ref.display_name());
+    println!(
+        "Copying {} -> {}",
+        src_ref.display_name(),
+        dst_ref.display_name()
+    );
     println!("Writing manifest to {}", dst_ref.display_name());
     0
 }
@@ -2716,7 +2719,10 @@ mod tests {
         let mut eng = Engine::new();
         let id = eng.create_container("nginx", Some("c1"), "", ContainerConfig::default());
         assert!(eng.start_container(&id).is_ok());
-        assert_eq!(eng.find_container(&id).unwrap().status, ContainerStatus::Running);
+        assert_eq!(
+            eng.find_container(&id).unwrap().status,
+            ContainerStatus::Running
+        );
     }
 
     #[test]
@@ -2733,7 +2739,10 @@ mod tests {
         let id = eng.create_container("nginx", Some("c1"), "", ContainerConfig::default());
         eng.start_container(&id).unwrap();
         assert!(eng.stop_container(&id).is_ok());
-        assert_eq!(eng.find_container(&id).unwrap().status, ContainerStatus::Exited);
+        assert_eq!(
+            eng.find_container(&id).unwrap().status,
+            ContainerStatus::Exited
+        );
     }
 
     #[test]
@@ -2749,7 +2758,10 @@ mod tests {
         let id = eng.create_container("nginx", Some("c1"), "", ContainerConfig::default());
         eng.start_container(&id).unwrap();
         assert!(eng.pause_container(&id).is_ok());
-        assert_eq!(eng.find_container(&id).unwrap().status, ContainerStatus::Paused);
+        assert_eq!(
+            eng.find_container(&id).unwrap().status,
+            ContainerStatus::Paused
+        );
     }
 
     #[test]
@@ -2766,7 +2778,10 @@ mod tests {
         eng.start_container(&id).unwrap();
         eng.pause_container(&id).unwrap();
         assert!(eng.unpause_container(&id).is_ok());
-        assert_eq!(eng.find_container(&id).unwrap().status, ContainerStatus::Running);
+        assert_eq!(
+            eng.find_container(&id).unwrap().status,
+            ContainerStatus::Running
+        );
     }
 
     #[test]
@@ -2781,7 +2796,10 @@ mod tests {
         let mut eng = Engine::new();
         let id = eng.create_container("nginx", Some("c1"), "", ContainerConfig::default());
         assert!(eng.restart_container(&id).is_ok());
-        assert_eq!(eng.find_container(&id).unwrap().status, ContainerStatus::Running);
+        assert_eq!(
+            eng.find_container(&id).unwrap().status,
+            ContainerStatus::Running
+        );
     }
 
     #[test]
@@ -3833,11 +3851,7 @@ mod tests {
 
     #[test]
     fn test_buildah_run_cli() {
-        let rc = run_buildah(&[
-            String::from("run"),
-            String::from("wc1"),
-            String::from("ls"),
-        ]);
+        let rc = run_buildah(&[String::from("run"), String::from("wc1"), String::from("ls")]);
         assert_eq!(rc, 0);
     }
 
@@ -4075,10 +4089,7 @@ mod tests {
 
     #[test]
     fn test_skopeo_delete_cli() {
-        let rc = run_skopeo(&[
-            String::from("delete"),
-            String::from("docker://nginx:old"),
-        ]);
+        let rc = run_skopeo(&[String::from("delete"), String::from("docker://nginx:old")]);
         assert_eq!(rc, 0);
     }
 
@@ -4090,10 +4101,7 @@ mod tests {
 
     #[test]
     fn test_skopeo_list_tags_cli() {
-        let rc = run_skopeo(&[
-            String::from("list-tags"),
-            String::from("docker://nginx"),
-        ]);
+        let rc = run_skopeo(&[String::from("list-tags"), String::from("docker://nginx")]);
         assert_eq!(rc, 0);
     }
 

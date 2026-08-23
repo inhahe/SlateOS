@@ -69,9 +69,10 @@ use super::number::{
     SYS_PROCESS_KILL, SYS_PROCESS_PARENT_ID, SYS_PROCESS_SET_CREDENTIALS, SYS_PROCESS_SET_EXEC_FDS,
     SYS_PROCESS_SET_NICE, SYS_PROCESS_SET_PGID, SYS_PROCESS_SET_SID, SYS_PROCESS_SPAWN,
     SYS_PROCESS_SPAWN_EX, SYS_PROCESS_SPAWN_EX2, SYS_PROCESS_TRY_WAIT, SYS_PROCESS_WAIT,
-    SYS_PROCESS_WAIT_STATUS, SYS_PTY_CLOSE, SYS_PTY_CREATE, SYS_PTY_DUP, SYS_PTY_GET_TERMIOS,
-    SYS_PTY_GET_WINSIZE, SYS_PTY_MASTER_READ, SYS_PTY_MASTER_TRY_READ, SYS_PTY_MASTER_WRITE,
-    SYS_PTY_POLL, SYS_PTY_SET_TERMIOS, SYS_PTY_SET_WINSIZE, SYS_PTY_SLAVE_ID, SYS_PTY_SLAVE_WRITE,
+    SYS_PROCESS_WAIT_STATUS, SYS_PTY_CLOSE, SYS_PTY_CREATE, SYS_PTY_DUP, SYS_PTY_GET_PGRP,
+    SYS_PTY_GET_TERMIOS, SYS_PTY_GET_WINSIZE, SYS_PTY_MASTER_READ, SYS_PTY_MASTER_TRY_READ,
+    SYS_PTY_MASTER_WRITE, SYS_PTY_POLL, SYS_PTY_READABLE_BYTES, SYS_PTY_SET_PGRP,
+    SYS_PTY_SET_TERMIOS, SYS_PTY_SET_WINSIZE, SYS_PTY_SLAVE_ID, SYS_PTY_SLAVE_WRITE,
     SYS_RLIMIT_GET, SYS_RLIMIT_SET, SYS_SCHED_GET_PROFILE, SYS_SCHED_GET_TIMESLICE,
     SYS_SCHED_RECONFIGURE, SYS_SCHED_SET_PROFILE, SYS_SCHED_SET_TIMESLICE, SYS_SEM_CLOSE,
     SYS_SEM_CREATE, SYS_SEM_SIGNAL, SYS_SEM_TRY_WAIT, SYS_SEM_WAIT, SYS_SEM_WAIT_TIMEOUT,
@@ -454,6 +455,13 @@ const fn build_v1_table() -> SyscallTable {
     handlers[SYS_PTY_SET_WINSIZE as usize] = Some(handlers::sys_pty_set_winsize);
     handlers[SYS_PTY_GET_TERMIOS as usize] = Some(handlers::sys_pty_get_termios);
     handlers[SYS_PTY_SET_TERMIOS as usize] = Some(handlers::sys_pty_set_termios);
+    // 869–871, not 557–559: the family's block was closed before these gaps
+    // were found. 870/871 generalise 537/538 to a *named* terminal rather than
+    // widening them, because libc calls 537 as `syscall0` — which never writes
+    // `rdi`, so a widened `arg0` would read whatever the caller left there.
+    handlers[SYS_PTY_READABLE_BYTES as usize] = Some(handlers::sys_pty_readable_bytes);
+    handlers[SYS_PTY_GET_PGRP as usize] = Some(handlers::sys_pty_get_pgrp);
+    handlers[SYS_PTY_SET_PGRP as usize] = Some(handlers::sys_pty_set_pgrp);
 
     // Resource limits (557–558). The native counterpart of the Linux shim's
     // `prlimit64`, sharing `pcb::get_rlimit`/`pcb::set_rlimit` with it so the
@@ -1563,6 +1571,7 @@ fn test_dispatch_pty_syscalls() -> KernelResult<()> {
         (SYS_PTY_DUP, "SYS_PTY_DUP"),
         (SYS_PTY_SLAVE_ID, "SYS_PTY_SLAVE_ID"),
         (SYS_PTY_POLL, "SYS_PTY_POLL"),
+        (SYS_PTY_READABLE_BYTES, "SYS_PTY_READABLE_BYTES"),
     ] {
         let got = dispatch(nr, &args_for(m.raw())).value;
         if got != invalid && got != no_proc {
@@ -1576,13 +1585,61 @@ fn test_dispatch_pty_syscalls() -> KernelResult<()> {
     // (2) The reserved raw values are refused by the handle-only syscalls
     //     rather than decoded into tty 0 (the console).  `SYS_PTY_POLL` on raw
     //     `0` would otherwise report on the console's non-existent pty.
+    //     `SYS_PTY_READABLE_BYTES` is checked alongside it because both return
+    //     a plain number rather than a status, so a decoded-instead-of-refused
+    //     bug there produces a *plausible* answer rather than a visible one.
     for raw in [0u64, 1] {
-        let got = dispatch(SYS_PTY_POLL, &args_for(raw)).value;
+        for (nr, name) in [
+            (SYS_PTY_POLL, "SYS_PTY_POLL"),
+            (SYS_PTY_READABLE_BYTES, "SYS_PTY_READABLE_BYTES"),
+        ] {
+            let got = dispatch(nr, &args_for(raw)).value;
+            if got != invalid {
+                serial_println!("[syscall]     ({} on raw {} returned {})", name, raw, got);
+                let _ = pty::close(m);
+                let _ = pty::close(s);
+                return fail("raw 0 and 1 are reserved and must be InvalidHandle");
+            }
+        }
+    }
+
+    // (2b) `SYS_PTY_GET_PGRP`/`SYS_PTY_SET_PGRP` are deliberately *not* in the
+    //      loop above: raw `0` means "my controlling terminal" for them, which
+    //      is a legitimate request. Raw `1` is still reserved, and an unowned
+    //      handle is still refused — the case that matters, because succeeding
+    //      would let any process read (or redirect) the foreground job of a
+    //      terminal it has no relationship to.
+    for (nr, name) in [
+        (SYS_PTY_GET_PGRP, "SYS_PTY_GET_PGRP"),
+        (SYS_PTY_SET_PGRP, "SYS_PTY_SET_PGRP"),
+    ] {
+        // Raw 1 is rejected by `owned_pty_handle` before it looks the caller
+        // up, so it must be exactly `InvalidHandle` — no weaker verdict. This
+        // is what pins the ordering: both handlers resolve the terminal before
+        // the caller precisely so this stays specific.
+        let mut a = args_for(1);
+        // arg1 is the pgid for the set form. A plausible one, so a handler
+        // that skipped the handle check entirely would sail past it.
+        a.arg1 = 1;
+        let got = dispatch(nr, &a).value;
         if got != invalid {
-            serial_println!("[syscall]     (SYS_PTY_POLL on raw {} returned {})", raw, got);
+            serial_println!("[syscall]     ({} on raw 1 returned {})", name, got);
             let _ = pty::close(m);
             let _ = pty::close(s);
-            return fail("raw 0 and 1 are reserved and must be InvalidHandle");
+            return fail("raw 1 is reserved and must be InvalidHandle");
+        }
+        // A real, live, *unowned* handle. `no_proc` is also acceptable here and
+        // is in fact what this kernel-task caller gets, because ownership is
+        // asked of a process it does not have — but either way the call must
+        // not reach the terminal.
+        let mut a = args_for(m.raw());
+        a.arg1 = 1;
+        let got = dispatch(nr, &a).value;
+        if got != invalid && got != no_proc {
+            serial_println!("[syscall]     ({} on an unowned handle returned {})", name, got);
+            let _ = pty::close(m);
+            let _ = pty::close(s);
+            return fail("an unowned handle must not name a terminal");
         }
     }
 
@@ -1648,7 +1705,9 @@ fn test_dispatch_pty_syscalls() -> KernelResult<()> {
         return fail("the test pty outlived both its ends");
     }
 
-    serial_println!("[syscall]   Pty syscalls (544-556) registered, ownership enforced: OK");
+    serial_println!(
+        "[syscall]   Pty syscalls (544-556, 869-871) registered, ownership enforced: OK"
+    );
     Ok(())
 }
 

@@ -261,6 +261,59 @@ pub mod fd_handle_type {
     /// fork() socket inheritance).
     #[allow(dead_code)] // Used only via fd inheritance; readable in matches.
     pub const STREAM_SOCKET: u8 = 6;
+    /// Either end of a pseudo-terminal (from `tty::pty`).  Spawn dups via
+    /// `pty::dup()`, which refcounts each *end* and returns the same raw
+    /// value, because a `PtyHandle` is `(tty_id << 1) | end` — the identity
+    /// of an end, not of a reference to one.
+    ///
+    /// **One constant covers both ends deliberately.**  The low bit of the
+    /// handle already says which end it is, and every operation that cares
+    /// (`pty::dup`, `pty::close`, `readable`, `writable`) decodes it from the
+    /// handle rather than from a type tag.  A second constant would be a
+    /// second place for the two to disagree, and the only thing it could
+    /// disagree about is a fact the handle already carries.
+    ///
+    /// The *slave* end rarely travels this way: a child that has called
+    /// `login_tty` reaches its slave through [`CONSOLE`], which resolves to
+    /// "my controlling terminal" and is exact rather than approximate.  It is
+    /// the **master** that has no other route, because a master is by
+    /// definition the end that is *not* the holder's controlling terminal, so
+    /// no resolution rule could ever name it.  That is the gap this closes:
+    /// without it a terminal emulator cannot hand its master to a child, which
+    /// is the shape of `script(1)`, a multiplexer spawning a helper to drive
+    /// the pty, and sshd's server side.
+    pub const PTY: u8 = 7;
+}
+
+/// Which [`ResourceType`](crate::cap::ResourceType) owns the kernel object
+/// behind an [`fd_handle_type`], or `None` if the type names no kernel object.
+///
+/// This is the bridge between the two vocabularies the fd-inheritance path
+/// straddles: userspace describes an inherited fd with an `fd_handle_type`,
+/// while the kernel accounts for its lifetime with a `ResourceType` entry in
+/// the owning process's `ipc_handles`.  Keeping the mapping in one function is
+/// what lets `spawn` register a duped handle without each call site having to
+/// remember which of the two vocabularies it is speaking.
+///
+/// `CONSOLE` maps to `None` because it is a *virtual* handle — it names "the
+/// console" rather than any refcounted object, so there is nothing to reclaim.
+/// `TCP_SOCKET`/`UDP_SOCKET` also map to `None`, but for a different reason:
+/// the dup loop has no arm for them at all, so no handle of either type can
+/// reach registration.  They are listed explicitly rather than swept into the
+/// wildcard so that adding the missing dup arm forces this decision to be made
+/// again rather than defaulting to "leaks silently".
+#[must_use]
+const fn ipc_resource_of(handle_type: u8) -> Option<crate::cap::ResourceType> {
+    use crate::cap::ResourceType;
+    match handle_type {
+        fd_handle_type::FILE => Some(ResourceType::File),
+        fd_handle_type::PIPE => Some(ResourceType::Pipe),
+        fd_handle_type::STREAM_SOCKET => Some(ResourceType::StreamSocket),
+        fd_handle_type::EVENTFD => Some(ResourceType::EventFd),
+        fd_handle_type::PTY => Some(ResourceType::Pty),
+        // CONSOLE: virtual. TCP_SOCKET/UDP_SOCKET: unreachable (no dup arm).
+        _ => None,
+    }
 }
 
 /// A file descriptor mapping entry passed from userspace.
@@ -1346,6 +1399,29 @@ fn spawn_process_inner(
     // store the (posix_fd, child_handle) pairs in the child's PCB.
     // The child's POSIX layer reads these during its init sequence via
     // SYS_PROCESS_GET_INITIAL_FDS.
+    //
+    // # Every dup is registered as the child's, and that is what makes it safe
+    //
+    // Each successful dup below is recorded in the child's `ipc_handles` via
+    // [`ipc_resource_of`], which is the *authoritative* per-process ownership
+    // list (`pcb::exit_close_fds` → `ipc::cleanup_handles`).  It has to be,
+    // because `initial_fds` is consumed by the first
+    // `SYS_PROCESS_GET_INITIAL_FDS`: before this, a handle the child *claimed*
+    // was owned by nobody at all, so a child that exited without an explicit
+    // close leaked its reference forever.  For a pipe write end that is not a
+    // slow leak but a hang — the reader never sees EOF, which is precisely the
+    // deadlock `exit_close_fds`' own doc comment exists to describe.
+    //
+    // This also brings the fd-map path into line with the `linux_fd_redirects`
+    // path above, which has always registered its moved-in handles.
+    //
+    // **Do not copy that path's alias de-duplication.** It *moves* one handle
+    // into several fds, so it must register once.  Here every entry is its own
+    // `dup`, and for the ref-counted types (`Pipe`/`Pty`/`EventFd`/
+    // `StreamSocket`) `dup` returns the *same raw value* with the refcount
+    // bumped — so two entries naming one pipe must appear **twice**, or
+    // teardown drops one reference short.  The list's multiplicity is the
+    // refcount; that is the same convention `SYS_PTY_DUP` already follows.
     if !options.fd_map.is_empty() {
         let mut initial_fds = alloc::vec::Vec::with_capacity(options.fd_map.len());
         for &(fd_num, handle_type, parent_handle) in options.fd_map {
@@ -1390,6 +1466,40 @@ fn spawn_process_inner(
                     ))
                     .map(|h| h.raw())
                 }
+                fd_handle_type::PTY => {
+                    // A pty end is the one handle family in this loop whose raw
+                    // value is *guessable*: it is `(tty_id << 1) | end`, so
+                    // without an ownership check any process could name `2` and
+                    // have the kernel hand its child a live master — which is
+                    // the authority to type arbitrary bytes into a stranger's
+                    // shell.  Every `SYS_PTY_*` handler gates on
+                    // `owns_ipc_handle` for exactly this reason, and spawn is
+                    // another way to obtain the handle, so it gates too.
+                    //
+                    // `options.parent == 0` means the kernel spawned this (see
+                    // `SpawnOptions::parent`), and a kernel caller passing a
+                    // handle it assembled itself has no process-table entry to
+                    // check against — there is no authority to verify because
+                    // there is no user process claiming any.
+                    if options.parent != 0
+                        && !pcb::owns_ipc_handle(
+                            options.parent,
+                            crate::cap::ResourceType::Pty,
+                            parent_handle,
+                        )
+                    {
+                        Err(KernelError::InvalidHandle)
+                    } else {
+                        // Refcounts the *end* and returns the same raw value —
+                        // the handle is the identity of an end, not of a
+                        // reference to it.  The child therefore inherits a
+                        // handle numerically equal to the parent's, and the two
+                        // references are told apart only by which process's
+                        // `ipc_handles` each appears in.
+                        crate::tty::pty::dup(crate::tty::pty::PtyHandle::from_raw(parent_handle))
+                            .map(|h| h.raw())
+                    }
+                }
                 _ => {
                     // Unknown handle type.
                     serial_println!(
@@ -1410,33 +1520,26 @@ fn spawn_process_inner(
                         handle_type,
                         parent_handle,
                     );
+                    // Record the child's ownership *before* pushing, so the
+                    // rollback below (and every later teardown) can find it.
+                    // `CONSOLE` names no kernel object and yields `None`.
+                    if let Some(rt) = ipc_resource_of(handle_type) {
+                        pcb::register_ipc_handle(pid, rt, child_handle);
+                    }
                     initial_fds.push((fd_num, handle_type, child_handle));
                 }
                 Err(e) => {
-                    // Close any handles we already duped — don't leak.
-                    // Pipe handles are pass-through (not duped) and
-                    // console handles are virtual — skip those.
-                    for &(_fd, ht, h) in &initial_fds {
-                        match ht {
-                            fd_handle_type::FILE => {
-                                let _ = crate::fs::handle::close(h);
-                            }
-                            fd_handle_type::EVENTFD => {
-                                crate::ipc::eventfd::close(
-                                    crate::ipc::eventfd::EventFdHandle::from_raw(h),
-                                );
-                            }
-                            fd_handle_type::PIPE => {
-                                crate::ipc::pipe::close(crate::ipc::pipe::PipeHandle::from_raw(h));
-                            }
-                            fd_handle_type::STREAM_SOCKET => {
-                                crate::ipc::stream_socket::close(
-                                    crate::ipc::stream_socket::StreamSocketHandle::from_raw(h),
-                                );
-                            }
-                            _ => {} // CONSOLE/etc.: nothing to close yet.
-                        }
-                    }
+                    // Nothing to unwind by hand: every handle duped so far is
+                    // already in the child's `ipc_handles`, and the
+                    // `pcb::destroy(pid)` below closes each of them exactly
+                    // once through `ipc::cleanup_handles`.
+                    //
+                    // This replaced a hand-written close loop that had to
+                    // re-list every handle type — the same list that has to be
+                    // extended for each new `fd_handle_type`, and the same one
+                    // that would silently leak a pty if it were forgotten.
+                    // Deleting it deletes that whole failure mode: teardown now
+                    // has exactly one implementation, shared with process exit.
                     serial_println!(
                         "[spawn] Failed to dup handle {} (type={}) for fd {}: {:?}",
                         parent_handle,
@@ -2570,6 +2673,8 @@ pub fn self_test() -> KernelResult<()> {
     test_spawn_with_fd_map()?;
     test_spawn_with_empty_fd_map()?;
     test_spawn_fd_map_invalid_handle()?;
+    test_spawn_with_pty_master()?;
+    test_spawn_pty_master_not_owned()?;
     test_take_initial_fds_one_shot()?;
     test_spawn_args_header_layout()?;
     test_spawn_with_argv()?;
@@ -32233,12 +32338,8 @@ fn test_spawn_with_fd_map() -> KernelResult<()> {
             "[spawn]   FAIL: expected 1 initial fd, got {}",
             child_fds.len()
         );
-        // Clean up.
-        for &(_fd, ht, h) in &child_fds {
-            if ht == fd_handle_type::FILE {
-                let _ = handle::close(h);
-            }
-        }
+        // Clean up.  The child's handles belong to its `ipc_handles`; the
+        // process is abandoned here, so its teardown releases them.
         let _ = handle::close(parent_handle);
         let _ = crate::fs::Vfs::remove("/test_fd_map_spawn.tmp");
         return Err(KernelError::InternalError);
@@ -32279,8 +32380,10 @@ fn test_spawn_with_fd_map() -> KernelResult<()> {
         );
     }
 
-    // Clean up: close both handles, let the process die, destroy it.
-    let _ = handle::close(child_handle);
+    // Clean up.  Only the *parent's* handle is closed here: the child's is
+    // registered in its `ipc_handles`, so `pcb::destroy` below releases it.
+    // Closing it here as well would be a double close — which is exactly the
+    // hazard that went away when `initial_fds` stopped being an ownership list.
     let _ = handle::close(parent_handle);
 
     // Let the child run (exit via SYS_EXIT).
@@ -32307,12 +32410,6 @@ fn test_spawn_with_empty_fd_map() -> KernelResult<()> {
     let fds = pcb::take_initial_fds(result.pid);
     if !fds.is_empty() {
         serial_println!("[spawn]   FAIL: expected 0 initial fds, got {}", fds.len());
-        // Clean up leaked handles.
-        for &(_fd, ht, h) in &fds {
-            if ht == fd_handle_type::FILE {
-                let _ = crate::fs::handle::close(h);
-            }
-        }
         return Err(KernelError::InternalError);
     }
 
@@ -32362,6 +32459,160 @@ fn test_spawn_fd_map_invalid_handle() -> KernelResult<()> {
     }
 }
 
+/// Test: a pty **master** survives `spawn` — the gap that made a terminal
+/// emulator unable to hand its master to a child.
+///
+/// The slave end had a route already (`CONSOLE`, resolving to "my controlling
+/// terminal"); the master never did, because a master is by definition the end
+/// that is *not* the holder's controlling terminal.  Checks the three things
+/// that have to hold for the inherited handle to be usable:
+///
+/// 1. it arrives in `initial_fds` tagged `PTY`, with the same raw value — a
+///    `PtyHandle` names an *end*, not a reference to one;
+/// 2. the child's `ipc_handles` records it, which is what makes every
+///    `SYS_PTY_*` call's `owns_ipc_handle` gate accept it;
+/// 3. the underlying device outlives the parent's own close — i.e. the dup
+///    really did take a reference rather than aliasing the parent's.
+fn test_spawn_with_pty_master() -> KernelResult<()> {
+    use crate::cap::ResourceType;
+    use crate::tty::pty;
+
+    let (master, slave) = pty::create()?;
+
+    let elf_data = elf::build_test_elf_public();
+    let fd_map = [(3_i32, fd_handle_type::PTY, master.raw())];
+    // `parent` stays 0 (kernel-spawned): there is no user process whose
+    // ownership could be checked, which is the documented meaning of 0.
+    let options = SpawnOptions::new("spawn-test-pty").fd_map(&fd_map);
+
+    let result = spawn_process(&elf_data, &options)?;
+
+    let child_fds = pcb::take_initial_fds(result.pid);
+    if child_fds.len() != 1 {
+        serial_println!(
+            "[spawn]   FAIL: pty master: expected 1 initial fd, got {}",
+            child_fds.len()
+        );
+        pty::close(master);
+        pty::close(slave);
+        return Err(KernelError::InternalError);
+    }
+
+    let (fd_num, child_ht, child_handle) = child_fds[0];
+    let mut ok = true;
+    if fd_num != 3 || child_ht != fd_handle_type::PTY {
+        serial_println!(
+            "[spawn]   FAIL: pty master: expected (fd 3, type {}), got (fd {}, type {})",
+            fd_handle_type::PTY,
+            fd_num,
+            child_ht
+        );
+        ok = false;
+    }
+    // Same raw value as the parent's: the handle is the identity of an end.
+    if child_handle != master.raw() {
+        serial_println!(
+            "[spawn]   FAIL: pty master: child handle {} should equal parent {}",
+            child_handle,
+            master.raw()
+        );
+        ok = false;
+    }
+    // The ownership record is the whole point — without it every SYS_PTY_*
+    // call from the child is rejected by `owned_pty_handle`.
+    if !pcb::owns_ipc_handle(result.pid, ResourceType::Pty, child_handle) {
+        serial_println!("[spawn]   FAIL: pty master: child does not own the inherited handle");
+        ok = false;
+    }
+
+    // Drop the parent's reference.  The device must survive, because the
+    // child holds one of its own — if the dup had not taken a reference this
+    // close would destroy the master end out from under it.
+    pty::close(master);
+    if !pty::exists(pty::PtyHandle::from_raw(child_handle)) {
+        serial_println!("[spawn]   FAIL: pty master: device died with the parent's reference");
+        ok = false;
+    }
+
+    // Tear the child down; its `ipc_handles` entry releases the master.
+    crate::sched::yield_now();
+    crate::sched::yield_now();
+    crate::sched::reap_dead_tasks();
+    thread::on_thread_exit(result.task_id);
+    pcb::destroy(result.pid);
+
+    // With both master references gone, closing the slave destroys the device.
+    pty::close(slave);
+    if pty::exists(slave) {
+        serial_println!("[spawn]   FAIL: pty master: device outlived every reference (leak)");
+        ok = false;
+    }
+
+    if !ok {
+        return Err(KernelError::InternalError);
+    }
+    serial_println!("[spawn]   Spawn inherits a pty master (refcounted, owned): OK");
+    Ok(())
+}
+
+/// Test: a pty handle the parent does not own is refused.
+///
+/// A `PtyHandle` is `(tty_id << 1) | end`, so its raw form is trivially
+/// enumerable — unlike every other handle in the fd map, guessing one is easy.
+/// A master is the authority to type arbitrary bytes into whatever shell is on
+/// the other end, so spawn must not become a way to launder one: naming a live
+/// pty owned by somebody else has to fail, not succeed quietly.
+fn test_spawn_pty_master_not_owned() -> KernelResult<()> {
+    use crate::tty::pty;
+
+    let (master, slave) = pty::create()?;
+
+    // A *real*, live handle — the check being exercised is ownership, not
+    // existence, so an obviously-bogus value would prove nothing.  Attribute
+    // the spawn to a pid that holds no pty (and, being a plausible-looking
+    // process id, is not rejected for some unrelated reason).
+    let elf_data = elf::build_test_elf_public();
+    let fd_map = [(3_i32, fd_handle_type::PTY, master.raw())];
+    let options = SpawnOptions::new("spawn-test-pty-unowned")
+        .fd_map(&fd_map)
+        .parent(1);
+
+    let outcome = spawn_process(&elf_data, &options);
+    let refused = match outcome {
+        Err(KernelError::InvalidHandle) => true,
+        Err(e) => {
+            serial_println!(
+                "[spawn]   FAIL: unowned pty master → {:?}, expected InvalidHandle",
+                e
+            );
+            false
+        }
+        Ok(result) => {
+            serial_println!("[spawn]   FAIL: unowned pty master was accepted");
+            crate::sched::yield_now();
+            crate::sched::reap_dead_tasks();
+            thread::on_thread_exit(result.task_id);
+            pcb::destroy(result.pid);
+            false
+        }
+    };
+
+    // The refusal must not have consumed a reference: the parent's handles are
+    // still the only ones, so closing both destroys the device.
+    pty::close(master);
+    pty::close(slave);
+    if pty::exists(slave) {
+        serial_println!("[spawn]   FAIL: refused pty spawn leaked a reference");
+        return Err(KernelError::InternalError);
+    }
+
+    if !refused {
+        return Err(KernelError::InternalError);
+    }
+    serial_println!("[spawn]   Spawn refuses a pty master the parent does not own: OK");
+    Ok(())
+}
+
 /// Test: take_initial_fds is one-shot — second call returns empty.
 ///
 /// Requires VFS to be initialized (needs a real file handle).
@@ -32397,12 +32648,10 @@ fn test_take_initial_fds_one_shot() -> KernelResult<()> {
         );
     }
 
-    // Close the duped handle.
-    for &(_fd, ht, h) in &fds {
-        if ht == fd_handle_type::FILE {
-            let _ = handle::close(h);
-        }
-    }
+    // The duped handle is *not* closed here — `pcb::destroy` below releases it
+    // through the child's `ipc_handles`.  What this test checks is that the
+    // alias list is one-shot, which is now independent of ownership: taking it
+    // twice must yield the handle once, and the reference survives either way.
 
     // Second take: should get 0 entries (already consumed).
     let fds2 = pcb::take_initial_fds(result.pid);
@@ -32411,11 +32660,6 @@ fn test_take_initial_fds_one_shot() -> KernelResult<()> {
             "[spawn]   FAIL: second take expected 0 fds, got {}",
             fds2.len()
         );
-        for &(_fd, ht, h) in &fds2 {
-            if ht == fd_handle_type::FILE {
-                let _ = handle::close(h);
-            }
-        }
         return Err(KernelError::InternalError);
     }
 

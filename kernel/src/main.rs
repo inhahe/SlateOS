@@ -5564,6 +5564,15 @@ extern "C" fn kernel_main() -> ! {
             // and deletes it again, and every other change it makes it undoes,
             // so it leaves the two default profiles exactly as it found them.
             fs::userprofile::self_test();
+            // useracct was reachable only from a `kshell` subcommand
+            // (TD-A-FS-SELFTESTS-NEVER-RUN) -- and until this commit it opened
+            // and closed with `clear_all()`, so `useracct test` deleted every
+            // account, group and session on the machine. It is now
+            // baseline-relative, declines to run while anybody is logged in,
+            // and restores `current_uid` and the login counter on exit.
+            if let Err(e) = fs::useracct::self_test() {
+                serial_println!("WARNING: useracct self-test failed: {:?}", e);
+            }
             if let Err(e) = crate::sockact::self_test() {
                 serial_println!("WARNING: socket-activation self-test failed: {:?}", e);
             }

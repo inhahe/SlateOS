@@ -3077,6 +3077,74 @@ pub fn ctty_set_fg_pgrp(pid: ProcessId, pgid: ProcessId) -> KernelResult<()> {
     Ok(())
 }
 
+/// Set the foreground process group of terminal `tty`, whoever holds it.
+///
+/// The counterpart of [`ctty_fg_pgrp`] on the writing side, and it exists for
+/// the same reason: a caller holding a **pty master** is operating on a
+/// terminal that is emphatically not its own controlling terminal — it is the
+/// other side of the wire — so [`ctty_set_fg_pgrp`], which resolves the
+/// session from the *caller*, cannot express the operation at all.
+///
+/// # The validation follows the terminal, not the caller
+///
+/// POSIX requires the named group to be in the session **associated with the
+/// terminal**. For [`ctty_set_fg_pgrp`] those are the same session, which is
+/// why it can get away with reading it off the caller; here they are
+/// different by construction. Validating against the caller's session instead
+/// would be both too strict and too lax at once: it would reject every group
+/// actually running on the pty (they are in the slave's session, not the
+/// emulator's), and it would accept groups from the emulator's own unrelated
+/// session — which is the terminal-stealing case the rule exists to prevent,
+/// merely pointed the other way.
+///
+/// Authority to name the terminal at all is the caller's pty handle, checked
+/// by the syscall layer before this is reached. This function's job is only
+/// the POSIX group rule.
+///
+/// # Errors
+/// - [`KernelError::InvalidArgument`] if `pgid` is 0.
+/// - [`KernelError::NotSupported`] (ENOTTY) if no session holds `tty` — a pty
+///   whose slave has not yet run `TIOCSCTTY` has no foreground group to set,
+///   and inventing one would be a value nothing consults.
+/// - [`KernelError::PermissionDenied`] if `pgid` names no live process group
+///   in the session holding `tty`.
+pub fn ctty_set_fg_pgrp_on(tty: u32, pgid: ProcessId) -> KernelResult<()> {
+    if pgid == 0 {
+        return Err(KernelError::InvalidArgument);
+    }
+
+    // Three short critical sections rather than one, because the two locks may
+    // never be held together (see the note on `CTTY_FG_PGRP`) and this needs
+    // both: the ctty map to learn *which* session to validate against, then
+    // the process table to do the validating, then the ctty map again to
+    // write. The final lookup is by `tty` again rather than by the `sid` read
+    // in step one, so a session that released the terminal in between gets
+    // ENOTTY instead of having its stale slot written.
+    let sid = {
+        let map = CTTY_FG_PGRP.lock();
+        map.iter().find(|(_, s)| s.tty == tty).map(|(sid, _)| *sid)
+    }
+    .ok_or(KernelError::NotSupported)?;
+
+    let group_ok = {
+        let table = PROCESS_TABLE.lock();
+        table
+            .values()
+            .any(|p| p.pgid == pgid && p.sid == sid && p.state != ProcessState::Zombie)
+    };
+    if !group_ok {
+        return Err(KernelError::PermissionDenied);
+    }
+
+    let mut map = CTTY_FG_PGRP.lock();
+    let slot = map
+        .values_mut()
+        .find(|s| s.tty == tty)
+        .ok_or(KernelError::NotSupported)?;
+    slot.fg_pgrp = pgid;
+    Ok(())
+}
+
 /// Terminal `tty`'s foreground process group, whoever owns it — or `None` if
 /// no session currently holds that terminal.
 ///
@@ -4578,13 +4646,7 @@ pub fn try_reap(parent_pid: ProcessId, child_pid: ProcessId) -> KernelResult<Opt
     // Phase 1: Under PROCESS_TABLE lock — verify state, extract
     // process info, and remove from table.  We must extract all
     // fields needed for cleanup before dropping the lock.
-    #[allow(clippy::type_complexity)]
-    let reaped: Option<(
-        ExitInfo,
-        u64,
-        Vec<(crate::cap::ResourceType, u64)>,
-        Vec<(i32, u8, u64)>,
-    )>;
+    let reaped: Option<(ExitInfo, u64, Vec<(crate::cap::ResourceType, u64)>)>;
 
     {
         let mut table = PROCESS_TABLE.lock();
@@ -4617,15 +4679,13 @@ pub fn try_reap(parent_pid: ProcessId, child_pid: ProcessId) -> KernelResult<Opt
         let child_nv = proc.acct_nvcsw.saturating_add(proc.child_nvcsw);
         let child_niv = proc.acct_nivcsw.saturating_add(proc.child_nivcsw);
 
-        // Extract the IPC handle list and initial fds before removing.
+        // Extract the IPC handle list before removing.  `initial_fds` needs no
+        // extraction: its entries alias handles already accounted for here, and
+        // it dies with the table entry.
         let mut removed = table.remove(&child_pid);
         let ipc_handles = removed
             .as_mut()
             .map(|p| core::mem::take(&mut p.ipc_handles))
-            .unwrap_or_default();
-        let initial_fds = removed
-            .as_mut()
-            .map(|p| core::mem::take(&mut p.initial_fds))
             .unwrap_or_default();
 
         // Credit the parent's children-time accumulator now that the child
@@ -4641,14 +4701,14 @@ pub fn try_reap(parent_pid: ProcessId, child_pid: ProcessId) -> KernelResult<Opt
         }
 
         let info = ExitInfo { exit_code, crash };
-        reaped = Some((info, pml4_phys, ipc_handles, initial_fds));
+        reaped = Some((info, pml4_phys, ipc_handles));
     }
     // PROCESS_TABLE lock dropped here.
 
-    if let Some((info, pml4_phys, ipc_handles, initial_fds)) = reaped {
+    if let Some((info, pml4_phys, ipc_handles)) = reaped {
         // Phase 2: Cleanup without holding PROCESS_TABLE lock.
         // This avoids ABBA deadlocks with exception handler / DMA / IPC locks.
-        destroy_process_resources(child_pid, pml4_phys, &ipc_handles, &initial_fds);
+        destroy_process_resources(child_pid, pml4_phys, &ipc_handles);
         Ok(Some(info))
     } else {
         Ok(None)
@@ -6114,39 +6174,30 @@ pub fn parent(pid: ProcessId) -> Option<ProcessId> {
     table.get(&pid).map(|p| p.parent)
 }
 
-/// Close a list of unclaimed initial fd handles (the `(fd, kind, raw)`
-/// tuples set up at spawn before userspace claims them via
-/// `SYS_PROCESS_GET_INITIAL_FDS`).
-///
-/// Console handles are virtual (no kernel resource).  Pipe / eventfd /
-/// stream-socket handles are ref-counted; closing drops just this
-/// process's reference.  File/socket handles close via the open-file
-/// table.  A no-op on an empty slice.
-fn close_initial_fds(initial_fds: &[(i32, u8, u64)]) {
-    for &(_fd, handle_type, handle) in initial_fds {
-        match handle_type {
-            crate::proc::spawn::fd_handle_type::CONSOLE => {
-                // Virtual handle — nothing to close.
-            }
-            crate::proc::spawn::fd_handle_type::PIPE => {
-                crate::ipc::pipe::close(crate::ipc::pipe::PipeHandle::from_raw(handle));
-            }
-            crate::proc::spawn::fd_handle_type::EVENTFD => {
-                crate::ipc::eventfd::close(crate::ipc::eventfd::EventFdHandle::from_raw(handle));
-            }
-            crate::proc::spawn::fd_handle_type::STREAM_SOCKET => {
-                crate::ipc::stream_socket::close(
-                    crate::ipc::stream_socket::StreamSocketHandle::from_raw(handle),
-                );
-            }
-            _ => {
-                // FILE, TCP_SOCKET, UDP_SOCKET, and any unknown types —
-                // close via the file handle table.
-                let _ = crate::fs::handle::close(handle);
-            }
-        }
-    }
-}
+// NOTE: there is intentionally no `close_initial_fds` here any more.
+//
+// `initial_fds` used to be a *second* ownership list: `spawn` duped handles
+// into it, and this function closed whichever ones userspace had not yet
+// claimed via `SYS_PROCESS_GET_INITIAL_FDS`.  Two lists meant two failure
+// modes, and both were live:
+//
+// * **A claimed handle was owned by nobody.**  The claim *drained*
+//   `initial_fds`, and `spawn` never registered anything in `ipc_handles`, so
+//   after the child called `SYS_PROCESS_GET_INITIAL_FDS` no kernel structure
+//   held that reference at all.  A child that exited without an explicit
+//   `close` leaked it permanently — and for a pipe write end that is a hang,
+//   not a leak: the reader never sees EOF, which is exactly the deadlock
+//   [`exit_close_fds`] exists to prevent.
+// * **Every new handle type had to be added here too**, or it fell through
+//   this function's `_` arm into `fs::handle::close` — the open-*file* table.
+//   A pty handle taking that path would have closed an unrelated file.
+//
+// `spawn` now registers each dup in the child's `ipc_handles` (see
+// `spawn::ipc_resource_of`), which makes that list authoritative for real:
+// `initial_fds` and `exec_inherited_fds` are now the same kind of thing —
+// pure *aliases* recording which fd number each handle should land on, owning
+// nothing.  Teardown therefore has one implementation, `ipc::cleanup_handles`,
+// which is exhaustive over `ResourceType` and cannot silently omit a type.
 
 /// Close every fd-bearing kernel resource owned by `pid` at the process
 /// **exit** (zombie transition), matching Linux's `exit_files()` in
@@ -6171,26 +6222,28 @@ fn close_initial_fds(initial_fds: &[(i32, u8, u64)]) {
 /// for `/proc` until `destroy()`; its entries merely alias handles whose
 /// references are accounted here.
 ///
-/// Drains both `ipc_handles` and the unclaimed `initial_fds` so the
-/// later `destroy()` cannot double-close them.  Idempotent: a second
-/// call, or `destroy()` on a force-killed process that never reached
-/// this path, finds the lists empty and closes nothing.
+/// Drains `ipc_handles` so the later `destroy()` cannot double-close it.
+/// Idempotent: a second call, or `destroy()` on a force-killed process that
+/// never reached this path, finds the list empty and closes nothing.
+///
+/// `initial_fds` is cleared alongside it but nothing is closed from it: since
+/// `spawn` began registering every dup it installs, those entries are aliases
+/// of handles this function has just released, not references of their own.
+/// Clearing it is what stops `SYS_PROCESS_GET_INITIAL_FDS` from handing a
+/// dying process's fd table a set of handles that have already been closed.
 pub fn exit_close_fds(pid: ProcessId) {
-    // Drain the ownership lists under the table lock, then release the
+    // Drain the ownership list under the table lock, then release the
     // lock before invoking any close (which acquires pipe/fs/socket
     // locks — see the lock-ordering note on `destroy_process_resources`).
-    let (ipc_handles, initial_fds) = {
+    let ipc_handles = {
         let mut table = PROCESS_TABLE.lock();
         let Some(proc) = table.get_mut(&pid) else {
             return;
         };
-        (
-            core::mem::take(&mut proc.ipc_handles),
-            core::mem::take(&mut proc.initial_fds),
-        )
+        proc.initial_fds.clear();
+        core::mem::take(&mut proc.ipc_handles)
     };
     crate::ipc::cleanup_handles(&ipc_handles);
-    close_initial_fds(&initial_fds);
 }
 
 /// Internal: release all resources associated with a process.
@@ -6205,11 +6258,14 @@ pub fn exit_close_fds(pid: ProcessId) {
 /// - Namespace attachment (idempotent — already detached in `on_thread_exit`)
 /// - DMA buffers
 /// - User address space (page tables + physical frames)
+///
+/// Takes no `initial_fds`: those entries are aliases of handles accounted for
+/// in `ipc_handles`, so there is nothing separate to release (see the note
+/// where `close_initial_fds` used to be).
 fn destroy_process_resources(
     pid: ProcessId,
     pml4_phys: u64,
     ipc_handles: &[(crate::cap::ResourceType, u64)],
-    initial_fds: &[(i32, u8, u64)],
 ) {
     // Remove exception handler registration (if any).
     crate::proc::exception::remove_handler(pid);
@@ -6227,13 +6283,12 @@ fn destroy_process_resources(
     // would block every other waiter on that path until reboot.
     crate::fs::Vfs::funlock_all(pid);
 
-    // Close all IPC handles owned by this process and any unclaimed
-    // initial fd handles.  In the normal exit path these were already
-    // drained and closed at the zombie transition by `exit_close_fds`
-    // (so the slices are empty here); this still runs for the
-    // force-kill / never-zombied path so no resource leaks.
+    // Close all IPC handles owned by this process.  In the normal exit
+    // path these were already drained and closed at the zombie
+    // transition by `exit_close_fds` (so the slice is empty here); this
+    // still runs for the force-kill / never-zombied path so no resource
+    // leaks.
     crate::ipc::cleanup_handles(ipc_handles);
-    close_initial_fds(initial_fds);
 
     // Detach from namespace (idempotent — may already be done
     // during zombie transition, but safe to call again).
@@ -6287,7 +6342,7 @@ pub fn destroy(pid: ProcessId) {
         // inherit a terminal it never acquired. Checked here rather than in
         // the zombie transition because a zombie is still a session member.
         ctty_release_if_session_empty(proc.sid);
-        destroy_process_resources(pid, proc.pml4_phys, &proc.ipc_handles, &proc.initial_fds);
+        destroy_process_resources(pid, proc.pml4_phys, &proc.ipc_handles);
     }
 }
 
@@ -8118,6 +8173,56 @@ fn test_controlling_terminal() -> KernelResult<()> {
             &[shell, job, stranger],
         );
     }
+
+    // (5b) The terminal-keyed setter, which is what a pty *master* holder uses:
+    //      it has no controlling terminal of its own to resolve, so it names
+    //      the device. What is being pinned here is that the POSIX group rule
+    //      follows the **terminal's** session and not any caller's, because
+    //      that is the one thing that cannot be got right by reusing
+    //      `ctty_set_fg_pgrp` with a different pid.
+    ctty_set_fg_pgrp_on(crate::tty::CONSOLE, shell)?;
+    if ctty_fg_pgrp(crate::tty::CONSOLE) != Some(shell) || ctty_get_fg_pgrp(shell) != Ok(shell) {
+        return fail(
+            "a terminal-keyed handoff did not reach the session's own slot",
+            &[shell, job, stranger],
+        );
+    }
+    // The stranger's group is live, and it would be accepted by a check that
+    // asked "is this group real?" — but it belongs to a different session from
+    // the one holding the console, which is the terminal-theft case pointed
+    // the other way round.
+    if ctty_set_fg_pgrp_on(crate::tty::CONSOLE, stranger) != Err(KernelError::PermissionDenied) {
+        return fail(
+            "a terminal was handed to a group outside its own session",
+            &[shell, job, stranger],
+        );
+    }
+    if ctty_set_fg_pgrp_on(crate::tty::CONSOLE, 0) != Err(KernelError::InvalidArgument) {
+        return fail(
+            "terminal-keyed tcsetpgrp(0) should be EINVAL",
+            &[shell, job, stranger],
+        );
+    }
+    // A terminal no session holds has no foreground group to read or write.
+    // This is the live case for a freshly created pty whose slave has not run
+    // TIOCSCTTY yet, and ENOTTY is what its master must be told — not 0, which
+    // the caller could mistake for a pgid and try to signal.
+    const UNHELD_TTY: u32 = 9_999;
+    if ctty_fg_pgrp(UNHELD_TTY).is_some() {
+        return fail(
+            "a terminal nobody holds reported a foreground group",
+            &[shell, job, stranger],
+        );
+    }
+    if ctty_set_fg_pgrp_on(UNHELD_TTY, shell) != Err(KernelError::NotSupported) {
+        return fail(
+            "setting the foreground group of an unheld terminal should be ENOTTY",
+            &[shell, job, stranger],
+        );
+    }
+    // Put the terminal back where step (5) left it so the steps below still
+    // describe the state they were written against.
+    ctty_set_fg_pgrp(shell, job)?;
 
     // (6) A zombie group member does not keep the group eligible. Kill the
     //     job's group off and confirm the terminal cannot be handed to it.

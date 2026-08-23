@@ -5970,6 +5970,124 @@ pub fn sys_pty_poll(args: &SyscallArgs) -> SyscallResult {
     SyscallResult::ok(bits)
 }
 
+/// `SYS_PTY_READABLE_BYTES` — how many bytes a read on this end would find.
+///
+/// The `FIONREAD` counterpart of `SYS_PIPE_READABLE_BYTES` and
+/// `SYS_SOCKETPAIR_READABLE_BYTES`. Exact on a master and on a raw-mode slave;
+/// an upper bound on a canonical slave, where the counted bytes have yet to go
+/// through the line editor. Zero is exact in every case — see
+/// [`crate::tty::pty::readable_bytes`].
+///
+/// Takes an owned handle rather than [`resolve_tty_arg`]'s terminal convention
+/// on purpose: the count is a property of *one end's* buffer, and the two ends
+/// of a pty have entirely different ones. A terminal id names both, so it
+/// cannot express the question.
+pub fn sys_pty_readable_bytes(args: &SyscallArgs) -> SyscallResult {
+    let handle = match owned_pty_handle(args.arg0) {
+        Ok(h) => h,
+        Err(e) => return SyscallResult::err(e),
+    };
+    // `usize` -> `i64`: the count is bounded by a ring capacity plus MAX_CANON,
+    // both of them small compile-time constants, so this cannot truncate.
+    let n = crate::tty::pty::readable_bytes(handle);
+    SyscallResult::ok(i64::try_from(n).unwrap_or(i64::MAX))
+}
+
+/// `SYS_PTY_GET_PGRP` — foreground process group of a *named* terminal
+/// (`ioctl(fd, TIOCGPGRP)` on a pty the caller owns).
+///
+/// `arg0` names the terminal: `0` is the caller's own controlling terminal,
+/// `>= 2` is an owned pty handle.
+///
+/// # Why `0` does not go through [`resolve_tty_arg`]
+///
+/// That helper resolves `0` to the console for a caller with no controlling
+/// terminal, which is the right answer for `termios` and window size. It is the
+/// wrong answer here: a process with no controlling terminal has no foreground
+/// process group, and handing it the *console's* would report a group it has no
+/// relationship to as its own. ENOTTY is the truthful answer, and it is what
+/// `SYS_TTY_GET_PGRP` (537) already gives — this arm must not quietly differ
+/// from the syscall it generalises.
+pub fn sys_pty_get_pgrp(args: &SyscallArgs) -> SyscallResult {
+    if args.arg0 == 0 {
+        // Identical to 537, deliberately: same call, same errors.
+        let pid = match caller_process_or_err() {
+            Ok(pid) => pid,
+            Err(e) => return SyscallResult::err(e),
+        };
+        return match crate::proc::pcb::ctty_get_fg_pgrp(pid) {
+            #[allow(clippy::cast_possible_wrap)]
+            Ok(pgid) => SyscallResult::ok(pgid as i64),
+            Err(e) => SyscallResult::err(e),
+        };
+    }
+    // The named path needs no caller process at all: the terminal is named by
+    // handle and its foreground group is a property of *that* terminal's
+    // session. Looking the caller up first would only turn a reserved handle's
+    // `InvalidHandle` into a less specific verdict.
+    let tty = match owned_pty_handle(args.arg0) {
+        Ok(h) => h.id(),
+        Err(e) => return SyscallResult::err(e),
+    };
+    // No session holds this terminal — a pty whose slave has not yet run
+    // TIOCSCTTY. It has no foreground group, and ENOTTY says so; returning 0
+    // would be a pgid the caller could try to signal.
+    match crate::proc::pcb::ctty_fg_pgrp(tty) {
+        #[allow(clippy::cast_possible_wrap)]
+        Some(pgid) => SyscallResult::ok(pgid as i64),
+        None => SyscallResult::err(KernelError::NotSupported),
+    }
+}
+
+/// `SYS_PTY_SET_PGRP` — hand a *named* terminal to a process group
+/// (`ioctl(fd, TIOCSPGRP)` on a pty the caller owns).
+///
+/// `arg0` names the terminal as for [`sys_pty_get_pgrp`]; `arg1` is the group.
+///
+/// The `arg0 == 0` path is `SYS_TTY_SET_PGRP` (538) exactly — one shared
+/// [`tty_set_pgrp_checked`], so the generalised form cannot drift from the form
+/// every existing caller uses.
+pub fn sys_pty_set_pgrp(args: &SyscallArgs) -> SyscallResult {
+    // A negative value is not a process group. Rejected on the full 64-bit
+    // width rather than reproducing Linux's `int` wrap, matching 538; 0 is
+    // rejected further down, where "there is no group 0" is the message.
+    #[allow(clippy::cast_possible_wrap)]
+    let pgid_signed = args.arg1 as i64;
+    if pgid_signed <= 0 {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+    if args.arg0 == 0 {
+        let pid = match caller_process_or_err() {
+            Ok(pid) => pid,
+            Err(e) => return SyscallResult::err(e),
+        };
+        return match tty_set_pgrp_checked(pid, args.arg1) {
+            TtyCtlOutcome::Done => SyscallResult::ok(0),
+            TtyCtlOutcome::Restart(r) => r,
+            TtyCtlOutcome::Fail(e) => SyscallResult::err(e),
+        };
+    }
+    // As in `sys_pty_get_pgrp`, the named path needs no caller process: both
+    // the authority (the handle) and the POSIX group rule (the terminal's
+    // session) are properties of the terminal, not of who is asking.
+    let tty = match owned_pty_handle(args.arg0) {
+        Ok(h) => h.id(),
+        Err(e) => return SyscallResult::err(e),
+    };
+    // SIGTTOU follows the terminal being written, not the caller — see
+    // `tty_job_control_check_for` for why an emulator must not be stopped for
+    // being a background job on a terminal that is not this one.
+    match tty_job_control_check_for(tty, crate::proc::signal::SIGTTOU) {
+        TtyCtlOutcome::Done => {}
+        TtyCtlOutcome::Restart(r) => return r,
+        TtyCtlOutcome::Fail(e) => return SyscallResult::err(e),
+    }
+    match crate::proc::pcb::ctty_set_fg_pgrp_on(tty, args.arg1) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
 /// `SYS_PTY_GET_WINSIZE` — read a terminal's `struct winsize`.
 ///
 /// `arg0` names the terminal ([`resolve_tty_arg`]), `arg1` is the output

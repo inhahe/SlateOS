@@ -2196,6 +2196,163 @@ const fn unsigned_file_size(size: i64) -> u64 {
     size as u64
 }
 
+// ----------------------------------------------- the time column of a line ---
+
+/// Half a mean Gregorian year, in seconds: the window inside which a timestamp
+/// is *recent* and prints a clock time rather than a year.
+///
+/// A Gregorian year averages 365.2425 days — 31 556 952 seconds — and upstream
+/// writes the halving as `31556952 / 2` rather than the quotient so that the
+/// year stays visible in the source. Spelled the same way here for the same
+/// reason.
+const SIX_MONTHS: i64 = 31_556_952 / 2;
+
+/// The clock, the zone and the fallback width — everything the time column
+/// needs that is fixed for a whole run.
+///
+/// It exists as a struct because upstream's three pieces are a mutable global
+/// (`current_time`), a process-wide `localtz`, and a function-local `static`
+/// cache inside `long_time_expected_width`. Gathering them makes the column a
+/// function of its inputs and lets a test hand it a clock that does not move.
+struct Times {
+    zone: localtime::Zone,
+    /// GNU's `current_time`. It starts *before every possible timestamp* —
+    /// upstream's `TYPE_MINIMUM (time_t)` with `tv_nsec = -1` — so that the
+    /// first file listed always reads the real clock.
+    now: Ts,
+    read_clock: fn() -> Ts,
+    /// [`long_time_expected_width`], computed once because upstream caches it
+    /// in a function-local `static`.
+    fallback_width: usize,
+}
+
+/// GNU's `long_time_expected_width`: how wide the time column's `?` is.
+///
+/// It is the **non-recent** format rendered at the epoch — the one instant that
+/// is always available — measured strictly, and zero if that measurement
+/// refuses. Nothing else is padded to it: a timestamp that renders is emitted
+/// at whatever width it comes out, which is why two `--time-style` formats of
+/// different widths really do misalign the column:
+///
+/// ```text
+/// $ ls -l --time-style=+"$(printf '%Y\n%Y-%m-%d')"
+/// -rw-r--r-- 1 u u 0 2026       future
+/// -rw-r--r-- 1 u u 0 2026-02-21 inside
+/// ```
+fn long_time_expected_width(cfg: &Config, zone: &localtime::Zone) -> usize {
+    let format = cfg.long_time_format.first().map_or(&[][..], Vec::as_slice);
+    let text = localtime::strftime(format, &zone.local(0, 0));
+    mbs_width(&text).unwrap_or(0)
+}
+
+impl Times {
+    fn new(cfg: &Config, zone: localtime::Zone, read_clock: fn() -> Ts) -> Self {
+        let fallback_width = long_time_expected_width(cfg, &zone);
+        Self {
+            zone,
+            now: Ts {
+                sec: i64::MIN,
+                nsec: -1,
+            },
+            read_clock,
+            fallback_width,
+        }
+    }
+
+    /// Whether `when` falls in the past six months, re-reading the clock first
+    /// if the file appears to be in the future.
+    ///
+    /// The re-read is upstream's, and its comment gives the reason: a file may
+    /// have been modified since the last time we looked at the clock, so a
+    /// timestamp ahead of `current_time` is more likely a stale clock than a
+    /// file from the future. It is also why the initial `current_time` is the
+    /// minimum — the first file always triggers one real read.
+    ///
+    /// Both comparisons are strict, so a file stamped *exactly* now is not
+    /// recent, and neither is one in the future.
+    fn is_recent(&mut self, when: Ts) -> bool {
+        if self.now < when {
+            self.now = (self.read_clock)();
+        }
+        let six_months_ago = Ts {
+            sec: self.now.sec.saturating_sub(SIX_MONTHS),
+            nsec: self.now.nsec,
+        };
+        six_months_ago < when && when < self.now
+    }
+
+    /// The time column: the rendered timestamp and its trailing space, or the
+    /// right-aligned `?` that stands in for a timestamp there is none of.
+    ///
+    /// Three cases, and upstream distinguishes them with one test on a sentinel
+    /// byte (`if (s || !*p)`) that is worth spelling out:
+    ///
+    /// | Case | Output |
+    /// |---|---|
+    /// | the format rendered something | that, then one space |
+    /// | the format is empty (`--time-style=+`) | one space, and no `?` |
+    /// | there is no timestamp to render | `?` right-aligned in [`Self::fallback_width`], then one space |
+    ///
+    /// The second case is not a curiosity — it is why the test is written on
+    /// the buffer rather than on the return value, since `nstrftime` returns 0
+    /// both for "wrote nothing" and for "did not fit".
+    ///
+    /// The third case is reached by a failed `stat` (a dangling symlink under
+    /// `-lL`, which prints `?` in every stat-derived column) and by
+    /// `--time=birth` on a filesystem that has no birth time. Upstream has a
+    /// fourth trigger — `localtime_rz` failing — which prints the raw seconds
+    /// instead of `?`; that cannot happen here, because [`localtime::Tm`]
+    /// carries a full `i64` year and so has no `struct tm`-style year overflow
+    /// to fail on. The difference is confined to instants no filesystem can
+    /// store: ext4 caps out in the year 2446.
+    fn format(&mut self, out: &mut Vec<u8>, cfg: &Config, stat_ok: bool, when: Ts) {
+        if stat_ok && when.is_known() {
+            let recent = self.is_recent(when);
+            // A negative `tv_nsec` is the birth-time sentinel, which
+            // `is_known` has already excluded; anything else out of range is
+            // a corrupt stat, and zero is what upstream's `int ns` would
+            // print for it too.
+            let nanos = u32::try_from(when.nsec).unwrap_or(0);
+            let tm = self.zone.local(when.sec, nanos);
+            let format = cfg
+                .long_time_format
+                .get(usize::from(recent))
+                .map_or(&[][..], Vec::as_slice);
+            out.extend_from_slice(&localtime::strftime(format, &tm));
+            out.push(b' ');
+            return;
+        }
+        let pad = self.fallback_width.saturating_sub(1);
+        out.resize(out.len().saturating_add(pad), b' ');
+        out.extend_from_slice(b"? ");
+    }
+}
+
+/// The wall clock, as [`Times`] reads it. `gettime` in upstream.
+///
+/// A clock before the epoch is not an error here — it is what a machine with a
+/// dead RTC reports, and `ls` has no business refusing to list a directory
+/// because of it — so the pre-epoch case is carried as a negative second count
+/// rather than clamped.
+fn system_clock() -> Ts {
+    let now = std::time::SystemTime::now();
+    match now.duration_since(std::time::UNIX_EPOCH) {
+        Ok(since) => Ts {
+            sec: i64::try_from(since.as_secs()).unwrap_or(i64::MAX),
+            nsec: i64::from(since.subsec_nanos()),
+        },
+        Err(before) => {
+            let d = before.duration();
+            Ts {
+                sec: i64::try_from(d.as_secs())
+                    .unwrap_or(i64::MAX)
+                    .saturating_neg(),
+                nsec: i64::from(d.subsec_nanos()),
+            }
+        }
+    }
+}
+
 fn main() -> ExitCode {
     ExitCode::SUCCESS
 }
@@ -3209,5 +3366,212 @@ mod tests {
         assert_eq!(unsigned_file_size(4096), 4096);
         assert_eq!(unsigned_file_size(-1), u64::MAX);
         assert_eq!(unsigned_file_size(i64::MIN), 1 << 63);
+    }
+
+    // ------------------------------------------------------ the time column ---
+
+    /// 2026-08-23 07:43:05 UTC — the instant the GNU measurements below were
+    /// taken against, frozen so that the six-month window does not move.
+    const FROZEN: i64 = 1_787_470_985;
+
+    fn frozen_clock() -> Ts {
+        Ts {
+            sec: FROZEN,
+            nsec: 0,
+        }
+    }
+
+    fn times(cfg: &Config) -> Times {
+        Times::new(cfg, localtime::Zone::utc(), frozen_clock)
+    }
+
+    fn time_field(cfg: &Config, stat_ok: bool, when: Ts) -> String {
+        let mut out = Vec::new();
+        times(cfg).format(&mut out, cfg, stat_ok, when);
+        String::from_utf8_lossy(&out).into_owned()
+    }
+
+    fn at(sec: i64) -> Ts {
+        Ts { sec, nsec: 0 }
+    }
+
+    /// Measured, `TZ=UTC`, against files stamped 60 s inside and 60 s outside
+    /// the window, plus one 60 s in the future:
+    ///
+    /// ```text
+    /// $ ls -l --time-style="+$(printf 'OLD\nNEW')" | awk '{print $6, $7}'
+    /// OLD future     NEW inside     NEW justnow     OLD outside
+    /// ```
+    ///
+    /// A file in the future is *not* recent, which is the second half of
+    /// upstream's `when < current_time` and is easy to lose.
+    #[test]
+    fn a_file_is_recent_only_inside_the_six_months_behind_the_clock() {
+        let cfg = Config::default();
+        let mut t = times(&cfg);
+
+        assert!(t.is_recent(at(FROZEN - SIX_MONTHS + 60)));
+        assert!(!t.is_recent(at(FROZEN - SIX_MONTHS - 60)));
+        assert!(t.is_recent(at(FROZEN - 1)));
+        assert!(!t.is_recent(at(FROZEN + 60)));
+
+        // Both ends are strict: the boundary second itself is not recent, and
+        // neither is a file stamped exactly now.
+        assert!(!t.is_recent(at(FROZEN - SIX_MONTHS)));
+        assert!(!t.is_recent(at(FROZEN)));
+    }
+
+    /// The clock is read once for the first file — `current_time` starts below
+    /// every possible timestamp — and then again only for a file that appears
+    /// to be in the future, because such a file is more likely evidence of a
+    /// stale clock than of time travel.
+    #[test]
+    fn the_clock_is_read_again_only_for_a_file_that_looks_like_the_future() {
+        use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+        static READS: AtomicUsize = AtomicUsize::new(0);
+        fn counting_clock() -> Ts {
+            READS.fetch_add(1, AtomicOrdering::Relaxed);
+            Ts {
+                sec: FROZEN,
+                nsec: 0,
+            }
+        }
+
+        READS.store(0, AtomicOrdering::Relaxed);
+        let cfg = Config::default();
+        let mut t = Times::new(&cfg, localtime::Zone::utc(), counting_clock);
+        assert_eq!(READS.load(AtomicOrdering::Relaxed), 0);
+
+        // The first file always reads it, whatever its timestamp.
+        t.is_recent(at(FROZEN - 1_000_000));
+        assert_eq!(READS.load(AtomicOrdering::Relaxed), 1);
+
+        // Every subsequent file in the past reads nothing.
+        t.is_recent(at(FROZEN - 2_000_000));
+        t.is_recent(at(0));
+        assert_eq!(READS.load(AtomicOrdering::Relaxed), 1);
+
+        // One in the future reads it again — and, since the clock has not
+        // actually moved, keeps reading it for every later future file.
+        t.is_recent(at(FROZEN + 60));
+        assert_eq!(READS.load(AtomicOrdering::Relaxed), 2);
+    }
+
+    /// ```text
+    /// $ TZ=UTC ls -l
+    /// -rw-r--r-- 1 u u 0 Jan  1  1970 epoch
+    /// -rw-r--r-- 1 u u 0 Jan  1  2038 future
+    /// -rw-r--r-- 1 u u 0 Aug  1 12:00 recent
+    /// ```
+    #[test]
+    fn a_recent_file_shows_a_clock_and_an_old_one_shows_a_year() {
+        let cfg = Config::default();
+        assert_eq!(time_field(&cfg, true, at(0)), "Jan  1  1970 ");
+        // 2026-08-01 12:00:00 UTC, three weeks before the frozen clock.
+        assert_eq!(time_field(&cfg, true, at(1_785_585_600)), "Aug  1 12:00 ");
+        // 2038-01-01, in the future and therefore not recent.
+        assert_eq!(time_field(&cfg, true, at(2_145_916_800)), "Jan  1  2038 ");
+    }
+
+    /// The `?` is right-aligned in the width of the *non-recent* format
+    /// rendered at the epoch, and nothing else is padded to that width.
+    ///
+    /// ```text
+    /// $ TZ=UTC ls -lL .                          # `broken` is a dangling symlink
+    /// l????????? ? ?      ?      ?            ? broken
+    /// $ TZ=UTC ls -lL --time-style=full-iso .
+    /// l????????? ? ?      ?      ?                                   ? broken
+    /// $ TZ=UTC ls -lL --time-style=+%Y .
+    /// l????????? ? ?      ?      ?    ? broken
+    /// $ TZ=UTC ls -lL --time-style=+ .
+    /// l????????? ? ?      ?      ? ? broken
+    /// ```
+    #[test]
+    fn a_file_with_no_timestamp_prints_a_question_mark_in_the_epochs_width() {
+        let with = |non_recent: &[u8]| Config {
+            long_time_format: [non_recent.to_vec(), b"%b %e %H:%M".to_vec()],
+            ..Config::default()
+        };
+
+        // "Jan  1  1970" — twelve columns.
+        let cfg = Config::default();
+        assert_eq!(times(&cfg).fallback_width, 12);
+        assert_eq!(time_field(&cfg, false, at(0)), "           ? ");
+
+        // "1970-01-01 00:00:00.000000000 +0000" — thirty-five.
+        let cfg = with(b"%Y-%m-%d %H:%M:%S.%N %z");
+        assert_eq!(times(&cfg).fallback_width, 35);
+        assert_eq!(time_field(&cfg, false, at(0)).len(), 36);
+
+        let cfg = with(b"%Y");
+        assert_eq!(times(&cfg).fallback_width, 4);
+        assert_eq!(time_field(&cfg, false, at(0)), "   ? ");
+
+        // A width of zero pads nothing at all: `%0s` prints just the `?`.
+        let cfg = with(b"");
+        assert_eq!(times(&cfg).fallback_width, 0);
+        assert_eq!(time_field(&cfg, false, at(0)), "? ");
+    }
+
+    /// An empty format is not a missing timestamp: it prints the separating
+    /// space and no `?`. Upstream tells the two apart by the sentinel byte it
+    /// left in the buffer, because `nstrftime` returns 0 for both.
+    ///
+    /// ```text
+    /// $ ls -l --time-style=+
+    /// -rw-r--r-- 1 u u 0  epoch
+    /// ```
+    #[test]
+    fn an_empty_time_format_prints_a_space_and_not_a_question_mark() {
+        let cfg = Config {
+            long_time_format: [Vec::new(), Vec::new()],
+            ..Config::default()
+        };
+        assert_eq!(time_field(&cfg, true, at(0)), " ");
+        // …whereas a file with no timestamp still gets its `?`, now unpadded.
+        assert_eq!(time_field(&cfg, false, at(0)), "? ");
+    }
+
+    /// `--time=birth` on a filesystem with no birth time reaches the same `?`
+    /// as a failed `stat`, by way of the `(-1, -1)` sentinel.
+    #[test]
+    fn a_birth_time_the_filesystem_does_not_have_prints_the_same_question_mark() {
+        let cfg = Config::default();
+        assert_eq!(time_field(&cfg, true, Ts::UNKNOWN), "           ? ");
+        assert_eq!(time_field(&cfg, false, at(0)), "           ? ");
+    }
+
+    /// A rendered timestamp is never padded, so two formats of different
+    /// widths misalign — which is GNU's behaviour and not a defect here.
+    ///
+    /// ```text
+    /// $ ls -l --time-style=+"$(printf '%Y\n%Y-%m-%d')"
+    /// -rw-r--r-- 1 u u 0 2026       future
+    /// -rw-r--r-- 1 u u 0 2026-02-21 inside
+    /// ```
+    #[test]
+    fn a_rendered_timestamp_is_never_padded_to_the_other_formats_width() {
+        let cfg = Config {
+            long_time_format: [b"%Y".to_vec(), b"%Y-%m-%d".to_vec()],
+            ..Config::default()
+        };
+        assert_eq!(time_field(&cfg, true, at(FROZEN + 60)), "2026 ");
+        assert_eq!(time_field(&cfg, true, at(FROZEN - 60)), "2026-08-23 ");
+    }
+
+    /// The zone is the one `ls` resolved, not UTC — the same instant reads
+    /// differently on either side of the dateline, and the column shows it.
+    #[test]
+    fn the_timestamp_is_rendered_in_the_zone_ls_resolved() {
+        let cfg = Config::default();
+        let mut out = Vec::new();
+        let zone = localtime::Zone::resolve(
+            Some(b"EST5EDT,M3.2.0,M11.1.0"),
+            "",
+            std::path::Path::new(""),
+        );
+        Times::new(&cfg, zone, frozen_clock).format(&mut out, &cfg, true, at(0));
+        // The epoch was 19:00 on New Year's Eve in New York.
+        assert_eq!(String::from_utf8_lossy(&out), "Dec 31  1969 ");
     }
 }

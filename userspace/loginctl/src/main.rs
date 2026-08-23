@@ -228,12 +228,25 @@ fn list_sessions(args: &[String]) {
     }
 
     if !no_legend {
-        println!("{:<8} {:>5} {:<16} {:<12} {:<8}", "SESSION", "UID", "USER", "SEAT", "TTY");
+        println!(
+            "{:<8} {:>5} {:<16} {:<12} {:<8}",
+            "SESSION", "UID", "USER", "SEAT", "TTY"
+        );
     }
     for s in &sessions {
-        let star = if s.state == SessionState::Active { "*" } else { "" };
-        println!("{:<8} {:>5} {:<16} {:<12} {:<8}",
-            format!("{}{}", s.id, star), s.uid, s.user, s.seat, s.tty);
+        let star = if s.state == SessionState::Active {
+            "*"
+        } else {
+            ""
+        };
+        println!(
+            "{:<8} {:>5} {:<16} {:<12} {:<8}",
+            format!("{}{}", s.id, star),
+            s.uid,
+            s.user,
+            s.seat,
+            s.tty
+        );
     }
     if !no_legend {
         println!("\n{} sessions listed.", sessions.len());
@@ -360,7 +373,10 @@ fn kill_session(args: &[String]) {
         eprintln!("Error: session ID required");
         process::exit(1);
     }
-    println!("Sending {} to {} processes in session '{}'.", signal, who, session_id);
+    println!(
+        "Sending {} to {} processes in session '{}'.",
+        signal, who, session_id
+    );
 }
 
 // ── User management ────────────────────────────────────────────────────
@@ -404,11 +420,19 @@ fn list_users(args: &[String]) {
     }
 
     if !no_legend {
-        println!("{:>5} {:<16} {:<10} {:<10}", "UID", "USER", "STATE", "SESSIONS");
+        println!(
+            "{:>5} {:<16} {:<10} {:<10}",
+            "UID", "USER", "STATE", "SESSIONS"
+        );
     }
     for u in &users {
-        println!("{:>5} {:<16} {:<10} {:<10}",
-            u.uid, u.name, u.state, u.sessions.len());
+        println!(
+            "{:>5} {:<16} {:<10} {:<10}",
+            u.uid,
+            u.name,
+            u.state,
+            u.sessions.len()
+        );
     }
     if !no_legend {
         println!("\n{} users listed.", users.len());
@@ -441,7 +465,10 @@ fn show_user(args: &[String]) {
     if !user.since.is_empty() {
         println!("          Since: {}", user.since);
     }
-    println!("         Linger: {}", if user._linger { "yes" } else { "no" });
+    println!(
+        "         Linger: {}",
+        if user._linger { "yes" } else { "no" }
+    );
 }
 
 fn enable_linger(args: &[String]) {
@@ -534,11 +561,13 @@ fn parse_seat_file(path: &std::path::Path) -> Option<Seat> {
     }
 
     let id = path.file_name()?.to_str()?.to_string();
-    let sessions: Vec<String> = map.get("SESSIONS")
+    let sessions: Vec<String> = map
+        .get("SESSIONS")
         .map(|s| s.split_whitespace().map(|x| x.to_string()).collect())
         .unwrap_or_default();
     let active_session = map.get("ACTIVE_SESSION").cloned().unwrap_or_default();
-    let devices: Vec<String> = map.get("DEVICES")
+    let devices: Vec<String> = map
+        .get("DEVICES")
         .map(|s| s.split_whitespace().map(|x| x.to_string()).collect())
         .unwrap_or_default();
 
@@ -758,8 +787,14 @@ fn userdbctl_group(args: &[String]) {
                     println!("{{");
                     println!("  \"groupName\": \"{}\",", g.name);
                     println!("  \"gid\": {},", g.gid);
-                    println!("  \"members\": [{}]",
-                        g.members.iter().map(|m| format!("\"{}\"", m)).collect::<Vec<_>>().join(", "));
+                    println!(
+                        "  \"members\": [{}]",
+                        g.members
+                            .iter()
+                            .map(|m| format!("\"{}\"", m))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    );
                     println!("}}");
                 } else {
                     println!("Group name: {}", g.name);
@@ -879,7 +914,10 @@ fn print_userdbctl_help() {
 
 fn run_loginctl(args: Vec<String>) -> i32 {
     let rest: Vec<String> = args.into_iter().skip(1).collect();
-    let cmd = rest.first().cloned().unwrap_or_else(|| "list-sessions".to_string());
+    let cmd = rest
+        .first()
+        .cloned()
+        .unwrap_or_else(|| "list-sessions".to_string());
     let cmd_args: Vec<String> = rest.into_iter().skip(1).collect();
 
     if cmd == "-h" || cmd == "--help" {

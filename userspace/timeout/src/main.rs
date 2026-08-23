@@ -349,7 +349,10 @@ fn run_timeout(args: &[String]) -> i32 {
                 if start.elapsed() >= duration {
                     // Timeout expired — send signal
                     if verbose {
-                        eprintln!("timeout: sending signal {} to command '{}'", signal, program);
+                        eprintln!(
+                            "timeout: sending signal {} to command '{}'",
+                            signal, program
+                        );
                     }
 
                     // Use our syscall to send signal
@@ -405,7 +408,11 @@ fn run_timeout(args: &[String]) -> i32 {
 
                     // Wait for child to die
                     let _ = child.wait();
-                    return if preserve_status { 128 + signal as i32 } else { 124 };
+                    return if preserve_status {
+                        128 + signal as i32
+                    } else {
+                        124
+                    };
                 }
 
                 // Sleep briefly before polling again

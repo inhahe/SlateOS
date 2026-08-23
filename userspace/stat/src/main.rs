@@ -312,7 +312,16 @@ fn format_timestamp(secs: u64, nsec: u64) -> String {
     let month_days: [u64; 12] = [
         31,
         if leap { 29 } else { 28 },
-        31, 30, 31, 30, 31, 31, 30, 31, 30, 31,
+        31,
+        30,
+        31,
+        30,
+        31,
+        31,
+        30,
+        31,
+        30,
+        31,
     ];
     let mut month: u64 = 1;
     for &md in &month_days {
@@ -324,9 +333,7 @@ fn format_timestamp(secs: u64, nsec: u64) -> String {
     }
     let day = days + 1;
 
-    format!(
-        "{year:04}-{month:02}-{day:02} {hour:02}:{min:02}:{sec:02}.{nsec:09} +0000"
-    )
+    format!("{year:04}-{month:02}-{day:02} {hour:02}:{min:02}:{sec:02}.{nsec:09} +0000")
 }
 
 fn is_leap_year(y: u64) -> bool {
@@ -668,7 +675,6 @@ fn apply_stat_format(fmt: &str, st: &KernelStat, name: &str, link_target: &str) 
                     out.push('%');
                     out.push(other);
                 }
-
             }
         } else if chars[i] == '\\' && i + 1 < chars.len() {
             i += 1;
@@ -760,15 +766,26 @@ fn run_stat(opts: &StatOpts) -> bool {
                     } else if opts.terse {
                         println!(
                             "{} {} {} {} {} {} {} {} {} {} {} {}",
-                            file, sf.f_fsid, sf.f_namelen, sf.f_type,
-                            sf.f_bsize, sf.f_frsize, sf.f_blocks, sf.f_bfree,
-                            sf.f_bavail, sf.f_files, sf.f_ffree, sf.f_flags,
+                            file,
+                            sf.f_fsid,
+                            sf.f_namelen,
+                            sf.f_type,
+                            sf.f_bsize,
+                            sf.f_frsize,
+                            sf.f_blocks,
+                            sf.f_bfree,
+                            sf.f_bavail,
+                            sf.f_files,
+                            sf.f_ffree,
+                            sf.f_flags,
                         );
                     } else {
                         println!("  File: \"{}\"", file);
                         println!(
                             "    ID: {:x} Namelen: {} Type: {}",
-                            sf.f_fsid, sf.f_namelen, fstype_name(sf.f_type),
+                            sf.f_fsid,
+                            sf.f_namelen,
+                            fstype_name(sf.f_type),
                         );
                         println!(
                             "Block size: {}   Fundamental block size: {}",
@@ -778,10 +795,7 @@ fn run_stat(opts: &StatOpts) -> bool {
                             "Blocks: Total: {}   Free: {}   Available: {}",
                             sf.f_blocks, sf.f_bfree, sf.f_bavail,
                         );
-                        println!(
-                            "Inodes: Total: {}   Free: {}",
-                            sf.f_files, sf.f_ffree,
-                        );
+                        println!("Inodes: Total: {}   Free: {}", sf.f_files, sf.f_ffree,);
                     }
                 }
                 Err(e) => {
@@ -805,11 +819,21 @@ fn run_stat(opts: &StatOpts) -> bool {
                     } else if opts.terse {
                         println!(
                             "{} {} {} {:x} {} {} {:x} {} {} {:x} {:x} {} {} {} {}",
-                            file, st.st_size, st.st_blocks, st.st_mode,
-                            st.st_uid, st.st_gid, st.st_dev, st.st_ino,
-                            st.st_nlink, (st.st_rdev >> 8) & 0xff,
-                            st.st_rdev & 0xff, st.st_atime_sec,
-                            st.st_mtime_sec, st.st_ctime_sec, 0u64,
+                            file,
+                            st.st_size,
+                            st.st_blocks,
+                            st.st_mode,
+                            st.st_uid,
+                            st.st_gid,
+                            st.st_dev,
+                            st.st_ino,
+                            st.st_nlink,
+                            (st.st_rdev >> 8) & 0xff,
+                            st.st_rdev & 0xff,
+                            st.st_atime_sec,
+                            st.st_mtime_sec,
+                            st.st_ctime_sec,
+                            0u64,
                         );
                     } else {
                         print_default_stat(&st, file, &link_target);
@@ -989,9 +1013,7 @@ fn parse_touch_stamp(s: &str) -> Result<i64, String> {
         (s, 0u32)
     };
 
-    if main_part.len() < 8
-        || !main_part.bytes().all(|b| b.is_ascii_digit())
-    {
+    if main_part.len() < 8 || !main_part.bytes().all(|b| b.is_ascii_digit()) {
         return Err(format!("invalid timestamp format: '{s}'"));
     }
 
@@ -1020,15 +1042,9 @@ fn parse_touch_stamp(s: &str) -> Result<i64, String> {
         }
     };
 
-    let month: u32 = rest[..2]
-        .parse()
-        .map_err(|_| "invalid month".to_string())?;
-    let day: u32 = rest[2..4]
-        .parse()
-        .map_err(|_| "invalid day".to_string())?;
-    let hour: u32 = rest[4..6]
-        .parse()
-        .map_err(|_| "invalid hour".to_string())?;
+    let month: u32 = rest[..2].parse().map_err(|_| "invalid month".to_string())?;
+    let day: u32 = rest[2..4].parse().map_err(|_| "invalid day".to_string())?;
+    let hour: u32 = rest[4..6].parse().map_err(|_| "invalid hour".to_string())?;
     let minute: u32 = rest[6..8]
         .parse()
         .map_err(|_| "invalid minute".to_string())?;
@@ -1082,14 +1098,8 @@ fn parse_date_string(s: &str) -> Result<i64, String> {
             .first()
             .and_then(|v| v.parse().ok())
             .unwrap_or(0);
-        let m: u32 = time_fields
-            .get(1)
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(0);
-        let sec: u32 = time_fields
-            .get(2)
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(0);
+        let m: u32 = time_fields.get(1).and_then(|v| v.parse().ok()).unwrap_or(0);
+        let sec: u32 = time_fields.get(2).and_then(|v| v.parse().ok()).unwrap_or(0);
         (h, m, sec)
     } else {
         (0, 0, 0)
@@ -1133,7 +1143,16 @@ fn date_to_epoch(year: u32, month: u32, day: u32, hour: u32, min: u32, sec: u32)
     let month_days: [i64; 12] = [
         31,
         if leap { 29 } else { 28 },
-        31, 30, 31, 30, 31, 31, 30, 31, 30, 31,
+        31,
+        30,
+        31,
+        30,
+        31,
+        31,
+        30,
+        31,
+        30,
+        31,
     ];
     let months_elapsed = (month.saturating_sub(1) as usize).min(12);
     for d in month_days.iter().take(months_elapsed) {
@@ -1153,7 +1172,10 @@ fn run_touch(opts: &TouchOpts) -> bool {
     // Determine the target time.
     let explicit_time: Option<Timespec> = if let Some(ref stamp) = opts.stamp {
         match parse_touch_stamp(stamp) {
-            Ok(epoch) => Some(Timespec { tv_sec: epoch, tv_nsec: 0 }),
+            Ok(epoch) => Some(Timespec {
+                tv_sec: epoch,
+                tv_nsec: 0,
+            }),
             Err(e) => {
                 eprintln!("touch: invalid timestamp: {e}");
                 return false;
@@ -1161,7 +1183,10 @@ fn run_touch(opts: &TouchOpts) -> bool {
         }
     } else if let Some(ref date) = opts.date {
         match parse_date_string(date) {
-            Ok(epoch) => Some(Timespec { tv_sec: epoch, tv_nsec: 0 }),
+            Ok(epoch) => Some(Timespec {
+                tv_sec: epoch,
+                tv_nsec: 0,
+            }),
             Err(e) => {
                 eprintln!("touch: invalid date: {e}");
                 return false;
@@ -1201,17 +1226,26 @@ fn run_touch(opts: &TouchOpts) -> bool {
 
         // Build timespec pair [atime, mtime].
         let now_ts = explicit_time.unwrap_or({
-            Timespec { tv_sec: 0, tv_nsec: UTIME_NOW }
+            Timespec {
+                tv_sec: 0,
+                tv_nsec: UTIME_NOW,
+            }
         });
 
         let atime = if opts.modify_only && !opts.access_only {
-            Timespec { tv_sec: 0, tv_nsec: UTIME_OMIT }
+            Timespec {
+                tv_sec: 0,
+                tv_nsec: UTIME_OMIT,
+            }
         } else {
             now_ts
         };
 
         let mtime = if opts.access_only && !opts.modify_only {
-            Timespec { tv_sec: 0, tv_nsec: UTIME_OMIT }
+            Timespec {
+                tv_sec: 0,
+                tv_nsec: UTIME_OMIT,
+            }
         } else {
             now_ts
         };
@@ -1519,8 +1553,8 @@ fn canonicalize_path(path: &str, mode: CanonMode) -> Result<String, String> {
     let abs = if p.is_absolute() {
         PathBuf::from(path)
     } else {
-        let cwd = env::current_dir()
-            .map_err(|e| format!("cannot determine current directory: {e}"))?;
+        let cwd =
+            env::current_dir().map_err(|e| format!("cannot determine current directory: {e}"))?;
         cwd.join(path)
     };
 
@@ -1569,9 +1603,7 @@ fn canonicalize_path(path: &str, mode: CanonMode) -> Result<String, String> {
                                     resolved = normalize_path(&resolved);
                                 }
                                 Err(e) => {
-                                    return Err(format!(
-                                        "cannot read symlink '{path_str}': {e}"
-                                    ));
+                                    return Err(format!("cannot read symlink '{path_str}': {e}"));
                                 }
                             }
                         }
@@ -1581,14 +1613,10 @@ fn canonicalize_path(path: &str, mode: CanonMode) -> Result<String, String> {
                         let is_last = idx == abs.components().count() - 1;
                         match mode {
                             CanonMode::CanonicalizeExisting => {
-                                return Err(format!(
-                                    "'{path_str}': no such file or directory"
-                                ));
+                                return Err(format!("'{path_str}': no such file or directory"));
                             }
                             CanonMode::Canonicalize if !is_last => {
-                                return Err(format!(
-                                    "'{path_str}': no such file or directory"
-                                ));
+                                return Err(format!("'{path_str}': no such file or directory"));
                             }
                             _ => {
                                 // Missing or CanonicalizeMissing: keep going textually.
@@ -1760,8 +1788,8 @@ fn resolve_no_symlinks(path: &str) -> Result<String, String> {
     let abs = if p.is_absolute() {
         PathBuf::from(path)
     } else {
-        let cwd = env::current_dir()
-            .map_err(|e| format!("cannot determine current directory: {e}"))?;
+        let cwd =
+            env::current_dir().map_err(|e| format!("cannot determine current directory: {e}"))?;
         cwd.join(path)
     };
     Ok(normalize_path(&abs).to_string_lossy().into_owned())
@@ -1789,10 +1817,7 @@ fn run_realpath(opts: &RealpathOpts) -> bool {
                     match abs_base {
                         Ok(ab) => {
                             if resolved.starts_with(&ab) {
-                                let rel_to = opts
-                                    .relative_to
-                                    .as_deref()
-                                    .unwrap_or(base.as_str());
+                                let rel_to = opts.relative_to.as_deref().unwrap_or(base.as_str());
                                 let abs_rel = if opts.no_symlinks {
                                     resolve_no_symlinks(rel_to)
                                 } else {
@@ -2053,90 +2078,78 @@ fn main() {
     };
 
     let success = match personality {
-        Personality::Stat => {
-            match parse_stat_args(&args) {
-                Ok(opts) => run_stat(&opts),
-                Err(msg) => {
-                    if msg.is_empty() {
-                        print_stat_help();
-                        process::exit(0);
-                    }
-                    eprintln!("{name}: {msg}");
-                    eprintln!("Try '{name} --help' for usage information.");
-                    process::exit(1);
+        Personality::Stat => match parse_stat_args(&args) {
+            Ok(opts) => run_stat(&opts),
+            Err(msg) => {
+                if msg.is_empty() {
+                    print_stat_help();
+                    process::exit(0);
                 }
+                eprintln!("{name}: {msg}");
+                eprintln!("Try '{name} --help' for usage information.");
+                process::exit(1);
             }
-        }
-        Personality::Touch => {
-            match parse_touch_args(&args) {
-                Ok(opts) => run_touch(&opts),
-                Err(msg) => {
-                    if msg.is_empty() {
-                        print_touch_help();
-                        process::exit(0);
-                    }
-                    eprintln!("{name}: {msg}");
-                    eprintln!("Try '{name} --help' for usage information.");
-                    process::exit(1);
+        },
+        Personality::Touch => match parse_touch_args(&args) {
+            Ok(opts) => run_touch(&opts),
+            Err(msg) => {
+                if msg.is_empty() {
+                    print_touch_help();
+                    process::exit(0);
                 }
+                eprintln!("{name}: {msg}");
+                eprintln!("Try '{name} --help' for usage information.");
+                process::exit(1);
             }
-        }
-        Personality::Ln => {
-            match parse_ln_args(&args) {
-                Ok(opts) => run_ln(&opts),
-                Err(msg) => {
-                    if msg.is_empty() {
-                        print_ln_help();
-                        process::exit(0);
-                    }
-                    eprintln!("{name}: {msg}");
-                    eprintln!("Try '{name} --help' for usage information.");
-                    process::exit(1);
+        },
+        Personality::Ln => match parse_ln_args(&args) {
+            Ok(opts) => run_ln(&opts),
+            Err(msg) => {
+                if msg.is_empty() {
+                    print_ln_help();
+                    process::exit(0);
                 }
+                eprintln!("{name}: {msg}");
+                eprintln!("Try '{name} --help' for usage information.");
+                process::exit(1);
             }
-        }
-        Personality::Readlink => {
-            match parse_readlink_args(&args) {
-                Ok(opts) => run_readlink(&opts),
-                Err(msg) => {
-                    if msg.is_empty() {
-                        print_readlink_help();
-                        process::exit(0);
-                    }
-                    eprintln!("{name}: {msg}");
-                    eprintln!("Try '{name} --help' for usage information.");
-                    process::exit(1);
+        },
+        Personality::Readlink => match parse_readlink_args(&args) {
+            Ok(opts) => run_readlink(&opts),
+            Err(msg) => {
+                if msg.is_empty() {
+                    print_readlink_help();
+                    process::exit(0);
                 }
+                eprintln!("{name}: {msg}");
+                eprintln!("Try '{name} --help' for usage information.");
+                process::exit(1);
             }
-        }
-        Personality::Realpath => {
-            match parse_realpath_args(&args) {
-                Ok(opts) => run_realpath(&opts),
-                Err(msg) => {
-                    if msg.is_empty() {
-                        print_realpath_help();
-                        process::exit(0);
-                    }
-                    eprintln!("{name}: {msg}");
-                    eprintln!("Try '{name} --help' for usage information.");
-                    process::exit(1);
+        },
+        Personality::Realpath => match parse_realpath_args(&args) {
+            Ok(opts) => run_realpath(&opts),
+            Err(msg) => {
+                if msg.is_empty() {
+                    print_realpath_help();
+                    process::exit(0);
                 }
+                eprintln!("{name}: {msg}");
+                eprintln!("Try '{name} --help' for usage information.");
+                process::exit(1);
             }
-        }
-        Personality::Mkfifo => {
-            match parse_mkfifo_args(&args) {
-                Ok(opts) => run_mkfifo(&opts),
-                Err(msg) => {
-                    if msg.is_empty() {
-                        print_mkfifo_help();
-                        process::exit(0);
-                    }
-                    eprintln!("{name}: {msg}");
-                    eprintln!("Try '{name} --help' for usage information.");
-                    process::exit(1);
+        },
+        Personality::Mkfifo => match parse_mkfifo_args(&args) {
+            Ok(opts) => run_mkfifo(&opts),
+            Err(msg) => {
+                if msg.is_empty() {
+                    print_mkfifo_help();
+                    process::exit(0);
                 }
+                eprintln!("{name}: {msg}");
+                eprintln!("Try '{name} --help' for usage information.");
+                process::exit(1);
             }
-        }
+        },
     };
 
     if !success {
@@ -2177,13 +2190,19 @@ mod tests {
     #[test]
     fn test_personality_readlink() {
         assert_eq!(detect_personality("readlink"), Personality::Readlink);
-        assert_eq!(detect_personality("/usr/bin/readlink"), Personality::Readlink);
+        assert_eq!(
+            detect_personality("/usr/bin/readlink"),
+            Personality::Readlink
+        );
     }
 
     #[test]
     fn test_personality_realpath() {
         assert_eq!(detect_personality("realpath"), Personality::Realpath);
-        assert_eq!(detect_personality("/usr/bin/realpath.exe"), Personality::Realpath);
+        assert_eq!(
+            detect_personality("/usr/bin/realpath.exe"),
+            Personality::Realpath
+        );
     }
 
     #[test]
@@ -2492,9 +2511,7 @@ mod tests {
 
     #[test]
     fn test_ln_args_force_verbose() {
-        let args = vec![
-            "ln".into(), "-sfv".into(), "target".into(), "link".into(),
-        ];
+        let args = vec!["ln".into(), "-sfv".into(), "target".into(), "link".into()];
         let opts = parse_ln_args(&args).unwrap();
         assert!(opts.symbolic);
         assert!(opts.force);
@@ -2504,7 +2521,11 @@ mod tests {
     #[test]
     fn test_ln_args_target_directory() {
         let args = vec![
-            "ln".into(), "-t".into(), "/tmp".into(), "file1".into(), "file2".into(),
+            "ln".into(),
+            "-t".into(),
+            "/tmp".into(),
+            "file1".into(),
+            "file2".into(),
         ];
         let opts = parse_ln_args(&args).unwrap();
         assert_eq!(opts.target_dir.as_deref(), Some("/tmp"));
@@ -2526,9 +2547,7 @@ mod tests {
 
     #[test]
     fn test_ln_args_no_target_dir() {
-        let args = vec![
-            "ln".into(), "-T".into(), "target".into(), "link".into(),
-        ];
+        let args = vec!["ln".into(), "-T".into(), "target".into(), "link".into()];
         let opts = parse_ln_args(&args).unwrap();
         assert!(opts.no_target_dir);
     }

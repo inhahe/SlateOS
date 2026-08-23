@@ -137,8 +137,7 @@ impl FlatpakRef {
     #[cfg_attr(not(test), allow(dead_code))]
     fn matches_query(&self, query: &str) -> bool {
         let q = query.to_lowercase();
-        self.app_id.to_lowercase().contains(&q)
-            || self.description.to_lowercase().contains(&q)
+        self.app_id.to_lowercase().contains(&q) || self.description.to_lowercase().contains(&q)
     }
 }
 
@@ -289,9 +288,10 @@ fn get_option_value<'a>(args: &'a [String], short: &str, long: &str) -> Option<&
         }
         // Handle --option=value
         if let Some(rest) = arg.strip_prefix(long)
-            && let Some(val) = rest.strip_prefix('=') {
-                return Some(val);
-            }
+            && let Some(val) = rest.strip_prefix('=')
+        {
+            return Some(val);
+        }
     }
     None
 }
@@ -370,10 +370,7 @@ fn is_valid_url(url: &str) -> bool {
 
 /// Validate an architecture string.
 fn is_valid_arch(arch: &str) -> bool {
-    matches!(
-        arch,
-        "x86_64" | "aarch64" | "i386" | "arm" | "riscv64"
-    )
+    matches!(arch, "x86_64" | "aarch64" | "i386" | "arm" | "riscv64")
 }
 
 /// Parse a ref string: could be a full ref or just an app ID.
@@ -515,10 +512,11 @@ fn cmd_install(args: &[String]) -> i32 {
     }
 
     if let Some(ref a) = arch
-        && !is_valid_arch(a) {
-            eprintln!("error: unsupported architecture '{}'", a);
-            return 1;
-        }
+        && !is_valid_arch(a)
+    {
+        eprintln!("error: unsupported architecture '{}'", a);
+        return 1;
+    }
 
     let remote_name = remote.unwrap_or("flathub");
     let branch_name = branch.as_deref().unwrap_or("stable");
@@ -644,11 +642,12 @@ fn cmd_run(args: &[String]) -> i32 {
     let mut env_vars: Vec<(String, String)> = Vec::new();
     for arg in args {
         if let Some(rest) = arg.strip_prefix("--env=")
-            && let Some(eq_pos) = rest.find('=') {
-                let key = rest[..eq_pos].to_string();
-                let val = rest[eq_pos + 1..].to_string();
-                env_vars.push((key, val));
-            }
+            && let Some(eq_pos) = rest.find('=')
+        {
+            let key = rest[..eq_pos].to_string();
+            let val = rest[eq_pos + 1..].to_string();
+            env_vars.push((key, val));
+        }
     }
 
     // Collect sandbox modifications
@@ -723,11 +722,10 @@ fn cmd_run(args: &[String]) -> i32 {
                 i += 1;
                 filesystems.push(args[i].clone());
             }
-            "--nofilesystem"
-                if i + 1 < args.len() => {
-                    i += 1;
-                    nofilesystems.push(args[i].clone());
-                }
+            "--nofilesystem" if i + 1 < args.len() => {
+                i += 1;
+                nofilesystems.push(args[i].clone());
+            }
             _ => {}
         }
         i += 1;
@@ -762,10 +760,11 @@ fn cmd_run(args: &[String]) -> i32 {
     }
 
     if let Some(a) = arch
-        && !is_valid_arch(a) {
-            eprintln!("error: unsupported architecture '{}'", a);
-            return 1;
-        }
+        && !is_valid_arch(a)
+    {
+        eprintln!("error: unsupported architecture '{}'", a);
+        return 1;
+    }
 
     let branch_name = branch.unwrap_or("stable");
     let arch_name = arch.unwrap_or("x86_64");
@@ -827,10 +826,7 @@ fn cmd_list(args: &[String]) -> i32 {
             let trimmed = col.trim();
             if !is_valid_column(trimmed) {
                 eprintln!("error: unknown column '{}'", trimmed);
-                eprintln!(
-                    "Valid columns: {}",
-                    VALID_COLUMNS.join(", ")
-                );
+                eprintln!("Valid columns: {}", VALID_COLUMNS.join(", "));
                 return 1;
             }
         }
@@ -906,7 +902,10 @@ fn cmd_info(args: &[String]) -> i32 {
         println!();
         println!("[Application]");
         println!("name={}", app_id);
-        println!("runtime=org.freedesktop.Platform/{}/{}", arch_name, branch_name);
+        println!(
+            "runtime=org.freedesktop.Platform/{}/{}",
+            arch_name, branch_name
+        );
     }
 
     if show_permissions {
@@ -1099,17 +1098,20 @@ fn cmd_history(args: &[String]) -> i32 {
 }
 
 fn cmd_override(args: &[String]) -> i32 {
-    let positional = collect_positionals(args, &[
-        "--share",
-        "--unshare",
-        "--socket",
-        "--nosocket",
-        "--device",
-        "--nodevice",
-        "--filesystem",
-        "--nofilesystem",
-        "--env",
-    ]);
+    let positional = collect_positionals(
+        args,
+        &[
+            "--share",
+            "--unshare",
+            "--socket",
+            "--nosocket",
+            "--device",
+            "--nodevice",
+            "--filesystem",
+            "--nofilesystem",
+            "--env",
+        ],
+    );
 
     if positional.is_empty() {
         eprintln!("error: no application specified");
@@ -1264,14 +1266,17 @@ fn cmd_build(args: &[String]) -> i32 {
 }
 
 fn cmd_build_finish(args: &[String]) -> i32 {
-    let positional = collect_positionals(args, &[
-        "--share",
-        "--socket",
-        "--device",
-        "--filesystem",
-        "--command",
-        "--env",
-    ]);
+    let positional = collect_positionals(
+        args,
+        &[
+            "--share",
+            "--socket",
+            "--device",
+            "--filesystem",
+            "--command",
+            "--env",
+        ],
+    );
 
     if positional.is_empty() {
         eprintln!("error: build directory required");
@@ -1410,10 +1415,7 @@ fn cmd_config(args: &[String]) -> i32 {
     let do_get = has_long_flag(args, "--get");
     let do_unset = has_long_flag(args, "--unset");
 
-    let flag_count = [do_set, do_get, do_unset]
-        .iter()
-        .filter(|&&v| v)
-        .count();
+    let flag_count = [do_set, do_get, do_unset].iter().filter(|&&v| v).count();
 
     if flag_count == 0 {
         eprintln!("error: one of --set, --get, or --unset required");
@@ -1628,26 +1630,17 @@ mod tests {
 
     #[test]
     fn personality_with_unix_path() {
-        assert_eq!(
-            run(vec!["/usr/bin/flatpak".to_string()]),
-            0
-        );
+        assert_eq!(run(vec!["/usr/bin/flatpak".to_string()]), 0);
     }
 
     #[test]
     fn personality_with_windows_path() {
-        assert_eq!(
-            run(vec!["C:\\Program Files\\flatpak.exe".to_string()]),
-            0
-        );
+        assert_eq!(run(vec!["C:\\Program Files\\flatpak.exe".to_string()]), 0);
     }
 
     #[test]
     fn personality_strips_exe() {
-        assert_eq!(
-            run(vec!["flatpak.exe".to_string()]),
-            0
-        );
+        assert_eq!(run(vec!["flatpak.exe".to_string()]), 0);
     }
 
     #[test]
@@ -1792,8 +1785,7 @@ mod tests {
 
     #[test]
     fn parse_full_ref() {
-        let (kind, id, arch, branch) =
-            parse_ref_string("app/org.example.App/x86_64/stable");
+        let (kind, id, arch, branch) = parse_ref_string("app/org.example.App/x86_64/stable");
         assert_eq!(kind, Some(RefKind::App));
         assert_eq!(id, "org.example.App");
         assert_eq!(arch.as_deref(), Some("x86_64"));
@@ -1812,8 +1804,7 @@ mod tests {
 
     #[test]
     fn parse_three_part_ref() {
-        let (kind, id, arch, branch) =
-            parse_ref_string("org.example.App/x86_64/stable");
+        let (kind, id, arch, branch) = parse_ref_string("org.example.App/x86_64/stable");
         assert_eq!(kind, None);
         assert_eq!(id, "org.example.App");
         assert_eq!(arch.as_deref(), Some("x86_64"));
@@ -1864,7 +1855,11 @@ mod tests {
 
     #[test]
     fn remote_new() {
-        let r = Remote::new("flathub", "https://dl.flathub.org/repo/", InstallationType::System);
+        let r = Remote::new(
+            "flathub",
+            "https://dl.flathub.org/repo/",
+            InstallationType::System,
+        );
         assert_eq!(r.name, "flathub");
         assert!(r.gpg_verify);
         assert!(r.enabled);
@@ -2442,10 +2437,7 @@ mod tests {
 
     #[test]
     fn run_with_filesystem() {
-        assert_eq!(
-            flatpak("run --filesystem /home/user org.example.App"),
-            0
-        );
+        assert_eq!(flatpak("run --filesystem /home/user org.example.App"), 0);
     }
 
     // ====================================================================
@@ -2575,10 +2567,7 @@ mod tests {
 
     #[test]
     fn remote_add_invalid_name() {
-        assert_eq!(
-            flatpak("remote-add bad@name https://example.com/repo"),
-            1
-        );
+        assert_eq!(flatpak("remote-add bad@name https://example.com/repo"), 1);
     }
 
     #[test]
@@ -2628,10 +2617,7 @@ mod tests {
 
     #[test]
     fn remote_info_basic() {
-        assert_eq!(
-            flatpak("remote-info flathub org.example.App"),
-            0
-        );
+        assert_eq!(flatpak("remote-info flathub org.example.App"), 0);
     }
 
     #[test]
@@ -2698,10 +2684,7 @@ mod tests {
 
     #[test]
     fn override_with_share() {
-        assert_eq!(
-            flatpak("override --share network org.example.App"),
-            0
-        );
+        assert_eq!(flatpak("override --share network org.example.App"), 0);
     }
 
     #[test]
@@ -2740,7 +2723,9 @@ mod tests {
     #[test]
     fn build_init_basic() {
         assert_eq!(
-            flatpak("build-init builddir org.example.App org.freedesktop.Sdk org.freedesktop.Platform"),
+            flatpak(
+                "build-init builddir org.example.App org.freedesktop.Sdk org.freedesktop.Platform"
+            ),
             0
         );
     }
@@ -2816,10 +2801,7 @@ mod tests {
 
     #[test]
     fn build_bundle_basic() {
-        assert_eq!(
-            flatpak("build-bundle repo app.flatpak org.example.App"),
-            0
-        );
+        assert_eq!(flatpak("build-bundle repo app.flatpak org.example.App"), 0);
     }
 
     #[test]
@@ -2911,10 +2893,7 @@ mod tests {
 
     #[test]
     fn install_path_system() {
-        assert_eq!(
-            install_path(InstallationType::System),
-            "/var/lib/flatpak"
-        );
+        assert_eq!(install_path(InstallationType::System), "/var/lib/flatpak");
     }
 
     #[test]
@@ -2930,50 +2909,32 @@ mod tests {
 
     #[test]
     fn install_full_ref_with_arch() {
-        assert_eq!(
-            flatpak("install app/org.example.App/aarch64/beta"),
-            0
-        );
+        assert_eq!(flatpak("install app/org.example.App/aarch64/beta"), 0);
     }
 
     #[test]
     fn run_with_unshare() {
-        assert_eq!(
-            flatpak("run --unshare network org.example.App"),
-            0
-        );
+        assert_eq!(flatpak("run --unshare network org.example.App"), 0);
     }
 
     #[test]
     fn run_with_nosocket() {
-        assert_eq!(
-            flatpak("run --nosocket x11 org.example.App"),
-            0
-        );
+        assert_eq!(flatpak("run --nosocket x11 org.example.App"), 0);
     }
 
     #[test]
     fn run_with_nodevice() {
-        assert_eq!(
-            flatpak("run --nodevice dri org.example.App"),
-            0
-        );
+        assert_eq!(flatpak("run --nodevice dri org.example.App"), 0);
     }
 
     #[test]
     fn run_with_nofilesystem() {
-        assert_eq!(
-            flatpak("run --nofilesystem /home org.example.App"),
-            0
-        );
+        assert_eq!(flatpak("run --nofilesystem /home org.example.App"), 0);
     }
 
     #[test]
     fn build_export_with_subject() {
-        assert_eq!(
-            flatpak("build-export --subject Release repo builddir"),
-            0
-        );
+        assert_eq!(flatpak("build-export --subject Release repo builddir"), 0);
     }
 
     #[test]

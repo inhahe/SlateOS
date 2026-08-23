@@ -61807,7 +61807,7 @@ a pure function returning a `Request` rather than left as statements inside
 
 ---
 
-## TD-B-THE-QUOTE-NAMES-TEST-READS-ONE-DIRECTORY-OF-EIGHTY (lane B, 2026-08-22) — GATED 2026-08-23, backlog OPEN
+## TD-B-THE-QUOTE-NAMES-TEST-READS-ONE-DIRECTORY-OF-EIGHTY (lane B, 2026-08-22) — GATED 2026-08-23, backlog CLEARED 2026-08-23 (1798 → 0)
 
 **In short:** We have a test that reads our own source code looking for error
 messages that print a file's name without quoting it. Unquoted names are a real
@@ -62025,6 +62025,81 @@ Current head of the ranking, post-correction:
 `timeout` 20, `snapper` 18, `loginctl` 17, `stat` 17, `apparmor` 16,
 `podman` 16, `selinux` 16, `pkg` 14, `mkfs` 13, `useradm` 13.
 Total **1711 sites in 780 files**.
+
+### Burn-down complete, 2026-08-23 — 1798 → 0, and the gate changes meaning
+
+**In short:** every error and status message in lane B's tree that prints a
+name the user supplied now puts quotes around it in a way the name itself
+cannot escape. The backlog this entry was opened for is empty. Because the
+gate compares against a recorded list, and the list is now empty, it stops
+being a "do not make this worse" rule and becomes "do not do this at all":
+the next such message that lands anywhere under `userspace/`, `posix/`,
+`services/` or `init/` fails the push that carries it.
+
+```
+$ python scripts/quote-names.py --check
+ok -- 0 known sites in 0 files (0 improved)
+```
+
+The last 444 crates went in five chunks of ~90, each taken through the same
+five stages before it was committed: `quote-names.py --fix` (textual),
+`quote-names-why.py --batch` (derive the rationale), `quote-names-wire.py
+--batch` (manifest + `use`), `cargo clippy --fix`, then `cargo fmt`, `cargo
+clippy -- -D warnings` and `cargo test`. All 444 test binaries pass.
+
+**Two tools were added under the fixer, and the second is the load-bearing
+one.** `quote-names-wire.py` writes the `quoting` dependency and the `use`
+into a crate, and records *why* that crate needs it as a comment in its
+`Cargo.toml`. Writing 444 of those sentences by recall would have produced
+444 plausible sentences, some of them false — the provenance genuinely
+differs from crate to crate, and a comment that says "this comes from argv"
+about a value that comes from a config file is worse than no comment.
+`quote-names-why.py` therefore *derives* the sentence from the crate's own
+source: it finds the quoting call, walks the interpolated value back through
+`let`/`for`/assignment/`push`/match-arm/parameter bindings — parameters
+resolved **by position** against each call site, and scoped per function, so
+a local named `governor` in one function is not evidence about another's —
+and emits the sentence only if the value reaches argv. 430 of the 444 were
+derived this way. The other 14 it **refused**, and every refusal was right:
+`doas`'s caller name comes from the password database, `readelf`'s operand
+arrives through a struct field, `sysctl`'s through an enum variant,
+`tput`'s through a tuple pushed onto a vector (and, under `-S`, from stdin
+rather than argv at all), `powertop`'s from the program's own table. Those 14
+sentences were written by hand, having been checked.
+
+The refusals were also the tool's own test suite: each one that turned out to
+be a *tracer* gap rather than a real difference produced a named selftest
+case and a fix. The last of those, `c79de5b47`, taught it that the value of
+`if c { a } else { b }` is `a` or `b` and never `c` — before it, `rake-cli`'s
+`let run_tasks = if tasks.is_empty() { vec!["default"] } else { tasks };`
+ended the trail one step short of the argv branch it actually takes. The
+inverse case is pinned too, because it is the reason the decomposition is
+worth having: a block that *tests* argv and returns a constant must not
+resolve.
+
+**Five classes of real defect surfaced underneath the mechanical rewrite,**
+all of which the type checker or the eye caught only because the rewrite
+moved the line:
+
+| class | example | why it matters |
+|---|---|---|
+| quotes around one of several argv values | `doas: {} is not allowed to run '{}' as {}` | quoting one of three quotes none of them; here it was a *security* decision's tail |
+| a line meant to be pasted into a shell | `xh`'s `curl -X {} '{}'` | the quotes were the only thing between a URL containing `'` and a second command |
+| the same value printed twice, quoted once | `tigervnc`'s `New '{}' desktop at {}` | the bare copy is the forgeable one |
+| `byte as char` | four crates | a Latin-1 widening that reports 0xE9 as an `é` nobody typed |
+| a genuine `char` off `.chars()` | `getopt`, `ldd` | fine, but needs `to_string`; `quoteaf_os` takes `AsRef<OsStr>` |
+
+Commits: `8a48fd5cc`, `643e41d82`, `b10cff206`, `3639cb6b4`, `97e23c24b`
+(the last also empties the baseline), over tooling in `ad754709e` and
+`c79de5b47`.
+
+**What is still not covered**, so that this is not read as a stronger claim
+than it is: `apps/` and `gui/` remain outside `ROOTS` (lane C's tree — see
+above); the detector only sees interpolation into a *format string*, so a
+name concatenated into a `String` and then printed is invisible to it; and
+the count-keyed baseline still cannot see a 1-for-1 swap inside one file,
+though with the count at zero for every file that gap now requires adding
+and removing a site in the same file in the same commit.
 
 ### Interaction with B-Q7
 

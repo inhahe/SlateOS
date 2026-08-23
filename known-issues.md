@@ -50388,7 +50388,7 @@ commands that carry the colour in question, and assert the two renders agree.
 Candidates: anything drawn on the wallpaper, on a video surface, on a
 thumbnail, or on any other content the palette does not own.
 
-**Part 2 progress. 24 of 49 modules converted.**
+**Part 2 progress. 25 of 49 modules converted.**
 
 - [x] `security_dialog.rs` — 29 constants, done 2026-08-22. The method above
   survived contact: the sweep lives in `gui/desktop/src/palette_check.rs` as
@@ -51614,6 +51614,61 @@ thumbnail, or on any other content the palette does not own.
   - **clippy trap: `unusual_byte_groupings`.** `Color::from_hex(0x2030_50)` is
     rejected — hex digits must group in equal-size runs. Write the full eight
     (`0x0020_3050`), which is what the rest of the file does anyway.
+- [x] `privacy_settings.rs` — 11 constants, done 2026-08-23. Eight tests,
+  harness defects Ax26–Zx27 (fifty-two).
+  - **The width rule has a fourth gap: an assertion is only as
+    discriminating as the palette it renders under.** Modules 21/22/24 taught
+    that the sweep is only as wide as its render, that a per-kind table is not
+    a per-site one, and that a site which only *selects* a colour is a source
+    site too. All three were applied here up front, and the first proof run
+    still left 19 defects declared-but-uncaught — because the three role
+    tables rendered **Mocha only, with the stock accent**. That is structurally
+    blind to exactly the two mistakes this conversion makes: a constant frozen
+    back to its Mocha value is *identical* to the role that replaced it when
+    viewed in Mocha, and a site naming `p.blue` instead of following the accent
+    is identical to the stock accent, which *is* blue. **Testing a conversion
+    in the palette it was converted from hides precisely the failures that
+    conversion causes.** The fix is `table_palettes()` — both modes, and in
+    each an accent (`0x00FF_8C1A`) deliberately outside either palette — which
+    every role table now loops over, with `"{mode}"` in all 38 failure
+    messages. 15 of the 19 resolved on that change alone.
+  - **An expectation written in terms of the code under test cannot fail.**
+    The text table asserted the app-state label against
+    `PermissionState::Allowed.color(&p)`. Swap the `Allowed => p.green` arm and
+    *both sides of the comparison move together*: the row a user reads as
+    "allowed" can turn any colour at all and the table stays green. Two arm-swap
+    defects walked through it. Assert the **role literal** instead, and list all
+    three states — that pins the value, and the three-way spread still proves
+    the call site asks the method, because a flat literal there would give all
+    three rows one colour. Generalised: **if the expected value is computed by
+    the thing being tested, the assertion is checking that a function equals
+    itself.**
+  - **Filtering before comparing throws away the evidence.** The accent test
+    first collected every colour equal to green, red or overlay0 and compared
+    *that list* across accents. The filter runs before the comparison, so a
+    site that stops drawing green and starts drawing the accent drops out of the
+    list — for every accent equally. The lists still matched. It was checking
+    that the sites which stayed put stayed put. The correct shape is the
+    inverse: render the same fixture under two out-of-palette accents A and B,
+    and require every command to draw the same colour in both **except** the
+    sites that draw A in the first and B in the second. That names the offending
+    command index instead of silently agreeing with itself.
+  - **Four judgements, all recorded in the module's prose header.** (1) Two
+    sites follow the accent, both meaning "you are here" — the active tab's
+    label and the selected telemetry level's label; held by a test that
+    **counts** them, so a third added later fails. (2) Allowed/Denied is a
+    *category*, not a decoration, so green and red freeze across every accent —
+    a privacy panel whose status a user cannot trust at a glance is worse than
+    no status at all. (3) Section headings stay `lavender`; the accent never
+    marks category. (4) The tab strip's own fill is position but not accent
+    (`p.surface0`/`p.mantle`) — only the label moves.
+  - **Traps.** `gen` is a reserved keyword in Rust 2024 and cannot name a
+    fixture variable. Harness patterns must contain literal `✓`/`✕`; the Rust
+    source stores the characters, not `\u{}` escapes. And `text_containing`
+    fired its ambiguity guard on `"Permissions"`, which is a substring of the
+    title `"Privacy & Permissions"` — the guard converted a silent
+    wrong-site comparison into a loud failure, which is what it is for; tab
+    labels now use a `text_exact` helper.
 
 **Trigger:** this is not blocked on anything. It is sequenced after the shell
 event loop (`TD-C-THE-SHELL-CAN-DRAW-ITSELF-AND-NOBODY-CAN-ASK-IT-TO`) only

@@ -74,9 +74,9 @@ use std::ffi::{OsStr, OsString};
 use std::io::{self, Write};
 use std::process::ExitCode;
 
-/// The file-mode creation mask. POSIX offers no way to read it without writing
-/// it, which is why there is no read-only spelling and why [`take_umask`] has to
-/// zero it to find out what it was.
+// The file-mode creation mask. POSIX offers no way to read it without writing
+// it, which is why there is no read-only spelling and why `take_umask` has to
+// zero it to find out what it was.
 #[cfg(unix)]
 unsafe extern "C" {
     fn umask(mask: u32) -> u32;

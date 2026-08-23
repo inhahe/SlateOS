@@ -50388,7 +50388,7 @@ commands that carry the colour in question, and assert the two renders agree.
 Candidates: anything drawn on the wallpaper, on a video surface, on a
 thumbnail, or on any other content the palette does not own.
 
-**Part 2 progress. 32 of 49 modules converted.**
+**Part 2 progress. 33 of 49 modules converted.**
 
 - [x] `security_dialog.rs` — 29 constants, done 2026-08-22. The method above
   survived contact: the sweep lives in `gui/desktop/src/palette_check.rs` as
@@ -52185,6 +52185,77 @@ thumbnail, or on any other content the palette does not own.
     wash is its own hue at a lower alpha, derived rather than named, so adding a
     category cannot leave a stale wash behind; and the dialog floats, which is
     one byte of alpha nothing else in the module would have noticed.
+- [x] `resmon.rs` — 11 constants over 16 colour sites, done 2026-08-23.
+  Fifty-five tests in the module (nine new), harness defects Ax48–Ix49
+  (thirty-five), all thirty-five caught, none escaped, none under-caught.
+  - **The first module in the shell that draws no accent at all, and the claim
+    is a count of zero.** There is nothing here to select, nothing to invite
+    and nothing in force — only quantities that have to be told apart. That is
+    worth stating because it is *falsifiable*: the test asserts the accent
+    appears in exactly zero commands, in both modes and both display modes, and
+    four defects exist only to trip it. It is also worth stating because it is
+    worth **nothing at the shipped theme**: the stock accent *is* `blue`, and
+    `Cpu` is blue, so under a default install "this module draws no accent" and
+    "every CPU line is accented" produce identical pixels and the count reads 40
+    rather than 0 for a reason that has nothing to do with position. Without the
+    off-palette magenta fixture this test would assert the opposite of what it
+    says. Same trap as `launcher.rs`, reached from the other direction: there
+    the accent and a category hue collided, here the accent and a *measurement*
+    hue do.
+  - **A permutation, and the one module where nobody could ever see it.**
+    `test_resource_type_colors_distinct` already walked the six hues pairwise,
+    and six distinct hues rotated by one are still six distinct hues — so the
+    whole widget can be drawn in its neighbours' colours with every pre-existing
+    test green. Only a table naming each pair (CPU/blue, RAM/green, Disk/peach,
+    Net/mauve, GPU/lavender, Temp/red) can fail, and the proof confirms it:
+    defect Cx48 rotates the four graphed hues and is caught **by that table
+    alone**, 1 test out of 55. And note what "nobody could see it" means here —
+    `resmon` is declared in `lib.rs` but nothing constructs a `ResourceMonitor`
+    (`TD-C-THE-SHELL-DRAWS-FOUR-OF-ITS-FIFTY-SEVEN-MODULES`), so there is no
+    screen to check against. Four distinct colours in the wrong order render as
+    a perfectly plausible graph; "it looked fine" would have certified it.
+  - **The pinning table is the only thing that covers what is never drawn.**
+    GPU and temperature are collected and given hues but not plotted, so the
+    membership sweep and the deleted-constant sweep — both of which read *drawn*
+    commands — are structurally blind to them. Defect Fx48 freezes the
+    temperature hue to Mocha red and is caught by one test. A sweep over render
+    output cannot check a value that never reaches render output, which is an
+    obvious sentence that took a defect to notice.
+  - **The compact strip's sparkline hues were untested, and writing a defect is
+    what found it.** The strip plots the same four metrics from a *different*
+    call site with its own hue lookup, and it carries no labels at all — so a
+    compact sparkline in the wrong metric's colour was unreachable by every
+    test in the module: membership passes (a wrong role is still a role), the
+    accent count passes, and the per-site table never looks at compact lines.
+    Fixed at the root before the run; defect Lx48 (every compact sparkline drawn
+    in the CPU hue) now proves it, caught by that test alone. The module-32
+    lesson again — a branch the fixture does not render is a branch the test
+    does not check — but here it was a whole *display mode*, not a state.
+  - **A pin wearing a relationship's docstring, found by four under-declared
+    catches.** `a_metric_is_one_colour_wherever_it_appears` says it asserts only
+    that a metric's label and its graph agree, never which colour they agree on;
+    it then ended `assert!(bars.all(|c| *c == p.blue))`, naming a role outright,
+    so every hue-map defect tripped it. **A test that quietly does two jobs
+    cannot be read as a coverage claim about either** — and this is the first
+    time the `[UNDECLARED:]` half of the harness output, rather than
+    `[MISSING:]`, is what found the problem. Over-catching is not harmless: it
+    is how a coverage report flatters itself. The pin belongs to
+    `each_measurement_is_pinned_to_the_role_it_names`, which caught all four
+    unaided.
+  - **`render_bar_graph` is a primitive this module never calls**, so judgement
+    4's original "label, sparkline and bars are one colour said three times"
+    overstated what the code does — the module draws two of those three. The
+    doc now says twice and says why: the primitive's hue is the caller's
+    business and not a claim this module gets to make. The bar claim survives
+    as its own test, restated honestly as "the primitive substitutes no default
+    for the colour it is handed", and is handed `p.accent` precisely because
+    nothing here draws the accent.
+  - Judgements, for the record: a hue names a *measurement*, never a state or a
+    position; six measurements are six distinct colours each pinned by name; the
+    grid is furniture, checked against all six metric hues rather than the four
+    currently plotted so that graphing GPU later cannot quietly make it
+    ambiguous; and a metric's label and sparkline are one colour said twice,
+    derived at each site rather than named beside it.
 
 **Trigger:** this is not blocked on anything. It is sequenced after the shell
 event loop (`TD-C-THE-SHELL-CAN-DRAW-ITSELF-AND-NOBODY-CAN-ASK-IT-TO`) only

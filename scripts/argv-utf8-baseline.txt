@@ -20,7 +20,6 @@ userspace/coreutils/src/bin/cmp.rs:argv-as-string
 userspace/coreutils/src/bin/dd.rs:argv-as-string
 userspace/coreutils/src/bin/df.rs:argv-as-string
 userspace/coreutils/src/bin/diff.rs:argv-as-string
-userspace/coreutils/src/bin/du.rs:argv-as-string
 userspace/coreutils/src/bin/echo.rs:argv-as-string
 userspace/coreutils/src/bin/ed.rs:argv-as-string
 userspace/coreutils/src/bin/fetch.rs:argv-as-string

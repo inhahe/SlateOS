@@ -63,9 +63,27 @@ impl Opts {
     /// the identity, which is why it has no separate code path below.
     pub const GROUP_DIGITS: Self = Self(4);
     /// Print `1K` rather than `1.0K`: drop a decimal point followed by a zero.
-    /// `df -h` and `du -h` pass this; `dd` does not, which is the whole reason
-    /// `dd` says `1.0 kB` where `df` would say `1.0K` only when the tenth is
-    /// nonzero.
+    ///
+    /// **No coreutils caller passes this, and an earlier version of this
+    /// comment claiming `df -h` and `du -h` did was wrong.** The claim was
+    /// reasoned from `df -h`'s `16G` rather than measured, and `16G` is not
+    /// evidence: 16 is at or above ten, where the decimal is dropped by the
+    /// rule above whatever this bit says. Measured on GNU coreutils 9.4, on
+    /// inputs that are *exactly* a power of the base — the only inputs that can
+    /// tell the two apart:
+    ///
+    /// ```text
+    /// $ du -h --apparent-size k1     ->  1.0K      (1024-byte file)
+    /// $ ls -lh k1                    ->  1.0K
+    /// $ ls -s -h m1                  ->  1.0M
+    /// $ ls -l --block-size=human-readable k1  ->  1.0K
+    /// ```
+    ///
+    /// So `du.rs` must **not** set it, and neither must `ls` or `df`; the
+    /// option is here because gnulib's `human_readable` has it and this is a
+    /// port of that function rather than of its coreutils call sites. If a
+    /// caller is ever found — upstream `tar` is the likely one — record the
+    /// measurement here rather than the inference.
     pub const SUPPRESS_POINT_ZERO: Self = Self(8);
     /// Divide by the base until the value is below it, and report the
     /// exponent as a letter. Without this the value is printed whole.
@@ -532,21 +550,33 @@ mod tests {
         assert_eq!(iec(999_949), "977 KiB");
     }
 
-    /// `SUPPRESS_POINT_ZERO` is what separates `df -h`'s `16G` from `dd`'s
-    /// `16 GB` — the exponent and the value are identical.
+    /// `SUPPRESS_POINT_ZERO` drops the `.0` and nothing else.
+    ///
+    /// It is exercised through a synthetic option set rather than a named
+    /// utility's, because — see [`Opts::SUPPRESS_POINT_ZERO`] — no coreutils
+    /// utility passes it. The last two assertions are the ones that matter:
+    /// they pin the *only* inputs on which the bit is observable at all, which
+    /// is why an earlier version of this test naming `df` and `16G` proved
+    /// nothing.
     #[test]
     fn suppress_point_zero_drops_a_trailing_zero_decimal() {
-        let df = Opts::AUTOSCALE
+        let terse = Opts::AUTOSCALE
             | Opts::ROUND_TO_NEAREST
             | Opts::BASE_1024
             | Opts::SUPPRESS_POINT_ZERO
             | Opts::SI;
-        assert_eq!(human_readable(1024, df, 1, 1), "1K");
-        assert_eq!(human_readable(1536, df, 1, 1), "1.5K");
-        assert_eq!(human_readable(16 * 1024 * 1024 * 1024, df, 1, 1), "16G");
-        // Without the option the same numbers keep the zero.
-        let keep = df.0 & !Opts::SUPPRESS_POINT_ZERO.0;
-        assert_eq!(human_readable(1024, Opts(keep), 1, 1), "1.0K");
+        let keep = Opts(terse.0 & !Opts::SUPPRESS_POINT_ZERO.0);
+        assert_eq!(human_readable(1024, terse, 1, 1), "1K");
+        assert_eq!(human_readable(1024, keep, 1, 1), "1.0K");
+        // A nonzero tenth keeps its decimal either way.
+        assert_eq!(human_readable(1536, terse, 1, 1), "1.5K");
+        assert_eq!(human_readable(1536, keep, 1, 1), "1.5K");
+        // At ten and above the decimal is already gone, so the bit changes
+        // nothing — which is exactly why GNU's `16G` is not evidence that
+        // `df` sets it.
+        let sixteen = 16 * 1024 * 1024 * 1024;
+        assert_eq!(human_readable(sixteen, terse, 1, 1), "16G");
+        assert_eq!(human_readable(sixteen, keep, 1, 1), "16G");
     }
 
     /// A zero exponent still gets its space when `B` is asked for, and does not

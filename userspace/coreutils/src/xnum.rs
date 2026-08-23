@@ -458,10 +458,22 @@ pub fn xdectoimax(
 /// and the suffix multipliers apply to the magnitude.
 #[must_use]
 pub fn xstrtoimax(text: &[u8], valid_suffixes: Option<&[u8]>) -> (i64, Status) {
+    xstrtoimax_base(text, 10, valid_suffixes)
+}
+
+/// [`xstrtoimax`] in a base other than ten — gnulib's third argument, which
+/// `du -t` passes as `0`.
+///
+/// It is not decoration there: measured against GNU du 9.4, `du -t 0x10`
+/// succeeds and thresholds at sixteen, where base ten would have refused it as
+/// `invalid suffix in -t argument '0x10'`. See [`strtoumax_base`] for what a
+/// base of zero reads.
+#[must_use]
+pub fn xstrtoimax_base(text: &[u8], base: u32, valid_suffixes: Option<&[u8]>) -> (i64, Status) {
     let lead = skip_space(text);
     let negative = matches!(text.get(lead), Some(b'-'));
     if !negative {
-        let (value, status) = xstrtoumax(text, valid_suffixes);
+        let (value, status) = xstrtoumax_base(text, base, valid_suffixes);
         let Ok(signed) = i64::try_from(value) else {
             return (i64::MAX, promote_overflow(status));
         };
@@ -473,7 +485,7 @@ pub fn xstrtoimax(text: &[u8], valid_suffixes: Option<&[u8]>) -> (i64, Status) {
     // size-taking utilities use — with no branch it can get wrong.
     let mut magnitude = Vec::with_capacity(text.len());
     magnitude.extend_from_slice(text.get(lead.saturating_add(1)..).unwrap_or_default());
-    let (value, status) = xstrtoumax(&magnitude, valid_suffixes);
+    let (value, status) = xstrtoumax_base(&magnitude, base, valid_suffixes);
     if status == Status::Invalid {
         return (0, Status::Invalid);
     }
@@ -787,6 +799,23 @@ mod tests {
             xstrtoimax(b"-9223372036854775809", NONE),
             (i64::MIN, Status::Overflow)
         );
+    }
+
+    /// The base parameter reaches the signed side too, which is what `du -t`
+    /// needs: measured against GNU du 9.4, `du -t 0x10` thresholds at sixteen
+    /// and `du -t 010` at eight, so a base-ten reading of either would be a
+    /// different threshold rather than a different diagnostic.
+    #[test]
+    fn the_signed_side_reads_a_base_prefix_when_asked() {
+        const SIZES: Option<&[u8]> = Some(b"kKmMGTPEZYRQ0");
+        assert_eq!(xstrtoimax_base(b"0x10", 0, SIZES), (16, Status::Ok));
+        assert_eq!(xstrtoimax_base(b"010", 0, SIZES), (8, Status::Ok));
+        assert_eq!(xstrtoimax_base(b"-0x10", 0, SIZES), (-16, Status::Ok));
+        // Base ten is the other reading of the same three arguments, and it
+        // refuses rather than answering sixteen.
+        assert_eq!(xstrtoimax_base(b"0x10", 10, SIZES).1, Status::InvalidSuffix);
+        // The suffix still applies on top of the prefix.
+        assert_eq!(xstrtoimax_base(b"0x10K", 0, SIZES), (16384, Status::Ok));
     }
 
     #[test]

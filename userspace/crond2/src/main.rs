@@ -1076,18 +1076,19 @@ fn read_anacron_timestamp(job_id: &str) -> u64 {
                     trimmed[0..4].parse::<i64>(),
                     trimmed[4..6].parse::<u32>(),
                     trimmed[6..8].parse::<u32>(),
-                ) {
-                    let bt = BrokenTime {
-                        year: y,
-                        month: m,
-                        day: d,
-                        hour: 0,
-                        minute: 0,
-                        second: 0,
-                        weekday: 0, // Not needed for conversion.
-                    };
-                    return broken_to_unix(&bt);
-                }
+                )
+            {
+                let bt = BrokenTime {
+                    year: y,
+                    month: m,
+                    day: d,
+                    hour: 0,
+                    minute: 0,
+                    second: 0,
+                    weekday: 0, // Not needed for conversion.
+                };
+                return broken_to_unix(&bt);
+            }
             0
         }
         Err(_) => 0,
@@ -1190,14 +1191,16 @@ fn execute_command(command: &str, user: &str, env_vars: &HashMap<String, String>
         Ok(output) => {
             // If the command produced output, log it or send to mail.
             if !output.stdout.is_empty()
-                && let Ok(text) = String::from_utf8(output.stdout) {
-                    // Send to user's mail spool.
-                    send_mail(user, command, &text);
-                }
+                && let Ok(text) = String::from_utf8(output.stdout)
+            {
+                // Send to user's mail spool.
+                send_mail(user, command, &text);
+            }
             if !output.stderr.is_empty()
-                && let Ok(text) = String::from_utf8(output.stderr) {
-                    log_msg(1, &format!("({user}) STDERR: {text}"));
-                }
+                && let Ok(text) = String::from_utf8(output.stderr)
+            {
+                log_msg(1, &format!("({user}) STDERR: {text}"));
+            }
             if !output.status.success() {
                 let code = output.status.code().unwrap_or(-1);
                 log_msg(
@@ -1629,6 +1632,9 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // Fixed names under the system temp directory raced between
+    // concurrent test binaries; see scratchdir's module docs.
+    use scratchdir::ScratchDir;
 
     // ---- FieldBitset basics ----
 
@@ -2331,9 +2337,8 @@ mod tests {
     #[test]
     fn anacron_parse_valid() {
         let content = "1 5 daily-job /bin/daily-task\n7 10 weekly-job /bin/weekly-task\n";
-        let tmpdir = std::env::temp_dir().join("crond2_test_anacron");
-        let _ = fs::create_dir_all(&tmpdir);
-        let path = tmpdir.join("anacrontab_test");
+        let scratch = ScratchDir::new("crond2_test_anacron");
+        let path = scratch.path("anacrontab_test");
         fs::write(&path, content).unwrap();
 
         let tab = AnacronTab::load(&path).unwrap();
@@ -2343,45 +2348,36 @@ mod tests {
         assert_eq!(tab.entries[0].job_id, "daily-job");
         assert_eq!(tab.entries[0].command, "/bin/daily-task");
         assert_eq!(tab.entries[1].period_days, 7);
-
-        let _ = fs::remove_dir_all(&tmpdir);
     }
 
     #[test]
     fn anacron_parse_with_comments_and_env() {
         let content = "# Comment line\nSHELL=/bin/bash\n\n1 5 test-job /bin/test\n";
-        let tmpdir = std::env::temp_dir().join("crond2_test_anacron2");
-        let _ = fs::create_dir_all(&tmpdir);
-        let path = tmpdir.join("anacrontab_test2");
+        let scratch = ScratchDir::new("crond2_test_anacron2");
+        let path = scratch.path("anacrontab_test2");
         fs::write(&path, content).unwrap();
 
         let tab = AnacronTab::load(&path).unwrap();
         assert_eq!(tab.entries.len(), 1);
         assert_eq!(tab.env_vars.get("SHELL"), Some(&"/bin/bash".to_string()));
-
-        let _ = fs::remove_dir_all(&tmpdir);
     }
 
     #[test]
     fn anacron_parse_bad_period() {
         let content = "abc 5 test-job /bin/test\n";
-        let tmpdir = std::env::temp_dir().join("crond2_test_anacron3");
-        let _ = fs::create_dir_all(&tmpdir);
-        let path = tmpdir.join("anacrontab_test3");
+        let scratch = ScratchDir::new("crond2_test_anacron3");
+        let path = scratch.path("anacrontab_test3");
         fs::write(&path, content).unwrap();
 
         assert!(AnacronTab::load(&path).is_err());
-
-        let _ = fs::remove_dir_all(&tmpdir);
     }
 
     // ---- Anacron timestamps ----
 
     #[test]
     fn anacron_timestamp_roundtrip() {
-        let tmpdir = std::env::temp_dir().join("crond2_test_ts");
-        let _ = fs::create_dir_all(&tmpdir);
-        let ts_path = tmpdir.join("test-job-ts");
+        let scratch = ScratchDir::new("crond2_test_ts");
+        let ts_path = scratch.path("test-job-ts");
 
         // Write a YYYYMMDD timestamp file manually.
         fs::write(&ts_path, "20260518").unwrap();
@@ -2397,8 +2393,6 @@ mod tests {
         assert_eq!(y, 2026);
         assert_eq!(m, 5);
         assert_eq!(d, 18);
-
-        let _ = fs::remove_dir_all(&tmpdir);
     }
 
     // ---- Next run time calculation ----

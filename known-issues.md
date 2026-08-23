@@ -63281,6 +63281,167 @@ because in all three cases the code read correctly and only the *wiring* was
 missing. Two questions catch it: does anything call this, and does anyone
 check what it returns?
 
+### 2026-08-22 — sweep 1 of that backlog: `drm/edid.rs` 100 → 0, and six blanket allows with it
+
+First file off the attacker-facing list above. `kernel/src/drm/edid.rs` parses
+the 128-byte block a monitor volunteers over the DDC wire — a surface with real
+CVE history in Linux — and it is now at **zero** `indexing_slicing` and
+**zero** `arithmetic_side_effects` findings, with **no `#[allow]` left anywhere
+in the file**. Whole-kernel total 18 173 → 18 122.
+
+That second clause is the part worth reading twice. The file's clippy count
+*already* read zero for `arithmetic_side_effects` before this work, because six
+blanket `#[allow(clippy::arithmetic_side_effects)]` attributes sat on the
+functions that do the arithmetic. **A zero produced by a suppression looks
+exactly like a zero produced by a fix**, and only one of them survives the next
+edit — a blanket allow on a function blesses whatever arithmetic a later change
+adds *inside* it. Neutralising the six (temporarily, via
+`#[cfg_attr(never_set, allow(…))]`) exposed 17 hidden sites. None was a live
+bug — every one was provably in range given u8/u16/u32 widths — but "provably
+in range" was an argument in a comment, not a property of the code.
+
+**The fix shape, in two kinds.** They are genuinely different and were treated
+differently rather than with one blanket rewrite:
+
+| kind | example | fix |
+|---|---|---|
+| bound is *known* — a fixed offset into a fixed-size block | 19 `data[N]` reads, the four 18-byte descriptor slots, the fixture builder | put the bound in the **type**: `&[u8; 128]`, `&[u8; 18]`, `[u8; 128]`. Clippy does not fire on a constant index *or a constant range* into an array — verified empirically, it was the one thing I was unsure of when planning this |
+| bound is *attacker-derived* — read out of the monitor's own bytes | the CEA data-block walk (`pos`, `length`, `dtd_offset`) | `get` / `checked_*` / `saturating_*`, with the guard folded **into** the operation |
+
+Concretely, on the second kind: `parse_detailed_timing` had
+`if htotal > 0 && vtotal > 0 { … if denom > 0 { numer / denom } else { 60 } }`
+— a correct guard standing *next* to the division. It is now
+`numer.checked_div(denom)…unwrap_or(60)`, where the check and the division are
+one operation and cannot drift apart. Same move in `decode_manufacturer_id`:
+`if c1 > 0 && c1 <= 26 { b'A' + c1 - 1 }` became `field.checked_sub(1)`, since
+0 is both "not a letter" and the value that would underflow — one operation
+decides both, and it replaced three copies of the guarded expression.
+
+Two incidental finds, neither a lint issue:
+
+- `EdidInfo::name_str` sliced `&name[..self.monitor_name_len]` on a **`pub`**
+  field. The parser never sets it past 13; a caller building an `EdidInfo` by
+  hand can. Now `get(..len).unwrap_or(name)` — a truncated name in the display
+  path beats a panic.
+- The self-test asked `modes.is_empty()` and then indexed `modes[0]`. Splitting
+  one question into two checks is what forced the index; `modes.first()` in a
+  `let … else` answers both.
+
+**Fixture code counts too, and the array move is why.** `build_test_edid` built
+into a `vec![0u8; 128]`, so ~48 constant-offset writes were flagged. Changing
+one line — the `Vec` to `[u8; EDID_BLOCK_SIZE]` — cleared all of them, along
+with the sixth blanket allow, which turned out to be dead afterwards. This is
+the cheapest ratio in the sweep and the same lesson as `proc/elf.rs` above,
+read the other way: those fixtures are not dangerous, but they are *free* to
+fix when the container can carry its own length.
+
+**Method note for the remaining files.** Grep the file for `#[allow(` before
+believing its count, and re-measure after the change rather than assuming —
+the count here moved 100 → 51 → 0 across three passes, and the middle number
+was only visible because the paths in `--message-format=short` use backslashes
+on Windows and my first `grep 'drm/edid.rs'` silently matched nothing. **A
+grep that returns zero and a file that is clean are indistinguishable until
+you check the total.**
+
+Next on the list, unchanged: the decompressors (`fs/zstd.rs` 299, `fs/xz.rs`
+144, `fs/compress.rs` 110, `fs/sevenz.rs` 92, `fs/bzip2.rs` 88), the wire
+parsers (`net/tcp.rs` 182, `net/ssh.rs` 104, `net/tls.rs` 99,
+`net/firewall.rs` 87), then `fs/fat.rs` 140 and `fs/ext4/driver.rs` 104.
+
+## B-TEST-FIXTURES-SHARE-TEMP-PATHS-ACROSS-CONCURRENT-RUNS (lane B, 2026-08-22) — lane B's half FIXED, lane C's half FILED
+
+**In short:** a test that names its scratch directory after a fixed string, or
+after the clock, shares that path with every other copy of the suite running at
+the same time. Two `cargo test` runs overlapping is ordinary, not exotic, so the
+tests delete and overwrite each other's fixtures. The failures land on the code
+under test — `du: cannot access …`, `save: Io(NotFound)` — which is why they
+were not recognised as fixture bugs for as long as they were.
+
+**How it was found.** A workspace run of mine failed two `apps/screenshot` tests
+while a second workspace run was still in flight. Chasing that rather than
+re-running it turned up the same defect in twelve crates.
+
+**Why the clock is not a fix, only a disguise.** The system clock is refreshed
+on a timer interrupt rather than recomputed per read, so two threads reading it
+inside one tick get the same value however many digits it carries — and `cargo
+test` runs a suite's tests as threads of one process. Lane C measured 2133
+collisions in 16000 draws (13%); the figure is recorded in
+`userspace/scratchdir/src/lib.rs`. Adding the pid separates concurrent *runs*
+and does nothing for concurrent *threads*. `userspace/scratchdir` draws from the
+pid **and** a process-wide `AtomicU64`, which covers both axes by construction.
+
+**Measured, 2026-08-22** — six copies of one test binary, run at once, no source
+changes:
+
+| suite | runs failing (of 6) | distinct tests |
+|---|---|---|
+| `screenshot` (lane C) | 6 | 6 |
+| `explorer` (lane C) | 3 | 2 |
+| `imageviewer` (lane C) | 1 | 1 |
+| `du` (lane B, before the fix) | 1 | 1 |
+
+**Lane B — fixed.** `ca36f3e47` (du, 3 sites) and `d733787ee` (crond2 4, userdb
+2, vi 2, polkit 1). All now use `ScratchDir`; the hand-written cleanup tails are
+gone with them, since `Drop` covers the failing test that a trailing
+`remove_dir_all` structurally cannot reach. Re-measured at 15 binaries running
+at once: green.
+
+Deliberately left alone, and sound as they stand: `fio` (pid plus a distinct
+per-test tag), `filekind` and `tail` (pid plus `ThreadId`, which Rust guarantees
+is never reused).
+
+**Lane C — filed**, not fixed, because `apps/**` and `gui/**` are not mine to
+edit: `requests/b-c-test-fixtures-in-apps-and-gui-race-on-shared-temp-paths.md`
+lists 6 fixed-name sites and 12 clock-tagged ones with file and line, the
+one-command reproduction, and the conversion. `apps/installer/src/grub.rs`
+already does it correctly and is left alone.
+
+**The lesson worth keeping.** `polkit` had already been fixed once — from a
+fixed name to a nanosecond tag — with a comment that diagnoses the race
+correctly and then picks a fix that does not work. A rarer, stranger failure is
+worse than an obvious one. When a fixture needs to be unique, take the
+uniqueness from a counter, never from a clock.
+
+### Addendum (2026-08-23): the race poisons its path permanently — and blocked the merge gate
+
+The entry above described a probabilistic failure. It is worse: the race can
+convert itself into a **deterministic, permanent** failure that survives the run
+that caused it, and it did.
+
+A clean single-run `cargo test --workspace` — nothing else in flight — failed in
+`screenshot` at `apps/screenshot/src/main.rs:2044` with `AlreadyExists` from
+`create_dir_all`. The cause was that
+`std::env::temp_dir()/slateos-screenshot-litter` had become **a 118-byte 4×4 BMP
+file** where the helper expects a directory: `remove_dir_all` therefore failed
+(not a directory), the helper discarded that error with `let _ =`, and
+`create_dir_all` failed on the file already there. Measured both ways — poisoned:
+3 runs, 3 failures; after deleting that one file: 69 passed, 0 failed.
+
+The poison is written by the very test that then cannot run.
+`a_save_leaves_no_temporary_files_behind` ends with a deliberate negative case
+that writes **to the directory path itself** and asserts the write fails —
+which holds only while that path *is* a directory. When a concurrent run's
+`temp_dir("litter")` deletes the path in the window before that line, the write
+succeeds and leaves a BMP at the directory's name.
+
+Three properties make this materially worse than the parent entry:
+
+- It is **not cleared by `cargo clean`** — the poison is in the system temp
+  directory, not `target/`.
+- It is **invisible from the repository**: nothing in the tree names
+  `slateos-screenshot-litter`, so the next reader gets `AlreadyExists` from a
+  line that says `create_dir_all` and no reason to suspect a file.
+- It **blocks all three lanes**, because `cargo test --workspace` is the shared
+  merge gate. It blocked lane B's merge to `main` on 2026-08-23, for a defect in
+  a crate lane B may not edit.
+
+Recorded in full, with the mechanism and the `write_bmp(&dir, …)` line that
+writes the poison, in the addendum to
+`requests/b-c-test-fixtures-in-apps-and-gui-race-on-shared-temp-paths.md`.
+`ScratchDir` prevents both halves: it never reuses a name and never opens by
+deleting. Workaround until then: delete `%TEMP%/slateos-screenshot-litter` — it
+is a file, so `rmdir` will not remove it.
+
 ---
 
 ## TD-C-THE-SHELL-DRAWS-FOUR-OF-ITS-FIFTY-SEVEN-MODULES (lane C, 2026-08-22)
@@ -63383,3 +63544,59 @@ seen, every crate-wide sweep pays for them, and the day someone wires one up is
 the day they discover what it assumed. Nothing breaks in the meantime, which is
 exactly why it has gone unnoticed for so long — a module nobody draws also
 never looks wrong.
+---
+
+## A malformed Data Offset injected the TCP header into the receive stream (lane A)
+
+**Status:** FIXED 2026-08-22 — `d5ca795fc`, boot-tested on `lane-a`.
+
+Found by reading, during the `net/tcp.rs` lint sweep, not by a lint: clippy
+flagged `data[12]` as `indexing_slicing` and the *value* it read turned out to
+be the actual bug. Worth recording because the sweep's stated purpose is
+removing panics, and the most serious thing it surfaced was not a panic.
+
+**What was wrong.** `process_tcp_common` took the segment's Data Offset field
+and used it as the payload's start offset without checking it:
+
+```rust
+let data_offset = ((data[12] >> 4) as usize) * 4;
+let payload = if data_offset < data.len() { &data[data_offset..] } else { &[] };
+```
+
+Data Offset is four bits. A peer may send 0. When it did, `payload` was
+`&data[0..]` — the whole segment, starting with its own 20-byte TCP header —
+and that was appended to `rx_buffer` and returned to the application as
+ordinary stream data. Twenty bytes of attacker-chosen content (ports,
+sequence numbers, flags, window) injected into a stream, from one segment,
+requiring only an established connection. Values 1..4 inject proportionally
+less. RFC 793 §3.1 sets the minimum at 5 words; nothing enforced it.
+
+The mirror case was also wrong but harmless: Data Offset past the end of the
+segment claims options that were never transmitted, and was silently treated
+as "no options", so a 20-byte segment could pose as an option-bearing one.
+Linux drops both in `tcp_v4_rcv`
+(`th->doff < sizeof(struct tcphdr) / 4 || skb->len < th->doff * 4`).
+
+**Why it lasted.** The check had nowhere to live. The header parse was
+sixteen index expressions at the top of an 800-line function, so the only way
+to exercise the kernel's first contact with peer-chosen bytes was to stand up
+a connection and inject a frame — which no test did. The fix is therefore a
+split as much as a check: `parse_tcp_header` returns a `TcpHeaderView` or
+`None`, holds options and payload as *slices* rather than the offsets used to
+cut them, and destructures the fixed header in a single refutable slice
+pattern so the length check and the field reads are one operation. It has a
+direct self-test pinning doff 0–4, doff past the end, short segments, the
+bare 20-byte header, and the doff 5 vs 6 split of one 24-byte segment.
+
+**Generalisation worth acting on.** Every other wire parser in the tree reads
+a length or offset field out of the header and slices with it. The three on
+the remaining sweep list — `net/ssh.rs`, `net/tls.rs`, `net/firewall.rs` —
+should be read for this specific shape (a header field used as an offset
+without a lower bound), not merely swept for `indexing_slicing`. A `.get()`
+conversion silences the lint on such a site while leaving the injection
+intact, which is the failure mode to avoid: the panic is the loud symptom,
+the unchecked offset is the bug.
+
+**Sweep status for `net/tcp.rs`:** 182 → 110 → 56 distinct sites, all now
+`indexing_slicing`; all 22 blanket `arithmetic_side_effects` allows removed
+(`953f828c0`), of which only seven functions had any arithmetic at all.

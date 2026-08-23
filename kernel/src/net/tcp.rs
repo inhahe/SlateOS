@@ -577,6 +577,34 @@ impl TcpConnection {
             last_error: 0,
         }
     }
+
+    /// Release the slot: mark it free and drop everything buffered on it.
+    ///
+    /// The invariant is that an inactive slot is `Closed` and holds no
+    /// data, so the next connection to take the slot inherits nothing
+    /// from the last one. `last_error` is deliberately *not* cleared —
+    /// it is the reason for the teardown, and a caller that still holds
+    /// the handle reads it after the fact to learn why.
+    ///
+    /// Written out eighteen times before this existed, and by then the
+    /// copies had stopped agreeing: three sites in `tick_retransmit`
+    /// left `state` at whatever it had been and never cleared
+    /// `rx_buffer`, so an abandoned slot kept a dead peer's received
+    /// bytes until something reused it and reported a live state to the
+    /// diagnostic APIs meanwhile. Nothing acted on either — every
+    /// consumer happens to check `active` first — which is exactly what
+    /// let the divergence sit unnoticed. One method means the next field
+    /// added to `TcpConnection` gets cleared in one place instead of
+    /// eighteen, where a miss would be a genuine leak across
+    /// connections rather than a near one.
+    fn deactivate(&mut self) {
+        self.active = false;
+        self.state = TcpState::Closed;
+        self.rx_buffer.clear();
+        self.tx_buffer.clear();
+        self.nagle_buf.clear();
+        self.ooo_buf.clear();
+    }
 }
 
 /// Global TCP connection table.
@@ -649,7 +677,6 @@ const EPHEMERAL_TCP_END: u16 = 65000;
 ///
 /// Must be called while holding the CONNECTIONS lock — the caller passes
 /// a slice of connections to check against.
-#[allow(clippy::arithmetic_side_effects)]
 fn alloc_port_for(
     conns: &[TcpConnection; MAX_CONNECTIONS],
     _ns_id: NetNsId,
@@ -678,7 +705,7 @@ fn alloc_port_for(
             *port_guard = if candidate >= EPHEMERAL_TCP_END {
                 EPHEMERAL_TCP_START
             } else {
-                candidate + 1
+                candidate.saturating_add(1)
             };
             return Ok(candidate);
         }
@@ -687,7 +714,7 @@ fn alloc_port_for(
         candidate = if candidate >= EPHEMERAL_TCP_END {
             EPHEMERAL_TCP_START
         } else {
-            candidate + 1
+            candidate.saturating_add(1)
         };
 
         // If we've wrapped all the way around, no port is available.
@@ -710,8 +737,26 @@ fn generate_isn() -> u32 {
 // TCP segment building
 // ---------------------------------------------------------------------------
 
+/// Patch the checksum into the two placeholder bytes at `offset`.
+///
+/// The checksum covers the segment including its own field, so every
+/// builder pushes two zero bytes, computes over the finished segment, and
+/// comes back here.  All three did that with a pair of indexed stores and
+/// a `+ 1`; one helper writing both bytes from `to_be_bytes` cannot get
+/// the byte order or the second offset wrong in one builder and right in
+/// the others.
+///
+/// `offset` is always a position the caller has just pushed two bytes at,
+/// so the range is present; the `if let` is what makes that structural
+/// fact cost nothing instead of being asserted with a panic.
+fn write_checksum(seg: &mut [u8], offset: usize, checksum: u16) {
+    let end = offset.saturating_add(2);
+    if let Some(dst) = seg.get_mut(offset..end) {
+        dst.copy_from_slice(&checksum.to_be_bytes());
+    }
+}
+
 /// Build a TCP segment (header + payload).
-#[allow(clippy::arithmetic_side_effects, clippy::cast_possible_truncation)]
 fn build_segment(
     src_port: u16,
     dst_port: u16,
@@ -724,8 +769,7 @@ fn build_segment(
     dst_ip: IpAddr,
 ) -> Vec<u8> {
     let header_words: u8 = 5; // 20 bytes, no options.
-    let total_len = TCP_HEADER_SIZE + payload.len();
-    let mut seg = Vec::with_capacity(total_len);
+    let mut seg = Vec::with_capacity(TCP_HEADER_SIZE.saturating_add(payload.len()));
 
     // Source port.
     seg.extend_from_slice(&src_port.to_be_bytes());
@@ -751,8 +795,7 @@ fn build_segment(
 
     // Compute TCP checksum (includes IPv4 or IPv6 pseudo-header).
     let checksum = tcp_checksum_ip(&seg, src_ip, dst_ip);
-    seg[checksum_offset] = (checksum >> 8) as u8;
-    seg[checksum_offset + 1] = checksum as u8;
+    write_checksum(&mut seg, checksum_offset, checksum);
 
     seg
 }
@@ -761,7 +804,7 @@ fn build_segment(
 ///
 /// `options` is the raw option bytes to place between the fixed header
 /// and the payload.  Must be padded to a 4-byte boundary.
-#[allow(clippy::arithmetic_side_effects, clippy::cast_possible_truncation)]
+#[allow(clippy::cast_possible_truncation)]
 fn build_segment_with_options(
     src_port: u16,
     dst_port: u16,
@@ -774,12 +817,13 @@ fn build_segment_with_options(
     src_ip: IpAddr,
     dst_ip: IpAddr,
 ) -> Vec<u8> {
-    // Pad options to 4-byte boundary.
-    let opt_padded = (options.len() + 3) & !3;
-    let header_len = TCP_HEADER_SIZE + opt_padded;
+    // Pad options to a 4-byte boundary.  `options` is at most the 40-byte
+    // TCP option space, so the round-up cannot wrap; `saturating_add`
+    // states that without relying on the reader to check it.
+    let opt_padded = options.len().saturating_add(3) & !3;
+    let header_len = TCP_HEADER_SIZE.saturating_add(opt_padded);
     let header_words = (header_len / 4) as u8;
-    let total_len = header_len + payload.len();
-    let mut seg = Vec::with_capacity(total_len);
+    let mut seg = Vec::with_capacity(header_len.saturating_add(payload.len()));
 
     seg.extend_from_slice(&src_port.to_be_bytes());
     seg.extend_from_slice(&dst_port.to_be_bytes());
@@ -796,7 +840,8 @@ fn build_segment_with_options(
     seg.extend_from_slice(options);
     // Pad with NOP/END to 4-byte boundary.
     seg.resize(
-        seg.len() + opt_padded.saturating_sub(options.len()),
+        seg.len()
+            .saturating_add(opt_padded.saturating_sub(options.len())),
         TCP_OPT_END,
     );
 
@@ -804,8 +849,7 @@ fn build_segment_with_options(
     seg.extend_from_slice(payload);
 
     let checksum = tcp_checksum_ip(&seg, src_ip, dst_ip);
-    seg[checksum_offset] = (checksum >> 8) as u8;
-    seg[checksum_offset + 1] = checksum as u8;
+    write_checksum(&mut seg, checksum_offset, checksum);
 
     seg
 }
@@ -898,7 +942,6 @@ const OUR_WSCALE: u8 = 0;
 /// Uses the monotonic clock divided to milliseconds, truncated to
 /// 32 bits.  This wraps every ~49.7 days — fine for PAWS since the
 /// window for detecting old duplicates is much shorter.
-#[allow(clippy::arithmetic_side_effects)]
 fn tcp_now_ms() -> u32 {
     (crate::hrtimer::now_ns() / 1_000_000) as u32
 }
@@ -909,6 +952,50 @@ fn tcp_now_ms() -> u32 {
 /// of the 40-byte TCP option space.  SACK header is 4 bytes (NOP+NOP+kind+len)
 /// plus 8 bytes per block.  With 28 bytes left: 4 + 3×8 = 28 → max 3 blocks.
 const MAX_SACK_BLOCKS_WITH_TS: usize = 3;
+
+/// The most option bytes a TCP segment can carry.
+///
+/// The header's data-offset field is four bits, so the header is at most
+/// 15 four-byte words: 60 bytes, of which 20 are the fixed header.
+/// `build_segment_with_options` computes that field as
+/// `(header_len / 4) as u8`, so exceeding this does not merely overflow a
+/// buffer — it silently truncates the offset and puts a malformed segment
+/// on the wire.
+const MAX_TCP_OPT_SPACE: usize = 40;
+
+/// Bytes used by the Timestamp option, including its two NOP pad bytes.
+const TS_OPT_LEN: usize = 12;
+
+/// Bytes used by a SACK option carrying `n` blocks, including NOP padding.
+///
+/// NOP + NOP + kind + length, then a 4-byte left and right edge per block.
+const fn sack_opt_len(n: usize) -> usize {
+    // Evaluated only in const context, where an overflow is a compile
+    // error rather than a wrap — which is the failure mode we want.
+    #[allow(clippy::arithmetic_side_effects)]
+    {
+        4 + n * 8
+    }
+}
+
+/// Buffer size for the SACK-only option builder.
+const SACK_OPT_BUF: usize = sack_opt_len(MAX_SACK_BLOCKS);
+
+// The two option builders previously hard-coded `[u8; 40]` and `[u8; 36]`,
+// each of which happened to be *exactly* the size its contents needed.
+// Nothing tied those literals to the block counts they were derived from,
+// so raising `MAX_SACK_BLOCKS` from 4 to 5 -- an ordinary tuning change --
+// would have indexed past the end of both arrays and panicked the kernel
+// on the send path.  Deriving the sizes turns that into these assertions,
+// which fail at compile time instead.
+const _: () = assert!(
+    TS_OPT_LEN + sack_opt_len(MAX_SACK_BLOCKS_WITH_TS) <= MAX_TCP_OPT_SPACE,
+    "timestamp + SACK options exceed the 40-byte TCP option space"
+);
+const _: () = assert!(
+    SACK_OPT_BUF <= MAX_TCP_OPT_SPACE,
+    "SACK-only options exceed the 40-byte TCP option space"
+);
 
 /// Parsed TCP options from an incoming segment.
 struct TcpOptions {
@@ -933,60 +1020,66 @@ fn parse_tcp_options(option_bytes: &[u8]) -> TcpOptions {
         sack_permitted: false,
         timestamp: None,
     };
-    let mut i = 0;
-    while i < option_bytes.len() {
-        let kind = option_bytes[i];
+    // Walked as a shrinking slice rather than an index, so "how much is
+    // left" is the slice's own length and cannot be got wrong.  These
+    // bytes come off the wire from an unauthenticated peer.
+    let mut rest = option_bytes;
+    while let Some((&kind, tail)) = rest.split_first() {
         match kind {
             TCP_OPT_END => break,
             TCP_OPT_NOP => {
-                i = i.wrapping_add(1);
+                // Single-byte option: no length byte follows.
+                rest = tail;
                 continue;
             }
-            _ => {
-                // All other options have a length byte.
-                if i.wrapping_add(1) >= option_bytes.len() {
-                    break; // Truncated.
-                }
-                let len = option_bytes[i.wrapping_add(1)] as usize;
-                if len < 2 || i.wrapping_add(len) > option_bytes.len() {
-                    break; // Malformed.
-                }
-                match kind {
-                    TCP_OPT_MSS if len == 4 => {
-                        opts.mss = u16::from_be_bytes([
-                            option_bytes[i.wrapping_add(2)],
-                            option_bytes[i.wrapping_add(3)],
-                        ]);
-                    }
-                    TCP_OPT_WSCALE if len == 3 => {
-                        // RFC 7323 §2.3: shift count MUST be ≤ 14.
-                        let shift = option_bytes[i.wrapping_add(2)];
-                        opts.wscale = Some(if shift > 14 { 14 } else { shift });
-                    }
-                    TCP_OPT_SACK_PERM if len == 2 => {
-                        opts.sack_permitted = true;
-                    }
-                    TCP_OPT_TIMESTAMP if len == 10 => {
-                        // RFC 7323 §3.2: TSval (4 bytes) + TSecr (4 bytes).
-                        let tsval = u32::from_be_bytes([
-                            option_bytes[i.wrapping_add(2)],
-                            option_bytes[i.wrapping_add(3)],
-                            option_bytes[i.wrapping_add(4)],
-                            option_bytes[i.wrapping_add(5)],
-                        ]);
-                        let tsecr = u32::from_be_bytes([
-                            option_bytes[i.wrapping_add(6)],
-                            option_bytes[i.wrapping_add(7)],
-                            option_bytes[i.wrapping_add(8)],
-                            option_bytes[i.wrapping_add(9)],
-                        ]);
-                        opts.timestamp = Some((tsval, tsecr));
-                    }
-                    _ => {} // Unknown option — skip.
-                }
-                i = i.wrapping_add(len);
-            }
+            _ => {}
         }
+
+        // Every other option is kind, length, then length-2 payload bytes,
+        // where `length` counts the two header bytes too.
+        let Some(&declared) = tail.first() else {
+            break; // Truncated: a length byte was promised and is not there.
+        };
+        let len = declared as usize;
+        if len < 2 {
+            break; // Malformed: a length below the header size cannot advance.
+        }
+        let Some(option) = rest.get(..len) else {
+            break; // Malformed: the option runs off the end of the block.
+        };
+
+        // Matching the option against a *slice pattern* is what makes this
+        // safe rather than merely correct: the pattern's arity is the
+        // length check and the field extraction at once, so a wrong
+        // `len ==` guard and an out-of-range read are no longer two things
+        // that can disagree.  A known option carrying the wrong length
+        // falls to `_` and is skipped, exactly as before.
+        match (kind, option) {
+            (TCP_OPT_MSS, [_, _, hi, lo]) => {
+                opts.mss = u16::from_be_bytes([*hi, *lo]);
+            }
+            (TCP_OPT_WSCALE, [_, _, shift]) => {
+                // RFC 7323 §2.3: shift count MUST be ≤ 14.
+                opts.wscale = Some((*shift).min(14));
+            }
+            (TCP_OPT_SACK_PERM, [_, _]) => {
+                opts.sack_permitted = true;
+            }
+            // RFC 7323 §3.2: TSval (4 bytes) + TSecr (4 bytes).
+            (TCP_OPT_TIMESTAMP, [_, _, v0, v1, v2, v3, e0, e1, e2, e3]) => {
+                opts.timestamp = Some((
+                    u32::from_be_bytes([*v0, *v1, *v2, *v3]),
+                    u32::from_be_bytes([*e0, *e1, *e2, *e3]),
+                ));
+            }
+            _ => {} // Unknown option — skip.
+        }
+
+        let Some(next) = rest.get(len..) else {
+            break;
+        };
+        // `len >= 2`, so the slice strictly shrinks and the loop ends.
+        rest = next;
     }
     opts
 }
@@ -1005,7 +1098,6 @@ fn parse_tcp_options(option_bytes: &[u8]) -> TcpOptions {
 ///   NOP(kind=1)                                         =  1 byte
 ///   Timestamp(kind=8, len=10, TSval=4, TSecr=4)         = 10 bytes
 ///   Total options: 24 bytes → header is 44 bytes (11 words).
-#[allow(clippy::arithmetic_side_effects)]
 fn build_segment_with_syn_options(
     src_port: u16,
     dst_port: u16,
@@ -1023,9 +1115,8 @@ fn build_segment_with_syn_options(
     // Options: MSS(4) + NOP(1) + WScale(3) + NOP(1) + NOP(1) + SACK-Perm(2)
     //        + NOP(1) + NOP(1) + Timestamp(10) = 24 bytes.
     let header_words: u8 = 11; // (20 + 24) / 4 = 11 words.
-    let header_len = (header_words as usize) * 4;
-    let total_len = header_len + payload.len();
-    let mut seg = Vec::with_capacity(total_len);
+    let header_len = usize::from(header_words).saturating_mul(4);
+    let mut seg = Vec::with_capacity(header_len.saturating_add(payload.len()));
 
     // Standard TCP header fields (first 20 bytes).
     seg.extend_from_slice(&src_port.to_be_bytes());
@@ -1077,8 +1168,7 @@ fn build_segment_with_syn_options(
 
     // Compute TCP checksum (IPv4 or IPv6 pseudo-header).
     let checksum = tcp_checksum_ip(&seg, src_ip, dst_ip);
-    seg[checksum_offset] = (checksum >> 8) as u8;
-    seg[checksum_offset + 1] = checksum as u8;
+    write_checksum(&mut seg, checksum_offset, checksum);
 
     seg
 }
@@ -1351,6 +1441,65 @@ fn send_ack_with_sack(conn: &TcpConnection) -> KernelResult<()> {
 // Public API
 // ---------------------------------------------------------------------------
 
+/// Take a connection slot, recycling the oldest TIME_WAIT one if none is free.
+///
+/// Returns `OutOfMemory` when every slot is active and none is in TIME_WAIT.
+///
+/// `why` names the caller in the recycling log line.
+///
+/// Extracted because `connect`, `connect_start` and `handle_incoming_syn`
+/// carried this logic verbatim: a slot-allocation rule that exists in
+/// three copies is one that will eventually exist in three *versions* —
+/// and it had already started, since only two of the three logged the
+/// recycle at all.  It also replaces a hand-rolled minimum search whose
+/// result was then used as an index six times over: `get_mut` once, into
+/// a binding, is both one bounds check instead of six and the reason none
+/// of them can be out of range.
+fn take_conn_slot(conns: &mut [TcpConnection], why: &str) -> KernelResult<usize> {
+    if let Some(idx) = conns.iter().position(|c| !c.active) {
+        return Ok(idx);
+    }
+
+    // No free slot.  Reclaim the least recently active TIME_WAIT one;
+    // `min_by_key` keeps the first minimum, which is what the open-coded
+    // strict-`<` loop did.
+    let idx = conns
+        .iter()
+        .enumerate()
+        .filter(|(_, c)| c.active && c.state == TcpState::TimeWait)
+        .min_by_key(|(_, c)| c.last_activity_ns)
+        .map(|(i, _)| i)
+        .ok_or(KernelError::OutOfMemory)?;
+    let conn = conns.get_mut(idx).ok_or(KernelError::InternalError)?;
+
+    crate::serial_println!(
+        "[tcp] Recycling TIME_WAIT slot {} (port {}) for {}",
+        idx,
+        conn.local_port,
+        why
+    );
+
+    conn.deactivate();
+    Ok(idx)
+}
+
+/// The connection a handle names, or `InvalidArgument` if it names none.
+///
+/// A handle is an index into a fixed-size array, so `conns[handle]` is
+/// what this code kept saying.  That is a panic — a kernel halt — for
+/// any handle a caller gets wrong, and the syscall layer hands these out
+/// to userspace, so "a caller gets it wrong" includes "a process passes
+/// a number it made up".  Every such site is one bad `write()` argument
+/// away from taking the machine down, which is why they are worth the
+/// `?` rather than an audit that concludes they are all reachable only
+/// with valid handles today.
+fn conn_mut(
+    conns: &mut [TcpConnection],
+    handle: usize,
+) -> KernelResult<&mut TcpConnection> {
+    conns.get_mut(handle).ok_or(KernelError::InvalidArgument)
+}
+
 /// Open a TCP connection to the given address and port.
 ///
 /// `ns_id` identifies the network namespace; connections in different
@@ -1359,7 +1508,6 @@ fn send_ack_with_sack(conn: &TcpConnection) -> KernelResult<()> {
 ///
 /// Performs the 3-way handshake (SYN → SYN-ACK → ACK).
 /// Returns a connection handle on success.
-#[allow(clippy::arithmetic_side_effects)]
 pub fn connect(ns_id: NetNsId, remote_ip: IpAddr, remote_port: u16) -> KernelResult<usize> {
     let isn = generate_isn();
 
@@ -1373,38 +1521,9 @@ pub fn connect(ns_id: NetNsId, remote_ip: IpAddr, remote_port: u16) -> KernelRes
         // to the same remote endpoint within the same namespace.
         let local_port = alloc_port_for(&conns, ns_id, remote_ip, remote_port)?;
 
-        let slot = match conns.iter().position(|c| !c.active) {
-            Some(idx) => idx,
-            None => {
-                // No free slots — try to reclaim a TIME_WAIT connection.
-                let mut best: Option<usize> = None;
-                let mut oldest_activity: u64 = u64::MAX;
-                for (i, c) in conns.iter().enumerate() {
-                    if c.active && c.state == TcpState::TimeWait {
-                        if c.last_activity_ns < oldest_activity {
-                            oldest_activity = c.last_activity_ns;
-                            best = Some(i);
-                        }
-                    }
-                }
-                let idx = best.ok_or(KernelError::OutOfMemory)?;
-                // Reclaim the TIME_WAIT slot.
-                crate::serial_println!(
-                    "[tcp] Recycling TIME_WAIT slot {} (port {}) for new connection",
-                    idx,
-                    conns[idx].local_port
-                );
-                conns[idx].active = false;
-                conns[idx].state = TcpState::Closed;
-                conns[idx].rx_buffer.clear();
-                conns[idx].tx_buffer.clear();
-                conns[idx].nagle_buf.clear();
-                conns[idx].ooo_buf.clear();
-                idx
-            }
-        };
+        let slot = take_conn_slot(&mut conns[..], "new connection")?;
 
-        let conn = &mut conns[slot];
+        let conn = conns.get_mut(slot).ok_or(KernelError::InternalError)?;
         conn.active = true;
         conn.ns_id = ns_id;
         conn.state = TcpState::SynSent;
@@ -1523,7 +1642,10 @@ pub fn connect(ns_id: NetNsId, remote_ip: IpAddr, remote_port: u16) -> KernelRes
         for _ in 0..polls {
             super::poll();
 
-            let state = CONNECTIONS.lock()[handle].state;
+            let state = {
+                let mut conns = CONNECTIONS.lock();
+                conn_mut(&mut conns[..], handle)?.state
+            };
             if state == TcpState::Established {
                 crate::serial_println!(
                     "[tcp] Connection established to {}:{}",
@@ -1544,9 +1666,11 @@ pub fn connect(ns_id: NetNsId, remote_ip: IpAddr, remote_port: u16) -> KernelRes
 
     // All attempts exhausted — clean up.
     let mut conns = CONNECTIONS.lock();
-    conns[handle].last_error = TCP_ERR_TIMEDOUT;
-    conns[handle].active = false;
-    conns[handle].state = TcpState::Closed;
+    let conn = conn_mut(&mut conns[..], handle)?;
+    // `last_error` first: `deactivate` deliberately preserves it, so the
+    // caller can still learn *why* the slot went away.
+    conn.last_error = TCP_ERR_TIMEDOUT;
+    conn.deactivate();
     Err(KernelError::TimedOut)
 }
 
@@ -1569,7 +1693,6 @@ pub fn connect(ns_id: NetNsId, remote_ip: IpAddr, remote_port: u16) -> KernelRes
 /// Returns `(handle, KernelError::WouldBlock)` — the WouldBlock is the
 /// expected "in progress" signal, not an error.  The caller should map
 /// this to EINPROGRESS at the POSIX layer.
-#[allow(clippy::arithmetic_side_effects)]
 pub fn connect_start(ns_id: NetNsId, remote_ip: IpAddr, remote_port: u16) -> KernelResult<usize> {
     let isn = generate_isn();
 
@@ -1581,31 +1704,9 @@ pub fn connect_start(ns_id: NetNsId, remote_ip: IpAddr, remote_port: u16) -> Ker
         // to the same remote endpoint within the same namespace.
         let local_port = alloc_port_for(&conns, ns_id, remote_ip, remote_port)?;
 
-        let slot = match conns.iter().position(|c| !c.active) {
-            Some(idx) => idx,
-            None => {
-                let mut best: Option<usize> = None;
-                let mut oldest_activity: u64 = u64::MAX;
-                for (i, c) in conns.iter().enumerate() {
-                    if c.active && c.state == TcpState::TimeWait {
-                        if c.last_activity_ns < oldest_activity {
-                            oldest_activity = c.last_activity_ns;
-                            best = Some(i);
-                        }
-                    }
-                }
-                let idx = best.ok_or(KernelError::OutOfMemory)?;
-                conns[idx].active = false;
-                conns[idx].state = TcpState::Closed;
-                conns[idx].rx_buffer.clear();
-                conns[idx].tx_buffer.clear();
-                conns[idx].nagle_buf.clear();
-                conns[idx].ooo_buf.clear();
-                idx
-            }
-        };
+        let slot = take_conn_slot(&mut conns[..], "new connection")?;
 
-        let conn = &mut conns[slot];
+        let conn = conns.get_mut(slot).ok_or(KernelError::InternalError)?;
         conn.active = true;
         conn.ns_id = ns_id;
         conn.state = TcpState::SynSent;
@@ -1696,7 +1797,6 @@ pub fn connect_start(ns_id: NetNsId, remote_ip: IpAddr, remote_port: u16) -> Ker
 /// If window scaling is active, the true window is right-shifted by
 /// `rcv_wnd_scale` before being placed in the header (the peer
 /// left-shifts it back).
-#[allow(clippy::arithmetic_side_effects)]
 fn advertised_window(conn: &TcpConnection) -> u16 {
     let free = MAX_RX_BUFFER.saturating_sub(conn.rx_buffer.len());
     // True window — up to 64 KiB for our buffer size.
@@ -1710,7 +1810,6 @@ fn advertised_window(conn: &TcpConnection) -> u16 {
 /// Update RTT estimate from a new measurement (Jacobson/Karels, RFC 6298).
 ///
 /// `sample_ns` is the measured round-trip time in nanoseconds.
-#[allow(clippy::arithmetic_side_effects)]
 fn update_rtt(conn: &mut TcpConnection, sample_ns: u64) {
     if !conn.rtt_initialized {
         // First measurement (RFC 6298 §2.2):
@@ -1784,7 +1883,6 @@ fn try_rtt_sample(conn: &mut TcpConnection, ack: u32) -> bool {
 ///
 /// This provides a sample on every ACK, much better than timing a single
 /// segment per flight (which is the fallback when timestamps aren't available).
-#[allow(clippy::arithmetic_side_effects)]
 fn try_rtt_sample_ts(conn: &mut TcpConnection, tsecr: u32) {
     if tsecr == 0 {
         return; // No echo yet (e.g. pure SYN-ACK response).
@@ -1849,7 +1947,6 @@ fn effective_mss(conn: &TcpConnection) -> usize {
 
 /// Called when an ACK arrives — updates congestion window (slow-start or
 /// congestion avoidance, RFC 5681 §3.1).
-#[allow(clippy::arithmetic_side_effects)]
 fn on_ack_congestion(conn: &mut TcpConnection, bytes_acked: u32) {
     if bytes_acked == 0 {
         return;
@@ -1861,8 +1958,15 @@ fn on_ack_congestion(conn: &mut TcpConnection, bytes_acked: u32) {
     } else {
         // Congestion avoidance: increase cwnd by MSS * MSS / cwnd per ACK
         // (approximately 1 MSS per RTT).
-        let inc = (mss as u64).saturating_mul(bytes_acked as u64) / (conn.cwnd as u64).max(1);
-        conn.cwnd = conn.cwnd.saturating_add(inc.min(mss as u64) as u32);
+        // `max(1)` already ruled out the divide-by-zero, but `checked_div`
+        // puts that guarantee at the operation instead of one line above
+        // it, so a later edit cannot drop the clamp and leave behind a
+        // division that halts the kernel on a zero congestion window.
+        let inc = u64::from(mss)
+            .saturating_mul(u64::from(bytes_acked))
+            .checked_div(u64::from(conn.cwnd))
+            .unwrap_or(0);
+        conn.cwnd = conn.cwnd.saturating_add(inc.min(u64::from(mss)) as u32);
     }
 }
 
@@ -1885,7 +1989,6 @@ fn on_loss_congestion(conn: &mut TcpConnection) {
 ///
 /// Called when `snd_una` advances.  `bytes_acked` is the number of bytes
 /// newly acknowledged.  Keeps `tx_buf_seq` in sync with `snd_una`.
-#[allow(clippy::arithmetic_side_effects)]
 fn tx_buffer_trim(conn: &mut TcpConnection, bytes_acked: u32) {
     let trim = (bytes_acked as usize).min(conn.tx_buffer.len());
     if trim > 0 {
@@ -1902,12 +2005,10 @@ fn tx_buffer_trim(conn: &mut TcpConnection, bytes_acked: u32) {
     }
 }
 
-/// Retransmit the first unacknowledged segment from the retransmit buffer.
-///
-/// Sends up to `effective_mss(conn)` bytes from `tx_buffer[0..]`
-/// (sequence `snd_una`).
-#[allow(clippy::arithmetic_side_effects)]
-/// Retransmit info tuple.
+/// Everything `retransmit_from_buffer` needs to hand to `send_segment`:
+/// local port, remote address, remote port, sequence, ack, window, the
+/// MSS-sized payload buffer with its length, whether timestamps are in
+/// use, and the echo value to put in them.
 type RetxInfo = (
     u16,
     IpAddr,
@@ -1915,19 +2016,33 @@ type RetxInfo = (
     u32,
     u32,
     u16,
-    [u8; 1460],
+    [u8; MSS],
     usize,
     bool,
     u32,
 );
 
+/// Retransmit the first unacknowledged segment from the retransmit buffer.
+///
+/// Sends up to `effective_mss(conn)` bytes from `tx_buffer[0..]`
+/// (sequence `snd_una`).  `None` when there is nothing unacknowledged.
 fn retransmit_from_buffer(conn: &TcpConnection) -> Option<RetxInfo> {
     let retx_len = conn.tx_buffer.len().min(effective_mss(conn));
     if retx_len == 0 {
         return None;
     }
-    let mut data = [0u8; 1460]; // MSS-sized stack buffer.
-    data[..retx_len].copy_from_slice(&conn.tx_buffer[..retx_len]);
+    // `effective_mss` returns `MSS.min(peer_mss)`, so `retx_len` cannot
+    // exceed `MSS` — which is why the buffer is sized from the constant
+    // rather than from a `1460` that would silently start truncating if
+    // `MSS` were ever raised.
+    let mut data = [0u8; MSS];
+    let (Some(dst), Some(src)) = (
+        data.get_mut(..retx_len),
+        conn.tx_buffer.get(..retx_len),
+    ) else {
+        return None;
+    };
+    dst.copy_from_slice(src);
     Some((
         conn.local_port,
         conn.remote_ip,
@@ -1952,7 +2067,6 @@ fn retransmit_from_buffer(conn: &TcpConnection) -> Option<RetxInfo> {
 /// one past the last byte.  If the new range overlaps or is adjacent to
 /// an existing block, they are merged.  The block list is sorted by
 /// `left_edge` and capped at `MAX_SACK_BLOCKS`.
-#[allow(clippy::arithmetic_side_effects)]
 fn sack_insert(conn: &mut TcpConnection, left: u32, right: u32) {
     // Merge with existing blocks that overlap or are adjacent.
     let mut new_left = left;
@@ -2009,7 +2123,6 @@ fn sack_insert(conn: &mut TcpConnection, left: u32, right: u32) {
 /// After `rcv_nxt` advances (because in-order or OOO-delivered data was
 /// accepted), removes SACK blocks whose left edge is at or below
 /// `rcv_nxt` (they're covered by the cumulative ACK).
-#[allow(clippy::arithmetic_side_effects)]
 fn sack_advance(conn: &mut TcpConnection) {
     // Remove blocks that are now below rcv_nxt (already acknowledged
     // by the cumulative ACK).
@@ -2048,7 +2161,6 @@ const MAX_OOO_BUF: usize = MAX_RX_BUFFER;
 /// `seq` is the segment's starting sequence number, `data` is the
 /// payload.  Data is written into `ooo_buf` at offset `seq - ooo_base`.
 /// The buffer is grown as needed (bounded by `MAX_OOO_BUF`).
-#[allow(clippy::arithmetic_side_effects)]
 fn ooo_store(conn: &mut TcpConnection, seq: u32, data: &[u8]) {
     if data.is_empty() {
         return;
@@ -2103,7 +2215,6 @@ fn ooo_store(conn: &mut TcpConnection, seq: u32, data: &[u8]) {
 ///
 /// Called before `sack_advance` so the SACK blocks are still present
 /// for lookup.
-#[allow(clippy::arithmetic_side_effects)]
 fn ooo_deliver(conn: &mut TcpConnection) {
     if conn.ooo_buf.is_empty() {
         return;
@@ -2184,19 +2295,24 @@ fn seq_lt(a: u32, b: u32) -> bool {
     (a.wrapping_sub(b) as i32) < 0
 }
 
-/// Build SACK option bytes for an outgoing ACK.
+/// Append `bytes` at `pos`, returning the position just past them.
 ///
-/// Returns the option bytes to append to the TCP header (including NOP
-/// padding and the SACK option header).  Returns empty if no SACK blocks
-/// or SACK not negotiated.
-///
-/// SACK option format (RFC 2018 §3):
-///   NOP, NOP  (alignment padding)
-///   kind=5, length=2+8*N
-///   [left_edge1, right_edge1]  (each 4 bytes, big-endian)
-///   [left_edge2, right_edge2]
-///   ...
-#[allow(clippy::arithmetic_side_effects)]
+/// Returns `pos` unchanged if they do not fit, so a builder can never
+/// write past its buffer nor report a length it did not write. The
+/// callers below size their buffers from `sack_opt_len`, and the
+/// `const` assertions beside it prove the short return unreachable —
+/// it is the safety net, not the mechanism.
+fn put_opt(buf: &mut [u8], pos: usize, bytes: &[u8]) -> usize {
+    let Some(end) = pos.checked_add(bytes.len()) else {
+        return pos;
+    };
+    let Some(dst) = buf.get_mut(pos..end) else {
+        return pos;
+    };
+    dst.copy_from_slice(bytes);
+    end
+}
+
 /// Build combined options (Timestamp + optional SACK) for outgoing segments.
 ///
 /// When timestamps are negotiated, every outgoing segment must carry the
@@ -2206,20 +2322,19 @@ fn seq_lt(a: u32, b: u32) -> bool {
 ///
 /// Returns `(buffer, length)`.  `length` is the total option bytes to
 /// include.  If neither timestamps nor SACK is active, returns length 0.
-fn build_ts_and_sack_options(conn: &TcpConnection) -> ([u8; 40], usize) {
-    let mut buf = [0u8; 40];
+fn build_ts_and_sack_options(conn: &TcpConnection) -> ([u8; MAX_TCP_OPT_SPACE], usize) {
+    let mut buf = [0u8; MAX_TCP_OPT_SPACE];
     let mut pos = 0;
 
     if conn.ts_ok {
-        // Timestamp option: NOP(1) + NOP(1) + kind(1) + len(1) + TSval(4) + TSecr(4) = 12.
-        buf[pos] = TCP_OPT_NOP;
-        buf[pos + 1] = TCP_OPT_NOP;
-        buf[pos + 2] = TCP_OPT_TIMESTAMP;
-        buf[pos + 3] = 10;
-        let tsval = tcp_now_ms();
-        buf[pos + 4..pos + 8].copy_from_slice(&tsval.to_be_bytes());
-        buf[pos + 8..pos + 12].copy_from_slice(&conn.ts_recent.to_be_bytes());
-        pos += 12;
+        // NOP, NOP, kind, len=10, TSval(4), TSecr(4) -- `TS_OPT_LEN` bytes.
+        pos = put_opt(
+            &mut buf,
+            pos,
+            &[TCP_OPT_NOP, TCP_OPT_NOP, TCP_OPT_TIMESTAMP, 10],
+        );
+        pos = put_opt(&mut buf, pos, &tcp_now_ms().to_be_bytes());
+        pos = put_opt(&mut buf, pos, &conn.ts_recent.to_be_bytes());
     }
 
     // SACK blocks (if negotiated and present).
@@ -2231,52 +2346,86 @@ fn build_ts_and_sack_options(conn: &TcpConnection) -> ([u8; 40], usize) {
         } else {
             MAX_SACK_BLOCKS
         };
-        let n = (conn.sack_block_count as usize).min(max_blocks);
-        let opt_len = 2 + n * 8; // kind + length + blocks.
+        // Bound by the room actually left as well, so the length byte
+        // written below and the writes that follow it are derived from a
+        // single `n`.  Previously the byte said `2 + n * 8` while the
+        // writes ran to wherever `n` took them; the two agreed only
+        // because the buffer had been hand-sized to make them agree.
+        let room = buf
+            .len()
+            .saturating_sub(pos)
+            .saturating_sub(4)
+            .saturating_div(8);
+        let n = (conn.sack_block_count as usize).min(max_blocks).min(room);
 
-        buf[pos] = TCP_OPT_NOP;
-        buf[pos + 1] = TCP_OPT_NOP;
-        buf[pos + 2] = TCP_OPT_SACK;
-        buf[pos + 3] = opt_len as u8;
-        pos += 4;
+        if n > 0 {
+            // kind + length + the blocks themselves.
+            let opt_len = 2usize.saturating_add(n.saturating_mul(8));
+            // `n <= MAX_SACK_BLOCKS` (4), so `opt_len <= 34` and the cast
+            // is exact; the const assertions beside `sack_opt_len` are
+            // what keep that true if the block count is ever raised.
+            #[allow(clippy::cast_possible_truncation)]
+            let opt_len_byte = opt_len as u8;
 
-        for i in 0..n {
-            let (left, right) = conn.sack_blocks[i];
-            buf[pos..pos + 4].copy_from_slice(&left.to_be_bytes());
-            buf[pos + 4..pos + 8].copy_from_slice(&right.to_be_bytes());
-            pos += 8;
+            pos = put_opt(
+                &mut buf,
+                pos,
+                &[TCP_OPT_NOP, TCP_OPT_NOP, TCP_OPT_SACK, opt_len_byte],
+            );
+
+            for &(left, right) in conn.sack_blocks.iter().take(n) {
+                pos = put_opt(&mut buf, pos, &left.to_be_bytes());
+                pos = put_opt(&mut buf, pos, &right.to_be_bytes());
+            }
         }
     }
 
     (buf, pos)
 }
 
-fn build_sack_option(conn: &TcpConnection) -> ([u8; 36], usize) {
-    // Max: 2 (NOP+NOP) + 2 (kind+len) + 4*8 (4 blocks × 8 bytes) = 36.
-    let mut buf = [0u8; 36];
+/// Build SACK option bytes for an outgoing ACK.
+///
+/// Returns the option bytes to append to the TCP header (including NOP
+/// padding and the SACK option header).  Returns length 0 if there are no
+/// SACK blocks or SACK was not negotiated.
+///
+/// SACK option format (RFC 2018 §3):
+///   NOP, NOP  (alignment padding)
+///   kind=5, length=2+8*N
+///   [left_edge1, right_edge1]  (each 4 bytes, big-endian)
+///   [left_edge2, right_edge2]
+///   ...
+///
+/// Used when timestamps are *not* negotiated; `build_ts_and_sack_options`
+/// covers the combined case.
+fn build_sack_option(conn: &TcpConnection) -> ([u8; SACK_OPT_BUF], usize) {
+    let mut buf = [0u8; SACK_OPT_BUF];
 
     if !conn.sack_ok || conn.sack_block_count == 0 {
         return (buf, 0);
     }
 
     let n = (conn.sack_block_count as usize).min(MAX_SACK_BLOCKS);
-    let opt_len = 2 + n * 8; // kind + length + blocks.
-    let total = 2 + opt_len; // NOP + NOP + option.
+    // kind + length + the blocks themselves.
+    let opt_len = 2usize.saturating_add(n.saturating_mul(8));
+    // `n <= MAX_SACK_BLOCKS` (4), so `opt_len <= 34` and the cast is exact.
+    #[allow(clippy::cast_possible_truncation)]
+    let opt_len_byte = opt_len as u8;
 
-    buf[0] = TCP_OPT_NOP;
-    buf[1] = TCP_OPT_NOP;
-    buf[2] = TCP_OPT_SACK;
-    buf[3] = opt_len as u8;
-
-    let mut pos = 4;
-    for i in 0..n {
-        let (left, right) = conn.sack_blocks[i];
-        buf[pos..pos + 4].copy_from_slice(&left.to_be_bytes());
-        buf[pos + 4..pos + 8].copy_from_slice(&right.to_be_bytes());
-        pos += 8;
+    let mut pos = put_opt(
+        &mut buf,
+        0,
+        &[TCP_OPT_NOP, TCP_OPT_NOP, TCP_OPT_SACK, opt_len_byte],
+    );
+    for &(left, right) in conn.sack_blocks.iter().take(n) {
+        pos = put_opt(&mut buf, pos, &left.to_be_bytes());
+        pos = put_opt(&mut buf, pos, &right.to_be_bytes());
     }
 
-    (buf, total)
+    // The returned length is now the cursor itself.  It used to be a
+    // separately computed `2 + opt_len`, which is a third place the same
+    // arithmetic had to come out right.
+    (buf, pos)
 }
 
 /// Send data on an established TCP connection.
@@ -2286,7 +2435,6 @@ fn build_sack_option(conn: &TcpConnection) -> ([u8; 36], usize) {
 /// delays small segments when unacknowledged data is in flight.
 ///
 /// Returns `Ok(())` even if the effective window truncated the send.
-#[allow(clippy::arithmetic_side_effects)]
 pub fn send(handle: usize, data: &[u8]) -> KernelResult<usize> {
     let (
         local_port,
@@ -2449,8 +2597,10 @@ pub fn send(handle: usize, data: &[u8]) -> KernelResult<usize> {
     };
 
     while offset < send_data.len() {
-        let chunk_end = (offset + eff_mss).min(send_data.len());
-        let chunk = &send_data[offset..chunk_end];
+        let chunk_end = offset.saturating_add(eff_mss).min(send_data.len());
+        let Some(chunk) = send_data.get(offset..chunk_end) else {
+            break;
+        };
 
         let send_seq = seq.wrapping_add(offset as u32);
         send_data_with_ts(
@@ -2477,7 +2627,7 @@ pub fn send(handle: usize, data: &[u8]) -> KernelResult<usize> {
     // Update snd_nxt, buffer sent data for retransmission, and reset keepalive.
     {
         let mut conns = CONNECTIONS.lock();
-        let conn = &mut conns[handle];
+        let conn = conn_mut(&mut conns[..], handle)?;
         conn.snd_nxt = seq.wrapping_add(sendable as u32);
         let now = crate::hrtimer::now_ns();
         conn.last_activity_ns = now;
@@ -2488,8 +2638,8 @@ pub fn send(handle: usize, data: &[u8]) -> KernelResult<usize> {
         // bound memory usage.
         let space = MAX_TX_BUFFER.saturating_sub(conn.tx_buffer.len());
         let copy_len = sendable.min(space);
-        if copy_len > 0 {
-            conn.tx_buffer.extend_from_slice(&send_data[..copy_len]);
+        if let Some(copy) = send_data.get(..copy_len) {
+            conn.tx_buffer.extend_from_slice(copy);
         }
         // Record send time for RTO-based retransmit.
         if conn.tx_last_send_ns == 0 {
@@ -2897,7 +3047,6 @@ pub fn read_blocking(handle: usize, timeout_polls: u32, max_bytes: usize) -> Ker
 ///
 /// If `rst` is true, send RST instead of FIN (abortive close, e.g.,
 /// when SO_LINGER timeout is 0 or unread data exists in rx_buffer).
-#[allow(clippy::arithmetic_side_effects)]
 pub fn close(handle: usize) -> KernelResult<()> {
     let (local_port, remote_ip, remote_port, seq, ack, state, has_unread) = {
         let conns = CONNECTIONS.lock();
@@ -2937,12 +3086,7 @@ pub fn close(handle: usize) -> KernelResult<()> {
             remote_port
         );
         let mut conns = CONNECTIONS.lock();
-        conns[handle].active = false;
-        conns[handle].state = TcpState::Closed;
-        conns[handle].rx_buffer.clear();
-        conns[handle].tx_buffer.clear();
-        conns[handle].nagle_buf.clear();
-        conns[handle].ooo_buf.clear();
+        conn_mut(&mut conns[..], handle)?.deactivate();
         return Ok(());
     }
 
@@ -2959,15 +3103,19 @@ pub fn close(handle: usize) -> KernelResult<()> {
                 &[],
             )?;
             let mut conns = CONNECTIONS.lock();
-            conns[handle].state = TcpState::FinWait1;
-            conns[handle].snd_nxt = seq.wrapping_add(1);
-            conns[handle].last_activity_ns = crate::hrtimer::now_ns();
+            let conn = conn_mut(&mut conns[..], handle)?;
+            conn.state = TcpState::FinWait1;
+            conn.snd_nxt = seq.wrapping_add(1);
+            conn.last_activity_ns = crate::hrtimer::now_ns();
 
             // Brief wait for FIN-ACK (non-blocking).
             drop(conns);
             for _ in 0..500 {
                 super::poll();
-                let state = CONNECTIONS.lock()[handle].state;
+                let state = {
+                    let mut conns = CONNECTIONS.lock();
+                    conn_mut(&mut conns[..], handle)?.state
+                };
                 if state == TcpState::Closed || state == TcpState::TimeWait {
                     break;
                 }
@@ -2981,13 +3129,9 @@ pub fn close(handle: usize) -> KernelResult<()> {
             // TimeWait cleanup and FIN retransmission for in-progress
             // teardowns are handled by tick_retransmit / tick_time_wait_cleanup.
             let mut conns = CONNECTIONS.lock();
-            let final_state = conns[handle].state;
-            if final_state == TcpState::Closed {
-                conns[handle].active = false;
-                conns[handle].rx_buffer.clear();
-                conns[handle].tx_buffer.clear();
-                conns[handle].nagle_buf.clear();
-                conns[handle].ooo_buf.clear();
+            let conn = conn_mut(&mut conns[..], handle)?;
+            if conn.state == TcpState::Closed {
+                conn.deactivate();
             }
             // If still FinWait1/FinWait2/TimeWait, leave slot active for
             // the timer-based handlers (FIN retransmit, TIME_WAIT cleanup).
@@ -3004,31 +3148,22 @@ pub fn close(handle: usize) -> KernelResult<()> {
                 &[],
             )?;
             let mut conns = CONNECTIONS.lock();
-            conns[handle].state = TcpState::LastAck;
-            conns[handle].snd_nxt = seq.wrapping_add(1);
-            conns[handle].last_activity_ns = crate::hrtimer::now_ns();
+            let conn = conn_mut(&mut conns[..], handle)?;
+            conn.state = TcpState::LastAck;
+            conn.snd_nxt = seq.wrapping_add(1);
+            conn.last_activity_ns = crate::hrtimer::now_ns();
             // Leave slot active — tick_retransmit() handles FIN retransmission
             // if the ACK is lost, and deactivation happens when the ACK arrives.
         }
         TcpState::SynSent => {
             // Connection never established — just deactivate.
             let mut conns = CONNECTIONS.lock();
-            conns[handle].active = false;
-            conns[handle].state = TcpState::Closed;
-            conns[handle].rx_buffer.clear();
-            conns[handle].tx_buffer.clear();
-            conns[handle].nagle_buf.clear();
-            conns[handle].ooo_buf.clear();
+            conn_mut(&mut conns[..], handle)?.deactivate();
         }
         _ => {
             // Already closing or other state — force deactivate.
             let mut conns = CONNECTIONS.lock();
-            conns[handle].active = false;
-            conns[handle].state = TcpState::Closed;
-            conns[handle].rx_buffer.clear();
-            conns[handle].tx_buffer.clear();
-            conns[handle].nagle_buf.clear();
-            conns[handle].ooo_buf.clear();
+            conn_mut(&mut conns[..], handle)?.deactivate();
         }
     }
 
@@ -3047,7 +3182,6 @@ pub fn close(handle: usize) -> KernelResult<()> {
 ///
 /// Unlike `close()`, the connection slot remains active for the
 /// remaining half that is still open.
-#[allow(clippy::arithmetic_side_effects)]
 pub fn shutdown(handle: usize, how: u32) -> KernelResult<()> {
     let shut_rd = how == 0 || how == 2;
     let shut_wr = how == 1 || how == 2;
@@ -3097,9 +3231,10 @@ pub fn shutdown(handle: usize, how: u32) -> KernelResult<()> {
                     &[],
                 )?;
                 let mut conns = CONNECTIONS.lock();
-                conns[handle].state = TcpState::FinWait1;
-                conns[handle].snd_nxt = seq.wrapping_add(1);
-                conns[handle].local_write_closed = true;
+                let conn = conn_mut(&mut conns[..], handle)?;
+                conn.state = TcpState::FinWait1;
+                conn.snd_nxt = seq.wrapping_add(1);
+                conn.local_write_closed = true;
             }
             TcpState::CloseWait => {
                 // Remote already sent FIN; our FIN completes the close.
@@ -3113,19 +3248,20 @@ pub fn shutdown(handle: usize, how: u32) -> KernelResult<()> {
                     &[],
                 )?;
                 let mut conns = CONNECTIONS.lock();
-                conns[handle].state = TcpState::LastAck;
-                conns[handle].snd_nxt = seq.wrapping_add(1);
-                conns[handle].local_write_closed = true;
+                let conn = conn_mut(&mut conns[..], handle)?;
+                conn.state = TcpState::LastAck;
+                conn.snd_nxt = seq.wrapping_add(1);
+                conn.local_write_closed = true;
             }
             TcpState::SynSent | TcpState::SynReceived => {
                 // Not yet established — just mark write closed.
                 let mut conns = CONNECTIONS.lock();
-                conns[handle].local_write_closed = true;
+                conn_mut(&mut conns[..], handle)?.local_write_closed = true;
             }
             _ => {
                 // Already in a closing state (FinWait1, FinWait2, etc.).
                 let mut conns = CONNECTIONS.lock();
-                conns[handle].local_write_closed = true;
+                conn_mut(&mut conns[..], handle)?.local_write_closed = true;
             }
         }
     }
@@ -3169,12 +3305,7 @@ pub fn abort(handle: usize) -> KernelResult<()> {
 
     // Immediately reclaim the slot.
     conn.last_error = TCP_ERR_RESET; // Aborted by local side.
-    conn.active = false;
-    conn.state = TcpState::Closed;
-    conn.rx_buffer.clear();
-    conn.tx_buffer.clear();
-    conn.nagle_buf.clear();
-    conn.ooo_buf.clear();
+    conn.deactivate();
 
     drop(conns);
 
@@ -3570,12 +3701,7 @@ pub fn close_listener(listener_handle: usize) -> KernelResult<()> {
                         ack: conn.rcv_nxt,
                     });
                     conn.last_error = TCP_ERR_TIMEDOUT;
-                    conn.active = false;
-                    conn.state = TcpState::Closed;
-                    conn.rx_buffer.clear();
-                    conn.tx_buffer.clear();
-                    conn.nagle_buf.clear();
-                    conn.ooo_buf.clear();
+                    conn.deactivate();
                 }
             }
         }
@@ -3613,7 +3739,6 @@ pub fn close_listener(listener_handle: usize) -> KernelResult<()> {
 ///
 /// `syn_flags` is the full TCP flags byte from the SYN segment, used to
 /// detect ECN negotiation (RFC 3168 §6.1.1: ECE+CWR in SYN).
-#[allow(clippy::arithmetic_side_effects)]
 fn handle_incoming_syn(
     ns_id: NetNsId,
     remote_ip: IpAddr,
@@ -3664,37 +3789,9 @@ fn handle_incoming_syn(
     let isn = generate_isn();
     let handle = {
         let mut conns = CONNECTIONS.lock();
-        let slot = match conns.iter().position(|c| !c.active) {
-            Some(idx) => idx,
-            None => {
-                // No free slots — try to reclaim a TIME_WAIT connection.
-                let mut best: Option<usize> = None;
-                let mut oldest_activity: u64 = u64::MAX;
-                for (i, c) in conns.iter().enumerate() {
-                    if c.active && c.state == TcpState::TimeWait {
-                        if c.last_activity_ns < oldest_activity {
-                            oldest_activity = c.last_activity_ns;
-                            best = Some(i);
-                        }
-                    }
-                }
-                let idx = best.ok_or(KernelError::OutOfMemory)?;
-                crate::serial_println!(
-                    "[tcp] Recycling TIME_WAIT slot {} (port {}) for incoming SYN",
-                    idx,
-                    conns[idx].local_port
-                );
-                conns[idx].active = false;
-                conns[idx].state = TcpState::Closed;
-                conns[idx].rx_buffer.clear();
-                conns[idx].tx_buffer.clear();
-                conns[idx].nagle_buf.clear();
-                conns[idx].ooo_buf.clear();
-                idx
-            }
-        };
+        let slot = take_conn_slot(&mut conns[..], "incoming SYN")?;
 
-        let conn = &mut conns[slot];
+        let conn = conns.get_mut(slot).ok_or(KernelError::InternalError)?;
         conn.active = true;
         conn.ns_id = effective_ns;
         conn.state = TcpState::SynReceived;
@@ -3879,7 +3976,6 @@ fn enqueue_to_listener(ns_id: NetNsId, local_port: u16, conn_handle: usize) {
 ///
 /// Verifies the IPv4 pseudo-header checksum, wraps the source address
 /// in `IpAddr::V4`, and delegates to the shared TCP state machine.
-#[allow(clippy::arithmetic_side_effects)]
 pub fn process_tcp(ip_packet: &Ipv4Packet<'_>, ns_id: NetNsId) -> KernelResult<()> {
     let data = ip_packet.payload;
     if data.len() < TCP_HEADER_SIZE {
@@ -3910,7 +4006,6 @@ pub fn process_tcp(ip_packet: &Ipv4Packet<'_>, ns_id: NetNsId) -> KernelResult<(
 ///
 /// ECN is extracted from the IPv6 traffic class field (low 2 bits,
 /// same encoding as IPv4).
-#[allow(clippy::arithmetic_side_effects)]
 pub fn process_tcp_v6(ip_packet: &Ipv6Packet<'_>, ns_id: NetNsId) -> KernelResult<()> {
     let data = ip_packet.payload;
     if data.len() < TCP_HEADER_SIZE {
@@ -3934,6 +4029,71 @@ pub fn process_tcp_v6(ip_packet: &Ipv6Packet<'_>, ns_id: NetNsId) -> KernelResul
     process_tcp_common(ns_id, remote_addr, data, ip_ecn_ce)
 }
 
+/// A validated view of one received TCP segment.
+///
+/// Produced only by `parse_tcp_header`, which is the single place the
+/// fixed header's bytes are read.  Holding the options and payload as
+/// slices — rather than the offsets used to cut them — means no later
+/// code can recompute a range and get a different answer.
+struct TcpHeaderView<'a> {
+    src_port: u16,
+    dst_port: u16,
+    seq: u32,
+    ack: u32,
+    flags: u8,
+    window: u16,
+    options: &'a [u8],
+    payload: &'a [u8],
+}
+
+/// Parse and validate the fixed TCP header, or `None` if the segment is
+/// malformed and must be dropped.
+///
+/// Split out of `process_tcp_common` so the validation has a name and a
+/// test.  It is the first code in the kernel to touch bytes the peer
+/// chose, and until it was separated the only way to exercise it was to
+/// stand up a live connection and inject a frame.
+///
+/// Rejects:
+/// - segments shorter than the 20-byte fixed header;
+/// - Data Offset < 5 words.  RFC 793 §3.1 sets the minimum at 5, but the
+///   field is 4 bits and a peer may send 0.  When it did, the payload
+///   slice started at byte 0 and the segment's *own header* was appended
+///   to the receive buffer and delivered to the application as stream
+///   data — remote data injection from one malformed segment.
+/// - Data Offset past the end of the segment, which claims options that
+///   were never transmitted.
+///
+/// Linux rejects the same two in `tcp_v4_rcv`:
+/// `th->doff < sizeof(struct tcphdr) / 4 || skb->len < th->doff * 4`.
+fn parse_tcp_header(data: &[u8]) -> Option<TcpHeaderView<'_>> {
+    // One refutable pattern makes the length check and the field
+    // extraction the same operation, so they cannot drift apart.
+    let &[sp_hi, sp_lo, dp_hi, dp_lo, sq0, sq1, sq2, sq3, ak0, ak1, ak2, ak3, off_nibble, flags, wnd_hi, wnd_lo, ..] =
+        data
+    else {
+        return None;
+    };
+
+    let data_offset = usize::from(off_nibble >> 4).saturating_mul(4);
+    if data_offset < TCP_HEADER_SIZE || data_offset > data.len() {
+        return None;
+    }
+
+    Some(TcpHeaderView {
+        src_port: u16::from_be_bytes([sp_hi, sp_lo]),
+        dst_port: u16::from_be_bytes([dp_hi, dp_lo]),
+        seq: u32::from_be_bytes([sq0, sq1, sq2, sq3]),
+        ack: u32::from_be_bytes([ak0, ak1, ak2, ak3]),
+        flags,
+        window: u16::from_be_bytes([wnd_hi, wnd_lo]),
+        // Both ranges are in bounds by the check above; `unwrap_or` keeps
+        // this total rather than restating that argument as a panic.
+        options: data.get(TCP_HEADER_SIZE..data_offset).unwrap_or(&[]),
+        payload: data.get(data_offset..).unwrap_or(&[]),
+    })
+}
+
 /// Shared TCP segment processing for both IPv4 and IPv6.
 ///
 /// The caller has already verified the transport checksum and extracted
@@ -3944,32 +4104,25 @@ pub fn process_tcp_v6(ip_packet: &Ipv6Packet<'_>, ns_id: NetNsId) -> KernelResul
 /// `remote_addr` — sender's IP (IpAddr::V4 or V6).
 /// `data` — raw TCP segment bytes (header + options + payload).
 /// `ip_ecn_ce` — true if the IP header indicated Congestion Experienced.
-#[allow(clippy::arithmetic_side_effects)]
 fn process_tcp_common(
     ns_id: NetNsId,
     remote_addr: IpAddr,
     data: &[u8],
     ip_ecn_ce: bool,
 ) -> KernelResult<()> {
-    let src_port = u16::from_be_bytes([data[0], data[1]]);
-    let dst_port = u16::from_be_bytes([data[2], data[3]]);
-    let seq = u32::from_be_bytes([data[4], data[5], data[6], data[7]]);
-    let ack = u32::from_be_bytes([data[8], data[9], data[10], data[11]]);
-    let data_offset = ((data[12] >> 4) as usize) * 4;
-    let flags = data[13];
-    let window = u16::from_be_bytes([data[14], data[15]]);
-
-    // TCP options sit between the fixed header and the payload.
-    let option_bytes = if data_offset > TCP_HEADER_SIZE && data_offset <= data.len() {
-        &data[TCP_HEADER_SIZE..data_offset]
-    } else {
-        &[]
-    };
-
-    let payload = if data_offset < data.len() {
-        &data[data_offset..]
-    } else {
-        &[]
+    // A malformed header is dropped, not processed: see `parse_tcp_header`.
+    let Some(TcpHeaderView {
+        src_port,
+        dst_port,
+        seq,
+        ack,
+        flags,
+        window,
+        options: option_bytes,
+        payload,
+    }) = parse_tcp_header(data)
+    else {
+        return Ok(());
     };
 
     // Find matching connection.
@@ -4136,12 +4289,7 @@ fn process_tcp_common(
         } else {
             TCP_ERR_RESET
         };
-        conn.active = false;
-        conn.state = TcpState::Closed;
-        conn.rx_buffer.clear();
-        conn.tx_buffer.clear();
-        conn.nagle_buf.clear();
-        conn.ooo_buf.clear();
+        conn.deactivate();
         return Ok(());
     }
 
@@ -4156,9 +4304,13 @@ fn process_tcp_common(
     // Skip for SynSent (receive window not yet established — we're waiting
     // for SYN-ACK) and SynReceived (handshake still in progress).
     if conn.state != TcpState::SynSent && conn.state != TcpState::SynReceived {
-        let seg_len = payload.len() as u32
-            + if flags & TCP_SYN != 0 { 1 } else { 0 }
-            + if flags & TCP_FIN != 0 { 1 } else { 0 };
+        // RFC 793: SYN and FIN each occupy one sequence number.  The
+        // payload is bounded by the MTU, so this cannot approach `u32`
+        // — but it is computed from a peer-supplied segment, which is
+        // reason enough not to leave a bare `+` on the path.
+        let seg_len = (payload.len() as u32)
+            .saturating_add(u32::from(flags & TCP_SYN != 0))
+            .saturating_add(u32::from(flags & TCP_FIN != 0));
         let rcv_wnd = (advertised_window(conn) as u32) << (conn.rcv_wnd_scale as u32);
         let acceptable = if rcv_wnd == 0 {
             // Zero window: only accept zero-length segment at exactly rcv_nxt.
@@ -4807,7 +4959,6 @@ pub fn set_keepalive_params(
 ///   resumes.
 ///
 /// Called from the same periodic tick as `tick_keepalive`.
-#[allow(clippy::arithmetic_side_effects)]
 pub fn tick_persist() {
     let now = crate::hrtimer::now_ns();
     let mut conns = CONNECTIONS.lock();
@@ -4896,7 +5047,6 @@ pub fn tick_persist() {
 /// Scans all established connections with keepalive enabled.  For each
 /// idle connection, either sends a probe or declares the connection dead
 /// if the probe limit has been reached.
-#[allow(clippy::arithmetic_side_effects)]
 pub fn tick_keepalive() {
     let now = crate::hrtimer::now_ns();
     let mut conns = CONNECTIONS.lock();
@@ -4939,12 +5089,7 @@ pub fn tick_keepalive() {
             let rcv_nxt = conn.rcv_nxt;
 
             conn.last_error = TCP_ERR_TIMEDOUT; // Keepalive failure.
-            conn.active = false;
-            conn.state = TcpState::Closed;
-            conn.rx_buffer.clear();
-            conn.tx_buffer.clear();
-            conn.nagle_buf.clear();
-            conn.ooo_buf.clear();
+            conn.deactivate();
 
             drop(conns);
             let _ = send_segment(
@@ -5071,12 +5216,7 @@ pub fn tick_time_wait_cleanup() {
                         conn.remote_port
                     );
                     conn.last_error = TCP_ERR_NONE; // Normal close.
-                    conn.active = false;
-                    conn.state = TcpState::Closed;
-                    conn.rx_buffer.clear();
-                    conn.tx_buffer.clear();
-                    conn.nagle_buf.clear();
-                    conn.ooo_buf.clear();
+                    conn.deactivate();
                 }
             }
             TcpState::FinWait1 => {
@@ -5093,12 +5233,7 @@ pub fn tick_time_wait_cleanup() {
                         conn.remote_port
                     );
                     conn.last_error = TCP_ERR_TIMEDOUT;
-                    conn.active = false;
-                    conn.state = TcpState::Closed;
-                    conn.rx_buffer.clear();
-                    conn.tx_buffer.clear();
-                    conn.nagle_buf.clear();
-                    conn.ooo_buf.clear();
+                    conn.deactivate();
                 }
             }
             TcpState::FinWait2 => {
@@ -5116,12 +5251,7 @@ pub fn tick_time_wait_cleanup() {
                         conn.remote_port
                     );
                     conn.last_error = TCP_ERR_TIMEDOUT;
-                    conn.active = false;
-                    conn.state = TcpState::Closed;
-                    conn.rx_buffer.clear();
-                    conn.tx_buffer.clear();
-                    conn.nagle_buf.clear();
-                    conn.ooo_buf.clear();
+                    conn.deactivate();
                 }
             }
             TcpState::LastAck => {
@@ -5137,12 +5267,7 @@ pub fn tick_time_wait_cleanup() {
                         conn.remote_port
                     );
                     conn.last_error = TCP_ERR_TIMEDOUT;
-                    conn.active = false;
-                    conn.state = TcpState::Closed;
-                    conn.rx_buffer.clear();
-                    conn.tx_buffer.clear();
-                    conn.nagle_buf.clear();
-                    conn.ooo_buf.clear();
+                    conn.deactivate();
                 }
             }
             TcpState::SynReceived => {
@@ -5158,12 +5283,7 @@ pub fn tick_time_wait_cleanup() {
                         conn.remote_port
                     );
                     conn.last_error = TCP_ERR_TIMEDOUT;
-                    conn.active = false;
-                    conn.state = TcpState::Closed;
-                    conn.rx_buffer.clear();
-                    conn.tx_buffer.clear();
-                    conn.nagle_buf.clear();
-                    conn.ooo_buf.clear();
+                    conn.deactivate();
                 }
             }
             TcpState::SynSent => {
@@ -5180,12 +5300,7 @@ pub fn tick_time_wait_cleanup() {
                         conn.remote_port
                     );
                     conn.last_error = TCP_ERR_TIMEDOUT;
-                    conn.active = false;
-                    conn.state = TcpState::Closed;
-                    conn.rx_buffer.clear();
-                    conn.tx_buffer.clear();
-                    conn.nagle_buf.clear();
-                    conn.ooo_buf.clear();
+                    conn.deactivate();
                 }
             }
             TcpState::CloseWait => {
@@ -5203,12 +5318,7 @@ pub fn tick_time_wait_cleanup() {
                         conn.remote_port
                     );
                     conn.last_error = TCP_ERR_TIMEDOUT;
-                    conn.active = false;
-                    conn.state = TcpState::Closed;
-                    conn.rx_buffer.clear();
-                    conn.tx_buffer.clear();
-                    conn.nagle_buf.clear();
-                    conn.ooo_buf.clear();
+                    conn.deactivate();
                 }
             }
             _ => {}
@@ -5261,10 +5371,7 @@ pub fn tick_retransmit() {
                 conn.remote_port
             );
             conn.last_error = TCP_ERR_TIMEDOUT;
-            conn.active = false;
-            conn.tx_buffer.clear();
-            conn.nagle_buf.clear();
-            conn.ooo_buf.clear();
+            conn.deactivate();
             continue;
         }
 
@@ -5340,10 +5447,7 @@ pub fn tick_retransmit() {
                 conn.local_port
             );
             conn.last_error = TCP_ERR_TIMEDOUT;
-            conn.active = false;
-            conn.tx_buffer.clear();
-            conn.nagle_buf.clear();
-            conn.ooo_buf.clear();
+            conn.deactivate();
             continue;
         }
 
@@ -5440,10 +5544,7 @@ pub fn tick_retransmit() {
                 conn.remote_port
             );
             conn.last_error = TCP_ERR_TIMEDOUT;
-            conn.active = false;
-            conn.tx_buffer.clear();
-            conn.nagle_buf.clear();
-            conn.ooo_buf.clear();
+            conn.deactivate();
             continue;
         }
 
@@ -5568,12 +5669,7 @@ pub fn icmp_error(
                     dst_port
                 );
                 conn.last_error = TCP_ERR_REFUSED; // ICMP unreachable on connect.
-                conn.active = false;
-                conn.state = TcpState::Closed;
-                conn.rx_buffer.clear();
-                conn.tx_buffer.clear();
-                conn.nagle_buf.clear();
-                conn.ooo_buf.clear();
+                conn.deactivate();
             }
             TcpState::SynReceived => {
                 // Also abort half-open connections from the server side.
@@ -5587,12 +5683,7 @@ pub fn icmp_error(
                     dst_port
                 );
                 conn.last_error = TCP_ERR_REFUSED; // ICMP unreachable on half-open.
-                conn.active = false;
-                conn.state = TcpState::Closed;
-                conn.rx_buffer.clear();
-                conn.tx_buffer.clear();
-                conn.nagle_buf.clear();
-                conn.ooo_buf.clear();
+                conn.deactivate();
             }
             _ => {
                 // PMTUD (RFC 1191): if ICMP "Fragmentation Needed" carries
@@ -5648,6 +5739,8 @@ pub fn self_test() -> KernelResult<()> {
     test_bind_duplicate_rejected()?;
     test_try_accept_empty()?;
     test_parse_tcp_options()?;
+    test_build_options_roundtrip()?;
+    test_parse_tcp_header()?;
     test_sack_blocks()?;
     test_seq_lt()?;
     test_ipv6_checksum()?;
@@ -5655,7 +5748,7 @@ pub fn self_test() -> KernelResult<()> {
     test_dual_stack_ip_addr()?;
     test_namespace_isolation()?;
 
-    crate::serial_println!("[tcp] TCP self-test PASSED (10 tests)");
+    crate::serial_println!("[tcp] TCP self-test PASSED (12 tests)");
     Ok(())
 }
 
@@ -5777,7 +5870,7 @@ fn test_v4_pseudo_header_unchanged() -> KernelResult<()> {
     Ok(())
 }
 
-/// Test 1: bind and close a listener.
+/// Test: bind and close a listener.
 fn test_bind_close() -> KernelResult<()> {
     let handle = bind(crate::netns::ROOT_NS, 9999)?;
 
@@ -5805,7 +5898,7 @@ fn test_bind_close() -> KernelResult<()> {
     Ok(())
 }
 
-/// Test 2: binding the same port twice is rejected.
+/// Test: binding the same port twice is rejected.
 fn test_bind_duplicate_rejected() -> KernelResult<()> {
     let handle = bind(crate::netns::ROOT_NS, 8888)?;
 
@@ -5829,7 +5922,7 @@ fn test_bind_duplicate_rejected() -> KernelResult<()> {
     Ok(())
 }
 
-/// Test 3: try_accept on empty backlog returns WouldBlock.
+/// Test: try_accept on empty backlog returns WouldBlock.
 fn test_try_accept_empty() -> KernelResult<()> {
     let handle = bind(crate::netns::ROOT_NS, 7777)?;
 
@@ -5847,7 +5940,7 @@ fn test_try_accept_empty() -> KernelResult<()> {
     Ok(())
 }
 
-/// Test 4: TCP option parsing (MSS, WScale, NOP, END).
+/// Test: TCP option parsing (MSS, WScale, NOP, END).
 fn test_parse_tcp_options() -> KernelResult<()> {
     // Empty options.
     let opts = parse_tcp_options(&[]);
@@ -5927,11 +6020,303 @@ fn test_parse_tcp_options() -> KernelResult<()> {
         return Err(KernelError::InternalError);
     }
 
+    // Timestamps: kind=8, len=10, TSval=0x01020304, TSecr=0x05060708.
+    // Previously untested despite being the longest option and the only
+    // one whose payload is read as two separate multi-byte fields.
+    let ts = [8, 10, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08];
+    let opts = parse_tcp_options(&ts);
+    if opts.timestamp != Some((0x0102_0304, 0x0506_0708)) {
+        crate::serial_println!(
+            "[tcp]   FAIL: timestamp expected Some((0x01020304, 0x05060708)), got {:?}",
+            opts.timestamp
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // --- Malformed input ---------------------------------------------------
+    //
+    // Everything above is a well-formed option block, which is the half an
+    // attacker does not send.  These bytes arrive from an unauthenticated
+    // peer before any connection exists, so the parser's behaviour on
+    // garbage is part of its contract, not an edge case.  Each case below
+    // asserts the same thing: parsing terminates and yields nothing.
+    for (what, bytes) in [
+        // A kind byte promising a length byte that is not there.
+        ("truncated header", &[2u8][..]),
+        // Length below the two header bytes.  This is the one that matters
+        // most: the length is also the loop's stride, so a guard that let
+        // 0 or 1 through would advance by zero and spin forever — a kernel
+        // hang from a single crafted segment.
+        ("zero length", &[2, 0][..]),
+        ("length 1", &[2, 1][..]),
+        // A well-formed header whose body runs off the end of the block.
+        ("body overruns block", &[2, 4, 0x05][..]),
+        ("timestamp overruns block", &[8, 10, 1, 2, 3][..]),
+        // A known option carrying a length it never has.  Must be skipped
+        // rather than read at the length the parser expected.
+        ("MSS with wrong length", &[2, 6, 0, 0, 0, 0][..]),
+        ("wscale with wrong length", &[3, 4, 7, 0][..]),
+        // END terminates parsing even with valid options behind it.
+        ("options after END", &[0, 2, 4, 0x05, 0xB4][..]),
+        // Padding only.  Must terminate rather than loop on the NOPs.
+        ("all NOP", &[1, 1, 1, 1][..]),
+    ] {
+        let opts = parse_tcp_options(bytes);
+        if opts.mss != 0
+            || opts.wscale.is_some()
+            || opts.sack_permitted
+            || opts.timestamp.is_some()
+        {
+            crate::serial_println!(
+                "[tcp]   FAIL: malformed options ({}) parsed something: \
+                 mss={} wscale={:?} sack={} ts={:?}",
+                what,
+                opts.mss,
+                opts.wscale,
+                opts.sack_permitted,
+                opts.timestamp
+            );
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // An unknown option must be skipped by its *declared* length, so a
+    // valid option behind it still parses.  This is the one malformed-ish
+    // case with a non-empty expected result, and it is what proves the
+    // walk advances by the length field rather than by a fixed step.
+    let unknown_then_mss = [99, 4, 0xAA, 0xBB, 2, 4, 0x05, 0xB4];
+    let opts = parse_tcp_options(&unknown_then_mss);
+    if opts.mss != 1460 {
+        crate::serial_println!(
+            "[tcp]   FAIL: option after unknown option: mss expected 1460, got {}",
+            opts.mss
+        );
+        return Err(KernelError::InternalError);
+    }
+
     crate::serial_println!("[tcp]   TCP option parsing: OK");
     Ok(())
 }
 
-/// Test 5: SACK block insertion and merging.
+/// Test: the option builders agree with the option parser.
+///
+/// The builders are the parser's inverse, and until now only the parser
+/// was tested. The specific thing worth asserting is that an option's
+/// declared length byte equals the number of bytes actually written after
+/// it: a builder that gets that wrong emits a segment every peer on the
+/// network parses differently from us, and it is silent locally because
+/// we never read back what we sent. Sharing one cursor between the length
+/// and the writes is what makes it true; this is the test that says so.
+fn test_build_options_roundtrip() -> KernelResult<()> {
+    let mut conn = TcpConnection::empty();
+    conn.ts_ok = true;
+    conn.ts_recent = 0xDEAD_BEEF;
+    conn.sack_ok = true;
+    conn.sack_blocks = [(100, 200), (300, 400), (500, 600), (0, 0)];
+    conn.sack_block_count = 3;
+
+    let (buf, len) = build_ts_and_sack_options(&conn);
+
+    // Three blocks alongside a timestamp exactly fill the 40 bytes a
+    // segment can carry — the case with no slack left at all.
+    let expect = TS_OPT_LEN.saturating_add(sack_opt_len(3));
+    if len != expect || len > MAX_TCP_OPT_SPACE {
+        crate::serial_println!(
+            "[tcp]   FAIL: ts+sack length {} (expected {}, cap {})",
+            len,
+            expect,
+            MAX_TCP_OPT_SPACE
+        );
+        return Err(KernelError::InternalError);
+    }
+    let Some(written) = buf.get(..len) else {
+        return Err(KernelError::InternalError);
+    };
+
+    // The parser finding the timestamp also proves it walked the whole
+    // block: the SACK option sits behind it, so a wrong length byte on
+    // either one desynchronises the walk and loses the other.
+    match parse_tcp_options(written).timestamp {
+        Some((_, 0xDEAD_BEEF)) => {}
+        other => {
+            crate::serial_println!("[tcp]   FAIL: TSecr round-trip got {:?}", other);
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // The SACK option's declared length must equal what follows it.
+    let sack = written.get(TS_OPT_LEN..).unwrap_or(&[]);
+    let edges = match sack {
+        [TCP_OPT_NOP, TCP_OPT_NOP, TCP_OPT_SACK, declared, rest @ ..] => {
+            if (*declared as usize) != rest.len().saturating_add(2) {
+                crate::serial_println!(
+                    "[tcp]   FAIL: SACK declares {} but carries {}",
+                    declared,
+                    rest.len().saturating_add(2)
+                );
+                return Err(KernelError::InternalError);
+            }
+            rest
+        }
+        _ => {
+            crate::serial_println!("[tcp]   FAIL: SACK option malformed: {:?}", sack);
+            return Err(KernelError::InternalError);
+        }
+    };
+
+    // ...and the edges must survive the trip byte-for-byte.
+    for (chunk, want) in edges.chunks_exact(4).zip([100u32, 200, 300, 400, 500, 600]) {
+        let bytes: [u8; 4] = chunk
+            .try_into()
+            .map_err(|_| KernelError::InternalError)?;
+        if u32::from_be_bytes(bytes) != want {
+            crate::serial_println!(
+                "[tcp]   FAIL: SACK edge expected {}, got {}",
+                want,
+                u32::from_be_bytes(bytes)
+            );
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // Without timestamps the SACK-only builder takes over, and a full
+    // four blocks must exactly fill its buffer. This is the case that
+    // would have written past the end had `MAX_SACK_BLOCKS` been raised
+    // while the hard-coded `[u8; 36]` stayed behind.
+    conn.ts_ok = false;
+    conn.sack_blocks = [(1, 2), (3, 4), (5, 6), (7, 8)];
+    conn.sack_block_count = 4;
+    let (_, slen) = build_sack_option(&conn);
+    if slen != SACK_OPT_BUF || slen != sack_opt_len(MAX_SACK_BLOCKS) {
+        crate::serial_println!(
+            "[tcp]   FAIL: sack-only length {} (buffer is {})",
+            slen,
+            SACK_OPT_BUF
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // Nothing to say means an empty option block, not a header with no body.
+    conn.sack_ok = false;
+    let (_, none_len) = build_sack_option(&conn);
+    if none_len != 0 {
+        crate::serial_println!("[tcp]   FAIL: sack disabled produced {} bytes", none_len);
+        return Err(KernelError::InternalError);
+    }
+
+    crate::serial_println!("[tcp]   TCP option building: OK");
+    Ok(())
+}
+
+/// Test: the fixed header is validated before any of it is believed.
+///
+/// The case that motivated this test is `doff = 0`.  The Data Offset
+/// field is four bits, so a peer can send any value 0..=15, and the
+/// parser used it as the payload's start offset without checking it
+/// against the 20-byte header it must clear.  A segment with Data Offset
+/// 0 therefore produced `payload = &data[0..]` — the segment's own header
+/// bytes — which `process_tcp_common` appended to the receive buffer and
+/// delivered to the application as ordinary stream data.  One malformed
+/// segment, no connection state required beyond an established one.
+fn test_parse_tcp_header() -> KernelResult<()> {
+    // A well-formed 20-byte header with four bytes of payload.  Data
+    // Offset 5 words = 20 bytes; ports 0x1234/0x5678; seq 1; ack 2.
+    let good: [u8; 24] = [
+        0x12, 0x34, 0x56, 0x78, // src port, dst port
+        0x00, 0x00, 0x00, 0x01, // seq
+        0x00, 0x00, 0x00, 0x02, // ack
+        0x50, TCP_ACK, // data offset 5 words, flags
+        0x20, 0x00, // window
+        0x00, 0x00, 0x00, 0x00, // checksum, urgent
+        b'd', b'a', b't', b'a', // payload
+    ];
+
+    let Some(h) = parse_tcp_header(&good) else {
+        crate::serial_println!("[tcp]   FAIL: well-formed header rejected");
+        return Err(KernelError::InternalError);
+    };
+    if h.src_port != 0x1234 || h.dst_port != 0x5678 || h.seq != 1 || h.ack != 2 {
+        crate::serial_println!(
+            "[tcp]   FAIL: fields {:#x}/{:#x} seq={} ack={}",
+            h.src_port,
+            h.dst_port,
+            h.seq,
+            h.ack
+        );
+        return Err(KernelError::InternalError);
+    }
+    // The payload must be the four trailing bytes and nothing more —
+    // this is the assertion the bug violated.
+    if h.payload != b"data".as_slice() || !h.options.is_empty() {
+        crate::serial_println!(
+            "[tcp]   FAIL: payload {:?} options {:?}",
+            h.payload,
+            h.options
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // Data Offset 6 words = 20 + 4 option bytes, so the same segment
+    // splits differently: one MSS option, no payload.
+    let mut with_opts = good;
+    with_opts[12] = 0x60;
+    match parse_tcp_header(&with_opts) {
+        Some(h) if h.options == b"data".as_slice() && h.payload.is_empty() => {}
+        other => {
+            crate::serial_println!(
+                "[tcp]   FAIL: doff=6 split wrong: {:?}",
+                other.map(|h| (h.options.len(), h.payload.len()))
+            );
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // Every rejection case.  `doff` 0 through 4 all describe a header
+    // shorter than the 20 bytes that are structurally always present, so
+    // all five must be refused, not clamped.
+    for words in 0u8..5 {
+        let mut bad = good;
+        bad[12] = words << 4;
+        if let Some(h) = parse_tcp_header(&bad) {
+            crate::serial_println!(
+                "[tcp]   FAIL: doff={} accepted, payload {} byte(s)",
+                words,
+                h.payload.len()
+            );
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // Data Offset past the end claims options that were never sent.
+    let mut overrun = good;
+    overrun[12] = 0xF0; // 15 words = 60 bytes, segment is 24.
+    if parse_tcp_header(&overrun).is_some() {
+        crate::serial_println!("[tcp]   FAIL: doff past end of segment accepted");
+        return Err(KernelError::InternalError);
+    }
+
+    // Shorter than the fixed header at all.
+    for take in [0usize, 1, 15, 19] {
+        if parse_tcp_header(good.get(..take).unwrap_or(&[])).is_some() {
+            crate::serial_println!("[tcp]   FAIL: {}-byte segment accepted", take);
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // Exactly the fixed header, no options and no payload, is valid.
+    match parse_tcp_header(good.get(..20).unwrap_or(&[])) {
+        Some(h) if h.options.is_empty() && h.payload.is_empty() => {}
+        _ => {
+            crate::serial_println!("[tcp]   FAIL: bare 20-byte header rejected");
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    crate::serial_println!("[tcp]   TCP header validation: OK");
+    Ok(())
+}
+
+/// Test: SACK block insertion and merging.
 fn test_sack_blocks() -> KernelResult<()> {
     let mut conn = TcpConnection::empty();
     conn.sack_ok = true;
@@ -6007,7 +6392,7 @@ fn test_sack_blocks() -> KernelResult<()> {
     Ok(())
 }
 
-/// Test 6: seq_lt() modular 32-bit sequence number comparison.
+/// Test: seq_lt() modular 32-bit sequence number comparison.
 fn test_seq_lt() -> KernelResult<()> {
     // Basic ordering.
     if !seq_lt(0, 1) {
@@ -6071,7 +6456,7 @@ fn test_seq_lt() -> KernelResult<()> {
     Ok(())
 }
 
-/// Test 7: IPv6 TCP checksum computation.
+/// Test: IPv6 TCP checksum computation.
 ///
 /// Validates the TCP checksum with IPv6 pseudo-header by computing a
 /// checksum over a known segment and verifying it with the IPv6
@@ -6135,7 +6520,7 @@ fn test_ipv6_checksum() -> KernelResult<()> {
     Ok(())
 }
 
-/// Test 8: dual-stack IpAddr in connection matching.
+/// Test: dual-stack IpAddr in connection matching.
 ///
 /// Validates that IPv4 and IPv6 connections with the same port numbers
 /// are distinguished by address family (IpAddr::V4 != IpAddr::V6).
@@ -6181,7 +6566,7 @@ fn test_dual_stack_ip_addr() -> KernelResult<()> {
     Ok(())
 }
 
-/// Test 9: namespace isolation — same port can be bound in different namespaces.
+/// Test: namespace isolation — same port can be bound in different namespaces.
 fn test_namespace_isolation() -> KernelResult<()> {
     let ns0 = crate::netns::ROOT_NS;
     let ns1: NetNsId = 42; // Fake non-root namespace (doesn't need to exist in netns table).

@@ -31365,6 +31365,17 @@ fn test_spawn_inherits_parent_capabilities() -> KernelResult<()> {
 /// * **A widening request fails too** — asking to delegate `EXECUTE` over a
 ///   resource the parent holds only `READ|WRITE` on must be refused, or the
 ///   subset mechanism becomes a way to mint rights.
+/// * **A rights-less entry is `InvalidArgument`, not `PermissionDenied`** — an
+///   entry naming a resource the parent *does* hold, with no rights set, is a
+///   malformed request rather than a refused one.  The verdict is load-bearing:
+///   `rights` is the field a hand-built entry is most likely to leave at its
+///   default, and a caller told `PermissionDenied` would go looking for a grant
+///   it already has.
+/// * **A non-empty list from the kernel is `PermissionDenied`** — the kernel has
+///   no capability table to delegate from, so no entry can be checked against
+///   anything.  This is asymmetric with the empty case below, deliberately:
+///   "give this child nothing" is satisfiable by a parent that holds nothing,
+///   and "give this child X" is not.
 /// * **No process is left behind by a refusal** — the live-process count is
 ///   compared across the failed spawn.  A refusal that leaked a half-built PCB
 ///   would be a resource leak reachable from userspace, i.e. a DoS.
@@ -31396,9 +31407,12 @@ fn test_spawn_capability_subset() -> KernelResult<()> {
         return Err(KernelError::InternalError);
     }
 
-    let opts = |name: &'static str| SpawnOptions {
+    // The parent is a parameter because one probe below spawns with the *kernel*
+    // as parent, which is a distinct arm of the delegation check rather than a
+    // variation on the same one.
+    let opts = |name: &'static str, spawn_parent: pcb::ProcessId| SpawnOptions {
         name,
-        parent,
+        parent: spawn_parent,
         priority: DEFAULT_PRIORITY,
         capabilities: &[],
         fd_map: &[],
@@ -31413,7 +31427,7 @@ fn test_spawn_capability_subset() -> KernelResult<()> {
     let subset = [(ResourceType::File, marker_id, Rights::READ)];
     let heir = match spawn_process_with_caps(
         &elf_data,
-        &opts("spawn-test-subset-heir"),
+        &opts("spawn-test-subset-heir", parent),
         CapInherit::Subset(&subset),
     ) {
         Ok(r) => r,
@@ -31450,12 +31464,31 @@ fn test_spawn_capability_subset() -> KernelResult<()> {
     }
     serial_println!("[spawn]   Subset child gets exactly the narrowed slice: OK");
 
-    // --- Half 2: an unheld request, and a widening request, are both refused. ---
+    // --- Half 2: four requests that must be refused, each with its own verdict. ---
     //
-    // Two separate probes because they exercise different arms of the check: the
-    // first has no matching entry at all, the second has one whose rights are
-    // too narrow.  An implementation that matched on `(type, id)` and ignored
-    // rights would refuse the first and grant the second.
+    // Separate probes because they exercise different arms of the check, and the
+    // *verdict* is part of what is being tested, not just the refusal:
+    //
+    // * `unheld` has no matching entry at all; `widened` has one whose rights are
+    //   too narrow.  An implementation that matched on `(type, id)` and ignored
+    //   rights would refuse the first and grant the second.  Both are
+    //   `PermissionDenied` — the parent is asking for authority it does not have.
+    // * `rightless` names a resource the parent *does* hold, with `Rights::empty()`.
+    //   That is `InvalidArgument`, not `PermissionDenied`, and the difference is
+    //   the point of testing it: an empty `rights` is not a narrowing that failed,
+    //   it is a table entry that would grant nothing and pass no gate — almost
+    //   certainly a caller that left the field at its default.  Reporting
+    //   `PermissionDenied` would send that caller hunting for a missing grant.
+    //   Lane B found this rule by reading `pcb::inherit_caps_subset` rather than
+    //   the ABI doc (`requests/b-a-spawn-ex2-mirror-landed-and-three-notes-back.md`),
+    //   which is the situation both the doc and this probe exist to prevent.
+    // * `kernel-parent` sends a non-empty list with `parent == 0`.  The kernel has
+    //   no capability table to delegate *from*, so there is nothing any entry
+    //   could be checked against; it is `PermissionDenied`.  Note the asymmetry
+    //   with test 3 above and with half 3 below: an *empty* subset from the kernel
+    //   succeeds, because `inherit_caps_subset` returns early on an empty request
+    //   before it ever looks at the parent.  "Give this child nothing" is
+    //   satisfiable by a parent that holds nothing; "give this child X" is not.
     //
     // The leak check that follows brackets the probes with `peek_next_pid`
     // rather than comparing `pcb::count()`.  A global count is perturbed by any
@@ -31463,7 +31496,10 @@ fn test_spawn_capability_subset() -> KernelResult<()> {
     // make this test flaky — and a flaky test is one that gets ignored, i.e. a
     // test that does not exist.  A PID window plus the parent field is exact:
     // `parent` is a pid nothing else on the system knows about, so a PCB that
-    // names it as its parent can only have come from a probe below.
+    // names it as its parent can only have come from a probe below.  The
+    // kernel-parent probe is the one exception — `0` is shared with every
+    // kernel-spawned process — so a leak from it is identified by name instead,
+    // and the window guarantees no *other* `spawn-test-subset-` process is in it.
     let first_pid = pcb::peek_next_pid();
     let unheld = [(ResourceType::File, 0xDEAD_BEEF_u64, Rights::READ)];
     let widened = [(
@@ -31471,20 +31507,43 @@ fn test_spawn_capability_subset() -> KernelResult<()> {
         marker_id,
         Rights::READ.union(Rights::EXECUTE),
     )];
-    for (name, request, what) in [
+    let rightless = [(ResourceType::File, marker_id, Rights::empty())];
+    for (name, spawn_parent, request, what, expect) in [
         (
             "spawn-test-subset-unheld",
+            parent,
             &unheld[..],
             "an unheld resource",
+            KernelError::PermissionDenied,
         ),
         (
             "spawn-test-subset-widen",
+            parent,
             &widened[..],
             "wider rights than the parent holds",
+            KernelError::PermissionDenied,
+        ),
+        (
+            "spawn-test-subset-rightless",
+            parent,
+            &rightless[..],
+            "a held resource with no rights at all",
+            KernelError::InvalidArgument,
+        ),
+        (
+            "spawn-test-subset-kernel-parent",
+            0,
+            &unheld[..],
+            "a non-empty list with the kernel as parent",
+            KernelError::PermissionDenied,
         ),
     ] {
-        match spawn_process_with_caps(&elf_data, &opts(name), CapInherit::Subset(request)) {
-            Err(KernelError::PermissionDenied) => {}
+        match spawn_process_with_caps(
+            &elf_data,
+            &opts(name, spawn_parent),
+            CapInherit::Subset(request),
+        ) {
+            Err(e) if e == expect => {}
             Ok(r) => {
                 serial_println!(
                     "[spawn]   FAIL: delegating {} succeeded (pid {}) — the subset \
@@ -31499,10 +31558,12 @@ fn test_spawn_capability_subset() -> KernelResult<()> {
             }
             Err(e) => {
                 serial_println!(
-                    "[spawn]   FAIL: delegating {} gave {:?}, expected PermissionDenied \
-                     (a distinct verdict would let a caller confuse 'refused' with 'malformed')",
+                    "[spawn]   FAIL: delegating {} gave {:?}, expected {:?} \
+                     (the verdict is part of the ABI: 'you may not have this' and \
+                     'this entry is malformed' send a caller to different places)",
                     what,
-                    e
+                    e,
+                    expect
                 );
                 pcb::destroy(parent);
                 return Err(KernelError::InternalError);
@@ -31516,7 +31577,12 @@ fn test_spawn_capability_subset() -> KernelResult<()> {
     let mut leaked = None;
     let mut pid = first_pid;
     while pid < last_pid {
-        if pcb::parent(pid) == Some(parent) {
+        let by_parent = pcb::parent(pid) == Some(parent);
+        // The kernel-parent probe cannot be identified by its parent field, so
+        // it is identified by its name.  Only probes were spawned inside this
+        // PID window, so the prefix cannot match anything else.
+        let by_name = pcb::name(pid).is_some_and(|n| n.starts_with("spawn-test-subset-"));
+        if by_parent || by_name {
             leaked = Some(pid);
             break;
         }
@@ -31534,12 +31600,14 @@ fn test_spawn_capability_subset() -> KernelResult<()> {
         pcb::destroy(parent);
         return Err(KernelError::InternalError);
     }
-    serial_println!("[spawn]   Unheld and widening requests refused, nothing leaked: OK");
+    serial_println!(
+        "[spawn]   All 4 bad subsets refused with the right verdict, nothing leaked: OK"
+    );
 
     // --- Half 3: an empty subset means empty, not unspecified. ---
     let pauper = match spawn_process_with_caps(
         &elf_data,
-        &opts("spawn-test-subset-pauper"),
+        &opts("spawn-test-subset-pauper", parent),
         CapInherit::Subset(&[]),
     ) {
         Ok(r) => r,

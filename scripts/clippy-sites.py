@@ -123,11 +123,28 @@ def report_by_context(sites, want_lint):
 
 
 def main(argv):
-    if len(argv) < 2:
+    args = argv[1:]
+    if not args or "--help" in args or "-h" in args:
         print(__doc__)
+        # An explicit `--help` is a request that succeeded; a bare
+        # invocation is a mistake.  A caller that gates on the exit status
+        # should be able to tell those apart.  Before this, `--help` was
+        # taken as the JSON path and died with a `FileNotFoundError`
+        # traceback -- the usage text was sitting right there, unreachable.
+        return 0 if args else 2
+    path = args[0]
+    flags = args[1:]
+    if path.startswith("-"):
+        print(f"first argument must be the clippy JSON file, got {path!r}")
         return 2
-    path = argv[1]
-    flags = argv[2:]
+    if not Path(path).is_file():
+        print(f"no such file: {path}")
+        print("generate it with:")
+        print(
+            "  cargo clippy -p <crate> --all-targets"
+            " --message-format=json > clippy.json"
+        )
+        return 2
     by_context = "--by-context" in flags
     list_sites = "--sites" in flags
     want_lint = None

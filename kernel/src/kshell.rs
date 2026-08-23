@@ -59687,7 +59687,7 @@ fn cmd_systemsounds(args: &str) {
                     shell_println!(
                         "  {:20} {} [{}] (plays: {})",
                         a.event.label(),
-                        a.sound_path,
+                        a.sound_path.display(),
                         status,
                         a.play_count
                     );
@@ -59707,7 +59707,7 @@ fn cmd_systemsounds(args: &str) {
                 }
             };
             match systemsounds::play(event) {
-                Ok(Some(path)) => shell_println!("Playing: {}", path),
+                Ok(Some(path)) => shell_println!("Playing: {}", path.display()),
                 Ok(None) => shell_println!("Sound disabled or not assigned."),
                 Err(e) => shell_println!("Error: {:?}", e),
             }

@@ -522,6 +522,26 @@ pub fn echo_enabled(id: TtyId) -> bool {
     get_termios(id).echo_enabled()
 }
 
+/// Bytes of a completed canonical line still held for the *next* `read`.
+///
+/// [`read`] drains this before it looks at the backend at all, so these bytes
+/// are readable **now**, with no dependence on the terminal's mode or on
+/// anything further arriving. That makes them the one part of a slave-side
+/// readability answer that is exact.
+///
+/// They exist because a canonical line is delivered as a unit: a reader whose
+/// buffer is smaller than the line gets the remainder here rather than losing
+/// it. A poller that ignored this buffer would report "not readable" while a
+/// `read` was standing by to return seven bytes immediately — and if the
+/// master sends nothing further, would go on reporting it forever.
+///
+/// Returns 0 for a terminal that does not exist, which is the same answer a
+/// `read` on it gives.
+#[must_use]
+pub fn pending_bytes(id: TtyId) -> usize {
+    with_device(id, |d| d.pending.remaining()).unwrap_or(0)
+}
+
 /// Current window size for `TIOCGWINSZ`.
 ///
 /// If userspace set an explicit size via `TIOCSWINSZ`, that is returned. The
@@ -852,6 +872,11 @@ impl PendingLine {
 
     fn has_data(&self) -> bool {
         self.pos < self.len
+    }
+
+    /// How many held bytes the next `read` would deliver.
+    fn remaining(&self) -> usize {
+        self.len.saturating_sub(self.pos)
     }
 
     /// Replace the held bytes with `src` (truncated to `MAX_CANON`).

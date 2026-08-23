@@ -415,7 +415,10 @@ fn plymouthd_main(args: &[String]) -> i32 {
 
     let config = load_config();
 
-    eprintln!("plymouthd: starting with theme '{}', mode {:?}", config.theme, mode);
+    eprintln!(
+        "plymouthd: starting with theme '{}', mode {:?}",
+        config.theme, mode
+    );
     eprintln!("plymouthd: no_daemon={no_daemon}, attach={attach_to_session}");
 
     // Create run directory.
@@ -489,21 +492,19 @@ fn set_theme_main(args: &[String]) -> i32 {
     }
 
     match theme_name {
-        Some(name) => {
-            match set_default_theme(&name) {
-                Ok(()) => {
-                    println!("plymouth-set-default-theme: theme set to '{name}'");
-                    if rebuild {
-                        eprintln!("plymouth-set-default-theme: would rebuild initramfs");
-                    }
-                    0
+        Some(name) => match set_default_theme(&name) {
+            Ok(()) => {
+                println!("plymouth-set-default-theme: theme set to '{name}'");
+                if rebuild {
+                    eprintln!("plymouth-set-default-theme: would rebuild initramfs");
                 }
-                Err(e) => {
-                    eprintln!("plymouth-set-default-theme: {e}");
-                    1
-                }
+                0
             }
-        }
+            Err(e) => {
+                eprintln!("plymouth-set-default-theme: {e}");
+                1
+            }
+        },
         None => {
             println!("{}", get_default_theme());
             0

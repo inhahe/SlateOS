@@ -32,10 +32,17 @@ fn run_wandb(args: Vec<String>) -> i32 {
     let cmd = args.first().map(|s| s.as_str()).unwrap_or("");
     match cmd {
         "login" => {
-            let key = args.get(1).map(|s| s.as_str()).unwrap_or("*****hidden*****");
+            let key = args
+                .get(1)
+                .map(|s| s.as_str())
+                .unwrap_or("*****hidden*****");
             println!("wandb: Logging in to wandb.ai...");
             println!("wandb: Appending key to /home/user/.netrc");
-            println!("wandb: API key: {}...{}", &key[..3.min(key.len())], &key[key.len().saturating_sub(3)..]);
+            println!(
+                "wandb: API key: {}...{}",
+                &key[..3.min(key.len())],
+                &key[key.len().saturating_sub(3)..]
+            );
             println!("wandb: Successfully logged in.");
             0
         }
@@ -44,7 +51,10 @@ fn run_wandb(args: Vec<String>) -> i32 {
             println!("wandb: Initializing project '{}'", project);
             println!("wandb: Created wandb directory");
             println!("wandb: Updated .gitignore");
-            println!("wandb: Project '{}' ready at https://wandb.ai/user/{}", project, project);
+            println!(
+                "wandb: Project '{}' ready at https://wandb.ai/user/{}",
+                project, project
+            );
             0
         }
         "sync" => {
@@ -72,12 +82,17 @@ fn run_wandb(args: Vec<String>) -> i32 {
                     println!("  def456      FINISHED  50     accuracy=0.958");
                     println!("  ghi789      PAUSED    8      accuracy=0.942");
                 }
-                _ => { println!("Sweep operation: {}", sub); }
+                _ => {
+                    println!("Sweep operation: {}", sub);
+                }
             }
             0
         }
         "agent" => {
-            let sweep_id = args.get(1).map(|s| s.as_str()).unwrap_or("user/project/abc123");
+            let sweep_id = args
+                .get(1)
+                .map(|s| s.as_str())
+                .unwrap_or("user/project/abc123");
             println!("wandb: Starting sweep agent for {}", sweep_id);
             println!("wandb: Agent pid: 12345");
             println!("wandb: Running run-1/50 with {{lr: 0.001, batch_size: 32}}");
@@ -96,21 +111,33 @@ fn run_wandb(args: Vec<String>) -> i32 {
                     println!("  eval-results            result    v2        12 KB    2024-01-14");
                 }
                 "get" => {
-                    let name = args.get(2).map(|s| s.as_str()).unwrap_or("best-model:latest");
+                    let name = args
+                        .get(2)
+                        .map(|s| s.as_str())
+                        .unwrap_or("best-model:latest");
                     println!("wandb: Downloading artifact '{}'...", name);
-                    println!("wandb: Downloaded 456 MB to ./artifacts/{}", name.split(':').next().unwrap_or(name));
+                    println!(
+                        "wandb: Downloaded 456 MB to ./artifacts/{}",
+                        name.split(':').next().unwrap_or(name)
+                    );
                 }
                 "put" => {
                     let path = args.get(2).map(|s| s.as_str()).unwrap_or("./model");
                     println!("wandb: Uploading artifact from '{}'...", path);
                     println!("wandb: Artifact uploaded as 'model:v8' (456 MB)");
                 }
-                _ => { println!("Artifact operation: {}", sub); }
+                _ => {
+                    println!("Artifact operation: {}", sub);
+                }
             }
             0
         }
         "server" => {
-            let port = args.windows(2).find(|w| w[0] == "--port").map(|w| w[1].as_str()).unwrap_or("8080");
+            let port = args
+                .windows(2)
+                .find(|w| w[0] == "--port")
+                .map(|w| w[1].as_str())
+                .unwrap_or("8080");
             println!("wandb: Starting local W&B server...");
             println!("wandb: Server running at http://localhost:{}", port);
             println!("wandb: Using SQLite backend at ./wandb.db");
@@ -145,7 +172,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_wandb};
+    use super::run_wandb;
 
     #[test]
     fn help_exits_zero() {

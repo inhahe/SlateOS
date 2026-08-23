@@ -7,8 +7,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_tkn(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
@@ -32,9 +36,15 @@ fn run_tkn(args: &[String]) -> i32 {
             let sub = args.get(1).map(|s| s.as_str()).unwrap_or("list");
             match sub {
                 "list" | "ls" => {
-                    println!("NAME             AGE              LAST RUN           STARTED        DURATION   STATUS");
-                    println!("build-deploy     2 days ago       build-deploy-r4    1 hour ago     3m 12s     Succeeded");
-                    println!("test-pipeline    5 days ago       test-pipeline-r8   2 hours ago    1m 45s     Succeeded");
+                    println!(
+                        "NAME             AGE              LAST RUN           STARTED        DURATION   STATUS"
+                    );
+                    println!(
+                        "build-deploy     2 days ago       build-deploy-r4    1 hour ago     3m 12s     Succeeded"
+                    );
+                    println!(
+                        "test-pipeline    5 days ago       test-pipeline-r8   2 hours ago    1m 45s     Succeeded"
+                    );
                 }
                 "start" => {
                     let name = args.get(2).map(|s| s.as_str()).unwrap_or("build-deploy");
@@ -87,7 +97,10 @@ fn run_tkn(args: &[String]) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "tkn".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "tkn".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_tkn(&rest);
     process::exit(code);
@@ -95,7 +108,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_tkn};
+    use super::{basename, run_tkn, strip_ext};
 
     #[test]
     fn basename_strips_path() {

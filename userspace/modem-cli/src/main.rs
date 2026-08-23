@@ -7,8 +7,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_mmcli(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
@@ -141,8 +145,18 @@ fn run_nmcli(args: &[String]) -> i32 {
                 }
                 "up" | "down" => {
                     let name = args.get(2).map(|s| s.as_str()).unwrap_or("Wired");
-                    println!("Connection successfully {}.", if cmd == "up" { "activated" } else { "deactivated" });
-                    println!("(D-Bus path: /org/freedesktop/NetworkManager/ActiveConnection/{})", name.len());
+                    println!(
+                        "Connection successfully {}.",
+                        if cmd == "up" {
+                            "activated"
+                        } else {
+                            "deactivated"
+                        }
+                    );
+                    println!(
+                        "(D-Bus path: /org/freedesktop/NetworkManager/ActiveConnection/{})",
+                        name.len()
+                    );
                 }
                 _ => println!("nmcli: connection command '{}' completed", cmd),
             }
@@ -160,10 +174,18 @@ fn run_nmcli(args: &[String]) -> i32 {
                 "wifi" => {
                     let subcmd = args.get(2).map(|s| s.as_str()).unwrap_or("list");
                     if subcmd == "list" {
-                        println!("IN-USE  BSSID              SSID          MODE   CHAN  RATE        SIGNAL  BARS  SECURITY");
-                        println!("*       66:77:88:99:AA:BB  MyNetwork     Infra  36    540 Mbit/s  92      ▂▄▆█  WPA2");
-                        println!("        11:22:33:44:55:66  Neighbor      Infra  6     270 Mbit/s  45      ▂▄__  WPA2");
-                        println!("        AA:BB:CC:DD:EE:FF  CoffeeShop    Infra  1     54 Mbit/s   30      ▂___  WPA2");
+                        println!(
+                            "IN-USE  BSSID              SSID          MODE   CHAN  RATE        SIGNAL  BARS  SECURITY"
+                        );
+                        println!(
+                            "*       66:77:88:99:AA:BB  MyNetwork     Infra  36    540 Mbit/s  92      ▂▄▆█  WPA2"
+                        );
+                        println!(
+                            "        11:22:33:44:55:66  Neighbor      Infra  6     270 Mbit/s  45      ▂▄__  WPA2"
+                        );
+                        println!(
+                            "        AA:BB:CC:DD:EE:FF  CoffeeShop    Infra  1     54 Mbit/s   30      ▂___  WPA2"
+                        );
                     } else {
                         println!("nmcli: wifi {} completed", subcmd);
                     }
@@ -195,7 +217,10 @@ fn run_nmcli(args: &[String]) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "mmcli".to_string());
+    let prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "mmcli".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = match prog.as_str() {
         "nmcli" => run_nmcli(&rest),
@@ -206,7 +231,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_mmcli};
+    use super::{basename, run_mmcli, strip_ext};
 
     #[test]
     fn basename_strips_path() {

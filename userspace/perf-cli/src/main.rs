@@ -48,25 +48,39 @@ fn run_perf(args: &[String]) -> i32 {
 
     match subcmd {
         "stat" => {
-            let command = rest.iter().find(|a| !a.starts_with('-')).map(|s| s.as_str()).unwrap_or("program");
+            let command = rest
+                .iter()
+                .find(|a| !a.starts_with('-'))
+                .map(|s| s.as_str())
+                .unwrap_or("program");
             println!();
             println!(" Performance counter stats for '{}':", command);
             println!();
-            println!("          1,234.56 msec task-clock                       #    0.998 CPUs utilized");
+            println!(
+                "          1,234.56 msec task-clock                       #    0.998 CPUs utilized"
+            );
             println!("                12      context-switches                 #    9.719 /sec");
             println!("                 3      cpu-migrations                   #    2.430 /sec");
             println!("             1,456      page-faults                      #    1.179 K/sec");
             println!("     3,456,789,012      cycles                           #    2.800 GHz");
-            println!("     2,345,678,901      instructions                     #    0.68  insn per cycle");
+            println!(
+                "     2,345,678,901      instructions                     #    0.68  insn per cycle"
+            );
             println!("       456,789,012      branches                         #  369.870 M/sec");
-            println!("        12,345,678      branch-misses                    #    2.70% of all branches");
+            println!(
+                "        12,345,678      branch-misses                    #    2.70% of all branches"
+            );
             println!();
             println!("       1.236789012 seconds time elapsed");
             println!("       1.200000000 seconds user");
             println!("       0.036000000 seconds sys");
         }
         "record" => {
-            let command = rest.iter().find(|a| !a.starts_with('-')).map(|s| s.as_str()).unwrap_or("program");
+            let command = rest
+                .iter()
+                .find(|a| !a.starts_with('-'))
+                .map(|s| s.as_str())
+                .unwrap_or("program");
             println!("Recording events for '{}'...", command);
             println!("[ perf record: Woken up 1 times to write data ]");
             println!("[ perf record: Captured and wrote 0.234 MB perf.data (5678 samples) ]");
@@ -119,9 +133,16 @@ fn run_perf(args: &[String]) -> i32 {
             println!("  4KB: 12.456 GB/sec");
         }
         "trace" => {
-            let command = rest.iter().find(|a| !a.starts_with('-')).map(|s| s.as_str()).unwrap_or("program");
+            let command = rest
+                .iter()
+                .find(|a| !a.starts_with('-'))
+                .map(|s| s.as_str())
+                .unwrap_or("program");
             println!("tracing '{}'...", command);
-            println!("  0.000 ( 0.012 ms): execve(filename: /usr/bin/{}) = 0", command);
+            println!(
+                "  0.000 ( 0.012 ms): execve(filename: /usr/bin/{}) = 0",
+                command
+            );
             println!("  0.045 ( 0.002 ms): brk(brk: 0) = 0x562000");
             println!("  0.048 ( 0.005 ms): openat(dfd: CWD, filename: /etc/ld.so.cache) = 3");
             println!("  0.060 ( 0.001 ms): close(fd: 3) = 0");
@@ -139,7 +160,10 @@ fn run_perf(args: &[String]) -> i32 {
             println!("  Total:                |      1248.146 |      180");
         }
         _ => {
-            eprintln!("perf: '{}' is not a perf command. See 'perf --help'.", subcmd);
+            eprintln!(
+                "perf: '{}' is not a perf command. See 'perf --help'.",
+                subcmd
+            );
             return 1;
         }
     }
@@ -148,7 +172,8 @@ fn run_perf(args: &[String]) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first()
+    let _prog = args
+        .first()
         .map(|s| strip_ext(basename(s)).to_string())
         .unwrap_or_else(|| "perf".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
@@ -159,7 +184,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_perf};
+    use super::{basename, run_perf, strip_ext};
 
     #[test]
     fn basename_strips_path() {

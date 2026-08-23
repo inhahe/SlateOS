@@ -36,7 +36,10 @@ fn run_pass(args: Vec<String>) -> i32 {
     let cmd = args.first().map(|s| s.as_str()).unwrap_or("ls");
     match cmd {
         "init" => {
-            let gpg_id = args.get(1).map(|s| s.as_str()).unwrap_or("user@example.com");
+            let gpg_id = args
+                .get(1)
+                .map(|s| s.as_str())
+                .unwrap_or("user@example.com");
             println!("Password store initialized for {}", gpg_id);
             println!("  Created /home/user/.password-store/.gpg-id");
             0
@@ -61,7 +64,10 @@ fn run_pass(args: Vec<String>) -> i32 {
             let name = args.get(1).map(|s| s.as_str()).unwrap_or("email/work");
             let clip = args.iter().any(|a| a == "-c" || a == "--clip");
             if clip {
-                println!("Copied {}/password to clipboard. Will clear in 45 seconds.", name);
+                println!(
+                    "Copied {}/password to clipboard. Will clear in 45 seconds.",
+                    name
+                );
             } else {
                 println!("s3cur3-p4ssw0rd-xyz!");
                 println!("---");
@@ -153,7 +159,9 @@ fn run_pass(args: Vec<String>) -> i32 {
                     println!("def456g Edited email/work.");
                     println!("ghi789j Added social/mastodon to store.");
                 }
-                _ => { println!("git {}", sub); }
+                _ => {
+                    println!("git {}", sub);
+                }
             }
             0
         }
@@ -175,7 +183,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_pass};
+    use super::run_pass;
 
     #[test]
     fn help_exits_zero() {

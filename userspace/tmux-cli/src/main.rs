@@ -34,8 +34,11 @@ fn run_tmux(args: Vec<String>) -> i32 {
     let cmd = args.first().map(|s| s.as_str()).unwrap_or("");
     match cmd {
         "new-session" | "new" => {
-            let name = args.windows(2).find(|w| w[0] == "-s")
-                .map(|w| w[1].as_str()).unwrap_or("0");
+            let name = args
+                .windows(2)
+                .find(|w| w[0] == "-s")
+                .map(|w| w[1].as_str())
+                .unwrap_or("0");
             let detach = args.iter().any(|a| a == "-d");
             if detach {
                 println!("Session '{}' created (detached)", name);
@@ -46,8 +49,11 @@ fn run_tmux(args: Vec<String>) -> i32 {
             0
         }
         "attach" | "attach-session" | "a" => {
-            let target = args.windows(2).find(|w| w[0] == "-t")
-                .map(|w| w[1].as_str()).unwrap_or("0");
+            let target = args
+                .windows(2)
+                .find(|w| w[0] == "-t")
+                .map(|w| w[1].as_str())
+                .unwrap_or("0");
             println!("[Attached to session '{}']", target);
             0
         }
@@ -62,8 +68,11 @@ fn run_tmux(args: Vec<String>) -> i32 {
             0
         }
         "kill-session" => {
-            let target = args.windows(2).find(|w| w[0] == "-t")
-                .map(|w| w[1].as_str()).unwrap_or("0");
+            let target = args
+                .windows(2)
+                .find(|w| w[0] == "-t")
+                .map(|w| w[1].as_str())
+                .unwrap_or("0");
             println!("Session '{}' killed", target);
             0
         }
@@ -77,8 +86,11 @@ fn run_tmux(args: Vec<String>) -> i32 {
             0
         }
         "list-windows" | "lsw" => {
-            let target = args.windows(2).find(|w| w[0] == "-t")
-                .map(|w| w[1].as_str()).unwrap_or("dev");
+            let target = args
+                .windows(2)
+                .find(|w| w[0] == "-t")
+                .map(|w| w[1].as_str())
+                .unwrap_or("dev");
             println!("Session: {}", target);
             println!("0: bash* (2 panes) [180x45]");
             println!("1: vim- (1 panes) [180x45]");
@@ -86,17 +98,26 @@ fn run_tmux(args: Vec<String>) -> i32 {
             0
         }
         "send-keys" => {
-            let target = args.windows(2).find(|w| w[0] == "-t")
-                .map(|w| w[1].as_str()).unwrap_or("0");
+            let target = args
+                .windows(2)
+                .find(|w| w[0] == "-t")
+                .map(|w| w[1].as_str())
+                .unwrap_or("0");
             println!("Keys sent to pane {}", target);
             0
         }
         "select-pane" => {
-            let direction = if args.iter().any(|a| a == "-L") { "left" }
-                else if args.iter().any(|a| a == "-R") { "right" }
-                else if args.iter().any(|a| a == "-U") { "up" }
-                else if args.iter().any(|a| a == "-D") { "down" }
-                else { "target" };
+            let direction = if args.iter().any(|a| a == "-L") {
+                "left"
+            } else if args.iter().any(|a| a == "-R") {
+                "right"
+            } else if args.iter().any(|a| a == "-U") {
+                "up"
+            } else if args.iter().any(|a| a == "-D") {
+                "down"
+            } else {
+                "target"
+            };
             println!("Selected {} pane", direction);
             0
         }
@@ -122,7 +143,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_tmux};
+    use super::run_tmux;
 
     #[test]
     fn help_exits_zero() {

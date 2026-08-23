@@ -577,6 +577,34 @@ impl TcpConnection {
             last_error: 0,
         }
     }
+
+    /// Release the slot: mark it free and drop everything buffered on it.
+    ///
+    /// The invariant is that an inactive slot is `Closed` and holds no
+    /// data, so the next connection to take the slot inherits nothing
+    /// from the last one. `last_error` is deliberately *not* cleared —
+    /// it is the reason for the teardown, and a caller that still holds
+    /// the handle reads it after the fact to learn why.
+    ///
+    /// Written out eighteen times before this existed, and by then the
+    /// copies had stopped agreeing: three sites in `tick_retransmit`
+    /// left `state` at whatever it had been and never cleared
+    /// `rx_buffer`, so an abandoned slot kept a dead peer's received
+    /// bytes until something reused it and reported a live state to the
+    /// diagnostic APIs meanwhile. Nothing acted on either — every
+    /// consumer happens to check `active` first — which is exactly what
+    /// let the divergence sit unnoticed. One method means the next field
+    /// added to `TcpConnection` gets cleared in one place instead of
+    /// eighteen, where a miss would be a genuine leak across
+    /// connections rather than a near one.
+    fn deactivate(&mut self) {
+        self.active = false;
+        self.state = TcpState::Closed;
+        self.rx_buffer.clear();
+        self.tx_buffer.clear();
+        self.nagle_buf.clear();
+        self.ooo_buf.clear();
+    }
 }
 
 /// Global TCP connection table.
@@ -1398,12 +1426,7 @@ fn take_conn_slot(conns: &mut [TcpConnection], why: &str) -> KernelResult<usize>
         why
     );
 
-    conn.active = false;
-    conn.state = TcpState::Closed;
-    conn.rx_buffer.clear();
-    conn.tx_buffer.clear();
-    conn.nagle_buf.clear();
-    conn.ooo_buf.clear();
+    conn.deactivate();
     Ok(idx)
 }
 
@@ -2942,12 +2965,7 @@ pub fn close(handle: usize) -> KernelResult<()> {
             remote_port
         );
         let mut conns = CONNECTIONS.lock();
-        conns[handle].active = false;
-        conns[handle].state = TcpState::Closed;
-        conns[handle].rx_buffer.clear();
-        conns[handle].tx_buffer.clear();
-        conns[handle].nagle_buf.clear();
-        conns[handle].ooo_buf.clear();
+        conns[handle].deactivate();
         return Ok(());
     }
 
@@ -2988,11 +3006,7 @@ pub fn close(handle: usize) -> KernelResult<()> {
             let mut conns = CONNECTIONS.lock();
             let final_state = conns[handle].state;
             if final_state == TcpState::Closed {
-                conns[handle].active = false;
-                conns[handle].rx_buffer.clear();
-                conns[handle].tx_buffer.clear();
-                conns[handle].nagle_buf.clear();
-                conns[handle].ooo_buf.clear();
+                conns[handle].deactivate();
             }
             // If still FinWait1/FinWait2/TimeWait, leave slot active for
             // the timer-based handlers (FIN retransmit, TIME_WAIT cleanup).
@@ -3018,22 +3032,12 @@ pub fn close(handle: usize) -> KernelResult<()> {
         TcpState::SynSent => {
             // Connection never established — just deactivate.
             let mut conns = CONNECTIONS.lock();
-            conns[handle].active = false;
-            conns[handle].state = TcpState::Closed;
-            conns[handle].rx_buffer.clear();
-            conns[handle].tx_buffer.clear();
-            conns[handle].nagle_buf.clear();
-            conns[handle].ooo_buf.clear();
+            conns[handle].deactivate();
         }
         _ => {
             // Already closing or other state — force deactivate.
             let mut conns = CONNECTIONS.lock();
-            conns[handle].active = false;
-            conns[handle].state = TcpState::Closed;
-            conns[handle].rx_buffer.clear();
-            conns[handle].tx_buffer.clear();
-            conns[handle].nagle_buf.clear();
-            conns[handle].ooo_buf.clear();
+            conns[handle].deactivate();
         }
     }
 
@@ -3174,12 +3178,7 @@ pub fn abort(handle: usize) -> KernelResult<()> {
 
     // Immediately reclaim the slot.
     conn.last_error = TCP_ERR_RESET; // Aborted by local side.
-    conn.active = false;
-    conn.state = TcpState::Closed;
-    conn.rx_buffer.clear();
-    conn.tx_buffer.clear();
-    conn.nagle_buf.clear();
-    conn.ooo_buf.clear();
+    conn.deactivate();
 
     drop(conns);
 
@@ -3575,12 +3574,7 @@ pub fn close_listener(listener_handle: usize) -> KernelResult<()> {
                         ack: conn.rcv_nxt,
                     });
                     conn.last_error = TCP_ERR_TIMEDOUT;
-                    conn.active = false;
-                    conn.state = TcpState::Closed;
-                    conn.rx_buffer.clear();
-                    conn.tx_buffer.clear();
-                    conn.nagle_buf.clear();
-                    conn.ooo_buf.clear();
+                    conn.deactivate();
                 }
             }
         }
@@ -4113,12 +4107,7 @@ fn process_tcp_common(
         } else {
             TCP_ERR_RESET
         };
-        conn.active = false;
-        conn.state = TcpState::Closed;
-        conn.rx_buffer.clear();
-        conn.tx_buffer.clear();
-        conn.nagle_buf.clear();
-        conn.ooo_buf.clear();
+        conn.deactivate();
         return Ok(());
     }
 
@@ -4916,12 +4905,7 @@ pub fn tick_keepalive() {
             let rcv_nxt = conn.rcv_nxt;
 
             conn.last_error = TCP_ERR_TIMEDOUT; // Keepalive failure.
-            conn.active = false;
-            conn.state = TcpState::Closed;
-            conn.rx_buffer.clear();
-            conn.tx_buffer.clear();
-            conn.nagle_buf.clear();
-            conn.ooo_buf.clear();
+            conn.deactivate();
 
             drop(conns);
             let _ = send_segment(
@@ -5048,12 +5032,7 @@ pub fn tick_time_wait_cleanup() {
                         conn.remote_port
                     );
                     conn.last_error = TCP_ERR_NONE; // Normal close.
-                    conn.active = false;
-                    conn.state = TcpState::Closed;
-                    conn.rx_buffer.clear();
-                    conn.tx_buffer.clear();
-                    conn.nagle_buf.clear();
-                    conn.ooo_buf.clear();
+                    conn.deactivate();
                 }
             }
             TcpState::FinWait1 => {
@@ -5070,12 +5049,7 @@ pub fn tick_time_wait_cleanup() {
                         conn.remote_port
                     );
                     conn.last_error = TCP_ERR_TIMEDOUT;
-                    conn.active = false;
-                    conn.state = TcpState::Closed;
-                    conn.rx_buffer.clear();
-                    conn.tx_buffer.clear();
-                    conn.nagle_buf.clear();
-                    conn.ooo_buf.clear();
+                    conn.deactivate();
                 }
             }
             TcpState::FinWait2 => {
@@ -5093,12 +5067,7 @@ pub fn tick_time_wait_cleanup() {
                         conn.remote_port
                     );
                     conn.last_error = TCP_ERR_TIMEDOUT;
-                    conn.active = false;
-                    conn.state = TcpState::Closed;
-                    conn.rx_buffer.clear();
-                    conn.tx_buffer.clear();
-                    conn.nagle_buf.clear();
-                    conn.ooo_buf.clear();
+                    conn.deactivate();
                 }
             }
             TcpState::LastAck => {
@@ -5114,12 +5083,7 @@ pub fn tick_time_wait_cleanup() {
                         conn.remote_port
                     );
                     conn.last_error = TCP_ERR_TIMEDOUT;
-                    conn.active = false;
-                    conn.state = TcpState::Closed;
-                    conn.rx_buffer.clear();
-                    conn.tx_buffer.clear();
-                    conn.nagle_buf.clear();
-                    conn.ooo_buf.clear();
+                    conn.deactivate();
                 }
             }
             TcpState::SynReceived => {
@@ -5135,12 +5099,7 @@ pub fn tick_time_wait_cleanup() {
                         conn.remote_port
                     );
                     conn.last_error = TCP_ERR_TIMEDOUT;
-                    conn.active = false;
-                    conn.state = TcpState::Closed;
-                    conn.rx_buffer.clear();
-                    conn.tx_buffer.clear();
-                    conn.nagle_buf.clear();
-                    conn.ooo_buf.clear();
+                    conn.deactivate();
                 }
             }
             TcpState::SynSent => {
@@ -5157,12 +5116,7 @@ pub fn tick_time_wait_cleanup() {
                         conn.remote_port
                     );
                     conn.last_error = TCP_ERR_TIMEDOUT;
-                    conn.active = false;
-                    conn.state = TcpState::Closed;
-                    conn.rx_buffer.clear();
-                    conn.tx_buffer.clear();
-                    conn.nagle_buf.clear();
-                    conn.ooo_buf.clear();
+                    conn.deactivate();
                 }
             }
             TcpState::CloseWait => {
@@ -5180,12 +5134,7 @@ pub fn tick_time_wait_cleanup() {
                         conn.remote_port
                     );
                     conn.last_error = TCP_ERR_TIMEDOUT;
-                    conn.active = false;
-                    conn.state = TcpState::Closed;
-                    conn.rx_buffer.clear();
-                    conn.tx_buffer.clear();
-                    conn.nagle_buf.clear();
-                    conn.ooo_buf.clear();
+                    conn.deactivate();
                 }
             }
             _ => {}
@@ -5238,10 +5187,7 @@ pub fn tick_retransmit() {
                 conn.remote_port
             );
             conn.last_error = TCP_ERR_TIMEDOUT;
-            conn.active = false;
-            conn.tx_buffer.clear();
-            conn.nagle_buf.clear();
-            conn.ooo_buf.clear();
+            conn.deactivate();
             continue;
         }
 
@@ -5317,10 +5263,7 @@ pub fn tick_retransmit() {
                 conn.local_port
             );
             conn.last_error = TCP_ERR_TIMEDOUT;
-            conn.active = false;
-            conn.tx_buffer.clear();
-            conn.nagle_buf.clear();
-            conn.ooo_buf.clear();
+            conn.deactivate();
             continue;
         }
 
@@ -5417,10 +5360,7 @@ pub fn tick_retransmit() {
                 conn.remote_port
             );
             conn.last_error = TCP_ERR_TIMEDOUT;
-            conn.active = false;
-            conn.tx_buffer.clear();
-            conn.nagle_buf.clear();
-            conn.ooo_buf.clear();
+            conn.deactivate();
             continue;
         }
 
@@ -5545,12 +5485,7 @@ pub fn icmp_error(
                     dst_port
                 );
                 conn.last_error = TCP_ERR_REFUSED; // ICMP unreachable on connect.
-                conn.active = false;
-                conn.state = TcpState::Closed;
-                conn.rx_buffer.clear();
-                conn.tx_buffer.clear();
-                conn.nagle_buf.clear();
-                conn.ooo_buf.clear();
+                conn.deactivate();
             }
             TcpState::SynReceived => {
                 // Also abort half-open connections from the server side.
@@ -5564,12 +5499,7 @@ pub fn icmp_error(
                     dst_port
                 );
                 conn.last_error = TCP_ERR_REFUSED; // ICMP unreachable on half-open.
-                conn.active = false;
-                conn.state = TcpState::Closed;
-                conn.rx_buffer.clear();
-                conn.tx_buffer.clear();
-                conn.nagle_buf.clear();
-                conn.ooo_buf.clear();
+                conn.deactivate();
             }
             _ => {
                 // PMTUD (RFC 1191): if ICMP "Fragmentation Needed" carries

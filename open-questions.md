@@ -1098,6 +1098,77 @@ match), `kernel/src/cap/mod.rs:194-360` (types 16–30), `kernel/src/cap/request
 (the broker itself).
 
 
+## C-Q6 — [C] We have written the Settings screens twice, in two different places, and neither copy is finished. Which one is the real one? — Status: OPEN
+
+**In short:** There are two separate, independently-written sets of Settings
+pages in this tree — one inside the desktop shell, one inside a standalone
+Settings application — covering mostly the same ground (sound, display, mouse,
+power, network, wallpaper, accounts, updates…). Neither knows the other exists.
+The shell's copy is better tested but **nothing can display it**; the app's copy
+is the one that would actually open if a user clicked "Settings". I need to know
+which one to keep, because everything I do to one I currently have to do twice.
+
+**Glossary:** the *shell* is the always-on desktop furniture — taskbar, start
+menu, wallpaper, the volume popup. An *application* is a separate program the
+user launches. A *panel* or *page* here means one screen of settings.
+
+**Where:**
+
+| | |
+|---|---|
+| Copy 1 | `gui/desktop/src/*_settings.rs` and friends — about 50 modules |
+| Copy 2 | `apps/settings/src/main.rs` — 8,227 lines, its own page list and its own data types |
+| What connects them | nothing (`apps/settings` does not depend on the `desktop` crate at all) |
+
+Copy 1 has one further problem on its own: the shell paints exactly **four** of
+its fifty-seven modules (`wallpaper`, `calendar`, `snap`, `overview`). Every
+other panel it contains — including a few with no counterpart in copy 2, such as
+the on-screen volume overlay, the print manager and the login screen — is drawn
+only by its own unit tests. Full detail is in `known-issues.md` →
+`TD-C-THE-SHELL-DRAWS-FOUR-OF-ITS-FIFTY-SEVEN-MODULES`.
+
+### The options
+
+**A. The standalone app is the real one; delete the shell's settings panels.**
+*What changes:* the desktop crate loses tens of thousands of lines; nothing a
+user can see changes today. Cheapest, and it deletes the copy nobody can open.
+Against: it throws away the better-tested implementation, and it does not
+account for the shell-only surfaces (volume overlay, login screen, print
+manager, security dialog) that are not settings pages at all and have nowhere
+else to go.
+
+**B. The shell's panels are the real ones; the app becomes a thin window that
+displays them.**
+*What changes:* the Settings app starts showing the shell's pages instead of its
+own; the duplicate data types in `apps/settings/src/main.rs` go. Keeps the
+tested code. Against: a Settings *application* that has to link the desktop
+shell to draw itself is a backwards dependency, and the shell crate is already
+sixty files.
+
+**C. Split by kind — shell surfaces stay in the shell and get wired up; settings
+pages move to the app and the shell copies are deleted.**
+*What changes:* the volume overlay and the login screen actually appear on
+screen for the first time; the Settings app gains the shell's better-tested
+pages; each page exists once. Most work, and I think it is right — the dividing
+line ("is this something the desktop shows you, or a screen you open?") is a
+real one rather than a compromise.
+
+**If it is never answered:** nothing breaks and nothing gets worse on its own.
+The concrete cost is that every crate-wide change is paid for twice. The one in
+flight is the palette conversion — 549 hardcoded colours in the shell's copy,
+2,258 in the app's — and I am partway through the shell's. I will keep going
+either way, because a converted module is converted once and leaving a module
+frozen guarantees the bug comes back when it is finally wired up. But I would
+rather not start the app's 2,258 without knowing whether half of them are about
+to be deleted.
+
+**Recommendation:** C. B is the tempting middle and I would push back on it: the
+dependency direction is wrong and it papers over the fact that four modules of
+fifty-seven are reachable. A is defensible if the answer is simply "the shell's
+settings pages were a mistake" — and if that is the answer, say so plainly and I
+will delete them rather than convert them.
+
+
 # Resolved
 
 **The body above holds OPEN questions only.** When the operator answers one,

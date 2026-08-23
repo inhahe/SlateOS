@@ -63218,3 +63218,106 @@ caller happened to arrange (§285) — and it is worth checking for directly,
 because in all three cases the code read correctly and only the *wiring* was
 missing. Two questions catch it: does anything call this, and does anyone
 check what it returns?
+
+---
+
+## TD-C-THE-SHELL-DRAWS-FOUR-OF-ITS-FIFTY-SEVEN-MODULES (lane C, 2026-08-22)
+
+**In short:** The desktop shell crate contains about fifty-seven modules, and
+roughly fifty of them are complete, tested user interfaces — a sound panel, a
+display panel, a privacy panel, an on-screen volume overlay, a login screen, a
+run dialog, a print manager — that **nothing in the running system can put on
+screen.** The shell's paint path reaches exactly four of them. The rest are
+drawn only by their own unit tests. Separately, `apps/settings` is a *second*,
+independent implementation of most of the same panels, and it is the one that
+would actually run.
+
+**Where:** `gui/desktop/src/session.rs`, `ShellSession::paint_background`
+(`:334`) and `ShellSession::paint_chrome` (`:353`), are the only two functions
+that hand render commands to a compositor. Between them they call:
+
+| Called | Which module actually draws |
+|---|---|
+| `self.wallpaper.get_render_commands` | `wallpaper.rs` |
+| `self.shell.render_taskbar` | **`lib.rs` inline** — not `taskbar.rs` |
+| `self.shell.render_start_menu` | **`lib.rs` inline** — not `launcher.rs` |
+| `self.shell.render_alt_tab` | **`lib.rs` inline** |
+| `self.shell.render_calendar` | `calendar.rs` |
+| `self.shell.render_zone_overlay` | `snap.rs` |
+| `self.shell.render_overview` | `overview.rs` |
+
+So four modules — `wallpaper`, `calendar`, `snap`, `overview` — plus whatever
+`lib.rs` draws by hand. A grep for `pub fn render` in `gui/desktop/src` returns
+**seventy-eight** entry points; six of those are the `lib.rs` ones above, and
+of the remaining seventy-two only four are reached.
+
+Note the two rows in bold especially. `taskbar.rs` defines a
+`TaskbarUI::render(&mut self, bar_width, bar_height)` and `launcher.rs` an
+`AppLauncher::render(&self)`, and `lib.rs` draws its own taskbar and its own
+start menu without consulting either. Those two are not merely uncalled; they
+are uncalled *while a second implementation of the same surface ships*.
+
+**And `apps/settings` is a third copy of the settings half.**
+`apps/settings/src/main.rs` (8,227 lines) declares its own `SettingsPage` enum
+— `Display`, `Sound`, `Mouse`, `Notifications`, `Power`, `NetworkStatus`,
+`WiFi`, `Wallpaper`, `LockScreen`, `DefaultApps`, `StartupApps`,
+`UserAccounts`, `SystemUpdates` and more — and its own `AudioDevice` /
+`AppVolume` types. It does not depend on the `desktop` crate at all (`grep -r
+'desktop::' apps/settings` finds nothing). Every one of those pages has a twin
+module in `gui/desktop/src` with the same name and the same job.
+
+**Why this is worth a file entry rather than a shrug.** Three separate costs,
+and the third is the one that bites:
+
+1. *Nothing exercises the panels against a real caller.* Their arguments,
+   their sizes and their assumptions about what the shell would pass are
+   asserted only by tests written next to them, by the same reasoning that
+   wrote the code. A panel that expects a width the shell would never give it
+   is not detectably wrong today.
+2. *Two implementations drift.* The `desktop` and `apps/settings` sound pages
+   already disagree about their data model; nothing forces them together and
+   nothing reports when they part.
+3. *It silently doubles the cost of every crate-wide change.* The palette
+   conversion (`TD-C-FORTY-NINE-SHELL-MODULES-CARRY-THEIR-OWN-COPY-OF-THE-PALETTE`)
+   is threading a `&Palette` through fifty modules that nobody draws — and the
+   same work will be needed a second time in `apps/settings`, where the count
+   is 2,258 constants (`TD-C-EVERY-APPLICATION-CARRIES-ITS-OWN-COPY-OF-THE-PALETTE-TOO`).
+   That is not an argument against doing it: leaving the modules frozen
+   guarantees the bug returns the moment they *are* wired up, and a module
+   converted now is converted once. It is an argument for deciding **which of
+   the two implementations survives** before converting the second one.
+
+**This is not `TD-C-THE-SHELL-CAN-DRAW-ITSELF-AND-NOBODY-CAN-ASK-IT-TO`**,
+which was resolved on 2026-08-21 and was about the shell having no event loop
+at all. The loop exists now and paints every frame. This entry is about what it
+paints *into* that loop, which is four modules.
+
+**Proper fix, and it starts with a decision, not with code.** The question is
+whether the shell's settings panels or `apps/settings` is the real one:
+
+- **`apps/settings` survives** — then some fifty modules in `gui/desktop/src`
+  are dead code and should be deleted, not converted, and this entry closes by
+  shrinking the crate by tens of thousands of lines. Against: the shell's
+  panels are the better-tested of the two and several have no counterpart in
+  `apps/settings` (the OSD overlay, the print manager, the security dialog,
+  the login screen, window rules).
+- **The shell's panels survive** — then `apps/settings` becomes a thin host
+  that depends on the `desktop` crate and draws them, and the duplicated data
+  models in `main.rs` go. Against: a settings *application* that links the
+  desktop shell inverts the dependency you would expect, and the shell crate
+  is already 60 files.
+- **Split by kind** — the panels that are genuinely *shell surfaces* (OSD,
+  taskbar, start menu, alt-tab, run dialog, security dialog, login screen)
+  stay in `desktop` and get wired into `paint_chrome`; the ones that are
+  genuinely *settings pages* move to `apps/settings` and the shell copies are
+  deleted. This is probably right, and it is the most work.
+
+Whichever is chosen, the wiring for the shell-surface half is small: each is a
+`Vec<RenderCommand>` already, and `paint_chrome` already knows how to build a
+`RenderTree` from several parts and show or hide the popup surface.
+
+**If never fixed:** the desktop crate keeps growing interfaces that cannot be
+seen, every crate-wide sweep pays for them, and the day someone wires one up is
+the day they discover what it assumed. Nothing breaks in the meantime, which is
+exactly why it has gone unnoticed for so long — a module nobody draws also
+never looks wrong.

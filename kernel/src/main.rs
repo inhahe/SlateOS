@@ -5528,6 +5528,13 @@ extern "C" fn kernel_main() -> ! {
             // pre-existing watch covers its fixture, and purges every version it
             // captures -- so it cannot destroy a real file's version history.
             fs::fileversion::self_test();
+            // screenrec was reachable only from a `kshell` subcommand, so its
+            // suite had never run in the boot test (TD-A-FS-SELFTESTS-NEVER-RUN).
+            // Safe here: it resets `STATE` to `None` at both ends, which is
+            // exactly the state a fresh boot has -- `init_defaults()` is
+            // otherwise reachable only from `screenrec init`. It records
+            // session *metadata* only; nothing touches the framebuffer.
+            fs::screenrec::self_test();
             if let Err(e) = crate::sockact::self_test() {
                 serial_println!("WARNING: socket-activation self-test failed: {:?}", e);
             }

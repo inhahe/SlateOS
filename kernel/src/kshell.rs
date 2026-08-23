@@ -38164,7 +38164,7 @@ fn cmd_screenrec(args: &str) {
                     if cfg.show_cursor { "shown" } else { "hidden" }
                 );
                 shell_println!("  Countdown: {}s", cfg.countdown_seconds);
-                shell_println!("  Output:    {}", cfg.output_dir);
+                shell_println!("  Output:    {}", cfg.output_dir.display());
             }
             shell_println!("  Recordings: {} ({} active)", count, active);
             shell_println!(
@@ -38185,7 +38185,7 @@ fn cmd_screenrec(args: &str) {
                     return;
                 };
                 shell_println!("Recording #{} started ({}).", id, rec.state.label());
-                shell_println!("  File: {}", rec.file_path);
+                shell_println!("  File: {}", rec.file_path.display());
                 if rec.state == screenrec::RecordingState::Countdown {
                     let _ = screenrec::begin_capture(id);
                     shell_println!("  Capture begun.");
@@ -38204,7 +38204,7 @@ fn cmd_screenrec(args: &str) {
                                 screenrec::format_duration(rec.duration_seconds)
                             );
                             shell_println!("  Frames:   {}", rec.frame_count);
-                            shell_println!("  File:     {}", rec.file_path);
+                            shell_println!("  File:     {}", rec.file_path.display());
                         }
                         Err(e) => shell_println!("Error: {:?}", e),
                     }
@@ -38261,7 +38261,7 @@ fn cmd_screenrec(args: &str) {
                         "  #{} [{}] {} — {} frames, {}",
                         r.id,
                         r.state.label(),
-                        r.file_path,
+                        r.file_path.display(),
                         r.frame_count,
                         screenrec::format_duration(r.duration_seconds)
                     );

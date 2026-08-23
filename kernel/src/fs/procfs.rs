@@ -7910,7 +7910,7 @@ fn gen_screenrec() -> Vec<u8> {
         out.push_str(&format!("quality: {}\n", cfg.quality.label()));
         out.push_str(&format!("fps: {}\n", cfg.fps));
         out.push_str(&format!("cursor: {}\n", cfg.show_cursor));
-        out.push_str(&format!("output_dir: {}\n", cfg.output_dir));
+        out.push_str(&format!("output_dir: {}\n", cfg.output_dir.display()));
     }
 
     out.into_bytes()

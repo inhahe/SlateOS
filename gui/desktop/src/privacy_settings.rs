@@ -1635,14 +1635,30 @@ mod tests {
             // that method in isolation (as the choice table does) does not prove
             // this call site still asks it -- swapping `app.state.color(p)` for a
             // flat `p.text` leaves the method, and that table, untouched.
+            //
+            // But state the expected colour as the ROLE, never as
+            // `PermissionState::X.color(&p)`. Writing the expectation in terms
+            // of the code under test makes the assertion tautological: change
+            // the `Allowed => p.green` arm and both sides of the comparison
+            // move together, so the row that a user reads as "allowed" can turn
+            // any colour at all and this table stays green. That is what let
+            // two arm-swap defects through the first time. The role literal
+            // pins the value; the three-state spread below still proves the
+            // call site asks the method, because a flat literal at the call
+            // site would give all three rows the same colour.
             assert_eq!(
                 rgb(text_containing(&full, PermissionState::Allowed.label())),
-                rgb(PermissionState::Allowed.color(&p)),
+                rgb(p.green),
+                "{mode}"
+            );
+            assert_eq!(
+                rgb(text_containing(&full, PermissionState::Denied.label())),
+                rgb(p.red),
                 "{mode}"
             );
             assert_eq!(
                 rgb(text_containing(&full, PermissionState::NotDecided.label())),
-                rgb(PermissionState::NotDecided.color(&p)),
+                rgb(p.overlay0),
                 "{mode}"
             );
             // render_permissions_tab, overview arm
@@ -1875,38 +1891,47 @@ mod tests {
     }
 
     #[test]
-    fn nothing_that_reports_a_permission_state_follows_the_accent() {
-        // This is a privacy panel: green means allowed and red means denied,
-        // and a user on a green desktop must still be able to read "denied".
-        // So every state read-out is pinned, and the way to prove a colour is
-        // pinned is to move the accent underneath it and watch it not budge.
-        let names = [
-            "overview: disabled, allowed, empty",
-            "detail: one app per state, enabled",
-            "activity: allowed and denied",
-            "general: level 0, toggles true",
-        ];
-        for name in names {
-            let mut first: Option<Vec<Color>> = None;
-            for accent in SAFE_ACCENTS {
-                let mut p = mocha();
-                p.accent = accent;
-                let cmds = draw(name, &p);
-                let states: Vec<Color> = every_color(&cmds)
-                    .into_iter()
-                    .filter(|c| {
-                        rgb(*c) == rgb(p.green)
-                            || rgb(*c) == rgb(p.red)
-                            || rgb(*c) == rgb(p.overlay0)
-                    })
-                    .collect();
-                match &first {
-                    None => first = Some(states),
-                    Some(want) => assert_eq!(
-                        states.iter().map(|c| rgb(*c)).collect::<Vec<_>>(),
-                        want.iter().map(|c| rgb(*c)).collect::<Vec<_>>(),
-                        "{name}: a state read-out moved when the accent did"
-                    ),
+    fn nothing_but_the_selection_labels_moves_when_the_accent_does() {
+        // Render each fixture under two accents and require every command to
+        // draw the same colour in both, except the sites that are supposed to
+        // track the accent -- recognised by drawing the first accent in the
+        // first render and the second in the second.
+        //
+        // The obvious formulation is the wrong one, and was written here
+        // first: collect every colour that equals green, red or overlay0 and
+        // compare *that* across accents. Filtering by role before comparing
+        // throws away exactly the colour that moved -- a site that stops
+        // drawing green and starts drawing the accent drops out of both
+        // lists, so they still match. It checked that the sites which stayed
+        // put stayed put.
+        //
+        // Both accents are deliberately outside either palette, so a frozen
+        // role can never be mistaken for an accent site.
+        const A: Color = Color::from_hex(0x00FF_8C1A);
+        const B: Color = Color::from_hex(0x0012_9E7D);
+
+        for light in [false, true] {
+            let (mut pa, mut pb) = (Palette::for_mode(light), Palette::for_mode(light));
+            pa.accent = A;
+            pb.accent = B;
+            for (what, ui) in every_state() {
+                let ca = ui.render(&pa, 0.0, 0.0, 500.0);
+                let cb = ui.render(&pb, 0.0, 0.0, 500.0);
+                assert_eq!(
+                    ca.len(),
+                    cb.len(),
+                    "{what}: the accent changed how much is drawn"
+                );
+                let (xa, xb) = (every_color(&ca), every_color(&cb));
+                for (i, (a, b)) in xa.iter().zip(xb.iter()).enumerate() {
+                    if rgb(*a) == rgb(A) && rgb(*b) == rgb(B) {
+                        continue; // a site that is meant to follow the accent
+                    }
+                    assert_eq!(
+                        rgb(*a),
+                        rgb(*b),
+                        "{what} (light={light}): command {i} moved with the accent"
+                    );
                 }
             }
         }

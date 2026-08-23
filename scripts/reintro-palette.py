@@ -6790,7 +6790,7 @@ DEFECTS = [
         ["desktop"],
         [
             'every_choice_this_panel_makes_hands_over_the_role_it_claims',
-            'nothing_that_reports_a_permission_state_follows_the_accent',
+            'nothing_but_the_selection_labels_moves_when_the_accent_does',
         ],
     ),
     (
@@ -6889,7 +6889,7 @@ DEFECTS = [
         ["desktop"],
         [
             'every_choice_this_panel_makes_hands_over_the_role_it_claims',
-            'nothing_that_reports_a_permission_state_follows_the_accent',
+            'nothing_but_the_selection_labels_moves_when_the_accent_does',
         ],
     ),
     (
@@ -7015,7 +7015,7 @@ DEFECTS = [
         ["desktop"],
         [
             'every_choice_this_panel_makes_hands_over_the_role_it_claims',
-            'nothing_that_reports_a_permission_state_follows_the_accent',
+            'nothing_but_the_selection_labels_moves_when_the_accent_does',
         ],
     ),
     (
@@ -7106,7 +7106,7 @@ DEFECTS = [
         [
             'every_choice_this_panel_makes_hands_over_the_role_it_claims',
             'allowed_and_denied_stay_apart_under_every_accent_and_mode',
-            'nothing_that_reports_a_permission_state_follows_the_accent',
+            'nothing_but_the_selection_labels_moves_when_the_accent_does',
         ],
     ),
     (

@@ -11,7 +11,7 @@
 # Do NOT raise a number, and do NOT add a file, to turn a red `--check`
 # green: that is the defect being recorded, not an exception to it.
 #
-# 1798 sites across 777 files.
+# 1752 sites across 776 files.
 
 init/servicebus/src/main.rs:4
 userspace/abduco-cli/src/main.rs:5
@@ -84,7 +84,6 @@ userspace/bridge-cli/src/main.rs:6
 userspace/broot-cli/src/main.rs:1
 userspace/bruno-cli/src/main.rs:1
 userspace/btrfs-cli/src/main.rs:3
-userspace/btrfs/src/main.rs:46
 userspace/buck-cli/src/main.rs:1
 userspace/buildah-cli/src/main.rs:1
 userspace/buildah/src/main.rs:1

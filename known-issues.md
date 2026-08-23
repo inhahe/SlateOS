@@ -65116,6 +65116,70 @@ false of the value — the correction is in `1c29294f3`.
 Converted in `1c29294f3`, wired in the commit that follows it.
 **Counts after this batch:** boot-reachable 933, manual-only 181, dead 0.
 
+### 2026-08-23 — "which of these are destructive?" was the wrong question all along
+
+**Of the 181 suites still manual-only, the survey called 8 destructive. 149
+of them permanently modify user state.** The gap is not a bug in the
+detector. It is the detector's premise.
+
+Both generations of the check looked for **deletion** — first by name
+(`clear_all`, `reset_all`, …), then, after that missed eleven, by the
+structural tell that a destructive call taking no arguments must act on the
+whole table. Both are real improvements and both are still looking for the
+wrong thing, because this is a self-test:
+
+```rust
+set_brightness(50);
+assert_eq!(get_brightness(), 50);
+```
+
+It deletes nothing. `set_brightness` is an ordinary mutating setter called
+exactly the way any caller would call it — there is no vocabulary tell and
+no arity tell, and there cannot be one, because nothing distinguishes the
+suite's call from a legitimate one except intent. `fs/brightness.rs` sat in
+the bucket labelled *"quiet — probably safe, still worth a glance"*, and
+typing `brightness test` at the kernel shell sets the user's screen
+brightness four times and leaves it wherever the last assertion put it.
+`colorscheme test` changes their accent colour and theme mode;
+`dpiscaling test` changes their display scale. All three were `quiet`.
+
+**The conclusion is not a fourth detector.** A self-test mutates its
+module's state because mutating state is what a self-test is for; the
+answer to "which of these are destructive?" is "essentially all of them",
+and the two suites that genuinely are not (`net/http`, `pciids` — pure
+parser tests over local values) are cheap to identify because they declare
+no module state at all. `with_pristine` restores whatever the suite did —
+a wipe and a settings change are the same operation to it — so **it can be
+applied without knowing which, and applying it everywhere is both cheaper
+and safer than any sequence of increasingly clever greps.**
+
+Generalising the rule: *when a safety check enumerates the ways something
+can go wrong, and each revision of the enumeration finds more cases than
+the last, stop revising it.* The enumeration is not converging on the
+answer; it is sampling an open set. Find the operation that is safe
+regardless — here, restore-after — and apply it unconditionally.
+
+**Measured shape of the remaining work** (`build/static_shapes.py`), which
+is what makes "convert everything" tractable rather than heroic:
+
+| shape | count | conversion |
+|---|---|---|
+| one lazy static (`Mutex<Option<T>>`) | 144 | mechanical; pristine value is `None` |
+| one eager static (`Mutex<T>`) | 22 | needs a `const fn new()` extracted from the initialiser |
+| two independent statics | 2 | `net/bridge`, `net/qos` — nested `with_pristine` |
+| no module state at all | 13 | nothing to do; these are the genuinely inert ones |
+
+The 13 with no state are *the same 13* the mutation scan independently
+found to mutate nothing, which is the only cross-check available here and
+it agrees.
+
+Superseded scripts: `build/survey_destructive.py` (name list, `fs/` only),
+`build/widen_check.py` (arity tell). `build/survey2.py` generalises both
+off the hardcoded `fs/` prefix — it was written to cover the 37 suites in
+`kernel/src/net/` and at the top of `kernel/src/` that the first survey
+literally could not open — and `build/mutation_check.py` is the scan that
+retired all of them.
+
 ---
 
 ## TD-A-SPARSE-FSTRIM-WRONG-DEVICE — hole punching queued discards for a nonexistent device at a file offset

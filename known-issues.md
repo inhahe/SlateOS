@@ -66292,3 +66292,96 @@ already has the interval machinery and the `Option<u64>` last-run
 semantics (`kernel/src/fs/tasksched.rs:662`), so this is wiring, not new
 mechanism. It was left out of `dc80769bf` to keep that commit to one
 logical change.
+
+### FIXED-A-STORAGE-SENSE-SCHEDULE-WAS-A-SETTING-THAT-DECIDED-NOTHING (lane A)
+
+**In short:** Storage Sense is the automatic disk-cleanup feature. You
+could set it to "Daily", "Weekly", "Monthly" or "when the disk gets
+full", and the setting would be remembered and shown back to you forever
+— but nothing in the system ever looked at it. Cleanup ran only when you
+asked for it by hand. Fixed in `78cae81f5`: the schedule now determines
+whether cleanup is due, and `storagesense show` says so.
+
+**Status:** FIXED (`78cae81f5`).
+
+**Where:** `kernel/src/fs/storagesense.rs`.
+
+**What was wrong.** Three fields — `schedule`, `low_space_threshold_mb`
+and `last_run_ns` — were all written and none of them ever read. Two of
+the three were settable from the shell (`storagesense schedule daily`,
+and the threshold), so the feature presented a full configuration
+surface over machinery that did not exist. Dead configuration is worse
+than absent configuration: absent configuration tells the user to do it
+themselves, dead configuration tells them it is handled.
+
+**The second bug, hidden behind the first.** `last_run_ns` was a `u64`
+in which `0` meant "never run". The clock is nanoseconds-since-boot and
+starts *at* zero, so `0` is a legal instant. This could not misbehave
+while nothing read the field — and giving it a reader is precisely what
+would have armed it. A cleanup run that landed at uptime 0 would read
+back as never having run, so the new due-check would have declared
+cleanup due again immediately and deleted the same files a second time,
+on the one boot where the first pass had only just finished. It is now
+`Option<u64>`.
+
+**Note on the low-space path.** `due_reason()` releases the module lock
+before calling `Vfs::statvfs`, because `statvfs` descends into a
+filesystem driver and may take VFS locks of its own. A `statvfs` that
+fails yields "not due", never "low space": the remedy for low space is
+deleting the user's files, so an unknown free-space figure must not be
+treated as a low one.
+
+**Not yet done:** as with backup schedules, nothing polls `due_reason()`
+on a timer — see `TD-A-BACKUP-DUE-SCHEDULES-HAS-NO-PERIODIC-CALLER`,
+which is now the same gap in two modules and wants one `tasksched` task
+that services both.
+
+### FIXED-A-FILE-INDEX-BUILT-AT-BOOT-CLAIMED-NEVER-TO-HAVE-BEEN-BUILT (lane A)
+
+**In short:** The file index (what `locate` searches) recorded when it
+was last rebuilt, using `0` to mean "never". The clock it used counts
+from boot and starts at 0, so an index built very early in boot recorded
+the same value as one never built at all. Nothing displayed the field, so
+nobody could see either answer. Fixed in `50ad94e28`.
+
+**Status:** FIXED (`50ad94e28`).
+
+**Where:** `kernel/src/fs/index.rs` (`IndexStats::last_rebuild_ns`),
+displayed by `locate --stats` in `kernel/src/kshell.rs`.
+
+**What was wrong.** Same pair as Storage Sense above: an in-band sentinel
+(`0` = never, on a clock where `0` is real) in a field that had no reader
+outside the self-test's own `== 0` check. The field is now `Option<u64>`,
+and `age_of_last_rebuild_ns()` plus a "Last build: Ns ago / never" line
+give it the reader it was always for. The age of the snapshot is the only
+number on that stats screen that tells a user whether a `locate` hit can
+be trusted, and it was the one number missing.
+
+### TD-A-STORAGE-SENSE-CLEANUP-IS-SIMULATED (lane A)
+
+**In short:** Storage Sense reports freeing gigabytes, but it does not
+actually delete anything — it copies each category's *estimated* size
+into its "freed" figure. The numbers are made up, and always exactly
+match the estimate.
+
+**Status:** OPEN. Pre-existing; noticed while fixing the schedule.
+
+**Where:** `kernel/src/fs/storagesense.rs::run_cleanup` and
+`run_category` — `let freed = policy.estimated_bytes;` with the comment
+`// Simulate cleanup: free the estimated amount.` The per-category
+`estimated_bytes` values are themselves constants set in
+`default_policies()`, not measurements.
+
+**Why it matters more now.** Before `78cae81f5` the simulation could only
+run when the user explicitly asked. Now that the schedule is meaningful,
+the intended next step is a timer that runs cleanup automatically — and
+wiring a timer to a function that reports fictional results would make
+the fiction periodic and unattended. **The periodic caller must not be
+added until the cleanup is real.**
+
+**Proper fix.** Each category needs a real enumerate-and-delete pass
+against the VFS: `TempFiles` over `/tmp`, `RecycleBin` via
+`fs::recyclebin`, `Logs` over the log directory with `max_age_days`
+actually applied, and so on. `estimated_bytes` should become the result
+of a dry-run walk rather than a constant, so that estimate and result can
+disagree — which is the whole point of having both.

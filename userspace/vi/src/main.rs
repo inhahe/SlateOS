@@ -2202,7 +2202,10 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
+    // Scratch directories come from the shared guard: a fixed name races
+    // between concurrent test binaries and the clock is not a unique id.
     use super::*;
+    use scratchdir::ScratchDir;
 
     fn make_editor(lines: &[&str]) -> Editor {
         let mut e = Editor::new();
@@ -2224,12 +2227,12 @@ mod tests {
     #[test]
     fn test_load_file_splits_lines() {
         let mut e = Editor::new();
-        let tmp = std::env::temp_dir().join("vi_test_load.txt");
+        let scratch = ScratchDir::new("vi_test_load");
+        let tmp = scratch.path("load.txt");
         std::fs::write(&tmp, "hello\nworld\n").unwrap();
         e.load_file(tmp.to_str().unwrap()).unwrap();
         assert_eq!(e.lines, vec!["hello", "world"]);
         assert!(!e.modified);
-        std::fs::remove_file(&tmp).ok();
     }
 
     #[test]
@@ -2242,14 +2245,14 @@ mod tests {
 
     #[test]
     fn test_save_and_reload() {
-        let tmp = std::env::temp_dir().join("vi_test_save.txt");
+        let scratch = ScratchDir::new("vi_test_save");
+        let tmp = scratch.path("save.txt");
         let mut e = make_editor(&["foo", "bar", "baz"]);
         e.save_file(tmp.to_str().unwrap()).unwrap();
         assert!(!e.modified);
         let mut e2 = Editor::new();
         e2.load_file(tmp.to_str().unwrap()).unwrap();
         assert_eq!(e2.lines, vec!["foo", "bar", "baz"]);
-        std::fs::remove_file(&tmp).ok();
     }
 
     // --- Movement -----------------------------------------------------------

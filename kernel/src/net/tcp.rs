@@ -3932,7 +3932,6 @@ fn enqueue_to_listener(ns_id: NetNsId, local_port: u16, conn_handle: usize) {
 ///
 /// Verifies the IPv4 pseudo-header checksum, wraps the source address
 /// in `IpAddr::V4`, and delegates to the shared TCP state machine.
-#[allow(clippy::arithmetic_side_effects)]
 pub fn process_tcp(ip_packet: &Ipv4Packet<'_>, ns_id: NetNsId) -> KernelResult<()> {
     let data = ip_packet.payload;
     if data.len() < TCP_HEADER_SIZE {
@@ -3963,7 +3962,6 @@ pub fn process_tcp(ip_packet: &Ipv4Packet<'_>, ns_id: NetNsId) -> KernelResult<(
 ///
 /// ECN is extracted from the IPv6 traffic class field (low 2 bits,
 /// same encoding as IPv4).
-#[allow(clippy::arithmetic_side_effects)]
 pub fn process_tcp_v6(ip_packet: &Ipv6Packet<'_>, ns_id: NetNsId) -> KernelResult<()> {
     let data = ip_packet.payload;
     if data.len() < TCP_HEADER_SIZE {
@@ -3987,6 +3985,71 @@ pub fn process_tcp_v6(ip_packet: &Ipv6Packet<'_>, ns_id: NetNsId) -> KernelResul
     process_tcp_common(ns_id, remote_addr, data, ip_ecn_ce)
 }
 
+/// A validated view of one received TCP segment.
+///
+/// Produced only by `parse_tcp_header`, which is the single place the
+/// fixed header's bytes are read.  Holding the options and payload as
+/// slices — rather than the offsets used to cut them — means no later
+/// code can recompute a range and get a different answer.
+struct TcpHeaderView<'a> {
+    src_port: u16,
+    dst_port: u16,
+    seq: u32,
+    ack: u32,
+    flags: u8,
+    window: u16,
+    options: &'a [u8],
+    payload: &'a [u8],
+}
+
+/// Parse and validate the fixed TCP header, or `None` if the segment is
+/// malformed and must be dropped.
+///
+/// Split out of `process_tcp_common` so the validation has a name and a
+/// test.  It is the first code in the kernel to touch bytes the peer
+/// chose, and until it was separated the only way to exercise it was to
+/// stand up a live connection and inject a frame.
+///
+/// Rejects:
+/// - segments shorter than the 20-byte fixed header;
+/// - Data Offset < 5 words.  RFC 793 §3.1 sets the minimum at 5, but the
+///   field is 4 bits and a peer may send 0.  When it did, the payload
+///   slice started at byte 0 and the segment's *own header* was appended
+///   to the receive buffer and delivered to the application as stream
+///   data — remote data injection from one malformed segment.
+/// - Data Offset past the end of the segment, which claims options that
+///   were never transmitted.
+///
+/// Linux rejects the same two in `tcp_v4_rcv`:
+/// `th->doff < sizeof(struct tcphdr) / 4 || skb->len < th->doff * 4`.
+fn parse_tcp_header(data: &[u8]) -> Option<TcpHeaderView<'_>> {
+    // One refutable pattern makes the length check and the field
+    // extraction the same operation, so they cannot drift apart.
+    let &[sp_hi, sp_lo, dp_hi, dp_lo, sq0, sq1, sq2, sq3, ak0, ak1, ak2, ak3, off_nibble, flags, wnd_hi, wnd_lo, ..] =
+        data
+    else {
+        return None;
+    };
+
+    let data_offset = usize::from(off_nibble >> 4).saturating_mul(4);
+    if data_offset < TCP_HEADER_SIZE || data_offset > data.len() {
+        return None;
+    }
+
+    Some(TcpHeaderView {
+        src_port: u16::from_be_bytes([sp_hi, sp_lo]),
+        dst_port: u16::from_be_bytes([dp_hi, dp_lo]),
+        seq: u32::from_be_bytes([sq0, sq1, sq2, sq3]),
+        ack: u32::from_be_bytes([ak0, ak1, ak2, ak3]),
+        flags,
+        window: u16::from_be_bytes([wnd_hi, wnd_lo]),
+        // Both ranges are in bounds by the check above; `unwrap_or` keeps
+        // this total rather than restating that argument as a panic.
+        options: data.get(TCP_HEADER_SIZE..data_offset).unwrap_or(&[]),
+        payload: data.get(data_offset..).unwrap_or(&[]),
+    })
+}
+
 /// Shared TCP segment processing for both IPv4 and IPv6.
 ///
 /// The caller has already verified the transport checksum and extracted
@@ -3997,32 +4060,25 @@ pub fn process_tcp_v6(ip_packet: &Ipv6Packet<'_>, ns_id: NetNsId) -> KernelResul
 /// `remote_addr` — sender's IP (IpAddr::V4 or V6).
 /// `data` — raw TCP segment bytes (header + options + payload).
 /// `ip_ecn_ce` — true if the IP header indicated Congestion Experienced.
-#[allow(clippy::arithmetic_side_effects)]
 fn process_tcp_common(
     ns_id: NetNsId,
     remote_addr: IpAddr,
     data: &[u8],
     ip_ecn_ce: bool,
 ) -> KernelResult<()> {
-    let src_port = u16::from_be_bytes([data[0], data[1]]);
-    let dst_port = u16::from_be_bytes([data[2], data[3]]);
-    let seq = u32::from_be_bytes([data[4], data[5], data[6], data[7]]);
-    let ack = u32::from_be_bytes([data[8], data[9], data[10], data[11]]);
-    let data_offset = ((data[12] >> 4) as usize) * 4;
-    let flags = data[13];
-    let window = u16::from_be_bytes([data[14], data[15]]);
-
-    // TCP options sit between the fixed header and the payload.
-    let option_bytes = if data_offset > TCP_HEADER_SIZE && data_offset <= data.len() {
-        &data[TCP_HEADER_SIZE..data_offset]
-    } else {
-        &[]
-    };
-
-    let payload = if data_offset < data.len() {
-        &data[data_offset..]
-    } else {
-        &[]
+    // A malformed header is dropped, not processed: see `parse_tcp_header`.
+    let Some(TcpHeaderView {
+        src_port,
+        dst_port,
+        seq,
+        ack,
+        flags,
+        window,
+        options: option_bytes,
+        payload,
+    }) = parse_tcp_header(data)
+    else {
+        return Ok(());
     };
 
     // Find matching connection.
@@ -5638,6 +5694,7 @@ pub fn self_test() -> KernelResult<()> {
     test_try_accept_empty()?;
     test_parse_tcp_options()?;
     test_build_options_roundtrip()?;
+    test_parse_tcp_header()?;
     test_sack_blocks()?;
     test_seq_lt()?;
     test_ipv6_checksum()?;
@@ -5645,7 +5702,7 @@ pub fn self_test() -> KernelResult<()> {
     test_dual_stack_ip_addr()?;
     test_namespace_isolation()?;
 
-    crate::serial_println!("[tcp] TCP self-test PASSED (11 tests)");
+    crate::serial_println!("[tcp] TCP self-test PASSED (12 tests)");
     Ok(())
 }
 
@@ -6105,7 +6162,115 @@ fn test_build_options_roundtrip() -> KernelResult<()> {
     Ok(())
 }
 
-/// Test 5: SACK block insertion and merging.
+/// Test: the fixed header is validated before any of it is believed.
+///
+/// The case that motivated this test is `doff = 0`.  The Data Offset
+/// field is four bits, so a peer can send any value 0..=15, and the
+/// parser used it as the payload's start offset without checking it
+/// against the 20-byte header it must clear.  A segment with Data Offset
+/// 0 therefore produced `payload = &data[0..]` — the segment's own header
+/// bytes — which `process_tcp_common` appended to the receive buffer and
+/// delivered to the application as ordinary stream data.  One malformed
+/// segment, no connection state required beyond an established one.
+fn test_parse_tcp_header() -> KernelResult<()> {
+    // A well-formed 20-byte header with four bytes of payload.  Data
+    // Offset 5 words = 20 bytes; ports 0x1234/0x5678; seq 1; ack 2.
+    let good: [u8; 24] = [
+        0x12, 0x34, 0x56, 0x78, // src port, dst port
+        0x00, 0x00, 0x00, 0x01, // seq
+        0x00, 0x00, 0x00, 0x02, // ack
+        0x50, TCP_ACK, // data offset 5 words, flags
+        0x20, 0x00, // window
+        0x00, 0x00, 0x00, 0x00, // checksum, urgent
+        b'd', b'a', b't', b'a', // payload
+    ];
+
+    let Some(h) = parse_tcp_header(&good) else {
+        crate::serial_println!("[tcp]   FAIL: well-formed header rejected");
+        return Err(KernelError::InternalError);
+    };
+    if h.src_port != 0x1234 || h.dst_port != 0x5678 || h.seq != 1 || h.ack != 2 {
+        crate::serial_println!(
+            "[tcp]   FAIL: fields {:#x}/{:#x} seq={} ack={}",
+            h.src_port,
+            h.dst_port,
+            h.seq,
+            h.ack
+        );
+        return Err(KernelError::InternalError);
+    }
+    // The payload must be the four trailing bytes and nothing more —
+    // this is the assertion the bug violated.
+    if h.payload != b"data".as_slice() || !h.options.is_empty() {
+        crate::serial_println!(
+            "[tcp]   FAIL: payload {:?} options {:?}",
+            h.payload,
+            h.options
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // Data Offset 6 words = 20 + 4 option bytes, so the same segment
+    // splits differently: one MSS option, no payload.
+    let mut with_opts = good;
+    with_opts[12] = 0x60;
+    match parse_tcp_header(&with_opts) {
+        Some(h) if h.options == b"data".as_slice() && h.payload.is_empty() => {}
+        other => {
+            crate::serial_println!(
+                "[tcp]   FAIL: doff=6 split wrong: {:?}",
+                other.map(|h| (h.options.len(), h.payload.len()))
+            );
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // Every rejection case.  `doff` 0 through 4 all describe a header
+    // shorter than the 20 bytes that are structurally always present, so
+    // all five must be refused, not clamped.
+    for words in 0u8..5 {
+        let mut bad = good;
+        bad[12] = words << 4;
+        if let Some(h) = parse_tcp_header(&bad) {
+            crate::serial_println!(
+                "[tcp]   FAIL: doff={} accepted, payload {} byte(s)",
+                words,
+                h.payload.len()
+            );
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // Data Offset past the end claims options that were never sent.
+    let mut overrun = good;
+    overrun[12] = 0xF0; // 15 words = 60 bytes, segment is 24.
+    if parse_tcp_header(&overrun).is_some() {
+        crate::serial_println!("[tcp]   FAIL: doff past end of segment accepted");
+        return Err(KernelError::InternalError);
+    }
+
+    // Shorter than the fixed header at all.
+    for take in [0usize, 1, 15, 19] {
+        if parse_tcp_header(good.get(..take).unwrap_or(&[])).is_some() {
+            crate::serial_println!("[tcp]   FAIL: {}-byte segment accepted", take);
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // Exactly the fixed header, no options and no payload, is valid.
+    match parse_tcp_header(good.get(..20).unwrap_or(&[])) {
+        Some(h) if h.options.is_empty() && h.payload.is_empty() => {}
+        _ => {
+            crate::serial_println!("[tcp]   FAIL: bare 20-byte header rejected");
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    crate::serial_println!("[tcp]   TCP header validation: OK");
+    Ok(())
+}
+
+/// Test: SACK block insertion and merging.
 fn test_sack_blocks() -> KernelResult<()> {
     let mut conn = TcpConnection::empty();
     conn.sack_ok = true;

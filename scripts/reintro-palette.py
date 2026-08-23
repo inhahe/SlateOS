@@ -79,6 +79,7 @@ POWER = "gui/desktop/src/power.rs"
 LOGIN = "gui/desktop/src/login_screen.rs"
 TB = "gui/desktop/src/taskbar.rs"
 LANG = "gui/desktop/src/language_settings.rs"
+DAPP = "gui/desktop/src/default_apps.rs"
 
 # (name, file, [(old, new), ...], [packages], [tests expected to fail])
 DEFECTS = [
@@ -10921,6 +10922,946 @@ DEFECTS = [
         ["desktop"],
         [
             'the_active_tabs_label_is_computed_from_the_accent_under_it',
+        ],
+    ),
+    # ------------------------------------------------------------------
+    # Module 31: default_apps.rs. Eleven constants over 33 colour sites
+    # and three tabs.
+    #
+    # Four judgements are written into the module docs and each has a test
+    # that can refute it. These defects break every one of them, in the two
+    # shapes that matter: a role frozen to the Mocha value it used to be
+    # (which only the *light* render can see) and a role swapped for a
+    # neighbouring role (which no membership sweep can see at all, because
+    # both values are legal members).
+    #
+    # Two sites deserve naming. The chip ink used to read `CRUST`, and
+    # `readable_on` answers exactly `CRUST` for the *stock* accent -- so a
+    # frozen value and the correct call are the same pixel until the accent
+    # moves, and the sweep allows both endpoints outright. Only the accent
+    # sweep in `the_current_chips_ink_is_computed_from_the_accent_under_it`
+    # separates them. And the "None set" case is a real defect this
+    # conversion found rather than an invented one: accenting a category
+    # with no handler accents twelve of twelve cards and so marks nothing.
+    # ------------------------------------------------------------------
+    (
+        'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA: the panel background is frozen to Mocha base',
+        DAPP,
+        [
+            ('            height,\n            color: p.base,',
+             '            height,\n            color: guitk::color::Color::from_hex(0x1E1E2E),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_panel_draws_comes_from_its_palette',
+            'none_of_the_eleven_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+            # Not an accident of over-broad assertion: a *light* render whose
+            # panel is frozen to Mocha base puts a near-black panel behind a
+            # pale well, so the recess inverts. The relational test sees the
+            # freeze that the two role tests see, by a different route.
+            'the_content_well_is_deeper_than_the_panel_it_sits_in',
+        ],
+    ),
+    (
+        'BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB: the panel background is drawn one rung too deep',
+        DAPP,
+        [
+            ('            height,\n            color: p.base,',
+             '            height,\n            color: p.mantle,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        'CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC: the panel title is frozen to Mocha text',
+        DAPP,
+        [
+            ('            font_size: 22.0,\n            color: p.text,',
+             '            font_size: 22.0,\n            color: guitk::color::Color::from_hex(0xCDD6F4),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_panel_draws_comes_from_its_palette',
+            'none_of_the_eleven_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        'DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD: the panel title is drawn at the subtitle rung',
+        DAPP,
+        [
+            ('            font_size: 22.0,\n            color: p.text,',
+             '            font_size: 22.0,\n            color: p.subtext0,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE: the open tab's fill is frozen to Mocha surface0",
+        DAPP,
+        [
+            ('                    height: 32.0,\n                    color: p.surface0,\n                    corner_radii: CornerRadii::all(6.0),\n                });\n            }',
+             '                    height: 32.0,\n                    color: guitk::color::Color::from_hex(0x313244),\n                    corner_radii: CornerRadii::all(6.0),\n                });\n            }'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_panel_draws_comes_from_its_palette',
+            'none_of_the_eleven_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF: the open tab's fill is raised a rung above its strip",
+        DAPP,
+        [
+            ('                    height: 32.0,\n                    color: p.surface0,\n                    corner_radii: CornerRadii::all(6.0),\n                });\n            }',
+             '                    height: 32.0,\n                    color: p.surface1,\n                    corner_radii: CornerRadii::all(6.0),\n                });\n            }'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        'GGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGG: the tab strip stops marking which tab is open',
+        DAPP,
+        [
+            ('                color: if is_active { p.accent } else { p.subtext0 },',
+             '                color: p.subtext0,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'the_accent_marks_which_app_is_in_force_and_nothing_else',
+        ],
+    ),
+    (
+        'HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH: the open and idle tab labels are exchanged',
+        DAPP,
+        [
+            ('                color: if is_active { p.accent } else { p.subtext0 },',
+             '                color: if is_active { p.subtext0 } else { p.accent },'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'the_accent_marks_which_app_is_in_force_and_nothing_else',
+        ],
+    ),
+    (
+        'IIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIII: an idle tab label is frozen to Mocha subtext0',
+        DAPP,
+        [
+            ('                color: if is_active { p.accent } else { p.subtext0 },',
+             '                color: if is_active { p.accent } else { guitk::color::Color::from_hex(0xA6ADC8) },'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_panel_draws_comes_from_its_palette',
+            'none_of_the_eleven_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        'JJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJ: the content well is frozen to Mocha crust',
+        DAPP,
+        [
+            ('            // base, so this reads as a recess in either mode.\n            color: p.crust,',
+             '            // base, so this reads as a recess in either mode.\n            color: guitk::color::Color::from_hex(0x11111B),'),
+        ],
+        ["desktop"],
+        [
+            'none_of_the_eleven_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        'KKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKK: the content well stops being a recess in the panel',
+        DAPP,
+        [
+            ('            // base, so this reads as a recess in either mode.\n            color: p.crust,',
+             '            // base, so this reads as a recess in either mode.\n            color: p.base,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'the_content_well_is_deeper_than_the_panel_it_sits_in',
+        ],
+    ),
+    (
+        "LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLL: the tab's subtitle is frozen to Mocha subtext0",
+        DAPP,
+        [
+            ('            text: "Choose default apps for each type of content".to_string(),\n            font_size: 12.0,\n            color: p.subtext0,',
+             '            text: "Choose default apps for each type of content".to_string(),\n            font_size: 12.0,\n            color: guitk::color::Color::from_hex(0xA6ADC8),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_panel_draws_comes_from_its_palette',
+            'none_of_the_eleven_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM: the tab's subtitle is drawn a rung too bright",
+        DAPP,
+        [
+            ('            text: "Choose default apps for each type of content".to_string(),\n            font_size: 12.0,\n            color: p.subtext0,',
+             '            text: "Choose default apps for each type of content".to_string(),\n            font_size: 12.0,\n            color: p.subtext1,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        'NNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNN: the Reset all button is frozen to Mocha surface1',
+        DAPP,
+        [
+            ('            height: 24.0,\n            color: p.surface1,',
+             '            height: 24.0,\n            color: guitk::color::Color::from_hex(0x45475A),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_panel_draws_comes_from_its_palette',
+            'none_of_the_eleven_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        'OOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOO: the Reset all button sinks to the card rung',
+        DAPP,
+        [
+            ('            height: 24.0,\n            color: p.surface1,',
+             '            height: 24.0,\n            color: p.surface0,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        'PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPP: the Reset all label is frozen to Mocha peach',
+        DAPP,
+        [
+            ('            // the shipped defaults, which is a state rather than a position.\n            color: p.peach,',
+             '            // the shipped defaults, which is a state rather than a position.\n            color: guitk::color::Color::from_hex(0xFAB387),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_panel_draws_comes_from_its_palette',
+            'none_of_the_eleven_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+            'peach_marks_a_departure_from_the_defaults_and_does_not_follow_the_accent',
+        ],
+    ),
+    (
+        'QQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQ: undoing a customisation is marked with the accent',
+        DAPP,
+        [
+            ('            // the shipped defaults, which is a state rather than a position.\n            color: p.peach,',
+             '            // the shipped defaults, which is a state rather than a position.\n            color: p.accent,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'the_accent_marks_which_app_is_in_force_and_nothing_else',
+            'peach_marks_a_departure_from_the_defaults_and_does_not_follow_the_accent',
+        ],
+    ),
+    (
+        'RRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRR: a category card is frozen to Mocha surface0',
+        DAPP,
+        [
+            ('                height: card_h,\n                color: p.surface0,',
+             '                height: card_h,\n                color: guitk::color::Color::from_hex(0x313244),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_panel_draws_comes_from_its_palette',
+            'none_of_the_eleven_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        'SSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSS: a category card is raised a rung off the well',
+        DAPP,
+        [
+            ('                height: card_h,\n                color: p.surface0,',
+             '                height: card_h,\n                color: p.surface1,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT: a category's icon is frozen to Mocha text",
+        DAPP,
+        [
+            ('                font_size: 20.0,\n                color: p.text,',
+             '                font_size: 20.0,\n                color: guitk::color::Color::from_hex(0xCDD6F4),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_panel_draws_comes_from_its_palette',
+            'none_of_the_eleven_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "UUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUU: a category's icon is dimmer than the name beside it",
+        DAPP,
+        [
+            ('                font_size: 20.0,\n                color: p.text,',
+             '                font_size: 20.0,\n                color: p.subtext0,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "VVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVV: a category's name is frozen to Mocha text",
+        DAPP,
+        [
+            ('                text: category.label().to_string(),\n                font_size: 14.0,\n                color: p.text,',
+             '                text: category.label().to_string(),\n                font_size: 14.0,\n                color: guitk::color::Color::from_hex(0xCDD6F4),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_panel_draws_comes_from_its_palette',
+            'none_of_the_eleven_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "WWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWW: a category's name is drawn at the heading rung",
+        DAPP,
+        [
+            ('                text: category.label().to_string(),\n                font_size: 14.0,\n                color: p.text,',
+             '                text: category.label().to_string(),\n                font_size: 14.0,\n                color: p.subtext1,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        'XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX: a category with no handler is accented as though it had one',
+        DAPP,
+        [
+            ('                color: if default_app.is_some() {\n                    p.accent\n                } else {\n                    p.overlay0\n                },',
+             '                color: p.accent,'),
+        ],
+        ["desktop"],
+        [
+            'the_accent_marks_which_app_is_in_force_and_nothing_else',
+            'a_category_with_no_default_app_is_not_accented_as_if_it_had_one',
+        ],
+    ),
+    (
+        'YYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYY: the app in force under a card stops being accented',
+        DAPP,
+        [
+            ('                color: if default_app.is_some() {\n                    p.accent\n                } else {\n                    p.overlay0\n                },',
+             '                color: if default_app.is_some() {\n                    p.lavender\n                } else {\n                    p.overlay0\n                },'),
+        ],
+        ["desktop"],
+        [
+            'the_accent_marks_which_app_is_in_force_and_nothing_else',
+        ],
+    ),
+    (
+        'ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ: an unset category is frozen to Mocha overlay0',
+        DAPP,
+        [
+            ('                color: if default_app.is_some() {\n                    p.accent\n                } else {\n                    p.overlay0\n                },',
+             '                color: if default_app.is_some() {\n                    p.accent\n                } else {\n                    guitk::color::Color::from_hex(0x6C7086)\n                },'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_panel_draws_comes_from_its_palette',
+            'none_of_the_eleven_deleted_constants_is_still_drawn',
+            'a_category_with_no_default_app_is_not_accented_as_if_it_had_one',
+        ],
+    ),
+    (
+        'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA: the expand chevron is frozen to Mocha overlay0',
+        DAPP,
+        [
+            ('                text: if is_expanded { "\\u{25B2}" } else { "\\u{25BC}" }.to_string(),\n                font_size: 12.0,\n                color: p.overlay0,',
+             '                text: if is_expanded { "\\u{25B2}" } else { "\\u{25BC}" }.to_string(),\n                font_size: 12.0,\n                color: guitk::color::Color::from_hex(0x6C7086),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_panel_draws_comes_from_its_palette',
+            'none_of_the_eleven_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        'BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB: the expand chevron is as bright as the text it sits beside',
+        DAPP,
+        [
+            ('                text: if is_expanded { "\\u{25B2}" } else { "\\u{25BC}" }.to_string(),\n                font_size: 12.0,\n                color: p.overlay0,',
+             '                text: if is_expanded { "\\u{25B2}" } else { "\\u{25BC}" }.to_string(),\n                font_size: 12.0,\n                color: p.subtext0,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC: the current app's chip and its rivals' are exchanged",
+        DAPP,
+        [
+            ('                        color: if is_current { p.accent } else { p.surface1 },',
+             '                        color: if is_current { p.surface1 } else { p.accent },'),
+        ],
+        ["desktop"],
+        [
+            'the_accent_marks_which_app_is_in_force_and_nothing_else',
+        ],
+    ),
+    (
+        "DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD: a rival app's chip is frozen to Mocha surface1",
+        DAPP,
+        [
+            ('                        color: if is_current { p.accent } else { p.surface1 },',
+             '                        color: if is_current { p.accent } else { guitk::color::Color::from_hex(0x45475A) },'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_panel_draws_comes_from_its_palette',
+            'none_of_the_eleven_deleted_constants_is_still_drawn',
+            'the_accent_marks_which_app_is_in_force_and_nothing_else',
+        ],
+    ),
+    (
+        "EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE: the current chip's ink is frozen to the CRUST it used to name",
+        DAPP,
+        [
+            ('                        color: if is_current {\n                            readable_on(p.accent)\n                        } else {\n                            p.text\n                        },',
+             '                        color: if is_current {\n                            guitk::color::Color::from_hex(0x11111B)\n                        } else {\n                            p.text\n                        },'),
+        ],
+        ["desktop"],
+        [
+            'none_of_the_eleven_deleted_constants_is_still_drawn',
+            'the_current_chips_ink_is_computed_from_the_accent_under_it',
+        ],
+    ),
+    (
+        "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF: the current chip's ink is named as a role instead of computed",
+        DAPP,
+        [
+            ('                        color: if is_current {\n                            readable_on(p.accent)\n                        } else {\n                            p.text\n                        },',
+             '                        color: if is_current {\n                            p.crust\n                        } else {\n                            p.text\n                        },'),
+        ],
+        ["desktop"],
+        [
+            'the_current_chips_ink_is_computed_from_the_accent_under_it',
+        ],
+    ),
+    (
+        "GGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGG: an idle chip's ink is frozen to Mocha text",
+        DAPP,
+        [
+            ('                        color: if is_current {\n                            readable_on(p.accent)\n                        } else {\n                            p.text\n                        },',
+             '                        color: if is_current {\n                            readable_on(p.accent)\n                        } else {\n                            guitk::color::Color::from_hex(0xCDD6F4)\n                        },'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_panel_draws_comes_from_its_palette',
+            'none_of_the_eleven_deleted_constants_is_still_drawn',
+            'the_current_chips_ink_is_computed_from_the_accent_under_it',
+        ],
+    ),
+    (
+        'HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH: the file-type search box is frozen to Mocha surface0',
+        DAPP,
+        [
+            ('            height: 32.0,\n            color: p.surface0,\n            corner_radii: CornerRadii::all(6.0),\n        });\n\n        let search_text = if self.search_query.is_empty() {\n            "Search file types...".to_string()',
+             '            height: 32.0,\n            color: guitk::color::Color::from_hex(0x313244),\n            corner_radii: CornerRadii::all(6.0),\n        });\n\n        let search_text = if self.search_query.is_empty() {\n            "Search file types...".to_string()'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_panel_draws_comes_from_its_palette',
+            'none_of_the_eleven_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        'IIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIII: the file-type search box is raised a rung off the well',
+        DAPP,
+        [
+            ('            height: 32.0,\n            color: p.surface0,\n            corner_radii: CornerRadii::all(6.0),\n        });\n\n        let search_text = if self.search_query.is_empty() {\n            "Search file types...".to_string()',
+             '            height: 32.0,\n            color: p.surface1,\n            corner_radii: CornerRadii::all(6.0),\n        });\n\n        let search_text = if self.search_query.is_empty() {\n            "Search file types...".to_string()'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        'JJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJ: the installed-app search box is frozen to Mocha surface0',
+        DAPP,
+        [
+            ('            height: 32.0,\n            color: p.surface0,\n            corner_radii: CornerRadii::all(6.0),\n        });\n\n        let search_text = if self.search_query.is_empty() {\n            "Search apps...".to_string()',
+             '            height: 32.0,\n            color: guitk::color::Color::from_hex(0x313244),\n            corner_radii: CornerRadii::all(6.0),\n        });\n\n        let search_text = if self.search_query.is_empty() {\n            "Search apps...".to_string()'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_panel_draws_comes_from_its_palette',
+            'none_of_the_eleven_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        'KKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKK: the installed-app search box is raised a rung off the well',
+        DAPP,
+        [
+            ('            height: 32.0,\n            color: p.surface0,\n            corner_radii: CornerRadii::all(6.0),\n        });\n\n        let search_text = if self.search_query.is_empty() {\n            "Search apps...".to_string()',
+             '            height: 32.0,\n            color: p.surface1,\n            corner_radii: CornerRadii::all(6.0),\n        });\n\n        let search_text = if self.search_query.is_empty() {\n            "Search apps...".to_string()'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        'LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLL: the file-type placeholder and a typed query are exchanged',
+        DAPP,
+        [
+            ('            "Search file types...".to_string()\n        } else {\n            self.search_query.clone()\n        };\n\n        cmds.push(RenderCommand::Text {\n            x: x + 12.0,\n            y: row_y + 8.0,\n            text: search_text,\n            font_size: 12.0,\n            color: if self.search_query.is_empty() {\n                p.overlay0\n            } else {\n                p.text\n            },',
+             '            "Search file types...".to_string()\n        } else {\n            self.search_query.clone()\n        };\n\n        cmds.push(RenderCommand::Text {\n            x: x + 12.0,\n            y: row_y + 8.0,\n            text: search_text,\n            font_size: 12.0,\n            color: if self.search_query.is_empty() {\n                p.text\n            } else {\n                p.overlay0\n            },'),
+        ],
+        ["desktop"],
+        [
+            'an_empty_search_box_is_dimmer_than_a_typed_query',
+        ],
+    ),
+    (
+        'MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM: the file-type placeholder is frozen to Mocha overlay0',
+        DAPP,
+        [
+            ('            "Search file types...".to_string()\n        } else {\n            self.search_query.clone()\n        };\n\n        cmds.push(RenderCommand::Text {\n            x: x + 12.0,\n            y: row_y + 8.0,\n            text: search_text,\n            font_size: 12.0,\n            color: if self.search_query.is_empty() {\n                p.overlay0\n            } else {\n                p.text\n            },',
+             '            "Search file types...".to_string()\n        } else {\n            self.search_query.clone()\n        };\n\n        cmds.push(RenderCommand::Text {\n            x: x + 12.0,\n            y: row_y + 8.0,\n            text: search_text,\n            font_size: 12.0,\n            color: if self.search_query.is_empty() {\n                guitk::color::Color::from_hex(0x6C7086)\n            } else {\n                p.text\n            },'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_panel_draws_comes_from_its_palette',
+            'none_of_the_eleven_deleted_constants_is_still_drawn',
+            'an_empty_search_box_is_dimmer_than_a_typed_query',
+        ],
+    ),
+    (
+        'NNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNN: the installed-app placeholder and a typed query are exchanged',
+        DAPP,
+        [
+            ('            "Search apps...".to_string()\n        } else {\n            self.search_query.clone()\n        };\n\n        cmds.push(RenderCommand::Text {\n            x: x + 12.0,\n            y: row_y + 8.0,\n            text: search_text,\n            font_size: 12.0,\n            color: if self.search_query.is_empty() {\n                p.overlay0\n            } else {\n                p.text\n            },',
+             '            "Search apps...".to_string()\n        } else {\n            self.search_query.clone()\n        };\n\n        cmds.push(RenderCommand::Text {\n            x: x + 12.0,\n            y: row_y + 8.0,\n            text: search_text,\n            font_size: 12.0,\n            color: if self.search_query.is_empty() {\n                p.text\n            } else {\n                p.overlay0\n            },'),
+        ],
+        ["desktop"],
+        [
+            'an_empty_search_box_is_dimmer_than_a_typed_query',
+        ],
+    ),
+    (
+        'OOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOO: the installed-app placeholder is frozen to Mocha overlay0',
+        DAPP,
+        [
+            ('            "Search apps...".to_string()\n        } else {\n            self.search_query.clone()\n        };\n\n        cmds.push(RenderCommand::Text {\n            x: x + 12.0,\n            y: row_y + 8.0,\n            text: search_text,\n            font_size: 12.0,\n            color: if self.search_query.is_empty() {\n                p.overlay0\n            } else {\n                p.text\n            },',
+             '            "Search apps...".to_string()\n        } else {\n            self.search_query.clone()\n        };\n\n        cmds.push(RenderCommand::Text {\n            x: x + 12.0,\n            y: row_y + 8.0,\n            text: search_text,\n            font_size: 12.0,\n            color: if self.search_query.is_empty() {\n                guitk::color::Color::from_hex(0x6C7086)\n            } else {\n                p.text\n            },'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_panel_draws_comes_from_its_palette',
+            'none_of_the_eleven_deleted_constants_is_still_drawn',
+            'an_empty_search_box_is_dimmer_than_a_typed_query',
+        ],
+    ),
+    (
+        'PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPP: the custom-association count is frozen to Mocha subtext0',
+        DAPP,
+        [
+            ('            ),\n            font_size: 12.0,\n            color: p.subtext0,',
+             '            ),\n            font_size: 12.0,\n            color: guitk::color::Color::from_hex(0xA6ADC8),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_panel_draws_comes_from_its_palette',
+            'none_of_the_eleven_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        'QQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQ: the custom-association count is drawn at the heading rung',
+        DAPP,
+        [
+            ('            ),\n            font_size: 12.0,\n            color: p.subtext0,',
+             '            ),\n            font_size: 12.0,\n            color: p.subtext1,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        'RRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRR: a file-type group heading is frozen to Mocha subtext1',
+        DAPP,
+        [
+            ('                font_size: 13.0,\n                color: p.subtext1,',
+             '                font_size: 13.0,\n                color: guitk::color::Color::from_hex(0xBAC2DE),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_panel_draws_comes_from_its_palette',
+            'none_of_the_eleven_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        'SSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSS: a file-type group heading sinks to the body rung',
+        DAPP,
+        [
+            ('                font_size: 13.0,\n                color: p.subtext1,',
+             '                font_size: 13.0,\n                color: p.subtext0,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        'TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT: an extension row is frozen to Mocha surface0',
+        DAPP,
+        [
+            ('                    height: 32.0,\n                    color: p.surface0,\n                    corner_radii: CornerRadii::all(4.0),',
+             '                    height: 32.0,\n                    color: guitk::color::Color::from_hex(0x313244),\n                    corner_radii: CornerRadii::all(4.0),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_panel_draws_comes_from_its_palette',
+            'none_of_the_eleven_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        'UUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUU: an extension row is raised a rung off the well',
+        DAPP,
+        [
+            ('                    height: 32.0,\n                    color: p.surface0,\n                    corner_radii: CornerRadii::all(4.0),',
+             '                    height: 32.0,\n                    color: p.surface1,\n                    corner_radii: CornerRadii::all(4.0),'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        'VVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVV: the extension pill is frozen to Mocha surface1',
+        DAPP,
+        [
+            ('                    width: 48.0,\n                    height: 20.0,\n                    color: p.surface1,',
+             '                    width: 48.0,\n                    height: 20.0,\n                    color: guitk::color::Color::from_hex(0x45475A),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_panel_draws_comes_from_its_palette',
+            'none_of_the_eleven_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        'WWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWW: the extension pill is raised a rung off its row',
+        DAPP,
+        [
+            ('                    width: 48.0,\n                    height: 20.0,\n                    color: p.surface1,',
+             '                    width: 48.0,\n                    height: 20.0,\n                    color: p.surface2,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        'XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX: the extension token is frozen to Mocha lavender',
+        DAPP,
+        [
+            ('                    text: format!(".{ext}"),\n                    font_size: 11.0,\n                    color: p.lavender,',
+             '                    text: format!(".{ext}"),\n                    font_size: 11.0,\n                    color: guitk::color::Color::from_hex(0xB4BEFE),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_panel_draws_comes_from_its_palette',
+            'none_of_the_eleven_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        'YYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYY: the extension token drifts to the neighbouring accent hue',
+        DAPP,
+        [
+            ('                    text: format!(".{ext}"),\n                    font_size: 11.0,\n                    color: p.lavender,',
+             '                    text: format!(".{ext}"),\n                    font_size: 11.0,\n                    color: p.mauve,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        'ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ: a custom association stops being marked as one',
+        DAPP,
+        [
+            ('                    color: if is_custom { p.peach } else { p.text },',
+             '                    color: p.text,'),
+        ],
+        ["desktop"],
+        [
+            'peach_marks_a_departure_from_the_defaults_and_does_not_follow_the_accent',
+        ],
+    ),
+    (
+        'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA: the custom and default handler inks are exchanged',
+        DAPP,
+        [
+            ('                    color: if is_custom { p.peach } else { p.text },',
+             '                    color: if is_custom { p.text } else { p.peach },'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'peach_marks_a_departure_from_the_defaults_and_does_not_follow_the_accent',
+        ],
+    ),
+    (
+        'BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB: a default handler name is frozen to Mocha text',
+        DAPP,
+        [
+            ('                    color: if is_custom { p.peach } else { p.text },',
+             '                    color: if is_custom { p.peach } else { guitk::color::Color::from_hex(0xCDD6F4) },'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_panel_draws_comes_from_its_palette',
+            'none_of_the_eleven_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        'CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC: the Custom badge is frozen to Mocha peach',
+        DAPP,
+        [
+            ('                        text: "Custom".to_string(),\n                        font_size: 10.0,\n                        color: p.peach,',
+             '                        text: "Custom".to_string(),\n                        font_size: 10.0,\n                        color: guitk::color::Color::from_hex(0xFAB387),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_panel_draws_comes_from_its_palette',
+            'none_of_the_eleven_deleted_constants_is_still_drawn',
+            'peach_marks_a_departure_from_the_defaults_and_does_not_follow_the_accent',
+        ],
+    ),
+    (
+        'DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD: the Custom badge is marked with the accent instead',
+        DAPP,
+        [
+            ('                        text: "Custom".to_string(),\n                        font_size: 10.0,\n                        color: p.peach,',
+             '                        text: "Custom".to_string(),\n                        font_size: 10.0,\n                        color: p.accent,'),
+        ],
+        ["desktop"],
+        [
+            'the_accent_marks_which_app_is_in_force_and_nothing_else',
+            'peach_marks_a_departure_from_the_defaults_and_does_not_follow_the_accent',
+        ],
+    ),
+    (
+        'EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE: the installed-app count is frozen to Mocha subtext0',
+        DAPP,
+        [
+            ('            text: format!("{total} installed apps ({third_party} third-party)"),\n            font_size: 12.0,\n            color: p.subtext0,',
+             '            text: format!("{total} installed apps ({third_party} third-party)"),\n            font_size: 12.0,\n            color: guitk::color::Color::from_hex(0xA6ADC8),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_panel_draws_comes_from_its_palette',
+            'none_of_the_eleven_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        'FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF: the installed-app count is drawn at the heading rung',
+        DAPP,
+        [
+            ('            text: format!("{total} installed apps ({third_party} third-party)"),\n            font_size: 12.0,\n            color: p.subtext0,',
+             '            text: format!("{total} installed apps ({third_party} third-party)"),\n            font_size: 12.0,\n            color: p.subtext1,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        'GGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGG: an installed-app row is frozen to Mocha surface0',
+        DAPP,
+        [
+            ('                height: 56.0,\n                color: p.surface0,',
+             '                height: 56.0,\n                color: guitk::color::Color::from_hex(0x313244),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_panel_draws_comes_from_its_palette',
+            'none_of_the_eleven_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        'HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH: an installed-app row is raised a rung off the well',
+        DAPP,
+        [
+            ('                height: 56.0,\n                color: p.surface0,',
+             '                height: 56.0,\n                color: p.surface1,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "IIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIII: an installed app's name is frozen to Mocha text",
+        DAPP,
+        [
+            ('                text: app.name.clone(),\n                font_size: 14.0,\n                color: p.text,',
+             '                text: app.name.clone(),\n                font_size: 14.0,\n                color: guitk::color::Color::from_hex(0xCDD6F4),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_panel_draws_comes_from_its_palette',
+            'none_of_the_eleven_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "JJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJ: an installed app's name is drawn at the heading rung",
+        DAPP,
+        [
+            ('                text: app.name.clone(),\n                font_size: 14.0,\n                color: p.text,',
+             '                text: app.name.clone(),\n                font_size: 14.0,\n                color: p.subtext1,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "KKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKK: an app's description is frozen to Mocha subtext0",
+        DAPP,
+        [
+            ('                text: app.description.clone(),\n                font_size: 11.0,\n                color: p.subtext0,',
+             '                text: app.description.clone(),\n                font_size: 11.0,\n                color: guitk::color::Color::from_hex(0xA6ADC8),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_panel_draws_comes_from_its_palette',
+            'none_of_the_eleven_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLL: an app's description sinks to the dimmest rung on its row",
+        DAPP,
+        [
+            ('                text: app.description.clone(),\n                font_size: 11.0,\n                color: p.subtext0,',
+             '                text: app.description.clone(),\n                font_size: 11.0,\n                color: p.overlay0,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        'MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM: the System badge pill is frozen to Mocha surface1',
+        DAPP,
+        [
+            ('                    width: 52.0,\n                    height: 18.0,\n                    color: p.surface1,',
+             '                    width: 52.0,\n                    height: 18.0,\n                    color: guitk::color::Color::from_hex(0x45475A),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_panel_draws_comes_from_its_palette',
+            'none_of_the_eleven_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        'NNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNN: the System badge pill sinks into the row behind it',
+        DAPP,
+        [
+            ('                    width: 52.0,\n                    height: 18.0,\n                    color: p.surface1,',
+             '                    width: 52.0,\n                    height: 18.0,\n                    color: p.surface0,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        'OOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOO: the System badge label is frozen to Mocha overlay0',
+        DAPP,
+        [
+            ('                    text: "System".to_string(),\n                    font_size: 10.0,\n                    color: p.overlay0,',
+             '                    text: "System".to_string(),\n                    font_size: 10.0,\n                    color: guitk::color::Color::from_hex(0x6C7086),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_panel_draws_comes_from_its_palette',
+            'none_of_the_eleven_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        'PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPP: the System badge label is brighter than the pill under it',
+        DAPP,
+        [
+            ('                    text: "System".to_string(),\n                    font_size: 10.0,\n                    color: p.overlay0,',
+             '                    text: "System".to_string(),\n                    font_size: 10.0,\n                    color: p.subtext0,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        'QQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQ: the join line under an app row is frozen to Mocha overlay0',
+        DAPP,
+        [
+            ('                    text: categories.join(", "),\n                    font_size: 10.0,\n                    color: p.overlay0,',
+             '                    text: categories.join(", "),\n                    font_size: 10.0,\n                    color: guitk::color::Color::from_hex(0x6C7086),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_panel_draws_comes_from_its_palette',
+            'none_of_the_eleven_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        'RRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRR: the join line under an app row is as bright as its description',
+        DAPP,
+        [
+            ('                    text: categories.join(", "),\n                    font_size: 10.0,\n                    color: p.overlay0,',
+             '                    text: categories.join(", "),\n                    font_size: 10.0,\n                    color: p.subtext0,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
         ],
     ),
 ]

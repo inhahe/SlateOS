@@ -50388,7 +50388,7 @@ commands that carry the colour in question, and assert the two renders agree.
 Candidates: anything drawn on the wallpaper, on a video surface, on a
 thumbnail, or on any other content the palette does not own.
 
-**Part 2 progress. 30 of 49 modules converted.**
+**Part 2 progress. 31 of 49 modules converted.**
 
 - [x] `security_dialog.rs` — 29 constants, done 2026-08-22. The method above
   survived contact: the sweep lives in `gui/desktop/src/palette_check.rs` as
@@ -52059,6 +52059,73 @@ thumbnail, or on any other content the palette does not own.
     `TD-C-EVERY-SECTION-HEADING-IS-WRITTEN-OUT-BY-HAND`; they cannot be
     collapsed inside a per-module conversion without invalidating earlier
     modules' harness patterns.
+- [x] `default_apps.rs` — 11 constants over 33 colour sites and three tabs,
+  done 2026-08-23. Thirty-five tests in the module (nine new), harness defects
+  Ax42–Rx44 (seventy), all seventy caught, none escaped.
+  - **The conversion found a real UI defect, and writing the judgement down is
+    what found it.** The module doc now says "the accent marks which app is in
+    force, and nothing else". Stating that as something refutable made it
+    obvious that the app name under each category card was drawn `p.accent`
+    *unconditionally* — including on the two cards that read "None set",
+    because `builtin_apps()` ships no web browser and no email client. So
+    twelve of twelve cards were accented, and a mark carried by everything
+    marks nothing; worse, the two cards that actually wanted the user's
+    attention looked exactly like the ten that were already settled. Fixed to
+    `p.overlay0` in a separate commit from the mechanical conversion, so the
+    harness proof of the conversion stays unambiguous. **A judgement you can
+    state in one sentence is a judgement you can check; the eleven constants
+    had been sitting on top of this bug for as long as they existed.**
+  - **The `readable_on`/`CRUST` collision, and the first module where it is
+    load-bearing rather than merely noted.** The ink on the current app's chip
+    used to be the constant `CRUST` (`0x11111B`). `readable_on` answers exactly
+    `0x11111B` for the *stock* accent, whose luma is 175 — so at the shipped
+    accent a leftover constant and the correct call produce the same pixel.
+    The membership sweep cannot help either, because it allows both
+    `readable_on` endpoints outright (`palette_check`'s documented hole). Only
+    sweeping the accent across all 21 roles separates them, because the
+    expected ink flips endpoints as the accent's luma crosses 140 and a frozen
+    value cannot flip. Defect Fx43 — the site naming `p.crust` instead of
+    calling `readable_on` — is caught by **that test and nothing else**, out of
+    thirty-five. The test closes with `seen.len() == 2` so that a palette which
+    happened to be all-dark could not quietly degrade it into a constant
+    comparison.
+  - **Four fixture traps in one default dataset, the `.take(12)` lesson
+    generalised.** `DefaultAppsSettings::default()` cannot exercise this module
+    at all: every category has exactly one handling app, so the chip `else`
+    arm never renders; nothing is customised, so *both* peach sites are dead;
+    and every builtin is a system app, so the third-party count is always 0 and
+    the `is_system` badge is never absent. One rival music player plus one
+    `.mp3` custom association turns all four branches on. **Check each branch
+    is reachable from the data you hand the renderer, not merely present in the
+    code** — and check it before writing the assertions, because an assertion
+    on a branch that never renders passes vacuously and looks like coverage.
+  - **Seven sites had no assertion, and only the defect enumeration found
+    them.** The module was committed with 26 tests reading as thorough. Writing
+    the defect list one colour site at a time — the module-30 lesson applied
+    rather than restated — turned up seven sites nothing named: the category
+    icon, both search-box fills, the extension rows, the *ordinary* (non-custom)
+    ink on a file-type row, an installed app's own name, and the join line under
+    it. Every one would have survived a swap to a neighbouring role. Two are
+    worth their own note. The File types search box and its extension rows are
+    both `width` × 32, so geometry cannot separate them — but `fills_sized`
+    preserves command order and the box is drawn first, which is enough to
+    index them. And the ordinary ink is the `else` of the peach branch:
+    **both arms of one `if` are two sites, and only one of them had a test.**
+  - **Two search boxes sharing one query field are still two sites.** They are
+    byte-identical in the source, which is exactly why the harness patterns for
+    them have to reach out to the placeholder string to disambiguate — and why
+    the test loops over both tabs. Checking only the File types box would have
+    left the Installed apps box free to draw anything.
+  - Judgements, for the record: the accent marks which one is in force and
+    nothing else (three sites, per-tab counts 12 / 1 / 1 — a dozen legitimate
+    accented marks are on screen at once, so the taskbar's "exactly one" test
+    cannot be borrowed and this needs a per-site table *plus* a count); peach
+    marks a departure from the shipped defaults, which is a state and not a
+    position, so it must hold still while the accent sweeps all 21 roles; the
+    content well is one rung below the panel, asserted as an *ordering* rather
+    than a pair of literals so it fails on a palette whose crust was made
+    lighter than its base; and ink on a fill this module chose is computed,
+    never named.
 
 **Trigger:** this is not blocked on anything. It is sequenced after the shell
 event loop (`TD-C-THE-SHELL-CAN-DRAW-ITSELF-AND-NOBODY-CAN-ASK-IT-TO`) only

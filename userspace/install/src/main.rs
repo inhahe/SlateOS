@@ -13,8 +13,71 @@ use std::process;
 
 // ── Mode constants ─────────────────────────────────────────────────
 
+/// What a target gets when no `-m` was given — a file, a `-d` directory, or the
+/// directory `-t` names. GNU's `install.c` `DEFAULT_MODE`; note it is `0755` for
+/// a *file* too, not the `0644` that `cp` would leave.
 const DEFAULT_MODE: u32 = 0o755;
-const DEFAULT_FILE_MODE: u32 = 0o755; // install default, NOT 0o644
+
+/// The mode of a directory `install` invents on the way to its target: the
+/// parents `-D` creates above a file, the ancestors above a `-d` operand, and
+/// the directory `-D -t` creates. GNU's `make_ancestor_dir` uses a fixed
+/// `0755` here, and measured against GNU 9.4 it really is fixed — five umasks
+/// (`000 022 077 002 027`) crossed with `-m 700` and `-m 'a=,+X'` all leave
+/// every invented ancestor at `0755`. The `-m` mode reaches only the target
+/// itself.
+const ANCESTOR_MODE: u32 = 0o755;
+
+/// The two modes one `-m` spec names: one for a file target, one for a
+/// directory target.
+///
+/// They are separate because `X` asks a different question of each — `+X` is
+/// `0111` on a directory and nothing on a file — so a single number cannot
+/// serve both. GNU compiles the spec once and applies it twice for exactly this
+/// reason (`mode_adjust (0, false, …)` and `mode_adjust (0, true, …)`).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+struct Modes {
+    /// For a file target, and for the destination of a copy.
+    file: u32,
+    /// For a `-d` target.
+    dir: u32,
+}
+
+impl Default for Modes {
+    fn default() -> Self {
+        Self {
+            file: DEFAULT_MODE,
+            dir: DEFAULT_MODE,
+        }
+    }
+}
+
+/// Compile a `-m` spec, or `None` if it is not a mode.
+///
+/// Base `0` and umask `0` are both GNU's, and both matter. Base `0` means the
+/// spec is read as a description of the finished mode rather than as an edit to
+/// something: `install -m u+w src d` is `0200`, not `0755 | 0200`, so a spec
+/// can only ever be *less* permissive than the user spelled. Umask `0` means a
+/// who-less clause is taken at its word — `install -m +s` is `6000` whatever the
+/// umask — which is where `install` parts company with `mkdir -m` and
+/// `mkfifo -m`, both of which do let the umask into such a clause. Measured
+/// across five umasks; every answer was identical.
+fn compile_mode(spec: &[u8]) -> Option<Modes> {
+    let changes = modechange::compile(spec)?;
+    Some(Modes {
+        file: modechange::adjust(0, false, 0, &changes).mode,
+        dir: modechange::adjust(0, true, 0, &changes).mode,
+    })
+}
+
+/// A string as GNU's `quote()` renders it in a diagnostic: `‘zzz’`.
+///
+/// `install`'s own messages use straight quotes, but the invalid-mode one does
+/// not — it comes from `error (…, _("invalid mode %s"), quote (…))`, and
+/// quoting style here is a property of the individual message, not of the
+/// utility.
+fn quote(s: &str) -> String {
+    format!("\u{2018}{s}\u{2019}")
+}
 
 // ── Argument parsing ───────────────────────────────────────────────
 
@@ -30,8 +93,8 @@ struct Args {
     target_directory: Option<String>,
     /// Do not treat last arg as directory (-T)
     no_target_directory: bool,
-    /// File mode (-m MODE)
-    mode: u32,
+    /// The modes `-m` resolved to, or the defaults when it was absent.
+    modes: Modes,
     /// Owner (-o OWNER)
     owner: Option<String>,
     /// Group (-g GROUP)
@@ -62,7 +125,7 @@ impl Default for Args {
             directory_mode: false,
             target_directory: None,
             no_target_directory: false,
-            mode: DEFAULT_FILE_MODE,
+            modes: Modes::default(),
             owner: None,
             group: None,
             backup: false,
@@ -77,127 +140,18 @@ impl Default for Args {
     }
 }
 
-fn parse_mode(s: &str) -> Result<u32, String> {
-    // Try octal first
-    if let Some(stripped) = s.strip_prefix('0') {
-        if stripped.is_empty() {
-            return Ok(0);
-        }
-        return u32::from_str_radix(stripped, 8).map_err(|_| format!("invalid mode: '{s}'"));
-    }
-
-    // Try as plain octal digits
-    if s.chars().all(|c| c.is_ascii_digit()) {
-        return u32::from_str_radix(s, 8).map_err(|_| format!("invalid mode: '{s}'"));
-    }
-
-    // Symbolic mode parsing (simplified: u+rwx,g+rx,o+rx style)
-    parse_symbolic_mode(s, DEFAULT_FILE_MODE)
-}
-
-fn parse_symbolic_mode(s: &str, base: u32) -> Result<u32, String> {
-    let mut result = base;
-
-    for clause in s.split(',') {
-        let clause = clause.trim();
-        if clause.is_empty() {
-            continue;
-        }
-
-        let mut chars = clause.chars().peekable();
-
-        // Parse who: u, g, o, a
-        let mut who_mask = 0u32;
-        let mut who_specified = false;
-        while let Some(&c) = chars.peek() {
-            match c {
-                'u' => {
-                    who_mask |= 0o700;
-                    who_specified = true;
-                    chars.next();
-                }
-                'g' => {
-                    who_mask |= 0o070;
-                    who_specified = true;
-                    chars.next();
-                }
-                'o' => {
-                    who_mask |= 0o007;
-                    who_specified = true;
-                    chars.next();
-                }
-                'a' => {
-                    who_mask |= 0o777;
-                    who_specified = true;
-                    chars.next();
-                }
-                _ => break,
-            }
-        }
-        // Default (no who) = all, for the regular rwx bits.
-        let who_mask = if who_mask == 0 { 0o777 } else { who_mask };
-
-        // Parse op: +, -, =
-        let op = chars.next().ok_or_else(|| format!("invalid mode: '{s}'"))?;
-        if op != '+' && op != '-' && op != '=' {
-            return Err(format!("invalid mode operator: '{op}'"));
-        }
-
-        // Parse perms: r, w, x, X, s, t. The setuid/setgid/sticky bits live
-        // outside the 0o777 rwx range, so they must NOT be masked by who_mask
-        // (which only selects the rwx triads). Track them separately.
-        let mut perm_bits = 0u32;
-        let mut has_setid = false;
-        let mut has_sticky = false;
-        for c in chars {
-            match c {
-                'r' => perm_bits |= 0o444,
-                'w' => perm_bits |= 0o222,
-                'x' | 'X' => perm_bits |= 0o111, // Treat X like x for simplicity
-                's' => has_setid = true,
-                't' => has_sticky = true,
-                _ => return Err(format!("invalid permission character: '{c}'")),
-            }
-        }
-
-        // Regular rwx bits restricted to the selected who triads.
-        let mut effective = perm_bits & who_mask;
-
-        // Special bits. `s` means setuid when applied to the owner triad and
-        // setgid when applied to the group triad; with no who (or `a`) it sets
-        // both. `t` is the sticky bit and is independent of who.
-        if has_setid {
-            if !who_specified || who_mask & 0o700 != 0 {
-                effective |= 0o4000; // setuid
-            }
-            if !who_specified || who_mask & 0o070 != 0 {
-                effective |= 0o2000; // setgid
-            }
-        }
-        if has_sticky {
-            effective |= 0o1000;
-        }
-
-        match op {
-            '+' => result |= effective,
-            '-' => result &= !effective,
-            '=' => {
-                // Clear the affected rwx triads plus any special bits being set,
-                // then apply.
-                result &= !who_mask;
-                result |= effective;
-            }
-            _ => {}
-        }
-    }
-
-    Ok(result & 0o7777)
-}
-
 fn parse_args() -> Args {
     let argv: Vec<String> = env::args().collect();
     let mut args = Args::default();
     let mut positionals = Vec::new();
+
+    // The `-m` spec is carried uncompiled until every operand has been counted,
+    // because GNU checks the operands first: `install -m zzz` with no operands
+    // is `missing file operand`, and `install -m zzz src` is `missing
+    // destination file operand after 'src'` — the invalid mode is not mentioned
+    // in either. A parser that validated the spec where it read it could not
+    // produce that ordering. Last `-m` wins, as with any repeated option.
+    let mut mode_spec: Option<String> = None;
 
     let mut i = 1;
     while i < argv.len() {
@@ -225,17 +179,10 @@ fn parse_args() -> Args {
                     eprintln!("install: option '-m' requires an argument");
                     process::exit(1);
                 }
-                args.mode = parse_mode(&argv[i]).unwrap_or_else(|e| {
-                    eprintln!("install: {e}");
-                    process::exit(1);
-                });
+                mode_spec = Some(argv[i].clone());
             }
             _ if arg.starts_with("--mode=") => {
-                let val = &arg["--mode=".len()..];
-                args.mode = parse_mode(val).unwrap_or_else(|e| {
-                    eprintln!("install: {e}");
-                    process::exit(1);
-                });
+                mode_spec = Some(arg["--mode=".len()..].to_string());
             }
             "-o" | "--owner" => {
                 i += 1;
@@ -321,10 +268,7 @@ fn parse_args() -> Args {
                             } else {
                                 rest
                             };
-                            args.mode = parse_mode(&mode_str).unwrap_or_else(|e| {
-                                eprintln!("install: {e}");
-                                process::exit(1);
-                            });
+                            mode_spec = Some(mode_str);
                             j = chars.len(); // Consumed rest
                             continue;
                         }
@@ -373,39 +317,66 @@ fn parse_args() -> Args {
         i += 1;
     }
 
+    // Operand arity first. GNU's one test is
+    // `n_files <= !(dir_arg || target_directory)`: with `-d` or `-t` a single
+    // operand suffices, otherwise a source and a destination are both required.
+    // The missing-operand diagnostics name only the operands, never the mode,
+    // which is why the `-m` spec is still uncompiled here.
+    let needs_two = !(args.directory_mode || args.target_directory.is_some());
+    if positionals.len() <= usize::from(needs_two) {
+        if let Some(first) = positionals.first() {
+            eprintln!("install: missing destination file operand after '{first}'");
+        } else {
+            eprintln!("install: missing file operand");
+        }
+        usage_error();
+    }
+
     if args.directory_mode {
         // -d: all positionals are directories to create
         args.sources = positionals;
-    } else if let Some(ref _td) = args.target_directory {
+    } else if args.target_directory.is_some() {
         // -t DIR: all positionals are sources
         args.sources = positionals;
     } else if args.no_target_directory {
         // -T: exactly src dest
-        if positionals.len() != 2 {
-            eprintln!("install: with -T, exactly two arguments required");
-            process::exit(1);
+        if let Some(extra) = positionals.get(2) {
+            eprintln!("install: extra operand '{extra}'");
+            usage_error();
         }
-        args.sources = vec![positionals[0].clone()];
-        args.target = Some(positionals[1].clone());
+        let mut it = positionals.into_iter();
+        let (Some(src), Some(dst)) = (it.next(), it.next()) else {
+            // Unreachable: the arity check above rejected a shorter list.
+            eprintln!("install: missing file operand");
+            usage_error();
+        };
+        args.sources = vec![src];
+        args.target = Some(dst);
     } else {
         // Normal: last arg is target, rest are sources
-        if positionals.len() < 2 {
-            if positionals.len() == 1 && args.create_dirs {
-                // -D with single arg: create parent dirs, then... need a source
-                eprintln!(
-                    "install: missing destination file operand after '{}'",
-                    positionals[0]
-                );
-                process::exit(1);
-            }
-            eprintln!("install: missing file operand");
-            process::exit(1);
-        }
         args.target = Some(positionals.pop().unwrap_or_default());
         args.sources = positionals;
     }
 
+    // Only now is the mode compiled, so that a bad one cannot pre-empt a
+    // missing operand.
+    if let Some(spec) = mode_spec {
+        match compile_mode(spec.as_bytes()) {
+            Some(modes) => args.modes = modes,
+            None => {
+                eprintln!("install: invalid mode {}", quote(&spec));
+                process::exit(1);
+            }
+        }
+    }
+
     args
+}
+
+/// GNU's `usage (EXIT_FAILURE)`: the referral line, not the whole help text.
+fn usage_error() -> ! {
+    eprintln!("Try 'install --help' for more information.");
+    process::exit(1);
 }
 
 fn print_usage() {
@@ -597,19 +568,30 @@ fn files_are_same(src: &Path, dst: &Path) -> bool {
 
 // ── Directory creation ─────────────────────────────────────────────
 
-fn create_directory_with_parents(path: &Path, mode: u32, verbose: bool) -> Result<(), String> {
-    if path.exists() {
+/// Create every missing component of `path`, each at [`ANCESTOR_MODE`].
+///
+/// A component that already exists is left exactly as it is — its mode is not
+/// touched. Measured: `chmod 700 mid; install -m 711 -d mid/deep/leaf` leaves
+/// `mid` at `700`, gives the invented `deep` `755`, and gives `leaf` the `-m`
+/// mode. This is GNU's `make_ancestor_dir`, which sets a mode only on a
+/// directory it created.
+///
+/// Used for the parents `-D` builds above a file, the ancestors above a `-d`
+/// operand, and the directory `-D -t` creates — never for a target itself.
+fn create_ancestors(path: &Path, verbose: bool) -> Result<(), String> {
+    if path.as_os_str().is_empty() || path.exists() {
         return Ok(());
     }
 
-    // Create parent directories
-    if let Some(parent) = path.parent()
-        && !parent.as_os_str().is_empty()
-        && !parent.exists()
-    {
-        create_directory_with_parents(parent, mode, verbose)?;
+    if let Some(parent) = path.parent() {
+        create_ancestors(parent, verbose)?;
     }
 
+    create_dir_at(path, ANCESTOR_MODE, verbose)
+}
+
+/// Create one directory and give it `mode`, reporting it under `-v`.
+fn create_dir_at(path: &Path, mode: u32, verbose: bool) -> Result<(), String> {
     fs::create_dir(path)
         .map_err(|e| format!("cannot create directory '{}': {e}", path.display()))?;
 
@@ -617,11 +599,32 @@ fn create_directory_with_parents(path: &Path, mode: u32, verbose: bool) -> Resul
         println!("install: creating directory '{}'", path.display());
     }
 
-    // Set mode on Slate OS
-    sys_chmod(&path.to_string_lossy(), mode)
-        .map_err(|e| format!("cannot set mode on '{}': {e}", path.display()))?;
+    set_mode(path, mode)
+}
 
-    Ok(())
+fn set_mode(path: &Path, mode: u32) -> Result<(), String> {
+    sys_chmod(&path.to_string_lossy(), mode)
+        .map_err(|e| format!("cannot set mode on '{}': {e}", path.display()))
+}
+
+/// Create a `-d` target: ancestors at [`ANCESTOR_MODE`], the target itself at
+/// `mode`.
+///
+/// The target's mode is set **whether or not it already existed**, which is the
+/// one place `install -d` differs from `mkdir -p -m`: measured, `mkdir -m 711 e;
+/// install -d e` leaves `e` at `755`, and `install -m 700 -d e` leaves it at
+/// `700`. `install -d` is a statement about what the directory should be, not a
+/// request to create it.
+fn create_target_dir(path: &Path, mode: u32, verbose: bool) -> Result<(), String> {
+    if path.exists() {
+        return set_mode(path, mode);
+    }
+
+    if let Some(parent) = path.parent() {
+        create_ancestors(parent, verbose)?;
+    }
+
+    create_dir_at(path, mode, verbose)
 }
 
 // ── Install file ───────────────────────────────────────────────────
@@ -642,10 +645,8 @@ fn install_file(src: &Path, dst: &Path, args: &Args) -> Result<(), String> {
     // Create parent directories if -D
     if args.create_dirs
         && let Some(parent) = dst.parent()
-        && !parent.as_os_str().is_empty()
-        && !parent.exists()
     {
-        create_directory_with_parents(parent, DEFAULT_MODE, args.verbose)?;
+        create_ancestors(parent, args.verbose)?;
     }
 
     // Copy the file: read source, write to temp, rename
@@ -680,8 +681,7 @@ fn install_file(src: &Path, dst: &Path, args: &Args) -> Result<(), String> {
     }
 
     // Set permissions
-    sys_chmod(&dst.to_string_lossy(), args.mode)
-        .map_err(|e| format!("cannot set mode on '{}': {e}", dst.display()))?;
+    set_mode(dst, args.modes.file)?;
 
     // Set ownership
     if args.owner.is_some() || args.group.is_some() {
@@ -747,7 +747,7 @@ fn run() -> Result<(), String> {
         // -d: create directories
         for dir in &args.sources {
             let path = PathBuf::from(dir);
-            create_directory_with_parents(&path, args.mode, args.verbose)?;
+            create_target_dir(&path, args.modes.dir, args.verbose)?;
         }
         return Ok(());
     }
@@ -770,7 +770,10 @@ fn run() -> Result<(), String> {
         // Ensure target directory exists
         if !td.exists() {
             if args.create_dirs {
-                create_directory_with_parents(td, DEFAULT_MODE, args.verbose)?;
+                // The directory `-D -t` invents is an ancestor, not the target:
+                // measured, `install -D -m 700 -t nodir src` leaves `nodir` at
+                // `755` and gives only the copied file the `-m` mode.
+                create_ancestors(td, args.verbose)?;
             } else {
                 return Err(format!(
                     "target directory '{}' does not exist",
@@ -814,92 +817,158 @@ fn main() {
 mod tests {
     use super::*;
 
-    // ── Mode parsing ──
+    // -- Mode parsing --
+    //
+    // Every row below was measured against GNU coreutils 9.4 under five umasks
+    // (000, 022, 077, 002, 027). Every answer was identical under all five,
+    // which is the whole reason `compile_mode` passes umask 0: unlike
+    // `mkdir -m` and `mkfifo -m`, no clause of an `install -m` spec is ever
+    // masked, not even a who-less one.
 
-    #[test]
-    fn test_parse_mode_octal() {
-        assert_eq!(parse_mode("0755").unwrap(), 0o755);
-        assert_eq!(parse_mode("0644").unwrap(), 0o644);
-        assert_eq!(parse_mode("0600").unwrap(), 0o600);
-        assert_eq!(parse_mode("0777").unwrap(), 0o777);
+    /// `-m` on a file target: `mode_adjust(0, false, 0, ...)`.
+    fn file_mode(spec: &str) -> u32 {
+        compile_mode(spec.as_bytes())
+            .unwrap_or_else(|| panic!("GNU accepts {spec:?}"))
+            .file
+    }
+
+    /// `-m` on a `-d` target: `mode_adjust(0, true, 0, ...)`.
+    fn dir_mode(spec: &str) -> u32 {
+        compile_mode(spec.as_bytes())
+            .unwrap_or_else(|| panic!("GNU accepts {spec:?}"))
+            .dir
     }
 
     #[test]
-    fn test_parse_mode_no_leading_zero() {
-        assert_eq!(parse_mode("755").unwrap(), 0o755);
-        assert_eq!(parse_mode("644").unwrap(), 0o644);
+    fn an_octal_spec_is_the_mode_it_spells() {
+        for (spec, want) in [
+            ("0755", 0o755),
+            ("0644", 0o644),
+            ("755", 0o755),
+            ("644", 0o644),
+            ("0", 0),
+            ("00", 0),
+            ("2755", 0o2755),
+            ("1777", 0o1777),
+        ] {
+            assert_eq!(file_mode(spec), want, "-m {spec} on a file");
+            assert_eq!(dir_mode(spec), want, "-m {spec} on a directory");
+        }
     }
 
+    /// The defect this conversion existed to remove.
+    ///
+    /// The old parser started from `0755` and edited it, so `-m u+w` produced
+    /// `0755`, not the `0200` the user asked for -- a mode *more* permissive
+    /// than the spec, arrived at silently. GNU starts from 0: a `-m` spec
+    /// describes the finished mode rather than editing a default.
     #[test]
-    fn test_parse_mode_zero() {
-        assert_eq!(parse_mode("0").unwrap(), 0);
-        assert_eq!(parse_mode("00").unwrap(), 0);
+    fn a_symbolic_spec_starts_from_zero_not_from_the_default() {
+        assert_eq!(file_mode("u+w"), 0o200);
+        assert_eq!(file_mode("u+rwx"), 0o700);
+        assert_eq!(file_mode("g+rwx"), 0o070);
+        assert_eq!(file_mode("o+rwx"), 0o007);
+        assert_eq!(file_mode("a+rwx"), 0o777);
+        assert_eq!(file_mode("+r"), 0o444);
+        assert_eq!(file_mode("u+rwx,g+rx,o+r"), 0o754);
+        assert_eq!(file_mode("u=rw,go="), 0o600);
+        assert_eq!(file_mode("a=,u+w,g+r"), 0o240);
     }
 
+    /// A who-less clause is *not* masked, which is where `install` parts
+    /// company with `mkdir -m` and `mkfifo -m`.
+    ///
+    /// Under `umask 077`, `mkdir -m 'a=,+w' d` is `0200` but
+    /// `install -m 'a=,+w' src d` is `0222`. Only the first passes a real
+    /// umask to `adjust`.
     #[test]
-    fn test_parse_mode_symbolic_user() {
-        assert_eq!(parse_symbolic_mode("u+rwx", 0).unwrap(), 0o700);
-        assert_eq!(parse_symbolic_mode("u+r", 0).unwrap(), 0o400);
-        assert_eq!(parse_symbolic_mode("u+w", 0).unwrap(), 0o200);
-        assert_eq!(parse_symbolic_mode("u+x", 0).unwrap(), 0o100);
+    fn the_umask_never_reaches_an_install_mode() {
+        assert_eq!(file_mode("a=,+w"), 0o222);
+        assert_eq!(file_mode("+x"), 0o111);
+        assert_eq!(file_mode("+s"), 0o6000);
+        assert_eq!(file_mode("+t"), 0o1000);
+        assert_eq!(file_mode("g+s"), 0o2000);
+        assert_eq!(file_mode("u+s"), 0o4000);
     }
 
+    /// `X` is why one spec has to yield two modes.
+    ///
+    /// The old parser mapped `'x' | 'X'` to the same bits "for simplicity",
+    /// which made `install -m 'a=,+X' src f` produce `0111` where GNU produces
+    /// `0`. `X` fires on a directory, or on a file that already has an execute
+    /// bit -- and the base here is 0, so a file never does.
     #[test]
-    fn test_parse_mode_symbolic_group() {
-        assert_eq!(parse_symbolic_mode("g+rwx", 0).unwrap(), 0o070);
-        assert_eq!(parse_symbolic_mode("g+rx", 0).unwrap(), 0o050);
+    fn capital_x_fires_on_a_directory_and_not_on_a_file() {
+        assert_eq!(file_mode("a=,+X"), 0);
+        assert_eq!(dir_mode("a=,+X"), 0o111);
+        assert_eq!(file_mode("+X"), 0);
+        assert_eq!(dir_mode("+X"), 0o111);
+        // `x` is unconditional, so the two targets agree on it.
+        assert_eq!(file_mode("+x"), 0o111);
+        assert_eq!(dir_mode("+x"), 0o111);
     }
 
+    /// The boundary between a mode GNU accepts and one it refuses.
+    ///
+    /// The two acceptances are the rows worth having: `+` names no bits at all
+    /// and `=` clears every bit, and both come out `0` here because the base is
+    /// 0. A parser written from intuition refuses them. The refusals are the
+    /// other half of the old defect -- it skipped empty clauses, so `,` and
+    /// `+r,` were silently accepted as "no change", i.e. mode `0755`.
     #[test]
-    fn test_parse_mode_symbolic_other() {
-        assert_eq!(parse_symbolic_mode("o+rwx", 0).unwrap(), 0o007);
+    fn the_boundary_between_a_valid_and_an_invalid_mode() {
+        for spec in ["+", "="] {
+            assert_eq!(file_mode(spec), 0, "GNU accepts -m {spec} as mode 0");
+            assert_eq!(dir_mode(spec), 0, "GNU accepts -m {spec} as mode 0");
+        }
+        for spec in ["zzz", "8", "u=q", "z+r", ",", "a", "+r,", "abc", "999", ""] {
+            assert!(
+                compile_mode(spec.as_bytes()).is_none(),
+                "GNU refuses -m {spec:?}"
+            );
+        }
     }
 
+    /// GNU's wording, which is not this utility's usual wording.
+    ///
+    /// `install`'s other diagnostics use straight quotes; this one comes from
+    /// `quote()` and uses curly ones, and it carries no colon after "mode".
     #[test]
-    fn test_parse_mode_symbolic_all() {
-        assert_eq!(parse_symbolic_mode("a+rwx", 0).unwrap(), 0o777);
-        assert_eq!(parse_symbolic_mode("a+r", 0).unwrap(), 0o444);
+    fn the_invalid_mode_diagnostic_matches_gnu() {
+        assert_eq!(
+            format!("install: invalid mode {}", quote("zzz")),
+            "install: invalid mode \u{2018}zzz\u{2019}"
+        );
+        assert_eq!(
+            format!("install: invalid mode {}", quote("")),
+            "install: invalid mode \u{2018}\u{2019}"
+        );
     }
 
+    /// No `-m` means `0755` for a file as well as for a directory.
+    ///
+    /// Not `0644`: `install` exists to place executables, and measured, a
+    /// `0700` source copied with no `-m` lands at `0755` -- the source's mode
+    /// does not leak into the destination either.
     #[test]
-    fn test_parse_mode_symbolic_remove() {
-        assert_eq!(parse_symbolic_mode("a-w", 0o777).unwrap(), 0o555);
-        assert_eq!(parse_symbolic_mode("o-rwx", 0o777).unwrap(), 0o770);
+    fn the_default_mode_is_0755_for_both_targets() {
+        let d = Modes::default();
+        assert_eq!(d.file, 0o755);
+        assert_eq!(d.dir, 0o755);
+        assert_eq!(DEFAULT_MODE, 0o755);
+        assert_eq!(Args::default().modes, d);
     }
 
+    /// An invented ancestor is `0755` whatever `-m` said.
+    ///
+    /// `install -D -m 711 src pp/qq/rr` gives `pp` and `qq` `0755` and only
+    /// `rr` `0711`; `install -m 711 -d mid/deep/leaf` gives `deep` `0755` and
+    /// only `leaf` `0711`. The old code handed the `-m` mode to every parent it
+    /// created, all the way up.
     #[test]
-    fn test_parse_mode_symbolic_equals() {
-        assert_eq!(parse_symbolic_mode("u=rwx", 0o777).unwrap(), 0o777);
-        assert_eq!(parse_symbolic_mode("u=r", 0o777).unwrap(), 0o477);
-    }
-
-    #[test]
-    fn test_parse_mode_symbolic_combined() {
-        assert_eq!(parse_symbolic_mode("u+rwx,g+rx,o+r", 0).unwrap(), 0o754);
-    }
-
-    #[test]
-    fn test_parse_mode_symbolic_default_who() {
-        // No who specified = all
-        assert_eq!(parse_symbolic_mode("+r", 0).unwrap(), 0o444);
-    }
-
-    #[test]
-    fn test_parse_mode_symbolic_setuid() {
-        let result = parse_symbolic_mode("u+s", 0).unwrap();
-        assert_eq!(result & 0o4000, 0o4000);
-    }
-
-    #[test]
-    fn test_parse_mode_symbolic_sticky() {
-        let result = parse_symbolic_mode("+t", 0).unwrap();
-        assert_eq!(result & 0o1000, 0o1000);
-    }
-
-    #[test]
-    fn test_parse_mode_invalid() {
-        assert!(parse_mode("abc").is_err());
-        assert!(parse_mode("999").is_err());
+    fn an_invented_ancestor_ignores_the_requested_mode() {
+        assert_eq!(ANCESTOR_MODE, 0o755);
+        assert_ne!(ANCESTOR_MODE, file_mode("711"));
     }
 
     // ── File comparison ──
@@ -914,10 +983,55 @@ mod tests {
 
     // ── Directory creation helpers ──
 
+    /// A scratch directory named for this process, so two lanes building at
+    /// once cannot collide. Removed by the test that made it.
+    fn scratch(tag: &str) -> PathBuf {
+        let dir = env::temp_dir().join(format!("install-test-{tag}-{}", process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).expect("scratch directory");
+        dir
+    }
+
+    /// `create_ancestors` builds the whole chain and stops at the target's
+    /// parent; it never creates the target.
     #[test]
-    fn test_default_mode() {
-        assert_eq!(DEFAULT_MODE, 0o755);
-        assert_eq!(DEFAULT_FILE_MODE, 0o755);
+    fn create_ancestors_builds_the_chain_and_nothing_more() {
+        let root = scratch("ancestors");
+        let deep = root.join("a").join("b").join("c");
+
+        create_ancestors(&deep, false).expect("create the chain");
+        assert!(deep.is_dir());
+        assert!(root.join("a").is_dir());
+        assert!(root.join("a").join("b").is_dir());
+
+        // Idempotent: an existing chain is not an error, and nothing below it
+        // is disturbed.
+        let marker = deep.join("marker");
+        fs::write(&marker, b"x").expect("write marker");
+        create_ancestors(&deep, false).expect("second call is a no-op");
+        assert!(marker.is_file());
+
+        fs::remove_dir_all(&root).expect("clean up");
+    }
+
+    /// `create_target_dir` succeeds on a directory that already exists.
+    ///
+    /// The old code returned early on `path.exists()`, so an existing `-d`
+    /// target never had its mode set at all. GNU sets it either way --
+    /// `mkdir -m 711 e; install -d e` leaves `e` at `0755` -- so the existing
+    /// case has to reach the chmod, not skip the function.
+    #[test]
+    fn create_target_dir_accepts_a_directory_that_already_exists() {
+        let root = scratch("target");
+        let target = root.join("x").join("y");
+
+        create_target_dir(&target, 0o711, false).expect("create the target");
+        assert!(target.is_dir());
+
+        create_target_dir(&target, 0o700, false).expect("existing target is not an error");
+        assert!(target.is_dir());
+
+        fs::remove_dir_all(&root).expect("clean up");
     }
 
     // ── User/Group resolution ──
@@ -976,7 +1090,7 @@ mod tests {
         let args = Args::default();
         assert!(!args.directory_mode);
         assert!(!args.no_target_directory);
-        assert_eq!(args.mode, 0o755);
+        assert_eq!(args.modes, Modes::default());
         assert!(args.owner.is_none());
         assert!(args.group.is_none());
         assert!(!args.backup);
@@ -987,27 +1101,19 @@ mod tests {
         assert!(!args.verbose);
     }
 
-    // ── Symbolic mode edge cases ──
+    // -- Symbolic mode edge cases --
 
+    /// Several `who` letters before one operator, and several clauses.
+    ///
+    /// `u=` with an empty permission list clears the user triad, which is the
+    /// clause the old parser's `if clause.is_empty()` skip came closest to
+    /// breaking: `u=` is not empty, but `` is, and both had to be told apart.
     #[test]
-    fn test_symbolic_mode_ug() {
-        assert_eq!(parse_symbolic_mode("ug+rx", 0).unwrap(), 0o550);
-    }
-
-    #[test]
-    fn test_symbolic_mode_multiple_clauses() {
-        assert_eq!(parse_symbolic_mode("u=rwx,g=rx,o=", 0).unwrap(), 0o750);
-    }
-
-    #[test]
-    fn test_symbolic_mode_empty_perms() {
-        // "u=" clears user bits
-        assert_eq!(parse_symbolic_mode("u=", 0o777).unwrap(), 0o077);
-    }
-
-    #[test]
-    fn test_symbolic_mode_invalid_char() {
-        assert!(parse_symbolic_mode("u+z", 0).is_err());
+    fn several_who_letters_and_several_clauses() {
+        assert_eq!(file_mode("ug+rx"), 0o550);
+        assert_eq!(file_mode("u=rwx,g=rx,o="), 0o750);
+        assert_eq!(file_mode("a=rwx,u="), 0o077);
+        assert!(compile_mode(b"u+z").is_none());
     }
 
     // ── Temp file naming ──

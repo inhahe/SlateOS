@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 description = "SlateOS install - copy files and set attributes"
 [dependencies]
+modechange = { path = "../modechange" }
 
 [build-dependencies]
 embed-manifest = "1.5.0"

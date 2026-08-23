@@ -37807,3 +37807,33 @@ the crate performs no I/O and no syscalls, which is what lets the 24,480-row
 fixture be a pure table-driven test rather than something that has to create
 files. Reading the umask is the caller's job, and `chmod` only does it when the
 mode was spelt symbolically — an octal mode ignores it entirely.
+
+### Correction, same day: the shell's `umask` is *not* one of the callers
+
+The reasoning above names three non-`coreutils` callers — `install`, `chown`
+and the shell's `umask` builtin. Converting them turned up that the third is
+wrong on the facts, and the conclusion is unchanged only by luck: `install` and
+`chown` alone are enough to force the separate crate, so A is still right.
+
+`umask` does not parse the coreutils grammar. It parses **bash's**, which looks
+identical and is a strict subset with different semantics. Measured against
+bash 5.2.21: it rejects `X`, `s` and `t` as permission characters, rejects the
+copy-source triads (`u=g`), and rejects more than one operator in a clause
+(`u+r-w`) — `modechange` accepts all of these. It works on the *complement* of
+the mask rather than on a file's mode bits, so a `who`-less clause is not
+umask-filtered (the value in hand *is* the umask). Its octal form has a
+`07777` ceiling and then keeps only the low nine bits. And it reports errors by
+quoting the single offending character, distinguishing an invalid operator from
+an invalid permission letter, where coreutils quotes the whole spec.
+
+So the shell keeps `parse_symbolic_umask`, and this is not a leftover to be
+tidied later: converting it would *widen* the language `osh` accepts —
+`umask u+X`, `umask u=g` and `umask 10000` would begin succeeding — and would
+discard diagnostics that name the exact offending character. The general
+principle worth carrying forward is that **two grammars that share a notation
+are not thereby the same grammar**; the way to tell is to measure the reference
+implementation of each, which is what turned this up. The comparison table is
+in `known-issues.md` under
+`TD-B-THREE-UTILITIES-STILL-CARRY-THEIR-OWN-MODE-PARSER`, and
+`parse_symbolic_umask`'s own doc comment now carries the short form so nobody
+re-opens the question from the code alone.

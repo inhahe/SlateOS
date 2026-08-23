@@ -58,13 +58,15 @@
 //!
 //! # Options this implementation does not have
 //!
-//! Everything except `-p`/`--parents` and `-m`/`--mode`. They are recognised and
-//! rejected with a message saying they are not implemented, rather than ignored,
-//! and they are listed in [`LONG_OPTIONS`] anyway because the table is what
-//! decides whether an abbreviation is ambiguous — `--v` must stay ambiguous
-//! between `--verbose` and `--version`, which is measured GNU behaviour and is
-//! exactly what a table pruned to the implemented options would get wrong:
-//! `mkdir --v` would print a version instead of refusing.
+//! Everything except `-p`/`--parents`, `-m`/`--mode` and `-v`/`--verbose` —
+//! which leaves only `-Z`/`--context`, SELinux security contexts, for which
+//! this system has no equivalent to report. It is recognised and rejected with
+//! a message saying it is not implemented, rather than ignored, and it is
+//! listed in [`LONG_OPTIONS`] anyway because the table is what decides whether
+//! an abbreviation is ambiguous — `--v` must stay ambiguous between
+//! `--verbose` and `--version`, which is measured GNU behaviour and is exactly
+//! what a table pruned to the implemented options would get wrong: `mkdir --v`
+//! would print a version instead of refusing.
 //!
 //! `-m`/`--mode` used to be in that list, and was the reason none of them are
 //! ignored: it asks for the new directory to be created with a specific
@@ -78,7 +80,7 @@
 
 use coreutils::errmsg::strerror;
 use coreutils::getopt::{self, Opt, Program, Takes};
-use coreutils::quote::quote_os;
+use coreutils::quote::{quote_os, quoteaf_os};
 use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::io::{self, Write};
@@ -124,6 +126,15 @@ const SHORT_OPTIONS: &str = "pm:vZ";
 #[cfg_attr(test, derive(Debug, PartialEq, Eq))]
 struct MkdirFlags {
     parents: bool,
+    /// `-v`: name each directory on **stdout** as it is created.
+    ///
+    /// Stdout, not stderr, and that is measured rather than assumed —
+    /// `mkdir -v d 2>/dev/null | cat` shows the line and `mkdir -v d 1>/dev/null`
+    /// shows nothing. It matters because it is the opposite of the utility's
+    /// other message: a `-v` run that half fails writes the successes to one
+    /// stream and the failure to the other, so a caller can keep the log and
+    /// discard the noise, or the reverse.
+    verbose: bool,
     /// `-m`'s argument **uncompiled**, because the order in which `mkdir`
     /// reports two different mistakes is observable and is the opposite of
     /// `chmod`'s. Measured: `mkdir -m zzz` with no operands answers `missing
@@ -153,8 +164,9 @@ fn main() -> ExitCode {
             ExitCode::SUCCESS
         }
         Ok(Request::Run(flags, dirs)) => {
+            let mut out = io::stdout().lock();
             let mut err = io::stderr().lock();
-            if make_all(&flags, &dirs, &mut err) {
+            if make_all(&flags, &dirs, &mut out, &mut err) {
                 ExitCode::SUCCESS
             } else {
                 ExitCode::from(1)
@@ -174,6 +186,7 @@ Create the DIRECTORY(ies), if they do not already exist.
 
   -m, --mode=MODE set file mode (as in chmod), not a=rwx - umask
   -p, --parents   no error if existing, make parent directories as needed
+  -v, --verbose   print a message for each created directory
       --help      display this help and exit
       --version   output version information and exit
 
@@ -211,11 +224,12 @@ fn parse_args(args: &[OsString]) -> Result<Request, getopt::Error> {
             Opt::Long("help", _) => return Ok(Request::Help),
             Opt::Long("version", _) => return Ok(Request::Version),
             Opt::Short(b'p', _) | Opt::Long("parents", _) => flags.parents = true,
+            Opt::Short(b'v', _) | Opt::Long("verbose", _) => flags.verbose = true,
             Opt::Short(b'm', value) | Opt::Long("mode", value) => flags.mode = value,
             // GNU `mkdir`'s remaining options. Rejected rather than ignored:
             // see the module docs.
-            Opt::Short(flag @ (b'v' | b'Z'), _) => return Err(unimplemented_short(flag)),
-            Opt::Long(name @ ("verbose" | "context"), _) => {
+            Opt::Short(flag @ b'Z', _) => return Err(unimplemented_short(flag)),
+            Opt::Long(name @ "context", _) => {
                 return Err(unimplemented_long(name));
             }
             Opt::Short(other, _) => return Err(MKDIR.invalid_option(other)),
@@ -372,7 +386,19 @@ type WalkError = (std::path::PathBuf, io::Error);
 /// `x` at `0755`. So an existing directory is skipped rather than attempted:
 /// that is also what keeps the walk off `/` and off a Windows drive root, which
 /// [`Path::ancestors`] yields and which no `create_dir` should ever be handed.
-fn create_dir_all_with_modes(path: &Path, modes: Option<Modes>) -> Result<(), WalkError> {
+///
+/// Every component actually created is appended to `created`, in creation order,
+/// which is what `-v` reports. Only components this call brought into being go
+/// in: one that was skipped for already existing is not reported, measured —
+/// `mkdir -p -v x/y/z` twice prints three lines and then none. `created` is
+/// filled even when the walk goes on to fail, because the components made
+/// before the failure really were made and GNU names them: `mkdir -p -v a/b`
+/// where `a` can be created and `b` cannot still prints `a`.
+fn create_dir_all_with_modes(
+    path: &Path,
+    modes: Option<Modes>,
+    created: &mut Vec<std::path::PathBuf>,
+) -> Result<(), WalkError> {
     let mut ancestors: Vec<&Path> = path.ancestors().collect();
     ancestors.reverse();
     let Some((named, parents)) = ancestors.split_last() else {
@@ -384,9 +410,9 @@ fn create_dir_all_with_modes(path: &Path, modes: Option<Modes>) -> Result<(), Wa
         if parent.as_os_str().is_empty() || parent.is_dir() {
             continue;
         }
-        create_one(parent, modes.map(|m| m.parent))?;
+        create_one(parent, modes.map(|m| m.parent), created)?;
     }
-    match create_one(named, modes.map(|m| m.named)) {
+    match create_one(named, modes.map(|m| m.named), created) {
         // The one case `-p` exists to swallow, and only for a *directory*: GNU
         // still reports `File exists` for `mkdir -p f` where `f` is a file.
         Err((_, e)) if e.kind() == io::ErrorKind::AlreadyExists && named.is_dir() => Ok(()),
@@ -394,24 +420,46 @@ fn create_dir_all_with_modes(path: &Path, modes: Option<Modes>) -> Result<(), Wa
     }
 }
 
-/// [`create_dir_with_mode`], with the path attached to any error.
-fn create_one(path: &Path, mode: Option<u32>) -> Result<(), WalkError> {
-    create_dir_with_mode(path, mode).map_err(|e| (path.to_path_buf(), e))
+/// [`create_dir_with_mode`], with the path attached to any error and the path
+/// appended to `created` on success.
+fn create_one(
+    path: &Path,
+    mode: Option<u32>,
+    created: &mut Vec<std::path::PathBuf>,
+) -> Result<(), WalkError> {
+    match create_dir_with_mode(path, mode) {
+        Ok(()) => {
+            created.push(path.to_path_buf());
+            Ok(())
+        }
+        Err(e) => Err((path.to_path_buf(), e)),
+    }
 }
 
 // ---------------------------------------------------------------- creating --
 
-/// Create every directory the command line asked for, reporting failures to
-/// `err`.
+/// Create every directory the command line asked for, reporting `-v` lines to
+/// `out` and failures to `err`.
 ///
-/// Returns `true` if every one was created. Takes the error sink as a parameter
-/// rather than writing to `stderr` directly so the diagnostics — the part of
+/// Returns `true` if every one was created. Takes both sinks as parameters
+/// rather than writing to the real streams so the diagnostics — the part of
 /// `mkdir` a caller actually sees when something goes wrong — can be asserted on
 /// in tests. The old file had no test of this path at all.
 ///
+/// Two sinks rather than one because GNU uses two: `-v` goes to **stdout** and
+/// every error to **stderr**, so a half-failing run splits across them. A single
+/// sink would test as one interleaved transcript and would hide a `-v` line sent
+/// to the wrong stream, which is the mistake worth catching here — it is the
+/// only line this utility writes to stdout at all.
+///
 /// One failure does not abandon the rest. Measured: `mkdir a g` with `a` already
 /// present reports `a`, still creates `g`, and exits 1.
-fn make_all<W: Write>(flags: &MkdirFlags, dirs: &[OsString], err: &mut W) -> bool {
+fn make_all<O: Write, W: Write>(
+    flags: &MkdirFlags,
+    dirs: &[OsString],
+    out: &mut O,
+    err: &mut W,
+) -> bool {
     if dirs.is_empty() {
         // Module docs, defect 3: GNU follows this with the referral, and
         // `usage_referring` is what adds it.
@@ -444,15 +492,35 @@ fn make_all<W: Write>(flags: &MkdirFlags, dirs: &[OsString], err: &mut W) -> boo
     };
 
     let mut ok = true;
+    let mut created: Vec<std::path::PathBuf> = Vec::new();
     for dir in dirs {
+        created.clear();
         let result = if flags.parents {
             // Silent when the path is already a directory, which is `-p`'s whole
             // point, and still failing when it is an existing *file* — matching
             // GNU, which reports `File exists` for `mkdir -p f`.
-            create_dir_all_with_modes(Path::new(dir), modes)
+            create_dir_all_with_modes(Path::new(dir), modes, &mut created)
         } else {
-            create_one(Path::new(dir), modes.map(|m| m.named))
+            create_one(Path::new(dir), modes.map(|m| m.named), &mut created)
         };
+        // Before the error, not after: under `-p` the components made on the way
+        // to a failure were still made, and GNU names them. Reported per operand
+        // rather than once at the end so that a run over several operands
+        // interleaves in the order the work happened.
+        //
+        // `quoteaf_os` here and `quote_os` below — straight marks for this line
+        // and curly for the error, in the same run and the same loop body. That
+        // pairing is the module docs' defect 2 made concrete; see the table
+        // there before making the two agree.
+        if flags.verbose {
+            for path in &created {
+                let _ = writeln!(
+                    out,
+                    "mkdir: created directory {}",
+                    quoteaf_os(path.as_os_str())
+                );
+            }
+        }
         // `failed` is the component that failed, which under `-p` need not be
         // the operand: see [`WalkError`].
         if let Err((failed, e)) = result {
@@ -637,32 +705,37 @@ mod tests {
         assert_eq!(e.status, 1);
     }
 
-    /// `-Z` ignored would silently drop a security context. `-m` used to be on
-    /// this list for the same reason — ignored, it would create world-readable
-    /// the directory a user asked to be private — and is now implemented; see
-    /// [`the_four_spellings_of_the_mode_option`].
+    /// `-Z` ignored would silently drop a security context. `-m` and `-v` used
+    /// to be on this list — `-m` for the same reason, since ignored it would
+    /// create world-readable the directory a user asked to be private — and
+    /// both are now implemented; see [`the_four_spellings_of_the_mode_option`]
+    /// and [`the_two_spellings_of_the_verbose_option`].
     #[test]
     fn unimplemented_short_options_are_rejected_by_name() {
-        for flag in ["-v", "-Z"] {
-            let e = fail(&[flag, "a"]);
-            assert!(
-                e.sentence.contains("not implemented"),
-                "{flag}: {:?}",
-                e.sentence
-            );
+        let e = fail(&["-Z", "a"]);
+        assert!(e.sentence.contains("not implemented"), "{:?}", e.sentence);
+    }
+
+    #[test]
+    fn the_two_spellings_of_the_verbose_option() {
+        for spelling in [&["-v", "a"][..], &["--verbose", "a"][..]] {
+            let (f, d) = run_parse(spelling);
+            assert!(f.verbose, "{spelling:?}");
+            assert_eq!(d, vec!["a"]);
         }
+        // Bundled with the other short option, which is the spelling the old
+        // parser could not read at all — see module docs, defect 1.
+        let (f, d) = run_parse(&["-pv", "a"]);
+        assert!(f.parents && f.verbose);
+        assert_eq!(d, vec!["a"]);
+        // And absent unless asked for.
+        assert!(!run_parse(&["a"]).0.verbose);
     }
 
     #[test]
     fn unimplemented_long_options_are_rejected_by_name() {
-        for name in ["--context", "--verbose"] {
-            let e = fail(&[name, "a"]);
-            assert!(
-                e.sentence.contains("not implemented"),
-                "{name}: {:?}",
-                e.sentence
-            );
-        }
+        let e = fail(&["--context", "a"]);
+        assert!(e.sentence.contains("not implemented"), "{:?}", e.sentence);
     }
 
     /// `-m 700`, `-m700`, `--mode=700` and `--mode 700` are one option, and the
@@ -796,14 +869,43 @@ mod tests {
     }
 
     fn run_with_mode(parents: bool, mode: Option<&str>, dirs: &[&Path]) -> (bool, String) {
+        let (ok, out, err) = run_all(parents, false, mode, dirs);
+        assert_eq!(out, "", "a run without -v must write nothing to stdout");
+        (ok, err)
+    }
+
+    /// `make_all` with both streams captured separately, which is the only way
+    /// to tell a `-v` line on stdout from one misdirected to stderr.
+    fn run_all(
+        parents: bool,
+        verbose: bool,
+        mode: Option<&str>,
+        dirs: &[&Path],
+    ) -> (bool, String, String) {
         let owned: Vec<OsString> = dirs.iter().map(|p| p.as_os_str().to_owned()).collect();
+        let mut out: Vec<u8> = Vec::new();
         let mut err: Vec<u8> = Vec::new();
         let flags = MkdirFlags {
             parents,
+            verbose,
             mode: mode.map(OsString::from),
         };
-        let ok = make_all(&flags, &owned, &mut err);
-        (ok, String::from_utf8_lossy(&err).into_owned())
+        let ok = make_all(&flags, &owned, &mut out, &mut err);
+        (
+            ok,
+            String::from_utf8_lossy(&out).into_owned(),
+            String::from_utf8_lossy(&err).into_owned(),
+        )
+    }
+
+    /// The `-v` line for `path`, built the way the code builds it, so a test
+    /// asserts on the *set and order* of reported paths without also restating
+    /// how a path is quoted or hard-coding a separator this file does not choose.
+    fn verbose_line(path: &Path) -> String {
+        format!(
+            "mkdir: created directory {}\n",
+            quoteaf_os(path.as_os_str())
+        )
     }
 
     /// Defect 3: the referral used to be missing.
@@ -947,6 +1049,148 @@ mod tests {
             !msg.contains(&coreutils::quote::quote_os(&deep)),
             "must not name the operand: {msg:?}"
         );
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    // ------------------------------------------------------------ verbose --
+
+    /// The line itself, and the stream it goes to.
+    ///
+    /// Measured against GNU 9.4: `mkdir -v d 2>/dev/null | cat` shows the line,
+    /// so it is stdout — the opposite of every other line this utility writes.
+    #[test]
+    fn verbose_names_each_directory_on_stdout() {
+        let d = scratch("v_one");
+        let a = d.join("a");
+        let (ok, out, err) = run_all(false, true, None, &[&a]);
+        assert!(ok, "{err}");
+        assert_eq!(out, verbose_line(&a));
+        assert_eq!(err, "", "the -v line must not reach stderr");
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    /// `-p` reports **every** component it creates, innermost last, and names
+    /// each by the path leading to it rather than by its own last component.
+    ///
+    /// Measured: `mkdir -p -v x/y/z` prints `'x'`, `'x/y'`, `'x/y/z'` — three
+    /// lines, growing. A version that reported only the operand would print one
+    /// line, and one that reported basenames would print `'x'`, `'y'`, `'z'`,
+    /// which reads as three siblings rather than a chain.
+    #[test]
+    fn verbose_under_parents_reports_every_component_it_creates() {
+        let d = scratch("v_chain");
+        let x = d.join("x");
+        let y = x.join("y");
+        let z = y.join("z");
+        let (ok, out, err) = run_all(true, true, None, &[&z]);
+        assert!(ok, "{err}");
+        assert_eq!(
+            out,
+            format!(
+                "{}{}{}",
+                verbose_line(&x),
+                verbose_line(&y),
+                verbose_line(&z)
+            )
+        );
+
+        // And a component that already existed is not reported: the second run
+        // creates only `w`, so only `w` is named. This is what makes `-v` a log
+        // of work done rather than of paths mentioned.
+        let w = y.join("w");
+        let (ok, out, err) = run_all(true, true, None, &[&w]);
+        assert!(ok, "{err}");
+        assert_eq!(out, verbose_line(&w));
+
+        // Re-creating the whole chain reports nothing at all, and still succeeds.
+        let (ok, out, err) = run_all(true, true, None, &[&z]);
+        assert!(ok, "{err}");
+        assert_eq!(out, "");
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    /// A run that half fails writes the successes to stdout and the failure to
+    /// stderr, and keeps going.
+    ///
+    /// Measured: `mkdir -v ok1 /nope/nah ok2` prints `ok1` and `ok2` as created,
+    /// reports `/nope/nah`, and exits 1. The two streams are the point — a
+    /// caller can keep one and discard the other, which it could not do if the
+    /// `-v` lines were mixed into stderr.
+    #[test]
+    fn verbose_splits_successes_and_failures_across_the_two_streams() {
+        let d = scratch("v_split");
+        let ok1 = d.join("ok1");
+        let nope = d.join("absent").join("nah");
+        let ok2 = d.join("ok2");
+        let (ok, out, err) = run_all(false, true, None, &[&ok1, &nope, &ok2]);
+        assert!(!ok, "a failed operand must still fail the run");
+        assert_eq!(out, format!("{}{}", verbose_line(&ok1), verbose_line(&ok2)));
+        assert!(
+            err.contains(&coreutils::quote::quote_os(&nope)),
+            "stderr must name the failure: {err:?}"
+        );
+        assert!(ok1.is_dir() && ok2.is_dir(), "the run must not abandon");
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    /// Under `-p`, the components made on the way to a failure were still made,
+    /// so they are reported even though the operand as a whole failed.
+    ///
+    /// Measured: with a 300-character leaf, `mkdir -p -v newmid/<long>` prints
+    /// ``created directory 'newmid'`` and *then* the `File name too long`
+    /// error, and `newmid` is still there afterwards. Reporting only on overall
+    /// success would lose that line and leave a directory on disk that nothing
+    /// said had been made — the one case where a silent `-v` is actively
+    /// misleading rather than merely quiet.
+    ///
+    /// A leaf too long for `NAME_MAX` is the scenario because it is the only
+    /// portable way to make the *last* component fail while an earlier one
+    /// succeeds: blocking a component with a planted file needs its parent to
+    /// exist already, which is exactly the case where nothing new gets created.
+    #[test]
+    fn verbose_reports_what_was_built_before_a_failure() {
+        let d = scratch("v_partial");
+        let mid = d.join("newmid");
+        let leaf = mid.join("z".repeat(300));
+
+        let (ok, out, err) = run_all(true, true, None, &[&leaf]);
+        assert!(!ok, "the over-long leaf must fail: {out}");
+        assert_eq!(out, verbose_line(&mid), "the intermediate must be reported");
+        assert!(!err.is_empty(), "the failure must be reported");
+        assert!(mid.is_dir(), "and the intermediate really was created");
+
+        // The contrasting case: when the *first* component is the one that
+        // fails, nothing was created and nothing is reported.
+        let (ok, out, err) = run_all(true, true, None, &[&d.join("y".repeat(300))]);
+        assert!(!ok);
+        assert_eq!(out, "");
+        assert!(!err.is_empty());
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    /// `-v` and `-m` are independent: the mode is applied and the line printed.
+    #[test]
+    fn verbose_and_mode_together() {
+        let d = scratch("v_mode");
+        let a = d.join("a");
+        let (ok, out, err) = run_all(false, true, Some("700"), &[&a]);
+        assert!(ok, "{err}");
+        assert_eq!(out, verbose_line(&a));
+        assert!(a.is_dir());
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    /// An invalid mode is refused before anything is created, so `-v` has
+    /// nothing to report — the bad-mode message must not be preceded by a line
+    /// claiming a directory was made.
+    #[test]
+    fn a_bad_mode_leaves_verbose_silent() {
+        let d = scratch("v_badmode");
+        let a = d.join("a");
+        let (ok, out, err) = run_all(false, true, Some("zzz"), &[&a]);
+        assert!(!ok);
+        assert_eq!(out, "");
+        assert_eq!(err, "mkdir: invalid mode \u{2018}zzz\u{2019}\n");
         let _ = fs::remove_dir_all(&d);
     }
 

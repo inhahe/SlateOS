@@ -79,11 +79,12 @@
 //! false would be a wrong answer rather than a refusal. `%Z` renders empty for
 //! the same reason. Tracked in `known-issues.md`.
 
-use coreutils::errmsg::strerror;
-use coreutils::fnmatch::{Flags, fnmatch};
+use coreutils::errmsg::{self, strerror};
 #[cfg(unix)]
-use coreutils::quote::os_from_bytes;
-use coreutils::quote::{os_bytes, quote};
+use coreutils::quote::os_bytes;
+use coreutils::quote::{self, os_from_bytes, quote};
+use coreutils::{cfmt, extfloat, fnmatch, pathname};
+#[cfg(unix)]
 use std::collections::HashMap;
 use std::io::{self, Write};
 use std::process::ExitCode;
@@ -97,17 +98,6 @@ use std::process::ExitCode;
 struct Ts {
     sec: i64,
     nsec: u32,
-}
-
-impl Ts {
-    /// The timestamp as a real number of seconds, for the difference
-    /// arithmetic `-mtime` and friends do in `double`.
-    fn as_f64(self) -> f64 {
-        #[allow(clippy::cast_precision_loss)]
-        {
-            self.sec as f64 + f64::from(self.nsec) / 1e9
-        }
-    }
 }
 
 /// The fields of `struct stat` this program actually reads.
@@ -177,7 +167,16 @@ fn type_letter(mode: u32) -> u8 {
 trait Tree {
     fn lstat(&self, path: &[u8]) -> io::Result<Meta>;
     fn stat(&self, path: &[u8]) -> io::Result<Meta>;
-    fn read_dir(&self, path: &[u8]) -> io::Result<Vec<Vec<u8>>>;
+    /// One entry per name, paired with the `S_IFMT` bits `readdir` reported in
+    /// `d_type` — or 0 where it reported `DT_UNKNOWN`.
+    ///
+    /// The pairing is not an optimisation. `fts` is opened `FTS_NOSTAT`, so
+    /// upstream never calls `stat` on an entry that no predicate asked about,
+    /// and that is *observable*: in a directory that is readable but not
+    /// searchable, `find d` prints every name while `find d -printf '%s\n'`
+    /// reports `Permission denied` for each of them. A walk that statted
+    /// eagerly would fail the first command as well as the second.
+    fn read_dir(&self, path: &[u8]) -> io::Result<Vec<(Vec<u8>, u32)>>;
     fn readlink(&self, path: &[u8]) -> io::Result<Vec<u8>>;
     /// `euidaccess(path, mode)`, where mode is 4/2/1 for read/write/execute.
     fn access(&self, path: &[u8], mode: i32) -> bool;
@@ -194,6 +193,13 @@ trait Tree {
     fn run(&self, argv: &[Vec<u8>], cwd: Option<&[u8]>) -> io::Result<bool>;
     /// Wall-clock now, read once at startup.
     fn now(&self) -> Ts;
+    /// `$PATH`, for `-execdir`'s safety check.
+    ///
+    /// On the trait rather than read from the environment where it is used,
+    /// because it is a question about the world outside the program — and
+    /// because a test whose answer depended on the `$PATH` the developer
+    /// happened to have would pass or fail by accident.
+    fn path_env(&self) -> Option<Vec<u8>>;
     /// One line from the terminal, for `-ok`/`-okdir`.
     fn confirm(&self) -> bool;
 }
@@ -247,7 +253,9 @@ fn read_mountinfo() -> HashMap<u64, Vec<u8>> {
     };
     for line in text.split(|&b| b == b'\n') {
         let fields: Vec<&[u8]> = line.split(|&b| b == b' ').collect();
-        let Some(devstr) = fields.get(2) else { continue };
+        let Some(devstr) = fields.get(2) else {
+            continue;
+        };
         let Some(sep) = fields.iter().position(|f| *f == b"-") else {
             continue;
         };
@@ -262,10 +270,8 @@ fn read_mountinfo() -> HashMap<u64, Vec<u8>> {
             continue;
         };
         // Re-encode with glibc's rule so the lookup key matches `st_dev`.
-        let dev = ((maj & 0xfff) << 8)
-            | ((maj & !0xfff) << 32)
-            | (min & 0xff)
-            | ((min & !0xff) << 12);
+        let dev =
+            ((maj & 0xfff) << 8) | ((maj & !0xfff) << 32) | (min & 0xff) | ((min & !0xff) << 12);
         map.entry(dev).or_insert_with(|| (*fstype).to_vec());
     }
     map
@@ -284,6 +290,30 @@ fn parse_u64(bytes: &[u8]) -> Option<u64> {
         n = n.checked_mul(10)?.checked_add(d)?;
     }
     Some(n)
+}
+
+/// The `S_IFMT` bits of a `DirEntry`'s type, which is `d_type` widened back
+/// out into the shape `state.type` carries it in.
+#[cfg(unix)]
+fn file_type_bits(t: &std::fs::FileType) -> u32 {
+    use std::os::unix::fs::FileTypeExt as _;
+    if t.is_file() {
+        modechange::S_IFREG
+    } else if t.is_dir() {
+        modechange::S_IFDIR
+    } else if t.is_symlink() {
+        modechange::S_IFLNK
+    } else if t.is_socket() {
+        modechange::S_IFSOCK
+    } else if t.is_fifo() {
+        modechange::S_IFIFO
+    } else if t.is_block_device() {
+        modechange::S_IFBLK
+    } else if t.is_char_device() {
+        modechange::S_IFCHR
+    } else {
+        0
+    }
 }
 
 #[cfg(unix)]
@@ -320,10 +350,20 @@ impl Tree for RealTree {
         Ok(meta_of(&std::fs::metadata(os_from_bytes(path))?))
     }
 
-    fn read_dir(&self, path: &[u8]) -> io::Result<Vec<Vec<u8>>> {
+    fn read_dir(&self, path: &[u8]) -> io::Result<Vec<(Vec<u8>, u32)>> {
         let mut names = Vec::new();
         for entry in std::fs::read_dir(os_from_bytes(path))? {
-            names.push(os_bytes(&entry?.file_name()).into_owned());
+            let entry = entry?;
+            // `file_type()` on a `DirEntry` is the `d_type` field when the
+            // filesystem filled it in, and a `lstat` when it did not — which
+            // is `DT_UNKNOWN`'s only correct handling and is what `fts` does
+            // too. The `S_IFMT` bits are all we keep; the permission bits are
+            // not knowable without the `stat` we are avoiding.
+            let mode = match entry.file_type() {
+                Ok(t) => file_type_bits(&t),
+                Err(_) => 0,
+            };
+            names.push((os_bytes(&entry.file_name()).into_owned(), mode));
         }
         Ok(names)
     }
@@ -397,6 +437,10 @@ impl Tree for RealTree {
             sec: i64::try_from(d.as_secs()).unwrap_or(i64::MAX),
             nsec: d.subsec_nanos(),
         }
+    }
+
+    fn path_env(&self) -> Option<Vec<u8>> {
+        std::env::var_os("PATH").map(|p| os_bytes(&p).into_owned())
     }
 
     fn confirm(&self) -> bool {
@@ -577,10 +621,6 @@ impl PKind {
             Self::Not => 4,
         }
     }
-
-    fn is_binary(self) -> bool {
-        matches!(self, Self::And | Self::Or | Self::Comma)
-    }
 }
 
 /// The expression, after `get_expr` has shaped the list into a tree.
@@ -613,14 +653,25 @@ type Parsed<T> = Result<T, Fatal>;
 
 /// Where an action writes.
 ///
-/// Deduplicated by name at parse time: GNU opens one `FILE *` per distinct
-/// filename, so `-fprint x -fprint x` interleaves through a single buffer.
-/// Opening it twice here would produce two buffers writing over each other at
-/// different offsets.
+/// Deduplicated by name at parse time — in `Parser::sink_names`, which is why
+/// the name is not carried here. GNU opens one `FILE *` per distinct filename,
+/// so `-fprint x -fprint x` interleaves through a single buffer; opening it
+/// twice here would produce two buffers writing over each other at different
+/// offsets.
 enum Sink {
     Stdout,
     Stderr,
-    File(Vec<u8>, std::fs::File),
+    File(std::fs::File),
+    /// Test-only stand-in for [`Sink::Stdout`]: [`Ctx::flush`] leaves the bytes
+    /// in the buffer instead of writing them, so `run_capture` can read them
+    /// afterwards.
+    ///
+    /// A sink rather than a wrapper around the whole of stdout because the
+    /// tests must exercise the *same* `run` the program does — a test harness
+    /// that assembled its own `Ctx` would stop testing the argument handling,
+    /// which is the half most likely to be wrong.
+    #[cfg(test)]
+    Capture,
 }
 
 /// `-exec` and its three relatives.
@@ -680,7 +731,7 @@ enum Follow {
 /// the ordinary sense.
 ///
 /// Returns the index of the first argument that is not a leading option.
-fn process_leading_options(argv: &[Vec<u8>], follow: &mut Follow) -> Parsed<usize> {
+fn process_leading_options(argv: &[Vec<u8>], follow: &mut Follow) -> Result<usize, Leading> {
     let mut i = 0usize;
     while i < argv.len() {
         let Some(arg) = argv.get(i) else { break };
@@ -693,17 +744,146 @@ fn process_leading_options(argv: &[Vec<u8>], follow: &mut Follow) -> Parsed<usiz
                 break;
             }
             b"-D" => {
-                if argv.get(i.saturating_add(1)).is_none() {
-                    return Err(Fatal::new("Missing argument after the -D option."));
-                }
+                let Some(spec) = argv.get(i.saturating_add(1)) else {
+                    return Err(Leading::Usage(
+                        "Missing argument after the -D option.".to_string(),
+                    ));
+                };
+                process_debug_options(spec)?;
                 i = i.saturating_add(1);
             }
-            a if a.starts_with(b"-O") => {}
+            a if a.starts_with(b"-O") => {
+                process_optimisation_option(a.get(2..).unwrap_or_default())?;
+            }
             _ => break,
         }
         i = i.saturating_add(1);
     }
     Ok(i)
+}
+
+/// The three ways `process_leading_options` can end the program, none of which
+/// is a plain [`Fatal`]: two print the terse `Try 'find --help'` pointer that
+/// `usage(EXIT_FAILURE)` adds and one succeeds.
+enum Leading {
+    /// `usage (EXIT_FAILURE)` — a `find: …` line, then the pointer, exit 1.
+    Usage(String),
+    /// `die (EXIT_FAILURE, …)` — a `find: …` line and nothing else, exit 1.
+    Die(String),
+    /// `-D help` — the debug-flag table on stdout, exit 0.
+    DebugHelp,
+}
+
+/// The `-D` flag names, in the order `show_valid_debug_options` prints them.
+const DEBUG_FLAGS: &[(&str, &str)] = &[
+    (
+        "exec",
+        "Show diagnostic information relating to -exec, -execdir, -ok and -okdir",
+    ),
+    (
+        "opt",
+        "Show diagnostic information relating to optimisation",
+    ),
+    ("rates", "Indicate how often each predicate succeeded"),
+    ("search", "Navigate the directory tree verbosely"),
+    ("stat", "Trace calls to stat(2) and lstat(2)"),
+    (
+        "time",
+        "Show diagnostic information relating to time-of-day and timestamp comparisons",
+    ),
+    ("tree", "Display the expression tree"),
+    ("all", "Set all of the debug flags (but help)"),
+    ("help", "Explain the various -D options"),
+];
+
+/// `process_debug_options`.
+///
+/// Every flag but `help` is accepted and then ignored: this port has no
+/// debugging output to switch on, and refusing a flag `find` accepts would
+/// break a command line that merely asked for tracing it did not read.
+fn process_debug_options(spec: &[u8]) -> Result<(), Leading> {
+    let mut empty = true;
+    let mut help = false;
+    for token in spec.split(|&b| b == b',').filter(|t| !t.is_empty()) {
+        empty = false;
+        help |= token == b"help";
+        if !DEBUG_FLAGS.iter().any(|(n, _)| n.as_bytes() == token) {
+            // Upstream quotes `arg`, not the token it failed on — and by this
+            // point `strtok_r` has written a NUL over the delimiter that ended
+            // the *first* token, so what gets quoted is that first token
+            // however late in the list the offender is. `-D exec,bogus`
+            // really does say `Ignoring unrecognised debug flag 'exec'`.
+            let head = strtok_first(spec);
+            eprintln!("find: Ignoring unrecognised debug flag {}", quote(head));
+        }
+    }
+    if empty {
+        return Err(Leading::Usage(
+            "Empty argument to the -D option.".to_string(),
+        ));
+    }
+    if help {
+        return Err(Leading::DebugHelp);
+    }
+    Ok(())
+}
+
+/// What `arg` reads as after `strtok_r` has extracted its first token: the
+/// leading delimiters are left alone, and the delimiter that *ends* the first
+/// token has been overwritten with a NUL.
+fn strtok_first(arg: &[u8]) -> &[u8] {
+    let start = arg.iter().position(|&b| b != b',').unwrap_or(arg.len());
+    match arg
+        .get(start..)
+        .and_then(|t| t.iter().position(|&b| b == b','))
+    {
+        Some(off) => arg.get(..start.saturating_add(off)).unwrap_or(arg),
+        None => arg,
+    }
+}
+
+/// `process_optimisation_option`. The level is parsed, validated and then
+/// discarded — this port does not reorder predicates, so there is nothing for
+/// it to select between. Validating it anyway is not ceremony: four of the
+/// five refusals above are the only observable behaviour `-O` has, and a
+/// `find` that accepted `-Ox` would differ from `find` on a command line
+/// someone can type.
+fn process_optimisation_option(arg: &[u8]) -> Result<(), Leading> {
+    if arg.is_empty() {
+        return Err(Leading::Die(
+            "The -O option must be immediately followed by a decimal integer".to_string(),
+        ));
+    }
+    if !arg.first().is_some_and(u8::is_ascii_digit) {
+        return Err(Leading::Die(
+            "Please specify a decimal number immediately after -O".to_string(),
+        ));
+    }
+    let run = digit_run(arg);
+    let digits = arg.get(..run).unwrap_or_default();
+    let level = xstrtoumax(digits);
+    if run != arg.len() {
+        return Err(Leading::Die(format!(
+            "Invalid optimisation level {}",
+            String::from_utf8_lossy(arg)
+        )));
+    }
+    // `strtoul` overflow, then the `USHRT_MAX` ceiling. Both refuse; only the
+    // wording differs, and only the second one names the level.
+    let Some(level) = level.filter(|l| *l <= u64::from(u16::MAX)) else {
+        return Err(Leading::Die(match level {
+            Some(l) => format!(
+                "Optimisation level {l} is too high.  If you want to find files very quickly, \
+                 consider using GNU locate."
+            ),
+            None => format!(
+                "Invalid optimisation level {}: Numerical result out of range",
+                String::from_utf8_lossy(arg)
+            ),
+        }));
+    };
+    let _ = level;
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -851,6 +1031,50 @@ struct Parser<'a> {
     no_default_print: bool,
     /// Diagnostics that are warnings rather than failures, emitted in order.
     warnings: Vec<String>,
+    /// `options.warnings`, whose default is `isatty(0)` and which `-warn` and
+    /// `-nowarn` move. Three of the parser's warnings are gated on it and the
+    /// rest are not, so it cannot simply suppress the whole list.
+    warn: bool,
+    /// `options.posixly_correct`: `POSIXLY_CORRECT` was in the environment.
+    /// Silences the same three warnings and halves `-ls`'s block size.
+    posixly_correct: bool,
+    /// `first_nonoption_arg`: the first token that was neither a global option
+    /// nor one of the four positional ones, remembered so that a global option
+    /// appearing *after* it can be warned about.
+    first_nonoption: Option<Vec<u8>>,
+}
+
+/// The `ARG_*` column of upstream's `parse_table`, to the extent
+/// `found_parser` cares about it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ArgClass {
+    /// `ARG_OPTION`: a global option, whose position on the command line does
+    /// *not* limit what it affects.
+    Option,
+    /// `ARG_POSITIONAL_OPTION`: `-daystart`, `-follow`, `-warn`, `-nowarn`,
+    /// `-regextype`. Exempt from the warning below because their position
+    /// genuinely does matter — they affect what follows and not what precedes.
+    Positional,
+    /// Everything else: tests, actions and punctuation.
+    Other,
+}
+
+/// `parse_table`'s `ARG_*` for one canonical name.
+fn arg_class(canon: &[u8]) -> ArgClass {
+    match canon {
+        b"d"
+        | b"depth"
+        | b"files0-from"
+        | b"ignore_readdir_race"
+        | b"maxdepth"
+        | b"mindepth"
+        | b"mount"
+        | b"noleaf"
+        | b"noignore_readdir_race"
+        | b"xdev" => ArgClass::Option,
+        b"daystart" | b"follow" | b"nowarn" | b"warn" | b"regextype" => ArgClass::Positional,
+        _ => ArgClass::Other,
+    }
 }
 
 /// Seconds in a day, as `find` counts them.
@@ -885,6 +1109,46 @@ impl<'a> Parser<'a> {
             cur_day_start,
             no_default_print: false,
             warnings: Vec::new(),
+            // `options.warnings = isatty(0)`. Not `isatty(1)`: the question
+            // upstream is asking is "is a person typing this", and a person
+            // typing it has a terminal on standard *input* whether or not the
+            // output is going to a pipe.
+            warn: std::io::IsTerminal::is_terminal(&io::stdin()),
+            posixly_correct: std::env::var_os("POSIXLY_CORRECT").is_some(),
+            first_nonoption: None,
+        }
+    }
+
+    /// `should_issue_warnings`.
+    fn should_warn(&self) -> bool {
+        !self.posixly_correct && self.warn
+    }
+
+    /// `found_parser`'s half: the warning for a global option written after a
+    /// test, which reads as though it were conditional on that test and is not.
+    fn found_parser(&mut self, tok: &[u8], canon: &[u8]) {
+        match arg_class(canon) {
+            ArgClass::Positional => {}
+            ArgClass::Option => {
+                if let Some(first) = self.first_nonoption.clone()
+                    && self.should_warn()
+                {
+                    self.warnings.push(format!(
+                        "warning: you have specified the global option {} after the argument {}, \
+                         but global options are not positional, i.e., {} affects tests specified \
+                         before it as well as those specified after it.  Please specify global \
+                         options before other arguments.",
+                        String::from_utf8_lossy(tok),
+                        String::from_utf8_lossy(&first),
+                        String::from_utf8_lossy(tok)
+                    ));
+                }
+            }
+            ArgClass::Other => {
+                if self.first_nonoption.is_none() {
+                    self.first_nonoption = Some(tok.to_vec());
+                }
+            }
         }
     }
 
@@ -947,10 +1211,9 @@ impl<'a> Parser<'a> {
         if let Some(idx) = self.sink_names.iter().position(|n| n == path) {
             return Ok(idx);
         }
-        let file = open_sink(path).map_err(|e| {
-            Fatal::new(format!("{}: {}", quote(path), strerror(&e)))
-        })?;
-        self.sinks.push(Sink::File(path.to_vec(), file));
+        let file = open_sink(path)
+            .map_err(|e| Fatal::new(format!("{}: {}", quote(path), strerror(&e))))?;
+        self.sinks.push(Sink::File(file));
         self.sink_names.push(path.to_vec());
         Ok(self.sinks.len().saturating_sub(1))
     }
@@ -1033,9 +1296,7 @@ fn safe_atoi(s: &[u8]) -> Parsed<i32> {
     };
     let text = String::from_utf8_lossy(s).into_owned();
     let body = text.trim_start_matches(|c: char| c.is_ascii_whitespace());
-    let digits_at = body
-        .strip_prefix(['+', '-'])
-        .map_or(0, |_| 1);
+    let digits_at = body.strip_prefix(['+', '-']).map_or(0, |_| 1);
     let end = body
         .get(digits_at..)
         .unwrap_or("")
@@ -1188,8 +1449,13 @@ fn parse_type_letters(name: &[u8], arg: &[u8]) -> Parsed<Vec<u8>> {
 /// symbol classes are not). Documented in `known-issues.md`.
 fn regex_is_extended(name: &[u8]) -> Option<bool> {
     match name {
-        b"findutils-default" | b"ed" | b"emacs" | b"grep" | b"posix-basic"
-        | b"posix-minimal-basic" | b"sed" => Some(false),
+        b"findutils-default"
+        | b"ed"
+        | b"emacs"
+        | b"grep"
+        | b"posix-basic"
+        | b"posix-minimal-basic"
+        | b"sed" => Some(false),
         b"gnu-awk" | b"posix-awk" | b"awk" | b"posix-egrep" | b"egrep" | b"posix-extended" => {
             Some(true)
         }
@@ -1501,8 +1767,8 @@ impl Parser<'_> {
             }
             b"used" => {
                 let arg = self.arg(tok)?;
-                let (cmp, ts) = get_relative_timestamp(&arg, Ts::default(), DAYSECS)
-                    .ok_or_else(|| {
+                let (cmp, ts) =
+                    get_relative_timestamp(&arg, Ts::default(), DAYSECS).ok_or_else(|| {
                         Fatal::new(format!("Invalid argument {} to -used", quote(&arg)))
                     })?;
                 self.push_prim(
@@ -1570,6 +1836,13 @@ impl Parser<'_> {
                 self.push_prim(tok, Prim::Noop);
             }
             b"depth" | b"d" => {
+                if canon == b"d" && self.should_warn() {
+                    self.warnings.push(
+                        "warning: the -d option is deprecated; please use -depth instead, \
+                         because the latter is a POSIX-compliant feature."
+                            .to_string(),
+                    );
+                }
                 self.depth_first = true;
                 self.push_prim(tok, Prim::Noop);
             }
@@ -1589,7 +1862,11 @@ impl Parser<'_> {
                 self.ignore_readdir_race = false;
                 self.push_prim(tok, Prim::Noop);
             }
-            b"noleaf" | b"nowarn" | b"warn" => self.push_prim(tok, Prim::Noop),
+            b"noleaf" => self.push_prim(tok, Prim::Noop),
+            b"nowarn" | b"warn" => {
+                self.warn = canon == b"warn";
+                self.push_prim(tok, Prim::Noop);
+            }
             b"files0-from" => {
                 let arg = self.arg(tok)?;
                 self.files0_from = Some(arg);
@@ -1685,7 +1962,7 @@ impl Parser<'_> {
     /// `-name`'s one warning: a pattern with a `/` in it can never match,
     /// because the name it is matched against is a single component.
     fn check_name_arg(&mut self, tok: &[u8], pat: &[u8]) {
-        if pat.contains(&b'/') {
+        if self.should_warn() && pat.contains(&b'/') {
             let alt = [b"-wholename".as_slice(), pat].concat();
             self.warnings.push(format!(
                 "warning: {} matches against basenames only, but the given pattern contains a directory separator ({}), thus the expression will evaluate to false all the time.  Did you mean {}?",
@@ -1830,12 +2107,11 @@ impl Parser<'_> {
         }
         // Consume the predicate token now that it is known to be one.
         self.i = self.i.saturating_add(1);
-        let arg = self.argv.get(self.i).cloned().ok_or_else(|| {
-            Fatal::new(format!(
-                "The {} test needs an argument",
-                quote(tok)
-            ))
-        })?;
+        let arg = self
+            .argv
+            .get(self.i)
+            .cloned()
+            .ok_or_else(|| Fatal::new(format!("The {} test needs an argument", quote(tok))))?;
         self.i = self.i.saturating_add(1);
 
         let ts = if y == b't' {
@@ -1888,7 +2164,7 @@ impl Parser<'_> {
             )));
         }
         if dir_relative {
-            check_path_safety(tok)?;
+            check_path_safety(tok, self.tree.path_env().as_deref())?;
             // `-execdir`'s whole point is that the name it hands the child is
             // relative, so a racing rename must not be ignored.
             self.ignore_readdir_race = false;
@@ -1900,8 +2176,7 @@ impl Parser<'_> {
         let mut saw_braces = false;
         let mut brace_count = 0usize;
         let mut brace_arg: Vec<u8> = Vec::new();
-        loop {
-            let Some(a) = self.argv.get(end) else { break };
+        while let Some(a) = self.argv.get(end) {
             if a.as_slice() == b";" {
                 break;
             }
@@ -1943,18 +2218,11 @@ impl Parser<'_> {
 
         // For the `+` form the trailing `{}` is dropped: the names are
         // appended to the initial arguments instead of replacing anything.
-        let last = if multiple {
-            end.saturating_sub(1)
-        } else {
-            end
-        };
+        let last = if multiple { end.saturating_sub(1) } else { end };
         let argv: Vec<Vec<u8>> = self
             .argv
             .get(start..last)
-            .unwrap_or(&[])
-            .iter()
-            .cloned()
-            .collect();
+            .map_or_else(Vec::new, <[Vec<u8>]>::to_vec);
         self.i = end.saturating_add(1);
         self.execs.push(ExecSpec {
             argv,
@@ -1979,11 +2247,10 @@ fn window_contains(haystack: &[u8], needle: &[u8]) -> bool {
 /// Upstream `check_path_safety`: `-execdir` runs a command from a directory
 /// an attacker may control, so a `$PATH` that can resolve relative to the cwd
 /// is refused outright rather than merely warned about.
-fn check_path_safety(action: &[u8]) -> Parsed<()> {
-    let Some(path) = std::env::var_os("PATH") else {
+fn check_path_safety(action: &[u8], path: Option<&[u8]>) -> Parsed<()> {
+    let Some(path) = path else {
         return Ok(());
     };
-    let path = os_bytes(&path).into_owned();
     for entry in path.split(|&b| b == b':') {
         if entry.is_empty() || entry == b"." {
             return Err(Fatal::new(format!(
@@ -2059,7 +2326,7 @@ fn parse_datetime(s: &[u8]) -> Option<Ts> {
     // Interpret in the local zone, as parse_datetime does.
     let zone = localtime::Zone::from_env();
     let guess = zone.lookup(utc);
-    let sec = utc.checked_sub(i64::from(guess.offset))?;
+    let sec = utc.checked_sub(i64::from(guess.gmtoff))?;
     Some(Ts { sec, nsec: 0 })
 }
 
@@ -2259,8 +2526,10 @@ fn compile_format(fmt: &[u8], warnings: &mut Vec<String>) -> Parsed<Vec<Seg>> {
             i = i.saturating_add(flen);
             let conv = buf.get(i).copied().unwrap_or(0);
             let speclen = format_specifier_length(conv);
-            let complete =
-                speclen > 0 && buf.get(i.saturating_add(speclen).saturating_sub(1)).is_some();
+            let complete = speclen > 0
+                && buf
+                    .get(i.saturating_add(speclen).saturating_sub(1))
+                    .is_some();
             if complete {
                 let aux = if speclen == 2 {
                     buf.get(i.saturating_add(1)).copied().unwrap_or(0)
@@ -2356,6 +2625,8 @@ impl Parser<'_> {
                 )));
             };
 
+            self.found_parser(&tok, canon);
+
             // `-newerXY` is the one `ARG_SPECIAL_PARSE` entry: it re-reads its
             // own name to find the two letters, so the driver must not eat it.
             if canon != b"newerXY" {
@@ -2375,10 +2646,13 @@ impl Parser<'_> {
         if self.nodes.len() == 1 {
             // Nothing but global options. Drop the `(` and print everything.
             self.nodes.clear();
-            self.push_prim(b"-print", Prim::Print {
-                sink: 0,
-                terminator: b'\n',
-            });
+            self.push_prim(
+                b"-print",
+                Prim::Print {
+                    sink: 0,
+                    terminator: b'\n',
+                },
+            );
         } else if self.no_default_print {
             // An action already produces output; drop the now-unmatched `(`.
             self.nodes.remove(0);
@@ -2599,7 +2873,114 @@ struct Item {
     /// The directory `-execdir` runs its command in, or `None` for the
     /// directory `find` itself started in.
     dir: Option<Vec<u8>>,
-    meta: Meta,
+    /// `state.type`: the `S_IFMT` bits `readdir` gave us for free, or 0 when
+    /// it gave us nothing. Never has permission bits in it.
+    type_mode: u32,
+    /// `state.have_stat` and the `struct stat` behind it, in one: `Some` once
+    /// [`Ctx::get_info`] has taken the `stat` some predicate asked for.
+    ///
+    /// A [`Cell`](std::cell::Cell) so that the evaluator can fill it while
+    /// holding the item by shared reference, which is what lets the whole of
+    /// [`Ctx::apply`] keep taking `&Item`.
+    stat: std::cell::Cell<Option<Meta>>,
+    /// `state.already_issued_stat_error_msg`: one diagnostic per file, however
+    /// many predicates go on to ask for the `stat` that failed.
+    reported: std::cell::Cell<bool>,
+}
+
+impl Item {
+    /// The `stat` we have, or the type-only stand-in `state.type` amounts to.
+    ///
+    /// Callers reach this only after [`Ctx::get_info`] has agreed the
+    /// predicate can run, so a zeroed `Meta` here means the predicate declared
+    /// it needed nothing more than the type — which is exactly what it gets.
+    fn meta(&self) -> Meta {
+        self.stat.get().unwrap_or(Meta {
+            dev: 0,
+            ino: 0,
+            mode: self.type_mode,
+            nlink: 0,
+            uid: 0,
+            gid: 0,
+            size: 0,
+            blocks: 0,
+            rdev: 0,
+            atime: Ts { sec: 0, nsec: 0 },
+            mtime: Ts { sec: 0, nsec: 0 },
+            ctime: Ts { sec: 0, nsec: 0 },
+        })
+    }
+}
+
+/// What a predicate must know before it can run: upstream's `need_stat`,
+/// `need_type` and `need_inum` triple, which is a total order in practice
+/// because `get_pred_cost` reads them as one.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Need {
+    /// The name is enough — `-name`, `-print`, `-exec`, `-delete`.
+    Nothing,
+    /// `-type` and `%y`: `d_type` will do, if `readdir` supplied it.
+    Type,
+    /// `-inum` and `%i`. Upstream distrusts `d_ino` for directories, which may
+    /// be mount points, and we have no `d_ino` at all, so this always stats.
+    Inum,
+    /// Everything else.
+    Stat,
+}
+
+/// `make_segment`'s per-directive contribution to the format's `need_*` flags.
+///
+/// The list of directives that need *nothing* is short and worth reading as a
+/// list rather than as a default, because it is the whole of what
+/// `find -printf` can report about a file it cannot `stat`: the four names
+/// (`%p %f %h %P`), the start point (`%H`), the depth (`%d`), a literal `%%`,
+/// and the SELinux context (`%Z`), which upstream costs as `NeedsAccessInfo`
+/// and does not stat for.
+fn seg_need(s: &Seg) -> Need {
+    match s {
+        Seg::Plain(_) | Seg::Stop(_) => Need::Nothing,
+        Seg::Format { conv, .. } => match conv {
+            b'%' | b'f' | b'h' | b'p' | b'P' | b'H' | b'd' | b'Z' => Need::Nothing,
+            b'y' => Need::Type,
+            b'i' => Need::Inum,
+            _ => Need::Stat,
+        },
+    }
+}
+
+/// The `need_stat`/`need_type`/`need_inum` flags upstream's parser attaches to
+/// each predicate, transcribed from `find -D tree` rather than from the
+/// source: several are the way they are only because `insert_primary` defaults
+/// them on and the parse function never cleared them (`-prune` needs a `stat`
+/// it does not read, and `-printf '%d'` needs one too, because *any* `%`
+/// directive that is not on print.c's short list raises the flag).
+fn prim_need(p: &Prim) -> Need {
+    match p {
+        Prim::True
+        | Prim::False
+        | Prim::Noop
+        | Prim::Name { .. }
+        | Prim::Path { .. }
+        | Prim::Regex(_)
+        | Prim::Access(_)
+        | Prim::Print { .. }
+        | Prim::Quit
+        | Prim::Delete
+        | Prim::Exec(_) => Need::Nothing,
+        Prim::Type(_) => Need::Type,
+        Prim::Inum(_) => Need::Inum,
+        Prim::Printf { segs, .. } => segs
+            .iter()
+            .map(seg_need)
+            .max_by_key(|n| match n {
+                Need::Nothing => 0u8,
+                Need::Type => 1,
+                Need::Inum => 2,
+                Need::Stat => 3,
+            })
+            .unwrap_or(Need::Nothing),
+        _ => Need::Stat,
+    }
 }
 
 /// C-locale day and month abbreviations. `find` carries its own arrays rather
@@ -2677,7 +3058,9 @@ fn parse_spec(spec: &[u8], conv: u8) -> extfloat::Spec {
             if !b.is_ascii_digit() {
                 break;
             }
-            prec = prec.saturating_mul(10).saturating_add(usize::from(b - b'0'));
+            prec = prec
+                .saturating_mul(10)
+                .saturating_add(usize::from(b - b'0'));
             i = i.saturating_add(1);
         }
         out.precision = Some(prec);
@@ -2853,7 +3236,11 @@ fn printf_dirname(path: &[u8]) -> Vec<u8> {
         end = end.saturating_sub(1);
     }
     // `pname < s`: a name that is nothing but slashes keeps them.
-    let trimmed = if end > 1 { path.get(..end).unwrap_or(path) } else { path };
+    let trimmed = if end > 1 {
+        path.get(..end).unwrap_or(path)
+    } else {
+        path
+    };
     match trimmed.iter().rposition(|&b| b == b'/') {
         None => b".".to_vec(),
         Some(pos) => trimmed.get(..pos).unwrap_or(b"").to_vec(),
@@ -2873,7 +3260,8 @@ fn render_printf(
         stop: false,
         errs: Vec::new(),
     };
-    let m = &it.meta;
+    let meta = it.meta();
+    let m = &meta;
 
     for seg in segs {
         match seg {
@@ -3059,11 +3447,7 @@ fn render_printf(
                     }
                     b'S' => {
                         let sparse = if m.size == 0 {
-                            if m.blocks == 0 {
-                                1.0
-                            } else {
-                                f64::INFINITY
-                            }
+                            if m.blocks == 0 { 1.0 } else { f64::INFINITY }
                         } else {
                             #[allow(clippy::cast_precision_loss)]
                             {
@@ -3202,11 +3586,7 @@ fn ls_time(mtime: Ts, start: Ts, zone: &localtime::Zone) -> Vec<u8> {
     const SIX_MONTHS: i64 = 6 * 30 * 24 * 60 * 60;
     let recent = start.sec.saturating_sub(SIX_MONTHS) <= mtime.sec
         && mtime.sec <= start.sec.saturating_add(3600);
-    let fmt: &[u8] = if recent {
-        b"%b %e %H:%M"
-    } else {
-        b"%b %e  %Y"
-    };
+    let fmt: &[u8] = if recent { b"%b %e %H:%M" } else { b"%b %e  %Y" };
     let tm = zone.local(mtime.sec, mtime.nsec);
     let out = localtime::strftime(fmt, &tm);
     if out.is_empty() {
@@ -3240,14 +3620,17 @@ fn render_ls(
     block_size: u64,
     literal: bool,
 ) -> (Vec<u8>, Option<String>) {
-    let m = &it.meta;
+    let meta = it.meta();
+    let m = &meta;
     let mut out = Vec::new();
 
     pad_left(&mut out, m.ino.to_string().as_bytes(), &mut w.inode);
     out.push(b' ');
     pad_left(
         &mut out,
-        scaled_ceil(m.blocks, 512, block_size).to_string().as_bytes(),
+        scaled_ceil(m.blocks, 512, block_size)
+            .to_string()
+            .as_bytes(),
         &mut w.blocks,
     );
     out.push(b' ');
@@ -3264,10 +3647,10 @@ fn render_ls(
 
     match tree.user_name(m.uid) {
         Some(name) => {
-            if let Some(len) = mbswidth(&name) {
-                if len > w.owner {
-                    w.owner = len;
-                }
+            if let Some(len) = mbswidth(&name)
+                && len > w.owner
+            {
+                w.owner = len;
             }
             pad_right(&mut out, &name, w.owner);
             out.push(b' ');
@@ -3288,10 +3671,10 @@ fn render_ls(
 
     match tree.group_name(m.gid) {
         Some(name) => {
-            if let Some(len) = mbswidth(&name) {
-                if len > w.group {
-                    w.group = len;
-                }
+            if let Some(len) = mbswidth(&name)
+                && len > w.group
+            {
+                w.group = len;
             }
             pad_right(&mut out, &name, w.group);
             out.push(b' ');
@@ -3467,9 +3850,15 @@ impl Ctx<'_> {
                 continue;
             }
             let res = match self.sinks.get_mut(i) {
-                Some(Sink::Stdout) => io::stdout().write_all(buf).and_then(|()| io::stdout().flush()),
+                Some(Sink::Stdout) => io::stdout()
+                    .write_all(buf)
+                    .and_then(|()| io::stdout().flush()),
                 Some(Sink::Stderr) => io::stderr().write_all(buf),
-                Some(Sink::File(_, f)) => f.write_all(buf).and_then(|()| f.flush()),
+                Some(Sink::File(f)) => f.write_all(buf).and_then(|()| f.flush()),
+                // Accumulates rather than drains: the point of it is that the
+                // bytes are still there when the walk has finished.
+                #[cfg(test)]
+                Some(Sink::Capture) => continue,
                 None => Ok(()),
             };
             buf.clear();
@@ -3483,6 +3872,16 @@ impl Ctx<'_> {
     }
 
     fn eval(&mut self, nodes: &[Node], e: &Expr, it: &Item) -> bool {
+        // `pred_quit` does not return: it calls `cleanup()` and `exit()`, so
+        // nothing to its right in the same expression ever runs and no
+        // enclosing operator ever sees its value. Exiting the process here
+        // would take the unit tests with it, so the flag stands in for the
+        // `exit` and this is the unwind — every node above and to the right of
+        // the `-quit` folds to false without being applied, which is the whole
+        // of what is observable about upstream's `exit`.
+        if self.quit {
+            return false;
+        }
         match e {
             Expr::Prim(i) => match nodes.get(*i).and_then(|n| n.prim.as_ref()) {
                 Some(p) => self.apply(p, it),
@@ -3578,10 +3977,19 @@ impl Ctx<'_> {
     }
 
     fn do_exec(&mut self, idx: usize, it: &Item) -> bool {
-        let Some(spec) = self.execs.get(idx) else {
+        // Everything the borrow of `self.execs` is needed for is taken here in
+        // one go, because the prompt and the batch flush below both want
+        // `self` mutably.
+        let Some((confirm, dir_relative, multiple, prog)) = self.execs.get(idx).map(|s| {
+            (
+                s.confirm,
+                s.dir_relative,
+                s.multiple,
+                s.argv.first().cloned().unwrap_or_default(),
+            )
+        }) else {
             return false;
         };
-        let (confirm, dir_relative, multiple) = (spec.confirm, spec.dir_relative, spec.multiple);
 
         // `-execdir` names the file relative to the directory holding it, and
         // prefixes `./` so that a name beginning with a dash cannot be read as
@@ -3599,7 +4007,6 @@ impl Ctx<'_> {
         };
 
         if confirm {
-            let prog = spec.argv.first().cloned().unwrap_or_default();
             self.flush();
             eprint!(
                 "< {} ... {} > ? ",
@@ -3629,31 +4036,39 @@ impl Ctx<'_> {
             return true;
         }
 
-        let argv: Vec<Vec<u8>> = spec
-            .argv
-            .iter()
-            .map(|a| substitute(a, prefix, &target))
-            .collect();
+        let argv: Vec<Vec<u8>> = self.execs.get(idx).map_or_else(Vec::new, |spec| {
+            spec.argv
+                .iter()
+                .map(|a| substitute(a, prefix, &target))
+                .collect()
+        });
         self.spawn(&argv, cwd.as_deref())
     }
 
     #[allow(clippy::too_many_lines)]
     fn apply(&mut self, p: &Prim, it: &Item) -> bool {
-        let m = it.meta;
+        // `apply_predicate` calls `get_info` before every predicate, and a
+        // predicate whose `stat` could not be taken is not run at all — it is
+        // simply false. That is why `find d -type f` still lists the regular
+        // files in a directory it cannot search, while `find d -size 1` lists
+        // none of them and reports each failure instead.
+        if self.get_info(prim_need(p), it).is_err() {
+            return false;
+        }
+        let m = it.meta();
         match p {
-            Prim::True | Prim::Noop | Prim::Prune | Prim::Quit => {
-                match p {
-                    Prim::Prune => {
-                        // `-prune` is a no-op under `-depth`, because by then
-                        // the directory's contents have already been visited.
-                        // It still evaluates true: POSIX requires that.
-                        if !self.depth_first && m.is_dir() {
-                            self.stop_at_current_level = true;
-                        }
-                    }
-                    Prim::Quit => self.quit = true,
-                    _ => {}
+            Prim::True | Prim::Noop => true,
+            Prim::Prune => {
+                // `-prune` is a no-op under `-depth`, because by then the
+                // directory's contents have already been visited. It still
+                // evaluates true: POSIX requires that.
+                if !self.depth_first && m.is_dir() {
+                    self.stop_at_current_level = true;
                 }
+                true
+            }
+            Prim::Quit => {
+                self.quit = true;
                 true
             }
             Prim::False => false,
@@ -3705,7 +4120,7 @@ impl Ctx<'_> {
                 }
             }
             Prim::Empty => self.empty(it),
-            Prim::Links(c) => c.test(u64::from(m.nlink)),
+            Prim::Links(c) => c.test(m.nlink),
             Prim::Inum(c) => c.test(m.ino),
             Prim::Uid(c) => c.test(u64::from(m.uid)),
             Prim::Gid(c) => c.test(u64::from(m.gid)),
@@ -3833,6 +4248,86 @@ impl Ctx<'_> {
         }
     }
 
+    /// `options.xstat` — the one of the three stat functions the `-H`/`-L`/`-P`
+    /// choice selected, applied to a file at a given depth.
+    ///
+    /// `optionh_stat` is the reason this takes a depth: under `-H` the start
+    /// points are followed and everything below them is not, so the same
+    /// function is `optionl_stat` at depth 0 and `optionp_stat` beneath.
+    fn xstat(&self, path: &[u8], depth: usize) -> io::Result<Meta> {
+        match self.follow {
+            Follow::Always => self.optionl_stat(path),
+            Follow::CommandLine if depth == 0 => self.optionl_stat(path),
+            Follow::CommandLine | Follow::Never => self.tree.lstat(path),
+        }
+    }
+
+    /// [`Self::xstat`] plus the mode-0000 complaint.
+    ///
+    /// The complaint belongs here rather than in [`Self::statinfo`] because
+    /// upstream makes it in *two* places — `consider_visiting`, for the stats
+    /// `fts` took of its own accord, and `get_statinfo`, for the ones a
+    /// predicate asked for — and the two must word it identically.
+    ///
+    /// Savannah bug #16378: a mode of zero is indistinguishable from "we have
+    /// no mode", so every `S_ISREG`-style test below would silently answer
+    /// false. Upstream refuses to guess and says so instead.
+    fn stat_at(&mut self, path: &[u8], depth: usize) -> io::Result<Meta> {
+        let m = self.xstat(path, depth)?;
+        if m.mode == 0 {
+            let msg = format!(
+                "WARNING: file {} appears to have mode 0000",
+                quote::quote(path)
+            );
+            self.fail(&msg);
+        }
+        Ok(m)
+    }
+
+    /// `get_statinfo`: take the `stat` and remember it, or report the failure
+    /// once and remember *that*.
+    fn statinfo(&mut self, it: &Item) -> Result<(), ()> {
+        match self.stat_at(&it.path, it.depth) {
+            Ok(m) => {
+                it.stat.set(Some(m));
+                Ok(())
+            }
+            Err(e) => {
+                // `-ignore_readdir_race` covers exactly this: a name `readdir`
+                // handed us for a file that was gone by the time we asked
+                // about it. Only `ENOENT` qualifies — a race cannot produce
+                // `EACCES`.
+                let raced = self.ignore_readdir_race && e.raw_os_error() == Some(2);
+                if !raced && !it.reported.get() {
+                    let msg = format!("{}: {}", quote::quote(&it.path), errmsg::strerror(&e));
+                    self.fail(&msg);
+                }
+                it.reported.set(true);
+                Err(())
+            }
+        }
+    }
+
+    /// `get_info`: the decision *whether* to `stat`, which is the whole of
+    /// what `FTS_NOSTAT` buys and the reason `Item` carries a `d_type` at all.
+    fn get_info(&mut self, need: Need, it: &Item) -> Result<(), ()> {
+        if it.stat.get().is_some() {
+            return Ok(());
+        }
+        let todo = match need {
+            Need::Nothing => false,
+            // `d_type` answers this one, when `readdir` supplied it.
+            Need::Type => it.type_mode == 0,
+            // Upstream can sometimes use `d_ino`, but distrusts it for
+            // directories — a mount point's `d_ino` belongs to the covered
+            // directory, not the covering one. `std::fs::DirEntry` does not
+            // expose `d_ino` portably, so this always stats, which is the
+            // conservative half of the same rule.
+            Need::Inum | Need::Stat => true,
+        };
+        if todo { self.statinfo(it) } else { Ok(()) }
+    }
+
     fn xtype(&mut self, letters: &[u8], it: &Item) -> bool {
         // `-xtype` asks the *other* question from `-type`: if the walk would
         // have followed the link, look at the link; if it would not, look
@@ -3850,7 +4345,7 @@ impl Ctx<'_> {
                 // Mimics `ls -lL`. Reachable only under `-L`/`-H`, where the
                 // probe is a bare `lstat` and so has no fallback of its own.
                 if following && e.raw_os_error() == Some(2) {
-                    return letters.contains(&type_letter(it.meta.mode));
+                    return letters.contains(&type_letter(it.meta().mode));
                 }
                 self.fail(&format!(
                     "{}: {}",
@@ -3863,7 +4358,8 @@ impl Ctx<'_> {
     }
 
     fn empty(&mut self, it: &Item) -> bool {
-        if it.meta.is_dir() {
+        let meta = it.meta();
+        if meta.is_dir() {
             return match self.tree.read_dir(&it.path) {
                 Ok(entries) => entries.is_empty(),
                 Err(e) => {
@@ -3876,8 +4372,8 @@ impl Ctx<'_> {
                 }
             };
         }
-        if it.meta.is_reg() {
-            return it.meta.size == 0;
+        if meta.is_reg() {
+            return meta.size == 0;
         }
         false
     }
@@ -3889,7 +4385,13 @@ impl Ctx<'_> {
         if it.rel == b"." {
             return true;
         }
-        let res = if it.meta.is_dir() {
+        // `state.have_stat && S_ISDIR(...)`, and not `it.meta().is_dir()`:
+        // `-delete` declares that it needs no `stat`, so unless some earlier
+        // predicate took one this is `unlink` first and `rmdir` only after the
+        // `EISDIR` below. The `d_type` we may have is deliberately not
+        // consulted, which is upstream's choice and not an oversight — it is
+        // what makes the `EISDIR` retry reachable at all.
+        let res = if it.stat.get().is_some_and(|m| m.is_dir()) {
             self.tree.remove_dir(&it.path)
         } else {
             self.tree.remove_file(&it.path)
@@ -3904,11 +4406,7 @@ impl Ctx<'_> {
             Some(2) if self.ignore_readdir_race => return true,
             // EISDIR: `unlink` was the wrong call. Only reachable when the
             // type we had was stale, so retry rather than report.
-            Some(21) => {
-                if self.tree.remove_dir(&it.path).is_ok() {
-                    return true;
-                }
-            }
+            Some(21) if self.tree.remove_dir(&it.path).is_ok() => return true,
             _ => {}
         }
         self.fail(&format!(
@@ -3930,4 +4428,1685 @@ fn ci_flag(ci: bool) -> fnmatch::Flags {
     }
 }
 
-// @@SPLIT@@
+// ---------------------------------------------------------------------------
+// The walk
+// ---------------------------------------------------------------------------
+
+/// `ftsfind.c`, which is `find`'s traversal: `fts` plus `consider_visiting`.
+///
+/// Written as a recursion rather than as a port of `fts` itself, because the
+/// only parts of `fts` that are visible from outside are the order entries
+/// come back in (`readdir` order, depth first) and the handful of `fts_info`
+/// codes `consider_visiting` switches on. Each of those codes is a branch
+/// below, named where it arises.
+struct Walk<'a, 'b> {
+    ctx: Ctx<'a>,
+    nodes: &'b [Node],
+    expr: &'b Expr,
+    max_depth: Option<usize>,
+    min_depth: usize,
+    xdev: bool,
+    /// `sp->fts_dev`: the device of the start point being walked. `-xdev` is
+    /// measured against *this*, not against the containing directory, so a
+    /// start point that is itself on another filesystem is searched normally.
+    root_dev: u64,
+    /// The active-directory set `FTS_TIGHT_CYCLE_CHECK` keeps: every directory
+    /// on the path from the start point, by `(dev, ino)`, with the name it was
+    /// reached by. A directory whose pair is already in here is `FTS_DC`.
+    active: Vec<(u64, u64, Vec<u8>)>,
+}
+
+impl Walk<'_, '_> {
+    /// `issue_loop_warning`.
+    ///
+    /// The first message is not reachable through `fts`: it tests
+    /// `S_ISLNK(ent->fts_statp->st_mode)`, and the only walk that descends
+    /// through a symlink is `-L`, under which `fts_statp` holds the *followed*
+    /// stat and so never says `S_IFLNK`. It is transcribed anyway, and tested
+    /// the same way, because the condition is upstream's and not ours to
+    /// simplify away.
+    fn issue_loop_warning(&mut self, it: &Item, ancestor: &[u8]) {
+        let msg = if it.meta().is_symlink() {
+            format!(
+                "Symbolic link {} is part of a loop in the directory hierarchy; \
+                 we have already visited the directory to which it points.",
+                quote::quote(&it.path)
+            )
+        } else {
+            format!(
+                "File system loop detected; {} is part of the same file system loop as {}.",
+                quote::quote(&it.path),
+                quote::quote(ancestor)
+            )
+        };
+        self.ctx.fail(&msg);
+    }
+
+    /// `visit`, guarded by `consider_visiting`'s `ignore` rules.
+    ///
+    /// The `-maxdepth` half of those rules is not here: upstream sets
+    /// `ignore` when `fts_level > options.maxdepth`, which a walk that stops
+    /// descending at the limit can never produce. Upstream cannot rely on that
+    /// either — `fts_set(FTS_SKIP)` is advisory and only takes effect on the
+    /// next `fts_read` — so the test is defensive there and absent here.
+    fn visit(&mut self, it: &Item) {
+        if it.depth < self.min_depth || self.ctx.quit {
+            return;
+        }
+        // `state.already_issued_stat_error_msg = false` at the top of the
+        // `fts_read` loop: the "one message per file" rule is really one per
+        // *visit*, so a directory seen both ways under `-depth` may complain
+        // twice.
+        it.reported.set(false);
+        let _ = self.ctx.eval(self.nodes, self.expr, it);
+    }
+
+    /// One entry, from `consider_visiting` through to the descent `fts_read`
+    /// would have driven on the next call.
+    fn node(&mut self, it: &Item) {
+        if self.ctx.quit {
+            return;
+        }
+        // `isdir`. For anything below a start point this is `d_type` unless a
+        // directory forced the `stat` below, which is the whole of what
+        // `FTS_NOSTAT` changes.
+        if it.type_mode & modechange::S_IFMT != modechange::S_IFDIR {
+            self.visit(it);
+            return;
+        }
+
+        if !self.ctx.depth_first {
+            self.visit(it);
+        }
+
+        // `fts_set(p, ent, FTS_SKIP)` — from `-prune`, from `-maxdepth`, or
+        // from `FTS_XDEV`. The `-prune` flag is read *after* the preorder
+        // visit because that is the visit that can set it.
+        let pruned = self.ctx.stop_at_current_level;
+        self.ctx.stop_at_current_level = false;
+        // `FTS_XDEV` is checked on the *child* side upstream; here it is the
+        // same question asked one level earlier, so it reads as "this directory
+        // is on another filesystem than the start point".
+        let crossed = self.xdev && it.meta().dev != self.root_dev;
+        let descend =
+            !pruned && !self.ctx.quit && !crossed && self.max_depth.is_none_or(|md| it.depth < md);
+
+        if descend {
+            match self.ctx.tree.read_dir(&it.path) {
+                Ok(entries) => self.children(it, entries),
+                Err(e) => {
+                    // `FTS_DNR`. The diagnostic comes first either way; what
+                    // changes is that without `-depth` the entry has already
+                    // had its one visit, whereas with `-depth` this *is* it —
+                    // a directory that could not be opened gets no `FTS_DP`.
+                    let msg = format!("{}: {}", quote::quote(&it.path), errmsg::strerror(&e));
+                    self.ctx.fail(&msg);
+                    if self.ctx.depth_first {
+                        self.visit(it);
+                    }
+                    return;
+                }
+            }
+        }
+
+        if self.ctx.depth_first {
+            self.visit(it);
+        }
+    }
+
+    /// The children of one directory, in `readdir` order.
+    fn children(&mut self, parent: &Item, entries: Vec<(Vec<u8>, u32)>) {
+        // `enter_dir`: this directory joins the active set for as long as we
+        // are inside it, which is what makes a descendant that points back at
+        // it detectable as `FTS_DC`.
+        let pm = parent.meta();
+        self.active.push((pm.dev, pm.ino, parent.path.clone()));
+        // A level change, which is upstream's trigger for running any
+        // `-execdir ... +` batch: the names in it are relative to the
+        // directory we are leaving and mean nothing in the one we are
+        // entering.
+        self.ctx.flush_execdirs();
+
+        for (name, dtype) in entries {
+            if self.ctx.quit {
+                break;
+            }
+            self.child(parent, &name, dtype);
+        }
+
+        self.ctx.flush_execdirs();
+        self.active.pop();
+        // `state.stop_at_current_level = false` on `FTS_DP`: a `-prune` inside
+        // this directory does not carry out of it.
+        self.ctx.stop_at_current_level = false;
+    }
+
+    /// One name from a `readdir`, turned into an [`Item`] and handed to
+    /// [`Walk::node`].
+    fn child(&mut self, parent: &Item, name: &[u8], dtype: u32) {
+        let mut path = parent.path.clone();
+        // `NAPPEND`: `fts` drops one trailing slash before joining, so
+        // `find dir/` prints `dir/f` rather than `dir//f`.
+        if path.last() != Some(&b'/') {
+            path.push(b'/');
+        }
+        path.extend_from_slice(name);
+        let depth = parent.depth.saturating_add(1);
+
+        // `skip_stat` in `fts_build`, negated: we must `stat` when `readdir`
+        // did not say what this is, when it says a directory (the device and
+        // inode are needed for the cycle check and for `-xdev`), and — under
+        // `-L` only — when it says a symlink, since the type that matters then
+        // is the target's.
+        let must_stat = dtype == 0
+            || dtype == modechange::S_IFDIR
+            || (self.ctx.follow == Follow::Always && dtype == modechange::S_IFLNK);
+
+        let mut it = Item {
+            path,
+            start_len: parent.start_len,
+            depth,
+            rel: name.to_vec(),
+            dir: Some(parent.path.clone()),
+            type_mode: dtype,
+            stat: std::cell::Cell::new(None),
+            reported: std::cell::Cell::new(false),
+        };
+
+        if !must_stat {
+            self.node(&it);
+            return;
+        }
+
+        match self.ctx.stat_at(&it.path, depth) {
+            Ok(m) => {
+                it.stat.set(Some(m));
+                it.type_mode = m.mode & modechange::S_IFMT;
+                if it.meta().is_dir()
+                    && let Some((_, _, anc)) = self
+                        .active
+                        .iter()
+                        .find(|(d, i, _)| *d == m.dev && *i == m.ino)
+                {
+                    // `FTS_DC`: `enter_dir` found this `(dev, ino)` already in
+                    // the active set. The entry is diagnosed and then dropped
+                    // entirely — no visit, in either order.
+                    let anc = anc.clone();
+                    self.issue_loop_warning(&it, &anc);
+                    return;
+                }
+                self.node(&it);
+            }
+            Err(e) => {
+                let msg = format!("{}: {}", quote::quote(&it.path), errmsg::strerror(&e));
+                self.ctx.fail(&msg);
+                if self.ctx.follow == Follow::Always && e.raw_os_error() == Some(40) {
+                    // `FTS_SLNONE` or `FTS_NS` where `symlink_loop()` says
+                    // yes: `-L` walked into `ln -s a b; ln -s b a`. Reported
+                    // as `ELOOP` and skipped entirely.
+                    return;
+                }
+                // `FTS_NS` below a start point: upstream reports the failure
+                // and carries on with no type at all, on the grounds that a
+                // name without stat information beats losing the name — and,
+                // for a directory, beats silently not searching it.
+                it.type_mode = 0;
+                it.reported.set(true);
+                self.node(&it);
+            }
+        }
+    }
+
+    /// Upstream `find (char *arg)`: one start point, `fts_open` to
+    /// `fts_close`.
+    fn start(&mut self, arg: &[u8]) {
+        self.active.clear();
+        // `FTS_COMFOLLOW` is set for both `-L` and `-H`, which is exactly what
+        // `xstat` at depth 0 already does.
+        let meta = match self.ctx.stat_at(arg, 0) {
+            Ok(m) => m,
+            Err(e) => {
+                // `FTS_NS` at `fts_level == 0` — a nonexistent start point.
+                // `symlink_loop()` is not consulted here; upstream returns on
+                // the level-0 branch before reaching it, so `find -L a` where
+                // `a` is a symlink loop reports `ELOOP` because that is what
+                // the failed `stat` said, not because anything checked.
+                let msg = format!("{}: {}", quote::quote(arg), errmsg::strerror(&e));
+                self.ctx.fail(&msg);
+                return;
+            }
+        };
+        self.root_dev = meta.dev;
+        let it = Item {
+            path: arg.to_vec(),
+            start_len: arg.len(),
+            depth: 0,
+            rel: arg.to_vec(),
+            dir: None,
+            type_mode: meta.mode & modechange::S_IFMT,
+            stat: std::cell::Cell::new(Some(meta)),
+            reported: std::cell::Cell::new(false),
+        };
+        self.node(&it);
+        // Leaving the last level of this start point.
+        self.ctx.flush_execdirs();
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The two texts
+// ---------------------------------------------------------------------------
+
+/// `usage`'s body, transcribed from 4.9.0 rather than regenerated.
+///
+/// It lists predicates this port refuses (`-context`) and one it does not
+/// implement (`-D`'s tracing), which is deliberate: the text is part of the
+/// output being matched, and a `find --help` that differs from `find --help`
+/// would be the first thing the differential harness reported. The refusals
+/// are documented where they are made, not by editing the manual out from
+/// under the reader.
+const HELP: &str = "\
+Usage: find [-H] [-L] [-P] [-Olevel] [-D debugopts] [path...] [expression]
+
+Default path is the current directory; default expression is -print.
+Expression may consist of: operators, options, tests, and actions.
+
+Operators (decreasing precedence; -and is implicit where no others are given):
+      ( EXPR )   ! EXPR   -not EXPR   EXPR1 -a EXPR2   EXPR1 -and EXPR2
+      EXPR1 -o EXPR2   EXPR1 -or EXPR2   EXPR1 , EXPR2
+
+Positional options (always true):
+      -daystart -follow -nowarn -regextype -warn
+
+Normal options (always true, specified before other expressions):
+      -depth -files0-from FILE -maxdepth LEVELS -mindepth LEVELS
+       -mount -noleaf -xdev -ignore_readdir_race -noignore_readdir_race
+
+Tests (N can be +N or -N or N):
+      -amin N -anewer FILE -atime N -cmin N -cnewer FILE -context CONTEXT
+      -ctime N -empty -false -fstype TYPE -gid N -group NAME -ilname PATTERN
+      -iname PATTERN -inum N -iwholename PATTERN -iregex PATTERN
+      -links N -lname PATTERN -mmin N -mtime N -name PATTERN -newer FILE
+      -nouser -nogroup -path PATTERN -perm [-/]MODE -regex PATTERN
+      -readable -writable -executable
+      -wholename PATTERN -size N[bcwkMG] -true -type [bcdpflsD] -uid N
+      -used N -user NAME -xtype [bcdpfls]
+
+Actions:
+      -delete -print0 -printf FORMAT -fprintf FILE FORMAT -print\x20
+      -fprint0 FILE -fprint FILE -ls -fls FILE -prune -quit
+      -exec COMMAND ; -exec COMMAND {} + -ok COMMAND ;
+      -execdir COMMAND ; -execdir COMMAND {} + -okdir COMMAND ;
+
+Other common options:
+      --help                   display this help and exit
+      --version                output version information and exit
+
+";
+
+/// The tail of `usage`, which is the same list `-D help` prints followed by
+/// the bug-reporting block.
+const HELP_TAIL: &str = "\
+Use '-D help' for a description of the options, or see find(1)
+
+Please see also the documentation at https://www.gnu.org/software/findutils/.
+You can report (and track progress on fixing) bugs in the \"find\"
+program via the GNU findutils bug-reporting page at
+https://savannah.gnu.org/bugs/?group=findutils or, if
+you have no web access, by sending email to <bug-findutils@gnu.org>.
+";
+
+/// `--version`.
+///
+/// The `Features enabled:` line is transcribed rather than derived. Three of
+/// the four claims are true of this port — `d_type` is read, `O_NOFOLLOW` is
+/// available, and the child-order optimisation level is the same 2 that is
+/// then discarded. `LEAF_OPTIMISATION` is not implemented here; it is a
+/// promise about how many `stat` calls happen, which nothing observable
+/// depends on, and the line is matched rather than corrected for the same
+/// reason [`HELP`] is. Recorded in `known-issues.md`.
+const VERSION: &str = "\
+find (GNU findutils) 4.9.0
+Copyright (C) 2022 Free Software Foundation, Inc.
+License GPLv3+: GNU GPL version 3 or later <https://gnu.org/licenses/gpl.html>.
+This is free software: you are free to change and redistribute it.
+There is NO WARRANTY, to the extent permitted by law.
+
+Written by Eric B. Decker, James Youngman, and Kevin Dalley.
+Features enabled: D_TYPE O_NOFOLLOW(enabled) LEAF_OPTIMISATION FTS(FTS_CWDFD) CBO(level=2) \n";
+
+/// `show_valid_debug_options`, which appears twice: on its own for `-D help`
+/// and embedded in [`HELP`] between the option list and the tail.
+fn debug_option_list(verbose: bool) -> String {
+    let mut out = String::from("Valid arguments for -D:\n");
+    if verbose {
+        for (name, desc) in DEBUG_FLAGS {
+            out.push_str(&format!("{name:<10} {desc}\n"));
+        }
+    } else {
+        let names: Vec<&str> = DEBUG_FLAGS.iter().map(|(n, _)| *n).collect();
+        out.push_str(&names.join(", "));
+        out.push('\n');
+    }
+    out
+}
+
+/// `usage(stdout)` — the whole of `--help`.
+fn help_text() -> String {
+    format!("{HELP}{}{HELP_TAIL}", debug_option_list(false))
+}
+
+// ---------------------------------------------------------------------------
+// main
+// ---------------------------------------------------------------------------
+
+/// Print a [`Fatal`]'s lines, each with the `find: ` prefix `error(0, 0, …)`
+/// supplies.
+fn report(f: &Fatal) {
+    for line in &f.0 {
+        eprintln!("find: {line}");
+    }
+}
+
+/// Point every stdout sink at a buffer instead. A no-op outside the tests.
+#[cfg(test)]
+fn divert_stdout(sinks: &mut [Sink]) {
+    for s in sinks {
+        if matches!(s, Sink::Stdout) {
+            *s = Sink::Capture;
+        }
+    }
+}
+
+#[cfg(not(test))]
+#[allow(clippy::missing_const_for_fn)]
+fn divert_stdout(_sinks: &mut [Sink]) {}
+
+/// Collect what [`divert_stdout`]'s sinks kept. A no-op outside the tests.
+///
+/// Every diverted sink is concatenated into the one buffer, for the reason the
+/// real ones share one `FILE *`: `-print -fprint /dev/stdout` interleaves.
+#[cfg(test)]
+fn harvest(ctx: &Ctx<'_>, out: &mut Vec<u8>) {
+    for (i, buf) in ctx.sink_buf.iter().enumerate() {
+        if matches!(ctx.sinks.get(i), Some(Sink::Capture)) {
+            out.extend_from_slice(buf);
+        }
+    }
+}
+
+#[cfg(not(test))]
+#[allow(clippy::missing_const_for_fn)]
+fn harvest(_ctx: &Ctx<'_>, _out: &mut Vec<u8>) {}
+
+/// Everything after `main` has turned the environment into bytes: taken as a
+/// function so the unit tests can drive it against a `FakeTree`.
+fn run(argv: &[Vec<u8>], tree: &dyn Tree) -> i32 {
+    run_inner(argv, tree, &mut None)
+}
+
+/// [`run`], with somewhere to put the bytes `-print` would have sent to stdout.
+///
+/// `capture` is `None` for the real program and `Some` under test; when it is
+/// `Some` the stdout sink is swapped for [`Sink::Capture`] and its buffer is
+/// moved out at the end. Nothing else differs, deliberately: a test that took a
+/// different path through the parser would not be testing this program.
+#[allow(clippy::too_many_lines)]
+fn run_inner(argv: &[Vec<u8>], tree: &dyn Tree, capture: &mut Option<Vec<u8>>) -> i32 {
+    let mut follow = Follow::Never;
+    let leading = match process_leading_options(argv, &mut follow) {
+        Ok(i) => i,
+        Err(Leading::Usage(msg)) => {
+            eprintln!("find: {msg}");
+            eprintln!("Try 'find --help' for more information.");
+            return 1;
+        }
+        Err(Leading::Die(msg)) => {
+            eprintln!("find: {msg}");
+            return 1;
+        }
+        Err(Leading::DebugHelp) => {
+            print!("{}", debug_option_list(true));
+            return 0;
+        }
+    };
+
+    // `build_expression_tree`'s first act: skip the start points, which are
+    // every remaining argument up to the first that `looks_like_expression`
+    // recognises *in leading position* — a laxer test than the one applied
+    // inside the expression, so that `find - -name f` searches a file called
+    // `-` and `find . ) -print` treats `)` as a path.
+    let rest = argv.get(leading..).unwrap_or_default();
+    let n_start = rest
+        .iter()
+        .position(|a| looks_like_expression(a, true))
+        .unwrap_or(rest.len());
+    let start_points = rest.get(..n_start).unwrap_or_default();
+    let expr_args = rest.get(n_start..).unwrap_or_default();
+
+    let mut parser = Parser::new(expr_args, tree, follow);
+    let parsed = parser.parse_expression();
+    // The parser's warnings are emitted in the order they were raised, and
+    // before whatever the parse produced — which is where upstream emits them,
+    // since it prints each one at the moment it decides on it and nothing else
+    // has reached the output yet.
+    for w in &parser.warnings {
+        eprintln!("find: {w}");
+    }
+    match parsed {
+        Ok(None) => {}
+        Ok(Some(Halt::Help)) => {
+            print!("{}", help_text());
+            return 0;
+        }
+        Ok(Some(Halt::Version)) => {
+            print!("{VERSION}");
+            return 0;
+        }
+        Err(f) => {
+            report(&f);
+            return 1;
+        }
+    }
+
+    let expr = match build_tree(&parser.nodes) {
+        Ok(e) => e,
+        Err(f) => {
+            report(&f);
+            return 1;
+        }
+    };
+
+    let mut sinks = parser.sinks;
+    if capture.is_some() {
+        divert_stdout(&mut sinks);
+    }
+    let sink_tty = sinks
+        .iter()
+        .map(|s| match s {
+            Sink::Stdout => std::io::IsTerminal::is_terminal(&io::stdout()),
+            Sink::Stderr => std::io::IsTerminal::is_terminal(&io::stderr()),
+            // `stream_is_tty` would answer for a `-fprint /dev/tty` too. It is
+            // answered false here because [`Parser::sink`] creates the file
+            // with `File::create`, and a port that opened `/dev/tty` for
+            // truncation would have bigger problems than its quoting.
+            Sink::File(_) => false,
+            // The tests are not a terminal, and must not be: quoting that
+            // depended on where the harness was run from would be untestable.
+            #[cfg(test)]
+            Sink::Capture => false,
+        })
+        .collect();
+    let sink_buf = vec![Vec::new(); sinks.len()];
+    let start = parser.now;
+    let ctx = Ctx {
+        sinks,
+        sink_tty,
+        sink_buf,
+        execs: parser.execs,
+        tree,
+        zone: localtime::Zone::from_env(),
+        start,
+        // `POSIXLY_CORRECT` halves it; `FIND_BLOCK_SIZE` is refused outright
+        // below rather than honoured.
+        block_size: if parser.posixly_correct { 512 } else { 1024 },
+        ls_widths: LsWidths::default(),
+        ignore_readdir_race: parser.ignore_readdir_race,
+        depth_first: parser.depth_first,
+        follow: parser.follow,
+        status: 0,
+        stop_at_current_level: false,
+        quit: false,
+    };
+
+    let mut walk = Walk {
+        ctx,
+        nodes: &parser.nodes,
+        expr: &expr,
+        max_depth: parser.max_depth,
+        min_depth: parser.min_depth,
+        xdev: parser.xdev,
+        root_dev: 0,
+        active: Vec::new(),
+    };
+
+    let ok_prompt = walk.ctx.execs.iter().any(|e| e.confirm);
+    let status = process_all_startpoints(
+        &mut walk,
+        start_points,
+        parser.files0_from.as_deref(),
+        ok_prompt,
+    );
+
+    // `cleanup()`: the outstanding `-exec … +` batches, then the buffers.
+    walk.ctx.flush_all_execs();
+    walk.ctx.flush();
+    if let Some(out) = capture.as_mut() {
+        harvest(&walk.ctx, out);
+    }
+    if status != 0 { status } else { walk.ctx.status }
+}
+
+/// Upstream `process_all_startpoints`.
+///
+/// Returns the exit status of the *fatal* failures only — the ones that end
+/// the program where they stand. Everything else it reports goes through
+/// [`Ctx::fail`], which is what carries `state.exit_status` out.
+fn process_all_startpoints(
+    walk: &mut Walk<'_, '_>,
+    start_points: &[Vec<u8>],
+    files0_from: Option<&[u8]>,
+    ok_prompt: bool,
+) -> i32 {
+    let names: Vec<Vec<u8>> = if let Some(from) = files0_from {
+        // `-files0-from` and start points on the command line are mutually
+        // exclusive, and the refusal is two lines: the operand, then the rule.
+        if let Some(first) = start_points.first() {
+            eprintln!("find: extra operand {}", quote(first));
+            eprintln!("find: file operands cannot be combined with -files0-from");
+            return 1;
+        }
+        if from == b"-" {
+            if ok_prompt {
+                // The prompt and the name list would be reading the same
+                // stream, so one would eat the other's input.
+                eprintln!(
+                    "find: option -files0-from reading from standard input cannot be combined with -ok, -okdir"
+                );
+                eprintln!();
+                return 1;
+            }
+            let mut buf = Vec::new();
+            if let Err(e) = io::Read::read_to_end(&mut io::stdin(), &mut buf) {
+                eprintln!(
+                    "find: {}: read error: {}",
+                    files0_name(from),
+                    errmsg::strerror(&e)
+                );
+                return 1;
+            }
+            split_nul(&buf)
+        } else {
+            match std::fs::read(os_from_bytes(from)) {
+                Ok(buf) => split_nul(&buf),
+                Err(e) => {
+                    eprintln!(
+                        "find: cannot open {} for reading: {}",
+                        files0_name(from),
+                        errmsg::strerror(&e)
+                    );
+                    return 1;
+                }
+            }
+        }
+    } else if start_points.is_empty() {
+        // No start points: `.`, supplied as a real argument rather than as a
+        // default inside the walk, because `%H` prints it.
+        vec![b".".to_vec()]
+    } else {
+        start_points.to_vec()
+    };
+
+    let quoted_from = files0_from.map(files0_name);
+
+    for (n, name) in names.iter().enumerate() {
+        if name.is_empty() {
+            // fts fails immediately on an empty name without looking at the
+            // rest, so these are reported and skipped before it sees them.
+            match &quoted_from {
+                // The record number is 1-based and counts the empty record
+                // itself, which is why an empty *first* record is `:1:`.
+                Some(q) => eprintln!(
+                    "find: {q}:{}: invalid zero-length file name",
+                    n.saturating_add(1)
+                ),
+                None => eprintln!("find: {}: No such file or directory", quote(name)),
+            }
+            walk.ctx.status = 1;
+            continue;
+        }
+        walk.start(name);
+        if walk.ctx.quit {
+            break;
+        }
+    }
+    0
+}
+
+/// How `-files0-from`'s operand is named in a diagnostic, quoted ready for the
+/// message.
+///
+/// Upstream renders the `-` that means standard input as `(standard input)`
+/// rather than as the dash the user typed, so the name in the message is not
+/// always the name in the argument. Called at each format site rather than
+/// hoisted into a local because the quoting has to be visible where the message
+/// is written — a pre-quoted local reads exactly like an unquoted one.
+fn files0_name(from: &[u8]) -> String {
+    if from == b"-" {
+        quote(b"(standard input)")
+    } else {
+        quote(from)
+    }
+}
+
+/// The records of a NUL-separated list.
+///
+/// A trailing NUL terminates the last record rather than introducing an empty
+/// one, which is why this is not a plain `split`: `argv_iter_init_stream`
+/// stops at EOF, and a file ending in NUL is at EOF straight afterwards.
+fn split_nul(buf: &[u8]) -> Vec<Vec<u8>> {
+    let mut out: Vec<Vec<u8>> = buf.split(|&b| b == 0).map(<[u8]>::to_vec).collect();
+    if buf.last() == Some(&0) {
+        out.pop();
+    }
+    out
+}
+
+#[cfg(unix)]
+fn main() -> ExitCode {
+    if std::env::var_os("FIND_BLOCK_SIZE").is_some() {
+        eprintln!(
+            "find: The environment variable FIND_BLOCK_SIZE is not supported, the only thing \
+             that affects the block size is the POSIXLY_CORRECT environment variable"
+        );
+        return ExitCode::from(1);
+    }
+    let argv: Vec<Vec<u8>> = std::env::args_os()
+        .skip(1)
+        .map(|a| os_bytes(&a).into_owned())
+        .collect();
+    let tree = RealTree::new();
+    ExitCode::from(u8::try_from(run(&argv, &tree)).unwrap_or(1))
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod tests {
+    use super::*;
+    use std::cell::RefCell;
+    use std::collections::BTreeMap;
+
+    /// One file in a [`FakeTree`].
+    struct FakeFile {
+        meta: Meta,
+        /// The symlink's target, verbatim, for the ones that have one.
+        link: Option<Vec<u8>>,
+    }
+
+    /// A whole filesystem as a literal.
+    ///
+    /// Keyed by the *exact* path the walk builds, which is the start point
+    /// joined to each component with one `/`. That is deliberately literal
+    /// rather than clever: a fake tree that normalised its keys could not tell
+    /// `find .` from `find ./`, and the difference between those two —
+    /// `NAPPEND`'s one-slash rule — is the sort of thing these tests exist to
+    /// pin.
+    ///
+    /// Entries come back from [`Tree::read_dir`] in sorted order because the
+    /// map is a `BTreeMap`. A real `readdir` promises no order at all and the
+    /// port passes on whatever it is handed; sorting here only makes the
+    /// assertions writable.
+    /// One command a `-exec` family action started: its argv, and the directory
+    /// it was to run in (`None` for the ones that do not chdir).
+    type Spawned = (Vec<Vec<u8>>, Option<Vec<u8>>);
+
+    struct FakeTree {
+        files: BTreeMap<Vec<u8>, FakeFile>,
+        /// Directories `read_dir` refuses with `EACCES`, to reach `FTS_DNR`.
+        unreadable: Vec<Vec<u8>>,
+        /// `readdir` reported `DT_UNKNOWN` for everything, so every type
+        /// question has to be answered by a `stat`. Both branches of the
+        /// `FTS_NOSTAT` decision have to be reachable from a test.
+        no_dtype: bool,
+        /// What `-ok` is told.
+        answer: bool,
+        /// Every command an `-exec` started, with its working directory.
+        spawned: RefCell<Vec<Spawned>>,
+        /// Every name `-delete` removed.
+        removed: RefCell<Vec<Vec<u8>>>,
+        /// The next inode to hand out.
+        next_ino: u64,
+    }
+
+    /// A fixed instant, so a `-newer` test means the same thing in June as in
+    /// December.
+    const NOW: i64 = 1_787_486_400;
+
+    impl FakeTree {
+        fn new() -> Self {
+            Self {
+                files: BTreeMap::new(),
+                unreadable: Vec::new(),
+                no_dtype: false,
+                answer: true,
+                spawned: RefCell::new(Vec::new()),
+                removed: RefCell::new(Vec::new()),
+                next_ino: 100,
+            }
+        }
+
+        fn add(&mut self, path: &str, mode: u32, size: u64, link: Option<&str>) {
+            let ino = self.next_ino;
+            self.next_ino += 1;
+            let ts = Ts {
+                sec: NOW - 3600,
+                nsec: 0,
+            };
+            let is_dir = mode & modechange::S_IFMT == modechange::S_IFDIR;
+            self.files.insert(
+                path.as_bytes().to_vec(),
+                FakeFile {
+                    meta: Meta {
+                        dev: 1,
+                        ino,
+                        mode,
+                        nlink: if is_dir { 2 } else { 1 },
+                        uid: 1000,
+                        gid: 1000,
+                        size,
+                        blocks: size.div_ceil(512),
+                        rdev: 0,
+                        atime: ts,
+                        mtime: ts,
+                        ctime: ts,
+                    },
+                    link: link.map(|t| t.as_bytes().to_vec()),
+                },
+            );
+        }
+
+        fn dir(mut self, path: &str) -> Self {
+            self.add(path, modechange::S_IFDIR | 0o755, 4096, None);
+            self
+        }
+
+        fn file(mut self, path: &str, size: u64) -> Self {
+            self.add(path, modechange::S_IFREG | 0o644, size, None);
+            self
+        }
+
+        fn file_mode(mut self, path: &str, mode: u32, size: u64) -> Self {
+            self.add(path, modechange::S_IFREG | mode, size, None);
+            self
+        }
+
+        fn symlink(mut self, path: &str, target: &str) -> Self {
+            self.add(path, modechange::S_IFLNK | 0o777, 7, Some(target));
+            self
+        }
+
+        /// Move a file onto another device, for `-xdev` and `-fstype`.
+        fn on_dev(mut self, path: &str, dev: u64) -> Self {
+            if let Some(f) = self.files.get_mut(path.as_bytes()) {
+                f.meta.dev = dev;
+            }
+            self
+        }
+
+        fn mtime(mut self, path: &str, sec: i64) -> Self {
+            if let Some(f) = self.files.get_mut(path.as_bytes()) {
+                f.meta.mtime = Ts { sec, nsec: 0 };
+            }
+            self
+        }
+
+        fn unreadable(mut self, path: &str) -> Self {
+            self.unreadable.push(path.as_bytes().to_vec());
+            self
+        }
+
+        fn blind(mut self) -> Self {
+            self.no_dtype = true;
+            self
+        }
+
+        fn says_no(mut self) -> Self {
+            self.answer = false;
+            self
+        }
+
+        /// One step of symlink resolution: the target, made relative to the
+        /// directory the link itself sits in.
+        fn resolve(path: &[u8], target: &[u8]) -> Vec<u8> {
+            if target.first() == Some(&b'/') {
+                return target.to_vec();
+            }
+            let mut out = pathname::dir_name(path).to_vec();
+            if out.last() != Some(&b'/') {
+                out.push(b'/');
+            }
+            out.extend_from_slice(target);
+            out
+        }
+
+        /// Resolve a name to the key of the file it finally denotes, following
+        /// a symlink wherever one appears — including part-way along, which is
+        /// what `find -L` needs the moment it descends through one.
+        fn follow(&self, path: &[u8]) -> io::Result<Vec<u8>> {
+            let mut cur: Vec<u8> = Vec::new();
+            // Deep enough to reach `ELOOP` on a cycle and never on a chain any
+            // test writes.
+            let mut hops = 0u32;
+            for comp in path.split(|&b| b == b'/') {
+                if !cur.is_empty() {
+                    cur.push(b'/');
+                }
+                cur.extend_from_slice(comp);
+                while let Some(t) = self.files.get(&cur).and_then(|f| f.link.clone()) {
+                    hops += 1;
+                    if hops > 40 {
+                        return Err(io::Error::from_raw_os_error(40));
+                    }
+                    cur = Self::resolve(&cur, &t);
+                }
+            }
+            if self.files.contains_key(&cur) {
+                Ok(cur)
+            } else {
+                Err(enoent())
+            }
+        }
+
+        fn ino_of(&self, path: &str) -> u64 {
+            self.files.get(path.as_bytes()).map_or(0, |f| f.meta.ino)
+        }
+
+        fn commands(&self) -> Vec<Vec<Vec<u8>>> {
+            self.spawned
+                .borrow()
+                .iter()
+                .map(|(argv, _)| argv.clone())
+                .collect()
+        }
+    }
+
+    fn enoent() -> io::Error {
+        io::Error::from_raw_os_error(2)
+    }
+
+    impl Tree for FakeTree {
+        fn lstat(&self, path: &[u8]) -> io::Result<Meta> {
+            if let Some(f) = self.files.get(path) {
+                return Ok(f.meta);
+            }
+            // Not a key of its own: some component before the last one was a
+            // symlink. `lstat` follows those and stops at the last, so resolve
+            // the directory part and look the name up inside it.
+            let mut real = self.follow(pathname::dir_name(path))?;
+            if real.last() != Some(&b'/') {
+                real.push(b'/');
+            }
+            real.extend_from_slice(pathname::base_name(path));
+            self.files.get(&real).map(|f| f.meta).ok_or_else(enoent)
+        }
+
+        fn stat(&self, path: &[u8]) -> io::Result<Meta> {
+            let real = self.follow(path)?;
+            self.files.get(&real).map(|f| f.meta).ok_or_else(enoent)
+        }
+
+        fn read_dir(&self, path: &[u8]) -> io::Result<Vec<(Vec<u8>, u32)>> {
+            // `opendir` follows the last component, which is why `find -L` can
+            // descend through a symlink to a directory at all.
+            let path = &self.follow(path)?;
+            if !self.files.contains_key(path) {
+                return Err(enoent());
+            }
+            if self.unreadable.iter().any(|u| u == path) {
+                return Err(io::Error::from_raw_os_error(13));
+            }
+            let mut prefix = path.to_vec();
+            if prefix.last() != Some(&b'/') {
+                prefix.push(b'/');
+            }
+            let mut out = Vec::new();
+            for (k, f) in &self.files {
+                let Some(rest) = k.strip_prefix(prefix.as_slice()) else {
+                    continue;
+                };
+                if rest.is_empty() || rest.contains(&b'/') {
+                    continue;
+                }
+                let dtype = if self.no_dtype {
+                    0
+                } else {
+                    f.meta.mode & modechange::S_IFMT
+                };
+                out.push((rest.to_vec(), dtype));
+            }
+            Ok(out)
+        }
+
+        fn readlink(&self, path: &[u8]) -> io::Result<Vec<u8>> {
+            match self.files.get(path).and_then(|f| f.link.clone()) {
+                Some(t) => Ok(t),
+                // EINVAL, which is what `readlink` says about a non-symlink.
+                None => Err(io::Error::from_raw_os_error(22)),
+            }
+        }
+
+        fn access(&self, path: &[u8], mode: i32) -> bool {
+            // The tests run as nobody in particular, so the "other" bits decide.
+            self.stat(path).is_ok_and(|m| {
+                let want = u32::try_from(mode).unwrap_or(0);
+                m.mode & want == want
+            })
+        }
+
+        fn remove_file(&self, path: &[u8]) -> io::Result<()> {
+            let f = self.files.get(path).ok_or_else(enoent)?;
+            if f.meta.is_dir() {
+                // EISDIR, so `Ctx::delete`'s retry is reachable.
+                return Err(io::Error::from_raw_os_error(21));
+            }
+            self.removed.borrow_mut().push(path.to_vec());
+            Ok(())
+        }
+
+        fn remove_dir(&self, path: &[u8]) -> io::Result<()> {
+            let f = self.files.get(path).ok_or_else(enoent)?;
+            if f.meta.is_dir() {
+                self.removed.borrow_mut().push(path.to_vec());
+                Ok(())
+            } else {
+                // ENOTDIR.
+                Err(io::Error::from_raw_os_error(20))
+            }
+        }
+
+        fn fstype(&self, dev: u64) -> Vec<u8> {
+            if dev == 1 {
+                b"ext4".to_vec()
+            } else {
+                b"tmpfs".to_vec()
+            }
+        }
+
+        fn user_name(&self, uid: u32) -> Option<Vec<u8>> {
+            match uid {
+                0 => Some(b"root".to_vec()),
+                1000 => Some(b"user".to_vec()),
+                _ => None,
+            }
+        }
+
+        fn group_name(&self, gid: u32) -> Option<Vec<u8>> {
+            self.user_name(gid)
+        }
+
+        fn uid_by_name(&self, name: &[u8]) -> Option<u32> {
+            match name {
+                b"root" => Some(0),
+                b"user" => Some(1000),
+                _ => None,
+            }
+        }
+
+        fn gid_by_name(&self, name: &[u8]) -> Option<u32> {
+            self.uid_by_name(name)
+        }
+
+        fn run(&self, argv: &[Vec<u8>], cwd: Option<&[u8]>) -> io::Result<bool> {
+            self.spawned
+                .borrow_mut()
+                .push((argv.to_vec(), cwd.map(<[u8]>::to_vec)));
+            Ok(true)
+        }
+
+        fn now(&self) -> Ts {
+            Ts { sec: NOW, nsec: 0 }
+        }
+
+        fn path_env(&self) -> Option<Vec<u8>> {
+            // A `$PATH` `-execdir` will accept. The host's own would not be:
+            // on Windows it is `;`-separated and full of drive letters, so
+            // every entry reads as a relative path and `check_path_safety`
+            // refuses before the walk starts.
+            Some(b"/bin:/usr/bin".to_vec())
+        }
+
+        fn confirm(&self) -> bool {
+            self.answer
+        }
+    }
+
+    /// The tree every test that does not need a special shape uses.
+    ///
+    /// ```text
+    /// .            d 0755
+    /// ./d          d 0755
+    /// ./d/g        f 0644   3 bytes
+    /// ./d/sub      d 0755
+    /// ./d/sub/h    f 0644   5 bytes
+    /// ./dangling   l -> nosuch
+    /// ./empty      d 0755   (no entries)
+    /// ./f          f 0644   0 bytes
+    /// ./link       l -> f
+    /// ```
+    fn sample() -> FakeTree {
+        FakeTree::new()
+            .dir(".")
+            .dir("./d")
+            .file("./d/g", 3)
+            .dir("./d/sub")
+            .file("./d/sub/h", 5)
+            .symlink("./dangling", "nosuch")
+            .dir("./empty")
+            .file("./f", 0)
+            .symlink("./link", "f")
+    }
+
+    /// Drive the real [`run_inner`] and return `(status, stdout)`.
+    fn find(tree: &FakeTree, args: &[&str]) -> (i32, String) {
+        let argv: Vec<Vec<u8>> = args.iter().map(|a| a.as_bytes().to_vec()).collect();
+        let mut cap = Some(Vec::new());
+        let status = run_inner(&argv, tree, &mut cap);
+        (
+            status,
+            String::from_utf8_lossy(&cap.unwrap_or_default()).into_owned(),
+        )
+    }
+
+    /// The lines `find` printed, which is what most of these assertions are.
+    fn lines(tree: &FakeTree, args: &[&str]) -> Vec<String> {
+        find(tree, args).1.lines().map(str::to_owned).collect()
+    }
+
+    fn none() -> Vec<String> {
+        Vec::new()
+    }
+
+    // -- the walk ----------------------------------------------------------
+
+    #[test]
+    fn bare_find_prints_the_whole_tree_preorder() {
+        assert_eq!(
+            lines(&sample(), &["."]),
+            [
+                ".",
+                "./d",
+                "./d/g",
+                "./d/sub",
+                "./d/sub/h",
+                "./dangling",
+                "./empty",
+                "./f",
+                "./link",
+            ]
+        );
+    }
+
+    #[test]
+    fn no_start_point_means_dot() {
+        assert_eq!(lines(&sample(), &[]), lines(&sample(), &["."]));
+    }
+
+    #[test]
+    fn depth_puts_a_directory_after_its_contents() {
+        assert_eq!(
+            lines(&sample(), &[".", "-depth"]),
+            [
+                "./d/g",
+                "./d/sub/h",
+                "./d/sub",
+                "./d",
+                "./dangling",
+                "./empty",
+                "./f",
+                "./link",
+                ".",
+            ]
+        );
+    }
+
+    #[test]
+    fn maxdepth_limits_descent_and_mindepth_hides_the_start_point() {
+        assert_eq!(
+            lines(&sample(), &[".", "-maxdepth", "1"]),
+            [".", "./d", "./dangling", "./empty", "./f", "./link"]
+        );
+        assert_eq!(
+            lines(&sample(), &[".", "-mindepth", "1", "-maxdepth", "1"]),
+            ["./d", "./dangling", "./empty", "./f", "./link"]
+        );
+    }
+
+    #[test]
+    fn a_trailing_slash_on_the_start_point_is_not_doubled() {
+        assert_eq!(
+            lines(&FakeTree::new().dir("d/").file("d/g", 1), &["d/"]),
+            ["d/", "d/g"]
+        );
+    }
+
+    #[test]
+    fn a_missing_start_point_is_reported_and_sets_the_status() {
+        let (status, out) = find(&sample(), &["nosuch"]);
+        assert_eq!(status, 1);
+        assert_eq!(out, "");
+    }
+
+    #[test]
+    fn a_missing_start_point_does_not_stop_the_others() {
+        let (status, out) = find(&sample(), &["nosuch", "./f"]);
+        assert_eq!(status, 1);
+        assert_eq!(out, "./f\n");
+    }
+
+    #[test]
+    fn an_unreadable_directory_is_reported_but_still_listed() {
+        let tree = sample().unreadable("./d");
+        let (status, out) = find(&tree, &["."]);
+        assert_eq!(status, 1);
+        // `./d` itself is visited; only its contents are missing.
+        assert!(out.contains("./d\n"), "{out}");
+        assert!(!out.contains("./d/g"), "{out}");
+    }
+
+    #[test]
+    fn xdev_does_not_cross_a_mount_point() {
+        let tree = sample().on_dev("./d", 2);
+        assert_eq!(
+            lines(&tree, &[".", "-xdev"]),
+            [".", "./d", "./dangling", "./empty", "./f", "./link"]
+        );
+    }
+
+    #[test]
+    fn a_dtype_less_readdir_gives_the_same_answers() {
+        // The whole of what `FTS_NOSTAT` changes is *when* the `stat` happens,
+        // never what the walk concludes.
+        assert_eq!(lines(&sample().blind(), &["."]), lines(&sample(), &["."]));
+        assert_eq!(
+            lines(&sample().blind(), &[".", "-type", "f"]),
+            lines(&sample(), &[".", "-type", "f"])
+        );
+    }
+
+    // -- the expression ----------------------------------------------------
+
+    #[test]
+    fn name_matches_the_last_component_only() {
+        assert_eq!(lines(&sample(), &[".", "-name", "g"]), ["./d/g"]);
+        assert_eq!(lines(&sample(), &[".", "-name", "d/g"]), none());
+    }
+
+    #[test]
+    fn name_takes_a_real_glob() {
+        // The matcher this replaced read `[a-z]` as three literal characters.
+        assert_eq!(
+            lines(&sample(), &[".", "-name", "[a-z]"]),
+            ["./d", "./d/g", "./d/sub/h", "./f"]
+        );
+        // `.` matches too: `-name` is `fnmatch` without `FNM_PERIOD`, so a
+        // leading dot is an ordinary character.
+        assert_eq!(
+            lines(&sample(), &[".", "-name", "[!fg]*"]),
+            [
+                ".",
+                "./d",
+                "./d/sub",
+                "./d/sub/h",
+                "./dangling",
+                "./empty",
+                "./link",
+            ]
+        );
+    }
+
+    #[test]
+    fn iname_folds_case() {
+        assert_eq!(lines(&sample(), &[".", "-iname", "F"]), ["./f"]);
+    }
+
+    #[test]
+    fn path_matches_the_whole_name_and_star_crosses_slashes() {
+        assert_eq!(
+            lines(&sample(), &[".", "-path", "./d/*"]),
+            ["./d/g", "./d/sub", "./d/sub/h"]
+        );
+    }
+
+    #[test]
+    fn regex_must_consume_the_whole_path() {
+        assert_eq!(lines(&sample(), &[".", "-regex", ".*/f"]), ["./f"]);
+        // Not a search: `f` alone matches nothing, because the pattern has to
+        // account for the whole of `./f`.
+        assert_eq!(lines(&sample(), &[".", "-regex", "f"]), none());
+    }
+
+    #[test]
+    fn type_selects_one_kind() {
+        assert_eq!(
+            lines(&sample(), &[".", "-type", "f"]),
+            ["./d/g", "./d/sub/h", "./f"]
+        );
+        assert_eq!(
+            lines(&sample(), &[".", "-type", "l"]),
+            ["./dangling", "./link"]
+        );
+    }
+
+    #[test]
+    fn type_takes_a_comma_separated_list() {
+        assert_eq!(
+            lines(&sample(), &[".", "-type", "l,f"]),
+            ["./d/g", "./d/sub/h", "./dangling", "./f", "./link"]
+        );
+    }
+
+    #[test]
+    fn xtype_asks_about_the_other_end_of_the_link() {
+        // For a dangling link `-xtype` falls back to the link itself, which is
+        // why `-xtype l` is how a broken one is found.
+        assert_eq!(lines(&sample(), &[".", "-xtype", "l"]), ["./dangling"]);
+        assert!(lines(&sample(), &[".", "-xtype", "f"]).contains(&"./link".to_owned()));
+    }
+
+    #[test]
+    fn lname_matches_the_target_text() {
+        assert_eq!(lines(&sample(), &[".", "-lname", "nosuch"]), ["./dangling"]);
+    }
+
+    #[test]
+    fn empty_covers_a_zero_length_file_and_a_childless_directory() {
+        assert_eq!(lines(&sample(), &[".", "-empty"]), ["./empty", "./f"]);
+    }
+
+    #[test]
+    fn size_counts_512_byte_blocks_by_default() {
+        assert_eq!(
+            lines(&sample(), &[".", "-type", "f", "-size", "1"]),
+            ["./d/g", "./d/sub/h"]
+        );
+        assert_eq!(
+            lines(&sample(), &[".", "-type", "f", "-size", "0"]),
+            ["./f"]
+        );
+    }
+
+    #[test]
+    fn size_takes_a_unit_suffix() {
+        assert_eq!(lines(&sample(), &[".", "-size", "3c"]), ["./d/g"]);
+        // Rounded *up*, so three bytes is one kibibyte-block and `-1k` — fewer
+        // than one — is the empty file alone.
+        assert_eq!(
+            lines(&sample(), &[".", "-type", "f", "-size", "-1k"]),
+            ["./f"]
+        );
+    }
+
+    #[test]
+    fn perm_distinguishes_exact_from_at_least_from_any() {
+        let tree = sample().file_mode("./x", 0o755, 1);
+        // `-type f` because the sample's directories are 0755 as well, and
+        // `-perm` says nothing about the file type.
+        assert_eq!(lines(&tree, &[".", "-type", "f", "-perm", "755"]), ["./x"]);
+        assert!(lines(&tree, &[".", "-perm", "-644"]).contains(&"./x".to_owned()));
+        assert!(lines(&tree, &[".", "-perm", "/111"]).contains(&"./x".to_owned()));
+        assert!(!lines(&tree, &[".", "-perm", "/111"]).contains(&"./f".to_owned()));
+    }
+
+    #[test]
+    fn user_resolves_through_the_database() {
+        assert_eq!(lines(&sample(), &[".", "-user", "user"]).len(), 9);
+        assert_eq!(lines(&sample(), &[".", "-user", "root"]), none());
+    }
+
+    #[test]
+    fn an_unknown_user_is_fatal() {
+        let (status, out) = find(&sample(), &[".", "-user", "nosuchuser"]);
+        assert_eq!(status, 1);
+        assert_eq!(out, "");
+    }
+
+    #[test]
+    fn newer_compares_modification_times() {
+        let tree = sample().mtime("./f", NOW - 10);
+        assert_eq!(lines(&tree, &[".", "-newer", "./d/g"]), ["./f"]);
+    }
+
+    #[test]
+    fn samefile_compares_dev_and_ino() {
+        assert_eq!(lines(&sample(), &[".", "-samefile", "./f"]), ["./f"]);
+    }
+
+    #[test]
+    fn fstype_reads_the_device() {
+        let tree = sample().on_dev("./f", 2);
+        assert_eq!(lines(&tree, &[".", "-fstype", "tmpfs"]), ["./f"]);
+    }
+
+    #[test]
+    fn inum_and_links_read_the_stat() {
+        let want = sample().ino_of("./f").to_string();
+        assert_eq!(lines(&sample(), &[".", "-inum", &want]), ["./f"]);
+        assert_eq!(
+            lines(&sample(), &[".", "-links", "2"]),
+            [".", "./d", "./d/sub", "./empty"]
+        );
+    }
+
+    // -- operators ---------------------------------------------------------
+
+    #[test]
+    fn and_binds_tighter_than_or() {
+        // `-name f -o -name g -print` is `(f) -o (g -print)`: only `g` prints,
+        // and the implicit `-print` is suppressed by the explicit one.
+        assert_eq!(
+            lines(
+                &sample(),
+                &[".", "-name", "f", "-o", "-name", "g", "-print"]
+            ),
+            ["./d/g"]
+        );
+    }
+
+    #[test]
+    fn parentheses_regroup() {
+        assert_eq!(
+            lines(
+                &sample(),
+                &[".", "(", "-name", "f", "-o", "-name", "g", ")", "-print"]
+            ),
+            ["./d/g", "./f"]
+        );
+    }
+
+    #[test]
+    fn not_negates() {
+        let all = lines(&sample(), &["."]);
+        let not_f = lines(&sample(), &[".", "!", "-name", "f"]);
+        assert_eq!(not_f.len(), all.len() - 1);
+        assert!(!not_f.contains(&"./f".to_owned()));
+        assert_eq!(not_f, lines(&sample(), &[".", "-not", "-name", "f"]));
+    }
+
+    #[test]
+    fn comma_evaluates_both_and_takes_the_right_hand_value() {
+        assert_eq!(
+            lines(
+                &sample(),
+                &[".", "-name", "f", "-print", ",", "-name", "g", "-print"]
+            ),
+            ["./d/g", "./f"]
+        );
+    }
+
+    #[test]
+    fn prune_stops_the_descent_but_is_true() {
+        assert_eq!(
+            lines(&sample(), &[".", "-name", "d", "-prune", "-o", "-print"]),
+            [".", "./dangling", "./empty", "./f", "./link"]
+        );
+    }
+
+    #[test]
+    fn prune_does_nothing_under_depth() {
+        // Upstream documents this: by the time `-prune` runs, the contents have
+        // already been visited.
+        assert!(
+            lines(
+                &sample(),
+                &[".", "-depth", "-name", "d", "-prune", "-o", "-print"]
+            )
+            .contains(&"./d/g".to_owned())
+        );
+    }
+
+    #[test]
+    fn quit_ends_the_walk_where_it_stands() {
+        assert_eq!(
+            lines(&sample(), &[".", "-name", "d", "-print", "-quit"]),
+            ["./d"]
+        );
+    }
+
+    #[test]
+    fn true_and_false_are_predicates() {
+        assert_eq!(lines(&sample(), &[".", "-false"]), none());
+        assert_eq!(lines(&sample(), &[".", "-true"]).len(), 9);
+    }
+
+    // -- actions -----------------------------------------------------------
+
+    #[test]
+    fn print0_separates_with_nul() {
+        let (_, out) = find(&sample(), &[".", "-name", "f", "-print0"]);
+        assert_eq!(out, "./f\u{0}");
+    }
+
+    #[test]
+    fn printf_renders_the_path_directives() {
+        let (_, out) = find(
+            &sample(),
+            &[".", "-name", "g", "-printf", "%p|%f|%h|%d|%y\n"],
+        );
+        assert_eq!(out, "./d/g|g|./d|2|f\n");
+    }
+
+    #[test]
+    fn printf_renders_sizes_and_the_filesystem() {
+        let (_, out) = find(&sample(), &[".", "-name", "g", "-printf", "%s %y %F\n"]);
+        assert_eq!(out, "3 f ext4\n");
+    }
+
+    #[test]
+    fn printf_reads_its_own_escapes() {
+        let (_, out) = find(&sample(), &[".", "-name", "f", "-printf", "%%|%p\\n"]);
+        assert_eq!(out, "%|./f\n");
+    }
+
+    #[test]
+    fn exec_substitutes_the_braces() {
+        let tree = sample();
+        let (status, _) = find(&tree, &[".", "-name", "f", "-exec", "echo", "A", "{}", ";"]);
+        assert_eq!(status, 0);
+        assert_eq!(
+            tree.commands(),
+            [vec![b"echo".to_vec(), b"A".to_vec(), b"./f".to_vec()]]
+        );
+    }
+
+    #[test]
+    fn exec_plus_batches_into_one_command() {
+        let tree = sample();
+        let (status, _) = find(&tree, &[".", "-type", "f", "-exec", "echo", "{}", "+"]);
+        assert_eq!(status, 0);
+        assert_eq!(
+            tree.commands(),
+            [vec![
+                b"echo".to_vec(),
+                b"./d/g".to_vec(),
+                b"./d/sub/h".to_vec(),
+                b"./f".to_vec(),
+            ]]
+        );
+    }
+
+    #[test]
+    fn execdir_runs_in_the_containing_directory_with_a_relative_name() {
+        let tree = sample();
+        let _ = find(&tree, &[".", "-name", "g", "-execdir", "echo", "{}", ";"]);
+        let spawned = tree.spawned.borrow();
+        let (argv, cwd) = spawned.first().expect("one command");
+        assert_eq!(argv.as_slice(), [b"echo".to_vec(), b"./g".to_vec()]);
+        assert_eq!(cwd.as_deref(), Some(b"./d".as_slice()));
+    }
+
+    #[test]
+    fn ok_does_not_run_the_command_when_the_answer_is_no() {
+        let tree = sample().says_no();
+        let _ = find(&tree, &[".", "-name", "f", "-ok", "echo", "{}", ";"]);
+        assert!(tree.commands().is_empty());
+    }
+
+    #[test]
+    fn delete_removes_contents_before_their_directory() {
+        let tree = sample();
+        let (status, _) = find(&tree, &["./d", "-delete"]);
+        assert_eq!(status, 0);
+        // `-delete` turns on `-depth`, which is what makes it able to work.
+        assert_eq!(
+            *tree.removed.borrow(),
+            [
+                b"./d/g".to_vec(),
+                b"./d/sub/h".to_vec(),
+                b"./d/sub".to_vec(),
+                b"./d".to_vec(),
+            ]
+        );
+    }
+
+    #[test]
+    fn an_explicit_action_suppresses_the_implicit_print() {
+        let tree = sample();
+        let (_, out) = find(&tree, &[".", "-name", "f", "-exec", "echo", "{}", ";"]);
+        assert_eq!(out, "");
+    }
+
+    // -- diagnostics -------------------------------------------------------
+
+    #[test]
+    fn a_missing_argument_is_fatal() {
+        for args in [
+            vec![".", "-name"],
+            vec![".", "-type"],
+            vec![".", "-maxdepth"],
+            vec![".", "-size"],
+            vec![".", "-perm"],
+            vec![".", "-exec"],
+        ] {
+            let (status, out) = find(&sample(), &args);
+            assert_eq!(status, 1, "{args:?}");
+            assert_eq!(out, "", "{args:?}");
+        }
+    }
+
+    #[test]
+    fn a_bad_argument_is_fatal() {
+        for args in [
+            vec![".", "-type", "q"],
+            vec![".", "-maxdepth", "x"],
+            vec![".", "-maxdepth", "-1"],
+            vec![".", "-size", "1x"],
+            vec![".", "-perm", "zzz"],
+            vec![".", "-newer", "nosuch"],
+        ] {
+            assert_eq!(find(&sample(), &args).0, 1, "{args:?}");
+        }
+    }
+
+    #[test]
+    fn an_unknown_predicate_is_fatal() {
+        assert_eq!(find(&sample(), &[".", "-zzz"]).0, 1);
+        // `-newerXY` is the one entry the driver does not consume before
+        // parsing, which is what makes this "invalid predicate" rather than
+        // "invalid argument".
+        assert_eq!(find(&sample(), &[".", "-newerqq", "x"]).0, 1);
+    }
+
+    #[test]
+    fn unbalanced_parentheses_are_fatal() {
+        assert_eq!(find(&sample(), &[".", "("]).0, 1);
+        assert_eq!(find(&sample(), &[".", "(", "-name", "f"]).0, 1);
+        assert_eq!(find(&sample(), &[".", ")"]).0, 1);
+    }
+
+    #[test]
+    fn a_dangling_operator_is_fatal() {
+        assert_eq!(find(&sample(), &[".", "-name", "f", "-o"]).0, 1);
+        assert_eq!(find(&sample(), &[".", "-o", "-name", "f"]).0, 1);
+        assert_eq!(find(&sample(), &[".", "!"]).0, 1);
+    }
+
+    #[test]
+    fn context_is_refused_rather_than_answered() {
+        assert_eq!(find(&sample(), &[".", "-context", "x"]).0, 1);
+    }
+
+    // -- leading options ---------------------------------------------------
+
+    #[test]
+    fn the_three_link_options_are_accepted() {
+        for opt in ["-P", "-L", "-H"] {
+            assert_eq!(find(&sample(), &[opt, ".", "-name", "f"]).0, 0, "{opt}");
+        }
+    }
+
+    #[test]
+    fn dash_l_descends_through_a_link_to_a_directory() {
+        let tree = sample().symlink("./dl", "d");
+        // Under `-P` the link is a leaf.
+        assert_eq!(lines(&tree, &[".", "-path", "./dl/*"]), none());
+        assert_eq!(
+            lines(&tree, &["-L", ".", "-path", "./dl/*"]),
+            ["./dl/g", "./dl/sub", "./dl/sub/h"]
+        );
+    }
+
+    #[test]
+    fn optimisation_levels_are_accepted_and_validated() {
+        assert_eq!(find(&sample(), &["-O3", ".", "-name", "f"]).0, 0);
+        assert_eq!(find(&sample(), &["-O", ".", "-name", "f"]).0, 1);
+        assert_eq!(find(&sample(), &["-O1x", "."]).0, 1);
+        assert_eq!(find(&sample(), &["-O65536", "."]).0, 1);
+    }
+
+    #[test]
+    fn a_double_dash_ends_the_leading_options() {
+        assert_eq!(lines(&sample(), &["--", ".", "-name", "f"]), ["./f"]);
+    }
+
+    // -- the pure helpers --------------------------------------------------
+
+    #[test]
+    fn split_nul_does_not_invent_a_trailing_record() {
+        assert_eq!(split_nul(b"a\0b\0"), [b"a".to_vec(), b"b".to_vec()]);
+        assert_eq!(split_nul(b"a\0b"), [b"a".to_vec(), b"b".to_vec()]);
+        assert_eq!(split_nul(b""), [Vec::<u8>::new()]);
+        assert_eq!(split_nul(b"\0"), [Vec::<u8>::new()]);
+    }
+
+    #[test]
+    fn strtok_first_reproduces_the_upstream_truncation() {
+        // `process_debug_options` quotes the whole argument, but `strtok_r` has
+        // already written a NUL over the first delimiter — so the message names
+        // the first token rather than the offending one.
+        assert_eq!(strtok_first(b"exec,bogus"), b"exec");
+        assert_eq!(strtok_first(b"bogus"), b"bogus");
+        // Leading delimiters are skipped rather than overwritten, so nothing is
+        // truncated at all.
+        assert_eq!(strtok_first(b",bogus"), b",bogus");
+        assert_eq!(strtok_first(b""), b"");
+    }
+
+    #[test]
+    fn type_letter_is_finds_alphabet_not_ls_s() {
+        assert_eq!(type_letter(modechange::S_IFREG), b'f');
+        assert_eq!(type_letter(modechange::S_IFDIR), b'd');
+        assert_eq!(type_letter(modechange::S_IFLNK), b'l');
+        assert_eq!(type_letter(0o150_000), b'D');
+        assert_eq!(type_letter(0), b'U');
+    }
+
+    #[test]
+    fn arg_class_matches_the_parse_table() {
+        assert!(arg_class(b"maxdepth") == ArgClass::Option);
+        assert!(arg_class(b"daystart") == ArgClass::Positional);
+        assert!(arg_class(b"name") == ArgClass::Other);
+        assert!(arg_class(b"print") == ArgClass::Other);
+    }
+
+    #[test]
+    fn the_two_texts_are_present() {
+        let h = help_text();
+        assert!(h.starts_with("Usage: find"), "{h}");
+        assert!(h.contains("-name"), "{h}");
+        assert!(VERSION.starts_with("find (GNU findutils)"), "{VERSION}");
+    }
+}

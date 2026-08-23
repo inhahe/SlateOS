@@ -295,12 +295,24 @@ def violations(text: str) -> list[tuple[int, str, str]]:
 # The whole call on one (logical) line. `lead` may carry a match-arm pattern:
 # `_ => println!("influx: '{}' completed", sub),` is a real and common shape in
 # the CLI wrappers, and without this it was reported as "not a single-line
-# call" -- five of `influx-cli`'s nine sites, all of them ordinary. The prefix
-# may not contain a quote or a brace, so it cannot span a block boundary or
-# swallow a string that happens to hold `println!(`. `end` is `;` or the `,`
-# that terminates a match arm.
+# call" -- five of `influx-cli`'s nine sites, all of them ordinary. `end` is
+# `;` or the `,` that terminates a match arm.
+#
+# The pattern in that arm is very often a *literal*: `"-a" => println!(...)` is
+# how the option-dispatch wrappers are written, and abduco-cli was four sites
+# out of five this shape. So `lead` has to be able to contain a quote -- which
+# is exactly what makes it dangerous, because a string holding the text
+# `println!(` must not be mistaken for the call itself.
+#
+# `_ARM_ATOM` is what buys the safety back. Outside a literal the lead may not
+# contain a quote, a brace or a semicolon, so it still cannot cross a block
+# boundary; and a literal may only be consumed *whole*. There is no way for
+# the match to end the lead in the middle of a string, because the only
+# alternative that can pass an opening quote is the one that also consumes the
+# closing one. A pattern of `"a println!(b"` is therefore harmless.
+_ARM_ATOM = r"""(?:[^"'{};]|"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*')"""
 _CALL = re.compile(
-    r'^(?P<lead>\s*(?:[^"\'{};]*=>\s*)?)(?P<mac>e?println!)'
+    rf'^(?P<lead>\s*(?:{_ARM_ATOM}*=>\s*)?)(?P<mac>e?println!)'
     r'\(\s*"(?P<fmt>(?:[^"\\]|\\.)*)"(?P<args>.*?)\s*\)(?P<end>[;,])$'
 )
 
@@ -705,6 +717,33 @@ def selftest() -> int:
         "match-arm-with-a-pattern",
         "    Cmd::Get(k) => eprintln!(\"db: key '{k}' missing\"),",
         '    Cmd::Get(k) => eprintln!("db: key {} missing", quoteaf_os(&k)),',
+    )
+    # The arm pattern is itself a string literal. This is how every option
+    # dispatcher in the CLI wrappers is written -- four of abduco-cli's five
+    # sites -- and it is the case that forced `lead` to be able to hold a
+    # quote at all.
+    expect_fix(
+        "match-arm-whose-pattern-is-a-literal",
+        "        \"-a\" => println!(\"abduco: session '{}'\", name),",
+        '        "-a" => println!("abduco: session {}", quoteaf_os(&name)),',
+    )
+    expect_fix(
+        "match-arm-with-an-or-pattern",
+        "        \"-c\" | \"-n\" => println!(\"abduco: new '{}'\", name),",
+        '        "-c" | "-n" => println!("abduco: new {}", quoteaf_os(&name)),',
+    )
+    expect_fix(
+        "match-arm-whose-pattern-is-a-char",
+        "        'q' => println!(\"pager: quit at '{}'\", pos),",
+        "        'q' => println!(\"pager: quit at {}\", quoteaf_os(&pos)),",
+    )
+    # The reason a quote in `lead` is dangerous, pinned down: a pattern that
+    # *contains the text of the call* must not let the match start inside it.
+    # A literal is consumed whole or not at all, so the real call still wins.
+    expect_fix(
+        "arm-pattern-containing-the-macro-text",
+        "        \"say println!(\" => println!(\"tool: got '{}'\", w),",
+        '        "say println!(" => println!("tool: got {}", quoteaf_os(&w)),',
     )
     # Declines. Each is a real shape in the tree, and each would be corrupted
     # by a rewrite that went ahead anyway.

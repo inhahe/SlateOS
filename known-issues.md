@@ -64908,3 +64908,50 @@ run even when the rows are cleaned up. Doing this *at wiring time* is
 essential rather than optional: a non-idempotent suite that has been wired
 into boot will pass the boot test (a fresh boot runs it exactly once) and
 still panic the kernel the first time a user types the subcommand.
+
+**Measured scope of the destructive variant: 56 modules, not three**
+(counted 2026-08-23). The `clear_all()`-at-the-top shape was not a quirk of
+the three §261 modules that happened to be converted first — it is the house
+style for `kernel/src/fs/*.rs` self-tests. Every module below opens its
+`self_test()` by wiping its own persistent table:
+
+```
+a11y appnotify autostart bootcfg capsettings cas colorpicker credentials
+cursorsettings detailcols display dyndns fcomment filepicker fontmgr fstune
+hotkeys ime immutable installer ioprio kbsettings keylayout locale
+loginscreen mmtune netindicator netsettings notifcenter osreset partmgr
+perfmon power prefetch progmgr queryable rundialog schedtune screenshot
+scriptlang servicemgr soundmixer swapcfg sysinfo systray tags taskbar theme
+timezone useracct vdesktop vpn wakesensor wallpaper widgets winsnap
+```
+
+(`cas` uses `clear()`, `ioprio`/`prefetch`/`tags` use `test_clear()`; the
+rest use `clear_all()`. Recount with the awk one-liner in the git history of
+this entry, or by hand: the destructive call is within the first six lines
+of `pub fn self_test`.)
+
+**Why this is a live data-loss bug and not merely latent.** Each of these
+has a `<module> test` shell subcommand today. Nothing warns the user, and
+the command reports success afterwards — `useracct test` prints `all tests
+passed` having deleted **every user account, every group and every session**
+on the machine and left `current_uid` at `None`. `credentials test` empties
+the credential store; `hotkeys test` discards every custom key binding;
+`wallpaper`, `theme`, `keylayout`, `locale` and `timezone` reset the desktop
+to factory defaults. The suites that look least alarming are the settings
+modules, and they are the ones a user is most likely to poke at.
+
+**Why it is not a boot problem.** At boot the tables are empty, so the wipe
+is a no-op and every one of these is safe to run from `main.rs` exactly as
+written. That asymmetry is the trap: wiring one of these into boot under
+TD-A-FS-SELFTESTS-NEVER-RUN gives a green boot test and leaves the
+destructive shell path untouched, so the boot wiring cannot be used as
+evidence that the suite is safe. The two must be fixed together.
+
+**The proper fix** is the same three shapes above, applied per module. Most
+of these are settings modules whose suites assert exact counts on a table
+that `init_defaults()` populates, which points at *reset at both ends* where
+there is no lazy init and *decline to run* where the table holds anything
+the user chose. `useracct` additionally needs its `current_uid`, its
+sessions' `active` flags and `LOGIN_COUNT` snapshotted and restored, because
+authenticating during the test hijacks whoever is logged in — cleaning up
+the fixture user is not enough.

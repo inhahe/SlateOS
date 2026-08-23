@@ -6965,7 +6965,11 @@ fn gen_bootcfg() -> Vec<u8> {
             let hid = if e.hidden { " (hidden)" } else { "" };
             out.push_str(&format!(
                 "  #{} {} — {}{}{}\n",
-                e.position, e.name, e.kernel_path, def, hid
+                e.position,
+                e.name,
+                e.kernel_path.display(),
+                def,
+                hid
             ));
         }
     }

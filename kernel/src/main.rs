@@ -5470,6 +5470,14 @@ extern "C" fn kernel_main() -> ! {
             if let Err(e) = fs::usage::self_test() {
                 serial_println!("WARNING: disk-usage self-test failed: {:?}", e);
             }
+            // bootcfg was reachable only from a `kshell` subcommand, so its
+            // suite had never run in the boot test (TD-A-FS-SELFTESTS-NEVER-RUN).
+            // Safe here: `clear_all()` at both ends, and nothing consults this
+            // module during boot -- it records the *next* boot's menu, not the
+            // one already in progress.
+            if let Err(e) = fs::bootcfg::self_test() {
+                serial_println!("WARNING: bootcfg self-test failed: {:?}", e);
+            }
             // progmgr was reachable only from a `kshell` subcommand, so its
             // suite had never run in the boot test (TD-A-FS-SELFTESTS-NEVER-RUN).
             // Safe here: `clear_all()` at both ends, and it registers only its

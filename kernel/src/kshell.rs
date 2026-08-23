@@ -29322,8 +29322,8 @@ fn cmd_bootcfg(args: &str) {
             shell_println!("Console:    {}", console);
             shell_println!("Activity:   {}", cfg.show_boot_activity);
             shell_println!("Secure Boot:{}", cfg.secure_boot);
-            shell_println!("ESP:        {}", cfg.esp_path);
-            shell_println!("GRUB cfg:   {}", cfg.grub_config_path);
+            shell_println!("ESP:        {}", cfg.esp_path.display());
+            shell_println!("GRUB cfg:   {}", cfg.grub_config_path.display());
             shell_println!("GFX mode:   {}", cfg.gfx_mode);
             shell_println!("Dual boot:  {}", cfg.dual_boot);
         }

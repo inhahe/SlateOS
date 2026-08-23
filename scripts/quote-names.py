@@ -17,15 +17,34 @@ have written a second line it never wrote. `quotef_os`/`quoteaf_os` render the
 name unambiguously; nothing else does.
 
 This script is that test's two detectors, run over the whole of lane B's tree
-rather than one directory, as a **ratchet**: the 1796 sites that exist today
-are recorded in `quote-names-baseline.txt`, and `--check` fails only on a
-*new* one. A backlog that cannot grow is a different thing from a backlog.
+rather than one directory, as a **ratchet**: every site that exists today is
+recorded in `quote-names-baseline.txt` -- which is also the live count, so no
+number is repeated here to go stale -- and `--check` fails only on a *new*
+one. A backlog that cannot grow is a different thing from a backlog.
 
     python scripts/quote-names.py                  # per-crate report
     python scripts/quote-names.py --list           # ... with every line
     python scripts/quote-names.py --check          # ratchet: new violations only
     python scripts/quote-names.py --selftest       # check the detectors
     python scripts/quote-names.py --write-baseline # re-record after a burn-down
+    python scripts/quote-names.py --fix PATH...    # rewrite the mechanical sites
+
+## Why `--fix` lives in the checker rather than in a script beside it
+
+The backlog is 1700-odd sites across 775 files, and the overwhelming majority
+of them are one of two shapes that convert without a judgement. A separate
+fixer would have to re-derive "what is a site", and the moment its idea of
+that drifts from the checker's, the two disagree in the direction that is
+hardest to notice: the fixer skips a line the checker still counts, and the
+burn-down silently stalls one site short. Sharing `violations()` makes that
+impossible by construction.
+
+`--fix` is deliberately timid. It transforms a line only when the result is
+forced -- no existing positional placeholder to renumber, no ambiguity about
+which argument a `{}` belongs to -- and prints every line it declined, so the
+remainder is a worklist rather than a silent omission. It does not touch
+`Cargo.toml` or add the `use`, because whether a crate should depend on
+`quoting` at all is the one decision here that is not mechanical.
 
 ## Why the baseline counts violations per file rather than naming them
 
@@ -53,6 +72,7 @@ unit of review is a file; a crate-level count would hide a new violation in
 
 from __future__ import annotations
 
+import re
 import sys
 from pathlib import Path
 
@@ -141,6 +161,137 @@ def violations(text: str) -> list[tuple[int, str, str]]:
         elif hand_written_quotes(line):
             out.append((i, "hand-written quotes", line.strip()))
     return out
+
+
+# A whole single-line `println!`/`eprintln!` call: indentation, the macro and
+# its format string, then the optional argument list, then `);`. `--fix`
+# refuses anything this does not match -- a call already split across lines is
+# exactly where a mechanical rewrite would go wrong, and there are few enough
+# of those to do by hand.
+_CALL = re.compile(r'^(?P<lead>\s*)(?P<mac>e?println!)\("(?P<fmt>(?:[^"\\]|\\.)*)"(?P<args>.*)\);$')
+
+# `'{ident}'` -- the hand-written-quote shape, with a plain identifier inside.
+_INLINE_QUOTED = re.compile(r"'\{([A-Za-z_][A-Za-z0-9_]*)\}'")
+# `'{}'` -- the same defect, but the value comes from the argument list.
+_POSITIONAL_QUOTED = re.compile(r"'\{\}'")
+# Any placeholder at all, used only to prove a rewrite cannot renumber one.
+_ANY_PLACEHOLDER = re.compile(r"\{[^{}]*\}")
+
+
+def _split_args(args: str) -> list[str] | None:
+    """The top-level comma-separated arguments of a macro call, or `None`.
+
+    Returns `None` rather than guessing when the text contains a string or
+    char literal, because a comma inside one is not a separator and getting
+    that wrong would silently mangle code.
+    """
+    args = args.strip()
+    if not args:
+        return []
+    if not args.startswith(","):
+        return None
+    args = args[1:]
+    if '"' in args or "'" in args:
+        return None
+    out: list[str] = []
+    depth = 0
+    cur = ""
+    for ch in args:
+        if ch in "([{":
+            depth += 1
+        elif ch in ")]}":
+            depth -= 1
+            if depth < 0:
+                return None
+        if ch == "," and depth == 0:
+            out.append(cur.strip())
+            cur = ""
+        else:
+            cur += ch
+    if cur.strip():
+        out.append(cur.strip())
+    return out if all(out) else None
+
+
+def fix_line(line: str) -> tuple[str | None, str]:
+    """Rewrite one flagged line, or explain why it was left alone.
+
+    Returns `(new_line_or_None, reason)`. The two shapes handled:
+
+    * `'{name}'` -> `{}` plus `quoteaf_os(&name)`. `quoteaf_os` *always*
+      quotes, so an ordinary name renders `'abc'` -- byte for byte what the
+      hand-written quotes printed. Choosing `quotef_os` here would change the
+      output of every existing message, which is a different change.
+    * `"prog: {name}: ..."` -> `{}` plus `quotef_os(&name)`. Nothing was
+      quoted before, so the quote-only-when-needed form keeps the common case
+      identical and only differs on names that were already ambiguous.
+
+    Anything else -- a call spanning lines, a format string that already has a
+    positional placeholder the rewrite would renumber, an argument list this
+    cannot parse -- is returned unchanged with a reason, never guessed at.
+    """
+    m = _CALL.match(line)
+    if m is None:
+        return None, "not a single-line println!/eprintln! call"
+    fmt, rest = m.group("fmt"), m.group("args")
+    args = _split_args(rest)
+    if args is None:
+        return None, "argument list not safely splittable"
+
+    def rebuilt(new_fmt: str, new_args: list[str]) -> str:
+        tail = "".join(f", {a}" for a in new_args)
+        return f'{m.group("lead")}{m.group("mac")}("{new_fmt}"{tail});'
+
+    ident = bare_interpolated_name(line)
+    if ident is not None:
+        # The rewrite turns `{ident}` into `{}`, which consumes the *first*
+        # unused argument. That is only the one being added if no earlier
+        # placeholder is already positional.
+        head = fmt.split("{" + ident + "}", 1)[0]
+        if "{}" in head or args:
+            return None, "would renumber an existing positional argument"
+        return rebuilt(fmt.replace("{" + ident + "}", "{}", 1), [f"quotef_os(&{ident})"]), ""
+
+    inline = _INLINE_QUOTED.findall(fmt)
+    positional = len(_POSITIONAL_QUOTED.findall(fmt))
+
+    if inline and not positional:
+        if any(p == "{}" for p in _ANY_PLACEHOLDER.findall(fmt)) or args:
+            return None, "would renumber an existing positional argument"
+        return (
+            rebuilt(_INLINE_QUOTED.sub("{}", fmt), [f"quoteaf_os(&{n})" for n in inline]),
+            "",
+        )
+
+    if positional == 1 and not inline and len(args) == 1:
+        # The single `'{}'` must be the only positional placeholder, or the
+        # lone argument is not the one it names.
+        if sum(1 for p in _ANY_PLACEHOLDER.findall(fmt) if p == "{}") != 1:
+            return None, "more than one positional placeholder"
+        return rebuilt(_POSITIONAL_QUOTED.sub("{}", fmt, count=1), [f"quoteaf_os(&{args[0]})"]), ""
+
+    return None, "mixed or multi-argument quoting -- fix by hand"
+
+
+def fix_file(path: Path) -> tuple[int, list[str]]:
+    """Rewrite what can be rewritten in `path`. Returns `(fixed, skipped)`."""
+    text = path.read_text(encoding="utf-8")
+    lines = text.split("\n")
+    fixed = 0
+    skipped: list[str] = []
+    for line_no, _what, _src in violations(text):
+        i = line_no - 1
+        new, reason = fix_line(lines[i])
+        if new is None:
+            skipped.append(f"{path.as_posix()}:{line_no}: {reason}\n      {lines[i].strip()}")
+        else:
+            lines[i] = new
+            fixed += 1
+    if fixed:
+        # newline="" for the same reason write_baseline uses it: Python would
+        # otherwise turn every "\n" into "\r\n" and rewrite the whole file.
+        path.write_text("\n".join(lines), encoding="utf-8", newline="")
+    return fixed, skipped
 
 
 def survey(root: Path = ROOT) -> dict[str, list[tuple[int, str, str]]]:
@@ -244,8 +395,8 @@ def selftest() -> int:
         expect(f"not-a-name-{ident}", f'eprintln!("cut: {{{ident}}}: rest");', 0)
 
     # 4. Shapes that look like the pattern but are not it. Each of these
-    #    over-matching would put a false positive in a 1796-line baseline,
-    #    where nobody would ever find it again.
+    #    over-matching would put a false positive into a baseline of hundreds
+    #    of lines, where nobody would ever find it again.
     expect("no-trailing-colon", 'eprintln!("cut: {path} is a directory");', 0)
     expect("uppercase-prog", 'eprintln!("Cut: {path}: {e}");', 0)
     expect("empty-prog", 'eprintln!(": {path}: {e}");', 0)
@@ -270,6 +421,65 @@ def selftest() -> int:
         'eprintln!("cut: {path}: {e}");\nlet x = 1;\neprintln!("cut: {name}: {e}");',
         2,
     )
+
+    # 8. The rewriter. A fixer that is wrong is worse than no fixer: it edits
+    #    775 files unattended, and a bad transform lands as a compile error at
+    #    best and a mangled message at worst. Each case below asserts the exact
+    #    output, and the `None` cases assert that it *declined* -- silence
+    #    where a rewrite should have happened is the failure that hides.
+    def expect_fix(label: str, src: str, want: str | None) -> None:
+        nonlocal checked
+        checked += 1
+        got, reason = fix_line(src)
+        if got != want:
+            failures.append(f"fix-{label}: want {want!r}, got {got!r} ({reason})\n    {src}")
+
+    expect_fix(
+        "inline-one",
+        "        eprintln!(\"lp: printer '{pname}' not found\");",
+        '        eprintln!("lp: printer {} not found", quoteaf_os(&pname));',
+    )
+    expect_fix(
+        "inline-two",
+        "    println!(\"Playing '{a}' on '{b}'...\");",
+        '    println!("Playing {} on {}...", quoteaf_os(&a), quoteaf_os(&b));',
+    )
+    expect_fix(
+        "inline-alongside-unquoted-capture",
+        "eprintln!(\"{cmd}: printer '{name}' not found\");",
+        'eprintln!("{cmd}: printer {} not found", quoteaf_os(&name));',
+    )
+    expect_fix(
+        "positional-one",
+        "eprintln!(\"lp: invalid copies value '{}'\", args[i]);",
+        'eprintln!("lp: invalid copies value {}", quoteaf_os(&args[i]));',
+    )
+    expect_fix(
+        "bare-name",
+        '    eprintln!("cut: {path}: {e}");',
+        '    eprintln!("cut: {}: {e}", quotef_os(&path));',
+    )
+    # Declines. Each is a real shape in the tree, and each would be corrupted
+    # by a rewrite that went ahead anyway.
+    expect_fix("declines-multiline", "eprintln!(\"lp: printer '{p}' not\"", None)
+    expect_fix(
+        "declines-existing-positional",
+        "eprintln!(\"lp: {} wants '{p}'\", n);",
+        None,
+    )
+    expect_fix(
+        "declines-two-positional-quotes",
+        "eprintln!(\"lp: '{}' and '{}'\", a, b);",
+        None,
+    )
+    expect_fix(
+        "declines-string-literal-arg",
+        "eprintln!(\"lp: '{}'\", x.unwrap_or(\", \"));",
+        None,
+    )
+    # The fixed form must not be a violation any more, or --fix would loop.
+    expect("fix-is-clean-inline", 'eprintln!("lp: printer {} not found", quoteaf_os(&p));', 0)
+    expect("fix-is-clean-bare", 'eprintln!("cut: {}: {e}", quotef_os(&path));', 0)
 
     for f in failures:
         print(f"selftest FAIL {f}")
@@ -338,10 +548,56 @@ def check(found: dict[str, list[tuple[int, str, str]]]) -> int:
     return 1
 
 
+def fix(targets: list[str]) -> int:
+    """`--fix`: rewrite the mechanical sites under each of `targets`."""
+    if not targets:
+        print("--fix needs at least one path", file=sys.stderr)
+        return 2
+    files: list[Path] = []
+    for t in targets:
+        p = (ROOT / t) if not Path(t).is_absolute() else Path(t)
+        if p.is_dir():
+            files += [f for f in sorted(p.rglob("*.rs")) if "target" not in f.parts]
+        elif p.is_file():
+            files.append(p)
+        else:
+            print(f"no such path: {t}", file=sys.stderr)
+            return 2
+    total_fixed = 0
+    all_skipped: list[str] = []
+    for f in files:
+        # A path outside the repo is legitimate -- it is how this rewriter is
+        # checked, by pointing it at a `git show` of a file already converted
+        # by hand -- so `relative_to` must not be allowed to raise on one.
+        try:
+            rel = f.resolve().relative_to(ROOT).as_posix()
+        except ValueError:
+            rel = f.as_posix()
+        if rel in IGNORE:
+            continue
+        n, skipped = fix_file(f)
+        total_fixed += n
+        all_skipped += skipped
+        if n:
+            print(f"{rel}: {n} site(s) rewritten")
+    for s in all_skipped:
+        print(f"  LEFT {s}")
+    print(f"\n{total_fixed} rewritten, {len(all_skipped)} left for a human")
+    if total_fixed:
+        print(
+            "Add `quoting = { path = \"../quoting\" }` to the crate's Cargo.toml and\n"
+            "`use quoting::{quoteaf_os, quotef_os};` (whichever it now calls), then\n"
+            "`cargo clippy --fix` to drop the borrows that turn out unnecessary."
+        )
+    return 0
+
+
 def main() -> int:
     args = sys.argv[1:]
     if "--selftest" in args:
         return selftest()
+    if "--fix" in args:
+        return fix([a for a in args if not a.startswith("--")])
     found = survey()
     if "--write-baseline" in args or "--update-baseline" in args:
         write_baseline(found)

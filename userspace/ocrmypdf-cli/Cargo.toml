@@ -2,3 +2,8 @@
 name = "ocrmypdf-cli"
 version = "0.1.0"
 edition = "2024"
+
+[dependencies]
+# The input and output PDF paths are echoed together in one line, both from
+# argv.
+quoting = { path = "../quoting" }

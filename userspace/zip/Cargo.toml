@@ -4,6 +4,9 @@ version = "0.1.0"
 edition = "2024"
 description = "SlateOS zip/unzip archive utility"
 [dependencies]
+# zip names the directory it is skipping and unzip names the destination it
+# extracted into; both are paths, and the second was passed to -d.
+quoting = { path = "../quoting" }
 
 [lints]
 workspace = true

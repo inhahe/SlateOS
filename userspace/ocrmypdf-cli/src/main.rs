@@ -4,6 +4,7 @@
 //!
 //! Single personality: `ocrmypdf`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -44,7 +45,8 @@ fn run_ocrmypdf(args: Vec<String>) -> i32 {
         return 0;
     }
 
-    let positional: Vec<&str> = args.iter()
+    let positional: Vec<&str> = args
+        .iter()
         .filter(|a| !a.starts_with('-'))
         .map(|s| s.as_str())
         .collect();
@@ -57,7 +59,8 @@ fn run_ocrmypdf(args: Vec<String>) -> i32 {
     let input = positional[0];
     let output = positional[1];
 
-    let lang = args.windows(2)
+    let lang = args
+        .windows(2)
         .find(|w| w[0] == "-l" || w[0] == "--language")
         .map(|w| w[1].as_str())
         .unwrap_or("eng");
@@ -67,18 +70,29 @@ fn run_ocrmypdf(args: Vec<String>) -> i32 {
     let force = args.iter().any(|a| a == "-f" || a == "--force-ocr");
     let quiet = args.iter().any(|a| a == "-q" || a == "--quiet");
 
-    let optimize = args.windows(2)
+    let optimize = args
+        .windows(2)
         .find(|w| w[0] == "--optimize")
         .map(|w| w[1].as_str())
         .unwrap_or("1");
 
     if !quiet {
-        println!("OCRmyPDF: processing '{}' → '{}'", input, output);
+        println!(
+            "OCRmyPDF: processing {} → {}",
+            quoteaf_os(input),
+            quoteaf_os(output)
+        );
         println!("  Language: {}", lang);
         println!("  Optimization level: {}", optimize);
-        if deskew { println!("  Deskew: enabled"); }
-        if clean { println!("  Clean: enabled"); }
-        if force { println!("  Force OCR: enabled"); }
+        if deskew {
+            println!("  Deskew: enabled");
+        }
+        if clean {
+            println!("  Clean: enabled");
+        }
+        if force {
+            println!("  Force OCR: enabled");
+        }
         println!();
         println!("  Scanning pages...");
         println!("  Page 1: OCR text layer added (confidence 94.1%)");
@@ -86,7 +100,10 @@ fn run_ocrmypdf(args: Vec<String>) -> i32 {
         println!("  Page 3: OCR text layer added (confidence 96.2%)");
         println!();
         println!("  Optimizing PDF...");
-        println!("  Output: '{}' (3 pages, 1.2 MB → 980 KB)", output);
+        println!(
+            "  Output: {} (3 pages, 1.2 MB → 980 KB)",
+            quoteaf_os(output)
+        );
     }
     0
 }
@@ -100,7 +117,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_ocrmypdf};
+    use super::run_ocrmypdf;
 
     #[test]
     fn help_exits_zero() {

@@ -4,6 +4,7 @@
 //!
 //! Multi-personality: `pulumi`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -83,13 +84,19 @@ fn run_pulumi(args: &[String]) -> i32 {
             match cmd {
                 "ls" => {
                     println!("NAME   LAST UPDATE  RESOURCE COUNT  URL");
-                    println!("dev    2h ago       4               https://app.pulumi.com/admin/slateos-infra/dev");
-                    println!("staging 1d ago      4               https://app.pulumi.com/admin/slateos-infra/staging");
-                    println!("prod   3d ago       8               https://app.pulumi.com/admin/slateos-infra/prod");
+                    println!(
+                        "dev    2h ago       4               https://app.pulumi.com/admin/slateos-infra/dev"
+                    );
+                    println!(
+                        "staging 1d ago      4               https://app.pulumi.com/admin/slateos-infra/staging"
+                    );
+                    println!(
+                        "prod   3d ago       8               https://app.pulumi.com/admin/slateos-infra/prod"
+                    );
                 }
                 "select" => {
                     let name = args.get(2).map(|s| s.as_str()).unwrap_or("dev");
-                    println!("Set stack to '{}'", name);
+                    println!("Set stack to {}", quoteaf_os(name));
                 }
                 _ => println!("pulumi stack {} completed", cmd),
             }
@@ -110,7 +117,7 @@ fn run_pulumi(args: &[String]) -> i32 {
             println!("    4 unchanged");
             println!("Duration: 5s");
         }
-        _ => println!("pulumi: command '{}' completed", subcmd),
+        _ => println!("pulumi: command {} completed", quoteaf_os(subcmd)),
     }
     0
 }
@@ -124,7 +131,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_pulumi};
+    use super::run_pulumi;
 
     #[test]
     fn help_exits_zero() {

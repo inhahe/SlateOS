@@ -2,3 +2,8 @@
 name = "pueue"
 version = "0.1.0"
 edition = "2024"
+
+[dependencies]
+# The task-group name is an argv word, and the rejected command name is
+# another.
+quoting = { path = "../quoting" }

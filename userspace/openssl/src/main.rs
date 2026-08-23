@@ -4,6 +4,7 @@
 //!
 //! Single personality: `openssl`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -78,7 +79,10 @@ fn run_openssl(args: Vec<String>) -> i32 {
         "verify" => openssl_verify(&cmd_args),
         "ciphers" => openssl_ciphers(&cmd_args),
         "list" => openssl_list(&cmd_args),
-        other => { eprintln!("openssl: '{}' is not a recognized command", other); 1 }
+        other => {
+            eprintln!("openssl: {} is not a recognized command", quoteaf_os(other));
+            1
+        }
     }
 }
 
@@ -97,17 +101,25 @@ fn openssl_version(args: &[String]) -> i32 {
 }
 
 fn openssl_genrsa(args: &[String]) -> i32 {
-    let bits = args.last().and_then(|s| s.parse::<u32>().ok()).unwrap_or(2048);
-    let out = args.iter().position(|a| a == "-out")
+    let bits = args
+        .last()
+        .and_then(|s| s.parse::<u32>().ok())
+        .unwrap_or(2048);
+    let out = args
+        .iter()
+        .position(|a| a == "-out")
         .and_then(|i| args.get(i + 1));
 
-    println!("Generating RSA private key, {} bit long modulus (2 primes)", bits);
+    println!(
+        "Generating RSA private key, {} bit long modulus (2 primes)",
+        bits
+    );
     println!("..............+++++++++++++++++++++++++++++++++++++++");
     println!("...+++++++++++++++++++++++++++++++++++++++");
     println!("e is 65537 (0x010001)");
 
     if let Some(path) = out {
-        println!("writing RSA key to '{}'", path);
+        println!("writing RSA key to {}", quoteaf_os(path));
     } else {
         println!("-----BEGIN RSA PRIVATE KEY-----");
         println!("MIIEpAIBAAKCAQEA... (simulated {} bit key)", bits);
@@ -117,7 +129,9 @@ fn openssl_genrsa(args: &[String]) -> i32 {
 }
 
 fn openssl_genpkey(args: &[String]) -> i32 {
-    let algorithm = args.iter().position(|a| a == "-algorithm")
+    let algorithm = args
+        .iter()
+        .position(|a| a == "-algorithm")
         .and_then(|i| args.get(i + 1))
         .map(|s| s.as_str())
         .unwrap_or("RSA");
@@ -191,7 +205,9 @@ fn openssl_x509(args: &[String]) -> i32 {
 
 fn openssl_enc(args: &[String]) -> i32 {
     let decrypt = args.iter().any(|a| a == "-d");
-    let cipher = args.iter().find(|a| a.starts_with("-aes") || a.starts_with("-chacha"))
+    let cipher = args
+        .iter()
+        .find(|a| a.starts_with("-aes") || a.starts_with("-chacha"))
         .map(|s| s.as_str())
         .unwrap_or("-aes-256-cbc");
 
@@ -205,19 +221,29 @@ fn openssl_enc(args: &[String]) -> i32 {
 }
 
 fn openssl_dgst(args: &[String]) -> i32 {
-    let algo = if args.iter().any(|a| a == "-sha256") { "SHA256" }
-        else if args.iter().any(|a| a == "-sha512") { "SHA512" }
-        else if args.iter().any(|a| a == "-sha1") { "SHA1" }
-        else if args.iter().any(|a| a == "-md5") { "MD5" }
-        else { "SHA256" };
+    let algo = if args.iter().any(|a| a == "-sha256") {
+        "SHA256"
+    } else if args.iter().any(|a| a == "-sha512") {
+        "SHA512"
+    } else if args.iter().any(|a| a == "-sha1") {
+        "SHA1"
+    } else if args.iter().any(|a| a == "-md5") {
+        "MD5"
+    } else {
+        "SHA256"
+    };
 
-    let files: Vec<&str> = args.iter()
+    let files: Vec<&str> = args
+        .iter()
         .filter(|a| !a.starts_with('-'))
         .map(|s| s.as_str())
         .collect();
 
     if files.is_empty() {
-        println!("{}(stdin)= e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", algo);
+        println!(
+            "{}(stdin)= e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            algo
+        );
     } else {
         for f in &files {
             println!("{}({})= a1b2c3d4e5f6... (simulated)", algo, f);
@@ -227,7 +253,9 @@ fn openssl_dgst(args: &[String]) -> i32 {
 }
 
 fn openssl_s_client(args: &[String]) -> i32 {
-    let connect = args.iter().position(|a| a == "-connect")
+    let connect = args
+        .iter()
+        .position(|a| a == "-connect")
         .and_then(|i| args.get(i + 1))
         .map(|s| s.as_str())
         .unwrap_or("localhost:443");
@@ -235,7 +263,10 @@ fn openssl_s_client(args: &[String]) -> i32 {
     println!("CONNECTED(00000003)");
     println!("---");
     println!("Certificate chain");
-    println!(" 0 s:CN = {}", connect.split(':').next().unwrap_or("localhost"));
+    println!(
+        " 0 s:CN = {}",
+        connect.split(':').next().unwrap_or("localhost")
+    );
     println!("   i:CN = Slate OS Root CA");
     println!("---");
     println!("Server certificate");
@@ -255,7 +286,10 @@ fn openssl_s_client(args: &[String]) -> i32 {
 fn openssl_rand(args: &[String]) -> i32 {
     let hex = args.iter().any(|a| a == "-hex");
     let base64 = args.iter().any(|a| a == "-base64");
-    let count = args.last().and_then(|s| s.parse::<u32>().ok()).unwrap_or(32);
+    let count = args
+        .last()
+        .and_then(|s| s.parse::<u32>().ok())
+        .unwrap_or(32);
 
     if hex {
         // Simulated hex random
@@ -279,14 +313,35 @@ fn openssl_rand(args: &[String]) -> i32 {
 
 fn openssl_speed() -> i32 {
     println!("Doing various benchmarks (simulated):");
-    println!("{:<30} {:>10} {:>10} {:>10}", "Algorithm", "16 bytes", "256 bytes", "8192 bytes");
+    println!(
+        "{:<30} {:>10} {:>10} {:>10}",
+        "Algorithm", "16 bytes", "256 bytes", "8192 bytes"
+    );
     println!("{}", "-".repeat(65));
-    println!("{:<30} {:>10} {:>10} {:>10}", "aes-128-cbc", "1234.56k", "5678.90k", "9012.34k");
-    println!("{:<30} {:>10} {:>10} {:>10}", "aes-256-cbc", "1111.22k", "4444.55k", "7777.88k");
-    println!("{:<30} {:>10} {:>10} {:>10}", "aes-128-gcm", "2345.67k", "6789.01k", "10234.56k");
-    println!("{:<30} {:>10} {:>10} {:>10}", "chacha20-poly1305", "3456.78k", "7890.12k", "11234.56k");
-    println!("{:<30} {:>10} {:>10} {:>10}", "sha256", "4567.89k", "8901.23k", "12345.67k");
-    println!("{:<30} {:>10} {:>10} {:>10}", "sha512", "5678.90k", "9012.34k", "13456.78k");
+    println!(
+        "{:<30} {:>10} {:>10} {:>10}",
+        "aes-128-cbc", "1234.56k", "5678.90k", "9012.34k"
+    );
+    println!(
+        "{:<30} {:>10} {:>10} {:>10}",
+        "aes-256-cbc", "1111.22k", "4444.55k", "7777.88k"
+    );
+    println!(
+        "{:<30} {:>10} {:>10} {:>10}",
+        "aes-128-gcm", "2345.67k", "6789.01k", "10234.56k"
+    );
+    println!(
+        "{:<30} {:>10} {:>10} {:>10}",
+        "chacha20-poly1305", "3456.78k", "7890.12k", "11234.56k"
+    );
+    println!(
+        "{:<30} {:>10} {:>10} {:>10}",
+        "sha256", "4567.89k", "8901.23k", "12345.67k"
+    );
+    println!(
+        "{:<30} {:>10} {:>10} {:>10}",
+        "sha512", "5678.90k", "9012.34k", "13456.78k"
+    );
     println!();
     println!("{:<30} {:>10} {:>10}", "Algorithm", "sign/s", "verify/s");
     println!("{}", "-".repeat(55));
@@ -298,7 +353,8 @@ fn openssl_speed() -> i32 {
 }
 
 fn openssl_verify(args: &[String]) -> i32 {
-    let files: Vec<&str> = args.iter()
+    let files: Vec<&str> = args
+        .iter()
         .filter(|a| !a.starts_with('-'))
         .map(|s| s.as_str())
         .collect();
@@ -317,13 +373,19 @@ fn openssl_ciphers(args: &[String]) -> i32 {
 
     if verbose {
         println!("TLS_AES_256_GCM_SHA384        TLSv1.3 Kx=any  Au=any  Enc=AESGCM(256) Mac=AEAD");
-        println!("TLS_CHACHA20_POLY1305_SHA256  TLSv1.3 Kx=any  Au=any  Enc=CHACHA20/POLY1305(256) Mac=AEAD");
+        println!(
+            "TLS_CHACHA20_POLY1305_SHA256  TLSv1.3 Kx=any  Au=any  Enc=CHACHA20/POLY1305(256) Mac=AEAD"
+        );
         println!("TLS_AES_128_GCM_SHA256        TLSv1.3 Kx=any  Au=any  Enc=AESGCM(128) Mac=AEAD");
         println!("ECDHE-RSA-AES256-GCM-SHA384   TLSv1.2 Kx=ECDH Au=RSA  Enc=AESGCM(256) Mac=AEAD");
         println!("ECDHE-RSA-AES128-GCM-SHA256   TLSv1.2 Kx=ECDH Au=RSA  Enc=AESGCM(128) Mac=AEAD");
-        println!("ECDHE-RSA-CHACHA20-POLY1305   TLSv1.2 Kx=ECDH Au=RSA  Enc=CHACHA20/POLY1305(256) Mac=AEAD");
+        println!(
+            "ECDHE-RSA-CHACHA20-POLY1305   TLSv1.2 Kx=ECDH Au=RSA  Enc=CHACHA20/POLY1305(256) Mac=AEAD"
+        );
     } else {
-        println!("TLS_AES_256_GCM_SHA384:TLS_CHACHA20_POLY1305_SHA256:TLS_AES_128_GCM_SHA256:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-RSA-CHACHA20-POLY1305");
+        println!(
+            "TLS_AES_256_GCM_SHA384:TLS_CHACHA20_POLY1305_SHA256:TLS_AES_128_GCM_SHA256:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-RSA-CHACHA20-POLY1305"
+        );
     }
     0
 }
@@ -334,15 +396,32 @@ fn openssl_list(args: &[String]) -> i32 {
     match what {
         "-cipher-algorithms" | "-ciphers" => {
             println!("Cipher algorithms:");
-            for alg in &["AES-128-CBC", "AES-256-CBC", "AES-128-GCM", "AES-256-GCM",
-                        "CHACHA20-POLY1305", "DES-EDE3-CBC", "CAMELLIA-256-CBC"] {
+            for alg in &[
+                "AES-128-CBC",
+                "AES-256-CBC",
+                "AES-128-GCM",
+                "AES-256-GCM",
+                "CHACHA20-POLY1305",
+                "DES-EDE3-CBC",
+                "CAMELLIA-256-CBC",
+            ] {
                 println!("  {}", alg);
             }
         }
         "-digest-algorithms" | "-digests" => {
             println!("Digest algorithms:");
-            for alg in &["SHA1", "SHA224", "SHA256", "SHA384", "SHA512",
-                        "SHA3-256", "SHA3-512", "BLAKE2b512", "BLAKE2s256", "MD5"] {
+            for alg in &[
+                "SHA1",
+                "SHA224",
+                "SHA256",
+                "SHA384",
+                "SHA512",
+                "SHA3-256",
+                "SHA3-512",
+                "BLAKE2b512",
+                "BLAKE2s256",
+                "MD5",
+            ] {
                 println!("  {}", alg);
             }
         }

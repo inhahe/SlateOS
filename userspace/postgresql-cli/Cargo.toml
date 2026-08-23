@@ -2,3 +2,8 @@
 name = "postgresql-cli"
 version = "0.1.0"
 edition = "2024"
+
+[dependencies]
+# createdb and dropdb each name the database, and a database name is
+# free-form text a user chose.
+quoting = { path = "../quoting" }

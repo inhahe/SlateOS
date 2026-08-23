@@ -4,6 +4,7 @@
 //!
 //! Multi-personality: `proton`, `steam`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -40,7 +41,7 @@ fn run_proton(args: &[String]) -> i32 {
             println!("Proton: setting up prefix...");
             println!("Proton: DXVK enabled");
             println!("Proton: VKD3D enabled");
-            println!("Proton: running '{}'", program);
+            println!("Proton: running {}", quoteaf_os(program));
         }
         "getcompatpath" => {
             let path = args.get(1).map(|s| s.as_str()).unwrap_or("/home/user");
@@ -48,10 +49,13 @@ fn run_proton(args: &[String]) -> i32 {
         }
         "getnativepath" => {
             let path = args.get(1).map(|s| s.as_str()).unwrap_or("C:\\");
-            println!("/home/user/.steam/compatdata/prefix/drive_c/{}", path.replace('\\', "/"));
+            println!(
+                "/home/user/.steam/compatdata/prefix/drive_c/{}",
+                path.replace('\\', "/")
+            );
         }
         _ => {
-            eprintln!("proton: unknown verb '{}'. See --help.", verb);
+            eprintln!("proton: unknown verb {}. See --help.", quoteaf_os(verb));
             return 1;
         }
     }
@@ -84,7 +88,11 @@ fn run_steam(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "-shutdown") {
         println!("Steam: shutting down...");
     } else if args.iter().any(|a| a == "-applaunch") {
-        let appid = args.windows(2).find(|w| w[0] == "-applaunch").map(|w| w[1].as_str()).unwrap_or("0");
+        let appid = args
+            .windows(2)
+            .find(|w| w[0] == "-applaunch")
+            .map(|w| w[1].as_str())
+            .unwrap_or("0");
         println!("Steam: launching app {}", appid);
     } else {
         println!("Steam client starting...");
@@ -96,7 +104,8 @@ fn run_steam(args: &[String]) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first()
+    let prog = args
+        .first()
         .map(|s| strip_ext(basename(s)).to_string())
         .unwrap_or_else(|| "proton".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
@@ -110,7 +119,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_proton};
+    use super::{basename, run_proton, strip_ext};
 
     #[test]
     fn basename_strips_path() {

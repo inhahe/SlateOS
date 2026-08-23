@@ -4,11 +4,16 @@
 //!
 //! Multi-personality: `root`, `rootcling`, `hadd`, `rootls`, `rootcp`, `rootmv`, `rootrm`, `rootprint`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_root(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -28,7 +33,10 @@ fn run_root(args: &[String]) -> i32 {
         println!("Python 3.12.0");
         return 0;
     }
-    let file = args.iter().find(|a| a.ends_with(".root") || a.ends_with(".C")).map(|s| s.as_str());
+    let file = args
+        .iter()
+        .find(|a| a.ends_with(".root") || a.ends_with(".C"))
+        .map(|s| s.as_str());
     let batch = args.iter().any(|a| a == "-b");
     if let Some(f) = file {
         if f.ends_with(".C") {
@@ -69,8 +77,12 @@ fn run_rootcling(args: &[String]) -> i32 {
         println!("rootcling 6.30.04 (Slate OS)");
         return 0;
     }
-    let dict = args.iter().find(|a| a.ends_with(".cxx")).map(|s| s.as_str()).unwrap_or("Dict.cxx");
-    println!("rootcling: generating dictionary '{}'", dict);
+    let dict = args
+        .iter()
+        .find(|a| a.ends_with(".cxx"))
+        .map(|s| s.as_str())
+        .unwrap_or("Dict.cxx");
+    println!("rootcling: generating dictionary {}", quoteaf_os(dict));
     println!("Parsing headers...");
     println!("Generating dictionary code...");
     println!("Dictionary generated successfully.");
@@ -86,14 +98,22 @@ fn run_hadd(args: &[String]) -> i32 {
         println!("  -a    Append to target file");
         return 0;
     }
-    let files: Vec<&str> = args.iter().filter(|a| a.ends_with(".root")).map(|s| s.as_str()).collect();
+    let files: Vec<&str> = args
+        .iter()
+        .filter(|a| a.ends_with(".root"))
+        .map(|s| s.as_str())
+        .collect();
     if files.len() < 2 {
         println!("hadd: need at least a target and one source file");
         return 1;
     }
     let target = files.first().unwrap_or(&"merged.root");
     let n_sources = files.len() - 1;
-    println!("hadd: merging {} files into '{}'", n_sources, target);
+    println!(
+        "hadd: merging {} files into {}",
+        n_sources,
+        quoteaf_os(target)
+    );
     for f in files.iter().skip(1) {
         println!("  Adding: {}", f);
     }
@@ -109,7 +129,11 @@ fn run_rootls(args: &[String]) -> i32 {
         println!("  -l    Long listing format");
         return 0;
     }
-    let file = args.iter().find(|a| a.ends_with(".root")).map(|s| s.as_str()).unwrap_or("data.root");
+    let file = args
+        .iter()
+        .find(|a| a.ends_with(".root"))
+        .map(|s| s.as_str())
+        .unwrap_or("data.root");
     let long = args.iter().any(|a| a == "-l");
     println!("{}", file);
     if long {
@@ -165,8 +189,16 @@ fn run_rootprint(args: &[String]) -> i32 {
         println!("  --size WxH Canvas size");
         return 0;
     }
-    let target = args.iter().find(|a| a.contains(".root")).map(|s| s.as_str()).unwrap_or("data.root:hist");
-    let output = args.windows(2).find(|w| w[0] == "-o").map(|w| w[1].as_str()).unwrap_or("output.png");
+    let target = args
+        .iter()
+        .find(|a| a.contains(".root"))
+        .map(|s| s.as_str())
+        .unwrap_or("data.root:hist");
+    let output = args
+        .windows(2)
+        .find(|w| w[0] == "-o")
+        .map(|w| w[1].as_str())
+        .unwrap_or("output.png");
     println!("Drawing: {}", target);
     println!("Canvas: 800x600");
     println!("Saved: {}", output);
@@ -175,7 +207,10 @@ fn run_rootprint(args: &[String]) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "root".to_string());
+    let prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "root".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = match prog.as_str() {
         "rootcling" => run_rootcling(&rest),
@@ -192,7 +227,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_root};
+    use super::{basename, run_root, strip_ext};
 
     #[test]
     fn basename_strips_path() {

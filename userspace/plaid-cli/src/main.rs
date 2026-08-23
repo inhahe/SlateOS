@@ -4,6 +4,7 @@
 //!
 //! Single personality: `plaid`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -38,7 +39,11 @@ fn run_plaid(args: Vec<String>) -> i32 {
             0
         }
         "transactions" => {
-            let count = args.windows(2).find(|w| w[0] == "--count").map(|w| w[1].as_str()).unwrap_or("5");
+            let count = args
+                .windows(2)
+                .find(|w| w[0] == "--count")
+                .map(|w| w[1].as_str())
+                .unwrap_or("5");
             println!("Recent transactions (last {}):", count);
             println!("  Date         Amount     Category              Merchant");
             println!("  2024-01-15   -$45.00    Food and Drink        Whole Foods");
@@ -66,9 +71,11 @@ fn run_plaid(args: Vec<String>) -> i32 {
         }
         "institutions" => {
             let query = args.get(1).map(|s| s.as_str()).unwrap_or("chase");
-            println!("Institutions matching '{}':", query);
+            println!("Institutions matching {}:", quoteaf_os(query));
             println!("  ID             Name                    Products");
-            println!("  ins_3          Chase                   auth, transactions, identity, balance");
+            println!(
+                "  ins_3          Chase                   auth, transactions, identity, balance"
+            );
             println!("  ins_56         Chase (Business)        auth, transactions, balance");
             0
         }
@@ -98,7 +105,9 @@ fn run_plaid(args: Vec<String>) -> i32 {
                     println!("item_abc123       Chase             good        3");
                     println!("item_def456       Bank of America   good        2");
                 }
-                _ => { println!("Item operation: {}", sub); }
+                _ => {
+                    println!("Item operation: {}", sub);
+                }
             }
             0
         }
@@ -106,7 +115,7 @@ fn run_plaid(args: Vec<String>) -> i32 {
             if cmd.is_empty() {
                 eprintln!("Usage: plaid <command>. See --help.");
             } else {
-                eprintln!("Error: unknown command '{}'. See --help.", cmd);
+                eprintln!("Error: unknown command {}. See --help.", quoteaf_os(cmd));
             }
             1
         }
@@ -122,7 +131,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_plaid};
+    use super::run_plaid;
 
     #[test]
     fn help_exits_zero() {

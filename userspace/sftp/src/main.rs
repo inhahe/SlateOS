@@ -48,9 +48,10 @@
 #![allow(
     clippy::arithmetic_side_effects,
     clippy::indexing_slicing,
-    clippy::unnecessary_wraps,
+    clippy::unnecessary_wraps
 )]
 
+use quoting::quoteaf_os;
 use std::env;
 use std::fmt;
 use std::io::{self, BufRead, Read, Write};
@@ -1032,9 +1033,7 @@ impl RemoteConn {
         push_bytes(&mut payload, handle);
         self.send_packet(&payload)?;
         match self.recv_packet()? {
-            SftpPacket::Status {
-                code, ..
-            } if code == status::SSH_FX_OK => Ok(()),
+            SftpPacket::Status { code, .. } if code == status::SSH_FX_OK => Ok(()),
             SftpPacket::Status { code, message, .. } => Err(SftpError::Remote { code, message }),
             _ => Err(SftpError::Protocol("unexpected response to CLOSE".into())),
         }
@@ -1069,9 +1068,7 @@ impl RemoteConn {
         push_bytes(&mut payload, data);
         self.send_packet(&payload)?;
         match self.recv_packet()? {
-            SftpPacket::Status {
-                code, ..
-            } if code == status::SSH_FX_OK => Ok(()),
+            SftpPacket::Status { code, .. } if code == status::SSH_FX_OK => Ok(()),
             SftpPacket::Status { code, message, .. } => Err(SftpError::Remote { code, message }),
             _ => Err(SftpError::Protocol("unexpected response to WRITE".into())),
         }
@@ -1154,9 +1151,7 @@ impl RemoteConn {
         );
         self.send_packet(&payload)?;
         match self.recv_packet()? {
-            SftpPacket::Status {
-                code, ..
-            } if code == status::SSH_FX_OK => Ok(()),
+            SftpPacket::Status { code, .. } if code == status::SSH_FX_OK => Ok(()),
             SftpPacket::Status { code, message, .. } => Err(SftpError::Remote { code, message }),
             _ => Err(SftpError::Protocol("unexpected response to MKDIR".into())),
         }
@@ -1171,9 +1166,7 @@ impl RemoteConn {
         push_str(&mut payload, path);
         self.send_packet(&payload)?;
         match self.recv_packet()? {
-            SftpPacket::Status {
-                code, ..
-            } if code == status::SSH_FX_OK => Ok(()),
+            SftpPacket::Status { code, .. } if code == status::SSH_FX_OK => Ok(()),
             SftpPacket::Status { code, message, .. } => Err(SftpError::Remote { code, message }),
             _ => Err(SftpError::Protocol("unexpected response to RMDIR".into())),
         }
@@ -1188,9 +1181,7 @@ impl RemoteConn {
         push_str(&mut payload, path);
         self.send_packet(&payload)?;
         match self.recv_packet()? {
-            SftpPacket::Status {
-                code, ..
-            } if code == status::SSH_FX_OK => Ok(()),
+            SftpPacket::Status { code, .. } if code == status::SSH_FX_OK => Ok(()),
             SftpPacket::Status { code, message, .. } => Err(SftpError::Remote { code, message }),
             _ => Err(SftpError::Protocol("unexpected response to REMOVE".into())),
         }
@@ -1206,9 +1197,7 @@ impl RemoteConn {
         push_str(&mut payload, new);
         self.send_packet(&payload)?;
         match self.recv_packet()? {
-            SftpPacket::Status {
-                code, ..
-            } if code == status::SSH_FX_OK => Ok(()),
+            SftpPacket::Status { code, .. } if code == status::SSH_FX_OK => Ok(()),
             SftpPacket::Status { code, message, .. } => Err(SftpError::Remote { code, message }),
             _ => Err(SftpError::Protocol("unexpected response to RENAME".into())),
         }
@@ -1224,9 +1213,7 @@ impl RemoteConn {
         push_attrs(&mut payload, attrs);
         self.send_packet(&payload)?;
         match self.recv_packet()? {
-            SftpPacket::Status {
-                code, ..
-            } if code == status::SSH_FX_OK => Ok(()),
+            SftpPacket::Status { code, .. } if code == status::SSH_FX_OK => Ok(()),
             SftpPacket::Status { code, message, .. } => Err(SftpError::Remote { code, message }),
             _ => Err(SftpError::Protocol("unexpected response to SETSTAT".into())),
         }
@@ -1526,7 +1513,7 @@ fn cmd_mget(session: &mut Session, pattern: &str) -> Result<(), SftpError> {
         }
     }
     if matched == 0 {
-        println!("No files matched pattern '{pattern}'");
+        println!("No files matched pattern {}", quoteaf_os(pattern));
     }
     Ok(())
 }
@@ -1548,7 +1535,7 @@ fn cmd_mput(session: &mut Session, pattern: &str) -> Result<(), SftpError> {
         }
     }
     if matched == 0 {
-        println!("No files matched pattern '{pattern}'");
+        println!("No files matched pattern {}", quoteaf_os(pattern));
     }
     Ok(())
 }

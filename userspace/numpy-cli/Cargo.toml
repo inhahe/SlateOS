@@ -2,3 +2,8 @@
 name = "numpy-cli"
 version = "0.1.0"
 edition = "2024"
+
+[dependencies]
+# The subcommand name and the data file it reports reading are argv words;
+# the second is a path and may hold any byte but `/`.
+quoting = { path = "../quoting" }

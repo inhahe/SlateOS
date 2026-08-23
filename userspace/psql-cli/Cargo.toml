@@ -2,3 +2,8 @@
 name = "psql-cli"
 version = "0.1.0"
 edition = "2024"
+
+[dependencies]
+# pg_dump and pg_restore each name the database they are working on, from
+# argv.
+quoting = { path = "../quoting" }

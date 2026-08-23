@@ -4,11 +4,16 @@
 //!
 //! Single personality: `waybar`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_waybar(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -27,32 +32,44 @@ fn run_waybar(args: &[String], _prog: &str) -> i32 {
         println!("waybar 0.10.3");
         return 0;
     }
-    let config = args.windows(2).find(|w| w[0] == "-c" || w[0] == "--config")
+    let config = args
+        .windows(2)
+        .find(|w| w[0] == "-c" || w[0] == "--config")
         .map(|w| w[1].as_str());
-    let style = args.windows(2).find(|w| w[0] == "-s" || w[0] == "--style")
+    let style = args
+        .windows(2)
+        .find(|w| w[0] == "-s" || w[0] == "--style")
         .map(|w| w[1].as_str());
-    let log_level = args.windows(2).find(|w| w[0] == "-l" || w[0] == "--log-level")
-        .map(|w| w[1].as_str()).unwrap_or("info");
+    let log_level = args
+        .windows(2)
+        .find(|w| w[0] == "-l" || w[0] == "--log-level")
+        .map(|w| w[1].as_str())
+        .unwrap_or("info");
 
     if let Some(c) = config {
-        println!("waybar: Loading config from '{}'", c);
+        println!("waybar: Loading config from {}", quoteaf_os(c));
     } else {
         println!("waybar: Loading config from ~/.config/waybar/config.jsonc");
     }
     if let Some(s) = style {
-        println!("waybar: Loading style from '{}'", s);
+        println!("waybar: Loading style from {}", quoteaf_os(s));
     } else {
         println!("waybar: Loading style from ~/.config/waybar/style.css");
     }
     println!("waybar: Log level: {}", log_level);
-    println!("waybar: Modules loaded: clock, workspaces, tray, network, pulseaudio, cpu, memory, battery");
+    println!(
+        "waybar: Modules loaded: clock, workspaces, tray, network, pulseaudio, cpu, memory, battery"
+    );
     println!("waybar: Bar rendered on DP-1.");
     0
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "waybar".to_string());
+    let prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "waybar".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_waybar(&rest, &prog);
     process::exit(code);
@@ -60,7 +77,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_waybar};
+    use super::{basename, run_waybar, strip_ext};
 
     #[test]
     fn basename_strips_path() {

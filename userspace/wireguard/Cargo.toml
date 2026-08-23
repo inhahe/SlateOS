@@ -3,3 +3,6 @@ name = "wireguard"
 version = "0.1.0"
 edition = "2024"
 [dependencies]
+# The interface name it could not find and the rejected wg-quick command are
+# argv words.
+quoting = { path = "../quoting" }

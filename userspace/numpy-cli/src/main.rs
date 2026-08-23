@@ -4,11 +4,16 @@
 //!
 //! Multi-personality: `numpy`, `f2py`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_numpy(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
@@ -58,7 +63,7 @@ fn run_numpy(args: &[String]) -> i32 {
             println!("  SVD (500x500): 89.1 ms");
             println!("  Eigenvalues (500x500): 120.4 ms");
         }
-        _ => println!("numpy: command '{}' completed", subcmd),
+        _ => println!("numpy: command {} completed", quoteaf_os(subcmd)),
     }
     0
 }
@@ -76,9 +81,13 @@ fn run_f2py(args: &[String]) -> i32 {
         println!("f2py 2 (NumPy 1.26.4, Slate OS)");
         return 0;
     }
-    let file = args.iter().find(|a| a.ends_with(".f90") || a.ends_with(".f")).map(|s| s.as_str()).unwrap_or("module.f90");
+    let file = args
+        .iter()
+        .find(|a| a.ends_with(".f90") || a.ends_with(".f"))
+        .map(|s| s.as_str())
+        .unwrap_or("module.f90");
     println!("Reading fortran codes...");
-    println!("\tReading file '{}'", file);
+    println!("\tReading file {}", quoteaf_os(file));
     println!("Post-processing...");
     println!("Building module...");
     println!("Module built successfully.");
@@ -87,7 +96,10 @@ fn run_f2py(args: &[String]) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "numpy".to_string());
+    let prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "numpy".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = match prog.as_str() {
         "f2py" => run_f2py(&rest),
@@ -98,7 +110,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_numpy};
+    use super::{basename, run_numpy, strip_ext};
 
     #[test]
     fn basename_strips_path() {

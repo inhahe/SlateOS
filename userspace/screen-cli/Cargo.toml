@@ -2,3 +2,8 @@
 name = "screen-cli"
 version = "0.1.0"
 edition = "2024"
+
+[dependencies]
+# The session name is an argv word, echoed by both the attached and the
+# detached banner.
+quoting = { path = "../quoting" }

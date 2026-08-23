@@ -2,3 +2,8 @@
 name = "spotify-tui"
 version = "0.1.0"
 edition = "2024"
+
+[dependencies]
+# The search query is joined from argv words before printing, and a music
+# query is free-form text.
+quoting = { path = "../quoting" }

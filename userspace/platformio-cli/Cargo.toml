@@ -2,3 +2,7 @@
 name = "platformio-cli"
 version = "0.1.0"
 edition = "2024"
+
+[dependencies]
+# The board filter and the pio subcommand are argv words echoed back.
+quoting = { path = "../quoting" }

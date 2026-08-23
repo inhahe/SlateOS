@@ -4,6 +4,7 @@
 //!
 //! Multi-personality: `pueue` (client), `pueued` (daemon)
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -79,7 +80,9 @@ fn run_pueue(args: Vec<String>) -> i32 {
             0
         }
         "add" => {
-            let task: String = args.iter().skip(1)
+            let task: String = args
+                .iter()
+                .skip(1)
                 .filter(|a| !a.starts_with('-'))
                 .cloned()
                 .collect::<Vec<_>>()
@@ -103,9 +106,7 @@ fn run_pueue(args: Vec<String>) -> i32 {
             0
         }
         "log" => {
-            let id = args.get(1)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(0);
+            let id = args.get(1).and_then(|s| s.parse::<u32>().ok()).unwrap_or(0);
             println!("Task {} output:", id);
             println!("   Compiling my-project v1.0.0");
             println!("    Finished `release` profile target(s) in 12.34s");
@@ -125,7 +126,7 @@ fn run_pueue(args: Vec<String>) -> i32 {
             match subcmd {
                 "add" => {
                     let name = args.get(2).map(|s| s.as_str()).unwrap_or("new-group");
-                    println!("Group '{}' created.", name);
+                    println!("Group {} created.", quoteaf_os(name));
                 }
                 _ => {
                     println!("Groups:");
@@ -141,7 +142,7 @@ fn run_pueue(args: Vec<String>) -> i32 {
             0
         }
         _ => {
-            eprintln!("Error: unknown command '{}'. See --help.", cmd);
+            eprintln!("Error: unknown command {}. See --help.", quoteaf_os(cmd));
             1
         }
     }
@@ -149,7 +150,10 @@ fn run_pueue(args: Vec<String>) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let argv0 = args.first().cloned().unwrap_or_else(|| String::from("pueue"));
+    let argv0 = args
+        .first()
+        .cloned()
+        .unwrap_or_else(|| String::from("pueue"));
     let p = personality(&argv0);
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = match p {
@@ -161,7 +165,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_pueued};
+    use super::run_pueued;
 
     #[test]
     fn help_exits_zero() {

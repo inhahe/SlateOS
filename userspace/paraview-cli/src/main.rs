@@ -4,11 +4,16 @@
 //!
 //! Multi-personality: `paraview`, `pvserver`, `pvbatch`, `pvpython`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_paraview(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -29,7 +34,10 @@ fn run_paraview(args: &[String]) -> i32 {
         println!("OpenGL: 4.6");
         return 0;
     }
-    let file = args.iter().find(|a| !a.starts_with('-')).map(|s| s.as_str());
+    let file = args
+        .iter()
+        .find(|a| !a.starts_with('-'))
+        .map(|s| s.as_str());
     if let Some(f) = file {
         println!("ParaView 5.12.0");
         println!("Loading: {}", f);
@@ -56,8 +64,16 @@ fn run_pvserver(args: &[String]) -> i32 {
         println!("pvserver 5.12.0 (ParaView, Slate OS)");
         return 0;
     }
-    let host = args.windows(2).find(|w| w[0] == "--hostname").map(|w| w[1].as_str()).unwrap_or("localhost");
-    let port = args.windows(2).find(|w| w[0] == "--port").map(|w| w[1].as_str()).unwrap_or("11111");
+    let host = args
+        .windows(2)
+        .find(|w| w[0] == "--hostname")
+        .map(|w| w[1].as_str())
+        .unwrap_or("localhost");
+    let port = args
+        .windows(2)
+        .find(|w| w[0] == "--port")
+        .map(|w| w[1].as_str())
+        .unwrap_or("11111");
     println!("pvserver starting...");
     println!("Listening on {}:{}", host, port);
     println!("Waiting for client connection...");
@@ -77,8 +93,12 @@ fn run_pvbatch(args: &[String]) -> i32 {
         println!("pvbatch 5.12.0 (ParaView, Slate OS)");
         return 0;
     }
-    let script = args.iter().find(|a| a.ends_with(".py")).map(|s| s.as_str()).unwrap_or("render.py");
-    println!("pvbatch: loading script '{}'", script);
+    let script = args
+        .iter()
+        .find(|a| a.ends_with(".py"))
+        .map(|s| s.as_str())
+        .unwrap_or("render.py");
+    println!("pvbatch: loading script {}", quoteaf_os(script));
     println!("Initializing offscreen rendering...");
     println!("Executing batch pipeline...");
     println!("Pipeline complete. Output written.");
@@ -100,7 +120,7 @@ fn run_pvpython(args: &[String]) -> i32 {
     }
     let script = args.iter().find(|a| a.ends_with(".py")).map(|s| s.as_str());
     if let Some(s) = script {
-        println!("pvpython: executing '{}'", s);
+        println!("pvpython: executing {}", quoteaf_os(s));
         println!("Script completed successfully.");
     } else {
         println!("ParaView Python Shell (5.12.0)");
@@ -112,7 +132,10 @@ fn run_pvpython(args: &[String]) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "paraview".to_string());
+    let prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "paraview".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = match prog.as_str() {
         "pvserver" => run_pvserver(&rest),
@@ -125,7 +148,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_paraview};
+    use super::{basename, run_paraview, strip_ext};
 
     #[test]
     fn basename_strips_path() {

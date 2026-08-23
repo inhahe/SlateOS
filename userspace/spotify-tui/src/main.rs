@@ -4,6 +4,7 @@
 //!
 //! Single personality: `spt`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -82,8 +83,14 @@ fn run_spt(args: Vec<String>) -> i32 {
             0
         }
         "search" => {
-            let query = args.iter().skip(1).map(|s| s.as_str()).collect::<Vec<_>>().join(" ");
-            println!("Search results for '{}':", if query.is_empty() { "music" } else { &query });
+            let query = args
+                .iter()
+                .skip(1)
+                .map(|s| s.as_str())
+                .collect::<Vec<_>>()
+                .join(" ");
+            let shown = if query.is_empty() { "music" } else { &query };
+            println!("Search results for {}:", quoteaf_os(shown));
             println!();
             println!("  Tracks:");
             println!("    1. Bohemian Rhapsody - Queen (6:07)");
@@ -151,7 +158,7 @@ fn run_spt(args: Vec<String>) -> i32 {
             0
         }
         _ => {
-            eprintln!("Error: unknown command '{}'. See --help.", cmd);
+            eprintln!("Error: unknown command {}. See --help.", quoteaf_os(cmd));
             1
         }
     }
@@ -166,7 +173,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_spt};
+    use super::run_spt;
 
     #[test]
     fn help_exits_zero() {

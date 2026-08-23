@@ -3,3 +3,5 @@ name = "rfkill"
 version = "0.1.0"
 edition = "2024"
 [dependencies]
+# The device type it found nothing of is the argv word the user typed.
+quoting = { path = "../quoting" }

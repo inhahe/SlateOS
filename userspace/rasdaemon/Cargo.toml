@@ -3,3 +3,6 @@ name = "rasdaemon"
 version = "0.1.0"
 edition = "2024"
 [dependencies]
+# The unknown-option messages in rasdaemon and ras-mc-ctl echo the offending
+# argv word itself.
+quoting = { path = "../quoting" }

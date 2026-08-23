@@ -12,6 +12,7 @@
 //! - `lzcat` — decompress LZMA to stdout
 //! - `xzdec` — lightweight XZ decompressor
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -97,9 +98,15 @@ fn run_xz(args: Vec<String>, personality: &str) -> i32 {
     // Set defaults based on personality
     match personality {
         "unxz" | "unlzma" => opts.action = Action::Decompress,
-        "xzcat" | "lzcat" => { opts.action = Action::Decompress; opts.stdout = true; }
+        "xzcat" | "lzcat" => {
+            opts.action = Action::Decompress;
+            opts.stdout = true;
+        }
         "lzma" => opts.format = Format::Lzma,
-        "xzdec" => { opts.action = Action::Decompress; opts.stdout = true; }
+        "xzdec" => {
+            opts.action = Action::Decompress;
+            opts.stdout = true;
+        }
         _ => {}
     }
 
@@ -172,12 +179,19 @@ fn run_xz(args: Vec<String>, personality: &str) -> i32 {
 }
 
 fn compress(opts: &XzOptions, personality: &str) -> i32 {
-    let ext = if opts.format == Format::Lzma || personality == "lzma" { ".lzma" } else { ".xz" };
+    let ext = if opts.format == Format::Lzma || personality == "lzma" {
+        ".lzma"
+    } else {
+        ".xz"
+    };
 
     for file in &opts.files {
         if file == "-" {
             if opts.verbose {
-                eprintln!("{}: compressing stdin (preset {})", personality, opts.preset);
+                eprintln!(
+                    "{}: compressing stdin (preset {})",
+                    personality, opts.preset
+                );
             }
             println!("(compressed data would be written to stdout)");
         } else {
@@ -188,14 +202,19 @@ fn compress(opts: &XzOptions, personality: &str) -> i32 {
             };
 
             if opts.verbose {
-                eprintln!("{}: {} → {} (preset {}, LZMA2)", personality, file, out, opts.preset);
+                eprintln!(
+                    "{}: {} → {} (preset {}, LZMA2)",
+                    personality, file, out, opts.preset
+                );
             }
-            println!("{}: compressed {} → {} (simulated, ratio 0.45)", personality, file, out);
+            println!(
+                "{}: compressed {} → {} (simulated, ratio 0.45)",
+                personality, file, out
+            );
 
-            if !opts.keep && !opts.stdout
-                && opts.verbose {
-                    eprintln!("{}: removed '{}'", personality, file);
-                }
+            if !opts.keep && !opts.stdout && opts.verbose {
+                eprintln!("{}: removed {}", personality, quoteaf_os(file));
+            }
         }
     }
     0
@@ -212,7 +231,8 @@ fn decompress(opts: &XzOptions, personality: &str) -> i32 {
             let out = if opts.stdout {
                 "stdout".to_string()
             } else {
-                let name = file.strip_suffix(".xz")
+                let name = file
+                    .strip_suffix(".xz")
                     .or_else(|| file.strip_suffix(".lzma"))
                     .or_else(|| file.strip_suffix(".lz"))
                     .unwrap_or(file);
@@ -222,12 +242,14 @@ fn decompress(opts: &XzOptions, personality: &str) -> i32 {
             if opts.verbose {
                 eprintln!("{}: {} → {}", personality, file, out);
             }
-            println!("{}: decompressed {} → {} (simulated)", personality, file, out);
+            println!(
+                "{}: decompressed {} → {} (simulated)",
+                personality, file, out
+            );
 
-            if !opts.keep && !opts.stdout
-                && opts.verbose {
-                    eprintln!("{}: removed '{}'", personality, file);
-                }
+            if !opts.keep && !opts.stdout && opts.verbose {
+                eprintln!("{}: removed {}", personality, quoteaf_os(file));
+            }
         }
     }
     0
@@ -244,20 +266,25 @@ fn test_files(opts: &XzOptions, personality: &str) -> i32 {
 }
 
 fn list_files(opts: &XzOptions) -> i32 {
-    let infos = vec![
-        FileInfo {
-            name: "example.xz".to_string(),
-            _uncompressed_size: 1048576,
-            _compressed_size: 472320,
-            _ratio: 0.450,
-            _check: "CRC64".to_string(),
-        },
-    ];
+    let infos = vec![FileInfo {
+        name: "example.xz".to_string(),
+        _uncompressed_size: 1048576,
+        _compressed_size: 472320,
+        _ratio: 0.450,
+        _check: "CRC64".to_string(),
+    }];
 
     println!("Strms  Blocks   Compressed Uncompressed  Ratio  Check   Filename");
     for info in &infos {
-        let name = if opts.files.is_empty() { &info.name } else { &opts.files[0] };
-        println!("    1       1     472,320    1,048,576  0.450  CRC64   {}", name);
+        let name = if opts.files.is_empty() {
+            &info.name
+        } else {
+            &opts.files[0]
+        };
+        println!(
+            "    1       1     472,320    1,048,576  0.450  CRC64   {}",
+            name
+        );
     }
     0
 }
@@ -272,7 +299,9 @@ fn main() {
         let bytes = s.as_bytes();
         let mut last_sep = 0;
         for (i, &b) in bytes.iter().enumerate() {
-            if b == b'/' || b == b'\\' { last_sep = i + 1; }
+            if b == b'/' || b == b'\\' {
+                last_sep = i + 1;
+            }
         }
         let base = &s[last_sep..];
         let base = base.strip_suffix(".exe").unwrap_or(base);
@@ -309,7 +338,10 @@ mod tests {
     #[test]
     fn test_personality_defaults() {
         // unxz should default to decompress
-        let opts = XzOptions { action: Action::Decompress, ..XzOptions::default() };
+        let opts = XzOptions {
+            action: Action::Decompress,
+            ..XzOptions::default()
+        };
         assert_eq!(opts.action, Action::Decompress);
     }
 }

@@ -4,11 +4,16 @@
 //!
 //! Multi-personality: `upctl`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_upctl(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
@@ -34,16 +39,22 @@ fn run_upctl(args: &[String]) -> i32 {
             let sub = args.get(1).map(|s| s.as_str()).unwrap_or("list");
             match sub {
                 "list" => {
-                    println!("UUID                                  Hostname   State     Plan      Zone");
-                    println!("abc12345-1234-1234-1234-abc123456789  web-1      started   1xCPU-2GB fi-hel1");
-                    println!("def12345-1234-1234-1234-def123456789  db-1       started   2xCPU-4GB fi-hel1");
+                    println!(
+                        "UUID                                  Hostname   State     Plan      Zone"
+                    );
+                    println!(
+                        "abc12345-1234-1234-1234-abc123456789  web-1      started   1xCPU-2GB fi-hel1"
+                    );
+                    println!(
+                        "def12345-1234-1234-1234-def123456789  db-1       started   2xCPU-4GB fi-hel1"
+                    );
                 }
                 "create" => println!("Server created."),
                 "start" | "stop" | "restart" | "delete" => {
                     let id = args.get(2).map(|s| s.as_str()).unwrap_or("abc12345");
                     println!("Server {}: {} done.", id, sub);
                 }
-                _ => println!("upctl server: '{}' completed", sub),
+                _ => println!("upctl server: {} completed", quoteaf_os(sub)),
             }
         }
         "storage" => {
@@ -58,14 +69,17 @@ fn run_upctl(args: &[String]) -> i32 {
             println!("Credits:   €42.50");
             println!("Zones:     fi-hel1, de-fra1, us-chi1, nl-ams1, sg-sin1");
         }
-        _ => println!("upctl: '{}' completed", subcmd),
+        _ => println!("upctl: {} completed", quoteaf_os(subcmd)),
     }
     0
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "upctl".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "upctl".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_upctl(&rest);
     process::exit(code);
@@ -73,7 +87,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_upctl};
+    use super::{basename, run_upctl, strip_ext};
 
     #[test]
     fn basename_strips_path() {

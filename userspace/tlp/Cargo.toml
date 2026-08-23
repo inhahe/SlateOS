@@ -3,3 +3,6 @@ name = "tlp"
 version = "0.1.0"
 edition = "2024"
 [dependencies]
+# tlp and tlp-rdw echo the rejected command name back, and that word is
+# whatever the user typed.
+quoting = { path = "../quoting" }

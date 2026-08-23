@@ -4,11 +4,16 @@
 //!
 //! Multi-personality: `psql`, `pg_dump`, `pg_restore`, `createdb`, `dropdb`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_psql(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -26,7 +31,10 @@ fn run_psql(args: &[String], _prog: &str) -> i32 {
         println!("  --version     Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("psql v16.1 (Slate OS, PostgreSQL)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("psql v16.1 (Slate OS, PostgreSQL)");
+        return 0;
+    }
     if args.iter().any(|a| a == "-l") {
         println!("                List of databases");
         println!("   Name    | Owner  | Encoding | Collation");
@@ -47,7 +55,10 @@ fn run_pg_dump(args: &[String], _prog: &str) -> i32 {
         println!("pg_dump v16.1 (Slate OS) — Dump a PostgreSQL database");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("pg_dump v16.1 (Slate OS)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("pg_dump v16.1 (Slate OS)");
+        return 0;
+    }
     println!("pg_dump: dumping database...");
     println!("  Tables: 24");
     println!("  Rows: 15,432");
@@ -60,7 +71,10 @@ fn run_pg_restore(args: &[String], _prog: &str) -> i32 {
         println!("pg_restore v16.1 (Slate OS) — Restore a PostgreSQL database");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("pg_restore v16.1 (Slate OS)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("pg_restore v16.1 (Slate OS)");
+        return 0;
+    }
     println!("pg_restore: restoring database...");
     0
 }
@@ -71,9 +85,12 @@ fn run_createdb(args: &[String], _prog: &str) -> i32 {
         println!("createdb v16.1 (Slate OS) — Create a new PostgreSQL database");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("createdb v16.1 (Slate OS)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("createdb v16.1 (Slate OS)");
+        return 0;
+    }
     if let Some(name) = args.iter().find(|a| !a.starts_with('-')) {
-        println!("createdb: database '{}' created", name);
+        println!("createdb: database {} created", quoteaf_os(name));
     } else {
         println!("createdb: no database name specified");
     }
@@ -86,9 +103,12 @@ fn run_dropdb(args: &[String], _prog: &str) -> i32 {
         println!("dropdb v16.1 (Slate OS) — Remove a PostgreSQL database");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("dropdb v16.1 (Slate OS)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("dropdb v16.1 (Slate OS)");
+        return 0;
+    }
     if let Some(name) = args.iter().find(|a| !a.starts_with('-')) {
-        println!("dropdb: database '{}' dropped", name);
+        println!("dropdb: database {} dropped", quoteaf_os(name));
     } else {
         println!("dropdb: no database name specified");
     }
@@ -97,7 +117,10 @@ fn run_dropdb(args: &[String], _prog: &str) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "psql".to_string());
+    let prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "psql".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = match prog.as_str() {
         "pg_dump" => run_pg_dump(&rest, &prog),
@@ -111,7 +134,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_psql};
+    use super::{basename, run_psql, strip_ext};
 
     #[test]
     fn basename_strips_path() {

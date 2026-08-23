@@ -4,6 +4,7 @@
 //!
 //! Single personality: `starship`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -13,7 +14,9 @@ fn run_starship(args: Vec<String>) -> i32 {
         "--help" | "-h" | "" => {
             println!("Usage: starship <COMMAND>");
             println!();
-            println!("The minimal, blazing-fast, and infinitely customizable prompt for any shell!");
+            println!(
+                "The minimal, blazing-fast, and infinitely customizable prompt for any shell!"
+            );
             println!();
             println!("Commands:");
             println!("  bug-report    Create a pre-populated GitHub issue");
@@ -63,7 +66,9 @@ fn run_starship(args: Vec<String>) -> i32 {
             0
         }
         "prompt" => {
-            println!("\u{1b}[36m~/projects/myapp\u{1b}[0m on \u{1b}[35m main\u{1b}[0m via \u{1b}[31m\u{1b}[0m v1.78.0");
+            println!(
+                "\u{1b}[36m~/projects/myapp\u{1b}[0m on \u{1b}[35m main\u{1b}[0m via \u{1b}[31m\u{1b}[0m v1.78.0"
+            );
             println!("\u{1b}[32m❯\u{1b}[0m ");
             0
         }
@@ -164,7 +169,7 @@ fn run_starship(args: Vec<String>) -> i32 {
                     eprintln!("Error: module name required");
                     return 1;
                 }
-                other => println!("(module '{}' — output depends on context)", other),
+                other => println!("(module {} — output depends on context)", quoteaf_os(other)),
             }
             0
         }
@@ -186,7 +191,7 @@ fn run_starship(args: Vec<String>) -> i32 {
             0
         }
         _ => {
-            eprintln!("Error: unknown command '{}'. See --help.", cmd);
+            eprintln!("Error: unknown command {}. See --help.", quoteaf_os(cmd));
             1
         }
     }
@@ -201,7 +206,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_starship};
+    use super::run_starship;
 
     #[test]
     fn help_exits_zero() {

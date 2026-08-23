@@ -2,3 +2,8 @@
 name = "nushell"
 version = "0.1.0"
 edition = "2024"
+
+[dependencies]
+# It echoes back the command string it ran and the script path it ran -- a
+# shell's argument is the least constrained text there is.
+quoting = { path = "../quoting" }

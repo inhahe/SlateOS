@@ -4,6 +4,7 @@
 //!
 //! Multi-personality: `potrace`, `mkbitmap`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -28,7 +29,9 @@ fn run_potrace(args: &[String]) -> i32 {
         println!("  -e, --eps             EPS output");
         println!("  -p, --postscript      PostScript output");
         println!("  -g, --pgm             PGM output");
-        println!("  -z, --turnpolicy P    Turn policy (black/white/right/left/minority/majority/random)");
+        println!(
+            "  -z, --turnpolicy P    Turn policy (black/white/right/left/minority/majority/random)"
+        );
         println!("  -t, --turdsize N      Suppress speckles up to N pixels");
         println!("  -a, --alphamax N      Corner threshold (0-1.33)");
         println!("  -O, --opttolerance N  Optimize paths (default 0.2)");
@@ -44,16 +47,24 @@ fn run_potrace(args: &[String]) -> i32 {
         return 0;
     }
 
-    let backend = args.windows(2)
+    let backend = args
+        .windows(2)
         .find(|w| w[0] == "-b" || w[0] == "--backend")
         .map(|w| w[1].as_str())
-        .unwrap_or(if args.iter().any(|a| a == "-s" || a == "--svg") { "svg" }
-            else if args.iter().any(|a| a == "-e" || a == "--eps") { "eps" }
-            else if args.iter().any(|a| a == "-p" || a == "--postscript") { "ps" }
-            else if args.iter().any(|a| a == "-g" || a == "--pgm") { "pgm" }
-            else { "svg" });
+        .unwrap_or(if args.iter().any(|a| a == "-s" || a == "--svg") {
+            "svg"
+        } else if args.iter().any(|a| a == "-e" || a == "--eps") {
+            "eps"
+        } else if args.iter().any(|a| a == "-p" || a == "--postscript") {
+            "ps"
+        } else if args.iter().any(|a| a == "-g" || a == "--pgm") {
+            "pgm"
+        } else {
+            "svg"
+        });
 
-    let files: Vec<&str> = args.iter()
+    let files: Vec<&str> = args
+        .iter()
         .filter(|a| !a.starts_with('-'))
         .map(|s| s.as_str())
         .collect();
@@ -64,7 +75,12 @@ fn run_potrace(args: &[String]) -> i32 {
     } else {
         for f in &files {
             let base = strip_ext(f);
-            println!("potrace: tracing '{}' → '{}.{}' ({})", f, base, backend, backend.to_uppercase());
+            println!(
+                "potrace: tracing {} → {} ({})",
+                quoteaf_os(f),
+                quoteaf_os(format!("{base}.{backend}")),
+                backend.to_uppercase()
+            );
         }
     }
     0
@@ -91,7 +107,8 @@ fn run_mkbitmap(args: &[String]) -> i32 {
         return 0;
     }
 
-    let files: Vec<&str> = args.iter()
+    let files: Vec<&str> = args
+        .iter()
         .filter(|a| !a.starts_with('-'))
         .map(|s| s.as_str())
         .collect();
@@ -101,7 +118,7 @@ fn run_mkbitmap(args: &[String]) -> i32 {
         println!("mkbitmap: output written to stdout");
     } else {
         for f in &files {
-            println!("mkbitmap: processing '{}' → PBM", f);
+            println!("mkbitmap: processing {} → PBM", quoteaf_os(f));
         }
     }
     0
@@ -109,7 +126,8 @@ fn run_mkbitmap(args: &[String]) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first()
+    let prog = args
+        .first()
         .map(|s| strip_ext(basename(s)).to_string())
         .unwrap_or_else(|| "potrace".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
@@ -123,7 +141,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_potrace};
+    use super::{basename, run_potrace, strip_ext};
 
     #[test]
     fn basename_strips_path() {

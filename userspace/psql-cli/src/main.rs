@@ -4,11 +4,16 @@
 //!
 //! Multi-personality: `psql`, `pg_dump`, `pg_restore`, `createdb`, `dropdb`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_psql(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help") {
@@ -43,14 +48,25 @@ fn run_psql(args: &[String]) -> i32 {
         println!(" template1 | postgres | UTF8     | en_US  | en_US   | en_US |");
         return 0;
     }
-    let cmd = args.windows(2).find(|w| w[0] == "-c").map(|w| w[1].as_str());
+    let cmd = args
+        .windows(2)
+        .find(|w| w[0] == "-c")
+        .map(|w| w[1].as_str());
     if let Some(c) = cmd {
         println!("{}", c);
         println!("(query executed)");
         return 0;
     }
-    let host = args.windows(2).find(|w| w[0] == "-h").map(|w| w[1].as_str()).unwrap_or("localhost");
-    let db = args.iter().find(|a| !a.starts_with('-')).map(|s| s.as_str()).unwrap_or("postgres");
+    let host = args
+        .windows(2)
+        .find(|w| w[0] == "-h")
+        .map(|w| w[1].as_str())
+        .unwrap_or("localhost");
+    let db = args
+        .iter()
+        .find(|a| !a.starts_with('-'))
+        .map(|s| s.as_str())
+        .unwrap_or("postgres");
     println!("psql (16.3)");
     println!("Type \"help\" for help.");
     println!();
@@ -71,10 +87,17 @@ fn run_pg_dump(args: &[String]) -> i32 {
         println!("  --data-only     Dump only data");
         return 0;
     }
-    let db = args.iter().find(|a| !a.starts_with('-')).map(|s| s.as_str()).unwrap_or("mydb");
-    let file = args.windows(2).find(|w| w[0] == "-f").map(|w| w[1].as_str());
+    let db = args
+        .iter()
+        .find(|a| !a.starts_with('-'))
+        .map(|s| s.as_str())
+        .unwrap_or("mydb");
+    let file = args
+        .windows(2)
+        .find(|w| w[0] == "-f")
+        .map(|w| w[1].as_str());
     if let Some(f) = file {
-        println!("pg_dump: dumping database '{}' to {}", db, f);
+        println!("pg_dump: dumping database {} to {}", quoteaf_os(db), f);
     } else {
         println!("-- PostgreSQL database dump");
         println!("-- Dumped from database version 16.3");
@@ -93,9 +116,21 @@ fn run_pg_restore(args: &[String]) -> i32 {
         println!("  -j N         Parallel jobs");
         return 0;
     }
-    let file = args.iter().find(|a| !a.starts_with('-')).map(|s| s.as_str()).unwrap_or("dump.sql");
-    let db = args.windows(2).find(|w| w[0] == "-d").map(|w| w[1].as_str()).unwrap_or("mydb");
-    println!("pg_restore: restoring {} into database '{}'", file, db);
+    let file = args
+        .iter()
+        .find(|a| !a.starts_with('-'))
+        .map(|s| s.as_str())
+        .unwrap_or("dump.sql");
+    let db = args
+        .windows(2)
+        .find(|w| w[0] == "-d")
+        .map(|w| w[1].as_str())
+        .unwrap_or("mydb");
+    println!(
+        "pg_restore: restoring {} into database {}",
+        file,
+        quoteaf_os(db)
+    );
     println!("pg_restore: complete.");
     0
 }
@@ -105,7 +140,11 @@ fn run_createdb(args: &[String]) -> i32 {
         println!("Usage: createdb [OPTIONS] DBNAME");
         return 0;
     }
-    let db = args.iter().find(|a| !a.starts_with('-')).map(|s| s.as_str()).unwrap_or("newdb");
+    let db = args
+        .iter()
+        .find(|a| !a.starts_with('-'))
+        .map(|s| s.as_str())
+        .unwrap_or("newdb");
     println!("createdb: database \"{}\" created.", db);
     0
 }
@@ -115,14 +154,21 @@ fn run_dropdb(args: &[String]) -> i32 {
         println!("Usage: dropdb [OPTIONS] DBNAME");
         return 0;
     }
-    let db = args.iter().find(|a| !a.starts_with('-')).map(|s| s.as_str()).unwrap_or("olddb");
+    let db = args
+        .iter()
+        .find(|a| !a.starts_with('-'))
+        .map(|s| s.as_str())
+        .unwrap_or("olddb");
     println!("dropdb: database \"{}\" dropped.", db);
     0
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "psql".to_string());
+    let prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "psql".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = match prog.as_str() {
         "pg_dump" => run_pg_dump(&rest),
@@ -136,7 +182,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_psql};
+    use super::{basename, run_psql, strip_ext};
 
     #[test]
     fn basename_strips_path() {

@@ -2,3 +2,7 @@
 name = "oh-my-posh-cli"
 version = "0.1.0"
 edition = "2024"
+
+[dependencies]
+# The font name it installs and the rejected command name are argv words.
+quoting = { path = "../quoting" }

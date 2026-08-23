@@ -4,11 +4,16 @@
 //!
 //! Multi-personality: `otel-cli`, `otelcol`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_otel_cli(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
@@ -31,11 +36,21 @@ fn run_otel_cli(args: &[String]) -> i32 {
     match subcmd {
         "version" | "--version" => println!("otel-cli 0.4.5"),
         "span" => {
-            let name = args.windows(2).find(|w| w[0] == "--name")
-                .map(|w| w[1].as_str()).unwrap_or("my-span");
-            let service = args.windows(2).find(|w| w[0] == "--service")
-                .map(|w| w[1].as_str()).unwrap_or("my-service");
-            println!("Sending span '{}' for service '{}'", name, service);
+            let name = args
+                .windows(2)
+                .find(|w| w[0] == "--name")
+                .map(|w| w[1].as_str())
+                .unwrap_or("my-span");
+            let service = args
+                .windows(2)
+                .find(|w| w[0] == "--service")
+                .map(|w| w[1].as_str())
+                .unwrap_or("my-service");
+            println!(
+                "Sending span {} for service {}",
+                quoteaf_os(name),
+                quoteaf_os(service)
+            );
             println!("Trace ID: abc123def456789012345678901234");
             println!("Span ID:  abc123def4567890");
             println!("Sent successfully.");
@@ -46,14 +61,17 @@ fn run_otel_cli(args: &[String]) -> i32 {
             println!("Wrapped in span, sent to collector.");
         }
         "status" => {
-            let endpoint = args.windows(2).find(|w| w[0] == "--endpoint")
-                .map(|w| w[1].as_str()).unwrap_or("localhost:4317");
+            let endpoint = args
+                .windows(2)
+                .find(|w| w[0] == "--endpoint")
+                .map(|w| w[1].as_str())
+                .unwrap_or("localhost:4317");
             println!("Checking collector at {}...", endpoint);
             println!("Status: OK");
             println!("  Receivers: otlp (grpc, http)");
             println!("  Exporters: otlp, prometheus");
         }
-        _ => println!("otel-cli: '{}' completed", subcmd),
+        _ => println!("otel-cli: {} completed", quoteaf_os(subcmd)),
     }
     0
 }
@@ -70,8 +88,11 @@ fn run_otelcol(args: &[String]) -> i32 {
         println!("otelcol version 0.104.0");
         return 0;
     }
-    let config = args.windows(2).find(|w| w[0] == "--config")
-        .map(|w| w[1].as_str()).unwrap_or("otel-config.yaml");
+    let config = args
+        .windows(2)
+        .find(|w| w[0] == "--config")
+        .map(|w| w[1].as_str())
+        .unwrap_or("otel-config.yaml");
     println!("Starting OpenTelemetry Collector with config: {}", config);
     println!("  Receivers: [otlp]");
     println!("  Processors: [batch]");
@@ -82,7 +103,10 @@ fn run_otelcol(args: &[String]) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "otel-cli".to_string());
+    let prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "otel-cli".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = match prog.as_str() {
         "otelcol" => run_otelcol(&rest),
@@ -93,7 +117,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_otel_cli};
+    use super::{basename, run_otel_cli, strip_ext};
 
     #[test]
     fn basename_strips_path() {

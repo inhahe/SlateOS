@@ -18,13 +18,10 @@ got both wrong:
     means it cannot be either of them. Calls on `self` are likewise assumed to
     be inherent methods.
 
-2.  **Attributing a site to its enclosing function -- all of them.** Two
-    earlier versions of this script got this wrong in opposite directions.
-    Tracking brace depth is fragile: raw strings, char literals and macro
-    bodies all perturb the count, and one slip silently reattributes hundreds
-    of lines -- it mis-filed every site in `oci.rs::self_test` as top-level.
-    Falling back to the *nearest preceding* `fn` is no better, because these
-    self-tests routinely define helpers inside themselves:
+2.  **Attributing a site to its enclosing function -- all of them.** Three
+    versions of this script have now existed, and the first two got this wrong
+    in opposite directions. Falling back to the *nearest preceding* `fn` fails
+    because these self-tests routinely define helpers inside themselves:
 
         pub fn self_test() {
             fn case(...) { ... }        // <- nearest preceding fn
@@ -34,15 +31,44 @@ got both wrong:
     Nearest-preceding blames `case`, which is not named `*test*`, so all 25
     sites across five files were reported as production. What matters is not
     the nearest enclosing `fn` but whether *any* enclosing `fn` is a test, so
-    this version keeps a **stack** of open functions, using indentation as the
-    nesting proxy. That is reliable here because the tree is rustfmt-formatted:
-    a function's body is indented strictly further than its `fn` line, and its
-    closing `}` sits at exactly that line's indent.
+    the second version kept a **stack** of open functions, using indentation as
+    the nesting proxy.
+
+    That worked, but only because the tree happens to be rustfmt-formatted --
+    a precondition this script asserted and nothing checked. It is now shared
+    with `scripts/rust_scopes.py`, which tracks brace depth through a lexer
+    that understands strings, raw strings, char literals and comments, so it
+    does not care how the file is laid out. Brace depth was rejected when the
+    second version was written, on the grounds that "raw strings, char literals
+    and macro bodies all perturb the count" -- true of a naive counter, which is
+    why the shared one is not naive, and why it is checked: it closes every
+    scope it opens across all 800 files of `kernel/src`, and a single
+    desynchronisation anywhere would leave a dangling scope at some file's EOF.
+
+    The two methods were run against each other over all 4407 panicking sites
+    in the tree before the switch, and agreed on every one.
 
 A site is TEST if **any** function on the enclosing stack is named `*test*`
 (which covers the `self_test` / `*_self_test` convention this kernel uses for
 its boot suites), or if it carries `#[test]` / sits under `#[cfg(test)]`.
 Doc-comment examples are skipped -- they are prose, not code.
+
+3.  **A name is a proxy for "is this a test", and a few production functions
+    trip it.** `kshell::eval_test` is the shell's `test` / `[` builtin: it
+    parses a user-supplied expression and is production code by any measure,
+    but it ends in `_test` and so was silently exempt. Nothing hides behind it
+    today -- it has no sites -- which is precisely why it is worth naming now
+    rather than after one appears. `NOT_TESTS` below is the list of such
+    functions, and adding to it is a deliberate, reviewable act.
+
+    The name is only a proxy for the real question, which is whether the
+    function is reachable from anything but the boot self-test suite. Answering
+    *that* needs a call graph, and it is not obviously worth one: the convention
+    is followed almost everywhere, and the exceptions fit on one screen. But the
+    proxy cannot separate `eval_test` (a shell builtin) from `tx_datapath_test`
+    (a driver self-test) on the strength of the name alone, so the list is not
+    optional -- without it the gate has a hole shaped like anything an author
+    happens to call `*_test`.
 
 Usage:
     python scripts/scan-unwrap.py [path ...]        # default: kernel/src
@@ -57,16 +83,18 @@ import re
 import sys
 from pathlib import Path
 
-FN_RE = re.compile(
-    r"^(\s*)(?:pub(?:\([^)]*\))?\s+)?"
-    r"(?:default\s+|const\s+|async\s+|unsafe\s+|extern\s+\"[^\"]*\"\s+)*"
-    r"fn\s+([A-Za-z0-9_]+)"
-)
-CFG_TEST_MOD_RE = re.compile(r"#\[cfg\(test\)\]")
+import rust_scopes
+
 SITE_RE = re.compile(r"\.(unwrap|expect)\s*\(")
 # `.expect(...)?` or `.unwrap()?` -- returns a Result, so not the panicking one.
 FALLIBLE_RE = re.compile(r"\.(?:unwrap|expect)\s*\([^()]*\)\s*\?")
 SELF_CALL_RE = re.compile(r"\bself\.(?:unwrap|expect)\s*\(")
+
+# The "is this test code?" policy -- the name rule and the list of production
+# functions that collide with it -- lives in `rust_scopes`, shared with
+# `clippy-sites.py`. Two copies of it would disagree the first time one was
+# edited, and this one gates the build.
+is_test_name = rust_scopes.is_test_name
 
 
 def classify_line(line: str) -> tuple[bool, str]:
@@ -85,8 +113,8 @@ def classify_line(line: str) -> tuple[bool, str]:
     return True, ""
 
 
-def _top(stack: list[tuple[int, str, bool]]) -> tuple[str, bool]:
-    """The name to report for a site, and whether *any* enclosing fn is a test.
+def _top(stack: list[rust_scopes.Scope]) -> tuple[str, bool]:
+    """The name to report for a site, and whether *any* enclosing scope is a test.
 
     The name is the innermost function -- that is the useful one to print when
     going to fix a site -- but the test verdict is taken over the whole stack,
@@ -95,7 +123,8 @@ def _top(stack: list[tuple[int, str, bool]]) -> tuple[str, bool]:
     """
     if not stack:
         return "<top level>", False
-    return stack[-1][1], any(is_test for _, _, is_test in stack)
+    is_test = any(is_test_name(s.name) or s.cfg_test for s in stack)
+    return stack[-1].name, is_test
 
 
 def scan_file(path: Path, show_skipped: bool = False):
@@ -108,54 +137,16 @@ def scan_file(path: Path, show_skipped: bool = False):
 
     lines = text.splitlines()
 
-    # Pass 1: for every line, the stack of `fn`s enclosing it.
-    #
-    # The stack is keyed by indentation. A `fn` at indent I owns every following
-    # line indented further than I, and is closed by the `}` at indent I. So on
-    # each line we first pop any function the line has fallen out of, then push
-    # if the line opens a new one. The `startswith("}")` distinction matters:
-    # a line at indent exactly I closes the function only if it is that brace --
-    # a multi-line signature's `) -> Foo {` also sits at indent I and must not.
-    #
-    # `#[cfg(test)]` on a *module* marks everything after it in that module.
-    enclosing_at: list[tuple[str, bool]] = []  # index = lineno - 1
-    stack: list[tuple[int, str, bool]] = []  # (indent, name, is_own_name_test)
-    saw_cfg_test = False
-    cfg_test_mod_line = None
-    for i, raw in enumerate(lines, start=1):
-        stripped = raw.strip()
-        if stripped:
-            indent = len(raw) - len(raw.lstrip())
-            if stripped.startswith("}"):
-                while stack and indent <= stack[-1][0]:
-                    stack.pop()
-            else:
-                while stack and indent < stack[-1][0]:
-                    stack.pop()
-
-        if CFG_TEST_MOD_RE.search(raw):
-            saw_cfg_test = True
-            if re.search(r"\bmod\b", lines[i] if i < len(lines) else ""):
-                cfg_test_mod_line = i
-            enclosing_at.append(_top(stack))
-            continue
-        if stripped.startswith("#["):
-            # Other attributes do not clear the pending cfg(test).
-            enclosing_at.append(_top(stack))
-            continue
-
-        m = FN_RE.match(raw)
-        if m:
-            indent, name = len(m.group(1)), m.group(2)
-            while stack and indent <= stack[-1][0]:
-                stack.pop()
-            stack.append((indent, name, saw_cfg_test or "test" in name.lower()))
-        if stripped:
-            saw_cfg_test = False
-        enclosing_at.append(_top(stack))
+    # Pass 1: for every line, the stack of items enclosing it. `rust_scopes`
+    # tracks `mod` as well as `fn`, so a `#[cfg(test)] mod tests` is a scope
+    # that opens and *closes* rather than a line number past which everything
+    # is assumed to be test code -- which is what this script used to do, and
+    # which was wrong for any file with code after such a module.
+    scopes = rust_scopes.scope_stack_per_line(lines)
 
     def enclosing(lineno: int) -> tuple[str, bool]:
-        return enclosing_at[lineno - 1]
+        idx = lineno - 1
+        return _top(scopes[idx] if 0 <= idx < len(scopes) else [])
 
     findings = []
     skipped = []
@@ -170,12 +161,7 @@ def scan_file(path: Path, show_skipped: bool = False):
         name, is_test = enclosing(i)
         if is_test:
             if show_skipped:
-                skipped.append((i, f"in test fn `{name}`", raw.strip()))
-            continue
-        # A cfg(test) module past this point makes everything in it a test.
-        if cfg_test_mod_line is not None and i > cfg_test_mod_line:
-            if show_skipped:
-                skipped.append((i, "in #[cfg(test)] mod", raw.strip()))
+                skipped.append((i, f"in test scope `{name}`", raw.strip()))
             continue
         findings.append((i, name, raw.strip()))
 
@@ -216,7 +202,12 @@ def main() -> int:
     for count, f in sorted(per_file, reverse=True):
         print(f"{count:5d}  {f}")
     print(f"\n{total} production site(s) across {len(per_file)} file(s)")
-    return 0
+    # Non-zero on findings, so `boot-test.sh` can gate on it. This was
+    # documented from the start and returned 0 unconditionally anyway, which
+    # made every caller's `if scan-unwrap.py; then` succeed regardless -- the
+    # same shape of defect as the `validate()` in `mm/kvspace.rs` that was
+    # documented "call once at boot" and called only from a self-test.
+    return 1 if total else 0
 
 
 if __name__ == "__main__":

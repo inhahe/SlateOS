@@ -10,13 +10,16 @@
 //! takes, and each is pinned by a test because none of them is recoverable
 //! from the code alone.
 //!
-//! 1. **The accent marks position, and position only.** Three things here say
-//!    "this is the one in force" — the selected tab, the bar beside the
-//!    current language, and the current currency's row — so all three take
-//!    `p.accent`. Nothing else does. Note this module cannot borrow the
-//!    taskbar's "exactly one thing carries the accent" test: three accented
-//!    marks are legitimately on screen at once, on three different axes, so
-//!    the check has to be a per-site table plus a count.
+//! 1. **The accent marks position, and position only.** Three *axes* here have
+//!    a "this is the one in force" mark, and each takes `p.accent`: which tab
+//!    is open, which language is the system language (marked twice — a bar
+//!    beside the row and the row's own name, which is one mark drawn in two
+//!    places), and which currency is the default. Nothing else does. Note
+//!    this module cannot borrow the taskbar's "exactly one thing carries the
+//!    accent" test: the axes are independent, so more than one accented mark
+//!    is legitimately on screen at once. The check therefore has to be a
+//!    per-site table plus a per-tab count — three on the Language tab, one on
+//!    Formats (its tab and nothing else), two on Region.
 //! 2. **The "Partial" badge is a *property of the data*, not a position.** It
 //!    reports that a translation is incomplete, which is true regardless of
 //!    what the user has selected or what accent they chose, so it keeps
@@ -1542,12 +1545,104 @@ mod tests {
         );
     }
 
-    /// Judgement 1: three things mark position, and they are the only three.
+    /// Every site, named one at a time, in the role this module claims for it.
+    ///
+    /// The sweep above proves only *membership*: a panel painted `surface2`
+    /// instead of `base` is still "from the palette", and a card that swapped
+    /// rungs with a list row still draws two legal colours. n source sites
+    /// need n assertions, so this is that table. Every command is selected by
+    /// a size, a y or a literal string the renderer writes — never by the
+    /// colour under test, which would make the expectation a restatement of
+    /// the code and unable to fail.
+    #[test]
+    fn every_site_draws_the_role_it_claims() {
+        for light in [false, true] {
+            let p = accented(light);
+            let by_tab = every_tab(&p);
+            let lang = &by_tab[0].1;
+
+            assert_eq!(fills_sized(lang, 600.0, 800.0), vec![p.base], "panel");
+            assert_eq!(text_color(lang, "Language & Region"), p.text, "title");
+
+            // The current-language card sits one rung above the list rows it
+            // summarises, so it is `surface1` while an ordinary row is
+            // `surface0`.
+            assert_eq!(fills_sized(lang, 552.0, 50.0), vec![p.surface1], "card");
+            assert_eq!(
+                text_color(lang, "Current: English (United States)"),
+                p.text,
+                "card title"
+            );
+            assert_eq!(
+                text_color(lang, "English (en-US)"),
+                p.subtext0,
+                "the card's native name is secondary to the card's title"
+            );
+
+            assert_eq!(
+                fills_sized(lang, 552.0, 30.0),
+                vec![p.surface0],
+                "search box"
+            );
+
+            // Indexed by position, not counted by set: the multiset
+            // {surface0, surface0, surface1} is the same whichever row is
+            // raised, so a permutation of the ladder would pass a count.
+            // Row 2 is the selected one; row 0 is merely the *current* one,
+            // which is marked by hue rather than by rung.
+            assert_eq!(
+                fills_sized(lang, 552.0, 40.0),
+                vec![p.surface0, p.surface0, p.surface1],
+                "only the selected row is raised, and it is the third"
+            );
+            assert_eq!(
+                text_color(lang, "Polish (Poland)"),
+                p.text,
+                "a row that is neither current nor selected"
+            );
+            assert_eq!(text_color(lang, "Polski"), p.subtext0, "row native name");
+            assert_eq!(
+                text_color(lang, "3 languages available"),
+                p.overlay0,
+                "the count line is the dimmest thing on the tab"
+            );
+
+            // The Region tab: both heading rungs, a label/value pair, and the
+            // currency rows, whose current entry is raised the same way.
+            let region = &by_tab[2].1;
+            assert_eq!(text_color(region, "Measurement"), p.lavender, "heading");
+            assert_eq!(
+                text_color(region, "Available Currencies"),
+                p.subtext1,
+                "the sub-heading rung, below the 15pt lavender one"
+            );
+            assert_eq!(text_color(region, "System"), p.subtext0, "label");
+            assert_eq!(
+                text_color(region, "Metric (kg, km, \u{00b0}C)"),
+                p.text,
+                "value"
+            );
+            let rows = fills_sized(region, 552.0, 28.0);
+            assert_eq!(rows.len(), 6, "six currency rows");
+            assert_eq!(
+                rows[0], p.surface1,
+                "USD is the default currency, so its row is the raised one"
+            );
+            assert!(
+                rows[1..].iter().all(|c| *c == p.surface0),
+                "every other currency row sits on the base rung"
+            );
+        }
+    }
+
+    /// Judgement 1: three axes mark position, and they are the only three.
     ///
     /// This module cannot use the taskbar's "exactly one thing carries the
     /// accent" check — a selected tab, a current language and a current
-    /// currency are three different axes and are legitimately accented at the
-    /// same time. So the accent is counted per site instead.
+    /// currency are three independent axes and are legitimately accented at
+    /// the same time. So the accent is counted per *tab* instead, and each
+    /// tab's count is different, which is what stops the three counts from
+    /// being one weak assertion repeated.
     #[test]
     fn only_the_three_position_marks_carry_the_accent() {
         for light in [false, true] {
@@ -1580,6 +1675,25 @@ mod tests {
                     .count(),
                 1,
                 "nothing on the Formats tab is a selection"
+            );
+
+            // The Region tab has one: the default currency's row. Checked by
+            // its text as well as by the count, because a count alone cannot
+            // tell "the right row is accented" from "some other row is".
+            let region = &by_tab[2].1;
+            assert_eq!(
+                text_color(region, "$ USD ($1234.56)"),
+                p.accent,
+                "the default currency's row marks which one prices are shown in"
+            );
+            let on_region = all_colors(region)
+                .iter()
+                .filter(|c| **c == p.accent)
+                .count();
+            assert_eq!(
+                on_region, 2,
+                "the Region tab should accent exactly its own tab and the \
+                 current currency's row — found {on_region}"
             );
         }
     }

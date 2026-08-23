@@ -74,6 +74,7 @@ WID = "gui/desktop/src/widgets.rs"
 SND = "gui/desktop/src/sound_settings.rs"
 OSD = "gui/desktop/src/osd.rs"
 PRIV = "gui/desktop/src/privacy_settings.rs"
+PRINTMGR = "gui/desktop/src/print_manager.rs"
 
 # (name, file, [(old, new), ...], [packages], [tests expected to fail])
 DEFECTS = [
@@ -7171,6 +7172,511 @@ DEFECTS = [
         [
             'every_choice_this_panel_makes_hands_over_the_role_it_claims',
             'the_fixtures_take_every_branch_this_panel_has',
+        ],
+    ),
+    # ---- print_manager.rs (module 26 of 49) ----
+    (
+        'AAAAAAAAAAAAAAAAAAAAAAAAAAAA: the dialog box is frozen back to Mocha base',
+        PRINTMGR,
+        [
+            ('            height: dh,\n            color: p.base,',
+             '            height: dh,\n            color: Color::from_hex(0x1E1E2E),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_dialog_draws_comes_from_its_palette',
+            'every_rectangle_this_dialog_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        'BBBBBBBBBBBBBBBBBBBBBBBBBBBB: the dialog box sinks to the recessed role',
+        PRINTMGR,
+        [
+            ('            height: dh,\n            color: p.base,',
+             '            height: dh,\n            color: p.mantle,'),
+        ],
+        ["desktop"],
+        [
+            'every_rectangle_this_dialog_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        'CCCCCCCCCCCCCCCCCCCCCCCCCCCC: the title is frozen back to Mocha text',
+        PRINTMGR,
+        [
+            ('            font_size: 16.0,\n            color: p.text,',
+             '            font_size: 16.0,\n            color: Color::from_hex(0xCDD6F4),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_dialog_draws_comes_from_its_palette',
+            'every_text_this_dialog_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        'DDDDDDDDDDDDDDDDDDDDDDDDDDDD: the title drops to secondary text',
+        PRINTMGR,
+        [
+            ('            font_size: 16.0,\n            color: p.text,',
+             '            font_size: 16.0,\n            color: p.subtext0,'),
+        ],
+        ["desktop"],
+        [
+            'every_text_this_dialog_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        'EEEEEEEEEEEEEEEEEEEEEEEEEEEE: the document name is promoted to primary text',
+        PRINTMGR,
+        [
+            ('            text: format!("Document: {}", self.document_name),\n            font_size: 12.0,\n            color: p.subtext0,',
+             '            text: format!("Document: {}", self.document_name),\n            font_size: 12.0,\n            color: p.text,'),
+        ],
+        ["desktop"],
+        [
+            'every_text_this_dialog_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        'FFFFFFFFFFFFFFFFFFFFFFFFFFFF: the document name is frozen back to Mocha subtext',
+        PRINTMGR,
+        [
+            ('            text: format!("Document: {}", self.document_name),\n            font_size: 12.0,\n            color: p.subtext0,',
+             '            text: format!("Document: {}", self.document_name),\n            font_size: 12.0,\n            color: Color::from_hex(0xA6ADC8),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_dialog_draws_comes_from_its_palette',
+            'every_text_this_dialog_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        'GGGGGGGGGGGGGGGGGGGGGGGGGGGG: the printer caption dims to secondary text',
+        PRINTMGR,
+        [
+            ('            text: "Printer:".to_string(),\n            font_size: 12.0,\n            color: p.text,',
+             '            text: "Printer:".to_string(),\n            font_size: 12.0,\n            color: p.subtext0,'),
+        ],
+        ["desktop"],
+        [
+            'every_text_this_dialog_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        "HHHHHHHHHHHHHHHHHHHHHHHHHHHH: the selected printer's name stops following the accent",
+        PRINTMGR,
+        [
+            ('            text: printer_name.to_string(),\n            font_size: 12.0,\n            color: p.accent,',
+             '            text: printer_name.to_string(),\n            font_size: 12.0,\n            color: p.blue,'),
+        ],
+        ["desktop"],
+        [
+            'every_text_this_dialog_draws_is_in_the_role_it_claims',
+            'nothing_but_the_selection_and_the_default_action_moves_with_the_accent',
+        ],
+    ),
+    (
+        "IIIIIIIIIIIIIIIIIIIIIIIIIIII: the selected printer's name is drawn as ordinary body text",
+        PRINTMGR,
+        [
+            ('            text: printer_name.to_string(),\n            font_size: 12.0,\n            color: p.accent,',
+             '            text: printer_name.to_string(),\n            font_size: 12.0,\n            color: p.text,'),
+        ],
+        ["desktop"],
+        [
+            'every_text_this_dialog_draws_is_in_the_role_it_claims',
+            'nothing_but_the_selection_and_the_default_action_moves_with_the_accent',
+        ],
+    ),
+    (
+        "JJJJJJJJJJJJJJJJJJJJJJJJJJJJ: the printer field's fill takes the accent as well as its label",
+        PRINTMGR,
+        [
+            ('            height: 24.0,\n            color: p.surface0,',
+             '            height: 24.0,\n            color: p.accent,'),
+        ],
+        ["desktop"],
+        [
+            'every_rectangle_this_dialog_draws_is_in_the_role_it_claims',
+            'nothing_but_the_selection_and_the_default_action_moves_with_the_accent',
+        ],
+    ),
+    (
+        'KKKKKKKKKKKKKKKKKKKKKKKKKKKK: the printer field is frozen back to Mocha surface0',
+        PRINTMGR,
+        [
+            ('            height: 24.0,\n            color: p.surface0,',
+             '            height: 24.0,\n            color: Color::from_hex(0x313244),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_dialog_draws_comes_from_its_palette',
+            'every_rectangle_this_dialog_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        'LLLLLLLLLLLLLLLLLLLLLLLLLLLL: every settings label dims to secondary text',
+        PRINTMGR,
+        [
+            ('                font_size: 12.0,\n                color: p.text,',
+             '                font_size: 12.0,\n                color: p.subtext0,'),
+        ],
+        ["desktop"],
+        [
+            'every_text_this_dialog_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        'MMMMMMMMMMMMMMMMMMMMMMMMMMMM: every settings value is promoted to primary text',
+        PRINTMGR,
+        [
+            ('                text: value.clone(),\n                font_size: 12.0,\n                color: p.subtext0,',
+             '                text: value.clone(),\n                font_size: 12.0,\n                color: p.text,'),
+        ],
+        ["desktop"],
+        [
+            'every_text_this_dialog_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        'NNNNNNNNNNNNNNNNNNNNNNNNNNNN: a validation error is reported in the accent instead of red',
+        PRINTMGR,
+        [
+            ('                font_size: 11.0,\n                color: p.red,',
+             '                font_size: 11.0,\n                color: p.accent,'),
+        ],
+        ["desktop"],
+        [
+            'every_text_this_dialog_draws_is_in_the_role_it_claims',
+            'nothing_but_the_selection_and_the_default_action_moves_with_the_accent',
+        ],
+    ),
+    (
+        'OOOOOOOOOOOOOOOOOOOOOOOOOOOO: a validation error is frozen back to Mocha red',
+        PRINTMGR,
+        [
+            ('                font_size: 11.0,\n                color: p.red,',
+             '                font_size: 11.0,\n                color: Color::from_hex(0xF38BA8),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_dialog_draws_comes_from_its_palette',
+            'every_text_this_dialog_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        'PPPPPPPPPPPPPPPPPPPPPPPPPPPP: a validation error is drawn as ordinary body text',
+        PRINTMGR,
+        [
+            ('                font_size: 11.0,\n                color: p.red,',
+             '                font_size: 11.0,\n                color: p.text,'),
+        ],
+        ["desktop"],
+        [
+            'every_text_this_dialog_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        'QQQQQQQQQQQQQQQQQQQQQQQQQQQQ: the Print button stops being the accent-coloured default action',
+        PRINTMGR,
+        [
+            ('            height: 28.0,\n            color: p.accent,',
+             '            height: 28.0,\n            color: p.blue,'),
+        ],
+        ["desktop"],
+        [
+            'every_rectangle_this_dialog_draws_is_in_the_role_it_claims',
+            'nothing_but_the_selection_and_the_default_action_moves_with_the_accent',
+        ],
+    ),
+    (
+        'RRRRRRRRRRRRRRRRRRRRRRRRRRRR: the Print button is frozen back to Mocha blue',
+        PRINTMGR,
+        [
+            ('            height: 28.0,\n            color: p.accent,',
+             '            height: 28.0,\n            color: Color::from_hex(0x89B4FA),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_dialog_draws_comes_from_its_palette',
+            'every_rectangle_this_dialog_draws_is_in_the_role_it_claims',
+            'nothing_but_the_selection_and_the_default_action_moves_with_the_accent',
+        ],
+    ),
+    (
+        "SSSSSSSSSSSSSSSSSSSSSSSSSSSS: the Print button's ink is named rather than derived from its fill",
+        PRINTMGR,
+        [
+            ('            text: "Print".to_string(),\n            font_size: 12.0,\n            color: p.on_accent(),',
+             '            text: "Print".to_string(),\n            font_size: 12.0,\n            color: p.base,'),
+        ],
+        ["desktop"],
+        [
+            'every_text_this_dialog_draws_is_in_the_role_it_claims',
+            'nothing_but_the_selection_and_the_default_action_moves_with_the_accent',
+            'the_default_action_ink_stays_readable_in_both_modes',
+        ],
+    ),
+    (
+        "TTTTTTTTTTTTTTTTTTTTTTTTTTTT: the Print button's ink is frozen back to Mocha base",
+        PRINTMGR,
+        [
+            ('            text: "Print".to_string(),\n            font_size: 12.0,\n            color: p.on_accent(),',
+             '            text: "Print".to_string(),\n            font_size: 12.0,\n            color: Color::from_hex(0x1E1E2E),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_dialog_draws_comes_from_its_palette',
+            'every_text_this_dialog_draws_is_in_the_role_it_claims',
+            'nothing_but_the_selection_and_the_default_action_moves_with_the_accent',
+            'the_default_action_ink_stays_readable_in_both_modes',
+        ],
+    ),
+    (
+        'UUUUUUUUUUUUUUUUUUUUUUUUUUUU: the Cancel button is dressed up as a second default action',
+        PRINTMGR,
+        [
+            ('            width: 80.0,\n            height: 28.0,\n            color: p.surface1,',
+             '            width: 80.0,\n            height: 28.0,\n            color: p.accent,'),
+        ],
+        ["desktop"],
+        [
+            'every_rectangle_this_dialog_draws_is_in_the_role_it_claims',
+            'nothing_but_the_selection_and_the_default_action_moves_with_the_accent',
+        ],
+    ),
+    (
+        'VVVVVVVVVVVVVVVVVVVVVVVVVVVV: the Cancel button is frozen back to Mocha surface1',
+        PRINTMGR,
+        [
+            ('            width: 80.0,\n            height: 28.0,\n            color: p.surface1,',
+             '            width: 80.0,\n            height: 28.0,\n            color: Color::from_hex(0x45475A),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_dialog_draws_comes_from_its_palette',
+            'every_rectangle_this_dialog_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        'WWWWWWWWWWWWWWWWWWWWWWWWWWWW: the Cancel label is inked as though it sat on the accent',
+        PRINTMGR,
+        [
+            ('            text: "Cancel".to_string(),\n            font_size: 12.0,\n            color: p.text,',
+             '            text: "Cancel".to_string(),\n            font_size: 12.0,\n            color: p.on_accent(),'),
+        ],
+        ["desktop"],
+        [
+            'every_text_this_dialog_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        'XXXXXXXXXXXXXXXXXXXXXXXXXXXX: an offline printer stops reporting itself in red',
+        PRINTMGR,
+        [
+            ('        if !self.online {\n            p.red',
+             '        if !self.online {\n            p.yellow'),
+        ],
+        ["desktop"],
+        [
+            'every_choice_this_module_makes_hands_over_the_role_it_claims',
+        ],
+    ),
+    (
+        'YYYYYYYYYYYYYYYYYYYYYYYYYYYY: an offline printer reports its state in the accent',
+        PRINTMGR,
+        [
+            ('        if !self.online {\n            p.red',
+             '        if !self.online {\n            p.accent'),
+        ],
+        ["desktop"],
+        [
+            'every_choice_this_module_makes_hands_over_the_role_it_claims',
+        ],
+    ),
+    (
+        'ZZZZZZZZZZZZZZZZZZZZZZZZZZZZ: a busy printer is reported as ready',
+        PRINTMGR,
+        [
+            ('        } else if self.queue_count > 0 {\n            p.yellow',
+             '        } else if self.queue_count > 0 {\n            p.green'),
+        ],
+        ["desktop"],
+        [
+            'every_choice_this_module_makes_hands_over_the_role_it_claims',
+        ],
+    ),
+    (
+        'AAAAAAAAAAAAAAAAAAAAAAAAAAAAA: a ready printer is reported as offline',
+        PRINTMGR,
+        [
+            ('        } else {\n            p.green\n        }\n    }',
+             '        } else {\n            p.red\n        }\n    }'),
+        ],
+        ["desktop"],
+        [
+            'every_choice_this_module_makes_hands_over_the_role_it_claims',
+        ],
+    ),
+    (
+        'BBBBBBBBBBBBBBBBBBBBBBBBBBBBB: a queued job follows the accent instead of meaning queued',
+        PRINTMGR,
+        [
+            ('            Self::Queued => p.blue,',
+             '            Self::Queued => p.accent,'),
+        ],
+        ["desktop"],
+        [
+            'every_choice_this_module_makes_hands_over_the_role_it_claims',
+        ],
+    ),
+    (
+        'CCCCCCCCCCCCCCCCCCCCCCCCCCCCC: a queued job is frozen back to Mocha blue',
+        PRINTMGR,
+        [
+            ('            Self::Queued => p.blue,',
+             '            Self::Queued => Color::from_hex(0x89B4FA),'),
+        ],
+        ["desktop"],
+        [
+            'every_choice_this_module_makes_hands_over_the_role_it_claims',
+        ],
+    ),
+    (
+        'DDDDDDDDDDDDDDDDDDDDDDDDDDDDD: a queued job is coloured as though it had finished',
+        PRINTMGR,
+        [
+            ('            Self::Queued => p.blue,',
+             '            Self::Queued => p.green,'),
+        ],
+        ["desktop"],
+        [
+            'every_choice_this_module_makes_hands_over_the_role_it_claims',
+            'every_state_a_job_can_be_in_stays_apart_from_every_other',
+        ],
+    ),
+    (
+        'EEEEEEEEEEEEEEEEEEEEEEEEEEEEE: a printing job is indistinguishable from a queued one',
+        PRINTMGR,
+        [
+            ('            Self::Printing => p.peach,',
+             '            Self::Printing => p.blue,'),
+        ],
+        ["desktop"],
+        [
+            'every_choice_this_module_makes_hands_over_the_role_it_claims',
+            'every_state_a_job_can_be_in_stays_apart_from_every_other',
+        ],
+    ),
+    (
+        'FFFFFFFFFFFFFFFFFFFFFFFFFFFFF: a paused job is indistinguishable from a cancelled one',
+        PRINTMGR,
+        [
+            ('            Self::Paused => p.yellow,',
+             '            Self::Paused => p.overlay0,'),
+        ],
+        ["desktop"],
+        [
+            'every_choice_this_module_makes_hands_over_the_role_it_claims',
+            'every_state_a_job_can_be_in_stays_apart_from_every_other',
+        ],
+    ),
+    (
+        'GGGGGGGGGGGGGGGGGGGGGGGGGGGGG: a completed job is reported in the red of a failed one',
+        PRINTMGR,
+        [
+            ('            Self::Completed => p.green,',
+             '            Self::Completed => p.red,'),
+        ],
+        ["desktop"],
+        [
+            'every_choice_this_module_makes_hands_over_the_role_it_claims',
+            'every_state_a_job_can_be_in_stays_apart_from_every_other',
+        ],
+    ),
+    (
+        'HHHHHHHHHHHHHHHHHHHHHHHHHHHHH: a failed job is reported in the green of a completed one',
+        PRINTMGR,
+        [
+            ('            Self::Failed => p.red,',
+             '            Self::Failed => p.green,'),
+        ],
+        ["desktop"],
+        [
+            'every_choice_this_module_makes_hands_over_the_role_it_claims',
+            'every_state_a_job_can_be_in_stays_apart_from_every_other',
+        ],
+    ),
+    (
+        'IIIIIIIIIIIIIIIIIIIIIIIIIIIII: a cancelled job follows the accent',
+        PRINTMGR,
+        [
+            ('            Self::Cancelled => p.overlay0,',
+             '            Self::Cancelled => p.accent,'),
+        ],
+        ["desktop"],
+        [
+            'every_choice_this_module_makes_hands_over_the_role_it_claims',
+        ],
+    ),
+    (
+        'JJJJJJJJJJJJJJJJJJJJJJJJJJJJJ: the hidden dialog draws itself anyway',
+        PRINTMGR,
+        [
+            ('        if !self.visible {\n            return cmds;',
+             '        if false {\n            return cmds;'),
+        ],
+        ["desktop"],
+        [
+            'the_fixtures_take_every_branch_this_dialog_has',
+        ],
+    ),
+    (
+        'KKKKKKKKKKKKKKKKKKKKKKKKKKKKK: the orientation row always reads Portrait',
+        PRINTMGR,
+        [
+            ('                if self.settings.orientation == Orientation::Portrait {',
+             '                if true {'),
+        ],
+        ["desktop"],
+        [
+            'the_fixtures_take_every_branch_this_dialog_has',
+        ],
+    ),
+    (
+        'LLLLLLLLLLLLLLLLLLLLLLLLLLLLL: the duplex row always reads Off',
+        PRINTMGR,
+        [
+            ('                if self.settings.duplex { "On" } else { "Off" }.to_string(),',
+             '                if false { "On" } else { "Off" }.to_string(),'),
+        ],
+        ["desktop"],
+        [
+            'the_fixtures_take_every_branch_this_dialog_has',
+        ],
+    ),
+    (
+        'MMMMMMMMMMMMMMMMMMMMMMMMMMMMM: the printer field never names the selected printer',
+        PRINTMGR,
+        [
+            ('            .map(|p| p.name.as_str())\n            .unwrap_or("None");',
+             '            .map(|_p| "None")\n            .unwrap_or("None");'),
+        ],
+        ["desktop"],
+        [
+            'the_fixtures_take_every_branch_this_dialog_has',
+        ],
+    ),
+    (
+        'NNNNNNNNNNNNNNNNNNNNNNNNNNNNN: validation errors are never drawn',
+        PRINTMGR,
+        [
+            ('        for err in &self.validation_errors {',
+             '        for err in &self.validation_errors[..0] {'),
+        ],
+        ["desktop"],
+        [
+            'the_fixtures_take_every_branch_this_dialog_has',
         ],
     ),
 ]

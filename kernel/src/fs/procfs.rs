@@ -4123,7 +4123,7 @@ fn gen_fcompress() -> Vec<u8> {
         };
         out.push_str(&format!(
             "    {} -> {} (ext: {})\n",
-            r.path_prefix,
+            r.path_prefix.display(),
             r.algorithm.name(),
             exts
         ));

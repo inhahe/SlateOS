@@ -63,6 +63,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
+use super::path::{Path, PathBuf};
 use crate::error::{KernelError, KernelResult};
 use crate::serial_println;
 
@@ -145,10 +146,21 @@ impl Algorithm {
 /// A compression policy rule.
 #[derive(Debug, Clone)]
 pub struct CompressionRule {
-    /// Path prefix this rule applies to (e.g., "/var/log").
-    pub path_prefix: String,
+    /// Directory subtree this rule applies to (e.g., "/var/log").
+    ///
+    /// A `PathBuf` rather than a `String` per design-decisions.md §261: a
+    /// legal filename may contain any byte but `/` and NUL, so a `String`
+    /// prefix cannot even name every directory it might be pointed at.
+    pub path_prefix: PathBuf,
     /// File extensions this rule applies to (e.g., ["log", "txt"]).
     /// Empty means all extensions.
+    ///
+    /// Extensions stay `Vec<String>` deliberately: an extension here is
+    /// compared against something the user *typed into a rule*, and a rule
+    /// naming an extension with no UTF-8 spelling is not something this
+    /// API needs to express.  The comparison is still byte-wise against
+    /// the real filename, so a non-UTF-8 filename is handled correctly —
+    /// it simply never matches a rule that filters on an extension.
     pub extensions: Vec<String>,
     /// Algorithm to use.
     pub algorithm: Algorithm,
@@ -268,10 +280,11 @@ pub fn add_rule(rule: CompressionRule) -> KernelResult<()> {
 }
 
 /// Remove all rules matching a path prefix.
-pub fn remove_rules(prefix: &str) -> usize {
+pub fn remove_rules(prefix: impl AsRef<Path>) -> usize {
+    let prefix = prefix.as_ref();
     let mut state = STATE.lock();
     let before = state.rules.len();
-    state.rules.retain(|r| r.path_prefix != prefix);
+    state.rules.retain(|r| r.path_prefix.as_path() != prefix);
     before - state.rules.len()
 }
 
@@ -318,7 +331,8 @@ fn note_skipped() {
 ///
 /// Returns `None` if the file should not be compressed (disabled,
 /// no matching rule, too small, or incompressible).
-pub fn compress_for_write(path: &str, data: &[u8]) -> Option<Vec<u8>> {
+pub fn compress_for_write(path: impl AsRef<Path>, data: &[u8]) -> Option<Vec<u8>> {
+    let path = path.as_ref();
     if !ENABLED.load(Ordering::Relaxed) {
         return None;
     }
@@ -470,38 +484,51 @@ pub fn file_info(data: &[u8]) -> FileCompressionInfo {
 // ---------------------------------------------------------------------------
 
 /// Find the compression algorithm for a given path.
-fn find_algorithm(path: &str) -> Option<Algorithm> {
+///
+/// A rule's `path_prefix` denotes a *directory subtree*, not a byte prefix.
+/// The distinction is the whole point: the previous implementation used a
+/// bare `path.starts_with(&rule.path_prefix)`, so a rule installed on
+/// `/var/log` also silently claimed `/var/logbackup.tar` and
+/// `/var/logger.db` — files in a different directory that merely happened
+/// to share the first eight bytes.  `path_in_subtree` ends the match on a
+/// component boundary, which is what a user typing a directory means.
+/// (See `fs/pathutil.rs`'s module doc; this is the same defect already
+/// swept out of `intercept`, `integrity`, `findex`, `freeze` and `atime`.)
+fn find_algorithm(path: &Path) -> Option<Algorithm> {
     let state = STATE.lock();
 
-    // Find the most specific (longest prefix) matching rule.
+    // Find the most specific (deepest) matching rule.
     let mut best: Option<&CompressionRule> = None;
-    let mut best_len = 0;
+    let mut best_depth = 0usize;
 
     for rule in &state.rules {
-        if path.starts_with(&rule.path_prefix) && rule.path_prefix.len() >= best_len {
-            // Check extension filter.
-            if !rule.extensions.is_empty() {
-                let ext = path_extension(path);
-                if !rule.extensions.iter().any(|e| e.as_str() == ext) {
-                    continue;
-                }
+        if !crate::fs::pathutil::path_in_subtree(path, rule.path_prefix.as_path()) {
+            continue;
+        }
+        // Check extension filter.
+        if !rule.extensions.is_empty() {
+            let matches_ext = path
+                .extension()
+                .is_some_and(|ext| rule.extensions.iter().any(|e| e.as_bytes() == ext.as_bytes()));
+            if !matches_ext {
+                continue;
             }
-            best_len = rule.path_prefix.len();
+        }
+        // Depth is counted in components, not bytes: byte length would rank
+        // a rule on `/aaaaaaaa` above one on `/a/b/c` despite the latter
+        // being the more specific location.  `best.is_none()` is
+        // load-bearing for a rule on `/` (or the empty catch-all prefix),
+        // both of which have zero components and so could never win a bare
+        // `>= best_depth` against the initial zero.  `>=` rather than `>`
+        // preserves the previous last-rule-wins tie-break.
+        let depth = rule.path_prefix.as_path().components().count();
+        if best.is_none() || depth >= best_depth {
+            best_depth = depth;
             best = Some(rule);
         }
     }
 
     best.map(|r| r.algorithm)
-}
-
-/// Extract file extension from a path (lowercase, without dot).
-fn path_extension(path: &str) -> &str {
-    if let Some(name) = path.rsplit('/').next() {
-        if let Some(dot_pos) = name.rfind('.') {
-            return &name[dot_pos + 1..];
-        }
-    }
-    ""
 }
 
 // ---------------------------------------------------------------------------
@@ -547,9 +574,123 @@ pub fn self_test() -> KernelResult<()> {
     test_rule_matching();
     test_min_size_filter();
     test_stats();
+    test_prefix_is_a_subtree_not_a_byte_prefix();
+    test_non_utf8_prefix();
 
-    serial_println!("[fcompress] Self-test passed (8 tests).");
+    serial_println!("[fcompress] Self-test passed (10 tests).");
     Ok(())
+}
+
+/// A rule on `/var/log` must not claim `/var/logbackup.tar`.
+///
+/// Regression test for the bare `path.starts_with(&rule.path_prefix)` this
+/// module used to match with.  Under it, a user who asked to compress one
+/// log directory also silently got compression on every sibling file whose
+/// name began with those same bytes — including files in a *different*
+/// directory, which is not a place the user pointed at.
+fn test_prefix_is_a_subtree_not_a_byte_prefix() {
+    let was_enabled = is_enabled();
+    let old_min = min_size();
+    set_enabled(true);
+    set_min_size(0);
+
+    add_rule(CompressionRule {
+        path_prefix: PathBuf::from("/tmp/fcomp_sub"),
+        extensions: Vec::new(),
+        algorithm: Algorithm::Lz4,
+    })
+    .expect("add rule");
+
+    let data = compressible_sample();
+
+    // Inside the subtree, and the directory itself's children: match.
+    assert!(
+        compress_for_write("/tmp/fcomp_sub/a.txt", &data).is_some(),
+        "a file under the rule's directory should match"
+    );
+    assert!(
+        compress_for_write("/tmp/fcomp_sub/deep/b.txt", &data).is_some(),
+        "a file deeper under the rule's directory should match"
+    );
+
+    // Shares the prefix bytes but is a *sibling*, in another directory.
+    assert!(
+        compress_for_write("/tmp/fcomp_subtly_different.txt", &data).is_none(),
+        "a sibling sharing the prefix bytes must not match"
+    );
+    assert!(
+        compress_for_write("/tmp/fcomp_subx/a.txt", &data).is_none(),
+        "a sibling directory sharing the prefix bytes must not match"
+    );
+
+    // A trailing slash on the rule must not change the answer.
+    remove_rules("/tmp/fcomp_sub");
+    add_rule(CompressionRule {
+        path_prefix: PathBuf::from("/tmp/fcomp_sub/"),
+        extensions: Vec::new(),
+        algorithm: Algorithm::Lz4,
+    })
+    .expect("add trailing-slash rule");
+    assert!(
+        compress_for_write("/tmp/fcomp_sub/a.txt", &data).is_some(),
+        "trailing slash on the rule must still match children"
+    );
+    assert!(
+        compress_for_write("/tmp/fcomp_subx/a.txt", &data).is_none(),
+        "trailing slash must not widen the match"
+    );
+
+    remove_rules("/tmp/fcomp_sub/");
+    set_min_size(old_min);
+    set_enabled(was_enabled);
+
+    serial_println!("[fcompress]   subtree (not byte-prefix) matching: ok");
+}
+
+/// A rule may be installed on a directory whose name has no UTF-8 spelling
+/// (design-decisions.md §261), and must govern only that directory.
+fn test_non_utf8_prefix() {
+    let was_enabled = is_enabled();
+    let old_min = min_size();
+    set_enabled(true);
+    set_min_size(0);
+
+    // `\xFF` and `\xFE` can begin no UTF-8 sequence, so under a `String`
+    // prefix these two directories would have collapsed onto one rule.
+    let dir_a = Path::new(&b"/tmp/fcomp_\xFFd"[..]);
+    let dir_b = Path::new(&b"/tmp/fcomp_\xFEd"[..]);
+
+    add_rule(CompressionRule {
+        path_prefix: dir_a.to_path_buf(),
+        extensions: Vec::new(),
+        algorithm: Algorithm::Lz4,
+    })
+    .expect("add rule");
+
+    let data = compressible_sample();
+
+    let mut in_a = dir_a.to_path_buf();
+    in_a.push("f.txt");
+    let mut in_b = dir_b.to_path_buf();
+    in_b.push("f.txt");
+
+    assert!(
+        compress_for_write(in_a.as_path(), &data).is_some(),
+        "a file under the non-UTF-8 rule directory should match"
+    );
+    assert!(
+        compress_for_write(in_b.as_path(), &data).is_none(),
+        "a file under the other non-UTF-8 directory must not match"
+    );
+
+    // Removal is byte-exact too: the other spelling removes nothing.
+    assert_eq!(remove_rules(dir_b), 0, "removing by the other name is a no-op");
+    assert_eq!(remove_rules(dir_a), 1, "removing by the exact name works");
+
+    set_min_size(old_min);
+    set_enabled(was_enabled);
+
+    serial_println!("[fcompress]   non-UTF-8 prefix: ok");
 }
 
 fn test_header_format() {
@@ -614,7 +755,7 @@ fn test_compress_decompress_lz4() {
     set_min_size(0); // Allow any size.
 
     add_rule(CompressionRule {
-        path_prefix: String::from("/tmp/fcomp_test"),
+        path_prefix: PathBuf::from("/tmp/fcomp_test"),
         extensions: Vec::new(),
         algorithm: Algorithm::Lz4,
     })
@@ -655,7 +796,7 @@ fn test_compress_decompress_gzip() {
     set_min_size(0);
 
     add_rule(CompressionRule {
-        path_prefix: String::from("/tmp/fcomp_gz"),
+        path_prefix: PathBuf::from("/tmp/fcomp_gz"),
         extensions: Vec::new(),
         algorithm: Algorithm::Gzip,
     })
@@ -685,7 +826,7 @@ fn test_compress_decompress_zstd() {
     set_min_size(0);
 
     add_rule(CompressionRule {
-        path_prefix: String::from("/tmp/fcomp_zst"),
+        path_prefix: PathBuf::from("/tmp/fcomp_zst"),
         extensions: Vec::new(),
         algorithm: Algorithm::Zstd,
     })
@@ -715,7 +856,7 @@ fn test_incompressible_skip() {
     set_min_size(0);
 
     add_rule(CompressionRule {
-        path_prefix: String::from("/tmp/fcomp_rand"),
+        path_prefix: PathBuf::from("/tmp/fcomp_rand"),
         extensions: Vec::new(),
         algorithm: Algorithm::Lz4,
     })
@@ -761,7 +902,7 @@ fn test_rule_matching() {
 
     // Rule for .log files under /var/log.
     add_rule(CompressionRule {
-        path_prefix: String::from("/var/log"),
+        path_prefix: PathBuf::from("/var/log"),
         extensions: alloc::vec![String::from("log")],
         algorithm: Algorithm::Gzip,
     })
@@ -798,7 +939,7 @@ fn test_min_size_filter() {
     set_min_size(1024); // Must be at least 1KB.
 
     add_rule(CompressionRule {
-        path_prefix: String::from("/tmp/fcomp_min"),
+        path_prefix: PathBuf::from("/tmp/fcomp_min"),
         extensions: Vec::new(),
         algorithm: Algorithm::Lz4,
     })
@@ -833,7 +974,7 @@ fn test_stats() {
     set_min_size(0);
 
     add_rule(CompressionRule {
-        path_prefix: String::from("/tmp/fcomp_stats"),
+        path_prefix: PathBuf::from("/tmp/fcomp_stats"),
         extensions: Vec::new(),
         algorithm: Algorithm::Lz4,
     })

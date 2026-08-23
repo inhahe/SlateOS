@@ -14855,7 +14855,7 @@ fn cmd_fcompress(args: &str) {
                     };
                     shell_println!(
                         "    {} -> {} (ext: {})",
-                        r.path_prefix,
+                        r.path_prefix.display(),
                         r.algorithm.name(),
                         exts
                     );
@@ -14912,7 +14912,7 @@ fn cmd_fcompress(args: &str) {
                 };
 
                 match fcompress::add_rule(fcompress::CompressionRule {
-                    path_prefix: prefix.clone(),
+                    path_prefix: PathBuf::from(prefix.clone()),
                     extensions,
                     algorithm: algo,
                 }) {
@@ -14940,7 +14940,12 @@ fn cmd_fcompress(args: &str) {
                         } else {
                             r.extensions.join(",")
                         };
-                        shell_println!("{:<30} {:<8} {}", r.path_prefix, r.algorithm.name(), exts);
+                        shell_println!(
+                            "{:<30} {:<8} {}",
+                            r.path_prefix.display(),
+                            r.algorithm.name(),
+                            exts
+                        );
                     }
                 }
             }
@@ -15007,7 +15012,7 @@ fn cmd_fcompress(args: &str) {
                     // full table -- report it and stop rather than pressing on
                     // to measure a compression that would not have happened.
                     if let Err(e) = fcompress::add_rule(fcompress::CompressionRule {
-                        path_prefix: path.clone(),
+                        path_prefix: PathBuf::from(path.clone()),
                         extensions: Vec::new(),
                         algorithm: algo,
                     }) {

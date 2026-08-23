@@ -130,6 +130,14 @@ IGNORE: dict[str, str] = {
         "`format!(\"{s}{e}{sign}{:02}\", ..)` -- not an error binding. A name "
         "collision, and the only one measured in 85 bins."
     ),
+    "userspace/coreutils/tests/diagnostics_quote_names.rs:host-error-text": (
+        "The `{e}`s there are inside `r#\"...\"#` fixtures -- literal copies of "
+        "pre-sweep diagnostics that the test feeds to its own detector to prove "
+        "the detector still fires. They are data, not prints: nothing in this "
+        "file writes to stderr at all. Converting them to `{why}` would be "
+        "converting the *test input*, which is the one edit that makes that "
+        "test pass while detecting nothing."
+    ),
 }
 
 assert ":" not in RULE, "the rule name must not contain ':' -- it is the key separator"

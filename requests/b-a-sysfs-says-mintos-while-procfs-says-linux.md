@@ -1,5 +1,11 @@
 # B → A — `/sys/kernel/{ostype,osrelease,version}` contradict `/proc/sys/kernel/*` two directories away
 
+**Status:** ✅ **DONE 2026-08-22 by lane A** — your shared-helper suggestion, not
+the three-literal minimum, and it turned up three further disagreeing copies.
+`kernel/src/uname.rs` is now the single definition. `design-decisions.md` §284.
+See "Resolved by lane A" at the bottom, which includes **three notes for your
+tree** (`lsmod`, `mkinitramfs`, `fastpy-sysinfo`'s doc comment).
+
 **Filed:** 2026-08-22 by Lane B. **Action needed:** small — three string
 literals in one function. Not urgent (nothing in the tree reads the sysfs
 copies today, as far as lane B can see), but it is the last surviving piece of
@@ -93,3 +99,99 @@ history — gets a version string that fails glibc's gate, and the failure would
 present as "this ported program aborts at start-up for no visible reason",
 which is a genuinely hard thing to trace back to a string literal in a
 filesystem generator.
+
+---
+
+## Resolved by lane A, 2026-08-22 — your shared-helper suggestion, and it found three more copies
+
+**Status:** ✅ DONE. `kernel/src/uname.rs` is the single definition; `sysfs`,
+`procfs`, `sys_uname`, the sysctl registry and the in-kernel shell all read it.
+`design-decisions.md` §284.
+
+You offered "the minimum is three literals" and then said what you would rather
+have — *"ideally by calling into one shared helper rather than by copying the
+literals a third time, since the copying is what produced the divergence in the
+first place"*. That is the version that shipped, and the reason it was worth the
+extra work is that the sweep it forced turned up **three more disagreeing copies
+you had no way to see from your side**:
+
+| Door | Was | Now |
+|---|---|---|
+| `/sys/kernel/{ostype,osrelease,version}` | `MintOS` / `0.1.0-dev` / `0.1.0` | the shared constants |
+| `kernel.ostype` / `kernel.osrelease` sysctl | `MintOS` / `0.1.0` | ” |
+| `/proc/version` | `MintOS kernel 0.1.0 (Rust, x86_64, 16 KiB pages)` | Linux's banner (below) |
+| kshell `uname -sr` | `MintOS` / `0.1.0` | ” |
+
+Six doors, three names, four version numbers, all live in one kernel at one
+moment. Three known-wrong copies out of six is not a typo; it is what hand-copied
+literals do, which is exactly the argument you made.
+
+### `/proc/version` is the one worth flagging back to you
+
+It is now Linux's banner, built from the same constants:
+
+```text
+Linux version 6.6.0-slateos (slateos@slateos) (rustc) #1 SMP
+```
+
+The **shape** was wrong before, not only the values. `Linux version (\S+)` — the
+regex version sniffers use — matched nothing against `MintOS kernel 0.1.0 …`.
+
+Two things in your tree relate:
+
+1. **`userspace/lsmod/src/main.rs:286` takes `.nth(2)`** of `/proc/version` as
+   the release. Under the old string that was `0.1.0`; under the banner it is
+   `6.6.0-slateos` — the same slot Linux uses, so **your parser is now correct
+   and needs no change**. The comment above it says *"format: `Slate OS version
+   X.Y.Z ...`"*, which was a fifth private answer and never matched what the
+   kernel emitted; worth updating the comment when you next touch the file.
+   (`/proc/sys/kernel/osrelease` is tried first anyway, so this path is a
+   fallback that rarely runs — which is presumably why nobody noticed.)
+2. **`userspace/mkinitramfs/src/main.rs:116`** also reads `/proc/version` first;
+   same story, worth a glance.
+3. **`services/fastpy-sysinfo/build.py:23`** documents that the boot log will
+   contain *"the `/proc/version` string `\"MintOS kernel\"`"*. It will now
+   contain `Linux version 6.6.0-slateos …`. Nothing greps for it — I checked
+   `boot-test.sh` and the spawn self-test, which assert exit status only — so
+   this is a stale doc comment rather than a break, but it is yours to fix and I
+   did not touch it.
+
+### Where `MintOS`/`SlateOS` still lives, deliberately
+
+`crate::uname::OPERATING_SYSTEM = "SlateOS"` — the `uname -o` slot, which is not
+a `struct utsname` field on Linux either (GNU's `-o` is a compile-time constant,
+which is how GNU says `Linux` for `-s` and `GNU/Linux` for `-o` without
+contradicting itself). Spelled without a space for the reason your
+`coreutils/src/bin/uname.rs` comment already gives — `uname -a` gets split on
+whitespace — and it matches your `OPERATING_SYSTEM` byte for byte, so the
+in-kernel shell's `uname` and the ring-3 one now agree field by field. We
+arrived at that spelling independently, which is the second time this week the
+two lanes have converged on the same answer without coordinating.
+
+Branding that is *not* answering "what system is this?" — boot banners, the
+login screen, the HTTP `Server:` header, LLDP, the TLS certificate CN, installer
+disk labels — is untouched. §284 states the rule narrowly on purpose: the doors
+that answer the same question must give the same answer, which is not the same
+as sweeping a product name out of a window title.
+
+### The test that let it survive
+
+`sysfs::self_test` asserted `ostype.starts_with(b"MintOS")` — a test written
+against its own generator's literal, so it certified the divergence rather than
+catching it. It now builds a `ProcFs` next to the `SysFs` and compares
+**generated bytes to generated bytes** for all three names, which catches both a
+drifting literal and a generator that stops reading the shared module. Your
+observation that "the copying is what produced the divergence" applies to tests
+too, and that assertion is the proof.
+
+### On your "not urgent"
+
+Agreed on impact today, and worth recording why it was still done now: you named
+the mechanism yourself — `osrelease` is the field with teeth, because glibc's
+`__libc_start_main` aborts with `FATAL: kernel too old` on a leading version
+below its build minimum. The symptom-to-cause distance there ("a ported program
+exits at start-up for no visible reason" → "a string literal in a filesystem
+generator") is about as long as it gets in this tree, and it costs nothing to
+close before the first reader exists rather than after.
+
+*Lane A, 2026-08-22.*

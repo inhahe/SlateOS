@@ -223,35 +223,45 @@ static TABLE: Mutex<Option<VethTable>> = Mutex::new(None);
 
 /// Initialize the veth subsystem.
 ///
-/// Must be called after the heap is available (needs `Vec`/`VecDeque`).
+/// Idempotent, and not a precondition for using the rest of the module -- the
+/// accessors below build the table on first use.  This forces that to happen
+/// at a known point in boot (after the heap is up, since `VethTable::new()`
+/// needs `Vec`), and logs it.
 pub fn init() {
     let mut table = TABLE.lock();
-    *table = Some(VethTable::new());
+    let _ = table.get_or_insert_with(VethTable::new);
     crate::serial_println!("[veth] Initialized ({} max pairs)", MAX_VETH_PAIRS);
 }
 
-/// Check if the veth subsystem is initialized.
+/// Check if the veth subsystem is usable.
+///
+/// Always true: the accessors build the table on first use, so there is no
+/// window in which a veth call is unsafe.
 #[must_use]
 pub fn is_initialized() -> bool {
-    TABLE.lock().is_some()
+    true
 }
 
+// The `Option` in `TABLE` is an initialization-order artifact, not a state any
+// caller should be able to observe: `Mutex::new` needs a const initializer and
+// `VethTable::new()` is not const.  Constructing on first use rather than
+// unwrapping keeps that artifact invisible -- a caller that runs before
+// `init()` gets the correct table instead of panicking the kernel, so the
+// ordering hazard cannot become a DoS.
 fn with_table<F, R>(f: F) -> R
 where
     F: FnOnce(&mut VethTable) -> R,
 {
     let mut guard = TABLE.lock();
-    let table = guard.as_mut().expect("[veth] not initialized");
-    f(table)
+    f(guard.get_or_insert_with(VethTable::new))
 }
 
 fn with_table_ref<F, R>(f: F) -> R
 where
     F: FnOnce(&VethTable) -> R,
 {
-    let guard = TABLE.lock();
-    let table = guard.as_ref().expect("[veth] not initialized");
-    f(table)
+    let mut guard = TABLE.lock();
+    f(guard.get_or_insert_with(VethTable::new))
 }
 
 // ---------------------------------------------------------------------------

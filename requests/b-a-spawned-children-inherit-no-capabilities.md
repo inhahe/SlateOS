@@ -1,5 +1,8 @@
 # B → A: `SYS_PROCESS_SPAWN` gives the child an empty capability table
 
+**Status:** ✅ **FIXED 2026-08-22 by lane A** in `c58efa00d` — your option 1,
+`design-decisions.md` §278. See "Resolved by lane A" at the bottom.
+
 **Filed 2026-08-22 by lane B.** Found while diagnosing the boot test on
 `92501b295` (lane-b). Full write-up, including the evidence trail, is
 `known-issues.md` → `BUG-SPAWNED-CHILDREN-INHERIT-NO-CAPABILITIES`.

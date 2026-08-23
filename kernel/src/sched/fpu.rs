@@ -337,11 +337,22 @@ pub fn init_bsp() {
     configure_fpu_cr_bits();
 
     // Verify FXSAVE support via cached CPU features.
-    let features = crate::cpu::features().expect("CPU features must be detected before FPU init");
-    assert!(
-        features.fxsr,
-        "CPU does not support FXSAVE/FXRSTOR (impossible on x86_64)"
-    );
+    //
+    // Neither missing detection nor a missing `fxsr` bit is fatal, so neither
+    // aborts the boot.  FXSAVE/FXRSTOR are mandatory in the x86_64 ISA
+    // baseline, which makes the FXSAVE branch below correct on any CPU that
+    // can run this code at all; the only thing an absent `CpuFeatures` can
+    // cost us is XSAVE's larger state, never correctness.  Weighed against
+    // that, panicking here is strictly worse than a warning: `init_bsp` runs
+    // before the console is up, so the panic would surface as a dead machine
+    // with no output rather than as a diagnosis.
+    let features = crate::cpu::features();
+    if !features.is_some_and(|f| f.fxsr) {
+        serial_println!(
+            "[fpu] WARNING: CPU features not detected (or FXSAVE not reported) — \
+             assuming FXSAVE, which x86_64 guarantees"
+        );
+    }
 
     // Initialize x87 FPU to known state.
     // SAFETY: We've verified the FPU hardware is present and enabled.
@@ -356,13 +367,16 @@ pub fn init_bsp() {
         asm!("ldmxcsr [{}]", in(reg) &default_mxcsr, options(nostack));
     }
 
-    // Try to enable XSAVE.
-    if features.xsave {
-        enable_xsave(features);
-    } else {
-        serial_println!("[fpu] XSAVE not supported — using FXSAVE (x87+SSE only)");
-        super::context::set_fpu_strategy(SaveStrategy::Fxsave as u8, 0x3, 0);
-        XSAVE_AREA_SIZE.store(512, Ordering::Release);
+    // Try to enable XSAVE.  Unknown features fall through to the same FXSAVE
+    // path as a CPU that genuinely lacks XSAVE — we cannot enable what we
+    // cannot confirm, and FXSAVE is always available.
+    match features {
+        Some(f) if f.xsave => enable_xsave(f),
+        _ => {
+            serial_println!("[fpu] XSAVE not supported — using FXSAVE (x87+SSE only)");
+            super::context::set_fpu_strategy(SaveStrategy::Fxsave as u8, 0x3, 0);
+            XSAVE_AREA_SIZE.store(512, Ordering::Release);
+        }
     }
 
     let strat = strategy();

@@ -47,6 +47,7 @@
     clippy::panic
 )]
 
+use crate::error::KernelResult;
 use crate::sync::PreemptSpinMutex as Mutex;
 use crate::{serial_print, serial_println};
 use alloc::string::String;
@@ -762,6 +763,30 @@ pub struct BenchResult {
     pub seq: usize,
 }
 
+impl BenchResult {
+    /// A zeroed result standing for "no measurement happened".
+    ///
+    /// Exists so [`run`] can satisfy its infallible return type without an
+    /// unwrap on the structurally-unreachable `Err` arm of [`try_run`]. Its
+    /// `seq` is deliberately out of range for [`MEASUREMENTS`], so that if one
+    /// of these ever *is* passed to [`record`] the mismatch is counted into
+    /// [`SCORED_WITHOUT_MEASUREMENT`] and printed rather than silently
+    /// crediting some unrelated window.
+    fn empty(name: &'static str) -> Self {
+        Self {
+            name: String::from(name),
+            iterations: 0,
+            min_cycles: 0,
+            mean_cycles: 0,
+            max_cycles: 0,
+            min_ns: 0,
+            mean_ns: 0,
+            split: SplitCheck::NotChecked,
+            seq: usize::MAX,
+        }
+    }
+}
+
 /// Time a single execution of `f`, in TSC cycles.
 ///
 /// The leading read is serialised so earlier work cannot drift into the
@@ -848,11 +873,48 @@ const SPLIT_MIN_ITERATIONS: u32 = 20;
 ///
 /// Returns the `BenchResult` for programmatic comparison.
 pub fn run<F: FnMut()>(name: &'static str, iterations: u32, mut f: F) -> BenchResult {
+    // The closure below returns `Ok` unconditionally, so the `Err` arm is
+    // unreachable.  Written as `unwrap_or_else` rather than an unwrap anyway:
+    // a benchmark harness must not be the thing that panics the kernel, and an
+    // empty result is inert where a panic is not.
+    try_run(name, iterations, move || {
+        f();
+        Ok(())
+    })
+    .unwrap_or_else(|_| BenchResult::empty(name))
+}
+
+/// Fallible sibling of [`run`], for benchmark bodies whose work can fail.
+///
+/// The measurement is identical -- same warmup, same window, same split check
+/// -- and this is in fact the shared implementation of both. The only
+/// difference is that the closure returns a [`KernelResult`], and a failure
+/// abandons the benchmark instead of panicking.
+///
+/// That distinction matters because most bench bodies allocate a frame, map a
+/// page or push an IPC message, and all of those can legitimately fail on a
+/// busy or small machine. A benchmark is diagnostic code: it must never be
+/// able to take down the kernel it is measuring, and "the machine was too busy
+/// to run the benchmark" is a result to report, not a fatal error.
+///
+/// The `Result` is inspected **after** `let end = rdtsc();`, so the added
+/// branch falls outside the measured window -- `run` and `try_run` time the
+/// same instructions.
+///
+/// # Errors
+///
+/// Returns the first error the closure produces, from warmup or from the
+/// measured loop. Nothing is printed in that case; the caller reports it.
+pub fn try_run<F: FnMut() -> KernelResult<()>>(
+    name: &'static str,
+    iterations: u32,
+    mut f: F,
+) -> KernelResult<BenchResult> {
     // Warmup: 10% of iterations, minimum 5.
     let warmup = core::cmp::max(iterations / 10, 5);
 
     for _ in 0..warmup {
-        f();
+        f()?;
     }
 
     let mut max = 0u64;
@@ -867,8 +929,11 @@ pub fn run<F: FnMut()>(name: &'static str, iterations: u32, mut f: F) -> BenchRe
 
     for i in 0..iterations {
         let start = rdtsc_serialized();
-        f();
+        let outcome = f();
         let end = rdtsc();
+        // Checked here, after the clock has stopped, so the branch cannot land
+        // inside the window it would otherwise inflate.
+        outcome?;
         let elapsed = end.saturating_sub(start);
 
         if i < midpoint {
@@ -939,7 +1004,7 @@ pub fn run<F: FnMut()>(name: &'static str, iterations: u32, mut f: F) -> BenchRe
         ),
     }
 
-    BenchResult {
+    Ok(BenchResult {
         name: String::from(name),
         iterations,
         min_cycles: min,
@@ -949,6 +1014,21 @@ pub fn run<F: FnMut()>(name: &'static str, iterations: u32, mut f: F) -> BenchRe
         mean_ns,
         split,
         seq,
+    })
+}
+
+/// Log a fallible benchmark's outcome without letting it abort the suite.
+///
+/// `run_all` is the top-level driver and has nothing to propagate an error to,
+/// so each `bench_*` that can now fail is wrapped in this. A benchmark that
+/// could not set its fixtures up is a missing measurement, not a reason for the
+/// twenty benchmarks after it to be skipped — and *silently* dropping the
+/// `Result` would be worse still, because a suite that quietly stopped
+/// measuring something reads exactly like one that measured it and found
+/// nothing wrong.
+fn report(name: &str, outcome: KernelResult<()>) {
+    if let Err(e) = outcome {
+        serial_println!("[bench] {}: SKIPPED ({:?})", name, e);
     }
 }
 
@@ -3363,28 +3443,33 @@ pub fn run_all() {
     // --- Page allocation (alloc + free cycle) ---
     {
         use crate::mm::frame;
-        let result = run("page_alloc_free", 500, || {
-            let f = frame::alloc_frame().expect("bench: alloc");
-            // SAFETY: frame was just allocated, exclusively ours.
-            unsafe {
-                frame::free_frame(f).expect("bench: free");
+        // An exhausted allocator is a plausible state at this point in boot, not
+        // a bug in the harness, so it costs this one measurement rather than the
+        // machine.  Every later benchmark in `run_all` still runs.
+        match try_run("page_alloc_free", 500, || {
+            let f = frame::alloc_frame()?;
+            // SAFETY: frame was just allocated, exclusively ours, and no mapping
+            // to it was ever published.
+            unsafe { frame::free_frame(f) }
+        }) {
+            Ok(result) => {
+                let target_ns = 1000u64; // From baselines.toml
+                score("page_alloc_free", &result, target_ns);
+                if result.min_ns <= target_ns {
+                    serial_println!(
+                        "[bench]   page_alloc_free: PASS (min {}ns <= target {}ns)",
+                        result.min_ns,
+                        target_ns
+                    );
+                } else {
+                    serial_println!(
+                        "[bench]   page_alloc_free: ABOVE TARGET (min {}ns > target {}ns)",
+                        result.min_ns,
+                        target_ns
+                    );
+                }
             }
-        });
-
-        let target_ns = 1000u64; // From baselines.toml
-        score("page_alloc_free", &result, target_ns);
-        if result.min_ns <= target_ns {
-            serial_println!(
-                "[bench]   page_alloc_free: PASS (min {}ns <= target {}ns)",
-                result.min_ns,
-                target_ns
-            );
-        } else {
-            serial_println!(
-                "[bench]   page_alloc_free: ABOVE TARGET (min {}ns > target {}ns)",
-                result.min_ns,
-                target_ns
-            );
+            Err(e) => serial_println!("[bench]   page_alloc_free: SKIPPED ({:?})", e),
         }
     }
 
@@ -3422,13 +3507,25 @@ pub fn run_all() {
         const ROUNDS: u32 = 400;
         let was_enabled = frame_owner::is_enabled();
 
+        // A failure here cannot propagate: this closure is the *timed body* of
+        // an interleaved experiment, so it must return normally or the two arms
+        // stop being comparable. It is counted instead, and the count
+        // invalidates the report below. (`Cell` rather than a `mut` capture so
+        // the closure stays `Fn` and can be shared by both arms.)
+        let alloc_failures = core::cell::Cell::new(0u32);
+
         // One alloc+free cycle. Both arms call this same function, so they
         // cannot differ by inlining or by TCG translating two distinct blocks.
         let alloc_free = || {
-            let f = frame::alloc_frame().expect("bench: alloc");
-            // SAFETY: frame was just allocated, exclusively ours.
-            unsafe {
-                frame::free_frame(f).expect("bench: free");
+            match frame::alloc_frame() {
+                // SAFETY: frame was just allocated, exclusively ours, and no
+                // mapping to it was ever published.
+                Ok(f) => {
+                    if unsafe { frame::free_frame(f) }.is_err() {
+                        alloc_failures.set(alloc_failures.get().saturating_add(1));
+                    }
+                }
+                Err(_) => alloc_failures.set(alloc_failures.get().saturating_add(1)),
             }
         };
 
@@ -3521,7 +3618,20 @@ pub fn run_all() {
         };
         let delta = min_on.saturating_sub(min_off);
         let (acc_whole, acc_tenth) = accesses(delta, access_floor);
-        if delta <= budget {
+        let failures = alloc_failures.get();
+        if failures != 0 {
+            // A failed alloc returns far sooner than a successful one, so even a
+            // handful of them pull `min` down on whichever arm happened to hit
+            // them, and the delta between the arms stops measuring tagging.
+            // Reporting PASS off such a window would be worse than reporting
+            // nothing at all.
+            serial_println!(
+                "[bench]   page_alloc_free_owner_ab: SKIPPED ({} of {} rounds \
+                 failed to alloc/free — arms not comparable)",
+                failures,
+                ROUNDS.saturating_mul(2)
+            );
+        } else if delta <= budget {
             serial_println!(
                 "[bench]   page_alloc_free_owner_ab: PASS (tagging costs {} cycles/\
                  alloc+free = {}.{} accesses, limit {} cycles [{} profile]; \
@@ -3668,20 +3778,21 @@ pub fn run_all() {
     // The second benchmark pre-fills the pool to measure the hot path.
     {
         use crate::mm::frame;
-        let result = run("page_alloc_zeroed_free", 500, || {
-            let f = frame::alloc_frame_zeroed().expect("bench: alloc_zeroed");
-            // SAFETY: frame was just allocated, exclusively ours.
-            unsafe {
-                frame::free_frame(f).expect("bench: free");
-            }
-        });
-        // Tracked, not scored: this is the cold path, whose cost is dominated by
-        // a 16 KiB memset and therefore by host memory bandwidth, so a published
-        // per-allocation figure is not the right yardstick. Its hot-path sibling
-        // `page_alloc_zeroed_pool` was already tracked; leaving the cold path
-        // untracked meant the *pool's* whole reason for existing — the gap
-        // between the two — had only one side recorded.
-        track("page_alloc_zeroed_free", &result);
+        match try_run("page_alloc_zeroed_free", 500, || {
+            let f = frame::alloc_frame_zeroed()?;
+            // SAFETY: frame was just allocated, exclusively ours, and no mapping
+            // to it was ever published.
+            unsafe { frame::free_frame(f) }
+        }) {
+            // Tracked, not scored: this is the cold path, whose cost is dominated
+            // by a 16 KiB memset and therefore by host memory bandwidth, so a
+            // published per-allocation figure is not the right yardstick. Its
+            // hot-path sibling `page_alloc_zeroed_pool` was already tracked;
+            // leaving the cold path untracked meant the *pool's* whole reason for
+            // existing — the gap between the two — had only one side recorded.
+            Ok(result) => track("page_alloc_zeroed_free", &result),
+            Err(e) => serial_println!("[bench]   page_alloc_zeroed_free: SKIPPED ({:?})", e),
+        }
     }
 
     // --- Page allocation from pre-zeroed pool (hot path) ---
@@ -3707,14 +3818,15 @@ pub fn run_all() {
             filled = filled.saturating_add(n);
         }
         if filled > 0 {
-            let result = run("page_alloc_zeroed_pool", 200, || {
-                let f = frame::alloc_frame_zeroed().expect("bench: alloc_zeroed");
-                // SAFETY: frame was just allocated, exclusively ours.
-                unsafe {
-                    frame::free_frame(f).expect("bench: free");
-                }
+            let measured = try_run("page_alloc_zeroed_pool", 200, || {
+                let f = frame::alloc_frame_zeroed()?;
+                // SAFETY: frame was just allocated, exclusively ours, and no
+                // mapping to it was ever published.
+                unsafe { frame::free_frame(f) }
             });
 
+            // Printed regardless of the outcome: if the run *did* fail, the hit/
+            // miss split is the first thing that says whether the pool drained.
             let (hits, misses) = frame::zero_pool_stats();
             serial_println!(
                 "[bench]   zero_pool: {} hits, {} misses (pool filled: {})",
@@ -3722,15 +3834,20 @@ pub fn run_all() {
                 misses,
                 frame::zero_pool_count()
             );
-            // The pool-warm path should be faster than the cold path
-            // (no 16 KiB memset inline).  Tracked rather than dropped: this
-            // used to be `let _ = result;`, which measured a real window and
-            // then threw the measurement away — no SCORE line, no history
-            // entry, and so no regression detection on a page-allocator fast
-            // path.  It also put the result outside the split tally until that
-            // moved to the measurement site, which is how a 74%-unstable window
-            // came to be contradicted by the suite summary in the same log.
-            track("page_alloc_zeroed_pool", &result);
+            match measured {
+                // The pool-warm path should be faster than the cold path
+                // (no 16 KiB memset inline).  Tracked rather than dropped: this
+                // used to be `let _ = result;`, which measured a real window and
+                // then threw the measurement away — no SCORE line, no history
+                // entry, and so no regression detection on a page-allocator fast
+                // path.  It also put the result outside the split tally until that
+                // moved to the measurement site, which is how a 74%-unstable window
+                // came to be contradicted by the suite summary in the same log.
+                Ok(result) => track("page_alloc_zeroed_pool", &result),
+                Err(e) => {
+                    serial_println!("[bench]   page_alloc_zeroed_pool: SKIPPED ({:?})", e);
+                }
+            }
         } else {
             serial_println!("[bench]   page_alloc_zeroed_pool: SKIP (zero pool not enabled)");
         }
@@ -3747,7 +3864,14 @@ pub fn run_all() {
     // The baselines.toml target (200ns) is for a single allocation.
     // Target for alloc+free cycle: 400ns.
     {
-        let layout = core::alloc::Layout::from_size_align(64, 8).expect("valid layout");
+        // `Layout::new::<[u64; N]>()` rather than
+        // `from_size_align(size, 8).expect("valid layout")`: the arguments were
+        // always literals, so the `Err` arm was already dead — this way it does
+        // not exist. `[u64; N]` is `8 * N` bytes with align 8, and the equality
+        // is checked by the compiler below rather than asserted in prose.
+        const _: () = assert!(core::mem::size_of::<[u64; 8]>() == 64);
+        const _: () = assert!(core::mem::align_of::<[u64; 8]>() == 8);
+        let layout = core::alloc::Layout::new::<[u64; 8]>();
         let result = run("heap_raw_alloc_free_64", 2000, || {
             // SAFETY: layout is valid, allocator is initialized.
             let ptr = unsafe { alloc::alloc::alloc(layout) };
@@ -3782,7 +3906,10 @@ pub fn run_all() {
 
     // --- Raw heap alloc + dealloc (512 bytes) ---
     {
-        let layout = core::alloc::Layout::from_size_align(512, 8).expect("valid layout");
+        // See the 64-byte case above for why this is `Layout::new`.
+        const _: () = assert!(core::mem::size_of::<[u64; 64]>() == 512);
+        const _: () = assert!(core::mem::align_of::<[u64; 64]>() == 8);
+        let layout = core::alloc::Layout::new::<[u64; 64]>();
         let result = run("heap_raw_alloc_free_512", 2000, || {
             // SAFETY: layout is valid, allocator is initialized.
             let ptr = unsafe { alloc::alloc::alloc(layout) };
@@ -3806,7 +3933,10 @@ pub fn run_all() {
 
     // --- Raw heap alloc + dealloc (4096 bytes) ---
     {
-        let layout = core::alloc::Layout::from_size_align(4096, 8).expect("valid layout");
+        // See the 64-byte case above for why this is `Layout::new`.
+        const _: () = assert!(core::mem::size_of::<[u64; 512]>() == 4096);
+        const _: () = assert!(core::mem::align_of::<[u64; 512]>() == 8);
+        let layout = core::alloc::Layout::new::<[u64; 512]>();
         let result = run("heap_raw_alloc_free_4096", 500, || {
             // SAFETY: layout is valid, allocator is initialized.
             let ptr = unsafe { alloc::alloc::alloc(layout) };
@@ -3939,7 +4069,7 @@ pub fn run_all() {
     //
     // Target from baselines.toml: < 2 µs round-trip (Fuchsia: ~1.5 µs,
     // L4: ~0.5-1 µs).
-    bench_ipc_channel();
+    report("ipc_channel", bench_ipc_channel());
 
     // --- Large (64 KiB) channel round-trip ---
     //
@@ -3960,26 +4090,26 @@ pub fn run_all() {
     //
     // Measures the kernel-side pipe hot path: write N bytes on the
     // write end, read them back from the read end.
-    bench_ipc_pipe();
+    report("ipc_pipe", bench_ipc_pipe());
 
     // --- Service registry connect+accept ---
     //
     // Measures the service discovery path: connect() creates a channel
     // pair, queues one end, and returns the other.  accept() dequeues.
-    bench_service_connect();
+    report("service_connect", bench_service_connect());
 
     // --- Eventfd signal+read round-trip ---
     //
     // Measures lightweight wake-up notification cost: write (signal)
     // then try_read (consume).
-    bench_ipc_eventfd();
+    report("ipc_eventfd", bench_ipc_eventfd());
 
     // --- Semaphore signal+wait round-trip ---
     //
     // Measures counting semaphore overhead: signal() increments the
     // counter, try_wait() decrements it.  Both are uncontended so
     // this captures the lock acquisition + counter update cost.
-    bench_ipc_semaphore();
+    report("ipc_semaphore", bench_ipc_semaphore());
 
     // --- Futex wake (uncontended) ---
     //
@@ -3994,14 +4124,14 @@ pub fn run_all() {
     // Measures the overhead of creating and destroying a shared memory
     // region (single 16 KiB frame).  This captures handle allocation,
     // frame allocation, and cleanup.
-    bench_ipc_shm();
+    report("ipc_shm", bench_ipc_shm());
 
     // --- Completion port try_wait (no events) ---
     //
     // Measures the cost of polling an empty completion port.  This is
     // the fast path for event-driven servers: check for events, get
     // none, go back to work.
-    bench_ipc_completion_port();
+    report("ipc_completion_port", bench_ipc_completion_port());
 
     // --- io_ring NOP submission throughput ---
     //
@@ -4019,7 +4149,7 @@ pub fn run_all() {
     // table update, and TLB flush.
     //
     // Target from baselines.toml: < 10 µs (Linux: ~2-5 µs).
-    bench_page_fault();
+    report("page_fault", bench_page_fault());
 
     // NOTE: bench_isr_latency() moved to end of sequence because it
     // crashes under QEMU (page fault at near-null struct offset → double
@@ -4712,27 +4842,32 @@ fn bench_syscall_dispatch_breakdown(dispatch_result: &BenchResult) {
 ///
 /// Creates a channel pair, sends a small message on one end, and receives
 /// it on the other.  Measures the kernel-side IPC hot path.
-fn bench_ipc_channel() {
+/// # Errors
+///
+/// Propagates any channel failure so the caller can report the benchmark as
+/// skipped. Both endpoints are closed on every path, including that one.
+fn bench_ipc_channel() -> KernelResult<()> {
     use crate::ipc::channel::{self, Message};
 
     let (tx, rx) = channel::create();
 
-    // Warm up: send/recv once so caches are primed.
-    {
-        let msg = Message::from_bytes(b"warmup").expect("bench: create warmup msg");
-        channel::send(tx, msg).expect("bench: warmup send");
-        let _ = channel::try_recv(rx).expect("bench: warmup recv");
-    }
-
-    let result = run("ipc_channel_roundtrip", 1000, || {
-        let msg = Message::from_bytes(b"bench").expect("bench: create msg");
-        channel::send(tx, msg).expect("bench: send");
-        let received = channel::try_recv(rx).expect("bench: recv");
+    // The hand-written one-shot warmup that used to sit here is gone -- its
+    // stated purpose, "send/recv once so caches are primed", is exactly what
+    // `try_run` already does 100 times before it starts timing.
+    //
+    // `outcome` is bound rather than `?`-ed so both `close` calls below run on
+    // the failure path too.
+    let outcome = try_run("ipc_channel_roundtrip", 1000, || {
+        let msg = Message::from_bytes(b"bench")?;
+        channel::send(tx, msg)?;
+        let received = channel::try_recv(rx)?;
         core::hint::black_box(received);
+        Ok(())
     });
 
     channel::close(tx);
     channel::close(rx);
+    let result = outcome?;
 
     // Target: < 2 µs round-trip (Fuchsia: ~1.5 µs, L4: ~0.5-1 µs).
     let target_ns = 2000u64;
@@ -4750,6 +4885,8 @@ fn bench_ipc_channel() {
             target_ns
         );
     }
+
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -5042,29 +5179,35 @@ fn bench_ipc_channel_sync() {
 ///
 /// Creates a pipe, writes 64 bytes, reads them back.  Measures the
 /// kernel-side hot path for byte-stream IPC.
-fn bench_ipc_pipe() {
+/// # Errors
+///
+/// Propagates any pipe failure so the caller can report the benchmark as
+/// skipped. Both ends are closed on every path, including that one.
+fn bench_ipc_pipe() -> KernelResult<()> {
     use crate::ipc::pipe;
 
     let (rd, wr) = pipe::create();
 
-    // Warm up.
-    {
-        let data = [0xABu8; 64];
-        pipe::write(wr, &data).expect("bench: pipe warmup write");
-        let mut buf = [0u8; 64];
-        let _ = pipe::read(rd, &mut buf).expect("bench: pipe warmup read");
-    }
-
-    let result = run("ipc_pipe_roundtrip_64", 1000, || {
+    // The hand-written one-shot warmup that used to sit here is gone: `try_run`
+    // discards 100 runs of this same closure before it starts timing.  (It used
+    // blocking `pipe::read` where the measured body uses `try_read`, which was
+    // the one real difference -- and an unhelpful one, since a warmup that can
+    // block is a warmup that can hang the bench.)
+    //
+    // `outcome` is bound rather than `?`-ed so both `close` calls below run on
+    // the failure path too.
+    let outcome = try_run("ipc_pipe_roundtrip_64", 1000, || {
         let data = [0x42u8; 64];
-        pipe::write(wr, &data).expect("bench: pipe write");
+        pipe::write(wr, &data)?;
         let mut buf = [0u8; 64];
-        let n = pipe::try_read(rd, &mut buf).expect("bench: pipe read");
+        let n = pipe::try_read(rd, &mut buf)?;
         core::hint::black_box(n);
+        Ok(())
     });
 
     pipe::close(rd);
     pipe::close(wr);
+    let result = outcome?;
 
     // Target: comparable to channel roundtrip (~1-2 µs).
     let target_ns = 3000u64;
@@ -5082,6 +5225,8 @@ fn bench_ipc_pipe() {
             target_ns
         );
     }
+
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -5092,32 +5237,53 @@ fn bench_ipc_pipe() {
 ///
 /// Registers a service, then repeatedly connects and accepts.  Measures
 /// the overhead of creating a channel pair and brokering the connection.
-fn bench_service_connect() {
+/// # Errors
+///
+/// Propagates a registry failure, or [`KernelError::WouldBlock`] if a
+/// connection that was just made is not pending on the listener. The service
+/// is unregistered on every path, including those.
+fn bench_service_connect() -> KernelResult<()> {
     use crate::ipc::channel;
     use crate::ipc::service;
 
-    let listener = service::register(b"bench.svc").expect("bench: service register");
+    let listener = service::register(b"bench.svc")?;
 
-    // Warm up.
-    {
-        let client = service::connect(b"bench.svc").expect("bench: warmup connect");
-        let server = service::try_accept(listener)
-            .expect("bench: warmup accept")
-            .expect("bench: warmup pending");
+    // The hand-written one-shot warmup that used to sit here is gone: `try_run`
+    // discards 50 runs of this same closure before it starts timing.
+    //
+    // `outcome` is bound rather than `?`-ed so `unregister` below runs on the
+    // failure path too -- otherwise a failed bench would leave "bench.svc"
+    // squatting in the registry for the rest of the boot.
+    let outcome = try_run("service_connect_accept", 500, || {
+        let client = service::connect(b"bench.svc")?;
+        // `try_accept` is doubly fallible: `Err` is a broken registry, `Ok(None)`
+        // just means nothing is queued yet.  The second is not a bug -- it is
+        // the answer "no connection pending" -- so it becomes `WouldBlock`
+        // rather than the panic it used to be.
+        //
+        // Neither may propagate before closing `client`.  Under the old
+        // `.expect()` that did not matter, because the panic ended everything;
+        // now that these are ordinary errors, a bare `?` here would leak one
+        // channel handle per iteration on the way out.
+        let server = match service::try_accept(listener) {
+            Ok(Some(s)) => s,
+            Ok(None) => {
+                channel::close(client);
+                return Err(crate::error::KernelError::WouldBlock);
+            }
+            Err(e) => {
+                channel::close(client);
+                return Err(e);
+            }
+        };
         channel::close(client);
         channel::close(server);
-    }
-
-    let result = run("service_connect_accept", 500, || {
-        let client = service::connect(b"bench.svc").expect("bench: connect");
-        let server = service::try_accept(listener)
-            .expect("bench: accept")
-            .expect("bench: pending");
-        channel::close(client);
-        channel::close(server);
+        Ok(())
     });
 
-    service::unregister(listener).expect("bench: unregister");
+    let unregistered = service::unregister(listener);
+    let result = outcome?;
+    unregistered?;
 
     // Target: connect+accept should be < 5 µs (channel create + queue push + dequeue).
     let target_ns = 5000u64;
@@ -5135,6 +5301,8 @@ fn bench_service_connect() {
             target_ns
         );
     }
+
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -5145,24 +5313,32 @@ fn bench_service_connect() {
 ///
 /// Creates an eventfd, writes (signals) it, then try_reads (consumes).
 /// Measures the lightweight wake-up notification path.
-fn bench_ipc_eventfd() {
+///
+/// # Errors
+///
+/// Propagates any eventfd failure so the caller can report the benchmark as
+/// skipped. The eventfd is closed on every path, including that one.
+fn bench_ipc_eventfd() -> KernelResult<()> {
     use crate::ipc::eventfd;
 
     let efd = eventfd::create(0);
 
-    // Warm up.
-    {
-        eventfd::write(efd, 1).expect("bench: efd warmup write");
-        let _ = eventfd::try_read(efd).expect("bench: efd warmup read");
-    }
-
-    let result = run("eventfd_signal_read", 2000, || {
-        eventfd::write(efd, 1).expect("bench: efd write");
-        let val = eventfd::try_read(efd).expect("bench: efd read");
+    // The hand-written one-shot warmup that used to sit here is gone: `try_run`
+    // already discards `max(iterations / 10, 5)` = 200 runs of this same
+    // closure before it starts timing, so the extra pair was measuring nothing
+    // and only existed to be unwrapped twice more.
+    //
+    // `outcome` is bound rather than `?`-ed so that `close` below runs on the
+    // failure path too -- the eventfd is ours whether or not the bench worked.
+    let outcome = try_run("eventfd_signal_read", 2000, || {
+        eventfd::write(efd, 1)?;
+        let val = eventfd::try_read(efd)?;
         core::hint::black_box(val);
+        Ok(())
     });
 
     eventfd::close(efd);
+    let result = outcome?;
 
     // Target: < 1 µs (lighter than channels).
     let target_ns = 1000u64;
@@ -5180,6 +5356,8 @@ fn bench_ipc_eventfd() {
             target_ns
         );
     }
+
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -5192,23 +5370,32 @@ fn bench_ipc_eventfd() {
 /// signals (increment) and try_waits (decrement).  Both operations
 /// are uncontended — no other task is involved — so this measures
 /// pure lock acquisition + atomic counter manipulation.
-fn bench_ipc_semaphore() {
+///
+/// # Errors
+///
+/// Propagates any semaphore failure so the caller can report the benchmark as
+/// skipped. The semaphore is closed on every path, including that one.
+fn bench_ipc_semaphore() -> KernelResult<()> {
     use crate::ipc::semaphore;
 
     let sem = semaphore::create(0, 1000);
 
-    // Warm up.
-    for _ in 0..10 {
-        semaphore::signal(sem, 1).expect("bench: sem warmup signal");
-        semaphore::try_wait(sem).expect("bench: sem warmup wait");
-    }
-
-    let result = run("semaphore_signal_wait", 2000, || {
-        semaphore::signal(sem, 1).expect("bench: sem signal");
-        semaphore::try_wait(sem).expect("bench: sem wait");
+    // The hand-written 10-iteration warmup that used to sit here is gone:
+    // `try_run` already discards 200 runs of this same closure before it starts
+    // timing, so those 10 were measuring nothing and only existed to be
+    // unwrapped twice more.
+    //
+    // `outcome` is bound rather than `?`-ed so `close` below runs on the
+    // failure path too -- the semaphore is ours whether or not the bench
+    // worked.
+    let outcome = try_run("semaphore_signal_wait", 2000, || {
+        semaphore::signal(sem, 1)?;
+        semaphore::try_wait(sem)?;
+        Ok(())
     });
 
     semaphore::close(sem);
+    let result = outcome?;
 
     // Target: < 1 µs (similar to eventfd — both are counter-based).
     let target_ns = 1000u64;
@@ -5226,6 +5413,8 @@ fn bench_ipc_semaphore() {
             target_ns
         );
     }
+
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -5324,20 +5513,22 @@ fn bench_ipc_futex() {
 /// unmaps and frees everything.
 ///
 /// This is the setup cost for any shared-memory IPC interaction.
-fn bench_ipc_shm() {
+/// # Errors
+///
+/// Propagates any shared-memory failure so the caller can report the benchmark
+/// as skipped. `shm::create` allocates frames, so exhausting memory here is an
+/// ordinary outcome on a small machine, not a bug.
+fn bench_ipc_shm() -> KernelResult<()> {
     use crate::ipc::shm;
 
-    // Warm up.
-    for _ in 0..5 {
-        let h = shm::create(16384).expect("bench: shm warmup create");
-        shm::close(h);
-    }
-
-    let result = run("shm_create_close_16k", 500, || {
-        let h = shm::create(16384).expect("bench: shm create");
+    // The hand-written 5-iteration warmup that used to sit here is gone:
+    // `try_run` already discards 50 runs of this same closure before timing.
+    let result = try_run("shm_create_close_16k", 500, || {
+        let h = shm::create(16384)?;
         core::hint::black_box(h);
         shm::close(h);
-    });
+        Ok(())
+    })?;
 
     // Target: < 5 µs.  Includes frame allocation, handle management,
     // and kernel mapping/unmapping.
@@ -5360,9 +5551,18 @@ fn bench_ipc_shm() {
     // Also benchmark a read/write cycle through shared memory.
     // Create once, write 64 bytes, read them back.
     {
-        let h = shm::create(16384).expect("bench: shm bench create");
-        let ptr = shm::kernel_addr(h).expect("bench: shm addr");
+        let h = shm::create(16384)?;
+        // `kernel_addr` can fail, and `h` is already ours by then -- close it
+        // before propagating rather than leaking a 16 KiB mapping.
+        let ptr = match shm::kernel_addr(h) {
+            Ok(p) => p,
+            Err(e) => {
+                shm::close(h);
+                return Err(e);
+            }
+        };
 
+        // The body is pure memory traffic and cannot fail, so plain `run`.
         let result_rw = run("shm_rw_64bytes", 2000, || {
             // SAFETY: ptr is valid kernel memory from shm::create,
             // exclusively ours, 16 KiB region is large enough for 64 bytes.
@@ -5392,6 +5592,8 @@ fn bench_ipc_shm() {
             );
         }
     }
+
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -5404,16 +5606,21 @@ fn bench_ipc_shm() {
 /// Event-driven servers call this in their main loop to check for
 /// new completions.  The try_wait path acquires a lock, checks the
 /// event queue, and returns an empty Vec.
-fn bench_ipc_completion_port() {
+///
+/// # Errors
+///
+/// Returns the first error from registering, measuring or unregistering the
+/// eventfd used by the notify+wait half. The completion port is closed either
+/// way; a failure means the notify+wait numbers are not reported, not that a
+/// port is leaked.
+fn bench_ipc_completion_port() -> KernelResult<()> {
     use crate::ipc::completion;
 
     let cp = completion::create();
 
-    // Warm up.
-    for _ in 0..10 {
-        let _ = completion::try_wait(cp);
-    }
-
+    // The hand-written 10-iteration warmup that used to sit here was redundant:
+    // `run` discards `max(iterations / 10, 5)` = 200 runs of this same closure
+    // before it starts timing.
     let result = run("cp_try_wait_empty", 2000, || {
         let events = completion::try_wait(cp);
         let _ = core::hint::black_box(events);
@@ -5437,46 +5644,62 @@ fn bench_ipc_completion_port() {
     }
 
     // Also benchmark notify + try_wait (post an event and consume it).
-    {
+    let rt_outcome = {
         use crate::ipc::completion::WaitSource;
         use crate::ipc::eventfd;
 
         let efd = eventfd::create(0);
-        completion::register(cp, WaitSource::EventFd(efd.raw()), 0x1234)
-            .expect("bench: cp register");
+        match completion::register(cp, WaitSource::EventFd(efd.raw()), 0x1234) {
+            Ok(()) => {
+                // Each iteration: signal the eventfd (which notifies the CP),
+                // then try_wait to consume the event, then consume the eventfd.
+                let measured = try_run("cp_notify_wait_rt", 1000, || {
+                    eventfd::write(efd, 1)?;
+                    let events = completion::try_wait(cp)?;
+                    core::hint::black_box(&events);
+                    // Drain the eventfd so the next iteration starts clean.
+                    let _ = eventfd::try_read(efd);
+                    Ok(())
+                });
 
-        // Each iteration: signal the eventfd (which notifies the CP),
-        // then try_wait to consume the event, then consume the eventfd.
-        let result_rt = run("cp_notify_wait_rt", 1000, || {
-            eventfd::write(efd, 1).expect("bench: cp efd write");
-            let events = completion::try_wait(cp).expect("bench: cp wait");
-            core::hint::black_box(&events);
-            // Drain the eventfd so the next iteration starts clean.
-            let _ = eventfd::try_read(efd);
-        });
-
-        completion::unregister(cp, WaitSource::EventFd(efd.raw())).expect("bench: cp unregister");
-        eventfd::close(efd);
-
-        // Target: < 2 µs.  Eventfd write + CP notification + try_wait.
-        let rt_target_ns = 2000u64;
-        score("cp_notify_wait_rt", &result_rt, rt_target_ns);
-        if result_rt.min_ns <= rt_target_ns {
-            serial_println!(
-                "[bench]   cp_notify_wait_rt: PASS (min {}ns <= target {}ns)",
-                result_rt.min_ns,
-                rt_target_ns
-            );
-        } else {
-            serial_println!(
-                "[bench]   cp_notify_wait_rt: ABOVE TARGET (min {}ns > target {}ns)",
-                result_rt.min_ns,
-                rt_target_ns
-            );
+                // Teardown runs whether or not the measurement succeeded.  Under
+                // the old `.expect()` a failure ended the machine, so leaving the
+                // source registered and the eventfd open cost nothing; now that
+                // it is an ordinary error, propagating before this point would
+                // leak both.
+                let unregistered = completion::unregister(cp, WaitSource::EventFd(efd.raw()));
+                eventfd::close(efd);
+                measured.and_then(|m| unregistered.map(|()| m))
+            }
+            // Nothing got registered, but `efd` is already ours to close.
+            Err(e) => {
+                eventfd::close(efd);
+                Err(e)
+            }
         }
-    }
+    };
 
     completion::close(cp);
+    let result_rt = rt_outcome?;
+
+    // Target: < 2 µs.  Eventfd write + CP notification + try_wait.
+    let rt_target_ns = 2000u64;
+    score("cp_notify_wait_rt", &result_rt, rt_target_ns);
+    if result_rt.min_ns <= rt_target_ns {
+        serial_println!(
+            "[bench]   cp_notify_wait_rt: PASS (min {}ns <= target {}ns)",
+            result_rt.min_ns,
+            rt_target_ns
+        );
+    } else {
+        serial_println!(
+            "[bench]   cp_notify_wait_rt: ABOVE TARGET (min {}ns > target {}ns)",
+            result_rt.min_ns,
+            rt_target_ns
+        );
+    }
+
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -5646,7 +5869,15 @@ fn bench_io_ring_nop() {
 ///
 /// This measures the full fault path excluding the CPU exception overhead
 /// (which we can't trigger from kernel mode).
-fn bench_page_fault() {
+///
+/// # Errors
+///
+/// Returns the first allocation/mapping error from the measured loop, or — if
+/// that loop succeeded — the first error from the bulk unmap/free cleanup.
+/// Either way every page this function actually mapped is unmapped and freed
+/// before returning: the error path tears down exactly the prefix that was
+/// built, so a failure costs a missing measurement rather than leaked frames.
+fn bench_page_fault() -> KernelResult<()> {
     use crate::mm::{
         frame,
         page_table::{self, PageFlags, VirtAddr},
@@ -5678,6 +5909,15 @@ fn bench_page_fault() {
     let mut max = 0u64;
     let mut total_cycles = 0u64;
 
+    // How many pages are actually mapped.  The cleanup loop below walks exactly
+    // this many, so a mid-loop failure tears down precisely the prefix that was
+    // built.  The old `.expect()` did not need this because the panic took the
+    // machine with it; an ordinary error must not leave a partially-mapped range
+    // behind at `bench_virt_base`, where the next boot benchmark would map over
+    // it.
+    let mut mapped: u32 = 0;
+    let mut failure: Option<crate::error::KernelError> = None;
+
     for i in 0..total_runs {
         #[allow(clippy::arithmetic_side_effects)]
         let vaddr = bench_virt_base + (i as u64) * (frame::FRAME_SIZE as u64);
@@ -5686,21 +5926,39 @@ fn bench_page_fault() {
         // --- Timed section: matches real demand_page() path ---
         let start = rdtsc_serialized();
 
-        let f = frame::alloc_frame_zeroed().expect("bench: alloc_zeroed");
-        // SAFETY: vaddr is in unused kernel space, pml4 is valid,
-        // f is freshly allocated.
-        unsafe {
-            page_table::map_frame(pml4, virt, f, flags).expect("bench: map");
-        }
-        // Local-only flush — matches real demand fault path (no IPI
-        // broadcast needed for never-before-mapped pages).
-        // SAFETY: invlpg is always safe in ring 0.
-        unsafe {
-            page_table::flush_frame_local(virt);
+        // SAFETY: `vaddr` is 16 KiB aligned and in unused kernel space, `pml4`
+        // is the live top-level table, and `f` is a freshly allocated frame
+        // owned solely by this iteration.  `free_frame` on the error path is
+        // sound for the same reason: the frame never became reachable, because
+        // the only thing that could have published it is the `map_frame` that
+        // just failed.
+        let outcome = frame::alloc_frame_zeroed().and_then(|f| unsafe {
+            page_table::map_frame(pml4, virt, f, flags).map_err(|e| {
+                // Hand the frame back rather than leaking it; the mapping error
+                // is the one worth reporting, so a failure to free is dropped.
+                let _ = frame::free_frame(f);
+                e
+            })
+        });
+        if outcome.is_ok() {
+            // Local-only flush — matches real demand fault path (no IPI
+            // broadcast needed for never-before-mapped pages).
+            // SAFETY: invlpg is always safe in ring 0.
+            unsafe {
+                page_table::flush_frame_local(virt);
+            }
         }
 
         let end = rdtsc();
         // --- End timed section ---
+
+        // Inspected after the clock has stopped, so the error branch cannot land
+        // inside the window it would otherwise inflate.
+        if let Err(e) = outcome {
+            failure = Some(e);
+            break;
+        }
+        mapped = mapped.saturating_add(1);
 
         // Only record measurement iterations (skip warmup).
         if i >= warmup {
@@ -5713,6 +5971,38 @@ fn bench_page_fault() {
             }
             total_cycles = total_cycles.saturating_add(elapsed);
         }
+    }
+
+    // Bulk cleanup: unmap and free every frame this function mapped.  Runs
+    // before the report and before any error is propagated, so the range is
+    // always given back.
+    //
+    // One failure must not abort the remaining frees — that would turn a single
+    // bad page into a leak of everything after it — so the loop records the
+    // first error and keeps going, per the batch-error rule in CLAUDE.md.
+    let mut cleanup_err: Option<crate::error::KernelError> = None;
+    for i in 0..mapped {
+        #[allow(clippy::arithmetic_side_effects)]
+        let vaddr = bench_virt_base + (i as u64) * (frame::FRAME_SIZE as u64);
+        let virt = VirtAddr::new(vaddr);
+        // SAFETY: we mapped these pages above and nothing else references them,
+        // so we are the sole owner of the returned frame.
+        let freed = unsafe {
+            page_table::unmap_frame(pml4, virt).and_then(|returned| frame::free_frame(returned))
+        };
+        if let Err(e) = freed {
+            cleanup_err.get_or_insert(e);
+        }
+    }
+    // Single TLB shootdown for the entire range after all unmaps.
+    crate::tlb::flush_range(bench_virt_base, mapped.saturating_mul(4));
+
+    // The measured loop's own failure is the root cause, so it outranks any
+    // cleanup error it may have caused.  Reporting is skipped in both cases:
+    // `min` is still `u64::MAX` if the very first iteration failed, and a
+    // truncated run's mean is divided by the full `iterations` either way.
+    if let Some(e) = failure.or(cleanup_err) {
+        return Err(e);
     }
 
     let mean = total_cycles.checked_div(iterations as u64).unwrap_or(0);
@@ -5728,22 +6018,6 @@ fn bench_page_fault() {
         max,
         iterations
     );
-
-    // Bulk cleanup: unmap and free all frames.
-    for i in 0..total_runs {
-        #[allow(clippy::arithmetic_side_effects)]
-        let vaddr = bench_virt_base + (i as u64) * (frame::FRAME_SIZE as u64);
-        let virt = VirtAddr::new(vaddr);
-        // SAFETY: we mapped these pages above.
-        let returned =
-            unsafe { page_table::unmap_frame(pml4, virt).expect("bench: unmap cleanup") };
-        // SAFETY: sole owner, all mappings removed.
-        unsafe {
-            frame::free_frame(returned).expect("bench: free cleanup");
-        }
-    }
-    // Single TLB shootdown for the entire range after all unmaps.
-    crate::tlb::flush_range(bench_virt_base, total_runs.saturating_mul(4));
 
     let result = BenchResult {
         name: String::from("page_fault_anonymous"),
@@ -5774,6 +6048,8 @@ fn bench_page_fault() {
             target_ns
         );
     }
+
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------

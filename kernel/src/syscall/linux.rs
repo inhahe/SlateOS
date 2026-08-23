@@ -46036,22 +46036,13 @@ fn sys_uname(args: &SyscallArgs) -> SyscallResult {
         buf[off..off + n].copy_from_slice(&s[..n]);
         // buf[off + n] is the NUL terminator (already zero).
     }
-    // sysname / release are Linux-ABI-only surfaces: in our
-    // architecture native code uses native APIs, so the ONLY callers
-    // of uname(2) are Linux binaries that expect Linux values.
-    // Reporting "Linux" / "6.6.x" is therefore the faithful answer for
-    // this ABI, not a lie about what we are — it tells a Linux program
-    // exactly which Linux personality it is talking to.
-    //
-    // The release string MUST satisfy glibc's startup version gate
-    // (`__libc_start_main` → "FATAL: kernel too old" if the leading
-    // MAJOR.MINOR is below glibc's build-time minimum). glibc parses
-    // only the leading integer triple, so "6.6.0-slateos" reads as the
-    // 6.6.0 baseline kernel we faithfully implement (see §72
-    // "Version-surface policy" in roadmap-detailed.md) while the
-    // "-slateos" suffix still signals our build to anything that prints
-    // the full string.
-    fill(&mut buf, 0, b"Linux"); // sysname
+    // The strings live in `crate::uname`, which is the single definition
+    // shared by this syscall, `/proc/sys/kernel/*`, `/sys/kernel/*` and the
+    // sysctl registry.  Those four used to hold three different answers; see
+    // that module for why the values are what they are (Linux-ABI-only
+    // surfaces, and glibc's start-up version gate on `release`) and why they
+    // are defined exactly once.
+    fill(&mut buf, 0, crate::uname::SYSNAME.as_bytes()); // sysname
     // Batch 511: pure read of nameservice state — no substitution
     // layer.  Mirrors v6.6's `memcpy(&tmp, utsname(), sizeof(tmp))`.
     // If userspace cleared nodename via `sethostname("", 0)` or
@@ -46066,9 +46057,9 @@ fn sys_uname(args: &SyscallArgs) -> SyscallResult {
     let nodename = crate::ipc::namespace::hostname_for(process_id)
         .unwrap_or_else(crate::fs::nameservice::get_hostname);
     fill(&mut buf, 1, nodename.as_bytes());
-    fill(&mut buf, 2, b"6.6.0-slateos"); // release
-    fill(&mut buf, 3, b"#1 SMP"); // version
-    fill(&mut buf, 4, b"x86_64"); // machine
+    fill(&mut buf, 2, crate::uname::RELEASE.as_bytes()); // release
+    fill(&mut buf, 3, crate::uname::VERSION.as_bytes()); // version
+    fill(&mut buf, 4, crate::uname::MACHINE.as_bytes()); // machine
     let domain = crate::fs::nameservice::get_domain();
     fill(&mut buf, 5, domain.as_bytes());
 

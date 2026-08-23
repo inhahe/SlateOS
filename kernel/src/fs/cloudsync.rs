@@ -577,8 +577,8 @@ pub fn self_test() {
     // contributed.  `active` is a live count and is exact.
     let (accts, syncs, conflicts, active, ops) = stats();
     assert_eq!(accts, base_accts + 1);
-    assert!(syncs >= base_syncs + 1);
-    assert!(conflicts >= base_conflicts + 1);
+    assert!(syncs > base_syncs);
+    assert!(conflicts > base_conflicts);
     assert_eq!(active, base_active + 1);
     assert!(ops > 0);
     crate::serial_println!("  [11/12] stats: OK");

@@ -577,7 +577,7 @@ pub fn self_test() {
     let (ver_count, _file_count, captured, restored, watch_count, ops) = stats();
     assert_eq!(ver_count, base_versions);
     assert!(captured >= base_captured + 2);
-    assert!(restored >= base_restored + 1);
+    assert!(restored > base_restored);
     assert_eq!(watch_count, base_watches + 1);
     assert!(ops > 0);
     crate::serial_println!("  [11/12] stats: OK");

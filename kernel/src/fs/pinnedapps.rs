@@ -179,21 +179,24 @@ pub fn pin(
         {
             return Err(KernelError::AlreadyExists);
         }
-        // Find max position in location.
-        let max_pos = state
+        // Append after the last pin in this location. `map_or(0, ..)` rather
+        // than `max().unwrap_or(0) + 1`: with the location empty there is no
+        // last pin, so the new one belongs at 0 -- the old form put the very
+        // first pin at position 1 and left slot 0 permanently vacant.
+        let next_pos = state
             .pins
             .iter()
             .filter(|p| p.location == location)
             .map(|p| p.position)
             .max()
-            .unwrap_or(0);
+            .map_or(0, |m| m.saturating_add(1));
         state.pins.push(PinnedApp {
             app_name: String::from(app_name),
             display_name: String::from(display_name),
             icon_path: PathBuf::new(),
             exec_path: exec_path.to_path_buf(),
             location,
-            position: max_pos + 1,
+            position: next_pos,
             group: String::new(),
             launch_count: 0,
         });
@@ -220,12 +223,41 @@ pub fn unpin(location: PinLocation, app_name: &str) -> KernelResult<()> {
 /// Move app to a new position.
 pub fn reorder(location: PinLocation, app_name: &str, new_position: u32) -> KernelResult<()> {
     with_state(|state| {
-        let pin = state
+        // A real move, not a relabel.
+        //
+        // This used to be `pin.position = new_position` and nothing else,
+        // which left two pins claiming the same slot. `list_pins` sorts by
+        // position with a stable sort, so the incumbent kept the slot and the
+        // reorder appeared to do nothing whatsoever -- `pinnedapps move
+        // taskbar terminal 0` reported success and changed no order. The bug
+        // survived because this module's self-test was reachable only from a
+        // `kshell` subcommand and so had never run (TD-A-FS-SELFTESTS-NEVER-RUN);
+        // wiring it into the boot test is what surfaced it.
+        //
+        // Build this location's pins in display order, move the one, then
+        // renumber contiguously so positions stay 0..n-1 with no ties or gaps.
+        let mut order: Vec<usize> = state
             .pins
-            .iter_mut()
-            .find(|p| p.app_name == app_name && p.location == location)
+            .iter()
+            .enumerate()
+            .filter(|(_, p)| p.location == location)
+            .map(|(i, _)| i)
+            .collect();
+        order.sort_by_key(|&i| state.pins.get(i).map_or(u32::MAX, |p| p.position));
+        let cur = order
+            .iter()
+            .position(|&i| state.pins.get(i).is_some_and(|p| p.app_name == app_name))
             .ok_or(KernelError::NotFound)?;
-        pin.position = new_position;
+        let moved = order.remove(cur);
+        // Clamp rather than reject a position past the end: "put it last" is
+        // the only sensible reading, and the caller is a user typing a number.
+        let dest = core::cmp::min(new_position as usize, order.len());
+        order.insert(dest, moved);
+        for (slot, &i) in order.iter().enumerate() {
+            if let Some(p) = state.pins.get_mut(i) {
+                p.position = u32::try_from(slot).unwrap_or(u32::MAX);
+            }
+        }
         Ok(())
     })
 }
@@ -410,10 +442,29 @@ pub fn self_test() {
     assert!(!is_pinned(PinLocation::Taskbar, "editor"));
     crate::serial_println!("  [5/9] unpin: OK");
 
-    // 6: Reorder.
+    // 6: Reorder. A move, not a relabel: the pin displaced from slot 0 must
+    // shift down rather than share the slot, and the positions must stay
+    // contiguous afterwards. (`reorder` used to set one pin's `position` and
+    // leave the rest alone, so two pins held slot 0 and the stable sort in
+    // `list_pins` kept the incumbent first -- the move did nothing.)
+    let taskbar_names = || -> Vec<String> {
+        list_pins(PinLocation::Taskbar)
+            .iter()
+            .map(|p| p.app_name.clone())
+            .collect()
+    };
+    assert_eq!(taskbar_names(), ["files", "browser", "terminal"]);
     reorder(PinLocation::Taskbar, "terminal", 0).expect("reorder");
-    let taskbar = list_pins(PinLocation::Taskbar);
-    assert_eq!(taskbar[0].app_name, "terminal");
+    assert_eq!(taskbar_names(), ["terminal", "files", "browser"]);
+    let positions: Vec<u32> = list_pins(PinLocation::Taskbar)
+        .iter()
+        .map(|p| p.position)
+        .collect();
+    assert_eq!(positions, [0, 1, 2], "positions must stay contiguous");
+    // A position past the end clamps to last rather than erroring.
+    reorder(PinLocation::Taskbar, "terminal", 99).expect("reorder to end");
+    assert_eq!(taskbar_names(), ["files", "browser", "terminal"]);
+    assert!(reorder(PinLocation::Taskbar, "nosuchapp", 0).is_err());
     crate::serial_println!("  [6/9] reorder: OK");
 
     // 7: Launch tracking.

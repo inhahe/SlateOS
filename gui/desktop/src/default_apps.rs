@@ -886,14 +886,23 @@ impl DefaultAppsUI {
                 overflow: TextOverflow::Clip,
             });
 
-            // Current default app
+            // Current default app. The accent is reserved for a category that
+            // actually has one: "None set" is the absence of the thing the
+            // accent exists to mark, so accenting it would mark every card
+            // equally and leave the eye nothing to find. Two of the twelve
+            // categories ship with no handler at all, so this is the ordinary
+            // case rather than a corner.
             let app_name = default_app.map(|a| a.name.as_str()).unwrap_or("None set");
             cmds.push(RenderCommand::Text {
                 x: x + 44.0,
                 y: row_y + 30.0,
                 text: app_name.to_string(),
                 font_size: 12.0,
-                color: p.accent,
+                color: if default_app.is_some() {
+                    p.accent
+                } else {
+                    p.overlay0
+                },
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
                 overflow: TextOverflow::Clip,
@@ -1978,10 +1987,10 @@ mod tests {
             );
             let on_cats = all_colors(cats).iter().filter(|c| **c == p.accent).count();
             assert_eq!(
-                on_cats, 14,
+                on_cats, 12,
                 "the Categories tab should accent its own tab, the app named \
-                 under each of the twelve cards, and the current chip — \
-                 found {on_cats}"
+                 under each of the *ten* cards that have one, and the current \
+                 chip — found {on_cats}"
             );
 
             // The other two tabs accent their own tab and nothing else.
@@ -1995,6 +2004,50 @@ mod tests {
                      tab should be the only accented thing — found {n}"
                 );
             }
+        }
+    }
+
+    /// A category with no handler is not marked as though it had one.
+    ///
+    /// `builtin_apps()` ships nothing that handles Web browser or Email, so
+    /// two of the twelve cards read "None set". Those two are the absence of
+    /// the fact the accent exists to mark, and drawing them in the accent —
+    /// which is what this module did until the palette conversion made the
+    /// rule explicit enough to notice — accents twelve of twelve cards and so
+    /// marks nothing at all.
+    ///
+    /// The two counts are asserted together on purpose: "ten accented" and
+    /// "two dim" only mean something as a pair, since either alone is
+    /// satisfied by a card that simply vanished.
+    #[test]
+    fn a_category_with_no_default_app_is_not_accented_as_if_it_had_one() {
+        for light in [false, true] {
+            let p = accented(light);
+            let cats = &every_tab(&p)[0].1;
+
+            let none_set = text_colors(cats, "None set");
+            assert_eq!(
+                none_set.len(),
+                2,
+                "Web browser and Email ship with no handler"
+            );
+            assert!(
+                none_set.iter().all(|c| *c == p.overlay0),
+                "an unset category is dim, not accented"
+            );
+
+            let named = ContentCategory::all()
+                .iter()
+                .filter_map(|c| {
+                    DefaultAppsSettings::default()
+                        .default_for_category(*c)
+                        .map(|_| ())
+                })
+                .count();
+            assert_eq!(
+                named, 10,
+                "ten of the twelve categories ship with a default"
+            );
         }
     }
 

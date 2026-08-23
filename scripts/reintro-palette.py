@@ -75,6 +75,7 @@ SND = "gui/desktop/src/sound_settings.rs"
 OSD = "gui/desktop/src/osd.rs"
 PRIV = "gui/desktop/src/privacy_settings.rs"
 PRINTMGR = "gui/desktop/src/print_manager.rs"
+POWER = "gui/desktop/src/power.rs"
 
 # (name, file, [(old, new), ...], [packages], [tests expected to fail])
 DEFECTS = [
@@ -7682,6 +7683,705 @@ DEFECTS = [
         [
             'every_text_this_dialog_draws_is_in_the_role_it_claims',
             'the_fixtures_take_every_branch_this_dialog_has',
+        ],
+    ),
+    # ---- power.rs (module 27 of 49) ----
+    (
+        'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAA: the AC hint is frozen back to Mocha subtext0',
+        POWER,
+        [
+            ('            text: "AC".to_string(),\n            color: p.subtext0,',
+             '            text: "AC".to_string(),\n            color: Color::from_hex(0xA6ADC8),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_taskbar_and_settings_draw_comes_from_their_palette',
+            'every_text_this_module_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        'BBBBBBBBBBBBBBBBBBBBBBBBBBBBBB: the AC hint is promoted to primary text',
+        POWER,
+        [
+            ('            text: "AC".to_string(),\n            color: p.subtext0,',
+             '            text: "AC".to_string(),\n            color: p.text,'),
+        ],
+        ["desktop"],
+        [
+            'every_text_this_module_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        'CCCCCCCCCCCCCCCCCCCCCCCCCCCCCC: the AC hint takes the accent',
+        POWER,
+        [
+            ('            text: "AC".to_string(),\n            color: p.subtext0,',
+             '            text: "AC".to_string(),\n            color: p.accent,'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_taskbar_and_settings_draw_comes_from_their_palette',
+            'every_text_this_module_draws_is_in_the_role_it_claims',
+            'nothing_this_module_draws_moves_when_the_accent_does',
+        ],
+    ),
+    (
+        'DDDDDDDDDDDDDDDDDDDDDDDDDDDDDD: the battery outline is frozen back to Mocha text',
+        POWER,
+        [
+            ('        width: batt_w,\n        height: batt_h,\n        color: p.text,',
+             '        width: batt_w,\n        height: batt_h,\n        color: Color::from_hex(0xCDD6F4),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_taskbar_and_settings_draw_comes_from_their_palette',
+            'every_rectangle_this_module_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        'EEEEEEEEEEEEEEEEEEEEEEEEEEEEEE: the battery outline fades to secondary ink',
+        POWER,
+        [
+            ('        width: batt_w,\n        height: batt_h,\n        color: p.text,',
+             '        width: batt_w,\n        height: batt_h,\n        color: p.subtext0,'),
+        ],
+        ["desktop"],
+        [
+            'every_rectangle_this_module_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        'FFFFFFFFFFFFFFFFFFFFFFFFFFFFFF: the battery outline takes the accent',
+        POWER,
+        [
+            ('        width: batt_w,\n        height: batt_h,\n        color: p.text,',
+             '        width: batt_w,\n        height: batt_h,\n        color: p.accent,'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_taskbar_and_settings_draw_comes_from_their_palette',
+            'every_rectangle_this_module_draws_is_in_the_role_it_claims',
+            'nothing_this_module_draws_moves_when_the_accent_does',
+        ],
+    ),
+    (
+        'GGGGGGGGGGGGGGGGGGGGGGGGGGGGGG: the battery tip is frozen back to Mocha text',
+        POWER,
+        [
+            ('        width: tip_w,\n        height: tip_h,\n        color: p.text,',
+             '        width: tip_w,\n        height: tip_h,\n        color: Color::from_hex(0xCDD6F4),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_taskbar_and_settings_draw_comes_from_their_palette',
+            'every_rectangle_this_module_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        'HHHHHHHHHHHHHHHHHHHHHHHHHHHHHH: the battery tip fades to the dimmest ink',
+        POWER,
+        [
+            ('        width: tip_w,\n        height: tip_h,\n        color: p.text,',
+             '        width: tip_w,\n        height: tip_h,\n        color: p.overlay0,'),
+        ],
+        ["desktop"],
+        [
+            'every_rectangle_this_module_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        'IIIIIIIIIIIIIIIIIIIIIIIIIIIIII: the battery tip takes the accent',
+        POWER,
+        [
+            ('        width: tip_w,\n        height: tip_h,\n        color: p.text,',
+             '        width: tip_w,\n        height: tip_h,\n        color: p.accent,'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_taskbar_and_settings_draw_comes_from_their_palette',
+            'every_rectangle_this_module_draws_is_in_the_role_it_claims',
+            'nothing_this_module_draws_moves_when_the_accent_does',
+        ],
+    ),
+    (
+        "JJJJJJJJJJJJJJJJJJJJJJJJJJJJJJ: the gauge's critical step is frozen back to its Mocha value",
+        POWER,
+        [
+            ('        p.red\n',
+             '        Color::from_hex(0xF38BA8)\n'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_taskbar_and_settings_draw_comes_from_their_palette',
+            'every_choice_this_module_makes_hands_over_the_role_it_claims',
+        ],
+    ),
+    (
+        "KKKKKKKKKKKKKKKKKKKKKKKKKKKKKK: the gauge's critical step is swapped with its neighbour",
+        POWER,
+        [
+            ('        p.red\n',
+             '        p.yellow\n'),
+        ],
+        ["desktop"],
+        [
+            'the_fixtures_take_every_branch_this_module_has',
+            'every_choice_this_module_makes_hands_over_the_role_it_claims',
+        ],
+    ),
+    (
+        "LLLLLLLLLLLLLLLLLLLLLLLLLLLLLL: the gauge's critical step takes the accent",
+        POWER,
+        [
+            ('        p.red\n',
+             '        p.accent\n'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_taskbar_and_settings_draw_comes_from_their_palette',
+            'every_choice_this_module_makes_hands_over_the_role_it_claims',
+            'nothing_this_module_draws_moves_when_the_accent_does',
+        ],
+    ),
+    (
+        "MMMMMMMMMMMMMMMMMMMMMMMMMMMMMM: the gauge's low step is frozen back to its Mocha value",
+        POWER,
+        [
+            ('        p.yellow\n',
+             '        Color::from_hex(0xF9E2AF)\n'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_taskbar_and_settings_draw_comes_from_their_palette',
+            'every_choice_this_module_makes_hands_over_the_role_it_claims',
+        ],
+    ),
+    (
+        "NNNNNNNNNNNNNNNNNNNNNNNNNNNNNN: the gauge's low step is swapped with its neighbour",
+        POWER,
+        [
+            ('        p.yellow\n',
+             '        p.red\n'),
+        ],
+        ["desktop"],
+        [
+            'the_fixtures_take_every_branch_this_module_has',
+            'every_choice_this_module_makes_hands_over_the_role_it_claims',
+        ],
+    ),
+    (
+        "OOOOOOOOOOOOOOOOOOOOOOOOOOOOOO: the gauge's low step takes the accent",
+        POWER,
+        [
+            ('        p.yellow\n',
+             '        p.accent\n'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_taskbar_and_settings_draw_comes_from_their_palette',
+            'every_choice_this_module_makes_hands_over_the_role_it_claims',
+            'nothing_this_module_draws_moves_when_the_accent_does',
+        ],
+    ),
+    (
+        "PPPPPPPPPPPPPPPPPPPPPPPPPPPPPP: the gauge's nearly full step is frozen back to its Mocha value",
+        POWER,
+        [
+            ('        p.green\n',
+             '        Color::from_hex(0xA6E3A1)\n'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_taskbar_and_settings_draw_comes_from_their_palette',
+            'every_choice_this_module_makes_hands_over_the_role_it_claims',
+        ],
+    ),
+    (
+        "QQQQQQQQQQQQQQQQQQQQQQQQQQQQQQ: the gauge's nearly full step is swapped with its neighbour",
+        POWER,
+        [
+            ('        p.green\n',
+             '        p.blue\n'),
+        ],
+        ["desktop"],
+        [
+            'the_fixtures_take_every_branch_this_module_has',
+            'every_choice_this_module_makes_hands_over_the_role_it_claims',
+        ],
+    ),
+    (
+        "RRRRRRRRRRRRRRRRRRRRRRRRRRRRRR: the gauge's nearly full step takes the accent",
+        POWER,
+        [
+            ('        p.green\n',
+             '        p.accent\n'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_taskbar_and_settings_draw_comes_from_their_palette',
+            'every_choice_this_module_makes_hands_over_the_role_it_claims',
+            'nothing_this_module_draws_moves_when_the_accent_does',
+        ],
+    ),
+    (
+        "SSSSSSSSSSSSSSSSSSSSSSSSSSSSSS: the gauge's normal step is frozen back to its Mocha value",
+        POWER,
+        [
+            ('        p.blue\n',
+             '        Color::from_hex(0x89B4FA)\n'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_taskbar_and_settings_draw_comes_from_their_palette',
+            'every_choice_this_module_makes_hands_over_the_role_it_claims',
+        ],
+    ),
+    (
+        "TTTTTTTTTTTTTTTTTTTTTTTTTTTTTT: the gauge's normal step is swapped with its neighbour",
+        POWER,
+        [
+            ('        p.blue\n',
+             '        p.green\n'),
+        ],
+        ["desktop"],
+        [
+            'the_fixtures_take_every_branch_this_module_has',
+            'every_choice_this_module_makes_hands_over_the_role_it_claims',
+        ],
+    ),
+    (
+        "UUUUUUUUUUUUUUUUUUUUUUUUUUUUUU: the gauge's normal step takes the accent",
+        POWER,
+        [
+            ('        p.blue\n',
+             '        p.accent\n'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_taskbar_and_settings_draw_comes_from_their_palette',
+            'every_choice_this_module_makes_hands_over_the_role_it_claims',
+            'nothing_this_module_draws_moves_when_the_accent_does',
+        ],
+    ),
+    (
+        'VVVVVVVVVVVVVVVVVVVVVVVVVVVVVV: the charging bolt is frozen back to Mocha yellow',
+        POWER,
+        [
+            ('            text: "\\u{26A1}".to_string(), // ⚡\n            color: p.yellow,',
+             '            text: "\\u{26A1}".to_string(), // ⚡\n            color: Color::from_hex(0xF9E2AF),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_taskbar_and_settings_draw_comes_from_their_palette',
+            'every_text_this_module_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        'WWWWWWWWWWWWWWWWWWWWWWWWWWWWWW: the charging bolt turns into an alarm',
+        POWER,
+        [
+            ('            text: "\\u{26A1}".to_string(), // ⚡\n            color: p.yellow,',
+             '            text: "\\u{26A1}".to_string(), // ⚡\n            color: p.red,'),
+        ],
+        ["desktop"],
+        [
+            'every_text_this_module_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        'XXXXXXXXXXXXXXXXXXXXXXXXXXXXXX: the charging bolt takes the accent',
+        POWER,
+        [
+            ('            text: "\\u{26A1}".to_string(), // ⚡\n            color: p.yellow,',
+             '            text: "\\u{26A1}".to_string(), // ⚡\n            color: p.accent,'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_taskbar_and_settings_draw_comes_from_their_palette',
+            'every_text_this_module_draws_is_in_the_role_it_claims',
+            'nothing_this_module_draws_moves_when_the_accent_does',
+        ],
+    ),
+    (
+        'YYYYYYYYYYYYYYYYYYYYYYYYYYYYYY: the percentage readout is frozen back to Mocha subtext0',
+        POWER,
+        [
+            ('            text: format!("{}%", battery.charge_pct),\n            color: p.subtext0,',
+             '            text: format!("{}%", battery.charge_pct),\n            color: Color::from_hex(0xA6ADC8),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_taskbar_and_settings_draw_comes_from_their_palette',
+            'every_text_this_module_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        'ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ: the percentage readout is promoted to primary text',
+        POWER,
+        [
+            ('            text: format!("{}%", battery.charge_pct),\n            color: p.subtext0,',
+             '            text: format!("{}%", battery.charge_pct),\n            color: p.text,'),
+        ],
+        ["desktop"],
+        [
+            'every_text_this_module_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA: the percentage readout takes the accent',
+        POWER,
+        [
+            ('            text: format!("{}%", battery.charge_pct),\n            color: p.subtext0,',
+             '            text: format!("{}%", battery.charge_pct),\n            color: p.accent,'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_taskbar_and_settings_draw_comes_from_their_palette',
+            'every_text_this_module_draws_is_in_the_role_it_claims',
+            'nothing_this_module_draws_moves_when_the_accent_does',
+        ],
+    ),
+    (
+        'BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB: the Balanced badge is frozen back to its Mocha value',
+        POWER,
+        [
+            ('        PowerProfile::Balanced => ("Balanced", p.blue),',
+             '        PowerProfile::Balanced => ("Balanced", Color::from_hex(0x89B4FA)),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_taskbar_and_settings_draw_comes_from_their_palette',
+            'every_choice_this_module_makes_hands_over_the_role_it_claims',
+        ],
+    ),
+    (
+        "CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC: the Balanced badge is swapped with another profile's hue",
+        POWER,
+        [
+            ('        PowerProfile::Balanced => ("Balanced", p.blue),',
+             '        PowerProfile::Balanced => ("Balanced", p.peach),'),
+        ],
+        ["desktop"],
+        [
+            'every_choice_this_module_makes_hands_over_the_role_it_claims',
+        ],
+    ),
+    (
+        'DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD: the Balanced badge takes the accent',
+        POWER,
+        [
+            ('        PowerProfile::Balanced => ("Balanced", p.blue),',
+             '        PowerProfile::Balanced => ("Balanced", p.accent),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_taskbar_and_settings_draw_comes_from_their_palette',
+            'every_choice_this_module_makes_hands_over_the_role_it_claims',
+            'nothing_this_module_draws_moves_when_the_accent_does',
+        ],
+    ),
+    (
+        'EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE: the Performance badge is frozen back to its Mocha value',
+        POWER,
+        [
+            ('        PowerProfile::Performance => ("Performance", p.peach),',
+             '        PowerProfile::Performance => ("Performance", Color::from_hex(0xFAB387)),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_taskbar_and_settings_draw_comes_from_their_palette',
+            'every_choice_this_module_makes_hands_over_the_role_it_claims',
+        ],
+    ),
+    (
+        "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF: the Performance badge is swapped with another profile's hue",
+        POWER,
+        [
+            ('        PowerProfile::Performance => ("Performance", p.peach),',
+             '        PowerProfile::Performance => ("Performance", p.blue),'),
+        ],
+        ["desktop"],
+        [
+            'every_choice_this_module_makes_hands_over_the_role_it_claims',
+        ],
+    ),
+    (
+        'GGGGGGGGGGGGGGGGGGGGGGGGGGGGGGG: the Performance badge takes the accent',
+        POWER,
+        [
+            ('        PowerProfile::Performance => ("Performance", p.peach),',
+             '        PowerProfile::Performance => ("Performance", p.accent),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_taskbar_and_settings_draw_comes_from_their_palette',
+            'every_choice_this_module_makes_hands_over_the_role_it_claims',
+            'nothing_this_module_draws_moves_when_the_accent_does',
+        ],
+    ),
+    (
+        'HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH: the Power Saver badge is frozen back to its Mocha value',
+        POWER,
+        [
+            ('        PowerProfile::PowerSaver => ("Power Saver", p.green),',
+             '        PowerProfile::PowerSaver => ("Power Saver", Color::from_hex(0xA6E3A1)),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_taskbar_and_settings_draw_comes_from_their_palette',
+            'every_choice_this_module_makes_hands_over_the_role_it_claims',
+        ],
+    ),
+    (
+        "IIIIIIIIIIIIIIIIIIIIIIIIIIIIIII: the Power Saver badge is swapped with another profile's hue",
+        POWER,
+        [
+            ('        PowerProfile::PowerSaver => ("Power Saver", p.green),',
+             '        PowerProfile::PowerSaver => ("Power Saver", p.lavender),'),
+        ],
+        ["desktop"],
+        [
+            'every_choice_this_module_makes_hands_over_the_role_it_claims',
+        ],
+    ),
+    (
+        'JJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJ: the Power Saver badge takes the accent',
+        POWER,
+        [
+            ('        PowerProfile::PowerSaver => ("Power Saver", p.green),',
+             '        PowerProfile::PowerSaver => ("Power Saver", p.accent),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_taskbar_and_settings_draw_comes_from_their_palette',
+            'every_choice_this_module_makes_hands_over_the_role_it_claims',
+            'nothing_this_module_draws_moves_when_the_accent_does',
+        ],
+    ),
+    (
+        'KKKKKKKKKKKKKKKKKKKKKKKKKKKKKKK: the Custom badge is frozen back to its Mocha value',
+        POWER,
+        [
+            ('        PowerProfile::Custom => ("Custom", p.lavender),',
+             '        PowerProfile::Custom => ("Custom", Color::from_hex(0xB4BEFE)),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_taskbar_and_settings_draw_comes_from_their_palette',
+            'every_choice_this_module_makes_hands_over_the_role_it_claims',
+        ],
+    ),
+    (
+        "LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLL: the Custom badge is swapped with another profile's hue",
+        POWER,
+        [
+            ('        PowerProfile::Custom => ("Custom", p.lavender),',
+             '        PowerProfile::Custom => ("Custom", p.green),'),
+        ],
+        ["desktop"],
+        [
+            'every_choice_this_module_makes_hands_over_the_role_it_claims',
+        ],
+    ),
+    (
+        'MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM: the Custom badge takes the accent',
+        POWER,
+        [
+            ('        PowerProfile::Custom => ("Custom", p.lavender),',
+             '        PowerProfile::Custom => ("Custom", p.accent),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_taskbar_and_settings_draw_comes_from_their_palette',
+            'every_choice_this_module_makes_hands_over_the_role_it_claims',
+            'nothing_this_module_draws_moves_when_the_accent_does',
+        ],
+    ),
+    (
+        "NNNNNNNNNNNNNNNNNNNNNNNNNNNNNNN: the badge's wash names a role instead of tinting the badge's own hue",
+        POWER,
+        [
+            ('            color: Color::rgba(color.r, color.g, color.b, 40),',
+             '            color: Color::rgba(p.blue.r, p.blue.g, p.blue.b, 40),'),
+        ],
+        ["desktop"],
+        [
+            'every_rectangle_this_module_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        "OOOOOOOOOOOOOOOOOOOOOOOOOOOOOOO: the badge's wash is drawn at full strength",
+        POWER,
+        [
+            ('            color: Color::rgba(color.r, color.g, color.b, 40),',
+             '            color: Color::rgba(color.r, color.g, color.b, 255),'),
+        ],
+        ["desktop"],
+        [
+            'every_rectangle_this_module_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        "PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPP: the saver's clock is drawn in the wrong hue",
+        POWER,
+        [
+            ('            text: "12:00".to_string(),\n            color: screen_palette().lavender,',
+             '            text: "12:00".to_string(),\n            color: screen_palette().blue,'),
+        ],
+        ["desktop"],
+        [
+            'every_text_this_module_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        "QQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQ: the saver's clock reaches into the light palette",
+        POWER,
+        [
+            ('            text: "12:00".to_string(),\n            color: screen_palette().lavender,',
+             '            text: "12:00".to_string(),\n            color: Palette::for_mode(true).lavender,'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_screen_saver_draws_is_a_dark_role_or_one_of_its_two_ramps',
+            'every_text_this_module_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        'RRRRRRRRRRRRRRRRRRRRRRRRRRRRRRR: the saver stops pinning itself to the dark palette',
+        POWER,
+        [
+            ('fn screen_palette() -> Palette {\n    Palette::for_mode(false)\n}',
+             'fn screen_palette() -> Palette {\n    Palette::for_mode(true)\n}'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_screen_saver_draws_is_a_dark_role_or_one_of_its_two_ramps',
+            'every_text_this_module_draws_is_in_the_role_it_claims',
+            'every_rectangle_this_module_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        'SSSSSSSSSSSSSSSSSSSSSSSSSSSSSSS: the logo plate is drawn in the wrong hue',
+        POWER,
+        [
+            ('            width: logo_w,\n            height: logo_h,\n            color: sp.blue,',
+             '            width: logo_w,\n            height: logo_h,\n            color: sp.green,'),
+        ],
+        ["desktop"],
+        [
+            'every_rectangle_this_module_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        "TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT: the logo's label names a role instead of deriving from the plate",
+        POWER,
+        [
+            ('            text: "Slate OS".to_string(),\n            color: appearance::readable_on(sp.blue),',
+             '            text: "Slate OS".to_string(),\n            color: sp.base,'),
+        ],
+        ["desktop"],
+        [
+            'every_text_this_module_draws_is_in_the_role_it_claims',
+            'the_logo_label_is_readable_on_the_logo_plate',
+        ],
+    ),
+    (
+        "UUUUUUUUUUUUUUUUUUUUUUUUUUUUUUU: the logo's label is drawn in the ink of the wrong surface",
+        POWER,
+        [
+            ('            text: "Slate OS".to_string(),\n            color: appearance::readable_on(sp.blue),',
+             '            text: "Slate OS".to_string(),\n            color: sp.text,'),
+        ],
+        ["desktop"],
+        [
+            'every_text_this_module_draws_is_in_the_role_it_claims',
+            'the_logo_label_is_readable_on_the_logo_plate',
+        ],
+    ),
+    (
+        'VVVVVVVVVVVVVVVVVVVVVVVVVVVVVVV: the blank saver lights the display instead of blacking it out',
+        POWER,
+        [
+            ('        vec![RenderCommand::FillRect {\n            x: 0.0,\n            y: 0.0,\n            width: self.width as f32,\n            height: self.height as f32,\n            color: Color::from_hex(0x000000),',
+             '        vec![RenderCommand::FillRect {\n            x: 0.0,\n            y: 0.0,\n            width: self.width as f32,\n            height: self.height as f32,\n            color: Palette::for_mode(false).base,'),
+        ],
+        ["desktop"],
+        [
+            'the_screen_saver_blacks_out_the_display_in_every_style_it_draws',
+        ],
+    ),
+    (
+        'WWWWWWWWWWWWWWWWWWWWWWWWWWWWWWW: the clock saver lights the display with the light palette',
+        POWER,
+        [
+            ('        // Black background.\n        cmds.push(RenderCommand::FillRect {\n            x: 0.0,\n            y: 0.0,\n            width: self.width as f32,\n            height: self.height as f32,\n            color: Color::from_hex(0x000000),',
+             '        // Black background.\n        cmds.push(RenderCommand::FillRect {\n            x: 0.0,\n            y: 0.0,\n            width: self.width as f32,\n            height: self.height as f32,\n            color: Palette::for_mode(true).base,'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_screen_saver_draws_is_a_dark_role_or_one_of_its_two_ramps',
+            'the_screen_saver_blacks_out_the_display_in_every_style_it_draws',
+        ],
+    ),
+    (
+        'XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX: the star field lights the display instead of blacking it out',
+        POWER,
+        [
+            ('        let mut cmds = Vec::with_capacity(self.stars.len().saturating_add(1));\n\n        cmds.push(RenderCommand::FillRect {\n            x: 0.0,\n            y: 0.0,\n            width: self.width as f32,\n            height: self.height as f32,\n            color: Color::from_hex(0x000000),',
+             '        let mut cmds = Vec::with_capacity(self.stars.len().saturating_add(1));\n\n        cmds.push(RenderCommand::FillRect {\n            x: 0.0,\n            y: 0.0,\n            width: self.width as f32,\n            height: self.height as f32,\n            color: Palette::for_mode(false).surface0,'),
+        ],
+        ["desktop"],
+        [
+            'the_screen_saver_blacks_out_the_display_in_every_style_it_draws',
+        ],
+    ),
+    (
+        'YYYYYYYYYYYYYYYYYYYYYYYYYYYYYYY: the bouncing logo lights the display instead of blacking it out',
+        POWER,
+        [
+            ('        let mut cmds = Vec::with_capacity(4);\n\n        cmds.push(RenderCommand::FillRect {\n            x: 0.0,\n            y: 0.0,\n            width: self.width as f32,\n            height: self.height as f32,\n            color: Color::from_hex(0x000000),',
+             '        let mut cmds = Vec::with_capacity(4);\n\n        cmds.push(RenderCommand::FillRect {\n            x: 0.0,\n            y: 0.0,\n            width: self.width as f32,\n            height: self.height as f32,\n            color: Palette::for_mode(false).blue,'),
+        ],
+        ["desktop"],
+        [
+            'the_screen_saver_blacks_out_the_display_in_every_style_it_draws',
+        ],
+    ),
+    (
+        "ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ: the rain's trail overlay stops being black",
+        POWER,
+        [
+            ('        // Semi-transparent black overlay for trail effect.\n        cmds.push(RenderCommand::FillRect {\n            x: 0.0,\n            y: 0.0,\n            width: self.width as f32,\n            height: self.height as f32,\n            color: Color::rgba(0, 0, 0, 220),',
+             '        // Semi-transparent black overlay for trail effect.\n        cmds.push(RenderCommand::FillRect {\n            x: 0.0,\n            y: 0.0,\n            width: self.width as f32,\n            height: self.height as f32,\n            color: Color::rgba(20, 0, 0, 220),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_screen_saver_draws_is_a_dark_role_or_one_of_its_two_ramps',
+            'the_screen_saver_blacks_out_the_display_in_every_style_it_draws',
+        ],
+    ),
+    (
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA: a star's depth is drawn as a red ramp rather than a grey one",
+        POWER,
+        [
+            ('                    color: Color::rgba(brightness, brightness, brightness, 255),',
+             '                    color: Color::rgba(brightness, 0, 0, 255),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_screen_saver_draws_is_a_dark_role_or_one_of_its_two_ramps',
+        ],
+    ),
+    (
+        "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB: a glyph's age is drawn as a magenta ramp rather than a green one",
+        POWER,
+        [
+            ('                    color: Color::rgba(0, green, 0, 255),',
+             '                    color: Color::rgba(green, 0, green, 255),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_screen_saver_draws_is_a_dark_role_or_one_of_its_two_ramps',
         ],
     ),
 ]

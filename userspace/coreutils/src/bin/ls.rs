@@ -238,7 +238,12 @@ enum FileType {
     /// predicate and no way to reach the raw `d_type`. The variant is kept
     /// because it holds this enum's discriminants in `filetype_letter`'s
     /// order, and dropping it would silently move `arg_directory`'s letter.
-    #[cfg_attr(unix, expect(dead_code, reason = "std exposes no DT_WHT"))]
+    // Only outside `cfg(test)`: the mode-string test constructs the variant,
+    // which fulfils the lint and would make the expectation itself a warning.
+    #[cfg_attr(
+        all(unix, not(test)),
+        expect(dead_code, reason = "std exposes no DT_WHT")
+    )]
     Whiteout,
     /// A directory named on the command line and being listed *as a file* —
     /// `ls -d`, or the header line a recursive listing prints for it.
@@ -2475,12 +2480,30 @@ fn system_clock() -> Ts {
 /// Upstream tracks the position in a global `dired_pos` that it increments by
 /// hand at every write, and gets away with it because every write goes through
 /// one of the four `dired_*` helpers. Here the bytes are accumulated in a
-/// [`Vec`] for the whole run — which `--dired` forces anyway, since an offset
-/// is only knowable once the text in front of it exists — so the position is
+/// [`Vec`] — which `--dired` forces anyway, since an offset is only knowable
+/// once the text in front of it exists — so the position is `flushed` plus
 /// [`Vec::len`] and cannot drift from the output it describes.
-#[derive(Default, Debug)]
-struct Out {
+///
+/// The buffer is *not* held for the whole run: gnulib's `error()` calls
+/// `fflush (stdout)` before it writes, so a diagnostic lands between the lines
+/// already printed and the ones still to come rather than in front of the whole
+/// listing. [`Out::flush`] is that `fflush`, and `flushed` is what keeps
+/// `--dired`'s offsets counted from the start of the output and not from the
+/// start of what is currently buffered.
+#[derive(Default)]
+struct Out<'a> {
     buf: Vec<u8>,
+    /// Where the bytes go when [`Out::flush`] is called. `None` holds
+    /// everything for the caller to read — which is what the tests want, and
+    /// what makes a flush a no-op there rather than a lost buffer.
+    sink: Option<&'a mut dyn Write>,
+    /// Bytes already written to `sink`. Only `--dired` reads it, through
+    /// [`Out::mark`].
+    flushed: usize,
+    /// Whether a write to `sink` failed. A listing that could not be written is
+    /// an exit status, not a diagnostic — there is nowhere to report it that is
+    /// not the stream that just failed.
+    broken: bool,
     /// GNU's `dired_obstack`: the begin and end offset of every **file name**,
     /// printed as the `//DIRED//` line.
     dired: Vec<usize>,
@@ -2489,6 +2512,19 @@ struct Out {
     /// editor following the output wants to descend into the second kind and
     /// visit the first.
     subdired: Vec<usize>,
+}
+
+impl std::fmt::Debug for Out<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Out")
+            .field("buf", &self.buf)
+            .field("sink", &self.sink.as_ref().map(|_| "<write>"))
+            .field("flushed", &self.flushed)
+            .field("broken", &self.broken)
+            .field("dired", &self.dired)
+            .field("subdired", &self.subdired)
+            .finish()
+    }
 }
 
 /// Which `--dired` list a name's offsets belong in, or neither.
@@ -2504,7 +2540,7 @@ enum Dired {
     Headers,
 }
 
-impl Out {
+impl Out<'_> {
     /// GNU's `dired_indent`: `--dired` shifts every long line right by two, so
     /// that the offsets it reports are not the offsets of an ordinary listing.
     fn indent(&mut self, cfg: &Config) {
@@ -2513,13 +2549,35 @@ impl Out {
         }
     }
 
+    /// gnulib's `fflush (stdout)`, which `error()` performs before writing a
+    /// diagnostic — the reason a GNU diagnostic appears *inside* the listing,
+    /// at the point the failure happened, rather than in front of all of it.
+    ///
+    /// Flushing more often than gnulib does is unobservable: the bytes and
+    /// their order are identical either way, and `--dired`'s offsets are
+    /// counted from `flushed`, not from the start of the buffer. What matters
+    /// is only that no write to stderr happens while stdout has bytes waiting.
+    fn flush(&mut self) {
+        let Some(sink) = self.sink.as_mut() else {
+            return;
+        };
+        if self.buf.is_empty() {
+            return;
+        }
+        if sink.write_all(&self.buf).is_err() || sink.flush().is_err() {
+            self.broken = true;
+        }
+        self.flushed = self.flushed.saturating_add(self.buf.len());
+        self.buf.clear();
+    }
+
     /// GNU's `push_current_dired_pos`, which is a no-op without `--dired` —
     /// the position is still tracked, but nothing asks for it.
     fn mark(&mut self, cfg: &Config, which: Dired) {
         if !cfg.dired {
             return;
         }
-        let pos = self.buf.len();
+        let pos = self.flushed.saturating_add(self.buf.len());
         match which {
             Dired::No => {}
             Dired::Names => self.dired.push(pos),
@@ -2549,7 +2607,7 @@ impl Out {
 /// `f->quoted = -1` when the link name needs quoting and the name did not, so
 /// the "skip the quoting pass" shortcut is withdrawn from both.
 fn print_name_with_quoting(
-    out: &mut Out,
+    out: &mut Out<'_>,
     cfg: &Config,
     cwd_some_quoted: bool,
     f: &FileInfo,
@@ -2630,7 +2688,7 @@ fn get_type_indicator(cfg: &Config, stat_ok: bool, mode: u32, kind: FileType) ->
 }
 
 /// GNU's `print_type_indicator`: [`get_type_indicator`], written out.
-fn print_type_indicator(out: &mut Out, cfg: &Config, stat_ok: bool, mode: u32, kind: FileType) {
+fn print_type_indicator(out: &mut Out<'_>, cfg: &Config, stat_ok: bool, mode: u32, kind: FileType) {
     if let Some(c) = get_type_indicator(cfg, stat_ok, mode, kind) {
         out.buf.push(c);
     }
@@ -2733,7 +2791,7 @@ fn pad_left_measured(out: &mut Vec<u8>, width: usize, text: &[u8]) {
 /// the stat — but keeps its inode's width, its name and its indicator, because
 /// those did not.
 fn print_long_format(
-    out: &mut Out,
+    out: &mut Out<'_>,
     cfg: &Config,
     names: &Names,
     times: &mut Times,
@@ -2877,7 +2935,7 @@ fn pad_left_zero_sep(out: &mut Vec<u8>, width: usize, text: &[u8]) {
 /// callers below all track position from
 /// [`length_of_file_name_and_frills`] instead.
 fn print_file_name_and_frills(
-    out: &mut Out,
+    out: &mut Out<'_>,
     cfg: &Config,
     w: &Widths,
     cwd_some_quoted: bool,
@@ -3124,7 +3182,7 @@ fn indent(out: &mut Vec<u8>, tabsize: usize, mut from: usize, to: usize) {
 /// last column is short rather than the last row — which is the whole visible
 /// difference from `-x`.
 fn print_many_per_line(
-    out: &mut Out,
+    out: &mut Out<'_>,
     cfg: &Config,
     w: &Widths,
     cwd_some_quoted: bool,
@@ -3166,7 +3224,7 @@ fn print_many_per_line(
 
 /// GNU's `print_horizontal` (`-x`): names across the page, then down.
 fn print_horizontal(
-    out: &mut Out,
+    out: &mut Out<'_>,
     cfg: &Config,
     w: &Widths,
     cwd_some_quoted: bool,
@@ -3215,7 +3273,7 @@ fn print_horizontal(
 /// the next line is the `sep` *and* the newline, in that order: `-m` output
 /// ends its lines with a comma.
 fn print_with_separator(
-    out: &mut Out,
+    out: &mut Out<'_>,
     cfg: &Config,
     w: &Widths,
     cwd_some_quoted: bool,
@@ -3272,7 +3330,7 @@ fn print_with_separator(
 /// `-C` and `-x` fall back to [`print_with_separator`] with a space when
 /// `-w0` removed the width they lay out against. `-m` uses it always.
 fn print_current_files(
-    out: &mut Out,
+    out: &mut Out<'_>,
     cfg: &Config,
     names: &Names,
     times: &mut Times,
@@ -3424,6 +3482,10 @@ fn gobble_file(
     names: &Names,
     cwd: &mut Cwd,
     status: &mut Exit,
+    // The pending listing travels with the stream the diagnostics go to,
+    // because gnulib's `error()` flushes the first before writing the second —
+    // see [`Out::flush`]. Nothing else here writes to `out`.
+    out: &mut Out<'_>,
     err: &mut dyn Write,
     name: &[u8],
     kind: FileType,
@@ -3491,6 +3553,7 @@ fn gobble_file(
         let stat = match result {
             Ok(stat) => stat,
             Err(error) => {
+                out.flush();
                 let _ = writeln!(
                     err,
                     "ls: cannot access {}: {}",
@@ -3514,6 +3577,7 @@ fn gobble_file(
             match tree.read_link(&full_name) {
                 Ok(target) => f.linkname = Some(target),
                 Err(error) => {
+                    out.flush();
                     let _ = writeln!(
                         err,
                         "ls: cannot read symbolic link {}: {}",
@@ -3595,7 +3659,7 @@ struct Listing<'a> {
     cfg: &'a Config,
     names: &'a Names,
     times: Times,
-    out: Out,
+    out: Out<'a>,
     err: &'a mut dyn Write,
     status: Exit,
     /// The directory currently being read. GNU's `cwd_file` and its widths.
@@ -3636,6 +3700,9 @@ impl Listing<'_> {
         name: &[u8],
         e: &std::io::Error,
     ) {
+        // gnulib's `error()` flushes stdout first, so the message lands at the
+        // point in the listing where the failure happened. See [`Out::flush`].
+        self.out.flush();
         // A diagnostic that cannot be written has nowhere left to be reported.
         let _ = writeln!(
             self.err,
@@ -3676,7 +3743,9 @@ impl Listing<'_> {
             if self.active.contains(&pair) {
                 // Not `file_failure`: there is no `errno` to report, so the
                 // sentence stands alone and the name is quoted the *other*
-                // way — `quotef`, which leaves a plain name unquoted.
+                // way — `quotef`, which leaves a plain name unquoted. It still
+                // goes through `error()`, so it still flushes first.
+                self.out.flush();
                 let _ = writeln!(
                     self.err,
                     "ls: {}: not listing already-listed directory",
@@ -3747,6 +3816,7 @@ impl Listing<'_> {
                 self.names,
                 &mut self.cwd,
                 &mut self.status,
+                &mut self.out,
                 self.err,
                 &child,
                 kind,
@@ -3899,6 +3969,7 @@ impl Listing<'_> {
             self.names,
             &mut self.cwd,
             &mut self.status,
+            &mut self.out,
             self.err,
             name,
             kind,
@@ -4282,13 +4353,25 @@ fn main() -> ExitCode {
     };
     let times = Times::new(&cfg, localtime::Zone::from_env(), system_clock);
 
+    // The listing accumulates in `Out::buf` and is written in as few pieces as
+    // the diagnostics allow: one write for a run that reports nothing, and one
+    // extra at each diagnostic, which is where gnulib's `error()` flushes too.
+    // `--dired` forces the bytes to be held for at least that long anyway — an
+    // offset is only knowable once the text in front of it exists — so there
+    // is no arrangement in which this streams a line at a time, and buffering
+    // it deliberately is cheaper than a `BufWriter` flushing at arbitrary
+    // points.
+    let mut stdout = std::io::stdout().lock();
     let tree = RealTree;
     let mut listing = Listing {
         tree: &tree,
         cfg: &cfg,
         names: &names,
         times,
-        out: Out::default(),
+        out: Out {
+            sink: Some(&mut stdout),
+            ..Out::default()
+        },
         err: &mut err,
         status: Exit::default(),
         cwd: Cwd::default(),
@@ -4298,18 +4381,11 @@ fn main() -> ExitCode {
         print_dir_name: true,
     };
     listing.run(&operands);
-    let (bytes, status) = (listing.out.buf, listing.status);
-
-    // One write for the whole listing. `--dired` forces the bytes to be held
-    // anyway — an offset is only knowable once the text in front of it exists
-    // — so there is no arrangement in which this streams, and buffering it
-    // deliberately is cheaper than a `BufWriter` that would flush at
-    // arbitrary points.
-    let mut out = std::io::stdout().lock();
-    if out.write_all(&bytes).is_err() || out.flush().is_err() {
+    listing.out.flush();
+    if listing.out.broken {
         return ExitCode::from(2);
     }
-    ExitCode::from(status.0)
+    ExitCode::from(listing.status.0)
 }
 
 #[cfg(test)]
@@ -6419,6 +6495,7 @@ mod tests {
             &inhahe(),
             &mut cwd,
             &mut status,
+            &mut Out::default(),
             &mut err,
             name.as_bytes(),
             kind,
@@ -6432,6 +6509,143 @@ mod tests {
             err: String::from_utf8_lossy(&err).into_owned(),
             blocks,
         }
+    }
+
+    /// One stream that two writers share, so a test can see the *order* they
+    /// wrote in — which is the whole subject of [`Out::flush`] and is invisible
+    /// to a test that captures the two streams separately.
+    #[derive(Clone, Default)]
+    struct Shared(std::rc::Rc<std::cell::RefCell<Vec<u8>>>);
+
+    impl Write for Shared {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.borrow_mut().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// A diagnostic goes to stderr the moment it happens, but the listing is
+    /// buffered — so unless the buffer is flushed first, `ls -R` reports a
+    /// directory it could not open *before* printing the directories it could.
+    /// gnulib's `error()` calls `fflush (stdout)` for exactly this reason, and
+    /// [`Out::flush`] is that call.
+    ///
+    /// Measured, GNU ls 9.5, on a tree `t` holding `a`, a mode-000 directory
+    /// `noperm`, and `z` (`t/noperm/inner` exists but cannot be reached):
+    ///
+    /// ```text
+    /// $ ls -R t 2>&1 | cat -A
+    /// t:$
+    /// a$
+    /// noperm$
+    /// z$
+    /// ls: cannot open directory 't/noperm': Permission denied$
+    /// ```
+    ///
+    /// The `t:` heading and the three names are what make the order
+    /// observable: they belong to the listing, and they are written before the
+    /// failure is even attempted. (No blank line precedes the diagnostic —
+    /// `print_dir` emits the separating newline only in front of a heading it
+    /// is about to print, and `t/noperm` never gets one because the `opendir`
+    /// that would have led to it is the thing that failed.) Here the fake tree
+    /// answers `ENOENT` rather than `EACCES`, which changes the sentence but
+    /// not the position.
+    #[test]
+    fn a_diagnostic_lands_where_it_happened_and_not_in_front_of_the_listing() {
+        let dir = |ino: u64| Stat {
+            mode: modechange::S_IFDIR | 0o755,
+            nlink: 2,
+            ino,
+            ..Stat::default()
+        };
+        let file = |ino: u64| Stat {
+            mode: S_IFREG | 0o644,
+            nlink: 1,
+            ino,
+            ..Stat::default()
+        };
+        let mut tree = FakeTree::default()
+            .file("t", dir(1))
+            .file("t/a", file(2))
+            .file("t/noperm", dir(3))
+            .file("t/z", file(4));
+        tree.dirs.insert(
+            b"t".to_vec(),
+            vec![
+                (b"a".to_vec(), FileType::Normal, 2),
+                (b"noperm".to_vec(), FileType::Directory, 3),
+                (b"z".to_vec(), FileType::Normal, 4),
+            ],
+        );
+        // `t/noperm` is a directory that `read_dir` refuses: it is in `lstats`
+        // and not in `dirs`.
+
+        let cfg = Config {
+            recursive: true,
+            format: Format::OnePerLine,
+            ..Config::default()
+        };
+        let names = inhahe();
+        let both = Shared::default();
+        let mut sink = both.clone();
+        let mut err = both.clone();
+        let mut listing = Listing {
+            tree: &tree,
+            cfg: &cfg,
+            names: &names,
+            times: times(&cfg),
+            out: Out {
+                sink: Some(&mut sink),
+                ..Out::default()
+            },
+            err: &mut err,
+            status: Exit::default(),
+            cwd: Cwd::default(),
+            pending: Vec::new(),
+            active: Vec::new(),
+            first: true,
+            print_dir_name: true,
+        };
+        listing.run(&[b"t".to_vec()]);
+        listing.out.flush();
+        let status = listing.status.0;
+        drop(listing);
+
+        assert_eq!(
+            String::from_utf8_lossy(&both.0.borrow()),
+            "t:\na\nnoperm\nz\nls: cannot open directory 't/noperm': \
+             No such file or directory\n"
+        );
+        // 1, not 2: `t/noperm` was reached by recursing, not named on the
+        // command line, and GNU reserves 2 for the latter. Measured, 9.5:
+        // `ls -R t` over this tree exits 1.
+        assert_eq!(status, 1);
+    }
+
+    /// `--dired`'s offsets are offsets into the *output*, not into whatever is
+    /// currently buffered, so flushing must not move them. [`Out::flush`]
+    /// carries the count in `flushed` for this reason.
+    #[test]
+    fn flushing_does_not_move_the_dired_offsets() {
+        let cfg = Config {
+            dired: true,
+            ..Config::default()
+        };
+        let mut sink = Vec::new();
+        let mut out = Out {
+            sink: Some(&mut sink),
+            ..Out::default()
+        };
+        out.buf.extend_from_slice(b"  hello\n");
+        out.mark(&cfg, Dired::Names);
+        out.flush();
+        out.buf.extend_from_slice(b"  world\n");
+        out.mark(&cfg, Dired::Names);
+        assert_eq!(out.dired, vec![8, 16]);
+        assert_eq!(out.flushed, 8);
     }
 
     /// `ls` in long format, which is the setting that makes every column and

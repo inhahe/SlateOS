@@ -516,11 +516,12 @@ if [ "$(id -u)" != 0 ]; then
     mkdir -p t/noperm/inner
     chmod 000 t/noperm
     # `ls -R t` is the one case here that prints to *both* streams, so it is
-    # the one that shows the flush order. The other three print a diagnostic
-    # and nothing else, so there is no listing for it to be out of order with.
-    for c in "ls t/noperm" "ls -l t/noperm" \
-             "!we do not flush stdout before a diagnostic; known-issues TD-B-LS-WRITES-A-DIAGNOSTIC-WITHOUT-FLUSHING-THE-LISTING-FIRST|ls -R t" \
-             "ls t"; do
+    # the one that shows the flush order -- the listing has to reach the
+    # terminal before the diagnostic about the directory it could not open,
+    # which is what gnulib's `error()` gets from its `fflush (stdout)`. The
+    # other three print a diagnostic and nothing else, so there is no listing
+    # for it to be out of order with.
+    for c in "ls t/noperm" "ls -l t/noperm" "ls -R t" "ls t"; do
         run_case "$c"
     done
     chmod 755 t/noperm

@@ -63584,7 +63584,7 @@ with the dots prepended, which is self-consistent and merely not GNU's.
 **Trigger:** do it when a second utility needs the dot entries, or when
 `ls -f`'s order starts mattering to something (a test, a script in the image).
 
-### [B] TD-B-LS-WRITES-A-DIAGNOSTIC-WITHOUT-FLUSHING-THE-LISTING-FIRST — 2026-08-22 — OPEN (bug)
+### [B] TD-B-LS-WRITES-A-DIAGNOSTIC-WITHOUT-FLUSHING-THE-LISTING-FIRST — 2026-08-22 — FIXED 2026-08-22
 
 **What it is.** `ls` accumulates its whole listing in `Out::buf` and writes it
 once, at the end of `main`. Diagnostics go to stderr the moment they happen. So
@@ -63617,6 +63617,30 @@ The four diagnostic sites are `Listing::file_failure`, the
 Flushing *more* often than GNU is unobservable (the bytes and their order are
 identical), so the fix does not have to match gnulib's flush points — only to
 guarantee that no stderr write happens while stdout has unflushed bytes.
+
+**Fixed 2026-08-22**, exactly as described above. `Out` became `Out<'a>` with a
+`sink: Option<&'a mut dyn Write>`, a `flushed: usize` and a `broken: bool`;
+`Out::mark` counts from `flushed + buf.len()`; `Out::flush` writes the buffer
+and clears it. `gobble_file` took an `out` parameter beside `err`, and all four
+diagnostic sites flush first. `main` holds the stdout lock, flushes once at the
+end, and exits 2 if the sink ever refused a write — a listing that could not be
+written is an exit status, because the only place to report it is the stream
+that just failed.
+
+Two tests cover it:
+`a_diagnostic_lands_where_it_happened_and_not_in_front_of_the_listing` points
+both streams at one buffer and asserts the byte-for-byte interleaving, and
+`flushing_does_not_move_the_dired_offsets` asserts a flush between two `mark`s
+leaves `--dired`'s offsets where they were. `scripts/ls-diff.sh`'s `ls -R t`
+case dropped its `!` deferral and now passes: 159 cases, 148 passed, 0 differed.
+
+One measurement corrected while writing the test: there is **no blank line**
+before the diagnostic. `print_dir` emits the separating newline only in front
+of a heading it is about to print, and `t/noperm` never gets one, because the
+`opendir` that would have led to that heading is the thing that failed. GNU
+9.5, `ls -R t 2>&1 | cat -A`, prints `t:$ a$ noperm$ z$` then the message. The
+exit status is **1**, not 2: `t/noperm` was reached by recursing rather than
+named on the command line, and GNU reserves 2 for the latter.
 
 ### [B] TD-B-OUR-WIDTH-TABLE-IS-BASHS-AND-COREUTILS-9.5S-IS-NOT — 2026-08-22 — OPEN (tech debt, blocked on B-Q8)
 

@@ -1931,54 +1931,6 @@ fn extract_dirs_from_files(
 
 // -------------------------------------------- the columns of a long line ---
 
-/// gnulib's `mbsnwidth` with **no** flags, the other of the two width
-/// functions `ls` uses.
-///
-/// [`mbs_width`] is called with `MBSWIDTH_FLAGS` and refuses a whole string
-/// that holds anything invalid or unprintable; this one is called with `0` and
-/// cannot fail. An invalid byte is one column, a truncated sequence at the end
-/// is one column, and an unprintable character is one column unless it is a
-/// control character, which is none.
-///
-/// `ls` measures *file names* with the strict one, because a name it cannot
-/// measure would misalign the whole page, and the `-q` default already
-/// replaced the offending bytes. It measures the fields it did not choose —
-/// a user name out of `/etc/passwd`, a size rendered by `human_readable` —
-/// with this one, because refusing those would blank a column rather than
-/// widen it.
-///
-/// The `unwrap_or(0)` is gnulib's `else if (!c32iscntrl (wc)) width++;`:
-/// [`char_width`] is `None` for exactly the control characters (C0, DEL and
-/// C1), so the branch that would add a column can never be taken. See
-/// `design-decisions.md` §357 for where that parts company with glibc.
-fn lenient_width(text: &[u8]) -> usize {
-    let mut width = 0usize;
-    let mut rest = text;
-    while let Some(&first) = rest.first() {
-        if (0x20..0x7f).contains(&first) {
-            width = width.saturating_add(1);
-            rest = rest.get(1..).unwrap_or_default();
-            continue;
-        }
-        match next_mb(rest) {
-            // Unreachable: `rest` is not empty.
-            None => break,
-            Some(Mb::Invalid) => {
-                width = width.saturating_add(1);
-                rest = rest.get(1..).unwrap_or_default();
-            }
-            // An incomplete sequence swallows the rest of the string, so it is
-            // one column however many bytes are left.
-            Some(Mb::Incomplete) => return width.saturating_add(1),
-            Some(Mb::Char(c, len)) => {
-                width = width.saturating_add(char_width(c).unwrap_or(0));
-                rest = rest.get(len..).unwrap_or_default();
-            }
-        }
-    }
-    width
-}
-
 /// The `/etc/passwd` and `/etc/group` lookups the owner and group columns do,
 /// and `-n`'s decision not to do them.
 struct Names {
@@ -2026,10 +1978,22 @@ impl Names {
 /// (pad--)` runs once more than `pad`, and the numeric branch has the space in
 /// its format string. That space is the field separator, so the caller does
 /// not add one.
+///
+/// A name whose width [`mbs_width`] refuses is padded by **nothing** — not by
+/// the full column, as measuring it at zero would give. That is upstream's
+/// `width_gap = name_width < 0 ? 0 : width - name_width`, and it is the
+/// visible half of the 9.4-to-9.5 change recorded in `design-decisions.md`
+/// §366. Measured against both binaries, with a group column seven wide and a
+/// group named `g\002bad`:
+///
+/// ```text
+/// 9.4: … root sp g 002 b a d sp sp sp sp 0 …   padded as though four wide
+/// 9.5: … root sp g 002 b a d sp 0 …            padded as though unmeasurable
+/// ```
 fn format_user_or_group(out: &mut Vec<u8>, name: Option<&[u8]>, id: u64, width: usize) {
     match name {
         Some(name) => {
-            let pad = width.saturating_sub(lenient_width(name));
+            let pad = mbs_width(name).map_or(0, |w| width.saturating_sub(w));
             out.extend_from_slice(name);
             out.resize(out.len().saturating_add(pad).saturating_add(1), b' ');
         }
@@ -2043,18 +2007,34 @@ fn format_user_or_group(out: &mut Vec<u8>, name: Option<&[u8]>, id: u64, width: 
     }
 }
 
-/// The width [`format_user_or_group`] will take, not counting the separator.
-fn format_user_or_group_width(name: Option<&[u8]>, id: u64) -> usize {
-    name.map_or_else(|| id.to_string().len(), lenient_width)
+/// The width [`format_user_or_group`] will take, not counting the separator,
+/// or [`None`] for a name that cannot be measured.
+///
+/// The `None` is kept rather than clamped because the two callers want
+/// different things from it: the column *accumulator* treats it as no
+/// contribution, which a zero also achieves, while [`format_user_or_group`]
+/// treats it as no padding, which a zero does not.
+fn format_user_or_group_width(name: Option<&[u8]>, id: u64) -> Option<usize> {
+    name.map_or_else(|| Some(id.to_string().len()), mbs_width)
 }
 
 /// GNU's `format_inode`: the `-i` column.
 ///
 /// `?` where the number is not known — a file whose `stat` failed, and a
-/// filesystem whose `readdir` gives no inode. It is a *byte*, not a number, so
-/// it does not widen the column: upstream never observes its width.
+/// filesystem whose `readdir` gives no inode. The second case is spelled as
+/// the number zero: `system.h`'s `NOT_AN_INODE_NUMBER = 0` is what
+/// `gobble_file` is handed for a command-line argument and what `D_INO`
+/// expands to where `struct dirent` has no `d_ino`, so upstream's test is
+/// `f->stat_ok && f->stat.st_ino != NOT_AN_INODE_NUMBER` rather than
+/// `stat_ok` alone. A real filesystem has no inode 0, so nothing is lost by
+/// spending the value as a marker.
+///
+/// The `?` is a *byte*, not a number, so it does not widen the column — but
+/// note that [`Widths::observe_inode`] deliberately measures the raw
+/// `st_ino`, so a zero inode does contribute a width of 1 even though it
+/// prints as one character anyway.
 fn format_inode(f: &FileInfo) -> Vec<u8> {
-    if f.stat_ok {
+    if f.stat_ok && f.stat.ino != 0 {
         f.stat.ino.to_string().into_bytes()
     } else {
         b"?".to_vec()
@@ -2099,24 +2079,29 @@ impl Widths {
                 ST_NBLOCKSIZE,
                 cfg.output_block_size,
             );
-            self.block_size = self.block_size.max(lenient_width(text.as_bytes()));
+            // A width `mbs_width` refuses contributes nothing, which is what
+            // upstream's `if (block_size_width < len)` does with a -1 — so
+            // `unwrap_or(0)` against a maximum that starts at zero is the same
+            // test, not a clamp. (`human_readable` output is digits and a unit
+            // letter, so this can only refuse under a hostile `--block-size`.)
+            self.block_size = self.block_size.max(mbs_width(text.as_bytes()).unwrap_or(0));
         }
 
         if cfg.format == Format::Long {
             if cfg.print_owner {
                 let w = format_user_or_group_width(names.user(f.stat.uid), u64::from(f.stat.uid));
-                self.owner = self.owner.max(w);
+                self.owner = self.owner.max(w.unwrap_or(0));
             }
             if cfg.print_group {
                 let w = format_user_or_group_width(names.group(f.stat.gid), u64::from(f.stat.gid));
-                self.group = self.group.max(w);
+                self.group = self.group.max(w.unwrap_or(0));
             }
             if cfg.print_author {
                 // GNU/Hurd's `st_author`. There is no such field on Linux or
                 // on SlateOS, and upstream's `fstat-nofollow` shim defines it
                 // as `st_uid`, so `--author` repeats the owner column.
                 let w = format_user_or_group_width(names.user(f.stat.uid), u64::from(f.stat.uid));
-                self.author = self.author.max(w);
+                self.author = self.author.max(w.unwrap_or(0));
             }
         }
 
@@ -2145,7 +2130,7 @@ impl Widths {
                     1,
                     cfg.file_output_block_size,
                 );
-                self.file_size = self.file_size.max(lenient_width(text.as_bytes()));
+                self.file_size = self.file_size.max(mbs_width(text.as_bytes()).unwrap_or(0));
             }
         }
     }
@@ -3114,31 +3099,53 @@ mod tests {
         ((major & 0xfff) << 8) | (minor & 0xff) | ((major & !0xfff) << 32) | ((minor & !0xff) << 12)
     }
 
-    /// `ls` has two width functions and uses each where the other would be
-    /// wrong. A file name with a stray byte is refused outright, because a
-    /// mismeasured name misaligns the page; the same byte in a user name is
-    /// one column, because refusing it would blank the column instead.
+    /// Every width in 9.5 is measured strictly, and text that refuses to be
+    /// measured is *skipped* rather than guessed at: it widens no column and
+    /// it is padded to no column. This is the whole of the 9.4 → 9.5 change
+    /// recorded in `design-decisions.md` §366, so it gets a test of its own.
+    ///
+    /// Measured against a group literally named `g\002bad`, with `od -c` so
+    /// that the space counts are byte-exact:
+    ///
+    /// ```text
+    /// 9.4  ... root  sp  g 002   b   a   d  sp  sp  sp  sp   0 ...
+    /// 9.5  ... root  sp  g 002   b   a   d  sp   0 ...
+    /// ```
+    ///
+    /// 9.4 measured the name as four columns and padded it out to the
+    /// column's seven; 9.5 measures nothing and pads nothing, so the size
+    /// that follows moves left. Neither is "right" — but only one can be
+    /// reproduced, and both binaries were on hand to choose between.
     #[test]
-    fn a_name_ls_chose_is_measured_strictly_and_one_it_was_given_leniently() {
+    fn a_width_that_cannot_be_measured_pads_nothing_rather_than_everything() {
+        // The four ways a width goes unmeasured, all of them refusals now.
         assert_eq!(mbs_width(b"ab"), Some(2));
-        assert_eq!(lenient_width(b"ab"), 2);
+        assert_eq!(mbs_width(b"a\xffb"), None, "a byte no character starts");
+        assert_eq!(mbs_width(b"a\xe4\xb8"), None, "a sequence cut short");
+        assert_eq!(mbs_width(b"a\x7fb"), None, "a character with no glyph");
+        assert_eq!(mbs_width("\u{4e00}".as_bytes()), Some(2), "and a wide one");
 
-        assert_eq!(mbs_width(b"a\xffb"), None);
-        assert_eq!(lenient_width(b"a\xffb"), 3);
+        // A measurable name is padded out to the column, as always.
+        let mut out = Vec::new();
+        format_user_or_group(&mut out, Some(b"root"), 0, 7);
+        assert_eq!(
+            out, b"root    ",
+            "four columns, three of padding, separator"
+        );
 
-        // A truncated sequence swallows the tail, so it is one column however
-        // many bytes are left.
-        assert_eq!(mbs_width(b"a\xe4\xb8"), None);
-        assert_eq!(lenient_width(b"a\xe4\xb8"), 2);
+        // An unmeasurable one is not padded at all — just the separator.
+        let mut out = Vec::new();
+        format_user_or_group(&mut out, Some(b"g\x02bad"), 0, 7);
+        assert_eq!(out, b"g\x02bad ");
 
-        // A control character has no width either way — strictly it refuses,
-        // leniently it contributes nothing.
-        assert_eq!(mbs_width(b"a\x7fb"), None);
-        assert_eq!(lenient_width(b"a\x7fb"), 2);
+        // And it contributed nothing to the width that column was computed
+        // from in the first place, so it cannot have been the file that made
+        // the column seven wide.
+        assert_eq!(format_user_or_group_width(Some(b"g\x02bad"), 0), None);
+        assert_eq!(format_user_or_group_width(Some(b"root"), 0), Some(4));
 
-        // And a wide character is two columns in both.
-        assert_eq!(mbs_width("\u{4e00}".as_bytes()), Some(2));
-        assert_eq!(lenient_width("\u{4e00}".as_bytes()), 2);
+        // A *number* is not text and cannot refuse, so `-n` is unaffected.
+        assert_eq!(format_user_or_group_width(None, 104), Some(3));
     }
 
     /// A name is padded on the right and a number on the left, so `-n` does not
@@ -3195,9 +3202,9 @@ mod tests {
         assert_eq!(numeric.user(0), None);
         assert_eq!(numeric.group(6), None);
 
-        assert_eq!(format_user_or_group_width(Some(b"root"), 0), 4);
-        assert_eq!(format_user_or_group_width(None, 4000), 4);
-        assert_eq!(format_user_or_group_width(None, 0), 1);
+        assert_eq!(format_user_or_group_width(Some(b"root"), 0), Some(4));
+        assert_eq!(format_user_or_group_width(None, 4000), Some(4));
+        assert_eq!(format_user_or_group_width(None, 0), Some(1));
     }
 
     /// The size column has to hold both a size and a `major, minor`, so one
@@ -3326,6 +3333,12 @@ mod tests {
     /// `-i` widens its column from the inode `readdir` supplied, with no stat
     /// at all — but a file whose stat *failed* prints `?` and does not widen
     /// it, because upstream returns before the width is observed.
+    ///
+    /// There are two ways to have no inode and they arrive by different
+    /// routes: a failed stat, and an inode of *zero*, which is
+    /// `NOT_AN_INODE_NUMBER` — the value `gobble_file` is handed for a
+    /// command-line argument and the value `D_INO` expands to where `struct
+    /// dirent` carries no `d_ino`. Both print `?`.
     #[test]
     fn a_file_with_no_inode_prints_a_question_mark_and_widens_nothing() {
         let cfg = Config {
@@ -3348,9 +3361,29 @@ mod tests {
         };
         assert_eq!(format_inode(&failed), b"?");
 
+        let marker = FileInfo {
+            stat_ok: true,
+            stat: Stat {
+                ino: 0,
+                ..Stat::default()
+            },
+            ..file("c")
+        };
+        assert_eq!(format_inode(&marker), b"?", "zero is the no-inode marker");
+
         let mut w = Widths::default();
         w.observe_inode(&cfg, &known);
         assert_eq!(w.inode, 6);
+
+        // The width is taken from the raw `st_ino` and not from what
+        // `format_inode` would print (upstream line 3690 measures
+        // `umaxtostr (f->stat.st_ino, buf)` directly), so the marker widens
+        // the column as the string `0` rather than as the `?` it prints.
+        // Both are one column, so the asymmetry never shows — but it is the
+        // reason this stays a measurement of the number.
+        let mut w = Widths::default();
+        w.observe_inode(&cfg, &marker);
+        assert_eq!(w.inode, 1);
 
         // And nothing is observed at all when `-i` was not asked for.
         let mut w = Widths::default();

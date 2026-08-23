@@ -17793,7 +17793,7 @@ fn cmd_directio(args: &str) {
             } else {
                 shell_println!("Registered DIO paths ({}):", paths.len());
                 for p in &paths {
-                    shell_println!("  {}", p);
+                    shell_println!("  {}", p.display());
                 }
             }
         }

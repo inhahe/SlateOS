@@ -44,10 +44,10 @@
 
 #![allow(dead_code)]
 
-use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
 
+use super::path::{Path, PathBuf};
 use crate::error::{KernelError, KernelResult};
 use crate::serial_println;
 use crate::sync::PreemptSpinMutex;
@@ -83,7 +83,10 @@ pub struct DioResult {
 /// A registered direct-I/O path entry.
 #[derive(Debug, Clone)]
 struct DioPathEntry {
-    path: String,
+    /// A `PathBuf`, not a `String`: a registered path is compared against
+    /// real filesystem names, which may contain any byte but `/` and NUL.
+    /// See `design-decisions.md` §261.
+    path: PathBuf,
     /// Timestamp when registered (for LRU).
     registered_ns: u64,
 }
@@ -128,9 +131,10 @@ fn align_up(val: u64) -> u64 {
 /// Offset and length should be aligned to 512 bytes for optimal
 /// performance. Unaligned operations fall back to buffered I/O
 /// but still invalidate the cache afterward.
-pub fn dio_read(path: &str, offset: u64, len: usize) -> KernelResult<(Vec<u8>, DioResult)> {
+pub fn dio_read(path: impl AsRef<Path>, offset: u64, len: usize) -> KernelResult<(Vec<u8>, DioResult)> {
     use crate::fs::Vfs;
 
+    let path = path.as_ref();
     if path.is_empty() {
         return Err(KernelError::InvalidArgument);
     }
@@ -177,9 +181,10 @@ pub fn dio_read(path: &str, offset: u64, len: usize) -> KernelResult<(Vec<u8>, D
 ///
 /// Offset and data length should be aligned to 512 bytes. The write
 /// goes directly to storage and any cached copy is invalidated.
-pub fn dio_write(path: &str, offset: u64, data: &[u8]) -> KernelResult<DioResult> {
+pub fn dio_write(path: impl AsRef<Path>, offset: u64, data: &[u8]) -> KernelResult<DioResult> {
     use crate::fs::Vfs;
 
+    let path = path.as_ref();
     if path.is_empty() {
         return Err(KernelError::InvalidArgument);
     }
@@ -218,9 +223,10 @@ pub fn dio_write(path: &str, offset: u64, data: &[u8]) -> KernelResult<DioResult
 }
 
 /// Read an entire file with direct I/O semantics.
-pub fn dio_read_file(path: &str) -> KernelResult<(Vec<u8>, DioResult)> {
+pub fn dio_read_file(path: impl AsRef<Path>) -> KernelResult<(Vec<u8>, DioResult)> {
     use crate::fs::Vfs;
 
+    let path = path.as_ref();
     if path.is_empty() {
         return Err(KernelError::InvalidArgument);
     }
@@ -244,9 +250,10 @@ pub fn dio_read_file(path: &str) -> KernelResult<(Vec<u8>, DioResult)> {
 }
 
 /// Write an entire file with direct I/O semantics.
-pub fn dio_write_file(path: &str, data: &[u8]) -> KernelResult<DioResult> {
+pub fn dio_write_file(path: impl AsRef<Path>, data: &[u8]) -> KernelResult<DioResult> {
     use crate::fs::Vfs;
 
+    let path = path.as_ref();
     if path.is_empty() {
         return Err(KernelError::InvalidArgument);
     }
@@ -274,13 +281,14 @@ pub fn dio_write_file(path: &str, data: &[u8]) -> KernelResult<DioResult> {
 ///
 /// When a path is registered, the VFS integration layer can check
 /// `is_dio_path()` and route operations through the DIO path.
-pub fn register_path(path: &str) -> bool {
+pub fn register_path(path: impl AsRef<Path>) -> bool {
+    let path = path.as_ref();
     let now = crate::timekeeping::clock_monotonic();
     let mut paths = DIO_PATHS.lock();
 
     // Already registered?
     for entry in paths.iter() {
-        if entry.path == path {
+        if entry.path.as_path() == path {
             return false; // Already exists.
         }
     }
@@ -298,33 +306,35 @@ pub fn register_path(path: &str) -> bool {
     }
 
     paths.push(DioPathEntry {
-        path: String::from(path),
+        path: path.to_path_buf(),
         registered_ns: now,
     });
     true
 }
 
 /// Unregister a path from automatic direct I/O.
-pub fn unregister_path(path: &str) -> bool {
+pub fn unregister_path(path: impl AsRef<Path>) -> bool {
+    let path = path.as_ref();
     let mut paths = DIO_PATHS.lock();
     let len_before = paths.len();
-    paths.retain(|e| e.path != path);
+    paths.retain(|e| e.path.as_path() != path);
     paths.len() < len_before
 }
 
 /// Check if a path is registered for direct I/O.
-pub fn is_dio_path(path: &str) -> bool {
+pub fn is_dio_path(path: impl AsRef<Path>) -> bool {
+    let path = path.as_ref();
     let paths = DIO_PATHS.lock();
     // A path is direct-I/O if it equals or sits under any registered entry.
     // The canonical subtree predicate tolerates a trailing slash. See
     // fs::pathutil.
     paths
         .iter()
-        .any(|e| crate::fs::pathutil::path_in_subtree(path, e.path.as_str()))
+        .any(|e| crate::fs::pathutil::path_in_subtree(path, e.path.as_path()))
 }
 
 /// List all registered direct I/O paths.
-pub fn list_paths() -> Vec<String> {
+pub fn list_paths() -> Vec<PathBuf> {
     let paths = DIO_PATHS.lock();
     paths.iter().map(|e| e.path.clone()).collect()
 }
@@ -376,7 +386,7 @@ pub fn reset_stats() {
 /// For now we record the invalidation intent (for statistics and future
 /// integration) and set the DontNeed prefetch hint, which signals the
 /// VFS caching layer to deprioritize this data.
-fn invalidate_cache_range(path: &str, _offset: u64, _len: u64) -> bool {
+fn invalidate_cache_range(path: impl AsRef<Path>, _offset: u64, _len: u64) -> bool {
     // Signal to the prefetch/caching system that this data shouldn't
     // remain cached (DontNeed advice).
     crate::fs::prefetch::advise(path, crate::fs::prefetch::AccessAdvice::DontNeed);
@@ -394,11 +404,12 @@ pub fn self_test() -> KernelResult<()> {
     test_alignment();
     test_dio_read_write();
     test_path_registration();
+    test_non_utf8_registration();
     test_unaligned_tracking();
     test_whole_file();
     test_stats();
 
-    serial_println!("[directio] Self-test passed (6 tests).");
+    serial_println!("[directio] Self-test passed (7 tests).");
     Ok(())
 }
 
@@ -463,7 +474,7 @@ fn test_path_registration() {
 
     // List.
     let paths = list_paths();
-    assert!(paths.iter().any(|p| p == path));
+    assert!(paths.iter().any(|p| p.as_path() == Path::new(path)));
 
     // Unregister.
     assert!(unregister_path(path));
@@ -471,6 +482,40 @@ fn test_path_registration() {
     assert!(!unregister_path(path)); // Already removed.
 
     serial_println!("[directio]   path_registration: ok");
+}
+
+/// Registration must work for a path that is not valid UTF-8.
+///
+/// The registry keys direct-I/O routing, so a name it cannot represent is a
+/// file that silently keeps going through the buffer cache no matter how
+/// often it is registered. The two names below differ only in a byte that
+/// cannot appear in UTF-8; a lossy key folds both to U+FFFD, which would
+/// make the second registration a duplicate of the first and route a file
+/// nobody asked for.
+fn test_non_utf8_registration() {
+    let a = Path::new(&b"/test/dio/\xFFdb"[..]);
+    let b = Path::new(&b"/test/dio/\xFEdb"[..]);
+
+    assert!(register_path(a));
+    assert!(!register_path(a));
+    // Distinct from `a`, so this is a fresh registration, not a duplicate.
+    assert!(register_path(b));
+
+    assert!(is_dio_path(a));
+    assert!(is_dio_path(b));
+    // Subtree matching must stay byte-exact too.
+    assert!(is_dio_path(Path::new(&b"/test/dio/\xFFdb/wal"[..])));
+    assert!(!is_dio_path(Path::new(&b"/test/dio/\xFDdb"[..])));
+
+    let listed = list_paths();
+    assert!(listed.iter().any(|p| p.as_path() == a));
+    assert!(listed.iter().any(|p| p.as_path() == b));
+
+    assert!(unregister_path(a));
+    assert!(unregister_path(b));
+    assert!(!is_dio_path(a));
+
+    serial_println!("[directio]   non_utf8_registration: ok");
 }
 
 fn test_unaligned_tracking() {

@@ -4752,7 +4752,7 @@ fn gen_directio() -> Vec<u8> {
     } else {
         out.push_str("Registered paths:\n");
         for p in &paths {
-            out.push_str(&format!("  {}\n", p));
+            out.push_str(&format!("  {}\n", p.display()));
         }
     }
 

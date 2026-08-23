@@ -5475,7 +5475,7 @@ fn gen_immutable() -> Vec<u8> {
         for (path, flags) in &flagged_files {
             out.push_str(&format!(
                 "{:40} {}\n",
-                path,
+                path.display(),
                 super::immutable::flags_to_string(*flags)
             ));
         }

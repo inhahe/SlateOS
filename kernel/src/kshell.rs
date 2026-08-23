@@ -82124,7 +82124,11 @@ fn cmd_fflags(args: &str) {
             } else {
                 shell_println!("{} flagged files:", flagged.len());
                 for (path, flags) in &flagged {
-                    shell_println!("  {:40} {}", path, immutable::flags_to_string(*flags));
+                    shell_println!(
+                        "  {:40} {}",
+                        path.display(),
+                        immutable::flags_to_string(*flags)
+                    );
                 }
             }
         }

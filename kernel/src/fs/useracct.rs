@@ -666,6 +666,29 @@ pub fn init_defaults() {
             system_group: sys,
         });
     }
+
+    // Lift the id allocators above every id assigned literally above.
+    //
+    // This fixes a live collision, not a hypothetical one.  `create_user`
+    // hands out `NEXT_UID.fetch_add(1)` from a base of 1000, and the default
+    // `user` account is written here with a hard-coded `uid: 1000` — so on
+    // any freshly booted system the **first account ever created** was given
+    // uid 1000 as well.  Nothing rejected it: `create_user` only checks that
+    // the *username* is unique.  From then on every uid-keyed operation —
+    // `get_user`, `remove_user`, `set_home_dir`, `set_shell`, `set_avatar`,
+    // group membership — resolved by linear scan to whichever of the two
+    // accounts came first, so `remove_user(1000)` deleted `user` and left the
+    // account the caller meant to delete in place.
+    //
+    // Derived from the entries actually pushed rather than written as a third
+    // literal: a future default with a higher id must not be able to
+    // reintroduce this by being added without anyone remembering to bump a
+    // constant.  `fetch_max` rather than `store` so a `create_user` that ran
+    // before `init_defaults` cannot have its allocator wound backwards.
+    let highest_uid = state.users.iter().map(|u| u.uid).max().unwrap_or(0);
+    NEXT_UID.fetch_max(highest_uid.saturating_add(1), Ordering::Relaxed);
+    let highest_gid = state.groups.iter().map(|g| g.gid).max().unwrap_or(0);
+    NEXT_GID.fetch_max(highest_gid.saturating_add(1), Ordering::Relaxed);
 }
 
 // ---------------------------------------------------------------------------
@@ -767,6 +790,14 @@ pub fn self_test() -> KernelResult<()> {
     let base_groups = list_groups().len();
 
     // Test 2: Create user.
+    //
+    // The uid assertions are the point, not incidental. A freshly booted
+    // system used to hand the first created account uid 1000 — the same uid
+    // `init_defaults` writes for `user` — and because only the *username* is
+    // checked for uniqueness, nothing complained. `get_user(uid)` then
+    // resolved by linear scan to whichever came first, so this test would have
+    // read back `user`. Asserting the *name behind the returned uid* is what
+    // catches that; asserting only that `create_user` succeeded would not.
     serial_println!("  useracct::self_test 2: create user");
     let uid = create_user(
         FIXTURE_USER,
@@ -774,6 +805,11 @@ pub fn self_test() -> KernelResult<()> {
         "pass123",
         AccountType::Standard,
     )?;
+    assert_eq!(
+        list_users().iter().filter(|u| u.uid == uid).count(),
+        1,
+        "create_user handed out a uid that was already in use"
+    );
     let acct = get_user(uid)?;
     assert_eq!(acct.username, FIXTURE_USER);
     assert_eq!(

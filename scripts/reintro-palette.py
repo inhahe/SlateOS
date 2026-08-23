@@ -14179,8 +14179,14 @@ DEFECTS = [
         "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB: MOCHA_MANTLE survives the conversion at the ctrlbg site",
         SCRCAP,
         [
-            ('        color: p.mantle,\n        corner_radii: CornerRadii::all(8.0),',
-             '        color: p.mantle,\n        color: guitk::color::Color::from_hex(0x181825),'),
+            # Anchored on the comment *above* rather than the `corner_radii`
+            # line below, so the colour line is the last line of the pattern.
+            # An anchor whose colour line is not last invites a replacement
+            # that rewrites the wrong line — which is how the first four
+            # versions of these four defects came to emit two `color:` fields
+            # and fail to compile. See known-issues.md lesson 19.
+            ('        // laid on the desktop rather than a sheet of it.\n        color: p.mantle,',
+             '        // laid on the desktop rather than a sheet of it.\n        color: guitk::color::Color::from_hex(0x181825),'),
         ],
         ["desktop"],
         [
@@ -14350,8 +14356,8 @@ DEFECTS = [
         [
             ('        color: p.panel_bg(),',
              '        color: p.mantle,'),
-            ('        color: p.mantle,\n        corner_radii: CornerRadii::all(8.0),',
-             '        color: p.mantle,\n        color: p.panel_bg(),'),
+            ('        // laid on the desktop rather than a sheet of it.\n        color: p.mantle,',
+             '        // laid on the desktop rather than a sheet of it.\n        color: p.panel_bg(),'),
         ],
         ["desktop"],
         [
@@ -14435,8 +14441,8 @@ DEFECTS = [
         "TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT: the controls bar is painted with the accent",
         SCRCAP,
         [
-            ('        color: p.mantle,\n        corner_radii: CornerRadii::all(8.0),',
-             '        color: p.mantle,\n        color: p.accent,'),
+            ('        // laid on the desktop rather than a sheet of it.\n        color: p.mantle,',
+             '        // laid on the desktop rather than a sheet of it.\n        color: p.accent,'),
         ],
         ["desktop"],
         [
@@ -14577,8 +14583,8 @@ DEFECTS = [
         "EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE: the controls bar drops to the lowest rung there is",
         SCRCAP,
         [
-            ('        color: p.mantle,\n        corner_radii: CornerRadii::all(8.0),',
-             '        color: p.mantle,\n        color: p.crust,'),
+            ('        // laid on the desktop rather than a sheet of it.\n        color: p.mantle,',
+             '        // laid on the desktop rather than a sheet of it.\n        color: p.crust,'),
         ],
         ["desktop"],
         [
@@ -14990,15 +14996,26 @@ def main():
     def tally(mark):
         return sum(1 for _, v in verdicts if mark in v)
 
-    escaped = tally("NO TEST FAILED") + tally("DID NOT COMPILE")
-    # Neither of these asked the suite anything, so neither is evidence about
+    # The only verdict that is evidence *against* the suite: the defect was
+    # introduced, the suite ran, and the suite said nothing.
+    escaped = tally("NO TEST FAILED")
+    # None of these three asked the suite anything, so none is evidence about
     # it. Counting them as "caught" would inflate the sweep with defects that
     # were never introduced; counting them as "escaped" would blame the tests
     # for the harness's own authoring error. They get their own column.
-    unasked = tally("PATCH IS A NO-OP") + tally("PATTERN NOT FOUND")
+    #
+    # `DID NOT COMPILE` belongs here and not with `escaped` for exactly the
+    # reason the no-op does: a patch that fails to build never reaches a test
+    # binary, so no test had the opportunity to fail. It is a defect in the
+    # *defect*, not in the suite — see known-issues.md lesson 19, where four
+    # module-36 defects emitted two `color:` fields and were reported as
+    # escapes by an earlier version of this line.
+    unasked = (
+        tally("PATCH IS A NO-OP") + tally("PATTERN NOT FOUND") + tally("DID NOT COMPILE")
+    )
     print(
         f"\n{len(verdicts)} defects: {len(verdicts) - escaped - unasked} caught, "
-        f"{escaped} escaped, {unasked} never introduced, "
+        f"{escaped} escaped, {unasked} never asked, "
         f"{tally('[MISSING:')} under-caught, "
         f"{tally('[UNDECLARED:')} under-declared"
     )

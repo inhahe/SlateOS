@@ -50388,7 +50388,7 @@ commands that carry the colour in question, and assert the two renders agree.
 Candidates: anything drawn on the wallpaper, on a video surface, on a
 thumbnail, or on any other content the palette does not own.
 
-**Part 2 progress. 26 of 49 modules converted.**
+**Part 2 progress. 27 of 49 modules converted.**
 
 - [x] `security_dialog.rs` — 29 constants, done 2026-08-22. The method above
   survived contact: the sweep lives in `gui/desktop/src/palette_check.rs` as
@@ -51734,6 +51734,57 @@ thumbnail, or on any other content the palette does not own.
     module draws one word in two roles, the lookup helper needs a second
     discriminator; the ambiguity guard only tells you that you have the
     problem, not which site you meant.
+- [x] `power.rs` — 9 constants, done 2026-08-23. Ten tests, harness defects
+  Ax30–Bx32 (fifty-four).
+  - **The first module whose surface deliberately does not follow the user's
+    mode**, and that turns out to matter for the proof, not just the pixels. A
+    screen saver blacks out the display in both modes — a light one is a lamp
+    pointed at a sleeping user — so Latte's roles, which are picked to sit on
+    white, are the wrong palette for that surface: Latte `text` is nearly black
+    and would vanish on it. The saver pins itself to the dark palette and, since
+    nothing it draws is a position or an invitation, takes no palette argument
+    at all. Making the independence *structural* rather than asserted is the
+    better half of the fix: a later edit cannot accidentally make the saver
+    follow the theme, because there is no theme in scope to follow.
+  - **Seventh lesson for the width rule: pinning a surface to one mode disarms
+    the membership sweep for that surface.** The sweep works by rendering in
+    Latte and finding a value Latte does not contain. A surface pinned to Mocha
+    contains every Mocha value *by construction*, in both modes — so a leftover
+    `COL_LAVENDER` is bit-for-bit `screen_palette().lavender` and there is no
+    observable difference for any test to see. The sweep is still worth running
+    (it catches an inline literal that is no role at all, and it pins the star
+    field's greys and the rain's greens to the two ramp shapes they are allowed
+    to have), but for such a surface the per-site role tables are not a
+    supplement to it: they are the entire proof, and anyone who trims them as
+    redundant is deleting the only check there is. The harness block says the
+    same thing from the other side — the saver's sites carry no freeze-to-Mocha
+    defect, because such a defect would be undetectable and declaring it would
+    be declaring a test that cannot exist. They reach for the *light* palette
+    instead, which is the failure pinning can genuinely suffer.
+  - **Lesson 5 applies to which palette, not just which role.** The saver's role
+    tables first wrote their expectations as `screen_palette().lavender`. That
+    is the module-25 tautology one level up: a `screen_palette` that started
+    returning the light palette takes both sides of the comparison with it. The
+    expectations now name `Palette::for_mode(false)` directly, and the defect
+    that flips the pinning is caught by three tests instead of none.
+  - **Four judgements.** (1) The saver follows neither mode nor accent. (2) The
+    battery gauge is a *measurement* — red at critical, yellow at low, green
+    when nearly full, blue otherwise — so it freezes; note its "otherwise" arm
+    is `p.blue` and must stay `p.blue`, which is the module-26 trap again and is
+    why every table renders under an off-palette accent. (3) The four power
+    profiles are a category, so none of them is the accent, not even Balanced.
+    (4) A star's grey is its depth and a glyph's green is its age in the column:
+    both are computed ramps, not roles that were missed, and the sweep declares
+    them as the two shapes `rgba(v, v, v, 255)` and `rgba(0, v, 0, 255)` rather
+    than waving arbitrary colour through.
+  - **The logo's ink is derived but cannot be proved so.** `readable_on(sp.blue)`
+    sits on a plate that never varies, so — unlike the accent cases, where the
+    fill moves and the ink must move with it — a frozen endpoint and a
+    derivation are indistinguishable here. The test asserts ink ==
+    `readable_on(plate as actually drawn)`, which is a consistency check rather
+    than a derivation proof; what it does catch is the failure that matters and
+    the one the code actually had, a *named* role (`COL_BASE`, dark) on a plate
+    whose lightness a later change could flip.
 
 **Trigger:** this is not blocked on anything. It is sequenced after the shell
 event loop (`TD-C-THE-SHELL-CAN-DRAW-ITSELF-AND-NOBODY-CAN-ASK-IT-TO`) only

@@ -156,8 +156,10 @@ impl Default for RotationConfig {
 struct FlushCursor {
     /// Namespace root name (e.g. "system", "security", or "combined").
     name: String,
-    /// Last event sequence number flushed for this namespace.
-    last_flushed_seq: u64,
+    /// Last event sequence number flushed for this namespace, or `None` if
+    /// nothing has been flushed yet. See [`State::global_last_flushed`] for
+    /// why this is not a `u64` with `0` meaning "nothing".
+    last_flushed_seq: Option<u64>,
     /// Current file size estimate (bytes).
     current_size: u64,
     /// Total bytes written across all rotations.
@@ -171,8 +173,16 @@ struct FlushCursor {
 struct State {
     config: RotationConfig,
     cursors: Vec<FlushCursor>,
-    /// Global last-flushed sequence.
-    global_last_flushed: u64,
+    /// Global last-flushed sequence, or `None` if nothing has been flushed.
+    ///
+    /// Not a `u64` with `0` meaning "nothing yet": event sequence numbers
+    /// start at **zero**, so `0` is a real event's sequence and cannot double
+    /// as the empty marker. [`flush`] resumes with an "events after N" query,
+    /// and "after 0" excludes sequence 0 — so under the old encoding the very
+    /// first event the system ever logged was skipped on every fresh boot and
+    /// never reached disk. It is the one event most worth keeping: on a boot
+    /// that crashes early it may be the only one there was.
+    global_last_flushed: Option<u64>,
     /// Total flush operations.
     total_flushes: u64,
     /// Total bytes written across all namespaces.
@@ -201,7 +211,7 @@ impl State {
                 compression: LogCompression::Zstd,
             },
             cursors: Vec::new(),
-            global_last_flushed: 0,
+            global_last_flushed: None,
             total_flushes: 0,
             total_bytes: 0,
             total_pruned: 0,
@@ -238,7 +248,7 @@ pub fn init_with_config(config: RotationConfig) {
         RotationMode::Combined => {
             state.cursors.push(FlushCursor {
                 name: String::from("combined"),
-                last_flushed_seq: 0,
+                last_flushed_seq: None,
                 current_size: 0,
                 total_bytes_written: 0,
                 rotation_count: 0,
@@ -249,7 +259,7 @@ pub fn init_with_config(config: RotationConfig) {
             for ns in eventlog::NAMESPACE_ROOTS {
                 state.cursors.push(FlushCursor {
                     name: String::from(*ns),
-                    last_flushed_seq: 0,
+                    last_flushed_seq: None,
                     current_size: 0,
                     total_bytes_written: 0,
                     rotation_count: 0,
@@ -349,7 +359,16 @@ pub fn flush() -> KernelResult<usize> {
     let min_sev = state.config.min_persist_severity;
 
     // Query new events since last flush.
-    let filter = EventFilter::all().after(after_seq).min_severity(min_sev);
+    //
+    // `after(n)` means "sequence strictly greater than n", so there is no `n`
+    // that means "everything" — sequence numbers start at 0. Omitting the
+    // filter entirely is what expresses the first flush; passing `after(0)`
+    // instead silently dropped event 0.
+    let base = EventFilter::all().min_severity(min_sev);
+    let filter = match after_seq {
+        None => base,
+        Some(seq) => base.after(seq),
+    };
     let result = eventlog::query(&filter, 1024);
 
     if result.events.is_empty() {
@@ -419,16 +438,19 @@ pub fn flush() -> KernelResult<usize> {
                     }
                 }
 
-                cursor.last_flushed_seq = result.newest_seq;
+                cursor.last_flushed_seq = Some(result.newest_seq);
             }
         }
         RotationMode::PerNamespace => {
             // Group events by namespace root and write to separate files.
             for cursor in &mut state.cursors {
-                let ns_filter = EventFilter::all()
-                    .after(after_seq)
+                let ns_base = EventFilter::all()
                     .min_severity(min_sev)
                     .namespace(&cursor.name);
+                let ns_filter = match after_seq {
+                    None => ns_base,
+                    Some(seq) => ns_base.after(seq),
+                };
                 let ns_result = eventlog::query(&ns_filter, 1024);
 
                 if ns_result.events.is_empty() {
@@ -480,7 +502,7 @@ pub fn flush() -> KernelResult<usize> {
                     }
                 }
 
-                cursor.last_flushed_seq = ns_result.newest_seq;
+                cursor.last_flushed_seq = Some(ns_result.newest_seq);
             }
         }
     }
@@ -493,7 +515,7 @@ pub fn flush() -> KernelResult<usize> {
         state.total_files_compressed += total_compress_ops;
     }
 
-    state.global_last_flushed = result.newest_seq;
+    state.global_last_flushed = Some(result.newest_seq);
     #[allow(clippy::arithmetic_side_effects)]
     {
         state.total_flushes += 1;
@@ -804,7 +826,7 @@ pub struct RotationStats {
     pub total_flushes: u64,
     pub total_bytes_written: u64,
     pub total_pruned: u64,
-    pub global_last_flushed_seq: u64,
+    pub global_last_flushed_seq: Option<u64>,
     pub max_file_size: u64,
     pub max_rotated_files: u32,
     pub max_total_storage: u64,
@@ -905,10 +927,12 @@ pub fn procfs_content() -> String {
         "Bytes saved:   {} bytes\n",
         st.bytes_saved_by_compression
     ));
-    out.push_str(&alloc::format!(
-        "Last seq:      {}\n",
-        st.global_last_flushed_seq
-    ));
+    // "none" rather than "0": sequence 0 is a real event, so printing 0 for
+    // "nothing flushed yet" would claim a flush that never happened.
+    out.push_str(&match st.global_last_flushed_seq {
+        None => alloc::string::String::from("Last seq:      none (nothing flushed yet)\n"),
+        Some(seq) => alloc::format!("Last seq:      {seq}\n"),
+    });
 
     if !st.cursors.is_empty() {
         out.push_str("\nPer-Namespace:\n");
@@ -1007,7 +1031,7 @@ fn self_test_inner() -> KernelResult<()> {
         state.total_flushes = 0;
         state.total_bytes = 0;
         state.total_pruned = 0;
-        state.global_last_flushed = 0;
+        state.global_last_flushed = None;
     }
     init_with_config(self_test_config());
     {
@@ -1021,9 +1045,23 @@ fn self_test_inner() -> KernelResult<()> {
             return Err(KernelError::InternalError);
         }
     }
+    if stats().global_last_flushed_seq.is_some() {
+        crate::serial_println!(
+            "[logpersist]   FAIL: a freshly-initialised cursor has flushed nothing; \
+             `0` is event zero, not `never`"
+        );
+        return Err(KernelError::InternalError);
+    }
     crate::serial_println!("[logpersist]   1. Init (combined mode): OK");
 
     // Test 2: Emit events and flush.
+    //
+    // `clear()` restarts sequence numbering, so event 1 below is sequence
+    // **zero**. That is the whole point of the test: the first flush must
+    // persist it. While `global_last_flushed` was a `u64` with `0` meaning
+    // "nothing flushed", the resume query said "everything after 0", which
+    // excludes sequence 0 — this flushed 1 of 2, and on a real boot it meant
+    // the system's first-ever event never reached disk.
     eventlog::clear();
     EventBuilder::new("system.test", Severity::Info)
         .message("Log rotation test event 1")
@@ -1032,12 +1070,31 @@ fn self_test_inner() -> KernelResult<()> {
         .message("Log rotation test event 2")
         .emit();
 
+    {
+        let seqs = eventlog::query(&EventFilter::all(), 16);
+        if seqs.events.first().map(crate::eventlog::EventEntry::seq) != Some(0) {
+            crate::serial_println!(
+                "[logpersist]   FAIL: expected the first event after clear() to be seq 0"
+            );
+            return Err(KernelError::InternalError);
+        }
+    }
+
     let flushed = flush()?;
     if flushed != 2 {
-        crate::serial_println!("[logpersist]   FAIL: expected 2 flushed, got {}", flushed);
+        crate::serial_println!(
+            "[logpersist]   FAIL: expected 2 flushed, got {} (event seq 0 must not be skipped)",
+            flushed
+        );
         return Err(KernelError::InternalError);
     }
-    crate::serial_println!("[logpersist]   2. Flush events: OK (flushed {})", flushed);
+    if stats().global_last_flushed_seq != Some(1) {
+        crate::serial_println!(
+            "[logpersist]   FAIL: cursor should sit at seq 1 after flushing seqs 0 and 1"
+        );
+        return Err(KernelError::InternalError);
+    }
+    crate::serial_println!("[logpersist]   2. Flush events (incl. seq 0): OK (flushed {})", flushed);
 
     // Test 3: Verify stats updated.
     let st = stats();
@@ -1092,7 +1149,7 @@ fn self_test_inner() -> KernelResult<()> {
         state.cursors.clear();
         state.total_flushes = 0;
         state.total_bytes = 0;
-        state.global_last_flushed = 0;
+        state.global_last_flushed = None;
     }
     init_with_config(RotationConfig {
         mode: RotationMode::PerNamespace,

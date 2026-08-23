@@ -61936,12 +61936,95 @@ The `--selftest` is not decoration. This detector's signal lives *inside* a
 string literal, so the natural way to make it "more correct" — reach for a Rust
 lexer, as the sibling checkers do — would blank out precisely the text it
 searches and report the whole tree clean. Gate 8 therefore runs `--selftest`
-before `--check` and refuses the push if the checker cannot pass its own 23
-cases, exactly as gate 6 does for the same reason.
+before `--check` and refuses the push if the checker cannot pass its own cases
+(23 at first; 42 as of the correction below), exactly as gate 6 does for the
+same reason.
 
-**Part (2) — the burn-down — remains open**, and the risk ranking in the
-section above is unchanged: `btrfs` 46, `pulseaudio` 38, `cups` 36, `flatpak`
-34, `timeout` 19, `snapper` 18, `loginctl` 17, `stat` 17.
+**Part (2) — the burn-down — remains open.** Progress and the current ranking
+are in the next two sections.
+
+### Amendment 2026-08-23 — the ratchet was silenceable by `cargo fmt`
+
+**In short:** Both detectors — the Python checker and the Rust test it was
+ported from — matched a *physical line*. `rustfmt` routinely breaks a long
+`eprintln!` so that the file name lands on a line with no macro name on it, and
+when it does, the site becomes invisible to both. Running a formatter, which
+nobody would think of as a security-relevant act, silently removed sites from
+the count. **71 of them — 4% of the backlog — were hidden this way.**
+
+It was found by arithmetic, not by suspicion. Converting `flatpak` should have
+dropped the baseline by 34; it dropped by 37. Checking out the pre-conversion
+`userspace/` and re-surveying showed the extra three were `loginctl` 17→16,
+`snapper` 18→17 and `timeout` 19→18 — three crates I had not touched, whose
+only change was the rustfmt-only commit landed just before. A checker a
+formatter can silence reports a clean tree for a dirty one.
+
+Both sides now join a wrapped call before matching:
+
+* `scripts/quote-names.py` — `_delta()` (net bracket depth, skipping string and
+  char literals) plus `join_wrapped_calls()`, which groups physical lines into
+  logical ones and reports the *first* line so a report still points where a
+  reader would go.
+* `userspace/coreutils/tests/diagnostics_quote_names.rs` — `bracket_delta()`
+  and `logical_lines()`, the same algorithm, with
+  `the_detector_sees_a_call_rustfmt_wrapped` pinning it.
+
+Literals must be skipped rather than counted: a format string is full of `{`
+and `}` and often holds a paren of its own (`purged {n} job(s)`), so counting
+those leaves every such call permanently unbalanced and it is never joined. The
+join is bounded at 40 physical lines, because the scanner does not model every
+Rust literal form — a raw string defeats it — and an unbounded join would then
+swallow the rest of the file, turning one unrecognised line into a silent hole
+over everything below it. Both regressions are pinned by tests.
+
+**This is the one legitimate reason a baseline number may go up**, and the
+generated baseline header now says so: it is a commit that changes
+`quote-names.py` and no `.rs` file under the scanned roots. It has happened
+once, here: 1641 → 1712.
+
+### The bug the correction immediately found: `tar` could be made to forge a line of its own stderr
+
+`userspace/coreutils/src/bin/tar.rs:605` had been wrapped by rustfmt and so was
+invisible to the test *for as long as the test had existed*:
+
+```rust
+eprintln!(
+    "tar: {}: unsupported entry type '{}'; skipped",
+    quotef_os(&name),
+    char::from(other)
+);
+```
+
+`other` is the type-flag byte out of the archive's own header — exactly as
+attacker-chosen as the name beside it, which is already quoted. `char::from`
+printed it raw, so an archive crafted with `\n` in that byte writes a second
+line into `tar`'s error stream that `tar` never wrote. Fixed in `05559d621` by
+`quoteaf(&[other])`, which renders that byte as `''\n'`. Negative-verified:
+reverting the fix makes `no_diagnostic_hand_writes_quotes_around_a_name` fail,
+naming the line.
+
+### Burn-down progress (part 2)
+
+| crate | sites | commit |
+|---|---|---|
+| `btrfs` | 46 | `4271941fb` |
+| `pulseaudio` | 38 | `892010376` |
+| `cups` | 36 | `b8c50660b` |
+| `flatpak` | 34 | `579d761cd` |
+| `tar` (hand-written quotes) | 1 | `05559d621` |
+
+`scripts/quote-names.py` gained a **`--fix PATH...`** mode, which is what makes
+the rest of this tractable. It lives inside the checker rather than beside it
+on purpose: a separate fixer would re-derive "what is a site" and would
+silently skip lines the checker still counts. It was verified rather than
+asserted — run against the `git show`-extracted pre-fix sources it reproduced
+83 of the 84 already-hand-converted sites identically, and declined the 84th
+for the right reason.
+
+Current head of the ranking, post-correction:
+`timeout` 20, `snapper` 18, `loginctl` 17, `stat` 17, `apparmor` 16,
+`podman` 16, `selinux` 16, `pkg` 14, `mkfs` 13, `useradm` 13.
+Total **1711 sites in 780 files**.
 
 ### Interaction with B-Q7
 

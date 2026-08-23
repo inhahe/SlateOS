@@ -493,28 +493,32 @@ pub fn close(handle: u64) -> KernelResult<()> {
 /// number of bytes actually read (may be less than `buf_len` if
 /// near end-of-file; 0 means already at EOF).
 pub fn read(handle: u64, buf: &mut [u8]) -> KernelResult<usize> {
-    // We need to look up the file, read data via VFS, then update
-    // the offset.  We hold the lock across the VFS call — acceptable
-    // for early dev but should be improved.
-    let mut table = OPEN_FILES.lock();
-    let file = table.get_mut(&handle).ok_or(KernelError::InvalidHandle)?;
+    // Snapshot what the VFS call needs, then drop the table lock before
+    // making it. See `advance_offset` for why holding it across the call is
+    // a deadlock and not merely a bottleneck.
+    let (path, start) = {
+        let table = OPEN_FILES.lock();
+        let file = table.get(&handle).ok_or(KernelError::InvalidHandle)?;
 
-    if file.is_directory {
-        return Err(KernelError::IsADirectory);
-    }
+        if file.is_directory {
+            return Err(KernelError::IsADirectory);
+        }
 
-    if !file.flags.is_readable() {
-        return Err(KernelError::PermissionDenied);
-    }
+        if !file.flags.is_readable() {
+            return Err(KernelError::PermissionDenied);
+        }
 
-    // Nothing to read if at or past EOF.
-    if file.offset >= file.size {
-        return Ok(0);
-    }
+        // Nothing to read if at or past EOF.
+        if file.offset >= file.size {
+            return Ok(0);
+        }
+
+        (file.path.clone(), file.offset)
+    };
 
     // Read via VFS.  Currently reads the whole file — the default
     // `read_at` in the FileSystem trait slices the result.
-    let data = crate::fs::Vfs::read_at_resolved(&file.path, file.offset, buf.len())?;
+    let data = crate::fs::Vfs::read_at_resolved(&path, start, buf.len())?;
     let copy_len = data.len().min(buf.len());
 
     if let Some(dest) = buf.get_mut(..copy_len) {
@@ -523,10 +527,41 @@ pub fn read(handle: u64, buf: &mut [u8]) -> KernelResult<usize> {
         }
     }
 
-    // Advance offset.
-    file.offset = file.offset.saturating_add(copy_len as u64);
+    advance_offset(handle, start, copy_len as u64);
 
     Ok(copy_len)
+}
+
+/// Move an open handle's cursor to `start + delta`, but never backwards.
+///
+/// Called after the VFS I/O has completed and the table lock has been
+/// released and retaken, so it must re-look-up the handle rather than hold a
+/// reference across the call: the map may have been rebalanced, and the
+/// handle may have been closed outright. A vanished handle is not an error —
+/// the bytes really were transferred — so the bookkeeping is simply skipped.
+///
+/// The advance is `max`, not `+=`, for the case where another thread sharing
+/// the handle completed its own transfer while this one was in the VFS: adding
+/// would count that thread's progress twice. Two threads reading one handle
+/// get an arbitrary interleaving either way — Linux guards only the position
+/// update itself, with `f_pos_lock`, and offers no more — but a monotone
+/// cursor never re-reads bytes it has already returned, which is the property
+/// callers actually depend on.
+///
+/// ## Why the lock is dropped at all
+///
+/// Holding `OPEN_FILES` across a VFS call inverts the kernel's lock order.
+/// `Vfs::readdir` takes the *filesystem's* lock and calls `readdir` under it;
+/// for procfs that generates content, which reaches `list_handles`, which
+/// takes `OPEN_FILES`. So one path runs FS → `OPEN_FILES` while the old
+/// `read`/`write` ran `OPEN_FILES` → FS. Lockdep observed both orders in a
+/// single boot (batch 32). Dropping the lock also stops every file read in
+/// the system from serialising behind one global mutex, which the original
+/// comment here acknowledged as "acceptable for early dev".
+fn advance_offset(handle: u64, start: u64, delta: u64) {
+    if let Some(file) = OPEN_FILES.lock().get_mut(&handle) {
+        file.offset = file.offset.max(start.saturating_add(delta));
+    }
 }
 
 /// Return the file offset at which the next byte written via
@@ -591,38 +626,47 @@ pub fn current_offset(handle: u64) -> KernelResult<u64> {
 /// Advances the offset by the number of bytes written.  Grows the
 /// file if writing past the current end.  Returns bytes written.
 pub fn write(handle: u64, data: &[u8]) -> KernelResult<usize> {
-    let mut table = OPEN_FILES.lock();
-    let file = table.get_mut(&handle).ok_or(KernelError::InvalidHandle)?;
+    // Snapshot, then release: see `advance_offset` for why the table lock
+    // must not span the VFS call.
+    let (path, write_offset) = {
+        let table = OPEN_FILES.lock();
+        let file = table.get(&handle).ok_or(KernelError::InvalidHandle)?;
 
-    if file.is_directory {
-        return Err(KernelError::IsADirectory);
-    }
+        if file.is_directory {
+            return Err(KernelError::IsADirectory);
+        }
 
-    if !file.flags.is_writable() {
-        return Err(KernelError::PermissionDenied);
-    }
+        if !file.flags.is_writable() {
+            return Err(KernelError::PermissionDenied);
+        }
 
-    let write_offset = if file.flags.contains(OpenFlags::APPEND) {
-        file.size
-    } else {
-        file.offset
+        // APPEND writes land at the cached end of file. This was never
+        // atomic against another process writing the same file through a
+        // different handle — `OPEN_FILES` does not serialise the filesystem
+        // — so releasing the lock here loses no guarantee that existed.
+        // Real append atomicity has to come from the filesystem.
+        let write_offset = if file.flags.contains(OpenFlags::APPEND) {
+            file.size
+        } else {
+            file.offset
+        };
+
+        (file.path.clone(), write_offset)
     };
 
     // Write via VFS.
-    crate::fs::Vfs::write_at_resolved(&file.path, write_offset, data)?;
+    crate::fs::Vfs::write_at_resolved(&path, write_offset, data)?;
 
     let written = data.len();
 
-    // Update offset and cached size.
+    // Update offset and cached size. Both APPEND and non-APPEND leave the
+    // cursor at the end of what was just written.
     let new_end = write_offset.saturating_add(written as u64);
-    if !file.flags.contains(OpenFlags::APPEND) {
-        file.offset = new_end;
-    } else {
-        // APPEND: offset tracks end of file.
-        file.offset = new_end;
-    }
-    if new_end > file.size {
-        file.size = new_end;
+    if let Some(file) = OPEN_FILES.lock().get_mut(&handle) {
+        file.offset = file.offset.max(new_end);
+        if new_end > file.size {
+            file.size = new_end;
+        }
     }
 
     Ok(written)
@@ -644,21 +688,27 @@ pub fn write(handle: u64, data: &[u8]) -> KernelResult<usize> {
 ///   reading.
 /// - VFS errors propagated unchanged.
 pub fn read_at(handle: u64, offset: u64, buf: &mut [u8]) -> KernelResult<usize> {
-    let table = OPEN_FILES.lock();
-    let file = table.get(&handle).ok_or(KernelError::InvalidHandle)?;
-    if file.is_directory {
-        return Err(KernelError::IsADirectory);
-    }
-    if !file.flags.is_readable() {
-        return Err(KernelError::PermissionDenied);
-    }
-    if buf.is_empty() {
-        return Ok(0);
-    }
-    if offset >= file.size {
-        return Ok(0);
-    }
-    let data = crate::fs::Vfs::read_at_resolved(&file.path, offset, buf.len())?;
+    // Snapshot, then release: see `advance_offset` for why the table lock
+    // must not span the VFS call. `pread` touches no cursor, so unlike
+    // `read` there is nothing to write back afterwards.
+    let path = {
+        let table = OPEN_FILES.lock();
+        let file = table.get(&handle).ok_or(KernelError::InvalidHandle)?;
+        if file.is_directory {
+            return Err(KernelError::IsADirectory);
+        }
+        if !file.flags.is_readable() {
+            return Err(KernelError::PermissionDenied);
+        }
+        if buf.is_empty() {
+            return Ok(0);
+        }
+        if offset >= file.size {
+            return Ok(0);
+        }
+        file.path.clone()
+    };
+    let data = crate::fs::Vfs::read_at_resolved(&path, offset, buf.len())?;
     let copy_len = data.len().min(buf.len());
     if let Some(dest) = buf.get_mut(..copy_len) {
         if let Some(src) = data.get(..copy_len) {
@@ -724,22 +774,29 @@ pub fn read_at_uncached(handle: u64, offset: u64, buf: &mut [u8]) -> KernelResul
 ///   writing.
 /// - VFS errors propagated unchanged.
 pub fn write_at(handle: u64, offset: u64, data: &[u8]) -> KernelResult<usize> {
-    let mut table = OPEN_FILES.lock();
-    let file = table.get_mut(&handle).ok_or(KernelError::InvalidHandle)?;
-    if file.is_directory {
-        return Err(KernelError::IsADirectory);
-    }
-    if !file.flags.is_writable() {
-        return Err(KernelError::PermissionDenied);
-    }
-    if data.is_empty() {
-        return Ok(0);
-    }
-    crate::fs::Vfs::write_at_resolved(&file.path, offset, data)?;
+    // Snapshot, then release: see `advance_offset` for why the table lock
+    // must not span the VFS call.
+    let path = {
+        let table = OPEN_FILES.lock();
+        let file = table.get(&handle).ok_or(KernelError::InvalidHandle)?;
+        if file.is_directory {
+            return Err(KernelError::IsADirectory);
+        }
+        if !file.flags.is_writable() {
+            return Err(KernelError::PermissionDenied);
+        }
+        if data.is_empty() {
+            return Ok(0);
+        }
+        file.path.clone()
+    };
+    crate::fs::Vfs::write_at_resolved(&path, offset, data)?;
     let written = data.len();
     let new_end = offset.saturating_add(written as u64);
-    if new_end > file.size {
-        file.size = new_end;
+    if let Some(file) = OPEN_FILES.lock().get_mut(&handle) {
+        if new_end > file.size {
+            file.size = new_end;
+        }
     }
     Ok(written)
 }
@@ -876,12 +933,17 @@ pub fn seek(handle: u64, from: SeekFrom) -> KernelResult<u64> {
 /// link count, block count).  Avoids a redundant user-side path
 /// lookup; the kernel already holds the resolved path for the handle.
 pub fn fstat(handle: u64) -> KernelResult<crate::fs::FileMeta> {
-    let table = OPEN_FILES.lock();
-    let file = table.get(&handle).ok_or(KernelError::InvalidHandle)?;
+    // Snapshot, then release: see `advance_offset` for why the table lock
+    // must not span the VFS call.
+    let path = {
+        let table = OPEN_FILES.lock();
+        let file = table.get(&handle).ok_or(KernelError::InvalidHandle)?;
+        file.path.clone()
+    };
 
     // metadata() follows symlinks, but an open handle already refers to
     // the resolved target, so this returns the correct underlying object.
-    crate::fs::Vfs::metadata_resolved(&file.path)
+    crate::fs::Vfs::metadata_resolved(&path)
 }
 
 /// Returns whether an open handle refers to a directory.
@@ -905,23 +967,31 @@ pub fn is_directory(handle: u64) -> bool {
 /// Updates the cached size and clamps the offset if it was
 /// beyond the new end-of-file.
 pub fn ftruncate(handle: u64, size: u64) -> KernelResult<()> {
-    let mut table = OPEN_FILES.lock();
-    let file = table.get_mut(&handle).ok_or(KernelError::InvalidHandle)?;
+    // Snapshot, then release: see `advance_offset` for why the table lock
+    // must not span the VFS call.
+    let path = {
+        let table = OPEN_FILES.lock();
+        let file = table.get(&handle).ok_or(KernelError::InvalidHandle)?;
 
-    if file.is_directory {
-        return Err(KernelError::IsADirectory);
-    }
+        if file.is_directory {
+            return Err(KernelError::IsADirectory);
+        }
 
-    if !file.flags.is_writable() {
-        return Err(KernelError::PermissionDenied);
-    }
+        if !file.flags.is_writable() {
+            return Err(KernelError::PermissionDenied);
+        }
 
-    crate::fs::Vfs::truncate_resolved(&file.path, size)?;
+        file.path.clone()
+    };
 
-    file.size = size;
-    // Clamp offset: if the cursor was beyond the new EOF, move it back.
-    if file.offset > size {
-        file.offset = size;
+    crate::fs::Vfs::truncate_resolved(&path, size)?;
+
+    if let Some(file) = OPEN_FILES.lock().get_mut(&handle) {
+        file.size = size;
+        // Clamp offset: if the cursor was beyond the new EOF, move it back.
+        if file.offset > size {
+            file.offset = size;
+        }
     }
 
     Ok(())

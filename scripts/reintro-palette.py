@@ -78,6 +78,10 @@ PRINTMGR = "gui/desktop/src/print_manager.rs"
 POWER = "gui/desktop/src/power.rs"
 LOGIN = "gui/desktop/src/login_screen.rs"
 TB = "gui/desktop/src/taskbar.rs"
+LANG = "gui/desktop/src/language_settings.rs"
+DAPP = "gui/desktop/src/default_apps.rs"
+LAUN = "gui/desktop/src/launcher.rs"
+RESMON = "gui/desktop/src/resmon.rs"
 
 # (name, file, [(old, new), ...], [packages], [tests expected to fail])
 DEFECTS = [
@@ -10154,6 +10158,2850 @@ DEFECTS = [
             # first — it looks for the literal text "Terminal", which an
             # icon-only bar never draws.
             'test_render_label_mode',
+        ],
+    ),
+    # ------------------------------------------------------------------
+    # Module 30: language_settings.rs. Eleven constants over three tabs.
+    #
+    # The module's five judgements are in its docs; these defects break
+    # each one in the two ways that matter -- a role frozen to the Mocha
+    # value it used to be (which only the light render can see), and a
+    # role swapped for a neighbouring role (which no membership sweep can
+    # see at all, because both are legal). The second kind is why this
+    # module grew a per-site table; several of the defects below are
+    # caught by nothing else.
+    # ------------------------------------------------------------------
+    (
+        'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA: the panel background is frozen to Mocha base',
+        LANG,
+        [
+            ('            color: p.base,\n            corner_radii: CornerRadii::all(8.0),\n        });\n\n        // Title',
+             '            color: guitk::color::Color::from_hex(0x1E1E2E),\n            corner_radii: CornerRadii::all(8.0),\n        });\n\n        // Title'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_panel_draws_comes_from_its_palette',
+            'every_site_draws_the_role_it_claims',
+            'none_of_the_eleven_deleted_constants_is_still_drawn',
+        ],
+    ),
+    (
+        'BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB: the panel background follows the accent',
+        LANG,
+        [
+            ('            color: p.base,\n            corner_radii: CornerRadii::all(8.0),\n        });\n\n        // Title',
+             '            color: p.accent,\n            corner_radii: CornerRadii::all(8.0),\n        });\n\n        // Title'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'only_the_three_position_marks_carry_the_accent',
+        ],
+    ),
+    (
+        'CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC: the panel title is frozen to Mocha text',
+        LANG,
+        [
+            ('            font_size: 22.0,\n            color: p.text,',
+             '            font_size: 22.0,\n            color: guitk::color::Color::from_hex(0xCDD6F4),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_panel_draws_comes_from_its_palette',
+            'every_site_draws_the_role_it_claims',
+            'none_of_the_eleven_deleted_constants_is_still_drawn',
+        ],
+    ),
+    (
+        'DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD: the tab strip stops marking which tab is open',
+        LANG,
+        [
+            ('                color: if active { p.accent } else { p.surface0 },',
+             '                color: p.surface0,'),
+        ],
+        ["desktop"],
+        [
+            'the_fixture_reaches_every_branch_this_module_has',
+            'only_the_three_position_marks_carry_the_accent',
+        ],
+    ),
+    (
+        'EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE: the active and inactive tab fills are exchanged',
+        LANG,
+        [
+            ('                color: if active { p.accent } else { p.surface0 },',
+             '                color: if active { p.surface0 } else { p.accent },'),
+        ],
+        ["desktop"],
+        [
+            'the_fixture_reaches_every_branch_this_module_has',
+            'only_the_three_position_marks_carry_the_accent',
+        ],
+    ),
+    (
+        'FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF: the active tab is raised a rung instead of accented',
+        LANG,
+        [
+            ('                color: if active { p.accent } else { p.surface0 },',
+             '                color: if active { p.surface1 } else { p.surface0 },'),
+        ],
+        ["desktop"],
+        [
+            'the_fixture_reaches_every_branch_this_module_has',
+            'only_the_three_position_marks_carry_the_accent',
+        ],
+    ),
+    (
+        "GGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGG: the active tab's label is frozen to near-black instead of computed",
+        LANG,
+        [
+            ('                color: if active {\n                    readable_on(p.accent)\n                } else {\n                    p.subtext0\n                },',
+             '                color: if active {\n                    guitk::color::Color::from_hex(0x11111B)\n                } else {\n                    p.subtext0\n                },'),
+        ],
+        ["desktop"],
+        [
+            # Only the accent sweep. The membership sweep is blind here by
+            # construction: 0x11111B is a `readable_on` endpoint, so it is
+            # allowed in both renders, and it is also Mocha `crust`, which
+            # is why the deleted-constants test excludes it. A site whose
+            # ink is one of the two endpoints contributes nothing to "did
+            # this module read its palette" -- it has to be driven.
+            'the_active_tabs_label_is_computed_from_the_accent_under_it',
+        ],
+    ),
+    (
+        "HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH: the active tab's label takes the accent it is sitting on",
+        LANG,
+        [
+            ('                color: if active {\n                    readable_on(p.accent)\n                } else {\n                    p.subtext0\n                },',
+             '                color: if active {\n                    p.accent\n                } else {\n                    p.subtext0\n                },'),
+        ],
+        ["desktop"],
+        [
+            'the_active_tabs_label_is_computed_from_the_accent_under_it',
+            'only_the_three_position_marks_carry_the_accent',
+        ],
+    ),
+    (
+        "IIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIII: an inactive tab's label is frozen to Mocha subtext0",
+        LANG,
+        [
+            ('                color: if active {\n                    readable_on(p.accent)\n                } else {\n                    p.subtext0\n                },',
+             '                color: if active {\n                    readable_on(p.accent)\n                } else {\n                    guitk::color::Color::from_hex(0xA6ADC8)\n                },'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_panel_draws_comes_from_its_palette',
+            'none_of_the_eleven_deleted_constants_is_still_drawn',
+        ],
+    ),
+    (
+        "JJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJ: the current-language card drops to the list rows' rung",
+        LANG,
+        [
+            ('                height: 50.0,\n                color: p.surface1,',
+             '                height: 50.0,\n                color: p.surface0,'),
+        ],
+        ["desktop"],
+        [
+            # Caught by nothing but the per-site table: both rungs are roles,
+            # so the membership sweep accepts either, and the card is still
+            # exactly one 552x50 fill so every count still balances. This is
+            # the defect that motivated writing that table.
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        'KKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKK: the current-language card is frozen to Mocha surface1',
+        LANG,
+        [
+            ('                height: 50.0,\n                color: p.surface1,',
+             '                height: 50.0,\n                color: guitk::color::Color::from_hex(0x45475A),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_panel_draws_comes_from_its_palette',
+            'every_site_draws_the_role_it_claims',
+            'none_of_the_eleven_deleted_constants_is_still_drawn',
+        ],
+    ),
+    (
+        "LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLL: the card's title drops to the secondary rung",
+        LANG,
+        [
+            ('                font_size: 14.0,\n                color: p.text,',
+             '                font_size: 14.0,\n                color: p.subtext0,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM: the card's native name is frozen to Mocha subtext0",
+        LANG,
+        [
+            ('                font_size: 12.0,\n                color: p.subtext0,',
+             '                font_size: 12.0,\n                color: guitk::color::Color::from_hex(0xA6ADC8),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_panel_draws_comes_from_its_palette',
+            'every_site_draws_the_role_it_claims',
+            'none_of_the_eleven_deleted_constants_is_still_drawn',
+        ],
+    ),
+    (
+        "NNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNN: the search box is raised to the card's rung",
+        LANG,
+        [
+            ('            height: 30.0,\n            color: p.surface0,',
+             '            height: 30.0,\n            color: p.surface1,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        'OOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOO: the search box is frozen to Mocha surface0',
+        LANG,
+        [
+            ('            height: 30.0,\n            color: p.surface0,',
+             '            height: 30.0,\n            color: guitk::color::Color::from_hex(0x313244),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_panel_draws_comes_from_its_palette',
+            'every_site_draws_the_role_it_claims',
+            'none_of_the_eleven_deleted_constants_is_still_drawn',
+        ],
+    ),
+    (
+        'PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPP: the placeholder is as bright as a query the user typed',
+        LANG,
+        [
+            ('            color: if self.language_search.is_empty() {\n                p.overlay0\n            } else {\n                p.text\n            },',
+             '            color: p.text,'),
+        ],
+        ["desktop"],
+        [
+            'an_empty_search_box_is_dimmer_than_one_with_a_query_in_it',
+        ],
+    ),
+    (
+        'QQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQ: the placeholder and the typed-query rungs are exchanged',
+        LANG,
+        [
+            ('            color: if self.language_search.is_empty() {\n                p.overlay0\n            } else {\n                p.text\n            },',
+             '            color: if self.language_search.is_empty() {\n                p.text\n            } else {\n                p.overlay0\n            },'),
+        ],
+        ["desktop"],
+        [
+            'an_empty_search_box_is_dimmer_than_one_with_a_query_in_it',
+        ],
+    ),
+    (
+        'RRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRR: the typed query is frozen to Mocha text',
+        LANG,
+        [
+            ('            color: if self.language_search.is_empty() {\n                p.overlay0\n            } else {\n                p.text\n            },',
+             '            color: if self.language_search.is_empty() {\n                p.overlay0\n            } else {\n                guitk::color::Color::from_hex(0xCDD6F4)\n            },'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_panel_draws_comes_from_its_palette',
+            'an_empty_search_box_is_dimmer_than_one_with_a_query_in_it',
+            'none_of_the_eleven_deleted_constants_is_still_drawn',
+        ],
+    ),
+    (
+        'SSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSS: the selected and unselected list-row rungs are exchanged',
+        LANG,
+        [
+            ('                color: if is_selected { p.surface1 } else { p.surface0 },',
+             '                color: if is_selected { p.surface0 } else { p.surface1 },'),
+        ],
+        ["desktop"],
+        [
+            # A permutation of {surface0, surface0, surface1}. The set is
+            # unchanged, so a count sees nothing; only the positional vector
+            # in the per-site table can tell which row was raised.
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        'TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT: a list row stops showing whether it is selected',
+        LANG,
+        [
+            ('                color: if is_selected { p.surface1 } else { p.surface0 },',
+             '                color: p.surface0,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        'UUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUU: an unselected list row is frozen to Mocha surface0',
+        LANG,
+        [
+            ('                color: if is_selected { p.surface1 } else { p.surface0 },',
+             '                color: if is_selected {\n                    p.surface1\n                } else {\n                    guitk::color::Color::from_hex(0x313244)\n                },'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_panel_draws_comes_from_its_palette',
+            'every_site_draws_the_role_it_claims',
+            'none_of_the_eleven_deleted_constants_is_still_drawn',
+        ],
+    ),
+    (
+        "VVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVV: the current language's marker bar stops being the accent",
+        LANG,
+        [
+            ('                    color: p.accent,\n                    corner_radii: CornerRadii::all(2.0),',
+             '                    color: p.text,\n                    corner_radii: CornerRadii::all(2.0),'),
+        ],
+        ["desktop"],
+        [
+            'only_the_three_position_marks_carry_the_accent',
+        ],
+    ),
+    (
+        "WWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWW: the current language's marker bar is not drawn at all",
+        LANG,
+        [
+            ('            if is_current {\n                cmds.push(RenderCommand::FillRect {\n                    x: x + 4.0,\n                    y: cy + 4.0,\n                    width: 4.0,\n                    height: 32.0,\n                    color: p.accent,\n                    corner_radii: CornerRadii::all(2.0),\n                });\n            }\n\n',
+             ''),
+        ],
+        ["desktop"],
+        [
+            'the_fixture_reaches_every_branch_this_module_has',
+            'only_the_three_position_marks_carry_the_accent',
+        ],
+    ),
+    (
+        "XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX: the current language's name stops being accented",
+        LANG,
+        [
+            ('                color: if is_current { p.accent } else { p.text },\n                font_weight: if is_current {',
+             '                color: p.text,\n                font_weight: if is_current {'),
+        ],
+        ["desktop"],
+        [
+            'only_the_three_position_marks_carry_the_accent',
+        ],
+    ),
+    (
+        'YYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYY: every list row is accented, not just the current one',
+        LANG,
+        [
+            ('                color: if is_current { p.accent } else { p.text },\n                font_weight: if is_current {',
+             '                color: p.accent,\n                font_weight: if is_current {'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'only_the_three_position_marks_carry_the_accent',
+        ],
+    ),
+    (
+        "ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ: an ordinary row's name is frozen to Mocha text",
+        LANG,
+        [
+            ('                color: if is_current { p.accent } else { p.text },\n                font_weight: if is_current {',
+             '                color: if is_current {\n                    p.accent\n                } else {\n                    guitk::color::Color::from_hex(0xCDD6F4)\n                },\n                font_weight: if is_current {'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_panel_draws_comes_from_its_palette',
+            'every_site_draws_the_role_it_claims',
+            'none_of_the_eleven_deleted_constants_is_still_drawn',
+        ],
+    ),
+    (
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA: a row's native name is frozen to Mocha subtext0",
+        LANG,
+        [
+            ('                font_size: 11.0,\n                color: p.subtext0,',
+             '                font_size: 11.0,\n                color: guitk::color::Color::from_hex(0xA6ADC8),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_panel_draws_comes_from_its_palette',
+            'every_site_draws_the_role_it_claims',
+            'none_of_the_eleven_deleted_constants_is_still_drawn',
+        ],
+    ),
+    (
+        "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB: a row's native name is promoted to the primary rung",
+        LANG,
+        [
+            ('                font_size: 11.0,\n                color: p.subtext0,',
+             '                font_size: 11.0,\n                color: p.text,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        'CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC: the Partial badge follows the accent',
+        LANG,
+        [
+            ('                    color: p.yellow,\n                    corner_radii: CornerRadii::all(9.0),',
+             '                    color: p.accent,\n                    corner_radii: CornerRadii::all(9.0),'),
+        ],
+        ["desktop"],
+        [
+            'the_partial_badge_is_a_property_of_the_language_not_a_selection',
+            'the_badge_ink_is_computed_from_the_badge_it_sits_on',
+            'only_the_three_position_marks_carry_the_accent',
+        ],
+    ),
+    (
+        'DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD: the Partial badge is frozen to Mocha yellow',
+        LANG,
+        [
+            ('                    color: p.yellow,\n                    corner_radii: CornerRadii::all(9.0),',
+             '                    color: guitk::color::Color::from_hex(0xF9E2AF),\n                    corner_radii: CornerRadii::all(9.0),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_panel_draws_comes_from_its_palette',
+            'the_partial_badge_is_a_property_of_the_language_not_a_selection',
+            'the_badge_ink_is_computed_from_the_badge_it_sits_on',
+            'none_of_the_eleven_deleted_constants_is_still_drawn',
+        ],
+    ),
+    (
+        "EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE: the Partial badge's ink is frozen to near-black",
+        LANG,
+        [
+            ('                    color: readable_on(p.yellow),',
+             '                    color: guitk::color::Color::from_hex(0x11111B),'),
+        ],
+        ["desktop"],
+        [
+            # The second instance of the endpoint blindness, and the sharper
+            # one: near-black is the *right* answer in the dark render, so
+            # the branch-coverage test -- which runs dark only -- passes too.
+            # Only the two-mode comparison sees it.
+            'the_badge_ink_is_computed_from_the_badge_it_sits_on',
+        ],
+    ),
+    (
+        "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF: the Partial badge's ink is computed from the panel, not the badge",
+        LANG,
+        [
+            ('                    color: readable_on(p.yellow),',
+             '                    color: readable_on(p.base),'),
+        ],
+        ["desktop"],
+        [
+            'the_fixture_reaches_every_branch_this_module_has',
+            'the_badge_ink_is_computed_from_the_badge_it_sits_on',
+        ],
+    ),
+    (
+        'GGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGG: the Partial badge marks the complete languages instead of the incomplete ones',
+        LANG,
+        [
+            ('            if !lang.complete {',
+             '            if lang.complete {'),
+        ],
+        ["desktop"],
+        [
+            'the_fixture_reaches_every_branch_this_module_has',
+            'the_partial_badge_is_a_property_of_the_language_not_a_selection',
+            'the_badge_ink_is_computed_from_the_badge_it_sits_on',
+        ],
+    ),
+    (
+        'HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH: the count line is frozen to Mocha overlay0',
+        LANG,
+        [
+            ('            font_size: 11.0,\n            color: p.overlay0,',
+             '            font_size: 11.0,\n            color: guitk::color::Color::from_hex(0x6C7086),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_panel_draws_comes_from_its_palette',
+            'every_site_draws_the_role_it_claims',
+            'none_of_the_eleven_deleted_constants_is_still_drawn',
+        ],
+    ),
+    (
+        'IIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIII: the count line is promoted to the primary text rung',
+        LANG,
+        [
+            ('            font_size: 11.0,\n            color: p.overlay0,',
+             '            font_size: 11.0,\n            color: p.text,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        'JJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJ: the Date Format heading is frozen to Mocha lavender',
+        LANG,
+        [
+            ('            text: "Date Format".into(),\n            font_size: 15.0,\n            color: p.lavender,',
+             '            text: "Date Format".into(),\n            font_size: 15.0,\n            color: guitk::color::Color::from_hex(0xB4BEFE),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_panel_draws_comes_from_its_palette',
+            'headings_keep_their_own_rung_under_every_accent',
+            'none_of_the_eleven_deleted_constants_is_still_drawn',
+        ],
+    ),
+    (
+        'KKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKK: the Time Format heading follows the accent',
+        LANG,
+        [
+            ('            text: "Time Format".into(),\n            font_size: 15.0,\n            color: p.lavender,',
+             '            text: "Time Format".into(),\n            font_size: 15.0,\n            color: p.accent,'),
+        ],
+        ["desktop"],
+        [
+            'headings_keep_their_own_rung_under_every_accent',
+            'only_the_three_position_marks_carry_the_accent',
+        ],
+    ),
+    (
+        'LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLL: the Measurement heading drops to the sub-heading rung',
+        LANG,
+        [
+            ('            text: "Measurement".into(),\n            font_size: 15.0,\n            color: p.lavender,',
+             '            text: "Measurement".into(),\n            font_size: 15.0,\n            color: p.subtext1,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'headings_keep_their_own_rung_under_every_accent',
+        ],
+    ),
+    (
+        'MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM: the Available Currencies sub-heading is promoted to the heading rung',
+        LANG,
+        [
+            ('            font_size: 13.0,\n            color: p.subtext1,',
+             '            font_size: 13.0,\n            color: p.lavender,'),
+        ],
+        ["desktop"],
+        [
+            'the_fixture_reaches_every_branch_this_module_has',
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        'NNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNN: the Currency heading is frozen to Mocha lavender',
+        LANG,
+        [
+            ('            text: "Currency".into(),\n            font_size: 15.0,\n            color: p.lavender,',
+             '            text: "Currency".into(),\n            font_size: 15.0,\n            color: guitk::color::Color::from_hex(0xB4BEFE),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_panel_draws_comes_from_its_palette',
+            'headings_keep_their_own_rung_under_every_accent',
+            'none_of_the_eleven_deleted_constants_is_still_drawn',
+        ],
+    ),
+    (
+        'OOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOO: the label and value rungs of every settings row are exchanged',
+        LANG,
+        [
+            ('            text: label.into(),\n            font_size: 13.0,\n            color: p.subtext0,',
+             '            text: label.into(),\n            font_size: 13.0,\n            color: p.text,'),
+            ('            text: value.into(),\n            font_size: 13.0,\n            color: p.text,',
+             '            text: value.into(),\n            font_size: 13.0,\n            color: p.subtext0,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPP: a settings row's label is frozen to Mocha subtext0",
+        LANG,
+        [
+            ('            text: label.into(),\n            font_size: 13.0,\n            color: p.subtext0,',
+             '            text: label.into(),\n            font_size: 13.0,\n            color: guitk::color::Color::from_hex(0xA6ADC8),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_panel_draws_comes_from_its_palette',
+            'every_site_draws_the_role_it_claims',
+            'none_of_the_eleven_deleted_constants_is_still_drawn',
+        ],
+    ),
+    (
+        "QQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQ: a settings row's value is frozen to Mocha text",
+        LANG,
+        [
+            ('            text: value.into(),\n            font_size: 13.0,\n            color: p.text,',
+             '            text: value.into(),\n            font_size: 13.0,\n            color: guitk::color::Color::from_hex(0xCDD6F4),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_panel_draws_comes_from_its_palette',
+            'every_site_draws_the_role_it_claims',
+            'none_of_the_eleven_deleted_constants_is_still_drawn',
+        ],
+    ),
+    (
+        "RRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRR: the default currency's row loses its raised rung",
+        LANG,
+        [
+            ('                color: if is_current { p.surface1 } else { p.surface0 },',
+             '                color: p.surface0,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "SSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSS: the default currency's row stops being accented",
+        LANG,
+        [
+            ('                color: if is_current { p.accent } else { p.text },\n                font_weight: FontWeightHint::Regular,',
+             '                color: p.text,\n                font_weight: FontWeightHint::Regular,'),
+        ],
+        ["desktop"],
+        [
+            # The Region tab's only position mark. It went unguarded until
+            # the accent count was extended past the first two tabs -- the
+            # module doc named it from the start, which is what made the
+            # gap findable.
+            'only_the_three_position_marks_carry_the_accent',
+        ],
+    ),
+    (
+        'TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT: every currency row is accented, not just the default one',
+        LANG,
+        [
+            ('                color: if is_current { p.accent } else { p.text },\n                font_weight: FontWeightHint::Regular,',
+             '                color: p.accent,\n                font_weight: FontWeightHint::Regular,'),
+        ],
+        ["desktop"],
+        [
+            'only_the_three_position_marks_carry_the_accent',
+        ],
+    ),
+    (
+        'UUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUU: render resolves its own palette instead of using the one it was handed',
+        LANG,
+        [
+            ('    pub fn render(&self, p: &Palette, width: f32, height: f32) -> Vec<RenderCommand> {\n        let mut cmds = Vec::new();',
+             '    pub fn render(&self, p: &Palette, width: f32, height: f32) -> Vec<RenderCommand> {\n        let p = &Palette::for_mode(p.light);\n        let mut cmds = Vec::new();'),
+        ],
+        ["desktop"],
+        [
+            # The whole point of part 2. Every role still matches, because
+            # the palette it resolves agrees with the one it was given about
+            # everything except the user's accent -- so only the tests that
+            # drive the accent notice, and the membership sweep does not.
+            'the_fixture_reaches_every_branch_this_module_has',
+            'only_the_three_position_marks_carry_the_accent',
+            'the_active_tabs_label_is_computed_from_the_accent_under_it',
+        ],
+    ),
+    (
+        "VVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVV: the probe palette's accent goes back to a stock role",
+        LANG,
+        [
+            ('        p.accent = Color::from_hex(0xFF00FF);',
+             '        p.accent = p.blue;'),
+        ],
+        ["desktop"],
+        [
+            # The guard inside `accented()` itself, which every test in the
+            # module runs -- including the three pre-conversion render tests,
+            # which assert nothing but non-emptiness and so can only ever
+            # fail this way.
+            'every_colour_this_panel_draws_comes_from_its_palette',
+            'the_fixture_reaches_every_branch_this_module_has',
+            'every_site_draws_the_role_it_claims',
+            'only_the_three_position_marks_carry_the_accent',
+            'the_partial_badge_is_a_property_of_the_language_not_a_selection',
+            'the_badge_ink_is_computed_from_the_badge_it_sits_on',
+            'headings_keep_their_own_rung_under_every_accent',
+            'an_empty_search_box_is_dimmer_than_one_with_a_query_in_it',
+            'the_render_is_not_the_same_in_both_modes',
+            'none_of_the_eleven_deleted_constants_is_still_drawn',
+            'test_ui_render_language_tab',
+            'test_ui_render_formats_tab',
+            'test_ui_render_region_tab',
+        ],
+    ),
+    (
+        "WWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWW: the fixture's query filters the current language out of the list",
+        LANG,
+        [
+            ('        ui.language_search = "n".to_string();',
+             '        ui.language_search = "an".to_string();'),
+        ],
+        ["desktop"],
+        [
+            # "an" matches Poland and German but not English, so the row
+            # carrying the marker bar and the accented name disappears --
+            # which is how the first draft of this fixture silently lost two
+            # branches at once.
+            'the_fixture_reaches_every_branch_this_module_has',
+            'every_site_draws_the_role_it_claims',
+            'only_the_three_position_marks_carry_the_accent',
+            'an_empty_search_box_is_dimmer_than_one_with_a_query_in_it',
+        ],
+    ),
+    (
+        "XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX: the fixture's languages are all complete, so the badge site goes unchecked",
+        LANG,
+        [
+            ('            Language::new("pl-PL", "Polish (Poland)", "Polski", false),',
+             '            Language::new("pl-PL", "Polish (Poland)", "Polski", true),'),
+        ],
+        ["desktop"],
+        [
+            'the_fixture_reaches_every_branch_this_module_has',
+            'the_partial_badge_is_a_property_of_the_language_not_a_selection',
+            'the_badge_ink_is_computed_from_the_badge_it_sits_on',
+        ],
+    ),
+    (
+        "YYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYY: the fixture selects the row that is already current, so the two marks coincide",
+        LANG,
+        [
+            ('        ui.selected_language_index = Some(2);',
+             '        ui.selected_language_index = Some(0);'),
+        ],
+        ["desktop"],
+        [
+            # Every count is unchanged -- three rows, one raised, three
+            # accents. Only the positional row vector notices that the
+            # raised row moved, which is the same blindness as defect S but
+            # arriving through the fixture rather than the renderer.
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ: the fixture's search box is empty, so the typed-text branch goes unchecked",
+        LANG,
+        [
+            ('        ui.language_search = "n".to_string();',
+             '        ui.language_search = String::new();'),
+        ],
+        ["desktop"],
+        [
+            'the_fixture_reaches_every_branch_this_module_has',
+            'an_empty_search_box_is_dimmer_than_one_with_a_query_in_it',
+        ],
+    ),
+    (
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA: the fixture drops its third language, so the selected-row branch goes unchecked",
+        LANG,
+        [
+            ('            Language::new("de-DE", "German (Germany)", "Deutsch", true),\n',
+             ''),
+        ],
+        ["desktop"],
+        [
+            'the_fixture_reaches_every_branch_this_module_has',
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB: the active tab's label is computed from the panel instead of the tab",
+        LANG,
+        [
+            ('                color: if active {\n                    readable_on(p.accent)\n                } else {\n                    p.subtext0\n                },',
+             '                color: if active {\n                    readable_on(p.base)\n                } else {\n                    p.subtext0\n                },'),
+        ],
+        ["desktop"],
+        [
+            'the_active_tabs_label_is_computed_from_the_accent_under_it',
+        ],
+    ),
+    # ------------------------------------------------------------------
+    # Module 31: default_apps.rs. Eleven constants over 33 colour sites
+    # and three tabs.
+    #
+    # Four judgements are written into the module docs and each has a test
+    # that can refute it. These defects break every one of them, in the two
+    # shapes that matter: a role frozen to the Mocha value it used to be
+    # (which only the *light* render can see) and a role swapped for a
+    # neighbouring role (which no membership sweep can see at all, because
+    # both values are legal members).
+    #
+    # Two sites deserve naming. The chip ink used to read `CRUST`, and
+    # `readable_on` answers exactly `CRUST` for the *stock* accent -- so a
+    # frozen value and the correct call are the same pixel until the accent
+    # moves, and the sweep allows both endpoints outright. Only the accent
+    # sweep in `the_current_chips_ink_is_computed_from_the_accent_under_it`
+    # separates them. And the "None set" case is a real defect this
+    # conversion found rather than an invented one: accenting a category
+    # with no handler accents twelve of twelve cards and so marks nothing.
+    # ------------------------------------------------------------------
+    (
+        'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA: the panel background is frozen to Mocha base',
+        DAPP,
+        [
+            ('            height,\n            color: p.base,',
+             '            height,\n            color: guitk::color::Color::from_hex(0x1E1E2E),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_panel_draws_comes_from_its_palette',
+            'none_of_the_eleven_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+            # Not an accident of over-broad assertion: a *light* render whose
+            # panel is frozen to Mocha base puts a near-black panel behind a
+            # pale well, so the recess inverts. The relational test sees the
+            # freeze that the two role tests see, by a different route.
+            'the_content_well_is_deeper_than_the_panel_it_sits_in',
+        ],
+    ),
+    (
+        'BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB: the panel background is drawn one rung too deep',
+        DAPP,
+        [
+            ('            height,\n            color: p.base,',
+             '            height,\n            color: p.mantle,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        'CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC: the panel title is frozen to Mocha text',
+        DAPP,
+        [
+            ('            font_size: 22.0,\n            color: p.text,',
+             '            font_size: 22.0,\n            color: guitk::color::Color::from_hex(0xCDD6F4),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_panel_draws_comes_from_its_palette',
+            'none_of_the_eleven_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        'DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD: the panel title is drawn at the subtitle rung',
+        DAPP,
+        [
+            ('            font_size: 22.0,\n            color: p.text,',
+             '            font_size: 22.0,\n            color: p.subtext0,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE: the open tab's fill is frozen to Mocha surface0",
+        DAPP,
+        [
+            ('                    height: 32.0,\n                    color: p.surface0,\n                    corner_radii: CornerRadii::all(6.0),\n                });\n            }',
+             '                    height: 32.0,\n                    color: guitk::color::Color::from_hex(0x313244),\n                    corner_radii: CornerRadii::all(6.0),\n                });\n            }'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_panel_draws_comes_from_its_palette',
+            'none_of_the_eleven_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF: the open tab's fill is raised a rung above its strip",
+        DAPP,
+        [
+            ('                    height: 32.0,\n                    color: p.surface0,\n                    corner_radii: CornerRadii::all(6.0),\n                });\n            }',
+             '                    height: 32.0,\n                    color: p.surface1,\n                    corner_radii: CornerRadii::all(6.0),\n                });\n            }'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        'GGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGG: the tab strip stops marking which tab is open',
+        DAPP,
+        [
+            ('                color: if is_active { p.accent } else { p.subtext0 },',
+             '                color: p.subtext0,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'the_accent_marks_which_app_is_in_force_and_nothing_else',
+        ],
+    ),
+    (
+        'HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH: the open and idle tab labels are exchanged',
+        DAPP,
+        [
+            ('                color: if is_active { p.accent } else { p.subtext0 },',
+             '                color: if is_active { p.subtext0 } else { p.accent },'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'the_accent_marks_which_app_is_in_force_and_nothing_else',
+        ],
+    ),
+    (
+        'IIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIII: an idle tab label is frozen to Mocha subtext0',
+        DAPP,
+        [
+            ('                color: if is_active { p.accent } else { p.subtext0 },',
+             '                color: if is_active { p.accent } else { guitk::color::Color::from_hex(0xA6ADC8) },'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_panel_draws_comes_from_its_palette',
+            'none_of_the_eleven_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        'JJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJ: the content well is frozen to Mocha crust',
+        DAPP,
+        [
+            ('            // base, so this reads as a recess in either mode.\n            color: p.crust,',
+             '            // base, so this reads as a recess in either mode.\n            color: guitk::color::Color::from_hex(0x11111B),'),
+        ],
+        ["desktop"],
+        [
+            'none_of_the_eleven_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        'KKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKK: the content well stops being a recess in the panel',
+        DAPP,
+        [
+            ('            // base, so this reads as a recess in either mode.\n            color: p.crust,',
+             '            // base, so this reads as a recess in either mode.\n            color: p.base,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'the_content_well_is_deeper_than_the_panel_it_sits_in',
+        ],
+    ),
+    (
+        "LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLL: the tab's subtitle is frozen to Mocha subtext0",
+        DAPP,
+        [
+            ('            text: "Choose default apps for each type of content".to_string(),\n            font_size: 12.0,\n            color: p.subtext0,',
+             '            text: "Choose default apps for each type of content".to_string(),\n            font_size: 12.0,\n            color: guitk::color::Color::from_hex(0xA6ADC8),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_panel_draws_comes_from_its_palette',
+            'none_of_the_eleven_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM: the tab's subtitle is drawn a rung too bright",
+        DAPP,
+        [
+            ('            text: "Choose default apps for each type of content".to_string(),\n            font_size: 12.0,\n            color: p.subtext0,',
+             '            text: "Choose default apps for each type of content".to_string(),\n            font_size: 12.0,\n            color: p.subtext1,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        'NNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNN: the Reset all button is frozen to Mocha surface1',
+        DAPP,
+        [
+            ('            height: 24.0,\n            color: p.surface1,',
+             '            height: 24.0,\n            color: guitk::color::Color::from_hex(0x45475A),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_panel_draws_comes_from_its_palette',
+            'none_of_the_eleven_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        'OOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOO: the Reset all button sinks to the card rung',
+        DAPP,
+        [
+            ('            height: 24.0,\n            color: p.surface1,',
+             '            height: 24.0,\n            color: p.surface0,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        'PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPP: the Reset all label is frozen to Mocha peach',
+        DAPP,
+        [
+            ('            // the shipped defaults, which is a state rather than a position.\n            color: p.peach,',
+             '            // the shipped defaults, which is a state rather than a position.\n            color: guitk::color::Color::from_hex(0xFAB387),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_panel_draws_comes_from_its_palette',
+            'none_of_the_eleven_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+            'peach_marks_a_departure_from_the_defaults_and_does_not_follow_the_accent',
+        ],
+    ),
+    (
+        'QQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQ: undoing a customisation is marked with the accent',
+        DAPP,
+        [
+            ('            // the shipped defaults, which is a state rather than a position.\n            color: p.peach,',
+             '            // the shipped defaults, which is a state rather than a position.\n            color: p.accent,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'the_accent_marks_which_app_is_in_force_and_nothing_else',
+            'peach_marks_a_departure_from_the_defaults_and_does_not_follow_the_accent',
+        ],
+    ),
+    (
+        'RRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRR: a category card is frozen to Mocha surface0',
+        DAPP,
+        [
+            ('                height: card_h,\n                color: p.surface0,',
+             '                height: card_h,\n                color: guitk::color::Color::from_hex(0x313244),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_panel_draws_comes_from_its_palette',
+            'none_of_the_eleven_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        'SSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSS: a category card is raised a rung off the well',
+        DAPP,
+        [
+            ('                height: card_h,\n                color: p.surface0,',
+             '                height: card_h,\n                color: p.surface1,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT: a category's icon is frozen to Mocha text",
+        DAPP,
+        [
+            ('                font_size: 20.0,\n                color: p.text,',
+             '                font_size: 20.0,\n                color: guitk::color::Color::from_hex(0xCDD6F4),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_panel_draws_comes_from_its_palette',
+            'none_of_the_eleven_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "UUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUU: a category's icon is dimmer than the name beside it",
+        DAPP,
+        [
+            ('                font_size: 20.0,\n                color: p.text,',
+             '                font_size: 20.0,\n                color: p.subtext0,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "VVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVV: a category's name is frozen to Mocha text",
+        DAPP,
+        [
+            ('                text: category.label().to_string(),\n                font_size: 14.0,\n                color: p.text,',
+             '                text: category.label().to_string(),\n                font_size: 14.0,\n                color: guitk::color::Color::from_hex(0xCDD6F4),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_panel_draws_comes_from_its_palette',
+            'none_of_the_eleven_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "WWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWW: a category's name is drawn at the heading rung",
+        DAPP,
+        [
+            ('                text: category.label().to_string(),\n                font_size: 14.0,\n                color: p.text,',
+             '                text: category.label().to_string(),\n                font_size: 14.0,\n                color: p.subtext1,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        'XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX: a category with no handler is accented as though it had one',
+        DAPP,
+        [
+            ('                color: if default_app.is_some() {\n                    p.accent\n                } else {\n                    p.overlay0\n                },',
+             '                color: p.accent,'),
+        ],
+        ["desktop"],
+        [
+            'the_accent_marks_which_app_is_in_force_and_nothing_else',
+            'a_category_with_no_default_app_is_not_accented_as_if_it_had_one',
+        ],
+    ),
+    (
+        'YYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYY: the app in force under a card stops being accented',
+        DAPP,
+        [
+            ('                color: if default_app.is_some() {\n                    p.accent\n                } else {\n                    p.overlay0\n                },',
+             '                color: if default_app.is_some() {\n                    p.lavender\n                } else {\n                    p.overlay0\n                },'),
+        ],
+        ["desktop"],
+        [
+            'the_accent_marks_which_app_is_in_force_and_nothing_else',
+        ],
+    ),
+    (
+        'ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ: an unset category is frozen to Mocha overlay0',
+        DAPP,
+        [
+            ('                color: if default_app.is_some() {\n                    p.accent\n                } else {\n                    p.overlay0\n                },',
+             '                color: if default_app.is_some() {\n                    p.accent\n                } else {\n                    guitk::color::Color::from_hex(0x6C7086)\n                },'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_panel_draws_comes_from_its_palette',
+            'none_of_the_eleven_deleted_constants_is_still_drawn',
+            'a_category_with_no_default_app_is_not_accented_as_if_it_had_one',
+        ],
+    ),
+    (
+        'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA: the expand chevron is frozen to Mocha overlay0',
+        DAPP,
+        [
+            ('                text: if is_expanded { "\\u{25B2}" } else { "\\u{25BC}" }.to_string(),\n                font_size: 12.0,\n                color: p.overlay0,',
+             '                text: if is_expanded { "\\u{25B2}" } else { "\\u{25BC}" }.to_string(),\n                font_size: 12.0,\n                color: guitk::color::Color::from_hex(0x6C7086),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_panel_draws_comes_from_its_palette',
+            'none_of_the_eleven_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        'BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB: the expand chevron is as bright as the text it sits beside',
+        DAPP,
+        [
+            ('                text: if is_expanded { "\\u{25B2}" } else { "\\u{25BC}" }.to_string(),\n                font_size: 12.0,\n                color: p.overlay0,',
+             '                text: if is_expanded { "\\u{25B2}" } else { "\\u{25BC}" }.to_string(),\n                font_size: 12.0,\n                color: p.subtext0,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC: the current app's chip and its rivals' are exchanged",
+        DAPP,
+        [
+            ('                        color: if is_current { p.accent } else { p.surface1 },',
+             '                        color: if is_current { p.surface1 } else { p.accent },'),
+        ],
+        ["desktop"],
+        [
+            'the_accent_marks_which_app_is_in_force_and_nothing_else',
+        ],
+    ),
+    (
+        "DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD: a rival app's chip is frozen to Mocha surface1",
+        DAPP,
+        [
+            ('                        color: if is_current { p.accent } else { p.surface1 },',
+             '                        color: if is_current { p.accent } else { guitk::color::Color::from_hex(0x45475A) },'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_panel_draws_comes_from_its_palette',
+            'none_of_the_eleven_deleted_constants_is_still_drawn',
+            'the_accent_marks_which_app_is_in_force_and_nothing_else',
+        ],
+    ),
+    (
+        "EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE: the current chip's ink is frozen to the CRUST it used to name",
+        DAPP,
+        [
+            ('                        color: if is_current {\n                            readable_on(p.accent)\n                        } else {\n                            p.text\n                        },',
+             '                        color: if is_current {\n                            guitk::color::Color::from_hex(0x11111B)\n                        } else {\n                            p.text\n                        },'),
+        ],
+        ["desktop"],
+        [
+            'none_of_the_eleven_deleted_constants_is_still_drawn',
+            'the_current_chips_ink_is_computed_from_the_accent_under_it',
+        ],
+    ),
+    (
+        "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF: the current chip's ink is named as a role instead of computed",
+        DAPP,
+        [
+            ('                        color: if is_current {\n                            readable_on(p.accent)\n                        } else {\n                            p.text\n                        },',
+             '                        color: if is_current {\n                            p.crust\n                        } else {\n                            p.text\n                        },'),
+        ],
+        ["desktop"],
+        [
+            'the_current_chips_ink_is_computed_from_the_accent_under_it',
+        ],
+    ),
+    (
+        "GGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGG: an idle chip's ink is frozen to Mocha text",
+        DAPP,
+        [
+            ('                        color: if is_current {\n                            readable_on(p.accent)\n                        } else {\n                            p.text\n                        },',
+             '                        color: if is_current {\n                            readable_on(p.accent)\n                        } else {\n                            guitk::color::Color::from_hex(0xCDD6F4)\n                        },'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_panel_draws_comes_from_its_palette',
+            'none_of_the_eleven_deleted_constants_is_still_drawn',
+            'the_current_chips_ink_is_computed_from_the_accent_under_it',
+        ],
+    ),
+    (
+        'HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH: the file-type search box is frozen to Mocha surface0',
+        DAPP,
+        [
+            ('            height: 32.0,\n            color: p.surface0,\n            corner_radii: CornerRadii::all(6.0),\n        });\n\n        let search_text = if self.search_query.is_empty() {\n            "Search file types...".to_string()',
+             '            height: 32.0,\n            color: guitk::color::Color::from_hex(0x313244),\n            corner_radii: CornerRadii::all(6.0),\n        });\n\n        let search_text = if self.search_query.is_empty() {\n            "Search file types...".to_string()'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_panel_draws_comes_from_its_palette',
+            'none_of_the_eleven_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        'IIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIII: the file-type search box is raised a rung off the well',
+        DAPP,
+        [
+            ('            height: 32.0,\n            color: p.surface0,\n            corner_radii: CornerRadii::all(6.0),\n        });\n\n        let search_text = if self.search_query.is_empty() {\n            "Search file types...".to_string()',
+             '            height: 32.0,\n            color: p.surface1,\n            corner_radii: CornerRadii::all(6.0),\n        });\n\n        let search_text = if self.search_query.is_empty() {\n            "Search file types...".to_string()'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        'JJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJ: the installed-app search box is frozen to Mocha surface0',
+        DAPP,
+        [
+            ('            height: 32.0,\n            color: p.surface0,\n            corner_radii: CornerRadii::all(6.0),\n        });\n\n        let search_text = if self.search_query.is_empty() {\n            "Search apps...".to_string()',
+             '            height: 32.0,\n            color: guitk::color::Color::from_hex(0x313244),\n            corner_radii: CornerRadii::all(6.0),\n        });\n\n        let search_text = if self.search_query.is_empty() {\n            "Search apps...".to_string()'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_panel_draws_comes_from_its_palette',
+            'none_of_the_eleven_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        'KKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKK: the installed-app search box is raised a rung off the well',
+        DAPP,
+        [
+            ('            height: 32.0,\n            color: p.surface0,\n            corner_radii: CornerRadii::all(6.0),\n        });\n\n        let search_text = if self.search_query.is_empty() {\n            "Search apps...".to_string()',
+             '            height: 32.0,\n            color: p.surface1,\n            corner_radii: CornerRadii::all(6.0),\n        });\n\n        let search_text = if self.search_query.is_empty() {\n            "Search apps...".to_string()'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        'LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLL: the file-type placeholder and a typed query are exchanged',
+        DAPP,
+        [
+            ('            "Search file types...".to_string()\n        } else {\n            self.search_query.clone()\n        };\n\n        cmds.push(RenderCommand::Text {\n            x: x + 12.0,\n            y: row_y + 8.0,\n            text: search_text,\n            font_size: 12.0,\n            color: if self.search_query.is_empty() {\n                p.overlay0\n            } else {\n                p.text\n            },',
+             '            "Search file types...".to_string()\n        } else {\n            self.search_query.clone()\n        };\n\n        cmds.push(RenderCommand::Text {\n            x: x + 12.0,\n            y: row_y + 8.0,\n            text: search_text,\n            font_size: 12.0,\n            color: if self.search_query.is_empty() {\n                p.text\n            } else {\n                p.overlay0\n            },'),
+        ],
+        ["desktop"],
+        [
+            'an_empty_search_box_is_dimmer_than_a_typed_query',
+        ],
+    ),
+    (
+        'MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM: the file-type placeholder is frozen to Mocha overlay0',
+        DAPP,
+        [
+            ('            "Search file types...".to_string()\n        } else {\n            self.search_query.clone()\n        };\n\n        cmds.push(RenderCommand::Text {\n            x: x + 12.0,\n            y: row_y + 8.0,\n            text: search_text,\n            font_size: 12.0,\n            color: if self.search_query.is_empty() {\n                p.overlay0\n            } else {\n                p.text\n            },',
+             '            "Search file types...".to_string()\n        } else {\n            self.search_query.clone()\n        };\n\n        cmds.push(RenderCommand::Text {\n            x: x + 12.0,\n            y: row_y + 8.0,\n            text: search_text,\n            font_size: 12.0,\n            color: if self.search_query.is_empty() {\n                guitk::color::Color::from_hex(0x6C7086)\n            } else {\n                p.text\n            },'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_panel_draws_comes_from_its_palette',
+            'none_of_the_eleven_deleted_constants_is_still_drawn',
+            'an_empty_search_box_is_dimmer_than_a_typed_query',
+        ],
+    ),
+    (
+        'NNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNN: the installed-app placeholder and a typed query are exchanged',
+        DAPP,
+        [
+            ('            "Search apps...".to_string()\n        } else {\n            self.search_query.clone()\n        };\n\n        cmds.push(RenderCommand::Text {\n            x: x + 12.0,\n            y: row_y + 8.0,\n            text: search_text,\n            font_size: 12.0,\n            color: if self.search_query.is_empty() {\n                p.overlay0\n            } else {\n                p.text\n            },',
+             '            "Search apps...".to_string()\n        } else {\n            self.search_query.clone()\n        };\n\n        cmds.push(RenderCommand::Text {\n            x: x + 12.0,\n            y: row_y + 8.0,\n            text: search_text,\n            font_size: 12.0,\n            color: if self.search_query.is_empty() {\n                p.text\n            } else {\n                p.overlay0\n            },'),
+        ],
+        ["desktop"],
+        [
+            'an_empty_search_box_is_dimmer_than_a_typed_query',
+        ],
+    ),
+    (
+        'OOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOO: the installed-app placeholder is frozen to Mocha overlay0',
+        DAPP,
+        [
+            ('            "Search apps...".to_string()\n        } else {\n            self.search_query.clone()\n        };\n\n        cmds.push(RenderCommand::Text {\n            x: x + 12.0,\n            y: row_y + 8.0,\n            text: search_text,\n            font_size: 12.0,\n            color: if self.search_query.is_empty() {\n                p.overlay0\n            } else {\n                p.text\n            },',
+             '            "Search apps...".to_string()\n        } else {\n            self.search_query.clone()\n        };\n\n        cmds.push(RenderCommand::Text {\n            x: x + 12.0,\n            y: row_y + 8.0,\n            text: search_text,\n            font_size: 12.0,\n            color: if self.search_query.is_empty() {\n                guitk::color::Color::from_hex(0x6C7086)\n            } else {\n                p.text\n            },'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_panel_draws_comes_from_its_palette',
+            'none_of_the_eleven_deleted_constants_is_still_drawn',
+            'an_empty_search_box_is_dimmer_than_a_typed_query',
+        ],
+    ),
+    (
+        'PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPP: the custom-association count is frozen to Mocha subtext0',
+        DAPP,
+        [
+            ('            ),\n            font_size: 12.0,\n            color: p.subtext0,',
+             '            ),\n            font_size: 12.0,\n            color: guitk::color::Color::from_hex(0xA6ADC8),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_panel_draws_comes_from_its_palette',
+            'none_of_the_eleven_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        'QQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQ: the custom-association count is drawn at the heading rung',
+        DAPP,
+        [
+            ('            ),\n            font_size: 12.0,\n            color: p.subtext0,',
+             '            ),\n            font_size: 12.0,\n            color: p.subtext1,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        'RRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRR: a file-type group heading is frozen to Mocha subtext1',
+        DAPP,
+        [
+            ('                font_size: 13.0,\n                color: p.subtext1,',
+             '                font_size: 13.0,\n                color: guitk::color::Color::from_hex(0xBAC2DE),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_panel_draws_comes_from_its_palette',
+            'none_of_the_eleven_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        'SSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSS: a file-type group heading sinks to the body rung',
+        DAPP,
+        [
+            ('                font_size: 13.0,\n                color: p.subtext1,',
+             '                font_size: 13.0,\n                color: p.subtext0,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        'TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT: an extension row is frozen to Mocha surface0',
+        DAPP,
+        [
+            ('                    height: 32.0,\n                    color: p.surface0,\n                    corner_radii: CornerRadii::all(4.0),',
+             '                    height: 32.0,\n                    color: guitk::color::Color::from_hex(0x313244),\n                    corner_radii: CornerRadii::all(4.0),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_panel_draws_comes_from_its_palette',
+            'none_of_the_eleven_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        'UUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUU: an extension row is raised a rung off the well',
+        DAPP,
+        [
+            ('                    height: 32.0,\n                    color: p.surface0,\n                    corner_radii: CornerRadii::all(4.0),',
+             '                    height: 32.0,\n                    color: p.surface1,\n                    corner_radii: CornerRadii::all(4.0),'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        'VVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVV: the extension pill is frozen to Mocha surface1',
+        DAPP,
+        [
+            ('                    width: 48.0,\n                    height: 20.0,\n                    color: p.surface1,',
+             '                    width: 48.0,\n                    height: 20.0,\n                    color: guitk::color::Color::from_hex(0x45475A),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_panel_draws_comes_from_its_palette',
+            'none_of_the_eleven_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        'WWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWW: the extension pill is raised a rung off its row',
+        DAPP,
+        [
+            ('                    width: 48.0,\n                    height: 20.0,\n                    color: p.surface1,',
+             '                    width: 48.0,\n                    height: 20.0,\n                    color: p.surface2,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        'XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX: the extension token is frozen to Mocha lavender',
+        DAPP,
+        [
+            ('                    text: format!(".{ext}"),\n                    font_size: 11.0,\n                    color: p.lavender,',
+             '                    text: format!(".{ext}"),\n                    font_size: 11.0,\n                    color: guitk::color::Color::from_hex(0xB4BEFE),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_panel_draws_comes_from_its_palette',
+            'none_of_the_eleven_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        'YYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYY: the extension token drifts to the neighbouring accent hue',
+        DAPP,
+        [
+            ('                    text: format!(".{ext}"),\n                    font_size: 11.0,\n                    color: p.lavender,',
+             '                    text: format!(".{ext}"),\n                    font_size: 11.0,\n                    color: p.mauve,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        'ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ: a custom association stops being marked as one',
+        DAPP,
+        [
+            ('                    color: if is_custom { p.peach } else { p.text },',
+             '                    color: p.text,'),
+        ],
+        ["desktop"],
+        [
+            'peach_marks_a_departure_from_the_defaults_and_does_not_follow_the_accent',
+        ],
+    ),
+    (
+        'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA: the custom and default handler inks are exchanged',
+        DAPP,
+        [
+            ('                    color: if is_custom { p.peach } else { p.text },',
+             '                    color: if is_custom { p.text } else { p.peach },'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'peach_marks_a_departure_from_the_defaults_and_does_not_follow_the_accent',
+        ],
+    ),
+    (
+        'BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB: a default handler name is frozen to Mocha text',
+        DAPP,
+        [
+            ('                    color: if is_custom { p.peach } else { p.text },',
+             '                    color: if is_custom { p.peach } else { guitk::color::Color::from_hex(0xCDD6F4) },'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_panel_draws_comes_from_its_palette',
+            'none_of_the_eleven_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        'CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC: the Custom badge is frozen to Mocha peach',
+        DAPP,
+        [
+            ('                        text: "Custom".to_string(),\n                        font_size: 10.0,\n                        color: p.peach,',
+             '                        text: "Custom".to_string(),\n                        font_size: 10.0,\n                        color: guitk::color::Color::from_hex(0xFAB387),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_panel_draws_comes_from_its_palette',
+            'none_of_the_eleven_deleted_constants_is_still_drawn',
+            'peach_marks_a_departure_from_the_defaults_and_does_not_follow_the_accent',
+        ],
+    ),
+    (
+        'DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD: the Custom badge is marked with the accent instead',
+        DAPP,
+        [
+            ('                        text: "Custom".to_string(),\n                        font_size: 10.0,\n                        color: p.peach,',
+             '                        text: "Custom".to_string(),\n                        font_size: 10.0,\n                        color: p.accent,'),
+        ],
+        ["desktop"],
+        [
+            'the_accent_marks_which_app_is_in_force_and_nothing_else',
+            'peach_marks_a_departure_from_the_defaults_and_does_not_follow_the_accent',
+        ],
+    ),
+    (
+        'EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE: the installed-app count is frozen to Mocha subtext0',
+        DAPP,
+        [
+            ('            text: format!("{total} installed apps ({third_party} third-party)"),\n            font_size: 12.0,\n            color: p.subtext0,',
+             '            text: format!("{total} installed apps ({third_party} third-party)"),\n            font_size: 12.0,\n            color: guitk::color::Color::from_hex(0xA6ADC8),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_panel_draws_comes_from_its_palette',
+            'none_of_the_eleven_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        'FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF: the installed-app count is drawn at the heading rung',
+        DAPP,
+        [
+            ('            text: format!("{total} installed apps ({third_party} third-party)"),\n            font_size: 12.0,\n            color: p.subtext0,',
+             '            text: format!("{total} installed apps ({third_party} third-party)"),\n            font_size: 12.0,\n            color: p.subtext1,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        'GGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGG: an installed-app row is frozen to Mocha surface0',
+        DAPP,
+        [
+            ('                height: 56.0,\n                color: p.surface0,',
+             '                height: 56.0,\n                color: guitk::color::Color::from_hex(0x313244),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_panel_draws_comes_from_its_palette',
+            'none_of_the_eleven_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        'HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH: an installed-app row is raised a rung off the well',
+        DAPP,
+        [
+            ('                height: 56.0,\n                color: p.surface0,',
+             '                height: 56.0,\n                color: p.surface1,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "IIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIII: an installed app's name is frozen to Mocha text",
+        DAPP,
+        [
+            ('                text: app.name.clone(),\n                font_size: 14.0,\n                color: p.text,',
+             '                text: app.name.clone(),\n                font_size: 14.0,\n                color: guitk::color::Color::from_hex(0xCDD6F4),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_panel_draws_comes_from_its_palette',
+            'none_of_the_eleven_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "JJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJ: an installed app's name is drawn at the heading rung",
+        DAPP,
+        [
+            ('                text: app.name.clone(),\n                font_size: 14.0,\n                color: p.text,',
+             '                text: app.name.clone(),\n                font_size: 14.0,\n                color: p.subtext1,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "KKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKK: an app's description is frozen to Mocha subtext0",
+        DAPP,
+        [
+            ('                text: app.description.clone(),\n                font_size: 11.0,\n                color: p.subtext0,',
+             '                text: app.description.clone(),\n                font_size: 11.0,\n                color: guitk::color::Color::from_hex(0xA6ADC8),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_panel_draws_comes_from_its_palette',
+            'none_of_the_eleven_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLL: an app's description sinks to the dimmest rung on its row",
+        DAPP,
+        [
+            ('                text: app.description.clone(),\n                font_size: 11.0,\n                color: p.subtext0,',
+             '                text: app.description.clone(),\n                font_size: 11.0,\n                color: p.overlay0,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        'MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM: the System badge pill is frozen to Mocha surface1',
+        DAPP,
+        [
+            ('                    width: 52.0,\n                    height: 18.0,\n                    color: p.surface1,',
+             '                    width: 52.0,\n                    height: 18.0,\n                    color: guitk::color::Color::from_hex(0x45475A),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_panel_draws_comes_from_its_palette',
+            'none_of_the_eleven_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        'NNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNN: the System badge pill sinks into the row behind it',
+        DAPP,
+        [
+            ('                    width: 52.0,\n                    height: 18.0,\n                    color: p.surface1,',
+             '                    width: 52.0,\n                    height: 18.0,\n                    color: p.surface0,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        'OOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOO: the System badge label is frozen to Mocha overlay0',
+        DAPP,
+        [
+            ('                    text: "System".to_string(),\n                    font_size: 10.0,\n                    color: p.overlay0,',
+             '                    text: "System".to_string(),\n                    font_size: 10.0,\n                    color: guitk::color::Color::from_hex(0x6C7086),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_panel_draws_comes_from_its_palette',
+            'none_of_the_eleven_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        'PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPP: the System badge label is brighter than the pill under it',
+        DAPP,
+        [
+            ('                    text: "System".to_string(),\n                    font_size: 10.0,\n                    color: p.overlay0,',
+             '                    text: "System".to_string(),\n                    font_size: 10.0,\n                    color: p.subtext0,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        'QQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQ: the join line under an app row is frozen to Mocha overlay0',
+        DAPP,
+        [
+            ('                    text: categories.join(", "),\n                    font_size: 10.0,\n                    color: p.overlay0,',
+             '                    text: categories.join(", "),\n                    font_size: 10.0,\n                    color: guitk::color::Color::from_hex(0x6C7086),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_panel_draws_comes_from_its_palette',
+            'none_of_the_eleven_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        'RRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRR: the join line under an app row is as bright as its description',
+        DAPP,
+        [
+            ('                    text: categories.join(", "),\n                    font_size: 10.0,\n                    color: p.overlay0,',
+             '                    text: categories.join(", "),\n                    font_size: 10.0,\n                    color: p.subtext0,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA: the drop shadow keeps the alpha this module chose for itself, one of three different answers three popups gave',
+        LAUN,
+        [('            color: p.shadow(),',
+          '            color: Color::rgba(0, 0, 0, 100),')],
+        ["desktop"],
+        [
+            "the_dialog_floats_over_a_shadow_rather_than_sitting_on_the_desktop",
+        ],
+    ),
+    (
+        'BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB: the drop shadow is a role, so it inverts with the theme instead of being an absence of light',
+        LAUN,
+        [('            color: p.shadow(),',
+          '            color: p.crust,')],
+        ["desktop"],
+        [
+            # Not the membership sweep: `p.crust` *is* a role of the light
+            # palette, so the sweep is right to accept it. Only the claim that
+            # a shadow is black in both modes can see this one.
+            "the_dialog_floats_over_a_shadow_rather_than_sitting_on_the_desktop",
+        ],
+    ),
+    (
+        'CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC: the drop shadow is the text shadow, which is three times as dark',
+        LAUN,
+        [('            color: p.shadow(),',
+          '            color: p.text_shadow(),')],
+        ["desktop"],
+        [
+            "the_dialog_floats_over_a_shadow_rather_than_sitting_on_the_desktop",
+        ],
+    ),
+    (
+        'DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD: the dialog background is frozen to Mocha base',
+        LAUN,
+        [('            color: with_alpha(p.base, DIALOG_ALPHA),',
+          '            color: Color::from_hex(0x1E1E2E),')],
+        ["desktop"],
+        [
+            "every_colour_this_launcher_draws_comes_from_its_palette",
+            "none_of_the_thirteen_deleted_constants_is_still_drawn",
+            "every_site_draws_the_role_it_claims",
+            "the_dialog_floats_over_a_shadow_rather_than_sitting_on_the_desktop",
+        ],
+    ),
+    (
+        'EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE: the dialog background sits on the mantle rung rather than the base one',
+        LAUN,
+        [('            color: with_alpha(p.base, DIALOG_ALPHA),',
+          '            color: with_alpha(p.mantle, DIALOG_ALPHA),')],
+        ["desktop"],
+        [
+            "every_site_draws_the_role_it_claims",
+        ],
+    ),
+    (
+        'FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF: the dialog reaches full opacity, so it stops reading as lifted off the desktop',
+        LAUN,
+        [('            color: with_alpha(p.base, DIALOG_ALPHA),',
+          '            color: p.base,')],
+        ["desktop"],
+        [
+            "the_dialog_floats_over_a_shadow_rather_than_sitting_on_the_desktop",
+        ],
+    ),
+    (
+        'GGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGG: DIALOG_ALPHA is opaque',
+        LAUN,
+        [('const DIALOG_ALPHA: u8 = 240;',
+          'const DIALOG_ALPHA: u8 = 255;')],
+        ["desktop"],
+        [
+            "the_dialog_floats_over_a_shadow_rather_than_sitting_on_the_desktop",
+        ],
+    ),
+    (
+        'HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH: DIALOG_ALPHA is so low the wallpaper reads through the result list',
+        LAUN,
+        [('const DIALOG_ALPHA: u8 = 240;',
+          'const DIALOG_ALPHA: u8 = 160;')],
+        ["desktop"],
+        [
+            "the_dialog_floats_over_a_shadow_rather_than_sitting_on_the_desktop",
+        ],
+    ),
+    (
+        'IIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIII: the search field is frozen to Mocha mantle',
+        LAUN,
+        [('            color: p.mantle,',
+          '            color: Color::from_hex(0x181825),')],
+        ["desktop"],
+        [
+            "every_colour_this_launcher_draws_comes_from_its_palette",
+            "none_of_the_thirteen_deleted_constants_is_still_drawn",
+            "every_site_draws_the_role_it_claims",
+        ],
+    ),
+    (
+        'JJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJ: the search field is the same rung as the dialog around it, so the well stops looking like a well',
+        LAUN,
+        [('            color: p.mantle,',
+          '            color: p.base,')],
+        ["desktop"],
+        [
+            "every_site_draws_the_role_it_claims",
+        ],
+    ),
+    (
+        'KKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKK: the search field is a raised rung rather than a sunken one',
+        LAUN,
+        [('            color: p.mantle,',
+          '            color: p.surface0,')],
+        ["desktop"],
+        [
+            "every_site_draws_the_role_it_claims",
+        ],
+    ),
+    (
+        "LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLL: the search field's border is frozen to Mocha surface2",
+        LAUN,
+        [('            color: p.surface2,',
+          '            color: Color::from_hex(0x585B70),')],
+        ["desktop"],
+        [
+            "every_colour_this_launcher_draws_comes_from_its_palette",
+            "none_of_the_thirteen_deleted_constants_is_still_drawn",
+            "every_site_draws_the_role_it_claims",
+        ],
+    ),
+    (
+        "MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM: the search field's border is a rung dimmer than it claims",
+        LAUN,
+        [('            color: p.surface2,',
+          '            color: p.surface1,')],
+        ["desktop"],
+        [
+            "every_site_draws_the_role_it_claims",
+        ],
+    ),
+    (
+        "NNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNN: the search field's border is drawn in the border role the overlays use",
+        LAUN,
+        [('            color: p.surface2,',
+          '            color: p.overlay0,')],
+        ["desktop"],
+        [
+            "every_site_draws_the_role_it_claims",
+        ],
+    ),
+    (
+        'OOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOO: the placeholder is frozen to Mocha overlay0',
+        LAUN,
+        [('                text: "Search...".to_string(),\n                color: p.overlay0,',
+          '                text: "Search...".to_string(),\n                color: Color::from_hex(0x6C7086),')],
+        ["desktop"],
+        [
+            "every_colour_this_launcher_draws_comes_from_its_palette",
+            "none_of_the_thirteen_deleted_constants_is_still_drawn",
+            "every_site_draws_the_role_it_claims",
+            "an_empty_query_is_dimmer_than_a_typed_one",
+        ],
+    ),
+    (
+        'PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPP: the placeholder is as bright as text the user actually typed',
+        LAUN,
+        [('                text: "Search...".to_string(),\n                color: p.overlay0,',
+          '                text: "Search...".to_string(),\n                color: p.text,')],
+        ["desktop"],
+        [
+            "every_site_draws_the_role_it_claims",
+            "an_empty_query_is_dimmer_than_a_typed_one",
+        ],
+    ),
+    (
+        'QQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQ: the placeholder is a prompt-coloured hint rather than the dimmest thing in the field',
+        LAUN,
+        [('                text: "Search...".to_string(),\n                color: p.overlay0,',
+          '                text: "Search...".to_string(),\n                color: p.subtext0,')],
+        ["desktop"],
+        [
+            "every_site_draws_the_role_it_claims",
+            "an_empty_query_is_dimmer_than_a_typed_one",
+        ],
+    ),
+    (
+        'RRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRR: the typed query is frozen to Mocha text',
+        LAUN,
+        [('                color: p.text,\n                font_size: INPUT_FONT_SIZE,',
+          '                color: Color::from_hex(0xCDD6F4),\n                font_size: INPUT_FONT_SIZE,')],
+        ["desktop"],
+        [
+            "every_colour_this_launcher_draws_comes_from_its_palette",
+            "none_of_the_thirteen_deleted_constants_is_still_drawn",
+            "every_site_draws_the_role_it_claims",
+            "an_empty_query_is_dimmer_than_a_typed_one",
+        ],
+    ),
+    (
+        'SSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSS: the typed query is as dim as the prompt it replaced',
+        LAUN,
+        [('                color: p.text,\n                font_size: INPUT_FONT_SIZE,',
+          '                color: p.overlay0,\n                font_size: INPUT_FONT_SIZE,')],
+        ["desktop"],
+        [
+            "every_site_draws_the_role_it_claims",
+            "an_empty_query_is_dimmer_than_a_typed_one",
+        ],
+    ),
+    (
+        'TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT: the typed query is a rung below the brightest ink',
+        LAUN,
+        [('                color: p.text,\n                font_size: INPUT_FONT_SIZE,',
+          '                color: p.subtext1,\n                font_size: INPUT_FONT_SIZE,')],
+        ["desktop"],
+        [
+            "every_site_draws_the_role_it_claims",
+            "an_empty_query_is_dimmer_than_a_typed_one",
+        ],
+    ),
+    (
+        'UUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUU: the caret is the blue the accent happens to be, which is the trap this whole module is about: under the shipped theme it is the same pixel',
+        LAUN,
+        [('            y2: text_y + INPUT_FONT_SIZE,\n            color: p.accent,',
+          '            y2: text_y + INPUT_FONT_SIZE,\n            color: p.blue,')],
+        ["desktop"],
+        [
+            "the_accent_marks_where_you_are_and_never_what_a_thing_is",
+            "the_caret_sits_where_the_query_text_ends",
+        ],
+    ),
+    (
+        'VVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVV: the caret is frozen to Mocha blue',
+        LAUN,
+        [('            y2: text_y + INPUT_FONT_SIZE,\n            color: p.accent,',
+          '            y2: text_y + INPUT_FONT_SIZE,\n            color: Color::from_hex(0x89B4FA),')],
+        ["desktop"],
+        [
+            "every_colour_this_launcher_draws_comes_from_its_palette",
+            "none_of_the_thirteen_deleted_constants_is_still_drawn",
+            "the_accent_marks_where_you_are_and_never_what_a_thing_is",
+            "the_caret_sits_where_the_query_text_ends",
+        ],
+    ),
+    (
+        'WWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWW: the caret is ordinary ink, so nothing marks where you are typing',
+        LAUN,
+        [('            y2: text_y + INPUT_FONT_SIZE,\n            color: p.accent,',
+          '            y2: text_y + INPUT_FONT_SIZE,\n            color: p.text,')],
+        ["desktop"],
+        [
+            "the_accent_marks_where_you_are_and_never_what_a_thing_is",
+            "the_caret_sits_where_the_query_text_ends",
+        ],
+    ),
+    (
+        'XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX: the selected row is frozen to Mocha surface1',
+        LAUN,
+        [('                    color: p.surface1,',
+          '                    color: Color::from_hex(0x45475A),')],
+        ["desktop"],
+        [
+            "every_colour_this_launcher_draws_comes_from_its_palette",
+            "none_of_the_thirteen_deleted_constants_is_still_drawn",
+            "every_site_draws_the_role_it_claims",
+        ],
+    ),
+    (
+        'YYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYY: the selected row is a rung lower, so selection is nearly invisible',
+        LAUN,
+        [('                    color: p.surface1,',
+          '                    color: p.surface0,')],
+        ["desktop"],
+        [
+            "every_site_draws_the_role_it_claims",
+        ],
+    ),
+    (
+        'ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ: the selected row is drawn on the sunken rung the search field uses',
+        LAUN,
+        [('                    color: p.surface1,',
+          '                    color: p.mantle,')],
+        ["desktop"],
+        [
+            "every_site_draws_the_role_it_claims",
+        ],
+    ),
+    (
+        'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA: the selection bar is the blue that is only coincidentally the accent',
+        LAUN,
+        [('                    color: p.accent,',
+          '                    color: p.blue,')],
+        ["desktop"],
+        [
+            "every_site_draws_the_role_it_claims",
+            "the_accent_marks_where_you_are_and_never_what_a_thing_is",
+        ],
+    ),
+    (
+        'BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB: the selection bar is frozen to Mocha blue',
+        LAUN,
+        [('                    color: p.accent,',
+          '                    color: Color::from_hex(0x89B4FA),')],
+        ["desktop"],
+        [
+            "every_colour_this_launcher_draws_comes_from_its_palette",
+            "none_of_the_thirteen_deleted_constants_is_still_drawn",
+            "every_site_draws_the_role_it_claims",
+            "the_accent_marks_where_you_are_and_never_what_a_thing_is",
+        ],
+    ),
+    (
+        "CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC: the selection bar is a border colour, so the marked row is marked with furniture rather than with the user's own accent",
+        LAUN,
+        [('                    color: p.accent,',
+          '                    color: p.surface2,')],
+        ["desktop"],
+        [
+            "every_site_draws_the_role_it_claims",
+            "the_accent_marks_where_you_are_and_never_what_a_thing_is",
+        ],
+    ),
+    (
+        "DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD: every row's icon is blue, so the icon stops saying what kind of thing the row is",
+        LAUN,
+        [('                height: 24.0,\n                color: entry.category.color(p),',
+          '                height: 24.0,\n                color: p.blue,')],
+        ["desktop"],
+        [
+            "the_five_category_hues_stay_five_distinct_colours",
+        ],
+    ),
+    (
+        "EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE: every row's icon is frozen to Mocha blue",
+        LAUN,
+        [('                height: 24.0,\n                color: entry.category.color(p),',
+          '                height: 24.0,\n                color: Color::from_hex(0x89B4FA),')],
+        ["desktop"],
+        [
+            "every_colour_this_launcher_draws_comes_from_its_palette",
+            "none_of_the_thirteen_deleted_constants_is_still_drawn",
+            "the_five_category_hues_stay_five_distinct_colours",
+        ],
+    ),
+    (
+        "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF: every row's icon takes the accent, so a mark of category becomes a mark of position five times over",
+        LAUN,
+        [('                height: 24.0,\n                color: entry.category.color(p),',
+          '                height: 24.0,\n                color: p.accent,')],
+        ["desktop"],
+        [
+            "the_accent_marks_where_you_are_and_never_what_a_thing_is",
+            "the_five_category_hues_stay_five_distinct_colours",
+        ],
+    ),
+    (
+        "GGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGG: the selected row's name and the unselected rows' names are the wrong way round, so the list points at the row you are not on",
+        LAUN,
+        [('                color: if is_selected { p.text } else { p.subtext1 },',
+          '                color: if is_selected { p.subtext1 } else { p.text },')],
+        ["desktop"],
+        [
+            "every_site_draws_the_role_it_claims",
+        ],
+    ),
+    (
+        "HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH: every row's name is drawn at the unselected brightness",
+        LAUN,
+        [('                color: if is_selected { p.text } else { p.subtext1 },',
+          '                color: p.subtext1,')],
+        ["desktop"],
+        [
+            "every_site_draws_the_role_it_claims",
+        ],
+    ),
+    (
+        "IIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIII: the selected row's name is frozen to Mocha text",
+        LAUN,
+        [('                color: if is_selected { p.text } else { p.subtext1 },',
+          '                color: if is_selected {\n                    Color::from_hex(0xCDD6F4)\n                } else {\n                    p.subtext1\n                },')],
+        ["desktop"],
+        [
+            "every_colour_this_launcher_draws_comes_from_its_palette",
+            "none_of_the_thirteen_deleted_constants_is_still_drawn",
+            "every_site_draws_the_role_it_claims",
+        ],
+    ),
+    (
+        "JJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJ: an unselected row's name is frozen to Mocha subtext1",
+        LAUN,
+        [('                color: if is_selected { p.text } else { p.subtext1 },',
+          '                color: if is_selected {\n                    p.text\n                } else {\n                    Color::from_hex(0xBAC2DE)\n                },')],
+        ["desktop"],
+        [
+            "every_colour_this_launcher_draws_comes_from_its_palette",
+            "none_of_the_thirteen_deleted_constants_is_still_drawn",
+            "every_site_draws_the_role_it_claims",
+        ],
+    ),
+    (
+        "KKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKK: a row's description is frozen to Mocha subtext0",
+        LAUN,
+        [('                color: p.subtext0,',
+          '                color: Color::from_hex(0xA6ADC8),')],
+        ["desktop"],
+        [
+            "every_colour_this_launcher_draws_comes_from_its_palette",
+            "none_of_the_thirteen_deleted_constants_is_still_drawn",
+            "every_site_draws_the_role_it_claims",
+        ],
+    ),
+    (
+        "LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLL: a row's description is as bright as the name above it",
+        LAUN,
+        [('                color: p.subtext0,',
+          '                color: p.subtext1,')],
+        ["desktop"],
+        [
+            "every_site_draws_the_role_it_claims",
+        ],
+    ),
+    (
+        "MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM: a row's description is dimmer than the placeholder in an empty field",
+        LAUN,
+        [('                color: p.subtext0,',
+          '                color: p.overlay0,')],
+        ["desktop"],
+        [
+            "every_site_draws_the_role_it_claims",
+        ],
+    ),
+    (
+        'NNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNN: the badge wash names a hue beside the badge rather than deriving it, so the two are free to disagree the day a category is added',
+        LAUN,
+        [('                color: with_alpha(entry.category.color(p), BADGE_WASH_ALPHA),',
+          '                color: with_alpha(p.blue, BADGE_WASH_ALPHA),')],
+        ["desktop"],
+        [
+            "a_badge_wash_is_its_own_hue_at_a_lower_alpha",
+        ],
+    ),
+    (
+        'OOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOO: the badge wash is fully solid, so the label on it is read against its own colour',
+        LAUN,
+        [('                color: with_alpha(entry.category.color(p), BADGE_WASH_ALPHA),',
+          '                color: entry.category.color(p),')],
+        ["desktop"],
+        [
+            "a_badge_wash_is_its_own_hue_at_a_lower_alpha",
+        ],
+    ),
+    (
+        'PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPP: the badge wash is opaque by an explicit alpha rather than by dropping the call',
+        LAUN,
+        [('                color: with_alpha(entry.category.color(p), BADGE_WASH_ALPHA),',
+          '                color: with_alpha(entry.category.color(p), 255),')],
+        ["desktop"],
+        [
+            "a_badge_wash_is_its_own_hue_at_a_lower_alpha",
+        ],
+    ),
+    (
+        'QQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQ: BADGE_WASH_ALPHA is high enough that the wash is a fill rather than a tint',
+        LAUN,
+        [('const BADGE_WASH_ALPHA: u8 = 40;',
+          'const BADGE_WASH_ALPHA: u8 = 200;')],
+        ["desktop"],
+        [
+            "a_badge_wash_is_its_own_hue_at_a_lower_alpha",
+        ],
+    ),
+    (
+        'RRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRR: the badge label is ordinary ink, so the badge says nothing the row did not already say',
+        LAUN,
+        [('                text: badge_text.to_string(),\n                color: entry.category.color(p),',
+          '                text: badge_text.to_string(),\n                color: p.text,')],
+        ["desktop"],
+        [
+            "every_site_draws_the_role_it_claims",
+            "the_five_category_hues_stay_five_distinct_colours",
+            "the_accent_marks_where_you_are_and_never_what_a_thing_is",
+            "a_badge_wash_is_its_own_hue_at_a_lower_alpha",
+        ],
+    ),
+    (
+        'SSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSS: the badge label is frozen to Mocha blue',
+        LAUN,
+        [('                text: badge_text.to_string(),\n                color: entry.category.color(p),',
+          '                text: badge_text.to_string(),\n                color: Color::from_hex(0x89B4FA),')],
+        ["desktop"],
+        [
+            "every_colour_this_launcher_draws_comes_from_its_palette",
+            "none_of_the_thirteen_deleted_constants_is_still_drawn",
+            "every_site_draws_the_role_it_claims",
+            "the_five_category_hues_stay_five_distinct_colours",
+            "the_accent_marks_where_you_are_and_never_what_a_thing_is",
+            "a_badge_wash_is_its_own_hue_at_a_lower_alpha",
+        ],
+    ),
+    (
+        "TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT: the badge label takes the accent, so every badge follows the user's accent and none of them says what kind of thing the row is",
+        LAUN,
+        [('                text: badge_text.to_string(),\n                color: entry.category.color(p),',
+          '                text: badge_text.to_string(),\n                color: p.accent,')],
+        ["desktop"],
+        [
+            "every_site_draws_the_role_it_claims",
+            "the_five_category_hues_stay_five_distinct_colours",
+            "the_accent_marks_where_you_are_and_never_what_a_thing_is",
+            "a_badge_wash_is_its_own_hue_at_a_lower_alpha",
+        ],
+    ),
+    (
+        'UUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUU: the no-results line is frozen to Mocha overlay0',
+        LAUN,
+        [('                text: "No results found".to_string(),\n                color: p.overlay0,',
+          '                text: "No results found".to_string(),\n                color: Color::from_hex(0x6C7086),')],
+        ["desktop"],
+        [
+            "every_colour_this_launcher_draws_comes_from_its_palette",
+            "none_of_the_thirteen_deleted_constants_is_still_drawn",
+            "every_site_draws_the_role_it_claims",
+        ],
+    ),
+    (
+        'VVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVV: the no-results line is an error rather than a quiet statement of fact',
+        LAUN,
+        [('                text: "No results found".to_string(),\n                color: p.overlay0,',
+          '                text: "No results found".to_string(),\n                color: p.red,')],
+        ["desktop"],
+        [
+            "every_site_draws_the_role_it_claims",
+        ],
+    ),
+    (
+        'WWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWW: the no-results line is as bright as a result would have been',
+        LAUN,
+        [('                text: "No results found".to_string(),\n                color: p.overlay0,',
+          '                text: "No results found".to_string(),\n                color: p.text,')],
+        ["desktop"],
+        [
+            "every_site_draws_the_role_it_claims",
+        ],
+    ),
+    (
+        'XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX: the App category is frozen to Mocha blue, which every test that asks Category::color what it meant will agree with',
+        LAUN,
+        [('            Self::Application => p.blue,',
+          '            Self::Application => Color::from_hex(0x89B4FA),')],
+        ["desktop"],
+        [
+            "every_colour_this_launcher_draws_comes_from_its_palette",
+            "none_of_the_thirteen_deleted_constants_is_still_drawn",
+            "every_site_draws_the_role_it_claims",
+        ],
+    ),
+    (
+        'YYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYY: the Sys category is frozen to Mocha red, which every test that asks Category::color what it meant will agree with',
+        LAUN,
+        [('            Self::System => p.red,',
+          '            Self::System => Color::from_hex(0xF38BA8),')],
+        ["desktop"],
+        [
+            "every_colour_this_launcher_draws_comes_from_its_palette",
+            "none_of_the_thirteen_deleted_constants_is_still_drawn",
+            "every_site_draws_the_role_it_claims",
+        ],
+    ),
+    (
+        'ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ: the Set category is frozen to Mocha peach, which every test that asks Category::color what it meant will agree with',
+        LAUN,
+        [('            Self::Setting => p.peach,',
+          '            Self::Setting => Color::from_hex(0xFAB387),')],
+        ["desktop"],
+        [
+            "every_colour_this_launcher_draws_comes_from_its_palette",
+            "none_of_the_thirteen_deleted_constants_is_still_drawn",
+            "every_site_draws_the_role_it_claims",
+        ],
+    ),
+    (
+        'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA: the File category is frozen to Mocha green, which every test that asks Category::color what it meant will agree with',
+        LAUN,
+        [('            Self::File => p.green,',
+          '            Self::File => Color::from_hex(0xA6E3A1),')],
+        ["desktop"],
+        [
+            "every_colour_this_launcher_draws_comes_from_its_palette",
+            "none_of_the_thirteen_deleted_constants_is_still_drawn",
+            "every_site_draws_the_role_it_claims",
+        ],
+    ),
+    (
+        'BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB: the Cmd category is frozen to Mocha mauve, which every test that asks Category::color what it meant will agree with',
+        LAUN,
+        [('            Self::Command => p.mauve,',
+          '            Self::Command => Color::from_hex(0xCBA6F7),')],
+        ["desktop"],
+        [
+            "every_colour_this_launcher_draws_comes_from_its_palette",
+            "none_of_the_thirteen_deleted_constants_is_still_drawn",
+            "every_site_draws_the_role_it_claims",
+        ],
+    ),
+    (
+        'CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC: the Application category is the accent rather than a named hue, which under the shipped theme is the same pixel and so cannot be seen at all',
+        LAUN,
+        [('            Self::Application => p.blue,',
+          '            Self::Application => p.accent,')],
+        ["desktop"],
+        [
+            "every_site_draws_the_role_it_claims",
+            "the_accent_marks_where_you_are_and_never_what_a_thing_is",
+        ],
+    ),
+    (
+        'DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD: two categories collapse onto one hue, so a badge cannot say which of them a row belongs to',
+        LAUN,
+        [('            Self::System => p.red,',
+          '            Self::System => p.peach,')],
+        ["desktop"],
+        [
+            "every_site_draws_the_role_it_claims",
+            "the_five_category_hues_stay_five_distinct_colours",
+        ],
+    ),
+    (
+        'EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE: Application and System trade hues, which no set-membership check can see because the set is unchanged',
+        LAUN,
+        [
+         ('            Self::Application => p.blue,',
+          '            Self::Application => p.red,'),
+         ('            Self::System => p.red,',
+          '            Self::System => p.blue,'),
+        ],
+        ["desktop"],
+        [
+            "every_site_draws_the_role_it_claims",
+        ],
+    ),
+    (
+        'FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF: all five category hues are rotated by one: still five distinct colours, still whatever Category::color says they are, and every row wrong',
+        LAUN,
+        [
+         ('            Self::Application => p.blue,',
+          '            Self::Application => p.red,'),
+         ('            Self::System => p.red,',
+          '            Self::System => p.peach,'),
+         ('            Self::Setting => p.peach,',
+          '            Self::Setting => p.green,'),
+         ('            Self::File => p.green,',
+          '            Self::File => p.mauve,'),
+         ('            Self::Command => p.mauve,',
+          '            Self::Command => p.blue,'),
+        ],
+        ["desktop"],
+        [
+            "every_site_draws_the_role_it_claims",
+        ],
+    ),
+    (
+        'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA: the CPU hue is frozen to its Mocha value, so a light theme still draws the dark one',
+        RESMON,
+        [
+            ('            Self::Cpu => p.blue,',
+             '            Self::Cpu => guitk::color::Color::from_hex(0x89B4FA),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_monitor_draws_comes_from_its_palette',
+            'none_of_the_eleven_deleted_constants_is_still_drawn',
+            'each_measurement_is_pinned_to_the_role_it_names',
+        ],
+    ),
+    (
+        'BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB: the CPU graph is accented, which makes the monitor say "you are here" about a quantity',
+        RESMON,
+        [
+            ('            Self::Cpu => p.blue,',
+             '            Self::Cpu => p.accent,'),
+        ],
+        ["desktop"],
+        [
+            'no_colour_in_this_module_marks_a_position',
+            'each_measurement_is_pinned_to_the_role_it_names',
+            'test_render_expanded_has_resource_labels',
+        ],
+    ),
+    (
+        "CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC: the four graphed hues are rotated by one -- still four distinct colours, every graph in its neighbour's",
+        RESMON,
+        [
+            ('            Self::Cpu => p.blue,',
+             '            Self::Cpu => p.green,'),
+            ('            Self::Memory => p.green,',
+             '            Self::Memory => p.peach,'),
+            ('            Self::Disk => p.peach,',
+             '            Self::Disk => p.mauve,'),
+            ('            Self::Network => p.mauve,',
+             '            Self::Network => p.blue,'),
+        ],
+        ["desktop"],
+        [
+            'each_measurement_is_pinned_to_the_role_it_names',
+        ],
+    ),
+    (
+        "DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD: all six hues rotate, so the GPU takes the temperature colour and the CPU takes memory's",
+        RESMON,
+        [
+            ('            Self::Cpu => p.blue,',
+             '            Self::Cpu => p.green,'),
+            ('            Self::Memory => p.green,',
+             '            Self::Memory => p.peach,'),
+            ('            Self::Disk => p.peach,',
+             '            Self::Disk => p.mauve,'),
+            ('            Self::Network => p.mauve,',
+             '            Self::Network => p.lavender,'),
+            ('            Self::Gpu => p.lavender,',
+             '            Self::Gpu => p.red,'),
+            ('            Self::Temperature => p.red,',
+             '            Self::Temperature => p.blue,'),
+        ],
+        ["desktop"],
+        [
+            'each_measurement_is_pinned_to_the_role_it_names',
+            'test_render_expanded_has_resource_labels',
+        ],
+    ),
+    (
+        'EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE: the GPU and the CPU are the same hue, so two graphs would be indistinguishable',
+        RESMON,
+        [
+            ('            Self::Gpu => p.lavender,',
+             '            Self::Gpu => p.blue,'),
+        ],
+        ["desktop"],
+        [
+            'each_measurement_is_pinned_to_the_role_it_names',
+            'test_resource_type_colors_distinct',
+        ],
+    ),
+    (
+        'FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF: the temperature hue is frozen to Mocha red -- and temperature is never plotted, so nothing that looks at the screen can see it',
+        RESMON,
+        [
+            ('            Self::Temperature => p.red,',
+             '            Self::Temperature => guitk::color::Color::from_hex(0xF38BA8),'),
+        ],
+        ["desktop"],
+        [
+            'each_measurement_is_pinned_to_the_role_it_names',
+        ],
+    ),
+    (
+        "GGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGG: the compact strip's background is frozen to Mocha base",
+        RESMON,
+        [
+            ('            color: p.base,\n            corner_radii: CornerRadii::all(4.0),',
+             '            color: guitk::color::Color::from_hex(0x1E1E2E),\n            corner_radii: CornerRadii::all(4.0),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_monitor_draws_comes_from_its_palette',
+            'none_of_the_eleven_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        'HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH: the compact strip sits a rung above the desktop instead of on the base',
+        RESMON,
+        [
+            ('            color: p.base,\n            corner_radii: CornerRadii::all(4.0),',
+             '            color: p.mantle,\n            corner_radii: CornerRadii::all(4.0),'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'test_render_compact_empty_produces_background',
+        ],
+    ),
+    (
+        "IIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIII: the compact strip's border is frozen to Mocha surface0",
+        RESMON,
+        [
+            ('            color: p.surface0,\n            line_width: 1.0,\n            corner_radii: CornerRadii::all(4.0),',
+             '            color: guitk::color::Color::from_hex(0x313244),\n            line_width: 1.0,\n            corner_radii: CornerRadii::all(4.0),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_monitor_draws_comes_from_its_palette',
+            'none_of_the_eleven_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "JJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJ: the compact strip's border is a rung too bright for furniture",
+        RESMON,
+        [
+            ('            color: p.surface0,\n            line_width: 1.0,\n            corner_radii: CornerRadii::all(4.0),',
+             '            color: p.surface2,\n            line_width: 1.0,\n            corner_radii: CornerRadii::all(4.0),'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "KKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKK: the compact sparklines are all accented rather than each drawn in its metric's hue",
+        RESMON,
+        [
+            ('            Self::render_sparkline(&mut cmds, data, sx, sy, slot_w, slot_h, res.color(p));',
+             '            Self::render_sparkline(&mut cmds, data, sx, sy, slot_w, slot_h, p.accent);'),
+        ],
+        ["desktop"],
+        [
+            'no_colour_in_this_module_marks_a_position',
+            'a_metric_is_one_colour_wherever_it_appears',
+        ],
+    ),
+    (
+        'LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLL: every compact sparkline is drawn in the CPU hue, so the strip reads as one metric plotted four times',
+        RESMON,
+        [
+            ('            Self::render_sparkline(&mut cmds, data, sx, sy, slot_w, slot_h, res.color(p));',
+             '            Self::render_sparkline(&mut cmds, data, sx, sy, slot_w, slot_h, ResourceType::Cpu.color(p));'),
+        ],
+        ["desktop"],
+        [
+            'a_metric_is_one_colour_wherever_it_appears',
+        ],
+    ),
+    (
+        'MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM: the compact sparklines are drawn in ink rather than in metric hues',
+        RESMON,
+        [
+            ('            Self::render_sparkline(&mut cmds, data, sx, sy, slot_w, slot_h, res.color(p));',
+             '            Self::render_sparkline(&mut cmds, data, sx, sy, slot_w, slot_h, p.subtext0);'),
+        ],
+        ["desktop"],
+        [
+            'a_metric_is_one_colour_wherever_it_appears',
+        ],
+    ),
+    (
+        "NNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNN: the expanded widget's background is frozen to Mocha base",
+        RESMON,
+        [
+            ('            color: p.base,\n            corner_radii: CornerRadii::all(6.0),',
+             '            color: guitk::color::Color::from_hex(0x1E1E2E),\n            corner_radii: CornerRadii::all(6.0),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_monitor_draws_comes_from_its_palette',
+            'none_of_the_eleven_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "OOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOO: the expanded widget's background is the crust, so the widget reads as a hole rather than a surface",
+        RESMON,
+        [
+            ('            color: p.base,\n            corner_radii: CornerRadii::all(6.0),',
+             '            color: p.crust,\n            corner_radii: CornerRadii::all(6.0),'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPP: the expanded widget's border is frozen to Mocha surface0",
+        RESMON,
+        [
+            ('            color: p.surface0,\n            line_width: 1.0,\n            corner_radii: CornerRadii::all(6.0),',
+             '            color: guitk::color::Color::from_hex(0x313244),\n            line_width: 1.0,\n            corner_radii: CornerRadii::all(6.0),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_monitor_draws_comes_from_its_palette',
+            'none_of_the_eleven_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "QQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQ: the expanded widget's border is its own background, so the widget has no edge",
+        RESMON,
+        [
+            ('            color: p.surface0,\n            line_width: 1.0,\n            corner_radii: CornerRadii::all(6.0),',
+             '            color: p.base,\n            line_width: 1.0,\n            corner_radii: CornerRadii::all(6.0),'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "RRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRR: the widget's title is frozen to Mocha text",
+        RESMON,
+        [
+            ('            color: p.text,\n            font_size: 13.0,',
+             '            color: guitk::color::Color::from_hex(0xCDD6F4),\n            font_size: 13.0,'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_monitor_draws_comes_from_its_palette',
+            'none_of_the_eleven_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "SSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSS: the widget's title is dimmer than the readings underneath it",
+        RESMON,
+        [
+            ('            color: p.text,\n            font_size: 13.0,',
+             '            color: p.subtext0,\n            font_size: 13.0,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT: the widget's title is accented, which is the one colour this module never draws",
+        RESMON,
+        [
+            ('            color: p.text,\n            font_size: 13.0,',
+             '            color: p.accent,\n            font_size: 13.0,'),
+        ],
+        ["desktop"],
+        [
+            'no_colour_in_this_module_marks_a_position',
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "UUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUU: a panel's label and graph are accented rather than drawn in the metric's hue",
+        RESMON,
+        [
+            ('        let color = resource.color(p);',
+             '        let color = p.accent;'),
+        ],
+        ["desktop"],
+        [
+            'no_colour_in_this_module_marks_a_position',
+            'every_site_draws_the_role_it_claims',
+            'each_measurement_is_pinned_to_the_role_it_names',
+            'a_metric_is_one_colour_wherever_it_appears',
+            'test_render_expanded_has_resource_labels',
+        ],
+    ),
+    (
+        'VVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVV: every panel is drawn in the CPU hue, so all four graphs claim to be the processor',
+        RESMON,
+        [
+            ('        let color = resource.color(p);',
+             '        let color = ResourceType::Cpu.color(p);'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'each_measurement_is_pinned_to_the_role_it_names',
+            'a_metric_is_one_colour_wherever_it_appears',
+        ],
+    ),
+    (
+        "WWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWW: a panel's background is the widget's own, so the stack has no depth",
+        RESMON,
+        [
+            ('            color: p.surface0,\n            corner_radii: CornerRadii::all(4.0),',
+             '            color: p.base,\n            corner_radii: CornerRadii::all(4.0),'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'test_render_expanded_has_panel_backgrounds',
+        ],
+    ),
+    (
+        "XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX: a panel's background is frozen to Mocha surface0",
+        RESMON,
+        [
+            ('            color: p.surface0,\n            corner_radii: CornerRadii::all(4.0),',
+             '            color: guitk::color::Color::from_hex(0x313244),\n            corner_radii: CornerRadii::all(4.0),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_monitor_draws_comes_from_its_palette',
+            'none_of_the_eleven_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        'YYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYY: the current reading is frozen to Mocha text',
+        RESMON,
+        [
+            ('            color: p.text,\n            font_size: 11.0,',
+             '            color: guitk::color::Color::from_hex(0xCDD6F4),\n            font_size: 11.0,'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_monitor_draws_comes_from_its_palette',
+            'none_of_the_eleven_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        'ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ: the current reading is as dim as the peak beneath it',
+        RESMON,
+        [
+            ('            color: p.text,\n            font_size: 11.0,',
+             '            color: p.subtext0,\n            font_size: 11.0,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA: the peak reading is frozen to Mocha subtext',
+        RESMON,
+        [
+            ('            color: p.subtext0,\n            font_size: 9.0,',
+             '            color: guitk::color::Color::from_hex(0xA6ADC8),\n            font_size: 9.0,'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_monitor_draws_comes_from_its_palette',
+            'none_of_the_eleven_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        'BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB: the peak reading is as bright as the current one, so the two cannot be told apart',
+        RESMON,
+        [
+            ('            color: p.subtext0,\n            font_size: 9.0,',
+             '            color: p.text,\n            font_size: 9.0,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        'CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC: the peak reading is accented',
+        RESMON,
+        [
+            ('            color: p.subtext0,\n            font_size: 9.0,',
+             '            color: p.accent,\n            font_size: 9.0,'),
+        ],
+        ["desktop"],
+        [
+            'no_colour_in_this_module_marks_a_position',
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        'DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD: the grid is frozen to Mocha surface1',
+        RESMON,
+        [
+            ('        let grid_color = p.surface1;',
+             '        let grid_color = guitk::color::Color::from_hex(0x45475A);'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_monitor_draws_comes_from_its_palette',
+            'none_of_the_eleven_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        'EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE: a gridline is the colour of the CPU graph, so furniture reads as a reading nobody took',
+        RESMON,
+        [
+            ('        let grid_color = p.surface1;',
+             '        let grid_color = p.blue;'),
+        ],
+        ["desktop"],
+        [
+            'no_gridline_can_be_mistaken_for_a_reading',
+            'every_site_draws_the_role_it_claims',
+            'test_render_expanded_has_grid_lines',
+        ],
+    ),
+    (
+        'FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF: the grid is as bright as the readings drawn over it',
+        RESMON,
+        [
+            ('        let grid_color = p.surface1;',
+             '        let grid_color = p.text;'),
+        ],
+        ["desktop"],
+        [
+            'no_gridline_can_be_mistaken_for_a_reading',
+            'every_site_draws_the_role_it_claims',
+            'test_render_expanded_has_grid_lines',
+        ],
+    ),
+    (
+        'GGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGG: the grid is accented',
+        RESMON,
+        [
+            ('        let grid_color = p.surface1;',
+             '        let grid_color = p.accent;'),
+        ],
+        ["desktop"],
+        [
+            'no_colour_in_this_module_marks_a_position',
+            'every_site_draws_the_role_it_claims',
+            'test_render_expanded_has_grid_lines',
+        ],
+    ),
+    (
+        "HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH: a panel's graph is detached from its label, so the label names a hue nothing on the screen uses",
+        RESMON,
+        [
+            ('            Self::render_sparkline(cmds, data, graph_x, graph_y, graph_w, graph_h, color);',
+             '            Self::render_sparkline(cmds, data, graph_x, graph_y, graph_w, graph_h, p.subtext0);'),
+        ],
+        ["desktop"],
+        [
+            'a_metric_is_one_colour_wherever_it_appears',
+        ],
+    ),
+    (
+        "IIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIII: a panel's graph is accented while its label keeps the metric's hue",
+        RESMON,
+        [
+            ('            Self::render_sparkline(cmds, data, graph_x, graph_y, graph_w, graph_h, color);',
+             '            Self::render_sparkline(cmds, data, graph_x, graph_y, graph_w, graph_h, p.accent);'),
+        ],
+        ["desktop"],
+        [
+            'no_colour_in_this_module_marks_a_position',
+            'a_metric_is_one_colour_wherever_it_appears',
         ],
     ),
 ]

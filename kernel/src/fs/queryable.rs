@@ -60,6 +60,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
 
+use super::path::{Path, PathBuf};
 use crate::error::{KernelError, KernelResult};
 
 // ---------------------------------------------------------------------------
@@ -281,7 +282,7 @@ pub enum QueryMode {
 #[derive(Debug, Clone)]
 pub struct QueryResult {
     /// File path.
-    pub path: String,
+    pub path: PathBuf,
     /// Matching attribute values (name → value).
     pub matched_attrs: Vec<(String, AttrValue)>,
 }
@@ -306,7 +307,7 @@ pub struct AttrSchema {
 /// Per-file attribute set.
 struct FileAttrs {
     /// File path.
-    path: String,
+    path: PathBuf,
     /// Attribute name → value.
     attrs: BTreeMap<String, AttrValue>,
 }
@@ -314,7 +315,12 @@ struct FileAttrs {
 /// Global attribute store.
 struct AttrStore {
     /// Path → index in `files`.
-    path_index: BTreeMap<String, usize>,
+    ///
+    /// Keyed by `PathBuf`, not `String`, per design-decisions.md §261: a
+    /// filename may hold any byte but `/` and NUL, so a `String` key is
+    /// narrower than the thing it keys and two distinct files could share
+    /// one attribute set.
+    path_index: BTreeMap<PathBuf, usize>,
     /// All files with attributes.
     files: Vec<FileAttrs>,
     /// Free slots (indices of removed entries).
@@ -326,7 +332,10 @@ struct AttrStore {
     /// The value_key is a string representation of the value for
     /// BTreeMap ordering. This trades exact type fidelity for O(log n)
     /// indexed lookup.
-    indexes: BTreeMap<String, BTreeMap<String, BTreeSet<String>>>,
+    /// Attribute names and value keys stay `String` — both are validated
+    /// user-typed identifiers — but the *paths* they resolve to are
+    /// `PathBuf` (§261).
+    indexes: BTreeMap<String, BTreeMap<String, BTreeSet<PathBuf>>>,
     /// Which attribute names are indexed.
     indexed_names: BTreeSet<String>,
 }
@@ -428,7 +437,8 @@ fn validate_value(val: &AttrValue) -> KernelResult<()> {
 // ---------------------------------------------------------------------------
 
 /// Set an attribute on a file.
-pub fn set_attr(path: &str, name: &str, value: AttrValue) -> KernelResult<()> {
+pub fn set_attr(path: impl AsRef<Path>, name: &str, value: AttrValue) -> KernelResult<()> {
+    let path = path.as_ref();
     validate_name(name)?;
     validate_value(&value)?;
     SET_COUNT.fetch_add(1, Ordering::Relaxed);
@@ -444,19 +454,19 @@ pub fn set_attr(path: &str, name: &str, value: AttrValue) -> KernelResult<()> {
         }
         let idx = if let Some(free) = store.free_slots.pop() {
             store.files[free] = FileAttrs {
-                path: String::from(path),
+                path: path.to_path_buf(),
                 attrs: BTreeMap::new(),
             };
             free
         } else {
             let i = store.files.len();
             store.files.push(FileAttrs {
-                path: String::from(path),
+                path: path.to_path_buf(),
                 attrs: BTreeMap::new(),
             });
             i
         };
-        store.path_index.insert(String::from(path), idx);
+        store.path_index.insert(path.to_path_buf(), idx);
         idx
     };
 
@@ -490,7 +500,7 @@ pub fn set_attr(path: &str, name: &str, value: AttrValue) -> KernelResult<()> {
         val_map
             .entry(new_key)
             .or_default()
-            .insert(String::from(path));
+            .insert(path.to_path_buf());
     }
 
     store.files[idx].attrs.insert(attr_name_owned, value);
@@ -498,7 +508,8 @@ pub fn set_attr(path: &str, name: &str, value: AttrValue) -> KernelResult<()> {
 }
 
 /// Get an attribute from a file.
-pub fn get_attr(path: &str, name: &str) -> KernelResult<AttrValue> {
+pub fn get_attr(path: impl AsRef<Path>, name: &str) -> KernelResult<AttrValue> {
+    let path = path.as_ref();
     GET_COUNT.fetch_add(1, Ordering::Relaxed);
     let store = STORE.lock();
     let idx = store.path_index.get(path).ok_or(KernelError::NotFound)?;
@@ -507,7 +518,8 @@ pub fn get_attr(path: &str, name: &str) -> KernelResult<AttrValue> {
 }
 
 /// Remove an attribute from a file.
-pub fn remove_attr(path: &str, name: &str) -> KernelResult<()> {
+pub fn remove_attr(path: impl AsRef<Path>, name: &str) -> KernelResult<()> {
+    let path = path.as_ref();
     let mut store = STORE.lock();
     let idx = store.path_index.get(path).ok_or(KernelError::NotFound)?;
     let idx = *idx;
@@ -542,7 +554,8 @@ pub fn remove_attr(path: &str, name: &str) -> KernelResult<()> {
 }
 
 /// List all attributes on a file.
-pub fn list_attrs(path: &str) -> KernelResult<Vec<(String, AttrValue)>> {
+pub fn list_attrs(path: impl AsRef<Path>) -> KernelResult<Vec<(String, AttrValue)>> {
+    let path = path.as_ref();
     let store = STORE.lock();
     let idx = store.path_index.get(path).ok_or(KernelError::NotFound)?;
     let file = &store.files[*idx];
@@ -554,7 +567,8 @@ pub fn list_attrs(path: &str) -> KernelResult<Vec<(String, AttrValue)>> {
 }
 
 /// Remove all attributes from a file.
-pub fn clear_attrs(path: &str) -> KernelResult<usize> {
+pub fn clear_attrs(path: impl AsRef<Path>) -> KernelResult<usize> {
+    let path = path.as_ref();
     let mut store = STORE.lock();
     let idx = store.path_index.get(path).ok_or(KernelError::NotFound)?;
     let idx = *idx;
@@ -607,7 +621,7 @@ pub fn create_index(attr_name: &str) -> KernelResult<()> {
     store.indexed_names.insert(name.clone());
 
     // Build index from existing data.
-    let mut val_map: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    let mut val_map: BTreeMap<String, BTreeSet<PathBuf>> = BTreeMap::new();
     for file in &store.files {
         if let Some(val) = file.attrs.get(attr_name) {
             let key = value_to_key(val);
@@ -679,7 +693,7 @@ pub fn list_schemas() -> Vec<AttrSchema> {
 pub fn query(
     predicates: &[Predicate],
     mode: QueryMode,
-    root_path: Option<&str>,
+    root_path: Option<&Path>,
 ) -> Vec<QueryResult> {
     QUERY_COUNT.fetch_add(1, Ordering::Relaxed);
 
@@ -695,7 +709,7 @@ pub fn query(
         // avoids /tmp matching /tmpfile and tolerates a trailing slash on
         // `root`. See fs::pathutil.
         if let Some(root) = root_path {
-            if !crate::fs::pathutil::path_in_subtree(file.path.as_str(), root) {
+            if !crate::fs::pathutil::path_in_subtree(file.path.as_path(), root) {
                 continue;
             }
         }
@@ -743,7 +757,7 @@ pub fn query(
 /// Query using the index for a single equality predicate on an indexed attr.
 ///
 /// Falls back to full scan if the attribute is not indexed.
-pub fn indexed_query(attr_name: &str, value: &AttrValue) -> Vec<String> {
+pub fn indexed_query(attr_name: &str, value: &AttrValue) -> Vec<PathBuf> {
     QUERY_COUNT.fetch_add(1, Ordering::Relaxed);
 
     let store = STORE.lock();
@@ -803,14 +817,15 @@ pub fn unique_values(attr_name: &str) -> Vec<AttrValue> {
 // ---------------------------------------------------------------------------
 
 /// Update all attributes when a file is renamed/moved.
-pub fn rename_path(old_path: &str, new_path: &str) -> KernelResult<()> {
+pub fn rename_path(old_path: impl AsRef<Path>, new_path: impl AsRef<Path>) -> KernelResult<()> {
+    let (old_path, new_path) = (old_path.as_ref(), new_path.as_ref());
     let mut store = STORE.lock();
     let idx = store
         .path_index
         .remove(old_path)
         .ok_or(KernelError::NotFound)?;
-    store.path_index.insert(String::from(new_path), idx);
-    store.files[idx].path = String::from(new_path);
+    store.path_index.insert(new_path.to_path_buf(), idx);
+    store.files[idx].path = new_path.to_path_buf();
 
     // Update all index entries.
     for (attr_name, val) in store.files[idx].attrs.clone() {
@@ -819,7 +834,7 @@ pub fn rename_path(old_path: &str, new_path: &str) -> KernelResult<()> {
             if let Some(val_map) = store.indexes.get_mut(&attr_name) {
                 if let Some(paths) = val_map.get_mut(&key) {
                     paths.remove(old_path);
-                    paths.insert(String::from(new_path));
+                    paths.insert(new_path.to_path_buf());
                 }
             }
         }
@@ -924,7 +939,27 @@ pub fn register_builtins() -> KernelResult<()> {
 // ---------------------------------------------------------------------------
 
 /// Run self-tests for the queryable metadata module.
+///
+/// The suite asserts exact table contents, so it needs a table of its own.
+/// It used to get one by calling `clear_all()`, which — since this suite is
+/// reachable from the shell — deleted whatever the user had stored here and
+/// then reported success.  The live state is moved aside for the duration and
+/// put back afterwards; `crate::fs::selftest` records why this shape rather
+/// than the alternatives.
 pub fn self_test() -> KernelResult<()> {
+    // These counters live outside the table, so `with_pristine` cannot
+    // see them; save and restore them here so a run leaves no trace.
+    let saved_set_count = SET_COUNT.load(Ordering::Relaxed);
+    let saved_get_count = GET_COUNT.load(Ordering::Relaxed);
+    let saved_query_count = QUERY_COUNT.load(Ordering::Relaxed);
+    let result = crate::fs::selftest::with_pristine(&STORE, AttrStore::new(), self_test_inner);
+    SET_COUNT.store(saved_set_count, Ordering::Relaxed);
+    GET_COUNT.store(saved_get_count, Ordering::Relaxed);
+    QUERY_COUNT.store(saved_query_count, Ordering::Relaxed);
+    result
+}
+
+fn self_test_inner() -> KernelResult<()> {
     use crate::serial_println;
 
     // Save and reset state.
@@ -1000,7 +1035,14 @@ pub fn self_test() -> KernelResult<()> {
         );
         // Only song.mp3 has Beatles AND bitrate > 200.
         assert_eq!(results.len(), 1);
-        assert!(results[0].path.contains("song.mp3") && !results[0].path.contains("song2"));
+        // Compared on the file name rather than by substring: a substring
+        // test on a path is the wrong tool anyway (it cannot tell a name
+        // from a directory component), and `Path` deliberately offers no
+        // `contains`.
+        assert_eq!(
+            results[0].path.as_path().file_name(),
+            Some(Path::new("song.mp3"))
+        );
         serial_println!("[queryable] test 5 passed: AND query");
     }
 
@@ -1030,10 +1072,72 @@ pub fn self_test() -> KernelResult<()> {
         serial_println!("[queryable] test 7 passed: remove/rename");
     }
 
+    // Test 8: non-UTF-8 paths key distinct attribute sets, and are carried
+    // correctly through the index, the query root filter and rename
+    // (design-decisions.md §261).
+    {
+        clear_all();
+
+        // `\xFF` and `\xFE` can begin no UTF-8 sequence, so under a
+        // `String` key these two files would have shared one attribute set.
+        let a = Path::new(&b"/q/\xFFf.mp3"[..]);
+        let b = Path::new(&b"/q/\xFEf.mp3"[..]);
+
+        create_index("Audio:Artist")?;
+        set_attr(a, "Audio:Artist", AttrValue::Text(String::from("A")))?;
+        set_attr(b, "Audio:Artist", AttrValue::Text(String::from("B")))?;
+
+        // Each file kept its own value.
+        assert_eq!(
+            get_attr(a, "Audio:Artist")?,
+            AttrValue::Text(String::from("A"))
+        );
+        assert_eq!(
+            get_attr(b, "Audio:Artist")?,
+            AttrValue::Text(String::from("B"))
+        );
+
+        // The reverse index resolves back to the exact bytes.
+        let hits = indexed_query("Audio:Artist", &AttrValue::Text(String::from("A")));
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].as_path(), a);
+
+        // A query rooted at a directory with no UTF-8 spelling finds only
+        // what is under it.
+        let root = Path::new(&b"/q"[..]);
+        let results = query(
+            &[Predicate::eq_text("Audio:Artist", "B")],
+            QueryMode::All,
+            Some(root),
+        );
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].path.as_path(), b);
+
+        // Rename moves only the file named, index included.
+        let a2 = Path::new(&b"/q/\xFFf2.mp3"[..]);
+        rename_path(a, a2)?;
+        assert!(get_attr(a, "Audio:Artist").is_err());
+        assert_eq!(
+            get_attr(a2, "Audio:Artist")?,
+            AttrValue::Text(String::from("A"))
+        );
+        let hits = indexed_query("Audio:Artist", &AttrValue::Text(String::from("A")));
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].as_path(), a2);
+
+        // `b` was never touched by any of it.
+        assert_eq!(
+            get_attr(b, "Audio:Artist")?,
+            AttrValue::Text(String::from("B"))
+        );
+
+        serial_println!("[queryable] test 8 passed: non-UTF-8 paths");
+    }
+
     // Cleanup.
     clear_all();
     reset_stats();
 
-    serial_println!("[queryable] all 7 self-tests passed");
+    serial_println!("[queryable] all 8 self-tests passed");
     Ok(())
 }

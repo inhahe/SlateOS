@@ -38,6 +38,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
 
+use super::path::{Path, PathBuf};
 use crate::error::{KernelError, KernelResult};
 use crate::serial_println;
 use crate::sync::PreemptSpinMutex;
@@ -154,7 +155,11 @@ pub enum SealOp {
 /// A sealed file entry.
 #[derive(Debug, Clone)]
 struct SealEntry {
-    path: String,
+    /// A `PathBuf`, not a `String`: seals are permanent by design (the
+    /// only removal is deleting the file), so a name the key cannot hold
+    /// is a file that can never be sealed at all. See
+    /// `design-decisions.md` §261.
+    path: PathBuf,
     flags: SealFlags,
     sealed_at_ns: u64,
 }
@@ -175,7 +180,8 @@ static DENIED_OPS: AtomicU64 = AtomicU64::new(0);
 ///
 /// Seals are additive — new seals are OR'd with existing ones.
 /// Returns an error if SealSeal is already set (no more seals allowed).
-pub fn add_seals(path: &str, new_seals: SealFlags) -> KernelResult<SealFlags> {
+pub fn add_seals(path: impl AsRef<Path>, new_seals: SealFlags) -> KernelResult<SealFlags> {
+    let path = path.as_ref();
     if path.is_empty() || new_seals.is_empty() {
         return Err(KernelError::InvalidArgument);
     }
@@ -186,7 +192,7 @@ pub fn add_seals(path: &str, new_seals: SealFlags) -> KernelResult<SealFlags> {
     let mut table = SEAL_TABLE.lock();
 
     // Check existing entry.
-    if let Some(entry) = table.iter_mut().find(|e| e.path == path) {
+    if let Some(entry) = table.iter_mut().find(|e| e.path.as_path() == path) {
         // Cannot add seals if SEAL is already set.
         if entry.flags.contains(SealFlags::SEAL) {
             DENIED_OPS.fetch_add(1, Ordering::Relaxed);
@@ -203,7 +209,7 @@ pub fn add_seals(path: &str, new_seals: SealFlags) -> KernelResult<SealFlags> {
 
     let flags = new_seals;
     table.push(SealEntry {
-        path: String::from(path),
+        path: path.to_path_buf(),
         flags,
         sealed_at_ns: now,
     });
@@ -212,11 +218,12 @@ pub fn add_seals(path: &str, new_seals: SealFlags) -> KernelResult<SealFlags> {
 }
 
 /// Get current seals for a file.
-pub fn get_seals(path: &str) -> SealFlags {
+pub fn get_seals(path: impl AsRef<Path>) -> SealFlags {
+    let path = path.as_ref();
     let table = SEAL_TABLE.lock();
     table
         .iter()
-        .find(|e| e.path == path)
+        .find(|e| e.path.as_path() == path)
         .map_or(SealFlags::NONE, |e| e.flags)
 }
 
@@ -224,7 +231,7 @@ pub fn get_seals(path: &str) -> SealFlags {
 ///
 /// Returns Ok(()) if the operation is allowed, or Err if a seal
 /// blocks it. This is the VFS integration point.
-pub fn check_seals(path: &str, op: SealOp) -> KernelResult<()> {
+pub fn check_seals(path: impl AsRef<Path>, op: SealOp) -> KernelResult<()> {
     CHECK_OPS.fetch_add(1, Ordering::Relaxed);
 
     let seals = get_seals(path);
@@ -252,13 +259,14 @@ pub fn check_seals(path: &str, op: SealOp) -> KernelResult<()> {
 ///
 /// This is the only way to remove seals — by deleting the file itself.
 /// Regular unseal operations are not supported by design.
-pub fn remove_on_delete(path: &str) {
+pub fn remove_on_delete(path: impl AsRef<Path>) {
+    let path = path.as_ref();
     let mut table = SEAL_TABLE.lock();
-    table.retain(|e| e.path != path);
+    table.retain(|e| e.path.as_path() != path);
 }
 
 /// List all sealed files.
-pub fn list_sealed() -> Vec<(String, SealFlags)> {
+pub fn list_sealed() -> Vec<(PathBuf, SealFlags)> {
     let table = SEAL_TABLE.lock();
     table.iter().map(|e| (e.path.clone(), e.flags)).collect()
 }
@@ -299,9 +307,37 @@ pub fn self_test() -> KernelResult<()> {
     test_write_implies_shrink_grow();
     test_flags_parse();
     test_remove_on_delete();
+    test_non_utf8_path();
 
-    serial_println!("[sealing] Self-test passed (6 tests).");
+    serial_println!("[sealing] Self-test passed (7 tests).");
     Ok(())
+}
+
+/// Seals must apply to a path that is not valid UTF-8.
+///
+/// Seals are permanent by design -- the only way to drop one is to delete
+/// the file -- so a name the table could not hold was a file that could
+/// never be sealed at all, with `add_seals` reporting success and
+/// `check_seals` then permitting every operation. The six tests above all
+/// use ASCII names, which a `String` key stored correctly.
+fn test_non_utf8_path() {
+    let a = Path::new(&b"/test/seal_\xFFa"[..]);
+    let b = Path::new(&b"/test/seal_\xFEa"[..]);
+
+    add_seals(a, SealFlags::WRITE).unwrap();
+    assert!(get_seals(a).contains(SealFlags::WRITE));
+    // Enforcement, not just the table, must see the seal.
+    assert!(check_seals(a, SealOp::Write).is_err());
+
+    // A neighbour differing only in a byte that cannot appear in UTF-8 must
+    // be unaffected; a lossy key folds both to U+FFFD and would seal it too.
+    assert!(get_seals(b).is_empty());
+    assert!(check_seals(b, SealOp::Write).is_ok());
+
+    remove_on_delete(a);
+    assert!(get_seals(a).is_empty());
+
+    serial_println!("[sealing]   non_utf8_path: ok");
 }
 
 fn test_add_get_seals() {

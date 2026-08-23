@@ -25,6 +25,7 @@ use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::error::KernelResult;
+use crate::fs::path::{Path, PathBuf};
 
 // ---------------------------------------------------------------------------
 // Types
@@ -47,7 +48,12 @@ pub enum ExplorerState {
 #[derive(Debug, Clone)]
 pub struct StatusInput {
     /// Current directory path.
-    pub directory: String,
+    ///
+    /// A `PathBuf`, not a `String` (design-decisions.md 261): this is a
+    /// filesystem path, and our filesystems permit any byte but `/` and NUL
+    /// in a name.  As a `String` it could not even name the directory the
+    /// user was standing in, let alone report its free space correctly.
+    pub directory: PathBuf,
     /// Total items in the current directory.
     pub total_items: u64,
     /// Number of files.
@@ -77,7 +83,7 @@ pub struct StatusInput {
 impl Default for StatusInput {
     fn default() -> Self {
         Self {
-            directory: String::from("/"),
+            directory: PathBuf::from("/"),
             total_items: 0,
             file_count: 0,
             dir_count: 0,
@@ -144,7 +150,12 @@ pub fn generate(input: &StatusInput) -> StatusContent {
 /// Generate status bar content for a directory with automatic info gathering.
 ///
 /// Convenience function that builds StatusInput from VFS queries.
-pub fn generate_for_dir(path: &str, selected_count: u64, selected_size: u64) -> StatusContent {
+pub fn generate_for_dir(
+    path: impl AsRef<Path>,
+    selected_count: u64,
+    selected_size: u64,
+) -> StatusContent {
+    let path = path.as_ref();
     GENERATE_COUNT.fetch_add(1, Ordering::Relaxed);
 
     let mut total_items = 0u64;
@@ -170,7 +181,7 @@ pub fn generate_for_dir(path: &str, selected_count: u64, selected_size: u64) -> 
     }
 
     let input = StatusInput {
-        directory: String::from(path),
+        directory: path.to_path_buf(),
         total_items,
         file_count,
         dir_count,
@@ -185,8 +196,8 @@ pub fn generate_for_dir(path: &str, selected_count: u64, selected_size: u64) -> 
 }
 
 /// Get disk information for the status bar.
-pub fn disk_info(path: &str) -> Option<DiskInfo> {
-    crate::fs::vfs::Vfs::statvfs(path)
+pub fn disk_info(path: impl AsRef<Path>) -> Option<DiskInfo> {
+    crate::fs::vfs::Vfs::statvfs(path.as_ref())
         .ok()
         .map(|info| DiskInfo {
             free_bytes: info.free_blocks.saturating_mul(info.block_size),
@@ -281,7 +292,7 @@ fn generate_center(input: &StatusInput) -> String {
 
 fn generate_right(input: &StatusInput) -> String {
     // Show disk free space.
-    match disk_info(&input.directory) {
+    match disk_info(input.directory.as_path()) {
         Some(info) => {
             alloc::format!("{} free", format_size(info.free_bytes))
         }
@@ -421,6 +432,41 @@ pub fn self_test() -> KernelResult<()> {
         serial_println!("[statusbar] test 7 passed: generate_for_dir");
     }
 
-    serial_println!("[statusbar] all 7 self-tests passed");
+    // Test 8: non-UTF-8 directory (design-decisions.md 261).
+    //
+    // The status bar describes whatever directory the user is standing in,
+    // and a directory name may contain any byte but `/` and NUL.  While
+    // `StatusInput::directory` was a `String` the explorer could not even
+    // represent such a directory, so its item counts and free-space figure
+    // would have come from whatever path the lossy conversion produced — a
+    // different directory, or none at all.
+    {
+        let dir = Path::new(&b"/tmp/sb_\xFFd"[..]);
+        let sub = Path::new(&b"/tmp/sb_\xFFd/sub"[..]);
+        crate::fs::vfs::Vfs::mkdir(dir)?;
+        crate::fs::vfs::Vfs::mkdir(sub)?;
+
+        let status = generate_for_dir(dir, 0, 0);
+        // One subdirectory, no files — proving the readdir reached the
+        // directory we actually named.
+        assert!(status.left.contains("1 folder"));
+
+        // The path survives byte-exactly into the input struct, which is
+        // what `generate_right` hands to `statvfs`.
+        let input = StatusInput {
+            directory: dir.to_path_buf(),
+            total_items: 1,
+            dir_count: 1,
+            ..Default::default()
+        };
+        assert_eq!(input.directory.as_path(), dir);
+        let _ = generate(&input);
+
+        crate::fs::vfs::Vfs::rmdir(sub)?;
+        crate::fs::vfs::Vfs::rmdir(dir)?;
+        serial_println!("[statusbar] test 8 passed: non-UTF-8 directory");
+    }
+
+    serial_println!("[statusbar] all 8 self-tests passed");
     Ok(())
 }

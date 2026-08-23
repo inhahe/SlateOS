@@ -30,6 +30,7 @@
 
 #![allow(dead_code)]
 
+use crate::fs::path::{Path, PathBuf};
 use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::format;
 use alloc::string::String;
@@ -201,7 +202,11 @@ pub struct RecordConfig {
     /// Maximum recording duration in seconds (0 = unlimited).
     pub max_duration_seconds: u32,
     /// Output directory.
-    pub output_dir: String,
+    ///
+    /// A `PathBuf`, not a `String`: a directory name may contain any byte
+    /// except `/` and NUL, and `String` cannot hold the ones with no UTF-8
+    /// spelling. See design-decisions.md §261.
+    pub output_dir: PathBuf,
     /// Whether to show system tray indicator while recording.
     pub show_indicator: bool,
 }
@@ -214,7 +219,7 @@ pub struct Recording {
     /// State.
     pub state: RecordingState,
     /// Output file path.
-    pub file_path: String,
+    pub file_path: PathBuf,
     /// Format used.
     pub format: OutputFormat,
     /// Recording start time (ns).
@@ -289,7 +294,7 @@ pub fn init_defaults() {
             show_clicks: false,
             countdown_seconds: 3,
             max_duration_seconds: 0,
-            output_dir: String::from("/home/Videos/Recordings"),
+            output_dir: PathBuf::from("/home/Videos/Recordings"),
             show_indicator: true,
         },
         recordings: Vec::new(),
@@ -403,12 +408,13 @@ pub fn set_max_duration(seconds: u32) -> KernelResult<()> {
 }
 
 /// Set output directory.
-pub fn set_output_dir(dir: &str) -> KernelResult<()> {
+pub fn set_output_dir(dir: impl AsRef<Path>) -> KernelResult<()> {
+    let dir = dir.as_ref();
     if dir.is_empty() {
         return Err(KernelError::InvalidArgument);
     }
     with_state(|state| {
-        state.config.output_dir = String::from(dir);
+        state.config.output_dir = dir.to_path_buf();
         Ok(())
     })
 }
@@ -460,7 +466,10 @@ pub fn start_recording() -> KernelResult<u64> {
         let now = crate::hpet::elapsed_ns();
 
         let file_name = format!("recording_{}.{}", id, state.config.format.extension());
-        let file_path = format!("{}/{}", state.config.output_dir, file_name);
+        // `join`, not `format!("{}/{}")`: it carries a non-UTF-8 output
+        // directory through unchanged, and it collapses a trailing `/` the
+        // user may have typed rather than emitting `dir//recording_1.mp4`.
+        let file_path = state.config.output_dir.join(&file_name);
 
         let initial_state = if state.config.countdown_seconds > 0 {
             RecordingState::Countdown
@@ -735,7 +744,7 @@ pub fn self_test() {
         assert_eq!(active, 0);
         assert!(!is_recording());
     }
-    serial_println!("[screenrec]  1/11 initial state OK");
+    serial_println!("[screenrec]  1/12 initial state OK");
 
     // Test 2: config defaults.
     {
@@ -745,7 +754,7 @@ pub fn self_test() {
         assert_eq!(cfg.fps, 60);
         assert!(cfg.show_cursor);
     }
-    serial_println!("[screenrec]  2/11 config defaults OK");
+    serial_println!("[screenrec]  2/12 config defaults OK");
 
     // Test 3: set format.
     {
@@ -758,7 +767,7 @@ pub fn self_test() {
         assert_eq!(cfg.audio, AudioMode::None);
         set_format(OutputFormat::WebM).unwrap();
     }
-    serial_println!("[screenrec]  3/11 set format OK");
+    serial_println!("[screenrec]  3/12 set format OK");
 
     // Test 4: set quality.
     {
@@ -767,7 +776,7 @@ pub fn self_test() {
         assert_eq!(cfg.fps, 30);
         set_quality(QualityPreset::High).unwrap();
     }
-    serial_println!("[screenrec]  4/11 set quality OK");
+    serial_println!("[screenrec]  4/12 set quality OK");
 
     // Test 5: start recording.
     {
@@ -780,7 +789,7 @@ pub fn self_test() {
         // Clean up.
         let _ = stop_recording(id);
     }
-    serial_println!("[screenrec]  5/11 start recording OK");
+    serial_println!("[screenrec]  5/12 start recording OK");
 
     // Test 6: pause/resume.
     {
@@ -794,7 +803,7 @@ pub fn self_test() {
         assert!(is_recording());
         let _ = stop_recording(id);
     }
-    serial_println!("[screenrec]  6/11 pause/resume OK");
+    serial_println!("[screenrec]  6/12 pause/resume OK");
 
     // Test 7: stop recording.
     {
@@ -806,7 +815,7 @@ pub fn self_test() {
         assert_eq!(result.frame_count, 2);
         assert!(!is_recording());
     }
-    serial_println!("[screenrec]  7/11 stop recording OK");
+    serial_println!("[screenrec]  7/12 stop recording OK");
 
     // Test 8: countdown.
     {
@@ -820,7 +829,7 @@ pub fn self_test() {
         let _ = stop_recording(id);
         set_countdown(0).unwrap();
     }
-    serial_println!("[screenrec]  8/11 countdown OK");
+    serial_println!("[screenrec]  8/12 countdown OK");
 
     // Test 9: region capture.
     {
@@ -831,7 +840,7 @@ pub fn self_test() {
         assert!(set_region(0, 0, 0, 0).is_err());
         set_area(CaptureArea::FullScreen).unwrap();
     }
-    serial_println!("[screenrec]  9/11 region capture OK");
+    serial_println!("[screenrec]  9/12 region capture OK");
 
     // Test 10: remove recording.
     {
@@ -840,14 +849,55 @@ pub fn self_test() {
         remove_recording(id).unwrap();
         assert!(get_recording(id).is_err());
     }
-    serial_println!("[screenrec] 10/11 remove recording OK");
+    serial_println!("[screenrec] 10/12 remove recording OK");
 
     // Test 11: stats.
     {
         let (_, _, total, _, _, _) = stats();
         assert!(total > 0);
     }
-    serial_println!("[screenrec] 11/11 stats OK");
+    serial_println!("[screenrec] 11/12 stats OK");
+
+    // Test 12: non-UTF-8 output directories survive byte-exact (§261).
+    //
+    // A directory name may hold any byte except `/` and NUL. Under the old
+    // `String` typing, a byte with no UTF-8 spelling in the user's video
+    // folder was unrepresentable, so every recording would have been filed
+    // under a U+FFFD-bearing name — a directory that does not exist.
+    {
+        set_output_dir(Path::new(b"/home/user/V\xFFdeos/")).unwrap();
+        let cfg = get_config().unwrap();
+        assert_eq!(
+            cfg.output_dir.as_path().as_bytes(),
+            &b"/home/user/V\xFFdeos/"[..],
+            "the configured directory must round-trip byte-for-byte"
+        );
+
+        set_countdown(0).unwrap();
+        let id = start_recording().unwrap();
+        let rec = get_recording(id).unwrap();
+        let mut expected = b"/home/user/V\xFFdeos/recording_".to_vec();
+        expected.extend_from_slice(format!("{}.webm", id).as_bytes());
+        assert_eq!(
+            rec.file_path.as_path().as_bytes(),
+            &expected[..],
+            "the output path must carry the non-UTF-8 directory through, and \
+             must collapse the trailing slash rather than emit a doubled one"
+        );
+        let _ = stop_recording(id);
+
+        // The empty path names nothing; accepting it would file recordings
+        // under the bare relative name `recording_1.webm`.
+        assert!(set_output_dir(Path::new(b"")).is_err());
+    }
+    serial_println!("[screenrec] 12/12 non-UTF-8 output directory OK");
+
+    // Leave the module exactly as a fresh boot has it: uninitialised.
+    // `init_defaults()` is otherwise reachable only from `screenrec init`, and
+    // `with_state` does not lazily initialise, so `None` — not the defaults —
+    // is the untouched state. Without this the suite would leave a mutated
+    // config and its own spent recordings visible in `screenrec show`.
+    *STATE.lock() = None;
 
     serial_println!("[screenrec] All self-tests passed.");
 }

@@ -12194,7 +12194,7 @@ fn cmd_assoc(args: &str) {
                     shell_println!(
                         "  {:>3}  {} — {}{}{}",
                         app.priority,
-                        app.app_path,
+                        app.app_path.display(),
                         app.app_name,
                         default_marker,
                         user_marker
@@ -12252,7 +12252,11 @@ fn cmd_assoc(args: &str) {
 
             match associations::default_app_for_file(&path) {
                 Some(app) => {
-                    shell_println!("Open with: {} ({})", app.app_name, app.app_path);
+                    shell_println!(
+                        "Open with: {} ({})",
+                        app.app_name,
+                        app.app_path.display()
+                    );
                 }
                 None => {
                     shell_println!("Open with: (no application registered)");
@@ -14855,7 +14859,7 @@ fn cmd_fcompress(args: &str) {
                     };
                     shell_println!(
                         "    {} -> {} (ext: {})",
-                        r.path_prefix,
+                        r.path_prefix.display(),
                         r.algorithm.name(),
                         exts
                     );
@@ -14912,7 +14916,7 @@ fn cmd_fcompress(args: &str) {
                 };
 
                 match fcompress::add_rule(fcompress::CompressionRule {
-                    path_prefix: prefix.clone(),
+                    path_prefix: PathBuf::from(prefix.clone()),
                     extensions,
                     algorithm: algo,
                 }) {
@@ -14940,7 +14944,12 @@ fn cmd_fcompress(args: &str) {
                         } else {
                             r.extensions.join(",")
                         };
-                        shell_println!("{:<30} {:<8} {}", r.path_prefix, r.algorithm.name(), exts);
+                        shell_println!(
+                            "{:<30} {:<8} {}",
+                            r.path_prefix.display(),
+                            r.algorithm.name(),
+                            exts
+                        );
                     }
                 }
             }
@@ -15007,7 +15016,7 @@ fn cmd_fcompress(args: &str) {
                     // full table -- report it and stop rather than pressing on
                     // to measure a compression that would not have happened.
                     if let Err(e) = fcompress::add_rule(fcompress::CompressionRule {
-                        path_prefix: path.clone(),
+                        path_prefix: PathBuf::from(path.clone()),
                         extensions: Vec::new(),
                         algorithm: algo,
                     }) {
@@ -17415,7 +17424,11 @@ fn cmd_atime(args: &str) {
                 shell_println!();
                 shell_println!("  Per-mount overrides:");
                 for ovr in &overrides {
-                    shell_println!("    {:20} → {}", ovr.mount_path, ovr.policy.label());
+                    shell_println!(
+                        "    {:20} → {}",
+                        ovr.mount_path.display(),
+                        ovr.policy.label()
+                    );
                 }
             }
         }
@@ -17544,7 +17557,7 @@ fn cmd_prefetch(args: &str) {
                 shell_println!("  {:40} {}", "PATH", "ADVICE");
                 shell_println!("  {}", "-".repeat(52));
                 for (path, advice) in &entries {
-                    shell_println!("  {:40} {}", path, advice.label());
+                    shell_println!("  {:40} {}", path.display(), advice.label());
                 }
             }
         }
@@ -17793,7 +17806,7 @@ fn cmd_directio(args: &str) {
             } else {
                 shell_println!("Registered DIO paths ({}):", paths.len());
                 for p in &paths {
-                    shell_println!("  {}", p);
+                    shell_println!("  {}", p.display());
                 }
             }
         }
@@ -18094,7 +18107,7 @@ fn cmd_sparse(args: &str) {
                 shell_println!("{:40} {:>6}", "PATH", "HOLES");
                 shell_println!("{}", "-".repeat(48));
                 for (path, holes) in &files {
-                    shell_println!("{:40} {:>6}", path, holes);
+                    shell_println!("{:40} {:>6}", path.display(), holes);
                 }
             }
         }
@@ -18310,7 +18323,7 @@ fn cmd_fsfreeze(args: &str) {
                     let ttl_s = entry.time_until_thaw_ns / 1_000_000_000;
                     shell_println!(
                         "{:20} {:>5} {:>8} {:>8} {:>8} {}",
-                        entry.mountpoint,
+                        entry.mountpoint.display(),
                         entry.freeze_level,
                         dur_s,
                         ttl_s,
@@ -18407,7 +18420,7 @@ fn cmd_seal(args: &str) {
                 shell_println!("{:40} {}", "PATH", "SEALS");
                 shell_println!("{}", "-".repeat(60));
                 for (path, flags) in &files {
-                    shell_println!("{:40} {}", path, flags.label());
+                    shell_println!("{:40} {}", path.display(), flags.label());
                 }
             }
         }
@@ -19438,7 +19451,7 @@ fn cmd_contextmenu(args: &str) {
             shell_println!(
                 "Context menu for {:?} on '{}':",
                 menu.target,
-                menu.target_path
+                menu.target_path.display()
             );
             for item in &menu.items {
                 if item.separator {
@@ -20411,7 +20424,11 @@ fn cmd_openwith(args: &str) {
             let app_name = app_path.rsplit('/').next().unwrap_or(app_path);
             match crate::fs::openwith::open_with(&file, app_path, app_name, set_default) {
                 Ok(result) => {
-                    shell_println!("Opened {} with {}", result.file_path, result.app_path);
+                    shell_println!(
+                        "Opened {} with {}",
+                        result.file_path.display(),
+                        result.app_path.display()
+                    );
                     if result.default_changed {
                         shell_println!("  (set as default for this type)");
                     }
@@ -20440,7 +20457,7 @@ fn cmd_openwith(args: &str) {
                 } else {
                     shell_println!("Recent apps for {}:", mime);
                     for (path, name, count) in &entries {
-                        shell_println!("  {} ({}) — {} uses", name, path, count);
+                        shell_println!("  {} ({}) — {} uses", name, path.display(), count);
                     }
                 }
             } else {
@@ -20455,7 +20472,7 @@ fn cmd_openwith(args: &str) {
                 shell_println!("{:<30} {}", "Path", "Name");
                 shell_println!("{}", "-".repeat(50));
                 for (path, name) in &apps {
-                    shell_println!("{:<30} {}", path, name);
+                    shell_println!("{:<30} {}", path.display(), name);
                 }
             }
         }
@@ -21026,7 +21043,14 @@ fn cmd_queryable(args: &str) {
                 op,
                 value,
             };
-            let results = queryable::query(&[pred], queryable::QueryMode::All, root.as_deref());
+            // Transitional: `resolve_path` still yields a `String`. The
+            // `Path::new` wrapper collapses to `root.as_deref()` once §261
+            // reaches it.
+            let results = queryable::query(
+                &[pred],
+                queryable::QueryMode::All,
+                root.as_deref().map(Path::new),
+            );
             if results.is_empty() {
                 shell_println!("No matches");
             } else {
@@ -21047,7 +21071,7 @@ fn cmd_queryable(args: &str) {
                             alloc::format!("{}={}", k, d)
                         })
                         .collect();
-                    shell_println!("  {} ({})", r.path, vals.join(", "));
+                    shell_println!("  {} ({})", r.path.display(), vals.join(", "));
                 }
             }
         }
@@ -21247,7 +21271,7 @@ fn cmd_fcomment(args: &str) {
                 shell_println!("Usage: fcomment search <text> [root]");
                 return;
             }
-            let results = fcomment::search(needle, root.as_deref());
+            let results = fcomment::search(needle, root.as_ref().map(|r| Path::new(r)));
             if results.is_empty() {
                 shell_println!("No matches");
             } else {
@@ -21255,13 +21279,13 @@ fn cmd_fcomment(args: &str) {
                 for (path, comment) in &results {
                     let preview: String = comment.chars().take(60).collect();
                     let preview = preview.replace('\n', " ");
-                    shell_println!("  {} — {}", path, preview);
+                    shell_println!("  {} — {}", path.display(), preview);
                 }
             }
         }
         "list" | "" => {
             let root = parts.get(1).map(|p| resolve_path(p));
-            let all = fcomment::list(root.as_deref());
+            let all = fcomment::list(root.as_ref().map(|r| Path::new(r)));
             if all.is_empty() {
                 shell_println!("No commented files");
             } else {
@@ -21269,7 +21293,7 @@ fn cmd_fcomment(args: &str) {
                 for (path, comment) in &all {
                     let preview: String = comment.chars().take(50).collect();
                     let preview = preview.replace('\n', " ");
-                    shell_println!("  {:40} {}", path, preview);
+                    shell_println!("  {:40} {}", path.display(), preview);
                 }
             }
         }
@@ -21756,7 +21780,7 @@ fn cmd_appregistry(args: &str) {
                 id: String::from(id),
                 name: String::from(name),
                 description: String::new(),
-                exec_path: String::from(exec_path),
+                exec_path: PathBuf::from(exec_path),
                 icon: String::new(),
                 categories,
                 mime_types: Vec::new(),
@@ -21793,7 +21817,7 @@ fn cmd_appregistry(args: &str) {
                     shell_println!("ID:          {}", app.id);
                     shell_println!("Name:        {}", app.name);
                     shell_println!("Description: {}", app.description);
-                    shell_println!("Exec:        {}", app.exec_path);
+                    shell_println!("Exec:        {}", app.exec_path.display());
                     shell_println!("Icon:        {}", app.icon);
                     shell_println!("Version:     {}", app.version);
                     shell_println!(
@@ -21823,7 +21847,7 @@ fn cmd_appregistry(args: &str) {
                 shell_println!("{} applications:", apps.len());
                 shell_println!("{:32} {:20} {}", "ID", "NAME", "EXEC");
                 for app in &apps {
-                    shell_println!("{:32} {:20} {}", app.id, app.name, app.exec_path);
+                    shell_println!("{:32} {:20} {}", app.id, app.name, app.exec_path.display());
                 }
             }
         }
@@ -21847,7 +21871,7 @@ fn cmd_appregistry(args: &str) {
                     } else {
                         shell_println!("{} — {} apps:", cat.label(), apps.len());
                         for app in &apps {
-                            shell_println!("  {} — {}", app.name, app.exec_path);
+                            shell_println!("  {} — {}", app.name, app.exec_path.display());
                         }
                     }
                 }
@@ -21866,7 +21890,7 @@ fn cmd_appregistry(args: &str) {
             } else {
                 shell_println!("{} handlers for {}:", handlers.len(), mime);
                 for app in &handlers {
-                    shell_println!("  {} ({}) — {}", app.name, app.id, app.exec_path);
+                    shell_println!("  {} ({}) — {}", app.name, app.id, app.exec_path.display());
                 }
             }
         }
@@ -21878,7 +21902,7 @@ fn cmd_appregistry(args: &str) {
                 for (cat, entries) in &tree {
                     shell_println!("[{}]", cat.label());
                     for entry in entries {
-                        shell_println!("  {} — {}", entry.name, entry.exec_path);
+                        shell_println!("  {} — {}", entry.name, entry.exec_path.display());
                     }
                 }
             }
@@ -21911,7 +21935,7 @@ fn cmd_appregistry(args: &str) {
                     } else {
                         ""
                     };
-                    shell_println!("  {} — {}{}", app.name, app.exec_path, hidden);
+                    shell_println!("  {} — {}{}", app.name, app.exec_path.display(), hidden);
                 }
             }
         }
@@ -23103,11 +23127,11 @@ fn cmd_wallpaper(args: &str) {
             }
         }
         "next" => match wallpaper::slideshow_next() {
-            Ok(path) => shell_println!("Next: {}", path),
+            Ok(path) => shell_println!("Next: {}", path.display()),
             Err(e) => shell_println!("Error: {:?}", e),
         },
         "prev" => match wallpaper::slideshow_prev() {
-            Ok(path) => shell_println!("Previous: {}", path),
+            Ok(path) => shell_println!("Previous: {}", path.display()),
             Err(e) => shell_println!("Error: {:?}", e),
         },
         "pause" => {
@@ -23188,11 +23212,14 @@ fn cmd_wallpaper(args: &str) {
                 shell_println!("Usage: wallpaper monitor <id> <path>");
             } else if path.is_empty() {
                 let wp = wallpaper::wallpaper_for_monitor(mon);
-                shell_println!(
-                    "Monitor '{}': {}",
-                    mon,
-                    if wp.is_empty() { "(none)" } else { &wp }
-                );
+                // An unset override is the empty path, so the two arms cannot
+                // share a type -- print the placeholder separately rather
+                // than force the path through a lossy `to_str`.
+                if wp.is_empty() {
+                    shell_println!("Monitor '{}': (none)", mon);
+                } else {
+                    shell_println!("Monitor '{}': {}", mon, wp.display());
+                }
             } else {
                 match wallpaper::set_per_monitor(mon, &path) {
                     Ok(()) => shell_println!("Monitor '{}' wallpaper: {}", mon, path),
@@ -23231,7 +23258,13 @@ fn cmd_wallpaper(args: &str) {
                     shell_println!("No exclusions");
                 } else {
                     for (i, e) in cfg.exclusions.iter().enumerate() {
-                        shell_println!("  [{}] {}", i, e);
+                        // An exclusion is a raw path fragment; borrow `Path`'s
+                        // byte-preserving formatter rather than assume UTF-8.
+                        shell_println!(
+                            "  [{}] {}",
+                            i,
+                            crate::fs::path::Path::new(&e[..]).display()
+                        );
                     }
                 }
             } else {
@@ -23258,21 +23291,21 @@ fn cmd_wallpaper(args: &str) {
             } else {
                 shell_println!("{:40} {:12} {}", "PATH", "SOURCE", "TIME_NS");
                 for h in hist.iter().take(20) {
-                    shell_println!("{:40} {:12} {}", h.path, h.source, h.set_at_ns);
+                    shell_println!("{:40} {:12} {}", h.path.display(), h.source, h.set_at_ns);
                 }
             }
         }
         "show" | "info" => {
             let cfg = wallpaper::current();
             shell_println!("Kind:       {}", cfg.kind.label());
-            shell_println!(
-                "Image:      {}",
-                if cfg.image_path.is_empty() {
-                    "(none)"
-                } else {
-                    &cfg.image_path
-                }
-            );
+            // An unset image is the empty path, so the two arms cannot share
+            // a type -- print the placeholder separately rather than force
+            // the path through a lossy `to_str`.
+            if cfg.image_path.is_empty() {
+                shell_println!("Image:      (none)");
+            } else {
+                shell_println!("Image:      {}", cfg.image_path.display());
+            }
             shell_println!("Fit:        {}", cfg.fit_mode.label());
             shell_println!("BG Color:   {}", cfg.background_color);
             shell_println!("Offset:     ({:.2}, {:.2})", cfg.offset_x, cfg.offset_y);
@@ -23302,7 +23335,7 @@ fn cmd_wallpaper(args: &str) {
             if !cfg.per_monitor.is_empty() {
                 shell_println!("Per-monitor:");
                 for (mon, path) in &cfg.per_monitor {
-                    shell_println!("  {} → {}", mon, path);
+                    shell_println!("  {} → {}", mon, path.display());
                 }
             }
         }
@@ -24720,7 +24753,7 @@ fn cmd_screenshot(args: &str) {
                     s.width,
                     s.height,
                     s.format.label(),
-                    s.path
+                    s.path.display()
                 );
             } else {
                 shell_println!("Screenshot #{} not found", id);
@@ -24738,7 +24771,7 @@ fn cmd_screenshot(args: &str) {
                         s.kind.label(),
                         s.width,
                         s.height,
-                        s.path
+                        s.path.display()
                     );
                 }
             }
@@ -24756,7 +24789,7 @@ fn cmd_screenshot(args: &str) {
                     s.kind.label(),
                     s.width,
                     s.height,
-                    s.path
+                    s.path.display()
                 );
             }
         }
@@ -24777,10 +24810,33 @@ fn cmd_screenshot(args: &str) {
         "dir" | "savedir" => {
             let dir = parts.get(1).copied().unwrap_or("");
             if dir.is_empty() {
-                shell_println!("Save dir: {}", screenshot::config().save_dir);
+                shell_println!("Save dir: {}", screenshot::config().save_dir.display());
             } else {
                 match screenshot::set_save_dir(dir) {
                     Ok(()) => shell_println!("Save dir: {}", dir),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            }
+        }
+        "pattern" | "name" => {
+            let pat = parts.get(1).copied().unwrap_or("");
+            if parts.len() < 2 {
+                let cfg = screenshot::config();
+                if cfg.filename_pattern.is_empty() {
+                    shell_println!("Filename pattern: screenshot (default)");
+                } else {
+                    shell_println!(
+                        "Filename pattern: {}",
+                        crate::fs::path::Path::new(&cfg.filename_pattern[..]).display()
+                    );
+                }
+            } else {
+                match screenshot::set_filename_pattern(pat) {
+                    // An explicit empty argument is how the default is restored.
+                    Ok(()) if pat.is_empty() => {
+                        shell_println!("Filename pattern: screenshot (default)");
+                    }
+                    Ok(()) => shell_println!("Filename pattern: {}", pat),
                     Err(e) => shell_println!("Error: {:?}", e),
                 }
             }
@@ -24873,7 +24929,7 @@ fn cmd_screenshot(args: &str) {
         }
         _ => {
             shell_println!(
-                "screenshot: full/window/region/monitor/get/history/recent/delete/clear/dir/format/quality/cursor/sound/delay/clipboard/init/test/stats/reset"
+                "screenshot: full/window/region/monitor/get/history/recent/delete/clear/dir/pattern/format/quality/cursor/sound/delay/clipboard/init/test/stats/reset"
             );
         }
     }
@@ -27128,7 +27184,7 @@ fn cmd_partmgr(args: &str) {
                         if p.mount_point.is_empty() {
                             String::new()
                         } else {
-                            alloc::format!(" → {}", p.mount_point)
+                            alloc::format!(" → {}", p.mount_point.display())
                         }
                     );
                 }
@@ -27592,7 +27648,7 @@ fn cmd_useracct(args: &str) {
                             u.username,
                             t,
                             s,
-                            u.home_dir
+                            u.home_dir.display()
                         );
                     }
                 }
@@ -27668,16 +27724,13 @@ fn cmd_useracct(args: &str) {
                             shell_println!("  Display name: {}", u.display_name);
                             shell_println!("  Type:         {}", t);
                             shell_println!("  Login method: {}", m);
-                            shell_println!("  Home:         {}", u.home_dir);
-                            shell_println!("  Shell:        {}", u.shell);
-                            shell_println!(
-                                "  Avatar:       {}",
-                                if u.avatar.is_empty() {
-                                    "(default)"
-                                } else {
-                                    &u.avatar
-                                }
-                            );
+                            shell_println!("  Home:         {}", u.home_dir.display());
+                            shell_println!("  Shell:        {}", u.shell.display());
+                            if u.avatar.is_empty() {
+                                shell_println!("  Avatar:       (default)");
+                            } else {
+                                shell_println!("  Avatar:       {}", u.avatar.display());
+                            }
                             shell_println!("  Auto-login:   {}", u.auto_login);
                             shell_println!("  Enabled:      {}", u.enabled);
                             shell_println!("  Locked:       {}", u.locked);
@@ -27857,22 +27910,31 @@ fn cmd_useracct(args: &str) {
             }
             case(&parts);
         }
-        "avatar" => {
+        "avatar" | "home" | "shell" => {
             #[inline(never)]
-            fn case(parts: &[&str]) {
+            fn case(sub: &str, parts: &[&str]) {
                 if parts.len() < 3 {
-                    shell_println!("Usage: useracct avatar <uid> <path>");
-                } else {
-                    match parts[1].parse::<u64>() {
-                        Ok(uid) => match useracct::set_avatar(uid, parts[2]) {
-                            Ok(()) => shell_println!("Set avatar for uid={}", uid),
-                            Err(e) => shell_println!("Error: {:?}", e),
-                        },
-                        Err(_) => shell_println!("Invalid uid"),
-                    }
+                    shell_println!("Usage: useracct {} <uid> <path>", sub);
+                    return;
+                }
+                let Ok(uid) = parts[1].parse::<u64>() else {
+                    shell_println!("Invalid uid");
+                    return;
+                };
+                // Rejoin the tail so a path containing spaces survives the
+                // whitespace split that produced `parts`.
+                let path = parts[2..].join(" ");
+                let r = match sub {
+                    "home" => useracct::set_home_dir(uid, &path),
+                    "shell" => useracct::set_shell(uid, &path),
+                    _ => useracct::set_avatar(uid, &path),
+                };
+                match r {
+                    Ok(()) => shell_println!("Set {} for uid={}", sub, uid),
+                    Err(e) => shell_println!("Error: {:?}", e),
                 }
             }
-            case(&parts);
+            case(sub, &parts);
         }
         "autologin" => {
             #[inline(never)]
@@ -28024,7 +28086,9 @@ fn cmd_useracct(args: &str) {
                 shell_println!("  unlock <uid>     Unlock account");
                 shell_println!("  type <uid> <t>   Set account type");
                 shell_println!("  display <uid> <n> Set display name");
-                shell_println!("  avatar <uid> <p> Set avatar path");
+                shell_println!("  avatar <uid> <p> Set avatar path ('' = default)");
+                shell_println!("  home <uid> <p>   Set home directory (absolute)");
+                shell_println!("  shell <uid> <p>  Set login shell (absolute)");
                 shell_println!("  autologin <uid> <on|off>  Toggle auto-login");
                 shell_println!("  groups           List groups");
                 shell_println!("  addgroup <name>  Create group");
@@ -28108,9 +28172,9 @@ fn cmd_progmgr(args: &str) {
                             };
                             shell_println!("Program: {} ({})", p.name, p.app_id);
                             shell_println!("  Version:    {}", p.version);
-                            shell_println!("  Install:    {}", p.install_dir);
-                            shell_println!("  Settings:   {}", p.settings_dir);
-                            shell_println!("  Data:       {}", p.data_dir);
+                            shell_println!("  Install:    {}", p.install_dir.display());
+                            shell_println!("  Settings:   {}", p.settings_dir.display());
+                            shell_println!("  Data:       {}", p.data_dir.display());
                             shell_println!("  Priority:   {}", prio);
                             shell_println!("  Caps:       {}", p.capabilities.len());
                             shell_println!("  Notifs:     {}", p.notifications.len());
@@ -28529,7 +28593,7 @@ fn cmd_progmgr(args: &str) {
                     shell_println!("Usage: progmgr wipedata <app_id>");
                 } else {
                     match progmgr::wipe_data(parts[1]) {
-                        Ok(dir) => shell_println!("Wiped data directory: {}", dir),
+                        Ok(dir) => shell_println!("Wiped data directory: {}", dir.display()),
                         Err(e) => shell_println!("Error: {:?}", e),
                     }
                 }
@@ -28543,7 +28607,9 @@ fn cmd_progmgr(args: &str) {
                     shell_println!("Usage: progmgr wipesettings <app_id>");
                 } else {
                     match progmgr::wipe_settings(parts[1]) {
-                        Ok(dir) => shell_println!("Wiped settings directory: {}", dir),
+                        Ok(dir) => {
+                            shell_println!("Wiped settings directory: {}", dir.display());
+                        }
                         Err(e) => shell_println!("Error: {:?}", e),
                     }
                 }
@@ -29287,8 +29353,8 @@ fn cmd_bootcfg(args: &str) {
             shell_println!("Console:    {}", console);
             shell_println!("Activity:   {}", cfg.show_boot_activity);
             shell_println!("Secure Boot:{}", cfg.secure_boot);
-            shell_println!("ESP:        {}", cfg.esp_path);
-            shell_println!("GRUB cfg:   {}", cfg.grub_config_path);
+            shell_println!("ESP:        {}", cfg.esp_path.display());
+            shell_println!("GRUB cfg:   {}", cfg.grub_config_path.display());
             shell_println!("GFX mode:   {}", cfg.gfx_mode);
             shell_println!("Dual boot:  {}", cfg.dual_boot);
         }
@@ -30136,8 +30202,8 @@ fn cmd_certmgr(args: &str) {
                     );
                     shell_println!("Auto-renew:  {}", c.auto_renew);
                     shell_println!("Renewals:    {}", c.renewal_count);
-                    shell_println!("Cert path:   {}", c.cert_path);
-                    shell_println!("Key path:    {}", c.key_path);
+                    shell_println!("Cert path:   {}", c.cert_path.display());
+                    shell_println!("Key path:    {}", c.key_path.display());
                     shell_println!("Pinned:      {}", c.pinned);
                 }
                 Err(e) => shell_println!("Error: {:?}", e),
@@ -33007,7 +33073,7 @@ fn cmd_vpn(args: &str) {
                     shell_println!(
                         "  {} ({}) — {} [{}]",
                         t.app_name,
-                        t.app_path,
+                        t.app_path.display(),
                         if t.connected {
                             "connected"
                         } else {
@@ -33035,9 +33101,9 @@ fn cmd_vpn(args: &str) {
                     shell_println!("Transport:     {:?}", p.transport);
                     shell_println!("Auth:          {:?}", p.auth);
                     shell_println!("Username:      {}", p.username);
-                    shell_println!("Cert:          {}", p.cert_path);
-                    shell_println!("Key:           {}", p.key_path);
-                    shell_println!("CA:            {}", p.ca_path);
+                    shell_println!("Cert:          {}", p.cert_path.display());
+                    shell_println!("Key:           {}", p.key_path.display());
+                    shell_println!("CA:            {}", p.ca_path.display());
                     shell_println!("DNS:           {:?}", p.dns_servers);
                     shell_println!("Route all:     {}", p.route_all);
                     shell_println!("Kill switch:   {}", p.kill_switch);
@@ -33598,14 +33664,14 @@ fn cmd_loginscreen(args: &str) {
         "show" => {
             let cfg = loginscreen::config();
             shell_println!("Background:    {:?}", cfg.background_mode);
-            shell_println!(
-                "Image:         {}",
-                if cfg.background_path.is_empty() {
-                    "-"
-                } else {
-                    &cfg.background_path
-                }
-            );
+            // An unset background is the empty path, so the two arms cannot
+            // share a type -- print the placeholder separately rather than
+            // force the path through a lossy `to_str`.
+            if cfg.background_path.is_empty() {
+                shell_println!("Image:         -");
+            } else {
+                shell_println!("Image:         {}", cfg.background_path.display());
+            }
             shell_println!("Color:         #{}", cfg.background_color);
             shell_println!("Synced:        {}", cfg.synced_with_desktop);
             shell_println!("Fit:           {:?}", cfg.fit_mode);
@@ -33627,14 +33693,11 @@ fn cmd_loginscreen(args: &str) {
                     &cfg.message
                 }
             );
-            shell_println!(
-                "Logo:          {}",
-                if cfg.logo_path.is_empty() {
-                    "-"
-                } else {
-                    &cfg.logo_path
-                }
-            );
+            if cfg.logo_path.is_empty() {
+                shell_println!("Logo:          -");
+            } else {
+                shell_println!("Logo:          {}", cfg.logo_path.display());
+            }
         }
         "bg" => {
             let mode = match parts.get(1).copied() {
@@ -34172,8 +34235,8 @@ fn cmd_kernelbuild(args: &str) {
                         shell_println!("ID:          {}", c.id);
                         shell_println!("Name:        {}", c.name);
                         shell_println!("Type:        {:?}", c.comp_type);
-                        shell_println!("Source:      {}", c.source_dir);
-                        shell_println!("Output:      {}", c.output_path);
+                        shell_println!("Source:      {}", c.source_dir.display());
+                        shell_println!("Output:      {}", c.output_path.display());
                         shell_println!("Status:      {:?}", c.status);
                         shell_println!("Opt level:   {:?}", c.opt_level);
                         shell_println!("Builds:      {}", c.build_count);
@@ -35332,8 +35395,8 @@ fn cmd_sysinfo(args: &str) {
                     };
                     shell_println!(
                         "{} on {} ({}) {} GiB / {} GiB ({}% used) [{}]{}",
-                        d.device,
-                        d.mount_point,
+                        d.device.display(),
+                        d.mount_point.display(),
                         d.fs_type,
                         cap_gib - free_gib,
                         cap_gib,
@@ -35622,8 +35685,15 @@ fn cmd_perfmon(args: &str) {
             } else {
                 match parts[1].parse::<u32>() {
                     Ok(v) => {
-                        perfmon::set_interval(v);
-                        shell_println!("Interval set to {} ms", v.clamp(100, 60000));
+                        // Report what was stored, not what was asked for: the
+                        // setter clamps, and restating its range here was a
+                        // second copy of that policy free to drift from it.
+                        let effective = perfmon::set_interval(v);
+                        if effective == v {
+                            shell_println!("Interval set to {} ms", effective);
+                        } else {
+                            shell_println!("Interval set to {} ms (clamped from {})", effective, v);
+                        }
                     }
                     Err(_) => shell_println!("Invalid value"),
                 }
@@ -38109,7 +38179,7 @@ fn cmd_screenrec(args: &str) {
                     if cfg.show_cursor { "shown" } else { "hidden" }
                 );
                 shell_println!("  Countdown: {}s", cfg.countdown_seconds);
-                shell_println!("  Output:    {}", cfg.output_dir);
+                shell_println!("  Output:    {}", cfg.output_dir.display());
             }
             shell_println!("  Recordings: {} ({} active)", count, active);
             shell_println!(
@@ -38130,7 +38200,7 @@ fn cmd_screenrec(args: &str) {
                     return;
                 };
                 shell_println!("Recording #{} started ({}).", id, rec.state.label());
-                shell_println!("  File: {}", rec.file_path);
+                shell_println!("  File: {}", rec.file_path.display());
                 if rec.state == screenrec::RecordingState::Countdown {
                     let _ = screenrec::begin_capture(id);
                     shell_println!("  Capture begun.");
@@ -38149,7 +38219,7 @@ fn cmd_screenrec(args: &str) {
                                 screenrec::format_duration(rec.duration_seconds)
                             );
                             shell_println!("  Frames:   {}", rec.frame_count);
-                            shell_println!("  File:     {}", rec.file_path);
+                            shell_println!("  File:     {}", rec.file_path.display());
                         }
                         Err(e) => shell_println!("Error: {:?}", e),
                     }
@@ -38206,7 +38276,7 @@ fn cmd_screenrec(args: &str) {
                         "  #{} [{}] {} — {} frames, {}",
                         r.id,
                         r.state.label(),
-                        r.file_path,
+                        r.file_path.display(),
                         r.frame_count,
                         screenrec::format_duration(r.duration_seconds)
                     );
@@ -40309,7 +40379,7 @@ fn cmd_fileshare(args: &str) {
                         "{:>4} {:<16} {:<30} {:>5} {:>10} {:>7}",
                         s.id,
                         s.name,
-                        s.path,
+                        s.path.display(),
                         s.protocol.label(),
                         s.access.label(),
                         s.enabled
@@ -40419,7 +40489,7 @@ fn cmd_fileshare(args: &str) {
                         r.id,
                         r.host,
                         r.share_name,
-                        r.mount_point,
+                        r.mount_point.display(),
                         r.protocol.label(),
                         r.status.label(),
                         auto
@@ -41881,7 +41951,7 @@ fn cmd_fileversion(args: &str) {
             };
             match fileversion::get_version(id) {
                 Ok(v) => {
-                    shell_println!("Version #{} of {}", v.id, v.path);
+                    shell_println!("Version #{} of {}", v.id, v.path.display());
                     shell_println!("  Version:  v{}", v.version);
                     shell_println!("  Size:     {} bytes", v.size);
                     shell_println!("  Checksum: 0x{:016x}", v.checksum);
@@ -41927,7 +41997,7 @@ fn cmd_fileversion(args: &str) {
                 Ok(v) => shell_println!(
                     "Restored version {} of {} ({} bytes)",
                     v.version,
-                    v.path,
+                    v.path.display(),
                     v.size
                 ),
                 Err(e) => shell_println!("Error: {:?}", e),
@@ -41967,7 +42037,7 @@ fn cmd_fileversion(args: &str) {
                     shell_println!("No watched paths.");
                 } else {
                     for w in &watches {
-                        shell_println!("  {} — {}", w.path, w.policy.label());
+                        shell_println!("  {} — {}", w.path.display(), w.policy.label());
                     }
                 }
             } else if parts.len() >= 3 && parts[1] == "add" {
@@ -42486,7 +42556,7 @@ fn cmd_diskencrypt(args: &str) {
                         "{:<4} {:<12} {:<14} {:<16} {:<10} {}",
                         v.id,
                         v.label,
-                        v.device,
+                        v.device.display(),
                         v.algorithm.label(),
                         v.status.label(),
                         v.key_slots.len()
@@ -42509,18 +42579,18 @@ fn cmd_diskencrypt(args: &str) {
             match diskencrypt::get_volume(id) {
                 Ok(v) => {
                     shell_println!("Volume {}: {}", v.id, v.label);
-                    shell_println!("  Device:    {}", v.device);
+                    shell_println!("  Device:    {}", v.device.display());
                     shell_println!("  Algorithm: {}", v.algorithm.label());
                     shell_println!("  Status:    {}", v.status.label());
                     shell_println!("  Size:      {} bytes", v.size_bytes);
-                    shell_println!(
-                        "  Mount:     {}",
-                        if v.mount_point.is_empty() {
-                            "-"
-                        } else {
-                            &v.mount_point
-                        }
-                    );
+                    // An unset mount point is the empty path, so the two arms
+                    // cannot share a type -- print the placeholder separately
+                    // rather than force one branch through a lossy `to_str`.
+                    if v.mount_point.as_path().as_bytes().is_empty() {
+                        shell_println!("  Mount:     -");
+                    } else {
+                        shell_println!("  Mount:     {}", v.mount_point.display());
+                    }
                     shell_println!("  Recovery:  {}", v.has_recovery_key);
                     shell_println!("  TPM:       {}", v.tpm_sealed);
                     if !v.key_slots.is_empty() {
@@ -44435,7 +44505,7 @@ fn cmd_cloudsync(args: &str) {
                         a.id,
                         a.provider.label(),
                         a.account_name,
-                        a.local_path,
+                        a.local_path.display(),
                         if a.enabled { "yes" } else { "no" }
                     );
                 }
@@ -44490,7 +44560,7 @@ fn cmd_cloudsync(args: &str) {
                     shell_println!(
                         "  [acct #{}] {} (local: {} B, remote: {} B)",
                         c.account_id,
-                        c.path,
+                        c.path.display(),
                         c.local_size,
                         c.remote_size
                     );
@@ -44501,7 +44571,9 @@ fn cmd_cloudsync(args: &str) {
             let excludes = cloudsync::list_excludes();
             shell_println!("Excluded patterns ({}):", excludes.len());
             for p in &excludes {
-                shell_println!("  {}", p);
+                // Patterns are raw bytes under §261; borrow `Path`'s formatter,
+                // which escapes what has no UTF-8 spelling instead of dropping it.
+                shell_println!("  {}", crate::fs::path::Path::new(&p[..]).display());
             }
         }
         "stats" => {
@@ -52321,8 +52393,8 @@ fn cmd_netshare(args: &str) {
                         s.id,
                         s.protocol.label(),
                         s.host,
-                        s.remote_path,
-                        s.mount_point,
+                        s.remote_path.display(),
+                        s.mount_point.display(),
                         s.state.label()
                     );
                 }
@@ -52374,8 +52446,8 @@ fn cmd_netshare(args: &str) {
                             shell_println!("Share #{}", s.id);
                             shell_println!("  Protocol:  {}", s.protocol.label());
                             shell_println!("  Host:      {}", s.host);
-                            shell_println!("  Remote:    {}", s.remote_path);
-                            shell_println!("  Mount:     {}", s.mount_point);
+                            shell_println!("  Remote:    {}", s.remote_path.display());
+                            shell_println!("  Mount:     {}", s.mount_point.display());
                             shell_println!("  User:      {}", s.username);
                             shell_println!("  State:     {}", s.state.label());
                             shell_println!("  Auto-mount: {}", s.auto_mount);
@@ -52405,8 +52477,8 @@ fn cmd_netshare(args: &str) {
                         "  [{}] {}:{} → {}",
                         s.id,
                         s.host,
-                        s.remote_path,
-                        s.mount_point
+                        s.remote_path.display(),
+                        s.mount_point.display()
                     );
                 }
             }
@@ -58928,8 +59000,8 @@ fn cmd_filevault(args: &str) {
                         v.name,
                         v.state.label(),
                         v.cipher.label(),
-                        v.path,
-                        v.mount_point
+                        v.path.display(),
+                        v.mount_point.display()
                     );
                     shell_println!("    Auto-lock: {}s", v.auto_lock_secs);
                 }
@@ -60558,6 +60630,10 @@ fn cmd_pinnedapps(args: &str) {
                             group,
                             p.launch_count
                         );
+                        shell_println!("      exec: {}", p.exec_path.display());
+                        if !p.icon_path.is_empty() {
+                            shell_println!("      icon: {}", p.icon_path.display());
+                        }
                     }
                 }
             }
@@ -60629,6 +60705,38 @@ fn cmd_pinnedapps(args: &str) {
                 None => shell_println!("Usage: pinnedapps move <location> <app> <position>"),
             }
         }
+        "icon" | "exec" => {
+            let loc_str = parts.get(1).copied().unwrap_or("");
+            let app = parts.get(2).copied().unwrap_or("");
+            // The rest of the line, not just one token: a path may legally
+            // contain spaces (our only forbidden bytes are `/` and NUL).
+            let path = parts.get(3..).map(|s| s.join(" ")).unwrap_or_default();
+            let loc = match loc_str {
+                "taskbar" | "tb" => pinnedapps::PinLocation::Taskbar,
+                "start" | "sm" => pinnedapps::PinLocation::StartMenu,
+                "desktop" | "dt" => pinnedapps::PinLocation::Desktop,
+                _ => {
+                    shell_println!(
+                        "Usage: pinnedapps {} <taskbar|start|desktop> <app> <path>",
+                        sub
+                    );
+                    return;
+                }
+            };
+            if app.is_empty() {
+                shell_println!("Usage: pinnedapps {} <location> <app> <path>", sub);
+                return;
+            }
+            let res = if sub == "icon" {
+                pinnedapps::set_icon(loc, app, &path)
+            } else {
+                pinnedapps::set_exec(loc, app, &path)
+            };
+            match res {
+                Ok(()) => shell_println!("'{}' {} set to '{}'.", app, sub, path),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
         "launch" => {
             let app = parts.get(1).copied().unwrap_or("");
             if app.is_empty() {
@@ -60656,6 +60764,8 @@ fn cmd_pinnedapps(args: &str) {
             shell_println!("  pin <loc> <app> [name] Pin app");
             shell_println!("  unpin <loc> <app>      Unpin app");
             shell_println!("  move <loc> <app> <pos>  Reorder");
+            shell_println!("  exec <loc> <app> <path> Set executable");
+            shell_println!("  icon <loc> <app> <path> Set icon (empty clears)");
             shell_println!("  launch <app>           Record launch");
             shell_println!("  Locations: taskbar(tb), start(sm), desktop(dt)");
             shell_println!("  stats / test / init");
@@ -69469,12 +69579,38 @@ fn cmd_userprofile(args: &str) {
                     shell_println!("User #{}: {}", p.id, p.username);
                     shell_println!("  Display: {}", p.display_name);
                     shell_println!("  Type: {}", p.account_type.label());
-                    shell_println!("  Home: {}", p.home_dir);
-                    shell_println!("  Shell: {}", p.shell);
+                    shell_println!("  Home: {}", p.home_dir.display());
+                    shell_println!("  Shell: {}", p.shell.display());
+                    if let Some(av) = p.avatar_path.as_deref() {
+                        shell_println!("  Avatar: {}", av.display());
+                    }
                     shell_println!("  Logins: {}", p.login_count);
                     shell_println!("  Active: {}, Locked: {}", p.is_active, p.is_locked);
                 }
                 None => shell_println!("Profile {} not found", id),
+            }
+        }
+        "home" | "shell" | "avatar" => {
+            let id: u32 = match parts.get(1).and_then(|s| s.parse().ok()) {
+                Some(v) => v,
+                None => {
+                    shell_println!("Usage: userprofile {} <id> <path>", sub);
+                    return;
+                }
+            };
+            // The rest of the line, not one token: a path may contain spaces.
+            let path = parts.get(2..).map(|s| s.join(" ")).unwrap_or_default();
+            let res = match sub {
+                "home" => userprofile::set_home_dir(id, &path),
+                "shell" => userprofile::set_shell(id, &path),
+                _ => userprofile::set_avatar(id, &path),
+            };
+            match res {
+                Ok(()) if path.is_empty() => {
+                    shell_println!("Cleared {} for profile {}", sub, id);
+                }
+                Ok(()) => shell_println!("Profile {} {} set to '{}'", id, sub, path),
+                Err(e) => shell_println!("Error: {:?}", e),
             }
         }
         "stats" => {
@@ -69494,8 +69630,9 @@ fn cmd_userprofile(args: &str) {
         "test" => userprofile::self_test(),
         _ => {
             shell_println!(
-                "Usage: userprofile <list|create|delete|switch|lock|unlock|rename|whoami|info|stats|init|test>"
+                "Usage: userprofile <list|create|delete|switch|lock|unlock|rename|whoami|info|home|shell|avatar|stats|init|test>"
             );
+            shell_println!("  home|shell|avatar <id> <path>   Set path (avatar: empty clears)");
             shell_println!("Aliases: uprof");
         }
     }
@@ -76236,7 +76373,7 @@ fn cmd_inodestat(args: &str) {
             for f in inodestat::fs_stats() {
                 shell_println!(
                     "{} ({}): active={} alloc={} free={} evict={} dirty={}",
-                    f.mount_point,
+                    f.mount_point.display(),
                     f.fs_type.label(),
                     f.active,
                     f.allocated,
@@ -82124,7 +82261,11 @@ fn cmd_fflags(args: &str) {
             } else {
                 shell_println!("{} flagged files:", flagged.len());
                 for (path, flags) in &flagged {
-                    shell_println!("  {:40} {}", path, immutable::flags_to_string(*flags));
+                    shell_println!(
+                        "  {:40} {}",
+                        path.display(),
+                        immutable::flags_to_string(*flags)
+                    );
                 }
             }
         }
@@ -82761,7 +82902,7 @@ fn cmd_viewstate(args: &str) {
                 for (path, settings) in &saved {
                     shell_println!(
                         "{:40} {:12} {:10} {:6}",
-                        path,
+                        path.display(),
                         settings.mode.label(),
                         settings.sort.column,
                         if settings.sort.ascending { "yes" } else { "no" }

@@ -4123,7 +4123,7 @@ fn gen_fcompress() -> Vec<u8> {
         };
         out.push_str(&format!(
             "    {} -> {} (ext: {})\n",
-            r.path_prefix,
+            r.path_prefix.display(),
             r.algorithm.name(),
             exts
         ));
@@ -4646,7 +4646,7 @@ fn gen_atime() -> Vec<u8> {
         for ovr in &overrides {
             out.push_str(&format!(
                 "  {:20} → {}\n",
-                ovr.mount_path,
+                ovr.mount_path.display(),
                 ovr.policy.label()
             ));
         }
@@ -4677,7 +4677,7 @@ fn gen_prefetch() -> Vec<u8> {
     } else {
         out.push_str(&format!("{:40} {}\n", "PATH", "ADVICE"));
         for (path, advice) in &entries {
-            out.push_str(&format!("{:40} {}\n", path, advice.label()));
+            out.push_str(&format!("{:40} {}\n", path.display(), advice.label()));
         }
     }
 
@@ -4752,7 +4752,7 @@ fn gen_directio() -> Vec<u8> {
     } else {
         out.push_str("Registered paths:\n");
         for p in &paths {
-            out.push_str(&format!("  {}\n", p));
+            out.push_str(&format!("  {}\n", p.display()));
         }
     }
 
@@ -4937,7 +4937,7 @@ fn gen_sparse() -> Vec<u8> {
     } else {
         out.push_str(&format!("{:40} {:>6}\n", "PATH", "HOLES"));
         for (path, holes) in &files {
-            out.push_str(&format!("{:40} {:>6}\n", path, holes));
+            out.push_str(&format!("{:40} {:>6}\n", path.display(), holes));
         }
     }
 
@@ -4995,7 +4995,7 @@ fn gen_freeze() -> Vec<u8> {
             let until_s = entry.time_until_thaw_ns / 1_000_000_000;
             out.push_str(&format!(
                 "{:20} {:>5} {:>10}s {:>10}s {:>8} {}\n",
-                entry.mountpoint,
+                entry.mountpoint.display(),
                 entry.freeze_level,
                 dur_s,
                 until_s,
@@ -5028,7 +5028,7 @@ fn gen_sealing() -> Vec<u8> {
     } else {
         out.push_str(&format!("{:40} {}\n", "PATH", "SEALS"));
         for (path, flags) in &files {
-            out.push_str(&format!("{:40} {}\n", path, flags.label()));
+            out.push_str(&format!("{:40} {}\n", path.display(), flags.label()));
         }
     }
 
@@ -5475,7 +5475,7 @@ fn gen_immutable() -> Vec<u8> {
         for (path, flags) in &flagged_files {
             out.push_str(&format!(
                 "{:40} {}\n",
-                path,
+                path.display(),
                 super::immutable::flags_to_string(*flags)
             ));
         }
@@ -5503,7 +5503,12 @@ fn gen_fcomment() -> Vec<u8> {
         for (path, comment) in &all {
             let preview: String = comment.chars().take(40).collect();
             let preview = preview.replace('\n', " ");
-            out.push_str(&format!("{:40} {:8} {}\n", path, comment.len(), preview));
+            out.push_str(&format!(
+                "{:40} {:8} {}\n",
+                path.display(),
+                comment.len(),
+                preview
+            ));
         }
     }
 
@@ -5615,7 +5620,11 @@ fn gen_appregistry() -> Vec<u8> {
         for (cat, entries) in &tree {
             out.push_str(&format!("[{}]\n", cat.label()));
             for entry in entries {
-                out.push_str(&format!("  {} ({})\n", entry.name, entry.exec_path));
+                out.push_str(&format!(
+                    "  {} ({})\n",
+                    entry.name,
+                    entry.exec_path.display()
+                ));
             }
         }
     }
@@ -5992,14 +6001,14 @@ fn gen_wallpaper() -> Vec<u8> {
     out.push_str("Desktop Wallpaper\n");
     out.push_str("=================\n\n");
     out.push_str(&format!("Kind:       {}\n", cfg.kind.label()));
-    out.push_str(&format!(
-        "Image:      {}\n",
-        if cfg.image_path.is_empty() {
-            "(none)"
-        } else {
-            &cfg.image_path
-        }
-    ));
+    // An unset image is the empty path, so the two arms cannot share a type
+    // -- print the placeholder separately rather than force the path through
+    // a lossy `to_str`.
+    if cfg.image_path.is_empty() {
+        out.push_str("Image:      (none)\n");
+    } else {
+        out.push_str(&format!("Image:      {}\n", cfg.image_path.display()));
+    }
     out.push_str(&format!("Fit:        {}\n", cfg.fit_mode.label()));
     out.push_str(&format!("BG Color:   {}\n", cfg.background_color));
     out.push_str(&format!(
@@ -6271,14 +6280,14 @@ fn gen_screenshot() -> Vec<u8> {
     out.push_str("==========\n\n");
     out.push_str(&format!("History:    {}\n", hc));
     out.push_str(&format!("Captures:   {}\n", cc));
-    out.push_str(&format!(
-        "Save dir:   {}\n",
-        if cfg.save_dir.is_empty() {
-            "(default)"
-        } else {
-            &cfg.save_dir
-        }
-    ));
+    // An unset save directory is the empty path, so the two arms cannot share a
+    // type -- print the placeholder separately rather than force the path
+    // through a lossy `to_str`.
+    if cfg.save_dir.is_empty() {
+        out.push_str("Save dir:   (default)\n");
+    } else {
+        out.push_str(&format!("Save dir:   {}\n", cfg.save_dir.display()));
+    }
     out.push_str(&format!("Format:     {}\n", cfg.format.label()));
     out.push_str(&format!("Cursor:     {}\n", cfg.include_cursor));
     out.push_str(&format!("Clipboard:  {}\n", cfg.copy_to_clipboard));
@@ -6292,7 +6301,7 @@ fn gen_screenshot() -> Vec<u8> {
             s.kind.label(),
             s.width,
             s.height,
-            s.path
+            s.path.display()
         ));
     }
 
@@ -6689,7 +6698,7 @@ fn gen_partmgr() -> Vec<u8> {
                 if p.mount_point.is_empty() {
                     String::new()
                 } else {
-                    alloc::format!(" → {}", p.mount_point)
+                    alloc::format!(" → {}", p.mount_point.display())
                 }
             ));
         }
@@ -6960,7 +6969,11 @@ fn gen_bootcfg() -> Vec<u8> {
             let hid = if e.hidden { " (hidden)" } else { "" };
             out.push_str(&format!(
                 "  #{} {} — {}{}{}\n",
-                e.position, e.name, e.kernel_path, def, hid
+                e.position,
+                e.name,
+                e.kernel_path.display(),
+                def,
+                hid
             ));
         }
     }
@@ -7901,7 +7914,7 @@ fn gen_screenrec() -> Vec<u8> {
         out.push_str(&format!("quality: {}\n", cfg.quality.label()));
         out.push_str(&format!("fps: {}\n", cfg.fps));
         out.push_str(&format!("cursor: {}\n", cfg.show_cursor));
-        out.push_str(&format!("output_dir: {}\n", cfg.output_dir));
+        out.push_str(&format!("output_dir: {}\n", cfg.output_dir.display()));
     }
 
     out.into_bytes()
@@ -8182,7 +8195,7 @@ fn gen_fileshare() -> Vec<u8> {
             "{}: {} → {} [{}] {}{}\n",
             s.id,
             s.name,
-            s.path,
+            s.path.display(),
             s.protocol.label(),
             s.access.label(),
             en
@@ -8342,7 +8355,7 @@ fn gen_fileversion() -> Vec<u8> {
 
     let watches = super::fileversion::list_watches();
     for w in &watches {
-        out.push_str(&format!("{}: {}\n", w.path, w.policy.label()));
+        out.push_str(&format!("{}: {}\n", w.path.display(), w.policy.label()));
     }
 
     out.into_bytes()
@@ -8430,7 +8443,7 @@ fn gen_diskencrypt() -> Vec<u8> {
             "{}: {} ({}) {} [{}]\n",
             v.id,
             v.label,
-            v.device,
+            v.device.display(),
             v.algorithm.label(),
             v.status.label()
         ));
@@ -12035,7 +12048,7 @@ fn gen_inodestat() -> Vec<u8> {
     for f in crate::fs::inodestat::fs_stats() {
         out.push_str(&format!(
             "{} ({}): active={} alloc={} free={} evict={} dirty={}\n",
-            f.mount_point,
+            f.mount_point.display(),
             f.fs_type.label(),
             f.active,
             f.allocated,
@@ -15079,7 +15092,11 @@ impl FileSystem for ProcFs {
 // ---------------------------------------------------------------------------
 
 /// Mount procfs at the given path (typically `/proc`).
-pub fn mount(mount_path: &str) -> KernelResult<()> {
+///
+/// Takes a path rather than a `&str` (design-decisions.md 261): a mount
+/// point is an ordinary directory, whose name may contain any byte but `/`
+/// and NUL.
+pub fn mount(mount_path: impl AsRef<Path>) -> KernelResult<()> {
     let fs = ProcFs::new();
     crate::fs::Vfs::mount(mount_path, alloc::boxed::Box::new(fs))?;
     Ok(())

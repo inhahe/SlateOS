@@ -35,10 +35,10 @@
 
 #![allow(dead_code)]
 
-use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
 
+use super::path::{Path, PathBuf};
 use crate::error::{KernelError, KernelResult};
 use crate::serial_println;
 use crate::sync::PreemptSpinMutex;
@@ -94,7 +94,10 @@ pub struct Region {
 #[derive(Debug, Clone)]
 pub struct SparseMap {
     /// File path.
-    pub path: String,
+    /// A `PathBuf`, not a `String`: this names a file, and our
+    /// filesystems admit every byte but `/` and NUL.  See
+    /// `design-decisions.md` §261.
+    pub path: PathBuf,
     /// Total file size.
     pub file_size: u64,
     /// Ordered list of regions covering the file.
@@ -121,7 +124,8 @@ pub struct RangeResult {
 /// Tracked sparse file metadata.
 #[derive(Debug, Clone)]
 struct SparseEntry {
-    path: String,
+    /// Keyed by `PathBuf` for the reason in `SparseMap::path`.
+    path: PathBuf,
     /// Sorted list of hole regions (offset, length).
     holes: Vec<(u64, u64)>,
     /// Last access timestamp for LRU.
@@ -147,7 +151,8 @@ static MAP_QUERIES: AtomicU64 = AtomicU64::new(0);
 ///
 /// The range [offset, offset+length) becomes a hole: future reads
 /// return zeros, and the storage can be reclaimed. File size is unchanged.
-pub fn punch_hole(path: &str, offset: u64, length: u64) -> KernelResult<RangeResult> {
+pub fn punch_hole(path: impl AsRef<Path>, offset: u64, length: u64) -> KernelResult<RangeResult> {
+    let path = path.as_ref();
     use crate::fs::Vfs;
 
     if path.is_empty() || length == 0 {
@@ -181,8 +186,24 @@ pub fn punch_hole(path: &str, offset: u64, length: u64) -> KernelResult<RangeRes
     // Track the hole in our sparse map.
     let created = track_hole(path, offset, actual_len);
 
-    // Notify fstrim about freed blocks.
-    crate::fs::fstrim::notify_free(path, offset, actual_len);
+    // No fstrim notification here, deliberately.
+    //
+    // `fstrim::notify_free` takes a *block device* and a *device* offset --
+    // every other caller passes `/dev/sda` and an LBA. This call passed the
+    // punched **file's** path and its **file** offset, so it was wrong on
+    // both axes: it queued a discard for a device that does not exist, at an
+    // offset that means nothing on any device. It is invisible today only
+    // because `issue_trim` is a stub that discards its `device` argument
+    // (`let _ = device`) and counts bytes; the damage was inflated TRIM
+    // statistics and a queue polluted with unmappable entries. The moment a
+    // real block-device discard is wired behind that stub, it would become a
+    // discard issued at a file offset -- i.e. data loss somewhere else on the
+    // volume.
+    //
+    // Notifying fstrim from here is the right thing to do; it needs a
+    // file-offset-to-device-extent mapping (a `fiemap`/`bmap` equivalent on
+    // `FileSystem`) that does not exist yet. See known-issues
+    // TD-A-SPARSE-FSTRIM-WRONG-DEVICE and todo.txt.
 
     Ok(RangeResult {
         bytes_affected: actual_len,
@@ -194,7 +215,8 @@ pub fn punch_hole(path: &str, offset: u64, length: u64) -> KernelResult<RangeRes
 ///
 /// Similar to punch_hole but guarantees the space remains allocated.
 /// Reads from the range return zeros. File size is unchanged.
-pub fn zero_range(path: &str, offset: u64, length: u64) -> KernelResult<RangeResult> {
+pub fn zero_range(path: impl AsRef<Path>, offset: u64, length: u64) -> KernelResult<RangeResult> {
+    let path = path.as_ref();
     use crate::fs::Vfs;
 
     if path.is_empty() || length == 0 {
@@ -232,7 +254,8 @@ pub fn zero_range(path: &str, offset: u64, length: u64) -> KernelResult<RangeRes
 ///
 /// This reduces the file size by `length` bytes. The range
 /// [offset, offset+length) is removed and data after it moves down.
-pub fn collapse_range(path: &str, offset: u64, length: u64) -> KernelResult<RangeResult> {
+pub fn collapse_range(path: impl AsRef<Path>, offset: u64, length: u64) -> KernelResult<RangeResult> {
+    let path = path.as_ref();
     use crate::fs::Vfs;
 
     if path.is_empty() || length == 0 {
@@ -283,7 +306,8 @@ pub fn collapse_range(path: &str, offset: u64, length: u64) -> KernelResult<Rang
 /// This increases the file size by `length` bytes. A hole of zeros
 /// is inserted at [offset, offset+length), and existing data from
 /// offset onward is shifted up.
-pub fn insert_range(path: &str, offset: u64, length: u64) -> KernelResult<RangeResult> {
+pub fn insert_range(path: impl AsRef<Path>, offset: u64, length: u64) -> KernelResult<RangeResult> {
+    let path = path.as_ref();
     use crate::fs::Vfs;
 
     if path.is_empty() || length == 0 {
@@ -338,7 +362,8 @@ pub fn insert_range(path: &str, offset: u64, length: u64) -> KernelResult<RangeR
 /// Map the sparse regions of a file.
 ///
 /// Returns a SparseMap describing which parts are data and which are holes.
-pub fn map_regions(path: &str) -> KernelResult<SparseMap> {
+pub fn map_regions(path: impl AsRef<Path>) -> KernelResult<SparseMap> {
+    let path = path.as_ref();
     use crate::fs::Vfs;
 
     if path.is_empty() {
@@ -401,7 +426,7 @@ pub fn map_regions(path: &str) -> KernelResult<SparseMap> {
     let data_bytes = file_size.saturating_sub(hole_bytes);
 
     Ok(SparseMap {
-        path: String::from(path),
+        path: path.to_path_buf(),
         file_size,
         regions,
         hole_bytes,
@@ -411,7 +436,8 @@ pub fn map_regions(path: &str) -> KernelResult<SparseMap> {
 
 /// Find the next data region at or after the given offset.
 /// Equivalent to lseek(fd, offset, SEEK_DATA).
-pub fn seek_data(path: &str, offset: u64) -> KernelResult<Option<u64>> {
+pub fn seek_data(path: impl AsRef<Path>, offset: u64) -> KernelResult<Option<u64>> {
+    let path = path.as_ref();
     use crate::fs::Vfs;
 
     let meta = Vfs::metadata(path)?;
@@ -440,7 +466,8 @@ pub fn seek_data(path: &str, offset: u64) -> KernelResult<Option<u64>> {
 
 /// Find the next hole at or after the given offset.
 /// Equivalent to lseek(fd, offset, SEEK_HOLE).
-pub fn seek_hole(path: &str, offset: u64) -> KernelResult<Option<u64>> {
+pub fn seek_hole(path: impl AsRef<Path>, offset: u64) -> KernelResult<Option<u64>> {
+    let path = path.as_ref();
     use crate::fs::Vfs;
 
     let meta = Vfs::metadata(path)?;
@@ -494,7 +521,7 @@ pub fn reset_stats() {
 }
 
 /// List tracked sparse files.
-pub fn list_tracked() -> Vec<(String, usize)> {
+pub fn list_tracked() -> Vec<(PathBuf, usize)> {
     let table = SPARSE_TABLE.lock();
     table
         .iter()
@@ -512,7 +539,7 @@ pub fn clear_tracking() {
 // ---------------------------------------------------------------------------
 
 /// Track a hole for a file.
-fn track_hole(path: &str, offset: u64, length: u64) -> bool {
+fn track_hole(path: &Path, offset: u64, length: u64) -> bool {
     if length < MIN_HOLE_SIZE {
         return false;
     }
@@ -521,7 +548,7 @@ fn track_hole(path: &str, offset: u64, length: u64) -> bool {
     let mut table = SPARSE_TABLE.lock();
 
     // Find or create entry.
-    let entry = if let Some(idx) = table.iter().position(|e| e.path == path) {
+    let entry = if let Some(idx) = table.iter().position(|e| e.path.as_path() == path) {
         table[idx].last_access_ns = now;
         &mut table[idx]
     } else {
@@ -537,7 +564,7 @@ fn track_hole(path: &str, offset: u64, length: u64) -> bool {
             }
         }
         table.push(SparseEntry {
-            path: String::from(path),
+            path: path.to_path_buf(),
             holes: Vec::new(),
             last_access_ns: now,
         });
@@ -598,10 +625,10 @@ fn track_hole(path: &str, offset: u64, length: u64) -> bool {
 }
 
 /// Get tracked holes for a file (sorted by offset).
-fn get_holes(path: &str) -> Vec<(u64, u64)> {
+fn get_holes(path: &Path) -> Vec<(u64, u64)> {
     let now = crate::timekeeping::clock_monotonic();
     let mut table = SPARSE_TABLE.lock();
-    if let Some(entry) = table.iter_mut().find(|e| e.path == path) {
+    if let Some(entry) = table.iter_mut().find(|e| e.path.as_path() == path) {
         entry.last_access_ns = now;
         entry.holes.clone()
     } else {
@@ -610,13 +637,13 @@ fn get_holes(path: &str) -> Vec<(u64, u64)> {
 }
 
 /// Remove tracking for a file.
-fn remove_tracking(path: &str) {
+fn remove_tracking(path: &Path) {
     let mut table = SPARSE_TABLE.lock();
-    table.retain(|e| e.path != path);
+    table.retain(|e| e.path.as_path() != path);
 }
 
 /// Truncate file to a specific size.
-fn truncate_to(path: &str, new_size: u64) -> KernelResult<()> {
+fn truncate_to(path: &Path, new_size: u64) -> KernelResult<()> {
     use crate::fs::Vfs;
 
     let current = Vfs::read_file(path)?;
@@ -640,8 +667,9 @@ pub fn self_test() -> KernelResult<()> {
     test_insert_range();
     test_map_regions();
     test_seek_data_hole();
+    test_non_utf8_path();
 
-    serial_println!("[sparse] Self-test passed (6 tests).");
+    serial_println!("[sparse] Self-test passed (7 tests).");
     Ok(())
 }
 
@@ -668,7 +696,7 @@ fn test_punch_hole() {
     assert!(after.iter().all(|&b| b == 0xFF));
 
     let _ = Vfs::remove(path);
-    remove_tracking(path);
+    remove_tracking(Path::new(path));
     serial_println!("[sparse]   punch_hole: ok");
 }
 
@@ -738,7 +766,7 @@ fn test_insert_range() {
     assert_eq!(&readback[8..12], &[b'C'; 4]);
 
     let _ = Vfs::remove(path);
-    remove_tracking(path);
+    remove_tracking(Path::new(path));
     serial_println!("[sparse]   insert_range: ok");
 }
 
@@ -760,7 +788,7 @@ fn test_map_regions() {
     assert!(map.regions.len() >= 3); // data-hole-data-hole or similar.
 
     let _ = Vfs::remove(path);
-    remove_tracking(path);
+    remove_tracking(Path::new(path));
     serial_println!("[sparse]   map_regions: ok");
 }
 
@@ -787,6 +815,50 @@ fn test_seek_data_hole() {
     assert_eq!(sh, Some(4096));
 
     let _ = Vfs::remove(path);
-    remove_tracking(path);
+    remove_tracking(Path::new(path));
     serial_println!("[sparse]   seek_data_hole: ok");
+}
+
+/// Two files differing only in a byte that cannot appear in UTF-8 must
+/// track separate hole maps.  With a lossy `String` key both folded onto
+/// the same U+FFFD-bearing name, so punching a hole in one made the other
+/// report the same hole -- and `seek_hole` on an untouched file returned an
+/// offset into a hole it does not have.
+fn test_non_utf8_path() {
+    use crate::fs::Vfs;
+
+    let a = Path::new(&b"/tmp/_sparse_\xFFn"[..]);
+    let b = Path::new(&b"/tmp/_sparse_\xFEn"[..]);
+    let data = alloc::vec![0x5Au8; 16384];
+    Vfs::write_file(a, &data).unwrap();
+    Vfs::write_file(b, &data).unwrap();
+
+    // Punch a hole in `a` only.
+    let res = punch_hole(a, 4096, 4096).unwrap();
+    assert_eq!(res.bytes_affected, 4096);
+    assert!(res.created_hole);
+
+    // `a` has the hole.
+    assert_eq!(seek_hole(a, 0).unwrap(), Some(4096));
+    let map_a = map_regions(a).unwrap();
+    assert_eq!(map_a.path.as_path(), a);
+    assert!(map_a.hole_bytes >= 4096);
+
+    // `b` must be untouched -- this is the assertion a lossy key fails.
+    // With no tracked hole, `seek_hole` reports the virtual hole at EOF
+    // rather than `None`; a shared key would report `a`'s hole at 4096.
+    assert_eq!(seek_hole(b, 0).unwrap(), Some(16384));
+    let map_b = map_regions(b).unwrap();
+    assert_eq!(map_b.path.as_path(), b);
+    assert_eq!(map_b.hole_bytes, 0);
+
+    // Both appear in the tracking table under their own names.
+    let tracked = list_tracked();
+    assert!(tracked.iter().any(|(p, _)| p.as_path() == a));
+
+    let _ = Vfs::remove(a);
+    let _ = Vfs::remove(b);
+    remove_tracking(a);
+    remove_tracking(b);
+    serial_println!("[sparse]   non_utf8_path: ok");
 }

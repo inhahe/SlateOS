@@ -23,11 +23,11 @@
 #![allow(dead_code)]
 
 use crate::sync::PreemptSpinMutex as Mutex;
-use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::error::{KernelError, KernelResult};
+use crate::fs::path::{Path, PathBuf};
 
 // ---------------------------------------------------------------------------
 // Types
@@ -61,7 +61,12 @@ impl FsType {
 #[derive(Debug, Clone)]
 pub struct FsInodeStats {
     pub fs_type: FsType,
-    pub mount_point: String,
+    /// Where the filesystem is mounted.
+    ///
+    /// A `PathBuf`, not a `String` (design-decisions.md 261): a mount point
+    /// is an ordinary directory, whose name may contain any byte but `/`
+    /// and NUL.
+    pub mount_point: PathBuf,
     pub allocated: u64,
     pub freed: u64,
     pub active: u64,
@@ -161,7 +166,8 @@ pub fn init_defaults() {
 /// Adds one zeroed row the VFS can drive via the record functions.  Returns
 /// [`KernelError::AlreadyExists`] if a row for `fs_type` is already present and
 /// [`KernelError::ResourceExhausted`] once [`MAX_FILESYSTEMS`] rows exist.
-pub fn register_fs(fs_type: FsType, mount_point: &str) -> KernelResult<()> {
+pub fn register_fs(fs_type: FsType, mount_point: impl AsRef<Path>) -> KernelResult<()> {
+    let mount_point = mount_point.as_ref();
     with_state(|state| {
         if state.filesystems.len() >= MAX_FILESYSTEMS {
             return Err(KernelError::ResourceExhausted);
@@ -171,7 +177,7 @@ pub fn register_fs(fs_type: FsType, mount_point: &str) -> KernelResult<()> {
         }
         state.filesystems.push(FsInodeStats {
             fs_type,
-            mount_point: String::from(mount_point),
+            mount_point: mount_point.to_path_buf(),
             allocated: 0,
             freed: 0,
             active: 0,
@@ -321,7 +327,7 @@ pub fn self_test() {
     assert_eq!((d0.lookups, d0.hits, d0.misses), (0, 0, 0));
     let (c0, a0, f0, e0, l0, _o0) = stats();
     assert_eq!((c0, a0, f0, e0, l0), (0, 0, 0, 0, 0));
-    crate::serial_println!("  [1/8] empty init: OK");
+    crate::serial_println!("  [1/9] empty init: OK");
 
     // 2: Register filesystems — rows created with zeroed counters; dup fails.
     register_fs(FsType::Ext4, "/").expect("reg ext4");
@@ -334,7 +340,7 @@ pub fn self_test() {
         .cloned()
         .expect("ext4");
     assert_eq!((ext4.allocated, ext4.active, ext4.evicted), (0, 0, 0));
-    crate::serial_println!("  [2/8] register: OK");
+    crate::serial_println!("  [2/9] register: OK");
 
     // 3: Alloc inode increments allocated + active exactly from zero.
     alloc_inode(FsType::Ext4).expect("alloc");
@@ -345,7 +351,7 @@ pub fn self_test() {
         .expect("ext4");
     assert_eq!(ext4.allocated, 1);
     assert_eq!(ext4.active, 1);
-    crate::serial_println!("  [3/8] alloc: OK");
+    crate::serial_println!("  [3/9] alloc: OK");
 
     // 4: Free inode increments freed, decrements active back to zero.
     free_inode(FsType::Ext4).expect("free");
@@ -356,7 +362,7 @@ pub fn self_test() {
         .expect("ext4");
     assert_eq!(ext4.freed, 1);
     assert_eq!(ext4.active, 0);
-    crate::serial_println!("  [4/8] free: OK");
+    crate::serial_println!("  [4/9] free: OK");
 
     // 5: Dcache lookups + hit rate computed exactly from zero (3 hits / 1 miss).
     dcache_lookup(true).expect("hit");
@@ -366,7 +372,7 @@ pub fn self_test() {
     let d = dcache_stats();
     assert_eq!((d.lookups, d.hits, d.misses), (4, 3, 1));
     assert_eq!(dcache_hit_rate(), 7500); // 3/4 = 75.00%
-    crate::serial_println!("  [5/8] dcache + hit rate: OK");
+    crate::serial_println!("  [5/9] dcache + hit rate: OK");
 
     // 6: Evict decrements active (alloc 2, evict 2 → active 0) and counts.
     alloc_inode(FsType::Tmpfs).expect("a1");
@@ -379,12 +385,12 @@ pub fn self_test() {
         .expect("tmpfs");
     assert_eq!(tmpfs.evicted, 2);
     assert_eq!(tmpfs.active, 0);
-    crate::serial_println!("  [6/8] evict: OK");
+    crate::serial_println!("  [6/9] evict: OK");
 
     // 7: Unregistered filesystem → NotFound.
     assert!(alloc_inode(FsType::Overlayfs).is_err());
     assert!(evict(FsType::Overlayfs, 1).is_err());
-    crate::serial_println!("  [7/8] not found: OK");
+    crate::serial_println!("  [7/9] not found: OK");
 
     // 8: Aggregate totals equal the exact sums of the operations above.
     let (fss, allocs, frees, evictions, lookups, ops) = stats();
@@ -394,7 +400,29 @@ pub fn self_test() {
     assert_eq!(evictions, 2); // 2 tmpfs
     assert_eq!(lookups, 4); // 3 hits + 1 miss
     assert!(ops > 0);
-    crate::serial_println!("  [8/8] stats: OK");
+    crate::serial_println!("  [8/9] stats: OK");
+
+    // 9: non-UTF-8 mount points (design-decisions.md 261).
+    //
+    // A mount point is an ordinary directory, so it may be named with bytes
+    // that have no UTF-8 spelling.  While the field was a `String` such a
+    // mount point could not be recorded at all, and /proc/inodestat would
+    // have attributed the row to a mangled path.
+    {
+        *STATE.lock() = None;
+        init_defaults();
+        let mp = Path::new(&b"/mnt/is_\xFFm"[..]);
+        register_fs(FsType::Fat32, mp).expect("reg non-utf8");
+        let row = fs_stats()
+            .iter()
+            .find(|f| f.fs_type == FsType::Fat32)
+            .cloned()
+            .expect("non-utf8 row");
+        // Byte-exact round trip: no replacement character, no truncation.
+        assert_eq!(row.mount_point.as_path(), mp);
+        assert_eq!(row.mount_point.as_path().as_bytes(), b"/mnt/is_\xFFm");
+        crate::serial_println!("  [9/9] non-UTF-8 mount point: OK");
+    }
 
     // Leave NO residue: a diagnostic self-test must not populate the live
     // /proc/inodestat table with its fixtures.  Reset to the uninitialised state
@@ -402,5 +430,5 @@ pub fn self_test() {
     // accounting.
     *STATE.lock() = None;
 
-    crate::serial_println!("inodestat::self_test() — all 8 tests passed");
+    crate::serial_println!("inodestat::self_test() — all 9 tests passed");
 }

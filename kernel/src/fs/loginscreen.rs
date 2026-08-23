@@ -26,6 +26,7 @@ use alloc::string::String;
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::error::KernelResult;
+use crate::fs::path::{Path, PathBuf};
 
 // ---------------------------------------------------------------------------
 // Types
@@ -92,7 +93,7 @@ pub struct LoginConfig {
     /// Background mode.
     pub background_mode: BackgroundMode,
     /// Background image path.
-    pub background_path: String,
+    pub background_path: PathBuf,
     /// Background colour (hex RRGGBB).
     pub background_color: String,
     /// Gradient end colour (hex RRGGBB).
@@ -104,7 +105,7 @@ pub struct LoginConfig {
     /// Slideshow interval in seconds.
     pub slideshow_interval_s: u32,
     /// Slideshow image directory.
-    pub slideshow_dir: String,
+    pub slideshow_dir: PathBuf,
     /// Whether background matches desktop wallpaper.
     pub synced_with_desktop: bool,
     /// Clock position.
@@ -128,20 +129,20 @@ pub struct LoginConfig {
     /// Custom message / MOTD.
     pub message: String,
     /// Logo / branding image path.
-    pub logo_path: String,
+    pub logo_path: PathBuf,
 }
 
 impl Default for LoginConfig {
     fn default() -> Self {
         Self {
             background_mode: BackgroundMode::BlurDesktop,
-            background_path: String::new(),
+            background_path: PathBuf::new(),
             background_color: String::from("1a1a2e"),
             gradient_end: String::from("16213e"),
             fit_mode: FitMode::Fill,
             blur_amount: 30,
             slideshow_interval_s: 30,
-            slideshow_dir: String::new(),
+            slideshow_dir: PathBuf::new(),
             synced_with_desktop: true,
             clock_position: ClockPosition::TopCenter,
             show_date: true,
@@ -153,7 +154,7 @@ impl Default for LoginConfig {
             show_power: true,
             lock_timeout_s: 300,
             message: String::new(),
-            logo_path: String::new(),
+            logo_path: PathBuf::new(),
         }
     }
 }
@@ -167,31 +168,42 @@ struct State {
     changes: u64,
 }
 
-static STATE: Mutex<State> = Mutex::new(State {
-    config: LoginConfig {
-        background_mode: BackgroundMode::BlurDesktop,
-        background_path: String::new(),
-        background_color: String::new(),
-        gradient_end: String::new(),
-        fit_mode: FitMode::Fill,
-        blur_amount: 30,
-        slideshow_interval_s: 30,
-        slideshow_dir: String::new(),
-        synced_with_desktop: true,
-        clock_position: ClockPosition::TopCenter,
-        show_date: true,
-        show_weather: false,
-        user_list: UserListMode::ShowAll,
-        show_last_login: true,
-        virtual_keyboard: false,
-        show_a11y: true,
-        show_power: true,
-        lock_timeout_s: 300,
-        message: String::new(),
-        logo_path: String::new(),
-    },
-    changes: 0,
-});
+impl State {
+    /// The state a fresh boot starts with.
+    ///
+    /// Extracted from the initialiser of `STATE` so that the self-test can
+    /// be handed a pristine table without disturbing the live one; see
+    /// `crate::fs::selftest`.
+    const fn new() -> Self {
+        Self {
+            config: LoginConfig {
+                background_mode: BackgroundMode::BlurDesktop,
+                background_path: PathBuf::new(),
+                background_color: String::new(),
+                gradient_end: String::new(),
+                fit_mode: FitMode::Fill,
+                blur_amount: 30,
+                slideshow_interval_s: 30,
+                slideshow_dir: PathBuf::new(),
+                synced_with_desktop: true,
+                clock_position: ClockPosition::TopCenter,
+                show_date: true,
+                show_weather: false,
+                user_list: UserListMode::ShowAll,
+                show_last_login: true,
+                virtual_keyboard: false,
+                show_a11y: true,
+                show_power: true,
+                lock_timeout_s: 300,
+                message: String::new(),
+                logo_path: PathBuf::new(),
+            },
+            changes: 0,
+        }
+    }
+}
+
+static STATE: Mutex<State> = Mutex::new(State::new());
 
 static OP_COUNT: AtomicU64 = AtomicU64::new(0);
 
@@ -216,9 +228,9 @@ pub fn set_background_mode(mode: BackgroundMode) {
 }
 
 /// Set background image path.
-pub fn set_background_image(path: &str) {
+pub fn set_background_image(path: impl AsRef<Path>) {
     let mut state = STATE.lock();
-    state.config.background_path = String::from(path);
+    state.config.background_path = path.as_ref().to_path_buf();
     state.config.background_mode = BackgroundMode::Image;
     state.config.synced_with_desktop = false;
     state.changes += 1;
@@ -312,16 +324,16 @@ pub fn set_message(msg: &str) {
 }
 
 /// Set logo path.
-pub fn set_logo(path: &str) {
+pub fn set_logo(path: impl AsRef<Path>) {
     let mut state = STATE.lock();
-    state.config.logo_path = String::from(path);
+    state.config.logo_path = path.as_ref().to_path_buf();
     state.changes += 1;
 }
 
 /// Set slideshow directory.
-pub fn set_slideshow_dir(dir: &str) {
+pub fn set_slideshow_dir(dir: impl AsRef<Path>) {
     let mut state = STATE.lock();
-    state.config.slideshow_dir = String::from(dir);
+    state.config.slideshow_dir = dir.as_ref().to_path_buf();
     state.changes += 1;
 }
 
@@ -382,13 +394,13 @@ pub fn clear_all() {
     let mut state = STATE.lock();
     state.config = LoginConfig {
         background_mode: BackgroundMode::BlurDesktop,
-        background_path: String::new(),
+        background_path: PathBuf::new(),
         background_color: String::new(),
         gradient_end: String::new(),
         fit_mode: FitMode::Fill,
         blur_amount: 30,
         slideshow_interval_s: 30,
-        slideshow_dir: String::new(),
+        slideshow_dir: PathBuf::new(),
         synced_with_desktop: true,
         clock_position: ClockPosition::TopCenter,
         show_date: true,
@@ -400,7 +412,7 @@ pub fn clear_all() {
         show_power: true,
         lock_timeout_s: 300,
         message: String::new(),
-        logo_path: String::new(),
+        logo_path: PathBuf::new(),
     };
     state.changes = 0;
     OP_COUNT.store(0, Ordering::Relaxed);
@@ -410,7 +422,22 @@ pub fn clear_all() {
 // Self-tests
 // ---------------------------------------------------------------------------
 
+/// The suite asserts exact table contents, so it needs a table of its own.
+/// It used to get one by calling `clear_all()`, which — since this suite is
+/// reachable from the shell — deleted whatever the user had stored here and
+/// then reported success.  The live state is moved aside for the duration and
+/// put back afterwards; `crate::fs::selftest` records why this shape rather
+/// than the alternatives.
 pub fn self_test() -> KernelResult<()> {
+    // These counters live outside the table, so `with_pristine` cannot
+    // see them; save and restore them here so a run leaves no trace.
+    let saved_op_count = OP_COUNT.load(Ordering::Relaxed);
+    let result = crate::fs::selftest::with_pristine(&STATE, State::new(), self_test_inner);
+    OP_COUNT.store(saved_op_count, Ordering::Relaxed);
+    result
+}
+
+fn self_test_inner() -> KernelResult<()> {
     use crate::serial_println;
 
     clear_all();
@@ -429,7 +456,10 @@ pub fn self_test() -> KernelResult<()> {
     let cfg = config();
     assert_eq!(cfg.background_mode, BackgroundMode::Image);
     assert!(!cfg.synced_with_desktop);
-    assert_eq!(cfg.background_path, "/usr/share/wallpapers/sunset.jpg");
+    assert_eq!(
+        cfg.background_path.as_path(),
+        Path::new("/usr/share/wallpapers/sunset.jpg")
+    );
 
     // Test 3: sync with desktop.
     serial_println!("loginscreen::self_test 3: sync");
@@ -472,7 +502,10 @@ pub fn self_test() -> KernelResult<()> {
     set_logo("/usr/share/branding/logo.png");
     let cfg = config();
     assert_eq!(cfg.message, "Welcome to MintOS");
-    assert_eq!(cfg.logo_path, "/usr/share/branding/logo.png");
+    assert_eq!(
+        cfg.logo_path.as_path(),
+        Path::new("/usr/share/branding/logo.png")
+    );
 
     // Test 7: slideshow settings.
     serial_println!("loginscreen::self_test 7: slideshow");
@@ -488,7 +521,46 @@ pub fn self_test() -> KernelResult<()> {
     assert!(cfg.show_weather);
     assert!(!cfg.show_a11y);
 
+    // Test 8: Non-UTF-8 paths (design-decisions.md §261).
+    //
+    // `\xFF` and `\xFE` are both invalid as a UTF-8 leading byte, so under the
+    // old `String` typing both spellings below folded to the same
+    // U+FFFD-bearing name.  For this module that means the greeter renders the
+    // wrong background, or none at all, on any system whose wallpaper
+    // directory is named in bytes with no UTF-8 spelling -- and the login
+    // screen is the one surface a user cannot get past in order to fix it.
+    serial_println!("loginscreen::self_test 8: non-UTF-8 paths");
+    let bg_a = Path::new(&b"/usr/share/wallpapers/ls_\xFFsunset.jpg"[..]);
+    let bg_b = Path::new(&b"/usr/share/wallpapers/ls_\xFEsunset.jpg"[..]);
+    set_background_image(bg_a);
+    let cfg = config();
+    assert_eq!(cfg.background_path.as_path(), bg_a);
+    assert_eq!(
+        cfg.background_path.as_path().as_bytes(),
+        b"/usr/share/wallpapers/ls_\xFFsunset.jpg"
+    );
+    set_background_image(bg_b);
+    assert_ne!(
+        config().background_path,
+        cfg.background_path,
+        "\\xFF must not fold to \\xFE"
+    );
+
+    let logo = Path::new(&b"/usr/share/branding/ls_\xFFlogo.png"[..]);
+    set_logo(logo);
+    assert_eq!(config().logo_path.as_path(), logo);
+
+    // Test 7 sets the slideshow directory but never reads it back; assert it
+    // here so the field is actually covered.
+    let slides = Path::new(&b"/usr/share/wallpapers/ls_\xFFslides"[..]);
+    set_slideshow_dir(slides);
+    assert_eq!(config().slideshow_dir.as_path(), slides);
+    assert_ne!(
+        config().slideshow_dir.as_path(),
+        Path::new(&b"/usr/share/wallpapers/ls_\xFEslides"[..])
+    );
+
     clear_all();
-    serial_println!("loginscreen::self_test: all 7 tests passed");
+    serial_println!("loginscreen::self_test: all 8 tests passed");
     Ok(())
 }

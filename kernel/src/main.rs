@@ -5203,10 +5203,16 @@ extern "C" fn kernel_main() -> ! {
             if let Err(e) = fs::timezone::self_test() {
                 serial_println!("WARNING: Timezone self-test failed: {:?}", e);
             }
-            // Both self-tests end by clearing their tables, so populate them after.
-            // Without this the zone database stays empty until someone types
-            // `locale init` at the kernel shell, and every offset query answers 0 —
-            // i.e. the kernel silently believes it is in UTC.
+            // Populate the tables. Nothing else does: without this the zone
+            // database stays empty until someone types `locale init` at the
+            // kernel shell, and every offset query answers 0 — i.e. the kernel
+            // silently believes it is in UTC.
+            //
+            // This used to have to come *after* the two suites above, which
+            // ended by clearing their tables. They now run against a table
+            // moved aside for the duration (`fs::selftest::with_pristine`) and
+            // put the real one back, so the order no longer constrains
+            // anything. It is kept only because there is no reason to move it.
             fs::locale::init_defaults();
             fs::timezone::init_defaults();
         }
@@ -5242,6 +5248,16 @@ extern "C" fn kernel_main() -> ! {
             if let Err(e) = fs::dragdrop::self_test() {
                 serial_println!("WARNING: drag-and-drop self-test failed: {:?}", e);
             }
+            // fcomment and immutable were reachable only from a `kshell`
+            // subcommand, so neither `self_test()` had ever run in the boot
+            // test -- including `immutable`'s, which covers the table that
+            // decides whether a write, truncate, delete or link is refused.
+            // Same "a test that never runs is not a test" trap as the batch
+            // above. See known-issues TD-A-FS-SELFTESTS-NEVER-RUN for the
+            // ~220 further `fs` modules still in that state.
+            if let Err(e) = fs::fcomment::self_test() {
+                serial_println!("WARNING: file comments self-test failed: {:?}", e);
+            }
             if let Err(e) = fs::fileinfo::self_test() {
                 serial_println!("WARNING: fileinfo self-test failed: {:?}", e);
             }
@@ -5256,6 +5272,9 @@ extern "C" fn kernel_main() -> ! {
             }
             if let Err(e) = fs::fstrim::self_test() {
                 serial_println!("WARNING: fstrim self-test failed: {:?}", e);
+            }
+            if let Err(e) = fs::immutable::self_test() {
+                serial_println!("WARNING: immutable flags self-test failed: {:?}", e);
             }
             if let Err(e) = fs::pathbar::self_test() {
                 serial_println!("WARNING: pathbar self-test failed: {:?}", e);
@@ -5335,6 +5354,12 @@ extern "C" fn kernel_main() -> ! {
             if let Err(e) = fs::dirsync::self_test() {
                 serial_println!("WARNING: dirsync self-test failed: {:?}", e);
             }
+            // diskencrypt was reachable only from a `kshell` subcommand, so
+            // its suite had never run in the boot test
+            // (TD-A-FS-SELFTESTS-NEVER-RUN).  It is in-memory volume
+            // bookkeeping -- the unlock/encrypt paths are simulated, it
+            // touches no disk -- and clears the state on the way out.
+            fs::diskencrypt::self_test();
             fs::diskio::self_test();
             if let Err(e) = fs::encrypt::self_test() {
                 serial_println!("WARNING: file-encryption self-test failed: {:?}", e);
@@ -5342,9 +5367,21 @@ extern "C" fn kernel_main() -> ! {
             if let Err(e) = fs::fcompress::self_test() {
                 serial_println!("WARNING: file-compression self-test failed: {:?}", e);
             }
+            // fileshare was reachable only from a `kshell` subcommand, so its
+            // suite had never run in the boot test (TD-A-FS-SELFTESTS-NEVER-RUN).
+            // It contacts no network -- it is in-memory share bookkeeping --
+            // and now resets to the uninitialised state on the way out, so it
+            // leaves no residue for a boot run to inherit.
+            fs::fileshare::self_test();
             if let Err(e) = fs::fileselect::self_test() {
                 serial_println!("WARNING: file-select self-test failed: {:?}", e);
             }
+            // filevault was reachable only from a `kshell` subcommand, so its
+            // suite had never run in the boot test (TD-A-FS-SELFTESTS-NEVER-RUN).
+            // It is in-memory vault bookkeeping with a simulated password
+            // hash -- no real crypto, no disk -- and clears the state on the
+            // way out, so it leaves no vault behind for a boot run.
+            fs::filevault::self_test();
             if let Err(e) = fs::filetype::self_test() {
                 serial_println!("WARNING: filetype self-test failed: {:?}", e);
             }
@@ -5363,8 +5400,21 @@ extern "C" fn kernel_main() -> ! {
             if let Err(e) = fs::linkcheck::self_test() {
                 serial_println!("WARNING: linkcheck self-test failed: {:?}", e);
             }
+            // netshare was reachable only from a `kshell` subcommand, so its
+            // suite had never run in the boot test (TD-A-FS-SELFTESTS-NEVER-RUN).
+            // It is pure in-memory registry bookkeeping -- it contacts no
+            // server -- so it is safe to run unconditionally at boot.
+            fs::netshare::self_test();
             if let Err(e) = fs::openwith::self_test() {
                 serial_println!("WARNING: open-with self-test failed: {:?}", e);
+            }
+            // partmgr was reachable only from a `kshell` subcommand, so its
+            // suite had never run in the boot test (TD-A-FS-SELFTESTS-NEVER-RUN).
+            // Unlike the others in this sweep it was already idempotent --
+            // it clears the table at both ends -- and it touches no real
+            // disk: `register_disk` only records what a caller tells it.
+            if let Err(e) = fs::partmgr::self_test() {
+                serial_println!("WARNING: partmgr self-test failed: {:?}", e);
             }
             if let Err(e) = fs::policy::self_test() {
                 serial_println!("WARNING: fs policy self-test failed: {:?}", e);
@@ -5372,6 +5422,15 @@ extern "C" fn kernel_main() -> ! {
             fs::powerwake::self_test();
             if let Err(e) = fs::properties::self_test() {
                 serial_println!("WARNING: file-properties self-test failed: {:?}", e);
+            }
+            // queryable was reachable only from a `kshell` subcommand, so
+            // its suite had never run in the boot test -- including the
+            // coverage of the attribute index, which is the structure that
+            // decides which files a query returns. Promoted here as one of
+            // the batches described in known-issues
+            // TD-A-FS-SELFTESTS-NEVER-RUN; ~255 fs suites remain manual-only.
+            if let Err(e) = fs::queryable::self_test() {
+                serial_println!("WARNING: queryable-attrs self-test failed: {:?}", e);
             }
             if let Err(e) = fs::readdir_plus::self_test() {
                 serial_println!("WARNING: readdir-plus self-test failed: {:?}", e);
@@ -5395,6 +5454,14 @@ extern "C" fn kernel_main() -> ! {
                 serial_println!("WARNING: statusbar self-test failed: {:?}", e);
             }
             fs::sysctlfs::self_test();
+            // sysinfo was reachable only from a `kshell` subcommand, so its
+            // suite had never run in the boot test (TD-A-FS-SELFTESTS-NEVER-RUN).
+            // It was already idempotent -- `clear_all()` at both ends -- and
+            // its CPU/kernel-parameter assertions read live values rather
+            // than fabricated ones, so it is genuine boot coverage.
+            if let Err(e) = fs::sysinfo::self_test() {
+                serial_println!("WARNING: sysinfo self-test failed: {:?}", e);
+            }
             fs::sysuptime::self_test();
             if let Err(e) = fs::tags::self_test() {
                 serial_println!("WARNING: file-tags self-test failed: {:?}", e);
@@ -5409,10 +5476,257 @@ extern "C" fn kernel_main() -> ! {
             if let Err(e) = fs::usage::self_test() {
                 serial_println!("WARNING: disk-usage self-test failed: {:?}", e);
             }
+            // bootcfg was reachable only from a `kshell` subcommand, so its
+            // suite had never run in the boot test (TD-A-FS-SELFTESTS-NEVER-RUN).
+            // Safe here: `clear_all()` at both ends, and nothing consults this
+            // module during boot -- it records the *next* boot's menu, not the
+            // one already in progress.
+            if let Err(e) = fs::bootcfg::self_test() {
+                serial_println!("WARNING: bootcfg self-test failed: {:?}", e);
+            }
+            // progmgr was reachable only from a `kshell` subcommand, so its
+            // suite had never run in the boot test (TD-A-FS-SELFTESTS-NEVER-RUN).
+            // Safe here: `clear_all()` at both ends, and it registers only its
+            // own `test.*` app ids, so it neither depends on nor leaves behind
+            // the four built-in program entries `init_defaults()` seeds.
+            if let Err(e) = fs::progmgr::self_test() {
+                serial_println!("WARNING: progmgr self-test failed: {:?}", e);
+            }
+            // vpn was reachable only from a `kshell` subcommand, so its suite
+            // had never run in the boot test (TD-A-FS-SELFTESTS-NEVER-RUN).
+            // Safe here: `clear_all()` at entry, mid and exit, and it asserts
+            // that `init_defaults()` seeds *no* profiles, so it neither relies
+            // on nor leaves fabricated VPN configuration behind.
+            if let Err(e) = fs::vpn::self_test() {
+                serial_println!("WARNING: vpn self-test failed: {:?}", e);
+            }
+            // wallpaper was reachable only from a `kshell` subcommand, so its
+            // suite had never run in the boot test (TD-A-FS-SELFTESTS-NEVER-RUN).
+            // It is safe to run here: it calls `clear_all()` and `reset_stats()`
+            // at both ends, so it neither depends on nor leaves behind state,
+            // and a boot has no wallpaper configured for it to destroy.
+            if let Err(e) = fs::wallpaper::self_test() {
+                serial_println!("WARNING: wallpaper self-test failed: {:?}", e);
+            }
+            // loginscreen was reachable only from a `kshell` subcommand, so its
+            // suite had never run in the boot test (TD-A-FS-SELFTESTS-NEVER-RUN).
+            // Safe here: `clear_all()` at both ends, and the greeter is not
+            // running yet -- this only edits the config it will later read.
+            if let Err(e) = fs::loginscreen::self_test() {
+                serial_println!("WARNING: loginscreen self-test failed: {:?}", e);
+            }
+            // screenshot was reachable only from a `kshell` subcommand, so its
+            // suite had never run in the boot test (TD-A-FS-SELFTESTS-NEVER-RUN).
+            // Safe here: `clear_all()` and `reset_stats()` at both ends, and it
+            // only records capture *metadata* -- nothing touches the framebuffer.
+            if let Err(e) = fs::screenshot::self_test() {
+                serial_println!("WARNING: screenshot self-test failed: {:?}", e);
+            }
+            // cloudsync was reachable only from a `kshell` subcommand, so its
+            // suite had never run in the boot test (TD-A-FS-SELFTESTS-NEVER-RUN).
+            // Safe here: it is baseline-relative and restores the account,
+            // conflict and exclude lists exactly, so it cannot disturb a user's
+            // cloud configuration -- and at boot there is none yet anyway.
+            fs::cloudsync::self_test();
+            // fileversion was reachable only from a `kshell` subcommand, so its
+            // suite had never run in the boot test (TD-A-FS-SELFTESTS-NEVER-RUN).
+            // Safe here: it is baseline-relative, refuses to run at all if a
+            // pre-existing watch covers its fixture, and purges every version it
+            // captures -- so it cannot destroy a real file's version history.
+            fs::fileversion::self_test();
+            // screenrec was reachable only from a `kshell` subcommand, so its
+            // suite had never run in the boot test (TD-A-FS-SELFTESTS-NEVER-RUN).
+            // Safe here: it resets `STATE` to `None` at both ends, which is
+            // exactly the state a fresh boot has -- `init_defaults()` is
+            // otherwise reachable only from `screenrec init`. It records
+            // session *metadata* only; nothing touches the framebuffer.
+            fs::screenrec::self_test();
+            // appregistry and startmenu were reachable only from `kshell`
+            // subcommands (TD-A-FS-SELFTESTS-NEVER-RUN). Both decline to run
+            // against a populated store rather than clearing it, and both end
+            // at the empty state a fresh boot has -- nothing outside their
+            // shell commands populates either.
+            if let Err(e) = fs::appregistry::self_test() {
+                serial_println!("WARNING: appregistry self-test failed: {:?}", e);
+            }
+            if let Err(e) = fs::startmenu::self_test() {
+                serial_println!("WARNING: startmenu self-test failed: {:?}", e);
+            }
+            // pinnedapps was reachable only from a `kshell` subcommand
+            // (TD-A-FS-SELFTESTS-NEVER-RUN). Safe here: it resets `STATE` to
+            // `None` at both ends, which is what a fresh boot has -- nothing
+            // calls `init_defaults()` outside the `pinnedapps` commands.
+            fs::pinnedapps::self_test();
+            // kernelbuild was reachable only from a `kshell` subcommand
+            // (TD-A-FS-SELFTESTS-NEVER-RUN). Safe here: it declines to run
+            // against a populated registry rather than clearing it, and at
+            // boot the registry is empty -- `init_defaults()` is reachable
+            // only from `kbuild init`.
+            if let Err(e) = fs::kernelbuild::self_test() {
+                serial_println!("WARNING: kernelbuild self-test failed: {:?}", e);
+            }
+            // userprofile was reachable only from a `kshell` subcommand
+            // (TD-A-FS-SELFTESTS-NEVER-RUN). Safe here: it creates one profile
+            // and deletes it again, and every other change it makes it undoes,
+            // so it leaves the two default profiles exactly as it found them.
+            fs::userprofile::self_test();
+            // useracct was reachable only from a `kshell` subcommand
+            // (TD-A-FS-SELFTESTS-NEVER-RUN) -- and until this commit it opened
+            // and closed with `clear_all()`, so `useracct test` deleted every
+            // account, group and session on the machine. It is now
+            // baseline-relative, declines to run while anybody is logged in,
+            // and restores `current_uid` and the login counter on exit.
+            if let Err(e) = fs::useracct::self_test() {
+                serial_println!("WARNING: useracct self-test failed: {:?}", e);
+            }
             if let Err(e) = crate::sockact::self_test() {
                 serial_println!("WARNING: socket-activation self-test failed: {:?}", e);
             }
             crate::sync::self_test();
+        }
+        case();
+    }
+
+    {
+        // The 37 self-tests that could not be wired until they stopped
+        // deleting the user's data.
+        //
+        // Each was reachable only as a kernel-shell subcommand, so the boot
+        // test never ran it (`TD-A-FS-SELFTESTS-NEVER-RUN`). Wiring them was
+        // blocked on a second defect in the same suites
+        // (`TD-A-SELFTESTS-NOT-IDEMPOTENT`): each opened with `clear_all()`,
+        // so `credentials test` emptied the credential store and `theme test`
+        // reset the desktop to factory defaults, both then printing "all
+        // tests passed".
+        //
+        // The two had to be fixed in that order, and the reason is the trap
+        // that hid this for a year: at boot the tables are empty, so the wipe
+        // is a no-op and the boot test is green either way. Wiring first
+        // would have produced a green boot test that said nothing whatever
+        // about the shell path -- boot coverage would have become *evidence*
+        // for a suite that still destroyed data the moment a user typed the
+        // command.
+        //
+        // They now run against a table moved aside for the duration
+        // (`fs::selftest::with_pristine`), so there is nothing left to
+        // destroy and every assertion is the one that was always written.
+        //
+        // Kept as its own `case()` for the same reasons as the block above:
+        // the reason they are here survives in the code, and a failure
+        // bisects to one obvious place.
+        #[inline(never)]
+        fn case() {
+            if let Err(e) = fs::a11y::self_test() {
+                serial_println!("WARNING: accessibility self-test failed: {:?}", e);
+            }
+            if let Err(e) = fs::appnotify::self_test() {
+                serial_println!("WARNING: per-app notification settings self-test failed: {:?}", e);
+            }
+            if let Err(e) = fs::autostart::self_test() {
+                serial_println!("WARNING: autostart self-test failed: {:?}", e);
+            }
+            if let Err(e) = fs::capsettings::self_test() {
+                serial_println!("WARNING: capability settings self-test failed: {:?}", e);
+            }
+            if let Err(e) = fs::colorpicker::self_test() {
+                serial_println!("WARNING: color picker self-test failed: {:?}", e);
+            }
+            if let Err(e) = fs::credentials::self_test() {
+                serial_println!("WARNING: credential store self-test failed: {:?}", e);
+            }
+            if let Err(e) = fs::cursorsettings::self_test() {
+                serial_println!("WARNING: cursor settings self-test failed: {:?}", e);
+            }
+            if let Err(e) = fs::detailcols::self_test() {
+                serial_println!("WARNING: detail columns self-test failed: {:?}", e);
+            }
+            if let Err(e) = fs::display::self_test() {
+                serial_println!("WARNING: display settings self-test failed: {:?}", e);
+            }
+            if let Err(e) = fs::dyndns::self_test() {
+                serial_println!("WARNING: dynamic DNS self-test failed: {:?}", e);
+            }
+            if let Err(e) = fs::filepicker::self_test() {
+                serial_println!("WARNING: file picker self-test failed: {:?}", e);
+            }
+            if let Err(e) = fs::fontmgr::self_test() {
+                serial_println!("WARNING: font manager self-test failed: {:?}", e);
+            }
+            if let Err(e) = fs::fstune::self_test() {
+                serial_println!("WARNING: filesystem tuning self-test failed: {:?}", e);
+            }
+            if let Err(e) = fs::hotkeys::self_test() {
+                serial_println!("WARNING: hotkeys self-test failed: {:?}", e);
+            }
+            if let Err(e) = fs::ime::self_test() {
+                serial_println!("WARNING: IME self-test failed: {:?}", e);
+            }
+            if let Err(e) = fs::installer::self_test() {
+                serial_println!("WARNING: installer self-test failed: {:?}", e);
+            }
+            if let Err(e) = fs::kbsettings::self_test() {
+                serial_println!("WARNING: keyboard settings self-test failed: {:?}", e);
+            }
+            if let Err(e) = fs::keylayout::self_test() {
+                serial_println!("WARNING: keyboard layout self-test failed: {:?}", e);
+            }
+            if let Err(e) = fs::mmtune::self_test() {
+                serial_println!("WARNING: memory-management tuning self-test failed: {:?}", e);
+            }
+            if let Err(e) = fs::netindicator::self_test() {
+                serial_println!("WARNING: network indicator self-test failed: {:?}", e);
+            }
+            if let Err(e) = fs::netsettings::self_test() {
+                serial_println!("WARNING: network settings self-test failed: {:?}", e);
+            }
+            if let Err(e) = fs::notifcenter::self_test() {
+                serial_println!("WARNING: notification center self-test failed: {:?}", e);
+            }
+            if let Err(e) = fs::osreset::self_test() {
+                serial_println!("WARNING: OS reset self-test failed: {:?}", e);
+            }
+            if let Err(e) = fs::perfmon::self_test() {
+                serial_println!("WARNING: performance monitor self-test failed: {:?}", e);
+            }
+            if let Err(e) = fs::rundialog::self_test() {
+                serial_println!("WARNING: run dialog self-test failed: {:?}", e);
+            }
+            if let Err(e) = fs::schedtune::self_test() {
+                serial_println!("WARNING: scheduler tuning self-test failed: {:?}", e);
+            }
+            if let Err(e) = fs::scriptlang::self_test() {
+                serial_println!("WARNING: script-engine registry self-test failed: {:?}", e);
+            }
+            if let Err(e) = fs::servicemgr::self_test() {
+                serial_println!("WARNING: service manager self-test failed: {:?}", e);
+            }
+            if let Err(e) = fs::soundmixer::self_test() {
+                serial_println!("WARNING: sound mixer self-test failed: {:?}", e);
+            }
+            if let Err(e) = fs::swapcfg::self_test() {
+                serial_println!("WARNING: swap configuration self-test failed: {:?}", e);
+            }
+            if let Err(e) = fs::systray::self_test() {
+                serial_println!("WARNING: system tray self-test failed: {:?}", e);
+            }
+            if let Err(e) = fs::taskbar::self_test() {
+                serial_println!("WARNING: taskbar self-test failed: {:?}", e);
+            }
+            if let Err(e) = fs::theme::self_test() {
+                serial_println!("WARNING: desktop theme self-test failed: {:?}", e);
+            }
+            if let Err(e) = fs::vdesktop::self_test() {
+                serial_println!("WARNING: virtual desktops self-test failed: {:?}", e);
+            }
+            if let Err(e) = fs::wakesensor::self_test() {
+                serial_println!("WARNING: wake sensor self-test failed: {:?}", e);
+            }
+            if let Err(e) = fs::widgets::self_test() {
+                serial_println!("WARNING: desktop widgets self-test failed: {:?}", e);
+            }
+            if let Err(e) = fs::winsnap::self_test() {
+                serial_println!("WARNING: window snapping self-test failed: {:?}", e);
+            }
         }
         case();
     }

@@ -29,7 +29,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use crate::error::{KernelError, KernelResult};
-use crate::fs::path::Path;
+use crate::fs::path::{Path, PathBuf};
 use crate::serial_println;
 
 // ---------------------------------------------------------------------------
@@ -41,7 +41,15 @@ use crate::serial_println;
 #[allow(dead_code)]
 pub struct Association {
     /// The application path (executable to launch).
-    pub app_path: String,
+    ///
+    /// A `PathBuf`, not a `String` (design-decisions.md 261): an installed
+    /// executable lives on the same filesystem as every other file, and our
+    /// filesystems permit any byte but `/` and NUL in a name.  While this was
+    /// a `String`, two applications whose paths differed only in a byte with
+    /// no UTF-8 spelling compared equal for the purposes of `register` and
+    /// `unregister` — so registering one overwrote the other's association,
+    /// and unregistering either removed both.
+    pub app_path: PathBuf,
     /// Human-readable application name.
     pub app_name: String,
     /// Priority (higher = preferred).  System defaults use 0-99,
@@ -89,18 +97,25 @@ static ASSOC: Mutex<AssocInner> = Mutex::new(AssocInner {
 /// If an association with the same `app_path` already exists for this
 /// MIME type, it is updated (priority/name replaced).  Otherwise a new
 /// entry is appended.  The list is re-sorted by priority.
-pub fn register(mime: &str, app_path: &str, app_name: &str, priority: u32, user_set: bool) {
+pub fn register(
+    mime: &str,
+    app_path: impl AsRef<Path>,
+    app_name: &str,
+    priority: u32,
+    user_set: bool,
+) {
+    let app_path = app_path.as_ref();
     let mut inner = ASSOC.lock();
     let list = inner.by_mime.entry(String::from(mime)).or_default();
 
     // Check for existing entry with same app_path.
-    if let Some(existing) = list.iter_mut().find(|a| a.app_path == app_path) {
+    if let Some(existing) = list.iter_mut().find(|a| a.app_path.as_path() == app_path) {
         existing.app_name = String::from(app_name);
         existing.priority = priority;
         existing.user_set = user_set;
     } else {
         list.push(Association {
-            app_path: String::from(app_path),
+            app_path: app_path.to_path_buf(),
             app_name: String::from(app_name),
             priority,
             user_set,
@@ -114,11 +129,12 @@ pub fn register(mime: &str, app_path: &str, app_name: &str, priority: u32, user_
 /// Unregister an application from a MIME type.
 ///
 /// Returns true if the entry was found and removed.
-pub fn unregister(mime: &str, app_path: &str) -> bool {
+pub fn unregister(mime: &str, app_path: impl AsRef<Path>) -> bool {
+    let app_path = app_path.as_ref();
     let mut inner = ASSOC.lock();
     if let Some(list) = inner.by_mime.get_mut(mime) {
         let before = list.len();
-        list.retain(|a| a.app_path != app_path);
+        list.retain(|a| a.app_path.as_path() != app_path);
         let removed = before != list.len();
         // Clean up empty lists.
         if list.is_empty() {
@@ -368,7 +384,7 @@ pub fn self_test() -> KernelResult<()> {
             return Err(KernelError::InternalError);
         }
         let app = app.unwrap();
-        if app.app_path != "/usr/bin/test_app" {
+        if app.app_path.as_path() != Path::new("/usr/bin/test_app") {
             serial_println!("[assoc]   ERROR: wrong app_path");
             return Err(KernelError::InternalError);
         }
@@ -394,7 +410,7 @@ pub fn self_test() -> KernelResult<()> {
         );
 
         let app = default_app("test/selftest").unwrap();
-        if app.app_path != "/usr/bin/test_high" {
+        if app.app_path.as_path() != Path::new("/usr/bin/test_high") {
             serial_println!("[assoc]   ERROR: highest priority not returned as default");
             return Err(KernelError::InternalError);
         }
@@ -417,7 +433,7 @@ pub fn self_test() -> KernelResult<()> {
         }
 
         let app = default_app("test/selftest").unwrap();
-        if app.app_path != "/usr/bin/test_app" {
+        if app.app_path.as_path() != Path::new("/usr/bin/test_app") {
             serial_println!("[assoc]   ERROR: wrong default after unregister");
             return Err(KernelError::InternalError);
         }
@@ -462,6 +478,55 @@ pub fn self_test() -> KernelResult<()> {
         serial_println!("[assoc]   list_types OK");
     }
 
+    // --- Test 6: non-UTF-8 app paths (design-decisions.md 261) ---
+    //
+    // An association's `app_path` is the path of an installed executable,
+    // which lives on the same filesystem as everything else and may contain
+    // any byte but `/` and NUL.  While it was a `String`, two applications
+    // whose paths differed only in a byte with no UTF-8 spelling collided:
+    // registering one overwrote the other's entry, and unregistering either
+    // removed both.
+    {
+        let app_a = Path::new(&b"/usr/bin/asc_\xFFp"[..]);
+        let app_b = Path::new(&b"/usr/bin/asc_\xFEp"[..]);
+
+        register("test/nonutf8", app_a, "App A", 10, false);
+        register("test/nonutf8", app_b, "App B", 20, false);
+
+        let all = apps_for("test/nonutf8");
+        if all.len() != 2 {
+            serial_println!(
+                "[assoc]   ERROR: non-UTF-8 app paths folded together ({} entries)",
+                all.len()
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // Priority still decides the default, and it is byte-exactly B.
+        let def = default_app("test/nonutf8");
+        match def {
+            Some(a) if a.app_path.as_path() == app_b => {}
+            _ => {
+                serial_println!("[assoc]   ERROR: wrong default for non-UTF-8 app paths");
+                return Err(KernelError::InternalError);
+            }
+        }
+
+        // Removing one must leave the other alone.
+        if !unregister("test/nonutf8", app_b) {
+            serial_println!("[assoc]   ERROR: unregister of non-UTF-8 path failed");
+            return Err(KernelError::InternalError);
+        }
+        let remaining = apps_for("test/nonutf8");
+        if remaining.len() != 1 || remaining[0].app_path.as_path() != app_a {
+            serial_println!("[assoc]   ERROR: unregister removed the wrong entry");
+            return Err(KernelError::InternalError);
+        }
+        unregister("test/nonutf8", app_a);
+
+        serial_println!("[assoc]   non-UTF-8 app paths OK");
+    }
+
     // Cleanup test data.
     unregister("test/selftest", "/usr/bin/test_app");
     unregister("test/selftest", "/usr/bin/test_low");
@@ -472,7 +537,7 @@ pub fn self_test() -> KernelResult<()> {
         return Err(KernelError::InternalError);
     }
 
-    serial_println!("[assoc] Self-test passed (5 tests).");
+    serial_println!("[assoc] Self-test passed (6 tests).");
     let _ = saved_stats;
     Ok(())
 }

@@ -32,6 +32,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
 
+use super::path::{Path, PathBuf};
 use crate::error::{KernelError, KernelResult};
 
 // ---------------------------------------------------------------------------
@@ -151,7 +152,11 @@ pub struct FileType {
 #[derive(Debug, Clone)]
 pub struct AppIconOverride {
     /// Application path.
-    pub app_path: String,
+    /// A `PathBuf` rather than a `String` per design-decisions.md §261:
+    /// this is the path of an installed application binary, which lives on
+    /// the same filesystem as everything else and is under no obligation to
+    /// be UTF-8.
+    pub app_path: PathBuf,
     /// MIME type.
     pub mime: String,
     /// Custom icon for this app + type combination.
@@ -290,12 +295,16 @@ pub fn init() {
 /// Resolve the icon for a file path.
 ///
 /// Checks app overrides, type registry, category defaults, and generic fallback.
-pub fn icon_for_file(path: &str) -> ResolvedIcon {
-    icon_for_file_with_app(path, None)
+pub fn icon_for_file(path: impl AsRef<Path>) -> ResolvedIcon {
+    icon_for_file_with_app(path, None::<&Path>)
 }
 
 /// Resolve the icon for a file, optionally considering an app's overrides.
-pub fn icon_for_file_with_app(path: &str, app_path: Option<&str>) -> ResolvedIcon {
+pub fn icon_for_file_with_app(
+    path: impl AsRef<Path>,
+    app_path: Option<impl AsRef<Path>>,
+) -> ResolvedIcon {
+    let path = path.as_ref();
     LOOKUP_COUNT.fetch_add(1, Ordering::Relaxed);
 
     let mime = crate::fs::mime::detect(path).unwrap_or("application/octet-stream");
@@ -325,10 +334,11 @@ pub fn icon_for_file_with_app(path: &str, app_path: Option<&str>) -> ResolvedIco
 
     // 1. Check app-specific override.
     if let Some(app) = app_path {
+        let app = app.as_ref();
         let overrides = APP_ICONS.lock();
         if let Some(ov) = overrides
             .iter()
-            .find(|o| o.app_path == app && o.mime == mime)
+            .find(|o| o.app_path.as_path() == app && o.mime == mime)
         {
             let desc = type_description(mime);
             return ResolvedIcon {
@@ -406,13 +416,18 @@ pub fn register_type(
 }
 
 /// Register an app-specific icon override.
-pub fn register_app_icon(app_path: &str, mime: &str, icon: &str) -> KernelResult<()> {
+pub fn register_app_icon(
+    app_path: impl AsRef<Path>,
+    mime: &str,
+    icon: &str,
+) -> KernelResult<()> {
+    let app_path = app_path.as_ref();
     let mut overrides = APP_ICONS.lock();
 
     // Update existing.
     if let Some(existing) = overrides
         .iter_mut()
-        .find(|o| o.app_path == app_path && o.mime == mime)
+        .find(|o| o.app_path.as_path() == app_path && o.mime == mime)
     {
         existing.icon = String::from(icon);
         return Ok(());
@@ -423,7 +438,7 @@ pub fn register_app_icon(app_path: &str, mime: &str, icon: &str) -> KernelResult
     }
 
     overrides.push(AppIconOverride {
-        app_path: String::from(app_path),
+        app_path: app_path.to_path_buf(),
         mime: String::from(mime),
         icon: String::from(icon),
     });
@@ -432,11 +447,12 @@ pub fn register_app_icon(app_path: &str, mime: &str, icon: &str) -> KernelResult
 }
 
 /// Unregister an app-specific icon override.
-pub fn unregister_app_icon(app_path: &str, mime: &str) -> KernelResult<()> {
+pub fn unregister_app_icon(app_path: impl AsRef<Path>, mime: &str) -> KernelResult<()> {
+    let app_path = app_path.as_ref();
     let mut overrides = APP_ICONS.lock();
     if let Some(pos) = overrides
         .iter()
-        .position(|o| o.app_path == app_path && o.mime == mime)
+        .position(|o| o.app_path.as_path() == app_path && o.mime == mime)
     {
         overrides.remove(pos);
         Ok(())
@@ -629,6 +645,41 @@ pub fn self_test() -> KernelResult<()> {
         serial_println!("[filetype] test 7 passed: stats");
     }
 
-    serial_println!("[filetype] all 7 self-tests passed");
+    // Test 8: non-UTF-8 paths (design-decisions.md 261).
+    //
+    // Both the file being iconified and the application doing the
+    // iconifying are ordinary filesystem paths, so both may contain any
+    // byte but `/` and NUL. When these were `String`, two applications
+    // whose paths differed only in a byte with no UTF-8 spelling folded
+    // to the same key, and one app silently inherited the other's icon
+    // overrides.
+    {
+        let img = Path::new(&b"/img_\xFF.png"[..]);
+        let icon = icon_for_file(img);
+        assert_eq!(icon.category, IconCategory::Image);
+        assert_eq!(icon.mime, "image/png");
+
+        let app_a = Path::new(&b"/usr/bin/view_\xFFr"[..]);
+        let app_b = Path::new(&b"/usr/bin/view_\xFEr"[..]);
+        register_app_icon(app_a, "image/png", "a-png-icon")?;
+
+        // The registering app gets its override...
+        let via_a = icon_for_file_with_app(img, Some(app_a));
+        assert_eq!(via_a.source, IconSource::AppOverride);
+        assert_eq!(via_a.icon, "a-png-icon");
+
+        // ...and the app that merely looks similar does not.
+        let via_b = icon_for_file_with_app(img, Some(app_b));
+        assert_eq!(via_b.source, IconSource::TypeRegistry);
+
+        // Removal is likewise byte-exact: `app_b` never registered
+        // anything, so unregistering it must fail rather than remove
+        // `app_a`'s override.
+        assert!(unregister_app_icon(app_b, "image/png").is_err());
+        assert!(unregister_app_icon(app_a, "image/png").is_ok());
+        serial_println!("[filetype] test 8 passed: non-UTF-8 paths");
+    }
+
+    serial_println!("[filetype] all 8 self-tests passed");
     Ok(())
 }

@@ -209,6 +209,15 @@ impl Ring {
         self.len == 0
     }
 
+    /// How many bytes are buffered.
+    ///
+    /// O(1) because `len` is a field rather than something derived from
+    /// `head` and a tail: the count `FIONREAD` wants is already being
+    /// maintained by every `write`/`read`, so reporting it costs nothing.
+    const fn len(&self) -> usize {
+        self.len
+    }
+
     #[allow(clippy::arithmetic_side_effects)]
     fn writable(&self) -> usize {
         // `len` is only ever increased by `write` (which caps at `writable`),
@@ -815,15 +824,83 @@ pub(crate) fn master_push_output(id: TtyId, bytes: &[u8]) {
 /// A hung-up end counts as ready: the read returns immediately, with `EIO` or a
 /// short count rather than data, and a poll loop that called this "not ready"
 /// would spin forever on a dead terminal.
+///
+/// # Why the slave arm consults the device and not just the ring
+///
+/// A canonical line is delivered as a unit, and a reader whose buffer is
+/// smaller than the line leaves the remainder in the device's pending buffer
+/// (see [`crate::tty::pending_bytes`]). Those bytes are not in the input ring —
+/// they have already been pulled out of it and processed — so a slave-side
+/// readability answer taken from the ring alone reports "not readable" while a
+/// `read` is standing by to return them immediately. If the master then sends
+/// nothing further, the poll loop parks forever on data it already has.
 #[must_use]
 pub fn readable(handle: PtyHandle) -> bool {
+    // Sampled *before* PTYS is taken: the documented lock order is `DEVICES`
+    // before `PTYS`, so reaching into the device with the pty table held would
+    // be the inversion. Sampling first is not a race that matters — bytes can
+    // only be added between the two reads, and a readability answer is a
+    // hint that is re-checked by the read itself either way.
+    let pending = if handle.end() == PtyEnd::Slave {
+        crate::tty::pending_bytes(handle.id())
+    } else {
+        0
+    };
     let table = PTYS.lock();
     let Some(pty) = table.get(&handle.id()) else {
         return true;
     };
     match handle.end() {
         PtyEnd::Master => !pty.output.is_empty() || pty.slave_gone(),
-        PtyEnd::Slave => !pty.input.is_empty() || pty.master_gone(),
+        PtyEnd::Slave => pending > 0 || !pty.input.is_empty() || pty.master_gone(),
+    }
+}
+
+/// How many bytes a read on `handle` would find waiting — `FIONREAD`.
+///
+/// # Exactness, which differs by end
+///
+/// * **Master** — exact. The output ring holds post-discipline bytes with
+///   nothing further to do to them, so its length is precisely what the next
+///   read delivers.
+/// * **Slave, raw mode** — exact. Every byte in the input ring reaches the
+///   reader unchanged.
+/// * **Slave, canonical mode** — an **upper bound**, and deliberately so. The
+///   input ring holds *pre*-discipline bytes; the line editor has not run on
+///   them yet, so an erase character will consume a byte rather than deliver
+///   one, and an unterminated line delivers nothing at all until its newline
+///   arrives. Counting them accurately would mean running the editor twice —
+///   once to answer the question and again to answer the read — and the
+///   second run would see different input.
+///
+/// **Zero is exact at both ends and in both modes**, which is what makes the
+/// bound usable rather than merely optimistic: a caller using `FIONREAD` only
+/// to test emptiness — the common case, and what a `select`-less polling loop
+/// does — is never told there is something to read when there is not. A caller
+/// that sizes a buffer by the count over-allocates in canonical mode and loses
+/// nothing, because `read` returns what is actually there regardless.
+///
+/// # Hangup is not readable *bytes*
+///
+/// Unlike [`readable`], a hung-up end with an empty ring answers 0. The two
+/// questions differ: "would a read return immediately" is yes (it returns EOF
+/// or `EIO`), but "how many bytes are there" is none, and `FIONREAD` is asked
+/// by callers who will believe the number. Linux answers 0 here too.
+#[must_use]
+pub fn readable_bytes(handle: PtyHandle) -> usize {
+    // Sampled before PTYS for the lock-order reason given on `readable`.
+    let pending = if handle.end() == PtyEnd::Slave {
+        crate::tty::pending_bytes(handle.id())
+    } else {
+        0
+    };
+    let table = PTYS.lock();
+    let Some(pty) = table.get(&handle.id()) else {
+        return 0;
+    };
+    match handle.end() {
+        PtyEnd::Master => pty.output.len(),
+        PtyEnd::Slave => pending.saturating_add(pty.input.len()),
     }
 }
 
@@ -931,6 +1008,97 @@ pub fn self_test() {
     // ...and Linux echoes it, so the emulator shows `^C`.
     let n = master_read(m, &mut got).expect("master read ^C echo");
     assert_eq!(got.get(..n), Some(&b"^C"[..]), "^C is echoed as caret-C");
+
+    // --- readable byte counts (FIONREAD) -----------------------------------
+    // Both ends are empty here: the ^C above consumed the last input and its
+    // echo was drained. Zero must be exact — a caller that uses FIONREAD only
+    // to test emptiness, which is what a select-less poll loop does, is the
+    // majority caller and the one that must never be misled.
+    assert_eq!(readable_bytes(m), 0, "drained master counts zero");
+    assert_eq!(readable_bytes(s), 0, "drained slave counts zero");
+    assert!(!readable(m), "drained master is not readable");
+    assert!(!readable(s), "drained slave is not readable");
+
+    // Master side is exact: `slave_write` puts post-discipline bytes in the
+    // output ring, so the count is precisely what the next read delivers —
+    // including the ONLCR expansion, because the expansion has already
+    // happened by the time the bytes are counted. Counting the *caller's* four
+    // bytes here would be an undercount, and a reader sized by it would leave
+    // the stray CR behind to be mistaken for the start of the next line.
+    let n = slave_write(s, b"abc\n").expect("slave write for count");
+    assert_eq!(n, 4, "four caller bytes consumed");
+    assert_eq!(
+        readable_bytes(m),
+        5,
+        "master counts the expanded bytes (abc\\r\\n), not the caller's four"
+    );
+    assert!(readable(m), "a master with bytes is readable");
+    let n = master_read(m, &mut got).expect("drain the counted bytes");
+    assert_eq!(n, 5, "the count was exact, not an estimate");
+    assert_eq!(readable_bytes(m), 0, "and the ring is empty again");
+
+    // Slave side, canonical mode: an *upper bound*, stated as such. An
+    // unterminated line delivers nothing yet, so this deliberately reports
+    // more than a read would return. It is still useful because it is an
+    // upper bound rather than an under-report: a caller sizing a buffer by it
+    // over-allocates and loses nothing.
+    let _ = master_write(m, b"xy").expect("partial line");
+    assert_eq!(
+        readable_bytes(s),
+        2,
+        "canonical slave counts unedited input bytes"
+    );
+    // Drain the partial line and its echo so the next case starts clean.
+    let _ = master_write(m, b"\n").expect("terminate the line");
+    let got_n = match tty::read(id, &mut buf) {
+        tty::ConsoleRead::Data(n) => n,
+        other => panic!("read returned {other:?}"),
+    };
+    assert_eq!(got_n, 3, "'xy\\n' delivered");
+    let _ = master_read(m, &mut got).expect("drain echo");
+    assert_eq!(readable_bytes(s), 0, "slave drained");
+
+    // The case that motivated consulting the device at all: a canonical line
+    // is delivered as a unit, and a reader whose buffer is smaller than the
+    // line leaves the rest in the device's pending buffer. Those bytes are in
+    // no ring. A slave-side answer taken from the input ring alone reports
+    // "nothing to read" while a read is standing by to return four bytes — and
+    // if the master sends nothing more, reports it forever, which is a hang
+    // rather than a wrong number.
+    let _ = master_write(m, b"hello\n").expect("full line");
+    let mut small = [0u8; 2];
+    let got_n = match tty::read(id, &mut small) {
+        tty::ConsoleRead::Data(n) => n,
+        other => panic!("short read returned {other:?}"),
+    };
+    assert_eq!(got_n, 2, "only what fits");
+    assert_eq!(
+        readable_bytes(s),
+        4,
+        "the undelivered remainder of the line is still readable"
+    );
+    assert!(
+        readable(s),
+        "a slave holding a partial line is readable even with an empty ring"
+    );
+    let got_n = match tty::read(id, &mut buf) {
+        tty::ConsoleRead::Data(n) => n,
+        other => panic!("remainder read returned {other:?}"),
+    };
+    assert_eq!(got_n, 4, "the remainder was exactly what was counted");
+    assert_eq!(buf.get(..4), Some(&b"llo\n"[..]), "and it is the right bytes");
+    assert_eq!(readable_bytes(s), 0, "nothing left");
+    let _ = master_read(m, &mut got).expect("drain the echo of 'hello'");
+
+    // A vanished pty counts zero rather than panicking or reporting a stale
+    // number: `readable` calls that end "ready" so a poll loop can observe the
+    // hangup, but there are no *bytes*, and FIONREAD's caller believes the
+    // number it is given.
+    let (m4, s4) = create().expect("pty create 4");
+    let _ = close(m4);
+    let _ = close(s4);
+    assert_eq!(readable_bytes(m4), 0, "a destroyed pty has no bytes");
+    assert!(readable(m4), "but it is still 'ready', so a poll wakes");
 
     // --- window size is per-device, and a resize is distinguishable ---------
     // `SYS_PTY_SET_WINSIZE` raises SIGWINCH only when `set_winsize` reports a

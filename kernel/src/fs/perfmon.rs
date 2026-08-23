@@ -168,6 +168,19 @@ pub struct Alert {
 const DEFAULT_MAX_SAMPLES: usize = 300; // ~5 minutes at 1s interval
 const MAX_ALERTS: usize = 64;
 
+/// Accepted range for [`set_interval`], in milliseconds.
+///
+/// Named rather than written inline at the clamp because `kshell` used to
+/// restate `100, 60000` in order to print the effective value, which is a
+/// second spelling of a policy that has to agree with the first one forever.
+const INTERVAL_MS_RANGE: core::ops::RangeInclusive<u32> = 100..=60_000;
+
+/// Accepted range for [`set_max_samples`], in samples.
+///
+/// The floor is not arbitrary: a history shorter than this cannot show a
+/// trend, which is the only thing the history is for.
+const MAX_SAMPLES_RANGE: core::ops::RangeInclusive<usize> = 10..=10_000;
+
 // ---------------------------------------------------------------------------
 // State
 // ---------------------------------------------------------------------------
@@ -183,26 +196,37 @@ struct State {
     changes: u64,
 }
 
-static STATE: Mutex<State> = Mutex::new(State {
-    config: MonitorConfig {
-        sample_interval_ms: 1000,
-        max_samples: DEFAULT_MAX_SAMPLES,
-        cpu_enabled: true,
-        mem_enabled: true,
-        disk_enabled: true,
-        net_enabled: true,
-        cpu_alert_pct: 90,
-        mem_alert_pct: 90,
-        disk_alert_pct: 95,
-    },
-    cpu_history: Vec::new(),
-    mem_history: Vec::new(),
-    disk_history: Vec::new(),
-    net_history: Vec::new(),
-    alerts: Vec::new(),
-    next_alert_id: 1,
-    changes: 0,
-});
+impl State {
+    /// The state a fresh boot starts with.
+    ///
+    /// Extracted from the initialiser of `STATE` so that the self-test can
+    /// be handed a pristine table without disturbing the live one; see
+    /// `crate::fs::selftest`.
+    const fn new() -> Self {
+        Self {
+            config: MonitorConfig {
+                sample_interval_ms: 1000,
+                max_samples: DEFAULT_MAX_SAMPLES,
+                cpu_enabled: true,
+                mem_enabled: true,
+                disk_enabled: true,
+                net_enabled: true,
+                cpu_alert_pct: 90,
+                mem_alert_pct: 90,
+                disk_alert_pct: 95,
+            },
+            cpu_history: Vec::new(),
+            mem_history: Vec::new(),
+            disk_history: Vec::new(),
+            net_history: Vec::new(),
+            alerts: Vec::new(),
+            next_alert_id: 1,
+            changes: 0,
+        }
+    }
+}
+
+static STATE: Mutex<State> = Mutex::new(State::new());
 
 static OP_COUNT: AtomicU64 = AtomicU64::new(0);
 
@@ -215,18 +239,39 @@ pub fn get_config() -> MonitorConfig {
     STATE.lock().config.clone()
 }
 
-/// Set sample interval.
-pub fn set_interval(ms: u32) {
+/// Set the sample interval, in milliseconds, and return the value stored.
+///
+/// The request is clamped to `INTERVAL_MS_RANGE`, so the return value is not
+/// always the argument. Returning it rather than clamping silently is what
+/// lets a caller report what actually happened without restating the range
+/// and drifting from it — see [`set_max_samples`], which was found to have
+/// exactly that problem.
+pub fn set_interval(ms: u32) -> u32 {
     let mut state = STATE.lock();
-    state.config.sample_interval_ms = ms.clamp(100, 60000);
+    let effective = ms.clamp(*INTERVAL_MS_RANGE.start(), *INTERVAL_MS_RANGE.end());
+    state.config.sample_interval_ms = effective;
     state.changes += 1;
+    effective
 }
 
-/// Set max history.
-pub fn set_max_samples(n: usize) {
+/// Set the history depth, in samples, and return the value stored.
+///
+/// The request is clamped to `MAX_SAMPLES_RANGE`, so the return value is not
+/// always the argument: a floor exists because a history too short to show a
+/// trend is worse than useless in a performance monitor.
+///
+/// That clamp used to be undocumented and invisible — the function returned
+/// `()`, so `set_max_samples(5)` stored 10 and said nothing. This module's own
+/// self-test asked for 5 and asserted it got 5, and was wrong for as long as it
+/// existed; nobody found out because the suite was reachable only from a shell
+/// subcommand and had never run. See `known-issues.md` →
+/// `TD-A-FS-SELFTESTS-NEVER-RUN`.
+pub fn set_max_samples(n: usize) -> usize {
     let mut state = STATE.lock();
-    state.config.max_samples = n.clamp(10, 10000);
+    let effective = n.clamp(*MAX_SAMPLES_RANGE.start(), *MAX_SAMPLES_RANGE.end());
+    state.config.max_samples = effective;
     state.changes += 1;
+    effective
 }
 
 /// Enable/disable CPU monitoring.
@@ -504,7 +549,22 @@ pub fn clear_all() {
 // Self-tests
 // ---------------------------------------------------------------------------
 
+/// The suite asserts exact table contents, so it needs a table of its own.
+/// It used to get one by calling `clear_all()`, which — since this suite is
+/// reachable from the shell — deleted whatever the user had stored here and
+/// then reported success.  The live state is moved aside for the duration and
+/// put back afterwards; `crate::fs::selftest` records why this shape rather
+/// than the alternatives.
 pub fn self_test() -> KernelResult<()> {
+    // These counters live outside the table, so `with_pristine` cannot
+    // see them; save and restore them here so a run leaves no trace.
+    let saved_op_count = OP_COUNT.load(Ordering::Relaxed);
+    let result = crate::fs::selftest::with_pristine(&STATE, State::new(), self_test_inner);
+    OP_COUNT.store(saved_op_count, Ordering::Relaxed);
+    result
+}
+
+fn self_test_inner() -> KernelResult<()> {
     use crate::serial_println;
 
     clear_all();
@@ -620,9 +680,37 @@ pub fn self_test() -> KernelResult<()> {
     set_cpu_enabled(true);
 
     // Test 10: history limit.
+    //
+    // This asked for a depth of 5 and asserted it got 5 for as long as it
+    // existed. `set_max_samples` clamps to `MAX_SAMPLES_RANGE`, so it stored
+    // 10 — and, returning `()`, said nothing about having done so. The first
+    // boot that ever ran this suite panicked here, `left: 10, right: 5`.
+    // Both halves are now covered: that the request is clamped, and that the
+    // depth it settles on is the one enforced.
     serial_println!("perfmon::self_test 10: limit");
-    set_max_samples(5);
-    for i in 0..10u32 {
+    let floor = *MAX_SAMPLES_RANGE.start();
+    assert_eq!(
+        set_max_samples(floor.saturating_sub(1)),
+        floor,
+        "below-floor request clamps"
+    );
+    assert_eq!(
+        get_config().max_samples,
+        floor,
+        "and the clamped value is stored"
+    );
+    assert_eq!(
+        set_max_samples(MAX_SAMPLES_RANGE.end().saturating_add(1)),
+        *MAX_SAMPLES_RANGE.end(),
+        "above-ceiling request clamps"
+    );
+    assert_eq!(
+        set_max_samples(floor),
+        floor,
+        "an in-range request is honoured"
+    );
+    // Recording twice the depth must leave exactly the depth.
+    for i in 0..u32::try_from(floor.saturating_mul(2)).unwrap_or(u32::MAX) {
         record_mem(MemSample {
             timestamp_ns: ts + i as u64 * 1000,
             used_bytes: 1000 * i as u64,
@@ -632,13 +720,14 @@ pub fn self_test() -> KernelResult<()> {
             page_faults: i as u64,
         });
     }
-    assert_eq!(mem_history().len(), 5);
+    assert_eq!(mem_history().len(), floor);
 
     // Test 11: stats.
     serial_println!("perfmon::self_test 11: stats");
     let (cpus, mems, disks, nets, alerts, _ops) = stats();
     assert!(cpus > 0);
-    assert_eq!(mems, 5);
+    // Whatever test 10 settled the depth at, `stats` must agree with it.
+    assert_eq!(mems, floor);
     assert_eq!(disks, 1);
     assert_eq!(nets, 1);
     assert!(alerts > 0);

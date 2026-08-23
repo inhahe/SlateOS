@@ -17,7 +17,7 @@
 //! launcher.show();
 //!
 //! // Each frame, if visible:
-//! let commands = launcher.render();
+//! let commands = launcher.render(&palette);
 //! // Draw commands on top of everything else
 //!
 //! // Forward key events while visible:
@@ -27,7 +27,43 @@
 //!     LauncherAction::None => {}
 //! }
 //! ```
+//!
+//! # Colour
+//!
+//! Every colour here is a role of the [`Palette`] handed to [`render`], and
+//! four judgements decide which role each site takes. Each is stated so it can
+//! be refuted by a test rather than merely believed.
+//!
+//! 1. **The accent marks where you are; it never says what a thing is.** Two
+//!    sites take `p.accent`: the caret in the search box and the bar beside the
+//!    selected row. Both answer "here". A category badge answers "what", and so
+//!    takes a *named hue* instead. This distinction is invisible under the
+//!    shipped theme and is the whole reason the conversion is delicate — the
+//!    stock accent **is** `blue`, and the `Application` category is also blue,
+//!    so before this change one constant `BLUE` served both meanings at four
+//!    sites and nothing could tell them apart. Move the accent to green and the
+//!    caret follows while the App badge does not; that is the test.
+//!
+//! 2. **A category's colour is a fixed vocabulary of five, not a scale.** App,
+//!    Sys, Set, File and Cmd take `blue`, `red`, `peach`, `green` and `mauve`.
+//!    They are five names, so they must stay five *distinct* values in either
+//!    mode — a vocabulary two of whose words are the same word cannot say
+//!    which one it means. None of them follows the accent.
+//!
+//! 3. **The badge fill is the badge's own hue at alpha 40, computed and never
+//!    named.** A category gains a colour by being added to the enum, not by
+//!    someone remembering to add a matching wash; deriving the fill is what
+//!    makes those two impossible to disagree.
+//!
+//! 4. **The dialog floats, so it is translucent over a real drop shadow.**
+//!    `p.base` at alpha 240 lets the desktop show through just enough to read
+//!    as lifted, and [`Palette::shadow`] is the shell's one shadow value —
+//!    this module was one of the three popups that each picked their own
+//!    (100 here, 120 and 160 elsewhere) without reference to the others. The
+//!    shadow is black in both modes because a shadow is an absence of light
+//!    rather than a colour.
 
+use appearance::Palette;
 use guitk::color::Color;
 use guitk::event::{Key, KeyEvent};
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
@@ -35,29 +71,16 @@ use guitk::step;
 use guitk::style::CornerRadii;
 use guitk::text;
 use guitk::text::TextCursor;
+use guitk::theme::with_alpha;
 
-// ============================================================================
-// Theme — Catppuccin Mocha palette
-// ============================================================================
+/// How opaque the dialog itself is.
+///
+/// Named because it is asserted: a floating panel that reached full opacity
+/// would stop reading as floating, and the difference is one byte.
+const DIALOG_ALPHA: u8 = 240;
 
-mod theme {
-    use guitk::color::Color;
-
-    pub const BASE: Color = Color::rgba(30, 30, 46, 240);
-    pub const MANTLE: Color = Color::from_hex(0x181825);
-    pub const SURFACE1: Color = Color::from_hex(0x45475A);
-    pub const SURFACE2: Color = Color::from_hex(0x585B70);
-    pub const TEXT: Color = Color::from_hex(0xCDD6F4);
-    pub const SUBTEXT0: Color = Color::from_hex(0xA6ADC8);
-    pub const SUBTEXT1: Color = Color::from_hex(0xBAC2DE);
-    pub const OVERLAY0: Color = Color::from_hex(0x6C7086);
-    pub const BLUE: Color = Color::from_hex(0x89B4FA);
-    pub const MAUVE: Color = Color::from_hex(0xCBA6F7);
-    pub const GREEN: Color = Color::from_hex(0xA6E3A1);
-    pub const PEACH: Color = Color::from_hex(0xFAB387);
-    pub const RED: Color = Color::from_hex(0xF38BA8);
-    pub const SHADOW: Color = Color::rgba(0, 0, 0, 100);
-}
+/// How strong the wash behind a category badge is.
+const BADGE_WASH_ALPHA: u8 = 40;
 
 // ============================================================================
 // Constants
@@ -98,13 +121,20 @@ impl Category {
         }
     }
 
-    fn color(self) -> Color {
+    /// The hue that stands for this category.
+    ///
+    /// A *named hue*, never `p.accent`, even for `Application` — whose colour
+    /// is the same pixel as the stock accent and so cannot be told apart from
+    /// it until the user picks a different one. See judgement 1 in the module
+    /// docs: this answers "what kind of thing", and the accent answers "where
+    /// you are".
+    fn color(self, p: &Palette) -> Color {
         match self {
-            Self::Application => theme::BLUE,
-            Self::System => theme::RED,
-            Self::Setting => theme::PEACH,
-            Self::File => theme::GREEN,
-            Self::Command => theme::MAUVE,
+            Self::Application => p.blue,
+            Self::System => p.red,
+            Self::Setting => p.peach,
+            Self::File => p.green,
+            Self::Command => p.mauve,
         }
     }
 }
@@ -509,7 +539,10 @@ impl LauncherState {
     }
 
     /// Render the launcher to a list of render commands.
-    pub fn render(&self) -> Vec<RenderCommand> {
+    ///
+    /// `p` is the resolved palette; see the module docs for which role each
+    /// site takes and why.
+    pub fn render(&self, p: &Palette) -> Vec<RenderCommand> {
         if !self.visible {
             return Vec::new();
         }
@@ -533,7 +566,7 @@ impl LauncherState {
             offset_y: 4.0,
             blur: 24.0,
             spread: 8.0,
-            color: theme::SHADOW,
+            color: p.shadow(),
             corner_radii: radii,
         });
 
@@ -543,7 +576,7 @@ impl LauncherState {
             y: dialog_y,
             width: DIALOG_WIDTH,
             height: dialog_height,
-            color: theme::BASE,
+            color: with_alpha(p.base, DIALOG_ALPHA),
             corner_radii: radii,
         });
 
@@ -568,7 +601,7 @@ impl LauncherState {
             y: 0.0,
             width: input_width,
             height: INPUT_HEIGHT - PADDING,
-            color: theme::MANTLE,
+            color: p.mantle,
             corner_radii: input_radii,
         });
 
@@ -578,7 +611,7 @@ impl LauncherState {
             y: 0.0,
             width: input_width,
             height: INPUT_HEIGHT - PADDING,
-            color: theme::SURFACE2,
+            color: p.surface2,
             line_width: 1.0,
             corner_radii: input_radii,
         });
@@ -590,7 +623,7 @@ impl LauncherState {
                 x: 12.0,
                 y: text_y,
                 text: "Search...".to_string(),
-                color: theme::OVERLAY0,
+                color: p.overlay0,
                 font_size: INPUT_FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
@@ -601,7 +634,7 @@ impl LauncherState {
                 x: 12.0,
                 y: text_y,
                 text: self.query.clone(),
-                color: theme::TEXT,
+                color: p.text,
                 font_size: INPUT_FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(input_width - 24.0),
@@ -629,7 +662,7 @@ impl LauncherState {
             y1: text_y,
             x2: cursor_x,
             y2: text_y + INPUT_FONT_SIZE,
-            color: theme::BLUE,
+            color: p.accent,
             width: 2.0,
         });
 
@@ -650,7 +683,7 @@ impl LauncherState {
                     y: row_y,
                     width: input_width,
                     height: ROW_HEIGHT,
-                    color: theme::SURFACE1,
+                    color: p.surface1,
                     corner_radii: CornerRadii::all(6.0),
                 });
                 cmds.push(RenderCommand::FillRect {
@@ -658,7 +691,7 @@ impl LauncherState {
                     y: row_y + 8.0,
                     width: 3.0,
                     height: ROW_HEIGHT - 16.0,
-                    color: theme::BLUE,
+                    color: p.accent,
                     corner_radii: CornerRadii::all(1.5),
                 });
             }
@@ -671,7 +704,7 @@ impl LauncherState {
                 y: icon_y,
                 width: 24.0,
                 height: 24.0,
-                color: entry.category.color(),
+                color: entry.category.color(p),
                 corner_radii: CornerRadii::all(4.0),
             });
 
@@ -681,11 +714,7 @@ impl LauncherState {
                 x: text_x,
                 y: row_y + 8.0,
                 text: entry.name.clone(),
-                color: if is_selected {
-                    theme::TEXT
-                } else {
-                    theme::SUBTEXT1
-                },
+                color: if is_selected { p.text } else { p.subtext1 },
                 font_size: NAME_FONT_SIZE,
                 font_weight: if is_selected {
                     FontWeightHint::Bold
@@ -701,7 +730,7 @@ impl LauncherState {
                 x: text_x,
                 y: row_y + 26.0,
                 text: entry.description.clone(),
-                color: theme::SUBTEXT0,
+                color: p.subtext0,
                 font_size: DESC_FONT_SIZE,
                 font_weight: FontWeightHint::Light,
                 max_width: Some(input_width - text_x - 80.0),
@@ -720,12 +749,10 @@ impl LauncherState {
                 y: badge_y,
                 width: badge_width,
                 height: 20.0,
-                color: Color::rgba(
-                    entry.category.color().r,
-                    entry.category.color().g,
-                    entry.category.color().b,
-                    40,
-                ),
+                // Derived from the badge's own hue, never named beside it:
+                // a category gets a colour by being added to the enum, and a
+                // hand-written wash is free to disagree with it.
+                color: with_alpha(entry.category.color(p), BADGE_WASH_ALPHA),
                 corner_radii: CornerRadii::all(4.0),
             });
 
@@ -733,7 +760,7 @@ impl LauncherState {
                 x: badge_x + 6.0,
                 y: badge_y + 4.0,
                 text: badge_text.to_string(),
-                color: entry.category.color(),
+                color: entry.category.color(p),
                 font_size: DESC_FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
@@ -747,7 +774,7 @@ impl LauncherState {
                 x: input_width / 2.0 - 40.0,
                 y: results_y_start + 16.0,
                 text: "No results found".to_string(),
-                color: theme::OVERLAY0,
+                color: p.overlay0,
                 font_size: NAME_FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
@@ -989,9 +1016,122 @@ mod tests {
         clippy::indexing_slicing,
         clippy::arithmetic_side_effects
     )]
+    // These tests select a command by the exact literal the code under test was
+    // handed — a width, a height, a font size. That is the assertion meant: a
+    // tolerance would let a command that had drifted answer for one that had not.
+    #![allow(clippy::float_cmp)]
 
     use super::*;
+    use crate::palette_check::assert_drawn_from;
     use guitk::event::{Key, KeyEvent, Modifiers};
+
+    /// A palette whose accent belongs to no palette.
+    ///
+    /// The stock accent **is** `blue`, and `blue` is also this module's colour
+    /// for the `Application` category — so under the shipped theme the caret,
+    /// the selection bar and every App badge are one pixel value and no
+    /// assertion can tell a position mark from a category mark. Every test
+    /// here that mentions the accent uses this instead, and the loop below
+    /// proves the substitute really is outside the palette rather than
+    /// coincidentally equal to a role the test then reads by accident.
+    fn accented(light: bool) -> Palette {
+        let mut p = Palette::for_mode(light);
+        p.accent = Color::from_hex(0xFF00FF);
+        for (name, role) in p.roles() {
+            assert!(
+                name == "accent"
+                    || (role.r, role.g, role.b) != (p.accent.r, p.accent.g, p.accent.b),
+                "the fixture accent collides with role {name}, so an assertion \
+                 about the accent could pass while reading the wrong role"
+            );
+        }
+        p
+    }
+
+    /// A launcher showing results, which is the only state that draws rows.
+    ///
+    /// A hidden launcher renders nothing at all, so a sweep over the default
+    /// state would check zero commands and pass — the same vacuous-coverage
+    /// trap the `.take(12)` fixture hit in `language_settings`.
+    fn showing() -> LauncherState {
+        let mut st = LauncherState::new(1280.0, 800.0);
+        st.show();
+        st
+    }
+
+    /// Every colour in `cmds`, whatever command carries it.
+    fn all_colors(cmds: &[RenderCommand]) -> Vec<Color> {
+        cmds.iter()
+            .filter_map(|c| match c {
+                RenderCommand::FillRect { color, .. }
+                | RenderCommand::StrokeRect { color, .. }
+                | RenderCommand::Text { color, .. }
+                | RenderCommand::Line { color, .. }
+                | RenderCommand::BoxShadow { color, .. } => Some(*color),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The colours of every `Text` command whose text is exactly `s`.
+    fn text_colors(cmds: &[RenderCommand], s: &str) -> Vec<Color> {
+        cmds.iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, color, .. } if text == s => Some(*color),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The colour of the one `Text` command reading `s`.
+    fn text_color(cmds: &[RenderCommand], s: &str) -> Color {
+        let found = text_colors(cmds, s);
+        assert_eq!(found.len(), 1, "expected exactly one command reading {s:?}");
+        found[0]
+    }
+
+    /// The colour of the one `Text` command reading `s` at `size` points.
+    ///
+    /// The size is what separates the query from a result: type the name of an
+    /// app and the same string is on the screen twice, once in the field at
+    /// [`INPUT_FONT_SIZE`] and once in the list at [`NAME_FONT_SIZE`]. Those
+    /// are two different sites that happen to share a role, so a lookup that
+    /// could not tell them apart would be asserting about neither.
+    fn text_color_sized(cmds: &[RenderCommand], s: &str, size: f32) -> Color {
+        let found: Vec<Color> = cmds
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text {
+                    text,
+                    color,
+                    font_size,
+                    ..
+                } if text == s && *font_size == size => Some(*color),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            found.len(),
+            1,
+            "expected exactly one command reading {s:?} at {size}pt"
+        );
+        found[0]
+    }
+
+    /// The colours of every `FillRect` of exactly `w` x `h`.
+    fn fills_sized(cmds: &[RenderCommand], w: f32, h: f32) -> Vec<Color> {
+        cmds.iter()
+            .filter_map(|c| match c {
+                RenderCommand::FillRect {
+                    width,
+                    height,
+                    color,
+                    ..
+                } if *width == w && *height == h => Some(*color),
+                _ => None,
+            })
+            .collect()
+    }
 
     /// The caret has to sit where the query text ends, and the query is drawn
     /// in the *proportional* UI face. It used to be placed at
@@ -1007,11 +1147,11 @@ mod tests {
             state.query = query.to_owned();
             state.cursor = query.len();
             state
-                .render()
+                .render(&accented(false))
                 .into_iter()
                 .find_map(|cmd| match cmd {
                     RenderCommand::Line { x1, x2, color, .. }
-                        if (x1 - x2).abs() < f32::EPSILON && color == theme::BLUE =>
+                        if (x1 - x2).abs() < f32::EPSILON && color == accented(false).accent =>
                     {
                         Some(x1)
                     }
@@ -1050,7 +1190,7 @@ mod tests {
         state.visible = true;
         state.query = "é".to_owned();
         state.cursor = 1;
-        assert!(!state.render().is_empty());
+        assert!(!state.render(&accented(false)).is_empty());
     }
 
     /// Editing must move by characters, not bytes. A byte-stepping caret puts
@@ -1221,7 +1361,10 @@ mod tests {
         // builtin_app_database has >> MAX_RESULTS entries.
         // We can't read private `results` directly, but render() returns
         // empty when hidden, so verify show() populates render output.
-        assert!(st.render().is_empty(), "hidden launcher renders nothing");
+        assert!(
+            st.render(&accented(false)).is_empty(),
+            "hidden launcher renders nothing"
+        );
     }
 
     #[test]
@@ -1231,7 +1374,7 @@ mod tests {
         assert!(st.visible);
         // A visible launcher must produce a non-empty render tree
         // (dialog background + input field + scrim).
-        assert!(!st.render().is_empty());
+        assert!(!st.render(&accented(false)).is_empty());
     }
 
     #[test]
@@ -1240,7 +1383,7 @@ mod tests {
         st.show();
         st.hide();
         assert!(!st.visible);
-        assert!(st.render().is_empty());
+        assert!(st.render(&accented(false)).is_empty());
     }
 
     #[test]
@@ -1255,7 +1398,7 @@ mod tests {
         // Re-showing must reset the query — first render after show
         // should contain results, not a stale filter.
         st.show();
-        let commands = st.render();
+        let commands = st.render(&accented(false));
         assert!(!commands.is_empty());
     }
 
@@ -1449,6 +1592,496 @@ mod tests {
         // Pathological viewport sizes should not panic the render path.
         st.set_viewport(0.0, 0.0);
         st.show();
-        let _ = st.render();
+        let _ = st.render(&accented(false));
+    }
+
+    // -------- Colour: the palette conversion --------
+    //
+    // TD-C-FORTY-NINE-SHELL-MODULES-CARRY-THEIR-OWN-COPY-OF-THE-PALETTE part 2.
+    // Thirteen chromatic constants plus a shadow used to live in a private
+    // `mod theme` here; the tests below check the four judgements in the
+    // module docs, one test per judgement, plus the mechanical sweep that
+    // catches a constant left behind by the edit.
+
+    /// One app per category, which is the only fixture that draws all five
+    /// badge hues.
+    ///
+    /// The builtin database is not that fixture: it is ranked and truncated to
+    /// `MAX_RESULTS`, so which categories reach the screen is a property of the
+    /// scoring, not of the render — and a category that never renders is a
+    /// category whose colour is never checked. Replacing `apps` wholesale also
+    /// pins the row *count*, which several assertions below index into.
+    fn five_categories() -> LauncherState {
+        fn entry(name: &str, category: Category) -> AppEntry {
+            AppEntry {
+                name: name.to_string(),
+                description: format!("the {name} description"),
+                executable_path: format!("/usr/bin/{name}"),
+                keywords: Vec::new(),
+                category,
+                launch_count: 0,
+            }
+        }
+        let mut st = LauncherState::new(1280.0, 800.0);
+        st.apps = vec![
+            entry("alpha", Category::Application),
+            entry("bravo", Category::System),
+            entry("charlie", Category::Setting),
+            entry("delta", Category::File),
+            entry("echo", Category::Command),
+        ];
+        st.show();
+        assert_eq!(st.results.len(), 5, "all five categories reach the screen");
+        st
+    }
+
+    /// The five categories in the order `five_categories` lists them.
+    const FIVE: [(Category, &str, &str); 5] = [
+        (Category::Application, "alpha", "App"),
+        (Category::System, "bravo", "Sys"),
+        (Category::Setting, "charlie", "Set"),
+        (Category::File, "delta", "File"),
+        (Category::Command, "echo", "Cmd"),
+    ];
+
+    /// Nothing this launcher draws comes from outside the palette it was given.
+    ///
+    /// Both modes, and both of the two states that draw different trees: a
+    /// list of results, and the "No results found" line, which is reached from
+    /// no other test here and would otherwise be swept zero times.
+    #[test]
+    fn every_colour_this_launcher_draws_comes_from_its_palette() {
+        for light in [false, true] {
+            let p = accented(light);
+
+            assert_drawn_from(&p, &five_categories().render(&p), &[], "launcher results");
+
+            // And again over the *shipped* app database rather than the
+            // five-row fixture: the fixture was built to reach every category,
+            // and a fixture built to reach everything is exactly the thing that
+            // cannot notice a row shape only the real data produces.
+            let real = showing().render(&p);
+            assert!(
+                real.len() > 10,
+                "the builtin database drew nothing worth sweeping"
+            );
+            assert_drawn_from(&p, &real, &[], "launcher over the builtin database");
+
+            let mut empty = five_categories();
+            "zzzzzzzz".clone_into(&mut empty.query);
+            empty.update_results();
+            let cmds = empty.render(&p);
+            assert!(
+                text_colors(&cmds, "No results found").len() == 1,
+                "the empty-result state was not actually reached"
+            );
+            assert_drawn_from(&p, &cmds, &[], "launcher with no results");
+        }
+    }
+
+    /// None of the thirteen deleted constants is still drawn.
+    ///
+    /// Every value below is a Catppuccin **Mocha** colour, so a light render
+    /// cannot legitimately produce one — which turns "a substitution was
+    /// missed" from an invisible defect into a named failure. The shadow is
+    /// not in the list because it is black in both modes on purpose.
+    #[test]
+    fn none_of_the_thirteen_deleted_constants_is_still_drawn() {
+        const DELETED: [(&str, u32); 13] = [
+            ("BASE", 0x001E_1E2E),
+            ("MANTLE", 0x0018_1825),
+            ("SURFACE1", 0x0045_475A),
+            ("SURFACE2", 0x0058_5B70),
+            ("TEXT", 0x00CD_D6F4),
+            ("SUBTEXT0", 0x00A6_ADC8),
+            ("SUBTEXT1", 0x00BA_C2DE),
+            ("OVERLAY0", 0x006C_7086),
+            ("BLUE", 0x0089_B4FA),
+            ("MAUVE", 0x00CB_A6F7),
+            ("GREEN", 0x00A6_E3A1),
+            ("PEACH", 0x00FA_B387),
+            ("RED", 0x00F3_8BA8),
+        ];
+
+        let p = accented(true);
+
+        // All three states, not just the one. The launcher draws three
+        // different trees and this test used to render only the first: an
+        // empty field draws the placeholder and no query at all, so a constant
+        // frozen into the *query* branch was a constant this test could never
+        // reach. The harness said so — defect Rx45 was caught by three tests
+        // and missed by this one, which is exactly the shape of a hole that a
+        // reading of the test cannot find.
+        let mut cmds = five_categories().render(&p);
+        let mut typed = five_categories();
+        "alpha".clone_into(&mut typed.query);
+        typed.update_results();
+        cmds.extend(typed.render(&p));
+        let mut none = five_categories();
+        "zzzzzzzz".clone_into(&mut none.query);
+        none.update_results();
+        cmds.extend(none.render(&p));
+
+        for c in all_colors(&cmds) {
+            let rgb = (u32::from(c.r) << 16) | (u32::from(c.g) << 8) | u32::from(c.b);
+            for (name, deleted) in DELETED {
+                assert_ne!(
+                    rgb, deleted,
+                    "the launcher still draws the deleted constant {name} \
+                     (#{deleted:06X}) in a light render"
+                );
+            }
+        }
+    }
+
+    /// Every site, named one at a time, in the role this module claims for it.
+    ///
+    /// The sweep above proves only *membership*, and membership cannot see a
+    /// swap: an input field painted `surface1` instead of `mantle` draws a
+    /// legal colour, and so does a description painted `subtext1`. Neither
+    /// changes any count, so a tally of roles would pass both. n source sites
+    /// need n assertions, so this is that table.
+    #[test]
+    fn every_site_draws_the_role_it_claims() {
+        for light in [false, true] {
+            let p = accented(light);
+            let st = five_categories();
+            let cmds = st.render(&p);
+
+            // The dialog: 620 wide, and 52 + 5*44 + 24 tall.
+            assert_eq!(
+                fills_sized(&cmds, DIALOG_WIDTH, 296.0).len(),
+                1,
+                "one dialog background"
+            );
+            let dialog = fills_sized(&cmds, DIALOG_WIDTH, 296.0)[0];
+            assert_eq!(
+                (dialog.r, dialog.g, dialog.b),
+                (p.base.r, p.base.g, p.base.b),
+                "the dialog is the panel rung"
+            );
+
+            // The search field and its border. The border is the module's only
+            // stroke, which is what selects it.
+            assert_eq!(
+                fills_sized(&cmds, 596.0, 40.0),
+                vec![p.mantle],
+                "the search field is a rung below the dialog around it"
+            );
+            let strokes: Vec<Color> = cmds
+                .iter()
+                .filter_map(|c| match c {
+                    RenderCommand::StrokeRect { color, .. } => Some(*color),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(strokes, vec![p.surface2], "the search field's border");
+
+            // The selected row: a fill and a bar, and exactly one of each.
+            assert_eq!(
+                fills_sized(&cmds, 596.0, ROW_HEIGHT),
+                vec![p.surface1],
+                "exactly one row is filled, at the raised rung"
+            );
+            assert_eq!(
+                fills_sized(&cmds, 3.0, ROW_HEIGHT - 16.0),
+                vec![p.accent],
+                "exactly one row carries the selection bar"
+            );
+
+            // The three lines of each row.
+            assert_eq!(
+                text_color_sized(&cmds, "alpha", NAME_FONT_SIZE),
+                p.text,
+                "the selected row's name is the brightest thing in the list"
+            );
+            for (_, name, _) in &FIVE[1..] {
+                assert_eq!(
+                    text_color_sized(&cmds, name, NAME_FONT_SIZE),
+                    p.subtext1,
+                    "an unselected row's name is a rung dimmer"
+                );
+            }
+            for (_, name, _) in FIVE {
+                assert_eq!(
+                    text_color_sized(&cmds, &format!("the {name} description"), DESC_FONT_SIZE),
+                    p.subtext0,
+                    "a row's description is dimmer than its name"
+                );
+            }
+
+            // The five categories, each pinned to the role it names. A table,
+            // not a set: a permutation of five distinct hues is still five
+            // distinct hues, so `the_five_category_hues_stay_five_distinct_colours`
+            // cannot see one, and neither can a test that compares the drawn
+            // colour to `Category::color` — that asks the code under test what
+            // it meant. Only naming the pairs here can fail.
+            for (category, expected, label) in [
+                (Category::Application, p.blue, "App"),
+                (Category::System, p.red, "Sys"),
+                (Category::Setting, p.peach, "Set"),
+                (Category::File, p.green, "File"),
+                (Category::Command, p.mauve, "Cmd"),
+            ] {
+                assert_eq!(category.color(&p), expected, "{label} names the wrong role");
+                assert_eq!(
+                    text_color(&cmds, label),
+                    expected,
+                    "the {label} badge is not drawn in the role its category names"
+                );
+            }
+
+            // The placeholder and the no-results line, each in its own state.
+            let mut typed = five_categories();
+            "alpha".clone_into(&mut typed.query);
+            typed.update_results();
+            let typed = typed.render(&p);
+            assert_eq!(
+                text_color_sized(&typed, "alpha", INPUT_FONT_SIZE),
+                p.text,
+                "a typed query"
+            );
+            assert_eq!(
+                text_color(&cmds, "Search..."),
+                p.overlay0,
+                "the placeholder in an empty field"
+            );
+
+            let mut none = five_categories();
+            "zzzzzzzz".clone_into(&mut none.query);
+            none.update_results();
+            assert_eq!(
+                text_color(&none.render(&p), "No results found"),
+                p.overlay0,
+                "the no-results line"
+            );
+        }
+    }
+
+    /// Judgement 1: the accent marks where you are; it never says what a thing
+    /// is.
+    ///
+    /// This is the module's real trap. The stock accent **is** `blue`, and
+    /// `Application` is also blue — so under the shipped theme the caret, the
+    /// selection bar and every App badge are one pixel value, and an
+    /// assertion made at the stock accent cannot fail. Hence the off-palette
+    /// accent for the count, and the sweep across all 21 roles for the claim
+    /// that a category badge does not move with it.
+    #[test]
+    fn the_accent_marks_where_you_are_and_never_what_a_thing_is() {
+        for light in [false, true] {
+            let p = accented(light);
+            let cmds = five_categories().render(&p);
+            let n = all_colors(&cmds).iter().filter(|c| **c == p.accent).count();
+            assert_eq!(
+                n, 2,
+                "the caret and the selected row's bar are the only two things \
+                 that say where you are — found {n}"
+            );
+
+            // The caret is one of the two, and it is the module's only Line.
+            let lines: Vec<Color> = cmds
+                .iter()
+                .filter_map(|c| match c {
+                    RenderCommand::Line { color, .. } => Some(*color),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(lines, vec![p.accent], "the caret");
+
+            // And the badges hold still while the accent moves everywhere.
+            let base = Palette::for_mode(light);
+            for (role, accent) in base.roles() {
+                let mut swept = Palette::for_mode(light);
+                swept.accent = accent;
+                let cmds = five_categories().render(&swept);
+                for (category, _, badge) in FIVE {
+                    assert_eq!(
+                        text_color(&cmds, badge),
+                        category.color(&swept),
+                        "the {badge} badge followed the accent when it was set \
+                         to {role}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Judgement 2: five categories are five distinct colours, in either mode.
+    ///
+    /// A vocabulary two of whose words are the same word cannot say which one
+    /// it means. Checked on the drawn commands rather than on `Category::color`
+    /// alone, so that a renderer which drew the wrong one of the five is
+    /// caught as well as a palette that collapsed two of them.
+    #[test]
+    fn the_five_category_hues_stay_five_distinct_colours() {
+        for light in [false, true] {
+            let p = accented(light);
+            let cmds = five_categories().render(&p);
+
+            let mut seen: Vec<Color> = Vec::new();
+            for (category, _, badge) in FIVE {
+                let drawn = text_color(&cmds, badge);
+                assert_eq!(
+                    drawn,
+                    category.color(&p),
+                    "the {badge} badge is not drawn in its own category's hue"
+                );
+                assert!(
+                    !seen.contains(&drawn),
+                    "two categories share the colour {drawn:?}, so the badge \
+                     cannot say which of them a row belongs to"
+                );
+                seen.push(drawn);
+            }
+            assert_eq!(seen.len(), 5);
+
+            // The icon square beside each row takes the same hue as the badge
+            // at the far end of it — one row, one colour, said twice.
+            let icons = fills_sized(&cmds, 24.0, 24.0);
+            assert_eq!(icons.len(), 5, "one icon per row");
+            for (i, (category, _, _)) in FIVE.iter().enumerate() {
+                assert_eq!(
+                    icons[i],
+                    category.color(&p),
+                    "row {i}'s icon disagrees with its own category"
+                );
+            }
+        }
+    }
+
+    /// Judgement 3: a badge's wash is its own hue at a lower alpha.
+    ///
+    /// Derived rather than named, so that adding a category cannot leave a
+    /// wash behind that still refers to the old one. Asserted as a
+    /// *relationship* between the two commands — RGB equal, alpha different —
+    /// which is a claim a pair of hand-written constants would fail even if
+    /// both happened to be plausible colours.
+    #[test]
+    fn a_badge_wash_is_its_own_hue_at_a_lower_alpha() {
+        for light in [false, true] {
+            let p = accented(light);
+            let cmds = five_categories().render(&p);
+
+            let washes: Vec<Color> = cmds
+                .iter()
+                .filter_map(|c| match c {
+                    RenderCommand::FillRect { height, color, .. } if *height == 20.0 => {
+                        Some(*color)
+                    }
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(washes.len(), 5, "one wash per badge");
+
+            for (i, (_, _, badge)) in FIVE.iter().enumerate() {
+                let ink = text_color(&cmds, badge);
+                assert_eq!(
+                    (washes[i].r, washes[i].g, washes[i].b),
+                    (ink.r, ink.g, ink.b),
+                    "the {badge} wash is not the same hue as the {badge} label \
+                     drawn on top of it"
+                );
+                assert_eq!(washes[i].a, BADGE_WASH_ALPHA, "the {badge} wash");
+                // Not only "fainter than the ink" — faint enough to be a tint.
+                // The line above compares the wash to the constant that
+                // produced it and so cannot notice that constant moving; this
+                // one can. A wash at, say, 200 still passes "the label is more
+                // solid", but by then the label is being read against its own
+                // hue rather than against the row it is sitting on.
+                assert!(
+                    washes[i].a <= 64,
+                    "a wash at alpha {} is a fill, not a tint",
+                    washes[i].a
+                );
+                assert!(
+                    ink.a > washes[i].a,
+                    "the {badge} label must be more solid than the wash under \
+                     it or it cannot be read"
+                );
+            }
+        }
+    }
+
+    /// Judgement 4: the dialog floats, so it is translucent over a real shadow.
+    ///
+    /// The alpha is the point. A launcher that reached full opacity would stop
+    /// reading as lifted off the desktop, and the difference is one byte that
+    /// nothing else in the module would notice. The shadow is asserted to be
+    /// black in **both** modes rather than equal to some role, because a
+    /// shadow is an absence of light and must not flip with the theme.
+    #[test]
+    fn the_dialog_floats_over_a_shadow_rather_than_sitting_on_the_desktop() {
+        for light in [false, true] {
+            let p = accented(light);
+            let cmds = five_categories().render(&p);
+
+            let dialog = fills_sized(&cmds, DIALOG_WIDTH, 296.0)[0];
+            assert_eq!(
+                dialog.a, DIALOG_ALPHA,
+                "the dialog stopped being translucent, so it no longer floats"
+            );
+            assert!(
+                dialog.a < 255,
+                "an opaque dialog is a panel, not a floating one"
+            );
+            // Bounded on both sides, because the line above compares the drawn
+            // alpha to the constant that produced it and so cannot notice that
+            // constant moving. Translucent enough to float, solid enough that
+            // the desktop does not read through the result list.
+            assert!(
+                dialog.a >= 224,
+                "at alpha {} the wallpaper shows through the results",
+                dialog.a
+            );
+
+            let shadows: Vec<Color> = cmds
+                .iter()
+                .filter_map(|c| match c {
+                    RenderCommand::BoxShadow { color, .. } => Some(*color),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(shadows, vec![p.shadow()], "one drop shadow");
+            assert_eq!(
+                (shadows[0].r, shadows[0].g, shadows[0].b),
+                (0, 0, 0),
+                "a shadow is an absence of light, so it does not follow the mode"
+            );
+            assert!(shadows[0].a > 0, "an invisible shadow is not a shadow");
+        }
+    }
+
+    /// An empty field reads as a prompt; a typed one reads as your text.
+    ///
+    /// The two-mode loop is not decoration: `p.text` in Mocha is exactly the
+    /// `0xCDD6F4` this module was converted from, so a frozen query ink
+    /// compared against `p.text` in the dark render would be comparing a
+    /// constant against itself.
+    #[test]
+    fn an_empty_query_is_dimmer_than_a_typed_one() {
+        for light in [false, true] {
+            let p = accented(light);
+            assert_eq!(
+                text_color(&five_categories().render(&p), "Search..."),
+                p.overlay0,
+                "the placeholder"
+            );
+
+            let mut typed = five_categories();
+            "alpha".clone_into(&mut typed.query);
+            typed.update_results();
+            let cmds = typed.render(&p);
+            assert_eq!(
+                text_color_sized(&cmds, "alpha", INPUT_FONT_SIZE),
+                p.text,
+                "the typed query"
+            );
+            assert_ne!(
+                p.overlay0, p.text,
+                "if these were equal a user could not tell a prompt from the \
+                 text they had typed"
+            );
+        }
     }
 }

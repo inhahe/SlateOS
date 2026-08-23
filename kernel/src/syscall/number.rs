@@ -4217,6 +4217,130 @@ pub const SYS_NET_RAW_RX: u64 = 867;
 pub const SYS_NET_RAW_CLOSE: u64 = 868;
 
 // ---------------------------------------------------------------------------
+// Pty readable-byte count (869)
+// ---------------------------------------------------------------------------
+
+/// Bytes waiting to be read on a pty end — the `FIONREAD` a pty owes.
+///
+/// `arg0`: the handle, which must be one the caller owns.
+///
+/// # Why this is 869 and not 557
+///
+/// The pty family was allocated 544–556 and 557 went to `SYS_RLIMIT_GET`
+/// before this gap was found, so the family's block is closed. Renumbering to
+/// keep it contiguous would break every caller already compiled against
+/// 544–556 in exchange for tidiness. The same thing happened to
+/// [`SYS_UDP_RX_FRONT_BYTES`] (848), which is nowhere near the UDP block
+/// either: a readable-byte count is the operation nobody remembers to design
+/// in, because it is the one you only need once something real polls the
+/// object.
+///
+/// # What the number means
+///
+/// Exact on a master and on a slave in raw mode; an **upper bound** on a slave
+/// in canonical mode, where the counted bytes have not been through the line
+/// editor yet and an erase will consume rather than deliver one.  **Zero is
+/// exact in every case**, so a caller testing for emptiness — which is what
+/// most `FIONREAD` callers are doing — is never misled. See
+/// [`crate::tty::pty::readable_bytes`] for why counting canonical input
+/// exactly would require running the editor twice against different input.
+///
+/// A hung-up end with nothing buffered answers 0, not an error: `FIONREAD`
+/// asks how many bytes there are, and the answer is none. That differs from
+/// [`SYS_PTY_POLL`], where hangup counts as readable because a read there
+/// returns *immediately*, just not with data.
+///
+/// Returns: the count; `InvalidHandle` if the caller does not own the handle
+/// or it names no pty.  Chosen number 869.
+pub const SYS_PTY_READABLE_BYTES: u64 = 869;
+
+// ---------------------------------------------------------------------------
+// Foreground process group of a *named* terminal (870–871)
+// ---------------------------------------------------------------------------
+//
+// [`SYS_TTY_GET_PGRP`] (537) and [`SYS_TTY_SET_PGRP`] (538) answer only for the
+// caller's own controlling terminal.  On a pty *slave* that is exactly right —
+// after `login_tty` the slave **is** the caller's controlling terminal, and
+// when it is not, ENOTTY is the truthful answer.  On a pty **master** it cannot
+// be right: a master is by definition the end that is *not* the holder's
+// controlling terminal, so 537 would report the *emulator's* foreground group
+// as though it were the pty's.  A wrong number is worse than a refusal, which
+// is why libc currently returns ENOTTY there rather than delegating.
+//
+// # Why these are new numbers and not a widened 537/538
+//
+// The same argument as [`SYS_PTY_GET_TERMIOS`] (555) versus
+// [`SYS_TTY_GET_TERMIOS`] (541): 537's shape is exactly right for the
+// overwhelmingly common case, and an ABI break buys something only when the old
+// shape is *wrong*.
+//
+// But here there is a second, harder reason.  libc invokes 537 as `syscall0` —
+// which does not write `rdi` at all, because the syscall takes no arguments.
+// Widening `arg0` to name a terminal would therefore not read a zero; it would
+// read **whatever the caller happened to leave in `rdi`**.  Under the naming
+// convention that is `0` (my terminal) sometimes, `1` (reserved, EINVAL)
+// sometimes, and a live pty handle belonging to some other terminal the rest of
+// the time.  A compatibility break that fails *nondeterministically*, differing
+// with the caller's register allocation, is not a break anyone could find.
+//
+// 538 has the same problem one argument along: its `arg0` is the pgid today, so
+// the terminal would have to move to `arg1`, which `syscall1` likewise never
+// writes.
+
+/// Read the foreground process group of a **named** terminal (`TIOCGPGRP` on a
+/// pty the caller owns).
+///
+/// `arg0`: terminal, under the family's naming convention — `0` is the caller's
+/// own controlling terminal, `>= 2` is an owned pty handle.
+///
+/// # `arg0 == 0` is *not* [`resolve_tty_arg`]'s fallback
+///
+/// That helper resolves `0` to the console for a caller with no controlling
+/// terminal, which is right for `termios` and window size — a caller asking
+/// about "my terminal" that has none can be usefully handed the console.  It is
+/// wrong here: a daemon has no foreground process group, and answering with the
+/// *console's* would report a group it has no relationship to as its own.  So
+/// `0` takes the strict path and yields ENOTTY, matching 537 exactly.
+///
+/// A named terminal that no session has claimed also yields ENOTTY: a pty whose
+/// slave has not yet run `TIOCSCTTY` genuinely has no foreground group, and the
+/// practical caller — a terminal emulator wanting the running command's name
+/// for its title bar — must be told "nothing is running there" rather than a
+/// number.
+///
+/// Returns: the pgid; `NotSupported` (ENOTTY), `InvalidHandle`,
+/// `NoSuchProcess`.  Chosen number 870.
+pub const SYS_PTY_GET_PGRP: u64 = 870;
+
+/// Hand a **named** terminal to process group `arg1` (`TIOCSPGRP` on a pty the
+/// caller owns).
+///
+/// `arg0`: terminal, as for [`SYS_PTY_GET_PGRP`].
+/// `arg1`: the process group to make foreground.
+///
+/// # The group is validated against the terminal's session, not the caller's
+///
+/// POSIX requires the group to belong to the session associated with the
+/// terminal.  For 538 those are the same session, so it reads it off the
+/// caller; for a master they are different by construction, and validating
+/// against the caller would be simultaneously too strict and too lax — it would
+/// reject every group actually running on the pty, and accept groups from the
+/// emulator's own unrelated session, which is the terminal-stealing case the
+/// rule exists to prevent, merely pointed the other way.  See
+/// [`crate::proc::pcb::ctty_set_fg_pgrp_on`].
+///
+/// The `SIGTTOU` rule follows the terminal being operated on rather than the
+/// caller ([`tty_job_control_check_for`]): an emulator holding a master is
+/// neither foreground nor background in that terminal's session, and stopping
+/// it for being a background job on some *other* terminal would deadlock — the
+/// emulator is often exactly the process that would have to be resumed to make
+/// itself foreground.
+///
+/// Returns: 0; `InvalidArgument`, `NotSupported` (ENOTTY), `InvalidHandle`,
+/// `PermissionDenied`, or the `SIGTTOU` restart sentinel.  Chosen number 871.
+pub const SYS_PTY_SET_PGRP: u64 = 871;
+
+// ---------------------------------------------------------------------------
 // Version info
 // ---------------------------------------------------------------------------
 

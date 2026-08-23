@@ -38,6 +38,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
 
+use super::path::{Path, PathBuf};
 use crate::error::{KernelError, KernelResult};
 use crate::serial_println;
 use crate::sync::PreemptSpinMutex;
@@ -60,7 +61,12 @@ const AUTO_THAW_NS: u64 = 5 * 60 * 1_000_000_000;
 #[derive(Debug, Clone)]
 struct FrozenEntry {
     /// Mountpoint or path prefix.
-    mountpoint: String,
+    ///
+    /// A `PathBuf`, not a `String`: this is a filesystem location, which
+    /// may hold any byte but `/` and NUL. The `reason` below stays a
+    /// `String` because it is a human-written message, not a name. See
+    /// `design-decisions.md` §261.
+    mountpoint: PathBuf,
     /// Freeze depth (supports nested freeze).
     freeze_level: u32,
     /// Timestamp when frozen.
@@ -97,7 +103,7 @@ pub struct ThawResult {
 #[derive(Debug, Clone)]
 pub struct FreezeStatus {
     /// Mountpoint.
-    pub mountpoint: String,
+    pub mountpoint: PathBuf,
     /// Current freeze level.
     pub freeze_level: u32,
     /// How long frozen (nanoseconds).
@@ -131,7 +137,8 @@ static BLOCKED_WRITE_COUNT: AtomicU64 = AtomicU64::new(0);
 ///
 /// Increments the freeze level. First freeze (level 0→1) triggers
 /// a sync to flush pending writes. Supports nested freezing.
-pub fn freeze(mountpoint: &str, reason: &str) -> KernelResult<FreezeResult> {
+pub fn freeze(mountpoint: impl AsRef<Path>, reason: &str) -> KernelResult<FreezeResult> {
+    let mountpoint = mountpoint.as_ref();
     if mountpoint.is_empty() {
         return Err(KernelError::InvalidArgument);
     }
@@ -145,7 +152,7 @@ pub fn freeze(mountpoint: &str, reason: &str) -> KernelResult<FreezeResult> {
     let mut table = FROZEN_TABLE.lock();
 
     // Find existing or create new.
-    if let Some(entry) = table.iter_mut().find(|e| e.mountpoint == mountpoint) {
+    if let Some(entry) = table.iter_mut().find(|e| e.mountpoint.as_path() == mountpoint) {
         entry.freeze_level += 1;
         entry.deadline_ns = now + AUTO_THAW_NS;
         if !reason.is_empty() {
@@ -168,7 +175,7 @@ pub fn freeze(mountpoint: &str, reason: &str) -> KernelResult<FreezeResult> {
 
     let mut table = FROZEN_TABLE.lock();
     table.push(FrozenEntry {
-        mountpoint: String::from(mountpoint),
+        mountpoint: mountpoint.to_path_buf(),
         freeze_level: 1,
         frozen_at_ns: now,
         deadline_ns: now + AUTO_THAW_NS,
@@ -186,7 +193,8 @@ pub fn freeze(mountpoint: &str, reason: &str) -> KernelResult<FreezeResult> {
 ///
 /// Decrements the freeze level. When level reaches 0, the filesystem
 /// is fully thawed and writes resume.
-pub fn thaw(mountpoint: &str) -> KernelResult<ThawResult> {
+pub fn thaw(mountpoint: impl AsRef<Path>) -> KernelResult<ThawResult> {
+    let mountpoint = mountpoint.as_ref();
     if mountpoint.is_empty() {
         return Err(KernelError::InvalidArgument);
     }
@@ -196,7 +204,7 @@ pub fn thaw(mountpoint: &str) -> KernelResult<ThawResult> {
     let mut table = FROZEN_TABLE.lock();
     let idx = table
         .iter()
-        .position(|e| e.mountpoint == mountpoint)
+        .position(|e| e.mountpoint.as_path() == mountpoint)
         .ok_or(KernelError::NotFound)?;
 
     let entry = &mut table[idx];
@@ -222,13 +230,14 @@ pub fn thaw(mountpoint: &str) -> KernelResult<ThawResult> {
 }
 
 /// Force-thaw a filesystem regardless of freeze level.
-pub fn force_thaw(mountpoint: &str) -> KernelResult<ThawResult> {
+pub fn force_thaw(mountpoint: impl AsRef<Path>) -> KernelResult<ThawResult> {
+    let mountpoint = mountpoint.as_ref();
     THAW_COUNT.fetch_add(1, Ordering::Relaxed);
 
     let mut table = FROZEN_TABLE.lock();
     let idx = table
         .iter()
-        .position(|e| e.mountpoint == mountpoint)
+        .position(|e| e.mountpoint.as_path() == mountpoint)
         .ok_or(KernelError::NotFound)?;
 
     let blocked = table[idx].blocked_writes;
@@ -246,7 +255,8 @@ pub fn force_thaw(mountpoint: &str) -> KernelResult<ThawResult> {
 /// This is the VFS integration point — write operations should call
 /// this before proceeding. Returns true if the filesystem containing
 /// `path` is currently frozen.
-pub fn is_frozen(path: &str) -> bool {
+pub fn is_frozen(path: impl AsRef<Path>) -> bool {
+    let path = path.as_ref();
     let now = crate::timekeeping::clock_monotonic();
 
     // Check for stale entries and query in one lock.
@@ -264,10 +274,13 @@ pub fn is_frozen(path: &str) -> bool {
 
     // Longest prefix match.
     for entry in table.iter_mut() {
-        if path == entry.mountpoint
-            || (path.starts_with(&entry.mountpoint)
-                && path.as_bytes().get(entry.mountpoint.len()) == Some(&b'/'))
-        {
+        // The canonical subtree predicate (see fs::pathutil) rather than a
+        // hand-rolled string prefix plus a separator probe. Besides being
+        // byte-clean, it is more correct: the old form matched on byte
+        // offsets, so a mountpoint recorded with a trailing slash --
+        // `/mnt/` -- failed the separator probe and left every write under
+        // it unblocked while the filesystem was frozen.
+        if crate::fs::pathutil::path_in_subtree(path, entry.mountpoint.as_path()) {
             entry.blocked_writes += 1;
             BLOCKED_WRITE_COUNT.fetch_add(1, Ordering::Relaxed);
             return true;
@@ -353,9 +366,58 @@ pub fn self_test() -> KernelResult<()> {
     test_is_frozen_check();
     test_multiple_mounts();
     test_auto_thaw_tracking();
+    test_non_utf8_mountpoint();
+    test_trailing_slash_mountpoint();
 
-    serial_println!("[freeze] Self-test passed (6 tests).");
+    serial_println!("[freeze] Self-test passed (8 tests).");
     Ok(())
+}
+
+/// A mountpoint that is not valid UTF-8 must freeze, block, and thaw.
+///
+/// `is_frozen` is the VFS integration point for write blocking, so a
+/// mountpoint the table could not represent was a frozen filesystem that
+/// kept accepting writes -- which defeats the entire purpose of a freeze
+/// (taking a consistent snapshot). The six tests above all use ASCII
+/// mountpoints, which a `String` field stored correctly.
+fn test_non_utf8_mountpoint() {
+    let mp = Path::new(&b"/mnt/\xFFvol"[..]);
+    let other = Path::new(&b"/mnt/\xFEvol"[..]);
+
+    freeze(mp, "snapshot").unwrap();
+    assert!(is_frozen(mp));
+    // Children of the frozen mountpoint are frozen too.
+    assert!(is_frozen(Path::new(&b"/mnt/\xFFvol/data"[..])));
+    // A sibling differing only in a byte that cannot appear in UTF-8 is not:
+    // a lossy key folds them together and would block writes to a filesystem
+    // that was never frozen.
+    assert!(!is_frozen(other));
+
+    let r = thaw(mp).unwrap();
+    assert!(r.fully_thawed);
+    assert!(!is_frozen(mp));
+
+    serial_println!("[freeze]   non_utf8_mountpoint: ok");
+}
+
+/// A mountpoint recorded with a trailing slash must still block its children.
+///
+/// This is a real bug the conversion fixed rather than a hazard it avoided.
+/// `is_frozen` used to hand-roll the subtree test as a byte prefix plus a
+/// probe for `/` at `mountpoint.len()`. Freezing `/mnt/x/` made that probe
+/// look at the `d` of `data`, so every write under the frozen filesystem
+/// went through. The canonical predicate in `fs::pathutil` matches on
+/// component boundaries and tolerates the trailing slash.
+fn test_trailing_slash_mountpoint() {
+    freeze("/test_slash/", "").unwrap();
+    assert!(is_frozen("/test_slash/data"));
+    assert!(is_frozen("/test_slash"));
+    // Still a component boundary: a sibling that merely shares a byte prefix
+    // must not be caught.
+    assert!(!is_frozen("/test_slashed"));
+    force_thaw("/test_slash/").unwrap();
+
+    serial_println!("[freeze]   trailing_slash_mountpoint: ok");
 }
 
 fn test_freeze_thaw() {
@@ -469,7 +531,7 @@ fn test_auto_thaw_tracking() {
     freeze(mp, "").unwrap();
 
     let list = list_frozen();
-    let entry = list.iter().find(|e| e.mountpoint == mp).unwrap();
+    let entry = list.iter().find(|e| e.mountpoint.as_path() == Path::new(mp)).unwrap();
 
     // Should have time remaining (close to 5 minutes).
     assert!(entry.time_until_thaw_ns > 0);

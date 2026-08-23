@@ -50388,7 +50388,7 @@ commands that carry the colour in question, and assert the two renders agree.
 Candidates: anything drawn on the wallpaper, on a video surface, on a
 thumbnail, or on any other content the palette does not own.
 
-**Part 2 progress. 29 of 49 modules converted.**
+**Part 2 progress. 33 of 49 modules converted.**
 
 - [x] `security_dialog.rs` — 29 constants, done 2026-08-22. The method above
   survived contact: the sweep lives in `gui/desktop/src/palette_check.rs` as
@@ -51983,6 +51983,279 @@ thumbnail, or on any other content the palette does not own.
     value that actually changed: dropping the third window still leaves a
     badge (any count above one draws one) and still leaves it `p.red`, so only
     the digit test — which selects the text by its content, `"3"` — notices.
+- [x] `language_settings.rs` — 11 constants over three tabs, done 2026-08-23.
+  Forty-five tests in the module (twelve new, three reworked), harness defects
+  Ax39–Bx41 (fifty-four), all fifty-four caught, none escaped.
+  - **Tenth lesson for the width rule, and the most useful one so far:
+    *writing the defects is what finds the holes; reviewing the tests is not.***
+    This module was committed with 44 passing tests — a two-mode sweep, a
+    branch-coverage test, an accent count and six judgement tests — and read as
+    thorough. Then the defect list was enumerated one colour site at a time,
+    each asking "which test names this back?", and for three whole classes the
+    answer was *none*: the current-language card dropping to the list rows'
+    rung, the selected and unselected row rungs exchanged, and the fixture
+    selecting the row that is already current. All three are
+    **role-for-neighbouring-role** substitutions — both values are legal
+    members, so the membership sweep accepts either, and no count changes, so
+    the coverage test balances. The fix was a per-site table
+    (`every_site_draws_the_role_it_claims`) whose row assertions are a
+    *positional vector*, not a set: `{surface0, surface0, surface1}` is the
+    same multiset whichever row is raised. Three of the fifty-four defects are
+    caught by that table and nothing else. **Enumerate the defects before
+    declaring a module converted — the declaration list is the coverage
+    report, and it is the only one that cannot flatter itself.**
+  - **When the module doc enumerates N things, the test must enumerate the
+    same N.** The doc named three accent-carrying position marks including the
+    default currency's row; the accent count covered the Language and Formats
+    tabs and stopped, so the Region tab — and that currency row — was
+    unguarded. The doc was ahead of the test, which is what made the gap
+    findable at all. The count is now per tab (3 / 1 / 2), and the differing
+    counts are what stop three assertions from being one weak assertion
+    repeated. The doc was also miscounting in the other direction: there are
+    three *axes* but four *sites*, because the current language is marked
+    twice — a bar beside its row and the row's own name.
+  - **The `.take(12)` trap: a default dataset is not a fixture.** The stock
+    language list holds 20 entries, every incomplete one sits at index 12 or
+    beyond, and the list renders `.take(12)`. So the default fixture cannot
+    reach the "Partial" badge *at all* — the badge fill and its derived ink
+    would have been swept without ever being drawn, and every assertion about
+    them would have passed vacuously. The fixture builds its own three-language
+    list instead. Check that each branch you mean to sweep is reachable **from
+    the data you hand the renderer**, not merely present in the code.
+  - **A selector must discriminate on something only its target has.** The tab
+    strip was first selected by `height == 32.0` — which also matches the
+    current-language marker bar, 4×32 — so "three tabs are drawn" counted
+    four. It selects on `y == 60.0` now. Same family as the module-26 accent
+    trap: a discriminator shared with another site is not a discriminator.
+  - **A filtering fixture must match every row it wants rendered.** The search
+    query started as `"an"`, which does not match "English (United States)";
+    the current language dropped out of the list and took the marker bar and
+    the accented row label with it, silently. `"n"` matches all three rows.
+    Pinned as defect Wx40, which puts `"an"` back.
+  - **The `readable_on` endpoint blindness, twice, and the second is sharper
+    than any previous instance.** Defect Gx39 freezes the active tab's label to
+    `0x11111B`: the membership sweep allows it (it is an endpoint) and the
+    deleted-constants test excludes it (it is also Mocha `crust`), so only the
+    accent sweep sees it. Defect Ex40 freezes the badge's ink the same way —
+    and near-black is the *right* answer in the dark render, so the
+    branch-coverage test, which runs dark only, passes as well. Only the
+    two-mode comparison catches it. **A derived-ink site needs a test that
+    drives its input across a range or compares the two modes; a single-mode
+    assertion on such a site is structurally incapable of failing.**
+  - Judgements, for the record: the accent marks position only (selected tab,
+    current language, current currency); the "Partial" badge is a property of
+    the *data*, so it keeps `p.yellow` and must never follow the accent; ink on
+    a fill this module chose is derived (`readable_on(p.accent)`,
+    `readable_on(p.yellow)`); headings are a two-rung hierarchy (`p.lavender`
+    15pt Bold over `p.subtext1` 13pt Bold, the convention already set by
+    `datetime_settings` and `notification_settings`); and an absent value is
+    dimmer than a present one (`p.overlay0` placeholder, `p.text` query).
+  - The seven lavender headings looked at first like the same category error
+    as the taskbar's lavender underline and were investigated as such. They are
+    not: `p.lavender` at 15pt Bold is the established section-heading rung
+    across three already-converted modules, so the mapping is a straight
+    `LAVENDER → p.lavender`. The fourteen verbatim copies of that heading push
+    are logged separately as
+    `TD-C-EVERY-SECTION-HEADING-IS-WRITTEN-OUT-BY-HAND`; they cannot be
+    collapsed inside a per-module conversion without invalidating earlier
+    modules' harness patterns.
+- [x] `default_apps.rs` — 11 constants over 33 colour sites and three tabs,
+  done 2026-08-23. Thirty-five tests in the module (nine new), harness defects
+  Ax42–Rx44 (seventy), all seventy caught, none escaped.
+  - **The conversion found a real UI defect, and writing the judgement down is
+    what found it.** The module doc now says "the accent marks which app is in
+    force, and nothing else". Stating that as something refutable made it
+    obvious that the app name under each category card was drawn `p.accent`
+    *unconditionally* — including on the two cards that read "None set",
+    because `builtin_apps()` ships no web browser and no email client. So
+    twelve of twelve cards were accented, and a mark carried by everything
+    marks nothing; worse, the two cards that actually wanted the user's
+    attention looked exactly like the ten that were already settled. Fixed to
+    `p.overlay0` in a separate commit from the mechanical conversion, so the
+    harness proof of the conversion stays unambiguous. **A judgement you can
+    state in one sentence is a judgement you can check; the eleven constants
+    had been sitting on top of this bug for as long as they existed.**
+  - **The `readable_on`/`CRUST` collision, and the first module where it is
+    load-bearing rather than merely noted.** The ink on the current app's chip
+    used to be the constant `CRUST` (`0x11111B`). `readable_on` answers exactly
+    `0x11111B` for the *stock* accent, whose luma is 175 — so at the shipped
+    accent a leftover constant and the correct call produce the same pixel.
+    The membership sweep cannot help either, because it allows both
+    `readable_on` endpoints outright (`palette_check`'s documented hole). Only
+    sweeping the accent across all 21 roles separates them, because the
+    expected ink flips endpoints as the accent's luma crosses 140 and a frozen
+    value cannot flip. Defect Fx43 — the site naming `p.crust` instead of
+    calling `readable_on` — is caught by **that test and nothing else**, out of
+    thirty-five. The test closes with `seen.len() == 2` so that a palette which
+    happened to be all-dark could not quietly degrade it into a constant
+    comparison.
+  - **Four fixture traps in one default dataset, the `.take(12)` lesson
+    generalised.** `DefaultAppsSettings::default()` cannot exercise this module
+    at all: every category has exactly one handling app, so the chip `else`
+    arm never renders; nothing is customised, so *both* peach sites are dead;
+    and every builtin is a system app, so the third-party count is always 0 and
+    the `is_system` badge is never absent. One rival music player plus one
+    `.mp3` custom association turns all four branches on. **Check each branch
+    is reachable from the data you hand the renderer, not merely present in the
+    code** — and check it before writing the assertions, because an assertion
+    on a branch that never renders passes vacuously and looks like coverage.
+  - **Seven sites had no assertion, and only the defect enumeration found
+    them.** The module was committed with 26 tests reading as thorough. Writing
+    the defect list one colour site at a time — the module-30 lesson applied
+    rather than restated — turned up seven sites nothing named: the category
+    icon, both search-box fills, the extension rows, the *ordinary* (non-custom)
+    ink on a file-type row, an installed app's own name, and the join line under
+    it. Every one would have survived a swap to a neighbouring role. Two are
+    worth their own note. The File types search box and its extension rows are
+    both `width` × 32, so geometry cannot separate them — but `fills_sized`
+    preserves command order and the box is drawn first, which is enough to
+    index them. And the ordinary ink is the `else` of the peach branch:
+    **both arms of one `if` are two sites, and only one of them had a test.**
+  - **Two search boxes sharing one query field are still two sites.** They are
+    byte-identical in the source, which is exactly why the harness patterns for
+    them have to reach out to the placeholder string to disambiguate — and why
+    the test loops over both tabs. Checking only the File types box would have
+    left the Installed apps box free to draw anything.
+  - Judgements, for the record: the accent marks which one is in force and
+    nothing else (three sites, per-tab counts 12 / 1 / 1 — a dozen legitimate
+    accented marks are on screen at once, so the taskbar's "exactly one" test
+    cannot be borrowed and this needs a per-site table *plus* a count); peach
+    marks a departure from the shipped defaults, which is a state and not a
+    position, so it must hold still while the accent sweeps all 21 roles; the
+    content well is one rung below the panel, asserted as an *ordering* rather
+    than a pair of literals so it fails on a palette whose crust was made
+    lighter than its base; and ink on a fill this module chose is computed,
+    never named.
+- [x] `launcher.rs` — 14 constants over 15 colour sites, done 2026-08-23.
+  Thirty-seven tests in the module (eight new), harness defects Ax45–Fx47
+  (fifty-eight), all fifty-eight caught, none escaped.
+  - **The deleted-constants test rendered one of the module's three states, and
+    only the harness noticed.** The launcher draws three different trees: an
+    empty field (placeholder, no query), a typed one (query, rows), and a typed
+    one that matches nothing (query, "No results found", no rows). The test
+    swept the first only — so a Mocha constant frozen into the *query* branch
+    was a constant it could never reach. Defect Rx45 was caught by three tests
+    and missed by that one. This is the module-30 lesson in its sharpest form
+    yet: the test read as complete, the module had thirty-seven passing tests,
+    and the hole was found by writing a defect rather than by reading anything.
+    **A branch the fixture does not render is a branch the test does not
+    check** — the same shape as `default_apps`'s four fixture traps, but here it
+    was the *test's* choice of state rather than the data's.
+  - **The module where the accent and a category hue are the same pixel.** The
+    stock accent *is* `blue`, and `Category::Application` is also blue — so
+    before the conversion one constant `BLUE` served two unrelated meanings at
+    four sites (the caret, the selection bar, every App icon and every App
+    badge) and nothing in the module could tell "where you are" from "what this
+    is". That is not a hypothetical: an assertion written at the stock accent
+    cannot fail, because the two answers agree. Every accent claim here
+    therefore runs against an off-palette magenta accent, which is what makes
+    the caret follow it while an App badge holds still. Defect Ux45 — the caret
+    written as `p.blue` — is the exact edit the pre-conversion code could not
+    distinguish from correct, and it is caught only because the fixture moved
+    the accent off blue.
+  - **A permutation of a set is invisible to a set-membership check, again.**
+    The five category hues had a distinctness test and a test that each badge
+    matched `Category::color`. Both pass under a *rotation* of all five hues:
+    five distinct colours are still five distinct colours, and asking
+    `Category::color` what a badge should be is asking the code under test what
+    it meant. Only a table naming each category's role — App/blue, Sys/red,
+    Set/peach, File/green, Cmd/mauve — can fail. This is the module-29 lesson
+    arriving in a module that already had two tests over the same five values.
+  - **Two constants compared only against themselves.** `DIALOG_ALPHA` and
+    `BADGE_WASH_ALPHA` were each asserted as `drawn.a == THE_CONSTANT`, which is
+    a tautology the moment the constant moves. Both now carry a bound as well:
+    the wash must be `<= 64` (a tint, not a fill — at 200 the label is read
+    against its own hue rather than against the row) and the dialog `>= 224`
+    (translucent enough to float, solid enough that the wallpaper does not read
+    through the results). Defects Fx45 and DDx46 exist precisely to prove those
+    two bounds do something, and before they were added both escaped.
+  - **The sweep runs over the shipped app database as well as the fixture.**
+    The five-row fixture was built to reach every category, and a fixture built
+    to reach everything is exactly the thing that cannot notice a row shape only
+    the real data produces. Sweeping `builtin_app_database()` too costs one line
+    and is the only check here that sees production data.
+  - **One more shadow consolidated.** This was the third of the three popups
+    that each picked their own drop-shadow alpha (100 here, against 120 and 160
+    elsewhere); it now reads `p.shadow()`, and the test asserts the shadow is
+    black in *both* modes rather than equal to any role, because a shadow is an
+    absence of light and must not flip with the theme.
+  - Judgements, for the record: the accent marks where you are and never what a
+    thing is (exactly two accented marks on screen — the caret and the selected
+    row's bar); five categories are five distinct hues in either mode; a badge's
+    wash is its own hue at a lower alpha, derived rather than named, so adding a
+    category cannot leave a stale wash behind; and the dialog floats, which is
+    one byte of alpha nothing else in the module would have noticed.
+- [x] `resmon.rs` — 11 constants over 16 colour sites, done 2026-08-23.
+  Fifty-five tests in the module (nine new), harness defects Ax48–Ix49
+  (thirty-five), all thirty-five caught, none escaped, none under-caught.
+  - **The first module in the shell that draws no accent at all, and the claim
+    is a count of zero.** There is nothing here to select, nothing to invite
+    and nothing in force — only quantities that have to be told apart. That is
+    worth stating because it is *falsifiable*: the test asserts the accent
+    appears in exactly zero commands, in both modes and both display modes, and
+    four defects exist only to trip it. It is also worth stating because it is
+    worth **nothing at the shipped theme**: the stock accent *is* `blue`, and
+    `Cpu` is blue, so under a default install "this module draws no accent" and
+    "every CPU line is accented" produce identical pixels and the count reads 40
+    rather than 0 for a reason that has nothing to do with position. Without the
+    off-palette magenta fixture this test would assert the opposite of what it
+    says. Same trap as `launcher.rs`, reached from the other direction: there
+    the accent and a category hue collided, here the accent and a *measurement*
+    hue do.
+  - **A permutation, and the one module where nobody could ever see it.**
+    `test_resource_type_colors_distinct` already walked the six hues pairwise,
+    and six distinct hues rotated by one are still six distinct hues — so the
+    whole widget can be drawn in its neighbours' colours with every pre-existing
+    test green. Only a table naming each pair (CPU/blue, RAM/green, Disk/peach,
+    Net/mauve, GPU/lavender, Temp/red) can fail, and the proof confirms it:
+    defect Cx48 rotates the four graphed hues and is caught **by that table
+    alone**, 1 test out of 55. And note what "nobody could see it" means here —
+    `resmon` is declared in `lib.rs` but nothing constructs a `ResourceMonitor`
+    (`TD-C-THE-SHELL-DRAWS-FOUR-OF-ITS-FIFTY-SEVEN-MODULES`), so there is no
+    screen to check against. Four distinct colours in the wrong order render as
+    a perfectly plausible graph; "it looked fine" would have certified it.
+  - **The pinning table is the only thing that covers what is never drawn.**
+    GPU and temperature are collected and given hues but not plotted, so the
+    membership sweep and the deleted-constant sweep — both of which read *drawn*
+    commands — are structurally blind to them. Defect Fx48 freezes the
+    temperature hue to Mocha red and is caught by one test. A sweep over render
+    output cannot check a value that never reaches render output, which is an
+    obvious sentence that took a defect to notice.
+  - **The compact strip's sparkline hues were untested, and writing a defect is
+    what found it.** The strip plots the same four metrics from a *different*
+    call site with its own hue lookup, and it carries no labels at all — so a
+    compact sparkline in the wrong metric's colour was unreachable by every
+    test in the module: membership passes (a wrong role is still a role), the
+    accent count passes, and the per-site table never looks at compact lines.
+    Fixed at the root before the run; defect Lx48 (every compact sparkline drawn
+    in the CPU hue) now proves it, caught by that test alone. The module-32
+    lesson again — a branch the fixture does not render is a branch the test
+    does not check — but here it was a whole *display mode*, not a state.
+  - **A pin wearing a relationship's docstring, found by four under-declared
+    catches.** `a_metric_is_one_colour_wherever_it_appears` says it asserts only
+    that a metric's label and its graph agree, never which colour they agree on;
+    it then ended `assert!(bars.all(|c| *c == p.blue))`, naming a role outright,
+    so every hue-map defect tripped it. **A test that quietly does two jobs
+    cannot be read as a coverage claim about either** — and this is the first
+    time the `[UNDECLARED:]` half of the harness output, rather than
+    `[MISSING:]`, is what found the problem. Over-catching is not harmless: it
+    is how a coverage report flatters itself. The pin belongs to
+    `each_measurement_is_pinned_to_the_role_it_names`, which caught all four
+    unaided.
+  - **`render_bar_graph` is a primitive this module never calls**, so judgement
+    4's original "label, sparkline and bars are one colour said three times"
+    overstated what the code does — the module draws two of those three. The
+    doc now says twice and says why: the primitive's hue is the caller's
+    business and not a claim this module gets to make. The bar claim survives
+    as its own test, restated honestly as "the primitive substitutes no default
+    for the colour it is handed", and is handed `p.accent` precisely because
+    nothing here draws the accent.
+  - Judgements, for the record: a hue names a *measurement*, never a state or a
+    position; six measurements are six distinct colours each pinned by name; the
+    grid is furniture, checked against all six metric hues rather than the four
+    currently plotted so that graphing GPU later cannot quietly make it
+    ambiguous; and a metric's label and sparkline are one colour said twice,
+    derived at each site rather than named beside it.
 
 **Trigger:** this is not blocked on anything. It is sequenced after the shell
 event loop (`TD-C-THE-SHELL-CAN-DRAW-ITSELF-AND-NOBODY-CAN-ASK-IT-TO`) only
@@ -51996,6 +52269,63 @@ defect observed from the settings end.
 picks Light gets a desktop that is light in five places and dark in every
 other, which reads as a broken theme rather than an unimplemented one — worse
 than having no setting at all.
+---
+
+### TD-C-EVERY-SECTION-HEADING-IS-WRITTEN-OUT-BY-HAND — 2026-08-23 — OPEN
+
+**In short.** A settings panel is divided into sections, and each section has a
+heading — "Date Format", "Measurement", "Notifications". Every one of those
+headings is eight lines of copied-out drawing code that differ only in the
+words. There are fourteen copies across three files today, and there will be
+one per section in every settings panel still to be converted. Nothing is
+*wrong* on screen; the cost is that the rule "a section heading looks like
+*this*" is recorded fourteen times instead of once, so the fifteenth copy is
+free to disagree with the other fourteen and nothing will notice.
+
+**Where:** `gui/desktop/src/language_settings.rs` (7 copies),
+`datetime_settings.rs` (4), `notification_settings.rs` (3). The shape is
+identical in all fourteen:
+
+```rust
+cmds.push(RenderCommand::Text {
+    x,
+    y: cy,
+    text: "Date Format".into(),
+    font_size: 15.0,
+    color: p.lavender,
+    font_weight: FontWeightHint::Bold,
+    max_width: Some(width),
+    overflow: TextOverflow::Ellipsis,
+});
+cy += 26.0;
+```
+
+**Proper fix:** one `fn section_heading(cmds, p, x, cy, width, text) -> f32`
+returning the advanced `cy`, somewhere all three modules can reach — the
+obvious home is beside `palette_check` in `gui/desktop/src`. The same argument
+applies to the sub-heading rung (`p.subtext1` at 13pt Bold) and to the
+label/value row, which is already a private helper duplicated per module.
+
+**Why it is not done inside a per-module palette conversion:** the
+reintroduction harness (`scripts/reintro-palette.py`) pins defects by *exact
+source text*. Rewriting these sites collapses the very strings that twenty-odd
+already-proved defects match on, in modules whose proofs are finished and
+merged. Folding the extraction into one module's conversion would silently
+invalidate earlier modules' evidence; doing it as its own change, across all
+modules at once, lets the harness be re-pointed in one deliberate edit and
+re-run to confirm the proofs still hold. That is a sequencing reason, not a
+cost one.
+
+**Trigger:** do it once the last settings panel is converted (part 2 of
+`TD-C-FORTY-NINE-SHELL-MODULES-CARRY-THEIR-OWN-COPY-OF-THE-PALETTE`), so the
+helper is extracted against the final set of call sites rather than a moving
+one.
+
+**If never fixed:** nothing breaks, but the heading convention stays
+unenforceable. The symptom to expect is drift — a panel written next month at
+14pt, or in `p.text` instead of `p.lavender`, sitting beside one written today,
+with no test able to state that they should match because there is no single
+place where the rule lives.
 ---
 
 ### TD-C-SWITCH-KNOBS-ARE-LOW-CONTRAST-ON-THE-ON-PILL — 2026-08-22 — OPEN
@@ -64706,3 +65036,500 @@ at `tcsetattr` does -- would otherwise strand a live slave with no
 descriptor. `retire_master` reports the orphan on the master's close and
 `close_pty_handle` reaps it. Under a Linux-style "open the slave later by
 name" design that leak would have been invisible from libc.
+
+---
+
+## TD-A-FS-SELFTESTS-NEVER-RUN — ~220 `kernel/src/fs` self-tests are dead code
+
+**Lane A. Found 2026-08-23, during the §261 byte-clean conversion.**
+
+`kernel/src/fs/` has 424 `pub fn self_test()` entry points. Only about 200
+of them are invoked from `main.rs`. The rest are called from nowhere at
+all — a few are reachable from a `kshell` subcommand a human would have to
+type, and the remainder are reachable from nothing whatsoever. They
+compile, so nothing warns; they simply never run, in the boot test or
+anywhere else.
+
+This was found the direct way: the §261 conversion added new non-UTF-8
+regression tests to six modules, and after a green boot test only four of
+the six markers appeared on the serial log. `fcomment` and `immutable`
+were missing because their `self_test()`s had never run — `immutable`'s
+covers the table that decides whether a write, truncate, delete or link is
+refused, so the flag-enforcement path had no boot coverage at all. Both
+are now wired into `main.rs`.
+
+**Reproduce / enumerate:**
+
+```bash
+for f in kernel/src/fs/*.rs; do m=$(basename "$f" .rs)
+  grep -q "pub fn self_test" "$f" &&
+  ! grep -q "fs::$m::self_test" kernel/src/main.rs && echo "$m"
+done
+```
+
+**The proper fix** is to call every one of them from the boot self-test
+block in `main.rs`, in the same `if let Err(e) = … { serial_println!(…) }`
+shape as the existing entries. Two things make it more than a mechanical
+edit, which is why it is filed rather than done inline:
+
+- These tests have *never executed*. Expect a substantial number to fail
+  or panic on first run, and a panic in the boot self-test block halts the
+  boot test rather than reporting. They should be enabled in batches, each
+  batch boot-tested, with the failures fixed as they surface — that is the
+  point of enabling them, but it is its own task and cannot ride along
+  inside an unrelated commit.
+- Boot time. These are in-memory table tests and individually fast, but
+  220 of them is a real addition to a boot test that already runs ~9
+  minutes.
+
+**Why it matters beyond the missing coverage:** every one of these modules
+reads as tested. A future reader — or a future session doing exactly what
+this one did — sees a `self_test()` with real assertions and reasonably
+concludes the module is covered. It is the same "a test that never runs is
+not a test" trap the earlier locale/timezone sweep hit, at about ten times
+the scale.
+
+**Confirmed: the wiring finds real bugs, not just stale tests.** The very
+first batch to be enabled panicked the boot on `fs::pinnedapps` test 6, and
+the assertion was right — `reorder` was broken. It set `pin.position =
+new_position` and touched nothing else, so the moved pin and the incumbent
+both claimed the slot; `list_pins` sorts by position with a *stable* sort,
+so the incumbent stayed first and `pinnedapps move taskbar terminal 0`
+reported success while changing no order at all. It now performs a real
+move and renumbers the location contiguously. `pin` had a smaller sibling
+defect found in the same read: `max().unwrap_or(0) + 1` put the first pin
+in an empty location at position 1, leaving slot 0 permanently vacant.
+Both are fixed in `82155959a`. Note what this says about the batching
+advice above — the panic is the *feature*; enable in batches precisely so
+each panic points at one module.
+
+### 2026-08-23 — the 37 that were blocked on the *other* defect
+
+**The batch of 37 wired in `d8f43153e` could not have been wired earlier,
+and the reason is worth recording because it is the same trap twice.**
+
+These 37 were manual-only, so this entry covered them — but they were also
+destructive (`TD-A-SELFTESTS-NOT-IDEMPOTENT`), each opening with
+`clear_all()`. The two defects had to be fixed in a fixed order, because at
+boot the tables are empty, so the wipe is a no-op and **the boot test is
+green either way**. Wiring first would have produced a green boot test that
+said nothing whatever about the shell path — and worse, boot coverage would
+then stand as *evidence* that the suite was fine, for a suite that still
+emptied the user's credential store the moment they typed `credentials
+test`. `ace6cff40` removed the destruction first; only then was the wiring
+honest.
+
+The general rule this yields, for the ~197 suites still manual-only: **check
+whether a suite is destructive before wiring it, not after.** A green boot
+test cannot tell you, and will actively mislead you.
+
+**Wiring 37 suites blind would have been reckless, so they were audited
+first.** Two of them are named `osreset` and `installer`. The audit asked
+one question of each suite — does it name anything outside its own module?
+— and across all 37 there is exactly one such reference: `perfmon` reading
+`crate::hpet::elapsed_ns`, a read-only clock query. `installer`'s
+alarming-looking `erase_disk: true` is a field of a config struct being
+recorded in an in-memory table, not a disk erase. So these are safe at boot
+by construction rather than by hope. Reproduce with:
+
+```bash
+sed -n '/^fn self_test_inner/,/^}\s*$/p' kernel/src/fs/<mod>.rs |
+  grep -oE "crate::[a-z_]+::[a-z_]+|fs::[a-z_]+::[a-z_]+" | sort -u
+```
+
+**The conversion broke this entry's own guard, which is the more
+interesting failure.** `scripts/check-self-tests-wired.py` modelled
+"reachable" as a mention followed by `(` — true only while every call in the
+tree was a direct call. `with_pristine(&STATE, State::new(),
+self_test_inner)` passes the suite as a function *value*, so the name is
+followed by `)`, and all 53 converted suites read as reachable from nothing.
+Dead count went 0 → 54 in one commit.
+
+That is the worst failure available to a guard: not a missed defect but a
+mass false alarm, which is how a guard gets `--quiet`-ed permanently and
+then misses the real one. Fixed in `ae822c8b5` by splitting the question in
+two — `BARE_CALL` still asks "is this a call?" for the gated-call report,
+where the distinction is the whole point, while `BARE_MENTION` asks "does
+this name reach a value?", which is what reachability means in Rust. The
+scan also now runs over the existing comment/string blanker, because
+relaxing the pattern alone would let a doc comment vouch for its own dead
+suite — and these suites' doc comments discuss `self_test` by name.
+
+**Counts after this batch:** boot-reachable 901, manual-only 197, dead 0.
+
+**It found a bug on the first boot, as predicted — `perfmon` test 10.**
+36 suites ran green and then the boot panicked with `left: 10, right: 5`.
+The suite called `set_max_samples(5)` and asserted the history held 5;
+`set_max_samples` clamps to a floor of 10, so it stored 10 and — returning
+`()` — said nothing about having done so. The assertion had been wrong for
+as long as it existed.
+
+The interesting part is what the cause had *already* done elsewhere. A
+silent clamp forces every caller that wants to report the effective value to
+restate the range, and `kshell` did exactly that: `v.clamp(100, 60000)`
+written out a second time next to `perfmon::set_interval(v)`, free to drift
+from the real policy with nothing to catch it. So the fix was not the
+assertion. Both setters now return the value stored, the ranges are named
+constants, the doc comments admit a clamp happens, and `kshell` prints
+`(clamped from N)` — strictly more than it could say before. Fixed in
+`b86e51354`.
+
+This is the second time this batch that the *test* was the wrong half to
+fix. Worth stating as a rule: when a never-run suite finally runs and fails,
+the assertion is a report, not a diagnosis — read the API it is asserting
+against before changing either.
+
+---
+
+## TD-A-SPARSE-FSTRIM-WRONG-DEVICE — hole punching queued discards for a nonexistent device at a file offset
+
+**Lane A. Found 2026-08-23, during the §261 byte-clean conversion.**
+
+`fs::sparse::punch_hole` called
+`fs::fstrim::notify_free(path, offset, actual_len)` — passing the punched
+**file's** path and its **file** offset to a function whose parameter is a
+**block device** and whose offset is a device LBA. Every other caller in
+the tree passes `/dev/sda`, `/dev/nvme0` and the like. The call was wrong
+on both axes at once.
+
+**Why nothing broke yet:** `fstrim::issue_trim` is a stub — its first line
+is `let _ = device;` — so the device name is discarded and only the byte
+count is added to the statistics. The observable damage today is inflated
+TRIM statistics and a discard queue holding entries keyed by a filename
+that matches no registered device, which `flush(device_filter)` can never
+select and `coalesce_ranges` groups into a phantom device of its own.
+
+**Why it matters:** the moment a real `block_device::discard(device,
+offset, length)` is wired in behind that stub — which is exactly what the
+comment at `fstrim.rs:423` says is coming — this becomes a discard issued
+at a *file* offset. On a device where the name happened to resolve, that
+is data loss at an unrelated location on the volume. The bug is latent
+precisely because the subsystem it depends on is unfinished, so it will
+surface at the worst moment: when someone implements discard and assumes
+the existing callers were correct.
+
+**Action taken:** the call is removed and replaced with a comment
+explaining why, at `fs/sparse.rs` in `punch_hole`. Removing it is the
+correct interim state — a queued entry that cannot map to a device has no
+value today and is a landmine tomorrow.
+
+**The proper fix** is to notify fstrim with the *device extents* the hole
+actually freed. That needs a file-offset-to-device-extent mapping — a
+`fiemap`/`bmap` equivalent on the `FileSystem` trait — which does not
+exist anywhere in the tree today (`grep -rn "fiemap\|fn bmap" kernel/src/fs`
+returns nothing). Two steps:
+
+1. Add `fn extents(&mut self, path: &Path, offset: u64, len: u64) ->
+   KernelResult<Vec<(u64, u64)>>` to `FileSystem`, returning device-relative
+   `(offset, length)` pairs, with a default implementation returning
+   `Err(Unsupported)` so only filesystems that can answer do.
+2. Have `punch_hole` (and `Vfs::remove`/`truncate`, which have the same
+   gap and today notify fstrim not at all) call it and pass each extent
+   plus the mount's backing device name to `notify_free`.
+
+**Trigger to promote this to active work:** anyone implementing real block
+device discard behind `fstrim::issue_trim`. Do not implement that stub
+without doing step 1 and 2 first.
+
+## TD-A-ACL-NEVER-ENFORCED — POSIX ACLs are stored, listed and formatted, but no VFS operation ever consults them (lane A, 2026-08-23)
+
+**Status:** open. Discovered while converting `kernel/src/fs/acl.rs` to
+byte-clean paths (design-decisions.md §261).
+
+`fs::acl::check_access` — the function that implements the whole POSIX
+1003.1e evaluation algorithm, all five steps of it — **has no production
+callers.** The evidence is a one-liner:
+
+```bash
+grep -rn "check_access" kernel/src --include=*.rs | grep -v "fs/acl.rs"
+```
+
+Every hit is a different, unrelated `check_access`: `cap/file_tags.rs`,
+`cap/groups.rs`, `fs/appsandbox.rs`. Nothing in `fs/vfs.rs` — or anywhere
+else — calls `fs::acl::check_access`. The only callers of the *rest* of
+the module are `kshell`'s `getfacl`/`setfacl` commands and `procfs`'s
+statistics line.
+
+**What this means in practice.** `setfacl` appears to work: it validates
+the ACL, stores it, and `getfacl` reads it back verbatim. The statistics in
+procfs will report `files_with_acls: N`. But the ACL governs nothing — an
+open/read/write/unlink goes through the VFS's traditional owner/group/other
+check and never learns the ACL exists. A user who denies a colleague access
+to a file with `setfacl -m u:1001:--- /path` is told the operation
+succeeded and is given no indication that user 1001 can still read the
+file. **This is a security feature that reports success while doing
+nothing**, which is worse than not having the feature: the absence of a
+feature is visible, a silently-inert one is not.
+
+Note also that `check_access` **fails open** by design — `None => return
+Ok(())`, deferring to traditional permissions — which is the right
+behavior for a hook that runs on every path, but it means that wiring it in
+incorrectly (e.g. passing an unnormalized or relative path, so the lookup
+misses) degrades silently to "no ACLs at all" rather than to a visible
+failure. Whoever does the wiring must test the *deny* direction, not just
+that nothing broke.
+
+**The proper fix** is to call `fs::acl::check_access` from the VFS
+permission check, on the same resolved absolute path the rest of the
+operation uses:
+
+1. Find the single point in `fs/vfs.rs` where traditional
+   owner/group/other permission is evaluated for a path operation. If there
+   is no single point, make one first — the ACL hook must not be sprinkled
+   across every entry point, or the next entry point added will forget it.
+2. Call `acl::check_access(path, uid, gid, file_uid, file_gid, request)`
+   *after* the traditional check grants access, never instead of it: POSIX
+   ACLs can only be evaluated once the owner/group of the file is known,
+   and an ACL that grants must not override a mount flag (`ro`, `noexec`)
+   or an immutable/append-only bit that already refused.
+3. The path passed must be the normalized absolute path, since that is what
+   `set_acl` keys on. `fs/vfs.rs`'s `normalize_mount_path` is the model.
+4. Test the deny direction end-to-end from `kshell`: `setfacl` a deny for a
+   non-owner uid, then confirm the read actually fails. `acl.rs`'s own
+   self-test (11 tests) covers the algorithm but cannot cover the wiring.
+
+**Trigger to promote this to active work:** any task that touches VFS
+permission checking, or any task that claims POSIX ACL support is done.
+Until then, `getfacl`/`setfacl` should be understood as a database editor
+for a database nothing reads.
+
+---
+
+## TD-A-SELFTESTS-NOT-IDEMPOTENT — the never-run self-tests panic on their *second* run, and that is why they can't just be switched on
+
+**Lane A. Found 2026-08-23, while wiring modules up under
+TD-A-FS-SELFTESTS-NEVER-RUN.**
+
+TD-A-FS-SELFTESTS-NEVER-RUN predicted that "a substantial number will fail
+or panic on first run". That is true, but it understates the shape of the
+problem and mis-states when it bites. The dominant failure is not a first
+run — it is the *second*. Every one of these suites has, by construction,
+only ever been run once in its life, so nothing ever exercised the case of
+running it against state a previous run left behind.
+
+**The pattern.** A module keeps `static STATE: Mutex<Option<State>>`, with
+an `init_defaults()` that returns early when the state already exists and a
+`with_state()` that does **not** lazily initialise. The suite then:
+
+1. calls `init_defaults()` — a no-op on the second run,
+2. asserts the table is empty (or in its seeded shape),
+3. creates fixtures, and
+4. never removes them.
+
+Run once, it passes. Run twice, step 2 fails against step 3's leftovers and
+the assertion panics — which in the kernel is not a red test, it is a dead
+machine. Each of these is reachable from a `kshell` subcommand, so this is
+a user-typeable kernel panic, not merely a testing inconvenience.
+
+**Found in six modules while converting them for §261** — it was not a
+coincidence in any of them, and all six are now fixed:
+
+| Module | Second-run failure | Fixed in |
+|---|---|---|
+| `fs::netshare` | test 1 `assert!(list_shares().is_empty())` — `id1` was never unmounted | `c5db19b8a` |
+| `fs::filevault` | test 1 `assert_eq!(list_vaults().len(), 0)` — the created vault was never deleted; test 8's exact counter assertions could not hold twice either | `c150f1b29` |
+| `fs::diskencrypt` | test 9 `start_encryption(1, …)` — run 1 leaves volume 1 `Unlocked`, and it only accepts `Unencrypted` | `59bd8befc` |
+| `fs::cloudsync` | test 3 `assert_eq!(list_accounts().len(), 2)` — run 1 leaves account `id1`, its conflict row and an extra `*.bak` exclude behind, so tests 3, 6, 8, 10 and 11 all fail on the second run | `2ebe9f40c` |
+| `fs::fileversion` | test 8 `assert_eq!(list_watches().len(), 1)` — run 1 leaves the watch behind. Worse, run 2's watch then *covers* the fixture, so its `KeepLast(5)` policy silently replaces the default `KeepLast(10)` the capture tests assume | `aae93b532` |
+| `fs::pinnedapps` | test 7 `assert_eq!(count, 1)` — `record_launch` is cumulative, so run 1 leaves `files` at 1 and run 2 reads 2. Test 6's reorder is likewise still in place, having moved `terminal` to position 0 | `d2876326f` |
+
+`fs::cloudsync` also showed a fixture hazard worth naming separately,
+because it is not about leftovers at all and so survives any amount of
+cleanup: the suite's fixtures were **plausible values a user might really
+have**. It added the account `user@cloud.example` and the exclude pattern
+`*.bak`; `add_account` rejects a duplicate `(provider, account_name)`, so a
+user who genuinely syncs that NextCloud account would have had the suite
+fail on *its first* run, on a machine where it had never run before — no
+amount of cleanup discipline prevents that. The fix is to make fixtures
+unmistakably synthetic: the account names are now in the reserved
+`.invalid` TLD and carry a `selftest` marker, and the exclude pattern is
+`*.cloudsync-selftest.bak`. Check for this whenever a suite's fixture is a
+*name* rather than an index — an ID the module mints is safe, a string the
+user also chooses is not.
+
+`fs::fileversion` had the same hazard with a sharper edge, because its
+fixture was fed to a *destructive* call: the suite captured versions of
+`/home/user/test.txt` and then ran `purge_file_versions` on it. On a
+machine where a user actually had that file under version control, typing
+`fversion test` would have deleted their real version history — and, since
+the purge count is what the suite asserts on, would have failed only
+*after* doing so. Its fixtures now live under `/tmp/.fileversion-selftest/`,
+a directory no user would keep data in. **Generalise further:** a plausible
+fixture is bad; a plausible fixture handed to a delete/purge/reset entry
+point is data loss.
+
+cloudsync's test 8 was additionally asserting `list_excludes().len() >= 6` — the
+count of the defaults `init_defaults()` installs. That is not a property of
+the module: `remove_exclude` is public and has a shell command, so a user
+can take a default away and turn the assertion into a panic. It now asserts
+the round-trip (added pattern is visible, removed pattern is gone) instead.
+**Generalise:** an assertion about the *defaults* is only sound in a suite
+that resets to `None` first; a baseline-relative suite may assert only
+about what it itself changed.
+
+`fs::fileshare` was a near miss of a different flavour: it *does* reset at
+entry, so it survives a second run, but it left `sharing_enabled = true`
+and the hostname set to `"fileserver"` in the live table. Wiring it into
+boot as it stood would have made `fileshare show` report sharing switched
+on and the machine renamed, without the user having asked for either.
+
+**A worse variant: the suite that "fixes" non-idempotency by wiping the
+user's data.** Three of the §261 modules — `fs::certmgr`, `fs::appregistry`
+and `fs::startmenu` — *were* idempotent, and were idempotent for the wrong
+reason: each opened with `clear_all()`. That does make a second run pass,
+and it makes the opening emptiness assertion true by construction. It also
+means `certmgr test` deleted every certificate in the trust store,
+`appreg test` deleted every registered application, and `startmenu test`
+deleted the user's favourites and quick links. These are shell commands. A
+user typing `test` on a subsystem reasonably expects to be told whether it
+works, not to have its contents destroyed. Treat a `clear_all()` at the top
+of a suite as a bug on sight, not as cleanup.
+
+**The three fixes, and when to use which:**
+
+- *Reset at both ends* — `*STATE.lock() = None; init_defaults();` on entry
+  and `*STATE.lock() = None;` on exit. Correct when the module has no lazy
+  init, so `None` is exactly the state a fresh boot has. This is what
+  `fs::inodestat` already did and documented, and what `filevault`,
+  `diskencrypt`, `fileshare`, `screenrec` and `pinnedapps` now do.
+- *Baseline-relative + full cleanup* — capture the row count on entry,
+  state every count relative to it, and assert on exit that the table was
+  restored. Correct when the module may legitimately hold live rows the
+  suite must not destroy. This is what `netshare`, `fileversion` and
+  `certmgr` now do.
+- *Decline to run* — check on entry whether the store is populated and, if
+  it is, print a `self-test skipped: …` line and return `Ok(())`. Correct
+  when the module holds user data **and** the suite's assertions are exact
+  counts that cannot be restated relative to a baseline ("exactly one app
+  in Accessories" is not a statement you can make baseline-relative). This
+  is what `appregistry` and `startmenu` now do, and what `fileversion`'s
+  watch guard does. It costs coverage on a machine in use and gains full
+  coverage at boot, where the store is genuinely empty — the right trade,
+  because the alternative on offer is not "more coverage" but "coverage
+  purchased with the user's data".
+
+Prefer the second where the module could plausibly be in use; fall back to
+the third only when the assertions cannot be made relative. Never reach for
+`clear_all()`: the first shape is safe only because `None` is what a fresh
+boot has, which is a fact about the module, not a licence to empty a table.
+
+**Reproduce:** run any such suite's shell subcommand twice, e.g.
+`dencrypt test` then `dencrypt test`.
+
+**The proper fix** is to apply one of the three shapes above to every
+state-holding suite in the ~250 still-manual-only set, as each is wired up
+under TD-A-FS-SELFTESTS-NEVER-RUN — checking specifically for (a) an
+opening emptiness/shape assertion, (b) fixtures that are never removed, and
+(c) exact assertions on cumulative counters, which cannot hold on a second
+run even when the rows are cleaned up. Doing this *at wiring time* is
+essential rather than optional: a non-idempotent suite that has been wired
+into boot will pass the boot test (a fresh boot runs it exactly once) and
+still panic the kernel the first time a user types the subcommand.
+
+**Measured scope of the destructive variant: 56 modules, not three**
+(counted 2026-08-23). The `clear_all()`-at-the-top shape was not a quirk of
+the three §261 modules that happened to be converted first — it is the house
+style for `kernel/src/fs/*.rs` self-tests. Every module below opens its
+`self_test()` by wiping its own persistent table:
+
+```
+a11y appnotify autostart bootcfg capsettings cas colorpicker credentials
+cursorsettings detailcols display dyndns fcomment filepicker fontmgr fstune
+hotkeys ime immutable installer ioprio kbsettings keylayout locale
+loginscreen mmtune netindicator netsettings notifcenter osreset partmgr
+perfmon power prefetch progmgr queryable rundialog schedtune screenshot
+scriptlang servicemgr soundmixer swapcfg sysinfo systray tags taskbar theme
+timezone useracct vdesktop vpn wakesensor wallpaper widgets winsnap
+```
+
+(`cas` uses `clear()`, `ioprio`/`prefetch`/`tags` use `test_clear()`; the
+rest use `clear_all()`. Recount with the awk one-liner in the git history of
+this entry, or by hand: the destructive call is within the first six lines
+of `pub fn self_test`.)
+
+**Why this is a live data-loss bug and not merely latent.** Each of these
+has a `<module> test` shell subcommand today. Nothing warns the user, and
+the command reports success afterwards — `useracct test` prints `all tests
+passed` having deleted **every user account, every group and every session**
+on the machine and left `current_uid` at `None`. `credentials test` empties
+the credential store; `hotkeys test` discards every custom key binding;
+`wallpaper`, `theme`, `keylayout`, `locale` and `timezone` reset the desktop
+to factory defaults. The suites that look least alarming are the settings
+modules, and they are the ones a user is most likely to poke at.
+
+**Why it is not a boot problem.** At boot the tables are empty, so the wipe
+is a no-op and every one of these is safe to run from `main.rs` exactly as
+written. That asymmetry is the trap: wiring one of these into boot under
+TD-A-FS-SELFTESTS-NEVER-RUN gives a green boot test and leaves the
+destructive shell path untouched, so the boot wiring cannot be used as
+evidence that the suite is safe. The two must be fixed together.
+
+**The proper fix** is the same three shapes above, applied per module. Most
+of these are settings modules whose suites assert exact counts on a table
+that `init_defaults()` populates, which points at *reset at both ends* where
+there is no lazy init and *decline to run* where the table holds anything
+the user chose. `useracct` additionally needs its `current_uid`, its
+sessions' `active` flags and `LOGIN_COUNT` snapshotted and restored, because
+authenticating during the test hijacks whoever is logged in — cleaning up
+the fixture user is not enough.
+
+### ✅ FIXED 2026-08-23 — a fourth shape, and why it beat all three above
+
+**All 56 are done**, and none of them used one of the three shapes. Writing
+them out made it clear that the three were a choice between *keeping the
+user's data* and *keeping the coverage*, and that the choice was false.
+
+The shape that landed is **move the live state aside**: swap the module's
+table for a pristine one, run the suite against that, put the original back.
+It is `crate::fs::selftest::with_pristine`, and every converted suite is now
+
+```rust
+pub fn self_test() -> KernelResult<()> {
+    crate::fs::selftest::with_pristine(&STATE, State::new(), self_test_inner)
+}
+```
+
+with the original body moved verbatim into `self_test_inner`. Every existing
+assertion holds **unchanged and unweakened** — including the exact ones
+(`next_id` starts at 1, "exactly one app in Accessories") that were the
+reason *baseline-relative* could not be used and *decline to run* had to give
+up coverage on exactly the machines where a user types `test` because they
+suspect something is wrong.
+
+Why it was not available before: it needs a *pristine value* to swap in, and
+23 of the 56 modules had no name for one — their fresh state existed only as
+an anonymous literal inside `static STATE: Mutex<State> = Mutex::new(State {
+… });`. Those literals are now `const fn new()`. That is worth having on its
+own account: the literal and `clear_all()` were two independent spellings of
+"what a fresh boot looks like", free to drift apart with nothing to catch it.
+
+**Three corrections to the survey above, found while doing the work:**
+
+- **`ioprio`, `prefetch` and `tags` were false positives.** The survey
+  counted them because they call `test_clear()`, but in all three that is a
+  *test of* the per-entry clear, not a wipe of the table. `ioprio` was
+  already well-behaved — synthetic task IDs in the 99996–99999 range, each
+  cleared afterwards — and got only its two statistics counters restored,
+  with a doc comment saying why it has no `with_pristine`. `prefetch` and
+  `tags` clean up by hand, one call at a time, which is a claim nobody
+  re-checks when a test is added; they are wrapped anyway, so "leaves no
+  trace" is now structural rather than a promise. So the destructive count
+  is **53**, not 56.
+- **Free-standing counters are part of the state and the three shapes did
+  not cover them.** Nearly every module keeps its statistics in
+  `static AtomicU64`s outside the table, so restoring the table alone still
+  left `theme stats` (and the rest) reporting the test's activity as the
+  user's. All of them are now saved and restored around the call.
+- **`servicemgr` is the one lazy-init module in the set** — its state is
+  `Mutex<Option<State>>` — so its pristine value is `None`, which is exactly
+  what a fresh boot holds.
+
+`useracct` was fixed earlier and separately, and keeps its *decline to run*
+guard: its suite authenticates, which reaches `current_uid`, the sessions'
+`active` flags and `LOGIN_COUNT` — state that is not reachable from the one
+table `with_pristine` swaps.
+
+**What is deliberately not handled:** a panic mid-suite does not restore.
+That is on purpose — a kernel that has just proved one of its own invariants
+wrong has no business carrying the user's data forward into whatever runs
+next. Every non-panicking exit, including an early `?`, does restore.

@@ -30,6 +30,7 @@ use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::error::{KernelError, KernelResult};
+use crate::fs::path::{Path, PathBuf};
 
 // ---------------------------------------------------------------------------
 // Types
@@ -89,9 +90,17 @@ pub struct NetShare {
     /// Remote host.
     pub host: String,
     /// Remote path.
-    pub remote_path: String,
+    ///
+    /// A `PathBuf`, not a `String` (design-decisions.md 261): a path on the
+    /// remote server is a byte string chosen by that server's filesystem,
+    /// which is under no obligation to be UTF-8 -- and less so than a local
+    /// one, since we do not even control which filesystem produced it.
+    pub remote_path: PathBuf,
     /// Local mount point.
-    pub mount_point: String,
+    ///
+    /// A `PathBuf` for the same reason: a mount point is an ordinary local
+    /// directory, whose name may contain any byte but `/` and NUL.
+    pub mount_point: PathBuf,
     /// Username.
     pub username: String,
     /// Mount state.
@@ -160,17 +169,22 @@ pub fn init_defaults() {
 pub fn mount(
     protocol: ShareProtocol,
     host: &str,
-    remote_path: &str,
-    mount_point: &str,
+    remote_path: impl AsRef<Path>,
+    mount_point: impl AsRef<Path>,
     username: &str,
     auto_mount: bool,
     read_only: bool,
 ) -> KernelResult<u32> {
+    let (remote_path, mount_point) = (remote_path.as_ref(), mount_point.as_ref());
     with_state(|state| {
         if state.shares.len() >= MAX_SHARES {
             return Err(KernelError::ResourceExhausted);
         }
-        if state.shares.iter().any(|s| s.mount_point == mount_point) {
+        if state
+            .shares
+            .iter()
+            .any(|s| s.mount_point.as_path() == mount_point)
+        {
             return Err(KernelError::AlreadyExists);
         }
 
@@ -180,8 +194,8 @@ pub fn mount(
             id,
             protocol,
             host: String::from(host),
-            remote_path: String::from(remote_path),
-            mount_point: String::from(mount_point),
+            remote_path: remote_path.to_path_buf(),
+            mount_point: mount_point.to_path_buf(),
             username: String::from(username),
             state: MountState::Connected,
             auto_mount,
@@ -313,9 +327,16 @@ pub fn self_test() {
     crate::serial_println!("netshare::self_test() — running tests...");
     init_defaults();
 
-    // 1: Empty initial.
-    assert!(list_shares().is_empty());
-    crate::serial_println!("  [1/11] empty initial: OK");
+    // 1: Baseline.
+    //
+    // Deliberately *not* `assert!(list_shares().is_empty())`.  This suite is
+    // reachable from the `netshare selftest` shell command, so a user can run
+    // it twice -- and the previous version left share `id1` mounted, so the
+    // second run panicked the kernel on this very line.  Every count below is
+    // relative to this baseline, and the cleanup at the end restores it
+    // exactly, which makes the suite re-runnable and safe to wire into boot.
+    let baseline = list_shares().len();
+    crate::serial_println!("  [1/12] baseline ({} shares): OK", baseline);
 
     // 2: Mount SMB share.
     let id1 = mount(
@@ -329,7 +350,7 @@ pub fn self_test() {
     )
     .expect("mount smb");
     assert!(id1 > 0);
-    crate::serial_println!("  [2/11] mount SMB: OK");
+    crate::serial_println!("  [2/12] mount SMB: OK");
 
     // 3: Mount NFS share.
     let id2 = mount(
@@ -342,8 +363,8 @@ pub fn self_test() {
         true,
     )
     .expect("mount nfs");
-    assert_eq!(list_shares().len(), 2);
-    crate::serial_println!("  [3/11] mount NFS: OK");
+    assert_eq!(list_shares().len(), baseline + 2);
+    crate::serial_println!("  [3/12] mount NFS: OK");
 
     // 4: Duplicate mount point rejected.
     let r = mount(
@@ -356,50 +377,129 @@ pub fn self_test() {
         false,
     );
     assert!(r.is_err());
-    crate::serial_println!("  [4/11] duplicate rejected: OK");
+    crate::serial_println!("  [4/12] duplicate rejected: OK");
 
     // 5: Get share info.
     let s = get_share(id1).expect("get share");
     assert_eq!(s.protocol, ShareProtocol::Smb3);
     assert_eq!(s.state, MountState::Connected);
-    crate::serial_println!("  [5/11] share info: OK");
+    crate::serial_println!("  [5/12] share info: OK");
 
     // 6: Record I/O.
     record_io(id1, 1024, 512).expect("io");
     let s = get_share(id1).expect("get 2");
     assert_eq!(s.bytes_read, 1024);
-    crate::serial_println!("  [6/11] record I/O: OK");
+    crate::serial_println!("  [6/12] record I/O: OK");
 
     // 7: Connection state.
     set_state(id1, MountState::Disconnected).expect("disconnect");
     let s = get_share(id1).expect("get 3");
     assert_eq!(s.state, MountState::Disconnected);
-    crate::serial_println!("  [7/11] connection state: OK");
+    crate::serial_println!("  [7/12] connection state: OK");
 
     // 8: Auto-mount list.
+    //
+    // Stated as membership rather than `len() == 1` so a pre-existing
+    // auto-mount share in the baseline does not fail the suite: what is
+    // being tested is that the flag selects, not how many shares exist.
     let auto = auto_mount_shares();
-    assert_eq!(auto.len(), 1);
-    assert_eq!(auto[0].id, id1);
-    crate::serial_println!("  [8/11] auto-mount: OK");
+    assert!(auto.iter().any(|s| s.id == id1));
+    assert!(!auto.iter().any(|s| s.id == id2));
+    crate::serial_println!("  [8/12] auto-mount: OK");
 
     // 9: Unmount.
     unmount(id2).expect("unmount");
-    assert_eq!(list_shares().len(), 1);
-    crate::serial_println!("  [9/11] unmount: OK");
+    assert_eq!(list_shares().len(), baseline + 1);
+    crate::serial_println!("  [9/12] unmount: OK");
 
     // 10: Error tracking.
     set_state(id1, MountState::Error).expect("error");
     let (_, _, _, errors, _) = stats();
     assert!(errors >= 1);
-    crate::serial_println!("  [10/11] error tracking: OK");
+    crate::serial_println!("  [10/12] error tracking: OK");
 
     // 11: Stats.
     let (count, connected, mounts, errors, ops) = stats();
-    assert_eq!(count, 1);
+    assert_eq!(count, baseline + 1);
     assert!(mounts >= 2);
     assert!(ops > 0);
     let _ = (connected, errors);
-    crate::serial_println!("  [11/11] stats: OK");
+    crate::serial_println!("  [11/12] stats: OK");
 
-    crate::serial_println!("netshare::self_test() — all 11 tests passed");
+    // 12: non-UTF-8 paths (design-decisions.md 261).
+    //
+    // The mount point is an ordinary local directory and the remote path
+    // comes from a server whose filesystem we do not control, so neither can
+    // be required to be UTF-8.  While both were `String`, two shares whose
+    // mount points differed only in a byte with no UTF-8 spelling collided
+    // on the duplicate check -- the second mount was refused as a duplicate
+    // of a directory it had nothing to do with.
+    {
+        let remote_a = Path::new(&b"/export/ns_\xFFr"[..]);
+        let mp_a = Path::new(&b"/mnt/ns_\xFFm"[..]);
+        let mp_b = Path::new(&b"/mnt/ns_\xFEm"[..]);
+
+        let ida = mount(
+            ShareProtocol::Smb3,
+            "nu.local",
+            remote_a,
+            mp_a,
+            "user",
+            false,
+            false,
+        )
+        .expect("mount non-utf8 a");
+        // A near-identical mount point is a *different* directory, so this
+        // must be accepted, not rejected as a duplicate.
+        let idb = mount(
+            ShareProtocol::Smb3,
+            "nu.local",
+            remote_a,
+            mp_b,
+            "user",
+            false,
+            false,
+        )
+        .expect("mount non-utf8 b");
+
+        // Re-using one of them is still a duplicate.
+        assert!(
+            mount(
+                ShareProtocol::Smb3,
+                "nu.local",
+                remote_a,
+                mp_a,
+                "user",
+                false,
+                false,
+            )
+            .is_err()
+        );
+
+        // Both paths round-trip byte-exactly.
+        let sa = get_share(ida).expect("get non-utf8 a");
+        assert_eq!(sa.mount_point.as_path(), mp_a);
+        assert_eq!(sa.remote_path.as_path(), remote_a);
+        let sb = get_share(idb).expect("get non-utf8 b");
+        assert_eq!(sb.mount_point.as_path(), mp_b);
+
+        unmount(ida).expect("unmount non-utf8 a");
+        unmount(idb).expect("unmount non-utf8 b");
+        crate::serial_println!("  [12/12] non-UTF-8 paths: OK");
+    }
+
+    // Cleanup: restore the baseline exactly.
+    //
+    // `id1` is the only share the suite still holds -- it is deliberately
+    // left mounted through tests 7-11 because they inspect its state.  It
+    // must go now: leaving it behind is what made the previous version of
+    // this suite panic on its second run.
+    unmount(id1).expect("cleanup: unmount id1");
+    assert_eq!(
+        list_shares().len(),
+        baseline,
+        "self_test must leave the share registry as it found it"
+    );
+
+    crate::serial_println!("netshare::self_test() — all 12 tests passed");
 }

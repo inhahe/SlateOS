@@ -355,6 +355,7 @@ pub mod secmod;
 pub mod secpolicy;
 pub mod secureboot;
 pub mod secureerase;
+pub mod selftest;
 pub mod servicemgr;
 pub mod sessionmgr;
 pub mod sevenz;

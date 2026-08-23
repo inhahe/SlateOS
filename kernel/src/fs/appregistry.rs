@@ -44,6 +44,7 @@
 
 #![allow(dead_code)]
 
+use crate::fs::path::{Path, PathBuf};
 use crate::sync::Mutex;
 use alloc::collections::BTreeMap;
 use alloc::collections::BTreeSet;
@@ -182,7 +183,13 @@ pub struct AppInfo {
     /// Short description.
     pub description: String,
     /// Path to the executable.
-    pub exec_path: String,
+    ///
+    /// A `PathBuf`, not a `String`: an executable's path may contain any
+    /// byte except `/` and NUL, and `String` cannot hold the ones with no
+    /// UTF-8 spelling. Launching an app is the one place where a lossily
+    /// decoded path does not merely display wrong -- it runs the wrong
+    /// binary, or nothing. See design-decisions.md §261.
+    pub exec_path: PathBuf,
     /// Icon identifier.
     pub icon: String,
     /// Categories this app belongs to.
@@ -213,7 +220,7 @@ pub struct MenuEntry {
     /// Icon.
     pub icon: String,
     /// Executable path.
-    pub exec_path: String,
+    pub exec_path: PathBuf,
 }
 
 // ---------------------------------------------------------------------------
@@ -552,7 +559,7 @@ pub fn register_builtins() -> KernelResult<()> {
             id: String::from(*id),
             name: String::from(*name),
             description: String::from(*desc),
-            exec_path: String::from(*path),
+            exec_path: PathBuf::from(*path),
             icon: String::from(*icon),
             categories: cats.to_vec(),
             mime_types: mimes.iter().map(|m| String::from(*m)).collect(),
@@ -605,7 +612,18 @@ pub fn clear_all() {
 pub fn self_test() -> KernelResult<()> {
     use crate::serial_println;
 
-    clear_all();
+    // The suite needs an empty registry: several assertions are exact counts
+    // ("exactly one app in Accessories"). Clearing a populated registry to make
+    // room would destroy whatever the user registered with `appreg register`,
+    // so decline instead. At boot it is genuinely empty -- nothing calls
+    // `register_builtins()` outside the `appreg init` shell command.
+    if app_count() != 0 {
+        serial_println!(
+            "[appregistry] self-test skipped: {} app(s) already registered",
+            app_count()
+        );
+        return Ok(());
+    }
     reset_stats();
 
     // Test 1: register and get.
@@ -614,7 +632,7 @@ pub fn self_test() -> KernelResult<()> {
             id: String::from("test.app"),
             name: String::from("Test App"),
             description: String::from("A test application"),
-            exec_path: String::from("/usr/bin/test-app"),
+            exec_path: PathBuf::from("/usr/bin/test-app"),
             icon: String::from("icon-test"),
             categories: alloc::vec![AppCategory::Accessories],
             mime_types: alloc::vec![String::from("text/plain")],
@@ -690,9 +708,72 @@ pub fn self_test() -> KernelResult<()> {
         serial_println!("[appregistry] test 7 passed: unregister");
     }
 
+    // Test 8: non-UTF-8 executable paths survive byte-exact (§261).
+    //
+    // Launching an app is the one place where a lossily decoded path does not
+    // merely display wrong. Under the old `String` typing an executable whose
+    // path holds a byte with no UTF-8 spelling was recorded as a U+FFFD-bearing
+    // name, so the launcher would have run a different binary or nothing at
+    // all -- and two apps whose paths differ only in such a byte became
+    // indistinguishable to anything reading the registry.
+    {
+        let raw_a = Path::new(b"/usr/bin/ed\xFFtor");
+        let raw_b = Path::new(b"/usr/bin/ed\xFEtor");
+        for (id, path) in [("test.raw.a", raw_a), ("test.raw.b", raw_b)] {
+            register(AppInfo {
+                id: String::from(id),
+                name: String::from("Raw Path App"),
+                description: String::new(),
+                exec_path: path.to_path_buf(),
+                icon: String::from("icon-test"),
+                categories: alloc::vec![AppCategory::Accessories],
+                mime_types: Vec::new(),
+                keywords: Vec::new(),
+                show_in_menu: true,
+                tray_icon: false,
+                start_hidden: false,
+                version: String::from("1.0"),
+                installed_ns: 0,
+            })?;
+        }
+
+        let a = get("test.raw.a").expect("raw.a registered");
+        assert_eq!(
+            a.exec_path.as_path().as_bytes(),
+            &b"/usr/bin/ed\xFFtor"[..],
+            "the executable path must round-trip byte-for-byte"
+        );
+        let b = get("test.raw.b").expect("raw.b registered");
+        assert_ne!(
+            a.exec_path, b.exec_path,
+            "paths differing only in a byte with no UTF-8 spelling must stay distinct"
+        );
+
+        // The path must survive the projection into `MenuEntry` too -- that is
+        // the form the launcher actually consumes.
+        let tree = menu_tree();
+        let entry = tree
+            .iter()
+            .flat_map(|(_, entries)| entries.iter())
+            .find(|e| e.id == "test.raw.a")
+            .expect("raw.a in menu tree");
+        assert_eq!(
+            entry.exec_path.as_path().as_bytes(),
+            &b"/usr/bin/ed\xFFtor"[..],
+            "the menu entry must carry the executable path through unchanged"
+        );
+
+        unregister("test.raw.a")?;
+        unregister("test.raw.b")?;
+        serial_println!("[appregistry] test 8 passed: non-UTF-8 exec paths");
+    }
+
+    // Back to the empty registry a fresh boot has -- `register_builtins()` in
+    // test 6 left nine apps behind, and nothing outside `appreg init` is
+    // supposed to have populated it.
     clear_all();
     reset_stats();
 
-    serial_println!("[appregistry] all 7 self-tests passed");
+    serial_println!("[appregistry] all 8 self-tests passed");
     Ok(())
 }

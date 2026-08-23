@@ -29,6 +29,7 @@ use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::error::{KernelError, KernelResult};
+use crate::fs::path::{Path, PathBuf};
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -194,7 +195,12 @@ pub struct PartitionInfo {
     /// Flags.
     pub flags: Vec<PartFlag>,
     /// Mount point (if currently mounted).
-    pub mount_point: String,
+    ///
+    /// A `PathBuf`, not a `String` (design-decisions.md 261): a mount point
+    /// is an ordinary directory, whose name may contain any byte but `/` and
+    /// NUL.  The `label`/`type_guid`/`part_guid` fields above stay `String`
+    /// -- those are partition-table metadata, not filesystem names.
+    pub mount_point: PathBuf,
 }
 
 // ---------------------------------------------------------------------------
@@ -360,7 +366,7 @@ pub fn create_partition(
         type_guid: String::new(),
         part_guid: String::new(),
         flags: Vec::new(),
-        mount_point: String::new(),
+        mount_point: PathBuf::new(),
     });
     OP_COUNT.fetch_add(1, Ordering::Relaxed);
     Ok(id)
@@ -477,14 +483,19 @@ pub fn set_flag(disk_id: u64, part_id: u64, flag: PartFlag, value: bool) -> Kern
 }
 
 /// Set mount point for a partition.
-pub fn set_mount_point(disk_id: u64, part_id: u64, mount: &str) -> KernelResult<()> {
+pub fn set_mount_point(
+    disk_id: u64,
+    part_id: u64,
+    mount: impl AsRef<Path>,
+) -> KernelResult<()> {
+    let mount = mount.as_ref();
     let mut state = STATE.lock();
     let part = state
         .partitions
         .iter_mut()
         .find(|p| p.disk_id == disk_id && p.id == part_id)
         .ok_or(KernelError::NotFound)?;
-    part.mount_point = String::from(mount);
+    part.mount_point = mount.to_path_buf();
     Ok(())
 }
 
@@ -591,7 +602,26 @@ pub fn clear_all() {
 // Self-tests
 // ---------------------------------------------------------------------------
 
+/// The suite asserts exact table contents, so it needs a table of its own.
+/// It used to get one by calling `clear_all()`, which — since this suite is
+/// reachable from the shell — deleted whatever the user had stored here and
+/// then reported success.  The live state is moved aside for the duration and
+/// put back afterwards; `crate::fs::selftest` records why this shape rather
+/// than the alternatives.
 pub fn self_test() -> KernelResult<()> {
+    // These counters live outside the table, so `with_pristine` cannot
+    // see them; save and restore them here so a run leaves no trace.
+    let saved_next_disk_id = NEXT_DISK_ID.load(Ordering::Relaxed);
+    let saved_next_part_id = NEXT_PART_ID.load(Ordering::Relaxed);
+    let saved_op_count = OP_COUNT.load(Ordering::Relaxed);
+    let result = crate::fs::selftest::with_pristine(&STATE, State::new(), self_test_inner);
+    NEXT_DISK_ID.store(saved_next_disk_id, Ordering::Relaxed);
+    NEXT_PART_ID.store(saved_next_part_id, Ordering::Relaxed);
+    OP_COUNT.store(saved_op_count, Ordering::Relaxed);
+    result
+}
+
+fn self_test_inner() -> KernelResult<()> {
     use crate::serial_println;
     clear_all();
     reset_stats();
@@ -652,12 +682,38 @@ pub fn self_test() -> KernelResult<()> {
     assert_eq!(root.fs_type, FsType::Btrfs);
     set_mount_point(d1, p2, "/")?;
     let root2 = get_partition(d1, p2)?;
-    assert_eq!(root2.mount_point, "/");
+    assert_eq!(root2.mount_point.as_path(), Path::new("/"));
 
     let (dc, pc, ops) = stats();
     assert_eq!(dc, 1);
     assert_eq!(pc, 1);
     assert!(ops > 0);
+
+    // Test 8: non-UTF-8 mount points (design-decisions.md 261).
+    //
+    // A mount point is an ordinary directory, so it may be named with bytes
+    // that have no UTF-8 spelling.  While the field was a `String` such a
+    // directory could not be recorded as a partition's mount point at all,
+    // and `partmgr list` would have shown the partition mounted somewhere it
+    // is not.
+    serial_println!("  partmgr::self_test 8: non-UTF-8 mount point");
+    {
+        let mp_a = Path::new(&b"/mnt/pm_\xFFm"[..]);
+        let mp_b = Path::new(&b"/mnt/pm_\xFEm"[..]);
+
+        set_mount_point(d1, p2, mp_a)?;
+        let got = get_partition(d1, p2)?;
+        // Byte-exact round trip: no replacement character, no truncation.
+        assert_eq!(got.mount_point.as_path(), mp_a);
+        assert_eq!(got.mount_point.as_path().as_bytes(), b"/mnt/pm_\xFFm");
+
+        // A mount point differing only in a byte with no UTF-8 spelling is a
+        // different directory and must overwrite to a different value.
+        set_mount_point(d1, p2, mp_b)?;
+        let got2 = get_partition(d1, p2)?;
+        assert_eq!(got2.mount_point.as_path(), mp_b);
+        assert_ne!(got2.mount_point, got.mount_point);
+    }
 
     clear_all();
     reset_stats();

@@ -31,6 +31,7 @@ use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::error::{KernelError, KernelResult};
+use crate::fs::path::{Path, PathBuf};
 
 // ---------------------------------------------------------------------------
 // Types
@@ -114,11 +115,16 @@ pub struct VpnProfile {
     /// Username (if user/pass auth).
     pub username: String,
     /// Certificate path (if cert auth).
-    pub cert_path: String,
+    ///
+    /// §261: these three name ordinary files, so their names may contain any
+    /// byte except `/` and NUL.  A `String` here would fold two distinct
+    /// certificates onto one U+FFFD-bearing name -- and the failure mode is
+    /// not a diagnostic but a connection authenticated with the wrong key.
+    pub cert_path: PathBuf,
     /// Key path.
-    pub key_path: String,
+    pub key_path: PathBuf,
     /// CA certificate path.
-    pub ca_path: String,
+    pub ca_path: PathBuf,
     /// DNS servers to use when connected.
     pub dns_servers: Vec<String>,
     /// Whether to route all traffic through VPN.
@@ -147,7 +153,10 @@ pub struct ThirdPartyVpn {
     /// Interface name (e.g., "tun0").
     pub interface: String,
     /// Path to the app binary.
-    pub app_path: String,
+    ///
+    /// §261: a third-party VPN client is installed wherever its packager put
+    /// it, under a name this kernel does not choose.
+    pub app_path: PathBuf,
 }
 
 /// Current VPN status snapshot.
@@ -195,21 +204,32 @@ fn default_status() -> VpnStatus {
     }
 }
 
-static STATE: Mutex<State> = Mutex::new(State {
-    profiles: Vec::new(),
-    status: VpnStatus {
-        state: VpnState::Disconnected,
-        active_profile: None,
-        connected_server: String::new(),
-        vpn_ip: String::new(),
-        uptime_s: 0,
-        bytes_sent: 0,
-        bytes_received: 0,
-        third_party: Vec::new(),
-    },
-    third_party: Vec::new(),
-    changes: 0,
-});
+impl State {
+    /// The state a fresh boot starts with.
+    ///
+    /// Extracted from the initialiser of `STATE` so that the self-test can
+    /// be handed a pristine table without disturbing the live one; see
+    /// `crate::fs::selftest`.
+    const fn new() -> Self {
+        Self {
+            profiles: Vec::new(),
+            status: VpnStatus {
+                state: VpnState::Disconnected,
+                active_profile: None,
+                connected_server: String::new(),
+                vpn_ip: String::new(),
+                uptime_s: 0,
+                bytes_sent: 0,
+                bytes_received: 0,
+                third_party: Vec::new(),
+            },
+            third_party: Vec::new(),
+            changes: 0,
+        }
+    }
+}
+
+static STATE: Mutex<State> = Mutex::new(State::new());
 
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 static OP_COUNT: AtomicU64 = AtomicU64::new(0);
@@ -239,9 +259,9 @@ pub fn create_profile(
         transport: Transport::Udp,
         auth: AuthMethod::UserPass,
         username: String::new(),
-        cert_path: String::new(),
-        key_path: String::new(),
-        ca_path: String::new(),
+        cert_path: PathBuf::new(),
+        key_path: PathBuf::new(),
+        ca_path: PathBuf::new(),
         dns_servers: Vec::new(),
         route_all: true,
         kill_switch: false,
@@ -319,16 +339,22 @@ pub fn set_username(profile_id: u64, username: &str) -> KernelResult<()> {
 }
 
 /// Set certificate paths.
-pub fn set_certs(profile_id: u64, cert: &str, key: &str, ca: &str) -> KernelResult<()> {
+pub fn set_certs(
+    profile_id: u64,
+    cert: impl AsRef<Path>,
+    key: impl AsRef<Path>,
+    ca: impl AsRef<Path>,
+) -> KernelResult<()> {
+    let (cert, key, ca) = (cert.as_ref(), key.as_ref(), ca.as_ref());
     let mut state = STATE.lock();
     let p = state
         .profiles
         .iter_mut()
         .find(|p| p.id == profile_id)
         .ok_or(KernelError::NotFound)?;
-    p.cert_path = String::from(cert);
-    p.key_path = String::from(key);
-    p.ca_path = String::from(ca);
+    p.cert_path = cert.to_path_buf();
+    p.key_path = key.to_path_buf();
+    p.ca_path = ca.to_path_buf();
     state.changes += 1;
     Ok(())
 }
@@ -473,7 +499,12 @@ pub fn is_active() -> bool {
 }
 
 /// Register a detected third-party VPN.
-pub fn register_third_party(app_name: &str, app_path: &str, interface: &str) -> KernelResult<()> {
+pub fn register_third_party(
+    app_name: &str,
+    app_path: impl AsRef<Path>,
+    interface: &str,
+) -> KernelResult<()> {
+    let app_path = app_path.as_ref();
     let mut state = STATE.lock();
     if state.third_party.len() >= 16 {
         return Err(KernelError::ResourceExhausted);
@@ -483,7 +514,7 @@ pub fn register_third_party(app_name: &str, app_path: &str, interface: &str) -> 
         pid: None,
         connected: false,
         interface: String::from(interface),
-        app_path: String::from(app_path),
+        app_path: app_path.to_path_buf(),
     });
     state.changes += 1;
     Ok(())
@@ -553,7 +584,24 @@ pub fn clear_all() {
 // Self-tests
 // ---------------------------------------------------------------------------
 
+/// The suite asserts exact table contents, so it needs a table of its own.
+/// It used to get one by calling `clear_all()`, which — since this suite is
+/// reachable from the shell — deleted whatever the user had stored here and
+/// then reported success.  The live state is moved aside for the duration and
+/// put back afterwards; `crate::fs::selftest` records why this shape rather
+/// than the alternatives.
 pub fn self_test() -> KernelResult<()> {
+    // These counters live outside the table, so `with_pristine` cannot
+    // see them; save and restore them here so a run leaves no trace.
+    let saved_next_id = NEXT_ID.load(Ordering::Relaxed);
+    let saved_op_count = OP_COUNT.load(Ordering::Relaxed);
+    let result = crate::fs::selftest::with_pristine(&STATE, State::new(), self_test_inner);
+    NEXT_ID.store(saved_next_id, Ordering::Relaxed);
+    OP_COUNT.store(saved_op_count, Ordering::Relaxed);
+    result
+}
+
+fn self_test_inner() -> KernelResult<()> {
     use crate::serial_println;
 
     clear_all();
@@ -622,8 +670,44 @@ pub fn self_test() -> KernelResult<()> {
     let s = status();
     assert_eq!(s.state, VpnState::Connected);
     assert!(!s.connected_server.is_empty());
+    disconnect()?;
+
+    // Test 8: non-UTF-8 credential and binary paths (§261).
+    //
+    // A certificate bundle is an ordinary file; its name may contain any byte
+    // except `/` and NUL.  Two bundles differing only in a byte with no UTF-8
+    // spelling used to collapse onto one U+FFFD-bearing name, so a profile
+    // could silently authenticate with the wrong key and report success.
+    serial_println!("vpn::self_test 8: non-UTF-8 credential paths");
+    let cert_a = Path::new(&b"/etc/vpn/vp_\xFFc.pem"[..]);
+    let cert_b = Path::new(&b"/etc/vpn/vp_\xFEc.pem"[..]);
+    let key_a = Path::new(&b"/etc/vpn/vp_\xFFk.pem"[..]);
+    let ca_a = Path::new(&b"/etc/vpn/vp_\xFFa.pem"[..]);
+    let p8 = create_profile("Bytes", VpnProtocol::OpenVpn, "vpn.bytes.test", 1194)?;
+    set_certs(p8, cert_a, key_a, ca_a)?;
+    let prof8 = get_profile(p8)?;
+    assert_eq!(prof8.cert_path.as_path(), cert_a);
+    assert_eq!(prof8.key_path.as_path(), key_a);
+    assert_eq!(prof8.ca_path.as_path(), ca_a);
+    assert_eq!(
+        prof8.cert_path.as_path().as_bytes(),
+        b"/etc/vpn/vp_\xFFc.pem"
+    );
+    // The two certificate names differ in exactly one byte, neither of which
+    // is representable in UTF-8 -- the case a `String` field silently folded.
+    set_certs(p8, cert_b, key_a, ca_a)?;
+    assert_ne!(get_profile(p8)?.cert_path, prof8.cert_path);
+
+    let app_a = Path::new(&b"/opt/vp_\xFFvpn/bin/client"[..]);
+    register_third_party("ByteVPN", app_a, "tun9")?;
+    let tp8 = list_third_party();
+    assert!(
+        tp8.iter()
+            .any(|t| t.app_name == "ByteVPN" && t.app_path.as_path() == app_a),
+        "third-party app path must survive byte-for-byte"
+    );
 
     clear_all();
-    serial_println!("vpn::self_test: all 7 tests passed");
+    serial_println!("vpn::self_test: all 8 tests passed");
     Ok(())
 }

@@ -44,6 +44,7 @@ use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec::Vec;
 
+use super::path::{Path, PathBuf};
 use crate::error::{KernelError, KernelResult};
 use crate::serial_println;
 
@@ -190,7 +191,17 @@ pub struct AclStats {
 
 struct AclInner {
     /// Path → ACL mapping.  Keyed by normalized absolute path.
-    acls: BTreeMap<String, Acl>,
+    ///
+    /// Keyed by `PathBuf`, not `String`, per design-decisions.md §261: our
+    /// filesystems admit every byte except `/` and NUL in a name, so a
+    /// `String` key is narrower than the thing it keys.  Two names that
+    /// differ only in a byte with no UTF-8 spelling would fold onto one
+    /// entry — and this table decides whether an access is *refused*, so
+    /// the fold is doubly wrong: `check_access` fails open when it finds
+    /// no entry, so the file whose ACL was displaced becomes unprotected,
+    /// while the file that displaced it inherits restrictions nobody asked
+    /// for.
+    acls: BTreeMap<PathBuf, Acl>,
     /// Statistics counters.
     checks_performed: u64,
     denials: u64,
@@ -215,7 +226,8 @@ static ACLS: Mutex<AclInner> = Mutex::new(AclInner {
 ///
 /// If named user or group entries are present, an ACL_MASK entry is
 /// required.
-pub fn set_acl(path: &str, acl: Acl) -> KernelResult<()> {
+pub fn set_acl(path: impl AsRef<Path>, acl: Acl) -> KernelResult<()> {
+    let path = path.as_ref();
     // Validate: must have USER_OBJ, GROUP_OBJ, OTHER.
     let has_user_obj = acl.entries.iter().any(|e| e.tag == AclTag::UserObj);
     let has_group_obj = acl.entries.iter().any(|e| e.tag == AclTag::GroupObj);
@@ -235,22 +247,22 @@ pub fn set_acl(path: &str, acl: Acl) -> KernelResult<()> {
         return Err(KernelError::InvalidArgument);
     }
 
-    ACLS.lock().acls.insert(String::from(path), acl);
+    ACLS.lock().acls.insert(path.to_path_buf(), acl);
     Ok(())
 }
 
 /// Get the ACL for a file path.
 ///
 /// Returns None if no ACL is set (file uses only traditional permissions).
-pub fn get_acl(path: &str) -> Option<Acl> {
-    ACLS.lock().acls.get(path).cloned()
+pub fn get_acl(path: impl AsRef<Path>) -> Option<Acl> {
+    ACLS.lock().acls.get(path.as_ref()).cloned()
 }
 
 /// Remove the ACL from a file path.
 ///
 /// After removal, the file uses only traditional permissions.
-pub fn remove_acl(path: &str) -> bool {
-    ACLS.lock().acls.remove(path).is_some()
+pub fn remove_acl(path: impl AsRef<Path>) -> bool {
+    ACLS.lock().acls.remove(path.as_ref()).is_some()
 }
 
 /// Check whether a specific access request is permitted by the ACL.
@@ -267,13 +279,14 @@ pub fn remove_acl(path: &str) -> bool {
 /// If no ACL exists for the path, returns Ok(()) (delegate to traditional
 /// permission checks elsewhere in VFS).
 pub fn check_access(
-    path: &str,
+    path: impl AsRef<Path>,
     requester_uid: u32,
     requester_gid: u32,
     file_uid: u32,
     file_gid: u32,
     request: AccessRequest,
 ) -> KernelResult<()> {
+    let path = path.as_ref();
     let mut inner = ACLS.lock();
     inner.checks_performed = inner.checks_performed.saturating_add(1);
 
@@ -351,7 +364,7 @@ pub fn check_access(
 
 /// List all paths that have ACLs set.
 #[allow(dead_code)]
-pub fn list_paths() -> Vec<String> {
+pub fn list_paths() -> Vec<PathBuf> {
     ACLS.lock().acls.keys().cloned().collect()
 }
 
@@ -837,6 +850,54 @@ pub fn self_test() -> KernelResult<()> {
         serial_println!("[acl]   no-ACL passthrough OK");
     }
 
-    serial_println!("[acl] Self-test passed (10 tests).");
+    // --- Test 11: non-UTF-8 paths key distinct ACLs (design-decisions.md §261) ---
+    //
+    // Asserted through `check_access`, not by round-tripping the table: the
+    // table is an implementation detail, whereas `check_access` is what the
+    // VFS is meant to consult, and it is the function whose *failure mode*
+    // makes the fold dangerous.  `\xFF` and `\xFE` are bytes no UTF-8
+    // sequence can begin with, so under a `String` key both names would have
+    // collapsed to the same U+FFFD-bearing spelling — and because
+    // `check_access` returns `Ok(())` for an unknown path, the collapse
+    // would have silently left one of these two files entirely unprotected.
+    {
+        let a = Path::new(&b"/tmp/_acl_\xFFn"[..]);
+        let b = Path::new(&b"/tmp/_acl_\xFEn"[..]);
+
+        // Deny-all-to-others ACL on `a` only.
+        let acl = build_acl(AclPerm::ALL, AclPerm::NONE, AclPerm::NONE, &[], &[]);
+        set_acl(a, acl)?;
+
+        // `a` is governed by the ACL: a stranger is refused.
+        if check_access(a, 9999, 9999, 0, 0, AccessRequest::READ).is_ok() {
+            serial_println!("[acl]   ERROR: non-UTF-8 path A should be denied");
+            return Err(KernelError::InternalError);
+        }
+        // `b` has no ACL of its own and must pass through untouched.  If the
+        // keys had folded, this call would hit A's deny-all entry.
+        if check_access(b, 9999, 9999, 0, 0, AccessRequest::READ).is_err() {
+            serial_println!("[acl]   ERROR: non-UTF-8 path B should pass through");
+            return Err(KernelError::InternalError);
+        }
+        // The owner still gets in, so the denial above was the ACL talking
+        // and not a blanket refusal.
+        if check_access(a, 0, 0, 0, 0, AccessRequest::READ).is_err() {
+            serial_println!("[acl]   ERROR: owner should be allowed on path A");
+            return Err(KernelError::InternalError);
+        }
+
+        // Removal is likewise byte-exact.
+        if remove_acl(b) {
+            serial_println!("[acl]   ERROR: removing B's absent ACL reported success");
+            return Err(KernelError::InternalError);
+        }
+        if !remove_acl(a) {
+            serial_println!("[acl]   ERROR: removing A's ACL reported failure");
+            return Err(KernelError::InternalError);
+        }
+        serial_println!("[acl]   non-UTF-8 paths OK");
+    }
+
+    serial_println!("[acl] Self-test passed (11 tests).");
     Ok(())
 }

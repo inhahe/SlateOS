@@ -26,6 +26,7 @@
 
 #![allow(dead_code)]
 
+use crate::fs::path::{Path, PathBuf};
 use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec;
@@ -112,9 +113,20 @@ pub struct Component {
     /// Component type.
     pub comp_type: ComponentType,
     /// Source directory path.
-    pub source_dir: String,
+    ///
+    /// `PathBuf`, not `String`: a path is a byte string with only `/` and NUL
+    /// forbidden, and this one is also the input to the change-detection hash.
+    /// Under the old `String` typing two source trees whose names differed
+    /// only in a byte with no UTF-8 spelling hashed identically, so a rebuild
+    /// of one was silently suppressed as "up to date" because the *other* had
+    /// been built. See design-decisions.md §261.
+    pub source_dir: PathBuf,
     /// Output path (binary / library).
-    pub output_path: String,
+    ///
+    /// `PathBuf` for the same reason, with a sharper edge: this is where the
+    /// build artefact is written, so a lossily decoded spelling overwrites a
+    /// different file than the one the user named.
+    pub output_path: PathBuf,
     /// Build parameters.
     pub params: Vec<BuildParam>,
     /// Build status.
@@ -182,9 +194,14 @@ static STATE: Mutex<State> = Mutex::new(State {
 
 static OP_COUNT: AtomicU64 = AtomicU64::new(0);
 
-fn simple_hash(s: &str) -> u64 {
+/// FNV-1a over raw bytes.
+///
+/// Takes `&[u8]` rather than `&str` so that a source directory whose name is
+/// not valid UTF-8 hashes as itself. The values are unchanged for names that
+/// *are* UTF-8 -- this hashed `s.as_bytes()` before too.
+fn simple_hash(s: &[u8]) -> u64 {
     let mut h: u64 = 0xcbf29ce484222325;
-    for b in s.as_bytes() {
+    for b in s {
         h ^= *b as u64;
         h = h.wrapping_mul(0x100000001b3);
     }
@@ -200,9 +217,10 @@ pub fn register_component(
     id: &str,
     name: &str,
     comp_type: ComponentType,
-    source_dir: &str,
-    output_path: &str,
+    source_dir: impl AsRef<Path>,
+    output_path: impl AsRef<Path>,
 ) -> KernelResult<()> {
+    let (source_dir, output_path) = (source_dir.as_ref(), output_path.as_ref());
     let mut state = STATE.lock();
     if state.components.len() >= MAX_COMPONENTS {
         return Err(KernelError::ResourceExhausted);
@@ -210,13 +228,13 @@ pub fn register_component(
     if state.components.iter().any(|c| c.id == id) {
         return Err(KernelError::AlreadyExists);
     }
-    let hash = simple_hash(source_dir);
+    let hash = simple_hash(source_dir.as_bytes());
     state.components.push(Component {
         id: String::from(id),
         name: String::from(name),
         comp_type,
-        source_dir: String::from(source_dir),
-        output_path: String::from(output_path),
+        source_dir: source_dir.to_path_buf(),
+        output_path: output_path.to_path_buf(),
         params: Vec::new(),
         status: BuildStatus::NeverBuilt,
         last_source_hash: 0,
@@ -566,20 +584,20 @@ pub fn init_defaults() {
     // build_count would be a fabricated claim (kshell surfaces it as "Builds: N").
     let mut state = STATE.lock();
 
-    let hash_kernel = simple_hash("/src/kernel");
-    let hash_drivers = simple_hash("/src/drivers");
-    let hash_compositor = simple_hash("/src/compositor");
-    let hash_shell = simple_hash("/src/shell");
-    let hash_init = simple_hash("/src/init");
-    let hash_boot = simple_hash("/src/boot");
+    let hash_kernel = simple_hash(b"/src/kernel");
+    let hash_drivers = simple_hash(b"/src/drivers");
+    let hash_compositor = simple_hash(b"/src/compositor");
+    let hash_shell = simple_hash(b"/src/shell");
+    let hash_init = simple_hash(b"/src/init");
+    let hash_boot = simple_hash(b"/src/boot");
 
-    state.components = vec![
+    let defaults = vec![
         Component {
             id: String::from("kernel"),
             name: String::from("Kernel"),
             comp_type: ComponentType::Kernel,
-            source_dir: String::from("/src/kernel"),
-            output_path: String::from("/boot/kernel"),
+            source_dir: PathBuf::from("/src/kernel"),
+            output_path: PathBuf::from("/boot/kernel"),
             params: vec![
                 BuildParam {
                     key: String::from("page_size"),
@@ -638,8 +656,8 @@ pub fn init_defaults() {
             id: String::from("drivers"),
             name: String::from("Userspace Drivers"),
             comp_type: ComponentType::KernelModule,
-            source_dir: String::from("/src/drivers"),
-            output_path: String::from("/lib/drivers/"),
+            source_dir: PathBuf::from("/src/drivers"),
+            output_path: PathBuf::from("/lib/drivers/"),
             params: vec![BuildParam {
                 key: String::from("virtio"),
                 description: String::from("Enable virtio drivers"),
@@ -663,8 +681,8 @@ pub fn init_defaults() {
             id: String::from("compositor"),
             name: String::from("Compositor"),
             comp_type: ComponentType::SystemService,
-            source_dir: String::from("/src/compositor"),
-            output_path: String::from("/usr/lib/compositor"),
+            source_dir: PathBuf::from("/src/compositor"),
+            output_path: PathBuf::from("/usr/lib/compositor"),
             params: vec![BuildParam {
                 key: String::from("gpu_backend"),
                 description: String::from("GPU rendering backend"),
@@ -692,8 +710,8 @@ pub fn init_defaults() {
             id: String::from("shell"),
             name: String::from("Shell"),
             comp_type: ComponentType::CoreUtility,
-            source_dir: String::from("/src/shell"),
-            output_path: String::from("/usr/bin/shell"),
+            source_dir: PathBuf::from("/src/shell"),
+            output_path: PathBuf::from("/usr/bin/shell"),
             params: Vec::new(),
             status: BuildStatus::UpToDate,
             last_source_hash: hash_shell,
@@ -710,8 +728,8 @@ pub fn init_defaults() {
             id: String::from("init"),
             name: String::from("Init System"),
             comp_type: ComponentType::SystemService,
-            source_dir: String::from("/src/init"),
-            output_path: String::from("/sbin/init"),
+            source_dir: PathBuf::from("/src/init"),
+            output_path: PathBuf::from("/sbin/init"),
             params: Vec::new(),
             status: BuildStatus::UpToDate,
             last_source_hash: hash_init,
@@ -728,8 +746,8 @@ pub fn init_defaults() {
             id: String::from("bootloader"),
             name: String::from("Bootloader"),
             comp_type: ComponentType::Bootloader,
-            source_dir: String::from("/src/boot"),
-            output_path: String::from("/boot/efi/boot.efi"),
+            source_dir: PathBuf::from("/src/boot"),
+            output_path: PathBuf::from("/boot/efi/boot.efi"),
             params: vec![BuildParam {
                 key: String::from("secure_boot"),
                 description: String::from("Sign for Secure Boot"),
@@ -751,7 +769,34 @@ pub fn init_defaults() {
         },
     ];
 
-    state.build_logs.clear();
+    // Restore the six defaults *without* touching anything else.
+    //
+    // This was `state.components = vec![...]` and `state.build_logs.clear()`,
+    // which did restore the defaults but also deleted every component the user
+    // had added with `kbuild register` and the whole build history along with
+    // it. Nothing about "initialise the defaults" promises that, and there is
+    // no undo: the registry is the only record that those components existed.
+    //
+    // Restoring a *default* component wholesale is still right -- that is what
+    // the command is for, and it is how a user reverts a build parameter they
+    // have broken. So each default replaces its own entry if present and is
+    // appended otherwise, and only the restored components' logs are dropped,
+    // because those logs describe a build configuration that no longer exists.
+    //
+    // The defaults are exempt from `MAX_COMPONENTS`: they are the system's own
+    // six, and refusing to seed them because the user filled the table would
+    // leave the machine with no kernel component at all.
+    state
+        .build_logs
+        .retain(|log| !defaults.iter().any(|d| d.id == log.component_id));
+    for def in defaults {
+        if let Some(slot) = state.components.iter_mut().find(|c| c.id == def.id) {
+            *slot = def;
+        } else {
+            state.components.push(def);
+        }
+    }
+
     state.changes += 1;
     OP_COUNT.fetch_add(1, Ordering::Relaxed);
 }
@@ -796,18 +841,40 @@ pub fn clear_all() {
 pub fn self_test() -> KernelResult<()> {
     use crate::serial_println;
 
-    clear_all();
+    // Decline to run against a populated registry rather than emptying it.
+    //
+    // This suite used to open with `clear_all()`. That did make it idempotent,
+    // and it did make test 1's implicit "the fixture is not already here" true
+    // by construction -- at the price of `kbuild test` deleting every
+    // component the user had registered, plus the whole build history, from a
+    // shell command whose name promises a report rather than a wipe.
+    //
+    // The assertions here cannot be restated relative to a baseline: test 10
+    // registers a *system-critical* component that `remove_component` then
+    // correctly refuses to delete, so the suite has no way to clean up after
+    // itself. Declining is therefore the only honest option. At boot the
+    // registry is genuinely empty -- nothing calls `init_defaults()` outside
+    // the `kbuild` shell commands -- so full coverage is retained where it
+    // matters.
+    if !list_components().is_empty() {
+        serial_println!(
+            "[kernelbuild] self-test skipped: {} component(s) already registered",
+            list_components().len()
+        );
+        return Ok(());
+    }
+    reset_stats();
 
     // Test 1: register component.
     serial_println!("kernelbuild::self_test 1: register");
     register_component(
-        "test-kern",
+        "kbuild-selftest-kern",
         "Test Kernel",
         ComponentType::Kernel,
-        "/src/test",
-        "/boot/test",
+        "/tmp/.kernelbuild-selftest/src",
+        "/tmp/.kernelbuild-selftest/out",
     )?;
-    let comp = get_component("test-kern")?;
+    let comp = get_component("kbuild-selftest-kern")?;
     assert_eq!(comp.name, "Test Kernel");
     assert_eq!(comp.status, BuildStatus::NeverBuilt);
     assert!(comp.system_critical);
@@ -816,11 +883,11 @@ pub fn self_test() -> KernelResult<()> {
     serial_println!("kernelbuild::self_test 2: duplicate");
     assert!(
         register_component(
-            "test-kern",
+            "kbuild-selftest-kern",
             "Dup",
             ComponentType::Kernel,
-            "/src/dup",
-            "/boot/dup"
+            "/tmp/.kernelbuild-selftest/dup",
+            "/tmp/.kernelbuild-selftest/dupout"
         )
         .is_err()
     );
@@ -828,87 +895,172 @@ pub fn self_test() -> KernelResult<()> {
     // Test 3: add parameter.
     serial_println!("kernelbuild::self_test 3: parameters");
     add_param(
-        "test-kern",
+        "kbuild-selftest-kern",
         "page_size",
         "Page size",
         "16384",
         &["4096", "16384", "65536"],
         true,
     )?;
-    let comp = get_component("test-kern")?;
+    let comp = get_component("kbuild-selftest-kern")?;
     assert_eq!(comp.params.len(), 1);
     assert_eq!(comp.params[0].value, "16384");
 
     // Test 4: set parameter.
     serial_println!("kernelbuild::self_test 4: set param");
-    set_param("test-kern", "page_size", "4096")?;
-    let comp = get_component("test-kern")?;
+    set_param("kbuild-selftest-kern", "page_size", "4096")?;
+    let comp = get_component("kbuild-selftest-kern")?;
     assert_eq!(comp.params[0].value, "4096");
     // Invalid value.
-    assert!(set_param("test-kern", "page_size", "1234").is_err());
+    assert!(set_param("kbuild-selftest-kern", "page_size", "1234").is_err());
 
     // Test 5: reset parameter.
     serial_println!("kernelbuild::self_test 5: reset param");
-    reset_param("test-kern", "page_size")?;
-    let comp = get_component("test-kern")?;
+    reset_param("kbuild-selftest-kern", "page_size")?;
+    let comp = get_component("kbuild-selftest-kern")?;
     assert_eq!(comp.params[0].value, "16384");
 
     // Test 6: build.
     serial_println!("kernelbuild::self_test 6: build");
-    build("test-kern")?;
-    let comp = get_component("test-kern")?;
+    build("kbuild-selftest-kern")?;
+    let comp = get_component("kbuild-selftest-kern")?;
     assert_eq!(comp.status, BuildStatus::UpToDate);
     assert_eq!(comp.build_count, 1);
-    let logs = build_logs("test-kern");
+    let logs = build_logs("kbuild-selftest-kern");
     assert_eq!(logs.len(), 1);
     assert!(logs[0].success);
 
     // Test 7: source change detection.
     serial_println!("kernelbuild::self_test 7: source change");
-    detect_source_change("test-kern", 999)?;
-    let comp = get_component("test-kern")?;
+    detect_source_change("kbuild-selftest-kern", 999)?;
+    let comp = get_component("kbuild-selftest-kern")?;
     assert_eq!(comp.status, BuildStatus::SourceChanged);
-    assert!(source_changed("test-kern")?);
+    assert!(source_changed("kbuild-selftest-kern")?);
     let changed = scan_changed();
-    assert!(changed.contains(&String::from("test-kern")));
+    assert!(changed.contains(&String::from("kbuild-selftest-kern")));
 
     // Test 8: rebuild after change.
     serial_println!("kernelbuild::self_test 8: rebuild");
-    build("test-kern")?;
-    let comp = get_component("test-kern")?;
+    build("kbuild-selftest-kern")?;
+    let comp = get_component("kbuild-selftest-kern")?;
     assert_eq!(comp.status, BuildStatus::UpToDate);
     assert_eq!(comp.build_count, 2);
 
     // Test 9: build failure.
     serial_println!("kernelbuild::self_test 9: build failure");
-    record_build_failure("test-kern", "missing dependency")?;
-    let comp = get_component("test-kern")?;
+    record_build_failure("kbuild-selftest-kern", "missing dependency")?;
+    let comp = get_component("kbuild-selftest-kern")?;
     assert_eq!(comp.status, BuildStatus::Failed);
-    let logs = build_logs("test-kern");
+    let logs = build_logs("kbuild-selftest-kern");
     assert_eq!(logs.len(), 3);
     assert!(!logs[2].success);
 
     // Test 10: remove (system_critical fails).
     serial_println!("kernelbuild::self_test 10: remove");
-    assert!(remove_component("test-kern").is_err());
+    assert!(remove_component("kbuild-selftest-kern").is_err());
     // Register and remove non-critical.
     register_component(
-        "test-util",
+        "kbuild-selftest-util",
         "Util",
         ComponentType::CoreUtility,
-        "/src/util",
-        "/bin/util",
+        "/tmp/.kernelbuild-selftest/util",
+        "/tmp/.kernelbuild-selftest/utilout",
     )?;
-    remove_component("test-util")?;
-    assert!(get_component("test-util").is_err());
+    remove_component("kbuild-selftest-util")?;
+    assert!(get_component("kbuild-selftest-util").is_err());
 
-    // Test 11: init_defaults.
+    // Test 11: init_defaults restores the defaults and eats nothing else.
     serial_println!("kernelbuild::self_test 11: defaults");
     init_defaults();
     let comps = list_components();
     assert!(comps.len() >= 5);
-
+    assert!(
+        comps.iter().any(|c| c.id == "kernel"),
+        "init_defaults must seed the kernel component"
+    );
+    // `kbuild-selftest-kern` is still registered: test 10 showed
+    // `remove_component` correctly refuses to delete a system-critical
+    // component. That makes it exactly the user-registered component that
+    // `init_defaults` used to delete on its way past, along with its logs.
+    assert!(
+        comps.iter().any(|c| c.id == "kbuild-selftest-kern"),
+        "init_defaults must not delete components it did not install"
+    );
+    assert_eq!(
+        build_logs("kbuild-selftest-kern").len(),
+        3,
+        "init_defaults must not clear build history it did not create"
+    );
     clear_all();
-    serial_println!("kernelbuild::self_test: all 11 tests passed");
+
+    // Test 12: non-UTF-8 source and output paths survive registration, and
+    // two source trees differing only in an unencodable byte are distinct.
+    //
+    // `\xFF` and `\xFE` have no UTF-8 spelling in any position, so under the
+    // old `String` typing both folded to the same U+FFFD-bearing name. Two
+    // consequences, neither of them cosmetic: the change-detection hash is
+    // computed over the source directory, so the two trees hashed identically
+    // and a rebuild of one was suppressed as "up to date" because the other
+    // had been built; and the output path is where the artefact is written,
+    // so a build wrote over a file the user never named.
+    // See design-decisions.md §261.
+    serial_println!("kernelbuild::self_test 12: non-UTF-8 paths");
+    let raw_src_a = Path::new(b"/tmp/.kernelbuild-selftest/s\xFFrc");
+    let raw_src_b = Path::new(b"/tmp/.kernelbuild-selftest/s\xFErc");
+    let raw_out = Path::new(b"/tmp/.kernelbuild-selftest/o\xFFut/img.bin");
+    register_component(
+        "kbuild-selftest-raw-a",
+        "Raw A",
+        ComponentType::CoreUtility,
+        raw_src_a,
+        raw_out,
+    )?;
+    register_component(
+        "kbuild-selftest-raw-b",
+        "Raw B",
+        ComponentType::CoreUtility,
+        raw_src_b,
+        raw_out,
+    )?;
+    let a = get_component("kbuild-selftest-raw-a")?;
+    let b = get_component("kbuild-selftest-raw-b")?;
+    assert_eq!(
+        a.source_dir.as_path().as_bytes(),
+        &b"/tmp/.kernelbuild-selftest/s\xFFrc"[..],
+        "the source directory must be stored byte-for-byte"
+    );
+    assert_eq!(
+        a.output_path.as_path().as_bytes(),
+        &b"/tmp/.kernelbuild-selftest/o\xFFut/img.bin"[..],
+        "the output path must be stored byte-for-byte"
+    );
+    assert_ne!(
+        a.source_dir, b.source_dir,
+        "two source trees differing only in an unencodable byte must stay distinct"
+    );
+    assert_ne!(
+        a.current_source_hash, b.current_source_hash,
+        "the change-detection hash must distinguish them, or one build masks the other"
+    );
+    // The payoff: once both are built, editing A's tree must mark A alone
+    // stale. `source_changed` reports nothing for a `NeverBuilt` component,
+    // so both have to be built before the question is even meaningful.
+    build("kbuild-selftest-raw-a")?;
+    build("kbuild-selftest-raw-b")?;
+    assert!(!source_changed("kbuild-selftest-raw-a")?);
+    assert!(!source_changed("kbuild-selftest-raw-b")?);
+    detect_source_change("kbuild-selftest-raw-a", 1234)?;
+    assert!(source_changed("kbuild-selftest-raw-a")?);
+    assert!(
+        !source_changed("kbuild-selftest-raw-b")?,
+        "the sibling spelling must not be dragged into a rebuild"
+    );
+    remove_component("kbuild-selftest-raw-a")?;
+    remove_component("kbuild-selftest-raw-b")?;
+
+    // Back to the empty registry we insisted on at entry -- test 11's defaults
+    // and test 12's build logs included.
+    clear_all();
+    serial_println!("kernelbuild::self_test: all 12 tests passed");
     Ok(())
 }

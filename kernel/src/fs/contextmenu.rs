@@ -32,6 +32,7 @@ use alloc::string::String;
 use alloc::{vec, vec::Vec};
 use core::sync::atomic::{AtomicU64, Ordering};
 
+use super::path::{Path, PathBuf};
 use crate::error::{KernelError, KernelResult};
 
 // ---------------------------------------------------------------------------
@@ -142,7 +143,10 @@ pub struct ContextMenu {
     /// The target that was right-clicked.
     pub target: ContextTarget,
     /// Target path (if applicable).
-    pub target_path: String,
+    /// A `PathBuf` rather than a `String` per design-decisions.md §261:
+    /// the menu is built for whatever file the user clicked, and a legal
+    /// filename may contain any byte but `/` and NUL.
+    pub target_path: PathBuf,
     /// All menu items in display order.
     pub items: Vec<MenuItem>,
 }
@@ -234,7 +238,8 @@ pub fn list_extensions() -> Vec<(u64, String, bool, usize)> {
 // ---------------------------------------------------------------------------
 
 /// Build a context menu for a target.
-pub fn build(target: ContextTarget, path: &str) -> ContextMenu {
+pub fn build(target: ContextTarget, path: impl AsRef<Path>) -> ContextMenu {
+    let path = path.as_ref();
     BUILD_COUNT.fetch_add(1, Ordering::Relaxed);
 
     let mut items = Vec::new();
@@ -271,7 +276,10 @@ pub fn build(target: ContextTarget, path: &str) -> ContextMenu {
                 return true;
             }
             // Check if file matches any pattern.
-            let name = path.rsplit('/').next().unwrap_or(path);
+            // Glob on the *name*, on bytes: `simple_glob` takes
+            // `AsRef<[u8]>`, so a filename with no UTF-8 spelling is matched
+            // correctly against a pattern the user could type.
+            let name = path.file_name().unwrap_or(path).as_bytes();
             e.file_patterns.iter().any(|pat| simple_glob(pat, name))
         })
         .collect();
@@ -302,7 +310,7 @@ pub fn build(target: ContextTarget, path: &str) -> ContextMenu {
 
     ContextMenu {
         target,
-        target_path: String::from(path),
+        target_path: path.to_path_buf(),
         items,
     }
 }
@@ -333,7 +341,7 @@ pub fn execute_action(menu: &ContextMenu, item_id: u64) -> KernelResult<String> 
 // ---------------------------------------------------------------------------
 
 /// Built-in items for a single file.
-fn file_builtin_items(path: &str) -> Vec<MenuItem> {
+fn file_builtin_items(path: &Path) -> Vec<MenuItem> {
     let mut items = vec![
         // Open.
         make_item("Open", "", "open", 10),
@@ -369,7 +377,7 @@ fn file_builtin_items(path: &str) -> Vec<MenuItem> {
 }
 
 /// Built-in items for a directory.
-fn directory_builtin_items(_path: &str) -> Vec<MenuItem> {
+fn directory_builtin_items(_path: &Path) -> Vec<MenuItem> {
     vec![
         make_item("Open", "", "open", 10),
         make_item("Open in new window", "", "open_new", 20),
@@ -708,6 +716,44 @@ pub fn self_test() -> KernelResult<()> {
         serial_println!("[contextmenu] test 7 passed: stats");
     }
 
-    serial_println!("[contextmenu] all 7 self-tests passed");
+    // Test 8: a file whose name has no UTF-8 spelling
+    // (design-decisions.md §261).
+    {
+        // `\xFF` can begin no UTF-8 sequence. Under a `String` target path,
+        // the menu would have reported a U+FFFD-bearing name back to the
+        // caller -- and any action taken on it would have acted on a
+        // different file, or none.
+        let p = Path::new(&b"/photo_\xFF.png"[..]);
+
+        let ext_items = alloc::vec![ExtensionItem {
+            label: String::from("Edit Image"),
+            icon: String::new(),
+            action: String::from("edit_image"),
+            priority: 0,
+        }];
+        let ext_id =
+            register_extension("ImageEditor", &[ContextTarget::File], &["*.png"], &ext_items)?;
+
+        let menu = build(ContextTarget::File, p);
+        // The path survives the round trip byte for byte.
+        assert_eq!(menu.target_path.as_path(), p);
+        // The glob still matches: the pattern is UTF-8 but the name is
+        // compared as bytes.
+        assert!(menu.items.iter().any(|i| i.label == "Edit Image"));
+        // And so does the built-in image item, which comes from
+        // `mime::detect` on the same bytes.
+        assert!(menu.items.iter().any(|i| i.label == "Set as wallpaper"));
+
+        // A non-UTF-8 name with the wrong extension must not match.
+        let q = Path::new(&b"/doc_\xFF.txt"[..]);
+        let menu_txt = build(ContextTarget::File, q);
+        assert_eq!(menu_txt.target_path.as_path(), q);
+        assert!(!menu_txt.items.iter().any(|i| i.label == "Edit Image"));
+
+        unregister_extension(ext_id)?;
+        serial_println!("[contextmenu] test 8 passed: non-UTF-8 target path");
+    }
+
+    serial_println!("[contextmenu] all 8 self-tests passed");
     Ok(())
 }

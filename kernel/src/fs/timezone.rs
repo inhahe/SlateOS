@@ -242,23 +242,34 @@ struct State {
     changes: u64,
 }
 
-static STATE: Mutex<State> = Mutex::new(State {
-    current_tz: String::new(), // set in init_defaults
-    tz_database: Vec::new(),
-    ntp_servers: Vec::new(),
-    ntp_enabled: true,
-    ntp_status: NtpStatus::Disabled,
-    time_format: TimeFormat::H24,
-    date_format: DateFormat::Iso,
-    week_start: WeekStart::Monday,
-    show_seconds: false,
-    show_date: true,
-    manual_offset_ns: 0,
-    last_gps_tz: String::new(),
-    last_gps_lat: 0.0,
-    last_gps_lon: 0.0,
-    changes: 0,
-});
+impl State {
+    /// The state a fresh boot starts with.
+    ///
+    /// Extracted from the initialiser of `STATE` so that the self-test can
+    /// be handed a pristine table without disturbing the live one; see
+    /// `crate::fs::selftest`.
+    const fn new() -> Self {
+        Self {
+            current_tz: String::new(), // set in init_defaults
+            tz_database: Vec::new(),
+            ntp_servers: Vec::new(),
+            ntp_enabled: true,
+            ntp_status: NtpStatus::Disabled,
+            time_format: TimeFormat::H24,
+            date_format: DateFormat::Iso,
+            week_start: WeekStart::Monday,
+            show_seconds: false,
+            show_date: true,
+            manual_offset_ns: 0,
+            last_gps_tz: String::new(),
+            last_gps_lat: 0.0,
+            last_gps_lon: 0.0,
+            changes: 0,
+        }
+    }
+}
+
+static STATE: Mutex<State> = Mutex::new(State::new());
 
 static OP_COUNT: AtomicU64 = AtomicU64::new(0);
 
@@ -769,7 +780,22 @@ pub fn clear_all() {
 // Self-tests
 // ---------------------------------------------------------------------------
 
+/// The suite asserts exact table contents, so it needs a table of its own.
+/// It used to get one by calling `clear_all()`, which — since this suite is
+/// reachable from the shell — deleted whatever the user had stored here and
+/// then reported success.  The live state is moved aside for the duration and
+/// put back afterwards; `crate::fs::selftest` records why this shape rather
+/// than the alternatives.
 pub fn self_test() -> KernelResult<()> {
+    // These counters live outside the table, so `with_pristine` cannot
+    // see them; save and restore them here so a run leaves no trace.
+    let saved_op_count = OP_COUNT.load(Ordering::Relaxed);
+    let result = crate::fs::selftest::with_pristine(&STATE, State::new(), self_test_inner);
+    OP_COUNT.store(saved_op_count, Ordering::Relaxed);
+    result
+}
+
+fn self_test_inner() -> KernelResult<()> {
     use crate::serial_println;
 
     clear_all();

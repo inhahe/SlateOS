@@ -266,7 +266,27 @@ pub fn stats() -> (u64, u64, u64, usize) {
 // Self-tests
 // ---------------------------------------------------------------------------
 
+/// Unlike most of its neighbours this suite never wiped the table — its
+/// `test_clear` exercises the per-entry clear rather than emptying the
+/// store — and it removes its own fixtures one call at a time.  That is a
+/// claim nobody re-checks when a test is added to the list below.  Running
+/// against a table moved aside for the duration makes "leaves no trace"
+/// structural instead: whatever the suite creates goes away with the
+/// substitute.  See `crate::fs::selftest`.
 pub fn self_test() -> KernelResult<()> {
+    // These counters live outside the table, so `with_pristine` cannot
+    // see them; save and restore them here so a run leaves no trace.
+    let saved_advise_count = ADVISE_COUNT.load(Ordering::Relaxed);
+    let saved_prefetch_count = PREFETCH_COUNT.load(Ordering::Relaxed);
+    let saved_prefetch_bytes = PREFETCH_BYTES.load(Ordering::Relaxed);
+    let result = crate::fs::selftest::with_pristine(&ADVICE_TABLE, Vec::new(), self_test_inner);
+    ADVISE_COUNT.store(saved_advise_count, Ordering::Relaxed);
+    PREFETCH_COUNT.store(saved_prefetch_count, Ordering::Relaxed);
+    PREFETCH_BYTES.store(saved_prefetch_bytes, Ordering::Relaxed);
+    result
+}
+
+fn self_test_inner() -> KernelResult<()> {
     serial_println!("[prefetch] Running self-test...");
 
     test_advice_parse();

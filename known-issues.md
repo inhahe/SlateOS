@@ -65066,3 +65066,64 @@ the user chose. `useracct` additionally needs its `current_uid`, its
 sessions' `active` flags and `LOGIN_COUNT` snapshotted and restored, because
 authenticating during the test hijacks whoever is logged in — cleaning up
 the fixture user is not enough.
+
+### ✅ FIXED 2026-08-23 — a fourth shape, and why it beat all three above
+
+**All 56 are done**, and none of them used one of the three shapes. Writing
+them out made it clear that the three were a choice between *keeping the
+user's data* and *keeping the coverage*, and that the choice was false.
+
+The shape that landed is **move the live state aside**: swap the module's
+table for a pristine one, run the suite against that, put the original back.
+It is `crate::fs::selftest::with_pristine`, and every converted suite is now
+
+```rust
+pub fn self_test() -> KernelResult<()> {
+    crate::fs::selftest::with_pristine(&STATE, State::new(), self_test_inner)
+}
+```
+
+with the original body moved verbatim into `self_test_inner`. Every existing
+assertion holds **unchanged and unweakened** — including the exact ones
+(`next_id` starts at 1, "exactly one app in Accessories") that were the
+reason *baseline-relative* could not be used and *decline to run* had to give
+up coverage on exactly the machines where a user types `test` because they
+suspect something is wrong.
+
+Why it was not available before: it needs a *pristine value* to swap in, and
+23 of the 56 modules had no name for one — their fresh state existed only as
+an anonymous literal inside `static STATE: Mutex<State> = Mutex::new(State {
+… });`. Those literals are now `const fn new()`. That is worth having on its
+own account: the literal and `clear_all()` were two independent spellings of
+"what a fresh boot looks like", free to drift apart with nothing to catch it.
+
+**Three corrections to the survey above, found while doing the work:**
+
+- **`ioprio`, `prefetch` and `tags` were false positives.** The survey
+  counted them because they call `test_clear()`, but in all three that is a
+  *test of* the per-entry clear, not a wipe of the table. `ioprio` was
+  already well-behaved — synthetic task IDs in the 99996–99999 range, each
+  cleared afterwards — and got only its two statistics counters restored,
+  with a doc comment saying why it has no `with_pristine`. `prefetch` and
+  `tags` clean up by hand, one call at a time, which is a claim nobody
+  re-checks when a test is added; they are wrapped anyway, so "leaves no
+  trace" is now structural rather than a promise. So the destructive count
+  is **53**, not 56.
+- **Free-standing counters are part of the state and the three shapes did
+  not cover them.** Nearly every module keeps its statistics in
+  `static AtomicU64`s outside the table, so restoring the table alone still
+  left `theme stats` (and the rest) reporting the test's activity as the
+  user's. All of them are now saved and restored around the call.
+- **`servicemgr` is the one lazy-init module in the set** — its state is
+  `Mutex<Option<State>>` — so its pristine value is `None`, which is exactly
+  what a fresh boot holds.
+
+`useracct` was fixed earlier and separately, and keeps its *decline to run*
+guard: its suite authenticates, which reaches `current_uid`, the sessions'
+`active` flags and `LOGIN_COUNT` — state that is not reachable from the one
+table `with_pristine` swaps.
+
+**What is deliberately not handled:** a panic mid-suite does not restore.
+That is on purpose — a kernel that has just proved one of its own invariants
+wrong has no business carrying the user's data forward into whatever runs
+next. Every non-panicking exit, including an early `?`, does restore.

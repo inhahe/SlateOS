@@ -243,7 +243,10 @@ pub fn get_flags(path: impl AsRef<Path>) -> FlagBits {
 /// Remove all flags for a file.
 pub fn remove_flags(path: impl AsRef<Path>) -> KernelResult<()> {
     let mut table = TABLE.lock();
-    table.entries.remove(path.as_ref()).ok_or(KernelError::NotFound)?;
+    table
+        .entries
+        .remove(path.as_ref())
+        .ok_or(KernelError::NotFound)?;
     Ok(())
 }
 

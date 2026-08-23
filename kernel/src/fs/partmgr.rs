@@ -483,11 +483,7 @@ pub fn set_flag(disk_id: u64, part_id: u64, flag: PartFlag, value: bool) -> Kern
 }
 
 /// Set mount point for a partition.
-pub fn set_mount_point(
-    disk_id: u64,
-    part_id: u64,
-    mount: impl AsRef<Path>,
-) -> KernelResult<()> {
+pub fn set_mount_point(disk_id: u64, part_id: u64, mount: impl AsRef<Path>) -> KernelResult<()> {
     let mount = mount.as_ref();
     let mut state = STATE.lock();
     let part = state

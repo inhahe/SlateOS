@@ -1330,7 +1330,10 @@ fn test_socket_activation() -> KernelResult<()> {
         return Err(KernelError::InternalError);
     }
     if observed.1 != 1 {
-        serial_println!("[service]   FAIL: expected 1 pre-queued, got {}", observed.1);
+        serial_println!(
+            "[service]   FAIL: expected 1 pre-queued, got {}",
+            observed.1
+        );
         channel::close(client_ep);
         unregister_socket_activation(name).ok();
         return Err(KernelError::InternalError);

@@ -249,7 +249,11 @@ pub fn tx_rename(tx_id: TxId, from: impl AsRef<Path>, to: impl AsRef<Path>) -> K
 }
 
 /// Add a symlink creation to the transaction.
-pub fn tx_symlink(tx_id: TxId, path: impl AsRef<Path>, target: impl AsRef<Path>) -> KernelResult<()> {
+pub fn tx_symlink(
+    tx_id: TxId,
+    path: impl AsRef<Path>,
+    target: impl AsRef<Path>,
+) -> KernelResult<()> {
     let (path, target) = (path.as_ref(), target.as_ref());
     let mut inner = TRANSACTIONS.lock();
     let tx = inner

@@ -416,11 +416,7 @@ pub fn register_type(
 }
 
 /// Register an app-specific icon override.
-pub fn register_app_icon(
-    app_path: impl AsRef<Path>,
-    mime: &str,
-    icon: &str,
-) -> KernelResult<()> {
+pub fn register_app_icon(app_path: impl AsRef<Path>, mime: &str, icon: &str) -> KernelResult<()> {
     let app_path = app_path.as_ref();
     let mut overrides = APP_ICONS.lock();
 

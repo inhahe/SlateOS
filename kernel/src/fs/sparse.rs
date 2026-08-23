@@ -133,7 +133,8 @@ struct SparseEntry {
 }
 
 /// Sparse file tracking table.
-static SPARSE_TABLE: PreemptSpinMutex<Vec<SparseEntry>> = PreemptSpinMutex::named(Vec::new(), b"SPARSE_TABLE");
+static SPARSE_TABLE: PreemptSpinMutex<Vec<SparseEntry>> =
+    PreemptSpinMutex::named(Vec::new(), b"SPARSE_TABLE");
 
 /// Statistics.
 static PUNCH_COUNT: AtomicU64 = AtomicU64::new(0);
@@ -254,7 +255,11 @@ pub fn zero_range(path: impl AsRef<Path>, offset: u64, length: u64) -> KernelRes
 ///
 /// This reduces the file size by `length` bytes. The range
 /// [offset, offset+length) is removed and data after it moves down.
-pub fn collapse_range(path: impl AsRef<Path>, offset: u64, length: u64) -> KernelResult<RangeResult> {
+pub fn collapse_range(
+    path: impl AsRef<Path>,
+    offset: u64,
+    length: u64,
+) -> KernelResult<RangeResult> {
     let path = path.as_ref();
     use crate::fs::Vfs;
 

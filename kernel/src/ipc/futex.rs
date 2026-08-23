@@ -82,7 +82,6 @@ fn current_addr_space() -> u64 {
     crate::proc::pcb::get_pml4(pid).unwrap_or(0)
 }
 
-
 /// Remove this task's lingering futex waiter from whatever bucket holds it,
 /// scoped to `addr_space`, and report whether one was found.
 ///
@@ -158,7 +157,6 @@ fn remove_all_self_waiters(task: u64) -> usize {
     }
     removed
 }
-
 
 // ---------------------------------------------------------------------------
 // Waiter and hash table

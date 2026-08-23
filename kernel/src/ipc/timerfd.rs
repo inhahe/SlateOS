@@ -532,9 +532,6 @@ fn timerfd_wake(tid: u64) {
     }
 }
 
-
-
-
 /// Outcome of a blocking timerfd read ([`read_expirations_blocking`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BlockingRead {

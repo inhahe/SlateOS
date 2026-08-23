@@ -1490,11 +1490,7 @@ fn kill_userspace_task_with_info(
             // — the mistake this dump's first version shipped with.
             unsafe {
                 crate::smep_smap::with_user_access(|| {
-                    core::ptr::copy_nonoverlapping(
-                        frame.rip as *const u8,
-                        buf.as_mut_ptr(),
-                        avail,
-                    );
+                    core::ptr::copy_nonoverlapping(frame.rip as *const u8, buf.as_mut_ptr(), avail);
                 });
             }
             serial_println!(

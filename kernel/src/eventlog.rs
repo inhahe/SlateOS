@@ -1225,11 +1225,17 @@ fn self_test_inner() -> KernelResult<()> {
             }
             if let Some(ev) = result.events.first() {
                 if ev.namespace_str() != "system.boot" {
-                    crate::serial_println!("[eventlog]   FAIL: wrong namespace: {}", ev.namespace_str());
+                    crate::serial_println!(
+                        "[eventlog]   FAIL: wrong namespace: {}",
+                        ev.namespace_str()
+                    );
                     return Err(KernelError::InternalError);
                 }
                 if ev.message_str() != "Test boot event" {
-                    crate::serial_println!("[eventlog]   FAIL: wrong message: {}", ev.message_str());
+                    crate::serial_println!(
+                        "[eventlog]   FAIL: wrong message: {}",
+                        ev.message_str()
+                    );
                     return Err(KernelError::InternalError);
                 }
             } else {

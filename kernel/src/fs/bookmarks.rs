@@ -120,7 +120,8 @@ pub struct Bookmark {
 // ---------------------------------------------------------------------------
 
 /// Bookmarks storage.
-static BOOKMARKS: PreemptSpinMutex<Vec<Bookmark>> = PreemptSpinMutex::named(Vec::new(), b"BOOKMARKS");
+static BOOKMARKS: PreemptSpinMutex<Vec<Bookmark>> =
+    PreemptSpinMutex::named(Vec::new(), b"BOOKMARKS");
 
 /// Whether system defaults have been initialized.
 static INITIALIZED: PreemptSpinMutex<bool> = PreemptSpinMutex::named(false, b"INITIALIZED");
@@ -591,13 +592,15 @@ fn test_validate() {
     let _ = crate::fs::Vfs::mkdir(dir);
 
     assert!(add("bm_real", dir, "Existing", Category::Favorites).is_ok());
-    assert!(add(
-        "bm_missing",
-        "/no/such/bookmark/target",
-        "Missing",
-        Category::Favorites,
-    )
-    .is_ok());
+    assert!(
+        add(
+            "bm_missing",
+            "/no/such/bookmark/target",
+            "Missing",
+            Category::Favorites,
+        )
+        .is_ok()
+    );
 
     let results = validate();
 

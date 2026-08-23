@@ -173,8 +173,10 @@ pub enum SortDir {
 
 static COMPUTE_COUNT: AtomicU64 = AtomicU64::new(0);
 
-static COLUMN_DEFS: PreemptSpinMutex<Vec<ColumnDef>> = PreemptSpinMutex::named(Vec::new(), b"COLUMN_DEFS");
-static USER_PREFS: PreemptSpinMutex<Vec<ColumnPref>> = PreemptSpinMutex::named(Vec::new(), b"USER_PREFS");
+static COLUMN_DEFS: PreemptSpinMutex<Vec<ColumnDef>> =
+    PreemptSpinMutex::named(Vec::new(), b"COLUMN_DEFS");
+static USER_PREFS: PreemptSpinMutex<Vec<ColumnPref>> =
+    PreemptSpinMutex::named(Vec::new(), b"USER_PREFS");
 static INITIALIZED: PreemptSpinMutex<bool> = PreemptSpinMutex::named(false, b"INITIALIZED");
 
 // ---------------------------------------------------------------------------

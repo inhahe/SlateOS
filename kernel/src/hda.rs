@@ -321,8 +321,7 @@ static CODEC_COUNT: AtomicU8 = AtomicU8::new(0);
 /// removes the hazard rather than trading it for a latency cliff. **If you add
 /// a field that `handle_irq` needs, publish it the same way; do not reach for
 /// `lock_irqsave` here.**
-static DEVICE: PreemptSpinMutex<Option<HdaDevice>> =
-    PreemptSpinMutex::named(None, b"HDA_DEVICE");
+static DEVICE: PreemptSpinMutex<Option<HdaDevice>> = PreemptSpinMutex::named(None, b"HDA_DEVICE");
 
 /// Controller MMIO base, published for [`handle_irq`]. Zero until initialised.
 ///
@@ -627,15 +626,13 @@ pub fn init(hhdm_offset: u64) {
 
     // CORB: 256 entries × 4 bytes = 1024 bytes.  The spec requires 128-byte
     // alignment; a buddy block is frame-aligned, which is stronger.
-    let Some((corb_phys, corb_virt)) =
-        dma_alloc(&mut dma_bufs, CORB_BYTES, dma_constraint, "CORB")
+    let Some((corb_phys, corb_virt)) = dma_alloc(&mut dma_bufs, CORB_BYTES, dma_constraint, "CORB")
     else {
         return;
     };
 
     // RIRB: 256 entries × 8 bytes = 2048 bytes.
-    let Some((rirb_phys, rirb_virt)) =
-        dma_alloc(&mut dma_bufs, RIRB_BYTES, dma_constraint, "RIRB")
+    let Some((rirb_phys, rirb_virt)) = dma_alloc(&mut dma_bufs, RIRB_BYTES, dma_constraint, "RIRB")
     else {
         return;
     };
@@ -717,8 +714,10 @@ pub fn init(hhdm_offset: u64) {
     // Publish the values `handle_irq` needs before anything can call it. The
     // index first, the base last with Release: the handler bails on a zero base,
     // so that ordering is what makes a non-zero base imply a valid index.
-    IRQ_STREAM_IDX.store(u32::from(dev.iss).wrapping_add(u32::from(dev.out_stream_idx)),
-        Ordering::Relaxed);
+    IRQ_STREAM_IDX.store(
+        u32::from(dev.iss).wrapping_add(u32::from(dev.out_stream_idx)),
+        Ordering::Relaxed,
+    );
     IRQ_MMIO_BASE.store(dev.mmio_base, Ordering::Release);
 
     INITIALIZED.store(true, Ordering::Release);

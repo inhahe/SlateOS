@@ -56,8 +56,8 @@ use super::label::{
     POOL_STATE_SPARE, SPA_VERSION_FEATURES, front_label_offset, parse_uberblock,
 };
 use super::nvlist::{
-    DATA_TYPE_NVLIST, DATA_TYPE_NVLIST_ARRAY, DATA_TYPE_STRING, DATA_TYPE_UINT64,
-    NV_ENCODE_NATIVE, NV_ENCODE_XDR, NV_LITTLE_ENDIAN, NvList,
+    DATA_TYPE_NVLIST, DATA_TYPE_NVLIST_ARRAY, DATA_TYPE_STRING, DATA_TYPE_UINT64, NV_ENCODE_NATIVE,
+    NV_ENCODE_XDR, NV_LITTLE_ENDIAN, NvList,
 };
 use super::raw::{
     BLKPTR_LEN, DMU_OST_META, DMU_OST_ZFS, DMU_OT_DIRECTORY_CONTENTS, DMU_OT_DNODE,
@@ -1566,12 +1566,7 @@ fn build_leaf_vdev(id: u64) -> Vec<u8> {
     // A nested list carries its own version and nvflag, but no encoding byte.
     out.extend_from_slice(&0u32.to_be_bytes());
     out.extend_from_slice(&1u32.to_be_bytes());
-    out.extend_from_slice(&nv_pair(
-        b"type",
-        DATA_TYPE_STRING,
-        1,
-        &xdr_string(b"disk"),
-    ));
+    out.extend_from_slice(&nv_pair(b"type", DATA_TYPE_STRING, 1, &xdr_string(b"disk")));
     out.extend_from_slice(&nv_pair_u64(b"id", id));
     out.extend_from_slice(&nv_pair_u64(b"ashift", IMG_ASHIFT));
     out.extend_from_slice(&0u32.to_be_bytes()); // terminator
@@ -2894,7 +2889,14 @@ fn test_gang(c: &mut Checks) -> KernelResult<()> {
     // every ordinary write stores it. A driver that fed the raw field to the
     // verifier would hash against txg 0 and reject this.
     let h2 = gang_alloc(&mut img, 512);
-    write_gang_header(&mut img, h2, h2, &[a_bp.clone(), d_bp.clone()], 512, GANG_TXG);
+    write_gang_header(
+        &mut img,
+        h2,
+        h2,
+        &[a_bp.clone(), d_bp.clone()],
+        512,
+        GANG_TXG,
+    );
     let ad: Vec<u8> = [a.as_slice(), d.as_slice()].concat();
     let bp2 = make_gang_blkptr(&[(h2, 512)], ad.len(), 0, GANG_TXG);
     match read(&img, &bp2) {
@@ -2933,7 +2935,14 @@ fn test_gang(c: &mut Checks) -> KernelResult<()> {
     // 512 of them meaningful. Reading it as 4096 finds no trailer magic at
     // 4056, so the reader must retry at 512 rather than call the block bad.
     let h4 = gang_alloc(&mut img, GANG_BIG);
-    write_gang_header(&mut img, h4, h4, &[a_bp.clone(), d_bp.clone()], 512, GANG_TXG);
+    write_gang_header(
+        &mut img,
+        h4,
+        h4,
+        &[a_bp.clone(), d_bp.clone()],
+        512,
+        GANG_TXG,
+    );
     let bp4 = make_gang_blkptr(&[(h4, GANG_BIG as u64)], ad.len(), GANG_TXG, GANG_TXG);
     match read(&img, &bp4) {
         Ok(got) => c.check_bytes(
@@ -2949,7 +2958,14 @@ fn test_gang(c: &mut Checks) -> KernelResult<()> {
 
     // --- A gang piece that is itself a gang block ------------------------
     let h5 = gang_alloc(&mut img, 512);
-    write_gang_header(&mut img, h5, h5, &[a_bp.clone(), b_bp.clone()], 512, GANG_TXG);
+    write_gang_header(
+        &mut img,
+        h5,
+        h5,
+        &[a_bp.clone(), b_bp.clone()],
+        512,
+        GANG_TXG,
+    );
     let ab_len = a.len().saturating_add(b.len());
     let inner_bp = make_gang_blkptr(&[(h5, 512)], ab_len, GANG_TXG, GANG_TXG);
     let h6 = gang_alloc(&mut img, 512);
@@ -2972,11 +2988,7 @@ fn test_gang(c: &mut Checks) -> KernelResult<()> {
     // reading would fail here and report a healthy pool as corrupt.
     let h7_bad = gang_alloc(&mut img, 512);
     let h7_good = gang_alloc(&mut img, 512);
-    put_bytes(
-        &mut img.bytes,
-        PoolImage::abs(h7_bad),
-        &vec![0x5A; 512],
-    );
+    put_bytes(&mut img.bytes, PoolImage::abs(h7_bad), &vec![0x5A; 512]);
     write_gang_header(
         &mut img,
         h7_good,
@@ -2985,7 +2997,12 @@ fn test_gang(c: &mut Checks) -> KernelResult<()> {
         512,
         GANG_TXG,
     );
-    let bp7 = make_gang_blkptr(&[(h7_bad, 512), (h7_good, 512)], ad.len(), GANG_TXG, GANG_TXG);
+    let bp7 = make_gang_blkptr(
+        &[(h7_bad, 512), (h7_good, 512)],
+        ad.len(),
+        GANG_TXG,
+        GANG_TXG,
+    );
     match read(&img, &bp7) {
         Ok(got) => c.check_bytes(
             &got,
@@ -3002,8 +3019,7 @@ fn test_gang(c: &mut Checks) -> KernelResult<()> {
     // the bytes are intact and the trailer magic is there, but the address it
     // was hashed against is not the one it is being read from. This is the
     // check that says the address is genuinely part of the checksum.
-    let bp7_misaddressed =
-        make_gang_blkptr(&[(h7_good, 512)], ad.len(), GANG_TXG, GANG_TXG);
+    let bp7_misaddressed = make_gang_blkptr(&[(h7_good, 512)], ad.len(), GANG_TXG, GANG_TXG);
     c.check_err(
         read(&img, &bp7_misaddressed).map(|_| ()),
         KernelError::IoError,
@@ -3079,7 +3095,11 @@ fn test_gang(c: &mut Checks) -> KernelResult<()> {
     );
     // The magic itself destroyed: not a gang header at all, so the complaint
     // is about the shape rather than about the contents.
-    put_u64(&mut damaged.bytes, PoolImage::abs(h1).saturating_add(472), 0);
+    put_u64(
+        &mut damaged.bytes,
+        PoolImage::abs(h1).saturating_add(472),
+        0,
+    );
     c.check_err(
         read(&damaged, &bp1).map(|_| ()),
         KernelError::InvalidArgument,

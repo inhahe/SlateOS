@@ -230,8 +230,14 @@ pub fn self_test() -> crate::error::KernelResult<()> {
     check!(off_a2 == off_a, "offset_for is idempotent per buffer");
 
     // Resolution.
-    check!(lookup(off_a) == Some(buf_a), "offset A resolves to buffer 100");
-    check!(lookup(off_b) == Some(buf_b), "offset B resolves to buffer 200");
+    check!(
+        lookup(off_a) == Some(buf_a),
+        "offset A resolves to buffer 100"
+    );
+    check!(
+        lookup(off_b) == Some(buf_b),
+        "offset B resolves to buffer 200"
+    );
     check!(
         lookup(0xDEAD_0000).is_none(),
         "unknown offset resolves to None"

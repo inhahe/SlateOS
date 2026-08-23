@@ -374,13 +374,7 @@ impl<'a> Reader<'a> {
     }
 
     /// Read one named copy of `bp`: `psize` verified bytes, gang or not.
-    fn read_copy(
-        &self,
-        bp: &BlkPtr,
-        dva: &Dva,
-        psize: usize,
-        depth: u32,
-    ) -> KernelResult<Vec<u8>> {
+    fn read_copy(&self, bp: &BlkPtr, dva: &Dva, psize: usize, depth: u32) -> KernelResult<Vec<u8>> {
         if dva.vdev != 0 {
             return Err(KernelError::NotSupported);
         }
@@ -414,7 +408,9 @@ impl<'a> Reader<'a> {
         let nblkptrs = gbh.len().saturating_sub(ZEC_LEN) / BLKPTR_LEN;
         let mut out: Vec<u8> = Vec::new();
         for g in 0..nblkptrs {
-            let off = g.checked_mul(BLKPTR_LEN).ok_or(KernelError::InvalidArgument)?;
+            let off = g
+                .checked_mul(BLKPTR_LEN)
+                .ok_or(KernelError::InvalidArgument)?;
             let gbp = parse_blkptr(&gbh, off)?;
             if gbp.is_hole() {
                 // A header allocated more pointer slots than the split needed.
@@ -459,17 +455,17 @@ impl<'a> Reader<'a> {
         asize: u64,
         verifier: &ZioCksum,
     ) -> KernelResult<Vec<u8>> {
-        let big = usize::try_from(asize).ok().filter(|&n| {
-            n > SPA_OLD_GANGBLOCKSIZE && n <= GANG_HEADER_MAX && n % BLKPTR_LEN == 0
-        });
+        let big = usize::try_from(asize)
+            .ok()
+            .filter(|&n| n > SPA_OLD_GANGBLOCKSIZE && n <= GANG_HEADER_MAX && n % BLKPTR_LEN == 0);
         if let Some(len) = big
             && let Ok(buf) = read_bytes(self.src, phys, len)
             && zio::verify_embedded(ZIO_CHECKSUM_GANG_HEADER, &buf, verifier).is_ok()
         {
             return Ok(buf);
         }
-        let buf = read_bytes(self.src, phys, SPA_OLD_GANGBLOCKSIZE)
-            .map_err(|_| KernelError::IoError)?;
+        let buf =
+            read_bytes(self.src, phys, SPA_OLD_GANGBLOCKSIZE).map_err(|_| KernelError::IoError)?;
         zio::verify_embedded(ZIO_CHECKSUM_GANG_HEADER, &buf, verifier)?;
         Ok(buf)
     }

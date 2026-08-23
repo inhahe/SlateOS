@@ -414,8 +414,8 @@ impl AtiBackend {
         if fb.width != mode.hdisplay || fb.height != mode.vdisplay {
             return Err(KernelError::InvalidArgument);
         }
-        let want =
-            timing::lookup(mode.hdisplay, mode.vdisplay, mode.vrefresh).ok_or(KernelError::NotFound)?;
+        let want = timing::lookup(mode.hdisplay, mode.vdisplay, mode.vrefresh)
+            .ok_or(KernelError::NotFound)?;
 
         // Order matters: the buffer's contents must be in memory before the
         // CRTC is pointed at it, and the CRTC is pointed at it by `apply`.

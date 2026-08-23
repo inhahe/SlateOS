@@ -370,7 +370,10 @@ pub fn create() -> KernelResult<(PtyHandle, PtyHandle)> {
     // being the one that reads correctly.
     PTYS.lock().insert(id, Box::new(Pty::new()));
     tty::create_device(id);
-    Ok((PtyHandle::new(id, PtyEnd::Master), PtyHandle::new(id, PtyEnd::Slave)))
+    Ok((
+        PtyHandle::new(id, PtyEnd::Master),
+        PtyHandle::new(id, PtyEnd::Slave),
+    ))
 }
 
 /// Duplicate a handle, taking another reference to that end.
@@ -484,7 +487,9 @@ pub fn master_write(handle: PtyHandle, data: &[u8]) -> KernelResult<usize> {
     loop {
         {
             let mut table = PTYS.lock();
-            let pty = table.get_mut(&handle.id()).ok_or(KernelError::InvalidHandle)?;
+            let pty = table
+                .get_mut(&handle.id())
+                .ok_or(KernelError::InvalidHandle)?;
             // Blocked on the input ring, so `input_waiters` throughout — see
             // the waiter rule on `Pty`. Deregister at the top of every
             // iteration: a wake does not clear our entry, and a stale entry
@@ -536,7 +541,9 @@ pub fn master_read(handle: PtyHandle, out: &mut [u8]) -> KernelResult<usize> {
     loop {
         {
             let mut table = PTYS.lock();
-            let pty = table.get_mut(&handle.id()).ok_or(KernelError::InvalidHandle)?;
+            let pty = table
+                .get_mut(&handle.id())
+                .ok_or(KernelError::InvalidHandle)?;
             // Blocked on the output ring, so `output_waiters` throughout.
             pty.output_waiters.remove(task);
 
@@ -575,7 +582,9 @@ pub fn master_try_read(handle: PtyHandle, out: &mut [u8]) -> KernelResult<usize>
         return Ok(0);
     }
     let mut table = PTYS.lock();
-    let pty = table.get_mut(&handle.id()).ok_or(KernelError::InvalidHandle)?;
+    let pty = table
+        .get_mut(&handle.id())
+        .ok_or(KernelError::InvalidHandle)?;
     let n = pty.output.read(out);
     if n > 0 {
         let woken = pty.output_waiters.take_all();
@@ -978,7 +987,10 @@ pub fn self_test() {
 
     // --- slave -> master ---------------------------------------------------
     let n = slave_write(s, b"out\n").expect("slave write");
-    assert_eq!(n, 4, "all four bytes consumed even though five were emitted");
+    assert_eq!(
+        n, 4,
+        "all four bytes consumed even though five were emitted"
+    );
     let mut got = [0u8; 32];
     let n = master_read(m, &mut got).expect("master read output");
     assert_eq!(got.get(..n), Some(&b"out\r\n"[..]), "ONLCR expanded output");
@@ -1086,7 +1098,11 @@ pub fn self_test() {
         other => panic!("remainder read returned {other:?}"),
     };
     assert_eq!(got_n, 4, "the remainder was exactly what was counted");
-    assert_eq!(buf.get(..4), Some(&b"llo\n"[..]), "and it is the right bytes");
+    assert_eq!(
+        buf.get(..4),
+        Some(&b"llo\n"[..]),
+        "and it is the right bytes"
+    );
     assert_eq!(readable_bytes(s), 0, "nothing left");
     let _ = master_read(m, &mut got).expect("drain the echo of 'hello'");
 

@@ -1371,8 +1371,7 @@ fn fill_shadow_with(first: u64, count: u64, val: u8, if_unmapped: IfUnmapped) {
     // a dropped poison costs a report that would have fired; a dropped unpoison
     // leaves stale poison on live memory and reports forever.
     debug_assert!(
-        matches!(if_unmapped, IfUnmapped::Map | IfUnmapped::SkipLossy)
-            || val == KASAN_ADDRESSABLE,
+        matches!(if_unmapped, IfUnmapped::Map | IfUnmapped::SkipLossy) || val == KASAN_ADDRESSABLE,
         "IfUnmapped::Skip silently drops a non-zero shadow value; \
          use SkipLossy if the loss is intended"
     );

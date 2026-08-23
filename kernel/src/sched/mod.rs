@@ -4765,7 +4765,9 @@ pub fn reap_dead_tasks() -> usize {
                 CURRENT_TASK_IDS
                     .get(i)
                     .map_or(0, |a| a.load(Ordering::Acquire)),
-                PREV_TASK_IDS.get(i).map_or(0, |a| a.load(Ordering::Acquire)),
+                PREV_TASK_IDS
+                    .get(i)
+                    .map_or(0, |a| a.load(Ordering::Acquire)),
             ]
         })
         .collect();

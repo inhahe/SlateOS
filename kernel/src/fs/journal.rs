@@ -663,7 +663,8 @@ const PROBE_MARKER: &[u8] = b"JOURNAL_ST_";
 /// True when `path` is one this suite recorded itself.
 fn is_probe_path(path: &Path) -> bool {
     let bytes = path.as_bytes();
-    bytes.len() >= PROBE_MARKER.len() && bytes.windows(PROBE_MARKER.len()).any(|w| w == PROBE_MARKER)
+    bytes.len() >= PROBE_MARKER.len()
+        && bytes.windows(PROBE_MARKER.len()).any(|w| w == PROBE_MARKER)
 }
 
 /// Entries recorded since `since_seq` by this suite, ignoring the rest of the

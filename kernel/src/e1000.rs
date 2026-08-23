@@ -1111,8 +1111,8 @@ fn tx_datapath_test(mac: MacAddress) -> bool {
         }
     }
 
-    let (gptc, tpt) = with_device(|dev| (dev.read_reg(REG_GPTC), dev.read_reg(REG_TPT)))
-        .unwrap_or((0, 0));
+    let (gptc, tpt) =
+        with_device(|dev| (dev.read_reg(REG_GPTC), dev.read_reg(REG_TPT))).unwrap_or((0, 0));
 
     // DD came back, so the descriptor was definitely processed.  If the
     // counters disagree the fault is downstream of the ring — a MAC that

@@ -671,10 +671,7 @@ impl VirtioGpuBackend {
         crate::virtio::gpu::with_scanout(|sc| {
             let dst_pitch = sc.pitch();
             let x_start = x.min(fb.width).min(sc.width()) as usize;
-            let y_end = y
-                .saturating_add(h)
-                .min(fb.height)
-                .min(sc.height()) as usize;
+            let y_end = y.saturating_add(h).min(fb.height).min(sc.height()) as usize;
             // Clamp the run to the right edge of *both* surfaces. Without this
             // an over-wide rectangle wraps onto the next row's left edge, which
             // is a wrong picture rather than a wrong write — but there is no

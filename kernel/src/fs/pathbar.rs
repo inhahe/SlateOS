@@ -103,12 +103,15 @@ pub struct NavState {
 static NAV_COUNT: AtomicU64 = AtomicU64::new(0);
 static COMPLETE_COUNT: AtomicU64 = AtomicU64::new(0);
 
-static NAV_STATE: PreemptSpinMutex<NavState> = PreemptSpinMutex::named(NavState {
-    current: PathBuf::new(),
-    history: Vec::new(),
-    position: 0,
-    recent: Vec::new(),
-}, b"NAV_STATE");
+static NAV_STATE: PreemptSpinMutex<NavState> = PreemptSpinMutex::named(
+    NavState {
+        current: PathBuf::new(),
+        history: Vec::new(),
+        position: 0,
+        recent: Vec::new(),
+    },
+    b"NAV_STATE",
+);
 
 // ---------------------------------------------------------------------------
 // Path parsing

@@ -471,8 +471,8 @@ pub fn self_test() {
     unsafe {
         *a.add(7) = 0x00;
     } // stomp poison (like a zeroed link pointer)
-      // `scan_all_from(SelfTest)`, not `scan_all()`: this find is ours and must
-      // not print `*** CORRUPTION ***` or move the global counter. See `Origin`.
+    // `scan_all_from(SelfTest)`, not `scan_all()`: this find is ours and must
+    // not print `*** CORRUPTION ***` or move the global counter. See `Origin`.
     let c1 = scan_all_from(Origin::SelfTest);
     assert!(c1 >= 1, "scan_all must catch the stomped parked slot");
     serial_println!("[quarantine]   scan_all (corrupted): OK ({} found)", c1);

@@ -2033,9 +2033,7 @@ fn send_packet_encrypted(
 /// down rather than the connection. `try_read_packet_encrypted` had the
 /// three-way shape from the start; this is the same function agreeing with it.
 fn try_read_packet_plain(recv_buf: &mut Vec<u8>) -> KernelResult<Option<Vec<u8>>> {
-    let (Some(&[b0, b1, b2, b3]), Some(&pad_byte)) =
-        (recv_buf.get(..4), recv_buf.get(4))
-    else {
+    let (Some(&[b0, b1, b2, b3]), Some(&pad_byte)) = (recv_buf.get(..4), recv_buf.get(4)) else {
         return Ok(None); // Fewer than 5 bytes: cannot even read the header.
     };
 

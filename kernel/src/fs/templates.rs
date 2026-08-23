@@ -142,7 +142,8 @@ static TEMPLATE_COUNTER: AtomicU64 = AtomicU64::new(100);
 static CREATE_COUNT: AtomicU64 = AtomicU64::new(0);
 static TOTAL_BYTES: AtomicU64 = AtomicU64::new(0);
 
-static TEMPLATES: PreemptSpinMutex<Vec<Template>> = PreemptSpinMutex::named(Vec::new(), b"TEMPLATES");
+static TEMPLATES: PreemptSpinMutex<Vec<Template>> =
+    PreemptSpinMutex::named(Vec::new(), b"TEMPLATES");
 static INITIALIZED: PreemptSpinMutex<bool> = PreemptSpinMutex::named(false, b"INITIALIZED");
 
 // ---------------------------------------------------------------------------

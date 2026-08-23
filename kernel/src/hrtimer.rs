@@ -491,11 +491,7 @@ fn dump_ring(label: &str, ring: &[AtomicU64; DISPOSITION_RING], pos: &AtomicUsiz
         }
     }
     if let Some(slice) = line.get(..n) {
-        serial_println!(
-            "[hrtimer]   last {} ids (oldest first): {:?}",
-            label,
-            slice
-        );
+        serial_println!("[hrtimer]   last {} ids (oldest first): {:?}", label, slice);
     }
 }
 
@@ -1343,7 +1339,11 @@ pub fn self_test() {
                 }
             }
         }
-        assert_eq!(cancelled, 4, "expected to cancel 4, cancelled {}", cancelled);
+        assert_eq!(
+            cancelled, 4,
+            "expected to cancel 4, cancelled {}",
+            cancelled
+        );
         let n = drain_for(5);
         assert_eq!(
             n, 5,

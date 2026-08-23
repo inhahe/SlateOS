@@ -1642,16 +1642,23 @@ mod tests {
     // Rendering tests
     // ==========================================================================
 
-    /// A palette whose accent is in no other role of either mode.
+    /// A palette on which two questions this module asks have distinct answers.
     ///
-    /// The stock accent *is* `blue`, so an assertion that the focus underline
-    /// is `p.accent` would pass just as happily against a module that still
-    /// said `blue` — which is precisely the confusion this conversion exists
-    /// to remove. Every accent question below is therefore asked of a palette
-    /// whose accent is a colour nothing else in the palette can supply.
+    /// Both changes exist because the *stock* palette cannot tell two things
+    /// apart, and a test run only against it would therefore never fail:
+    ///
+    /// - The stock accent **is** `blue`, so "the focus underline is
+    ///   `p.accent`" would pass just as happily against a module that still
+    ///   said `blue` — which is precisely the confusion this conversion exists
+    ///   to remove. The probe accent is a hue nothing else in either palette
+    ///   supplies, and that is asserted rather than assumed.
+    /// - The stock `panel_alpha` is 255, so `panel_bg()` and `base` are the
+    ///   same colour and "the menu is a panel" is unfalsifiable. Setting a
+    ///   real transparency makes the difference observable.
     fn accented(light: bool) -> Palette {
         let mut p = Palette::for_mode(light);
         p.accent = Color::from_hex(0xFF00FF);
+        p.panel_alpha = 200;
         assert!(
             p.roles()
                 .iter()
@@ -1660,6 +1667,12 @@ mod tests {
                 == 0,
             "the probe accent collides with another role, so accent \
              assertions below would not distinguish them"
+        );
+        assert_ne!(
+            p.panel_bg(),
+            p.base,
+            "a panel that is indistinguishable from a flat surface makes the \
+             menu's role assertion vacuous"
         );
         p
     }
@@ -1715,18 +1728,33 @@ mod tests {
         s
     }
 
-    fn fills(cmds: &[RenderCommand]) -> Vec<(f32, f32, Color)> {
+    /// Every `FillRect` as `(x, width, height, colour)`.
+    ///
+    /// `x` is carried because several fills share a size and differ only in
+    /// which button they belong to — and a table that cannot say *which* site
+    /// a colour came from cannot see two sites swapped.
+    fn fills(cmds: &[RenderCommand]) -> Vec<(f32, f32, f32, Color)> {
         cmds.iter()
             .filter_map(|c| match c {
                 RenderCommand::FillRect {
+                    x,
                     width,
                     height,
                     color,
                     ..
-                } => Some((*width, *height, *color)),
+                } => Some((*x, *width, *height, *color)),
                 _ => None,
             })
             .collect()
+    }
+
+    /// Where button `i` is drawn, given the default config.
+    ///
+    /// `start_button_width + gap + i * (button_icon_width + gap)`, spelled out
+    /// so the table below is indexed by a number the test computed and not by
+    /// one it read back out of the render.
+    fn button_x(i: usize) -> f32 {
+        48.0 + 4.0 + i as f32 * (44.0 + 4.0)
     }
 
     /// Every colour the render puts on screen, whatever command carries it.
@@ -1751,8 +1779,8 @@ mod tests {
     fn only_fill(cmds: &[RenderCommand], w: f32, h: f32, what: &str) -> Color {
         let hits: Vec<Color> = fills(cmds)
             .into_iter()
-            .filter(|(fw, fh, _)| *fw == w && *fh == h)
-            .map(|(_, _, c)| c)
+            .filter(|(_, fw, fh, _)| *fw == w && *fh == h)
+            .map(|(_, _, _, c)| c)
             .collect();
         assert_eq!(
             hits.len(),
@@ -1926,7 +1954,7 @@ mod tests {
         assert!(
             fills(&cmds)
                 .iter()
-                .any(|(w, h, _)| *w == 1920.0 && *h == 48.0)
+                .any(|(_, w, h, _)| *w == 1920.0 && *h == 48.0)
         );
         assert!(cmds.iter().any(|c| matches!(
             c,
@@ -1938,29 +1966,41 @@ mod tests {
             RenderCommand::Line { x1, x2, .. } if x1 == x2
         )));
         // Drag: the 2px insertion caret and the full-size ghost.
-        assert!(fills(&cmds).iter().any(|(w, h, _)| *w == 2.0 && *h == 36.0));
         assert!(
             fills(&cmds)
                 .iter()
-                .any(|(w, h, c)| *w == 44.0 && *h == 44.0 && c.a == 180)
+                .any(|(_, w, h, _)| *w == 2.0 && *h == 36.0)
+        );
+        assert!(
+            fills(&cmds)
+                .iter()
+                .any(|(_, w, h, c)| *w == 44.0 && *h == 44.0 && c.a == 180)
         );
         // Three button backgrounds: hovered, focused, running-at-alpha. The
         // idle one is `TRANSPARENT` and is therefore *not* pushed, which is
         // asserted by counting below rather than by looking for it.
         let bgs: Vec<Color> = fills(&cmds)
             .into_iter()
-            .filter(|(w, h, _)| *w == 44.0 && *h == 44.0)
-            .map(|(_, _, c)| c)
+            .filter(|(_, w, h, _)| *w == 44.0 && *h == 44.0)
+            .map(|(_, _, _, c)| c)
             .collect();
         assert_eq!(bgs.len(), 4, "ghost + three drawn button backgrounds");
         // Both underlines.
-        assert!(fills(&cmds).iter().any(|(w, h, _)| *w == 16.0 && *h == 3.0));
-        assert!(fills(&cmds).iter().any(|(w, h, _)| *w == 8.0 && *h == 3.0));
+        assert!(
+            fills(&cmds)
+                .iter()
+                .any(|(_, w, h, _)| *w == 16.0 && *h == 3.0)
+        );
+        assert!(
+            fills(&cmds)
+                .iter()
+                .any(|(_, w, h, _)| *w == 8.0 && *h == 3.0)
+        );
         // Badge and its digit.
         assert!(
             fills(&cmds)
                 .iter()
-                .any(|(w, h, _)| *w == 12.0 && *h == 12.0)
+                .any(|(_, w, h, _)| *w == 12.0 && *h == 12.0)
         );
         assert!(cmds.iter().any(|c| matches!(
             c,
@@ -1970,7 +2010,7 @@ mod tests {
         assert_eq!(
             fills(&cmds)
                 .iter()
-                .filter(|(w, h, _)| *w == 20.0 && *h == 20.0)
+                .filter(|(_, w, h, _)| *w == 20.0 && *h == 20.0)
                 .count(),
             5
         );
@@ -1983,7 +2023,7 @@ mod tests {
             cmds.iter()
                 .any(|c| matches!(c, RenderCommand::StrokeRect { .. }))
         );
-        assert!(fills(&cmds).iter().any(|(w, _, _)| *w == 140.0));
+        assert!(fills(&cmds).iter().any(|(_, w, _, _)| *w == 140.0));
 
         // And the branch no `full_fixture` render can reach.
         let cmds = label_fixture().render(&p, 1920.0, 48.0);
@@ -2012,8 +2052,8 @@ mod tests {
             // not a per-site table.
             let running: Vec<Color> = fills(&cmds)
                 .into_iter()
-                .filter(|(w, h, _)| *w == 8.0 && *h == 3.0)
-                .map(|(_, _, c)| c)
+                .filter(|(_, w, h, _)| *w == 8.0 && *h == 3.0)
+                .map(|(_, _, _, c)| c)
                 .collect();
             assert_eq!(running, vec![p.subtext0; 2], "running underlines");
             assert_eq!(only_fill(&cmds, 12.0, 12.0, "count badge"), p.red);
@@ -2051,32 +2091,55 @@ mod tests {
         }
     }
 
-    /// The four button states, each in the role that describes it.
+    /// The four button states, each in the role that describes it — and each
+    /// checked at the button it belongs to, not merely somewhere in the render.
+    ///
+    /// The site matters because these four colours are drawn as one shape at
+    /// one size and differ only in `x`. A table that asked "is `surface1`
+    /// present" would be satisfied by a render that had swapped the hovered
+    /// and focused rungs of the ladder, which is a permutation of the same
+    /// set. Indexing by `button_x` is what makes the ladder's *order*
+    /// falsifiable.
     #[test]
     fn each_button_state_draws_the_background_its_role_names() {
         for light in [false, true] {
             let p = accented(light);
             let cmds = full_fixture().render(&p, 1920.0, 48.0);
-            let bgs: Vec<Color> = fills(&cmds)
+            let bgs: Vec<(f32, Color)> = fills(&cmds)
                 .into_iter()
-                .filter(|(w, h, _)| *w == 44.0 && *h == 44.0)
-                .map(|(_, _, c)| c)
+                .filter(|(_, w, h, _)| *w == 44.0 && *h == 44.0)
+                .map(|(x, _, _, c)| (x, c))
                 .collect();
 
-            assert!(bgs.contains(&p.surface2), "hovered is surface2");
-            assert!(bgs.contains(&p.surface1), "focused is surface1");
-            assert!(
-                bgs.contains(&with_alpha(p.surface0, 128)),
+            let at = |x: f32| -> Color {
+                bgs.iter()
+                    .find(|(bx, _)| *bx == x)
+                    .unwrap_or_else(|| panic!("no button background at x={x}"))
+                    .1
+            };
+            // Button 1 is focused, 3 is hovered, 4 is running-but-unfocused.
+            assert_eq!(at(button_x(1)), p.surface1, "focused is surface1");
+            assert_eq!(at(button_x(3)), p.surface2, "hovered is surface2");
+            assert_eq!(
+                at(button_x(4)),
+                with_alpha(p.surface0, 128),
                 "running-but-unfocused is surface0 at half"
             );
-            assert!(
-                bgs.contains(&with_alpha(p.surface1, 180)),
+            // The ghost follows the pointer, so it is the one background not
+            // at a button's x: `current_x - btn_width / 2`.
+            assert_eq!(
+                at(400.0 - 22.0),
+                with_alpha(p.surface1, 180),
                 "the dragged ghost is surface1 at 180"
             );
-            // Four buttons draw a background; the fifth is idle and draws
-            // none. Counting is what proves the idle branch stayed
-            // transparent — there is no colour to look for.
+            // Four backgrounds for five buttons: button 2 is idle, and idle is
+            // `TRANSPARENT`, which is not drawn at all. Counting is the only
+            // way to assert that — there is no colour to go looking for.
             assert_eq!(bgs.len(), 4);
+            assert!(
+                !bgs.iter().any(|(x, _)| *x == button_x(2)),
+                "an idle button drew a background"
+            );
         }
     }
 
@@ -2089,8 +2152,8 @@ mod tests {
             let cmds = full_fixture().render(&p, 1920.0, 48.0);
             let icons: Vec<Color> = fills(&cmds)
                 .into_iter()
-                .filter(|(w, h, _)| *w == 20.0 && *h == 20.0)
-                .map(|(_, _, c)| c)
+                .filter(|(_, w, h, _)| *w == 20.0 && *h == 20.0)
+                .map(|(_, _, _, c)| c)
                 .collect();
 
             assert_eq!(icons.len(), 5);
@@ -2150,9 +2213,9 @@ mod tests {
 
             let panel = fills(&cmds)
                 .into_iter()
-                .find(|(w, _, _)| *w == 140.0)
+                .find(|(_, w, _, _)| *w == 140.0)
                 .expect("menu panel")
-                .2;
+                .3;
             assert_eq!(panel, p.panel_bg());
             assert_eq!(
                 panel.a, p.panel_alpha,
@@ -2287,8 +2350,8 @@ mod tests {
         let cmds = full_fixture().render(&p, 1920.0, 48.0);
         let underlines: Vec<f32> = fills(&cmds)
             .into_iter()
-            .filter(|(_, h, _)| *h == 3.0)
-            .map(|(w, _, _)| w)
+            .filter(|(_, _, h, _)| *h == 3.0)
+            .map(|(_, w, _, _)| w)
             .collect();
         assert_eq!(underlines.len(), 3, "one focused, two running");
         assert_eq!(underlines.iter().filter(|w| **w == 16.0).count(), 1);

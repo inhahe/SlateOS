@@ -743,7 +743,25 @@ pub fn clear_all() {
 // ---------------------------------------------------------------------------
 
 /// Run self-tests for the theme system.
+///
+/// The suite asserts exact table contents, so it needs a table of its own.
+/// It used to get one by calling `clear_all()`, which — since this suite is
+/// reachable from the shell — deleted whatever the user had stored here and
+/// then reported success.  The live state is moved aside for the duration and
+/// put back afterwards; `crate::fs::selftest` records why this shape rather
+/// than the alternatives.
 pub fn self_test() -> KernelResult<()> {
+    // These counters live outside the table, so `with_pristine` cannot
+    // see them; save and restore them here so a run leaves no trace.
+    let saved_query_count = QUERY_COUNT.load(Ordering::Relaxed);
+    let saved_change_count = CHANGE_COUNT.load(Ordering::Relaxed);
+    let result = crate::fs::selftest::with_pristine(&THEME, ThemeState::new(), self_test_inner);
+    QUERY_COUNT.store(saved_query_count, Ordering::Relaxed);
+    CHANGE_COUNT.store(saved_change_count, Ordering::Relaxed);
+    result
+}
+
+fn self_test_inner() -> KernelResult<()> {
     use crate::serial_println;
 
     clear_all();

@@ -126,8 +126,23 @@ USE_RE = re.compile(
 )
 
 QUAL = re.compile(r"(\w+)::(self_test\w*)")
-BARE = re.compile(r"(?<![\w:])(self_test\w*)\s*[(<]")
 DECL = re.compile(r"\bfn\s+(self_test\w*)\s*[(<]")
+
+# Two different questions, so two different patterns.
+#
+# `BARE_CALL` asks "is this line a call?", which is what the gated-call report
+# needs: a *call* inside `if fat_ok { ... }` may not execute.
+#
+# `BARE_MENTION` asks "does this name reach a value?", which is what
+# reachability needs, and it is deliberately looser -- Rust reaches a function
+# by naming it, not only by calling it. `selftest::with_pristine(&STATE,
+# State::new(), self_test_inner)` passes the suite as a function *value*, so the
+# name is followed by `)`, and under the call-shaped pattern all 53 suites
+# converted to that helper read as reachable from nothing. The failure mode of
+# getting this wrong is the worst one available to a guard: 53 false alarms at
+# once, which is how a guard gets `--quiet`-ed permanently.
+BARE_CALL = re.compile(r"(?<![\w:])(self_test\w*)\s*[(<]")
+BARE_MENTION = re.compile(r"(?<![\w:])(self_test\w*)(?![\w:])")
 
 
 def module_path(rel):
@@ -213,17 +228,24 @@ def add_reexport_aliases(files, by_qualified):
 
 
 def collect_mentions(files, defs, by_qualified, by_bare):
-    """rel path -> set of symbols that file names."""
+    """rel path -> set of symbols that file names.
+
+    Scans the *code*, not the text: a name written in a doc comment is not a
+    caller, and counting it as one hides a genuinely dead suite behind its own
+    documentation. That matters more now than it used to -- the suites this
+    guard watches carry doc comments that discuss `self_test` by name.
+    """
     mentions = {}
     for rel, text in files.items():
+        text = strip_text(text)
         hit = set()
         for m in QUAL.finditer(text):
             for sym in by_qualified.get((m.group(1), m.group(2)), ()):
                 hit.add(sym)
-        # A bare call only counts inside the defining file, and only in excess
-        # of the declarations -- every file contains its own `fn` line.
+        # A bare mention only counts inside the defining file, and only in
+        # excess of the declarations -- every file contains its own `fn` line.
         used, declared = {}, {}
-        for m in BARE.finditer(text):
+        for m in BARE_MENTION.finditer(text):
             used[m.group(1)] = used.get(m.group(1), 0) + 1
         for m in DECL.finditer(text):
             declared[m.group(1)] = declared.get(m.group(1), 0) + 1
@@ -334,6 +356,15 @@ def strip_code(line, in_block):
     return "".join(out), in_block
 
 
+def strip_text(text):
+    """`strip_code` over a whole file, carrying block-comment state across lines."""
+    out, in_block = [], False
+    for line in text.split("\n"):
+        stripped, in_block = strip_code(line, in_block)
+        out.append(stripped)
+    return "\n".join(out)
+
+
 def calls_on(text, defs, by_qualified, by_bare, rel):
     """Symbols named by this one line, using the same spellings as elsewhere."""
     hit = set()
@@ -341,7 +372,7 @@ def calls_on(text, defs, by_qualified, by_bare, rel):
         for sym in by_qualified.get((m.group(1), m.group(2)), ()):
             hit.add(sym)
     if not DECL.search(text):          # a definition is not a call
-        for m in BARE.finditer(text):
+        for m in BARE_CALL.finditer(text):
             for sym in by_bare.get(m.group(1), ()):
                 if defs[sym][0] == rel:
                     hit.add(sym)

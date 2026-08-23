@@ -553,7 +553,26 @@ pub fn clear_all() {
 // ---------------------------------------------------------------------------
 
 /// Run self-tests for the service manager.
+///
+/// The suite asserts exact table contents, so it needs a table of its own.
+/// It used to get one by calling `clear_all()`, which — since this suite is
+/// reachable from the shell — discarded every registered service and then
+/// reported success.  The live state is moved aside for the duration and put
+/// back afterwards; `crate::fs::selftest` records why this shape rather than
+/// the alternatives.
+///
+/// The pristine value here is `None` rather than a `State`: this module inits
+/// lazily, and `None` is exactly what a fresh boot holds.
 pub fn self_test() -> KernelResult<()> {
+    // This counter lives outside the table, so `with_pristine` cannot see it;
+    // save and restore it here so a run leaves no trace.
+    let saved_ops = OPS.load(Ordering::Relaxed);
+    let result = crate::fs::selftest::with_pristine(&STATE, None, self_test_inner);
+    OPS.store(saved_ops, Ordering::Relaxed);
+    result
+}
+
+fn self_test_inner() -> KernelResult<()> {
     use crate::serial_println;
 
     clear_all();

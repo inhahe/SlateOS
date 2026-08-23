@@ -65032,6 +65032,82 @@ Both are fixed in `82155959a`. Note what this says about the batching
 advice above — the panic is the *feature*; enable in batches precisely so
 each panic points at one module.
 
+### 2026-08-23 — the 37 that were blocked on the *other* defect
+
+**The batch of 37 wired in `d8f43153e` could not have been wired earlier,
+and the reason is worth recording because it is the same trap twice.**
+
+These 37 were manual-only, so this entry covered them — but they were also
+destructive (`TD-A-SELFTESTS-NOT-IDEMPOTENT`), each opening with
+`clear_all()`. The two defects had to be fixed in a fixed order, because at
+boot the tables are empty, so the wipe is a no-op and **the boot test is
+green either way**. Wiring first would have produced a green boot test that
+said nothing whatever about the shell path — and worse, boot coverage would
+then stand as *evidence* that the suite was fine, for a suite that still
+emptied the user's credential store the moment they typed `credentials
+test`. `ace6cff40` removed the destruction first; only then was the wiring
+honest.
+
+The general rule this yields, for the ~197 suites still manual-only: **check
+whether a suite is destructive before wiring it, not after.** A green boot
+test cannot tell you, and will actively mislead you.
+
+**Wiring 37 suites blind would have been reckless, so they were audited
+first.** Two of them are named `osreset` and `installer`. The audit asked
+one question of each suite — does it name anything outside its own module?
+— and across all 37 there is exactly one such reference: `perfmon` reading
+`crate::hpet::elapsed_ns`, a read-only clock query. `installer`'s
+alarming-looking `erase_disk: true` is a field of a config struct being
+recorded in an in-memory table, not a disk erase. So these are safe at boot
+by construction rather than by hope. Reproduce with:
+
+```bash
+sed -n '/^fn self_test_inner/,/^}\s*$/p' kernel/src/fs/<mod>.rs |
+  grep -oE "crate::[a-z_]+::[a-z_]+|fs::[a-z_]+::[a-z_]+" | sort -u
+```
+
+**The conversion broke this entry's own guard, which is the more
+interesting failure.** `scripts/check-self-tests-wired.py` modelled
+"reachable" as a mention followed by `(` — true only while every call in the
+tree was a direct call. `with_pristine(&STATE, State::new(),
+self_test_inner)` passes the suite as a function *value*, so the name is
+followed by `)`, and all 53 converted suites read as reachable from nothing.
+Dead count went 0 → 54 in one commit.
+
+That is the worst failure available to a guard: not a missed defect but a
+mass false alarm, which is how a guard gets `--quiet`-ed permanently and
+then misses the real one. Fixed in `ae822c8b5` by splitting the question in
+two — `BARE_CALL` still asks "is this a call?" for the gated-call report,
+where the distinction is the whole point, while `BARE_MENTION` asks "does
+this name reach a value?", which is what reachability means in Rust. The
+scan also now runs over the existing comment/string blanker, because
+relaxing the pattern alone would let a doc comment vouch for its own dead
+suite — and these suites' doc comments discuss `self_test` by name.
+
+**Counts after this batch:** boot-reachable 901, manual-only 197, dead 0.
+
+**It found a bug on the first boot, as predicted — `perfmon` test 10.**
+36 suites ran green and then the boot panicked with `left: 10, right: 5`.
+The suite called `set_max_samples(5)` and asserted the history held 5;
+`set_max_samples` clamps to a floor of 10, so it stored 10 and — returning
+`()` — said nothing about having done so. The assertion had been wrong for
+as long as it existed.
+
+The interesting part is what the cause had *already* done elsewhere. A
+silent clamp forces every caller that wants to report the effective value to
+restate the range, and `kshell` did exactly that: `v.clamp(100, 60000)`
+written out a second time next to `perfmon::set_interval(v)`, free to drift
+from the real policy with nothing to catch it. So the fix was not the
+assertion. Both setters now return the value stored, the ranges are named
+constants, the doc comments admit a clamp happens, and `kshell` prints
+`(clamped from N)` — strictly more than it could say before. Fixed in
+`b86e51354`.
+
+This is the second time this batch that the *test* was the wrong half to
+fix. Worth stating as a rule: when a never-run suite finally runs and fails,
+the assertion is a report, not a diagnosis — read the API it is asserting
+against before changing either.
+
 ---
 
 ## TD-A-SPARSE-FSTRIM-WRONG-DEVICE — hole punching queued discards for a nonexistent device at a file offset
@@ -65325,3 +65401,64 @@ the user chose. `useracct` additionally needs its `current_uid`, its
 sessions' `active` flags and `LOGIN_COUNT` snapshotted and restored, because
 authenticating during the test hijacks whoever is logged in — cleaning up
 the fixture user is not enough.
+
+### ✅ FIXED 2026-08-23 — a fourth shape, and why it beat all three above
+
+**All 56 are done**, and none of them used one of the three shapes. Writing
+them out made it clear that the three were a choice between *keeping the
+user's data* and *keeping the coverage*, and that the choice was false.
+
+The shape that landed is **move the live state aside**: swap the module's
+table for a pristine one, run the suite against that, put the original back.
+It is `crate::fs::selftest::with_pristine`, and every converted suite is now
+
+```rust
+pub fn self_test() -> KernelResult<()> {
+    crate::fs::selftest::with_pristine(&STATE, State::new(), self_test_inner)
+}
+```
+
+with the original body moved verbatim into `self_test_inner`. Every existing
+assertion holds **unchanged and unweakened** — including the exact ones
+(`next_id` starts at 1, "exactly one app in Accessories") that were the
+reason *baseline-relative* could not be used and *decline to run* had to give
+up coverage on exactly the machines where a user types `test` because they
+suspect something is wrong.
+
+Why it was not available before: it needs a *pristine value* to swap in, and
+23 of the 56 modules had no name for one — their fresh state existed only as
+an anonymous literal inside `static STATE: Mutex<State> = Mutex::new(State {
+… });`. Those literals are now `const fn new()`. That is worth having on its
+own account: the literal and `clear_all()` were two independent spellings of
+"what a fresh boot looks like", free to drift apart with nothing to catch it.
+
+**Three corrections to the survey above, found while doing the work:**
+
+- **`ioprio`, `prefetch` and `tags` were false positives.** The survey
+  counted them because they call `test_clear()`, but in all three that is a
+  *test of* the per-entry clear, not a wipe of the table. `ioprio` was
+  already well-behaved — synthetic task IDs in the 99996–99999 range, each
+  cleared afterwards — and got only its two statistics counters restored,
+  with a doc comment saying why it has no `with_pristine`. `prefetch` and
+  `tags` clean up by hand, one call at a time, which is a claim nobody
+  re-checks when a test is added; they are wrapped anyway, so "leaves no
+  trace" is now structural rather than a promise. So the destructive count
+  is **53**, not 56.
+- **Free-standing counters are part of the state and the three shapes did
+  not cover them.** Nearly every module keeps its statistics in
+  `static AtomicU64`s outside the table, so restoring the table alone still
+  left `theme stats` (and the rest) reporting the test's activity as the
+  user's. All of them are now saved and restored around the call.
+- **`servicemgr` is the one lazy-init module in the set** — its state is
+  `Mutex<Option<State>>` — so its pristine value is `None`, which is exactly
+  what a fresh boot holds.
+
+`useracct` was fixed earlier and separately, and keeps its *decline to run*
+guard: its suite authenticates, which reaches `current_uid`, the sessions'
+`active` flags and `LOGIN_COUNT` — state that is not reachable from the one
+table `with_pristine` swaps.
+
+**What is deliberately not handled:** a panic mid-suite does not restore.
+That is on purpose — a kernel that has just proved one of its own invariants
+wrong has no business carrying the user's data forward into whatever runs
+next. Every non-panicking exit, including an early `?`, does restore.

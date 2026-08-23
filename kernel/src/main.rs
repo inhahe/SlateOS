@@ -5203,10 +5203,16 @@ extern "C" fn kernel_main() -> ! {
             if let Err(e) = fs::timezone::self_test() {
                 serial_println!("WARNING: Timezone self-test failed: {:?}", e);
             }
-            // Both self-tests end by clearing their tables, so populate them after.
-            // Without this the zone database stays empty until someone types
-            // `locale init` at the kernel shell, and every offset query answers 0 —
-            // i.e. the kernel silently believes it is in UTC.
+            // Populate the tables. Nothing else does: without this the zone
+            // database stays empty until someone types `locale init` at the
+            // kernel shell, and every offset query answers 0 — i.e. the kernel
+            // silently believes it is in UTC.
+            //
+            // This used to have to come *after* the two suites above, which
+            // ended by clearing their tables. They now run against a table
+            // moved aside for the duration (`fs::selftest::with_pristine`) and
+            // put the real one back, so the order no longer constrains
+            // anything. It is kept only because there is no reason to move it.
             fs::locale::init_defaults();
             fs::timezone::init_defaults();
         }
@@ -5577,6 +5583,150 @@ extern "C" fn kernel_main() -> ! {
                 serial_println!("WARNING: socket-activation self-test failed: {:?}", e);
             }
             crate::sync::self_test();
+        }
+        case();
+    }
+
+    {
+        // The 37 self-tests that could not be wired until they stopped
+        // deleting the user's data.
+        //
+        // Each was reachable only as a kernel-shell subcommand, so the boot
+        // test never ran it (`TD-A-FS-SELFTESTS-NEVER-RUN`). Wiring them was
+        // blocked on a second defect in the same suites
+        // (`TD-A-SELFTESTS-NOT-IDEMPOTENT`): each opened with `clear_all()`,
+        // so `credentials test` emptied the credential store and `theme test`
+        // reset the desktop to factory defaults, both then printing "all
+        // tests passed".
+        //
+        // The two had to be fixed in that order, and the reason is the trap
+        // that hid this for a year: at boot the tables are empty, so the wipe
+        // is a no-op and the boot test is green either way. Wiring first
+        // would have produced a green boot test that said nothing whatever
+        // about the shell path -- boot coverage would have become *evidence*
+        // for a suite that still destroyed data the moment a user typed the
+        // command.
+        //
+        // They now run against a table moved aside for the duration
+        // (`fs::selftest::with_pristine`), so there is nothing left to
+        // destroy and every assertion is the one that was always written.
+        //
+        // Kept as its own `case()` for the same reasons as the block above:
+        // the reason they are here survives in the code, and a failure
+        // bisects to one obvious place.
+        #[inline(never)]
+        fn case() {
+            if let Err(e) = fs::a11y::self_test() {
+                serial_println!("WARNING: accessibility self-test failed: {:?}", e);
+            }
+            if let Err(e) = fs::appnotify::self_test() {
+                serial_println!("WARNING: per-app notification settings self-test failed: {:?}", e);
+            }
+            if let Err(e) = fs::autostart::self_test() {
+                serial_println!("WARNING: autostart self-test failed: {:?}", e);
+            }
+            if let Err(e) = fs::capsettings::self_test() {
+                serial_println!("WARNING: capability settings self-test failed: {:?}", e);
+            }
+            if let Err(e) = fs::colorpicker::self_test() {
+                serial_println!("WARNING: color picker self-test failed: {:?}", e);
+            }
+            if let Err(e) = fs::credentials::self_test() {
+                serial_println!("WARNING: credential store self-test failed: {:?}", e);
+            }
+            if let Err(e) = fs::cursorsettings::self_test() {
+                serial_println!("WARNING: cursor settings self-test failed: {:?}", e);
+            }
+            if let Err(e) = fs::detailcols::self_test() {
+                serial_println!("WARNING: detail columns self-test failed: {:?}", e);
+            }
+            if let Err(e) = fs::display::self_test() {
+                serial_println!("WARNING: display settings self-test failed: {:?}", e);
+            }
+            if let Err(e) = fs::dyndns::self_test() {
+                serial_println!("WARNING: dynamic DNS self-test failed: {:?}", e);
+            }
+            if let Err(e) = fs::filepicker::self_test() {
+                serial_println!("WARNING: file picker self-test failed: {:?}", e);
+            }
+            if let Err(e) = fs::fontmgr::self_test() {
+                serial_println!("WARNING: font manager self-test failed: {:?}", e);
+            }
+            if let Err(e) = fs::fstune::self_test() {
+                serial_println!("WARNING: filesystem tuning self-test failed: {:?}", e);
+            }
+            if let Err(e) = fs::hotkeys::self_test() {
+                serial_println!("WARNING: hotkeys self-test failed: {:?}", e);
+            }
+            if let Err(e) = fs::ime::self_test() {
+                serial_println!("WARNING: IME self-test failed: {:?}", e);
+            }
+            if let Err(e) = fs::installer::self_test() {
+                serial_println!("WARNING: installer self-test failed: {:?}", e);
+            }
+            if let Err(e) = fs::kbsettings::self_test() {
+                serial_println!("WARNING: keyboard settings self-test failed: {:?}", e);
+            }
+            if let Err(e) = fs::keylayout::self_test() {
+                serial_println!("WARNING: keyboard layout self-test failed: {:?}", e);
+            }
+            if let Err(e) = fs::mmtune::self_test() {
+                serial_println!("WARNING: memory-management tuning self-test failed: {:?}", e);
+            }
+            if let Err(e) = fs::netindicator::self_test() {
+                serial_println!("WARNING: network indicator self-test failed: {:?}", e);
+            }
+            if let Err(e) = fs::netsettings::self_test() {
+                serial_println!("WARNING: network settings self-test failed: {:?}", e);
+            }
+            if let Err(e) = fs::notifcenter::self_test() {
+                serial_println!("WARNING: notification center self-test failed: {:?}", e);
+            }
+            if let Err(e) = fs::osreset::self_test() {
+                serial_println!("WARNING: OS reset self-test failed: {:?}", e);
+            }
+            if let Err(e) = fs::perfmon::self_test() {
+                serial_println!("WARNING: performance monitor self-test failed: {:?}", e);
+            }
+            if let Err(e) = fs::rundialog::self_test() {
+                serial_println!("WARNING: run dialog self-test failed: {:?}", e);
+            }
+            if let Err(e) = fs::schedtune::self_test() {
+                serial_println!("WARNING: scheduler tuning self-test failed: {:?}", e);
+            }
+            if let Err(e) = fs::scriptlang::self_test() {
+                serial_println!("WARNING: script-engine registry self-test failed: {:?}", e);
+            }
+            if let Err(e) = fs::servicemgr::self_test() {
+                serial_println!("WARNING: service manager self-test failed: {:?}", e);
+            }
+            if let Err(e) = fs::soundmixer::self_test() {
+                serial_println!("WARNING: sound mixer self-test failed: {:?}", e);
+            }
+            if let Err(e) = fs::swapcfg::self_test() {
+                serial_println!("WARNING: swap configuration self-test failed: {:?}", e);
+            }
+            if let Err(e) = fs::systray::self_test() {
+                serial_println!("WARNING: system tray self-test failed: {:?}", e);
+            }
+            if let Err(e) = fs::taskbar::self_test() {
+                serial_println!("WARNING: taskbar self-test failed: {:?}", e);
+            }
+            if let Err(e) = fs::theme::self_test() {
+                serial_println!("WARNING: desktop theme self-test failed: {:?}", e);
+            }
+            if let Err(e) = fs::vdesktop::self_test() {
+                serial_println!("WARNING: virtual desktops self-test failed: {:?}", e);
+            }
+            if let Err(e) = fs::wakesensor::self_test() {
+                serial_println!("WARNING: wake sensor self-test failed: {:?}", e);
+            }
+            if let Err(e) = fs::widgets::self_test() {
+                serial_println!("WARNING: desktop widgets self-test failed: {:?}", e);
+            }
+            if let Err(e) = fs::winsnap::self_test() {
+                serial_println!("WARNING: window snapping self-test failed: {:?}", e);
+            }
         }
         case();
     }

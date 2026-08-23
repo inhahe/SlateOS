@@ -223,60 +223,71 @@ struct State {
     changes: u64,
 }
 
-static STATE: Mutex<State> = Mutex::new(State {
-    os: OsInfo {
-        name: String::new(),
-        version: String::new(),
-        build_number: 0,
-        build_date: String::new(),
-        codename: String::new(),
-        arch: String::new(),
-        kernel_version: String::new(),
-        website: String::new(),
-        uptime_secs: 0,
-        boot_ns: 0,
-    },
-    cpu: CpuInfo {
-        model: String::new(),
-        vendor: String::new(),
-        cores: 0,
-        threads: 0,
-        base_freq_mhz: 0,
-        max_freq_mhz: 0,
-        l1d_cache_kib: 0,
-        l1i_cache_kib: 0,
-        l2_cache_kib: 0,
-        l3_cache_kib: 0,
-        features: Vec::new(),
-        family: 0,
-        model_num: 0,
-        stepping: 0,
-    },
-    memory: MemoryInfo {
-        total_bytes: 0,
-        used_bytes: 0,
-        available_bytes: 0,
-        swap_total: 0,
-        swap_used: 0,
-        dimm_count: 0,
-        mem_type: String::new(),
-        speed_mts: 0,
-    },
-    storage: Vec::new(),
-    gpus: Vec::new(),
-    net_ifaces: Vec::new(),
-    kernel_params: KernelParams {
-        page_size: 16384,
-        sched_model: String::new(),
-        preempt_model: String::new(),
-        alloc_model: String::new(),
-        overcommit_mode: String::new(),
-        max_cpus: 256,
-        root_fs: String::new(),
-        debug_assertions: false,
-    },
-    changes: 0,
-});
+impl State {
+    /// The state a fresh boot starts with.
+    ///
+    /// Extracted from the initialiser of `STATE` so that the self-test can
+    /// be handed a pristine table without disturbing the live one; see
+    /// `crate::fs::selftest`.
+    const fn new() -> Self {
+        Self {
+            os: OsInfo {
+                name: String::new(),
+                version: String::new(),
+                build_number: 0,
+                build_date: String::new(),
+                codename: String::new(),
+                arch: String::new(),
+                kernel_version: String::new(),
+                website: String::new(),
+                uptime_secs: 0,
+                boot_ns: 0,
+            },
+            cpu: CpuInfo {
+                model: String::new(),
+                vendor: String::new(),
+                cores: 0,
+                threads: 0,
+                base_freq_mhz: 0,
+                max_freq_mhz: 0,
+                l1d_cache_kib: 0,
+                l1i_cache_kib: 0,
+                l2_cache_kib: 0,
+                l3_cache_kib: 0,
+                features: Vec::new(),
+                family: 0,
+                model_num: 0,
+                stepping: 0,
+            },
+            memory: MemoryInfo {
+                total_bytes: 0,
+                used_bytes: 0,
+                available_bytes: 0,
+                swap_total: 0,
+                swap_used: 0,
+                dimm_count: 0,
+                mem_type: String::new(),
+                speed_mts: 0,
+            },
+            storage: Vec::new(),
+            gpus: Vec::new(),
+            net_ifaces: Vec::new(),
+            kernel_params: KernelParams {
+                page_size: 16384,
+                sched_model: String::new(),
+                preempt_model: String::new(),
+                alloc_model: String::new(),
+                overcommit_mode: String::new(),
+                max_cpus: 256,
+                root_fs: String::new(),
+                debug_assertions: false,
+            },
+            changes: 0,
+        }
+    }
+}
+
+static STATE: Mutex<State> = Mutex::new(State::new());
 
 static OP_COUNT: AtomicU64 = AtomicU64::new(0);
 
@@ -678,7 +689,22 @@ pub fn clear_all() {
 // Self-tests
 // ---------------------------------------------------------------------------
 
+/// The suite asserts exact table contents, so it needs a table of its own.
+/// It used to get one by calling `clear_all()`, which — since this suite is
+/// reachable from the shell — deleted whatever the user had stored here and
+/// then reported success.  The live state is moved aside for the duration and
+/// put back afterwards; `crate::fs::selftest` records why this shape rather
+/// than the alternatives.
 pub fn self_test() -> KernelResult<()> {
+    // These counters live outside the table, so `with_pristine` cannot
+    // see them; save and restore them here so a run leaves no trace.
+    let saved_op_count = OP_COUNT.load(Ordering::Relaxed);
+    let result = crate::fs::selftest::with_pristine(&STATE, State::new(), self_test_inner);
+    OP_COUNT.store(saved_op_count, Ordering::Relaxed);
+    result
+}
+
+fn self_test_inner() -> KernelResult<()> {
     use crate::serial_println;
 
     clear_all();

@@ -302,7 +302,21 @@ pub fn stats() -> (u64, u64, usize) {
 // Self-tests
 // ---------------------------------------------------------------------------
 
+/// Run the I/O-priority self-tests.
+///
+/// This suite is not one of the destructive ones, despite appearances: its
+/// `test_clear` exercises `clear_ioprio` on a single task rather than
+/// emptying `TASK_PRIO`, and every test uses a synthetic task ID in the
+/// 99996–99999 range and clears its own entry afterwards.  There is no table
+/// to move aside, so there is no `with_pristine` here — see
+/// `crate::fs::selftest` for the shape its neighbours needed.
+///
+/// The two statistics counters *are* perturbed, and are restored, so that
+/// `ioprio stats` reads the same before and after.
 pub fn self_test() -> crate::error::KernelResult<()> {
+    let saved_set_count = SET_COUNT.load(Ordering::Relaxed);
+    let saved_get_count = GET_COUNT.load(Ordering::Relaxed);
+
     serial_println!("[ioprio] Running self-test...");
 
     test_priority_types();
@@ -311,6 +325,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
     test_clear();
     test_comparison();
     test_list();
+
+    SET_COUNT.store(saved_set_count, Ordering::Relaxed);
+    GET_COUNT.store(saved_get_count, Ordering::Relaxed);
 
     serial_println!("[ioprio] Self-test passed (6 tests).");
     Ok(())

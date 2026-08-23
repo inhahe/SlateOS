@@ -126,11 +126,22 @@ struct TagIndex {
     built: bool,
 }
 
-static INDEX: Mutex<TagIndex> = Mutex::new(TagIndex {
-    by_tag: BTreeMap::new(),
-    by_path: BTreeMap::new(),
-    built: false,
-});
+impl TagIndex {
+    /// The state a fresh boot starts with.
+    ///
+    /// Extracted from the initialiser of `INDEX` so that the self-test can
+    /// be handed a pristine table without disturbing the live one; see
+    /// `crate::fs::selftest`.
+    const fn new() -> Self {
+        Self {
+            by_tag: BTreeMap::new(),
+            by_path: BTreeMap::new(),
+            built: false,
+        }
+    }
+}
+
+static INDEX: Mutex<TagIndex> = Mutex::new(TagIndex::new());
 
 // ---------------------------------------------------------------------------
 // Configuration API
@@ -745,7 +756,29 @@ pub fn list_tagged_files() -> Vec<TaggedFile> {
 // Self-tests
 // ---------------------------------------------------------------------------
 
+/// Unlike most of its neighbours this suite never wiped the table — its
+/// `test_clear` exercises the per-entry clear rather than emptying the
+/// store — and it removes its own fixtures one call at a time.  That is a
+/// claim nobody re-checks when a test is added to the list below.  Running
+/// against a table moved aside for the duration makes "leaves no trace"
+/// structural instead: whatever the suite creates goes away with the
+/// substitute.  See `crate::fs::selftest`.
 pub fn self_test() -> KernelResult<()> {
+    // These counters live outside the table, so `with_pristine` cannot
+    // see them; save and restore them here so a run leaves no trace.
+    let saved_enabled = ENABLED.load(Ordering::Relaxed);
+    let saved_adds = ADDS.load(Ordering::Relaxed);
+    let saved_removes = REMOVES.load(Ordering::Relaxed);
+    let saved_searches = SEARCHES.load(Ordering::Relaxed);
+    let result = crate::fs::selftest::with_pristine(&INDEX, TagIndex::new(), self_test_inner);
+    ENABLED.store(saved_enabled, Ordering::Relaxed);
+    ADDS.store(saved_adds, Ordering::Relaxed);
+    REMOVES.store(saved_removes, Ordering::Relaxed);
+    SEARCHES.store(saved_searches, Ordering::Relaxed);
+    result
+}
+
+fn self_test_inner() -> KernelResult<()> {
     serial_println!("[tags] Running self-test...");
 
     test_validate_tag();

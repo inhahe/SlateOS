@@ -91,15 +91,26 @@ struct CasInner {
     gc_collected: u64,
 }
 
-static CAS: Mutex<CasInner> = Mutex::new(CasInner {
-    blobs: BTreeMap::new(),
-    total_bytes: 0,
-    max_bytes: 64 * 1024 * 1024, // 64 MiB default
-    dedup_hits: 0,
-    total_refs: 0,
-    integrity_failures: 0,
-    gc_collected: 0,
-});
+impl CasInner {
+    /// The state a fresh boot starts with.
+    ///
+    /// Extracted from the initialiser of `CAS` so that the self-test can
+    /// be handed a pristine table without disturbing the live one; see
+    /// `crate::fs::selftest`.
+    const fn new() -> Self {
+        Self {
+            blobs: BTreeMap::new(),
+            total_bytes: 0,
+            max_bytes: 64 * 1024 * 1024, // 64 MiB default
+            dedup_hits: 0,
+            total_refs: 0,
+            integrity_failures: 0,
+            gc_collected: 0,
+        }
+    }
+}
+
+static CAS: Mutex<CasInner> = Mutex::new(CasInner::new());
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -343,7 +354,19 @@ fn from_hex_digit(ch: u8) -> Option<u8> {
 // ---------------------------------------------------------------------------
 
 /// Self-test for the content-addressed store.
+///
+/// The suite asserts exact table contents, so it needs a table of its own.
+/// It used to get one by calling `clear_all()`, which — since this suite is
+/// reachable from the shell — deleted whatever the user had stored here and
+/// then reported success.  The live state is moved aside for the duration and
+/// put back afterwards; `crate::fs::selftest` records why this shape rather
+/// than the alternatives.
 pub fn self_test() -> KernelResult<()> {
+    let result = crate::fs::selftest::with_pristine(&CAS, CasInner::new(), self_test_inner);
+    result
+}
+
+fn self_test_inner() -> KernelResult<()> {
     serial_println!("[cas] Running self-test...");
 
     // Clean slate.

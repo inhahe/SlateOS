@@ -35685,8 +35685,15 @@ fn cmd_perfmon(args: &str) {
             } else {
                 match parts[1].parse::<u32>() {
                     Ok(v) => {
-                        perfmon::set_interval(v);
-                        shell_println!("Interval set to {} ms", v.clamp(100, 60000));
+                        // Report what was stored, not what was asked for: the
+                        // setter clamps, and restating its range here was a
+                        // second copy of that policy free to drift from it.
+                        let effective = perfmon::set_interval(v);
+                        if effective == v {
+                            shell_println!("Interval set to {} ms", effective);
+                        } else {
+                            shell_println!("Interval set to {} ms (clamped from {})", effective, v);
+                        }
                     }
                     Err(_) => shell_println!("Invalid value"),
                 }

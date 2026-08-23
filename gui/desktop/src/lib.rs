@@ -3122,11 +3122,17 @@ impl DesktopShell {
             return None;
         }
         let mut tree = RenderTree::new();
-        tree.commands.extend(self.snap.render_overlay());
+        // Resolved once for all three renderers, and here rather than cached
+        // beside `theme` for the reason `render_overview` documents: the
+        // settings are the single source of truth and a stored derivation of
+        // them is a second thing that can go stale.
+        let p = Palette::from_settings(&self.appearance);
+        tree.commands.extend(self.snap.render_overlay(&p));
         if let Some(zone) = self.snap.hovered_zone() {
-            tree.commands.extend(self.snap.render_zone_highlight(zone));
+            tree.commands
+                .extend(self.snap.render_zone_highlight(&p, zone));
         }
-        tree.commands.extend(self.snap.render_picker());
+        tree.commands.extend(self.snap.render_picker(&p));
         Some(tree)
     }
 

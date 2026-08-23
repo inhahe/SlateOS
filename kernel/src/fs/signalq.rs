@@ -373,11 +373,29 @@ fn self_test_inner() {
     crate::serial_println!("  [7/8] numbers: OK");
 
     // 8: Stats.
+    //
+    // `total_sent` counts signals *queued*, not `send` calls: the blocked
+    // Breakpoint in test 4 returns `Ok(())` after bumping the target's
+    // `total_blocked` and never reaches the increment.  So four calls to
+    // `send` leave the counter at 3, which is what makes this assertion worth
+    // stating exactly -- it asserted `>= 4` and failed the first time it ran.
+    //
+    // `total_delivered` is 8 because `init_defaults` seeds it at 7 (matching
+    // the 5 + 2 it seeds on the two processes) and test 3 delivers one more.
     let (procs, sent, delivered, dropped, ops) = stats();
     assert_eq!(procs, 3);
-    assert!(sent >= 4);
-    assert!(delivered >= 8);
-    let _ = dropped;
+    assert_eq!(sent, 3, "four sends, one of them blocked before queueing");
+    assert_eq!(delivered, 8, "seeded 7, plus the one test 3 delivered");
+    assert_eq!(dropped, 0, "nothing reached MAX_PENDING");
+    // The send that did not count as sent counted as blocked. Asserted here
+    // rather than left implicit: it is the whole reason `sent` is 3, and
+    // without it a `send` that silently dropped blocked signals on the floor
+    // would look identical from `stats()`.
+    let p1 = list_processes()
+        .into_iter()
+        .find(|p| p.pid == 1)
+        .expect("pid 1");
+    assert_eq!(p1.total_blocked, 1, "the blocked Breakpoint was counted");
     assert!(ops > 0);
     crate::serial_println!("  [8/8] stats: OK");
 

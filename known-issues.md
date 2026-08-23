@@ -13900,10 +13900,63 @@ is one that could not have raised the `error=0x3` signature described above, so
 the WATCH stands unchanged and the diagnostic added on 2026-08-14 is still the
 mechanism that will identify a genuine recurrence.
 
-Still unaudited, and the natural continuation: every *other* kernel path that
-writes through a user pointer in the current address space without calling
-`validate_user_write` first. `copy_to_user` itself pre-validates, so the
-candidates are paths that bypass it and touch a user address directly.
+**Audit of the continuation — done 2026-08-22, one finding.** The open item
+here was "every *other* kernel path that writes through a user pointer in the
+current address space without calling `validate_user_write` first". That is now
+swept, and the sweep is enforced by `scripts/check-user-access-sites.py`, gated
+in `boot-test.sh` before the build.
+
+*Why the enumeration is complete rather than a sampling.* SMAP is enabled and
+its enforcement re-verified at every boot (`[smep_smap] SMAP enforcement:
+VERIFIED`). A ring-0 access to a user *virtual* address therefore faults unless
+it sits inside a `stac()`/`clac()` window, so the set of same-address-space
+user-access paths is exactly the set of `stac()` call sites — a grep, not a
+guess. All six live in `mm/user.rs`, and all six validate for **write**: the two
+`copy_*` primitives, plus the four futex atomics, which require write permission
+even on the load-only path so that one rule covers every operation. So the
+question as originally posed has the answer "none", and the check now keeps it
+that way.
+
+*The finding was in the class the original question did not cover.* The other
+way to reach a user page is through the **HHDM alias of its physical frame**,
+and that is invisible to the whole mechanism above: the alias is a *kernel*
+address in a legitimately writable mapping, so neither SMAP nor the user
+mapping's write-protect bit can stop a write through it. A present-but-read-only
+page — i.e. every page of a freshly forked address space — gets modified **in
+place**, and the process sharing the frame silently diverges. That is strictly
+worse than the fault this entry tracks, which at least announces itself.
+
+`proc/linux_stack.rs::write_user_image` was such a path. It was a second,
+hand-rolled implementation of `mm::user::copy_to_user_as`, resolving each page
+with plain `page_table::translate` — which reports the frame behind a mapping
+without consulting its flags — and it had silently lost three of the
+primitive's checks: the `WRITABLE` test, the CoW break and demand-population
+via the owning process's fault resolver, and the null/wrap/`USER_SPACE_END`
+bound. It was **not reachable today**: its only caller runs after
+`setup_user_stack`, which maps all stack frames eagerly, present + writable,
+from freshly allocated memory into an address space the calling thread solely
+owns. The defect was that every precondition held by construction *in the
+caller*, while the function's own contract merely asserted them. Making the
+stack demand-paged, or reaching that path with a forked address space, would
+have converted a caller-side change into silent cross-process corruption here.
+It now calls `copy_to_user_as` and inherits that function's existing CoW
+coverage (`mm::user::self_test_cross_as_resolution`).
+
+The generalisation is the one §284 recorded for the duplicated `uname`
+literals: a hand-copied second implementation does not stay equivalent to the
+first. `copy_to_user_as` gained its CoW break in §249; this copy did not,
+because nothing connected them. Hence a checker rather than a resolution to be
+careful — and it was validated by running it against the pre-fix tree and
+confirming it fires, not merely by observing it pass on the fixed one.
+
+Three other `translate`-then-HHDM sites were adjudicated as safe on their own
+terms rather than whitelisted: `proc/pcb.rs`'s fault handler uses `translate`
+as a *negative* presence guard (it skips subpages that are already present, so
+it writes only to a proven-absent page) and derives the written address from
+the frame it allocated itself, not from the translate result; `mm/swap.rs`
+*reads* through the alias, and a CoW page reads correctly from either sharer's
+view; and the sites in `syscall/linux.rs` are inside `self_test_*` functions
+that build and tear down the address spaces they stamp.
 
 ### B-ABI1. A *bare* static Linux ELF (no OSABI/PT_INTERP/PT_GNU_PROPERTY) is misclassified as Native-ABI on `exec` — KNOWN LIMITATION (escalated as open-questions.md Q9)
 
@@ -50335,7 +50388,7 @@ commands that carry the colour in question, and assert the two renders agree.
 Candidates: anything drawn on the wallpaper, on a video surface, on a
 thumbnail, or on any other content the palette does not own.
 
-**Part 2 progress. 20 of 49 modules converted.**
+**Part 2 progress. 22 of 49 modules converted.**
 
 - [x] `security_dialog.rs` — 29 constants, done 2026-08-22. The method above
   survived contact: the sweep lives in `gui/desktop/src/palette_check.rs` as
@@ -51295,6 +51348,162 @@ thumbnail, or on any other content the palette does not own.
     card extractor `w > 40.0 && h > 40.0 && w != 400.0` also matched the
     1920×1080 backdrop, which is a mantle wash — so the "a card is `surface0`"
     assertion was being handed the backdrop's `mantle`. Bounded with `w < SW`.
+- [x] `context_ext.rs` — 12 constants, done 2026-08-22. Seven tests, harness
+  defects AAAAAAAAAAAAAAA–EEEEEEEEEEEEEEEE (thirty-one).
+  - **The first module whose constants were *unprefixed*.** They were `BASE`,
+    `TEXT`, `BLUE` and so on rather than `MOCHA_BASE`, which is worth noting for
+    the twenty-eight modules still to come: the bulk rewrite has to be anchored
+    on `\b` word boundaries, and the post-conversion leftover grep cannot key on
+    the string `MOCHA_` the way every previous module's could. Verified instead
+    by grepping the twelve bare names, which came back empty.
+  - **The shadow joins the shared popup shadow, and that is a small deliberate
+    behaviour change rather than a rebinding.** It was `rgba(0, 0, 0, 80)`,
+    chosen alone; `Palette::shadow()` is `rgba(0, 0, 0, 120)` and its doc
+    comment already says it exists because three modules drawing the same kind
+    of popup had each picked a depth without reference to the others. This menu
+    is the fourth, and the point of the change is precisely that four popups
+    which used to sit at four different depths now sit at one.
+  - **A shadow is exactly what the membership sweep waves through.**
+    `assert_drawn_from` allows black at any alpha — it must, because a shadow is
+    not a role — so the depth could drift back to 80, or to fully opaque, with
+    the sweep silent. `the_menu_casts_the_shared_popup_shadow` asserts equality
+    with `p.shadow()` *and* that the alpha is below 255. This is the same shape
+    as module 20's wash rule arriving from the other side: **the sweep's
+    deliberate blind spots are a list of the tests a module still owes.**
+  - **The module's one accent site is the icon of a hovered extension item, and
+    the reason it is one is worth stating generally: a colour that appears in
+    exactly one state marks that state.** The hardcoded blue was drawn only
+    while the pointer was over the row, which makes it a hover mark, and hover
+    is a position. A built-in item's icon merely brightens to `text` instead —
+    a hierarchy rather than an inconsistency, since an extension item invokes
+    code the shell did not write. The test asserts both halves: the accent when
+    hovered, `subtext0` when not, so the accent is carrying the state rather
+    than decorating the row.
+  - **Nothing else here takes the accent, and two established rules did the
+    deciding without a new judgement being needed.** Pointing at a menu row
+    lifts it one surface step (`base` → `surface0`), which is what
+    `notif_pane`'s hovered list row already did; a selected settings row does
+    the same over `mantle`, which is what `storage_settings` and
+    `update_settings` already did. The enabled/disabled dot and the "Slow"
+    badge are frozen because they report facts about an extension, which is
+    module 19's rule. **Twenty-one modules in, most sites now have a precedent
+    rather than a decision**, and the value of having written the earlier ones
+    down is that this module needed four judgements instead of twenty-six.
+  - **`Color` left the production imports entirely.** The module no longer names
+    a colour type outside its tests — it reads roles off the palette it was
+    handed and never constructs one. That is a small but real signal that the
+    conversion is complete in a way a grep for leftovers cannot show.
+  - **…and that signal broke the proof, which is the more useful half of the
+    story.** Twenty of the thirty-one defects came back `DID NOT COMPILE` on
+    the first proof run, for a reason that had nothing to do with the tests:
+    each of them reinstates a hardcoded `Color::from_hex(…)` in production
+    code, and after the conversion there is no `Color` in production scope to
+    say it with. The harness had been left unable to *state* the very defect it
+    exists to state. **A defect has to be expressible in the converted source's
+    namespace, not the original's** — a constraint that only appears once a
+    conversion is thorough enough to shrink that namespace, and one that will
+    recur in every remaining module whose `Color` import likewise becomes
+    test-only. The fix is to spell the type by its full path
+    (`guitk::color::Color::from_hex(…)`), which needs no import and leaves the
+    production code's imports alone; the alternative — keeping a `Color` import
+    alive purely so the harness can corrupt the file — would have meant
+    carrying a dead import in shipped code to please a test tool, which is
+    backwards.
+  - **The most important finding of this module, and it is not about this
+    module: three defects escaped because the *fixture* never drew them.** A
+    built-in item's shortcut hint, a slow extension's "loading..." label and the
+    submenu arrow all came back `*** NO TEST FAILED ***`, and not one of them
+    was a weak assertion. The fixture menu held a built-in with no shortcut
+    (`Open`), an extension with `slow: false`, and an extension with an empty
+    submenu — so all three colour sites were drawn by no test at all, and the
+    sweep was handed a render in which they simply did not appear. **The sweep
+    is only as wide as the render it is given.** Strengthening an assertion can
+    never fix this, because there is no assertion: a branch nothing takes is a
+    colour nothing checks.
+    - Fixed by widening `ext_menu()` to take every branch the renderer has —
+      `Open` *and* `Copy` (no shortcut / shortcut), an extension with an icon,
+      a shortcut and no submenu, and one that is slow, has no icon of its own
+      and does have a submenu — and then by pinning that coverage with
+      `the_fixture_menu_takes_every_branch_the_renderer_has`, which asserts
+      against the emitted commands rather than the fixture's shape, since a
+      branch can stop drawing without the entry that feeds it changing.
+    - **This is a standing hazard for the twenty-eight modules still to come,
+      and it is invisible without a defect run.** Every previous module's sweep
+      was equally at the mercy of its fixture and nothing said so; the only
+      reason it surfaced here is that the harness names each colour site
+      individually and so notices when one of them is unreachable. Treat a
+      `*** NO TEST FAILED ***` on a plain membership defect as a fixture-coverage
+      report first and a test-strength report second — in this module it was the
+      former three times out of three. The practical rule when writing a
+      module's fixtures: **enumerate the renderer's `if`s, not its colours.**
+  - **One defect's declaration was wrong rather than its test.** "The menu's
+    shadow is drawn in a palette role instead of black" was declared as
+    something the membership sweep should catch. It is not: `p.crust` is a
+    member of both palettes, so the sweep passing it is the sweep behaving
+    exactly as documented. Corrected the declaration to expect only the shadow
+    test. Worth stating because it is the failure mode of writing the expected
+    catchers from intent rather than from the sweep's stated contract — and
+    because a `[MISSING:]` note is ambiguous between "the test has a hole" and
+    "the declaration overclaims", so each one has to be read against the
+    contract before it is believed.
+
+- [x] `widgets.rs` — 11 constants, done 2026-08-22. Eleven tests, harness
+  defects AAAAAAAAAAAAAAAAA–UUUUUUUUUUUUUUUUUU (forty-seven).
+  - **Four judgements, and three of them were settled by precedent rather than
+    argued.** The selected widget's 2px ring takes the accent, by module 21's
+    rule that *a colour appearing in exactly one state marks that state* — and
+    with a second reason peculiar to this module: a ring floating on the
+    wallpaper cannot say "here" with a surface step the way a hovered list row
+    can, so the accent is the only mark available to it. The picker joins
+    `Palette::shadow()`, as `context_ext` did. The picker's row icons stay
+    `p.blue` because every row is drawn identically, so an accent there says
+    nothing about any particular row — and it would cost the accent the one job
+    it has here. **Within a single render the accent has to mean one thing.**
+  - **The one new rule: a meter is not a slider.** Module 19 gave sliders a
+    `surface1` track and an accent fill, and the CPU/Memory/Disk bars look
+    exactly like sliders. They are not: a slider is something you drag, and
+    these are read-outs nobody can move. They are further a *category* set —
+    blue is CPU, green is Memory, peach is Disk — and three bars told apart by
+    colour stop being three bars the moment they all follow one accent. The
+    tracks keep `surface1`, which is the half of the slider rule that does
+    survive: a track is a surface either way. The battery glyph's green is the
+    same judgement one widget over — green there is the reading itself, not
+    decoration, so a red accent would make the widget say something false.
+  - **The per-widget shadow is the first shadow deliberately *not* unified.**
+    `rgba(0, 0, 0, bg_opacity / 3)` stays, because its depth is a function of
+    the widget's own translucency: a widget you can see through casts a shadow
+    you can see through, and pinning it to `Palette::shadow()` would make a
+    nearly invisible widget cast a solid one. Both shadows in this module carry
+    their own assertions, because the sweep waves black through at any alpha
+    and is blind to both by design.
+  - **The fixture-coverage lesson from module 21 was applied up front and
+    earned its keep immediately.** `full_mgr` was built by enumerating the
+    renderer's `if`s rather than its colours — `layer_visible`, `edit_mode`,
+    per-widget `visible`, `picker_open`, the selection test, the five
+    `WidgetKind` arms and the empty-note branch inside one of them — and four
+    of the forty-seven defects do nothing but switch a branch off, purely to
+    prove that `the_fixture_takes_every_branch_the_widget_layer_has` notices.
+    Zero defects escaped for want of a branch, against three in module 21.
+  - **Two did escape, for a different reason, and it is the other half of the
+    same rule.** "The Disk meter's label is promoted to body text" and "the
+    battery's estimate is promoted to body text" both came back
+    `*** NO TEST FAILED ***`. The wash test's table of content colours had one
+    entry per *kind* of site rather than one per *source* site: `"CPU"` was
+    listed and `"Memory"` and `"Disk"` were not, though all three are separate
+    `commands.push` calls, and the battery's estimate was not listed at all.
+    **A representative sample is not a per-site check.** So the width rule has
+    two halves and they fail independently: the *fixture* decides which
+    branches draw at all, and the *assertion table* decides which of the drawn
+    sites anyone looks at. Module 21 lost three defects to the first; this
+    module lost two to the second, with a fixture that was complete. The table
+    now carries a comment saying it must not be shortened, since a shortened
+    table looks tidier and reads as an improvement.
+  - **Extra catchers are worth chasing down even though the harness tolerates
+    them.** Widening the wash table meant four defects were now caught by a
+    test their declaration did not name. The harness only reports the reverse
+    (`[MISSING:]`), so nothing would have complained — but a declaration that
+    understates what a defect proves is a declaration that will not notice when
+    that coverage later disappears. All four were updated.
 
 **Trigger:** this is not blocked on anything. It is sequenced after the shell
 event loop (`TD-C-THE-SHELL-CAN-DRAW-ITSELF-AND-NOBODY-CAN-ASK-IT-TO`) only
@@ -62889,3 +63098,142 @@ Two smaller notes for whoever picks that up:
   possibility" shape and leaves less behind.
 - Do not bulk-`allow` the lints in kernel modules to clear the count. The
   userspace crates that did this are recorded above as a warning, not a model.
+
+### 2026-08-22 — that 18 000 triaged, and two of the claims above corrected
+
+The paragraph above is right that 18 000 warnings exist and wrong about what
+they mean. `scripts/clippy-sites.py --by-context` now splits them by enclosing
+scope (see §286), giving **9 751 production / 8 386 self-test / 24 test**.
+Within production:
+
+| lint | production | self-test |
+|---|---:|---:|
+| `arithmetic_side_effects` | 4 893 | 2 545 |
+| `indexing_slicing` | 4 455 | 1 428 |
+| `expect_used` | **0** | 3 509 |
+| `unwrap_used` | **0** | 877 |
+| `panic` | **3** | 21 |
+
+So the second bullet of "what this does NOT cover" — direct `panic!` — was
+never a large backlog. It is three sites, and all three were adjudicated:
+
+- `main.rs:5882` — aborts the boot when syscall dispatch is broken under live
+  filtering. Correct: a kernel that cannot dispatch syscalls should stop
+  loudly, and this one shipped broken once already (stale `MAX_SYSCALL_NR`).
+- `sync.rs:962` — a proven self-deadlock. Correct, and already carries a
+  "## Why it panics" section arguing it: the alternative is spinning to the
+  boot test's timeout with no indication of which lock was involved.
+- `mm/kvspace.rs:238` — **fixed**, see below.
+
+The remaining ~9 300 production sites are all `arithmetic_side_effects` and
+`indexing_slicing`. That is still a real backlog and still unworked, but it is
+one kind of work, not five.
+
+**Do not prioritise it by count.** The per-file ranking puts
+`kernel/src/proc/elf.rs` first by a wide margin, which reads as "the ELF parser
+handles attacker-supplied executables and is the worst file in the tree". It is
+not: every one of those sites is in a `build_*_elf` function that *constructs*
+a synthetic ELF for a self-test, writing constants into a `Vec` of known size.
+They are test fixtures that happen to live in a production module, and they are
+now classified as such. Ranking by count points at the safest code in the file.
+
+The criterion that matters is the one CLAUDE.md states — "a potential DoS if an
+attacker can shape the input" — which picks out a different list: the
+decompressors (`fs/zstd.rs`, `fs/xz.rs`, `fs/bzip2.rs`, `fs/sevenz.rs`,
+`fs/compress.rs`), the wire parsers (`net/tcp.rs`, `net/tls.rs`, `net/ssh.rs`,
+`net/firewall.rs`), `drm/edid.rs` (bytes supplied by whatever monitor is
+plugged in), and the untrusted-image filesystems (`fs/fat.rs`,
+`fs/ext4/driver.rs`). Start there.
+
+**Correction 1: `kvspace::validate` was not the boot check it said it was.**
+Its doc read "Call once at boot to catch configuration errors", and no boot
+path called it — its only caller was this module's own `self_test`, so the
+check ran when the self-test ran and never otherwise. The module's blanket
+`#![allow(dead_code)]` meant nothing pointed out the gap. Every region it
+compares is a compile-time constant, so the question was always a compile-time
+one: it is now `const _: () = assert!(first_overlap().is_none(), …)`, which
+fails the **build**. Verified by moving `FAULT_TEST` onto `PT_SELFTEST` and
+confirming `error[E0080]: evaluation panicked`.
+
+**Correction 2: "the exit status is 1 when it finds something" was false.**
+`scan-unwrap.py`'s `main()` returned 0 unconditionally, so any caller written
+as `if scan-unwrap.py; then` would have succeeded on a tree full of findings.
+Nothing called it, so nothing noticed. Now it returns 1 on findings *and* is
+wired into `scripts/boot-test.sh` as `check_production_unwrap`, next to the
+user-access gate. Verified by injecting `Some(1u64).unwrap()` into
+`kvspace::identify` and confirming exit 1, then removing it and confirming 0.
+
+Those two are the same defect wearing different clothes: **a guard whose
+documentation asserts an enforcement that nothing performs.** It is the third
+instance in this file — `write_user_image`'s safety contract asserted what its
+caller happened to arrange (§285) — and it is worth checking for directly,
+because in all three cases the code read correctly and only the *wiring* was
+missing. Two questions catch it: does anything call this, and does anyone
+check what it returns?
+
+### 2026-08-22 — sweep 1 of that backlog: `drm/edid.rs` 100 → 0, and six blanket allows with it
+
+First file off the attacker-facing list above. `kernel/src/drm/edid.rs` parses
+the 128-byte block a monitor volunteers over the DDC wire — a surface with real
+CVE history in Linux — and it is now at **zero** `indexing_slicing` and
+**zero** `arithmetic_side_effects` findings, with **no `#[allow]` left anywhere
+in the file**. Whole-kernel total 18 173 → 18 122.
+
+That second clause is the part worth reading twice. The file's clippy count
+*already* read zero for `arithmetic_side_effects` before this work, because six
+blanket `#[allow(clippy::arithmetic_side_effects)]` attributes sat on the
+functions that do the arithmetic. **A zero produced by a suppression looks
+exactly like a zero produced by a fix**, and only one of them survives the next
+edit — a blanket allow on a function blesses whatever arithmetic a later change
+adds *inside* it. Neutralising the six (temporarily, via
+`#[cfg_attr(never_set, allow(…))]`) exposed 17 hidden sites. None was a live
+bug — every one was provably in range given u8/u16/u32 widths — but "provably
+in range" was an argument in a comment, not a property of the code.
+
+**The fix shape, in two kinds.** They are genuinely different and were treated
+differently rather than with one blanket rewrite:
+
+| kind | example | fix |
+|---|---|---|
+| bound is *known* — a fixed offset into a fixed-size block | 19 `data[N]` reads, the four 18-byte descriptor slots, the fixture builder | put the bound in the **type**: `&[u8; 128]`, `&[u8; 18]`, `[u8; 128]`. Clippy does not fire on a constant index *or a constant range* into an array — verified empirically, it was the one thing I was unsure of when planning this |
+| bound is *attacker-derived* — read out of the monitor's own bytes | the CEA data-block walk (`pos`, `length`, `dtd_offset`) | `get` / `checked_*` / `saturating_*`, with the guard folded **into** the operation |
+
+Concretely, on the second kind: `parse_detailed_timing` had
+`if htotal > 0 && vtotal > 0 { … if denom > 0 { numer / denom } else { 60 } }`
+— a correct guard standing *next* to the division. It is now
+`numer.checked_div(denom)…unwrap_or(60)`, where the check and the division are
+one operation and cannot drift apart. Same move in `decode_manufacturer_id`:
+`if c1 > 0 && c1 <= 26 { b'A' + c1 - 1 }` became `field.checked_sub(1)`, since
+0 is both "not a letter" and the value that would underflow — one operation
+decides both, and it replaced three copies of the guarded expression.
+
+Two incidental finds, neither a lint issue:
+
+- `EdidInfo::name_str` sliced `&name[..self.monitor_name_len]` on a **`pub`**
+  field. The parser never sets it past 13; a caller building an `EdidInfo` by
+  hand can. Now `get(..len).unwrap_or(name)` — a truncated name in the display
+  path beats a panic.
+- The self-test asked `modes.is_empty()` and then indexed `modes[0]`. Splitting
+  one question into two checks is what forced the index; `modes.first()` in a
+  `let … else` answers both.
+
+**Fixture code counts too, and the array move is why.** `build_test_edid` built
+into a `vec![0u8; 128]`, so ~48 constant-offset writes were flagged. Changing
+one line — the `Vec` to `[u8; EDID_BLOCK_SIZE]` — cleared all of them, along
+with the sixth blanket allow, which turned out to be dead afterwards. This is
+the cheapest ratio in the sweep and the same lesson as `proc/elf.rs` above,
+read the other way: those fixtures are not dangerous, but they are *free* to
+fix when the container can carry its own length.
+
+**Method note for the remaining files.** Grep the file for `#[allow(` before
+believing its count, and re-measure after the change rather than assuming —
+the count here moved 100 → 51 → 0 across three passes, and the middle number
+was only visible because the paths in `--message-format=short` use backslashes
+on Windows and my first `grep 'drm/edid.rs'` silently matched nothing. **A
+grep that returns zero and a file that is clean are indistinguishable until
+you check the total.**
+
+Next on the list, unchanged: the decompressors (`fs/zstd.rs` 299, `fs/xz.rs`
+144, `fs/compress.rs` 110, `fs/sevenz.rs` 92, `fs/bzip2.rs` 88), the wire
+parsers (`net/tcp.rs` 182, `net/ssh.rs` 104, `net/tls.rs` 99,
+`net/firewall.rs` 87), then `fs/fat.rs` 140 and `fs/ext4/driver.rs` 104.

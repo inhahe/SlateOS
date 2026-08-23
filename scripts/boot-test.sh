@@ -2418,6 +2418,86 @@ check_recursive_locks() {
 
 check_recursive_locks
 
+# Keep kernel writes to user memory inside the validated primitives.
+#
+# Same placement rationale as the two checks above: it costs milliseconds, the
+# build costs ten minutes, and a check that cannot run must not look like a
+# check that passed.
+#
+# The failure it guards is the quietest one in the tree.  Writing to a user page
+# through the HHDM alias of its physical frame is a write to a *kernel* address
+# in a writable mapping, so neither SMAP nor the page's own write-protect bit
+# applies -- a copy-on-write page gets modified in place and the process sharing
+# it silently diverges, with no fault and no log line.  Unlike
+# `W-KERNEL-COW-WRITE`, which at least announces itself as a ring-0 #PF, nothing
+# reports this at all, which is why it is worth a pre-build gate rather than a
+# boot-time self-test.
+check_user_access_sites() {
+    local py=""
+    if command -v python &>/dev/null; then
+        py=python
+    elif command -v python3 &>/dev/null; then
+        py=python3
+    else
+        echo "=== User-access-site check: skipped (no python) ===" >&2
+        return 0
+    fi
+
+    echo "=== Checking kernel writes to user memory ==="
+    if "$py" "$PROJECT_ROOT/scripts/check-user-access-sites.py"; then
+        return 0
+    fi
+
+    echo "" >&2
+    echo "ERROR: refusing to build.  Each report above either opens a SMAP" >&2
+    echo "window outside mm/user.rs, or writes through the HHDM alias of a page" >&2
+    echo "it resolved with page_table::translate -- which reports a frame" >&2
+    echo "without regard to whether the mapping is writable.  Route it through" >&2
+    echo "mm::user::copy_to_user_as, which checks WRITABLE and breaks a CoW" >&2
+    echo "before writing.  If the frame genuinely belongs to no address space" >&2
+    echo "yet, add the file to ALLOWED_HHDM_WRITERS with a note saying why." >&2
+    exit 1
+}
+
+check_user_access_sites
+
+# Keep `.unwrap()` / `.expect()` out of kernel production paths.
+#
+# The count reached zero on 2026-08-22 and the script that measured it was
+# documented as gateable ("exit status is 1 when it finds something") -- but it
+# returned 0 unconditionally, and no caller existed to notice. A count at zero
+# with nothing holding it there is a count on its way back up: the only reason
+# it is cheap to keep at zero is that a regression is caught by the commit that
+# introduces it, and that only happens if something checks.
+check_production_unwrap() {
+    local py=""
+    if command -v python &>/dev/null; then
+        py=python
+    elif command -v python3 &>/dev/null; then
+        py=python3
+    else
+        echo "=== Production unwrap/expect check: skipped (no python) ===" >&2
+        return 0
+    fi
+
+    echo "=== Checking for unwrap/expect in kernel production paths ==="
+    if "$py" "$PROJECT_ROOT/scripts/scan-unwrap.py" --summary; then
+        return 0
+    fi
+
+    echo "" >&2
+    echo "ERROR: refusing to build.  Each site above is an .unwrap()/.expect()" >&2
+    echo "reachable from a kernel production path, where a panic takes the" >&2
+    echo "machine down -- a denial of service for any of them an attacker can" >&2
+    echo "steer.  Return the error with ?, or restructure so the failure cannot" >&2
+    echo "be represented (design-decisions.md 282 lists the three shapes)." >&2
+    echo "Test code is exempt and detected automatically; if a genuine test" >&2
+    echo "site is being reported, its enclosing fn needs 'test' in its name." >&2
+    exit 1
+}
+
+check_production_unwrap
+
 # Step 1: Build
 if [ "$NO_BUILD" -eq 0 ]; then
     check_free_space "before building"

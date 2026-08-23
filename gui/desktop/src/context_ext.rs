@@ -12,27 +12,47 @@
 //! - Settings page to see and disable individual extensions.
 //! - Rate limit: if a handler takes >200ms, skip it with "loading..." entry.
 
-use guitk::color::Color;
+use appearance::Palette;
 use guitk::idseq::IdSeq;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 
 // ============================================================================
-// Catppuccin Mocha palette
+// Colour
 // ============================================================================
-
-const BASE: Color = Color::from_hex(0x1E1E2E);
-const MANTLE: Color = Color::from_hex(0x181825);
-const SURFACE0: Color = Color::from_hex(0x313244);
-const SURFACE1: Color = Color::from_hex(0x45475A);
-const TEXT: Color = Color::from_hex(0xCDD6F4);
-const SUBTEXT0: Color = Color::from_hex(0xA6ADC8);
-const SUBTEXT1: Color = Color::from_hex(0xBAC2DE);
-const BLUE: Color = Color::from_hex(0x89B4FA);
-const GREEN: Color = Color::from_hex(0xA6E3A1);
-const RED: Color = Color::from_hex(0xF38BA8);
-const YELLOW: Color = Color::from_hex(0xF9E2AF);
-const OVERLAY0: Color = Color::from_hex(0x6C7086);
+//
+// Every colour drawn here comes from the `&Palette` passed to
+// `render_context_menu` and to `ExtensionSettingsUI::render`, so both follow the
+// desktop's mode and accent.  Four judgements had to be made when the hardcoded
+// hexes came out, because a literal carries no role until someone assigns one:
+//
+// *Pointing at a row is said by the row, not by its contents.*  The hovered
+// row lifts one surface step — `base` menu, `surface0` highlight — which is the
+// same thing a hovered list row does in `notif_pane`, and a selected row in the
+// settings panel does the same over `mantle`.  A surface step is how this crate
+// says "here", and it costs the accent nothing.
+//
+// *One thing takes the accent: the icon of a hovered extension item.*  It was
+// a hardcoded blue that appears in no other state, and a colour that appears
+// only in one state marks that **state** — hover, which is a position, which is
+// what the accent is for.  A built-in item's icon merely brightens to `text`
+// instead.  That is a hierarchy rather than an inconsistency: an extension item
+// invokes code the shell did not write, so it gets the stronger mark of the
+// two, and the row highlight already tells you where the pointer is either way.
+//
+// *Three things are frozen, because they report facts rather than offering
+// choices*: the green/red dot that says whether an extension is enabled, and
+// the yellow "Slow" badge.  Each is the answer to a question about the
+// extension — an answer that must not change because the user picked a
+// different accent, and must not be mistaken for something clickable.
+//
+// *The shadow is the shared popup shadow.*  It was `rgba(0, 0, 0, 80)`, chosen
+// alone; `Palette::shadow()` is `rgba(0, 0, 0, 120)` and is documented as the
+// one shadow for every popup that sits on top of a window, which a context menu
+// is.  This menu is the fourth to join it, and the slight deepening is the
+// point: four popups that used to be four different depths are now one.  Note
+// that the membership sweep cannot check this, since it allows black at any
+// alpha; the shadow therefore carries its own assertion.
 
 // ============================================================================
 // Types
@@ -679,6 +699,7 @@ pub fn build_context_menu(
 /// Render a context menu into render commands.
 pub fn render_context_menu(
     menu: &[ContextMenuEntry],
+    p: &Palette,
     x: f32,
     y: f32,
     width: f32,
@@ -710,7 +731,7 @@ pub fn render_context_menu(
         offset_y: 4.0,
         blur: 12.0,
         spread: 0.0,
-        color: Color::rgba(0, 0, 0, 80),
+        color: p.shadow(),
         corner_radii: CornerRadii::all(corner),
     });
 
@@ -720,7 +741,7 @@ pub fn render_context_menu(
         y,
         width,
         height: total_height,
-        color: BASE,
+        color: p.base,
         corner_radii: CornerRadii::all(corner),
     });
 
@@ -730,7 +751,7 @@ pub fn render_context_menu(
         y,
         width,
         height: total_height,
-        color: SURFACE1,
+        color: p.surface1,
         line_width: 1.0,
         corner_radii: CornerRadii::all(corner),
     });
@@ -746,7 +767,7 @@ pub fn render_context_menu(
                     y1: sep_y,
                     x2: x + width - 12.0,
                     y2: sep_y,
-                    color: SURFACE0,
+                    color: p.surface0,
                     width: 1.0,
                 });
                 cy += separator_height;
@@ -759,7 +780,7 @@ pub fn render_context_menu(
                         y: cy,
                         width: width - 8.0,
                         height: item_height,
-                        color: SURFACE0,
+                        color: p.surface0,
                         corner_radii: CornerRadii::all(4.0),
                     });
                 }
@@ -770,7 +791,7 @@ pub fn render_context_menu(
                     y: cy + 5.0,
                     text: item.icon().to_string(),
                     font_size: 13.0,
-                    color: if hovered { TEXT } else { SUBTEXT1 },
+                    color: if hovered { p.text } else { p.subtext1 },
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
                     overflow: TextOverflow::Clip,
@@ -782,7 +803,7 @@ pub fn render_context_menu(
                     y: cy + 6.0,
                     text: item.label().to_string(),
                     font_size: 13.0,
-                    color: if hovered { TEXT } else { SUBTEXT1 },
+                    color: if hovered { p.text } else { p.subtext1 },
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
                     overflow: TextOverflow::Clip,
@@ -795,7 +816,7 @@ pub fn render_context_menu(
                         y: cy + 7.0,
                         text: shortcut.to_string(),
                         font_size: 11.0,
-                        color: OVERLAY0,
+                        color: p.overlay0,
                         font_weight: FontWeightHint::Light,
                         max_width: None,
                         overflow: TextOverflow::Clip,
@@ -819,7 +840,7 @@ pub fn render_context_menu(
                         y: cy,
                         width: width - 8.0,
                         height: item_height,
-                        color: SURFACE0,
+                        color: p.surface0,
                         corner_radii: CornerRadii::all(4.0),
                     });
                 }
@@ -831,7 +852,7 @@ pub fn render_context_menu(
                     y: cy + 5.0,
                     text: icon_text.to_string(),
                     font_size: 13.0,
-                    color: if hovered { BLUE } else { SUBTEXT0 },
+                    color: if hovered { p.accent } else { p.subtext0 },
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
                     overflow: TextOverflow::Clip,
@@ -849,11 +870,11 @@ pub fn render_context_menu(
                     text: display_label,
                     font_size: 13.0,
                     color: if *slow {
-                        OVERLAY0
+                        p.overlay0
                     } else if hovered {
-                        TEXT
+                        p.text
                     } else {
-                        SUBTEXT1
+                        p.subtext1
                     },
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
@@ -867,7 +888,7 @@ pub fn render_context_menu(
                         y: cy + 7.0,
                         text: sc.clone(),
                         font_size: 11.0,
-                        color: OVERLAY0,
+                        color: p.overlay0,
                         font_weight: FontWeightHint::Light,
                         max_width: None,
                         overflow: TextOverflow::Clip,
@@ -881,7 +902,7 @@ pub fn render_context_menu(
                         y: cy + 5.0,
                         text: "\u{25B6}".to_string(),
                         font_size: 10.0,
-                        color: SUBTEXT0,
+                        color: p.subtext0,
                         font_weight: FontWeightHint::Regular,
                         max_width: None,
                         overflow: TextOverflow::Clip,
@@ -954,7 +975,7 @@ impl ExtensionSettingsUI {
     }
 
     /// Render the settings panel.
-    pub fn render(&self, x: f32, y: f32, width: f32) -> Vec<RenderCommand> {
+    pub fn render(&self, p: &Palette, x: f32, y: f32, width: f32) -> Vec<RenderCommand> {
         let mut commands = Vec::new();
         let padding = 12.0;
         let mut cy = y + padding - self.scroll_y;
@@ -965,7 +986,7 @@ impl ExtensionSettingsUI {
             y: cy,
             text: "Context Menu Extensions".to_string(),
             font_size: 18.0,
-            color: TEXT,
+            color: p.text,
             font_weight: FontWeightHint::Bold,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -978,7 +999,7 @@ impl ExtensionSettingsUI {
             y: cy,
             width: width - padding * 2.0,
             height: 28.0,
-            color: SURFACE0,
+            color: p.surface0,
             corner_radii: CornerRadii::all(6.0),
         });
         let search_display = if self.search_text.is_empty() {
@@ -992,9 +1013,9 @@ impl ExtensionSettingsUI {
             text: search_display,
             font_size: 12.0,
             color: if self.search_text.is_empty() {
-                OVERLAY0
+                p.overlay0
             } else {
-                TEXT
+                p.text
             },
             font_weight: FontWeightHint::Regular,
             max_width: None,
@@ -1010,7 +1031,7 @@ impl ExtensionSettingsUI {
                 y: cy,
                 text: "No extensions registered".to_string(),
                 font_size: 13.0,
-                color: SUBTEXT0,
+                color: p.subtext0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
                 overflow: TextOverflow::Clip,
@@ -1021,7 +1042,7 @@ impl ExtensionSettingsUI {
                 let row_h = 48.0;
 
                 // Row background.
-                let row_bg = if selected { SURFACE0 } else { MANTLE };
+                let row_bg = if selected { p.surface0 } else { p.mantle };
                 commands.push(RenderCommand::FillRect {
                     x: x + padding,
                     y: cy,
@@ -1032,7 +1053,7 @@ impl ExtensionSettingsUI {
                 });
 
                 // Enable/disable indicator.
-                let status_color = if ext.enabled { GREEN } else { RED };
+                let status_color = if ext.enabled { p.green } else { p.red };
                 commands.push(RenderCommand::FillRect {
                     x: x + padding + 8.0,
                     y: cy + 16.0,
@@ -1048,7 +1069,7 @@ impl ExtensionSettingsUI {
                     y: cy + 6.0,
                     text: ext.label.clone(),
                     font_size: 13.0,
-                    color: if ext.enabled { TEXT } else { SUBTEXT0 },
+                    color: if ext.enabled { p.text } else { p.subtext0 },
                     font_weight: FontWeightHint::Bold,
                     max_width: None,
                     overflow: TextOverflow::Clip,
@@ -1060,7 +1081,7 @@ impl ExtensionSettingsUI {
                     y: cy + 26.0,
                     text: ext.app_name.clone(),
                     font_size: 11.0,
-                    color: OVERLAY0,
+                    color: p.overlay0,
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
                     overflow: TextOverflow::Clip,
@@ -1073,7 +1094,7 @@ impl ExtensionSettingsUI {
                         y: cy + 6.0,
                         text: "Slow".to_string(),
                         font_size: 10.0,
-                        color: YELLOW,
+                        color: p.yellow,
                         font_weight: FontWeightHint::Bold,
                         max_width: None,
                         overflow: TextOverflow::Clip,
@@ -1087,7 +1108,7 @@ impl ExtensionSettingsUI {
                         y: cy + 26.0,
                         text: format!("{:.0}ms avg", ext.response_time_avg_ms),
                         font_size: 10.0,
-                        color: OVERLAY0,
+                        color: p.overlay0,
                         font_weight: FontWeightHint::Light,
                         max_width: None,
                         overflow: TextOverflow::Clip,
@@ -1116,7 +1137,8 @@ mod tests {
         clippy::expect_used,
         clippy::panic,
         clippy::indexing_slicing,
-        clippy::arithmetic_side_effects
+        clippy::arithmetic_side_effects,
+        clippy::float_cmp
     )]
 
     use super::*;
@@ -1497,7 +1519,7 @@ mod tests {
         let mgr = make_mgr();
         let ctx = ContextTarget::file("test.txt", Some("txt"));
         let menu = build_context_menu(&ctx, &mgr);
-        let cmds = render_context_menu(&menu, 100.0, 100.0, 250.0, None);
+        let cmds = render_context_menu(&menu, &Palette::for_mode(false), 100.0, 100.0, 250.0, None);
         assert!(!cmds.is_empty());
     }
 
@@ -1506,7 +1528,14 @@ mod tests {
         let mgr = make_mgr();
         let ctx = ContextTarget::file("test.txt", Some("txt"));
         let menu = build_context_menu(&ctx, &mgr);
-        let cmds = render_context_menu(&menu, 100.0, 100.0, 250.0, Some(0));
+        let cmds = render_context_menu(
+            &menu,
+            &Palette::for_mode(false),
+            100.0,
+            100.0,
+            250.0,
+            Some(0),
+        );
         // Hovered item should produce extra FillRect.
         assert!(cmds.len() > 5);
     }
@@ -1548,7 +1577,7 @@ mod tests {
     #[test]
     fn settings_ui_empty() {
         let ui = ExtensionSettingsUI::new(&[]);
-        let cmds = ui.render(0.0, 0.0, 400.0);
+        let cmds = ui.render(&Palette::for_mode(false), 0.0, 0.0, 400.0);
         assert!(!cmds.is_empty());
     }
 
@@ -1556,7 +1585,7 @@ mod tests {
     fn settings_ui_with_extensions() {
         let ext = ContextMenuExtension::new(1, "Test Ext", TargetKind::Any, "test_app", "cmd", 1);
         let ui = ExtensionSettingsUI::new(&[ext]);
-        let cmds = ui.render(0.0, 0.0, 400.0);
+        let cmds = ui.render(&Palette::for_mode(false), 0.0, 0.0, 400.0);
         assert!(cmds.len() > 5);
     }
 
@@ -1580,5 +1609,434 @@ mod tests {
         ui.app_filter = Some("app1".to_string());
         let filtered = ui.filtered_extensions();
         assert_eq!(filtered.len(), 1);
+    }
+
+    // ========================================================================
+    // The palette conversion
+    // ========================================================================
+
+    use crate::draw_check::assert_nothing_is_drawn_and_never_seen;
+    use crate::palette_check::assert_drawn_from;
+    // Only the tests name a colour type now. Production code here reads
+    // roles off the palette it was handed and never constructs one.
+    use guitk::color::Color;
+
+    const MX: f32 = 100.0;
+    const MY: f32 = 100.0;
+    const MW: f32 = 250.0;
+
+    /// The accents a test may sweep without a frozen neighbour coinciding with
+    /// the accented site on exactly the accent that matters. `YELLOW`, `GREEN`
+    /// and `RED` are excluded because this module freezes all three.
+    const SAFE_ACCENTS: [Color; 4] = [
+        appearance::BLUE,
+        appearance::MAUVE,
+        appearance::TEAL,
+        appearance::SAPPHIRE,
+    ];
+
+    /// A glyph no built-in item uses.
+    ///
+    /// It matters that this is distinctive: a built-in item's icon and an
+    /// extension's are drawn at the same x and the same font size, so geometry
+    /// cannot tell them apart and the extractor keys on the glyph instead.
+    const EXT_ICON: &str = "\u{2699}";
+
+    /// A menu that takes every branch `render_context_menu` has.
+    ///
+    /// The shape is not arbitrary and must not be trimmed. Every optional part
+    /// of a row — a built-in's shortcut hint, an extension's shortcut hint, the
+    /// icon fallback, the "loading..." label a slow extension gets, the submenu
+    /// arrow — is drawn in its own colour, so an entry that omits one takes a
+    /// colour site out of *every* test in this module at once. See
+    /// `the_fixture_menu_takes_every_branch_the_renderer_has`, which pins it.
+    ///
+    /// `Open` has no shortcut and `Copy` does, so both halves of that branch
+    /// are covered; `Compress` is the row the accent test hovers, and carries
+    /// `EXT_ICON` so the extractor can find it; `Scan` is slow, has no icon of
+    /// its own, and has a submenu.
+    fn ext_menu() -> Vec<ContextMenuEntry> {
+        vec![
+            ContextMenuEntry::Builtin(BuiltinMenuItem::Open),
+            ContextMenuEntry::Builtin(BuiltinMenuItem::Copy),
+            ContextMenuEntry::Separator,
+            ContextMenuEntry::Extension {
+                id: 1,
+                label: "Compress".to_string(),
+                icon: Some(EXT_ICON.to_string()),
+                shortcut: Some("Ctrl+K".to_string()),
+                slow: false,
+                submenu: Vec::new(),
+            },
+            ContextMenuEntry::Extension {
+                id: 2,
+                label: "Scan".to_string(),
+                icon: None,
+                shortcut: None,
+                slow: true,
+                submenu: vec![SubMenuItem::new("Quick scan", "quick")],
+            },
+        ]
+    }
+
+    /// The index of the extension entry, which is what `hovered_index` takes.
+    fn ext_index(menu: &[ContextMenuEntry]) -> usize {
+        menu.iter()
+            .position(|e| matches!(e, ContextMenuEntry::Extension { .. }))
+            .expect("the fixture menu has an extension entry")
+    }
+
+    /// A settings panel holding one enabled extension, one disabled one, and
+    /// one slow enough to earn the "Slow" badge.
+    fn settings_ui() -> ExtensionSettingsUI {
+        let enabled = ContextMenuExtension::new(1, "Compress", TargetKind::Any, "archiver", "c", 1);
+        let mut disabled =
+            ContextMenuExtension::new(2, "Open in Editor", TargetKind::Any, "editor", "c", 1);
+        disabled.enabled = false;
+        let mut slow = ContextMenuExtension::new(3, "Scan", TargetKind::Any, "scanner", "c", 1);
+        // Twice, because the average is exponential and one invocation is not
+        // enough to carry it over the 200ms threshold from a start of zero.
+        slow.record_invocation(2000.0);
+        slow.record_invocation(2000.0);
+        assert!(slow.is_slow(), "the slow fixture is not actually slow");
+        ExtensionSettingsUI::new(&[enabled, disabled, slow])
+    }
+
+    /// Every render this module can produce, in one mode.
+    fn every_render(p: &Palette) -> Vec<(Vec<RenderCommand>, String)> {
+        let menu = ext_menu();
+        let ext_at = ext_index(&menu);
+        let mut ui_selected = settings_ui();
+        ui_selected.selected = Some(1);
+        let mut ui_searching = settings_ui();
+        ui_searching.search_text = "compress".to_string();
+        vec![
+            (
+                render_context_menu(&menu, p, MX, MY, MW, None),
+                "menu at rest".to_string(),
+            ),
+            (
+                render_context_menu(&menu, p, MX, MY, MW, Some(0)),
+                "menu, built-in hovered".to_string(),
+            ),
+            (
+                render_context_menu(&menu, p, MX, MY, MW, Some(ext_at)),
+                "menu, extension hovered".to_string(),
+            ),
+            (
+                settings_ui().render(p, 0.0, 0.0, 400.0),
+                "settings".to_string(),
+            ),
+            (
+                ui_selected.render(p, 0.0, 0.0, 400.0),
+                "settings, row selected".to_string(),
+            ),
+            (
+                ui_searching.render(p, 0.0, 0.0, 400.0),
+                "settings, searching".to_string(),
+            ),
+            (
+                ExtensionSettingsUI::new(&[]).render(p, 0.0, 0.0, 400.0),
+                "settings, no extensions".to_string(),
+            ),
+        ]
+    }
+
+    fn fills(cmds: &[RenderCommand], keep: impl Fn(f32, f32, f32, f32) -> bool) -> Vec<Color> {
+        cmds.iter()
+            .filter_map(|cmd| match cmd {
+                RenderCommand::FillRect {
+                    x,
+                    y,
+                    width,
+                    height,
+                    color,
+                    ..
+                } if keep(*x, *y, *width, *height) => Some(*color),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The colour of every `Text` command whose glyph is exactly `want`.
+    fn texts_saying(cmds: &[RenderCommand], want: &str) -> Vec<Color> {
+        cmds.iter()
+            .filter_map(|cmd| match cmd {
+                RenderCommand::Text { text, color, .. } if text == want => Some(*color),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The status dot beside each row: the only 8x8 fill the panel draws.
+    fn status_dots(cmds: &[RenderCommand]) -> Vec<Color> {
+        fills(cmds, |_, _, w, h| w == 8.0 && h == 8.0)
+    }
+
+    // -- The sweep -----------------------------------------------------------
+
+    /// Nothing this module draws is outside the palette it was handed.
+    ///
+    /// Rendered in both modes; the light render is the one that matters, since
+    /// every constant deleted here was a Mocha value and Mocha is not a subset
+    /// of Latte. `p.shadow()` is black, which the sweep allows at any alpha.
+    #[test]
+    fn every_colour_the_context_menu_draws_comes_from_its_palette() {
+        for light in [false, true] {
+            let p = Palette::for_mode(light);
+            for (cmds, what) in every_render(&p) {
+                assert_drawn_from(&p, &cmds, &[], &what);
+            }
+        }
+    }
+
+    /// Nothing is drawn that covers no pixels or is immediately painted over.
+    #[test]
+    fn the_menu_draws_nothing_that_is_immediately_erased() {
+        for light in [false, true] {
+            let p = Palette::for_mode(light);
+            for (cmds, what) in every_render(&p) {
+                assert_nothing_is_drawn_and_never_seen(&cmds, &what);
+            }
+        }
+    }
+
+    /// The fixture menu draws every branch the renderer has.
+    ///
+    /// Three defects escaped the sweep on this module's first proof run — a
+    /// built-in's shortcut hint, a slow extension's label, and the submenu
+    /// arrow. None of them was a weak assertion: the fixture simply never
+    /// produced those commands, so the sweep was handed a render in which those
+    /// three colours did not appear. **The sweep is only as wide as the render
+    /// it is given**, which makes fixture coverage a property the whole module
+    /// rests on and nothing else was checking.
+    ///
+    /// So it is checked here, and checked against the *render* rather than
+    /// against the fixture's shape, because what matters is that the commands
+    /// come out — a branch can stop drawing without the entry that feeds it
+    /// changing at all. The two `shortcut()` assertions are the exception, and
+    /// deliberately so: whether a built-in has a shortcut is a fact about the
+    /// item, and both arms of that `if let` have to be taken by *some* row.
+    #[test]
+    fn the_fixture_menu_takes_every_branch_the_renderer_has() {
+        assert!(
+            BuiltinMenuItem::Open.shortcut().is_none(),
+            "the fixture no longer covers a built-in without a shortcut"
+        );
+        assert!(
+            BuiltinMenuItem::Copy.shortcut().is_some(),
+            "the fixture no longer covers a built-in with a shortcut"
+        );
+
+        let p = Palette::for_mode(false);
+        let menu = ext_menu();
+        let cmds = render_context_menu(&menu, &p, MX, MY, MW, None);
+
+        assert!(
+            cmds.iter().any(|c| matches!(c, RenderCommand::Line { .. })),
+            "no separator is drawn"
+        );
+        for (glyph, what) in [
+            ("Ctrl+C", "a built-in's shortcut hint"),
+            ("Ctrl+K", "an extension's shortcut hint"),
+            (
+                "\u{1F50C}",
+                "the icon an extension without one falls back to",
+            ),
+            ("Scan (loading...)", "a slow extension's label"),
+            ("\u{25B6}", "the submenu arrow"),
+        ] {
+            assert_eq!(
+                texts_saying(&cmds, glyph).len(),
+                1,
+                "{what} is not drawn, so no test in this module checks its colour"
+            );
+        }
+    }
+
+    // -- The one accent site -------------------------------------------------
+
+    /// Pointing at an extension item marks its icon with the accent.
+    ///
+    /// This is the module's only accent site, and it is one because the colour
+    /// appears in exactly one state — hover — and a colour that appears only in
+    /// one state marks that state. Hover is a position, which is what the
+    /// accent is for. Asserting *equality with the accent* rather than
+    /// inequality with the old hardcoded blue is deliberate: an assertion whose
+    /// truth depends on which accent the user picked is a bug in the test.
+    #[test]
+    fn a_hovered_extensions_icon_follows_the_accent() {
+        let menu = ext_menu();
+        let ext_at = ext_index(&menu);
+        for light in [false, true] {
+            for accent in SAFE_ACCENTS {
+                let mut p = Palette::for_mode(light);
+                p.accent = accent;
+
+                let hovered = render_context_menu(&menu, &p, MX, MY, MW, Some(ext_at));
+                let icon = texts_saying(&hovered, EXT_ICON);
+                assert_eq!(icon.len(), 1, "expected one extension icon (light={light})");
+                assert_eq!(
+                    icon[0], p.accent,
+                    "a hovered extension's icon is not the accent (light={light})"
+                );
+
+                // And it is the accent only while hovered: at rest it is the
+                // recessed body colour, so the accent is carrying the state
+                // rather than decorating the row.
+                let at_rest = render_context_menu(&menu, &p, MX, MY, MW, None);
+                let idle = texts_saying(&at_rest, EXT_ICON);
+                assert_eq!(idle.len(), 1, "expected one extension icon at rest");
+                assert_eq!(
+                    idle[0], p.subtext0,
+                    "an unhovered extension's icon is not p.subtext0 (light={light})"
+                );
+            }
+        }
+    }
+
+    // -- The frozen reports --------------------------------------------------
+
+    /// Nothing that reports a fact about an extension follows the accent.
+    ///
+    /// Two kinds of site: the dot that says whether an extension is enabled,
+    /// and the "Slow" badge. Each answers a question *about the extension*, and
+    /// an answer that changes because the user picked a different accent has
+    /// stopped being an answer. The sweep cannot see this — every one of these
+    /// is a palette role either way — so it needs its own assertion.
+    #[test]
+    fn nothing_that_reports_a_fact_follows_the_accent() {
+        for light in [false, true] {
+            let baseline = {
+                let p = Palette::for_mode(light);
+                let cmds = settings_ui().render(&p, 0.0, 0.0, 400.0);
+                (status_dots(&cmds), texts_saying(&cmds, "Slow"))
+            };
+            assert_eq!(baseline.0.len(), 3, "expected three status dots");
+            assert_eq!(baseline.1.len(), 1, "expected one Slow badge");
+
+            for accent in SAFE_ACCENTS {
+                let mut p = Palette::for_mode(light);
+                p.accent = accent;
+                let cmds = settings_ui().render(&p, 0.0, 0.0, 400.0);
+                assert_eq!(
+                    status_dots(&cmds),
+                    baseline.0,
+                    "a status dot moved with the accent (light={light})"
+                );
+                assert_eq!(
+                    texts_saying(&cmds, "Slow"),
+                    baseline.1,
+                    "the Slow badge moved with the accent (light={light})"
+                );
+            }
+        }
+    }
+
+    /// An enabled extension and a disabled one never look alike.
+    ///
+    /// The dot is the only thing that tells them apart at a glance, so the two
+    /// colours must stay distinct in both modes — and each must be the role it
+    /// claims, not merely some member of the palette.
+    #[test]
+    fn an_enabled_extension_and_a_disabled_one_never_look_alike() {
+        for light in [false, true] {
+            let p = Palette::for_mode(light);
+            let cmds = settings_ui().render(&p, 0.0, 0.0, 400.0);
+            let dots = status_dots(&cmds);
+            assert_eq!(dots.len(), 3, "expected three status dots");
+            // Rows are drawn in fixture order: enabled, disabled, slow-enabled.
+            assert_eq!(dots[0], p.green, "an enabled dot is not p.green");
+            assert_eq!(dots[1], p.red, "a disabled dot is not p.red");
+            assert_ne!(
+                dots[0], dots[1],
+                "enabled and disabled are the same colour (light={light})"
+            );
+        }
+    }
+
+    // -- The surfaces --------------------------------------------------------
+
+    /// The menu's own surfaces are the palette's, not merely *a* member of it.
+    ///
+    /// The sweep proves membership; this proves identity, which is strictly
+    /// stronger and, unlike membership, can fail in dark mode too.
+    #[test]
+    fn the_menus_own_surfaces_come_from_the_palette() {
+        for light in [false, true] {
+            let p = Palette::for_mode(light);
+
+            let menu = ext_menu();
+            let cmds = render_context_menu(&menu, &p, MX, MY, MW, None);
+
+            let background = fills(&cmds, |_, _, w, _| w == MW);
+            assert_eq!(background.len(), 1, "expected one menu background");
+            assert_eq!(background[0], p.base, "the menu is not p.base");
+
+            let border: Vec<Color> = cmds
+                .iter()
+                .filter_map(|cmd| match cmd {
+                    RenderCommand::StrokeRect { color, .. } => Some(*color),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(border.len(), 1, "expected one menu border");
+            assert_eq!(border[0], p.surface1, "the menu border is not p.surface1");
+
+            // Pointing at a row lifts it one surface step above the menu.
+            let hovered = render_context_menu(&menu, &p, MX, MY, MW, Some(0));
+            let highlight = fills(&hovered, |_, _, w, _| w == MW - 8.0);
+            assert_eq!(highlight.len(), 1, "expected one hovered row highlight");
+            assert_eq!(
+                highlight[0], p.surface0,
+                "the hovered row is not p.surface0 (light={light})"
+            );
+            assert_ne!(
+                highlight[0], background[0],
+                "the hovered row is the same colour as the menu under it, so \
+                 pointing at a row says nothing (light={light})"
+            );
+
+            // A selected settings row does the same over p.mantle.
+            let mut ui = settings_ui();
+            ui.selected = Some(1);
+            let rows = fills(&ui.render(&p, 0.0, 0.0, 400.0), |_, _, _, h| h == 48.0);
+            assert_eq!(rows.len(), 3, "expected three settings rows");
+            assert_eq!(rows[0], p.surface0, "the selected row is not p.surface0");
+            assert_eq!(rows[1], p.mantle, "an unselected row is not p.mantle");
+        }
+    }
+
+    // -- The shadow ----------------------------------------------------------
+
+    /// The menu casts the shared popup shadow, at the shared depth.
+    ///
+    /// It was `rgba(0, 0, 0, 80)`, chosen alone; `Palette::shadow()` is the one
+    /// shadow for every popup that sits on top of a window. The sweep allows
+    /// black at *any* alpha — it has to, since a shadow is not a role — so
+    /// nothing but this assertion would notice the depth drifting back.
+    #[test]
+    fn the_menu_casts_the_shared_popup_shadow() {
+        for light in [false, true] {
+            let p = Palette::for_mode(light);
+            let menu = ext_menu();
+            let shadows: Vec<Color> = render_context_menu(&menu, &p, MX, MY, MW, None)
+                .iter()
+                .filter_map(|cmd| match cmd {
+                    RenderCommand::BoxShadow { color, .. } => Some(*color),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(shadows.len(), 1, "expected one menu shadow");
+            assert_eq!(
+                shadows[0],
+                p.shadow(),
+                "the menu's shadow is not the shared popup shadow (light={light})"
+            );
+            assert!(
+                shadows[0].a < 255,
+                "the menu's shadow is opaque, so it is no longer a shadow"
+            );
+        }
     }
 }

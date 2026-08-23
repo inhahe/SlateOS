@@ -35,7 +35,6 @@
 //! - Linux `drivers/gpu/drm/drm_edid.c` for real-world quirks
 
 extern crate alloc;
-use alloc::vec;
 use alloc::vec::Vec;
 
 use crate::error::{KernelError, KernelResult};
@@ -55,6 +54,39 @@ const EDID_HEADER: [u8; 8] = [0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x00];
 
 /// CEA extension block tag.
 const CEA_EXTENSION_TAG: u8 = 0x02;
+
+/// Byte offset of the first 18-byte descriptor slot in a base block.
+const DESC_START: usize = 54;
+/// Size of one descriptor slot.  Both detailed timings and display
+/// descriptors (monitor name, range limits, …) occupy one of these.
+const DESC_LEN: usize = 18;
+/// Number of descriptor slots in a base block: bytes 54..126.
+const DESC_COUNT: usize = 4;
+
+const _: () = assert!(
+    DESC_START + DESC_LEN * DESC_COUNT <= EDID_BLOCK_SIZE,
+    "the descriptor slots must fit inside the base block"
+);
+
+/// The four 18-byte descriptor slots of a base block, as fixed-size arrays.
+///
+/// This exists so the slot arithmetic (`54 + i * 18`) is written once instead
+/// of once per caller — `parse` and `extract_monitor_name` both walk these
+/// slots, and each used to recompute the offsets itself.  Yielding
+/// `&[u8; DESC_LEN]` rather than `&[u8]` is the point: every field a
+/// descriptor parser reads is at a constant offset, so carrying the length in
+/// the type makes all of those reads infallible instead of merely
+/// bounds-checked at runtime.  The `const` assertion above is what lets this
+/// be written without a fallible path — the slots provably fit, so
+/// `chunks_exact` yields exactly `DESC_COUNT` of them.
+fn descriptors(block: &[u8; EDID_BLOCK_SIZE]) -> impl Iterator<Item = &[u8; DESC_LEN]> {
+    block
+        .get(DESC_START..)
+        .into_iter()
+        .flat_map(|rest| rest.chunks_exact(DESC_LEN))
+        .filter_map(|c| <&[u8; DESC_LEN]>::try_from(c).ok())
+        .take(DESC_COUNT)
+}
 
 // ---------------------------------------------------------------------------
 // Parsed EDID result
@@ -103,7 +135,11 @@ impl EdidInfo {
     #[must_use]
     pub fn name_str(&self) -> &[u8] {
         match &self.monitor_name {
-            Some(name) => &name[..self.monitor_name_len as usize],
+            // `monitor_name_len` is a `pub` field, so it is not this
+            // method's to assume in range: the parser never sets it past
+            // 13, but a caller that builds an `EdidInfo` by hand can.
+            // A truncated name beats a panic in the display path.
+            Some(name) => name.get(..self.monitor_name_len as usize).unwrap_or(name),
             None => b"Unknown",
         }
     }
@@ -126,79 +162,89 @@ impl EdidInfo {
 ///
 /// Returns parsed display information including all detected modes.
 pub fn parse(data: &[u8]) -> KernelResult<EdidInfo> {
-    if data.len() < EDID_BLOCK_SIZE {
-        return Err(KernelError::InvalidArgument);
-    }
+    // Take the base block as a fixed-size array *once*, here, and index that
+    // for the rest of the function.  Every read below is at a constant offset
+    // fixed by the EDID spec, so once the length is in the type they are all
+    // infallible — where against a `&[u8]` each one is a separate potential
+    // panic that only this length check makes safe, thirty-odd lines away.
+    //
+    // The bytes come from whatever monitor is plugged in, over a bus that has
+    // a long history of malformed and hostile blobs, so "the guard is up
+    // there somewhere" is not good enough: the bound belongs in the type.
+    let head: &[u8; EDID_BLOCK_SIZE] = data
+        .get(..EDID_BLOCK_SIZE)
+        .and_then(|s| <&[u8; EDID_BLOCK_SIZE]>::try_from(s).ok())
+        .ok_or(KernelError::InvalidArgument)?;
 
     // --- Validate header ---
-    if data[..8] != EDID_HEADER {
+    if head[..8] != EDID_HEADER {
         return Err(KernelError::InvalidArgument);
     }
 
     // --- Validate checksum ---
-    if !validate_checksum(&data[..EDID_BLOCK_SIZE]) {
+    if !validate_checksum(head) {
         return Err(KernelError::InvalidArgument);
     }
 
     // --- Manufacturer ID (bytes 8-9) ---
     // Encoded as three 5-bit characters: bits 14-10, 9-5, 4-0 of u16 BE.
-    let mfg_raw = u16::from_be_bytes([data[8], data[9]]);
+    let mfg_raw = u16::from_be_bytes([head[8], head[9]]);
     let manufacturer = decode_manufacturer_id(mfg_raw);
 
     // --- Product code (bytes 10-11, LE) ---
-    let product_code = u16::from_le_bytes([data[10], data[11]]);
+    let product_code = u16::from_le_bytes([head[10], head[11]]);
 
     // --- Serial number (bytes 12-15, LE) ---
-    let serial_number = u32::from_le_bytes([data[12], data[13], data[14], data[15]]);
+    let serial_number = u32::from_le_bytes([head[12], head[13], head[14], head[15]]);
 
     // --- Manufacture date (bytes 16-17) ---
-    let manufacture_week = data[16];
-    #[allow(clippy::arithmetic_side_effects)]
-    let manufacture_year = (data[17] as u16) + 1990;
+    let manufacture_week = head[16];
+    let manufacture_year = u16::from(head[17]).saturating_add(1990);
 
     // --- Version/revision (bytes 18-19) ---
-    let version = data[18];
-    let revision = data[19];
+    let version = head[18];
+    let revision = head[19];
 
     // --- Video input (byte 20) ---
-    let digital_input = (data[20] & 0x80) != 0;
+    let digital_input = (head[20] & 0x80) != 0;
 
     // --- Screen size (bytes 21-22) ---
-    let screen_width_cm = data[21];
-    let screen_height_cm = data[22];
+    let screen_width_cm = head[21];
+    let screen_height_cm = head[22];
 
     // --- Gamma (byte 23) ---
     // Stored as (gamma * 100) - 100.  Value 0xFF means gamma is defined
     // in an extension block.
-    #[allow(clippy::arithmetic_side_effects)]
-    let gamma_x100 = if data[23] == 0xFF {
+    let gamma_x100 = if head[23] == 0xFF {
         0
     } else {
-        (data[23] as u16) + 100
+        u16::from(head[23]).saturating_add(100)
     };
 
     // --- Extension count (byte 126) ---
-    let extension_count = data[126];
+    let extension_count = head[126];
 
     // --- Extract modes ---
     let mut modes = Vec::new();
 
     // 1. Detailed timing descriptors (bytes 54-125, 4 * 18 bytes).
     //    These are the highest-quality mode descriptions.
-    for i in 0..4 {
-        #[allow(clippy::arithmetic_side_effects)]
-        let offset = 54 + i * 18;
-        if let Some(mode) = parse_detailed_timing(&data[offset..offset + 18]) {
+    for desc in descriptors(head) {
+        if let Some(mode) = parse_detailed_timing(desc) {
             modes.push(mode);
         }
     }
 
-    // 2. Standard timings (bytes 38-53, 8 * 2 bytes).
-    for i in 0..8 {
-        #[allow(clippy::arithmetic_side_effects)]
-        let offset = 38 + i * 2;
-        if let Some(mode) = parse_standard_timing(data[offset], data[offset + 1], version, revision)
-        {
+    // 2. Standard timings (bytes 38-53, 8 * 2 bytes).  `chunks_exact` both
+    //    pairs the bytes and bounds the walk, so neither the offset
+    //    arithmetic nor the `offset + 1` needs to be trusted.
+    for pair in head
+        .get(38..54)
+        .into_iter()
+        .flat_map(|s| s.chunks_exact(2))
+        .filter_map(|c| <&[u8; 2]>::try_from(c).ok())
+    {
+        if let Some(mode) = parse_standard_timing(pair[0], pair[1], version, revision) {
             // Don't add duplicates (detailed timings already cover the preferred mode).
             if !modes.iter().any(|m| {
                 m.hdisplay == mode.hdisplay
@@ -211,7 +257,7 @@ pub fn parse(data: &[u8]) -> KernelResult<EdidInfo> {
     }
 
     // 3. Established timings (bytes 35-37).
-    let established = parse_established_timings(data[35], data[36], data[37]);
+    let established = parse_established_timings(head[35], head[36], head[37]);
     for mode in established {
         if !modes.iter().any(|m| {
             m.hdisplay == mode.hdisplay
@@ -223,26 +269,27 @@ pub fn parse(data: &[u8]) -> KernelResult<EdidInfo> {
     }
 
     // 4. CEA extension blocks (if present).
-    if extension_count > 0 {
-        let ext_start = EDID_BLOCK_SIZE;
-        for ext_idx in 0..extension_count as usize {
-            #[allow(clippy::arithmetic_side_effects)]
-            let ext_offset = ext_start + ext_idx * EDID_BLOCK_SIZE;
-            #[allow(clippy::arithmetic_side_effects)]
-            let ext_end = ext_offset + EDID_BLOCK_SIZE;
-            if ext_end <= data.len() {
-                let ext_block = &data[ext_offset..ext_end];
-                if ext_block[0] == CEA_EXTENSION_TAG && validate_checksum(ext_block) {
-                    let cea_modes = parse_cea_extension(ext_block);
-                    for mode in cea_modes {
-                        if !modes.iter().any(|m| {
-                            m.hdisplay == mode.hdisplay
-                                && m.vdisplay == mode.vdisplay
-                                && m.vrefresh == mode.vrefresh
-                        }) {
-                            modes.push(mode);
-                        }
-                    }
+    //
+    //    `extension_count` is a byte out of the monitor's own data, so it can
+    //    claim up to 255 blocks that are not there.  Walking the tail with
+    //    `chunks_exact` takes the claim as an upper bound rather than a fact:
+    //    a block that is not fully present is simply not yielded, so an
+    //    inflated count costs nothing and a truncated blob cannot be read past.
+    for ext_block in data
+        .get(EDID_BLOCK_SIZE..)
+        .into_iter()
+        .flat_map(|tail| tail.chunks_exact(EDID_BLOCK_SIZE))
+        .filter_map(|c| <&[u8; EDID_BLOCK_SIZE]>::try_from(c).ok())
+        .take(extension_count as usize)
+    {
+        if ext_block[0] == CEA_EXTENSION_TAG && validate_checksum(ext_block) {
+            for mode in parse_cea_extension(ext_block) {
+                if !modes.iter().any(|m| {
+                    m.hdisplay == mode.hdisplay
+                        && m.vdisplay == mode.vdisplay
+                        && m.vrefresh == mode.vrefresh
+                }) {
+                    modes.push(mode);
                 }
             }
         }
@@ -255,7 +302,7 @@ pub fn parse(data: &[u8]) -> KernelResult<EdidInfo> {
     }
 
     // --- Extract monitor name from display descriptors ---
-    let (monitor_name, monitor_name_len) = extract_monitor_name(data);
+    let (monitor_name, monitor_name_len) = extract_monitor_name(head);
 
     Ok(EdidInfo {
         manufacturer,
@@ -281,7 +328,7 @@ pub fn parse(data: &[u8]) -> KernelResult<EdidInfo> {
 // ---------------------------------------------------------------------------
 
 /// Validate that all bytes in a 128-byte block sum to 0 (mod 256).
-fn validate_checksum(block: &[u8]) -> bool {
+fn validate_checksum(block: &[u8; EDID_BLOCK_SIZE]) -> bool {
     let sum: u8 = block.iter().fold(0u8, |acc, &b| acc.wrapping_add(b));
     sum == 0
 }
@@ -290,28 +337,23 @@ fn validate_checksum(block: &[u8]) -> bool {
 ///
 /// Each letter is encoded as a 5-bit value (A=1, B=2, ..., Z=26)
 /// packed into a big-endian u16: bits 14-10 = first, 9-5 = second, 4-0 = third.
-#[allow(clippy::arithmetic_side_effects)]
 fn decode_manufacturer_id(raw: u16) -> [u8; 3] {
-    let c1 = ((raw >> 10) & 0x1F) as u8;
-    let c2 = ((raw >> 5) & 0x1F) as u8;
-    let c3 = (raw & 0x1F) as u8;
-    // Convert 1-based to ASCII: 1='A', 2='B', ...
+    /// Convert one 5-bit field to ASCII: 1='A', 2='B', ... 26='Z'.
+    ///
+    /// `checked_sub` is what makes the 1-based encoding safe rather than a
+    /// guard standing next to it: 0 is "not a letter" and is the value
+    /// that would underflow, so the same operation decides both.
+    fn letter(field: u8) -> u8 {
+        match field.checked_sub(1) {
+            Some(index) if index < 26 => b'A'.saturating_add(index),
+            _ => b'?',
+        }
+    }
+
     [
-        if c1 > 0 && c1 <= 26 {
-            b'A' + c1 - 1
-        } else {
-            b'?'
-        },
-        if c2 > 0 && c2 <= 26 {
-            b'A' + c2 - 1
-        } else {
-            b'?'
-        },
-        if c3 > 0 && c3 <= 26 {
-            b'A' + c3 - 1
-        } else {
-            b'?'
-        },
+        letter(((raw >> 10) & 0x1F) as u8),
+        letter(((raw >> 5) & 0x1F) as u8),
+        letter((raw & 0x1F) as u8),
     ]
 }
 
@@ -319,8 +361,7 @@ fn decode_manufacturer_id(raw: u16) -> [u8; 3] {
 ///
 /// Returns `None` if the descriptor is a display descriptor (first two
 /// bytes are zero) or if the timing data is invalid.
-#[allow(clippy::arithmetic_side_effects)]
-fn parse_detailed_timing(desc: &[u8]) -> Option<DrmMode> {
+fn parse_detailed_timing(desc: &[u8; DESC_LEN]) -> Option<DrmMode> {
     // Pixel clock in 10 kHz units (LE u16).  Zero means display descriptor.
     let pixel_clock_10khz = u16::from_le_bytes([desc[0], desc[1]]);
     if pixel_clock_10khz == 0 {
@@ -351,25 +392,26 @@ fn parse_detailed_timing(desc: &[u8]) -> Option<DrmMode> {
         return None;
     }
 
-    let htotal = h_active + h_blank;
-    let vtotal = v_active + v_blank;
+    // Each of these four is at most 12 bits wide, so the sums cannot come
+    // near overflowing a u32; saturating is used anyway so the property is
+    // enforced by the operation rather than asserted by this comment.
+    let htotal = h_active.saturating_add(h_blank);
+    let vtotal = v_active.saturating_add(v_blank);
 
     // Pixel clock in kHz.
-    let clock_khz = (pixel_clock_10khz as u32) * 10;
+    let clock_khz = u32::from(pixel_clock_10khz).saturating_mul(10);
 
-    // Refresh rate = pixel_clock / (htotal * vtotal).
-    let vrefresh = if htotal > 0 && vtotal > 0 {
-        // Use u64 to avoid overflow: clock_khz * 1000 / (htotal * vtotal).
-        let numer = (clock_khz as u64) * 1000;
-        let denom = (htotal as u64) * (vtotal as u64);
-        if denom > 0 {
-            (numer / denom) as u32
-        } else {
-            60
-        }
-    } else {
-        60
-    };
+    // Refresh rate = pixel_clock / (htotal * vtotal), in u64 so the
+    // product cannot wrap.  `checked_div` *is* the zero-total guard: a
+    // monitor is free to report a zero total, and folding the check into
+    // the division is what stops the two drifting apart under a later
+    // edit.  Anything unusable falls back to 60 Hz, as before.
+    let numer = u64::from(clock_khz).saturating_mul(1000);
+    let denom = u64::from(htotal).saturating_mul(u64::from(vtotal));
+    let vrefresh = numer
+        .checked_div(denom)
+        .and_then(|hz| u32::try_from(hz).ok())
+        .unwrap_or(60);
 
     // Interlace flag (byte 17, bit 7).
     let interlaced = (desc[17] & 0x80) != 0;
@@ -391,15 +433,17 @@ fn parse_detailed_timing(desc: &[u8]) -> Option<DrmMode> {
 /// Parse a standard timing entry (2 bytes).
 ///
 /// Returns `None` for unused entries (both bytes 0x01 or both 0x00).
-#[allow(clippy::arithmetic_side_effects)]
 fn parse_standard_timing(byte0: u8, byte1: u8, version: u8, revision: u8) -> Option<DrmMode> {
     // Unused entries are marked with 0x0101 or 0x0000.
     if (byte0 == 0x01 && byte1 == 0x01) || (byte0 == 0x00 && byte1 == 0x00) {
         return None;
     }
 
-    // Horizontal active pixels = (byte0 + 31) * 8.
-    let h_active = ((byte0 as u32) + 31) * 8;
+    // Horizontal active pixels = (byte0 + 31) * 8.  `byte0` is a u8, so
+    // the largest this can be is (255 + 31) * 8 = 2288 — nowhere near a
+    // u32 — but the bound lives in the operation rather than in this
+    // sentence, which is the point.
+    let h_active = u32::from(byte0).saturating_add(31).saturating_mul(8);
     if h_active < 256 {
         return None;
     }
@@ -410,19 +454,19 @@ fn parse_standard_timing(byte0: u8, byte1: u8, version: u8, revision: u8) -> Opt
         0b00 => {
             // EDID 1.3+: 16:10.  EDID 1.2 and earlier: 1:1.
             if version > 1 || (version == 1 && revision >= 3) {
-                h_active * 10 / 16
+                h_active.saturating_mul(10) / 16
             } else {
                 h_active
             }
         }
-        0b01 => h_active * 3 / 4,  // 4:3
-        0b10 => h_active * 4 / 5,  // 5:4
-        0b11 => h_active * 9 / 16, // 16:9
+        0b01 => h_active.saturating_mul(3) / 4,  // 4:3
+        0b10 => h_active.saturating_mul(4) / 5,  // 5:4
+        0b11 => h_active.saturating_mul(9) / 16, // 16:9
         _ => return None,
     };
 
     // Vertical frequency = (bits 5-0 of byte1) + 60.
-    let vrefresh = ((byte1 & 0x3F) as u32) + 60;
+    let vrefresh = u32::from(byte1 & 0x3F).saturating_add(60);
 
     Some(DrmMode::from_resolution(h_active, v_active, vrefresh))
 }
@@ -482,8 +526,7 @@ fn parse_established_timings(byte0: u8, byte1: u8, byte2: u8) -> Vec<DrmMode> {
 /// CEA blocks contain a data block collection with video data blocks
 /// (tag 0x02) listing supported CEA/CTA video modes by their VIC
 /// (Video Identification Code).
-#[allow(clippy::arithmetic_side_effects)]
-fn parse_cea_extension(block: &[u8]) -> Vec<DrmMode> {
+fn parse_cea_extension(block: &[u8; EDID_BLOCK_SIZE]) -> Vec<DrmMode> {
     let mut modes = Vec::new();
 
     // Byte 0: tag (0x02)
@@ -495,49 +538,72 @@ fn parse_cea_extension(block: &[u8]) -> Vec<DrmMode> {
         return modes;
     }
 
-    let dtd_offset = block[2] as usize;
+    // Clamped once, here, so the two loops below need only compare against
+    // it rather than each re-testing the block size as well.  A monitor is
+    // free to claim an offset of 255; that just means "no data blocks left".
+    let dtd_offset = (block[2] as usize).min(EDID_BLOCK_SIZE);
     if dtd_offset < 4 {
         // No data blocks (or invalid offset).
         return modes;
     }
 
     // Parse data blocks from byte 4 to dtd_offset.
-    let mut pos = 4;
-    while pos < dtd_offset && pos < EDID_BLOCK_SIZE {
-        let header = block[pos];
+    //
+    // `pos`, `length` and `dtd_offset` all come out of the monitor's own
+    // bytes, so every step here is a genuine runtime bound rather than
+    // something the type can carry: `get` for the reads, `saturating_add`
+    // for the walk.  The old code was correct, but it stated its bounds in
+    // a manual `if` under a blanket arithmetic allow, which is exactly the
+    // shape a later edit slips past.
+    let mut pos = 4usize;
+    while pos < dtd_offset {
+        let Some(&header) = block.get(pos) else { break };
         let tag = (header >> 5) & 0x07;
         let length = (header & 0x1F) as usize;
 
-        if pos + 1 + length > dtd_offset || pos + 1 + length > EDID_BLOCK_SIZE {
+        // One header byte plus `length` payload bytes.  `length` is five
+        // bits, so this cannot come near overflowing; saturating is used
+        // so the bound is enforced by the comparison below rather than by
+        // that argument holding.
+        let body_end = pos.saturating_add(1).saturating_add(length);
+        if body_end > dtd_offset {
             break;
         }
 
         // Tag 0x02 = Video Data Block — contains VIC numbers.
         if tag == 0x02 {
-            for i in 0..length {
-                let vic = block[pos + 1 + i] & 0x7F; // Bit 7 = native flag.
-                if let Some(mode) = vic_to_mode(vic) {
-                    modes.push(mode);
+            if let Some(vics) = block.get(pos.saturating_add(1)..body_end) {
+                for &raw in vics {
+                    if let Some(mode) = vic_to_mode(raw & 0x7F) {
+                        // Bit 7 = native flag.
+                        modes.push(mode);
+                    }
                 }
             }
         }
 
-        pos += 1 + length;
+        // `body_end >= pos + 1` because `saturating_add` only ever moves
+        // forward here, so the loop always makes progress.
+        pos = body_end;
     }
 
-    // Parse detailed timing descriptors after dtd_offset.
-    if dtd_offset > 0 && dtd_offset < EDID_BLOCK_SIZE {
-        let mut dtd_pos = dtd_offset;
-        while dtd_pos + 18 <= EDID_BLOCK_SIZE {
-            // Stop at padding (all zeros).
-            if block[dtd_pos] == 0 && block[dtd_pos + 1] == 0 {
-                break;
-            }
-            if let Some(mode) = parse_detailed_timing(&block[dtd_pos..dtd_pos + 18]) {
-                modes.push(mode);
-            }
-            dtd_pos += 18;
+    // Parse detailed timing descriptors after dtd_offset.  Asking for a
+    // fixed-size chunk is the bound: the descriptor either fits in what is
+    // left of the block or the slot does not exist.
+    let mut dtd_pos = dtd_offset;
+    while let Some(desc) = block
+        .get(dtd_pos..)
+        .and_then(|tail| tail.get(..DESC_LEN))
+        .and_then(|s| <&[u8; DESC_LEN]>::try_from(s).ok())
+    {
+        // Stop at padding (all zeros).
+        if desc[0] == 0 && desc[1] == 0 {
+            break;
         }
+        if let Some(mode) = parse_detailed_timing(desc) {
+            modes.push(mode);
+        }
+        dtd_pos = dtd_pos.saturating_add(DESC_LEN);
     }
 
     modes
@@ -590,29 +656,27 @@ fn vic_to_mode(vic: u8) -> Option<DrmMode> {
 ///
 /// Scans the four 18-byte descriptor slots for a "Monitor Name"
 /// descriptor (tag 0xFC).  Returns the name and its length.
-#[allow(clippy::arithmetic_side_effects)]
-fn extract_monitor_name(data: &[u8]) -> (Option<[u8; 13]>, u8) {
-    for i in 0..4 {
-        let offset = 54 + i * 18;
+fn extract_monitor_name(block: &[u8; EDID_BLOCK_SIZE]) -> (Option<[u8; 13]>, u8) {
+    for desc in descriptors(block) {
         // Display descriptor: first two bytes are 0, byte 3 is tag.
-        if data[offset] == 0 && data[offset + 1] == 0 {
-            let tag = data[offset + 3];
-            if tag == 0xFC {
-                // Monitor name is in bytes 5-17 of the descriptor,
-                // padded with 0x0A (newline) and trailing spaces.
-                let mut name = [0u8; 13];
-                let mut len = 0u8;
-                for j in 0..13 {
-                    let c = data[offset + 5 + j];
-                    if c == 0x0A || c == 0x00 {
-                        break;
-                    }
-                    name[j] = c;
-                    len += 1;
-                }
-                return (Some(name), len);
-            }
+        if desc[0] != 0 || desc[1] != 0 || desc[3] != 0xFC {
+            continue;
         }
+        // Monitor name is in bytes 5-17 of the descriptor, padded with
+        // 0x0A (newline) and trailing spaces.  Zipping the name buffer
+        // against the descriptor tail carries both bounds in the types:
+        // 13 slots against 18 - 5 = 13 source bytes, so neither side can
+        // run past the other and there is no offset arithmetic to check.
+        let mut name = [0u8; 13];
+        let mut len = 0u8;
+        for (slot, &c) in name.iter_mut().zip(desc.iter().skip(5)) {
+            if c == 0x0A || c == 0x00 {
+                break;
+            }
+            *slot = c;
+            len = len.saturating_add(1);
+        }
+        return (Some(name), len);
     }
     (None, 0)
 }
@@ -647,14 +711,14 @@ pub(crate) fn self_test() -> KernelResult<()> {
         return Err(KernelError::InternalError);
     }
 
-    // 4. Should have extracted at least one mode.
-    if info.modes.is_empty() {
+    // 4 + 5. The first (preferred) mode should be 1920x1080@60.  Asking
+    // for it with `first` subsumes the separate "parsed at least one mode"
+    // check — that was the same question asked one step earlier, and
+    // splitting it was what forced an index here.
+    let Some(preferred) = info.modes.first() else {
         serial_println!("[drm]   FAIL: EDID parsed zero modes");
         return Err(KernelError::InternalError);
-    }
-
-    // 5. The first (preferred) mode should be 1920x1080@60.
-    let preferred = &info.modes[0];
+    };
     if preferred.hdisplay != 1920 || preferred.vdisplay != 1080 {
         serial_println!(
             "[drm]   FAIL: EDID preferred mode mismatch: {}x{}",
@@ -696,11 +760,8 @@ pub(crate) fn self_test() -> KernelResult<()> {
     }
 
     // 9. Checksum validation: corrupt the block and verify failure.
-    let mut bad_edid = edid.clone();
-    #[allow(clippy::arithmetic_side_effects)]
-    {
-        bad_edid[127] = bad_edid[127].wrapping_add(1);
-    }
+    let mut bad_edid = edid;
+    bad_edid[127] = bad_edid[127].wrapping_add(1);
     if parse(&bad_edid).is_ok() {
         serial_println!("[drm]   FAIL: corrupt EDID accepted");
         return Err(KernelError::InternalError);
@@ -728,9 +789,12 @@ pub(crate) fn self_test() -> KernelResult<()> {
 /// Encodes a 1920x1080@60 display with manufacturer "TST", product 0x1234,
 /// digital input, established timings for 640x480@60 and 800x600@60,
 /// and a monitor name of "Test Monitor".
-#[allow(clippy::arithmetic_side_effects)]
-fn build_test_edid() -> Vec<u8> {
-    let mut edid = vec![0u8; EDID_BLOCK_SIZE];
+fn build_test_edid() -> [u8; EDID_BLOCK_SIZE] {
+    // A fixed-size array rather than a `Vec`: every write below is at a
+    // constant offset, and on an array the compiler proves each one in
+    // range at compile time instead of emitting a bounds check the test
+    // would have to be trusted not to trip.
+    let mut edid = [0u8; EDID_BLOCK_SIZE];
 
     // Header.
     edid[..8].copy_from_slice(&EDID_HEADER);
@@ -775,11 +839,9 @@ fn build_test_edid() -> Vec<u8> {
     edid[36] = 0x00;
     edid[37] = 0x00;
 
-    // Standard timings: all unused (0x0101).
-    for i in 0..8 {
-        edid[38 + i * 2] = 0x01;
-        edid[38 + i * 2 + 1] = 0x01;
-    }
+    // Standard timings: all unused.  Every one of the eight slots is the
+    // two bytes 0x01 0x01, so the whole region is one fill.
+    edid[38..54].fill(0x01);
 
     // Detailed Timing Descriptor 1: 1920x1080@60Hz.
     // Pixel clock: 148500 kHz = 14850 * 10 kHz → LE u16 = 14850.
@@ -787,7 +849,10 @@ fn build_test_edid() -> Vec<u8> {
     // Timing values from the standard 1080p60 CEA mode:
     // H active = 1920, H blank = 280 (total 2200)
     // V active = 1080, V blank = 45  (total 1125)
-    let dtd1 = &mut edid[54..72];
+    // Built as its own descriptor-sized array and copied in, so the field
+    // offsets below are constants into an 18-byte type rather than into a
+    // borrowed slice whose length the compiler has already forgotten.
+    let mut dtd1 = [0u8; DESC_LEN];
     let pclk: u16 = 14850; // 148.50 MHz in 10 kHz units
     dtd1[0..2].copy_from_slice(&pclk.to_le_bytes());
     // Bind the timing values so the lo/hi-nibble splits are computed from
@@ -818,16 +883,16 @@ fn build_test_edid() -> Vec<u8> {
     dtd1[16] = 0;
     // Features: non-interlaced, normal display.
     dtd1[17] = 0x18; // Digital separate sync, H pos, V pos
+    edid[54..72].copy_from_slice(&dtd1);
 
-    // Descriptor 2: Monitor Name descriptor (tag 0xFC).
-    let desc2 = &mut edid[72..90];
-    desc2[0] = 0x00;
-    desc2[1] = 0x00;
-    desc2[2] = 0x00;
+    // Descriptor 2: Monitor Name descriptor (tag 0xFC).  Bytes 0-2 and 4
+    // are the zeros the array already holds.
+    let mut desc2 = [0u8; DESC_LEN];
     desc2[3] = 0xFC; // Monitor name tag
-    desc2[4] = 0x00;
-    let name = b"Test Monitor\x0a";
-    desc2[5..5 + name.len()].copy_from_slice(name);
+    // Bytes 5..18 are the name field: exactly 13 bytes, so the literal is
+    // sized by the same constant the destination range is.
+    desc2[5..18].copy_from_slice(b"Test Monitor\x0a");
+    edid[72..90].copy_from_slice(&desc2);
 
     // Descriptors 3-4: unused (all zeros = fine).
 

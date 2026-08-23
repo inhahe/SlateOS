@@ -361,7 +361,17 @@ find t -ilname 'NOWHERE'
 find t -regex '.*/f'
 find t -regex 't/f'
 find t -regex 'f'
-find t -regex '.*'
+# The fixture tree contains `t/n\377ame`, whose name is not valid UTF-8, and
+# this is the one case in the file where `.*` has to decide what a "character"
+# is. GNU compiles the pattern with glibc's multibyte matcher, which cannot
+# decode \377 in a UTF-8 locale and so declines to match the name at all; ours
+# is byte-based and matches it. Ours is the deliberate answer, not an
+# oversight: a path on this system is a byte string with no encoding attached
+# (design-decisions.md §322), and a `find -regex '.*'` that silently skips
+# files is worse than one that matches every byte string, which is what `.*`
+# reads as. Every other `-regex` case in this file agrees exactly, because
+# every other one is over a name that decodes.
+!our regex engine is byte-based, GNU's is multibyte, and one fixture name is not UTF-8|find t -regex '.*'
 find t -iregex '.*/F'
 find t -regex 't/su.'
 find t -regextype posix-basic -regex 't/su.'

@@ -211,14 +211,20 @@ const BACKTRACK_BUDGET_PER_CHAR: u64 = 1_000;
 /// reach it.
 const BACKTRACK_BUDGET_MAX: u64 = 100_000_000;
 
-/// Upper bound on a *single* `{m,n}` count (POSIX `RE_DUP_MAX` is 255; we allow
-/// a bit more).
+/// Upper bound on a *single* `{m,n}` count: glibc's `RE_DUP_MAX`, which is what
+/// a caller's pattern was written against. (POSIX only requires 255.)
+///
+/// Exceeding it is `REG_ESIZE`, "Regular expression too big" — the one error
+/// the count itself can produce, as distinct from the two a malformed interval
+/// produces. Matching glibc's number rather than picking a smaller one matters
+/// because the difference is silent in the only direction that hurts: a pattern
+/// GNU compiles and we reject looks to the caller like a broken tool.
 ///
 /// This bounds one interval and nothing else. Intervals compose by
 /// multiplication — `(a{1000}){1000}` is a million copies of `a` and
 /// `((a{1000}){1000}){1000}` is a billion — so the thing that actually bounds
 /// compilation is [`MAX_PROG`], not this.
-const MAX_REPEAT: usize = 1000;
+const MAX_REPEAT: usize = 32_767;
 
 /// Upper bound on the size of the compiled program, in instructions.
 ///
@@ -372,10 +378,34 @@ impl PosixClass {
 
 // ---- Parser -----------------------------------------------------------------
 
+/// One bound of a `{m,n}` interval as [`EParser::fetch_number`] read it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BraceNum {
+    Value(usize),
+    /// No digits at all: the `{,3}` and `{}` case.
+    Absent,
+    /// Something that is not a count — a non-digit, or the end of the pattern.
+    Invalid,
+}
+
+/// What ended one bound of a `{m,n}` interval.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BraceStop {
+    Comma,
+    Close,
+    /// The pattern ran out before the interval was closed.
+    End,
+}
+
 struct EParser {
     chars: Vec<Ch>,
     pos: usize,
     ngroups: usize,
+    /// How many `(` are open at the cursor.
+    ///
+    /// It exists only to answer whether a `)` closes a group or is an ordinary
+    /// character — see [`EParser::parse_concat`].
+    depth: usize,
 }
 
 impl EParser {
@@ -410,20 +440,22 @@ impl EParser {
     }
 
     fn parse(&mut self) -> Result<Node, EreError> {
-        // bash rejects an empty `=~` right-hand side outright — `[[ x =~ "" ]]`
-        // is status 2, not a match on the empty string. An empty *sub*expression
-        // is still fine: `[[ x =~ () ]]` matches.
-        if self.chars.is_empty() {
-            return Err(EreError::new(RegCode::BadPattern, b"empty regex".to_vec()));
-        }
+        // An empty pattern is legal and matches the empty string, which is not
+        // what the comment here used to claim. Measured on bash 5.2.21 and
+        // findutils 4.9.0/glibc 2.39: `[[ x =~ "" ]]` is status 0, and `find
+        // -regextype posix-extended -regex ''` compiles and simply matches
+        // nothing (because `-regex` must match a whole path, and no path is
+        // empty). See the acceptance test for the rest of that survey.
         let node = self.parse_alt()?;
         if self.pos != self.chars.len() {
-            // A stray `)` (or other unconsumed input) is a syntax error. The
-            // character is quoted back as its own bytes — it is a slice of the
-            // pattern, which need not be text.
+            // Nothing else may be left. A stray `)` cannot reach here — it is
+            // an ordinary character, see `parse_concat` — so this is the
+            // unreachable-in-practice backstop rather than the `)` path it
+            // used to be. The character is quoted back as its own bytes: it is
+            // a slice of the pattern, which need not be text.
             let at = self.peek().map(Ch::to_str).unwrap_or_default();
             return Err(EreError::new(
-                RegCode::UnmatchedRightParen,
+                RegCode::BadPattern,
                 cat(&[b"unexpected '", &at, b"' in regex"]),
             ));
         }
@@ -439,91 +471,86 @@ impl EParser {
         if branches.len() == 1 {
             Ok(branches.pop().unwrap_or(Node::Empty))
         } else {
-            // `a|`, `|a`, `(a||b)`: glibc requires every branch of an
-            // alternation to be a real expression, even though a wholly empty
-            // pattern between parens (`()`) is fine.
-            if branches.iter().any(|b| matches!(b, Node::Empty)) {
-                return Err(EreError::new(
-                    RegCode::BadPattern,
-                    b"empty alternation branch in regex".to_vec(),
-                ));
-            }
+            // An empty branch is legal: `a|` matches "a" or nothing, and `|a`
+            // and `(a||b)` likewise. Measured; the previous rejection here was
+            // wrong on all three.
             Ok(Node::Alt(branches))
         }
     }
 
-    /// Parse a run of repeated atoms up to `|`, `)` or the end of the pattern.
+    /// Parse a run of repeated atoms up to `|`, an *enclosing* `)`, or the end
+    /// of the pattern.
     ///
-    /// A `{0}` / `{0,0}` interval *deletes* the atom it follows rather than
-    /// repeating it zero times, and glibc then complains if that leaves the run
-    /// with nothing in it — which is why `a{0}` and `(a{0})` are errors while
-    /// `a{0}b`, `^a{0}` and the explicitly-empty `()` are not. The distinction
-    /// is how the run was written, not what it ends up matching, so it has to be
-    /// made here: a run that started with nothing is fine, a run that was
-    /// emptied is not.
+    /// Whether a `)` ends the run is exactly the question of whether a group is
+    /// open, because a POSIX ERE gives `)` no meaning of its own:
+    /// `RE_UNMATCHED_RIGHT_PAREN_ORD` is set in `RE_SYNTAX_POSIX_EXTENDED`, so
+    /// `find -regex 'a)'` matches a file called `a)` rather than failing to
+    /// compile. That is why the depth has to be tracked rather than simply
+    /// breaking on the character.
     fn parse_concat(&mut self) -> Result<Node, EreError> {
         let mut parts = Vec::new();
-        let mut deleted = false;
         while let Some(c) = self.peek() {
-            if c == '|' || c == ')' {
+            if c == '|' || (c == ')' && self.depth > 0) {
                 break;
             }
-            match self.parse_repeat()? {
-                Some(n) => parts.push(n),
-                None => deleted = true,
-            }
+            parts.push(self.parse_repeat()?);
         }
         match parts.len() {
-            0 if deleted => Err(EreError::new(
-                RegCode::BadRepeat,
-                b"nothing to repeat in regex".to_vec(),
-            )),
             0 => Ok(Node::Empty),
             1 => Ok(parts.pop().unwrap_or(Node::Empty)),
             _ => Ok(Node::Concat(parts)),
         }
     }
 
-    /// Parse one atom and its quantifier, if any. `Ok(None)` means the atom was
-    /// deleted by a zero-count interval — see [`Self::parse_concat`].
-    fn parse_repeat(&mut self) -> Result<Option<Node>, EreError> {
-        // A quantifier has to have something to quantify. glibc rejects `*a`,
-        // `?a`, `{2}a` and — because an alternation branch or a group starts a
-        // fresh expression — `a|*b` and `(*a)` too.
+    /// Parse one atom and every quantifier stacked on it.
+    fn parse_repeat(&mut self) -> Result<Node, EreError> {
+        // A quantifier has to have something to quantify. `RE_CONTEXT_INVALID_OPS`
+        // is set in `RE_SYNTAX_POSIX_EXTENDED`, so glibc rejects `*a`, `?a`,
+        // `{2}a` and — because an alternation branch and a group each start a
+        // fresh expression — `a|*b` and `(*a)` too. (`grep -E` accepts all of
+        // those with a warning, because egrep syntax sets `RE_CONTEXT_INDEP_OPS`
+        // instead. This crate implements the POSIX-extended answer, which is
+        // also bash's and findutils'.)
         if is_quantifier_start(self.peek_ascii()) {
-            return Err(EreError::new(
-                RegCode::BadRepeat,
-                b"nothing to repeat in regex".to_vec(),
-            ));
+            return Err(nothing_to_repeat());
         }
         let atom = self.parse_atom()?;
-        let Some((min, max)) = self.parse_quantifier()? else {
-            return Ok(Some(atom));
-        };
-        // `^` is an assertion, not an atom, so glibc reports `^*` and `a^*b`
-        // the same way it reports a leading `*`. `$` it does accept.
-        if matches!(atom, Node::Start) {
-            return Err(EreError::new(
-                RegCode::BadRepeat,
-                b"nothing to repeat in regex".to_vec(),
-            ));
+        self.stack_quantifiers(atom)
+    }
+
+    /// Apply every quantifier at the cursor to `node`, innermost first.
+    ///
+    /// A *second* quantifier is not an error. glibc simply wraps the expression
+    /// again, so `a**` is `(a*)*`, `a*?` is `(a*)?` and `a{1}{2}` is `(a{1}){2}`;
+    /// all three compile, and `find -regex 'a**'` accordingly runs. (The extra
+    /// layer is a no-op for matching in every case that can be written, since
+    /// repeating an already-repeated expression widens nothing — but what
+    /// matters here is that it *compiles*, because the previous reading of
+    /// "quantifier already applied" as an error made those four patterns fail.)
+    fn stack_quantifiers(&mut self, mut node: Node) -> Result<Node, EreError> {
+        while let Some((min, max)) = self.parse_quantifier()? {
+            // `^` is an assertion, not an atom, so glibc reports `^*` and
+            // `a^*b` the way it reports a leading `*`. `$` it does accept.
+            if matches!(node, Node::Start) {
+                return Err(nothing_to_repeat());
+            }
+            node = if max == Some(0) {
+                // `a{0}` is not an error and does not delete anything: it is an
+                // expression matching the empty string, which is why
+                // `[[ b =~ a{0} ]]` succeeds and `a{0}b` matches "b". The old
+                // reading — that the atom was deleted and an emptied run was
+                // then an error — made `a{0}` and `(a{0})` fail to compile,
+                // which neither bash nor findutils does.
+                Node::Empty
+            } else {
+                Node::Repeat {
+                    node: Box::new(node),
+                    min,
+                    max,
+                }
+            };
         }
-        // One quantifier per atom: `a**`, `a*?`, `a{1}*` and `a*{1}` are all
-        // errors, not a repeat of a repeat.
-        if is_quantifier_start(self.peek_ascii()) {
-            return Err(EreError::new(
-                RegCode::BadRepeat,
-                b"repeated quantifier in regex".to_vec(),
-            ));
-        }
-        if max == Some(0) {
-            return Ok(None);
-        }
-        Ok(Some(Node::Repeat {
-            node: Box::new(atom),
-            min,
-            max,
-        }))
+        Ok(node)
     }
 
     /// Consume a `*` / `+` / `?` / `{m,n}` quantifier if one is at the cursor.
@@ -546,71 +573,136 @@ impl EParser {
         }
     }
 
-    /// Parse a `{m}` / `{m,}` / `{m,n}` interval at the cursor.
+    /// Parse a `{m}` / `{m,}` / `{,n}` / `{m,n}` interval at the cursor.
     ///
     /// An unescaped `{` that does not open a well-formed interval is an error,
-    /// not a literal brace: glibc rejects `a{b`, `a{1`, `a{}`, `a{,3}` and
-    /// `a{1,2,3}` outright, and only `\{` or `[{]` gets you a literal one.
+    /// not a literal brace — `RE_INVALID_INTERVAL_ORD` is clear in
+    /// `RE_SYNTAX_POSIX_EXTENDED` — but *which* error it is depends on
+    /// something less obvious than it looks, so this is written as a
+    /// transcription of glibc's `parse_dup_op` rather than as its own reading:
+    ///
+    /// | pattern | glibc | why |
+    /// |---|---|---|
+    /// | `a{`, `a{2`, `a{b` | `REG_EBRACE` | the pattern ended before a `}` |
+    /// | `a{}`, `a{x}`, `a{1,2,3}` | `REG_BADBR` | a `}` was found; what preceded it was not a count |
+    /// | `a{99999999}` | `REG_ESIZE` | a count above `RE_DUP_MAX` |
+    ///
+    /// The dividing line is "did a `}` ever turn up", not "was the content
+    /// sane" — which is why the scan below runs to the `}` before judging
+    /// anything. An absent lower bound is zero (`{,3}` is `{0,3}` and `{,}` is
+    /// `{0,}`), which POSIX does not require and glibc nonetheless does.
     fn parse_brace(&mut self) -> Result<(usize, Option<usize>), EreError> {
-        let bad = || {
+        let unmatched = || {
             EreError::new(
                 RegCode::UnmatchedBrace,
+                b"unterminated '{' in regex".to_vec(),
+            )
+        };
+        let bad = || {
+            EreError::new(
+                RegCode::BadBraceContent,
                 b"invalid interval in regex".to_vec(),
             )
         };
         self.bump(1); // consume '{'
-        let Some(min) = self.parse_int() else {
-            return Err(bad());
-        };
-        let max = if self.peek_ascii() == Some(',') {
-            self.bump(1);
-            if self.peek_ascii() == Some('}') {
-                None // `{m,}`
-            } else {
-                Some(self.parse_int().ok_or_else(bad)?)
+
+        let (first, stop) = self.fetch_number();
+        let min = match first {
+            BraceNum::Value(n) => n,
+            // `{,n}` — an absent lower bound is zero, but only when a comma is
+            // what ended it. `{}` has no comma and is an error.
+            BraceNum::Absent if stop == BraceStop::Comma => 0,
+            BraceNum::Absent => return Err(bad()),
+            BraceNum::Invalid => {
+                return Err(if stop == BraceStop::End {
+                    unmatched()
+                } else {
+                    bad()
+                });
             }
-        } else {
-            Some(min) // `{m}`
         };
-        if self.peek_ascii() != Some('}') {
+        let (max, stop) = match stop {
+            // `{m}` is `{m,m}`.
+            BraceStop::Close => (Some(min), stop),
+            BraceStop::Comma => {
+                let (second, stop) = self.fetch_number();
+                match second {
+                    BraceNum::Value(n) => (Some(n), stop),
+                    // `{m,}` — an absent upper bound is no bound.
+                    BraceNum::Absent => (None, stop),
+                    BraceNum::Invalid => {
+                        return Err(if stop == BraceStop::End {
+                            unmatched()
+                        } else {
+                            bad()
+                        });
+                    }
+                }
+            }
+            // Unreachable: `fetch_number` only stops at the end of the pattern
+            // by returning `Invalid`, which the match above has consumed.
+            BraceStop::End => return Err(unmatched()),
+        };
+        // A second comma (`{1,2,3}`) leaves the scan stopped somewhere other
+        // than the closing brace.
+        if stop != BraceStop::Close {
             return Err(bad());
         }
-        self.bump(1); // consume '}'
-        if min > MAX_REPEAT || max.is_some_and(|n| n > MAX_REPEAT) {
-            return Err(EreError::new(
-                RegCode::BadBraceContent,
-                b"repetition count too large".to_vec(),
-            ));
+        // Order before size, as glibc checks them: `{5,3}` is `REG_BADBR` even
+        // though both bounds are enormous.
+        if max.is_some_and(|n| min > n) {
+            return Err(bad());
         }
-        if let Some(n) = max
-            && min > n
-        {
-            // Both bounds are decimal digits the scan just accepted, so this
-            // one message really is text.
+        if max.unwrap_or(min) > MAX_REPEAT {
             return Err(EreError::new(
-                RegCode::BadBraceContent,
-                format!("invalid interval {{{min},{n}}}").into_bytes(),
+                RegCode::TooBig,
+                b"repetition count too large".to_vec(),
             ));
         }
         Ok((min, max))
     }
 
-    fn parse_int(&mut self) -> Option<usize> {
-        let start = self.pos;
-        while self.peek_ascii().is_some_and(|c| c.is_ascii_digit()) {
+    /// glibc's `fetch_number`: read one bound of an interval, consuming the
+    /// `,` or `}` that ends it.
+    ///
+    /// It reports the value *and* what stopped it, because the caller needs
+    /// both — see [`EParser::parse_brace`]. Note that it keeps scanning past a
+    /// character that is not a digit rather than stopping there, so `{b}`
+    /// consumes its `}` and is distinguishable from `{b`.
+    fn fetch_number(&mut self) -> (BraceNum, BraceStop) {
+        let mut num = BraceNum::Absent;
+        loop {
+            let Some(c) = self.peek() else {
+                // The pattern ended inside the braces. Whatever digits were
+                // read are discarded: glibc reports the missing `}` and not
+                // the count, so `{2` and `{b` are the same error.
+                return (BraceNum::Invalid, BraceStop::End);
+            };
             self.bump(1);
+            match c.as_ascii() {
+                Some('}') => return (num, BraceStop::Close),
+                Some(',') => return (num, BraceStop::Comma),
+                Some(d @ '0'..='9') => {
+                    let v = (d as usize).saturating_sub('0' as usize);
+                    num = match num {
+                        BraceNum::Absent => BraceNum::Value(v),
+                        // Saturating at one above the cap, exactly as glibc's
+                        // `MIN (RE_DUP_MAX + 1, …)` does: the digits after it
+                        // cannot change the answer, and an unbounded
+                        // accumulation would overflow on a long enough run.
+                        BraceNum::Value(n) => BraceNum::Value(
+                            n.saturating_mul(10)
+                                .saturating_add(v)
+                                .min(MAX_REPEAT.saturating_add(1)),
+                        ),
+                        BraceNum::Invalid => BraceNum::Invalid,
+                    };
+                }
+                // A non-digit — including a byte that is not ASCII at all —
+                // spoils the number without ending the scan.
+                _ => num = BraceNum::Invalid,
+            }
         }
-        if self.pos == start {
-            return None;
-        }
-        // Every character in the span was just tested `is_ascii_digit`.
-        let s: String = self
-            .chars
-            .get(start..self.pos)?
-            .iter()
-            .filter_map(|c| c.as_ascii())
-            .collect();
-        s.parse::<usize>().ok()
     }
 
     fn parse_atom(&mut self) -> Result<Node, EreError> {
@@ -619,7 +711,9 @@ impl EParser {
                 self.bump(1);
                 self.ngroups = self.ngroups.saturating_add(1);
                 let idx = self.ngroups;
+                self.depth = self.depth.saturating_add(1);
                 let inner = self.parse_alt()?;
+                self.depth = self.depth.saturating_sub(1);
                 if self.peek_ascii() != Some(')') {
                     return Err(EreError::new(
                         RegCode::UnmatchedParen,
@@ -677,7 +771,8 @@ impl EParser {
             // Only `parse_quantifier` may consume a `{`, and `parse_repeat`
             // rejects one that reaches an atom slot, so this is unreachable —
             // but a literal brace here would silently resurrect the lenient
-            // reading glibc does not have.
+            // reading glibc does not have. `UnmatchedBrace` is the right code
+            // for it anyway: a `{` in this position had no `}` to reach.
             Some('{') => Err(EreError::new(
                 RegCode::UnmatchedBrace,
                 b"invalid interval in regex".to_vec(),
@@ -821,6 +916,11 @@ impl EParser {
 /// turn out to be malformed — that is an error either way, never a literal.
 fn is_quantifier_start(c: Option<char>) -> bool {
     matches!(c, Some('*' | '+' | '?' | '{'))
+}
+
+/// The error for a quantifier with nothing to quantify.
+fn nothing_to_repeat() -> EreError {
+    EreError::new(RegCode::BadRepeat, b"nothing to repeat in regex".to_vec())
 }
 
 /// Map an escaped character to the literal it denotes (`\n` → newline, etc.).
@@ -1139,6 +1239,7 @@ impl Regex {
             chars: bytes::chars(pattern).collect(),
             pos: 0,
             ngroups: 0,
+            depth: 0,
         };
         let ast = parser.parse()?;
         let ngroups = parser.ngroups;
@@ -2052,9 +2153,27 @@ mod tests {
             ("{1}", RegCode::BadRepeat),
             ("(", RegCode::UnmatchedParen),
             ("a(", RegCode::UnmatchedParen),
+            ("((a)", RegCode::UnmatchedParen),
+            // Everything that reaches an atom slot with a quantifier in it.
+            // A group and an alternation branch each start a fresh
+            // expression, which is why the last two are errors and not
+            // repetitions of what precedes them.
+            ("+", RegCode::BadRepeat),
+            ("?", RegCode::BadRepeat),
+            ("^*", RegCode::BadRepeat),
+            ("(*a)", RegCode::BadRepeat),
+            ("a|*b", RegCode::BadRepeat),
+            // The interval split: no `}` in the pattern is a different error
+            // from a `}` with nonsense in front of it.
+            ("a{", RegCode::UnmatchedBrace),
             ("a{1", RegCode::UnmatchedBrace),
             ("a{2", RegCode::UnmatchedBrace),
+            ("a{b", RegCode::UnmatchedBrace),
+            ("a{}", RegCode::BadBraceContent),
+            ("a{b}", RegCode::BadBraceContent),
+            ("a{1,2,3}", RegCode::BadBraceContent),
             ("a{1,0}", RegCode::BadBraceContent),
+            ("a{99999999}", RegCode::TooBig),
             ("a\\", RegCode::TrailingBackslash),
         ];
         for &(pat, want) in cases {
@@ -2063,6 +2182,67 @@ mod tests {
                 .code;
             assert_eq!(got, want, "{pat:?}");
         }
+    }
+
+    /// Every pattern glibc *accepts* compiles here too.
+    ///
+    /// This is the other half of the table above and the more easily got
+    /// wrong: a parser written from the grammar rejects most of these, and
+    /// each rejection is a `find -regex` that fails to run against a pattern
+    /// GNU runs happily. Measured the same way — `find t -regextype
+    /// posix-extended -regex PAT` exiting 0 — and cross-checked against bash
+    /// 5.2.21's `[[ x =~ PAT ]]`, which uses the same
+    /// `RE_SYNTAX_POSIX_EXTENDED` and agrees on every row.
+    #[test]
+    fn patterns_glibc_accepts_compile_here_too() {
+        let cases: &[&str] = &[
+            // The empty pattern is an expression matching the empty string.
+            "",
+            // A quantifier may be stacked on an already-quantified
+            // expression; glibc just wraps it again.
+            "a**", "a*+", "a*?", "a{1}{2}",
+            // `)` has no meaning of its own in a POSIX ERE
+            // (`RE_UNMATCHED_RIGHT_PAREN_ORD`), so an unopened one is the
+            // literal character.
+            ")", "a)",
+            // An absent interval bound is zero on the left and unbounded on
+            // the right.
+            "a{,}", "a{,3}", "a{2,}",
+            // An empty branch, and an empty group, match the empty string.
+            "()", "a|", "|a", "(|a)", "(a||b)",
+            // `{0}` does not delete the atom; it yields an expression
+            // matching the empty string.
+            "a{0}", "(a{0})", "a{0}b",
+        ];
+        for &pat in cases {
+            assert!(
+                Regex::new(pat.as_bytes()).is_ok(),
+                "{pat:?} should compile: {:?}",
+                Regex::new(pat.as_bytes()).err()
+            );
+        }
+    }
+
+    /// The two patterns whose *meaning* the acceptance above could get wrong
+    /// by accepting them as the wrong thing.
+    #[test]
+    fn the_accepted_oddities_mean_what_glibc_means_by_them() {
+        // `a{0}b` matches "b", not "ab": the atom is not deleted, it is made
+        // optional-zero-times.
+        assert!(m("^a{0}b$", "b"));
+        assert!(!m("^a{0}b$", "ab"));
+        // `a|` is "a, or nothing".
+        assert!(m("^(a|)$", "a"));
+        assert!(m("^(a|)$", ""));
+        // `a)` is a two-character literal.
+        assert!(m("^a)$", "a)"));
+        // `{,3}` is `{0,3}`, so it matches nothing through three.
+        assert!(m("^a{,3}$", ""));
+        assert!(m("^a{,3}$", "aaa"));
+        assert!(!m("^a{,3}$", "aaaa"));
+        // `a**` is `(a*)*`, which is still "any number of a".
+        assert!(m("^a**$", "aaaa"));
+        assert!(!m("^a**$", "b"));
     }
 
     /// The sentences are glibc's, byte for byte.
@@ -2175,30 +2355,46 @@ mod tests {
         assert!(!m("^a{3}$", "aa"));
         assert!(m("^a{2,}$", "aaaaa"));
         assert!(!m("^a{2,}$", "a"));
-        // A zero-count interval deletes the atom rather than repeating it.
+        // A zero-count interval yields an expression matching the empty
+        // string, so the atom before it is not required — and not forbidden
+        // either, which is why `^a{0}b$` does not match "ab".
         assert!(m("^a{0}b$", "b"));
         assert!(m("^a{0,0}b$", "b"));
+        assert!(!m("^a{0}b$", "ab"));
+        // The open-ended forms, including the one whose lower bound is absent.
+        assert!(m("^a{,2}$", ""));
+        assert!(m("^a{,2}$", "aa"));
+        assert!(!m("^a{,2}$", "aaa"));
+        assert!(m("^a{,}$", "aaaaaaa"));
     }
 
     /// glibc — which is what bash's `=~` runs on — rejects a good deal that a
     /// lenient engine would happily accept. Everything here is measured against
-    /// bash 5.2: each pattern makes `[[ x =~ … ]]` exit 2.
+    /// bash 5.2.21: each pattern makes `[[ x =~ … ]]` exit 2.
+    ///
+    /// The *accept* side of the same survey is
+    /// [`patterns_glibc_accepts_compile_here_too`], and it is worth reading the
+    /// two together: this test used to claim a dozen of those patterns were
+    /// rejected, on the strength of the grammar rather than a measurement, and
+    /// every one of those claims was wrong.
     #[test]
     fn rejects_what_glibc_rejects() {
         let bad = |pat: &str| {
             assert!(compile(pat).is_err(), "expected {pat} to be rejected");
         };
         // A `{` that opens no well-formed interval is an error, not a literal.
+        // (`a{,3}` *is* well-formed — see the accept side.)
         bad("a{b");
         bad("a{1");
         bad("a{}");
-        bad("a{,3}");
         bad("a{1,2,3}");
         bad("{b");
         // Only a backslash or a bracket expression gets a literal brace.
         assert!(m("^a\\{b$", "a{b"));
         assert!(m("^a[{]b$", "a{b"));
-        // A quantifier needs an atom before it — in every context.
+        // A quantifier needs an atom before it — in every context. A group and
+        // an alternation branch each begin a fresh expression, so the last two
+        // have nothing before them either.
         bad("*a");
         bad("+a");
         bad("?a");
@@ -2209,32 +2405,11 @@ mod tests {
         bad("^*a");
         bad("a^*b");
         assert!(compile("a$*").is_ok());
-        // One quantifier per atom.
-        bad("a**");
-        bad("a*+");
-        bad("a*?");
-        bad("a?+");
-        bad("a{1}*");
-        bad("a*{1}");
-        bad("a{1}{2}");
-        bad("(a)*+");
-        // Every branch of an alternation has to be a real expression …
-        bad("|a");
-        bad("a|");
-        bad("(a|)");
-        bad("(|a)");
-        bad("(a||b)");
-        // … and a run emptied by a zero-count interval counts as no expression,
-        // even though an explicitly empty one is fine.
-        bad("a{0}");
-        bad("(a{0})");
-        bad("a{0}|b");
-        bad("a{0}b{0}");
-        assert!(compile("()").is_ok());
-        assert!(compile("^a{0}").is_ok());
-        assert!(compile("a{0}$").is_ok());
-        // An empty pattern is not an empty match.
-        bad("");
+        // A parenthesis has to be closed. An *unopened* `)` does not have to
+        // be — it is an ordinary character — which is the accept side's job.
+        bad("(");
+        bad("((a)");
+        bad("(a");
     }
 
     #[test]

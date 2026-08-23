@@ -7,39 +7,79 @@
 //! - Drag into/out of pinned section to pin/unpin
 //! - Configurable position and appearance (icon-only or icon+name)
 //!
-//! Uses Catppuccin Mocha for theming.
+//! Every colour comes from the [`Palette`] the caller resolved — see the
+//! "Colour" section below.
 
+use appearance::{Palette, readable_on};
 use guitk::color::Color;
 use guitk::event::{EventResult, MouseButton, MouseEvent, MouseEventKind};
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
+use guitk::theme::with_alpha;
 
 use std::collections::HashMap;
 
 // ============================================================================
-// Catppuccin Mocha theme constants
+// Colour
 // ============================================================================
-
-/// Catppuccin Mocha: base (background)
-const MOCHA_BASE: Color = Color::from_hex(0x1E1E2E);
-/// Catppuccin Mocha: surface0
-const MOCHA_SURFACE0: Color = Color::from_hex(0x313244);
-/// Catppuccin Mocha: surface1
-const MOCHA_SURFACE1: Color = Color::from_hex(0x45475A);
-/// Catppuccin Mocha: surface2
-const MOCHA_SURFACE2: Color = Color::from_hex(0x585B70);
-/// Catppuccin Mocha: text
-const MOCHA_TEXT: Color = Color::from_hex(0xCDD6F4);
-/// Catppuccin Mocha: subtext0
-const MOCHA_SUBTEXT0: Color = Color::from_hex(0xA6ADC8);
-/// Catppuccin Mocha: blue (accent)
-const MOCHA_BLUE: Color = Color::from_hex(0x89B4FA);
-/// Catppuccin Mocha: lavender
-const MOCHA_LAVENDER: Color = Color::from_hex(0xB4BEFE);
-/// Catppuccin Mocha: red
-const MOCHA_RED: Color = Color::from_hex(0xF38BA8);
-/// Catppuccin Mocha: mantle
-const MOCHA_MANTLE: Color = Color::from_hex(0x181825);
+//
+// This module used to keep ten `const MOCHA_*: Color` of its own, and four
+// more colours written inline as raw `Color::rgba(...)` triples with the role
+// they were derived from noted only in a comment. All fourteen now come from
+// the `Palette` the caller resolved. The taskbar is the shell's one
+// permanently-visible surface, so it is also the one where a frozen theme is
+// least deniable: with the light mode selected, everything else on screen
+// turned pale and a black bar stayed nailed across the bottom.
+//
+// Six judgements are worth stating, because a reader will otherwise assume the
+// module either forgot the theme or changed the design for no reason:
+//
+// 1. *The focus underline is the accent; the running underline is not.* The
+//    accent marks position — "this is the window you are in" — which is what
+//    the wide underline under the focused button says. The narrow underline
+//    under a running-but-unfocused button says something different: "this app
+//    is open." That is presence, not position, so it is `subtext0`: legible,
+//    clearly secondary, and unmistakable against the accent beside it. The
+//    widths (16 vs 8) already differ; colour is the second channel, and a
+//    module that spent both channels on the same distinction would be using
+//    one.
+//
+// 2. *The drag insertion caret is green, not the accent.* This is the one
+//    place the taskbar contradicts "position takes the accent", and
+//    deliberately: during a reorder drag the caret ("release here") and the
+//    focus underline ("you are here") are on screen at the same moment, a few
+//    pixels apart, both small bars near the bottom edge. Two marks that must
+//    be told apart at a glance cannot be the same hue. `Palette::drop_target`
+//    exists for exactly this reason and says so; the caret takes that helper's
+//    *hue* but not its alpha, because a 2-pixel-wide bar has no area in which
+//    to be translucent.
+//
+// 3. *The window-count badge is a measurement, so it is frozen to a named
+//    hue.* "3 windows" is a count the user reads a number off; a count that
+//    changed colour with the accent would say something different on every
+//    machine. It stays `red` — the conventional badge hue — and that is
+//    `p.red` and emphatically *not* `p.accent`, even on the stock theme where
+//    the two happen to sit side by side in the same palette.
+//
+// 4. *The digit on the badge is derived, never named.* It is ink on a coloured
+//    fill, so it is `readable_on(p.red)`, which answers near-black on Mocha's
+//    pale red and near-white on Latte's deep one. The old code named
+//    `MOCHA_MANTLE`, which is legible on one of those two and invisible on the
+//    other.
+//
+// 5. *The button-background ladder was re-seated on the roles that describe
+//    it.* The old ladder ran surface0 (focused) < surface1 (hovered) with a
+//    half-transparent surface0 for merely-running; the palette's own docs
+//    reserve `surface1` for "a button at rest, a selected row" and `surface2`
+//    for "a hovered button". The ladder is therefore surface0-at-alpha
+//    (running) < surface1 (focused) < surface2 (hovered), which keeps the
+//    original ordering — quieter to louder — while making each step the role
+//    that names it.
+//
+// 6. *The section divider is `overlay0`, not `surface2`.* `overlay0` is the
+//    palette's separator role; `surface2` is a raised surface, and the context
+//    menu's outline still uses it. The two were the same value in this file
+//    only because Mocha's happened to look acceptable for both.
 
 // ============================================================================
 // Configuration
@@ -461,8 +501,11 @@ impl TaskbarState {
     // ======================================================================
 
     /// Render the taskbar into a list of render commands.
-    /// `bar_width` and `bar_height` are the dimensions of the taskbar area.
-    pub fn render(&mut self, bar_width: f32, bar_height: f32) -> Vec<RenderCommand> {
+    ///
+    /// `p` is the palette the caller resolved for the user's mode and accent;
+    /// this module holds no colours of its own. `bar_width` and `bar_height`
+    /// are the dimensions of the taskbar area.
+    pub fn render(&mut self, p: &Palette, bar_width: f32, bar_height: f32) -> Vec<RenderCommand> {
         if self.dirty {
             self.rebuild_buttons();
         }
@@ -475,7 +518,7 @@ impl TaskbarState {
             y: 0.0,
             width: bar_width,
             height: bar_height,
-            color: MOCHA_BASE,
+            color: p.base,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -485,7 +528,7 @@ impl TaskbarState {
             y1: 0.0,
             x2: bar_width,
             y2: 0.0,
-            color: MOCHA_SURFACE0,
+            color: p.surface0,
             width: 1.0,
         });
 
@@ -512,7 +555,8 @@ impl TaskbarState {
                     y1: btn_y + 8.0,
                     x2: div_x,
                     y2: btn_y + btn_h - 8.0,
-                    color: MOCHA_SURFACE2,
+                    // Judgement 6: a separator, which is `overlay0`'s job.
+                    color: p.overlay0,
                     width: 1.0,
                 });
             }
@@ -536,7 +580,11 @@ impl TaskbarState {
                         y: btn_y + 4.0,
                         width: 2.0,
                         height: btn_h - 8.0,
-                        color: MOCHA_BLUE,
+                        // Judgement 2: green, not the accent, because the
+                        // focus underline is on screen at the same moment and
+                        // has to be a different hue. `drop_target`'s hue at
+                        // full opacity — a 2px bar cannot be translucent.
+                        color: p.green,
                         corner_radii: CornerRadii::all(1.0),
                     });
                 }
@@ -549,11 +597,13 @@ impl TaskbarState {
                         y: btn_y,
                         width: btn_width,
                         height: btn_h,
-                        color: Color::rgba(69, 71, 90, 180), // MOCHA_SURFACE1 with transparency
+                        // The button as it is being carried: its resting
+                        // background, half-there.
+                        color: with_alpha(p.surface1, 180),
                         corner_radii: CornerRadii::all(6.0),
                     });
                     self.render_button_content(
-                        &mut cmds, button, ghost_x, btn_y, btn_width, btn_h, true,
+                        &mut cmds, p, button, ghost_x, btn_y, btn_width, btn_h, true,
                     );
                 }
 
@@ -561,11 +611,12 @@ impl TaskbarState {
                 continue;
             }
 
-            // Background based on state.
+            // Background based on state. Judgement 5: the ladder runs quiet to
+            // loud, and each rung is the role whose documentation describes it.
             let bg_color = match (button.state, button.hovered) {
-                (_, true) => MOCHA_SURFACE1,
-                (ButtonState::Focused, false) => MOCHA_SURFACE0,
-                (ButtonState::Running, false) => Color::rgba(49, 50, 68, 128), // subtle bg
+                (_, true) => p.surface2,
+                (ButtonState::Focused, false) => p.surface1,
+                (ButtonState::Running, false) => with_alpha(p.surface0, 128),
                 (ButtonState::Idle, false) => Color::TRANSPARENT,
             };
 
@@ -581,14 +632,17 @@ impl TaskbarState {
             }
 
             // Button content (icon placeholder + optional label).
-            self.render_button_content(&mut cmds, button, x, btn_y, btn_width, btn_h, false);
+            self.render_button_content(&mut cmds, p, button, x, btn_y, btn_width, btn_h, false);
 
             // Underline indicator for running/focused apps.
             if button.is_running() {
+                // Judgement 1: the accent means "you are here", so only the
+                // focused button gets it. A running app that is not focused is
+                // reporting presence, not position.
                 let indicator_color = if button.state == ButtonState::Focused {
-                    MOCHA_BLUE
+                    p.accent
                 } else {
-                    MOCHA_LAVENDER
+                    p.subtext0
                 };
                 let indicator_w = if button.state == ButtonState::Focused {
                     16.0
@@ -616,14 +670,18 @@ impl TaskbarState {
                     y: badge_y,
                     width: 12.0,
                     height: 12.0,
-                    color: MOCHA_RED,
+                    // Judgement 3: a count is a measurement, so its hue is
+                    // named and frozen. Not `p.accent`.
+                    color: p.red,
                     corner_radii: CornerRadii::all(6.0),
                 });
                 cmds.push(RenderCommand::Text {
                     x: badge_x + 3.0,
                     y: badge_y + 1.0,
                     text: format!("{}", button.window_count()),
-                    color: MOCHA_MANTLE,
+                    // Judgement 4: ink on a coloured fill is derived from that
+                    // fill, never named alongside it.
+                    color: readable_on(p.red),
                     font_size: 9.0,
                     font_weight: FontWeightHint::Bold,
                     max_width: None,
@@ -638,7 +696,7 @@ impl TaskbarState {
         if let Some(ref menu) = self.context_menu
             && menu.visible
         {
-            self.render_context_menu(&mut cmds, menu.button_index, menu.x, menu.y);
+            self.render_context_menu(&mut cmds, p, menu.button_index, menu.x, menu.y);
         }
 
         cmds
@@ -1062,9 +1120,15 @@ impl TaskbarState {
     // Internal: rendering helpers
     // ======================================================================
 
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "geometry plus the palette; splitting it into a struct would \
+                  hide which of the six numbers a caller got wrong"
+    )]
     fn render_button_content(
         &self,
         cmds: &mut Vec<RenderCommand>,
+        p: &Palette,
         button: &TaskbarButton,
         x: f32,
         y: f32,
@@ -1073,11 +1137,13 @@ impl TaskbarState {
         ghost: bool,
     ) {
         let icon_color = if ghost {
-            Color::rgba(205, 214, 244, 140) // MOCHA_TEXT with alpha
+            // Being carried: the primary ink, half-there, to match the ghost
+            // background behind it.
+            with_alpha(p.text, 140)
         } else {
             match button.state {
-                ButtonState::Idle => MOCHA_SUBTEXT0,
-                ButtonState::Running | ButtonState::Focused => MOCHA_TEXT,
+                ButtonState::Idle => p.subtext0,
+                ButtonState::Running | ButtonState::Focused => p.text,
             }
         };
 
@@ -1130,6 +1196,7 @@ impl TaskbarState {
     fn render_context_menu(
         &self,
         cmds: &mut Vec<RenderCommand>,
+        p: &Palette,
         button_index: usize,
         menu_x: f32,
         menu_y: f32,
@@ -1155,17 +1222,21 @@ impl TaskbarState {
             offset_y: 2.0,
             blur: 8.0,
             spread: 0.0,
-            color: Color::rgba(0, 0, 0, 80),
+            // Black in both modes: a shadow is an absence of light, not a
+            // colour. The shell had three different alphas for this one thing;
+            // `Palette::shadow` is the one it settled on.
+            color: p.shadow(),
             corner_radii: CornerRadii::all(6.0),
         });
 
-        // Background.
+        // Background. A menu floats, so it takes the transparency the user set
+        // for floating surfaces rather than a flat surface colour.
         cmds.push(RenderCommand::FillRect {
             x: menu_x,
             y: actual_y,
             width: menu_w,
             height: menu_h,
-            color: MOCHA_SURFACE0,
+            color: p.panel_bg(),
             corner_radii: CornerRadii::all(6.0),
         });
 
@@ -1175,7 +1246,7 @@ impl TaskbarState {
             y: actual_y,
             width: menu_w,
             height: menu_h,
-            color: MOCHA_SURFACE2,
+            color: p.surface2,
             line_width: 1.0,
             corner_radii: CornerRadii::all(6.0),
         });
@@ -1193,7 +1264,7 @@ impl TaskbarState {
                 x: menu_x + 12.0,
                 y: iy + 7.0,
                 text: label.to_string(),
-                color: MOCHA_TEXT,
+                color: p.text,
                 font_size: 12.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(menu_w - 24.0),
@@ -1571,10 +1642,132 @@ mod tests {
     // Rendering tests
     // ==========================================================================
 
+    /// A palette whose accent is in no other role of either mode.
+    ///
+    /// The stock accent *is* `blue`, so an assertion that the focus underline
+    /// is `p.accent` would pass just as happily against a module that still
+    /// said `blue` — which is precisely the confusion this conversion exists
+    /// to remove. Every accent question below is therefore asked of a palette
+    /// whose accent is a colour nothing else in the palette can supply.
+    fn accented(light: bool) -> Palette {
+        let mut p = Palette::for_mode(light);
+        p.accent = Color::from_hex(0xFF00FF);
+        assert!(
+            p.roles()
+                .iter()
+                .filter(|(name, c)| *name != "accent" && *c == p.accent)
+                .count()
+                == 0,
+            "the probe accent collides with another role, so accent \
+             assertions below would not distinguish them"
+        );
+        p
+    }
+
+    /// A taskbar in which every branch of `render` is taken at once.
+    ///
+    /// Five buttons: one being dragged (ghost + insertion caret), one focused,
+    /// one idle, one hovered, and one unpinned-and-running with three windows
+    /// (the count badge). Four pinned before one unpinned forces the section
+    /// divider, and a visible context menu forces the popup.
+    fn full_fixture() -> TaskbarState {
+        let mut s = default_state();
+        s.add_pinned(make_pinned("dragged", "Dragged", 0));
+        s.add_pinned(make_pinned("focused", "Focused", 1));
+        s.add_pinned(make_pinned("idle", "Idle", 2));
+        s.add_pinned(make_pinned("hovered", "Hovered", 3));
+        s.add_running_window(WindowId(1), "focused", "Focused");
+        s.add_running_window(WindowId(2), "hovered", "Hovered");
+        s.add_running_window(WindowId(10), "many", "Many 1");
+        s.add_running_window(WindowId(11), "many", "Many 2");
+        s.add_running_window(WindowId(12), "many", "Many 3");
+        s.set_focused_window(Some(WindowId(1)));
+        s.hover_index = Some(3);
+        s.drag = Some(DragState {
+            source_index: 0,
+            current_x: 400.0,
+            current_y: 20.0,
+            start_x: 60.0,
+            start_y: 20.0,
+            active: true,
+        });
+        s.context_menu = Some(ContextMenu {
+            button_index: 1,
+            x: 200.0,
+            y: 300.0,
+            visible: true,
+        });
+        s.rebuild_buttons();
+        s
+    }
+
+    /// The same taskbar in label mode, which is the one branch `full_fixture`
+    /// cannot also be in.
+    fn label_fixture() -> TaskbarState {
+        let mut s = TaskbarState::new(TaskbarConfig {
+            icon_only: false,
+            ..Default::default()
+        });
+        s.add_pinned(make_pinned("terminal", "Terminal", 0));
+        s.add_running_window(WindowId(1), "terminal", "Terminal");
+        s.set_focused_window(Some(WindowId(1)));
+        s.rebuild_buttons();
+        s
+    }
+
+    fn fills(cmds: &[RenderCommand]) -> Vec<(f32, f32, Color)> {
+        cmds.iter()
+            .filter_map(|c| match c {
+                RenderCommand::FillRect {
+                    width,
+                    height,
+                    color,
+                    ..
+                } => Some((*width, *height, *color)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Every colour the render puts on screen, whatever command carries it.
+    fn all_colors(cmds: &[RenderCommand]) -> Vec<Color> {
+        cmds.iter()
+            .filter_map(|c| match c {
+                RenderCommand::FillRect { color, .. }
+                | RenderCommand::StrokeRect { color, .. }
+                | RenderCommand::Text { color, .. }
+                | RenderCommand::Line { color, .. }
+                | RenderCommand::BoxShadow { color, .. } => Some(*color),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn rgb_eq(a: Color, b: Color) -> bool {
+        a.r == b.r && a.g == b.g && a.b == b.b
+    }
+
+    /// The one fill of a given size, or a failure naming what was there.
+    fn only_fill(cmds: &[RenderCommand], w: f32, h: f32, what: &str) -> Color {
+        let hits: Vec<Color> = fills(cmds)
+            .into_iter()
+            .filter(|(fw, fh, _)| *fw == w && *fh == h)
+            .map(|(_, _, c)| c)
+            .collect();
+        assert_eq!(
+            hits.len(),
+            1,
+            "expected exactly one {what} ({w}x{h}), found {}",
+            hits.len()
+        );
+        hits[0]
+    }
+
     #[test]
     fn test_render_empty_taskbar() {
+        let p = Palette::for_mode(false);
         let mut state = default_state();
-        let cmds = state.render(1920.0, 48.0);
+        let cmds = state.render(&p, 1920.0, 48.0);
 
         // Should have at least background + top border line.
         assert!(cmds.len() >= 2);
@@ -1589,7 +1782,7 @@ mod tests {
             } => {
                 assert_eq!(*width, 1920.0);
                 assert_eq!(*height, 48.0);
-                assert_eq!(*color, MOCHA_BASE);
+                assert_eq!(*color, p.base);
             }
             _ => panic!("Expected FillRect as first command"),
         }
@@ -1597,11 +1790,12 @@ mod tests {
 
     #[test]
     fn test_render_with_pinned_apps() {
+        let p = Palette::for_mode(false);
         let mut state = default_state();
         state.add_pinned(make_pinned("terminal", "Terminal", 0));
         state.add_pinned(make_pinned("files", "Files", 1));
 
-        let cmds = state.render(1920.0, 48.0);
+        let cmds = state.render(&p, 1920.0, 48.0);
         // Should render background + top line + icon placeholders for 2 buttons.
         // Each button gets at least an icon rect.
         assert!(cmds.len() >= 4);
@@ -1609,17 +1803,17 @@ mod tests {
 
     #[test]
     fn test_render_shows_indicator_for_running() {
+        let p = accented(false);
         let mut state = default_state();
         state.add_pinned(make_pinned("terminal", "Terminal", 0));
         state.add_running_window(WindowId(1), "terminal", "Terminal");
 
-        let cmds = state.render(1920.0, 48.0);
+        let cmds = state.render(&p, 1920.0, 48.0);
 
-        // Should have an indicator (small FillRect with MOCHA_LAVENDER or MOCHA_BLUE color).
+        // A running-but-unfocused app reports presence, not position, so its
+        // underline is `subtext0` and explicitly not the accent.
         let has_indicator = cmds.iter().any(|cmd| match cmd {
-            RenderCommand::FillRect { color, height, .. } => {
-                (*color == MOCHA_LAVENDER || *color == MOCHA_BLUE) && *height == 3.0
-            }
+            RenderCommand::FillRect { color, height, .. } => *color == p.subtext0 && *height == 3.0,
             _ => false,
         });
         assert!(
@@ -1630,21 +1824,22 @@ mod tests {
 
     #[test]
     fn test_render_shows_badge_for_multiple_windows() {
+        let p = Palette::for_mode(false);
         let mut state = default_state();
         state.add_running_window(WindowId(1), "editor", "Editor 1");
         state.add_running_window(WindowId(2), "editor", "Editor 2");
         state.add_running_window(WindowId(3), "editor", "Editor 3");
 
-        let cmds = state.render(1920.0, 48.0);
+        let cmds = state.render(&p, 1920.0, 48.0);
 
-        // Should have a badge circle (FillRect with MOCHA_RED) and text "3".
+        // Should have a badge circle (a 12x12 fill in `red`) and text "3".
         let has_badge_bg = cmds.iter().any(|cmd| match cmd {
             RenderCommand::FillRect {
                 color,
                 width,
                 height,
                 ..
-            } => *color == MOCHA_RED && *width == 12.0 && *height == 12.0,
+            } => *color == p.red && *width == 12.0 && *height == 12.0,
             _ => false,
         });
         let has_badge_text = cmds.iter().any(|cmd| match cmd {
@@ -1657,16 +1852,18 @@ mod tests {
 
     #[test]
     fn test_render_divider_between_pinned_and_running() {
+        let p = Palette::for_mode(false);
         let mut state = default_state();
         state.add_pinned(make_pinned("terminal", "Terminal", 0));
         state.add_running_window(WindowId(1), "terminal", "Terminal");
         state.add_running_window(WindowId(2), "browser", "Browser");
 
-        let cmds = state.render(1920.0, 48.0);
+        let cmds = state.render(&p, 1920.0, 48.0);
 
-        // Should have a vertical divider line between pinned and unpinned sections.
+        // Should have a vertical divider line between pinned and unpinned
+        // sections, in the palette's separator role.
         let has_divider = cmds.iter().any(|cmd| match cmd {
-            RenderCommand::Line { color, .. } => *color == MOCHA_SURFACE2,
+            RenderCommand::Line { color, x1, x2, .. } => *color == p.overlay0 && x1 == x2,
             _ => false,
         });
         assert!(has_divider, "Expected divider line between sections");
@@ -1674,13 +1871,10 @@ mod tests {
 
     #[test]
     fn test_render_label_mode() {
-        let mut state = TaskbarState::new(TaskbarConfig {
-            icon_only: false,
-            ..Default::default()
-        });
-        state.add_pinned(make_pinned("terminal", "Terminal", 0));
+        let p = Palette::for_mode(false);
+        let mut state = label_fixture();
 
-        let cmds = state.render(1920.0, 48.0);
+        let cmds = state.render(&p, 1920.0, 48.0);
 
         // Should have a text command with the app name.
         let has_label = cmds.iter().any(|cmd| match cmd {
@@ -1688,6 +1882,467 @@ mod tests {
             _ => false,
         });
         assert!(has_label, "Expected label text in non-icon-only mode");
+    }
+
+    // ==========================================================================
+    // Colour: the conversion off this module's own ten constants
+    // ==========================================================================
+
+    /// The membership sweep, in both modes, over a render that takes every
+    /// branch — see `crate::palette_check` for why the *light* pass is the one
+    /// that finds a leftover Mocha constant.
+    ///
+    /// `derived` is empty on purpose. Everything this module computes is
+    /// either a role at an alpha (which the sweep compares on RGB alone), a
+    /// `readable_on` endpoint, or black — so a colour that needs declaring
+    /// here would be a colour that came from nowhere.
+    #[test]
+    fn every_colour_the_taskbar_draws_comes_from_its_palette() {
+        for light in [false, true] {
+            let p = accented(light);
+            let cmds = full_fixture().render(&p, 1920.0, 48.0);
+            crate::palette_check::assert_drawn_from(&p, &cmds, &[], "taskbar (full)");
+
+            let cmds = label_fixture().render(&p, 1920.0, 48.0);
+            crate::palette_check::assert_drawn_from(&p, &cmds, &[], "taskbar (labels)");
+
+            let cmds = default_state().render(&p, 1920.0, 48.0);
+            crate::palette_check::assert_drawn_from(&p, &cmds, &[], "taskbar (empty)");
+        }
+    }
+
+    /// A sweep is only as wide as the render it is handed, so this pins the
+    /// fixture's coverage rather than trusting it.
+    ///
+    /// Every `if` in `render` and its two helpers is represented here. If a
+    /// future edit makes one of these branches unreachable from the fixture,
+    /// this fails loudly instead of the sweep quietly checking less.
+    #[test]
+    fn the_fixture_takes_every_branch_this_module_has() {
+        let p = accented(false);
+        let cmds = full_fixture().render(&p, 1920.0, 48.0);
+
+        // Bar background and its top border.
+        assert!(
+            fills(&cmds)
+                .iter()
+                .any(|(w, h, _)| *w == 1920.0 && *h == 48.0)
+        );
+        assert!(cmds.iter().any(|c| matches!(
+            c,
+            RenderCommand::Line { x1, x2, .. } if *x1 == 0.0 && *x2 == 1920.0
+        )));
+        // The pinned/running divider is the vertical line.
+        assert!(cmds.iter().any(|c| matches!(
+            c,
+            RenderCommand::Line { x1, x2, .. } if x1 == x2
+        )));
+        // Drag: the 2px insertion caret and the full-size ghost.
+        assert!(fills(&cmds).iter().any(|(w, h, _)| *w == 2.0 && *h == 36.0));
+        assert!(
+            fills(&cmds)
+                .iter()
+                .any(|(w, h, c)| *w == 44.0 && *h == 44.0 && c.a == 180)
+        );
+        // Three button backgrounds: hovered, focused, running-at-alpha. The
+        // idle one is `TRANSPARENT` and is therefore *not* pushed, which is
+        // asserted by counting below rather than by looking for it.
+        let bgs: Vec<Color> = fills(&cmds)
+            .into_iter()
+            .filter(|(w, h, _)| *w == 44.0 && *h == 44.0)
+            .map(|(_, _, c)| c)
+            .collect();
+        assert_eq!(bgs.len(), 4, "ghost + three drawn button backgrounds");
+        // Both underlines.
+        assert!(fills(&cmds).iter().any(|(w, h, _)| *w == 16.0 && *h == 3.0));
+        assert!(fills(&cmds).iter().any(|(w, h, _)| *w == 8.0 && *h == 3.0));
+        // Badge and its digit.
+        assert!(
+            fills(&cmds)
+                .iter()
+                .any(|(w, h, _)| *w == 12.0 && *h == 12.0)
+        );
+        assert!(cmds.iter().any(|c| matches!(
+            c,
+            RenderCommand::Text { text, .. } if text == "3"
+        )));
+        // Icon placeholders: one per button, dragged one included.
+        assert_eq!(
+            fills(&cmds)
+                .iter()
+                .filter(|(w, h, _)| *w == 20.0 && *h == 20.0)
+                .count(),
+            5
+        );
+        // The context menu: shadow, panel, outline, and at least one label.
+        assert!(
+            cmds.iter()
+                .any(|c| matches!(c, RenderCommand::BoxShadow { .. }))
+        );
+        assert!(
+            cmds.iter()
+                .any(|c| matches!(c, RenderCommand::StrokeRect { .. }))
+        );
+        assert!(fills(&cmds).iter().any(|(w, _, _)| *w == 140.0));
+
+        // And the branch no `full_fixture` render can reach.
+        let cmds = label_fixture().render(&p, 1920.0, 48.0);
+        assert!(cmds.iter().any(|c| matches!(
+            c,
+            RenderCommand::Text { text, .. } if text == "Terminal"
+        )));
+    }
+
+    /// Every colour on the bar itself, named against the role literal.
+    ///
+    /// Written as role literals rather than as "whatever `render` produced",
+    /// because an expectation phrased in terms of the code under test cannot
+    /// fail. Run in both modes: a mapping that is right in the palette it was
+    /// converted *from* proves nothing.
+    #[test]
+    fn every_colour_on_the_bar_is_in_the_role_it_claims() {
+        for light in [false, true] {
+            let p = accented(light);
+            let cmds = full_fixture().render(&p, 1920.0, 48.0);
+
+            assert_eq!(only_fill(&cmds, 1920.0, 48.0, "bar background"), p.base);
+            assert_eq!(only_fill(&cmds, 16.0, 3.0, "focus underline"), p.accent);
+            // Two apps are running-but-unfocused, and *both* underlines are
+            // checked: a per-site table with one representative per site is
+            // not a per-site table.
+            let running: Vec<Color> = fills(&cmds)
+                .into_iter()
+                .filter(|(w, h, _)| *w == 8.0 && *h == 3.0)
+                .map(|(_, _, c)| c)
+                .collect();
+            assert_eq!(running, vec![p.subtext0; 2], "running underlines");
+            assert_eq!(only_fill(&cmds, 12.0, 12.0, "count badge"), p.red);
+            assert_eq!(only_fill(&cmds, 2.0, 36.0, "insertion caret"), p.green);
+
+            // The top border and the section divider are both `Line`s, told
+            // apart by orientation.
+            let horizontal: Vec<Color> = cmds
+                .iter()
+                .filter_map(|c| match c {
+                    RenderCommand::Line { x1, x2, color, .. } if x1 != x2 => Some(*color),
+                    _ => None,
+                })
+                .collect();
+            let vertical: Vec<Color> = cmds
+                .iter()
+                .filter_map(|c| match c {
+                    RenderCommand::Line { x1, x2, color, .. } if x1 == x2 => Some(*color),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(horizontal, vec![p.surface0], "the bar's top border");
+            assert_eq!(vertical, vec![p.overlay0], "the pinned/running divider");
+
+            // The digit on the badge is chosen *from* the badge, so it is one
+            // of the two `readable_on` answers and not a named role.
+            let digit = cmds
+                .iter()
+                .find_map(|c| match c {
+                    RenderCommand::Text { text, color, .. } if text == "3" => Some(*color),
+                    _ => None,
+                })
+                .expect("badge digit");
+            assert_eq!(digit, readable_on(p.red));
+        }
+    }
+
+    /// The four button states, each in the role that describes it.
+    #[test]
+    fn each_button_state_draws_the_background_its_role_names() {
+        for light in [false, true] {
+            let p = accented(light);
+            let cmds = full_fixture().render(&p, 1920.0, 48.0);
+            let bgs: Vec<Color> = fills(&cmds)
+                .into_iter()
+                .filter(|(w, h, _)| *w == 44.0 && *h == 44.0)
+                .map(|(_, _, c)| c)
+                .collect();
+
+            assert!(bgs.contains(&p.surface2), "hovered is surface2");
+            assert!(bgs.contains(&p.surface1), "focused is surface1");
+            assert!(
+                bgs.contains(&with_alpha(p.surface0, 128)),
+                "running-but-unfocused is surface0 at half"
+            );
+            assert!(
+                bgs.contains(&with_alpha(p.surface1, 180)),
+                "the dragged ghost is surface1 at 180"
+            );
+            // Four buttons draw a background; the fifth is idle and draws
+            // none. Counting is what proves the idle branch stayed
+            // transparent — there is no colour to look for.
+            assert_eq!(bgs.len(), 4);
+        }
+    }
+
+    /// Button ink: idle is secondary, running and focused are primary, and a
+    /// button being carried is the primary ink made half-there.
+    #[test]
+    fn button_ink_follows_the_button_state() {
+        for light in [false, true] {
+            let p = accented(light);
+            let cmds = full_fixture().render(&p, 1920.0, 48.0);
+            let icons: Vec<Color> = fills(&cmds)
+                .into_iter()
+                .filter(|(w, h, _)| *w == 20.0 && *h == 20.0)
+                .map(|(_, _, c)| c)
+                .collect();
+
+            assert_eq!(icons.len(), 5);
+            assert_eq!(
+                icons
+                    .iter()
+                    .filter(|c| **c == with_alpha(p.text, 140))
+                    .count(),
+                1,
+                "exactly one button is being dragged"
+            );
+            assert_eq!(
+                icons.iter().filter(|c| **c == p.subtext0).count(),
+                1,
+                "exactly one button is idle"
+            );
+            assert_eq!(
+                icons.iter().filter(|c| **c == p.text).count(),
+                3,
+                "the other three are running or focused"
+            );
+
+            // In label mode the label shares the icon's colour, which is the
+            // point of computing it once.
+            let cmds = label_fixture().render(&p, 1920.0, 48.0);
+            let label = cmds
+                .iter()
+                .find_map(|c| match c {
+                    RenderCommand::Text { text, color, .. } if text == "Terminal" => Some(*color),
+                    _ => None,
+                })
+                .expect("label");
+            assert_eq!(label, p.text);
+        }
+    }
+
+    /// The context menu floats, so it is a panel and a shadow, not a surface.
+    #[test]
+    fn every_colour_in_the_context_menu_is_in_the_role_it_claims() {
+        for light in [false, true] {
+            let p = accented(light);
+            let cmds = full_fixture().render(&p, 1920.0, 48.0);
+
+            let shadow = cmds
+                .iter()
+                .find_map(|c| match c {
+                    RenderCommand::BoxShadow { color, .. } => Some(*color),
+                    _ => None,
+                })
+                .expect("menu shadow");
+            assert_eq!(shadow, p.shadow());
+            assert_eq!(
+                (shadow.r, shadow.g, shadow.b),
+                (0, 0, 0),
+                "a shadow is an absence of light, so it does not flip with the mode"
+            );
+
+            let panel = fills(&cmds)
+                .into_iter()
+                .find(|(w, _, _)| *w == 140.0)
+                .expect("menu panel")
+                .2;
+            assert_eq!(panel, p.panel_bg());
+            assert_eq!(
+                panel.a, p.panel_alpha,
+                "a menu takes the user's transparency setting"
+            );
+
+            let outline = cmds
+                .iter()
+                .find_map(|c| match c {
+                    RenderCommand::StrokeRect { color, .. } => Some(*color),
+                    _ => None,
+                })
+                .expect("menu outline");
+            assert_eq!(outline, p.surface2);
+
+            for item in ["Unpin", "Close", "Close all", "Pin to taskbar"] {
+                if let Some(color) = cmds.iter().find_map(|c| match c {
+                    RenderCommand::Text { text, color, .. } if text == item => Some(*color),
+                    _ => None,
+                }) {
+                    assert_eq!(color, p.text, "menu item {item}");
+                }
+            }
+        }
+    }
+
+    /// Judgement 1: exactly one mark on the taskbar says "you are here".
+    ///
+    /// Counting rather than inspecting, because the module draws several small
+    /// bars and the question is not "is this one the accent" but "how many
+    /// things claim to be the focus". A second accent-coloured mark is the
+    /// failure; a test that only looked at the focus underline could not see
+    /// it.
+    #[test]
+    fn exactly_one_thing_on_the_taskbar_carries_the_accent() {
+        for light in [false, true] {
+            let p = accented(light);
+            let cmds = full_fixture().render(&p, 1920.0, 48.0);
+            let n = all_colors(&cmds)
+                .into_iter()
+                .filter(|c| rgb_eq(*c, p.accent))
+                .count();
+            assert_eq!(
+                n,
+                1,
+                "the focused button's underline is the only accent on the bar \
+                 ({} in {} mode)",
+                n,
+                if light { "light" } else { "dark" }
+            );
+        }
+    }
+
+    /// Judgement 2: the "release here" caret and the "you are here" underline
+    /// are on screen together, so they must not be the same hue.
+    ///
+    /// The check is a hue comparison and not "the caret is green", because
+    /// what matters is that the two are told apart — a future edit that moved
+    /// the focus underline to green would satisfy a literal test and break the
+    /// thing the literal was standing in for.
+    #[test]
+    fn the_drop_caret_is_never_the_same_hue_as_the_focus_underline() {
+        for light in [false, true] {
+            let p = accented(light);
+            let cmds = full_fixture().render(&p, 1920.0, 48.0);
+            let caret = only_fill(&cmds, 2.0, 36.0, "insertion caret");
+            let focus = only_fill(&cmds, 16.0, 3.0, "focus underline");
+            assert!(
+                !rgb_eq(caret, focus),
+                "the drop caret and the focus underline are both on screen \
+                 during a reorder and both are small bars; identical hues make \
+                 them one mark"
+            );
+        }
+    }
+
+    /// Judgement 3: a count is a measurement, so the accent must not reach it.
+    #[test]
+    fn the_count_badge_does_not_follow_the_accent() {
+        for light in [false, true] {
+            let p = accented(light);
+            let cmds = full_fixture().render(&p, 1920.0, 48.0);
+            let badge = only_fill(&cmds, 12.0, 12.0, "count badge");
+            assert!(
+                !rgb_eq(badge, p.accent),
+                "a window count would say something different on every machine \
+                 if it followed the accent"
+            );
+            assert_eq!(badge, p.red);
+        }
+    }
+
+    /// Judgement 4: the digit is *derived* from the badge, not named beside it.
+    ///
+    /// Proved by the two modes disagreeing. `readable_on` answers near-black on
+    /// Mocha's pale red and near-white on Latte's deep one, so a module that
+    /// froze the digit to any single value fails one of the two.
+    #[test]
+    fn the_badge_digit_is_computed_from_the_badge_it_sits_on() {
+        let digits: Vec<Color> = [false, true]
+            .into_iter()
+            .map(|light| {
+                let p = accented(light);
+                let cmds = full_fixture().render(&p, 1920.0, 48.0);
+                let badge = only_fill(&cmds, 12.0, 12.0, "count badge");
+                let digit = cmds
+                    .iter()
+                    .find_map(|c| match c {
+                        RenderCommand::Text { text, color, .. } if text == "3" => Some(*color),
+                        _ => None,
+                    })
+                    .expect("badge digit");
+                assert_eq!(digit, readable_on(badge));
+                digit
+            })
+            .collect();
+        assert_ne!(
+            digits[0], digits[1],
+            "the two modes' reds are on opposite sides of the legibility \
+             threshold, so a digit that is the same in both was not derived \
+             from the fill"
+        );
+    }
+
+    /// The underlines differ in width as well as in colour.
+    ///
+    /// Two channels for one distinction is redundancy, not waste: the focus
+    /// mark has to survive a user who cannot tell the accent from `subtext0`.
+    #[test]
+    fn the_focus_underline_is_wider_than_the_running_one() {
+        let p = accented(false);
+        let cmds = full_fixture().render(&p, 1920.0, 48.0);
+        let underlines: Vec<f32> = fills(&cmds)
+            .into_iter()
+            .filter(|(_, h, _)| *h == 3.0)
+            .map(|(w, _, _)| w)
+            .collect();
+        assert_eq!(underlines.len(), 3, "one focused, two running");
+        assert_eq!(underlines.iter().filter(|w| **w == 16.0).count(), 1);
+        assert_eq!(underlines.iter().filter(|w| **w == 8.0).count(), 2);
+    }
+
+    /// The whole point, stated as one assertion: the bar is not the same in
+    /// both modes.
+    #[test]
+    fn the_render_is_not_the_same_in_both_modes() {
+        let dark = full_fixture().render(&accented(false), 1920.0, 48.0);
+        let light = full_fixture().render(&accented(true), 1920.0, 48.0);
+        assert_eq!(dark.len(), light.len(), "same shapes, different colours");
+        assert_ne!(
+            all_colors(&dark),
+            all_colors(&light),
+            "a module that ignored its palette would draw the same bar twice"
+        );
+    }
+
+    /// None of the ten deleted constants survives anywhere in a light render.
+    ///
+    /// The sweep above already rejects any colour outside the palette, but it
+    /// cannot name the offender in the terms the conversion was written in.
+    /// This one does, and it covers the case the sweep is blind to: a value
+    /// that happens to also be a `readable_on` endpoint.
+    #[test]
+    fn none_of_the_ten_deleted_constants_is_still_drawn() {
+        const DELETED: [(&str, u32); 10] = [
+            ("MOCHA_BASE", 0x001E_1E2E),
+            ("MOCHA_SURFACE0", 0x0031_3244),
+            ("MOCHA_SURFACE1", 0x0045_475A),
+            ("MOCHA_SURFACE2", 0x0058_5B70),
+            ("MOCHA_TEXT", 0x00CD_D6F4),
+            ("MOCHA_SUBTEXT0", 0x00A6_ADC8),
+            ("MOCHA_BLUE", 0x0089_B4FA),
+            ("MOCHA_LAVENDER", 0x00B4_BEFE),
+            ("MOCHA_RED", 0x00F3_8BA8),
+            ("MOCHA_MANTLE", 0x0018_1825),
+        ];
+        let p = accented(true);
+        let mut cmds = full_fixture().render(&p, 1920.0, 48.0);
+        cmds.extend(label_fixture().render(&p, 1920.0, 48.0));
+
+        for c in all_colors(&cmds) {
+            let rgb = (u32::from(c.r) << 16) | (u32::from(c.g) << 8) | u32::from(c.b);
+            for (name, value) in DELETED {
+                assert_ne!(
+                    rgb, value,
+                    "the light taskbar still draws {name} (#{value:06X}), so \
+                     that constant's substitution was missed"
+                );
+            }
+        }
     }
 
     // ==========================================================================

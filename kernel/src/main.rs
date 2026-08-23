@@ -5448,6 +5448,14 @@ extern "C" fn kernel_main() -> ! {
                 serial_println!("WARNING: statusbar self-test failed: {:?}", e);
             }
             fs::sysctlfs::self_test();
+            // sysinfo was reachable only from a `kshell` subcommand, so its
+            // suite had never run in the boot test (TD-A-FS-SELFTESTS-NEVER-RUN).
+            // It was already idempotent -- `clear_all()` at both ends -- and
+            // its CPU/kernel-parameter assertions read live values rather
+            // than fabricated ones, so it is genuine boot coverage.
+            if let Err(e) = fs::sysinfo::self_test() {
+                serial_println!("WARNING: sysinfo self-test failed: {:?}", e);
+            }
             fs::sysuptime::self_test();
             if let Err(e) = fs::tags::self_test() {
                 serial_println!("WARNING: file-tags self-test failed: {:?}", e);

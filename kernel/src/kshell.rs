@@ -35356,8 +35356,8 @@ fn cmd_sysinfo(args: &str) {
                     };
                     shell_println!(
                         "{} on {} ({}) {} GiB / {} GiB ({}% used) [{}]{}",
-                        d.device,
-                        d.mount_point,
+                        d.device.display(),
+                        d.mount_point.display(),
                         d.fs_type,
                         cap_gib - free_gib,
                         cap_gib,

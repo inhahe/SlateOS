@@ -34,6 +34,7 @@ use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::error::{KernelError, KernelResult};
+use crate::fs::path::{Path, PathBuf};
 
 // ---------------------------------------------------------------------------
 // Types
@@ -122,7 +123,12 @@ pub struct MemoryInfo {
 #[derive(Debug, Clone)]
 pub struct StorageDevice {
     /// Device name (e.g. "/dev/sda").
-    pub device: String,
+    ///
+    /// A `PathBuf`, not a `String` (design-decisions.md 261): a device node
+    /// is an ordinary filesystem entry, and this doubles as the lookup key
+    /// for `update_storage_free`, so a narrower type would fold two distinct
+    /// devices onto one row.
+    pub device: PathBuf,
     /// Model / product name.
     pub model: String,
     /// Total capacity (bytes).
@@ -132,7 +138,10 @@ pub struct StorageDevice {
     /// Filesystem type (e.g. "ext4").
     pub fs_type: String,
     /// Mount point.
-    pub mount_point: String,
+    ///
+    /// A `PathBuf`, not a `String` (design-decisions.md 261): a mount point
+    /// is an ordinary directory.
+    pub mount_point: PathBuf,
     /// Whether this is a network drive.
     pub network: bool,
     /// Whether this is removable.
@@ -392,12 +401,13 @@ pub fn update_memory(used: u64, available: u64, swap_used: u64) {
 }
 
 /// Update storage free space.
-pub fn update_storage_free(device: &str, free_bytes: u64) -> KernelResult<()> {
+pub fn update_storage_free(device: impl AsRef<Path>, free_bytes: u64) -> KernelResult<()> {
+    let device = device.as_ref();
     let mut state = STATE.lock();
     let dev = state
         .storage
         .iter_mut()
-        .find(|s| s.device == device)
+        .find(|s| s.device.as_path() == device)
         .ok_or(KernelError::NotFound)?;
     dev.free_bytes = free_bytes;
     Ok(())
@@ -715,12 +725,12 @@ pub fn self_test() -> KernelResult<()> {
     // Test 6: add a storage device, then update its free space.
     serial_println!("sysinfo::self_test 6: add + update storage");
     add_storage(StorageDevice {
-        device: String::from("/dev/nvme0n1p1"),
+        device: PathBuf::from("/dev/nvme0n1p1"),
         model: String::from("Test SSD"),
         capacity_bytes: 512 * 1024 * 1024 * 1024,
         free_bytes: 350 * 1024 * 1024 * 1024,
         fs_type: String::from("ext4"),
-        mount_point: String::from("/"),
+        mount_point: PathBuf::from("/"),
         network: false,
         removable: false,
         interface: String::from("NVMe"),
@@ -752,21 +762,78 @@ pub fn self_test() -> KernelResult<()> {
     // Test 11: add extra device — count rises to exactly 2.
     serial_println!("sysinfo::self_test 11: add devices");
     add_storage(StorageDevice {
-        device: String::from("/dev/sdb1"),
+        device: PathBuf::from("/dev/sdb1"),
         model: String::from("USB Drive"),
         capacity_bytes: 32 * 1024 * 1024 * 1024,
         free_bytes: 20 * 1024 * 1024 * 1024,
         fs_type: String::from("fat32"),
-        mount_point: String::from("/mnt/usb"),
+        mount_point: PathBuf::from("/mnt/usb"),
         network: false,
         removable: true,
         interface: String::from("USB"),
     })?;
     assert_eq!(storage_info().len(), 2);
 
-    // Reset so the test leaves the pristine empty state (sysinfo is not
-    // boot-wired, so uninitialised is the natural state for /proc/sysinfo).
+    // Test 12: non-UTF-8 device nodes and mount points (design-decisions.md 261).
+    //
+    // A device node and a mount point are both ordinary filesystem entries,
+    // so either may be named with bytes that have no UTF-8 spelling.  The
+    // device name doubles as `update_storage_free`'s lookup key, so while it
+    // was a `String` two distinct devices could fold onto one row -- and the
+    // free-space update would then silently land on the wrong disk, which is
+    // the kind of misreport a system-information page must never produce.
+    serial_println!("sysinfo::self_test 12: non-UTF-8 device + mount point");
+    {
+        let dev_a = Path::new(&b"/dev/si_\xFFd"[..]);
+        let dev_b = Path::new(&b"/dev/si_\xFEd"[..]);
+        let mp_a = Path::new(&b"/mnt/si_\xFFm"[..]);
+
+        add_storage(StorageDevice {
+            device: dev_a.to_path_buf(),
+            model: String::from("NU A"),
+            capacity_bytes: 1024,
+            free_bytes: 1024,
+            fs_type: String::from("ext4"),
+            mount_point: mp_a.to_path_buf(),
+            network: false,
+            removable: false,
+            interface: String::from("NVMe"),
+        })?;
+        add_storage(StorageDevice {
+            device: dev_b.to_path_buf(),
+            model: String::from("NU B"),
+            capacity_bytes: 1024,
+            free_bytes: 1024,
+            fs_type: String::from("ext4"),
+            mount_point: PathBuf::from("/mnt/si_plain"),
+            network: false,
+            removable: false,
+            interface: String::from("NVMe"),
+        })?;
+        assert_eq!(storage_info().len(), 4);
+
+        // Updating A must not touch B: the two device names differ only in a
+        // byte with no UTF-8 spelling, which is exactly the case that folded.
+        update_storage_free(dev_a, 7)?;
+        let devs = storage_info();
+        let a = devs
+            .iter()
+            .find(|d| d.device.as_path() == dev_a)
+            .expect("device a");
+        let b = devs
+            .iter()
+            .find(|d| d.device.as_path() == dev_b)
+            .expect("device b");
+        assert_eq!(a.free_bytes, 7);
+        assert_eq!(b.free_bytes, 1024);
+        // Byte-exact round trip for both the device node and the mount point.
+        assert_eq!(a.device.as_path().as_bytes(), b"/dev/si_\xFFd");
+        assert_eq!(a.mount_point.as_path(), mp_a);
+    }
+
+    // Reset so the test leaves the pristine empty state (uninitialised is the
+    // natural state for /proc/sysinfo until a caller asks for the defaults).
     clear_all();
-    serial_println!("sysinfo::self_test: all 11 tests passed");
+    serial_println!("sysinfo::self_test: all 12 tests passed");
     Ok(())
 }

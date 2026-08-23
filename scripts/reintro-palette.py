@@ -70,6 +70,7 @@ DTS = "gui/desktop/src/datetime_settings.rs"
 TPAD = "gui/desktop/src/touchpad.rs"
 OV = "gui/desktop/src/overview.rs"
 CTX = "gui/desktop/src/context_ext.rs"
+WID = "gui/desktop/src/widgets.rs"
 
 # (name, file, [(old, new), ...], [packages], [tests expected to fail])
 DEFECTS = [
@@ -3959,6 +3960,611 @@ DEFECTS = [
             # sweep is *supposed* to be blind to it. That blind spot is the
             # whole reason the shadow test exists.
             'the_menu_casts_the_shared_popup_shadow',
+        ],
+    ),
+    # ---- widgets.rs (module 22 of 49) --------------------------------------
+    (
+        "AAAAAAAAAAAAAAAAA: the edit-mode grid keeps Mocha's surface0",
+        WID,
+        [
+            ('color: Color::rgba(p.surface0.r, p.surface0.g, p.surface0.b, 80),',
+             'color: Color::rgba(0x31, 0x32, 0x44, 80),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_widget_layer_draws_comes_from_its_palette',
+            'every_wash_the_widget_layer_draws_is_a_role_under_its_own_veil',
+        ],
+    ),
+    (
+        "BBBBBBBBBBBBBBBBB: the grid's veil is thickened to a widget's opacity",
+        WID,
+        [
+            ('p.surface0.b, 80),',
+             'p.surface0.b, 200),'),
+        ],
+        ["desktop"],
+        [
+            # The grid's alpha is a property of the grid, which no widget owns,
+            # so it is the one wash here that must NOT move with bg_opacity.
+            'every_wash_the_widget_layer_draws_is_a_role_under_its_own_veil',
+        ],
+    ),
+    (
+        "CCCCCCCCCCCCCCCCC: a widget's shadow is pinned to a fixed depth",
+        WID,
+        [
+            ('color: Color::rgba(0, 0, 0, w.bg_opacity / 3),',
+             'color: Color::rgba(0, 0, 0, 120),'),
+        ],
+        ["desktop"],
+        [
+            'a_translucent_widget_casts_a_translucent_shadow',
+        ],
+    ),
+    (
+        "DDDDDDDDDDDDDDDDD: a widget's shadow joins the shared popup shadow",
+        WID,
+        [
+            ('color: Color::rgba(0, 0, 0, w.bg_opacity / 3),',
+             'color: p.shadow(),'),
+        ],
+        ["desktop"],
+        [
+            # The sweep waves black through at any alpha, so it is blind to both
+            # shadows by design. That is exactly why each has its own test.
+            'a_translucent_widget_casts_a_translucent_shadow',
+        ],
+    ),
+    (
+        "EEEEEEEEEEEEEEEEE: a widget's panel keeps Mocha's base",
+        WID,
+        [
+            ('color: Color::rgba(p.base.r, p.base.g, p.base.b, w.bg_opacity),',
+             'color: Color::rgba(0x1E, 0x1E, 0x2E, w.bg_opacity),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_widget_layer_draws_comes_from_its_palette',
+            'every_wash_the_widget_layer_draws_is_a_role_under_its_own_veil',
+        ],
+    ),
+    (
+        "FFFFFFFFFFFFFFFFF: a widget's panel is drawn opaque",
+        WID,
+        [
+            ('p.base.b, w.bg_opacity),',
+             'p.base.b, 255),'),
+        ],
+        ["desktop"],
+        [
+            'every_wash_the_widget_layer_draws_is_a_role_under_its_own_veil',
+        ],
+    ),
+    (
+        "GGGGGGGGGGGGGGGGG: the selected widget's ring is frozen to blue",
+        WID,
+        [
+            ('color: p.accent,\n                line_width: 2.0,',
+             'color: p.blue,\n                line_width: 2.0,'),
+        ],
+        ["desktop"],
+        [
+            # `p.blue` is a palette member in both modes, so the sweep is
+            # supposed to be blind to it. Only the accent test can see this.
+            'the_selected_widgets_outline_follows_the_accent',
+        ],
+    ),
+    (
+        "HHHHHHHHHHHHHHHHH: the selected widget's ring keeps Mocha's blue",
+        WID,
+        [
+            ('color: p.accent,\n                line_width: 2.0,',
+             'color: guitk::color::Color::from_hex(0x89B4FA),\n                line_width: 2.0,'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_widget_layer_draws_comes_from_its_palette',
+            'the_selected_widgets_outline_follows_the_accent',
+        ],
+    ),
+    (
+        "IIIIIIIIIIIIIIIII: the selection ring is drawn outside edit mode",
+        WID,
+        [
+            ('if self.edit_mode && self.selected_widget == Some(w.id) {',
+             'if self.selected_widget == Some(w.id) {'),
+        ],
+        ["desktop"],
+        [
+            'the_selected_widgets_outline_follows_the_accent',
+        ],
+    ),
+    (
+        "JJJJJJJJJJJJJJJJJ: every widget gets a selection ring once anything is selected",
+        WID,
+        [
+            ('if self.edit_mode && self.selected_widget == Some(w.id) {',
+             'if self.edit_mode && self.selected_widget.is_some() {'),
+        ],
+        ["desktop"],
+        [
+            'the_selected_widgets_outline_follows_the_accent',
+            'the_fixture_takes_every_branch_the_widget_layer_has',
+        ],
+    ),
+    (
+        "KKKKKKKKKKKKKKKKK: a widget's title bar keeps Mocha's surface0",
+        WID,
+        [
+            ('color: Color::rgba(p.surface0.r, p.surface0.g, p.surface0.b, w.bg_opacity),',
+             'color: Color::rgba(0x31, 0x32, 0x44, w.bg_opacity),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_widget_layer_draws_comes_from_its_palette',
+            'every_wash_the_widget_layer_draws_is_a_role_under_its_own_veil',
+        ],
+    ),
+    (
+        "LLLLLLLLLLLLLLLLL: a widget's title bar is emphasised like its text",
+        WID,
+        [
+            ('p.surface0.b, w.bg_opacity),\n            corner_radii: CornerRadii {',
+             'p.surface0.b, (w.bg_opacity as f32 * 1.2) as u8),\n            corner_radii: CornerRadii {'),
+        ],
+        ["desktop"],
+        [
+            'every_wash_the_widget_layer_draws_is_a_role_under_its_own_veil',
+        ],
+    ),
+    (
+        "MMMMMMMMMMMMMMMMM: a widget's title-bar icon is drawn in body text",
+        WID,
+        [
+            ('color: Color::rgba(\n                p.subtext0.r,\n                p.subtext0.g,\n                p.subtext0.b,\n                (w.bg_opacity as f32 * 1.2) as u8,\n            ),\n            font_weight: FontWeightHint::Regular,',
+             'color: Color::rgba(\n                p.text.r,\n                p.text.g,\n                p.text.b,\n                (w.bg_opacity as f32 * 1.2) as u8,\n            ),\n            font_weight: FontWeightHint::Regular,'),
+        ],
+        ["desktop"],
+        [
+            'every_wash_the_widget_layer_draws_is_a_role_under_its_own_veil',
+        ],
+    ),
+    (
+        "NNNNNNNNNNNNNNNNN: a widget's title-bar icon loses its emphasis over the panel",
+        WID,
+        [
+            ('color: Color::rgba(\n                p.subtext0.r,\n                p.subtext0.g,\n                p.subtext0.b,\n                (w.bg_opacity as f32 * 1.2) as u8,\n            ),\n            font_weight: FontWeightHint::Regular,',
+             'color: Color::rgba(\n                p.subtext0.r,\n                p.subtext0.g,\n                p.subtext0.b,\n                w.bg_opacity,\n            ),\n            font_weight: FontWeightHint::Regular,'),
+        ],
+        ["desktop"],
+        [
+            'every_wash_the_widget_layer_draws_is_a_role_under_its_own_veil',
+        ],
+    ),
+    (
+        "OOOOOOOOOOOOOOOOO: a widget's title keeps Mocha's subtext0",
+        WID,
+        [
+            ('color: Color::rgba(\n                p.subtext0.r,\n                p.subtext0.g,\n                p.subtext0.b,\n                (w.bg_opacity as f32 * 1.2) as u8,\n            ),\n            font_weight: FontWeightHint::Bold,',
+             'color: Color::rgba(\n                0xA6,\n                0xAD,\n                0xC8,\n                (w.bg_opacity as f32 * 1.2) as u8,\n            ),\n            font_weight: FontWeightHint::Bold,'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_widget_layer_draws_comes_from_its_palette',
+            'every_wash_the_widget_layer_draws_is_a_role_under_its_own_veil',
+        ],
+    ),
+    (
+        "PPPPPPPPPPPPPPPPP: the clock's time keeps Mocha's text",
+        WID,
+        [
+            ('text: "12:34".to_string(),\n                    font_size: 36.0,\n                    color: Color::rgba(p.text.r, p.text.g, p.text.b, alpha),',
+             'text: "12:34".to_string(),\n                    font_size: 36.0,\n                    color: Color::rgba(0xCD, 0xD6, 0xF4, alpha),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_widget_layer_draws_comes_from_its_palette',
+            'every_wash_the_widget_layer_draws_is_a_role_under_its_own_veil',
+        ],
+    ),
+    (
+        "QQQQQQQQQQQQQQQQQ: the clock's date is dimmed to a placeholder",
+        WID,
+        [
+            ('text: "Sunday, May 18".to_string(),\n                    font_size: 12.0,\n                    color: Color::rgba(p.subtext0.r, p.subtext0.g, p.subtext0.b, alpha),',
+             'text: "Sunday, May 18".to_string(),\n                    font_size: 12.0,\n                    color: Color::rgba(p.overlay0.r, p.overlay0.g, p.overlay0.b, alpha),'),
+        ],
+        ["desktop"],
+        [
+            'every_wash_the_widget_layer_draws_is_a_role_under_its_own_veil',
+        ],
+    ),
+    (
+        "RRRRRRRRRRRRRRRRR: the CPU meter's label keeps Mocha's subtext0",
+        WID,
+        [
+            ('text: "CPU".to_string(),\n                    font_size: 10.0,\n                    color: Color::rgba(p.subtext0.r, p.subtext0.g, p.subtext0.b, alpha),',
+             'text: "CPU".to_string(),\n                    font_size: 10.0,\n                    color: Color::rgba(0xA6, 0xAD, 0xC8, alpha),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_widget_layer_draws_comes_from_its_palette',
+            'every_wash_the_widget_layer_draws_is_a_role_under_its_own_veil',
+        ],
+    ),
+    (
+        "SSSSSSSSSSSSSSSSS: the CPU meter's track steps up a surface",
+        WID,
+        [
+            ('y: y + 14.0,\n                    width,\n                    height: bar_h,\n                    color: Color::rgba(p.surface1.r, p.surface1.g, p.surface1.b, alpha),',
+             'y: y + 14.0,\n                    width,\n                    height: bar_h,\n                    color: Color::rgba(p.surface2.r, p.surface2.g, p.surface2.b, alpha),'),
+        ],
+        ["desktop"],
+        [
+            'nothing_that_reports_a_measurement_follows_the_accent',
+        ],
+    ),
+    (
+        "TTTTTTTTTTTTTTTTT: the CPU meter follows the accent",
+        WID,
+        [
+            ('width: width * 0.45,\n                    height: bar_h,\n                    color: Color::rgba(p.blue.r, p.blue.g, p.blue.b, alpha),',
+             'width: width * 0.45,\n                    height: bar_h,\n                    color: Color::rgba(p.accent.r, p.accent.g, p.accent.b, alpha),'),
+        ],
+        ["desktop"],
+        [
+            # This is module 19's slider rule applied to something that is not a
+            # slider. The accent is a palette member, so only the frozen test sees it.
+            'nothing_that_reports_a_measurement_follows_the_accent',
+        ],
+    ),
+    (
+        "UUUUUUUUUUUUUUUUU: the CPU meter is drawn opaque over a translucent panel",
+        WID,
+        [
+            ('width: width * 0.45,\n                    height: bar_h,\n                    color: Color::rgba(p.blue.r, p.blue.g, p.blue.b, alpha),',
+             'width: width * 0.45,\n                    height: bar_h,\n                    color: Color::rgba(p.blue.r, p.blue.g, p.blue.b, 255),'),
+        ],
+        ["desktop"],
+        [
+            'every_wash_the_widget_layer_draws_is_a_role_under_its_own_veil',
+        ],
+    ),
+    (
+        "VVVVVVVVVVVVVVVVV: the Memory meter's label keeps Mocha's subtext0",
+        WID,
+        [
+            ('text: "Memory".to_string(),\n                    font_size: 10.0,\n                    color: Color::rgba(p.subtext0.r, p.subtext0.g, p.subtext0.b, alpha),',
+             'text: "Memory".to_string(),\n                    font_size: 10.0,\n                    color: Color::rgba(0xA6, 0xAD, 0xC8, alpha),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_widget_layer_draws_comes_from_its_palette',
+            'every_wash_the_widget_layer_draws_is_a_role_under_its_own_veil',
+        ],
+    ),
+    (
+        "WWWWWWWWWWWWWWWWW: the Memory meter's track keeps Mocha's surface1",
+        WID,
+        [
+            ('y: y + 46.0,\n                    width,\n                    height: bar_h,\n                    color: Color::rgba(p.surface1.r, p.surface1.g, p.surface1.b, alpha),',
+             'y: y + 46.0,\n                    width,\n                    height: bar_h,\n                    color: Color::rgba(0x45, 0x47, 0x5A, alpha),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_widget_layer_draws_comes_from_its_palette',
+            'nothing_that_reports_a_measurement_follows_the_accent',
+        ],
+    ),
+    (
+        "XXXXXXXXXXXXXXXXX: the Memory meter is the same colour as the CPU meter",
+        WID,
+        [
+            ('width: width * 0.62,\n                    height: bar_h,\n                    color: Color::rgba(p.green.r, p.green.g, p.green.b, alpha),',
+             'width: width * 0.62,\n                    height: bar_h,\n                    color: Color::rgba(p.blue.r, p.blue.g, p.blue.b, alpha),'),
+        ],
+        ["desktop"],
+        [
+            'nothing_that_reports_a_measurement_follows_the_accent',
+            'the_three_meters_never_look_alike',
+        ],
+    ),
+    (
+        "YYYYYYYYYYYYYYYYY: the Disk meter's label is promoted to body text",
+        WID,
+        [
+            ('text: "Disk".to_string(),\n                    font_size: 10.0,\n                    color: Color::rgba(p.subtext0.r, p.subtext0.g, p.subtext0.b, alpha),',
+             'text: "Disk".to_string(),\n                    font_size: 10.0,\n                    color: Color::rgba(p.text.r, p.text.g, p.text.b, alpha),'),
+        ],
+        ["desktop"],
+        [
+            'every_wash_the_widget_layer_draws_is_a_role_under_its_own_veil',
+        ],
+    ),
+    (
+        "ZZZZZZZZZZZZZZZZZ: the Disk meter's track keeps Mocha's surface1",
+        WID,
+        [
+            ('y: y + 78.0,\n                    width,\n                    height: bar_h,\n                    color: Color::rgba(p.surface1.r, p.surface1.g, p.surface1.b, alpha),',
+             'y: y + 78.0,\n                    width,\n                    height: bar_h,\n                    color: Color::rgba(0x45, 0x47, 0x5A, alpha),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_widget_layer_draws_comes_from_its_palette',
+            'nothing_that_reports_a_measurement_follows_the_accent',
+        ],
+    ),
+    (
+        "AAAAAAAAAAAAAAAAAA: the Disk meter follows the accent",
+        WID,
+        [
+            ('width: width * 0.38,\n                    height: bar_h,\n                    color: Color::rgba(p.peach.r, p.peach.g, p.peach.b, alpha),',
+             'width: width * 0.38,\n                    height: bar_h,\n                    color: Color::rgba(p.accent.r, p.accent.g, p.accent.b, alpha),'),
+        ],
+        ["desktop"],
+        [
+            'nothing_that_reports_a_measurement_follows_the_accent',
+        ],
+    ),
+    (
+        "BBBBBBBBBBBBBBBBBB: an empty note's placeholder is drawn like a written one",
+        WID,
+        [
+            ('                        if w.state_text.is_empty() {\n                            p.overlay0.r\n                        } else {\n                            p.text.r\n                        },\n                        if w.state_text.is_empty() {\n                            p.overlay0.g\n                        } else {\n                            p.text.g\n                        },\n                        if w.state_text.is_empty() {\n                            p.overlay0.b\n                        } else {\n                            p.text.b\n                        },',
+             '                        if w.state_text.is_empty() {\n                            p.text.r\n                        } else {\n                            p.text.r\n                        },\n                        if w.state_text.is_empty() {\n                            p.text.g\n                        } else {\n                            p.text.g\n                        },\n                        if w.state_text.is_empty() {\n                            p.text.b\n                        } else {\n                            p.text.b\n                        },'),
+        ],
+        ["desktop"],
+        [
+            'an_empty_note_and_a_written_one_never_look_alike',
+            'every_wash_the_widget_layer_draws_is_a_role_under_its_own_veil',
+        ],
+    ),
+    (
+        "CCCCCCCCCCCCCCCCCC: a written note keeps Mocha's text",
+        WID,
+        [
+            ('                        if w.state_text.is_empty() {\n                            p.overlay0.r\n                        } else {\n                            p.text.r\n                        },\n                        if w.state_text.is_empty() {\n                            p.overlay0.g\n                        } else {\n                            p.text.g\n                        },\n                        if w.state_text.is_empty() {\n                            p.overlay0.b\n                        } else {\n                            p.text.b\n                        },',
+             '                        if w.state_text.is_empty() {\n                            p.overlay0.r\n                        } else {\n                            0xCD\n                        },\n                        if w.state_text.is_empty() {\n                            p.overlay0.g\n                        } else {\n                            0xD6\n                        },\n                        if w.state_text.is_empty() {\n                            p.overlay0.b\n                        } else {\n                            0xF4\n                        },'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_widget_layer_draws_comes_from_its_palette',
+            'every_wash_the_widget_layer_draws_is_a_role_under_its_own_veil',
+        ],
+    ),
+    (
+        "DDDDDDDDDDDDDDDDDD: a note is drawn opaque over a translucent panel",
+        WID,
+        [
+            ('                        },\n                        alpha,\n                    ),\n                    font_weight: FontWeightHint::Regular,\n                    max_width: Some(width),\n                    overflow: TextOverflow::Ellipsis,\n                });\n            }\n            WidgetKind::BatteryStatus => {',
+             '                        },\n                        255,\n                    ),\n                    font_weight: FontWeightHint::Regular,\n                    max_width: Some(width),\n                    overflow: TextOverflow::Ellipsis,\n                });\n            }\n            WidgetKind::BatteryStatus => {'),
+        ],
+        ["desktop"],
+        [
+            'every_wash_the_widget_layer_draws_is_a_role_under_its_own_veil',
+        ],
+    ),
+    (
+        "EEEEEEEEEEEEEEEEEE: the battery glyph follows the accent",
+        WID,
+        [
+            ('text: "\\u{1F50B}".to_string(),\n                    font_size: 28.0,\n                    color: Color::rgba(p.green.r, p.green.g, p.green.b, alpha),',
+             'text: "\\u{1F50B}".to_string(),\n                    font_size: 28.0,\n                    color: Color::rgba(p.accent.r, p.accent.g, p.accent.b, alpha),'),
+        ],
+        ["desktop"],
+        [
+            # Green on a battery is the reading itself, not decoration: it is how
+            # the widget says the charge is healthy. A red accent would make it lie.
+            'nothing_that_reports_a_measurement_follows_the_accent',
+            'every_wash_the_widget_layer_draws_is_a_role_under_its_own_veil',
+        ],
+    ),
+    (
+        "FFFFFFFFFFFFFFFFFF: the battery glyph keeps Mocha's green",
+        WID,
+        [
+            ('text: "\\u{1F50B}".to_string(),\n                    font_size: 28.0,\n                    color: Color::rgba(p.green.r, p.green.g, p.green.b, alpha),',
+             'text: "\\u{1F50B}".to_string(),\n                    font_size: 28.0,\n                    color: Color::rgba(0xA6, 0xE3, 0xA1, alpha),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_widget_layer_draws_comes_from_its_palette',
+            'nothing_that_reports_a_measurement_follows_the_accent',
+            'every_wash_the_widget_layer_draws_is_a_role_under_its_own_veil',
+        ],
+    ),
+    (
+        "GGGGGGGGGGGGGGGGGG: the battery's reading keeps Mocha's text",
+        WID,
+        [
+            ('text: "85%".to_string(),\n                    font_size: 20.0,\n                    color: Color::rgba(p.text.r, p.text.g, p.text.b, alpha),',
+             'text: "85%".to_string(),\n                    font_size: 20.0,\n                    color: Color::rgba(0xCD, 0xD6, 0xF4, alpha),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_widget_layer_draws_comes_from_its_palette',
+            'every_wash_the_widget_layer_draws_is_a_role_under_its_own_veil',
+        ],
+    ),
+    (
+        "HHHHHHHHHHHHHHHHHH: the battery's estimate is promoted to body text",
+        WID,
+        [
+            ('text: "3h 42m remaining".to_string(),\n                    font_size: 11.0,\n                    color: Color::rgba(p.subtext0.r, p.subtext0.g, p.subtext0.b, alpha),',
+             'text: "3h 42m remaining".to_string(),\n                    font_size: 11.0,\n                    color: Color::rgba(p.text.r, p.text.g, p.text.b, alpha),'),
+        ],
+        ["desktop"],
+        [
+            'every_wash_the_widget_layer_draws_is_a_role_under_its_own_veil',
+        ],
+    ),
+    (
+        "IIIIIIIIIIIIIIIIII: the generic widget's placeholder icon keeps Mocha's surface2",
+        WID,
+        [
+            ('font_size: 32.0,\n                    color: Color::rgba(p.surface2.r, p.surface2.g, p.surface2.b, alpha),',
+             'font_size: 32.0,\n                    color: Color::rgba(0x58, 0x5B, 0x70, alpha),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_widget_layer_draws_comes_from_its_palette',
+            'every_wash_the_widget_layer_draws_is_a_role_under_its_own_veil',
+        ],
+    ),
+    (
+        "JJJJJJJJJJJJJJJJJJ: the generic widget's label is dimmed to a placeholder",
+        WID,
+        [
+            ('font_size: 13.0,\n                    color: Color::rgba(p.subtext0.r, p.subtext0.g, p.subtext0.b, alpha),',
+             'font_size: 13.0,\n                    color: Color::rgba(p.overlay0.r, p.overlay0.g, p.overlay0.b, alpha),'),
+        ],
+        ["desktop"],
+        [
+            'every_wash_the_widget_layer_draws_is_a_role_under_its_own_veil',
+        ],
+    ),
+    (
+        "KKKKKKKKKKKKKKKKKK: the picker keeps its own shadow depth",
+        WID,
+        [
+            ('            blur: 20.0,\n            spread: 0.0,\n            color: p.shadow(),',
+             '            blur: 20.0,\n            spread: 0.0,\n            color: guitk::color::Color::rgba(0, 0, 0, 100),'),
+        ],
+        ["desktop"],
+        [
+            'the_picker_casts_the_shared_popup_shadow',
+        ],
+    ),
+    (
+        "LLLLLLLLLLLLLLLLLL: the picker's panel keeps Mocha's mantle",
+        WID,
+        [
+            ('            color: p.mantle,',
+             '            color: guitk::color::Color::from_hex(0x181825),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_widget_layer_draws_comes_from_its_palette',
+            'the_pickers_own_surfaces_come_from_the_palette',
+        ],
+    ),
+    (
+        "MMMMMMMMMMMMMMMMMM: the picker's border keeps Mocha's surface1",
+        WID,
+        [
+            ('            color: p.surface1,\n            line_width: 1.0,',
+             '            color: guitk::color::Color::from_hex(0x45475A),\n            line_width: 1.0,'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_widget_layer_draws_comes_from_its_palette',
+            'the_pickers_own_surfaces_come_from_the_palette',
+        ],
+    ),
+    (
+        "NNNNNNNNNNNNNNNNNN: the picker's title follows the accent",
+        WID,
+        [
+            ('text: "Add Widget".to_string(),\n            font_size: 16.0,\n            color: p.text,',
+             'text: "Add Widget".to_string(),\n            font_size: 16.0,\n            color: p.accent,'),
+        ],
+        ["desktop"],
+        [
+            'the_pickers_own_surfaces_come_from_the_palette',
+        ],
+    ),
+    (
+        "OOOOOOOOOOOOOOOOOO: every picker row's icon follows the accent",
+        WID,
+        [
+            ('font_size: 16.0,\n                color: p.blue,',
+             'font_size: 16.0,\n                color: p.accent,'),
+        ],
+        ["desktop"],
+        [
+            # Every row is drawn identically, so an accent here says nothing about
+            # any row -- and it costs the accent its one job, which is the ring.
+            'the_pickers_own_surfaces_come_from_the_palette',
+        ],
+    ),
+    (
+        "PPPPPPPPPPPPPPPPPP: the picker's row labels keep Mocha's text",
+        WID,
+        [
+            ('font_size: 13.0,\n                color: p.text,',
+             'font_size: 13.0,\n                color: guitk::color::Color::from_hex(0xCDD6F4),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_widget_layer_draws_comes_from_its_palette',
+            'the_pickers_own_surfaces_come_from_the_palette',
+        ],
+    ),
+    (
+        "QQQQQQQQQQQQQQQQQQ: the picker's size hints keep Mocha's overlay0",
+        WID,
+        [
+            ('font_size: 10.0,\n                color: p.overlay0,',
+             'font_size: 10.0,\n                color: guitk::color::Color::from_hex(0x6C7086),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_widget_layer_draws_comes_from_its_palette',
+            'the_pickers_own_surfaces_come_from_the_palette',
+        ],
+    ),
+    (
+        "RRRRRRRRRRRRRRRRRR: the edit-mode grid stops being drawn in edit mode",
+        WID,
+        [
+            ('        if self.edit_mode {\n            self.render_grid(p, &mut commands);',
+             '        if !self.edit_mode {\n            self.render_grid(p, &mut commands);'),
+        ],
+        ["desktop"],
+        [
+            # Not a colour bug. The four defects here exist because module 21 lost
+            # three defects to a fixture that never drew them: a branch that stops
+            # firing silently removes a colour site from every test at once.
+            'the_fixture_takes_every_branch_the_widget_layer_has',
+        ],
+    ),
+    (
+        "SSSSSSSSSSSSSSSSSS: the picker stops being drawn while a widget is selected",
+        WID,
+        [
+            ('        if self.picker_open {',
+             '        if self.picker_open && self.selected_widget.is_none() {'),
+        ],
+        ["desktop"],
+        [
+            'the_fixture_takes_every_branch_the_widget_layer_has',
+            'the_picker_casts_the_shared_popup_shadow',
+            'the_pickers_own_surfaces_come_from_the_palette',
+        ],
+    ),
+    (
+        "TTTTTTTTTTTTTTTTTT: a hidden widget is drawn anyway",
+        WID,
+        [
+            ('            if !w.visible {\n                continue;\n            }\n            self.render_widget(w, p, &mut commands);',
+             '            if !w.visible && w.bg_opacity == 0 {\n                continue;\n            }\n            self.render_widget(w, p, &mut commands);'),
+        ],
+        ["desktop"],
+        [
+            'the_fixture_takes_every_branch_the_widget_layer_has',
+        ],
+    ),
+    (
+        "UUUUUUUUUUUUUUUUUU: a hidden widget layer still draws itself",
+        WID,
+        [
+            ('        if !self.layer_visible {\n            return Vec::new();\n        }',
+             '        if !self.layer_visible && self.widgets.is_empty() {\n            return Vec::new();\n        }'),
+        ],
+        ["desktop"],
+        [
+            'a_hidden_widget_layer_draws_nothing',
         ],
     ),
 ]

@@ -8,26 +8,64 @@
 //! add, remove, move, and resize widgets. Third-party apps can provide widgets
 //! via a capability-gated registration API.
 
+use appearance::Palette;
 use guitk::color::Color;
 use guitk::idseq::IdSeq;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 
 // ============================================================================
-// Catppuccin Mocha palette
+// Colour
 // ============================================================================
-
-const BASE: Color = Color::from_hex(0x1E1E2E);
-const MANTLE: Color = Color::from_hex(0x181825);
-const SURFACE0: Color = Color::from_hex(0x313244);
-const SURFACE1: Color = Color::from_hex(0x45475A);
-const SURFACE2: Color = Color::from_hex(0x585B70);
-const TEXT: Color = Color::from_hex(0xCDD6F4);
-const SUBTEXT0: Color = Color::from_hex(0xA6ADC8);
-const BLUE: Color = Color::from_hex(0x89B4FA);
-const GREEN: Color = Color::from_hex(0xA6E3A1);
-const PEACH: Color = Color::from_hex(0xFAB387);
-const OVERLAY0: Color = Color::from_hex(0x6C7086);
+//
+// Every colour drawn here comes from the `&Palette` passed to `render`, so the
+// widget layer follows the desktop's mode and accent.  Most of this module is
+// **washes** -- `Color::rgba(role.r, role.g, role.b, alpha)` -- because a
+// widget panel is translucent over the wallpaper.  Module 20's rule governs
+// them: a wash is a role seen through a veil, so the veil is the alpha and the
+// role is everything else.  Every alpha below is untouched by the conversion;
+// only the three channels in front of it changed hands.
+//
+// Four judgements had to be made when the hardcoded hexes came out, because a
+// literal carries no role until someone assigns one:
+//
+// *The selected widget's outline takes the accent.*  In edit mode a 2px ring is
+// drawn around exactly the widget you have picked, and around nothing else.  It
+// was a hardcoded blue that appears in no other state, and a colour that
+// appears in exactly one state marks that state -- here, which widget you are
+// working on, which is a position, which is what the accent is for.  A ring
+// floating on the wallpaper cannot say "here" with a surface step the way a
+// hovered list row can, so the accent is also the only mark available to it.
+//
+// *Everything that reports a measurement is frozen, because a meter reports
+// rather than invites.*  Module 19 gave sliders a `surface1` track and an
+// accent fill, but a slider is something you drag; the CPU/Memory/Disk bars are
+// read-outs nobody can move, and the accent never marks measurement.  Their
+// fills are further a **category** set -- blue is CPU, green is Memory, peach
+// is Disk -- and three bars told apart by colour stop being three bars the
+// moment they all follow one accent.  The tracks stay `surface1`, which is the
+// half of the slider rule that does survive: a track is a surface either way.
+// The battery glyph's green is the same judgement one widget over: green there
+// is not decoration but the reading itself -- it is how the widget says the
+// charge is healthy -- so it would be saying something false the day someone
+// picked a red accent.
+//
+// *The picker joins the shared popup shadow; a widget's own shadow does not.*
+// The picker is a panel that sits on top of everything else, so its
+// `rgba(0, 0, 0, 100)` became `Palette::shadow()` -- the same move
+// `context_ext` made, for the same reason.  The per-widget shadow keeps
+// `rgba(0, 0, 0, bg_opacity / 3)` deliberately: its depth is a function of the
+// widget's own translucency, so a widget you can see through casts a shadow you
+// can see through, and pinning it to one shared depth would make a nearly
+// invisible widget cast a solid shadow.  Note that the membership sweep waves
+// black through at any alpha, so it checks neither shadow; both therefore carry
+// their own assertions.
+//
+// *The picker's row icons stay `p.blue` rather than becoming the accent.*
+// Every row in the picker is drawn identically, so an accent there would be
+// saying nothing about any particular row -- and it would cost the accent the
+// one job it has in this module, which is to say which widget is selected.
+// Within a single render the accent has to mean one thing.
 
 // ============================================================================
 // Widget types
@@ -614,7 +652,7 @@ impl DesktopWidgetManager {
     }
 
     /// Render all visible widgets into render commands.
-    pub fn render(&self) -> Vec<RenderCommand> {
+    pub fn render(&self, p: &Palette) -> Vec<RenderCommand> {
         if !self.layer_visible {
             return Vec::new();
         }
@@ -623,7 +661,7 @@ impl DesktopWidgetManager {
 
         // In edit mode, render the grid.
         if self.edit_mode {
-            self.render_grid(&mut commands);
+            self.render_grid(p, &mut commands);
         }
 
         // Render each visible widget.
@@ -631,12 +669,12 @@ impl DesktopWidgetManager {
             if !w.visible {
                 continue;
             }
-            self.render_widget(w, &mut commands);
+            self.render_widget(w, p, &mut commands);
         }
 
         // Widget picker overlay.
         if self.picker_open {
-            self.render_picker(&mut commands);
+            self.render_picker(p, &mut commands);
         }
 
         commands
@@ -659,7 +697,7 @@ impl DesktopWidgetManager {
             .any(|w| rect.intersects(&w.rect()))
     }
 
-    fn render_grid(&self, commands: &mut Vec<RenderCommand>) {
+    fn render_grid(&self, p: &Palette, commands: &mut Vec<RenderCommand>) {
         for row in 0..self.grid.rows {
             for col in 0..self.grid.columns {
                 let (x, y) = GridPos::new(col, row).pixels(
@@ -674,7 +712,7 @@ impl DesktopWidgetManager {
                     y,
                     width: self.grid.cell_width,
                     height: self.grid.cell_height,
-                    color: Color::rgba(SURFACE0.r, SURFACE0.g, SURFACE0.b, 80),
+                    color: Color::rgba(p.surface0.r, p.surface0.g, p.surface0.b, 80),
                     line_width: 1.0,
                     corner_radii: CornerRadii::all(4.0),
                 });
@@ -682,7 +720,7 @@ impl DesktopWidgetManager {
         }
     }
 
-    fn render_widget(&self, w: &WidgetInstance, commands: &mut Vec<RenderCommand>) {
+    fn render_widget(&self, w: &WidgetInstance, p: &Palette, commands: &mut Vec<RenderCommand>) {
         let (x, y) = w.position.pixels(
             self.grid.origin_x,
             self.grid.origin_y,
@@ -715,7 +753,7 @@ impl DesktopWidgetManager {
             y,
             width,
             height,
-            color: Color::rgba(BASE.r, BASE.g, BASE.b, w.bg_opacity),
+            color: Color::rgba(p.base.r, p.base.g, p.base.b, w.bg_opacity),
             corner_radii: CornerRadii::all(cr),
         });
 
@@ -726,7 +764,7 @@ impl DesktopWidgetManager {
                 y: y - 2.0,
                 width: width + 4.0,
                 height: height + 4.0,
-                color: BLUE,
+                color: p.accent,
                 line_width: 2.0,
                 corner_radii: CornerRadii::all(cr + 2.0),
             });
@@ -739,7 +777,7 @@ impl DesktopWidgetManager {
             y,
             width,
             height: title_h,
-            color: Color::rgba(SURFACE0.r, SURFACE0.g, SURFACE0.b, w.bg_opacity),
+            color: Color::rgba(p.surface0.r, p.surface0.g, p.surface0.b, w.bg_opacity),
             corner_radii: CornerRadii {
                 top_left: cr,
                 top_right: cr,
@@ -755,9 +793,9 @@ impl DesktopWidgetManager {
             text: w.kind.icon().to_string(),
             font_size: 12.0,
             color: Color::rgba(
-                SUBTEXT0.r,
-                SUBTEXT0.g,
-                SUBTEXT0.b,
+                p.subtext0.r,
+                p.subtext0.g,
+                p.subtext0.b,
                 (w.bg_opacity as f32 * 1.2) as u8,
             ),
             font_weight: FontWeightHint::Regular,
@@ -770,9 +808,9 @@ impl DesktopWidgetManager {
             text: w.title().to_string(),
             font_size: 11.0,
             color: Color::rgba(
-                SUBTEXT0.r,
-                SUBTEXT0.g,
-                SUBTEXT0.b,
+                p.subtext0.r,
+                p.subtext0.g,
+                p.subtext0.b,
                 (w.bg_opacity as f32 * 1.2) as u8,
             ),
             font_weight: FontWeightHint::Bold,
@@ -785,6 +823,7 @@ impl DesktopWidgetManager {
         let content_h = height - title_h - 8.0;
         self.render_widget_content(
             w,
+            p,
             x + 8.0,
             content_y,
             width - 16.0,
@@ -797,6 +836,7 @@ impl DesktopWidgetManager {
     fn render_widget_content(
         &self,
         w: &WidgetInstance,
+        p: &Palette,
         x: f32,
         y: f32,
         width: f32,
@@ -812,7 +852,7 @@ impl DesktopWidgetManager {
                     y: y + 10.0,
                     text: "12:34".to_string(),
                     font_size: 36.0,
-                    color: Color::rgba(TEXT.r, TEXT.g, TEXT.b, alpha),
+                    color: Color::rgba(p.text.r, p.text.g, p.text.b, alpha),
                     font_weight: FontWeightHint::Bold,
                     max_width: Some(width),
                     overflow: TextOverflow::Ellipsis,
@@ -822,7 +862,7 @@ impl DesktopWidgetManager {
                     y: y + 55.0,
                     text: "Sunday, May 18".to_string(),
                     font_size: 12.0,
-                    color: Color::rgba(SUBTEXT0.r, SUBTEXT0.g, SUBTEXT0.b, alpha),
+                    color: Color::rgba(p.subtext0.r, p.subtext0.g, p.subtext0.b, alpha),
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(width),
                     overflow: TextOverflow::Ellipsis,
@@ -836,7 +876,7 @@ impl DesktopWidgetManager {
                     y,
                     text: "CPU".to_string(),
                     font_size: 10.0,
-                    color: Color::rgba(SUBTEXT0.r, SUBTEXT0.g, SUBTEXT0.b, alpha),
+                    color: Color::rgba(p.subtext0.r, p.subtext0.g, p.subtext0.b, alpha),
                     font_weight: FontWeightHint::Bold,
                     max_width: None,
                     overflow: TextOverflow::Clip,
@@ -846,7 +886,7 @@ impl DesktopWidgetManager {
                     y: y + 14.0,
                     width,
                     height: bar_h,
-                    color: Color::rgba(SURFACE1.r, SURFACE1.g, SURFACE1.b, alpha),
+                    color: Color::rgba(p.surface1.r, p.surface1.g, p.surface1.b, alpha),
                     corner_radii: CornerRadii::all(4.0),
                 });
                 commands.push(RenderCommand::FillRect {
@@ -854,7 +894,7 @@ impl DesktopWidgetManager {
                     y: y + 14.0,
                     width: width * 0.45,
                     height: bar_h,
-                    color: Color::rgba(BLUE.r, BLUE.g, BLUE.b, alpha),
+                    color: Color::rgba(p.blue.r, p.blue.g, p.blue.b, alpha),
                     corner_radii: CornerRadii::all(4.0),
                 });
                 // Memory bar.
@@ -863,7 +903,7 @@ impl DesktopWidgetManager {
                     y: y + 32.0,
                     text: "Memory".to_string(),
                     font_size: 10.0,
-                    color: Color::rgba(SUBTEXT0.r, SUBTEXT0.g, SUBTEXT0.b, alpha),
+                    color: Color::rgba(p.subtext0.r, p.subtext0.g, p.subtext0.b, alpha),
                     font_weight: FontWeightHint::Bold,
                     max_width: None,
                     overflow: TextOverflow::Clip,
@@ -873,7 +913,7 @@ impl DesktopWidgetManager {
                     y: y + 46.0,
                     width,
                     height: bar_h,
-                    color: Color::rgba(SURFACE1.r, SURFACE1.g, SURFACE1.b, alpha),
+                    color: Color::rgba(p.surface1.r, p.surface1.g, p.surface1.b, alpha),
                     corner_radii: CornerRadii::all(4.0),
                 });
                 commands.push(RenderCommand::FillRect {
@@ -881,7 +921,7 @@ impl DesktopWidgetManager {
                     y: y + 46.0,
                     width: width * 0.62,
                     height: bar_h,
-                    color: Color::rgba(GREEN.r, GREEN.g, GREEN.b, alpha),
+                    color: Color::rgba(p.green.r, p.green.g, p.green.b, alpha),
                     corner_radii: CornerRadii::all(4.0),
                 });
                 // Disk bar.
@@ -890,7 +930,7 @@ impl DesktopWidgetManager {
                     y: y + 64.0,
                     text: "Disk".to_string(),
                     font_size: 10.0,
-                    color: Color::rgba(SUBTEXT0.r, SUBTEXT0.g, SUBTEXT0.b, alpha),
+                    color: Color::rgba(p.subtext0.r, p.subtext0.g, p.subtext0.b, alpha),
                     font_weight: FontWeightHint::Bold,
                     max_width: None,
                     overflow: TextOverflow::Clip,
@@ -900,7 +940,7 @@ impl DesktopWidgetManager {
                     y: y + 78.0,
                     width,
                     height: bar_h,
-                    color: Color::rgba(SURFACE1.r, SURFACE1.g, SURFACE1.b, alpha),
+                    color: Color::rgba(p.surface1.r, p.surface1.g, p.surface1.b, alpha),
                     corner_radii: CornerRadii::all(4.0),
                 });
                 commands.push(RenderCommand::FillRect {
@@ -908,7 +948,7 @@ impl DesktopWidgetManager {
                     y: y + 78.0,
                     width: width * 0.38,
                     height: bar_h,
-                    color: Color::rgba(PEACH.r, PEACH.g, PEACH.b, alpha),
+                    color: Color::rgba(p.peach.r, p.peach.g, p.peach.b, alpha),
                     corner_radii: CornerRadii::all(4.0),
                 });
             }
@@ -925,19 +965,19 @@ impl DesktopWidgetManager {
                     font_size: 12.0,
                     color: Color::rgba(
                         if w.state_text.is_empty() {
-                            OVERLAY0.r
+                            p.overlay0.r
                         } else {
-                            TEXT.r
+                            p.text.r
                         },
                         if w.state_text.is_empty() {
-                            OVERLAY0.g
+                            p.overlay0.g
                         } else {
-                            TEXT.g
+                            p.text.g
                         },
                         if w.state_text.is_empty() {
-                            OVERLAY0.b
+                            p.overlay0.b
                         } else {
-                            TEXT.b
+                            p.text.b
                         },
                         alpha,
                     ),
@@ -953,7 +993,7 @@ impl DesktopWidgetManager {
                     y: y + 10.0,
                     text: "\u{1F50B}".to_string(),
                     font_size: 28.0,
-                    color: Color::rgba(GREEN.r, GREEN.g, GREEN.b, alpha),
+                    color: Color::rgba(p.green.r, p.green.g, p.green.b, alpha),
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
                     overflow: TextOverflow::Clip,
@@ -963,7 +1003,7 @@ impl DesktopWidgetManager {
                     y: y + 16.0,
                     text: "85%".to_string(),
                     font_size: 20.0,
-                    color: Color::rgba(TEXT.r, TEXT.g, TEXT.b, alpha),
+                    color: Color::rgba(p.text.r, p.text.g, p.text.b, alpha),
                     font_weight: FontWeightHint::Bold,
                     max_width: None,
                     overflow: TextOverflow::Clip,
@@ -973,7 +1013,7 @@ impl DesktopWidgetManager {
                     y: y + 55.0,
                     text: "3h 42m remaining".to_string(),
                     font_size: 11.0,
-                    color: Color::rgba(SUBTEXT0.r, SUBTEXT0.g, SUBTEXT0.b, alpha),
+                    color: Color::rgba(p.subtext0.r, p.subtext0.g, p.subtext0.b, alpha),
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(width),
                     overflow: TextOverflow::Ellipsis,
@@ -986,7 +1026,7 @@ impl DesktopWidgetManager {
                     y: y + height / 2.0 - 10.0,
                     text: w.kind.icon().to_string(),
                     font_size: 32.0,
-                    color: Color::rgba(SURFACE2.r, SURFACE2.g, SURFACE2.b, alpha),
+                    color: Color::rgba(p.surface2.r, p.surface2.g, p.surface2.b, alpha),
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
                     overflow: TextOverflow::Clip,
@@ -996,7 +1036,7 @@ impl DesktopWidgetManager {
                     y: y + height / 2.0 - 4.0,
                     text: w.kind.label().to_string(),
                     font_size: 13.0,
-                    color: Color::rgba(SUBTEXT0.r, SUBTEXT0.g, SUBTEXT0.b, alpha),
+                    color: Color::rgba(p.subtext0.r, p.subtext0.g, p.subtext0.b, alpha),
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(width - 44.0),
                     overflow: TextOverflow::Ellipsis,
@@ -1005,7 +1045,7 @@ impl DesktopWidgetManager {
         }
     }
 
-    fn render_picker(&self, commands: &mut Vec<RenderCommand>) {
+    fn render_picker(&self, p: &Palette, commands: &mut Vec<RenderCommand>) {
         let picker_w = 300.0;
         let picker_h = 400.0;
         let px = self.grid.origin_x + 50.0;
@@ -1021,7 +1061,7 @@ impl DesktopWidgetManager {
             offset_y: 6.0,
             blur: 20.0,
             spread: 0.0,
-            color: Color::rgba(0, 0, 0, 100),
+            color: p.shadow(),
             corner_radii: CornerRadii::all(12.0),
         });
         commands.push(RenderCommand::FillRect {
@@ -1029,7 +1069,7 @@ impl DesktopWidgetManager {
             y: py,
             width: picker_w,
             height: picker_h,
-            color: MANTLE,
+            color: p.mantle,
             corner_radii: CornerRadii::all(12.0),
         });
         commands.push(RenderCommand::StrokeRect {
@@ -1037,7 +1077,7 @@ impl DesktopWidgetManager {
             y: py,
             width: picker_w,
             height: picker_h,
-            color: SURFACE1,
+            color: p.surface1,
             line_width: 1.0,
             corner_radii: CornerRadii::all(12.0),
         });
@@ -1048,7 +1088,7 @@ impl DesktopWidgetManager {
             y: py + 14.0,
             text: "Add Widget".to_string(),
             font_size: 16.0,
-            color: TEXT,
+            color: p.text,
             font_weight: FontWeightHint::Bold,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -1065,7 +1105,7 @@ impl DesktopWidgetManager {
                 y: cy + 4.0,
                 text: kind.icon().to_string(),
                 font_size: 16.0,
-                color: BLUE,
+                color: p.blue,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
                 overflow: TextOverflow::Clip,
@@ -1075,7 +1115,7 @@ impl DesktopWidgetManager {
                 y: cy + 6.0,
                 text: kind.label().to_string(),
                 font_size: 13.0,
-                color: TEXT,
+                color: p.text,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
                 overflow: TextOverflow::Clip,
@@ -1086,7 +1126,7 @@ impl DesktopWidgetManager {
                 y: cy + 8.0,
                 text: format!("{}x{}", sz.cols, sz.rows),
                 font_size: 10.0,
-                color: OVERLAY0,
+                color: p.overlay0,
                 font_weight: FontWeightHint::Light,
                 max_width: None,
                 overflow: TextOverflow::Clip,
@@ -1120,6 +1160,7 @@ mod tests {
     )]
 
     use super::*;
+    use crate::palette_check::assert_drawn_from;
 
     fn make_mgr() -> DesktopWidgetManager {
         DesktopWidgetManager::new()
@@ -1509,7 +1550,7 @@ mod tests {
     #[test]
     fn render_empty() {
         let mgr = make_mgr();
-        let cmds = mgr.render();
+        let cmds = mgr.render(&Palette::for_mode(false));
         assert!(cmds.is_empty());
     }
 
@@ -1517,7 +1558,7 @@ mod tests {
     fn render_with_widget() {
         let mut mgr = make_mgr();
         mgr.add_widget(WidgetKind::Clock, GridPos::new(0, 0));
-        let cmds = mgr.render();
+        let cmds = mgr.render(&Palette::for_mode(false));
         assert!(!cmds.is_empty());
     }
 
@@ -1526,7 +1567,7 @@ mod tests {
         let mut mgr = make_mgr();
         mgr.add_widget(WidgetKind::Clock, GridPos::new(0, 0));
         mgr.layer_visible = false;
-        let cmds = mgr.render();
+        let cmds = mgr.render(&Palette::for_mode(false));
         assert!(cmds.is_empty());
     }
 
@@ -1534,7 +1575,7 @@ mod tests {
     fn render_edit_mode_shows_grid() {
         let mut mgr = make_mgr();
         mgr.edit_mode = true;
-        let cmds = mgr.render();
+        let cmds = mgr.render(&Palette::for_mode(false));
         // Should have grid cells rendered.
         assert!(!cmds.is_empty());
     }
@@ -1543,7 +1584,7 @@ mod tests {
     fn render_picker() {
         let mut mgr = make_mgr();
         mgr.picker_open = true;
-        let cmds = mgr.render();
+        let cmds = mgr.render(&Palette::for_mode(false));
         assert!(!cmds.is_empty());
     }
 
@@ -1551,7 +1592,7 @@ mod tests {
     fn render_system_monitor() {
         let mut mgr = make_mgr();
         mgr.add_widget(WidgetKind::SystemMonitor, GridPos::new(0, 0));
-        let cmds = mgr.render();
+        let cmds = mgr.render(&Palette::for_mode(false));
         assert!(cmds.len() > 5);
     }
 
@@ -1559,7 +1600,7 @@ mod tests {
     fn render_notes_empty() {
         let mut mgr = make_mgr();
         mgr.add_widget(WidgetKind::Notes, GridPos::new(0, 0));
-        let cmds = mgr.render();
+        let cmds = mgr.render(&Palette::for_mode(false));
         assert!(!cmds.is_empty());
     }
 
@@ -1570,7 +1611,7 @@ mod tests {
             .add_widget(WidgetKind::Notes, GridPos::new(0, 0))
             .unwrap();
         mgr.get_mut(id).unwrap().state_text = "Hello world".to_string();
-        let cmds = mgr.render();
+        let cmds = mgr.render(&Palette::for_mode(false));
         assert!(!cmds.is_empty());
     }
 
@@ -1578,7 +1619,7 @@ mod tests {
     fn render_battery_status() {
         let mut mgr = make_mgr();
         mgr.add_widget(WidgetKind::BatteryStatus, GridPos::new(0, 0));
-        let cmds = mgr.render();
+        let cmds = mgr.render(&Palette::for_mode(false));
         assert!(cmds.len() > 5);
     }
 
@@ -1588,7 +1629,647 @@ mod tests {
         mgr.add_widget(WidgetKind::Clock, GridPos::new(0, 0));
         mgr.add_widget(WidgetKind::SystemMonitor, GridPos::new(2, 0));
         mgr.add_widget(WidgetKind::BatteryStatus, GridPos::new(4, 0));
-        let cmds = mgr.render();
+        let cmds = mgr.render(&Palette::for_mode(false));
         assert!(cmds.len() > 15);
+    }
+
+    // ---- Colour ----
+    //
+    // The shape of this set is dictated by what the membership sweep in
+    // `palette_check` deliberately *cannot* see, because each blind spot is a
+    // test the module owes:
+    //
+    // - it compares roles on RGB only, so every wash needs its own test;
+    // - it waves black through at any alpha, so both shadows need their own;
+    // - a role belongs to *both* palettes, so anything that must not follow the
+    //   mode or the accent needs its own.
+    //
+    // And one that is not a blind spot but a width: **the sweep is only as
+    // wide as the render it is given.** A colour drawn by a branch no fixture
+    // takes is a colour no test checks, however strong the assertions are.
+    // Module 21 lost three defects to exactly that, so `full_mgr` is built to
+    // take every branch and `the_fixture_takes_every_branch_the_widget_layer_has`
+    // pins it.
+
+    /// Accents that are none of the colours this module freezes.
+    ///
+    /// `blue`, `green` and `peach` are the CPU/Memory/Disk category set, and
+    /// `green` is the battery glyph as well. An accent equal to any of them
+    /// would make "the meter did not follow the accent" true by coincidence,
+    /// in the one run where a real failure would be hardest to notice.
+    const SAFE_ACCENTS: [Color; 4] = [
+        appearance::MAUVE,
+        appearance::TEAL,
+        appearance::SAPPHIRE,
+        appearance::PINK,
+    ];
+
+    /// A `bg_opacity` no default produces, so no wash's alpha can be right by
+    /// accident. `WidgetInstance::new` uses 200, and 200 shares its low bits
+    /// with several of the constants nearby.
+    const ODD_OPACITY: u8 = 137;
+
+    /// What the icon and title texts are washed at: `ODD_OPACITY * 1.2`,
+    /// truncated, exactly as `render_widget` computes it.
+    const ODD_EMPHASIS: u8 = 164;
+
+    /// What a widget's own shadow is washed at: `ODD_OPACITY / 3`.
+    const ODD_SHADOW: u8 = 45;
+
+    const EMPTY_NOTE: &str = "Click to add a note...";
+    const WRITTEN_NOTE: &str = "Remember the milk";
+
+    fn rgb(c: Color) -> (u8, u8, u8) {
+        (c.r, c.g, c.b)
+    }
+
+    /// A manager configured so that `render` takes every branch it has.
+    ///
+    /// The shape is not arbitrary and must not be trimmed. `render` branches on
+    /// `layer_visible`, `edit_mode`, each widget's `visible`, and `picker_open`;
+    /// `render_widget` branches on whether the widget is the selected one; and
+    /// `render_widget_content` has five arms, one of which branches again on
+    /// whether the note is empty. Every one of those branches draws a colour
+    /// nothing else draws, so a fixture that misses one takes a colour site out
+    /// of *every* test below at once.
+    ///
+    /// So: `Clock`, `SystemMonitor`, `Notes` twice (empty and written),
+    /// `BatteryStatus`, and `Weather` for the generic arm — six visible, plus a
+    /// `Calendar` hidden to exercise the `visible` filter. The clock is the
+    /// selected widget, edit mode and the picker are both on, and every widget
+    /// carries `ODD_OPACITY` so the washes have an alpha that cannot be right by
+    /// accident.
+    ///
+    /// The `layer_visible == false` arm is the one branch not taken here: it
+    /// draws nothing at all, which is the point, and
+    /// `a_hidden_widget_layer_draws_nothing` checks it separately.
+    fn full_mgr() -> DesktopWidgetManager {
+        let mut mgr = DesktopWidgetManager::new(); // 8 x 6
+        let clock = mgr
+            .add_widget(WidgetKind::Clock, GridPos::new(0, 0))
+            .unwrap();
+        mgr.add_widget(WidgetKind::SystemMonitor, GridPos::new(1, 0))
+            .unwrap();
+        mgr.add_widget(WidgetKind::Notes, GridPos::new(3, 0))
+            .unwrap();
+        let written = mgr
+            .add_widget(WidgetKind::Notes, GridPos::new(5, 0))
+            .unwrap();
+        mgr.add_widget(WidgetKind::BatteryStatus, GridPos::new(7, 0))
+            .unwrap();
+        mgr.add_widget(WidgetKind::Weather, GridPos::new(0, 1))
+            .unwrap();
+        let hidden = mgr
+            .add_widget(WidgetKind::Calendar, GridPos::new(2, 1))
+            .unwrap();
+
+        mgr.get_mut(written).unwrap().state_text = WRITTEN_NOTE.to_string();
+        assert!(mgr.toggle_visibility(hidden));
+
+        let ids: Vec<_> = mgr.all_widgets().iter().map(|w| w.id).collect();
+        for id in ids {
+            mgr.get_mut(id).unwrap().bg_opacity = ODD_OPACITY;
+        }
+
+        mgr.edit_mode = true;
+        mgr.selected_widget = Some(clock);
+        mgr.picker_open = true;
+        mgr
+    }
+
+    /// The same manager with the picker shut.
+    ///
+    /// The picker draws a row per built-in kind, and those rows reuse the font
+    /// sizes the widget bodies use. Closing it is cheaper and clearer than
+    /// disambiguating every body assertion by x-coordinate.
+    fn body_mgr() -> DesktopWidgetManager {
+        let mut mgr = full_mgr();
+        mgr.picker_open = false;
+        mgr
+    }
+
+    /// Every `Text` command that says `want` at `size`, as a colour.
+    ///
+    /// The font size is part of the key because the same string is drawn more
+    /// than once at different sizes — a widget's icon appears in its title bar
+    /// at 12pt and again as the generic arm's placeholder at 32pt, and every
+    /// kind's label appears in the picker as well as on the widget.
+    fn texts_saying(cmds: &[RenderCommand], want: &str, size: f32) -> Vec<Color> {
+        cmds.iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text {
+                    text,
+                    font_size,
+                    color,
+                    ..
+                } if text == want && (font_size - size).abs() < 0.01 => Some(*color),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The `FillRect`s that make up the three meters, in emission order:
+    /// track, CPU, track, Memory, track, Disk.
+    ///
+    /// Keyed on the 8px bar height, which nothing else in the module draws.
+    fn meter_rects(cmds: &[RenderCommand]) -> Vec<Color> {
+        cmds.iter()
+            .filter_map(|c| match c {
+                RenderCommand::FillRect { height, color, .. } if (height - 8.0).abs() < 0.01 => {
+                    Some(*color)
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn strokes_of_width(cmds: &[RenderCommand], lw: f32) -> Vec<Color> {
+        cmds.iter()
+            .filter_map(|c| match c {
+                RenderCommand::StrokeRect {
+                    color, line_width, ..
+                } if (line_width - lw).abs() < 0.01 => Some(*color),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn shadows_with_blur(cmds: &[RenderCommand], blur_want: f32) -> Vec<Color> {
+        cmds.iter()
+            .filter_map(|c| match c {
+                RenderCommand::BoxShadow { color, blur, .. } if (blur - blur_want).abs() < 0.01 => {
+                    Some(*color)
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn fills_exactly(cmds: &[RenderCommand], c: Color) -> usize {
+        cmds.iter()
+            .filter(|k| matches!(k, RenderCommand::FillRect { color, .. } if *color == c))
+            .count()
+    }
+
+    #[test]
+    fn every_colour_the_widget_layer_draws_comes_from_its_palette() {
+        for light in [false, true] {
+            for accent in SAFE_ACCENTS {
+                let mut p = Palette::for_mode(light);
+                p.accent = accent;
+                let cmds = full_mgr().render(&p);
+                assert_drawn_from(
+                    &p,
+                    &cmds,
+                    &[],
+                    &format!("widget layer (light={light}, accent={:?})", rgb(accent)),
+                );
+            }
+        }
+    }
+
+    /// The fixture draws every branch the widget layer has.
+    ///
+    /// This is checked against the *render* rather than against the manager's
+    /// configuration, because a branch can stop drawing without the state that
+    /// feeds it changing at all — and because what the other tests need is the
+    /// command, not the intention behind it.
+    #[test]
+    fn the_fixture_takes_every_branch_the_widget_layer_has() {
+        let p = Palette::for_mode(false);
+        let body = body_mgr().render(&p);
+        let full = full_mgr().render(&p);
+
+        assert_eq!(
+            strokes_of_width(&body, 1.0).len(),
+            8 * 6,
+            "the edit-mode grid is not drawn, so no test sees its wash"
+        );
+        assert_eq!(
+            strokes_of_width(&body, 2.0).len(),
+            1,
+            "no widget is selected, so no test sees the accent"
+        );
+        assert_eq!(
+            shadows_with_blur(&body, 12.0).len(),
+            6,
+            "expected six visible widgets, each casting its own shadow"
+        );
+        assert_eq!(
+            shadows_with_blur(&body, 20.0).len(),
+            0,
+            "the picker is open in the render that is supposed to omit it"
+        );
+        assert_eq!(
+            shadows_with_blur(&full, 20.0).len(),
+            1,
+            "the picker is not open, so no test sees the shared popup shadow"
+        );
+        assert_eq!(
+            meter_rects(&body).len(),
+            6,
+            "the three meters are not drawn as three tracks and three bars"
+        );
+
+        for (glyph, size, what) in [
+            ("12:34", 36.0, "the clock's time"),
+            ("Sunday, May 18", 12.0, "the clock's date"),
+            ("CPU", 10.0, "a meter's label"),
+            (EMPTY_NOTE, 12.0, "the placeholder an empty note draws"),
+            (WRITTEN_NOTE, 12.0, "a written note"),
+            (WidgetKind::BatteryStatus.icon(), 28.0, "the battery glyph"),
+            ("85%", 20.0, "the battery's reading"),
+            ("3h 42m remaining", 11.0, "the battery's estimate"),
+            (
+                WidgetKind::Weather.icon(),
+                32.0,
+                "the generic arm's placeholder icon",
+            ),
+            (WidgetKind::Weather.label(), 13.0, "the generic arm's label"),
+        ] {
+            assert_eq!(
+                texts_saying(&body, glyph, size).len(),
+                1,
+                "{what} is not drawn, so no test in this module checks its colour"
+            );
+        }
+
+        // The picker's own three text colours.
+        for (glyph, size, what) in [
+            ("Add Widget", 16.0, "the picker's title"),
+            (WidgetKind::Clock.icon(), 16.0, "a picker row's icon"),
+            (WidgetKind::Clock.label(), 13.0, "a picker row's label"),
+            ("1x1", 10.0, "a picker row's size hint"),
+        ] {
+            assert!(
+                !texts_saying(&full, glyph, size).is_empty(),
+                "{what} is not drawn, so no test in this module checks its colour"
+            );
+        }
+
+        assert!(
+            texts_saying(&body, WidgetKind::Calendar.label(), 11.0).is_empty(),
+            "the hidden widget is drawn, so the visible filter is untested"
+        );
+    }
+
+    #[test]
+    fn a_hidden_widget_layer_draws_nothing() {
+        let mut mgr = full_mgr();
+        mgr.layer_visible = false;
+        assert!(mgr.render(&Palette::for_mode(false)).is_empty());
+    }
+
+    /// The ring around the selected widget is the module's one accent site.
+    ///
+    /// In edit mode a 2px ring is drawn around exactly the widget you have
+    /// picked and around nothing else, which makes it a colour that appears in
+    /// exactly one state — and a colour that appears in exactly one state marks
+    /// that state. Checked as equality with `p.accent` rather than inequality
+    /// with the blue it used to be: a ring that had been frozen to some *other*
+    /// literal would pass the inequality and fail the user.
+    #[test]
+    fn the_selected_widgets_outline_follows_the_accent() {
+        for light in [false, true] {
+            for accent in SAFE_ACCENTS {
+                let mut p = Palette::for_mode(light);
+                p.accent = accent;
+
+                let ring = strokes_of_width(&full_mgr().render(&p), 2.0);
+                assert_eq!(ring.len(), 1, "expected exactly one selection ring");
+                assert_eq!(
+                    ring[0], p.accent,
+                    "the selected widget's ring is not the accent (light={light})"
+                );
+
+                // And only while something is selected.
+                let mut none = full_mgr();
+                none.selected_widget = None;
+                assert!(
+                    strokes_of_width(&none.render(&p), 2.0).is_empty(),
+                    "a ring is drawn with nothing selected (light={light})"
+                );
+
+                // And only in edit mode: outside it the ring would be marking a
+                // widget the user cannot act on.
+                let mut viewing = full_mgr();
+                viewing.edit_mode = false;
+                assert!(
+                    strokes_of_width(&viewing.render(&p), 2.0).is_empty(),
+                    "a ring is drawn outside edit mode (light={light})"
+                );
+            }
+        }
+    }
+
+    /// Nothing that reports a measurement follows the accent.
+    ///
+    /// Module 19's slider rule — `surface1` track, accent fill — is about
+    /// *controls*. These bars are read-outs nobody can drag, and the battery
+    /// glyph's green is not decoration but the reading itself: it is how the
+    /// widget says the charge is healthy. Both would be saying something false
+    /// the day someone picked a red accent.
+    ///
+    /// Five source sites, so five assertions per configuration — the three bar
+    /// fills, the battery glyph, and the tracks, which keep the half of the
+    /// slider rule that does survive.
+    #[test]
+    fn nothing_that_reports_a_measurement_follows_the_accent() {
+        for light in [false, true] {
+            for accent in SAFE_ACCENTS {
+                let mut p = Palette::for_mode(light);
+                p.accent = accent;
+                let cmds = full_mgr().render(&p);
+
+                let bars = meter_rects(&cmds);
+                assert_eq!(bars.len(), 6);
+                for (i, (role, name)) in [(p.blue, "CPU"), (p.green, "Memory"), (p.peach, "Disk")]
+                    .into_iter()
+                    .enumerate()
+                {
+                    let track = bars[i * 2];
+                    let fill = bars[i * 2 + 1];
+                    assert_eq!(
+                        rgb(track),
+                        rgb(p.surface1),
+                        "the {name} track is not surface1 (light={light})"
+                    );
+                    assert_eq!(
+                        rgb(fill),
+                        rgb(role),
+                        "the {name} bar is not its own role (light={light})"
+                    );
+                    assert_ne!(
+                        rgb(fill),
+                        rgb(p.accent),
+                        "the {name} bar followed the accent (light={light})"
+                    );
+                }
+
+                let batt = texts_saying(&cmds, WidgetKind::BatteryStatus.icon(), 28.0);
+                assert_eq!(batt.len(), 1);
+                assert_eq!(
+                    rgb(batt[0]),
+                    rgb(p.green),
+                    "the battery glyph is not green (light={light})"
+                );
+                assert_ne!(
+                    rgb(batt[0]),
+                    rgb(p.accent),
+                    "the battery glyph followed the accent (light={light})"
+                );
+            }
+        }
+    }
+
+    /// The three meters never look alike.
+    ///
+    /// This is the property the category judgement exists to protect, and it is
+    /// stated separately from "they are blue, green and peach" because it is
+    /// the part that would survive a future re-colouring: three bars told apart
+    /// by colour stop being three bars the moment any two of them agree.
+    #[test]
+    fn the_three_meters_never_look_alike() {
+        for light in [false, true] {
+            let p = Palette::for_mode(light);
+            let bars = meter_rects(&full_mgr().render(&p));
+            let fills = [rgb(bars[1]), rgb(bars[3]), rgb(bars[5])];
+            for i in 0..fills.len() {
+                for j in (i + 1)..fills.len() {
+                    assert_ne!(
+                        fills[i], fills[j],
+                        "two meters are the same colour (light={light})"
+                    );
+                }
+            }
+        }
+    }
+
+    /// An empty note and a written one never look alike.
+    ///
+    /// The placeholder is `overlay0` and the note is `text`, which is the same
+    /// judgement the rest of the shell makes about prompt text: a prompt is not
+    /// content, and the difference has to be visible without reading the words.
+    #[test]
+    fn an_empty_note_and_a_written_one_never_look_alike() {
+        for light in [false, true] {
+            let p = Palette::for_mode(light);
+            let cmds = body_mgr().render(&p);
+
+            let empty = texts_saying(&cmds, EMPTY_NOTE, 12.0);
+            let written = texts_saying(&cmds, WRITTEN_NOTE, 12.0);
+            assert_eq!(empty.len(), 1);
+            assert_eq!(written.len(), 1);
+            assert_eq!(
+                rgb(empty[0]),
+                rgb(p.overlay0),
+                "an empty note's placeholder is not overlay0 (light={light})"
+            );
+            assert_eq!(
+                rgb(written[0]),
+                rgb(p.text),
+                "a written note is not body text (light={light})"
+            );
+            assert_ne!(
+                rgb(empty[0]),
+                rgb(written[0]),
+                "a prompt and a note are indistinguishable (light={light})"
+            );
+        }
+    }
+
+    /// Every wash is a role under its own veil.
+    ///
+    /// The membership sweep compares on RGB only, so it would pass a wash whose
+    /// alpha had been dropped, doubled, or swapped with another wash's. Each
+    /// alpha is therefore read out of the *render* and compared against what
+    /// `render_widget` computes from `bg_opacity` — not against a second lookup
+    /// of the same palette, which would only be a second opinion about the same
+    /// question.
+    ///
+    /// `ODD_OPACITY` is deliberately not the default 200: an alpha test against
+    /// the value the code would have used anyway proves nothing.
+    #[test]
+    fn every_wash_the_widget_layer_draws_is_a_role_under_its_own_veil() {
+        for light in [false, true] {
+            let p = Palette::for_mode(light);
+            let cmds = body_mgr().render(&p);
+
+            // The grid's wash is a fixed 80, independent of any widget: it is a
+            // property of the grid, which no widget owns.
+            for c in strokes_of_width(&cmds, 1.0) {
+                assert_eq!(rgb(c), rgb(p.surface0), "a grid cell is not surface0");
+                assert_eq!(c.a, 80, "a grid cell's veil moved (light={light})");
+            }
+
+            // Six panels and six title bars, all at the widget's own opacity.
+            assert_eq!(
+                fills_exactly(
+                    &cmds,
+                    Color::rgba(p.base.r, p.base.g, p.base.b, ODD_OPACITY)
+                ),
+                6,
+                "a widget panel is not base under its own opacity (light={light})"
+            );
+            assert_eq!(
+                fills_exactly(
+                    &cmds,
+                    Color::rgba(p.surface0.r, p.surface0.g, p.surface0.b, ODD_OPACITY)
+                ),
+                6,
+                "a widget title bar is not surface0 under its own opacity (light={light})"
+            );
+
+            // The title bar's icon and text are emphasised: 1.2x the panel's
+            // opacity, so a widget you can barely see still has a readable name.
+            for (glyph, size) in [
+                (WidgetKind::Clock.icon(), 12.0),
+                (WidgetKind::Clock.label(), 11.0),
+            ] {
+                let t = texts_saying(&cmds, glyph, size);
+                assert_eq!(t.len(), 1);
+                assert_eq!(rgb(t[0]), rgb(p.subtext0), "a title is not subtext0");
+                assert_eq!(
+                    t[0].a, ODD_EMPHASIS,
+                    "a title is not emphasised over its panel (light={light})"
+                );
+            }
+
+            // Content is drawn at the panel's own opacity, not the title's.
+            //
+            // This list has one entry per *source* site, not one per kind of
+            // site, and must not be shortened to a representative sample. Two
+            // defects escaped the first proof run because it was one: "Memory"
+            // and "Disk" are drawn by three separate pushes, and asserting on
+            // "CPU" alone left the other two checked by nothing, as it left
+            // the battery's estimate. n source sites, n assertions.
+            for (glyph, size, role) in [
+                ("12:34", 36.0, p.text),
+                ("Sunday, May 18", 12.0, p.subtext0),
+                ("CPU", 10.0, p.subtext0),
+                ("Memory", 10.0, p.subtext0),
+                ("Disk", 10.0, p.subtext0),
+                (WRITTEN_NOTE, 12.0, p.text),
+                (EMPTY_NOTE, 12.0, p.overlay0),
+                (WidgetKind::BatteryStatus.icon(), 28.0, p.green),
+                ("85%", 20.0, p.text),
+                ("3h 42m remaining", 11.0, p.subtext0),
+                (WidgetKind::Weather.icon(), 32.0, p.surface2),
+                (WidgetKind::Weather.label(), 13.0, p.subtext0),
+            ] {
+                let t = texts_saying(&cmds, glyph, size);
+                assert_eq!(t.len(), 1, "{glyph} at {size} is not drawn once");
+                assert_eq!(rgb(t[0]), rgb(role), "{glyph} is drawn in the wrong role");
+                assert_eq!(
+                    t[0].a, ODD_OPACITY,
+                    "{glyph} is not washed at its panel's opacity (light={light})"
+                );
+            }
+
+            for c in meter_rects(&cmds) {
+                assert_eq!(
+                    c.a, ODD_OPACITY,
+                    "a meter is not washed at its panel's opacity (light={light})"
+                );
+            }
+        }
+    }
+
+    /// The picker casts the shared popup shadow.
+    ///
+    /// The sweep waves black through at any alpha, which is right — a shadow is
+    /// an absence of light rather than a colour — and is exactly why a shadow
+    /// needs a test of its own. The picker is a panel sitting on top of
+    /// everything else, so its depth is the one every popup uses.
+    #[test]
+    fn the_picker_casts_the_shared_popup_shadow() {
+        for light in [false, true] {
+            let p = Palette::for_mode(light);
+            let s = shadows_with_blur(&full_mgr().render(&p), 20.0);
+            assert_eq!(s.len(), 1, "expected exactly one picker shadow");
+            assert_eq!(
+                s[0],
+                p.shadow(),
+                "the picker does not cast the shared popup shadow (light={light})"
+            );
+        }
+    }
+
+    /// A widget you can see through casts a shadow you can see through.
+    ///
+    /// This is the one shadow that does *not* join `Palette::shadow()`, and the
+    /// reason is that its depth is a function of the widget's own translucency
+    /// rather than of the surface it sits on. Pinning it to the shared depth
+    /// would make a nearly invisible widget cast a solid shadow.
+    #[test]
+    fn a_translucent_widget_casts_a_translucent_shadow() {
+        let p = Palette::for_mode(false);
+
+        for s in shadows_with_blur(&body_mgr().render(&p), 12.0) {
+            assert_eq!(rgb(s), (0, 0, 0), "a widget's shadow is not black");
+            assert_eq!(
+                s.a, ODD_SHADOW,
+                "a widget's shadow does not track its own opacity"
+            );
+            assert_ne!(
+                s.a,
+                p.shadow().a,
+                "a widget's shadow was pinned to the shared popup depth"
+            );
+        }
+
+        // Halve the widget's opacity and its shadow follows.
+        let mut fainter = body_mgr();
+        let ids: Vec<_> = fainter.all_widgets().iter().map(|w| w.id).collect();
+        for id in ids {
+            fainter.get_mut(id).unwrap().bg_opacity = 60;
+        }
+        for s in shadows_with_blur(&fainter.render(&p), 12.0) {
+            assert_eq!(s.a, 20, "a fainter widget did not cast a fainter shadow");
+        }
+    }
+
+    /// The picker's own surfaces come from the palette.
+    ///
+    /// Six source sites, six assertions. The row icons stay `p.blue` on
+    /// purpose: every row is drawn identically, so an accent there would be
+    /// saying nothing about any particular row — and it would cost the accent
+    /// the one job it has in this module, which is to say which widget is
+    /// selected. Within a single render the accent has to mean one thing.
+    #[test]
+    fn the_pickers_own_surfaces_come_from_the_palette() {
+        for light in [false, true] {
+            for accent in SAFE_ACCENTS {
+                let mut p = Palette::for_mode(light);
+                p.accent = accent;
+                let cmds = full_mgr().render(&p);
+
+                assert_eq!(
+                    fills_exactly(&cmds, p.mantle),
+                    1,
+                    "the picker's panel is not mantle (light={light})"
+                );
+                let border = strokes_of_width(&cmds, 1.0);
+                assert_eq!(
+                    border.iter().filter(|c| **c == p.surface1).count(),
+                    1,
+                    "the picker's border is not surface1 (light={light})"
+                );
+
+                for (glyph, size, role, what) in [
+                    ("Add Widget", 16.0, p.text, "the picker's title"),
+                    (WidgetKind::Clock.icon(), 16.0, p.blue, "a row's icon"),
+                    (WidgetKind::Clock.label(), 13.0, p.text, "a row's label"),
+                    ("1x1", 10.0, p.overlay0, "a row's size hint"),
+                ] {
+                    let t = texts_saying(&cmds, glyph, size);
+                    assert!(!t.is_empty(), "{what} is not drawn (light={light})");
+                    for c in t {
+                        assert_eq!(c, role, "{what} is the wrong role (light={light})");
+                        assert_ne!(c, p.accent, "{what} followed the accent (light={light})");
+                    }
+                }
+            }
+        }
     }
 }

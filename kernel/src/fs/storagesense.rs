@@ -89,6 +89,52 @@ impl Schedule {
             Self::OnLowSpace => "On Low Space",
         }
     }
+
+    /// How long to wait between runs, in nanoseconds.
+    ///
+    /// `None` means the schedule is not time-based at all, which covers two
+    /// unlike cases on purpose: `Manual` never comes due by itself, and
+    /// `OnLowSpace` comes due on a condition rather than a clock. Neither has
+    /// an interval to compare against, and [`due_reason`] distinguishes them.
+    ///
+    /// `Monthly` is a flat 30 days. There is no calendar here — the kernel has
+    /// an uptime counter, not a date — so "monthly" can only mean an interval,
+    /// and 30 days is the least surprising one to pick.
+    #[must_use]
+    pub fn interval_ns(self) -> Option<u64> {
+        const DAY_NS: u64 = 24 * 3_600 * 1_000_000_000;
+        match self {
+            Self::Daily => Some(DAY_NS),
+            Self::Weekly => Some(7 * DAY_NS),
+            Self::Monthly => Some(30 * DAY_NS),
+            Self::Manual | Self::OnLowSpace => None,
+        }
+    }
+}
+
+/// Why a cleanup run is currently due.
+///
+/// Returned by [`due_reason`]. Distinguishing the reasons matters because they
+/// have different remedies: an elapsed interval is satisfied by running once,
+/// whereas low space may still be low afterwards.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DueReason {
+    /// The schedule is time-based and cleanup has never run.
+    NeverRun,
+    /// The schedule's interval has elapsed since the last run.
+    IntervalElapsed {
+        /// Nanoseconds since the last run.
+        since_last_ns: u64,
+        /// The interval that has been exceeded.
+        interval_ns: u64,
+    },
+    /// The schedule is `OnLowSpace` and free space is below the threshold.
+    LowSpace {
+        /// Free space on `/`, in MiB.
+        free_mb: u64,
+        /// The configured threshold, in MiB.
+        threshold_mb: u32,
+    },
 }
 
 /// Policy for a cleanup category.
@@ -115,7 +161,15 @@ struct State {
     low_space_threshold_mb: u32,
     total_runs: u64,
     total_bytes_freed: u64,
-    last_run_ns: u64,
+    /// When cleanup last ran (ns since boot), or `None` if it never has.
+    ///
+    /// Not a `u64` with `0` meaning "never": this clock counts nanoseconds
+    /// since boot and starts *at* zero, so `0` is a legal instant. Under a
+    /// sentinel encoding a run that landed at uptime 0 would read back as
+    /// never having happened, and [`due_reason`] would declare cleanup
+    /// immediately due again — deleting the same files a second time on the
+    /// one boot where the first pass had only just finished.
+    last_run_ns: Option<u64>,
     ops: u64,
 }
 
@@ -216,7 +270,7 @@ pub fn init_defaults() {
         low_space_threshold_mb: 1024,
         total_runs: 0,
         total_bytes_freed: 0,
-        last_run_ns: 0,
+        last_run_ns: None,
         ops: 0,
     });
 }
@@ -250,7 +304,7 @@ pub fn run_cleanup() -> KernelResult<u64> {
         }
         state.total_runs += 1;
         state.total_bytes_freed = state.total_bytes_freed.saturating_add(total_freed);
-        state.last_run_ns = now;
+        state.last_run_ns = Some(now);
         Ok(total_freed)
     })
 }
@@ -267,7 +321,7 @@ pub fn run_category(category: CleanupCategory) -> KernelResult<u64> {
         policy.last_freed_bytes = freed;
         state.total_bytes_freed = state.total_bytes_freed.saturating_add(freed);
         state.total_runs += 1;
-        state.last_run_ns = crate::hpet::elapsed_ns();
+        state.last_run_ns = Some(crate::hpet::elapsed_ns());
         Ok(freed)
     })
 }
@@ -330,6 +384,75 @@ pub fn get_schedule() -> Schedule {
         .map_or(Schedule::Manual, |s| s.schedule)
 }
 
+/// When cleanup last ran, in nanoseconds since boot; `None` if it never has.
+#[must_use]
+pub fn last_run_ns() -> Option<u64> {
+    STATE.lock().as_ref().and_then(|s| s.last_run_ns)
+}
+
+/// The configured low-space threshold, in MiB.
+#[must_use]
+pub fn low_space_threshold_mb() -> u32 {
+    STATE
+        .lock()
+        .as_ref()
+        .map_or(0, |s| s.low_space_threshold_mb)
+}
+
+/// Whether a cleanup run is currently due, and why.
+///
+/// This is the function that makes the schedule mean something. Before it,
+/// `schedule`, `low_space_threshold_mb` and `last_run_ns` were all recorded,
+/// two of them settable from the shell, and *none* of them ever consulted: a
+/// user could set `storagesense schedule daily`, see "Daily" echoed back
+/// forever, and cleanup would still only ever run when they asked for it by
+/// hand. Dead configuration is worse than absent configuration, because it
+/// looks like a promise.
+///
+/// The disk query is deliberately outside the lock. `Vfs::statvfs` descends
+/// into a filesystem driver and may take VFS locks of its own, and holding the
+/// Storage Sense lock across that would invert against every path that calls in
+/// here while holding one. The values read under the lock are copied out first.
+///
+/// A failed `statvfs` yields `None` rather than a default: "cannot tell how
+/// much space is free" must not be reported as "space is low", because the
+/// remedy for low space is to delete the user's files.
+#[must_use]
+pub fn due_reason() -> Option<DueReason> {
+    let (schedule, last_run, threshold_mb) = {
+        let guard = STATE.lock();
+        let state = guard.as_ref()?;
+        (
+            state.schedule,
+            state.last_run_ns,
+            state.low_space_threshold_mb,
+        )
+    };
+
+    if schedule == Schedule::OnLowSpace {
+        // Lock released above; statvfs may take VFS locks.
+        let info = crate::fs::vfs::Vfs::statvfs("/").ok()?;
+        let free_mb = info
+            .free_blocks
+            .saturating_mul(info.block_size)
+            .checked_div(1024 * 1024)?;
+        return (free_mb < u64::from(threshold_mb)).then_some(DueReason::LowSpace {
+            free_mb,
+            threshold_mb,
+        });
+    }
+
+    let interval_ns = schedule.interval_ns()?;
+    let Some(last) = last_run else {
+        return Some(DueReason::NeverRun);
+    };
+    let since_last_ns = crate::hpet::elapsed_ns().saturating_sub(last);
+    (since_last_ns >= interval_ns).then_some(DueReason::IntervalElapsed {
+        since_last_ns,
+        interval_ns,
+    })
+}
+
 /// Format bytes to human-readable string.
 ///
 /// See [`crate::bytesize`]. Storage Sense and the disk-cleanup tool report on
@@ -378,45 +501,58 @@ fn self_test_inner() {
     crate::serial_println!("storagesense::self_test() — running tests...");
     init_defaults();
 
-    // 1: Default policies.
+    // 1: Default policies, and the pristine "never run" state.
     let policies = list_policies();
     assert_eq!(policies.len(), 9);
     assert!(policies[0].enabled); // TempFiles
     assert!(!policies[2].enabled); // Downloads disabled by default
-    crate::serial_println!("  [1/8] default policies: OK");
+    // `0` is a legal uptime, so a never-run schedule must say `None` rather
+    // than borrow an instant that means something else.
+    assert_eq!(
+        last_run_ns(),
+        None,
+        "pristine state has never run cleanup; `0` is a legal uptime, not `never`"
+    );
+    assert_eq!(get_schedule(), Schedule::Weekly);
+    assert_eq!(
+        due_reason(),
+        Some(DueReason::NeverRun),
+        "a time-based schedule that has never run is due immediately"
+    );
+    crate::serial_println!("  [1/11] default policies + never-run: OK");
 
     // 2: Estimate savings.
     let est = estimate_savings().expect("estimate");
     assert!(est > 0);
-    crate::serial_println!("  [2/8] estimate: OK ({} bytes)", est);
+    crate::serial_println!("  [2/11] estimate: OK ({} bytes)", est);
 
     // 3: Run cleanup.
     let freed = run_cleanup().expect("cleanup");
     assert!(freed > 0);
-    crate::serial_println!("  [3/8] cleanup: OK ({} freed)", format_bytes(freed));
+    crate::serial_println!("  [3/11] cleanup: OK ({} freed)", format_bytes(freed));
 
     // 4: Category cleanup.
     let freed = run_category(CleanupCategory::TempFiles).expect("cat");
     assert_eq!(freed, 50_000_000);
-    crate::serial_println!("  [4/8] category cleanup: OK");
+    crate::serial_println!("  [4/11] category cleanup: OK");
 
     // 5: Set schedule.
     set_schedule(Schedule::Daily).expect("sched");
     assert_eq!(get_schedule(), Schedule::Daily);
-    crate::serial_println!("  [5/8] schedule: OK");
+    crate::serial_println!("  [5/11] schedule: OK");
 
     // 6: Enable/disable category.
     set_category_enabled(CleanupCategory::Downloads, true).expect("enable");
     let policies = list_policies();
     assert!(policies[2].enabled);
-    crate::serial_println!("  [6/8] category toggle: OK");
+    crate::serial_println!("  [6/11] category toggle: OK");
 
     // 7: Format bytes.  `GiB`/`MiB` since the move onto `bytesize`: these are
     // 1024-based quantities and calling them GB/MB overstated the prefix by
     // ~7% per unit, which is the precise confusion the IEC names exist to end.
     assert_eq!(format_bytes(1_073_741_824), "1.0 GiB");
     assert_eq!(format_bytes(5_242_880), "5.0 MiB");
-    crate::serial_println!("  [7/8] format bytes: OK");
+    crate::serial_println!("  [7/11] format bytes: OK");
 
     // 8: Stats.
     let (policies, runs, freed, ops) = stats();
@@ -424,7 +560,60 @@ fn self_test_inner() {
     assert!(runs >= 2);
     assert!(freed > 0);
     assert!(ops > 0);
-    crate::serial_println!("  [8/8] stats: OK");
+    crate::serial_println!("  [8/11] stats: OK");
 
-    crate::serial_println!("storagesense::self_test() — all 8 tests passed");
+    // 9: A run clears the due state.  Tests 3 and 4 ran cleanup, so the
+    // timestamp is now recorded and no interval has elapsed since.
+    let last = last_run_ns().expect("a run above must have recorded its time");
+    assert!(
+        due_reason().is_none(),
+        "a daily schedule that just ran is not due again"
+    );
+    set_schedule(Schedule::Monthly).expect("sched");
+    assert!(
+        due_reason().is_none(),
+        "lengthening the interval cannot make a just-run schedule due"
+    );
+    crate::serial_println!("  [9/11] run clears due: OK (last run at {} ns)", last);
+
+    // 10: The two non-time-based schedules.  `Manual` never comes due on its
+    // own — that is the whole meaning of the setting, and the bug this suite
+    // exists to prevent is a scheduler that ignores it and cleans anyway.
+    set_schedule(Schedule::Manual).expect("sched");
+    assert_eq!(Schedule::Manual.interval_ns(), None);
+    assert!(
+        due_reason().is_none(),
+        "Manual must never come due by itself, even long after the last run"
+    );
+    // `OnLowSpace` is also intervalless, but for the opposite reason: it is
+    // condition-driven, not never-driven.  Its due-ness depends on the disk, so
+    // assert only what is deterministic — that it consults space, not a clock,
+    // and so is never `NeverRun` or `IntervalElapsed`.
+    assert_eq!(Schedule::OnLowSpace.interval_ns(), None);
+    set_schedule(Schedule::OnLowSpace).expect("sched");
+    assert!(
+        matches!(due_reason(), None | Some(DueReason::LowSpace { .. })),
+        "OnLowSpace must decide on free space, never on elapsed time"
+    );
+    assert_eq!(low_space_threshold_mb(), 1024);
+    crate::serial_println!("  [10/11] Manual and OnLowSpace: OK");
+
+    // 11: Intervals are ordered and distinct.  A `Monthly` that silently
+    // equalled `Daily` would look correct in every other test here.
+    let day = Schedule::Daily
+        .interval_ns()
+        .expect("daily has an interval");
+    let week = Schedule::Weekly
+        .interval_ns()
+        .expect("weekly has an interval");
+    let month = Schedule::Monthly
+        .interval_ns()
+        .expect("monthly has an interval");
+    assert_eq!(day, 86_400 * 1_000_000_000);
+    assert_eq!(week, 7 * day);
+    assert_eq!(month, 30 * day);
+    assert!(day < week && week < month);
+    crate::serial_println!("  [11/11] schedule intervals: OK");
+
+    crate::serial_println!("storagesense::self_test() — all 11 tests passed");
 }

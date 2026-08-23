@@ -60934,10 +60934,46 @@ fn cmd_storagesense(args: &str) {
         }
         "show" | "" => {
             storagesense::init_defaults();
-            shell_println!(
-                "Storage Sense — Schedule: {}",
-                storagesense::get_schedule().label()
-            );
+            let schedule = storagesense::get_schedule();
+            shell_println!("Storage Sense — Schedule: {}", schedule.label());
+            if schedule == storagesense::Schedule::OnLowSpace {
+                shell_println!(
+                    "  Low-space threshold: {} MiB",
+                    storagesense::low_space_threshold_mb()
+                );
+            }
+            match storagesense::last_run_ns() {
+                None => shell_println!("  Last run: never"),
+                Some(ns) => shell_println!(
+                    "  Last run: {}s ago",
+                    crate::hpet::elapsed_ns().saturating_sub(ns) / 1_000_000_000
+                ),
+            }
+            // The schedule used to be echoed back and nothing more. Saying
+            // whether it has actually come due is the difference between
+            // reporting a setting and reporting a state.
+            match storagesense::due_reason() {
+                None => shell_println!("  Due now: no"),
+                Some(storagesense::DueReason::NeverRun) => {
+                    shell_println!("  Due now: YES (scheduled, never run)");
+                }
+                Some(storagesense::DueReason::IntervalElapsed {
+                    since_last_ns,
+                    interval_ns,
+                }) => shell_println!(
+                    "  Due now: YES ({}s since last run, interval {}s)",
+                    since_last_ns / 1_000_000_000,
+                    interval_ns / 1_000_000_000
+                ),
+                Some(storagesense::DueReason::LowSpace {
+                    free_mb,
+                    threshold_mb,
+                }) => shell_println!(
+                    "  Due now: YES ({} MiB free, below {} MiB threshold)",
+                    free_mb,
+                    threshold_mb
+                ),
+            }
             let policies = storagesense::list_policies();
             for p in &policies {
                 let status = if p.enabled { "on" } else { "off" };

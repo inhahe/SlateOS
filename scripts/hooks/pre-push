@@ -781,7 +781,11 @@ fi
 
 quote="${repo_root:-.}/scripts/quote-names.py"
 [ -f "$quote" ] || skip_quote=1
-touches userspace/ services/ init/ posix/ || skip_quote=1
+# The scanned trees, plus the checker and its baseline: a push that edits the
+# baseline by hand -- the one way to defeat this gate without the bypass -- must
+# be the push that re-verifies it, or lowering a number is unattended.
+touches userspace/ services/ init/ posix/ \
+        scripts/quote-names.py scripts/quote-names-baseline.txt || skip_quote=1
 
 quote_failed=0
 if [ "$skip_quote" != "1" ]; then

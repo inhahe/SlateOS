@@ -50401,7 +50401,7 @@ guarantee, and on Windows the failure mode would be a sharing violation in
 whichever of the two processes lost the race. Wait for `[run-timeout] child
 exited` before running any cargo command against the same target directory.
 
-**Part 2 progress. 37 of 49 modules converted.**
+**Part 2 progress. 38 of 49 modules converted.**
 
 - [x] `security_dialog.rs` — 29 constants, done 2026-08-22. The method above
   survived contact: the sweep lives in `gui/desktop/src/palette_check.rs` as
@@ -52719,6 +52719,104 @@ exited` before running any cargo command against the same target directory.
     caught by exactly one test — the accent-walking label test, which is the
     only test that can see it. Module 37 closes at **51/51**. The census above
     gains one to that test, taking it to 7 catches and its first sole catch.
+
+- [x] `display_settings.rs` — 9 constants over 23 colour sites, done
+  2026-08-23. Sixty-one tests in the module (eight new), harness defects
+  Ax58–Zx59 (fifty-two).
+  - **This is the first module where "read the colour from the palette" is the
+    wrong instruction for part of the file.** Three things here are
+    *instruments*, not decoration, and a settings page that themes its own
+    measuring equipment is lying to the user about what their display does:
+    1. **The five test patterns.** A sixteen-step grey ramp, eight SMPTE bars,
+       a twenty-four-step hue sweep, a black-and-white checkerboard and
+       `rgb(128, 128, 128)`. Their entire purpose is being *exact* and the same
+       on every machine in every theme. `TestPattern::render` therefore takes
+       no `&Palette` at all — the protection is in the signature, so the
+       mistake cannot be made by a future edit rather than merely not having
+       been made by this one.
+    2. **The night-light preview swatch**, which shows what the screen will
+       physically look like at the chosen colour temperature. It follows
+       `ColorTemperature::preview_color`, not the theme.
+    3. **The Red, Green and Blue gamma rows.** These are coloured because they
+       *are* the red, green and blue channels; the colour is a label, not a
+       style. They take `p.red` / `p.green` / `p.blue`, which shift between
+       modes for legibility but never follow the accent — the same answer as
+       `screen_capture`'s transport buttons two modules earlier, and for the
+       same reason: a colour that a user *decodes* is not a colour that says
+       "this one is chosen".
+  - **The deleted `MOCHA_BLUE` was two different things, and the shipped theme
+    is what hid that.** It coloured the active tab's label, the filled part of
+    a slider and the selected pattern chip — all of which mean "chosen" and
+    become `p.accent` — *and* the Blue Gamma row, which means "the blue
+    channel" and becomes `p.blue`. The stock accent **is** blue, so the two
+    were the same pixels and the file had no way to say which it meant. This
+    is the sharpest instance yet of the defect the whole task is about: a
+    single copied constant does not merely duplicate a value, it **merges two
+    concepts**, and the merge is invisible for exactly as long as nobody
+    changes the accent.
+  - **The selected chip's lettering was near-black and had to stop being.**
+    `MOCHA_MANTLE` on Mocha's pale blue is legible; on Latte's `#1D62EC`
+    (luma 93) it is not. The ink is `p.on_accent()`, computed from the fill
+    rather than named beside it — module 36's finding, now the standing
+    practice.
+  - **Two of the new tests locate their subject structurally rather than by
+    index, and the first draft proves why.** The swatch was `cols[4]` and the
+    chip fill was `chip[7]`; run against the real command stream, the first
+    pointed at the active tab's label and the second at the "Test Patterns"
+    heading. An index into a render is a claim about *layout*, and this module
+    is not about layout — so the swatch is now found as **the only colour on
+    the page that belongs to no palette** (which is also precisely the property
+    being asserted), and a chip as **the 32-pixel fill plus the `Text`
+    immediately after it**, which additionally checks all five chips instead of
+    the one at a fixed offset.
+  - **Lesson 21: an off-palette fixture must be off the *instruments* too, not
+    only off the palette.** The obvious accent for a module full of colour is
+    magenta, and it is the one this module must not use: the SMPTE bars *are*
+    magenta, so counting "how many accents does this tab draw" counted a
+    calibration target as chrome and reported three where one was correct.
+    The fixture is now `#C828A0`, chosen by a property rather than by taste —
+    no channel at 0 or 255 and not a grey, which is exactly what puts it
+    outside every pattern, since the bars are combinations of 0 and 255, the
+    ramp and the board are greys, and the hue sweep is fully saturated at every
+    step. `accented()` asserts both non-collisions, so the reasoning is in the
+    code and not only here.
+    - The general form: **a test fixture must be disjoint from everything the
+      module draws that the fixture is not**, and "everything the module draws"
+      now includes things the module is forbidden to theme. Twenty modules of
+      "pick something not in the palette" was a sufficient rule only because no
+      earlier module drew anything outside the palette on purpose.
+  - **Preflight then sweep: 52 build / 0 do not / 0 not applied, then 52
+    caught, 0 escaped, 0 never asked, 0 under-caught, 0 under-declared.** The
+    first perfect prediction since module 36, and worth saying *why* it came
+    back after module 37 broke the streak: the one under-declaration in this
+    module's set was found by reading the declarations against the assertions
+    before the run rather than by the run — defect H (every tab label accented)
+    also trips the gamma-row test, because that test pins the Calibration tab
+    at exactly one accent and four accented labels is four. Module 37's lesson
+    was that predictions go wrong when a module's shape changes; the response
+    is not to predict better but to *check the prediction against the test
+    source*, which costs minutes against a sweep that costs half an hour.
+  - **The catcher census**, from the fifty-two:
+    `every_site_draws_the_role_it_claims` 33 and sole on 6;
+    `none_of_the_nine_deleted_constants_is_still_drawn` 26, sole on none;
+    `every_colour_the_panel_draws_comes_from_its_palette` 25, sole on none;
+    `the_gamma_rows_are_the_channels_and_never_the_accent` 12, sole on none;
+    `an_unchosen_chip_and_an_unchosen_tab_are_never_the_accent` 9 and sole on 1;
+    `a_selected_pattern_chip_is_lettered_for_its_own_fill` 7 and sole on 3;
+    `the_test_patterns_are_the_same_in_both_modes` 5 and **sole on 4**;
+    `the_night_light_swatch_shows_the_temperature_not_the_theme` 2 and **sole on
+    both**. **No pre-existing test caught anything**, for the fourth
+    consecutive module.
+    - The shape of that census is the module's argument in one line. The two
+      broadest tests — the membership sweep and the deleted-constant table —
+      caught 51 defects between them and were sole catcher of **none**, while
+      the two narrowest caught 7 and were sole catcher of 6. A sweep that only
+      had the broad tests would have reported 47 of 52 and looked excellent.
+      What it would have missed is every defect that themes an instrument,
+      which is the only class of defect this module has that the others do not:
+      the instrument colours are *declared to the sweep as derived*, so the
+      sweep is structurally blind to them and the pinning tests are the entire
+      coverage. A membership test cannot check a value it was told to accept.
 
 **Trigger:** this is not blocked on anything. It is sequenced after the shell
 event loop (`TD-C-THE-SHELL-CAN-DRAW-ITSELF-AND-NOBODY-CAN-ASK-IT-TO`) only

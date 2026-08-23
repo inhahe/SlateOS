@@ -107,6 +107,7 @@ MOUSESET = "gui/desktop/src/mouse_settings.rs"
 HOTKEYS = "gui/desktop/src/hotkeys.rs"
 SCRCAP = "gui/desktop/src/screen_capture.rs"
 SNAP = "gui/desktop/src/snap.rs"
+DISP = "gui/desktop/src/display_settings.rs"
 
 # (name, file, [(old, new), ...], [packages], [tests expected to fail])
 DEFECTS = [
@@ -15511,6 +15512,701 @@ DEFECTS = [
         ["desktop"],
         [
             'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA: the panel goes back to being Mocha base",
+        DISP,
+        [
+            ('            width,\n            height,\n            color: p.base,',
+             '            width,\n            height,\n            color: Color::from_hex(0x001E_1E2E),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_panel_draws_comes_from_its_palette',
+            'none_of_the_nine_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB: the panel drops to the rung below its own",
+        DISP,
+        [
+            ('            width,\n            height,\n            color: p.base,',
+             '            width,\n            height,\n            color: p.mantle,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC: the title goes back to being Mocha text",
+        DISP,
+        [
+            ('            font_size: 18.0,\n            color: p.text,',
+             '            font_size: 18.0,\n            color: Color::from_hex(0x00CD_D6F4),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_panel_draws_comes_from_its_palette',
+            'none_of_the_nine_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD: the chosen tab's pill goes back to being Mocha surface1",
+        DISP,
+        [
+            ('                    height: 28.0,\n                    color: p.surface1,',
+             '                    height: 28.0,\n                    color: Color::from_hex(0x0045_475A),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_panel_draws_comes_from_its_palette',
+            'none_of_the_nine_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE: the chosen tab's pill drops a rung",
+        DISP,
+        [
+            ('                    height: 28.0,\n                    color: p.surface1,',
+             '                    height: 28.0,\n                    color: p.surface0,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF: the chosen tab's label goes back to being Mocha blue",
+        DISP,
+        [
+            ('                color: if is_active { p.accent } else { p.subtext0 },',
+             '                color: if is_active { Color::from_hex(0x0089_B4FA) } else { p.subtext0 },'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_panel_draws_comes_from_its_palette',
+            'none_of_the_nine_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+            'the_gamma_rows_are_the_channels_and_never_the_accent',
+            'an_unchosen_chip_and_an_unchosen_tab_are_never_the_accent',
+        ],
+    ),
+    (
+        "GGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGG: the unchosen tabs' labels go back to being Mocha subtext0",
+        DISP,
+        [
+            ('                color: if is_active { p.accent } else { p.subtext0 },',
+             '                color: if is_active { p.accent } else { Color::from_hex(0x00A6_ADC8) },'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_panel_draws_comes_from_its_palette',
+            'none_of_the_nine_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH: every tab label is accented, chosen or not",
+        DISP,
+        [
+            ('                color: if is_active { p.accent } else { p.subtext0 },',
+             '                color: p.accent,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'the_gamma_rows_are_the_channels_and_never_the_accent',
+            'an_unchosen_chip_and_an_unchosen_tab_are_never_the_accent',
+        ],
+    ),
+    (
+        "IIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIII: no tab label is accented, not even the chosen one",
+        DISP,
+        [
+            ('                color: if is_active { p.accent } else { p.subtext0 },',
+             '                color: p.subtext0,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'the_gamma_rows_are_the_channels_and_never_the_accent',
+            'an_unchosen_chip_and_an_unchosen_tab_are_never_the_accent',
+        ],
+    ),
+    (
+        "JJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJ: the tab bar accents every label except the chosen one",
+        DISP,
+        [
+            ('                color: if is_active { p.accent } else { p.subtext0 },',
+             '                color: if is_active { p.subtext0 } else { p.accent },'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'the_gamma_rows_are_the_channels_and_never_the_accent',
+            'an_unchosen_chip_and_an_unchosen_tab_are_never_the_accent',
+        ],
+    ),
+    (
+        "KKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKK: the General tab's heading goes back to being Mocha text",
+        DISP,
+        [
+            ('                    if d.is_primary { "Primary" } else { "Secondary" }\n                ),\n                font_size: 14.0,\n                color: p.text,',
+             '                    if d.is_primary { "Primary" } else { "Secondary" }\n                ),\n                font_size: 14.0,\n                color: Color::from_hex(0x00CD_D6F4),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_panel_draws_comes_from_its_palette',
+            'none_of_the_nine_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLL: the Night Light heading goes back to being Mocha text",
+        DISP,
+        [
+            ('            text: "Night Light".to_string(),\n            font_size: 14.0,\n            color: p.text,',
+             '            text: "Night Light".to_string(),\n            font_size: 14.0,\n            color: Color::from_hex(0x00CD_D6F4),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_panel_draws_comes_from_its_palette',
+            'none_of_the_nine_deleted_constants_is_still_drawn',
+        ],
+    ),
+    (
+        "MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM: the temperature label goes back to being Mocha subtext0",
+        DISP,
+        [
+            ('            text: format!("Color Temperature: {}K", nl.temperature.0),\n            font_size: 12.0,\n            color: p.subtext0,',
+             '            text: format!("Color Temperature: {}K", nl.temperature.0),\n            font_size: 12.0,\n            color: Color::from_hex(0x00A6_ADC8),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_panel_draws_comes_from_its_palette',
+            'none_of_the_nine_deleted_constants_is_still_drawn',
+        ],
+    ),
+    (
+        "NNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNN: the Color Calibration heading goes back to being Mocha text",
+        DISP,
+        [
+            ('                text: "Color Calibration".to_string(),\n                font_size: 14.0,\n                color: p.text,',
+             '                text: "Color Calibration".to_string(),\n                font_size: 14.0,\n                color: Color::from_hex(0x00CD_D6F4),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_panel_draws_comes_from_its_palette',
+            'none_of_the_nine_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "OOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOO: the Red Gamma row follows the accent instead of the channel",
+        DISP,
+        [
+            ('"Red Gamma", d.gamma.red, p.red);',
+             '"Red Gamma", d.gamma.red, p.accent);'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'the_gamma_rows_are_the_channels_and_never_the_accent',
+        ],
+    ),
+    (
+        "PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPP: the Red Gamma row goes back to being Mocha red",
+        DISP,
+        [
+            ('"Red Gamma", d.gamma.red, p.red);',
+             '"Red Gamma", d.gamma.red, Color::from_hex(0x00F3_8BA8));'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_panel_draws_comes_from_its_palette',
+            'none_of_the_nine_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+            'the_gamma_rows_are_the_channels_and_never_the_accent',
+        ],
+    ),
+    (
+        "QQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQ: the Green Gamma row goes back to being Mocha green",
+        DISP,
+        [
+            ('                d.gamma.green,\n                p.green,',
+             '                d.gamma.green,\n                Color::from_hex(0x00A6_E3A1),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_panel_draws_comes_from_its_palette',
+            'none_of_the_nine_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+            'the_gamma_rows_are_the_channels_and_never_the_accent',
+        ],
+    ),
+    (
+        "RRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRR: the Green Gamma row draws the neighbouring role, which is in both palettes",
+        DISP,
+        [
+            ('                d.gamma.green,\n                p.green,',
+             '                d.gamma.green,\n                p.teal,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'the_gamma_rows_are_the_channels_and_never_the_accent',
+        ],
+    ),
+    (
+        "SSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSS: the Blue Gamma row means 'chosen' again, which is the bug the theme hid",
+        DISP,
+        [
+            ('                // channel, and the deleted constant meant both.\n                p.blue,',
+             '                // channel, and the deleted constant meant both.\n                p.accent,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'the_gamma_rows_are_the_channels_and_never_the_accent',
+        ],
+    ),
+    (
+        "TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT: the Blue Gamma row goes back to being Mocha blue",
+        DISP,
+        [
+            ('                // channel, and the deleted constant meant both.\n                p.blue,',
+             '                // channel, and the deleted constant meant both.\n                Color::from_hex(0x0089_B4FA),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_panel_draws_comes_from_its_palette',
+            'none_of_the_nine_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+            'the_gamma_rows_are_the_channels_and_never_the_accent',
+        ],
+    ),
+    (
+        "UUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUU: the gamma indicator stops being its channel and becomes the accent",
+        DISP,
+        [
+            ('            width: 8.0,\n            height: 12.0,\n            color,',
+             '            width: 8.0,\n            height: 12.0,\n            color: p.accent,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'the_gamma_rows_are_the_channels_and_never_the_accent',
+        ],
+    ),
+    (
+        "VVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVV: the gamma label stops being its channel and becomes body text",
+        DISP,
+        [
+            ('            text: format!("{}: {:.2}", label, value),\n            font_size: 12.0,\n            color,',
+             '            text: format!("{}: {:.2}", label, value),\n            font_size: 12.0,\n            color: p.text,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'the_gamma_rows_are_the_channels_and_never_the_accent',
+        ],
+    ),
+    (
+        "WWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWW: the gamma track goes back to being Mocha surface0",
+        DISP,
+        [
+            ('            width: bar_w,\n            height: 6.0,\n            color: p.surface0,',
+             '            width: bar_w,\n            height: 6.0,\n            color: Color::from_hex(0x0031_3244),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_panel_draws_comes_from_its_palette',
+            'none_of_the_nine_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX: the reset button goes back to being Mocha surface0",
+        DISP,
+        [
+            ('                width: 120.0,\n                height: 28.0,\n                color: p.surface0,',
+             '                width: 120.0,\n                height: 28.0,\n                color: Color::from_hex(0x0031_3244),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_panel_draws_comes_from_its_palette',
+            'none_of_the_nine_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "YYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYY: the reset button climbs a rung and stops reading as a control",
+        DISP,
+        [
+            ('                width: 120.0,\n                height: 28.0,\n                color: p.surface0,',
+             '                width: 120.0,\n                height: 28.0,\n                color: p.surface1,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ: the reset button's label goes back to being Mocha text",
+        DISP,
+        [
+            ('                text: "Reset to Defaults".to_string(),\n                font_size: 12.0,\n                color: p.text,',
+             '                text: "Reset to Defaults".to_string(),\n                font_size: 12.0,\n                color: Color::from_hex(0x00CD_D6F4),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_panel_draws_comes_from_its_palette',
+            'none_of_the_nine_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA: the Test Patterns heading goes back to being Mocha text",
+        DISP,
+        [
+            ('            text: "Test Patterns".to_string(),\n            font_size: 14.0,\n            color: p.text,',
+             '            text: "Test Patterns".to_string(),\n            font_size: 14.0,\n            color: Color::from_hex(0x00CD_D6F4),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_panel_draws_comes_from_its_palette',
+            'none_of_the_nine_deleted_constants_is_still_drawn',
+        ],
+    ),
+    (
+        "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB: the chosen pattern chip goes back to being Mocha blue",
+        DISP,
+        [
+            ('            let bg_color = if is_active { p.accent } else { p.surface0 };',
+             '            let bg_color = if is_active { Color::from_hex(0x0089_B4FA) } else { p.surface0 };'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_panel_draws_comes_from_its_palette',
+            'none_of_the_nine_deleted_constants_is_still_drawn',
+            'a_selected_pattern_chip_is_lettered_for_its_own_fill',
+            'an_unchosen_chip_and_an_unchosen_tab_are_never_the_accent',
+        ],
+    ),
+    (
+        "CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC: the unchosen pattern chips go back to being Mocha surface0",
+        DISP,
+        [
+            ('            let bg_color = if is_active { p.accent } else { p.surface0 };',
+             '            let bg_color = if is_active { p.accent } else { Color::from_hex(0x0031_3244) };'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_panel_draws_comes_from_its_palette',
+            'none_of_the_nine_deleted_constants_is_still_drawn',
+            'an_unchosen_chip_and_an_unchosen_tab_are_never_the_accent',
+        ],
+    ),
+    (
+        "DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD: every pattern chip is accented, chosen or not",
+        DISP,
+        [
+            ('            let bg_color = if is_active { p.accent } else { p.surface0 };',
+             '            let bg_color = p.accent;'),
+        ],
+        ["desktop"],
+        [
+            'an_unchosen_chip_and_an_unchosen_tab_are_never_the_accent',
+        ],
+    ),
+    (
+        "EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE: no pattern chip is accented, not even the chosen one",
+        DISP,
+        [
+            ('            let bg_color = if is_active { p.accent } else { p.surface0 };',
+             '            let bg_color = p.surface0;'),
+        ],
+        ["desktop"],
+        [
+            'a_selected_pattern_chip_is_lettered_for_its_own_fill',
+            'an_unchosen_chip_and_an_unchosen_tab_are_never_the_accent',
+        ],
+    ),
+    (
+        "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF: the chip list accents every pattern except the chosen one",
+        DISP,
+        [
+            ('            let bg_color = if is_active { p.accent } else { p.surface0 };',
+             '            let bg_color = if is_active { p.surface0 } else { p.accent };'),
+        ],
+        ["desktop"],
+        [
+            'a_selected_pattern_chip_is_lettered_for_its_own_fill',
+            'an_unchosen_chip_and_an_unchosen_tab_are_never_the_accent',
+        ],
+    ),
+    (
+        "GGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGG: the chosen chip's lettering goes back to being Mocha mantle",
+        DISP,
+        [
+            ('                color: if is_active { p.on_accent() } else { p.text },',
+             '                color: if is_active { Color::from_hex(0x0018_1825) } else { p.text },'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_panel_draws_comes_from_its_palette',
+            'none_of_the_nine_deleted_constants_is_still_drawn',
+            'a_selected_pattern_chip_is_lettered_for_its_own_fill',
+        ],
+    ),
+    (
+        "HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH: the chosen chip is lettered like an unchosen one",
+        DISP,
+        [
+            ('                color: if is_active { p.on_accent() } else { p.text },',
+             '                color: p.text,'),
+        ],
+        ["desktop"],
+        [
+            'a_selected_pattern_chip_is_lettered_for_its_own_fill',
+        ],
+    ),
+    (
+        "IIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIII: the chosen chip's lettering is named beside its fill rather than read off it",
+        DISP,
+        [
+            ('                color: if is_active { p.on_accent() } else { p.text },',
+             '                color: if is_active { p.crust } else { p.text },'),
+        ],
+        ["desktop"],
+        [
+            'a_selected_pattern_chip_is_lettered_for_its_own_fill',
+        ],
+    ),
+    (
+        "JJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJ: the chip lettering rule is applied to exactly the wrong chip",
+        DISP,
+        [
+            ('                color: if is_active { p.on_accent() } else { p.text },',
+             '                color: if is_active { p.text } else { p.on_accent() },'),
+        ],
+        ["desktop"],
+        [
+            'a_selected_pattern_chip_is_lettered_for_its_own_fill',
+        ],
+    ),
+    (
+        "KKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKK: a setting row's label goes back to being Mocha subtext0",
+        DISP,
+        [
+            ('            text: label.to_string(),\n            font_size: 12.0,\n            color: p.subtext0,',
+             '            text: label.to_string(),\n            font_size: 12.0,\n            color: Color::from_hex(0x00A6_ADC8),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_panel_draws_comes_from_its_palette',
+            'none_of_the_nine_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLL: a setting row's value goes back to being Mocha text",
+        DISP,
+        [
+            ('            text: value.to_string(),\n            font_size: 12.0,\n            color: p.text,',
+             '            text: value.to_string(),\n            font_size: 12.0,\n            color: Color::from_hex(0x00CD_D6F4),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_panel_draws_comes_from_its_palette',
+            'none_of_the_nine_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM: a setting row's label and value trade roles, which no membership table can see",
+        DISP,
+        [
+            ('            text: label.to_string(),\n            font_size: 12.0,\n            color: p.subtext0,',
+             '            text: label.to_string(),\n            font_size: 12.0,\n            color: p.text,'),
+            ('            text: value.to_string(),\n            font_size: 12.0,\n            color: p.text,',
+             '            text: value.to_string(),\n            font_size: 12.0,\n            color: p.subtext0,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "NNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNN: a slider's label goes back to being Mocha subtext0",
+        DISP,
+        [
+            ('            text: format!("{}: {}%", label, value),\n            font_size: 12.0,\n            color: p.subtext0,',
+             '            text: format!("{}: {}%", label, value),\n            font_size: 12.0,\n            color: Color::from_hex(0x00A6_ADC8),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_panel_draws_comes_from_its_palette',
+            'none_of_the_nine_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "OOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOO: a slider's track goes back to being Mocha surface0",
+        DISP,
+        [
+            ('            width: track_w,\n            height: 6.0,\n            color: p.surface0,',
+             '            width: track_w,\n            height: 6.0,\n            color: Color::from_hex(0x0031_3244),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_panel_draws_comes_from_its_palette',
+            'none_of_the_nine_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPP: a slider's filled portion goes back to being Mocha blue",
+        DISP,
+        [
+            ('            // How much of the setting is chosen, so: the accent.\n            color: p.accent,',
+             '            // How much of the setting is chosen, so: the accent.\n            color: Color::from_hex(0x0089_B4FA),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_panel_draws_comes_from_its_palette',
+            'none_of_the_nine_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "QQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQ: a slider stops showing how much of it is chosen",
+        DISP,
+        [
+            ('            // How much of the setting is chosen, so: the accent.\n            color: p.accent,',
+             '            // How much of the setting is chosen, so: the accent.\n            color: p.surface1,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "RRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRR: a slider's track and its filled portion trade roles",
+        DISP,
+        [
+            ('            width: track_w,\n            height: 6.0,\n            color: p.surface0,',
+             '            width: track_w,\n            height: 6.0,\n            color: p.accent,'),
+            ('            // How much of the setting is chosen, so: the accent.\n            color: p.accent,',
+             '            // How much of the setting is chosen, so: the accent.\n            color: p.surface0,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "SSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSS: a slider's thumb goes back to being Mocha text",
+        DISP,
+        [
+            ('            width: 12.0,\n            height: 12.0,\n            color: p.text,',
+             '            width: 12.0,\n            height: 12.0,\n            color: Color::from_hex(0x00CD_D6F4),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_panel_draws_comes_from_its_palette',
+            'none_of_the_nine_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT: the grey ramp is tinted, so a display's colour cast is measured against a tint",
+        DISP,
+        [
+            ('                color: Color::rgb(gray, gray, gray),',
+             '                color: Color::rgb(gray, gray, gray.saturating_add(20)),'),
+        ],
+        ["desktop"],
+        [
+            'the_test_patterns_are_the_same_in_both_modes',
+        ],
+    ),
+    (
+        "UUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUU: the SMPTE bars' magenta becomes the theme's mauve",
+        DISP,
+        [
+            ('            Color::rgb(255, 0, 255),   // Magenta',
+             '            Color::from_hex(0x00CB_A6F7), // Magenta'),
+        ],
+        ["desktop"],
+        [
+            'the_test_patterns_are_the_same_in_both_modes',
+        ],
+    ),
+    (
+        "VVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVV: the 18% grey card becomes a theme colour",
+        DISP,
+        [
+            ('            color: Color::rgb(128, 128, 128),',
+             '            color: Color::from_hex(0x0058_5B70),'),
+        ],
+        ["desktop"],
+        [
+            'the_test_patterns_are_the_same_in_both_modes',
+        ],
+    ),
+    (
+        "WWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWW: the checkerboard's white cells become the theme's white",
+        DISP,
+        [
+            ('                    Color::rgb(255, 255, 255)\n                } else {',
+             '                    Color::from_hex(0x00CD_D6F4)\n                } else {'),
+        ],
+        ["desktop"],
+        [
+            'none_of_the_nine_deleted_constants_is_still_drawn',
+            'the_test_patterns_are_the_same_in_both_modes',
+        ],
+    ),
+    (
+        "XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX: the hue sweep is drawn at less than full opacity",
+        DISP,
+        [
+            ('            let color = hue_to_rgb(hue);',
+             '            let c0 = hue_to_rgb(hue);\n            let color = Color::rgba(c0.r, c0.g, c0.b, 200);'),
+        ],
+        ["desktop"],
+        [
+            'the_test_patterns_are_the_same_in_both_modes',
+        ],
+    ),
+    (
+        "YYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYY: the night-light swatch shows the theme instead of the temperature",
+        DISP,
+        [
+            ('            color: preview_color,',
+             '            color: p.accent,'),
+        ],
+        ["desktop"],
+        [
+            'the_night_light_swatch_shows_the_temperature_not_the_theme',
+        ],
+    ),
+    (
+        "ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ: the night-light swatch stops moving with the temperature",
+        DISP,
+        [
+            ('        let (r, g, b) = self.to_rgb_multiplier();\n        Color::rgb((r * 255.0) as u8, (g * 255.0) as u8, (b * 255.0) as u8)',
+             '        let (r, g, _b) = self.to_rgb_multiplier();\n        Color::rgb((r * 255.0) as u8, (g * 255.0) as u8, 200)'),
+        ],
+        ["desktop"],
+        [
+            'the_night_light_swatch_shows_the_temperature_not_the_theme',
         ],
     ),
 ]

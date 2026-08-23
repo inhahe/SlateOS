@@ -6578,6 +6578,7 @@ DEFECTS = [
         ["desktop"],
         [
             'every_choice_this_panel_makes_hands_over_the_role_it_claims',
+            'nothing_but_the_selection_labels_moves_when_the_accent_does',
             'only_the_two_selection_labels_follow_the_accent',
         ],
     ),
@@ -6590,8 +6591,9 @@ DEFECTS = [
         ],
         ["desktop"],
         [
-            'every_colour_this_panel_draws_comes_from_its_palette',
             'every_choice_this_panel_makes_hands_over_the_role_it_claims',
+            'every_colour_this_panel_draws_comes_from_its_palette',
+            'nothing_but_the_selection_labels_moves_when_the_accent_does',
             'only_the_two_selection_labels_follow_the_accent',
         ],
     ),
@@ -6605,6 +6607,7 @@ DEFECTS = [
         ["desktop"],
         [
             'every_choice_this_panel_makes_hands_over_the_role_it_claims',
+            'nothing_but_the_selection_labels_moves_when_the_accent_does',
             'only_the_two_selection_labels_follow_the_accent',
         ],
     ),
@@ -6618,6 +6621,7 @@ DEFECTS = [
         ["desktop"],
         [
             'every_choice_this_panel_makes_hands_over_the_role_it_claims',
+            'nothing_but_the_selection_labels_moves_when_the_accent_does',
             'only_the_two_selection_labels_follow_the_accent',
         ],
     ),
@@ -6644,6 +6648,7 @@ DEFECTS = [
         ["desktop"],
         [
             'every_text_this_panel_draws_is_in_the_role_it_claims',
+            'nothing_but_the_selection_labels_moves_when_the_accent_does',
         ],
     ),
     (
@@ -6902,6 +6907,7 @@ DEFECTS = [
         ["desktop"],
         [
             'every_text_this_panel_draws_is_in_the_role_it_claims',
+            'nothing_but_the_selection_labels_moves_when_the_accent_does',
             'only_the_two_selection_labels_follow_the_accent',
         ],
     ),
@@ -6940,6 +6946,7 @@ DEFECTS = [
         ["desktop"],
         [
             'every_choice_this_panel_makes_hands_over_the_role_it_claims',
+            'nothing_but_the_selection_labels_moves_when_the_accent_does',
             'only_the_two_selection_labels_follow_the_accent',
         ],
     ),
@@ -6953,6 +6960,7 @@ DEFECTS = [
         ["desktop"],
         [
             'every_choice_this_panel_makes_hands_over_the_role_it_claims',
+            'nothing_but_the_selection_labels_moves_when_the_accent_does',
             'only_the_two_selection_labels_follow_the_accent',
         ],
     ),
@@ -6966,6 +6974,7 @@ DEFECTS = [
         ["desktop"],
         [
             'every_choice_this_panel_makes_hands_over_the_role_it_claims',
+            'nothing_but_the_selection_labels_moves_when_the_accent_does',
             'only_the_two_selection_labels_follow_the_accent',
         ],
     ),
@@ -7016,6 +7025,7 @@ DEFECTS = [
         [
             'every_choice_this_panel_makes_hands_over_the_role_it_claims',
             'nothing_but_the_selection_labels_moves_when_the_accent_does',
+            'only_the_two_selection_labels_follow_the_accent',
         ],
     ),
     (
@@ -7078,8 +7088,9 @@ DEFECTS = [
         ],
         ["desktop"],
         [
-            'every_choice_this_panel_makes_hands_over_the_role_it_claims',
             'allowed_and_denied_stay_apart_under_every_accent_and_mode',
+            'every_choice_this_panel_makes_hands_over_the_role_it_claims',
+            'every_text_this_panel_draws_is_in_the_role_it_claims',
         ],
     ),
     (
@@ -7104,8 +7115,9 @@ DEFECTS = [
         ],
         ["desktop"],
         [
-            'every_choice_this_panel_makes_hands_over_the_role_it_claims',
             'allowed_and_denied_stay_apart_under_every_accent_and_mode',
+            'every_choice_this_panel_makes_hands_over_the_role_it_claims',
+            'every_text_this_panel_draws_is_in_the_role_it_claims',
             'nothing_but_the_selection_labels_moves_when_the_accent_does',
         ],
     ),
@@ -7118,6 +7130,7 @@ DEFECTS = [
         ],
         ["desktop"],
         [
+            'every_text_this_panel_draws_is_in_the_role_it_claims',
             'the_fixtures_take_every_branch_this_panel_has',
         ],
     ),
@@ -7130,6 +7143,7 @@ DEFECTS = [
         ],
         ["desktop"],
         [
+            'every_text_this_panel_draws_is_in_the_role_it_claims',
             'the_fixtures_take_every_branch_this_panel_has',
         ],
     ),
@@ -7142,6 +7156,7 @@ DEFECTS = [
         ],
         ["desktop"],
         [
+            'every_choice_this_panel_makes_hands_over_the_role_it_claims',
             'the_fixtures_take_every_branch_this_panel_has',
         ],
     ),
@@ -7154,6 +7169,7 @@ DEFECTS = [
         ],
         ["desktop"],
         [
+            'every_choice_this_panel_makes_hands_over_the_role_it_claims',
             'the_fixtures_take_every_branch_this_panel_has',
         ],
     ),
@@ -7290,6 +7306,16 @@ def main():
                 missing = [t for t in expect if t not in all_failed]
                 if missing:
                     verdict += f"  [MISSING: {missing}]"
+                # Report the other direction too. A test that fired but was
+                # not declared means the declaration understates what the
+                # suite proves -- and the declarations are the only record of
+                # that, so the next person to prune a "redundant" test has no
+                # way to see what they would be giving up. This half used to
+                # be an out-of-band audit script run by hand, which meant it
+                # was run when someone remembered to.
+                extra = [t for t in sorted(all_failed) if t not in expect]
+                if extra:
+                    verdict += f"  [UNDECLARED: {extra}]"
             verdicts.append((name, verdict))
             print(f"{name}\n    {verdict}\n", flush=True)
     finally:
@@ -7306,6 +7332,16 @@ def main():
     print("\n=== summary ===")
     for name, verdict in verdicts:
         print(f"{name}\n    {verdict}")
+
+    def tally(mark):
+        return sum(1 for _, v in verdicts if mark in v)
+
+    escaped = tally("NO TEST FAILED") + tally("DID NOT COMPILE")
+    print(
+        f"\n{len(verdicts)} defects: {len(verdicts) - escaped} caught, "
+        f"{escaped} escaped, {tally('[MISSING:')} under-caught, "
+        f"{tally('[UNDECLARED:')} under-declared"
+    )
 
 
 if __name__ == "__main__":

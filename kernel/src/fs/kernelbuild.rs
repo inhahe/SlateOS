@@ -591,7 +591,7 @@ pub fn init_defaults() {
     let hash_init = simple_hash(b"/src/init");
     let hash_boot = simple_hash(b"/src/boot");
 
-    state.components = vec![
+    let defaults = vec![
         Component {
             id: String::from("kernel"),
             name: String::from("Kernel"),
@@ -769,7 +769,34 @@ pub fn init_defaults() {
         },
     ];
 
-    state.build_logs.clear();
+    // Restore the six defaults *without* touching anything else.
+    //
+    // This was `state.components = vec![...]` and `state.build_logs.clear()`,
+    // which did restore the defaults but also deleted every component the user
+    // had added with `kbuild register` and the whole build history along with
+    // it. Nothing about "initialise the defaults" promises that, and there is
+    // no undo: the registry is the only record that those components existed.
+    //
+    // Restoring a *default* component wholesale is still right -- that is what
+    // the command is for, and it is how a user reverts a build parameter they
+    // have broken. So each default replaces its own entry if present and is
+    // appended otherwise, and only the restored components' logs are dropped,
+    // because those logs describe a build configuration that no longer exists.
+    //
+    // The defaults are exempt from `MAX_COMPONENTS`: they are the system's own
+    // six, and refusing to seed them because the user filled the table would
+    // leave the machine with no kernel component at all.
+    state
+        .build_logs
+        .retain(|log| !defaults.iter().any(|d| d.id == log.component_id));
+    for def in defaults {
+        if let Some(slot) = state.components.iter_mut().find(|c| c.id == def.id) {
+            *slot = def;
+        } else {
+            state.components.push(def);
+        }
+    }
+
     state.changes += 1;
     OP_COUNT.fetch_add(1, Ordering::Relaxed);
 }
@@ -942,11 +969,28 @@ pub fn self_test() -> KernelResult<()> {
     remove_component("kbuild-selftest-util")?;
     assert!(get_component("kbuild-selftest-util").is_err());
 
-    // Test 11: init_defaults.
+    // Test 11: init_defaults restores the defaults and eats nothing else.
     serial_println!("kernelbuild::self_test 11: defaults");
     init_defaults();
     let comps = list_components();
     assert!(comps.len() >= 5);
+    assert!(
+        comps.iter().any(|c| c.id == "kernel"),
+        "init_defaults must seed the kernel component"
+    );
+    // `kbuild-selftest-kern` is still registered: test 10 showed
+    // `remove_component` correctly refuses to delete a system-critical
+    // component. That makes it exactly the user-registered component that
+    // `init_defaults` used to delete on its way past, along with its logs.
+    assert!(
+        comps.iter().any(|c| c.id == "kbuild-selftest-kern"),
+        "init_defaults must not delete components it did not install"
+    );
+    assert_eq!(
+        build_logs("kbuild-selftest-kern").len(),
+        3,
+        "init_defaults must not clear build history it did not create"
+    );
     clear_all();
 
     // Test 12: non-UTF-8 source and output paths survive registration, and

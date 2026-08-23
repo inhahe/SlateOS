@@ -1705,7 +1705,9 @@ fn test_dispatch_pty_syscalls() -> KernelResult<()> {
         return fail("the test pty outlived both its ends");
     }
 
-    serial_println!("[syscall]   Pty syscalls (544-556) registered, ownership enforced: OK");
+    serial_println!(
+        "[syscall]   Pty syscalls (544-556, 869-871) registered, ownership enforced: OK"
+    );
     Ok(())
 }
 

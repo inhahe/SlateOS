@@ -19,7 +19,7 @@
 # 71 real sites. If a number rises in a commit that also edits code, the
 # code is what raised it.
 #
-# 1591 sites across 773 files.
+# 1527 sites across 768 files.
 
 init/servicebus/src/main.rs:8
 userspace/abduco-cli/src/main.rs:5
@@ -105,7 +105,6 @@ userspace/caddy-cli/src/main.rs:1
 userspace/caddy/src/main.rs:1
 userspace/calibre-cli/src/main.rs:1
 userspace/capnproto-cli/src/main.rs:1
-userspace/capsh/src/main.rs:12
 userspace/cargo-audit/src/main.rs:1
 userspace/cargo-make-cli/src/main.rs:1
 userspace/cargo-nextest/src/main.rs:1
@@ -416,7 +415,6 @@ userspace/mimir-cli/src/main.rs:3
 userspace/minio-cli/src/main.rs:1
 userspace/minio/src/main.rs:1
 userspace/mkdocs-cli/src/main.rs:1
-userspace/mkfs/src/main.rs:13
 userspace/mkinitramfs/src/main.rs:5
 userspace/mktemp/src/main.rs:4
 userspace/mlflow-cli/src/main.rs:3
@@ -486,7 +484,6 @@ userspace/pagerduty-cli/src/main.rs:1
 userspace/pandas-cli/src/main.rs:1
 userspace/pants-cli/src/main.rs:1
 userspace/paraview-cli/src/main.rs:2
-userspace/parted/src/main.rs:12
 userspace/pass-cli/src/main.rs:5
 userspace/passwd/src/main.rs:9
 userspace/paste/src/main.rs:4
@@ -506,7 +503,6 @@ userspace/pinecone-cli/src/main.rs:1
 userspace/pipewire/src/main.rs:8
 userspace/pipx-cli/src/main.rs:1
 userspace/pkg-cli/src/main.rs:1
-userspace/pkg/src/main.rs:14
 userspace/pkgconf/src/main.rs:1
 userspace/plaid-cli/src/main.rs:2
 userspace/platformio-cli/src/main.rs:2
@@ -725,7 +721,6 @@ userspace/unreal-cli/src/main.rs:1
 userspace/upcloud-cli/src/main.rs:2
 userspace/update-alternatives/src/main.rs:1
 userspace/useradd-cli/src/main.rs:5
-userspace/useradm/src/main.rs:13
 userspace/uvtool-cli/src/main.rs:1
 userspace/v-cli/src/main.rs:2
 userspace/vagrant-cli/src/main.rs:3

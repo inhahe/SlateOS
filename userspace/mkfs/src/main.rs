@@ -37,6 +37,7 @@
 //!   -S <sector-size>       Logical sector size in bytes
 //! ```
 
+use quoting::quoteaf_os;
 use std::env;
 use std::fs;
 use std::process;
@@ -414,7 +415,10 @@ fn parse_args() -> MkfsOptions {
                 }
                 let normalized = normalize_fs_type(&args[i]);
                 if normalized.is_empty() {
-                    eprintln!("mkfs: error: unsupported filesystem type '{}'", args[i]);
+                    eprintln!(
+                        "mkfs: error: unsupported filesystem type {}",
+                        quoteaf_os(&args[i])
+                    );
                     eprintln!("  Supported types: ext4, fat32 (vfat), tmpfs");
                     process::exit(1);
                 }
@@ -446,7 +450,7 @@ fn parse_args() -> MkfsOptions {
                 match args[i].parse::<u64>() {
                     Ok(bs) => opts.ext4_block_size = bs,
                     Err(_) => {
-                        eprintln!("mkfs: error: invalid block size '{}'", args[i]);
+                        eprintln!("mkfs: error: invalid block size {}", quoteaf_os(&args[i]));
                         process::exit(1);
                     }
                 }
@@ -461,7 +465,10 @@ fn parse_args() -> MkfsOptions {
                 match args[i].parse::<u64>() {
                     Ok(bpi) => opts.ext4_bytes_per_inode = bpi,
                     Err(_) => {
-                        eprintln!("mkfs: error: invalid bytes-per-inode '{}'", args[i]);
+                        eprintln!(
+                            "mkfs: error: invalid bytes-per-inode {}",
+                            quoteaf_os(&args[i])
+                        );
                         process::exit(1);
                     }
                 }
@@ -476,7 +483,7 @@ fn parse_args() -> MkfsOptions {
                 match args[i].parse::<u64>() {
                     Ok(n) => opts.ext4_num_inodes = n,
                     Err(_) => {
-                        eprintln!("mkfs: error: invalid inode count '{}'", args[i]);
+                        eprintln!("mkfs: error: invalid inode count {}", quoteaf_os(&args[i]));
                         process::exit(1);
                     }
                 }
@@ -493,14 +500,14 @@ fn parse_args() -> MkfsOptions {
                     match val.parse::<u64>() {
                         Ok(sz) => opts.ext4_journal_size_mib = sz,
                         Err(_) => {
-                            eprintln!("mkfs: error: invalid journal size '{}'", args[i]);
+                            eprintln!("mkfs: error: invalid journal size {}", quoteaf_os(&args[i]));
                             process::exit(1);
                         }
                     }
                 } else {
                     eprintln!(
-                        "mkfs: error: unrecognized -J parameter '{}' (expected size=<N>)",
-                        args[i]
+                        "mkfs: error: unrecognized -J parameter {} (expected size=<N>)",
+                        quoteaf_os(&args[i])
                     );
                     process::exit(1);
                 }
@@ -529,7 +536,7 @@ fn parse_args() -> MkfsOptions {
                         process::exit(1);
                     }
                     Err(_) => {
-                        eprintln!("mkfs: error: invalid FAT size '{}'", args[i]);
+                        eprintln!("mkfs: error: invalid FAT size {}", quoteaf_os(&args[i]));
                         process::exit(1);
                     }
                 }
@@ -544,7 +551,10 @@ fn parse_args() -> MkfsOptions {
                 match args[i].parse::<u32>() {
                     Ok(spc) => opts.fat_sectors_per_cluster = spc,
                     Err(_) => {
-                        eprintln!("mkfs: error: invalid sectors-per-cluster '{}'", args[i]);
+                        eprintln!(
+                            "mkfs: error: invalid sectors-per-cluster {}",
+                            quoteaf_os(&args[i])
+                        );
                         process::exit(1);
                     }
                 }
@@ -559,7 +569,7 @@ fn parse_args() -> MkfsOptions {
                 match args[i].parse::<u32>() {
                     Ok(ss) => opts.fat_sector_size = ss,
                     Err(_) => {
-                        eprintln!("mkfs: error: invalid sector size '{}'", args[i]);
+                        eprintln!("mkfs: error: invalid sector size {}", quoteaf_os(&args[i]));
                         process::exit(1);
                     }
                 }
@@ -578,13 +588,17 @@ fn parse_args() -> MkfsOptions {
             other => {
                 // Treat as device path if it doesn't start with '-'.
                 if other.starts_with('-') {
-                    eprintln!("mkfs: error: unknown option '{other}'");
+                    eprintln!("mkfs: error: unknown option {}", quoteaf_os(other));
                     eprintln!("  Run 'mkfs --help' for usage.");
                     process::exit(1);
                 }
                 if !opts.device.is_empty() {
                     eprintln!("mkfs: error: multiple device arguments given");
-                    eprintln!("  Already have '{}', got '{other}'", opts.device);
+                    eprintln!(
+                        "  Already have {}, got {}",
+                        quoteaf_os(&opts.device),
+                        quoteaf_os(other)
+                    );
                     process::exit(1);
                 }
                 opts.device = other.to_string();
@@ -659,8 +673,10 @@ fn validate_options(opts: &MkfsOptions) {
         };
         if opts.label.len() > max_len {
             eprintln!(
-                "mkfs: error: label '{}' too long for {} (max {} characters)",
-                opts.label, opts.fs_type, max_len
+                "mkfs: error: label {} too long for {} (max {} characters)",
+                quoteaf_os(&opts.label),
+                opts.fs_type,
+                max_len
             );
             process::exit(1);
         }
@@ -696,7 +712,7 @@ fn normalize_device(device: &str) -> (String, String) {
 fn preflight_checks(opts: &MkfsOptions, dev_path: &str, dev_name: &str) -> bool {
     // Check that the device exists.
     if !device_exists(dev_path) {
-        eprintln!("mkfs: error: '{}' does not exist", dev_path);
+        eprintln!("mkfs: error: {} does not exist", quoteaf_os(dev_path));
         return false;
     }
 

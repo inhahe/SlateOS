@@ -1279,6 +1279,9 @@ version = "0.1.0"
 [[package]]
 name = "capsh"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "capstone-cli"
@@ -6551,6 +6554,9 @@ version = "0.1.0"
 [[package]]
 name = "mkfs"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "mkinitcpio-cli"
@@ -7769,6 +7775,9 @@ version = "0.1.0"
 [[package]]
 name = "parted"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "parted-cli"
@@ -8114,6 +8123,7 @@ name = "pkg"
 version = "0.1.0"
 dependencies = [
  "httpclient",
+ "quoting",
  "sha2",
 ]
 
@@ -11364,6 +11374,7 @@ version = "0.1.0"
 name = "useradm"
 version = "0.1.0"
 dependencies = [
+ "quoting",
  "userdb",
 ]
 

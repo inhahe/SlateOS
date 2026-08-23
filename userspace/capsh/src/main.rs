@@ -12,6 +12,7 @@
 
 #![deny(clippy::all)]
 
+use quoting::quoteaf_os;
 use std::collections::HashMap;
 use std::env;
 use std::fmt;
@@ -916,7 +917,7 @@ fn run_capsh(args: &[String]) -> i32 {
             match Cap::from_name(cap_name) {
                 Some(cap) => state.caps.bounding.clear(cap),
                 None => {
-                    eprintln!("capsh: --drop: unknown capability '{}'", cap_name);
+                    eprintln!("capsh: --drop: unknown capability {}", quoteaf_os(cap_name));
                     return 1;
                 }
             }
@@ -935,7 +936,10 @@ fn run_capsh(args: &[String]) -> i32 {
                     state.caps.ambient.set(cap);
                 }
                 None => {
-                    eprintln!("capsh: --addamb: unknown capability '{}'", cap_name);
+                    eprintln!(
+                        "capsh: --addamb: unknown capability {}",
+                        quoteaf_os(cap_name)
+                    );
                     return 1;
                 }
             }
@@ -943,7 +947,10 @@ fn run_capsh(args: &[String]) -> i32 {
             match Cap::from_name(cap_name) {
                 Some(cap) => state.caps.ambient.clear(cap),
                 None => {
-                    eprintln!("capsh: --delamb: unknown capability '{}'", cap_name);
+                    eprintln!(
+                        "capsh: --delamb: unknown capability {}",
+                        quoteaf_os(cap_name)
+                    );
                     return 1;
                 }
             }
@@ -976,7 +983,7 @@ fn run_capsh(args: &[String]) -> i32 {
             match val.parse::<u32>() {
                 Ok(uid) => state.uid = uid,
                 Err(_) => {
-                    eprintln!("capsh: --uid: invalid uid '{}'", val);
+                    eprintln!("capsh: --uid: invalid uid {}", quoteaf_os(val));
                     return 1;
                 }
             }
@@ -984,7 +991,7 @@ fn run_capsh(args: &[String]) -> i32 {
             match val.parse::<u32>() {
                 Ok(gid) => state.gid = gid,
                 Err(_) => {
-                    eprintln!("capsh: --gid: invalid gid '{}'", val);
+                    eprintln!("capsh: --gid: invalid gid {}", quoteaf_os(val));
                     return 1;
                 }
             }
@@ -992,10 +999,10 @@ fn run_capsh(args: &[String]) -> i32 {
             state.user = Some(name.to_string());
             // In a real OS, this would do getpwnam() and set uid/gid/groups.
             // Here we simulate for the compatibility layer.
-            println!("capsh: switching to user '{}'", name);
+            println!("capsh: switching to user {}", quoteaf_os(name));
         } else if let Some(dir) = arg.strip_prefix("--chroot=") {
             state.chroot = Some(dir.to_string());
-            println!("capsh: would chroot to '{}'", dir);
+            println!("capsh: would chroot to {}", quoteaf_os(dir));
         } else if let Some(hex) = arg.strip_prefix("--secbits=") {
             match u32::from_str_radix(
                 hex.strip_prefix("0x")
@@ -1004,7 +1011,7 @@ fn run_capsh(args: &[String]) -> i32 {
             ) {
                 Ok(bits) => state.securebits = bits,
                 Err(_) => {
-                    eprintln!("capsh: --secbits: invalid hex '{}'", hex);
+                    eprintln!("capsh: --secbits: invalid hex {}", quoteaf_os(hex));
                     return 1;
                 }
             }
@@ -1013,7 +1020,7 @@ fn run_capsh(args: &[String]) -> i32 {
                 "0" => state.securebits &= !SECBIT_KEEP_CAPS,
                 "1" => state.securebits |= SECBIT_KEEP_CAPS,
                 _ => {
-                    eprintln!("capsh: --keep: expected 0 or 1, got '{}'", val);
+                    eprintln!("capsh: --keep: expected 0 or 1, got {}", quoteaf_os(val));
                     return 1;
                 }
             }
@@ -1043,7 +1050,7 @@ fn run_capsh(args: &[String]) -> i32 {
                     println!("capsh: set mode to {}", mode.name());
                 }
                 None => {
-                    eprintln!("capsh: --mode: unknown mode '{}'", name);
+                    eprintln!("capsh: --mode: unknown mode {}", quoteaf_os(name));
                     return 1;
                 }
             }
@@ -1063,7 +1070,7 @@ fn run_capsh(args: &[String]) -> i32 {
             state.print();
             return 0;
         } else {
-            eprintln!("capsh: unknown option '{}'", arg);
+            eprintln!("capsh: unknown option {}", quoteaf_os(arg));
             eprintln!("Try 'capsh --help' for more information.");
             return 1;
         }
@@ -1314,7 +1321,7 @@ fn run_getpcaps(args: &[String]) -> i32 {
     for pid in args {
         // Validate pid is numeric.
         if pid.parse::<u64>().is_err() {
-            eprintln!("getpcaps: invalid pid '{}'", pid);
+            eprintln!("getpcaps: invalid pid {}", quoteaf_os(pid));
             exit_code = 1;
             continue;
         }

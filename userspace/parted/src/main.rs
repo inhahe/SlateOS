@@ -31,6 +31,7 @@
 #![allow(clippy::needless_range_loop)]
 #![allow(dead_code)]
 
+use quoting::quoteaf_os;
 use std::env;
 use std::fmt;
 use std::process;
@@ -2588,7 +2589,7 @@ fn run_parted(args: &[String]) -> i32 {
         if let Some(cmd) = parse_parted_command(&commands) {
             return execute_parted_command(&mut editor, &cmd);
         }
-        eprintln!("Error: Unknown command '{}'", commands[0]);
+        eprintln!("Error: Unknown command {}", quoteaf_os(&commands[0]));
         return 1;
     }
 
@@ -2611,7 +2612,7 @@ fn execute_parted_command(editor: &mut DiskEditor, cmd: &PartedCommand) -> i32 {
                 0
             }
             None => {
-                eprintln!("Error: Unknown label type '{}'", label_type);
+                eprintln!("Error: Unknown label type {}", quoteaf_os(label_type));
                 1
             }
         },
@@ -2626,14 +2627,14 @@ fn execute_parted_command(editor: &mut DiskEditor, cmd: &PartedCommand) -> i32 {
             let start_bytes = match parse_size(start, sector_size, disk_bytes) {
                 Some(v) => v,
                 None => {
-                    eprintln!("Error: Invalid start position '{}'", start);
+                    eprintln!("Error: Invalid start position {}", quoteaf_os(start));
                     return 1;
                 }
             };
             let end_bytes = match parse_size(end, sector_size, disk_bytes) {
                 Some(v) => v,
                 None => {
-                    eprintln!("Error: Invalid end position '{}'", end);
+                    eprintln!("Error: Invalid end position {}", quoteaf_os(end));
                     return 1;
                 }
             };
@@ -2658,8 +2659,8 @@ fn execute_parted_command(editor: &mut DiskEditor, cmd: &PartedCommand) -> i32 {
                         "logical" => MbrPartRole::Logical,
                         _ => {
                             eprintln!(
-                                "Error: Invalid partition type '{}' (use primary, extended, or logical)",
-                                part_type
+                                "Error: Invalid partition type {} (use primary, extended, or logical)",
+                                quoteaf_os(part_type)
                             );
                             return 1;
                         }
@@ -2693,7 +2694,7 @@ fn execute_parted_command(editor: &mut DiskEditor, cmd: &PartedCommand) -> i32 {
         },
         PartedCommand::Name { number, name } => match editor.name_partition(*number, name) {
             Ok(()) => {
-                println!("Set name of partition {} to '{}'", number, name);
+                println!("Set name of partition {} to {}", number, quoteaf_os(name));
                 0
             }
             Err(e) => {
@@ -2709,7 +2710,7 @@ fn execute_parted_command(editor: &mut DiskEditor, cmd: &PartedCommand) -> i32 {
             let pf = match PartitionFlag::from_str(flag) {
                 Some(f) => f,
                 None => {
-                    eprintln!("Error: Unknown flag '{}'", flag);
+                    eprintln!("Error: Unknown flag {}", quoteaf_os(flag));
                     return 1;
                 }
             };
@@ -2717,7 +2718,7 @@ fn execute_parted_command(editor: &mut DiskEditor, cmd: &PartedCommand) -> i32 {
                 "on" | "1" | "true" | "yes" => true,
                 "off" | "0" | "false" | "no" => false,
                 _ => {
-                    eprintln!("Error: Invalid state '{}' (use on/off)", state);
+                    eprintln!("Error: Invalid state {} (use on/off)", quoteaf_os(state));
                     return 1;
                 }
             };
@@ -2733,7 +2734,7 @@ fn execute_parted_command(editor: &mut DiskEditor, cmd: &PartedCommand) -> i32 {
             let pf = match PartitionFlag::from_str(flag) {
                 Some(f) => f,
                 None => {
-                    eprintln!("Error: Unknown flag '{}'", flag);
+                    eprintln!("Error: Unknown flag {}", quoteaf_os(flag));
                     return 1;
                 }
             };
@@ -2751,7 +2752,7 @@ fn execute_parted_command(editor: &mut DiskEditor, cmd: &PartedCommand) -> i32 {
             let end_bytes = match parse_size(end, sector_size, disk_bytes) {
                 Some(v) => v,
                 None => {
-                    eprintln!("Error: Invalid end position '{}'", end);
+                    eprintln!("Error: Invalid end position {}", quoteaf_os(end));
                     return 1;
                 }
             };
@@ -2772,7 +2773,7 @@ fn execute_parted_command(editor: &mut DiskEditor, cmd: &PartedCommand) -> i32 {
             let start_bytes = match parse_size(start, sector_size, disk_bytes) {
                 Some(v) => v,
                 None => {
-                    eprintln!("Error: Invalid start position '{}'", start);
+                    eprintln!("Error: Invalid start position {}", quoteaf_os(start));
                     return 1;
                 }
             };
@@ -2793,7 +2794,7 @@ fn execute_parted_command(editor: &mut DiskEditor, cmd: &PartedCommand) -> i32 {
                 0
             }
             None => {
-                eprintln!("Error: Unknown unit '{}'", unit);
+                eprintln!("Error: Unknown unit {}", quoteaf_os(unit));
                 1
             }
         },

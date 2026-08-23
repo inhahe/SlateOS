@@ -66166,3 +66166,129 @@ Related: the same investigation added `ksyms::resolve_static` (lock-free,
 allocation-free) so panic/spin-stall/lockdep reporters can resolve symbols
 without re-entering the machinery they are diagnosing. See commit
 `0b43b6443`.
+
+### FIXED-A-LOGPERSIST-NEVER-PERSISTED-THE-SYSTEMS-FIRST-EVENT (lane A)
+
+**In short:** The kernel keeps a log of notable events and periodically
+writes new ones out to a file on disk. It remembered how far it had got by
+storing the number of the last event it wrote, and it started that counter
+at zero to mean "haven't written anything yet". But events are also numbered
+from zero — so the very first event the system ever recorded had the same
+number as the "nothing yet" marker, and the writer skipped it as already
+done. On every fresh boot, event number one was silently lost. It is the
+event most worth having: if a machine dies seconds into booting, that may be
+the only one it managed to record. Fixed.
+
+**Status:** FIXED 2026-08-23, commit `b66622ab6`.
+
+**Where:** `kernel/src/logpersist.rs` — `State::global_last_flushed`,
+`FlushCursor::last_flushed_seq`, and the two `EventFilter::after(..)` calls
+in `flush()`.
+
+**The defect.** `eventlog` assigns sequence numbers starting at 0
+(`kernel/src/eventlog.rs:647`, `let seq = self.total_written;`). `flush()`
+resumed from where it left off with `EventFilter::all().after(after_seq)`,
+and `after` is *strictly* greater (`eventlog.rs:916`, `if entry.seq <= after
+{ return false }`). With `global_last_flushed: u64` seeded to `0` to mean
+"nothing flushed yet", the first flush of every boot asked for "everything
+after 0" and thereby excluded sequence 0.
+
+This is the in-band-sentinel class again (see
+`FIXED-A-SYSMAINT-NEVER-RUN-TASKS-WERE-NEVER-DUE` and the `tasksched`
+`last_run_ns` fix): a `u64` field where one legal value is stolen to mean
+"unset". The distinguishing feature here is that **no** `u64` could have
+worked — `after(n)` has no value meaning "everything", because the range it
+excludes always includes at least sequence 0.
+
+**The fix.** `Option<u64>` for both cursors, and the first flush omits the
+`after` clause rather than passing a sentinel:
+
+```rust
+let base = EventFilter::all().min_severity(min_sev);
+let filter = match after_seq {
+    None => base,
+    Some(seq) => base.after(seq),
+};
+```
+
+Both display sites (`logpersist::format_stats` and `kshell`'s `logrotate
+stats`) now print `none (nothing flushed yet)` rather than `0`, which had
+claimed a flush that never happened.
+
+**How it was found.** logpersist's own self-test, which reported
+`expected 2 flushed, got 1` on boot batch 29 — the first boot after the
+suite was de-fanged and actually started running. This is the fourth
+product bug the de-fanging programme has surfaced, and the pattern holds:
+the suites were switched off *because* they failed, and they failed
+because they were right.
+
+The test now pins the cause rather than the symptom — it asserts that the
+post-`clear()` event really is sequence 0, that both events flush, that the
+resulting cursor is `Some(1)`, and that a freshly-initialised cursor reads
+`None` rather than `Some(0)`.
+
+### FIXED-A-BACKUP-FREQUENCY-WAS-RECORDED-DISPLAYED-AND-NEVER-OBEYED (lane A)
+
+**In short:** Backup schedules let you pick how often a backup should run —
+hourly, daily, weekly, monthly. That setting was saved, and shown back to
+you in the schedule list, but nothing anywhere in the system ever compared
+it against a clock. Every schedule therefore behaved as "manual": it ran
+only when someone explicitly asked, no matter what frequency was chosen.
+A second bug sat underneath it — the "when did this last run?" timestamp
+used zero to mean "never", but zero is also a real time (the instant the
+machine booted), so a backup that had never run looked like one that had
+just run. Fixed both.
+
+**Status:** FIXED 2026-08-23, commit `dc80769bf`.
+
+**Where:** `kernel/src/fs/backupsched.rs` — `BackupFrequency`,
+`BackupSchedule::last_run_ns`, new `due_schedules()`; display in
+`kernel/src/kshell.rs`'s `cmd_backupsched` `list` subcommand.
+
+**The defect, in two layers.**
+
+1. *Dead configuration.* `BackupSchedule::frequency` had a `label()` and
+   nothing else. No caller in the tree computed due-ness from it. The
+   companion state was equally inert: `last_run_ns` was written by
+   `run_now` and read by no one, in this module or any other.
+2. *In-band sentinel.* `last_run_ns: u64` used `0` for "never ran". `0` is
+   a legal uptime, so once a due-check existed it would have read a
+   never-run schedule as one that ran at boot. The failure direction is the
+   bad one: the schedule that had never once run is the one the scheduler
+   would have been most confident it could skip, for a full interval after
+   every reboot.
+
+**The fix.** `BackupFrequency::interval_ns() -> Option<u64>` (`None` for
+`Manual`, which genuinely never comes due on its own and so is not
+expressible as a large interval); `last_run_ns: Option<u64>`; and
+`due_schedules()` returning the enabled schedules whose interval has
+elapsed or which have never run. `bsched list` now shows the last-run time
+and a `DUE` marker, so the state is observable rather than merely stored.
+
+**Note on scope.** `interval_ns` treats a month as a flat 30 days. The
+kernel has an uptime counter, not a calendar, so "the same day-of-month
+next month" is not expressible here. Documented at the definition.
+
+**Not yet done:** nothing *calls* `due_schedules()` on a timer yet — this
+commit makes the frequency meaningful and observable, but automatic
+triggering needs a periodic task, which belongs with `tasksched`
+integration. Tracked below.
+
+### TD-A-BACKUP-DUE-SCHEDULES-HAS-NO-PERIODIC-CALLER (lane A)
+
+**In short:** Backup schedules can now correctly report which of them are
+overdue, but nothing checks that list on a timer, so an overdue backup is
+still not started automatically — you have to ask. The missing piece is a
+recurring task that polls the list and runs what it finds.
+
+**Status:** OPEN.
+
+**Where:** `kernel/src/fs/backupsched.rs::due_schedules` has no caller
+outside the self-test and `kshell`'s `list`.
+
+**Proper fix.** Register a `tasksched` interval task at init that calls
+`due_schedules()` and then `run_now()` for each id returned. `tasksched`
+already has the interval machinery and the `Option<u64>` last-run
+semantics (`kernel/src/fs/tasksched.rs:662`), so this is wiring, not new
+mechanism. It was left out of `dc80769bf` to keep that commit to one
+logical change.

@@ -505,6 +505,37 @@ pub(crate) fn check_readiness(kind: fdtable::HandleKind, handle: u64) -> (bool, 
             let readable = crate::epoll::inotify_is_readable(handle);
             (readable, false, false, false)
         }
+
+        // Either end of a pty.  `SYS_PTY_POLL` takes either handle and
+        // answers for that end: bit 0 readable, bit 1 writable.
+        //
+        // Note the bit layout is *not* the pipe/socket one used above
+        // (`0x01` / `0x04` / `0x08` / `0x10`) -- writable is `0x02` here,
+        // where a pipe puts POLLPRI.  Reading it with the pipe mask would
+        // report every readable pty as unwritable and hang any event loop
+        // that waits for POLLOUT before typing.
+        //
+        // Hangup is folded into readable by the kernel deliberately, and
+        // that is the right shape for `poll`: a master whose last slave
+        // has gone is readable in the sense that matters -- the next
+        // `read` returns immediately, with the drained output first and
+        // then `EIO`.  An event loop must wake up for that, and a
+        // separate POLLHUP that some callers ignore would let it sleep
+        // forever instead.  We therefore report `hangup = false` and let
+        // the read deliver the news, rather than synthesising a POLLHUP
+        // we cannot distinguish from ordinary readability.
+        HandleKind::PtyMaster | HandleKind::PtySlave => {
+            let status = syscall1(crate::syscall::SYS_PTY_POLL, handle);
+            if status < 0 {
+                // The handle is gone or was never ours.  POLLERR, and
+                // readable so a caller blocked on input is released
+                // rather than parked on a terminal that cannot answer.
+                return (true, false, true, true);
+            }
+            #[allow(clippy::cast_sign_loss)] // guarded non-negative above
+            let bits = status as u64;
+            ((bits & 0x1) != 0, (bits & 0x2) != 0, false, false)
+        }
     }
 }
 

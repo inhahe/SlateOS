@@ -16,22 +16,24 @@
 //! `login_tty.c`, `forkpty.c`, checked against glibc 2.39) and musl
 //! (`src/misc/pty.c`, `src/misc/login_tty.c`, `src/misc/forkpty.c`) do.
 //! It would have been shorter to return `ENOSYS` from all three, since
-//! `posix_openpt` returns `ENOSYS` today and therefore `openpty` cannot
-//! presently succeed.  Composing instead buys two things:
+//! `posix_openpt` returned `ENOSYS` when this module was written and
+//! `openpty` therefore could not succeed.  Composing instead bought two
+//! things, and the second one has now been collected:
 //!
 //! 1. **The errno a caller sees is the truthful one.** `openpty` fails
-//!    with whatever `posix_openpt` failed with — `ENOSYS` now, `EMFILE`
-//!    or `ENOSPC` later — rather than a hardcoded verdict that would
-//!    become a lie the moment the pty layer lands.
-//! 2. **They start working with no edit.** When the kernel grows
-//!    `/dev/ptmx` and `posix_openpt` begins returning a master fd, these
-//!    functions become correct by themselves.  A stub would have to be
-//!    found and rewritten, and stubs that must be found later are the
-//!    ones that are not.
+//!    with whatever `posix_openpt` failed with — `EMFILE` when the pty
+//!    table is full, `EBADF` from a lost descriptor — rather than a
+//!    hardcoded verdict that would have become a lie the moment the pty
+//!    layer landed.
+//! 2. **They started working with no edit.** The kernel grew the pty
+//!    family (syscalls 544\u2013556) and `posix_openpt` began returning a real
+//!    master fd; **nothing in this file changed**, and all three functions
+//!    became correct.  A stub would have had to be found and rewritten,
+//!    and stubs that must be found later are the ones that are not.
 //!
-//! `login_tty` is the exception that is already fully functional: it is
-//! `setsid` + `ioctl(TIOCSCTTY)` + three `dup2`s + a `close`, all of
-//! which exist, and it works on any tty fd, not just a pty slave.
+//! `login_tty` was fully functional throughout: it is `setsid` +
+//! `ioctl(TIOCSCTTY)` + three `dup2`s + a `close`, all of which existed,
+//! and it works on any tty fd, not just a pty slave.
 
 use crate::errno;
 use crate::fcntl::{O_CLOEXEC, O_NOCTTY, O_RDWR};
@@ -58,10 +60,17 @@ const PTS_NAME_MAX: usize = 64;
 /// Returns 0 on success (with the master fd in `*amaster` and the slave
 /// fd in `*aslave`), or -1 with `errno` set.
 ///
-/// The sequence is glibc's and musl's, in their order, because the order
-/// is load-bearing: `grantpt` and `unlockpt` must both run before the
-/// slave can be opened, and the slave must be opened before `termp`/
-/// `winp` can be applied to it.
+/// The sequence is glibc's and musl's, in their order.  Half of that
+/// order is load-bearing here and half is not, and the distinction is
+/// worth stating: the slave must be opened before `termp`/`winp` can be
+/// applied to it, and that is real.  `grantpt` and `unlockpt` running
+/// first is not — on SlateOS they are validated no-ops, because the
+/// kernel hands both ends of the pair straight to the caller and never
+/// publishes a node for a third party to race for (see `posix_openpt`).
+/// They are still called, in place, because this is the sequence every
+/// pty program in the world performs, and a libc that quietly tolerated
+/// their omission would let a program that skips them ship broken to
+/// every other system.
 ///
 /// 1. `posix_openpt(O_RDWR | O_NOCTTY)` — `O_NOCTTY` because acquiring
 ///    the master must not make it the caller's controlling terminal;

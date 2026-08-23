@@ -64502,3 +64502,114 @@ is the same shape but two orders of magnitude smaller -- bounded by the field
 width, survivable, and the same order as the reserve cap now applied at frame
 level. Noted rather than changed, so a future reader who spots it knows it was
 seen and judged, not missed.
+
+
+## Four limitations left behind by wiring libc's pty family to syscalls 544-556 (lane B, 2026-08-23)
+
+All four were found while landing
+`requests/a-b-pty-the-tty-layer-is-now-n-devices-and-a-pty-object-exists.md`
+on the libc side. None of them is a bug in what lane A built; each is a
+place where the Linux ABI has an operation our syscall set does not, and
+libc had to pick the least-wrong answer. Three are filed to lane A as
+`requests/b-a-pty-gaps-master-inheritance-and-readable-bytes.md`; the
+fourth is ours and is a non-issue by design.
+
+### TD-B-PTY-MASTER-CANNOT-BE-INHERITED-ACROSS-SPAWN -- OPEN, blocking for one shape of program
+
+**Where:** `posix/src/spawn.rs`, `build_fd_map`.
+
+`SYS_PROCESS_SPAWN` takes an `fd_handle_type` per inherited descriptor and
+has no value that names a pty end, so libc filters master fds out of the
+inherited set -- the same treatment it gives `epoll`/`timerfd`/`inotify`
+fds. For those three the filter is honest, because they are userspace-only
+objects with no kernel identity to pass. For a master it is a lie of
+convenience: the master *does* have a kernel identity, and the child simply
+does not get it.
+
+The slave needs nothing, and that is not luck: `kind_to_handle_type` maps
+`PtySlave` to `CONSOLE`, `CONSOLE` resolves through `current_tty()`, and
+`login_tty` has just made the pty the child's controlling terminal, so the
+mapping is exact. The master is precisely the end that is *not* anyone's
+controlling terminal, so no resolution rule could name it.
+
+**What breaks:** a program where the *child* is the master holder --
+`script -f` re-execing itself, a multiplexer that spawns a helper to drive
+the pty, sshd's server side. The common shape (parent keeps the master,
+child gets the slave) is unaffected, which is why this is a gap rather than
+a hole in the feature.
+
+**Proper fix:** kernel-side. An `fd_handle_type` for a pty end plus a
+refcount bump in `SYS_PROCESS_SPAWN`. Note for whoever implements it that
+this must *not* be spelled as a blind `SYS_PTY_DUP` -- see the next entry
+but one for why libc's own `dup` does not call it either.
+
+### TD-B-PTY-FIONREAD-IS-A-BOOLEAN -- OPEN, degrades but does not break
+
+**Where:** `posix/src/ioctl.rs`, `handle_fionread`, the
+`PtyMaster | PtySlave` arm.
+
+`SYS_PIPE_READABLE_BYTES`, `SYS_SOCKETPAIR_READABLE_BYTES` and
+`SYS_UDP_RX_FRONT_BYTES` all exist; the pty ring has no counterpart. So
+`ioctl(FIONREAD)` is answered from bit 0 of `SYS_PTY_POLL`, widened to 0
+or 1.
+
+`ENOTTY` was considered and rejected: a pty *does* support `FIONREAD` on
+Linux, and the callers are terminal emulators, whose fallback for "not a
+terminal" is worse than a low count. The degradation is bounded -- a caller
+that sizes a read by it reads a byte at a time, which is slow and loses
+nothing, because `read()` returns what is actually there regardless of what
+`FIONREAD` said.
+
+**The 0 case is exact**, which is what keeps this merely degraded: a caller
+using `FIONREAD` only to test emptiness -- the common case, and what
+`select`-less polling loops do -- is right every time.
+
+**Proper fix:** a `SYS_PTY_READABLE_BYTES`, if the ring carries a cheap
+count. If it does not, this entry should be closed "won't fix" rather than
+left open forever; that is stated in the request to lane A.
+
+### TD-B-PTY-MASTER-HAS-NO-FOREGROUND-GROUP -- OPEN, narrow
+
+**Where:** `posix/src/ioctl.rs`, `is_pgrp_terminal`.
+
+`SYS_TTY_GET_PGRP`/`SYS_TTY_SET_PGRP` (537/538) were not widened to the
+terminal-naming convention lane A built for 539 and 553-556, so they still
+answer only for the caller's own controlling terminal. Therefore
+`TIOCGPGRP`/`TIOCSPGRP` on a pty **master** returns `ENOTTY`. On a
+**slave** they delegate to `tcgetpgrp`/`tcsetpgrp` and are correct, because
+after `login_tty` the slave *is* our controlling terminal, and when it is
+not, `ENOTTY` is the truthful answer.
+
+Delegating on a master would have been the bug worth avoiding: it would
+report the *emulator's* foreground process group as though it were the
+pty's -- a wrong number instead of a refusal. `is_pgrp_terminal` exists
+solely to make that refusal explicit and commented, rather than falling out
+of an omission someone later "fixes".
+
+**Proper fix:** 537/538 take a terminal under the same convention as
+539/553-556.
+
+### The slave cannot be reopened by name after its first claim -- WORKS AS DESIGNED, recorded so it is not mistaken for a bug
+
+**Where:** `posix/src/ptytab.rs`; `open_pty_device` in `posix/src/file.rs`.
+
+On Linux, `/dev/pts/<n>` is a real device node and may be opened any number
+of times. Here `SYS_PTY_CREATE` returns *both* ends at once, so libc holds
+the slave in `ptytab` between `posix_openpt` and the caller's
+`open("/dev/pts/<n>")`, and that open **claims** the held handle rather
+than opening a device. A second open of the same name gets `ENOENT`.
+
+This is a consequence of a kernel design decision that is right for other
+reasons (it removes Linux's `grantpt` chmod dance and `unlockpt`
+`TIOCSPTLCK` state machine entirely -- both are validated no-ops here), and
+it costs almost nothing in practice, because the one caller that matters is
+`openpty`, which opens the slave exactly once. It is written down here
+because a reader who knows Linux will expect the other behaviour and should
+find this rather than conclude the claim path is broken.
+
+The holder is also what makes the orphan case safe: a caller who takes a
+master and never claims the slave -- precisely what an `openpty` that fails
+at `tcsetattr` does -- would otherwise strand a live slave with no
+descriptor. `retire_master` reports the orphan on the master's close and
+`close_pty_handle` reaps it. Under a Linux-style "open the slave later by
+name" design that leak would have been invisible from libc.

@@ -2536,6 +2536,7 @@ pub mod printf;
 pub mod process;
 pub mod pthread;
 pub mod pty;
+pub mod ptytab;
 pub mod pwd;
 pub mod random;
 pub mod regex;

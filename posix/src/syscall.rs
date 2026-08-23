@@ -203,6 +203,137 @@ pub const SYS_TTY_SET_TERMIOS: u64 = 542;
 /// Returns the byte count (0 at EOF) or a negative error.
 pub const SYS_TTY_READ: u64 = 543;
 
+// ---------------------------------------------------------------------------
+// Pseudo-terminals (544–556)
+// ---------------------------------------------------------------------------
+//
+// Built by lane A and described in
+// `requests/a-b-pty-the-tty-layer-is-now-n-devices-and-a-pty-object-exists.md`.
+//
+// # How these name a terminal
+//
+// Three of them — `SYS_PTY_{GET,SET}_WINSIZE` and `SYS_PTY_{GET,SET}_TERMIOS` —
+// take a *terminal* rather than a pty end, and so do the handle-taking forms of
+// `SYS_TTY_ACQUIRE_CTTY`.  One convention covers all of them:
+//
+// | `arg0` | Means |
+// |---|---|
+// | `0` | the caller's **controlling terminal** — the console for a process that was never re-parented onto a pty, so this is the pre-pty behaviour unchanged |
+// | `1` | **invalid, reserved** — a handle is `(tty_id << 1) \| end`, so `1` decodes as "the slave of tty 0", and tty 0 is the console, which has no slave |
+// | `>= 2` | a pty handle the caller owns, either end |
+//
+// The ownership check on `>= 2` is real and is the point: a pty handle is
+// *enumerable*, unlike every other kernel handle here, whose value is
+// unguessable — and a master handle is the authority to type arbitrary bytes at
+// whatever shell is on the far end.  The check happens **before** the buffer
+// argument is looked at, so a caller cannot learn whether a pty exists by
+// probing numbers and watching which errno comes back.
+//
+// # Why there is no "open the slave" syscall
+//
+// Linux hands you the master from `/dev/ptmx` and makes you find the slave by
+// name.  That shape is forced by the slave being a *filesystem path* an
+// unrelated process might open first, and `grantpt`/`unlockpt`/`TIOCSPTLCK`
+// exist to guard the window between creating the pty and the intended user
+// opening it.  `SYS_PTY_CREATE` returns **both ends**, which closes that window
+// rather than guarding it.  See [`crate::ioctl::posix_openpt`] for what libc
+// does with the slave end it is handed before anyone has asked for it.
+
+/// Create a pseudo-terminal, returning **both** ends: master in `rax`, slave in
+/// `rdx` (`syscall*_2ret`).  Takes no arguments.
+///
+/// Returns: the pair; `OutOfMemory` if the pty id space is exhausted.
+pub const SYS_PTY_CREATE: u64 = 544;
+/// Write "keystrokes" into a pty — bytes the slave's line discipline sees as
+/// terminal *input*.  `arg0` = master handle, `arg1` = bytes, `arg2` = length.
+///
+/// Blocks while the input ring is full, so a paste into a slow program gets
+/// back-pressure rather than a silent truncation; the returned count may be
+/// short and the caller must resume from it.
+///
+/// Returns: bytes accepted; `InvalidHandle`; `ChannelClosed` (→ `EPIPE`) if the
+/// slave is closed, because nothing will ever read these bytes.
+pub const SYS_PTY_MASTER_WRITE: u64 = 545;
+/// Read program output from a pty's master end, blocking.  `arg0` = master
+/// handle, `arg1` = buffer, `arg2` = capacity.
+///
+/// Bytes have already been through output post-processing, so a `\n` written by
+/// the program arrives as CRLF under `ONLCR`.
+///
+/// **At last-slave-close this returns `IoError` (EIO), not 0** — see
+/// `design-decisions.md` §259.  Buffered output is delivered first.  A libc that
+/// "helpfully" turned that EIO into a zero-length read would break every
+/// emulator ported from Linux, which reads `0` as "nothing right now" and spins;
+/// [`crate::file`] therefore passes the `EIO` through.
+pub const SYS_PTY_MASTER_READ: u64 = 546;
+/// Non-blocking [`SYS_PTY_MASTER_READ`]: `WouldBlock` (→ `EAGAIN`) instead of
+/// parking when the output ring is empty and the slave is still open.  Used
+/// when the master fd carries `O_NONBLOCK`.
+pub const SYS_PTY_MASTER_TRY_READ: u64 = 547;
+/// Write program output into a pty from its slave end.  `arg0` = slave handle,
+/// or `0` for the caller's controlling terminal; `arg1` = bytes, `arg2` = len.
+///
+/// The counterpart of [`SYS_TTY_READ`]: a program running *on* a pty reads its
+/// terminal with 543 and writes it with this.  `OPOST`/`ONLCR` are applied by
+/// the kernel, because only the terminal knows a line break is two bytes, and
+/// the returned count is in *the caller's* bytes rather than the expanded ones
+/// — so a short write can be resumed from without re-sending half a CRLF.
+pub const SYS_PTY_SLAVE_WRITE: u64 = 548;
+/// Drop one reference to a pty end.  `arg0` = the handle.
+///
+/// Last *master* reference: the slave's readers see EOF, its writers get
+/// `IoError`, and every session holding it as a controlling terminal has its
+/// foreground group hung up (`SIGHUP` then `SIGCONT`).  Last *slave* reference:
+/// the master drains and then reports `IoError`.
+///
+/// Returns: 0; `InvalidHandle` if the caller does not own the handle — which is
+/// also what a second close of the same value gets, since the reference was
+/// already given up.
+pub const SYS_PTY_CLOSE: u64 = 549;
+/// Take another reference to a pty end.  `arg0` = the handle.
+///
+/// Returns the **same** raw value with the refcount bumped: a pty end has one
+/// identity, and two names for it would make "the last close" ambiguous.  This
+/// is what [`crate::fdtable`] needs for `dup`, and what a shell about to `fork`
+/// uses so the child's exit does not hang up the parent.
+pub const SYS_PTY_DUP: u64 = 550;
+/// Report the terminal id behind a pty handle, for `ptsname(3)`.  `arg0` =
+/// either end's handle; returns the `TtyId`, which libc formats as
+/// `/dev/pts/<id>`.  A *name*, not a way to obtain the end.
+pub const SYS_PTY_SLAVE_ID: u64 = 551;
+/// Report whether a pty end would read or write without blocking.  `arg0` = the
+/// handle; returns a bitmask, bit 0 readable and bit 1 writable.
+///
+/// **Hangup counts as readable**, because a read at hangup returns immediately
+/// and a poller that called it "not ready" would never notice the terminal had
+/// gone — the same rule Linux's `poll` follows when it sets `POLLHUP` alongside
+/// `POLLIN`.
+pub const SYS_PTY_POLL: u64 = 552;
+/// Read a terminal's window size (`ioctl(fd, TIOCGWINSZ)`).  `arg0` = terminal
+/// under the naming convention above, `arg1` = a `struct winsize` out-buffer.
+pub const SYS_PTY_GET_WINSIZE: u64 = 553;
+/// Set a terminal's window size, raising `SIGWINCH` on a real change
+/// (`ioctl(fd, TIOCSWINSZ)`).  Arguments as for [`SYS_PTY_GET_WINSIZE`].
+///
+/// The handle form exists for the terminal *emulator*, which owns a master end
+/// that is emphatically not its own controlling terminal and is the only party
+/// that knows the window was resized.  Without it, dragging a window's corner
+/// could not reach the program inside — the one thing `SIGWINCH` exists to
+/// prevent.
+pub const SYS_PTY_SET_WINSIZE: u64 = 554;
+/// Read a terminal's `struct termios` by handle.  `arg0` = terminal, `arg1` = a
+/// wire-format out-buffer of the kernel's `TERMIOS_BYTES` — the same encoding
+/// `SYS_TTY_GET_TERMIOS` uses, so `ioctl.rs`'s existing `termios_from_wire`
+/// decodes it unchanged.
+///
+/// The handle form is what lets `openpty(3)` install a discipline on the slave
+/// *before* forking, which is the only race-free time to do it — the reason
+/// `openpty` takes a `termp` argument at all.
+pub const SYS_PTY_GET_TERMIOS: u64 = 555;
+/// Install a terminal's `struct termios` by handle.  Arguments as for
+/// [`SYS_PTY_GET_TERMIOS`].
+pub const SYS_PTY_SET_TERMIOS: u64 = 556;
+
 // POSIX signal shim (522–526)
 pub const SYS_SIGNAL_REGISTER: u64 = 522;
 pub const SYS_SIGNAL_SEND: u64 = 523;

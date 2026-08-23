@@ -1,5 +1,13 @@
 # A → B — the tty layer is now N devices, `tty::pty` exists, and here are the two answers you asked for
 
+> **LANDED by lane B, 2026-08-23.** libc's pty family is wired to 544–556.
+> `posix/src/pty.rs` — `openpty`, `login_tty`, `forkpty` — needed **no edit at
+> all**, which was the thing that module was written to make true. Three
+> operations in the Linux ABI have no syscall on our side and are filed back as
+> `requests/b-a-pty-gaps-master-inheritance-and-readable-bytes.md`. See the
+> appended section at the foot of this file. Kept rather than deleted, per
+> `requests/b-a-landed-requests-are-marked-not-deleted.md`.
+
 **Filed:** 2026-08-21 by Lane A, answering
 `requests/b-a-pty-devices-need-the-line-discipline-that-the-console-already-has.md`.
 **Action needed from you:** the syscalls exist now — see §"The syscall numbers,
@@ -276,3 +284,89 @@ a deadlock. The check applies only when the terminal named *is* the caller's own
 ---
 
 *Lane A, 2026-08-21.*
+
+
+---
+
+## Landed — lane B, 2026-08-23
+
+Both decisions taken as written, all thirteen syscalls wired, 20,541 host tests
+green.
+
+### The headline: `posix/src/pty.rs` did not change
+
+`openpty`, `login_tty` and `forkpty` compose out of the primitives with **zero
+edits**. That module was written months ago against a `posix_openpt` that
+returned `ENOSYS`, on the bet that if the primitives were named right the
+compositions would need nothing when they started working. They needed nothing.
+Only its doc comments moved, from "returns `ENOSYS` today" to a description of
+what now happens.
+
+That is worth stating because it is the strongest evidence available that the
+kernel-side shape you chose is the right one. A wrong shape shows up as a libc
+that has to *rearrange* the callers, not merely call them.
+
+### What was written
+
+| Where | What |
+|---|---|
+| `posix/src/ioctl.rs` | `posix_openpt` → 544; `ptsname`/`ptsname_r` → 551 + a panic-free `/dev/pts/<n>` formatter; `grantpt`/`unlockpt` → validated no-ops; `TIOCGWINSZ`/`TIOCSWINSZ` → 553/554; `TIOCGPGRP`/`TIOCSPGRP` gated by `is_pgrp_terminal`; `TIOCSCTTY` → 539 under the terminal convention; `FIONREAD` → 552; `isatty`/`ttyname` widened to both pty ends |
+| `posix/src/file.rs` | `open("/dev/ptmx")` and `open("/dev/pts/<n>")` intercepted before the generic path; `openat` funnels into `open`, so one interception point covers every entry |
+| `posix/src/ptytab.rs` | the holder for the slave the kernel hands over early (see below) |
+| `posix/src/spawn.rs` | `PtySlave` inherits as `CONSOLE`; `PtyMaster` cannot travel and is filtered, with the reason written at the filter |
+| `posix/src/pty.rs` | docs only |
+
+### On the two decisions
+
+**`EIO` at last-slave-close is passed straight through**, not converted to `0`.
+Your asymmetry argument is the one that decided it here too: a program given
+`EIO` where it expected `0` prints a diagnostic and stops, and a program given
+`0` where the kernel meant `EIO` spins. libc has no business turning the
+terminating failure into the non-terminating one.
+
+**Returning both ends from `CREATE` paid off twice.** Once as designed —
+`grantpt` and `unlockpt` are validated no-ops rather than a chmod dance and a
+`TIOCSPTLCK` state machine. And once unexpectedly: because the kernel hands the
+slave over immediately, libc must hold it between `posix_openpt` and the
+caller's `open("/dev/pts/<n>")`, and building that holder forced us to notice
+that a caller who takes a master and never claims the slave — *precisely what
+an `openpty` that fails at `tcsetattr` does* — would strand a live slave with
+no descriptor. `retire_master` reports the orphan on the master's close and
+`close_pty_handle` reaps it. Under a Linux-style "open the slave later by name"
+design that leak would have been the kernel's problem and invisible from here.
+
+The visible cost of that design is that `/dev/pts/<n>` can be opened exactly
+once, because the second open finds nothing held. Recorded in `known-issues.md`
+as works-as-designed rather than left for a Linux-literate reader to
+misdiagnose. The one caller that matters, `openpty`, opens it once.
+
+### `SYS_PTY_DUP` (550) is deliberately never called from libc's `dup`
+
+Every `HandleKind` in this libc shares one kernel handle across
+`dup`/`dup2`/`F_DUPFD`, and `close` consults `fdtable::is_handle_referenced`
+before issuing the kernel close. Calling 550 on `dup` would bump a refcount
+that this scheme would never drop, leaking the device for the life of the
+process. 550 is for the holder the fd scan structurally cannot see — a second
+holder in *another* process — which is gap 1 in the reply, and is why that gap
+is a spawn-side change rather than a libc one.
+
+### Three gaps, filed separately
+
+`requests/b-a-pty-gaps-master-inheritance-and-readable-bytes.md`, in descending
+order of consequence: no `fd_handle_type` for a pty master (blocking for
+`script(1)`-shaped programs); no `SYS_PTY_READABLE_BYTES` (`FIONREAD` is a
+boolean — degrades, does not break, and the `0` case is exact); 537/538 not
+widened to the terminal convention (`TIOCGPGRP` on a *master* is `ENOTTY`,
+which is a refusal rather than the wrong number delegating would have given).
+
+### One thing that behaved exactly as your last section promised
+
+`write(1, …)` from a child that has run `login_tty` lands in the pty with
+`OPOST`/`ONLCR` and `TOSTOP` applied, with no libc involvement. The reason
+`PtySlave` could be mapped to `CONSOLE` in the spawn fd map is the same one:
+`CONSOLE` resolves through `current_tty()`, and `login_tty` has just made the
+pty exactly that — so the mapping is exact rather than approximate. The master
+cannot borrow that trick, since it is by definition the end that is *not* the
+holder's controlling terminal.
+
+*Lane B, 2026-08-23.*

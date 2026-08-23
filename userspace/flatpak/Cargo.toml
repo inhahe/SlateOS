@@ -3,4 +3,10 @@ name = "flatpak"
 version = "0.1.0"
 edition = "2024"
 description = "SlateOS flatpak utility"
+
 [dependencies]
+# One rendering of untrusted text inside a diagnostic. An application id, a
+# remote name and a branch are all chosen by whoever published the app, and a
+# file path may hold a newline -- so a message that pastes one in raw lets the
+# publisher write extra lines of this program's output. See `userspace/quoting`.
+quoting = { path = "../quoting" }

@@ -45,6 +45,13 @@ use std::env;
 use std::fmt;
 use std::process;
 
+// An application id, a remote name, a branch and a file path are all
+// attacker-chosen text -- a path may hold any byte but `/` and NUL, including
+// a newline. `quoteaf_os` renders an ordinary word as `'abc'`, byte for byte
+// what the hand-written quotes here used to print, and escapes a hostile one
+// so it cannot close the quotes and keep writing. See `userspace/quoting`.
+use quoting::quoteaf_os;
+
 // ============================================================================
 // Data model
 // ============================================================================
@@ -507,14 +514,17 @@ fn cmd_install(args: &[String]) -> i32 {
     let (_kind, app_id, arch, branch) = parse_ref_string(app_ref);
 
     if !is_valid_app_id(&app_id) {
-        eprintln!("error: '{}' is not a valid application ID", app_id);
+        eprintln!(
+            "error: {} is not a valid application ID",
+            quoteaf_os(&app_id)
+        );
         return 1;
     }
 
     if let Some(ref a) = arch
         && !is_valid_arch(a)
     {
-        eprintln!("error: unsupported architecture '{}'", a);
+        eprintln!("error: unsupported architecture {}", quoteaf_os(a));
         return 1;
     }
 
@@ -572,7 +582,10 @@ fn cmd_uninstall(args: &[String]) -> i32 {
     let (_kind, app_id, _arch, _branch) = parse_ref_string(app_ref);
 
     if !is_valid_app_id(&app_id) {
-        eprintln!("error: '{}' is not a valid application ID", app_id);
+        eprintln!(
+            "error: {} is not a valid application ID",
+            quoteaf_os(&app_id)
+        );
         return 1;
     }
 
@@ -605,7 +618,10 @@ fn cmd_update(args: &[String]) -> i32 {
     if let Some(app_ref) = positional.first() {
         let (_kind, app_id, _arch, _branch) = parse_ref_string(app_ref);
         if !is_valid_app_id(&app_id) {
-            eprintln!("error: '{}' is not a valid application ID", app_id);
+            eprintln!(
+                "error: {} is not a valid application ID",
+                quoteaf_os(&app_id)
+            );
             return 1;
         }
         println!("Checking for updates to {}...", app_id);
@@ -668,7 +684,7 @@ fn cmd_run(args: &[String]) -> i32 {
                 i += 1;
                 let val = &args[i];
                 if !is_valid_shared(val) {
-                    eprintln!("error: unknown share type '{val}'");
+                    eprintln!("error: unknown share type {}", quoteaf_os(val));
                     return 1;
                 }
                 shares.push(val.clone());
@@ -677,7 +693,7 @@ fn cmd_run(args: &[String]) -> i32 {
                 i += 1;
                 let val = &args[i];
                 if !is_valid_shared(val) {
-                    eprintln!("error: unknown share type '{val}'");
+                    eprintln!("error: unknown share type {}", quoteaf_os(val));
                     return 1;
                 }
                 unshares.push(val.clone());
@@ -686,7 +702,7 @@ fn cmd_run(args: &[String]) -> i32 {
                 i += 1;
                 let val = &args[i];
                 if !is_valid_socket(val) {
-                    eprintln!("error: unknown socket type '{val}'");
+                    eprintln!("error: unknown socket type {}", quoteaf_os(val));
                     return 1;
                 }
                 sockets.push(val.clone());
@@ -695,7 +711,7 @@ fn cmd_run(args: &[String]) -> i32 {
                 i += 1;
                 let val = &args[i];
                 if !is_valid_socket(val) {
-                    eprintln!("error: unknown socket type '{val}'");
+                    eprintln!("error: unknown socket type {}", quoteaf_os(val));
                     return 1;
                 }
                 nosockets.push(val.clone());
@@ -704,7 +720,7 @@ fn cmd_run(args: &[String]) -> i32 {
                 i += 1;
                 let val = &args[i];
                 if !is_valid_device(val) {
-                    eprintln!("error: unknown device type '{val}'");
+                    eprintln!("error: unknown device type {}", quoteaf_os(val));
                     return 1;
                 }
                 devices.push(val.clone());
@@ -713,7 +729,7 @@ fn cmd_run(args: &[String]) -> i32 {
                 i += 1;
                 let val = &args[i];
                 if !is_valid_device(val) {
-                    eprintln!("error: unknown device type '{val}'");
+                    eprintln!("error: unknown device type {}", quoteaf_os(val));
                     return 1;
                 }
                 nodevices.push(val.clone());
@@ -755,14 +771,17 @@ fn cmd_run(args: &[String]) -> i32 {
 
     let app_id = positional[0].as_str();
     if !is_valid_app_id(app_id) {
-        eprintln!("error: '{}' is not a valid application ID", app_id);
+        eprintln!(
+            "error: {} is not a valid application ID",
+            quoteaf_os(app_id)
+        );
         return 1;
     }
 
     if let Some(a) = arch
         && !is_valid_arch(a)
     {
-        eprintln!("error: unsupported architecture '{}'", a);
+        eprintln!("error: unsupported architecture {}", quoteaf_os(a));
         return 1;
     }
 
@@ -825,7 +844,7 @@ fn cmd_list(args: &[String]) -> i32 {
         for col in cols.split(',') {
             let trimmed = col.trim();
             if !is_valid_column(trimmed) {
-                eprintln!("error: unknown column '{}'", trimmed);
+                eprintln!("error: unknown column {}", quoteaf_os(trimmed));
                 eprintln!("Valid columns: {}", VALID_COLUMNS.join(", "));
                 return 1;
             }
@@ -874,7 +893,10 @@ fn cmd_info(args: &[String]) -> i32 {
     let (_kind, app_id, arch, branch) = parse_ref_string(app_ref);
 
     if !is_valid_app_id(&app_id) {
-        eprintln!("error: '{}' is not a valid application ID", app_id);
+        eprintln!(
+            "error: {} is not a valid application ID",
+            quoteaf_os(&app_id)
+        );
         return 1;
     }
 
@@ -929,7 +951,7 @@ fn cmd_search(args: &[String]) -> i32 {
     }
 
     let query = positional.join(" ");
-    println!("Searching for '{}'...", query);
+    println!("Searching for {}...", quoteaf_os(&query));
     println!("No matches found.");
     0
 }
@@ -965,16 +987,20 @@ fn cmd_remote_add(args: &[String]) -> i32 {
     }
 
     if if_not_exists {
-        println!("Adding remote '{}' at {} (if not exists)...", name, url);
+        println!(
+            "Adding remote {} at {} (if not exists)...",
+            quoteaf_os(name),
+            url
+        );
     } else {
-        println!("Adding remote '{}' at {}...", name, url);
+        println!("Adding remote {} at {}...", quoteaf_os(name), url);
     }
 
     if no_gpg_verify {
         println!("  Warning: GPG verification disabled for this remote.");
     }
 
-    println!("Remote '{}' added.", name);
+    println!("Remote {} added.", quoteaf_os(name));
     0
 }
 
@@ -991,17 +1017,17 @@ fn cmd_remote_delete(args: &[String]) -> i32 {
     let name = positional[0].as_str();
 
     if !is_valid_remote_name(name) {
-        eprintln!("error: '{}' is not a valid remote name", name);
+        eprintln!("error: {} is not a valid remote name", quoteaf_os(name));
         return 1;
     }
 
     if force {
-        println!("Force-removing remote '{}'...", name);
+        println!("Force-removing remote {}...", quoteaf_os(name));
     } else {
-        println!("Removing remote '{}'...", name);
+        println!("Removing remote {}...", quoteaf_os(name));
     }
 
-    println!("Remote '{}' deleted.", name);
+    println!("Remote {} deleted.", quoteaf_os(name));
     0
 }
 
@@ -1030,14 +1056,17 @@ fn cmd_remote_info(args: &[String]) -> i32 {
     let app_ref = positional[1].as_str();
 
     if !is_valid_remote_name(remote) {
-        eprintln!("error: '{}' is not a valid remote name", remote);
+        eprintln!("error: {} is not a valid remote name", quoteaf_os(remote));
         return 1;
     }
 
     let (_kind, app_id, arch, branch) = parse_ref_string(app_ref);
 
     if !is_valid_app_id(&app_id) {
-        eprintln!("error: '{}' is not a valid application ID", app_id);
+        eprintln!(
+            "error: {} is not a valid application ID",
+            quoteaf_os(&app_id)
+        );
         return 1;
     }
 
@@ -1121,7 +1150,10 @@ fn cmd_override(args: &[String]) -> i32 {
 
     let app_id = positional[0].as_str();
     if !is_valid_app_id(app_id) {
-        eprintln!("error: '{}' is not a valid application ID", app_id);
+        eprintln!(
+            "error: {} is not a valid application ID",
+            quoteaf_os(app_id)
+        );
         return 1;
     }
 
@@ -1191,7 +1223,10 @@ fn cmd_permission_show(args: &[String]) -> i32 {
 
     let app_id = positional[0].as_str();
     if !is_valid_app_id(app_id) {
-        eprintln!("error: '{}' is not a valid application ID", app_id);
+        eprintln!(
+            "error: {} is not a valid application ID",
+            quoteaf_os(app_id)
+        );
         return 1;
     }
 
@@ -1223,17 +1258,20 @@ fn cmd_build_init(args: &[String]) -> i32 {
     };
 
     if !is_valid_app_id(app_id) {
-        eprintln!("error: '{}' is not a valid application ID", app_id);
+        eprintln!(
+            "error: {} is not a valid application ID",
+            quoteaf_os(app_id)
+        );
         return 1;
     }
 
     if !is_valid_app_id(sdk) {
-        eprintln!("error: '{}' is not a valid SDK ID", sdk);
+        eprintln!("error: {} is not a valid SDK ID", quoteaf_os(sdk));
         return 1;
     }
 
     if !is_valid_app_id(runtime) {
-        eprintln!("error: '{}' is not a valid runtime ID", runtime);
+        eprintln!("error: {} is not a valid runtime ID", quoteaf_os(runtime));
         return 1;
     }
 
@@ -1393,7 +1431,7 @@ fn cmd_build_bundle(args: &[String]) -> i32 {
 
     let (_kind, app_id, _arch_parsed, _branch) = parse_ref_string(ref_name);
     if !is_valid_app_id(&app_id) {
-        eprintln!("error: '{}' is not a valid ref", ref_name);
+        eprintln!("error: {} is not a valid ref", quoteaf_os(ref_name));
         return 1;
     }
 
@@ -1438,7 +1476,7 @@ fn cmd_config(args: &[String]) -> i32 {
             return 1;
         }
         let key = positional[0].as_str();
-        println!("Config key '{}' is not set.", key);
+        println!("Config key {} is not set.", quoteaf_os(key));
         return 0;
     }
 
@@ -1448,7 +1486,7 @@ fn cmd_config(args: &[String]) -> i32 {
             return 1;
         }
         let key = positional[0].as_str();
-        println!("Unset config key '{}'.", key);
+        println!("Unset config key {}.", quoteaf_os(key));
         return 0;
     }
 
@@ -1459,7 +1497,7 @@ fn cmd_config(args: &[String]) -> i32 {
     }
     let key = positional[0].as_str();
     let value = positional[1].as_str();
-    println!("Set config '{}' = '{}'.", key, value);
+    println!("Set config {} = {}.", quoteaf_os(key), quoteaf_os(value));
     0
 }
 
@@ -1585,7 +1623,11 @@ fn run(args: Vec<String>) -> i32 {
             0
         }
         _ => {
-            eprintln!("error: unknown command '{}' for '{}'", subcmd, prog_name);
+            eprintln!(
+                "error: unknown command {} for {}",
+                quoteaf_os(subcmd),
+                quoteaf_os(&prog_name)
+            );
             eprintln!("Run '{} --help' for usage information.", prog_name);
             1
         }

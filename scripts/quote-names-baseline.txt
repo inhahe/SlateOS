@@ -11,7 +11,7 @@
 # Do NOT raise a number, and do NOT add a file, to turn a red `--check`
 # green: that is the defect being recorded, not an exception to it.
 #
-# 1678 sites across 774 files.
+# 1641 sites across 773 files.
 
 init/servicebus/src/main.rs:4
 userspace/abduco-cli/src/main.rs:5
@@ -235,7 +235,6 @@ userspace/firebase-cli/src/main.rs:2
 userspace/firecracker-cli/src/main.rs:3
 userspace/fivetran-cli/src/main.rs:4
 userspace/flask-cli/src/main.rs:2
-userspace/flatpak/src/main.rs:34
 userspace/flavours-cli/src/main.rs:1
 userspace/flux-cli/src/main.rs:1
 userspace/flux/src/main.rs:1
@@ -361,7 +360,7 @@ userspace/liquibase-cli/src/main.rs:2
 userspace/lite-xl-cli/src/main.rs:1
 userspace/locale-cli/src/main.rs:1
 userspace/localectl/src/main.rs:3
-userspace/loginctl/src/main.rs:17
+userspace/loginctl/src/main.rs:16
 userspace/loki-cli/src/main.rs:1
 userspace/loki/src/main.rs:1
 userspace/look/src/main.rs:1
@@ -618,7 +617,7 @@ userspace/skopeo-cli/src/main.rs:1
 userspace/skopeo/src/main.rs:1
 userspace/slack-cli/src/main.rs:2
 userspace/snap-cli/src/main.rs:1
-userspace/snapper/src/main.rs:18
+userspace/snapper/src/main.rs:17
 userspace/snapper2/src/main.rs:1
 userspace/sns-cli/src/main.rs:2
 userspace/snyk-cli/src/main.rs:4
@@ -688,7 +687,7 @@ userspace/texlive-cli/src/main.rs:2
 userspace/thanos-cli/src/main.rs:3
 userspace/threescale-cli/src/main.rs:1
 userspace/tigervnc/src/main.rs:1
-userspace/timeout/src/main.rs:19
+userspace/timeout/src/main.rs:18
 userspace/timg-cli/src/main.rs:1
 userspace/tlp-cli/src/main.rs:1
 userspace/tlp/src/main.rs:2

@@ -53,6 +53,38 @@ const MAX_WINDOW_SIZE: usize = 128 * 1024 * 1024;
 /// Maximum output size we allow (256 MiB) to prevent unbounded allocation.
 const MAX_OUTPUT_SIZE: usize = 256 * 1024 * 1024;
 
+/// Cap on the output buffer we reserve up front from the frame's *declared*
+/// content size.
+///
+/// `MAX_OUTPUT_SIZE` is the ceiling on what we will ever *produce*, and it is
+/// enforced incrementally, as each block actually appends bytes. It is the
+/// wrong bound for a reservation made before any block has been read: the
+/// frame's content size is an eight-byte field near the front of the header,
+/// so a fourteen-byte file can declare `u64::MAX` and, clamped only by
+/// `MAX_OUTPUT_SIZE`, demand a 256 MiB kernel allocation before a single byte
+/// of compressed data has been examined. The declared size is not checked
+/// against reality until the frame is fully decoded.
+///
+/// `Vec::with_capacity` cannot decline. An over-large request does not return
+/// an error; the allocator calls `handle_alloc_error`, which in a kernel is a
+/// halt. `unzstd` is reachable from `kshell` on a user-supplied file, so the
+/// header is untrusted input.
+///
+/// A reservation is only a performance hint, which is what makes capping it
+/// cheap: a frame that really does decode to 256 MiB now costs eight
+/// geometric regrowths, negligible against the decode itself, and the point
+/// at which memory is committed tracks bytes actually produced rather than
+/// bytes merely claimed. One MiB covers eight maximum-size zstd blocks, so
+/// the ordinary case still reserves once and never grows.
+const MAX_INITIAL_RESERVE: usize = 1024 * 1024;
+
+// A reserve above the output ceiling would be a clamp that never clamps, and
+// one below a single maximum-size block (128 KiB) would make every frame
+// regrow. Checked at compile time so an edit to either constant fails the
+// build rather than quietly restoring the hazard.
+const _: () = assert!(MAX_INITIAL_RESERVE <= MAX_OUTPUT_SIZE);
+const _: () = assert!(MAX_INITIAL_RESERVE >= 128 * 1024);
+
 /// Maximum number of FSE symbols for literal-length codes.
 const LL_MAX_SYMBOL: usize = 35;
 /// Maximum number of FSE symbols for match-length codes.
@@ -1050,16 +1082,28 @@ const BLOCK_RLE: u8 = 1;
 const BLOCK_COMPRESSED: u8 = 2;
 const BLOCK_RESERVED: u8 = 3;
 
+/// How much output buffer to reserve before decoding a frame's first block.
+///
+/// Clamped to `MAX_INITIAL_RESERVE` rather than `MAX_OUTPUT_SIZE` because the
+/// content size is a claim the header makes about itself and is not checked
+/// against what the frame actually produces until decoding finishes. See
+/// `MAX_INITIAL_RESERVE` for why an unclamped claim is a halt and not an
+/// error.
+///
+/// Split out from `decompress_frame` so the bound is reachable from a test: a
+/// clamp inside a function body that also does the decoding can only be
+/// exercised by allocating whatever it failed to clamp, which is the thing
+/// being prevented.
+fn initial_output_capacity(content_size: Option<u64>) -> usize {
+    content_size.map_or(4096, |s| s.min(MAX_INITIAL_RESERVE as u64) as usize)
+}
+
 /// Decompress a single zstd frame.
 fn decompress_frame(data: &[u8]) -> KernelResult<(Vec<u8>, usize)> {
     let header = parse_frame_header(data)?;
     let mut pos = header.header_size;
 
-    let initial_cap = header
-        .content_size
-        .map(|s| s.min(MAX_OUTPUT_SIZE as u64) as usize)
-        .unwrap_or(4096);
-    let mut output = Vec::with_capacity(initial_cap);
+    let mut output = Vec::with_capacity(initial_output_capacity(header.content_size));
 
     // Sequence decoder state: repeated offsets.
     let mut rep_offsets = [1u32, 4, 8];
@@ -2921,6 +2965,51 @@ pub fn self_test() -> KernelResult<()> {
         compressed_text.len(),
         compressed_text.len() as f64 / text_input.len() as f64 * 100.0
     );
+
+    // Test 17: a declared content size cannot drive the up-front reservation.
+    //
+    // The frame's content size sits eight bytes into the header and is not
+    // checked against what the frame really produces until decoding ends, so
+    // before this bound a fourteen-byte file could demand a 256 MiB kernel
+    // allocation. `Vec::with_capacity` cannot decline one: it calls
+    // `handle_alloc_error`, which here is a halt rather than an error. This
+    // is pinned on both sides, because a clamp that also shrank honest
+    // reservations would just be a slower bug.
+    serial_println!("[zstd]   Initial reservation bound...");
+    if initial_output_capacity(Some(u64::MAX)) != MAX_INITIAL_RESERVE {
+        serial_println!("[zstd]   FAIL: an unbacked content size was reserved in full");
+        return Err(KernelError::InternalError);
+    }
+    if initial_output_capacity(Some(MAX_OUTPUT_SIZE as u64)) != MAX_INITIAL_RESERVE {
+        serial_println!("[zstd]   FAIL: reservation still clamped only by MAX_OUTPUT_SIZE");
+        return Err(KernelError::InternalError);
+    }
+    // A modest claim is honoured exactly; an absent one keeps its default.
+    if initial_output_capacity(Some(4096)) != 4096 || initial_output_capacity(None) != 4096 {
+        serial_println!("[zstd]   FAIL: an ordinary content size was not honoured");
+        return Err(KernelError::InternalError);
+    }
+    // And a frame that lies about its size must still be rejected, not merely
+    // survived: the reservation bound must not have replaced the validation.
+    let mut huge_claim = build_test_frame(b"hello");
+    // Byte 5 is the single-byte content size for a frame built this way.
+    match huge_claim.get_mut(5) {
+        Some(b) => *b = 0xFF,
+        None => {
+            serial_println!("[zstd]   FAIL: test frame too short to hold a content size");
+            return Err(KernelError::InternalError);
+        }
+    }
+    match unzstd(&huge_claim) {
+        Err(KernelError::CorruptedData) => {}
+        other => {
+            serial_println!(
+                "[zstd]   FAIL: expected CorruptedData for an inflated size, got {:?}",
+                other.err()
+            );
+            return Err(KernelError::InternalError);
+        }
+    }
 
     serial_println!("[zstd] Self-test passed.");
     Ok(())

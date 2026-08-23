@@ -193,6 +193,35 @@ impl<'a> SevenZReader<'a> {
         Ok(v)
     }
 
+    /// Read a count field, rejecting one the archive cannot substantiate.
+    ///
+    /// Counts in a 7z header are `read_vli` values — anything up to
+    /// `u64::MAX` — and each is used immediately to size an allocation or to
+    /// fill a vector. Nothing in the format obliges the count to match what
+    /// actually follows, so a nine-byte header can declare four billion
+    /// files.
+    ///
+    /// The bound needs no invented constant. Every counted item costs at
+    /// least one byte somewhere in the archive, so a count larger than the
+    /// bytes remaining is a lie whatever it is counting. That is generous —
+    /// real entries cost far more than a byte each — and it is exact in the
+    /// direction that matters: it can never reject an archive that could
+    /// actually have been parsed.
+    ///
+    /// This is worth more than an ordinary range check because these values
+    /// reach `Vec::with_capacity`, `vec![_; n]` and `resize_with`, none of
+    /// which can report failure. An over-large request does not return an
+    /// error; the allocator calls `handle_alloc_error`, and in a kernel that
+    /// is a halt. `un7z` is reachable from a shell command on a
+    /// user-supplied file, so the input is untrusted.
+    fn read_count(&mut self) -> KernelResult<usize> {
+        let n = self.read_vli()?;
+        if n > self.remaining() as u64 {
+            return Err(KernelError::CorruptedData);
+        }
+        usize::try_from(n).map_err(|_| KernelError::CorruptedData)
+    }
+
     fn read_bytes(&mut self, n: usize) -> KernelResult<&'a [u8]> {
         let end = self.pos.checked_add(n).ok_or(KernelError::CorruptedData)?;
         let slice = self
@@ -237,6 +266,15 @@ impl<'a> SevenZReader<'a> {
 
     /// Read a boolean vector: `num_items` bits, optionally all-true.
     fn read_bool_vector(&mut self, num_items: usize) -> KernelResult<Vec<bool>> {
+        // Guard at the allocation, not only at the callers. The `all_defined`
+        // branch below allocates `num_items` bools while consuming no input
+        // at all, so it is the one place in this parser where a count turns
+        // straight into memory with nothing to check it against. Callers use
+        // `read_count`, but a future one might not, and the cost of being
+        // wrong here is a kernel halt rather than an error.
+        if num_items > self.remaining() {
+            return Err(KernelError::CorruptedData);
+        }
         let all_defined = self.read_u8()?;
         if all_defined != 0 {
             return Ok(vec![true; num_items]);
@@ -353,7 +391,7 @@ fn parse_streams_info(
 
 fn parse_pack_info(reader: &mut SevenZReader<'_>, header: &mut ArchiveHeader) -> KernelResult<()> {
     let _pack_pos = reader.read_vli()?; // Offset of pack streams from signature end.
-    let num_pack_streams = reader.read_vli()? as usize;
+    let num_pack_streams = reader.read_count()?;
 
     loop {
         let prop_id = reader.read_u8()?;
@@ -391,7 +429,7 @@ fn parse_unpack_info(
         match prop_id {
             K_END => break,
             K_FOLDER => {
-                let num_folders = reader.read_vli()? as usize;
+                let num_folders = reader.read_count()?;
                 let external = reader.read_u8()?;
                 if external != 0 {
                     return Err(KernelError::NotSupported); // External folders
@@ -506,7 +544,7 @@ fn parse_substreams_info(
             K_END => break,
             K_NUM_UNPACK_STREAM => {
                 for i in 0..num_folders {
-                    num_unpack_streams_in_folder[i] = reader.read_vli()?;
+                    num_unpack_streams_in_folder[i] = reader.read_count()? as u64;
                 }
             }
             K_SIZE => {
@@ -533,10 +571,19 @@ fn parse_substreams_info(
             }
             K_CRC => {
                 // Sub-stream CRCs.
-                let total_ss: usize = num_unpack_streams_in_folder
+                // Each folder's count is bounded individually, but their sum
+                // is not: `sum()` on `usize` panics on overflow under the
+                // kernel's overflow checks, and a total that merely avoids
+                // overflow still sizes the `vec![_; n]` inside
+                // `read_bool_vector`. Bound the total the same way the parts
+                // were bounded.
+                let total_ss = num_unpack_streams_in_folder
                     .iter()
-                    .map(|&n| n as usize)
-                    .sum();
+                    .try_fold(0usize, |acc, &n| {
+                        acc.checked_add(usize::try_from(n).ok()?)
+                    })
+                    .filter(|&t| t <= reader.remaining())
+                    .ok_or(KernelError::CorruptedData)?;
                 let defined = reader.read_bool_vector(total_ss)?;
                 for i in 0..total_ss {
                     if defined.get(i).copied().unwrap_or(false) {
@@ -569,7 +616,7 @@ fn parse_substreams_info(
 }
 
 fn parse_files_info(reader: &mut SevenZReader<'_>, header: &mut ArchiveHeader) -> KernelResult<()> {
-    let num_files = reader.read_vli()? as usize;
+    let num_files = reader.read_count()?;
     header.files.clear();
     header.files.resize_with(num_files, || FileInfo {
         name: PathBuf::new(),
@@ -1004,7 +1051,58 @@ pub fn self_test() -> KernelResult<()> {
     // Test 2: Magic detection.
     test_magic()?;
 
+    // Test 3: counts must be bounded by the bytes that exist.
+    test_count_bounds()?;
+
     crate::serial_println!("[7z] Self-test passed.");
+    Ok(())
+}
+
+/// A count field must not be able to demand memory the archive cannot back.
+///
+/// These values reach `vec![_; n]` and `resize_with`, which cannot fail
+/// gracefully — an over-large request calls `handle_alloc_error`, and in a
+/// kernel that is a halt. So the check has to happen before the allocation,
+/// and `un7z` is reachable from a shell command on a user-supplied file.
+fn test_count_bounds() -> KernelResult<()> {
+    // A 9-byte VLI declaring 2^56-ish items, in a 9-byte file. Accepting this
+    // is a multi-terabyte allocation; the whole file is the count itself.
+    let huge = [0xFFu8, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF];
+    let mut reader = SevenZReader::new(&huge);
+    if reader.read_count().is_ok() {
+        crate::serial_println!("[7z]   FAIL: an unbacked count was accepted");
+        return Err(KernelError::InternalError);
+    }
+
+    // A count no larger than the bytes remaining is legitimate and must pass:
+    // the bound must not reject archives that could actually be parsed.
+    let ok = [0x03u8, 0, 0, 0, 0];
+    let mut reader = SevenZReader::new(&ok);
+    if reader.read_count() != Ok(3) {
+        crate::serial_println!("[7z]   FAIL: a satisfiable count was rejected");
+        return Err(KernelError::InternalError);
+    }
+
+    // `read_bool_vector`'s all-defined branch consumes one byte and allocates
+    // `num_items` bools, so it must refuse a count the file cannot back even
+    // when a caller hands it one directly.
+    let mut reader = SevenZReader::new(&[0x01u8, 0x00]);
+    if reader.read_bool_vector(usize::MAX).is_ok() {
+        crate::serial_println!("[7z]   FAIL: bool vector allocated an unbacked count");
+        return Err(KernelError::InternalError);
+    }
+
+    // And it must still work for a count that fits.
+    let mut reader = SevenZReader::new(&[0x01u8, 0x00, 0x00]);
+    match reader.read_bool_vector(2) {
+        Ok(v) if v.len() == 2 && v.iter().all(|&b| b) => {}
+        _ => {
+            crate::serial_println!("[7z]   FAIL: bool vector rejected a valid count");
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    crate::serial_println!("[7z]   Count bounds: OK");
     Ok(())
 }
 

@@ -63791,8 +63791,8 @@ the assertion panics — which in the kernel is not a red test, it is a dead
 machine. Each of these is reachable from a `kshell` subcommand, so this is
 a user-typeable kernel panic, not merely a testing inconvenience.
 
-**Found in four modules while converting them for §261** — it was not a
-coincidence in any of them, and all four are now fixed:
+**Found in five modules while converting them for §261** — it was not a
+coincidence in any of them, and all five are now fixed:
 
 | Module | Second-run failure | Fixed in |
 |---|---|---|
@@ -63800,6 +63800,7 @@ coincidence in any of them, and all four are now fixed:
 | `fs::filevault` | test 1 `assert_eq!(list_vaults().len(), 0)` — the created vault was never deleted; test 8's exact counter assertions could not hold twice either | `c150f1b29` |
 | `fs::diskencrypt` | test 9 `start_encryption(1, …)` — run 1 leaves volume 1 `Unlocked`, and it only accepts `Unencrypted` | `59bd8befc` |
 | `fs::cloudsync` | test 3 `assert_eq!(list_accounts().len(), 2)` — run 1 leaves account `id1`, its conflict row and an extra `*.bak` exclude behind, so tests 3, 6, 8, 10 and 11 all fail on the second run | `2ebe9f40c` |
+| `fs::fileversion` | test 8 `assert_eq!(list_watches().len(), 1)` — run 1 leaves the watch behind. Worse, run 2's watch then *covers* the fixture, so its `KeepLast(5)` policy silently replaces the default `KeepLast(10)` the capture tests assume | `aae93b532` |
 
 `fs::cloudsync` also showed a fixture hazard worth naming separately,
 because it is not about leftovers at all and so survives any amount of
@@ -63815,7 +63816,18 @@ unmistakably synthetic: the account names are now in the reserved
 *name* rather than an index — an ID the module mints is safe, a string the
 user also chooses is not.
 
-Its test 8 was additionally asserting `list_excludes().len() >= 6` — the
+`fs::fileversion` had the same hazard with a sharper edge, because its
+fixture was fed to a *destructive* call: the suite captured versions of
+`/home/user/test.txt` and then ran `purge_file_versions` on it. On a
+machine where a user actually had that file under version control, typing
+`fversion test` would have deleted their real version history — and, since
+the purge count is what the suite asserts on, would have failed only
+*after* doing so. Its fixtures now live under `/tmp/.fileversion-selftest/`,
+a directory no user would keep data in. **Generalise further:** a plausible
+fixture is bad; a plausible fixture handed to a delete/purge/reset entry
+point is data loss.
+
+cloudsync's test 8 was additionally asserting `list_excludes().len() >= 6` — the
 count of the defaults `init_defaults()` installs. That is not a property of
 the module: `remove_exclude` is public and has a shell command, so a user
 can take a default away and turn the assertion into a panic. It now asserts

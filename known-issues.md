@@ -66385,3 +66385,107 @@ against the VFS: `TempFiles` over `/tmp`, `RecycleBin` via
 actually applied, and so on. `estimated_bytes` should become the result
 of a dry-run walk rather than a constant, so that estimate and result can
 disagree — which is the whole point of having both.
+
+## FIXED-A-THE-OPEN-FILE-TABLE-WAS-HELD-ACROSS-EVERY-FILE-READ — and 31 more places do the same thing
+
+**In short:** two parts of the kernel took the same two locks in opposite
+orders, which is the textbook way to freeze a machine solid: CPU 1 holds lock
+A and waits for B, CPU 2 holds B and waits for A, and neither ever moves
+again. One of the two orders was on the path of *every single file read and
+write* in the system. It is fixed, and a new checker found 31 more places
+with the same shape, which are being worked through.
+
+**Lane A. Found 2026-08-23, by lockdep, during boot batch 32.**
+
+### What the two locks are
+
+- **The filesystem lock** — one per mounted filesystem. `Vfs::readdir` takes
+  it and then asks the filesystem to list a directory *while still holding
+  it*. For `/proc` that listing is not a lookup, it is a *computation*:
+  procfs makes its content up on demand, and doing so reaches into
+  half the kernel — the open-file table, the process list, network state.
+  So the order that really happens is **filesystem lock, then some
+  module's own lock**.
+
+- **`OPEN_FILES`** — the table of every open file handle, in
+  `kernel/src/fs/handle.rs`. `read`, `write`, `read_at`, `write_at`,
+  `fstat` and `ftruncate` all locked it and *kept it locked* while calling
+  into the VFS, which takes the filesystem lock. That is **module's own
+  lock, then filesystem lock** — the same two locks, backwards.
+
+### Why it went unnoticed
+
+The bug is older than the tooling that found it. Lockdep — the kernel's
+lock-order validator — had been reporting this exact inversion for some
+time, but it could only say *which types* were locked, because both sites
+resolved to `kernel::sync::Mutex<T>::lock`, the generic function every lock
+goes through. Commit `38f1d738e` taught it to walk one stack frame further
+and print the *caller*, and the very next boot named both sides outright:
+
+```
+[lockdep]     held taken at:  ...Mutex<T>::lock+0x6f
+[lockdep]                via: ...fs::vfs::Vfs::readdir+0x2ec
+[lockdep]     acquiring at:   ...Mutex<T>::lock+0x6f
+[lockdep]                via: ...fs::handle::list_handles+0x2c
+```
+
+`read`'s own comment had admitted the problem in the meantime: *"we hold the
+lock across the VFS call — acceptable for early dev but should be improved."*
+And three functions in the same file — `close`, `read_at_uncached`,
+`read_dir_at` — already did it correctly. Six wrong, three right, in one
+file, is what a rule with nothing enforcing it looks like after a while.
+
+### The fix, and its shape
+
+Commit `2b06e1070`. Snapshot what the VFS call needs (the path) under the
+lock, drop the guard, make the call, then retake the lock and look the handle
+up *again* by its number to write back the cursor and cached size. Never keep
+a reference into the map across the call — the map may have been rebalanced,
+and the handle may have been closed outright, which is not an error, since
+the bytes really were transferred.
+
+One deliberate semantic change: the cursor now advances with `max` rather
+than `+=`. Two threads sharing one handle get an arbitrary interleaving
+either way — Linux guards only the position update itself, with `f_pos_lock`,
+and offers no more — but `max` keeps the cursor monotone, so a reader never
+re-reads bytes it has already returned and a concurrent thread's progress is
+never counted twice.
+
+A side effect worth naming: file I/O no longer serialises the whole system
+behind one global mutex.
+
+### The other 31 — Status: OPEN
+
+`scripts/check-vfs-under-lock.py` (commit `7bc19a853`) enforces the rule
+statically: *do not enter the VFS while holding a module-global lock.* It
+shares `check-recursive-locks.py`'s parser and currently reports 31 further
+sites, every one the same class:
+
+| File | Locks held across a VFS call |
+|---|---|
+| `fs/changetrack.rs` | `STATE` × 7 (`init`, and six via `ensure_init`) |
+| `fs/filepicker.rs` | `PICKER` × 4 (via `build_listing`) |
+| `fs/fileselect.rs` | `SETS` × 6 (via `make_item`) |
+| `fs/journal.rs` | `JOURNAL` (`init`) |
+| `fs/mount_ns.rs` | `NAMESPACES` (`init`) |
+| `fs/overlay.rs` | `OVERLAYS` × 2 (`copy_up`, `which_layer`) |
+| `fs/rundialog.rs` | `STATE` (`resolve`) |
+| `fs/sidebar.rs` | `HIDDEN_SECTIONS`, `EXPANDED_STATE` (`build`) |
+| `fs/tags.rs` | `INDEX` × 2 (via `read_tags`) |
+| `logpersist.rs` | `STATE` × 3 (`flush`, `init_with_config`, `prune`) |
+| `net/ssh.rs` | `STATE` (via `process_message`) |
+| `net/tftp.rs` | `SERVER_STATE` (via `handle_rrq`) |
+
+Not all are equally live — several are `init` paths that run once at boot
+with nothing racing them — but each is a standing invitation for the next
+caller to be a live one, and the checker cannot tell the difference.
+
+**The checker is deliberately not yet a boot-test gate.** Wiring it in now
+would fail every build for a backlog rather than for a regression. It becomes
+a gate when it reports clean.
+
+**Proper fix.** Every site takes the same shape as `fs::handle`'s: snapshot
+under the lock, release, call, retake and re-look-up. Where the call is to a
+helper that itself reaches the VFS (`ensure_init`, `build_listing`,
+`make_item`, `read_tags`), the helper should be split so that the VFS work
+happens outside the caller's critical section.

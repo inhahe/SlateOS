@@ -1892,18 +1892,22 @@ mod tests {
 
     #[test]
     fn nothing_but_the_selection_labels_moves_when_the_accent_does() {
-        // Render each fixture under two accents and require every command to
-        // draw the same colour in both, except the sites that are supposed to
-        // track the accent -- recognised by drawing the first accent in the
-        // first render and the second in the second.
+        // Render each fixture under two accents, require every command to draw
+        // the same colour in both, and require the commands that DO move to be
+        // exactly as many as this panel is allowed to have.
         //
-        // The obvious formulation is the wrong one, and was written here
-        // first: collect every colour that equals green, red or overlay0 and
-        // compare *that* across accents. Filtering by role before comparing
-        // throws away exactly the colour that moved -- a site that stops
-        // drawing green and starts drawing the accent drops out of both
-        // lists, so they still match. It checked that the sites which stayed
-        // put stayed put.
+        // The count is the load-bearing half, and two earlier attempts died
+        // without it. The first collected every colour equal to green, red or
+        // overlay0 and compared *that* across accents -- filtering by role
+        // before comparing throws away exactly the colour that moved, so a
+        // site that stops drawing green and starts drawing the accent drops
+        // out of both lists and they still match. The second compared every
+        // command but skipped any site drawing accent A in the first render
+        // and accent B in the second, "because that is a site meant to follow
+        // the accent". That is the same hole: a toggle that wrongly reports
+        // its state in the accent follows the accent too, so it was skipped
+        // as well. Recognising accent sites by the fact that they follow the
+        // accent can never tell a legitimate one from a new one. Counting can.
         //
         // Both accents are deliberately outside either palette, so a frozen
         // role can never be mistaken for an accent site.
@@ -1922,17 +1926,31 @@ mod tests {
                     cb.len(),
                     "{what}: the accent changed how much is drawn"
                 );
+                // The tab strip always draws exactly one active tab label in
+                // the accent. The general tab adds one more: the selected
+                // telemetry level. Nothing else in this panel may move --
+                // every permission state, every log row and every toggle
+                // reports a fact, and a fact does not follow a preference.
+                let want = if what.starts_with("general") { 2 } else { 1 };
+                let mut moved = 0;
                 let (xa, xb) = (every_color(&ca), every_color(&cb));
                 for (i, (a, b)) in xa.iter().zip(xb.iter()).enumerate() {
-                    if rgb(*a) == rgb(A) && rgb(*b) == rgb(B) {
-                        continue; // a site that is meant to follow the accent
+                    if rgb(*a) == rgb(*b) {
+                        continue;
                     }
                     assert_eq!(
-                        rgb(*a),
-                        rgb(*b),
-                        "{what} (light={light}): command {i} moved with the accent"
+                        (rgb(*a), rgb(*b)),
+                        (rgb(A), rgb(B)),
+                        "{what} (light={light}): command {i} changed with the \
+                         accent without being the accent"
                     );
+                    moved += 1;
                 }
+                assert_eq!(
+                    moved, want,
+                    "{what} (light={light}): {moved} commands follow the accent, \
+                     but this state is allowed exactly {want}"
+                );
             }
         }
     }

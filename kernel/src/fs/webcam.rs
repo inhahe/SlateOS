@@ -520,10 +520,29 @@ fn self_test_inner() {
     assert_eq!(list_cameras().len(), 1);
     crate::serial_println!("  [10/10] unregister: OK");
 
+    // Stats.
+    //
+    // `total_streams` counts streams actually *opened*, not `open_stream`
+    // calls: it is incremented only after both gates pass, and each gate
+    // increments `total_denied` and returns instead. That is the right
+    // semantic -- a refused request did not put the camera light on -- but it
+    // means the suite's four calls split 2/2, and this asserted `total >= 3`:
+    //
+    //   [3] cam_id, "video_call"            -> opened  (streams 1)
+    //   [5] cam_id, "malware_app", blocked  -> denied  (denied  1)
+    //   [6] cam_id, "malware_app", unblocked-> opened  (streams 2)
+    //   [8] cam_id, "test", privacy off     -> denied  (denied  2)
+    //
+    // Assert exact values rather than bounds: both are deterministic, and an
+    // equality also catches a counter *over*-counting -- a denial that started
+    // incrementing `total_streams` would still satisfy any `>=`, and for this
+    // module that is the failure that matters. `total_streams` is what
+    // `/proc/webcam` reports as camera use; a count inflated by refusals would
+    // tell the user their camera had been on when it had not.
     let (cam_count, _, total, denied, ops) = stats();
     assert_eq!(cam_count, 1);
-    assert!(total >= 3);
-    assert!(denied >= 1);
+    assert_eq!(total, 2, "two of the four open_stream() calls succeed");
+    assert_eq!(denied, 2, "the other two are refused");
     assert!(ops > 0);
 
     // Leave no residue for later callers / the live /proc/webcam view: the test

@@ -50335,7 +50335,7 @@ commands that carry the colour in question, and assert the two renders agree.
 Candidates: anything drawn on the wallpaper, on a video surface, on a
 thumbnail, or on any other content the palette does not own.
 
-**Part 2 progress. 21 of 49 modules converted.**
+**Part 2 progress. 22 of 49 modules converted.**
 
 - [x] `security_dialog.rs` — 29 constants, done 2026-08-22. The method above
   survived contact: the sweep lives in `gui/desktop/src/palette_check.rs` as
@@ -51393,6 +51393,64 @@ thumbnail, or on any other content the palette does not own.
     because a `[MISSING:]` note is ambiguous between "the test has a hole" and
     "the declaration overclaims", so each one has to be read against the
     contract before it is believed.
+
+- [x] `widgets.rs` — 11 constants, done 2026-08-22. Eleven tests, harness
+  defects AAAAAAAAAAAAAAAAA–UUUUUUUUUUUUUUUUUU (forty-seven).
+  - **Four judgements, and three of them were settled by precedent rather than
+    argued.** The selected widget's 2px ring takes the accent, by module 21's
+    rule that *a colour appearing in exactly one state marks that state* — and
+    with a second reason peculiar to this module: a ring floating on the
+    wallpaper cannot say "here" with a surface step the way a hovered list row
+    can, so the accent is the only mark available to it. The picker joins
+    `Palette::shadow()`, as `context_ext` did. The picker's row icons stay
+    `p.blue` because every row is drawn identically, so an accent there says
+    nothing about any particular row — and it would cost the accent the one job
+    it has here. **Within a single render the accent has to mean one thing.**
+  - **The one new rule: a meter is not a slider.** Module 19 gave sliders a
+    `surface1` track and an accent fill, and the CPU/Memory/Disk bars look
+    exactly like sliders. They are not: a slider is something you drag, and
+    these are read-outs nobody can move. They are further a *category* set —
+    blue is CPU, green is Memory, peach is Disk — and three bars told apart by
+    colour stop being three bars the moment they all follow one accent. The
+    tracks keep `surface1`, which is the half of the slider rule that does
+    survive: a track is a surface either way. The battery glyph's green is the
+    same judgement one widget over — green there is the reading itself, not
+    decoration, so a red accent would make the widget say something false.
+  - **The per-widget shadow is the first shadow deliberately *not* unified.**
+    `rgba(0, 0, 0, bg_opacity / 3)` stays, because its depth is a function of
+    the widget's own translucency: a widget you can see through casts a shadow
+    you can see through, and pinning it to `Palette::shadow()` would make a
+    nearly invisible widget cast a solid one. Both shadows in this module carry
+    their own assertions, because the sweep waves black through at any alpha
+    and is blind to both by design.
+  - **The fixture-coverage lesson from module 21 was applied up front and
+    earned its keep immediately.** `full_mgr` was built by enumerating the
+    renderer's `if`s rather than its colours — `layer_visible`, `edit_mode`,
+    per-widget `visible`, `picker_open`, the selection test, the five
+    `WidgetKind` arms and the empty-note branch inside one of them — and four
+    of the forty-seven defects do nothing but switch a branch off, purely to
+    prove that `the_fixture_takes_every_branch_the_widget_layer_has` notices.
+    Zero defects escaped for want of a branch, against three in module 21.
+  - **Two did escape, for a different reason, and it is the other half of the
+    same rule.** "The Disk meter's label is promoted to body text" and "the
+    battery's estimate is promoted to body text" both came back
+    `*** NO TEST FAILED ***`. The wash test's table of content colours had one
+    entry per *kind* of site rather than one per *source* site: `"CPU"` was
+    listed and `"Memory"` and `"Disk"` were not, though all three are separate
+    `commands.push` calls, and the battery's estimate was not listed at all.
+    **A representative sample is not a per-site check.** So the width rule has
+    two halves and they fail independently: the *fixture* decides which
+    branches draw at all, and the *assertion table* decides which of the drawn
+    sites anyone looks at. Module 21 lost three defects to the first; this
+    module lost two to the second, with a fixture that was complete. The table
+    now carries a comment saying it must not be shortened, since a shortened
+    table looks tidier and reads as an improvement.
+  - **Extra catchers are worth chasing down even though the harness tolerates
+    them.** Widening the wash table meant four defects were now caught by a
+    test their declaration did not name. The harness only reports the reverse
+    (`[MISSING:]`), so nothing would have complained — but a declaration that
+    understates what a defect proves is a declaration that will not notice when
+    that coverage later disappears. All four were updated.
 
 **Trigger:** this is not blocked on anything. It is sequenced after the shell
 event loop (`TD-C-THE-SHELL-CAN-DRAW-ITSELF-AND-NOBODY-CAN-ASK-IT-TO`) only

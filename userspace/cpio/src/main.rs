@@ -45,11 +45,11 @@ const TRAILER_NAME: &str = "TRAILER!!!";
 /// Block size for block counting (matches traditional cpio behavior).
 const BLOCK_SIZE: usize = 512;
 
-// File type bits from the mode field (matching POSIX S_IFMT).
-const S_IFMT: u32 = 0o170000;
-const S_IFDIR: u32 = 0o040000;
-const S_IFREG: u32 = 0o100000;
-const S_IFLNK: u32 = 0o120000;
+// The file-type field of a mode word, defined once in `modechange` — the crate
+// that owns mode words — because an archive's stored mode is the same integer
+// `ls -l` and `chmod` read, and a header written with one set of values and
+// read back with another would silently change a file's type.
+use modechange::{S_IFDIR, S_IFLNK, S_IFMT, S_IFREG};
 
 // ============================================================================
 // Newc header structure

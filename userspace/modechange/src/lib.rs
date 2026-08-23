@@ -109,9 +109,19 @@
 //! [`permission_string`] is gnulib's `strmode`, and is here rather than in a
 //! caller because the same twelve bits are involved and the same overload has
 //! to be got right: setuid, setgid and sticky have no column of their own and
-//! are shown in the execute slot. `chmod -v` needs it to say what it did, `ls
-//! -l` and `stat` need it for the same reason, and `stat.rs` currently has its
-//! own copy — see `known-issues.md`.
+//! are shown in the execute slot. `chmod -v` needs it to say what it did, and
+//! `ls -l` and `stat` need it for the same reason.
+//!
+//! [`file_type_letter`], [`file_type_name`] and the `S_IF*` constants are here
+//! for the mirror-image reason: they are the *other* half of the same integer.
+//! A mode word carries a file's type and its permissions in one number, and a
+//! caller holding one half needs the mask that separates them. Five places had
+//! written the seven type values out by hand — coreutils' `stat`,
+//! `userspace/stat`, `cpio`, `mkinitramfs` and `ls` — and two of them had a
+//! measurable bug for it: `userspace/stat` answered `unknown` where GNU
+//! answers `weird file`, and `mkinitramfs` tested `mode & S_IFDIR` as though
+//! the values were flags, which counts a block device and a socket as
+//! directories because `S_IFCHR | S_IFDIR == S_IFBLK`.
 
 /// Every bit a mode string can name: setuid, setgid, sticky, and `rwx` for all
 /// three of user, group and other.
@@ -510,6 +520,87 @@ pub fn permission_string(mode: u32) -> String {
     s
 }
 
+// ----------------------------------------------------------- file types ---
+
+/// The bits of a mode word that hold the file's *type* — POSIX's `S_IFMT`.
+///
+/// This is the part [`CHMOD_MODE_BITS`] masks off, and the two together are the
+/// whole reason both live here: a mode word carries two unrelated things in one
+/// integer, and a caller that forgets which half it is holding gets a
+/// permission string with a directory bit in it.
+pub const S_IFMT: u32 = 0o170000;
+
+/// A named pipe (`p`).
+pub const S_IFIFO: u32 = 0o010000;
+/// A character device (`c`).
+pub const S_IFCHR: u32 = 0o020000;
+/// A directory (`d`).
+pub const S_IFDIR: u32 = 0o040000;
+/// A block device (`b`).
+pub const S_IFBLK: u32 = 0o060000;
+/// A regular file (`-`).
+pub const S_IFREG: u32 = 0o100000;
+/// A symbolic link (`l`).
+pub const S_IFLNK: u32 = 0o120000;
+/// A socket (`s`).
+pub const S_IFSOCK: u32 = 0o140000;
+
+/// The first character of `ls -l`'s mode string — gnulib's `ftypelet`.
+///
+/// `?` is the answer for a type this system has no letter for, which is not a
+/// hypothetical: it is what a Solaris door or a filesystem the kernel knows and
+/// we do not comes out as, and printing a wrong letter would be worse than
+/// printing an honest question mark.
+///
+/// The `S_IF*` values are not bit flags despite looking like them — `S_IFBLK`
+/// is `0o060000` and `S_IFCHR | S_IFDIR` is the same number — so this must
+/// compare the masked field for equality and never test a bit.
+#[must_use]
+pub const fn file_type_letter(mode: u32) -> u8 {
+    match mode & S_IFMT {
+        S_IFIFO => b'p',
+        S_IFCHR => b'c',
+        S_IFDIR => b'd',
+        S_IFBLK => b'b',
+        S_IFREG => b'-',
+        S_IFLNK => b'l',
+        S_IFSOCK => b's',
+        _ => b'?',
+    }
+}
+
+/// The type as `stat`'s `%F` names it.
+///
+/// The wording is GNU's and is not free: "character special file" rather than
+/// "character device", "fifo" rather than "named pipe". A script that greps
+/// `stat -c %F` for one of these strings is matching the exact words.
+#[must_use]
+pub const fn file_type_name(mode: u32) -> &'static str {
+    match mode & S_IFMT {
+        S_IFIFO => "fifo",
+        S_IFCHR => "character special file",
+        S_IFDIR => "directory",
+        S_IFBLK => "block special file",
+        S_IFREG => "regular file",
+        S_IFLNK => "symbolic link",
+        S_IFSOCK => "socket",
+        _ => "weird file",
+    }
+}
+
+/// The whole ten-character mode string: the type letter and the nine
+/// permission characters.
+///
+/// This is gnulib's `strmode` minus its eleventh character, the alternate-access
+/// marker, which every caller in coreutils strips before printing.
+#[must_use]
+pub fn mode_string(mode: u32) -> String {
+    let mut s = String::with_capacity(10);
+    s.push(char::from(file_type_letter(mode)));
+    s.push_str(&permission_string(mode));
+    s
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::panic, clippy::indexing_slicing)]
 mod tests {
@@ -526,6 +617,66 @@ mod tests {
     /// The common case: a regular file and no umask in play.
     fn f(old: u32, spec: &str) -> u32 {
         go(old, spec, 0, false)
+    }
+
+    // -------------------------------------------------------- file types ---
+
+    /// Every row measured, GNU coreutils 9.4:
+    ///
+    /// ```text
+    /// $ stat -c '%A %F' reg d sym pipe sock /dev/null /dev/loop0
+    /// -rw-r--r-- regular file
+    /// drwxr-xr-x directory
+    /// lrwxrwxrwx symbolic link
+    /// prw-r--r-- fifo
+    /// srwxr-xr-x socket
+    /// crw-rw-rw- character special file
+    /// brw-rw---- block special file
+    /// ```
+    #[test]
+    fn every_file_type_has_a_letter_and_a_name() {
+        for (bits, letter, name) in [
+            (S_IFREG, b'-', "regular file"),
+            (S_IFDIR, b'd', "directory"),
+            (S_IFLNK, b'l', "symbolic link"),
+            (S_IFIFO, b'p', "fifo"),
+            (S_IFSOCK, b's', "socket"),
+            (S_IFCHR, b'c', "character special file"),
+            (S_IFBLK, b'b', "block special file"),
+        ] {
+            assert_eq!(file_type_letter(bits | 0o644), letter);
+            assert_eq!(file_type_name(bits | 0o644), name);
+        }
+        // A type this system has no letter for. gnulib prints `?` and
+        // `weird file` rather than guessing, and so does this.
+        assert_eq!(file_type_letter(0o160000), b'?');
+        assert_eq!(file_type_name(0o160000), "weird file");
+        // …including a mode with no type field at all, which is what a
+        // caller that already masked with `CHMOD_MODE_BITS` would pass.
+        assert_eq!(file_type_letter(0o644), b'?');
+    }
+
+    /// The `S_IF*` values look like flags and are not: `S_IFCHR | S_IFDIR`
+    /// *is* `S_IFBLK`. Anything that tests a bit rather than comparing the
+    /// masked field answers `b` for a directory, which is the mistake this
+    /// pins against.
+    #[test]
+    fn the_type_field_is_a_number_and_not_a_set_of_flags() {
+        assert_eq!(S_IFCHR | S_IFDIR, S_IFBLK);
+        assert_eq!(file_type_letter(S_IFDIR), b'd');
+        assert_eq!(file_type_letter(S_IFBLK), b'b');
+    }
+
+    /// The ten-character string is the letter and the nine permission
+    /// characters, which is `stat -c %A` and `ls -l`'s first column.
+    #[test]
+    fn the_mode_string_is_the_type_letter_and_the_permissions() {
+        assert_eq!(mode_string(S_IFREG | 0o644), "-rw-r--r--");
+        assert_eq!(mode_string(S_IFDIR | 0o755), "drwxr-xr-x");
+        assert_eq!(mode_string(S_IFLNK | 0o777), "lrwxrwxrwx");
+        assert_eq!(mode_string(S_IFDIR | 0o1777), "drwxrwxrwt");
+        assert_eq!(mode_string(S_IFREG | 0o4755), "-rwsr-xr-x");
+        assert_eq!(mode_string(S_IFREG | 0o2644), "-rw-r-Sr--");
     }
 
     fn bad(spec: &str) -> bool {

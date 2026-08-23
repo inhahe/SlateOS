@@ -1927,6 +1927,9 @@ version = "0.1.0"
 [[package]]
 name = "cpio"
 version = "0.1.0"
+dependencies = [
+ "modechange",
+]
 
 [[package]]
 name = "cpupower"
@@ -6540,6 +6543,9 @@ version = "0.1.0"
 [[package]]
 name = "mkinitramfs"
 version = "0.1.0"
+dependencies = [
+ "modechange",
+]
 
 [[package]]
 name = "mkswap"
@@ -10203,6 +10209,9 @@ dependencies = [
 [[package]]
 name = "stat"
 version = "0.1.0"
+dependencies = [
+ "modechange",
+]
 
 [[package]]
 name = "statping-cli"

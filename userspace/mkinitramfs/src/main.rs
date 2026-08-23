@@ -194,6 +194,11 @@ fn read_config(config_dir: &Path) -> InitramfsConfig {
 // CPIO archive building (newc format)
 // ============================================================================
 
+// The file-type field of a mode word, defined once in `modechange` — the crate
+// that owns mode words. A newc header stores the same integer `ls -l` reads
+// back out of the unpacked file.
+use modechange::{S_IFCHR, S_IFDIR, S_IFLNK, S_IFREG};
+
 /// CPIO newc header (110 bytes ASCII).
 struct CpioEntry {
     name: String,
@@ -213,7 +218,7 @@ impl CpioEntry {
     fn directory(name: &str, mode: u32) -> Self {
         Self {
             name: name.to_string(),
-            mode: 0o040000 | mode,
+            mode: S_IFDIR | mode,
             uid: 0,
             gid: 0,
             nlink: 2,
@@ -229,7 +234,7 @@ impl CpioEntry {
     fn file(name: &str, mode: u32, data: Vec<u8>) -> Self {
         Self {
             name: name.to_string(),
-            mode: 0o100000 | mode,
+            mode: S_IFREG | mode,
             uid: 0,
             gid: 0,
             nlink: 1,
@@ -245,7 +250,7 @@ impl CpioEntry {
     fn symlink(name: &str, target: &str) -> Self {
         Self {
             name: name.to_string(),
-            mode: 0o120000 | 0o777,
+            mode: S_IFLNK | 0o777,
             uid: 0,
             gid: 0,
             nlink: 1,
@@ -261,7 +266,7 @@ impl CpioEntry {
     fn _char_device(name: &str, mode: u32, major: u32, minor: u32) -> Self {
         Self {
             name: name.to_string(),
-            mode: 0o020000 | mode,
+            mode: S_IFCHR | mode,
             uid: 0,
             gid: 0,
             nlink: 1,
@@ -1093,7 +1098,7 @@ mod tests {
         let entries = build_initramfs_entries(&config);
         let dir_names: Vec<&str> = entries
             .iter()
-            .filter(|e| e.mode & 0o040000 != 0)
+            .filter(|e| e.mode & modechange::S_IFMT == S_IFDIR)
             .map(|e| e.name.as_str())
             .collect();
         assert!(dir_names.contains(&"proc"));

@@ -92,51 +92,22 @@ struct FsInfo {
 // Mode formatting
 // ===========================================================================
 
-/// The file-type bits of a mode word (`S_IFMT`).
-const S_IFMT: u32 = 0o170000;
+use modechange::{S_IFMT, S_IFREG, file_type_name, mode_string};
 
 /// Format a POSIX mode word as a 10-character permission string like
 /// `-rwxr-xr--`, with setuid/setgid/sticky rendered in the standard way.
+///
+/// Both halves live in `modechange`: `chmod -v`, `ls -l` and this must render
+/// the same twelve bits the same way, and the file-type letter is the one part
+/// of a mode word that crate deliberately masks off everywhere else.
 fn format_mode(mode: u32) -> String {
-    let file_type = match mode & S_IFMT {
-        0o140000 => 's',
-        0o120000 => 'l',
-        0o100000 => '-',
-        0o060000 => 'b',
-        0o040000 => 'd',
-        0o020000 => 'c',
-        0o010000 => 'p',
-        _ => '?',
-    };
-
-    // The nine permission characters are gnulib's `strmode`, which lives in
-    // `modechange` because `chmod -v`, `ls -l` and this all need the same
-    // setuid/setgid/sticky overload rendered the same way. Only the leading
-    // file-type character is `stat`'s own.
-    let mut s = String::with_capacity(10);
-    s.push(file_type);
-    s.push_str(&modechange::permission_string(mode));
-    s
-}
-
-/// The human-readable file type, as GNU's `%F` prints it.
-fn file_type_name(mode: u32) -> &'static str {
-    match mode & S_IFMT {
-        0o140000 => "socket",
-        0o120000 => "symbolic link",
-        0o100000 => "regular file",
-        0o060000 => "block special file",
-        0o040000 => "directory",
-        0o020000 => "character special file",
-        0o010000 => "fifo",
-        _ => "weird file",
-    }
+    mode_string(mode)
 }
 
 /// `%F` for a regular file of zero length is `regular empty file`, which is
 /// GNU's one special case and the one people grep for.
 fn file_type_name_sized(mode: u32, size: u64) -> &'static str {
-    if mode & S_IFMT == 0o100000 && size == 0 {
+    if mode & S_IFMT == S_IFREG && size == 0 {
         "regular empty file"
     } else {
         file_type_name(mode)

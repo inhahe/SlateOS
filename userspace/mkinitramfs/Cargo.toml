@@ -4,3 +4,6 @@ version = "0.1.0"
 edition = "2024"
 description = "SlateOS mkinitramfs utility"
 [dependencies]
+# One definition of a mode word's file-type field, shared with `cpio`, `chmod`,
+# `stat` and `ls -l`. A newc header stores the same integer they read.
+modechange = { path = "../modechange" }

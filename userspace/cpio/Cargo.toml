@@ -4,3 +4,6 @@ version = "0.1.0"
 edition = "2024"
 description = "SlateOS cpio archive utility"
 [dependencies]
+# One definition of a mode word's file-type field, shared with `chmod`, `stat`
+# and `ls -l`. An archive header stores the same integer they read.
+modechange = { path = "../modechange" }

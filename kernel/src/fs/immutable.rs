@@ -47,6 +47,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
 
+use super::path::{Path, PathBuf};
 use crate::error::{KernelError, KernelResult};
 
 // ---------------------------------------------------------------------------
@@ -155,7 +156,11 @@ const MAX_FILES: usize = 65536;
 
 struct FlagTable {
     /// Path → flags.
-    entries: BTreeMap<String, FlagBits>,
+    /// Keyed by `PathBuf`, not `String`. This table decides whether a
+    /// write, truncate, delete, or link is refused, so a key type that
+    /// cannot hold a legal filename is a file whose protection silently
+    /// does not apply. See `design-decisions.md` §261.
+    entries: BTreeMap<PathBuf, FlagBits>,
 }
 
 impl FlagTable {
@@ -175,7 +180,8 @@ static CHECK_COUNT: AtomicU64 = AtomicU64::new(0);
 // ---------------------------------------------------------------------------
 
 /// Set flags on a file (OR with existing flags).
-pub fn set_flags(path: &str, flags: FlagBits) -> KernelResult<()> {
+pub fn set_flags(path: impl AsRef<Path>, flags: FlagBits) -> KernelResult<()> {
+    let path = path.as_ref();
     if flags & !FileFlags::ALL_KNOWN != 0 {
         return Err(KernelError::InvalidArgument);
     }
@@ -188,13 +194,14 @@ pub fn set_flags(path: &str, flags: FlagBits) -> KernelResult<()> {
         if table.entries.len() >= MAX_FILES {
             return Err(KernelError::ResourceExhausted);
         }
-        table.entries.insert(String::from(path), flags);
+        table.entries.insert(path.to_path_buf(), flags);
     }
     Ok(())
 }
 
 /// Clear specific flags on a file.
-pub fn clear_flags(path: &str, flags: FlagBits) -> KernelResult<()> {
+pub fn clear_flags(path: impl AsRef<Path>, flags: FlagBits) -> KernelResult<()> {
+    let path = path.as_ref();
     let mut table = TABLE.lock();
     if let Some(existing) = table.entries.get_mut(path) {
         *existing &= !flags;
@@ -208,7 +215,8 @@ pub fn clear_flags(path: &str, flags: FlagBits) -> KernelResult<()> {
 }
 
 /// Replace all flags on a file.
-pub fn replace_flags(path: &str, flags: FlagBits) -> KernelResult<()> {
+pub fn replace_flags(path: impl AsRef<Path>, flags: FlagBits) -> KernelResult<()> {
+    let path = path.as_ref();
     if flags & !FileFlags::ALL_KNOWN != 0 {
         return Err(KernelError::InvalidArgument);
     }
@@ -221,21 +229,21 @@ pub fn replace_flags(path: &str, flags: FlagBits) -> KernelResult<()> {
         if !table.entries.contains_key(path) && table.entries.len() >= MAX_FILES {
             return Err(KernelError::ResourceExhausted);
         }
-        table.entries.insert(String::from(path), flags);
+        table.entries.insert(path.to_path_buf(), flags);
     }
     Ok(())
 }
 
 /// Get flags for a file (0 if none set).
-pub fn get_flags(path: &str) -> FlagBits {
+pub fn get_flags(path: impl AsRef<Path>) -> FlagBits {
     let table = TABLE.lock();
-    table.entries.get(path).copied().unwrap_or(0)
+    table.entries.get(path.as_ref()).copied().unwrap_or(0)
 }
 
 /// Remove all flags for a file.
-pub fn remove_flags(path: &str) -> KernelResult<()> {
+pub fn remove_flags(path: impl AsRef<Path>) -> KernelResult<()> {
     let mut table = TABLE.lock();
-    table.entries.remove(path).ok_or(KernelError::NotFound)?;
+    table.entries.remove(path.as_ref()).ok_or(KernelError::NotFound)?;
     Ok(())
 }
 
@@ -248,7 +256,7 @@ pub fn remove_flags(path: &str) -> KernelResult<()> {
 /// - Immutable files reject all writes.
 /// - Append-only files reject writes that are not at end-of-file.
 ///   `is_append` should be true if the write is an append operation.
-pub fn check_write(path: &str, is_append: bool) -> KernelResult<()> {
+pub fn check_write(path: impl AsRef<Path>, is_append: bool) -> KernelResult<()> {
     CHECK_COUNT.fetch_add(1, Ordering::Relaxed);
     let flags = get_flags(path);
     if flags & FileFlags::IMMUTABLE != 0 {
@@ -261,7 +269,7 @@ pub fn check_write(path: &str, is_append: bool) -> KernelResult<()> {
 }
 
 /// Check whether a truncation is allowed.
-pub fn check_truncate(path: &str) -> KernelResult<()> {
+pub fn check_truncate(path: impl AsRef<Path>) -> KernelResult<()> {
     CHECK_COUNT.fetch_add(1, Ordering::Relaxed);
     let flags = get_flags(path);
     if flags & (FileFlags::IMMUTABLE | FileFlags::APPEND_ONLY) != 0 {
@@ -271,7 +279,7 @@ pub fn check_truncate(path: &str) -> KernelResult<()> {
 }
 
 /// Check whether a delete/rename is allowed.
-pub fn check_delete(path: &str) -> KernelResult<()> {
+pub fn check_delete(path: impl AsRef<Path>) -> KernelResult<()> {
     CHECK_COUNT.fetch_add(1, Ordering::Relaxed);
     let flags = get_flags(path);
     if flags & (FileFlags::IMMUTABLE | FileFlags::NO_DELETE) != 0 {
@@ -281,7 +289,7 @@ pub fn check_delete(path: &str) -> KernelResult<()> {
 }
 
 /// Check whether metadata changes are allowed.
-pub fn check_metadata(path: &str) -> KernelResult<()> {
+pub fn check_metadata(path: impl AsRef<Path>) -> KernelResult<()> {
     CHECK_COUNT.fetch_add(1, Ordering::Relaxed);
     let flags = get_flags(path);
     if flags & FileFlags::IMMUTABLE != 0 {
@@ -291,7 +299,7 @@ pub fn check_metadata(path: &str) -> KernelResult<()> {
 }
 
 /// Check whether a link (hard link) can be created to this file.
-pub fn check_link(path: &str) -> KernelResult<()> {
+pub fn check_link(path: impl AsRef<Path>) -> KernelResult<()> {
     CHECK_COUNT.fetch_add(1, Ordering::Relaxed);
     let flags = get_flags(path);
     if flags & FileFlags::IMMUTABLE != 0 {
@@ -305,10 +313,10 @@ pub fn check_link(path: &str) -> KernelResult<()> {
 // ---------------------------------------------------------------------------
 
 /// Update flag table when a file is renamed.
-pub fn rename_path(old_path: &str, new_path: &str) -> KernelResult<()> {
+pub fn rename_path(old_path: impl AsRef<Path>, new_path: impl AsRef<Path>) -> KernelResult<()> {
     let mut table = TABLE.lock();
-    if let Some(flags) = table.entries.remove(old_path) {
-        table.entries.insert(String::from(new_path), flags);
+    if let Some(flags) = table.entries.remove(old_path.as_ref()) {
+        table.entries.insert(new_path.as_ref().to_path_buf(), flags);
         Ok(())
     } else {
         // No flags on this file — nothing to do.
@@ -321,13 +329,13 @@ pub fn rename_path(old_path: &str, new_path: &str) -> KernelResult<()> {
 // ---------------------------------------------------------------------------
 
 /// List all files with any flags set.
-pub fn list_flagged() -> Vec<(String, FlagBits)> {
+pub fn list_flagged() -> Vec<(PathBuf, FlagBits)> {
     let table = TABLE.lock();
     table.entries.iter().map(|(p, f)| (p.clone(), *f)).collect()
 }
 
 /// List files with a specific flag set.
-pub fn list_with_flag(flag: FlagBits) -> Vec<String> {
+pub fn list_with_flag(flag: FlagBits) -> Vec<PathBuf> {
     let table = TABLE.lock();
     table
         .entries
@@ -448,9 +456,46 @@ pub fn self_test() -> KernelResult<()> {
         serial_println!("[immutable] test 7 passed: rename and list");
     }
 
+    // Test 8: protection applies to a path that is not valid UTF-8.
+    //
+    // This table is the one that answers "may this write happen?", so a key
+    // type too narrow to hold a legal filename does not merely lose a
+    // bookkeeping entry -- it silently unprotects the file. Tests 1-7 all use
+    // ASCII names, which a `String` key stored correctly, so none of them
+    // could observe that.
+    {
+        clear_all();
+        let a = Path::new(&b"/test/\xFFlocked"[..]);
+        let b = Path::new(&b"/test/\xFElocked"[..]);
+
+        set_flags(a, FileFlags::IMMUTABLE)?;
+        assert_eq!(get_flags(a), FileFlags::IMMUTABLE);
+        // The check API -- the part that actually enforces -- must refuse.
+        assert!(check_write(a, false).is_err());
+        assert!(check_truncate(a).is_err());
+        assert!(check_delete(a).is_err());
+        assert!(check_link(a).is_err());
+
+        // A neighbour differing only in a byte that cannot appear in UTF-8
+        // must NOT inherit the protection. A lossy key folds both names to
+        // U+FFFD, which would make this file unwritable for no reason -- and,
+        // with the roles reversed, would leave `a` writable.
+        assert_eq!(get_flags(b), 0);
+        assert!(check_write(b, false).is_ok());
+
+        // Renaming must carry the flags to exactly the new bytes.
+        rename_path(a, &b"/test/\xFFmoved"[..])?;
+        assert_eq!(get_flags(a), 0);
+        assert_eq!(
+            get_flags(Path::new(&b"/test/\xFFmoved"[..])),
+            FileFlags::IMMUTABLE
+        );
+        serial_println!("[immutable] test 8 passed: non-UTF-8 paths");
+    }
+
     clear_all();
     reset_stats();
 
-    serial_println!("[immutable] all 7 self-tests passed");
+    serial_println!("[immutable] all 8 self-tests passed");
     Ok(())
 }

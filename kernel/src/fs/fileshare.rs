@@ -28,6 +28,7 @@ use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::error::{KernelError, KernelResult};
+use crate::fs::path::{Path, PathBuf};
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -129,7 +130,12 @@ pub struct LocalShare {
     /// Share name (network-visible).
     pub name: String,
     /// Local path being shared.
-    pub path: String,
+    ///
+    /// A `PathBuf`, not a `String` (design-decisions.md 261): this names a
+    /// local directory, which may contain any byte but `/` and NUL.  The
+    /// share *name* above stays a `String` -- that one is a network-visible
+    /// protocol identifier, not a filesystem name.
+    pub path: PathBuf,
     /// Protocol.
     pub protocol: ShareProtocol,
     /// Default access level.
@@ -156,7 +162,11 @@ pub struct RemoteShare {
     /// Share path on remote.
     pub share_name: String,
     /// Local mount point.
-    pub mount_point: String,
+    ///
+    /// A `PathBuf`, not a `String` (design-decisions.md 261): a mount point
+    /// is an ordinary local directory.  `host`/`share_name`/`username` above
+    /// stay `String` -- those are protocol identifiers.
+    pub mount_point: PathBuf,
     /// Protocol.
     pub protocol: ShareProtocol,
     /// Username (empty for guest/kerberos).
@@ -277,11 +287,12 @@ pub fn set_workgroup(name: &str) -> KernelResult<()> {
 /// Add a local shared folder.
 pub fn add_share(
     name: &str,
-    path: &str,
+    path: impl AsRef<Path>,
     protocol: ShareProtocol,
     access: ShareAccess,
 ) -> KernelResult<u32> {
-    if name.is_empty() || path.is_empty() {
+    let path = path.as_ref();
+    if name.is_empty() || path.as_bytes().is_empty() {
         return Err(KernelError::InvalidArgument);
     }
     with_state(|state| {
@@ -296,7 +307,7 @@ pub fn add_share(
         state.local_shares.push(LocalShare {
             id,
             name: String::from(name),
-            path: String::from(path),
+            path: path.to_path_buf(),
             protocol,
             access,
             enabled: true,
@@ -401,11 +412,12 @@ pub fn list_shares() -> Vec<LocalShare> {
 pub fn connect_remote(
     host: &str,
     share_name: &str,
-    mount_point: &str,
+    mount_point: impl AsRef<Path>,
     protocol: ShareProtocol,
     username: &str,
 ) -> KernelResult<u32> {
-    if host.is_empty() || share_name.is_empty() || mount_point.is_empty() {
+    let mount_point = mount_point.as_ref();
+    if host.is_empty() || share_name.is_empty() || mount_point.as_bytes().is_empty() {
         return Err(KernelError::InvalidArgument);
     }
     with_state(|state| {
@@ -418,7 +430,7 @@ pub fn connect_remote(
             id,
             host: String::from(host),
             share_name: String::from(share_name),
-            mount_point: String::from(mount_point),
+            mount_point: mount_point.to_path_buf(),
             protocol,
             username: String::from(username),
             status: ShareStatus::Connected,
@@ -533,14 +545,14 @@ pub fn self_test() {
         assert!(list_shares().is_empty());
         assert!(list_remotes().is_empty());
     }
-    serial_println!("[fileshare]  1/11 initial state OK");
+    serial_println!("[fileshare]  1/12 initial state OK");
 
     // Test 2: enable sharing.
     {
         set_sharing_enabled(true).unwrap();
         assert!(is_sharing_enabled());
     }
-    serial_println!("[fileshare]  2/11 enable sharing OK");
+    serial_println!("[fileshare]  2/12 enable sharing OK");
 
     // Test 3: hostname.
     {
@@ -548,7 +560,7 @@ pub fn self_test() {
         assert_eq!(hostname(), "fileserver");
         assert!(set_hostname("").is_err());
     }
-    serial_println!("[fileshare]  3/11 hostname OK");
+    serial_println!("[fileshare]  3/12 hostname OK");
 
     // Test 4: add local share.
     {
@@ -561,11 +573,11 @@ pub fn self_test() {
         .unwrap();
         let share = get_share(id).unwrap();
         assert_eq!(share.name, "Public");
-        assert_eq!(share.path, "/home/public");
+        assert_eq!(share.path.as_path(), Path::new("/home/public"));
         assert_eq!(share.protocol, ShareProtocol::Smb);
         assert!(share.enabled);
     }
-    serial_println!("[fileshare]  4/11 add share OK");
+    serial_println!("[fileshare]  4/12 add share OK");
 
     // Test 5: modify share.
     {
@@ -579,7 +591,7 @@ pub fn self_test() {
         assert!(s.guest_access);
         assert_eq!(s.description, "Public files");
     }
-    serial_println!("[fileshare]  5/11 modify share OK");
+    serial_println!("[fileshare]  5/12 modify share OK");
 
     // Test 6: duplicate name.
     {
@@ -593,7 +605,7 @@ pub fn self_test() {
             .is_err()
         );
     }
-    serial_println!("[fileshare]  6/11 duplicate check OK");
+    serial_println!("[fileshare]  6/12 duplicate check OK");
 
     // Test 7: connect remote.
     {
@@ -611,7 +623,7 @@ pub fn self_test() {
         assert_eq!(remotes.first().unwrap().status, ShareStatus::Connected);
         let _ = id;
     }
-    serial_println!("[fileshare]  7/11 connect remote OK");
+    serial_println!("[fileshare]  7/12 connect remote OK");
 
     // Test 8: disconnect.
     {
@@ -621,7 +633,7 @@ pub fn self_test() {
         let remotes = list_remotes();
         assert_eq!(remotes.first().unwrap().status, ShareStatus::Disconnected);
     }
-    serial_println!("[fileshare]  8/11 disconnect OK");
+    serial_println!("[fileshare]  8/12 disconnect OK");
 
     // Test 9: auto-mount.
     {
@@ -631,7 +643,7 @@ pub fn self_test() {
         let auto = auto_mount_shares();
         assert_eq!(auto.len(), 1);
     }
-    serial_println!("[fileshare]  9/11 auto-mount OK");
+    serial_println!("[fileshare]  9/12 auto-mount OK");
 
     // Test 10: remove.
     {
@@ -644,7 +656,7 @@ pub fn self_test() {
         remove_remote(id).unwrap();
         assert!(list_remotes().is_empty());
     }
-    serial_println!("[fileshare] 10/11 remove OK");
+    serial_println!("[fileshare] 10/12 remove OK");
 
     // Test 11: stats.
     {
@@ -654,7 +666,59 @@ pub fn self_test() {
         assert!(enabled);
         assert!(ops > 0);
     }
-    serial_println!("[fileshare] 11/11 stats OK");
+    serial_println!("[fileshare] 11/12 stats OK");
+
+    // Test 12: non-UTF-8 local paths and mount points (design-decisions.md 261).
+    //
+    // A shared folder and a mount point are both ordinary local directories,
+    // so either may be named with bytes that have no UTF-8 spelling.  While
+    // these fields were `String`s such a directory could not be shared or
+    // mounted at all.  Two mount points differing only in such a byte are
+    // distinct directories and must stay distinct rows.
+    {
+        let share_path = Path::new(&b"/srv/fsh_\xFFp"[..]);
+        let mp_a = Path::new(&b"/mnt/fsh_\xFFm"[..]);
+        let mp_b = Path::new(&b"/mnt/fsh_\xFEm"[..]);
+
+        let lid = add_share(
+            "nonutf8",
+            share_path,
+            ShareProtocol::Smb,
+            ShareAccess::ReadOnly,
+        )
+        .expect("add non-utf8 share");
+        let got = get_share(lid).expect("get non-utf8 share");
+        assert_eq!(got.path.as_path(), share_path);
+        assert_eq!(got.path.as_path().as_bytes(), b"/srv/fsh_\xFFp");
+
+        let ra = connect_remote("nu.local", "docs", mp_a, ShareProtocol::Smb, "user")
+            .expect("connect non-utf8 a");
+        let rb = connect_remote("nu.local", "docs", mp_b, ShareProtocol::Smb, "user")
+            .expect("connect non-utf8 b");
+        assert_ne!(ra, rb);
+        let remotes = list_remotes();
+        let sa = remotes.iter().find(|r| r.id == ra).expect("remote a");
+        let sb = remotes.iter().find(|r| r.id == rb).expect("remote b");
+        assert_eq!(sa.mount_point.as_path(), mp_a);
+        assert_eq!(sb.mount_point.as_path(), mp_b);
+        assert_ne!(sa.mount_point, sb.mount_point);
+
+        // Restore the empty registry test 11 left behind.
+        remove_share(lid).expect("remove non-utf8 share");
+        remove_remote(ra).expect("remove remote a");
+        remove_remote(rb).expect("remove remote b");
+        assert!(list_shares().is_empty());
+        assert!(list_remotes().is_empty());
+    }
+    serial_println!("[fileshare] 12/12 non-UTF-8 paths OK");
+
+    // Leave NO residue.  The tests above enable sharing and set the hostname
+    // to "fileserver"; leaving that behind would make `fileshare show` report
+    // sharing switched on and the machine renamed, neither of which the user
+    // asked for.  `init_defaults()` is only ever called explicitly (there is
+    // no lazy init -- `with_state` returns NotSupported when uninitialised),
+    // so resetting to `None` restores exactly the state a fresh boot has.
+    *STATE.lock() = None;
 
     serial_println!("[fileshare] All self-tests passed.");
 }

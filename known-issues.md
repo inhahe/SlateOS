@@ -64706,3 +64706,363 @@ at `tcsetattr` does -- would otherwise strand a live slave with no
 descriptor. `retire_master` reports the orphan on the master's close and
 `close_pty_handle` reaps it. Under a Linux-style "open the slave later by
 name" design that leak would have been invisible from libc.
+
+---
+
+## TD-A-FS-SELFTESTS-NEVER-RUN — ~220 `kernel/src/fs` self-tests are dead code
+
+**Lane A. Found 2026-08-23, during the §261 byte-clean conversion.**
+
+`kernel/src/fs/` has 424 `pub fn self_test()` entry points. Only about 200
+of them are invoked from `main.rs`. The rest are called from nowhere at
+all — a few are reachable from a `kshell` subcommand a human would have to
+type, and the remainder are reachable from nothing whatsoever. They
+compile, so nothing warns; they simply never run, in the boot test or
+anywhere else.
+
+This was found the direct way: the §261 conversion added new non-UTF-8
+regression tests to six modules, and after a green boot test only four of
+the six markers appeared on the serial log. `fcomment` and `immutable`
+were missing because their `self_test()`s had never run — `immutable`'s
+covers the table that decides whether a write, truncate, delete or link is
+refused, so the flag-enforcement path had no boot coverage at all. Both
+are now wired into `main.rs`.
+
+**Reproduce / enumerate:**
+
+```bash
+for f in kernel/src/fs/*.rs; do m=$(basename "$f" .rs)
+  grep -q "pub fn self_test" "$f" &&
+  ! grep -q "fs::$m::self_test" kernel/src/main.rs && echo "$m"
+done
+```
+
+**The proper fix** is to call every one of them from the boot self-test
+block in `main.rs`, in the same `if let Err(e) = … { serial_println!(…) }`
+shape as the existing entries. Two things make it more than a mechanical
+edit, which is why it is filed rather than done inline:
+
+- These tests have *never executed*. Expect a substantial number to fail
+  or panic on first run, and a panic in the boot self-test block halts the
+  boot test rather than reporting. They should be enabled in batches, each
+  batch boot-tested, with the failures fixed as they surface — that is the
+  point of enabling them, but it is its own task and cannot ride along
+  inside an unrelated commit.
+- Boot time. These are in-memory table tests and individually fast, but
+  220 of them is a real addition to a boot test that already runs ~9
+  minutes.
+
+**Why it matters beyond the missing coverage:** every one of these modules
+reads as tested. A future reader — or a future session doing exactly what
+this one did — sees a `self_test()` with real assertions and reasonably
+concludes the module is covered. It is the same "a test that never runs is
+not a test" trap the earlier locale/timezone sweep hit, at about ten times
+the scale.
+
+**Confirmed: the wiring finds real bugs, not just stale tests.** The very
+first batch to be enabled panicked the boot on `fs::pinnedapps` test 6, and
+the assertion was right — `reorder` was broken. It set `pin.position =
+new_position` and touched nothing else, so the moved pin and the incumbent
+both claimed the slot; `list_pins` sorts by position with a *stable* sort,
+so the incumbent stayed first and `pinnedapps move taskbar terminal 0`
+reported success while changing no order at all. It now performs a real
+move and renumbers the location contiguously. `pin` had a smaller sibling
+defect found in the same read: `max().unwrap_or(0) + 1` put the first pin
+in an empty location at position 1, leaving slot 0 permanently vacant.
+Both are fixed in `82155959a`. Note what this says about the batching
+advice above — the panic is the *feature*; enable in batches precisely so
+each panic points at one module.
+
+---
+
+## TD-A-SPARSE-FSTRIM-WRONG-DEVICE — hole punching queued discards for a nonexistent device at a file offset
+
+**Lane A. Found 2026-08-23, during the §261 byte-clean conversion.**
+
+`fs::sparse::punch_hole` called
+`fs::fstrim::notify_free(path, offset, actual_len)` — passing the punched
+**file's** path and its **file** offset to a function whose parameter is a
+**block device** and whose offset is a device LBA. Every other caller in
+the tree passes `/dev/sda`, `/dev/nvme0` and the like. The call was wrong
+on both axes at once.
+
+**Why nothing broke yet:** `fstrim::issue_trim` is a stub — its first line
+is `let _ = device;` — so the device name is discarded and only the byte
+count is added to the statistics. The observable damage today is inflated
+TRIM statistics and a discard queue holding entries keyed by a filename
+that matches no registered device, which `flush(device_filter)` can never
+select and `coalesce_ranges` groups into a phantom device of its own.
+
+**Why it matters:** the moment a real `block_device::discard(device,
+offset, length)` is wired in behind that stub — which is exactly what the
+comment at `fstrim.rs:423` says is coming — this becomes a discard issued
+at a *file* offset. On a device where the name happened to resolve, that
+is data loss at an unrelated location on the volume. The bug is latent
+precisely because the subsystem it depends on is unfinished, so it will
+surface at the worst moment: when someone implements discard and assumes
+the existing callers were correct.
+
+**Action taken:** the call is removed and replaced with a comment
+explaining why, at `fs/sparse.rs` in `punch_hole`. Removing it is the
+correct interim state — a queued entry that cannot map to a device has no
+value today and is a landmine tomorrow.
+
+**The proper fix** is to notify fstrim with the *device extents* the hole
+actually freed. That needs a file-offset-to-device-extent mapping — a
+`fiemap`/`bmap` equivalent on the `FileSystem` trait — which does not
+exist anywhere in the tree today (`grep -rn "fiemap\|fn bmap" kernel/src/fs`
+returns nothing). Two steps:
+
+1. Add `fn extents(&mut self, path: &Path, offset: u64, len: u64) ->
+   KernelResult<Vec<(u64, u64)>>` to `FileSystem`, returning device-relative
+   `(offset, length)` pairs, with a default implementation returning
+   `Err(Unsupported)` so only filesystems that can answer do.
+2. Have `punch_hole` (and `Vfs::remove`/`truncate`, which have the same
+   gap and today notify fstrim not at all) call it and pass each extent
+   plus the mount's backing device name to `notify_free`.
+
+**Trigger to promote this to active work:** anyone implementing real block
+device discard behind `fstrim::issue_trim`. Do not implement that stub
+without doing step 1 and 2 first.
+
+## TD-A-ACL-NEVER-ENFORCED — POSIX ACLs are stored, listed and formatted, but no VFS operation ever consults them (lane A, 2026-08-23)
+
+**Status:** open. Discovered while converting `kernel/src/fs/acl.rs` to
+byte-clean paths (design-decisions.md §261).
+
+`fs::acl::check_access` — the function that implements the whole POSIX
+1003.1e evaluation algorithm, all five steps of it — **has no production
+callers.** The evidence is a one-liner:
+
+```bash
+grep -rn "check_access" kernel/src --include=*.rs | grep -v "fs/acl.rs"
+```
+
+Every hit is a different, unrelated `check_access`: `cap/file_tags.rs`,
+`cap/groups.rs`, `fs/appsandbox.rs`. Nothing in `fs/vfs.rs` — or anywhere
+else — calls `fs::acl::check_access`. The only callers of the *rest* of
+the module are `kshell`'s `getfacl`/`setfacl` commands and `procfs`'s
+statistics line.
+
+**What this means in practice.** `setfacl` appears to work: it validates
+the ACL, stores it, and `getfacl` reads it back verbatim. The statistics in
+procfs will report `files_with_acls: N`. But the ACL governs nothing — an
+open/read/write/unlink goes through the VFS's traditional owner/group/other
+check and never learns the ACL exists. A user who denies a colleague access
+to a file with `setfacl -m u:1001:--- /path` is told the operation
+succeeded and is given no indication that user 1001 can still read the
+file. **This is a security feature that reports success while doing
+nothing**, which is worse than not having the feature: the absence of a
+feature is visible, a silently-inert one is not.
+
+Note also that `check_access` **fails open** by design — `None => return
+Ok(())`, deferring to traditional permissions — which is the right
+behavior for a hook that runs on every path, but it means that wiring it in
+incorrectly (e.g. passing an unnormalized or relative path, so the lookup
+misses) degrades silently to "no ACLs at all" rather than to a visible
+failure. Whoever does the wiring must test the *deny* direction, not just
+that nothing broke.
+
+**The proper fix** is to call `fs::acl::check_access` from the VFS
+permission check, on the same resolved absolute path the rest of the
+operation uses:
+
+1. Find the single point in `fs/vfs.rs` where traditional
+   owner/group/other permission is evaluated for a path operation. If there
+   is no single point, make one first — the ACL hook must not be sprinkled
+   across every entry point, or the next entry point added will forget it.
+2. Call `acl::check_access(path, uid, gid, file_uid, file_gid, request)`
+   *after* the traditional check grants access, never instead of it: POSIX
+   ACLs can only be evaluated once the owner/group of the file is known,
+   and an ACL that grants must not override a mount flag (`ro`, `noexec`)
+   or an immutable/append-only bit that already refused.
+3. The path passed must be the normalized absolute path, since that is what
+   `set_acl` keys on. `fs/vfs.rs`'s `normalize_mount_path` is the model.
+4. Test the deny direction end-to-end from `kshell`: `setfacl` a deny for a
+   non-owner uid, then confirm the read actually fails. `acl.rs`'s own
+   self-test (11 tests) covers the algorithm but cannot cover the wiring.
+
+**Trigger to promote this to active work:** any task that touches VFS
+permission checking, or any task that claims POSIX ACL support is done.
+Until then, `getfacl`/`setfacl` should be understood as a database editor
+for a database nothing reads.
+
+---
+
+## TD-A-SELFTESTS-NOT-IDEMPOTENT — the never-run self-tests panic on their *second* run, and that is why they can't just be switched on
+
+**Lane A. Found 2026-08-23, while wiring modules up under
+TD-A-FS-SELFTESTS-NEVER-RUN.**
+
+TD-A-FS-SELFTESTS-NEVER-RUN predicted that "a substantial number will fail
+or panic on first run". That is true, but it understates the shape of the
+problem and mis-states when it bites. The dominant failure is not a first
+run — it is the *second*. Every one of these suites has, by construction,
+only ever been run once in its life, so nothing ever exercised the case of
+running it against state a previous run left behind.
+
+**The pattern.** A module keeps `static STATE: Mutex<Option<State>>`, with
+an `init_defaults()` that returns early when the state already exists and a
+`with_state()` that does **not** lazily initialise. The suite then:
+
+1. calls `init_defaults()` — a no-op on the second run,
+2. asserts the table is empty (or in its seeded shape),
+3. creates fixtures, and
+4. never removes them.
+
+Run once, it passes. Run twice, step 2 fails against step 3's leftovers and
+the assertion panics — which in the kernel is not a red test, it is a dead
+machine. Each of these is reachable from a `kshell` subcommand, so this is
+a user-typeable kernel panic, not merely a testing inconvenience.
+
+**Found in six modules while converting them for §261** — it was not a
+coincidence in any of them, and all six are now fixed:
+
+| Module | Second-run failure | Fixed in |
+|---|---|---|
+| `fs::netshare` | test 1 `assert!(list_shares().is_empty())` — `id1` was never unmounted | `c5db19b8a` |
+| `fs::filevault` | test 1 `assert_eq!(list_vaults().len(), 0)` — the created vault was never deleted; test 8's exact counter assertions could not hold twice either | `c150f1b29` |
+| `fs::diskencrypt` | test 9 `start_encryption(1, …)` — run 1 leaves volume 1 `Unlocked`, and it only accepts `Unencrypted` | `59bd8befc` |
+| `fs::cloudsync` | test 3 `assert_eq!(list_accounts().len(), 2)` — run 1 leaves account `id1`, its conflict row and an extra `*.bak` exclude behind, so tests 3, 6, 8, 10 and 11 all fail on the second run | `2ebe9f40c` |
+| `fs::fileversion` | test 8 `assert_eq!(list_watches().len(), 1)` — run 1 leaves the watch behind. Worse, run 2's watch then *covers* the fixture, so its `KeepLast(5)` policy silently replaces the default `KeepLast(10)` the capture tests assume | `aae93b532` |
+| `fs::pinnedapps` | test 7 `assert_eq!(count, 1)` — `record_launch` is cumulative, so run 1 leaves `files` at 1 and run 2 reads 2. Test 6's reorder is likewise still in place, having moved `terminal` to position 0 | `d2876326f` |
+
+`fs::cloudsync` also showed a fixture hazard worth naming separately,
+because it is not about leftovers at all and so survives any amount of
+cleanup: the suite's fixtures were **plausible values a user might really
+have**. It added the account `user@cloud.example` and the exclude pattern
+`*.bak`; `add_account` rejects a duplicate `(provider, account_name)`, so a
+user who genuinely syncs that NextCloud account would have had the suite
+fail on *its first* run, on a machine where it had never run before — no
+amount of cleanup discipline prevents that. The fix is to make fixtures
+unmistakably synthetic: the account names are now in the reserved
+`.invalid` TLD and carry a `selftest` marker, and the exclude pattern is
+`*.cloudsync-selftest.bak`. Check for this whenever a suite's fixture is a
+*name* rather than an index — an ID the module mints is safe, a string the
+user also chooses is not.
+
+`fs::fileversion` had the same hazard with a sharper edge, because its
+fixture was fed to a *destructive* call: the suite captured versions of
+`/home/user/test.txt` and then ran `purge_file_versions` on it. On a
+machine where a user actually had that file under version control, typing
+`fversion test` would have deleted their real version history — and, since
+the purge count is what the suite asserts on, would have failed only
+*after* doing so. Its fixtures now live under `/tmp/.fileversion-selftest/`,
+a directory no user would keep data in. **Generalise further:** a plausible
+fixture is bad; a plausible fixture handed to a delete/purge/reset entry
+point is data loss.
+
+cloudsync's test 8 was additionally asserting `list_excludes().len() >= 6` — the
+count of the defaults `init_defaults()` installs. That is not a property of
+the module: `remove_exclude` is public and has a shell command, so a user
+can take a default away and turn the assertion into a panic. It now asserts
+the round-trip (added pattern is visible, removed pattern is gone) instead.
+**Generalise:** an assertion about the *defaults* is only sound in a suite
+that resets to `None` first; a baseline-relative suite may assert only
+about what it itself changed.
+
+`fs::fileshare` was a near miss of a different flavour: it *does* reset at
+entry, so it survives a second run, but it left `sharing_enabled = true`
+and the hostname set to `"fileserver"` in the live table. Wiring it into
+boot as it stood would have made `fileshare show` report sharing switched
+on and the machine renamed, without the user having asked for either.
+
+**A worse variant: the suite that "fixes" non-idempotency by wiping the
+user's data.** Three of the §261 modules — `fs::certmgr`, `fs::appregistry`
+and `fs::startmenu` — *were* idempotent, and were idempotent for the wrong
+reason: each opened with `clear_all()`. That does make a second run pass,
+and it makes the opening emptiness assertion true by construction. It also
+means `certmgr test` deleted every certificate in the trust store,
+`appreg test` deleted every registered application, and `startmenu test`
+deleted the user's favourites and quick links. These are shell commands. A
+user typing `test` on a subsystem reasonably expects to be told whether it
+works, not to have its contents destroyed. Treat a `clear_all()` at the top
+of a suite as a bug on sight, not as cleanup.
+
+**The three fixes, and when to use which:**
+
+- *Reset at both ends* — `*STATE.lock() = None; init_defaults();` on entry
+  and `*STATE.lock() = None;` on exit. Correct when the module has no lazy
+  init, so `None` is exactly the state a fresh boot has. This is what
+  `fs::inodestat` already did and documented, and what `filevault`,
+  `diskencrypt`, `fileshare`, `screenrec` and `pinnedapps` now do.
+- *Baseline-relative + full cleanup* — capture the row count on entry,
+  state every count relative to it, and assert on exit that the table was
+  restored. Correct when the module may legitimately hold live rows the
+  suite must not destroy. This is what `netshare`, `fileversion` and
+  `certmgr` now do.
+- *Decline to run* — check on entry whether the store is populated and, if
+  it is, print a `self-test skipped: …` line and return `Ok(())`. Correct
+  when the module holds user data **and** the suite's assertions are exact
+  counts that cannot be restated relative to a baseline ("exactly one app
+  in Accessories" is not a statement you can make baseline-relative). This
+  is what `appregistry` and `startmenu` now do, and what `fileversion`'s
+  watch guard does. It costs coverage on a machine in use and gains full
+  coverage at boot, where the store is genuinely empty — the right trade,
+  because the alternative on offer is not "more coverage" but "coverage
+  purchased with the user's data".
+
+Prefer the second where the module could plausibly be in use; fall back to
+the third only when the assertions cannot be made relative. Never reach for
+`clear_all()`: the first shape is safe only because `None` is what a fresh
+boot has, which is a fact about the module, not a licence to empty a table.
+
+**Reproduce:** run any such suite's shell subcommand twice, e.g.
+`dencrypt test` then `dencrypt test`.
+
+**The proper fix** is to apply one of the three shapes above to every
+state-holding suite in the ~250 still-manual-only set, as each is wired up
+under TD-A-FS-SELFTESTS-NEVER-RUN — checking specifically for (a) an
+opening emptiness/shape assertion, (b) fixtures that are never removed, and
+(c) exact assertions on cumulative counters, which cannot hold on a second
+run even when the rows are cleaned up. Doing this *at wiring time* is
+essential rather than optional: a non-idempotent suite that has been wired
+into boot will pass the boot test (a fresh boot runs it exactly once) and
+still panic the kernel the first time a user types the subcommand.
+
+**Measured scope of the destructive variant: 56 modules, not three**
+(counted 2026-08-23). The `clear_all()`-at-the-top shape was not a quirk of
+the three §261 modules that happened to be converted first — it is the house
+style for `kernel/src/fs/*.rs` self-tests. Every module below opens its
+`self_test()` by wiping its own persistent table:
+
+```
+a11y appnotify autostart bootcfg capsettings cas colorpicker credentials
+cursorsettings detailcols display dyndns fcomment filepicker fontmgr fstune
+hotkeys ime immutable installer ioprio kbsettings keylayout locale
+loginscreen mmtune netindicator netsettings notifcenter osreset partmgr
+perfmon power prefetch progmgr queryable rundialog schedtune screenshot
+scriptlang servicemgr soundmixer swapcfg sysinfo systray tags taskbar theme
+timezone useracct vdesktop vpn wakesensor wallpaper widgets winsnap
+```
+
+(`cas` uses `clear()`, `ioprio`/`prefetch`/`tags` use `test_clear()`; the
+rest use `clear_all()`. Recount with the awk one-liner in the git history of
+this entry, or by hand: the destructive call is within the first six lines
+of `pub fn self_test`.)
+
+**Why this is a live data-loss bug and not merely latent.** Each of these
+has a `<module> test` shell subcommand today. Nothing warns the user, and
+the command reports success afterwards — `useracct test` prints `all tests
+passed` having deleted **every user account, every group and every session**
+on the machine and left `current_uid` at `None`. `credentials test` empties
+the credential store; `hotkeys test` discards every custom key binding;
+`wallpaper`, `theme`, `keylayout`, `locale` and `timezone` reset the desktop
+to factory defaults. The suites that look least alarming are the settings
+modules, and they are the ones a user is most likely to poke at.
+
+**Why it is not a boot problem.** At boot the tables are empty, so the wipe
+is a no-op and every one of these is safe to run from `main.rs` exactly as
+written. That asymmetry is the trap: wiring one of these into boot under
+TD-A-FS-SELFTESTS-NEVER-RUN gives a green boot test and leaves the
+destructive shell path untouched, so the boot wiring cannot be used as
+evidence that the suite is safe. The two must be fixed together.
+
+**The proper fix** is the same three shapes above, applied per module. Most
+of these are settings modules whose suites assert exact counts on a table
+that `init_defaults()` populates, which points at *reset at both ends* where
+there is no lazy init and *decline to run* where the table holds anything
+the user chose. `useracct` additionally needs its `current_uid`, its
+sessions' `active` flags and `LOGIN_COUNT` snapshotted and restored, because
+authenticating during the test hijacks whoever is logged in — cleaning up
+the fixture user is not enough.

@@ -27,6 +27,7 @@ use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::error::{KernelError, KernelResult};
+use crate::fs::path::{Path, PathBuf};
 
 // ---------------------------------------------------------------------------
 // Types
@@ -72,9 +73,20 @@ impl VaultCipher {
 #[derive(Debug, Clone)]
 pub struct Vault {
     pub id: u32,
+    /// Human-readable vault label.  Stays a `String`: it is a display name
+    /// the user types, not a name read off a filesystem.
     pub name: String,
-    pub path: String,
-    pub mount_point: String,
+    /// Directory backing the vault's encrypted store.
+    ///
+    /// A `PathBuf`, not a `String` (design-decisions.md 261): this is a
+    /// caller-supplied directory, which may contain any byte but `/` and NUL.
+    pub path: PathBuf,
+    /// Where the unlocked vault is exposed.
+    ///
+    /// Derived as `/vault/<id>` and so always ASCII, but typed as a
+    /// `PathBuf` because it is a path -- callers should not have to know
+    /// which of a struct's paths happen to be generated.
+    pub mount_point: PathBuf,
     pub state: VaultState,
     pub cipher: VaultCipher,
     /// Auto-lock timeout in seconds (0 = disabled).
@@ -148,10 +160,11 @@ pub fn init_defaults() {
 /// Create a new vault.
 pub fn create_vault(
     name: &str,
-    path: &str,
+    path: impl AsRef<Path>,
     password: &str,
     cipher: VaultCipher,
 ) -> KernelResult<u32> {
+    let path = path.as_ref();
     with_state(|state| {
         if state.vaults.len() >= MAX_VAULTS {
             return Err(KernelError::ResourceExhausted);
@@ -161,11 +174,11 @@ pub fn create_vault(
         }
         let id = state.next_id;
         state.next_id += 1;
-        let mount = format!("/vault/{}", id);
+        let mount = PathBuf::from(format!("/vault/{}", id));
         state.vaults.push(Vault {
             id,
             name: String::from(name),
-            path: String::from(path),
+            path: path.to_path_buf(),
             mount_point: mount,
             state: VaultState::Locked,
             cipher,
@@ -314,11 +327,17 @@ pub fn stats() -> (usize, usize, u64, u64, u64) {
 
 pub fn self_test() {
     crate::serial_println!("filevault::self_test() — running tests...");
+    // Start from a genuinely empty table.  `init_defaults()` returns early
+    // when the state already exists, so without this reset a second run of
+    // `filevault test` inherited the vault the first run created and panicked
+    // on test 1 -- and the exact counter assertions in test 8 could never
+    // hold twice either.
+    *STATE.lock() = None;
     init_defaults();
 
     // 1: No vaults initially.
     assert_eq!(list_vaults().len(), 0);
-    crate::serial_println!("  [1/8] no vaults: OK");
+    crate::serial_println!("  [1/9] no vaults: OK");
 
     // 2: Create vault.
     let id = create_vault(
@@ -331,35 +350,35 @@ pub fn self_test() {
     assert_eq!(list_vaults().len(), 1);
     let v = get_vault(id).expect("get");
     assert_eq!(v.state, VaultState::Locked);
-    crate::serial_println!("  [2/8] create vault: OK");
+    crate::serial_println!("  [2/9] create vault: OK");
 
     // 3: Wrong password rejected.
     let result = unlock(id, "wrongpass");
     assert!(result.is_err());
-    crate::serial_println!("  [3/8] wrong password: OK");
+    crate::serial_println!("  [3/9] wrong password: OK");
 
     // 4: Correct password unlocks.
     unlock(id, "secret123").expect("unlock");
     let v = get_vault(id).expect("get2");
     assert_eq!(v.state, VaultState::Unlocked);
-    crate::serial_println!("  [4/8] unlock: OK");
+    crate::serial_println!("  [4/9] unlock: OK");
 
     // 5: Lock.
     lock(id).expect("lock");
     let v = get_vault(id).expect("get3");
     assert_eq!(v.state, VaultState::Locked);
-    crate::serial_println!("  [5/8] lock: OK");
+    crate::serial_println!("  [5/9] lock: OK");
 
     // 6: Change password.
     change_password(id, "secret123", "newpass456").expect("change");
     unlock(id, "newpass456").expect("unlock2");
-    crate::serial_println!("  [6/8] change password: OK");
+    crate::serial_println!("  [6/9] change password: OK");
 
     // 7: Auto-lock timeout.
     set_auto_lock(id, 600).expect("autolock");
     let v = get_vault(id).expect("get4");
     assert_eq!(v.auto_lock_secs, 600);
-    crate::serial_println!("  [7/8] auto-lock: OK");
+    crate::serial_println!("  [7/9] auto-lock: OK");
 
     // 8: Stats.
     let (count, unlocked, unlocks, failed, ops) = stats();
@@ -368,7 +387,39 @@ pub fn self_test() {
     assert_eq!(unlocks, 2);
     assert_eq!(failed, 1);
     assert!(ops > 0);
-    crate::serial_println!("  [8/8] stats: OK");
+    crate::serial_println!("  [8/9] stats: OK");
 
-    crate::serial_println!("filevault::self_test() — all 8 tests passed");
+    // 9: non-UTF-8 vault paths (design-decisions.md 261).
+    //
+    // The vault's backing directory is caller-supplied, so it may be named
+    // with bytes that have no UTF-8 spelling.  While `path` was a `String`
+    // such a directory could not back a vault at all -- and two vaults over
+    // directories differing only in such a byte would have been shown
+    // identically by `filevault list`, which for an encrypted store is a
+    // dangerous thing to get wrong.
+    {
+        let pa = Path::new(&b"/home/user/fv_\xFFv"[..]);
+        let pb = Path::new(&b"/home/user/fv_\xFEv"[..]);
+        let ia = create_vault("nu-a", pa, "pw", VaultCipher::Aes256Gcm).expect("create a");
+        let ib = create_vault("nu-b", pb, "pw", VaultCipher::Aes256Gcm).expect("create b");
+        let va = get_vault(ia).expect("get a");
+        let vb = get_vault(ib).expect("get b");
+        // Byte-exact round trip, and the two remain distinguishable.
+        assert_eq!(va.path.as_path(), pa);
+        assert_eq!(va.path.as_path().as_bytes(), b"/home/user/fv_\xFFv");
+        assert_eq!(vb.path.as_path(), pb);
+        assert_ne!(va.path, vb.path);
+        // The derived mount point is per-vault, so it is distinct too.
+        assert_ne!(va.mount_point, vb.mount_point);
+        delete_vault(ia, "pw").expect("delete a");
+        delete_vault(ib, "pw").expect("delete b");
+    }
+    crate::serial_println!("  [9/9] non-UTF-8 vault paths: OK");
+
+    // Leave NO residue: a diagnostic self-test must not leave vaults (least
+    // of all unlocked ones) in the live table.  There is no lazy init, so
+    // clearing the state restores exactly what a fresh boot has.
+    *STATE.lock() = None;
+
+    crate::serial_println!("filevault::self_test() — all 9 tests passed");
 }

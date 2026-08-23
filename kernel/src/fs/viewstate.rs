@@ -29,6 +29,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
 
+use super::path::{Path, PathBuf};
 use crate::error::{KernelError, KernelResult};
 use crate::sync::PreemptSpinMutex;
 
@@ -255,7 +256,14 @@ static TEMPLATE_COUNTER: AtomicU64 = AtomicU64::new(1);
 static GET_COUNT: AtomicU64 = AtomicU64::new(0);
 static SET_COUNT: AtomicU64 = AtomicU64::new(0);
 
-static STATES: PreemptSpinMutex<Vec<(String, ViewSettings)>> = PreemptSpinMutex::named(Vec::new(), b"STATES");
+/// Saved per-directory view settings, keyed by directory path.
+///
+/// Keyed by `PathBuf` rather than `String` per design-decisions.md §261:
+/// a directory name may contain any byte but `/` and NUL, so two distinct
+/// directories whose names differ only in a byte with no UTF-8 spelling
+/// would otherwise share one entry, and the user would find that setting
+/// a view mode on one folder silently changed a different folder's.
+static STATES: PreemptSpinMutex<Vec<(PathBuf, ViewSettings)>> = PreemptSpinMutex::named(Vec::new(), b"STATES");
 static TEMPLATES: PreemptSpinMutex<Vec<ViewTemplate>> = PreemptSpinMutex::named(Vec::new(), b"TEMPLATES");
 static GLOBAL_DEFAULTS: PreemptSpinMutex<Option<ViewSettings>> = PreemptSpinMutex::named(None, b"GLOBAL_DEFAULTS");
 
@@ -270,12 +278,13 @@ static GLOBAL_DEFAULTS: PreemptSpinMutex<Option<ViewSettings>> = PreemptSpinMute
 /// 2. Matching template pattern
 /// 3. Global defaults
 /// 4. Built-in defaults
-pub fn get(path: &str) -> ViewSettings {
+pub fn get(path: impl AsRef<Path>) -> ViewSettings {
+    let path = path.as_ref();
     GET_COUNT.fetch_add(1, Ordering::Relaxed);
 
     // 1. Check saved state.
     let states = STATES.lock();
-    if let Some((_, settings)) = states.iter().find(|(p, _)| p == path) {
+    if let Some((_, settings)) = states.iter().find(|(p, _)| p.as_path() == path) {
         return settings.clone();
     }
     drop(states);
@@ -301,13 +310,14 @@ pub fn get(path: &str) -> ViewSettings {
 }
 
 /// Save view settings for a directory.
-pub fn set(path: &str, settings: ViewSettings) -> KernelResult<()> {
+pub fn set(path: impl AsRef<Path>, settings: ViewSettings) -> KernelResult<()> {
+    let path = path.as_ref();
     SET_COUNT.fetch_add(1, Ordering::Relaxed);
 
     let mut states = STATES.lock();
 
     // Update existing or add new.
-    if let Some(entry) = states.iter_mut().find(|(p, _)| p == path) {
+    if let Some(entry) = states.iter_mut().find(|(p, _)| p.as_path() == path) {
         entry.1 = settings;
         return Ok(());
     }
@@ -317,15 +327,16 @@ pub fn set(path: &str, settings: ViewSettings) -> KernelResult<()> {
         states.remove(0);
     }
 
-    states.push((String::from(path), settings));
+    states.push((path.to_path_buf(), settings));
     Ok(())
 }
 
 /// Remove saved settings for a directory (reverts to defaults).
-pub fn remove(path: &str) -> bool {
+pub fn remove(path: impl AsRef<Path>) -> bool {
+    let path = path.as_ref();
     let mut states = STATES.lock();
     let before = states.len();
-    states.retain(|(p, _)| p != path);
+    states.retain(|(p, _)| p.as_path() != path);
     states.len() < before
 }
 
@@ -404,23 +415,29 @@ pub fn init_defaults() {
 // ---------------------------------------------------------------------------
 
 /// Simple glob-like pattern matching for directory paths.
-fn path_matches_pattern(path: &str, pattern: &str) -> bool {
-    if pattern == "*" {
+///
+/// The pattern is a `&str` because it is something the user types into a
+/// template; the *path* is bytes, so the comparison is done on bytes and a
+/// directory with no UTF-8 spelling still matches `**/` and `*` correctly.
+/// A pattern can only ever name a directory it is possible to type, which
+/// is the intended limit of a template.
+fn path_matches_pattern(path: &Path, pattern: &str) -> bool {
+    let path = path.as_bytes();
+    let pattern = pattern.as_bytes();
+
+    if pattern == b"*" {
         return true;
     }
 
-    if pattern.starts_with("**/") {
-        // Match any directory ending with this suffix.
-        let suffix = pattern.get(3..).unwrap_or("");
-        // Check if path ends with /suffix or equals suffix.
-        if path.ends_with(suffix) {
-            // Verify it's a complete path segment.
-            let prefix_end = path.len().saturating_sub(suffix.len());
-            if prefix_end == 0 || path.as_bytes().get(prefix_end.saturating_sub(1)) == Some(&b'/') {
-                return true;
-            }
+    if let Some(suffix) = pattern.strip_prefix(b"**/".as_slice()) {
+        // Match any directory ending with this suffix...
+        if !path.ends_with(suffix) {
+            return false;
         }
-        return false;
+        // ...but only on a complete path segment, so `**/Pictures` does not
+        // also claim `/home/OldPictures`.
+        let prefix_end = path.len().saturating_sub(suffix.len());
+        return prefix_end == 0 || path.get(prefix_end.saturating_sub(1)) == Some(&b'/');
     }
 
     // Exact match.
@@ -432,7 +449,7 @@ fn path_matches_pattern(path: &str, pattern: &str) -> bool {
 // ---------------------------------------------------------------------------
 
 /// List all saved view states.
-pub fn list_saved() -> Vec<(String, ViewSettings)> {
+pub fn list_saved() -> Vec<(PathBuf, ViewSettings)> {
     STATES.lock().clone()
 }
 
@@ -511,10 +528,35 @@ pub fn self_test() -> KernelResult<()> {
 
     // Test 4: pattern matching.
     {
-        assert!(path_matches_pattern("/home/user/Pictures", "**/Pictures"));
-        assert!(path_matches_pattern("/data/Photos/Pictures", "**/Pictures"));
-        assert!(!path_matches_pattern("/home/user/pics", "**/Pictures"));
-        assert!(path_matches_pattern("/anything", "*"));
+        assert!(path_matches_pattern(
+            Path::new("/home/user/Pictures"),
+            "**/Pictures"
+        ));
+        assert!(path_matches_pattern(
+            Path::new("/data/Photos/Pictures"),
+            "**/Pictures"
+        ));
+        assert!(!path_matches_pattern(
+            Path::new("/home/user/pics"),
+            "**/Pictures"
+        ));
+        // The suffix must land on a component boundary, or `**/Pictures`
+        // would also claim a differently-named sibling directory.
+        assert!(!path_matches_pattern(
+            Path::new("/home/user/OldPictures"),
+            "**/Pictures"
+        ));
+        assert!(path_matches_pattern(Path::new("/anything"), "*"));
+        // A directory with no UTF-8 spelling still matches `*` and still
+        // matches a `**/` suffix, because the comparison is on bytes.
+        assert!(path_matches_pattern(
+            Path::new(&b"/home/\xFFu/Pictures"[..]),
+            "**/Pictures"
+        ));
+        assert!(path_matches_pattern(
+            Path::new(&b"/home/\xFFu"[..]),
+            "*"
+        ));
         serial_println!("[viewstate] test 4 passed: pattern matching");
     }
 
@@ -537,6 +579,31 @@ pub fn self_test() -> KernelResult<()> {
         serial_println!("[viewstate] test 6 passed: stats");
     }
 
-    serial_println!("[viewstate] all 6 self-tests passed");
+    // Test 7: non-UTF-8 directory names key distinct states
+    // (design-decisions.md §261).
+    {
+        let a = Path::new(&b"/test/vs_\xFFd"[..]);
+        let b = Path::new(&b"/test/vs_\xFEd"[..]);
+
+        let mut sa = ViewSettings::default_settings();
+        sa.mode = ViewMode::LargeIcons;
+        sa.icon_size = 128;
+        set(a, sa)?;
+
+        // `a` has what we set.
+        assert_eq!(get(a).mode, ViewMode::LargeIcons);
+        assert_eq!(get(a).icon_size, 128);
+        // `b` is a different directory and must be untouched.  Under a
+        // `String` key both names would have folded to the same
+        // U+FFFD-bearing spelling and `b` would report `a`'s settings.
+        assert_eq!(get(b).mode, ViewSettings::default_settings().mode);
+
+        // Removal is byte-exact in both directions.
+        assert!(!remove(b), "removing b's absent state reported success");
+        assert!(remove(a), "removing a's state reported failure");
+        serial_println!("[viewstate] test 7 passed: non-UTF-8 directory names");
+    }
+
+    serial_println!("[viewstate] all 7 self-tests passed");
     Ok(())
 }

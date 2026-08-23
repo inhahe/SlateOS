@@ -54846,3 +54846,23 @@ TRIGGER
   A ported script that passes -s or -w and expects the checking to happen, or
   the first bc source file in the tree that is not UTF-8.  Neither exists
   today, which is why refusing loudly is enough for now.
+
+## fs::sparse punched holes no longer notify fstrim (lane A, 2026-08-23)
+
+`punch_hole` used to call `fstrim::notify_free(path, offset, len)` with a
+*file* path and a *file* offset, where that function wants a block device
+and a device LBA.  Removed rather than left in place -- see known-issues
+TD-A-SPARSE-FSTRIM-WRONG-DEVICE for the full write-up, including why it
+was silently harmless until someone implements real discard and why it
+becomes data loss the moment they do.
+
+The correct fix needs a file-offset-to-device-extent mapping (`fiemap`
+equivalent) on the `FileSystem` trait, which does not exist yet.  Until
+then, punching a hole frees space in the filesystem but issues no TRIM
+to the underlying SSD, which is a performance/endurance gap, not a
+correctness one.
+
+TRIGGER
+  Implementing block-device discard behind `fstrim::issue_trim`.  Do the
+  `FileSystem::extents` work first; do not wire discard to the existing
+  callers on the assumption they pass device offsets.

@@ -94,6 +94,21 @@ const MAX_PACKET_SIZE: usize = 262_144;
 /// Maximum version string length.
 const MAX_VERSION_LEN: usize = 255;
 
+/// Hard ceiling on a session's receive buffer.
+///
+/// Sized to the largest thing that can legitimately be in flight: a full
+/// `MAX_PACKET_SIZE` packet, its 4-byte length prefix and its Poly1305 tag.
+/// A buffer larger than this cannot be a prefix of any packet we would
+/// accept, so holding the bytes serves no purpose. This is a *kernel* heap
+/// allocation driven by a pre-authentication peer, which is why it needs an
+/// absolute bound and not merely a per-packet one.
+const MAX_RECV_BUF: usize = 4 + MAX_PACKET_SIZE + POLY1305_TAG_LEN;
+
+// A ceiling that did not admit a full-size packet would silently cut off legal
+// traffic, which is the failure this backstop must not cause. Checked at
+// compile time so an edit to either constant fails the build, not the boot.
+const _: () = assert!(MAX_RECV_BUF > MAX_PACKET_SIZE);
+
 /// Maximum payload size for a single packet (before encryption).
 const MAX_PAYLOAD_SIZE: usize = 32_768;
 
@@ -1995,37 +2010,66 @@ fn send_packet_encrypted(
 
 /// Try to extract a complete unencrypted SSH packet from the receive buffer.
 ///
-/// Returns the payload if a complete packet is available, or None if more
-/// data is needed.
-fn try_read_packet_plain(recv_buf: &mut Vec<u8>) -> Option<Vec<u8>> {
-    if recv_buf.len() < 5 {
-        return None;
+/// Three outcomes, and the distinction between the last two is the whole
+/// point of the signature:
+///
+/// * `Ok(Some(payload))` — a complete packet was consumed.
+/// * `Ok(None)` — the bytes so far are a *prefix* of a legal packet. Wait
+///   for more.
+/// * `Err(..)` — the bytes so far can never become a legal packet. The
+///   caller must drop the session; no amount of further data helps.
+///
+/// This used to return `Option`, folding the last two together into `None`.
+/// The caller loops `while let Some(..)`, so an unparseable length field made
+/// it break out exactly as if the packet were merely incomplete — and then
+/// nothing ever drained the buffer, because draining only happens on a
+/// successful parse. An unauthenticated peer sending four bytes of `ff` and
+/// then streaming filler grew `recv_buf` without bound, and since this server
+/// runs *in the kernel*, that exhausts the kernel heap and takes the machine
+/// down rather than the connection. `try_read_packet_encrypted` had the
+/// three-way shape from the start; this is the same function agreeing with it.
+fn try_read_packet_plain(recv_buf: &mut Vec<u8>) -> KernelResult<Option<Vec<u8>>> {
+    let (Some(&[b0, b1, b2, b3]), Some(&pad_byte)) =
+        (recv_buf.get(..4), recv_buf.get(4))
+    else {
+        return Ok(None); // Fewer than 5 bytes: cannot even read the header.
+    };
+
+    let packet_length = u32::from_be_bytes([b0, b1, b2, b3]) as usize;
+
+    // A length outside the legal range is not a short read — it is a peer
+    // that is not speaking SSH.
+    // The smallest legal packet is the `padding_length` byte plus the
+    // RFC-mandated four bytes of padding, with an empty payload. Whether an
+    // empty payload is *meaningful* is the message layer's business; framing
+    // only rejects what cannot be framed.
+    if packet_length > MAX_PACKET_SIZE || packet_length < MIN_PADDING + 1 {
+        return Err(KernelError::InvalidArgument);
     }
 
-    let packet_length =
-        u32::from_be_bytes([recv_buf[0], recv_buf[1], recv_buf[2], recv_buf[3]]) as usize;
-
-    if packet_length > MAX_PACKET_SIZE || packet_length < 2 {
-        return None; // Invalid.
+    // `padding_length` is one byte, so this cannot overflow.
+    let padding_len = usize::from(pad_byte);
+    if padding_len < MIN_PADDING || padding_len + 1 > packet_length {
+        return Err(KernelError::InvalidArgument);
     }
 
-    let total = 4 + packet_length;
+    let total = packet_length.saturating_add(4);
     if recv_buf.len() < total {
-        return None; // Incomplete.
+        return Ok(None); // Incomplete — a legal prefix, keep waiting.
     }
 
-    let padding_len = recv_buf[4] as usize;
-    if padding_len + 1 > packet_length {
-        return None; // Invalid.
-    }
-
+    // Both subtractions are covered by the `padding_len + 1 > packet_length`
+    // rejection above, and `5 + payload_len <= total <= recv_buf.len()`.
     let payload_len = packet_length - 1 - padding_len;
-    let payload = recv_buf[5..5 + payload_len].to_vec();
+    let payload = recv_buf
+        .get(5..5usize.saturating_add(payload_len))
+        .ok_or(KernelError::InvalidArgument)?
+        .to_vec();
 
     // Remove consumed bytes.
     *recv_buf = recv_buf.split_off(total);
 
-    Some(payload)
+    Ok(Some(payload))
 }
 
 /// Try to extract a complete encrypted SSH packet from the receive buffer.
@@ -2292,11 +2336,21 @@ pub fn tick() {
         // Read available data from TCP.
         match tcp_read(session.tcp_handle) {
             Ok(data) if !data.is_empty() => {
-                #[allow(clippy::cast_possible_truncation)]
-                {
-                    session.bytes_rx += data.len() as u64;
-                }
+                session.bytes_rx = session.bytes_rx.saturating_add(data.len() as u64);
                 session.recv_buf.extend_from_slice(&data);
+                // Backstop. The readers below bound what they *consume*, but
+                // nothing bounded what accumulates, and this buffer is kernel
+                // heap fed by an unauthenticated peer. Past this point the
+                // bytes cannot be the prefix of any legal packet — the largest
+                // one that exists is `MAX_RECV_BUF` — so the peer is either
+                // broken or hostile, and either way the session is over.
+                if session.recv_buf.len() > MAX_RECV_BUF {
+                    crate::serial_println!(
+                        "[ssh] Receive buffer overrun ({} bytes) — closing session",
+                        session.recv_buf.len()
+                    );
+                    session.phase = SessionPhase::Closed;
+                }
             }
             Err(_) => {
                 // Connection error — close session.
@@ -2336,7 +2390,23 @@ pub fn tick() {
             | SessionPhase::WaitKexEcdhInit
             | SessionPhase::WaitNewKeys => {
                 // Read unencrypted packets.
-                while let Some(payload) = try_read_packet_plain(&mut session.recv_buf) {
+                loop {
+                    let payload = match try_read_packet_plain(&mut session.recv_buf) {
+                        Ok(Some(payload)) => payload,
+                        // A legal prefix. Leave it buffered and come back.
+                        Ok(None) => break,
+                        // Unframeable. Nothing further from this peer can
+                        // rescue the byte stream, so drop the session rather
+                        // than leave undrainable bytes on the kernel heap.
+                        Err(e) => {
+                            crate::serial_println!(
+                                "[ssh] Malformed packet ({e:?}) — closing session"
+                            );
+                            session.phase = SessionPhase::Closed;
+                            break;
+                        }
+                    };
+
                     match process_message(session, &payload, &host_key_seed, &host_key_public) {
                         Ok(responses) => {
                             for resp in responses {
@@ -2518,6 +2588,7 @@ pub struct SshStats {
 pub fn self_test() -> KernelResult<()> {
     use crate::serial_println;
     serial_println!("[ssh] Running self-test...");
+    let mut passed = 0u32;
 
     // Test 1: Unencrypted packet build/parse round-trip.
     {
@@ -2533,12 +2604,65 @@ pub fn self_test() -> KernelResult<()> {
 
         // Parse it back.
         let mut buf = packet;
-        let parsed = try_read_packet_plain(&mut buf);
+        let parsed = try_read_packet_plain(&mut buf)?;
         assert!(parsed.is_some(), "Packet parse failed");
-        assert_eq!(parsed.unwrap(), payload, "Payload mismatch");
+        assert_eq!(parsed.unwrap_or_default(), payload, "Payload mismatch");
         assert!(buf.is_empty(), "Buffer not empty after parse");
 
+        passed = passed.saturating_add(1);
         serial_println!("[ssh]   Packet build/parse: OK");
+    }
+
+    // Test 1b: the framing reader must tell "incomplete" apart from
+    // "impossible".  Conflating them is what let an unauthenticated peer grow
+    // `recv_buf` without bound: the caller breaks out of its read loop on
+    // `Ok(None)` and waits for more data, so a length field that can never be
+    // satisfied parks bytes on the kernel heap forever.
+    {
+        // A legal prefix must be `Ok(None)` — held, not rejected.
+        for prefix in [0usize, 1, 4, 5, 8] {
+            let full = build_packet(b"partial packet body");
+            let mut buf = full.get(..prefix).unwrap_or_default().to_vec();
+            let r = try_read_packet_plain(&mut buf);
+            assert!(
+                matches!(r, Ok(None)),
+                "a legal prefix must be held for more data"
+            );
+            assert_eq!(buf.len(), prefix, "a held prefix must not be consumed");
+        }
+
+        // An oversize length must be `Err`, not `Ok(None)`.  This is the exact
+        // shape of the denial of service: four bytes of `ff` and then filler.
+        let mut buf = vec![0xffu8; 64];
+        assert!(
+            try_read_packet_plain(&mut buf).is_err(),
+            "a length above MAX_PACKET_SIZE must close the session"
+        );
+
+        // A length below the smallest frameable packet, likewise.
+        for bad_len in 0..=MIN_PADDING {
+            let mut buf = u32::try_from(bad_len).unwrap_or(0).to_be_bytes().to_vec();
+            buf.resize(64, 0);
+            assert!(
+                try_read_packet_plain(&mut buf).is_err(),
+                "an undersize packet_length must close the session"
+            );
+        }
+
+        // Padding below the RFC 4253 minimum of four, and padding that would
+        // consume more than the packet holds.
+        for bad_pad in [0u8, 1, 2, 3, 0xff] {
+            let mut buf = 16u32.to_be_bytes().to_vec();
+            buf.push(bad_pad);
+            buf.resize(64, 0);
+            assert!(
+                try_read_packet_plain(&mut buf).is_err(),
+                "an out-of-range padding_length must close the session"
+            );
+        }
+
+        passed = passed.saturating_add(1);
+        serial_println!("[ssh]   Packet framing rejects unframeable input: OK");
     }
 
     // Test 2: Encrypted packet round-trip.
@@ -2554,6 +2678,7 @@ pub fn self_test() -> KernelResult<()> {
         let decrypted = decrypt_packet(&encrypted, seq, &main_key, &header_key)?;
         assert_eq!(decrypted, payload, "Encrypted round-trip mismatch");
 
+        passed = passed.saturating_add(1);
         serial_println!("[ssh]   Encrypted packet round-trip: OK");
     }
 
@@ -2577,6 +2702,7 @@ pub fn self_test() -> KernelResult<()> {
             "Tampered packet should fail decryption"
         );
 
+        passed = passed.saturating_add(1);
         serial_println!("[ssh]   MAC tamper detection: OK");
     }
 
@@ -2604,6 +2730,7 @@ pub fn self_test() -> KernelResult<()> {
             "C2S and S2C keys should differ"
         );
 
+        passed = passed.saturating_add(1);
         serial_println!("[ssh]   Key derivation: OK");
     }
 
@@ -2622,6 +2749,7 @@ pub fn self_test() -> KernelResult<()> {
         assert_eq!(s, b"test");
         assert_eq!(consumed, 8);
 
+        passed = passed.saturating_add(1);
         serial_println!("[ssh]   Wire format helpers: OK");
     }
 
@@ -2639,6 +2767,7 @@ pub fn self_test() -> KernelResult<()> {
         let h = encode_mpint(&[0x80]);
         assert_eq!(h, [0, 0, 0, 2, 0x00, 0x80]);
 
+        passed = passed.saturating_add(1);
         serial_println!("[ssh]   mpint encoding: OK");
     }
 
@@ -2651,6 +2780,7 @@ pub fn self_test() -> KernelResult<()> {
         let extracted = extract_ed25519_pubkey(&blob)?;
         assert_eq!(extracted, pubkey, "Host key round-trip failed");
 
+        passed = passed.saturating_add(1);
         serial_println!("[ssh]   Host key encoding: OK");
     }
 
@@ -2660,6 +2790,7 @@ pub fn self_test() -> KernelResult<()> {
         assert_eq!(kexinit[0], msg::KEXINIT, "KEXINIT msg type");
         assert!(kexinit.len() > 17, "KEXINIT too short");
 
+        passed = passed.saturating_add(1);
         serial_println!("[ssh]   KEXINIT construction: OK");
     }
 
@@ -2671,9 +2802,10 @@ pub fn self_test() -> KernelResult<()> {
         assert_eq!(lf_to_crlf("\n"), "\r\n");
         assert_eq!(lf_to_crlf("a\r\nb"), "a\r\r\nb"); // Pre-existing CRLF: don't double-convert
         // (real usage won't have these, but it's safe).
+        passed = passed.saturating_add(1);
         serial_println!("[ssh]   LF→CRLF conversion: OK");
     }
 
-    serial_println!("[ssh] Self-test PASSED (9 tests)");
+    serial_println!("[ssh] Self-test PASSED ({passed} tests)");
     Ok(())
 }

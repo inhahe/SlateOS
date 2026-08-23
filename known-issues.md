@@ -50388,7 +50388,7 @@ commands that carry the colour in question, and assert the two renders agree.
 Candidates: anything drawn on the wallpaper, on a video surface, on a
 thumbnail, or on any other content the palette does not own.
 
-**Part 2 progress. 33 of 49 modules converted.**
+**Part 2 progress. 34 of 49 modules converted.**
 
 - [x] `security_dialog.rs` — 29 constants, done 2026-08-22. The method above
   survived contact: the sweep lives in `gui/desktop/src/palette_check.rs` as
@@ -52256,6 +52256,80 @@ thumbnail, or on any other content the palette does not own.
     currently plotted so that graphing GPU later cannot quietly make it
     ambiguous; and a metric's label and sparkline are one colour said twice,
     derived at each site rather than named beside it.
+- [x] `mouse_settings.rs` — 10 constants over 14 colour sites, done 2026-08-23.
+  Twenty-three tests in the module (nine new), harness defects Ax50–Kx51
+  (thirty-seven), all thirty-seven caught, none escaped, none under-caught,
+  none under-declared.
+  - **The first module in the conversion to come back clean on the first run**,
+    and the reason is that the last two modules' lessons were applied *before*
+    writing the tests rather than discovered by writing the defects. Module 32
+    taught that a branch the fixture does not render is a branch the test does
+    not check, so all three state-dependent sites here — the header background,
+    the heading ink and the toggle pill — are rendered both ways at every
+    section from the start. Module 33 taught that a test doing two jobs cannot
+    be read as a coverage claim about either, so each test here makes exactly
+    one claim and every *pin* lives in the pinning table. That is worth
+    recording because it is the first evidence the method is transferable
+    rather than a sequence of one-off saves.
+  - **Seventeen of the thirty-seven defects are invisible to both sweeps.**
+    Membership caught 20 and the deleted-constant list caught 20 — the same 20,
+    every one of them a leftover Mocha literal. Every *permutation* defect (a
+    legal role in the wrong place) passes both, and six of them are caught by
+    `every_site_draws_the_role_it_claims` **alone**: the panel drawn a rung up
+    on `surface0`, the title at a label's dimness, the label and value swapped,
+    the switch label at a value's brightness, and the pill with its branches
+    collapsed so every switch looks on. n source sites still need n assertions;
+    nothing else has ever caught these.
+  - **The one defect the shipped theme would hide, stated as its own defect.**
+    The open section's heading pinned to `p.blue` rather than the accent is
+    legal (blue is a role), survives both sweeps, and is caught by four tests —
+    *all four of which would pass under the stock palette*, because the stock
+    accent **is** blue. The off-palette magenta fixture is the only reason any
+    of them can see it. Third module in a row where the accent/role collision
+    is the load-bearing part of the fixture rather than a detail of it.
+  - **The thumb is asserted from both sides, and the second side is the
+    load-bearing one.** `emphasized(p.accent)` replaces a `LAVENDER` that sat
+    beside a `BLUE` fill with nothing connecting them — the same shape as
+    `launcher.rs`'s two self-comparing alphas. The test asserts both that the
+    handle *is* the derivation and that it equals **no role at all**, across
+    three different accents. The first half alone would pass a future edit that
+    pinned the thumb to whichever role happened to match under one accent; the
+    second half is also what makes the membership sweep's `derived` list honest,
+    since a derived colour that turned out to be a role would be waved through
+    by `Palette::roles()` without the declaration doing any work. Defect
+    "thumb is `emphasized(p.blue)`" is caught by the sweep for exactly that
+    reason: (107, 139, 194) is in neither palette and is not what was declared.
+  - **A count is what makes "the accent means one thing" falsifiable.** The
+    pinning table names fourteen sites and by construction cannot notice a
+    fifteenth, and "the accent is used tastefully" is not a property a command
+    list carries. So judgement 1 is a table of exact counts per (section,
+    switches) — one heading plus one fill per slider on show — written out by
+    hand rather than derived from the same `if` the renderer uses, which would
+    have made the test agree with any answer. It catches eleven defects,
+    including every one that *adds* an accent: the banner, a switched-on pill,
+    the track along its whole length, the thumb, and the panel background.
+  - **The retheme test is narrow, and that is why it could be declared
+    precisely.** `only_what_is_in_force_moves_when_the_accent_moves` renders the
+    whole panel under two different accents and asks which commands differ —
+    the question a user asks by changing their accent and glancing at the
+    screen. It caught seven defects and, correctly, said nothing about the ten
+    that swap one fixed role for another: those render identically under both
+    accents. A whole-list test that fired on everything would have been an
+    under-declared mess; this one fires only on sites that gain or lose their
+    dependence on the accent.
+  - **The low-contrast knob is left alone on purpose.** `text` on a `green`
+    pill is two light values —
+    `TD-C-SWITCH-KNOBS-ARE-LOW-CONTRAST-ON-THE-ON-PILL`, being fixed across the
+    shell in one pass so every switch reaches the same answer. What *is*
+    asserted here is the separable half: the knob is the same ink on both
+    pills, because it marks a position and a position does not change meaning
+    when the state does. The docstring names the debt so the next reader does
+    not mistake a deferred fix for an unnoticed one.
+  - Judgements, for the record: the accent says what is in force and says
+    nothing else; a state is not a position, so the on-pill and the unsaved
+    banner keep named hues that survive a retheme; the thumb is derived from
+    its fill rather than named beside it; and three sites choose by state, so
+    every test renders both branches.
 
 **Trigger:** this is not blocked on anything. It is sequenced after the shell
 event loop (`TD-C-THE-SHELL-CAN-DRAW-ITSELF-AND-NOBODY-CAN-ASK-IT-TO`) only

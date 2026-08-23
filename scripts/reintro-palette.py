@@ -82,6 +82,7 @@ LANG = "gui/desktop/src/language_settings.rs"
 DAPP = "gui/desktop/src/default_apps.rs"
 LAUN = "gui/desktop/src/launcher.rs"
 RESMON = "gui/desktop/src/resmon.rs"
+MOUSESET = "gui/desktop/src/mouse_settings.rs"
 
 # (name, file, [(old, new), ...], [packages], [tests expected to fail])
 DEFECTS = [
@@ -13002,6 +13003,526 @@ DEFECTS = [
         [
             'no_colour_in_this_module_marks_a_position',
             'a_metric_is_one_colour_wherever_it_appears',
+        ],
+    ),
+    (
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA: the panel background keeps Catppuccin Mocha's own base",
+        MOUSESET,
+        [
+            ('            height: 900.0,\n            color: p.base,',
+             '            height: 900.0,\n            color: guitk::color::Color::from_hex(0x1E1E2E),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_panel_draws_comes_from_its_palette',
+            'none_of_the_ten_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        'BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB: the panel title keeps Mocha text',
+        MOUSESET,
+        [
+            ('            font_size: 20.0,\n            color: p.text,',
+             '            font_size: 20.0,\n            color: guitk::color::Color::from_hex(0xCDD6F4),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_panel_draws_comes_from_its_palette',
+            'none_of_the_ten_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC: the open section's header keeps Mocha surface0",
+        MOUSESET,
+        [
+            ('                color: if expanded { p.surface0 } else { p.mantle },',
+             '                color: if expanded { guitk::color::Color::from_hex(0x313244) } else { p.mantle },'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_panel_draws_comes_from_its_palette',
+            'none_of_the_ten_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+            'exactly_one_section_reads_as_open',
+        ],
+    ),
+    (
+        "DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD: the closed sections' headers keep Mocha mantle",
+        MOUSESET,
+        [
+            ('                color: if expanded { p.surface0 } else { p.mantle },',
+             '                color: if expanded { p.surface0 } else { guitk::color::Color::from_hex(0x181825) },'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_panel_draws_comes_from_its_palette',
+            'none_of_the_ten_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+            'exactly_one_section_reads_as_open',
+        ],
+    ),
+    (
+        "EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE: the open section's heading keeps Mocha blue, which is the very substitution the stock accent hides",
+        MOUSESET,
+        [
+            ('                color: if expanded { p.accent } else { p.text },',
+             '                color: if expanded { guitk::color::Color::from_hex(0x89B4FA) } else { p.text },'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_panel_draws_comes_from_its_palette',
+            'none_of_the_ten_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+            'exactly_one_section_reads_as_open',
+            'only_what_is_in_force_is_accented',
+            'only_what_is_in_force_moves_when_the_accent_moves',
+        ],
+    ),
+    (
+        "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF: the closed sections' headings keep Mocha text",
+        MOUSESET,
+        [
+            ('                color: if expanded { p.accent } else { p.text },',
+             '                color: if expanded { p.accent } else { guitk::color::Color::from_hex(0xCDD6F4) },'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_panel_draws_comes_from_its_palette',
+            'none_of_the_ten_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+            'exactly_one_section_reads_as_open',
+        ],
+    ),
+    (
+        'GGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGG: the unsaved-changes banner keeps Mocha surface0',
+        MOUSESET,
+        [
+            ('                height: 36.0,\n                color: p.surface0,',
+             '                height: 36.0,\n                color: guitk::color::Color::from_hex(0x313244),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_panel_draws_comes_from_its_palette',
+            'none_of_the_ten_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        'HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH: the unsaved-changes warning keeps Mocha yellow',
+        MOUSESET,
+        [
+            ('                color: p.yellow,',
+             '                color: guitk::color::Color::from_hex(0xF9E2AF),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_panel_draws_comes_from_its_palette',
+            'none_of_the_ten_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+            'a_state_is_not_a_position',
+        ],
+    ),
+    (
+        "IIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIII: a setting's label keeps Mocha subtext0",
+        MOUSESET,
+        [
+            ('            color: p.subtext0,\n            font_weight: FontWeightHint::Regular,\n            max_width: Some(width * 0.5),',
+             '            color: guitk::color::Color::from_hex(0xA6ADC8),\n            font_weight: FontWeightHint::Regular,\n            max_width: Some(width * 0.5),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_panel_draws_comes_from_its_palette',
+            'none_of_the_ten_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "JJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJ: a setting's value keeps Mocha text",
+        MOUSESET,
+        [
+            ('            color: p.text,\n            font_weight: FontWeightHint::Regular,\n            max_width: Some(width * 0.4),',
+             '            color: guitk::color::Color::from_hex(0xCDD6F4),\n            font_weight: FontWeightHint::Regular,\n            max_width: Some(width * 0.4),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_panel_draws_comes_from_its_palette',
+            'none_of_the_ten_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "KKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKK: a switch's label keeps Mocha subtext0",
+        MOUSESET,
+        [
+            ('            color: p.subtext0,\n            font_weight: FontWeightHint::Regular,\n            max_width: Some(width * 0.6),',
+             '            color: guitk::color::Color::from_hex(0xA6ADC8),\n            font_weight: FontWeightHint::Regular,\n            max_width: Some(width * 0.6),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_panel_draws_comes_from_its_palette',
+            'none_of_the_ten_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        'LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLL: a switched-on pill keeps Mocha green',
+        MOUSESET,
+        [
+            ('        let bg = if on { p.green } else { p.surface1 };',
+             '        let bg = if on { guitk::color::Color::from_hex(0xA6E3A1) } else { p.surface1 };'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_panel_draws_comes_from_its_palette',
+            'none_of_the_ten_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+            'a_state_is_not_a_position',
+        ],
+    ),
+    (
+        'MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM: a switched-off pill keeps Mocha surface1',
+        MOUSESET,
+        [
+            ('        let bg = if on { p.green } else { p.surface1 };',
+             '        let bg = if on { p.green } else { guitk::color::Color::from_hex(0x45475A) };'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_panel_draws_comes_from_its_palette',
+            'none_of_the_ten_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        'NNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNN: the switch knob keeps Mocha text',
+        MOUSESET,
+        [
+            ('            height: 16.0,\n            color: p.text,',
+             '            height: 16.0,\n            color: guitk::color::Color::from_hex(0xCDD6F4),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_panel_draws_comes_from_its_palette',
+            'none_of_the_ten_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+            'the_knob_is_the_same_ink_on_both_pills',
+        ],
+    ),
+    (
+        'OOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOO: the slider track keeps Mocha surface1',
+        MOUSESET,
+        [
+            ('            height: track_h,\n            color: p.surface1,',
+             '            height: track_h,\n            color: guitk::color::Color::from_hex(0x45475A),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_panel_draws_comes_from_its_palette',
+            'none_of_the_ten_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        'PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPP: the slider fill keeps Mocha blue',
+        MOUSESET,
+        [
+            ('            // Judgement 1: how much of this control is set.\n            color: p.accent,',
+             '            // Judgement 1: how much of this control is set.\n            color: guitk::color::Color::from_hex(0x89B4FA),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_panel_draws_comes_from_its_palette',
+            'none_of_the_ten_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+            'only_what_is_in_force_is_accented',
+        ],
+    ),
+    (
+        'QQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQ: the slider thumb keeps Mocha lavender',
+        MOUSESET,
+        [
+            ('            color: emphasized(p.accent),',
+             '            color: guitk::color::Color::from_hex(0xB4BEFE),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_panel_draws_comes_from_its_palette',
+            'none_of_the_ten_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+            'the_thumb_is_derived_from_the_fill_it_ends',
+        ],
+    ),
+    (
+        'RRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRR: the panel background is drawn a rung up, on the same surface as the header that is meant to stand proud of it',
+        MOUSESET,
+        [
+            ('            height: 900.0,\n            color: p.base,',
+             '            height: 900.0,\n            color: p.surface0,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "SSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSS: the panel title is drawn at a label's dimness",
+        MOUSESET,
+        [
+            ('            font_size: 20.0,\n            color: p.text,',
+             '            font_size: 20.0,\n            color: p.subtext0,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        'TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT: the section headers are the wrong way round, so the four you are not editing stand proud and the one you are recedes',
+        MOUSESET,
+        [
+            ('                color: if expanded { p.surface0 } else { p.mantle },',
+             '                color: if expanded { p.mantle } else { p.surface0 },'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'exactly_one_section_reads_as_open',
+        ],
+    ),
+    (
+        'UUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUU: the section headings are the wrong way round, so four sections claim to be in force and the open one does not',
+        MOUSESET,
+        [
+            ('                color: if expanded { p.accent } else { p.text },',
+             '                color: if expanded { p.text } else { p.accent },'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'exactly_one_section_reads_as_open',
+            'only_what_is_in_force_is_accented',
+            'only_what_is_in_force_moves_when_the_accent_moves',
+        ],
+    ),
+    (
+        'VVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVV: the unsaved-changes warning is accented, so a fact about the whole panel reads as the section you are looking at',
+        MOUSESET,
+        [
+            ('                color: p.yellow,',
+             '                color: p.accent,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'a_state_is_not_a_position',
+            'only_what_is_in_force_is_accented',
+            'only_what_is_in_force_moves_when_the_accent_moves',
+            'ui_render_with_dirty',
+        ],
+    ),
+    (
+        "WWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWW: a switched-on pill is accented, so 'switched on' and 'where you are' become one colour",
+        MOUSESET,
+        [
+            ('        let bg = if on { p.green } else { p.surface1 };',
+             '        let bg = if on { p.accent } else { p.surface1 };'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'a_state_is_not_a_position',
+            'only_what_is_in_force_is_accented',
+            'only_what_is_in_force_moves_when_the_accent_moves',
+        ],
+    ),
+    (
+        "XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX: a setting's label and its value swap, so the name is brighter than the number the user came to read",
+        MOUSESET,
+        [
+            ('            color: p.subtext0,\n            font_weight: FontWeightHint::Regular,\n            max_width: Some(width * 0.5),',
+             '            color: p.text,\n            font_weight: FontWeightHint::Regular,\n            max_width: Some(width * 0.5),'),
+            ('            color: p.text,\n            font_weight: FontWeightHint::Regular,\n            max_width: Some(width * 0.4),',
+             '            color: p.subtext0,\n            font_weight: FontWeightHint::Regular,\n            max_width: Some(width * 0.4),'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "YYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYY: the slider fill is pinned to blue, so how much is set stops following the user's accent",
+        MOUSESET,
+        [
+            ('            // Judgement 1: how much of this control is set.\n            color: p.accent,',
+             '            // Judgement 1: how much of this control is set.\n            color: p.blue,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'only_what_is_in_force_is_accented',
+        ],
+    ),
+    (
+        "ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ: the open section's heading is pinned to blue — legal, invisible at the stock theme, and wrong at every other",
+        MOUSESET,
+        [
+            ('                color: if expanded { p.accent } else { p.text },',
+             '                color: if expanded { p.blue } else { p.text },'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'exactly_one_section_reads_as_open',
+            'only_what_is_in_force_is_accented',
+            'only_what_is_in_force_moves_when_the_accent_moves',
+        ],
+    ),
+    (
+        'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA: the slider thumb is pinned to lavender again, the named-beside-it shape this conversion existed to remove',
+        MOUSESET,
+        [
+            ('            color: emphasized(p.accent),',
+             '            color: p.lavender,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'the_thumb_is_derived_from_the_fill_it_ends',
+        ],
+    ),
+    (
+        "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB: the slider thumb is the fill's own colour, so there is no handle to see",
+        MOUSESET,
+        [
+            ('            color: emphasized(p.accent),',
+             '            color: p.accent,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'the_thumb_is_derived_from_the_fill_it_ends',
+            'only_what_is_in_force_is_accented',
+        ],
+    ),
+    (
+        'CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC: the switch knob follows its pill, so the thing that marks the position changes meaning with the state',
+        MOUSESET,
+        [
+            ('            height: 16.0,\n            color: p.text,',
+             '            height: 16.0,\n            color: bg,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'the_knob_is_the_same_ink_on_both_pills',
+        ],
+    ),
+    (
+        'DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD: the slider track is accented along its whole length, so every control reads as fully set',
+        MOUSESET,
+        [
+            ('            height: track_h,\n            color: p.surface1,',
+             '            height: track_h,\n            color: p.accent,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'only_what_is_in_force_is_accented',
+        ],
+    ),
+    (
+        'EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE: the section header stops depending on state, so nothing in the strip says which section is open',
+        MOUSESET,
+        [
+            ('                color: if expanded { p.surface0 } else { p.mantle },',
+             '                color: p.surface0,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'exactly_one_section_reads_as_open',
+        ],
+    ),
+    (
+        'FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF: the section heading stops depending on state, so all five sections claim to be in force at once',
+        MOUSESET,
+        [
+            ('                color: if expanded { p.accent } else { p.text },',
+             '                color: p.accent,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'exactly_one_section_reads_as_open',
+            'only_what_is_in_force_is_accented',
+            'only_what_is_in_force_moves_when_the_accent_moves',
+        ],
+    ),
+    (
+        'GGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGG: the toggle pill stops depending on state, so every switch looks on',
+        MOUSESET,
+        [
+            ('        let bg = if on { p.green } else { p.surface1 };',
+             '        let bg = p.green;'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH: a switch's label is drawn at a value's brightness, so the two halves of a row disagree about which is the reading",
+        MOUSESET,
+        [
+            ('            color: p.subtext0,\n            font_weight: FontWeightHint::Regular,\n            max_width: Some(width * 0.6),',
+             '            color: p.text,\n            font_weight: FontWeightHint::Regular,\n            max_width: Some(width * 0.6),'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        'IIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIII: the panel background itself is accented, so the accent stops meaning anything at all',
+        MOUSESET,
+        [
+            ('            height: 900.0,\n            color: p.base,',
+             '            height: 900.0,\n            color: p.accent,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'only_what_is_in_force_is_accented',
+            'only_what_is_in_force_moves_when_the_accent_moves',
+        ],
+    ),
+    (
+        'JJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJ: the slider thumb is emphasized off blue rather than off the fill, so it is derived from a colour the track never uses',
+        MOUSESET,
+        [
+            ('            color: emphasized(p.accent),',
+             '            color: emphasized(p.blue),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_panel_draws_comes_from_its_palette',
+            'every_site_draws_the_role_it_claims',
+            'the_thumb_is_derived_from_the_fill_it_ends',
+        ],
+    ),
+    (
+        "KKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKK: the switch knob is drawn at a label's dimness",
+        MOUSESET,
+        [
+            ('            height: 16.0,\n            color: p.text,',
+             '            height: 16.0,\n            color: p.subtext0,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'the_knob_is_the_same_ink_on_both_pills',
         ],
     ),
 ]

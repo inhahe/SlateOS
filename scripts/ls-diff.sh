@@ -498,16 +498,75 @@ ls -C -w 40 --quoting-style=escape w
 ls -C -w 40 --quoting-style=shell-escape w
 ls -l w
 
+# --- colour ---
+#
+# The fixture is chosen for this as much as for anything else: `t` holds one
+# entry for nearly every slot the default table colours -- a directory, a
+# setgid directory, a sticky-and-other-writable directory, a fifo, a socket, a
+# symlink that resolves, one that does not, a setuid executable, a file with
+# two links, and three extensions.
+#
+# `--color=auto` and `--color=never` are here to be measured *not* colouring:
+# neither side has a terminal, so `auto` must come out identical to a plain
+# listing, and that is the case that decides whether a script parsing `ls`
+# breaks.
+ls --color=always t
+ls --color=always -l t
+ls --color=always -F t
+ls --color=always -C -w 40 t
+ls --color=always -C -w 14 t
+ls --color=always -x -w 40 t
+ls --color=always -m -w 40 t
+ls --color=always -i -s t
+ls --color=always -R r
+ls --color=always -a -l t
+ls --color=always -C -w 0 t
+ls --color=always -F -C -w 14 t
+ls --color=always -l --dired t
+ls --color=auto t
+ls --color=never t
+ls --color t
+ls --colour=always t
+
+# Each of these reaches a branch of the table that the default `LS_COLORS`
+# cannot: `no` (which every other colour is then reset against), an `ec` that
+# replaces the three-part end sequence, `ln=target` (a link painted as what it
+# points at), `mi` (which only `ln=target` can reach), an extension whose case
+# does and does not collide, the three other-writable slots, the multi-link
+# slot, the setuid and setgid slots, an unknown two-letter key, a trailing
+# separator, a colour that is exactly `0` (which is *not* "no colour"), an
+# empty variable (which is not the same as an unset one), replaced `lc`/`rc`
+# brackets, and a `cl` reached only by a name that might have wrapped.
+LS_COLORS='di=01;34:ex=01;32' ls --color=always t
+LS_COLORS='no=01;37:di=34' ls --color=always -l t
+LS_COLORS='ec=\e[0m:di=34' ls --color=always t
+LS_COLORS='ln=target' ls --color=always -l t
+LS_COLORS='mi=05;41:ln=target' ls --color=always -l t
+LS_COLORS='*.gz=01;31:*.TAR.GZ=01;35' ls --color=always t
+LS_COLORS='*.gz=01;31:*.GZ=01;31' ls --color=always t
+LS_COLORS='ow=34;42:st=37;44:tw=30;42' ls --color=always t
+LS_COLORS='mh=04;44' ls --color=always t
+LS_COLORS='su=37;41:sg=30;43' ls --color=always -l t
+LS_COLORS='xy=01:di=34' ls --color=always t
+LS_COLORS='di=34:' ls --color=always t
+LS_COLORS='di=0' ls --color=always t
+LS_COLORS= ls --color=always t
+LS_COLORS='lc=<:rc=>:di=34' ls --color=always t
+LS_COLORS='cl=\e[K:di=34' ls --color=always -C -w 14 t
+
+# `TERM` and `COLORTERM` are read by `dircolors`, not by `ls` -- so all three
+# of these must be identical to the case above them. They are here because
+# that is not obvious, and a port that consulted `TERM` would look right.
+TERM=xterm ls --color=always t
+TERM=dumb ls --color=always t
+COLORTERM=truecolor ls --color=always t
+
 # --- deliberately different ---
 !our width table is bash's and 9.5's is gnulib's; open-questions "Which width table should charwidth follow"|ls --sort=width -1 y
 !same entry: the soft hyphen is zero columns to gnulib and one to glibc, so 22 columns hold one row of four for GNU and two rows of two for us|ls -C -w 22 y
 !--help text is ours|ls --help
 !--version text is ours|ls --version
-!colour is not implemented; known-issues TD-B-LS-ACCEPTS-COLOUR-AND-HYPERLINK-WITHOUT-EMITTING-EITHER|ls --color=always t
-!colour is not implemented|ls --color=always -l t
-!colour is not implemented|LS_COLORS='di=01;34:ex=01;32' ls --color=always t
-!colour is not implemented|ls --color=always -F t
-!hyperlinks are not implemented; same entry|ls --hyperlink=always t
+!hyperlinks are not implemented; known-issues TD-B-LS-ACCEPTS-HYPERLINK-WITHOUT-EMITTING-IT|ls --hyperlink=always t
 !hyperlinks are not implemented|ls --hyperlink=always -l t
 CASES
 

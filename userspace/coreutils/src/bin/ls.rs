@@ -32,7 +32,7 @@
 //! `ls -l`'s owner column and `id`'s must agree, `ls -l`'s clock and `date`'s
 //! must agree, and `ls -h`'s `1.5G` and `df -h`'s must agree.
 //!
-//! # The four rules that are not guessable
+//! # The five rules that are not guessable
 //!
 //! **A file's *suffix* is cut off before `-v` compares it.** That is why `ls -v`
 //! puts `a.b` before `a-b`, and it lives in `coreutils::vercmp` because
@@ -51,6 +51,13 @@
 //! accumulated in memory rather than streamed: the offsets are only knowable
 //! once the surrounding text has been written.
 //!
+//! **Those offsets do not count the colour escapes.** Upstream increments its
+//! `dired_pos` by hand at every write, and the one write that forgets is the
+//! one that emits a colour — so `ls --color --dired` reports offsets that point
+//! into the middle of an escape. It is reproduced, at the cost of a counter
+//! ([`Out::uncounted`]) that exists only to subtract bytes this program would
+//! otherwise have counted correctly. See `design-decisions.md` §368.
+//!
 //! Built only on unix-family targets — our `x86_64-slateos` presents as
 //! `linux-musl`, so `cfg(unix)` matches.
 
@@ -65,7 +72,10 @@ use coreutils::pathname::{base_len, last_component, last_component_offset};
 use coreutils::quote::{Mb, Style, next_mb, os_bytes, quote, quoteaf, quotef};
 use coreutils::vercmp::version;
 use coreutils::xnum::{self, Status, strtol_fatal};
-use modechange::{S_IFBLK, S_IFCHR, S_IFDIR, S_IFIFO, S_IFLNK, S_IFMT, S_IFREG, S_IFSOCK};
+use modechange::{
+    S_IFBLK, S_IFCHR, S_IFDIR, S_IFIFO, S_IFLNK, S_IFMT, S_IFREG, S_IFSOCK, S_ISGID, S_ISUID,
+    S_ISVTX, S_IWOTH, S_IXUGO,
+};
 use std::cmp::Ordering;
 use std::ffi::OsString;
 use std::io::Write;
@@ -573,6 +583,12 @@ struct Config {
     format_needs_stat: bool,
     format_needs_type: bool,
     check_symlink_mode: bool,
+    /// The colour table, or `None` for no colour. Upstream keeps the two apart
+    /// — a `print_with_color` flag, and a global table that exists whether or
+    /// not it is used — and so has to re-test the flag right after calling
+    /// `parse_ls_color`, because parsing can turn colour back off. One
+    /// `Option` says that once: if the table is here, colour is on.
+    colors: Option<Box<Colors>>,
 }
 
 impl Default for Config {
@@ -620,6 +636,7 @@ impl Default for Config {
             format_needs_stat: false,
             format_needs_type: false,
             check_symlink_mode: false,
+            colors: None,
         }
     }
 }
@@ -634,6 +651,16 @@ struct Environment {
     time_style: Option<Vec<u8>>,
     ls_block_size: Option<Vec<u8>>,
     block_size: Option<Vec<u8>>,
+    /// `LS_COLORS`, read only when the switches asked for colour. Unset and
+    /// empty mean the same thing to [`parse_ls_color`] and different things to
+    /// nothing else.
+    ls_colors: Option<Vec<u8>>,
+    /// `COLORTERM`. Any non-empty value is enough to make the built-in colour
+    /// table apply when `LS_COLORS` is unset; the value itself is never read.
+    colorterm: Option<Vec<u8>>,
+    /// `TERM`, matched against `dircolors`' own list of terminals in
+    /// [`known_term_type`] for the same purpose.
+    term: Option<Vec<u8>>,
     posixly_correct: bool,
     stdout_isatty: bool,
     /// `hard_locale (LC_TIME)`: false only for exactly `C` and `POSIX`.
@@ -766,6 +793,11 @@ struct Settings {
     width_opt: Option<u64>,
     time_style_option: Option<Vec<u8>>,
     print_hyperlink: bool,
+    /// Whether the switches asked for colour. It is not `Config::colors`
+    /// because the environment has not been consulted yet: `--color=always`
+    /// with an unparsable `LS_COLORS`, or with a `TERM` `dircolors` does not
+    /// know, still ends with no colour at all. [`finish`] resolves the two.
+    print_with_color: bool,
 }
 
 /// GNU's `decode_switches`, up to the end of its `while` loop.
@@ -801,10 +833,8 @@ fn parse_args(
         width_opt: None,
         time_style_option: None,
         print_hyperlink: false,
+        print_with_color: false,
     };
-    // Recognised, validated, and then dropped: see `known-issues.md`
-    // → `TD-B-LS-ACCEPTS-COLOUR-AND-HYPERLINK-WITHOUT-EMITTING-EITHER`.
-    let mut print_with_color = false;
 
     for item in LS.parse(argv, SHORT_OPTIONS, LONG_OPTIONS) {
         let item = item.map_err(|error| Refusal::from_getopt(&error))?;
@@ -850,7 +880,7 @@ fn parse_args(
                 if set.format_opt == Some(Format::Long) {
                     set.format_opt = None;
                 }
-                print_with_color = false;
+                set.print_with_color = false;
                 set.print_hyperlink = false;
                 cfg.print_block_size = false;
             }
@@ -998,7 +1028,7 @@ fn parse_args(
                         .argmatch(text, "--color", WHEN_ARGS)
                         .map_err(|e| Refusal::from_getopt(&e))?,
                 };
-                print_with_color =
+                set.print_with_color =
                     when == When::Always || (when == When::IfTty && env.stdout_isatty);
             }
             Flag::Hyperlink => {
@@ -1052,13 +1082,12 @@ fn parse_args(
                 if set.format_opt != Some(Format::Long) {
                     set.format_opt = Some(Format::OnePerLine);
                 }
-                print_with_color = false;
+                set.print_with_color = false;
                 set.quoting_style_opt = Some(Style::Literal);
             }
         }
     }
 
-    let _ = print_with_color;
     finish(cfg, env, err, set).map(|cfg| Request::Run(Box::new(cfg), operands))
 }
 
@@ -1106,12 +1135,18 @@ fn finish(
     });
 
     // The width is only *asked for* when it could matter, which is why
-    // `COLUMNS=x ls -l` is silent and `COLUMNS=x ls -C` warns.
+    // `COLUMNS=x ls -l` is silent and `COLUMNS=x ls -C` warns. Colour makes it
+    // matter even under `-l`: the clear-to-end-of-line sequence is emitted
+    // only for a name that might have wrapped, so the width has to be known.
+    // The test is on the *switch*, not on the table — `LS_COLORS` has not been
+    // looked at yet, so `--color=always -l` warns about a bad `COLUMNS` even
+    // when the colours are then turned off again.
     let mut linelen = set.width_opt;
-    if matches!(
+    if (matches!(
         cfg.format,
         Format::ManyPerLine | Format::Horizontal | Format::WithCommas
-    ) && linelen.is_none()
+    ) || set.print_with_color)
+        && linelen.is_none()
     {
         // Upstream's `TIOCGWINSZ` branch comes first and is absent here: our
         // terminal exports `COLUMNS` and has no window-size ioctl yet.
@@ -1232,8 +1267,32 @@ fn finish(
 
     // ---- `main`'s own derivations, which depend on the whole command line ---
 
+    if set.print_with_color {
+        let (setup, diagnostics) = parse_ls_color(env);
+        for line in diagnostics {
+            let _ = writeln!(err, "{line}");
+        }
+        if let ColorSetup::On(colors) = setup {
+            cfg.colors = Some(colors);
+            // Upstream: "Don't use TAB characters in output. Some terminal
+            // emulators can't handle the combination of tabs and color codes
+            // on the same line."
+            cfg.tabsize = 0;
+        }
+    }
+
     if cfg.directories_first {
         cfg.check_symlink_mode = true;
+    } else if let Some(colors) = cfg.colors.as_deref() {
+        // Only the three indicators that need the *target*'s identity force a
+        // second `stat`; a plain `di=`/`ex=` listing gets by with the symlink's
+        // own `lstat`.
+        if colors.is_colored(Ind::Orphan)
+            || (colors.is_colored(Ind::Exec) && colors.symlink_as_referent)
+            || (colors.is_colored(Ind::Missing) && cfg.format == Format::Long)
+        {
+            cfg.check_symlink_mode = true;
+        }
     }
 
     if cfg.dereference == Deref::Undefined {
@@ -1253,7 +1312,10 @@ fn finish(
         || cfg.print_scontext
         || cfg.print_block_size;
     cfg.format_needs_type = !cfg.format_needs_stat
-        && (cfg.recursive || cfg.indicator_style != Indicator::None || cfg.directories_first);
+        && (cfg.recursive
+            || cfg.colors.is_some()
+            || cfg.indicator_style != Indicator::None
+            || cfg.directories_first);
 
     Ok(cfg)
 }
@@ -1961,28 +2023,49 @@ fn basename_is_dot_or_dotdot(name: &[u8]) -> bool {
 /// type, and nothing in the default output needs more than the name. Every
 /// clause below names an option that does need more.
 ///
-/// Three of upstream's clauses are absent, all of them `--color`'s: colouring
-/// a directory needs its mode for the sticky and other-writable cases, and
-/// colouring a regular file needs it for the executable and set-id cases.
-/// `ls` here accepts `--color` and emits nothing for it (see
-/// `known-issues.md`), so a `stat` driven by it could only change which errors
-/// are printed, never the listing. `--hyperlink` is absent for the same
-/// reason.
+/// Upstream's `print_hyperlink` clause is absent: `ls` here accepts
+/// `--hyperlink` and emits nothing for it (`known-issues.md`
+/// `TD-B-LS-ACCEPTS-HYPERLINK-WITHOUT-EMITTING-IT`), so a `stat` driven by it
+/// could only change which errors are printed, never the listing.
 fn needs_stat(cfg: &Config, kind: FileType, inode_known: bool, command_line_arg: bool) -> bool {
+    // The three sticky/other-writable colours are decided from the mode, and
+    // `readdir` supplies only the type — so a coloured listing stats every
+    // directory it is going to have to tell apart.
+    let color_needs_dir_mode = kind == FileType::Directory
+        && cfg.colors.as_deref().is_some_and(|c| {
+            c.is_colored(Ind::OtherWritable)
+                || c.is_colored(Ind::Sticky)
+                || c.is_colored(Ind::StickyOtherWritable)
+        });
+    // Likewise for a plain file's execute and set-id bits. `ca` is in
+    // upstream's list too and is omitted here for the reason given in
+    // [`get_color_indicator`] — it can never be chosen, so stating for it
+    // would buy nothing.
+    let color_needs_file_mode = kind == FileType::Normal
+        && cfg.colors.as_deref().is_some_and(|c| {
+            c.is_colored(Ind::Exec) || c.is_colored(Ind::Setuid) || c.is_colored(Ind::Setgid)
+        });
+
     command_line_arg
         || cfg.format_needs_stat
+        || color_needs_dir_mode
         // Dereferencing changes both the inode and the type, and `readdir`
         // reports the link's, not the target's.
         || ((cfg.print_inode || cfg.format_needs_type)
             && matches!(kind, FileType::SymbolicLink | FileType::Unknown)
-            && (cfg.dereference == Deref::Always || cfg.check_symlink_mode))
+            && (cfg.dereference == Deref::Always
+                || cfg.colors.as_deref().is_some_and(|c| c.symlink_as_referent)
+                || cfg.check_symlink_mode))
         || (cfg.print_inode && !inode_known)
         || (cfg.format_needs_type
             && (kind == FileType::Unknown
                 || command_line_arg
                 // `-F` marks an executable with `*`, and only the mode says
-                // whether a regular file is one.
-                || (kind == FileType::Normal && cfg.indicator_style == Indicator::Classify)))
+                // whether a regular file is one. `--color` needs the same bits
+                // for `ex`/`su`/`sg`, which is why they highlight even without
+                // `-F`.
+                || (kind == FileType::Normal
+                    && (cfg.indicator_style == Indicator::Classify || color_needs_file_mode))))
 }
 
 /// A directory waiting to be listed. GNU's `struct pending`.
@@ -2500,10 +2583,31 @@ struct Out<'a> {
     /// Bytes already written to `sink`. Only `--dired` reads it, through
     /// [`Out::mark`].
     flushed: usize,
+    /// Bytes written that upstream's `dired_pos` did not count, which is every
+    /// colour escape and nothing else.
+    ///
+    /// Upstream increments `dired_pos` by hand at each write, and the colour
+    /// writer — `put_indicator` — is the one write that does not: it calls
+    /// `fwrite` directly rather than one of the `dired_*` helpers. So with
+    /// `--color` GNU's `//DIRED//` offsets are short by exactly the escapes
+    /// emitted so far, and point into the middle of the escape rather than at
+    /// the name. That is a bug upstream (`--dired` and `--color` are not
+    /// usefully combinable), but it is the observable behaviour of the program
+    /// this one has to match, so it is reproduced rather than corrected:
+    /// subtracting this counter from the real stream position gives
+    /// `dired_pos`.
+    uncounted: usize,
     /// Whether a write to `sink` failed. A listing that could not be written is
     /// an exit status, not a diagnostic — there is nowhere to report it that is
     /// not the stream that just failed.
     broken: bool,
+    /// GNU's `used_color`: whether any escape has been emitted yet. It is a
+    /// latch and not a copy of "colour is on", and the difference is visible:
+    /// the *first* indicator to be written is preceded by a
+    /// [`Out::prep_non_filename_text`], which is why a coloured listing starts
+    /// with a stray `\033[0m`. It also decides whether `main` ends by putting
+    /// the terminal back.
+    used_color: bool,
     /// GNU's `dired_obstack`: the begin and end offset of every **file name**,
     /// printed as the `//DIRED//` line.
     dired: Vec<usize>,
@@ -2520,7 +2624,9 @@ impl std::fmt::Debug for Out<'_> {
             .field("buf", &self.buf)
             .field("sink", &self.sink.as_ref().map(|_| "<write>"))
             .field("flushed", &self.flushed)
+            .field("uncounted", &self.uncounted)
             .field("broken", &self.broken)
+            .field("used_color", &self.used_color)
             .field("dired", &self.dired)
             .field("subdired", &self.subdired)
             .finish()
@@ -2577,13 +2683,802 @@ impl Out<'_> {
         if !cfg.dired {
             return;
         }
-        let pos = self.flushed.saturating_add(self.buf.len());
+        let pos = self.pos();
         match which {
             Dired::No => {}
             Dired::Names => self.dired.push(pos),
             Dired::Headers => self.subdired.push(pos),
         }
     }
+
+    /// GNU's `put_indicator`, given the bytes rather than the slot.
+    ///
+    /// The latch fires *before* the bytes are looked at, so an indicator that
+    /// is unset still triggers the initial [`Out::prep_non_filename_text`].
+    /// That is not a detail: `LS_COLORS='ec='` — an `ec` that exists and is
+    /// empty — still makes a listing begin with the reset sequence.
+    ///
+    /// Upstream also installs signal handlers here, so that a `ls` suspended
+    /// mid-name puts the terminal back. We have no signals, and the design
+    /// forbids adding them; the omission is recorded in `known-issues.md` as
+    /// `TD-B-LS-CANNOT-RESTORE-THE-TERMINAL-ON-AN-ABNORMAL-EXIT`, and the
+    /// reasoning in `design-decisions.md` §368.
+    fn put_str(&mut self, colors: &Colors, s: Option<&[u8]>) {
+        if !self.used_color {
+            self.used_color = true;
+            self.prep_non_filename_text(colors);
+        }
+        if let Some(s) = s {
+            self.buf.extend_from_slice(s);
+            // Upstream's `put_indicator` writes with `fwrite` and leaves
+            // `dired_pos` alone. See [`Out::uncounted`].
+            self.uncounted = self.uncounted.saturating_add(s.len());
+        }
+    }
+
+    /// GNU's `put_indicator`.
+    fn put_indicator(&mut self, colors: &Colors, ind: Ind) {
+        self.put_str(colors, colors.get(ind));
+    }
+
+    /// GNU's `prep_non_filename_text`: return the terminal to normal after a
+    /// coloured name, so that the spaces and the newline between names are not
+    /// painted too.
+    ///
+    /// `ec` is the whole sequence when it is set; otherwise it is assembled
+    /// from `lc`, `rs` and `rc` — which is the same string for the default
+    /// table, and is the point of having three parts for a terminal whose
+    /// escapes are not ANSI's.
+    fn prep_non_filename_text(&mut self, colors: &Colors) {
+        if colors.get(Ind::End).is_some() {
+            self.put_indicator(colors, Ind::End);
+        } else {
+            self.put_indicator(colors, Ind::Left);
+            self.put_indicator(colors, Ind::Reset);
+            self.put_indicator(colors, Ind::Right);
+        }
+    }
+
+    /// GNU's `restore_default_color`: `lc` and `rc` with nothing between them,
+    /// which for the default table is `\033[m` — the ANSI "everything off".
+    fn restore_default_color(&mut self, colors: &Colors) {
+        self.put_indicator(colors, Ind::Left);
+        self.put_indicator(colors, Ind::Right);
+    }
+
+    /// GNU's `set_normal_color`: `no`, the colour of everything that is not a
+    /// file name — the `-l` columns, the separators, the `-i` numbers.
+    fn set_normal_color(&mut self, cfg: &Config) {
+        let Some(colors) = cfg.colors.as_deref() else {
+            return;
+        };
+        if colors.is_colored(Ind::Norm) {
+            self.put_indicator(colors, Ind::Left);
+            self.put_indicator(colors, Ind::Norm);
+            self.put_indicator(colors, Ind::Right);
+        }
+    }
+
+    /// GNU's `print_color_indicator`: one file's colour, wrapped in `lc`/`rc`.
+    ///
+    /// The `no` reset in front is upstream's "need to reset so not dealing
+    /// with attribute combinations": with `no` set, a name's own colour would
+    /// otherwise be *added* to the normal one — bold from `no` plus blue from
+    /// `di` is bold blue, which is not what `di=34` asked for.
+    fn print_color_indicator(&mut self, colors: &Colors, seq: &[u8]) {
+        if colors.is_colored(Ind::Norm) {
+            self.restore_default_color(colors);
+        }
+        self.put_indicator(colors, Ind::Left);
+        self.put_str(colors, Some(seq));
+        self.put_indicator(colors, Ind::Right);
+    }
+
+    /// Upstream's `dired_pos`: the byte offset of the next write within the
+    /// whole output, *not counting the colour escapes* — which is what
+    /// `--dired` reports and what the long line measures its prefix with.
+    ///
+    /// The two uses want the same number for different reasons. `--dired` wants
+    /// it because upstream's counter is the one being reproduced, escapes and
+    /// all. The long line wants it because upstream measures its prefix as
+    /// `p - buf`, a length in a private `sprintf` buffer that no escape ever
+    /// reaches — and the difference between two of these is that same length.
+    fn pos(&self) -> usize {
+        self.flushed
+            .saturating_add(self.buf.len())
+            .saturating_sub(self.uncounted)
+    }
+}
+
+// ------------------------------------------------------------- LS_COLORS ---
+
+/// The twenty-four things `LS_COLORS` can name, in upstream's
+/// `enum indicator_no` order — which is also the order of the
+/// `color_indicator[]` defaults and of [`INDICATOR_NAME`], and all three are
+/// indexed by the same integer, so the order is load-bearing rather than
+/// stylistic.
+///
+/// Three of them are not colours at all but the punctuation the others are
+/// wrapped in: `lc` and `rc` are what goes to the left and right of a sequence
+/// (`\033[` and `m`), and `ec` is an escape that replaces `lc`+`rs`+`rc`
+/// wholesale. `cl` is the clear-to-end-of-line that follows a coloured name
+/// which might have wrapped.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Ind {
+    Left,
+    Right,
+    End,
+    Reset,
+    Norm,
+    File,
+    Dir,
+    Link,
+    Fifo,
+    Sock,
+    Blk,
+    Chr,
+    Missing,
+    Orphan,
+    Exec,
+    /// A Solaris door. Parsed, defaulted and printable, but never *chosen*:
+    /// `S_ISDOOR` is a constant `0` on every system we target, so
+    /// [`get_color_indicator`] has no arm that can reach it. Kept because
+    /// dropping it would move every following variant's number, and the number
+    /// is what indexes [`INDICATOR_NAME`] and [`COLOR_DEFAULT`].
+    // Only outside `cfg(test)`: the slot test below names it, which fulfils the
+    // lint and would make the expectation itself a warning.
+    #[cfg_attr(
+        all(unix, not(test)),
+        expect(dead_code, reason = "no target of ours has doors")
+    )]
+    Door,
+    Setuid,
+    Setgid,
+    Sticky,
+    OtherWritable,
+    StickyOtherWritable,
+    /// A file carrying a POSIX capability. Never chosen, for the reason given
+    /// in [`get_color_indicator`]: deciding it needs `getxattr` for
+    /// `security.capability`, which SlateOS does not have — the same position a
+    /// GNU `ls` built without libcap is in.
+    // Only outside `cfg(test)`: the slot test names it, as for `Door` above.
+    #[cfg_attr(
+        all(unix, not(test)),
+        expect(dead_code, reason = "no getxattr, as in a GNU ls built without libcap")
+    )]
+    Cap,
+    MultiHardlink,
+    ClrToEol,
+}
+
+/// How many indicators there are. Upstream asserts
+/// `ARRAY_CARDINALITY (color_indicator) + 1 == ARRAY_CARDINALITY
+/// (indicator_name)` — the `+ 1` being the `nullptr` terminator — which is the
+/// same statement as this constant being the length of both arrays here.
+const INDICATORS: usize = 24;
+
+/// Upstream's `indicator_name`: the two-letter label each indicator answers to
+/// in `LS_COLORS`, indexed by [`Ind`].
+const INDICATOR_NAME: [&[u8; 2]; INDICATORS] = [
+    b"lc", b"rc", b"ec", b"rs", b"no", b"fi", b"di", b"ln", b"pi", b"so", b"bd", b"cd", b"mi",
+    b"or", b"ex", b"do", b"su", b"sg", b"st", b"ow", b"tw", b"ca", b"mh", b"cl",
+];
+
+/// Upstream's `color_indicator[]` initialiser. `None` is upstream's `nullptr`,
+/// which is *not* the same as an empty string: an unset indicator is one
+/// [`Colors::get`] returns nothing for, so nothing is emitted and no reset is
+/// needed either.
+///
+/// The defaults that are `None` — `ec`, `no`, `fi`, `mi`, `or`, `ca`, `mh` —
+/// are the ones a bare `--color` leaves alone: an ordinary file is printed in
+/// whatever colour the terminal was already using, which is why `ls --color` on
+/// a directory of plain files emits no escapes at all.
+const COLOR_DEFAULT: [Option<&[u8]>; INDICATORS] = [
+    Some(b"\x1b["),  // lc: left of a colour sequence
+    Some(b"m"),      // rc: right of one
+    None,            // ec: end colour, replacing lc+rs+rc
+    Some(b"0"),      // rs: reset to ordinary colours
+    None,            // no: normal
+    None,            // fi: regular file
+    Some(b"01;34"),  // di: directory, bright blue
+    Some(b"01;36"),  // ln: symlink, bright cyan
+    Some(b"33"),     // pi: fifo, yellow/brown
+    Some(b"01;35"),  // so: socket, bright magenta
+    Some(b"01;33"),  // bd: block device, bright yellow
+    Some(b"01;33"),  // cd: character device, bright yellow
+    None,            // mi: missing file
+    None,            // or: orphaned symlink
+    Some(b"01;32"),  // ex: executable, bright green
+    Some(b"01;35"),  // do: door, bright magenta
+    Some(b"37;41"),  // su: setuid, white on red
+    Some(b"30;43"),  // sg: setgid, black on yellow
+    Some(b"37;44"),  // st: sticky, white on blue
+    Some(b"34;42"),  // ow: other-writable, blue on green
+    Some(b"30;42"),  // tw: other-writable and sticky, black on green
+    None,            // ca: capabilities, disabled by default
+    None,            // mh: multiple hard links, disabled by default
+    Some(b"\x1b[K"), // cl: clear to end of line
+];
+
+/// One `*.ext=seq` rule.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ExtColor {
+    /// The suffix, as written — including the dot, since `*.gz` stores `.gz`.
+    ext: Vec<u8>,
+    seq: Vec<u8>,
+    /// Whether the suffix is matched case-sensitively. Set during the
+    /// postprocessing pass, not during parsing: a suffix is exact only if some
+    /// *other* rule spells the same letters in a different case and asks for a
+    /// different colour.
+    exact_match: bool,
+    /// Upstream's `ext.len = SIZE_MAX`, which means "this rule can never win,
+    /// so do not bother comparing against it". A rule is ignored when an
+    /// earlier one in the list already matches everything it would.
+    ignored: bool,
+}
+
+/// A parsed `LS_COLORS`, or the built-in defaults.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Colors {
+    seq: [Option<Vec<u8>>; INDICATORS],
+    /// In *lookup* order, which is the reverse of the order they were written
+    /// in: upstream pushes each new rule onto the head of a linked list, so a
+    /// later `*.gz=` overrides an earlier one.
+    ext: Vec<ExtColor>,
+    /// `ln=target`, which asks for a symlink to be coloured as whatever it
+    /// points at rather than as a symlink.
+    symlink_as_referent: bool,
+}
+
+impl Default for Colors {
+    fn default() -> Self {
+        Self {
+            seq: COLOR_DEFAULT.map(|d| d.map(<[u8]>::to_vec)),
+            ext: Vec::new(),
+            symlink_as_referent: false,
+        }
+    }
+}
+
+impl Colors {
+    /// Upstream's `is_colored`: whether emitting this indicator would change
+    /// anything. An unset one, an empty one, and the two spellings of "reset"
+    /// (`0` and `00`) all count as no colour — which is how `LS_COLORS='di=0'`
+    /// turns *off* the directory colour rather than setting it to the reset
+    /// sequence.
+    fn is_colored(&self, ind: Ind) -> bool {
+        match self.seq[ind as usize].as_deref() {
+            None | Some(b"") | Some(b"0") | Some(b"00") => false,
+            Some(_) => true,
+        }
+    }
+
+    /// The bytes to emit for an indicator, or nothing if it is unset. Note the
+    /// difference from [`Colors::is_colored`]: `di=0` *is* emitted (as `0`),
+    /// it just does not count as a colour for the purposes of the tests that
+    /// ask whether one is in effect.
+    fn get(&self, ind: Ind) -> Option<&[u8]> {
+        self.seq[ind as usize].as_deref()
+    }
+}
+
+/// The state machine in gnulib's `get_funky_string`, one variant per its
+/// `ST_*`.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Funky {
+    Ground,
+    Backslash,
+    Octal,
+    Hex,
+    Caret,
+    End,
+    Error,
+}
+
+/// Upstream's `get_funky_string`: decode one `LS_COLORS` field, which may
+/// contain `\`-escapes, `^`-escapes, octal and hex.
+///
+/// Returns the decoded bytes and the offset of the byte that ended the field —
+/// the `:` or `=`, or `src.len()` at the end of the string — or `None` if the
+/// field was unparsable, which upstream treats as poisoning the whole variable.
+///
+/// `equals_end` is set only for the `*.ext` half of an extension rule, where
+/// `=` separates the suffix from its colour; in a colour field an `=` is just a
+/// byte.
+///
+/// Two upstream quirks are reproduced deliberately:
+///
+/// * **`^?` yields two bytes.** The caret arm advances past its operand only
+///   for `@`..`~`; `?` is `0x3f`, below `@`, so it takes the second branch,
+///   which emits `0x7f` and *does not* advance. The `?` is then re-read in the
+///   ground state and emitted as itself, so `^?` decodes to `\x7f?`. Measured
+///   against 9.5, `LS_COLORS='di=^?'`.
+/// * **Octal and hex wrap in a byte.** Upstream accumulates into a `char`, so
+///   `\501` is `(('5' << 3) + 0) << 3 + 1` truncated — the arithmetic is done
+///   on the byte, not on a wide integer that is later checked.
+fn get_funky_string(src: &[u8], equals_end: bool) -> Option<(Vec<u8>, usize)> {
+    let mut out = Vec::new();
+    let mut p = 0usize;
+    let mut num: u8 = 0;
+    let mut state = Funky::Ground;
+
+    while state != Funky::End && state != Funky::Error {
+        match state {
+            Funky::Ground => match src.get(p) {
+                None | Some(b':') => state = Funky::End,
+                Some(b'\\') => {
+                    state = Funky::Backslash;
+                    p = p.saturating_add(1);
+                }
+                Some(b'^') => {
+                    state = Funky::Caret;
+                    p = p.saturating_add(1);
+                }
+                Some(b'=') if equals_end => state = Funky::End,
+                Some(&c) => {
+                    out.push(c);
+                    p = p.saturating_add(1);
+                }
+            },
+            Funky::Backslash => {
+                match src.get(p) {
+                    Some(&c @ b'0'..=b'7') => {
+                        state = Funky::Octal;
+                        num = c.wrapping_sub(b'0');
+                    }
+                    Some(b'x' | b'X') => {
+                        state = Funky::Hex;
+                        num = 0;
+                    }
+                    Some(b'a') => num = 0x07,
+                    Some(b'b') => num = 0x08,
+                    Some(b'e') => num = 0x1b,
+                    Some(b'f') => num = 0x0c,
+                    Some(b'n') => num = b'\n',
+                    Some(b'r') => num = b'\r',
+                    Some(b't') => num = b'\t',
+                    Some(b'v') => num = 0x0b,
+                    Some(b'?') => num = 0x7f,
+                    Some(b'_') => num = b' ',
+                    // A backslash at the end of the string: upstream's
+                    // `case '\0'`, which is an error and not a literal
+                    // backslash.
+                    None => state = Funky::Error,
+                    // `\\`, `\^`, `\:`, `\=` and anything else: the byte
+                    // itself.
+                    Some(&c) => num = c,
+                }
+                if state == Funky::Backslash {
+                    out.push(num);
+                    state = Funky::Ground;
+                }
+                p = p.saturating_add(1);
+            }
+            Funky::Octal => match src.get(p) {
+                Some(&c @ b'0'..=b'7') => {
+                    num = num.wrapping_shl(3).wrapping_add(c.wrapping_sub(b'0'));
+                    p = p.saturating_add(1);
+                }
+                // The digit run ended — including at the end of the string,
+                // where upstream reads the terminating NUL and finds it is not
+                // a digit. The offset is *not* advanced, so the byte that
+                // ended the run is re-read in the ground state.
+                _ => {
+                    out.push(num);
+                    state = Funky::Ground;
+                }
+            },
+            Funky::Hex => match src.get(p).map(|c| (c, hex_digit(*c))) {
+                Some((_, Some(d))) => {
+                    num = num.wrapping_shl(4).wrapping_add(d);
+                    p = p.saturating_add(1);
+                }
+                _ => {
+                    out.push(num);
+                    state = Funky::Ground;
+                }
+            },
+            Funky::Caret => {
+                state = Funky::Ground;
+                match src.get(p) {
+                    Some(&c @ b'@'..=b'~') => {
+                        out.push(c & 0o37);
+                        p = p.saturating_add(1);
+                    }
+                    // See the doc comment: no advance, so the `?` is emitted
+                    // again as itself.
+                    Some(b'?') => out.push(0x7f),
+                    _ => state = Funky::Error,
+                }
+            }
+            Funky::End | Funky::Error => unreachable!(),
+        }
+    }
+
+    if state == Funky::Error {
+        None
+    } else {
+        Some((out, p))
+    }
+}
+
+/// The value of one hex digit, upstream's three `case` runs in `ST_HEX`.
+fn hex_digit(c: u8) -> Option<u8> {
+    match c {
+        b'0'..=b'9' => Some(c.wrapping_sub(b'0')),
+        b'a'..=b'f' => Some(c.wrapping_sub(b'a').wrapping_add(10)),
+        b'A'..=b'F' => Some(c.wrapping_sub(b'A').wrapping_add(10)),
+        _ => None,
+    }
+}
+
+/// The terminal names `dircolors` ships a `TERM` line for, from
+/// `src/dircolors.hin`. Consulted only when `LS_COLORS` is unset or empty:
+/// upstream will not invent colours for a terminal it has never heard of.
+const KNOWN_TERMS: [&[u8]; 25] = [
+    b"Eterm",
+    b"ansi",
+    b"*color*",
+    b"con[0-9]*x[0-9]*",
+    b"cons25",
+    b"console",
+    b"cygwin",
+    b"*direct*",
+    b"dtterm",
+    b"gnome",
+    b"hurd",
+    b"jfbterm",
+    b"konsole",
+    b"kterm",
+    b"linux",
+    b"linux-c",
+    b"mlterm",
+    b"putty",
+    b"rxvt*",
+    b"screen*",
+    b"st",
+    b"terminator",
+    b"tmux*",
+    b"vt100",
+    b"xterm*",
+];
+
+/// Upstream's `known_term_type`: whether `$TERM` matches one of the patterns
+/// `dircolors` knows. The patterns are globs and are matched with `fnmatch`,
+/// so `xterm*` covers `xterm-256color` and `*color*` covers anything that
+/// advertises colour in its name.
+fn known_term_type(term: Option<&[u8]>) -> bool {
+    let Some(term) = term else { return false };
+    if term.is_empty() {
+        return false;
+    }
+    KNOWN_TERMS
+        .iter()
+        .any(|pattern| fnmatch(pattern, term, Flags::NONE))
+}
+
+/// What [`parse_ls_color`] concluded.
+#[derive(Debug, PartialEq, Eq)]
+enum ColorSetup {
+    /// Colours are on, with this table.
+    On(Box<Colors>),
+    /// Colours are off after all — either because `LS_COLORS` was unset and
+    /// the terminal is not one `dircolors` knows, or because the variable did
+    /// not parse. Upstream reaches both by assigning `print_with_color =
+    /// false` *after* `decode_switches` has already turned it on.
+    Off,
+}
+
+/// Upstream's `parse_ls_color`, called from `main` only when the switches
+/// asked for colour.
+///
+/// Returns the table and the diagnostics to print, which are upstream's two:
+/// `unrecognized prefix: 'xy'` for a two-letter label that is not an
+/// indicator, and `unparsable value for LS_COLORS environment variable` for a
+/// field that would not decode. The first is *not* fatal to the rest of the
+/// variable in the sense of stopping the parse — it is, though, because
+/// upstream leaves `state` at `PS_FAIL` and falls straight out of the loop, so
+/// one bad label discards everything. Both diagnostics leave the exit status
+/// alone; upstream's `error (0, 0, …)` does not touch it.
+fn parse_ls_color(env: &Environment) -> (ColorSetup, Vec<String>) {
+    let mut diagnostics = Vec::new();
+    let text = match env.ls_colors.as_deref() {
+        Some(t) if !t.is_empty() => t,
+        // Unset or empty: fall back to the built-in table, but only for a
+        // terminal that is likely to understand it.
+        _ => {
+            let colorterm_set = env.colorterm.as_deref().is_some_and(|c| !c.is_empty());
+            return if colorterm_set || known_term_type(env.term.as_deref()) {
+                (ColorSetup::On(Box::default()), diagnostics)
+            } else {
+                (ColorSetup::Off, diagnostics)
+            };
+        }
+    };
+
+    let mut colors = Colors::default();
+    // Extensions accumulate in the order written and are reversed at the end,
+    // because upstream builds a list by pushing onto its head.
+    let mut ext: Vec<ExtColor> = Vec::new();
+    let mut p = 0usize;
+    let mut failed = false;
+
+    while !failed {
+        match text.get(p) {
+            None => break,
+            Some(b':') => p = p.saturating_add(1),
+            Some(b'*') => {
+                p = p.saturating_add(1);
+                let Some((suffix, after)) = get_funky_string(text.get(p..).unwrap_or(&[]), true)
+                else {
+                    failed = true;
+                    break;
+                };
+                p = p.saturating_add(after);
+                // `PS_4`: the `=` must be there, and it is consumed whether or
+                // not it was.
+                let sep = text.get(p).copied();
+                p = p.saturating_add(1);
+                if sep != Some(b'=') {
+                    failed = true;
+                    break;
+                }
+                let Some((seq, after)) = get_funky_string(text.get(p..).unwrap_or(&[]), false)
+                else {
+                    failed = true;
+                    break;
+                };
+                p = p.saturating_add(after);
+                ext.push(ExtColor {
+                    ext: suffix,
+                    seq,
+                    exact_match: false,
+                    ignored: false,
+                });
+            }
+            Some(_) => {
+                // `PS_START` -> `PS_2` -> `PS_3`: exactly two label bytes and
+                // then an `=`, all three consumed unconditionally.
+                let Some(label) = text.get(p..p.saturating_add(2)) else {
+                    // `PS_2` with nothing after the first byte.
+                    failed = true;
+                    break;
+                };
+                let label: [u8; 2] = [label[0], label[1]];
+                p = p.saturating_add(2);
+                let sep = text.get(p).copied();
+                p = p.saturating_add(1);
+                if sep != Some(b'=') {
+                    failed = true;
+                    break;
+                }
+                let Some(slot) = INDICATOR_NAME.iter().position(|name| **name == label) else {
+                    diagnostics.push(format!("ls: unrecognized prefix: {}", quote(&label)));
+                    failed = true;
+                    break;
+                };
+                let Some((seq, after)) = get_funky_string(text.get(p..).unwrap_or(&[]), false)
+                else {
+                    failed = true;
+                    break;
+                };
+                p = p.saturating_add(after);
+                // Not `is_colored`: an explicitly empty `di=` is stored as an
+                // empty string, which upstream distinguishes from `nullptr`
+                // nowhere that matters but stores faithfully.
+                colors.seq[slot] = Some(seq);
+            }
+        }
+    }
+
+    if failed {
+        diagnostics.push("ls: unparsable value for LS_COLORS environment variable".to_owned());
+        return (ColorSetup::Off, diagnostics);
+    }
+
+    ext.reverse();
+    mark_redundant_extensions(&mut ext);
+    colors.ext = ext;
+    colors.symlink_as_referent = colors.get(Ind::Link) == Some(&b"target"[..]);
+    (ColorSetup::On(Box::new(colors)), diagnostics)
+}
+
+/// Upstream's postprocessing pass over the extension list, which decides two
+/// things at once.
+///
+/// **`exact_match`** is set on a pair of rules that spell the same suffix in
+/// different cases and ask for *different* colours — `*.z=01;31:*.Z=01;32`.
+/// Only then does case matter; otherwise a suffix is matched case-insensitively,
+/// which is why `*.gz` colours `FOO.GZ`.
+///
+/// **`ignored`** marks a rule that can never win because an earlier one in the
+/// list already matches everything it would: an exact duplicate, or a
+/// differently-cased spelling asking for the same colour. Upstream writes it as
+/// `ext.len = SIZE_MAX` purely to skip the comparison; it changes no output.
+fn mark_redundant_extensions(list: &mut [ExtColor]) {
+    for i in 0..list.len() {
+        let Some(e1) = list.get(i) else { continue };
+        // Upstream destroys the length when it ignores a rule (`SIZE_MAX`), so
+        // an already-ignored rule can no longer compare equal to anything.
+        if e1.ignored {
+            continue;
+        }
+        let ext = e1.ext.clone();
+        let seq = e1.seq.clone();
+        let mut case_ignored = false;
+        let mut exact = false;
+        for j in i.saturating_add(1)..list.len() {
+            let Some(e2) = list.get_mut(j) else { continue };
+            if e2.ignored || ext.len() != e2.ext.len() {
+                continue;
+            }
+            if ext == e2.ext {
+                e2.ignored = true;
+            } else if ext.eq_ignore_ascii_case(&e2.ext) {
+                if case_ignored {
+                    e2.ignored = true;
+                } else if seq == e2.seq {
+                    e2.ignored = true;
+                    // Every later spelling of these same letters is redundant
+                    // too, whatever colour it asks for.
+                    case_ignored = true;
+                } else {
+                    e2.exact_match = true;
+                    exact = true;
+                }
+            }
+        }
+        if exact && let Some(e1) = list.get_mut(i) {
+            e1.exact_match = true;
+        }
+    }
+}
+
+/// GNU's `FILETYPE_INDICATORS`: which colour a file gets when its `stat`
+/// failed and all that is known is what `readdir` said.
+///
+/// Indexed by [`FileType`], whose variants are in upstream's `enum filetype`
+/// order for exactly this reason. `unknown` becomes `or` — the orphan colour —
+/// because a file whose type could not be established is, as far as a listing
+/// can tell, a broken link; and `whiteout` becomes `fi`, the plain-file colour,
+/// because there is no indicator for a tombstone.
+const FILETYPE_INDICATORS: [Ind; 10] = [
+    Ind::Orphan,
+    Ind::Fifo,
+    Ind::Chr,
+    Ind::Dir,
+    Ind::Blk,
+    Ind::File,
+    Ind::Link,
+    Ind::Sock,
+    Ind::File,
+    Ind::Dir,
+];
+
+/// GNU's `file_or_link_mode`: whose mode decides the colour.
+///
+/// `ln=target` is the whole of the difference — with it, a symlink is painted
+/// as the thing it points at, so the mode consulted is the target's.
+fn file_or_link_mode(colors: &Colors, f: &FileInfo) -> u32 {
+    if colors.symlink_as_referent && f.link_ok {
+        f.link_mode
+    } else {
+        f.stat.mode
+    }
+}
+
+/// GNU's `get_color_indicator`: the escape body for one file, or [`None`] when
+/// the table has nothing to say about it and the name is printed plain.
+///
+/// `linkok` is an `i32` and not a `bool` because upstream's is, and the third
+/// value is load-bearing: `-1` means "this name does not exist", which only the
+/// symlink-*target* path can produce (`f->linkok ? 0 : -1`). On the ordinary
+/// path it is 0 or 1, so `mi` is unreachable there — a dangling link is
+/// coloured `or`, and `mi` colours only the target text after the `->`.
+///
+/// `ca` (a file carrying a POSIX capability) is never chosen: deciding it needs
+/// `getxattr` for `security.capability`, which SlateOS does not have. That
+/// matches a GNU `ls` built without libcap, which is the common configuration —
+/// upstream's own `has_capability` is a stub returning false there.
+fn get_color_indicator<'c>(
+    colors: &'c Colors,
+    f: &FileInfo,
+    symlink_target: bool,
+) -> Option<&'c [u8]> {
+    let empty = Vec::new();
+    let (name, mode, linkok): (&[u8], u32, i32) = if symlink_target {
+        (
+            f.linkname.as_ref().unwrap_or(&empty),
+            f.link_mode,
+            if f.link_ok { 0 } else { -1 },
+        )
+    } else {
+        (&f.name, file_or_link_mode(colors, f), i32::from(f.link_ok))
+    };
+
+    let mut ty = if linkok == -1 && colors.is_colored(Ind::Missing) {
+        Ind::Missing
+    } else if !f.stat_ok {
+        FILETYPE_INDICATORS
+            .get(f.filetype as usize)
+            .copied()
+            .unwrap_or(Ind::Orphan)
+    } else {
+        match mode & S_IFMT {
+            S_IFREG => {
+                if mode & S_ISUID != 0 && colors.is_colored(Ind::Setuid) {
+                    Ind::Setuid
+                } else if mode & S_ISGID != 0 && colors.is_colored(Ind::Setgid) {
+                    Ind::Setgid
+                } else if mode & S_IXUGO != 0 && colors.is_colored(Ind::Exec) {
+                    Ind::Exec
+                } else if f.stat.nlink > 1 && colors.is_colored(Ind::MultiHardlink) {
+                    Ind::MultiHardlink
+                } else {
+                    Ind::File
+                }
+            }
+            S_IFDIR => {
+                if mode & S_ISVTX != 0
+                    && mode & S_IWOTH != 0
+                    && colors.is_colored(Ind::StickyOtherWritable)
+                {
+                    Ind::StickyOtherWritable
+                } else if mode & S_IWOTH != 0 && colors.is_colored(Ind::OtherWritable) {
+                    Ind::OtherWritable
+                } else if mode & S_ISVTX != 0 && colors.is_colored(Ind::Sticky) {
+                    Ind::Sticky
+                } else {
+                    Ind::Dir
+                }
+            }
+            S_IFLNK => Ind::Link,
+            S_IFIFO => Ind::Fifo,
+            S_IFSOCK => Ind::Sock,
+            S_IFBLK => Ind::Blk,
+            S_IFCHR => Ind::Chr,
+            // Upstream's "classify a file of some other type as C_ORPHAN".
+            // Solaris doors would be `do` here; `S_ISDOOR` is a constant 0 on
+            // every system we target, so the arm is folded into this one.
+            _ => Ind::Orphan,
+        }
+    };
+
+    // The suffix rules are consulted only for a file still classified as a
+    // plain one, which is why `*.gz=…` cannot recolour a *directory* named
+    // `foo.gz`.
+    let mut ext_seq: Option<&[u8]> = None;
+    if ty == Ind::File {
+        for e in &colors.ext {
+            if e.ignored || e.ext.len() > name.len() {
+                continue;
+            }
+            let Some(tail) = name.get(name.len().saturating_sub(e.ext.len())..) else {
+                continue;
+            };
+            let hit = if e.exact_match {
+                tail == e.ext.as_slice()
+            } else {
+                tail.eq_ignore_ascii_case(&e.ext)
+            };
+            if hit {
+                ext_seq = Some(&e.seq);
+                break;
+            }
+        }
+    }
+
+    // A dangling symlink. `color_symlink_as_referent` forces `or` even when
+    // `or` is unset, because painting it as its (missing) target is not
+    // possible — there is no target to take a colour from.
+    if ty == Ind::Link
+        && linkok == 0
+        && (colors.symlink_as_referent || colors.is_colored(Ind::Orphan))
+    {
+        ty = Ind::Orphan;
+    }
+
+    ext_seq.or_else(|| colors.get(ty))
 }
 
 /// GNU's `print_name_with_quoting`: write one name and return the bytes it
@@ -2613,6 +3508,7 @@ fn print_name_with_quoting(
     f: &FileInfo,
     symlink_target: bool,
     stack: Dired,
+    start_col: usize,
 ) -> usize {
     let empty = Vec::new();
     let name = if symlink_target {
@@ -2622,19 +3518,51 @@ fn print_name_with_quoting(
     };
     let rendered = quote_name(cfg, &cfg.filename_extra, cwd_some_quoted, name, f.quoted);
 
+    let color = cfg
+        .colors
+        .as_deref()
+        .and_then(|c| get_color_indicator(c, f, symlink_target));
+    // Upstream's `used_color_this_time`. `no` counts even when this file has
+    // no colour of its own, because [`Out::set_normal_color`] has already
+    // painted the row and the name has to end it.
+    let used_color_this_time = cfg
+        .colors
+        .as_deref()
+        .is_some_and(|c| color.is_some() || c.is_colored(Ind::Norm));
+
     let pad = usize::from(rendered.pad && !symlink_target);
     if pad == 1 {
         out.buf.push(b' ');
+    }
+    // The escape goes *after* the alignment space, so that a coloured column
+    // still lines up with an uncoloured one.
+    if let (Some(colors), Some(seq)) = (cfg.colors.as_deref(), color) {
+        out.print_color_indicator(colors, seq);
     }
     out.mark(cfg, stack);
     out.buf.extend_from_slice(&rendered.bytes);
     out.mark(cfg, stack);
 
-    rendered.bytes.len().saturating_add(pad)
-}
+    let len = rendered.bytes.len().saturating_add(pad);
 
-/// `S_IXUGO`: the three execute bits, which are what `-F` marks with `*`.
-const S_IXUGO: u32 = 0o111;
+    if used_color_this_time && let Some(colors) = cfg.colors.as_deref() {
+        out.prep_non_filename_text(colors);
+        // Upstream measures in *bytes* rather than columns on purpose: the
+        // clear-to-end-of-line sequence is only needed when the name *might*
+        // have wrapped, and a byte count is never less than the width it
+        // bounds. A multi-byte name can therefore emit it needlessly, which is
+        // inconsequential.
+        let last = start_col.saturating_add(len).saturating_sub(1);
+        if start_col
+            .checked_div(cfg.line_length)
+            .is_some_and(|row| Some(row) != last.checked_div(cfg.line_length))
+        {
+            out.put_indicator(colors, Ind::ClrToEol);
+        }
+    }
+
+    len
+}
 
 /// GNU's `get_type_indicator`: the character `-F`, `-p` or `--file-type`
 /// appends, or `None` for the files that get nothing.
@@ -2802,6 +3730,10 @@ fn print_long_format(
     let when = chosen_time(cfg, f);
 
     out.indent(cfg);
+    // Upstream's `p - buf`: the width of everything on this line in front of
+    // the name. It is measured from *after* `dired_indent`, because upstream
+    // builds the prefix in a private buffer and prints the indent separately.
+    let line_start = out.pos();
 
     if cfg.print_inode {
         pad_left(&mut out.buf, w.inode, &format_inode(f));
@@ -2887,7 +3819,8 @@ fn print_long_format(
 
     times.format(&mut out.buf, cfg, f.stat_ok, when);
 
-    print_name_with_quoting(out, cfg, cwd_some_quoted, f, false, Dired::Names);
+    let prefix = out.pos().saturating_sub(line_start);
+    let w_name = print_name_with_quoting(out, cfg, cwd_some_quoted, f, false, Dired::Names, prefix);
 
     if f.filetype == FileType::SymbolicLink {
         // A link whose target could not be *read* prints as a bare name: there
@@ -2895,7 +3828,10 @@ fn print_long_format(
         // also prints no indicator, which is why this is not an `else`.
         if f.linkname.is_some() {
             out.buf.extend_from_slice(b" -> ");
-            print_name_with_quoting(out, cfg, cwd_some_quoted, f, true, Dired::No);
+            // Upstream's `(p - buf) + w + 4`: the prefix, the name, and the
+            // four bytes of ` -> `.
+            let after_arrow = prefix.saturating_add(w_name).saturating_add(4);
+            print_name_with_quoting(out, cfg, cwd_some_quoted, f, true, Dired::No, after_arrow);
             if cfg.indicator_style != Indicator::None {
                 // The indicator describes the *target*, and is chosen from the
                 // target's mode with `unknown` as the fallback type — so a
@@ -2940,8 +3876,11 @@ fn print_file_name_and_frills(
     w: &Widths,
     cwd_some_quoted: bool,
     f: &FileInfo,
+    start_col: usize,
 ) {
     let flowing = cfg.format == Format::WithCommas;
+
+    out.set_normal_color(cfg);
 
     if cfg.print_inode {
         let width = if flowing { 0 } else { w.inode };
@@ -2970,7 +3909,10 @@ fn print_file_name_and_frills(
         pad_left(&mut out.buf, width, SCONTEXT_UNKNOWN);
     }
 
-    print_name_with_quoting(out, cfg, cwd_some_quoted, f, false, Dired::Names);
+    // `start_col` is passed on unchanged rather than advanced past the frills,
+    // which is upstream's — so the wrap test measures from the start of the
+    // *row* and not from the start of the name.
+    print_name_with_quoting(out, cfg, cwd_some_quoted, f, false, Dired::Names, start_col);
 
     if cfg.indicator_style != Indicator::None {
         print_type_indicator(out, cfg, f.stat_ok, f.stat.mode, f.filetype);
@@ -3200,7 +4142,7 @@ fn print_many_per_line(
         while let (Some(f), Some(&name_length)) = (files.get(filesno), lengths.get(filesno)) {
             let max_name_length = col_arr.get(col).copied().unwrap_or(MIN_COLUMN_WIDTH);
             col = col.saturating_add(1);
-            print_file_name_and_frills(out, cfg, w, cwd_some_quoted, f);
+            print_file_name_and_frills(out, cfg, w, cwd_some_quoted, f, pos);
 
             filesno = filesno.saturating_add(rows);
             if filesno >= n {
@@ -3237,7 +4179,7 @@ fn print_horizontal(
     let mut max_name_length = col_arr.first().copied().unwrap_or(MIN_COLUMN_WIDTH);
 
     let Some(first) = files.first() else { return };
-    print_file_name_and_frills(out, cfg, w, cwd_some_quoted, first);
+    print_file_name_and_frills(out, cfg, w, cwd_some_quoted, first, 0);
 
     for (filesno, f) in files.iter().enumerate().skip(1) {
         let col = filesno % cols;
@@ -3254,7 +4196,7 @@ fn print_horizontal(
             );
             pos = pos.saturating_add(max_name_length);
         }
-        print_file_name_and_frills(out, cfg, w, cwd_some_quoted, f);
+        print_file_name_and_frills(out, cfg, w, cwd_some_quoted, f, pos);
         name_length = lengths.get(filesno).copied().unwrap_or(0);
         max_name_length = col_arr.get(col).copied().unwrap_or(MIN_COLUMN_WIDTH);
     }
@@ -3318,7 +4260,7 @@ fn print_with_separator(
             out.buf.push(separator);
         }
 
-        print_file_name_and_frills(out, cfg, w, cwd_some_quoted, f);
+        print_file_name_and_frills(out, cfg, w, cwd_some_quoted, f, pos);
         pos = pos.wrapping_add(len);
     }
     out.buf.push(cfg.eolbyte);
@@ -3349,7 +4291,7 @@ fn print_current_files(
     match cfg.format {
         Format::OnePerLine => {
             for f in files {
-                print_file_name_and_frills(out, cfg, w, cwd_some_quoted, f);
+                print_file_name_and_frills(out, cfg, w, cwd_some_quoted, f, 0);
                 out.buf.push(cfg.eolbyte);
             }
         }
@@ -3372,6 +4314,7 @@ fn print_current_files(
         }
         Format::Long => {
             for f in files {
+                out.set_normal_color(cfg);
                 print_long_format(out, cfg, names, times, w, cwd_some_quoted, f);
                 out.buf.push(cfg.eolbyte);
             }
@@ -3940,6 +4883,24 @@ impl Listing<'_> {
             self.print_dir_name = true;
         }
 
+        // Put the terminal back, before `--dired`'s trailer rather than after
+        // it — upstream's order, and the offsets in that trailer already count
+        // whatever this writes.
+        if self.out.used_color
+            && let Some(colors) = self.cfg.colors.as_deref()
+        {
+            // Skipped when it would be a no-op: with the default `lc`/`rc`
+            // every name already ended with `\033[0m`, and `\033[m` after it
+            // would say the same thing again. A table with unusual brackets
+            // gets the restore, because there is no telling what its escapes
+            // left switched on.
+            let plain = colors.get(Ind::Left) == Some(&b"\x1b["[..])
+                && colors.get(Ind::Right) == Some(&b"m"[..]);
+            if !plain {
+                self.out.restore_default_color(colors);
+            }
+        }
+
         if self.cfg.dired {
             // An *empty* obstack prints no line at all — not an empty one.
             // `ls --dired` of a directory with no files prints only the
@@ -4305,6 +5266,9 @@ fn main() -> ExitCode {
         time_style: var("TIME_STYLE"),
         ls_block_size: var("LS_BLOCK_SIZE"),
         block_size: var("BLOCK_SIZE"),
+        ls_colors: var("LS_COLORS"),
+        colorterm: var("COLORTERM"),
+        term: var("TERM"),
         posixly_correct: std::env::var_os("POSIXLY_CORRECT").is_some(),
         stdout_isatty: std::io::stdout().is_terminal(),
         // `hard_locale (LC_TIME)`: false for exactly `C` and `POSIX`, and the
@@ -6076,6 +7040,588 @@ mod tests {
         });
         assert_eq!(String::from_utf8_lossy(&stated_mode), "-rwsr-xr-x");
         assert_eq!(stated_mode.len(), 10);
+    }
+
+    // ------------------------------------------------------------- colour ---
+
+    /// One field of an `LS_COLORS`, decoded — the whole of it, so a test that
+    /// leaves bytes behind fails rather than passing on a prefix.
+    fn funky(src: &str) -> Option<Vec<u8>> {
+        let (bytes, end) = get_funky_string(src.as_bytes(), false)?;
+        assert_eq!(end, src.len(), "the field did not consume {src:?}");
+        Some(bytes)
+    }
+
+    /// `LS_COLORS` parsed, with the diagnostics.
+    fn parse(ls_colors: Option<&str>) -> (ColorSetup, Vec<String>) {
+        parse_ls_color(&Environment {
+            ls_colors: ls_colors.map(|s| s.as_bytes().to_vec()),
+            ..Environment::default()
+        })
+    }
+
+    /// `LS_COLORS` parsed, insisting it produced a table.
+    fn table(ls_colors: &str) -> Box<Colors> {
+        match parse(Some(ls_colors)) {
+            (ColorSetup::On(c), d) => {
+                assert!(d.is_empty(), "unexpected diagnostics: {d:?}");
+                c
+            }
+            (ColorSetup::Off, d) => panic!("{ls_colors:?} did not parse: {d:?}"),
+        }
+    }
+
+    /// A `Config` that colours, with the given table.
+    fn color_cfg(colors: Box<Colors>) -> Config {
+        Config {
+            colors: Some(colors),
+            ..Config::default()
+        }
+    }
+
+    /// One name written through the colour path, as an escaped string —
+    /// `\033` spelled out, so a failure is readable.
+    fn colored_name(cfg: &Config, f: &FileInfo, start_col: usize) -> String {
+        let mut out = Out::default();
+        out.set_normal_color(cfg);
+        print_name_with_quoting(&mut out, cfg, false, f, false, Dired::No, start_col);
+        String::from_utf8_lossy(&out.buf)
+            .replace('\u{1b}', "\\e")
+            .to_string()
+    }
+
+    /// gnulib's `get_funky_string` decodes four escape families, and two of its
+    /// answers are wrong in ways a rewrite would silently correct.
+    ///
+    /// `^?` is the first: the caret arm advances past its operand only for
+    /// `@`..`~`, and `?` is `0x3f`, one below `@` — so it emits `0x7f` without
+    /// advancing and the `?` is read again as itself. Measured, GNU ls 9.5:
+    /// `LS_COLORS='di=^?'` paints a directory with `\033[\177?m`.
+    ///
+    /// The second is that the accumulator is a `char`: `\501` is three octal
+    /// digits shifted into a byte, so it wraps rather than being rejected.
+    #[test]
+    fn a_colour_field_decodes_backslashes_carets_octal_and_hex() {
+        assert_eq!(funky("01;34"), Some(b"01;34".to_vec()));
+        // The four spellings of ESC that dircolors emits.
+        assert_eq!(funky(r"\e"), Some(b"\x1b".to_vec()));
+        assert_eq!(funky(r"\033"), Some(b"\x1b".to_vec()));
+        assert_eq!(funky(r"\x1b"), Some(b"\x1b".to_vec()));
+        assert_eq!(funky("^["), Some(b"\x1b".to_vec()));
+        // `\_` is a space, which is the only way to write one: a raw space
+        // would be kept, but dircolors' own output never contains one.
+        assert_eq!(funky(r"\_"), Some(b" ".to_vec()));
+        assert_eq!(
+            funky(r"\a\b\f\n\r\t\v"),
+            Some(b"\x07\x08\x0c\n\r\t\x0b".to_vec())
+        );
+        // An unknown escape is the byte itself, which is how `\:` and `\=`
+        // reach a field they would otherwise terminate.
+        assert_eq!(funky(r"\:\=\\"), Some(b":=\\".to_vec()));
+        // The two quirks.
+        assert_eq!(funky("^?"), Some(b"\x7f?".to_vec()));
+        assert_eq!(funky(r"\501"), Some(vec![0o501u16 as u8]));
+        // A trailing backslash is upstream's `case '\0'` — an error, and one
+        // that poisons the whole variable rather than being dropped.
+        assert_eq!(get_funky_string(br"\", false), None);
+        // A field ends at `:`, and the offset points *at* the `:`.
+        assert_eq!(
+            get_funky_string(b"34:di=1", false),
+            Some((b"34".to_vec(), 2))
+        );
+        // `=` ends a field only on the suffix half of an extension rule.
+        assert_eq!(get_funky_string(b".gz=1", true), Some((b".gz".to_vec(), 3)));
+        assert_eq!(
+            get_funky_string(b".gz=1", false),
+            Some((b".gz=1".to_vec(), 5))
+        );
+    }
+
+    /// `do` and `ca` are parsed and stored like any other indicator; what they
+    /// lack is a caller. [`get_color_indicator`] can never return either —
+    /// `S_ISDOOR` is a constant `0` on our targets, and deciding `ca` needs a
+    /// `getxattr` we do not have — so the only thing left to pin down is that
+    /// their slots did not drift, because the slot number is what indexes
+    /// [`INDICATOR_NAME`] and [`COLOR_DEFAULT`], and a drift would silently
+    /// hand one indicator's escape to another.
+    #[test]
+    fn the_two_indicators_we_never_choose_still_keep_their_slots() {
+        assert_eq!(INDICATOR_NAME[Ind::Door as usize], b"do");
+        assert_eq!(INDICATOR_NAME[Ind::Cap as usize], b"ca");
+        // `do` carries upstream's default even though nothing can select it;
+        // `ca` is one of the seven upstream leaves unset.
+        assert_eq!(COLOR_DEFAULT[Ind::Door as usize], Some(&b"01;35"[..]));
+        assert_eq!(COLOR_DEFAULT[Ind::Cap as usize], None);
+        let c = table("do=01;35:ca=30;41");
+        assert_eq!(c.get(Ind::Door), Some(&b"01;35"[..]));
+        assert_eq!(c.get(Ind::Cap), Some(&b"30;41"[..]));
+    }
+
+    /// With `LS_COLORS` unset or empty, upstream does not invent a table: it
+    /// asks whether the terminal is one `dircolors` ships a line for. So
+    /// `--color=always` on a terminal it has never heard of emits nothing at
+    /// all — which is why the harness's `TERM=dumb` case is identical to its
+    /// neighbours, all of which run with no `TERM` at all.
+    #[test]
+    fn an_unset_ls_colors_falls_back_to_the_terminal_and_not_to_the_defaults() {
+        assert_eq!(parse(None).0, ColorSetup::Off);
+        assert_eq!(parse(Some("")).0, ColorSetup::Off);
+
+        let with = |term: Option<&str>, colorterm: Option<&str>| {
+            parse_ls_color(&Environment {
+                term: term.map(|s| s.as_bytes().to_vec()),
+                colorterm: colorterm.map(|s| s.as_bytes().to_vec()),
+                ..Environment::default()
+            })
+            .0
+        };
+        assert_eq!(with(Some("dumb"), None), ColorSetup::Off);
+        assert_eq!(with(Some(""), None), ColorSetup::Off);
+        // The list is globs, so `xterm*` covers every suffix and `*color*`
+        // covers anything advertising colour in its name.
+        assert!(matches!(
+            with(Some("xterm-256color"), None),
+            ColorSetup::On(_)
+        ));
+        assert!(matches!(with(Some("linux"), None), ColorSetup::On(_)));
+        assert!(matches!(with(Some("screen.rxvt"), None), ColorSetup::On(_)));
+        // `COLORTERM` overrides the question entirely, and its value is never
+        // looked at — only whether it is non-empty.
+        assert!(matches!(
+            with(Some("dumb"), Some("truecolor")),
+            ColorSetup::On(_)
+        ));
+        assert_eq!(with(Some("dumb"), Some("")), ColorSetup::Off);
+
+        // A *set* `LS_COLORS` is used whatever `TERM` says: the terminal test
+        // is only the fallback's.
+        assert!(matches!(
+            parse_ls_color(&Environment {
+                ls_colors: Some(b"di=34".to_vec()),
+                term: Some(b"dumb".to_vec()),
+                ..Environment::default()
+            })
+            .0,
+            ColorSetup::On(_)
+        ));
+    }
+
+    /// One bad label discards the whole variable — upstream leaves `state` at
+    /// `PS_FAIL` and falls out of the loop, so the `di=34` *after* an
+    /// `xy=01` is lost along with it. Both diagnostics print and neither
+    /// changes the exit status.
+    #[test]
+    fn an_unparsable_ls_colors_turns_colour_off_and_says_so_twice() {
+        let (setup, diagnostics) = parse(Some("xy=01:di=34"));
+        assert_eq!(setup, ColorSetup::Off);
+        assert_eq!(
+            diagnostics,
+            vec![
+                "ls: unrecognized prefix: \u{2018}xy\u{2019}".to_owned(),
+                "ls: unparsable value for LS_COLORS environment variable".to_owned(),
+            ]
+        );
+
+        // A missing `=`, a one-byte label and a bad escape are the same
+        // outcome, with only the second diagnostic.
+        for bad in ["di34", "d", r"di=\"] {
+            let (setup, diagnostics) = parse(Some(bad));
+            assert_eq!(setup, ColorSetup::Off, "{bad:?}");
+            assert_eq!(
+                diagnostics,
+                vec!["ls: unparsable value for LS_COLORS environment variable".to_owned()],
+                "{bad:?}"
+            );
+        }
+
+        // A *trailing* separator is not an error: the loop consumes the `:`
+        // and then finds the end.
+        assert_eq!(table("di=34:").get(Ind::Dir), Some(&b"34"[..]));
+        // Nor is an explicitly empty field.
+        assert_eq!(table("di=").get(Ind::Dir), Some(&b""[..]));
+        assert!(!table("di=").is_colored(Ind::Dir));
+    }
+
+    /// `is_colored` and `get` answer different questions, and the three
+    /// spellings of "no colour" — unset, empty, and `0`/`00` — are where they
+    /// part. `get` still hands the sequence over and it is still emitted, so
+    /// `di=0` paints a directory with `\033[0m`; what `is_colored` decides is
+    /// only the *four* places that ask whether a colour is in effect at all.
+    /// Measured, GNU ls 9.5, on a directory `d` and a plain file `p`:
+    ///
+    /// ```text
+    /// LS_COLORS='di='         ->  ^[[0m^[[md^[[0m
+    /// LS_COLORS='di=0'        ->  ^[[0m^[[0md^[[0m
+    /// LS_COLORS='no=0:di=34'  ->  ^[[0m^[[34md^[[0m  p
+    /// ```
+    ///
+    /// The last line is the one that matters: `no=0` leaves the row unpainted,
+    /// so the plain file emits nothing and the directory loses the extra reset
+    /// that a real `no` would have put in front of its colour.
+    #[test]
+    fn a_reset_sequence_is_emitted_but_does_not_count_as_a_colour() {
+        let dir = stated("d", S_IFDIR | 0o755, FileType::Directory);
+        let plain = stated("p", S_IFREG | 0o644, FileType::Normal);
+
+        for (off, want) in [("di=", r"\e[0m\e[md\e[0m"), ("di=0", r"\e[0m\e[0md\e[0m")] {
+            let colors = table(off);
+            assert!(!colors.is_colored(Ind::Dir), "{off:?}");
+            // Not colouring is not the same as not emitting: the wrapper is
+            // still written, and the latch still fires.
+            assert_eq!(colored_name(&color_cfg(colors), &dir, 0), want, "{off:?}");
+        }
+
+        // `no` is where `is_colored` is actually consulted, and all three
+        // spellings of "no colour" reach the same listing.
+        for off in ["no=0:di=34", "no=00:di=34", "no=:di=34", "di=34"] {
+            let cfg = color_cfg(table(off));
+            assert_eq!(colored_name(&cfg, &dir, 0), r"\e[0m\e[34md\e[0m", "{off:?}");
+            assert_eq!(colored_name(&cfg, &plain, 0), "p", "{off:?}");
+        }
+
+        // An unset indicator differs from an empty one only to `get`.
+        assert_eq!(Colors::default().get(Ind::Norm), None);
+        assert_eq!(table("no=").get(Ind::Norm), Some(&b""[..]));
+        assert!(!Colors::default().is_colored(Ind::Norm));
+        assert!(Colors::default().is_colored(Ind::Dir));
+    }
+
+    /// Extensions are looked up in the reverse of the order they were written,
+    /// because upstream pushes each onto the head of a list — so a later
+    /// `*.gz=` wins. Case matters only when two spellings of the same letters
+    /// ask for *different* colours; otherwise `*.gz` paints `FOO.GZ` too.
+    #[test]
+    fn an_extension_rule_is_case_insensitive_until_two_of_them_disagree() {
+        let colors = table("*.gz=01;31:*.gz=01;32");
+        assert_eq!(colors.ext.len(), 2);
+        // Reversed: the last one written is first, and the earlier one can
+        // never be reached.
+        assert_eq!(colors.ext[0].seq, b"01;32".to_vec());
+        assert!(!colors.ext[0].ignored);
+        assert!(colors.ext[1].ignored);
+
+        // Same letters, same colour: still redundant, so no exact match is
+        // forced and `.GZ` keeps matching `.gz`.
+        let colors = table("*.gz=01;31:*.GZ=01;31");
+        assert!(!colors.ext[0].exact_match);
+        assert!(colors.ext[1].ignored);
+
+        // Same letters, *different* colours: both become exact, and a name
+        // whose case matches neither gets nothing.
+        let colors = table("*.gz=01;31:*.GZ=01;35");
+        assert!(colors.ext[0].exact_match && colors.ext[1].exact_match);
+
+        let seq_for = |colors: &Colors, name: &str| {
+            get_color_indicator(
+                colors,
+                &stated(name, S_IFREG | 0o644, FileType::Normal),
+                false,
+            )
+            .map(<[u8]>::to_vec)
+        };
+        assert_eq!(seq_for(&colors, "a.GZ"), Some(b"01;35".to_vec()));
+        assert_eq!(seq_for(&colors, "a.gz"), Some(b"01;31".to_vec()));
+        assert_eq!(seq_for(&colors, "a.Gz"), None);
+
+        // Case-insensitive when they agree.
+        let colors = table("*.gz=01;31");
+        assert_eq!(seq_for(&colors, "a.Gz"), Some(b"01;31".to_vec()));
+        // A suffix is compared against the tail of the name, so a name that is
+        // exactly the suffix matches and a shorter one cannot.
+        assert_eq!(seq_for(&colors, ".gz"), Some(b"01;31".to_vec()));
+        assert_eq!(seq_for(&colors, "gz"), None);
+    }
+
+    /// The mode tests, in upstream's order — which is what decides that a
+    /// setuid *directory* is `su` and not `di`, and that `tw` beats `ow` beats
+    /// `st`. `mh` sits in front of all of them and only for a regular file with
+    /// more than one link, which is why it is off by default: it would repaint
+    /// every file on a filesystem with hard links.
+    #[test]
+    fn the_mode_decides_the_colour_in_upstreams_order() {
+        let colors = Colors::default();
+        let seq = |f: &FileInfo| get_color_indicator(&colors, f, false).map(<[u8]>::to_vec);
+        let of = |mode: u32, kind: FileType| stated("n", mode, kind);
+
+        assert_eq!(
+            seq(&of(S_IFDIR | 0o755, FileType::Directory)),
+            Some(b"01;34".to_vec())
+        );
+        assert_eq!(
+            seq(&of(S_IFIFO | 0o644, FileType::Fifo)),
+            Some(b"33".to_vec())
+        );
+        assert_eq!(
+            seq(&of(S_IFSOCK | 0o644, FileType::Sock)),
+            Some(b"01;35".to_vec())
+        );
+        assert_eq!(
+            seq(&of(S_IFBLK | 0o644, FileType::Blockdev)),
+            Some(b"01;33".to_vec())
+        );
+        assert_eq!(
+            seq(&of(S_IFCHR | 0o644, FileType::Chardev)),
+            Some(b"01;33".to_vec())
+        );
+        assert_eq!(
+            seq(&of(S_IFREG | 0o755, FileType::Normal)),
+            Some(b"01;32".to_vec())
+        );
+        assert_eq!(
+            seq(&of(S_IFREG | 0o4755, FileType::Normal)),
+            Some(b"37;41".to_vec())
+        );
+        assert_eq!(
+            seq(&of(S_IFREG | 0o2755, FileType::Normal)),
+            Some(b"30;43".to_vec())
+        );
+        // A plain file has no default colour at all — `fi` is unset, which is
+        // why `ls --color` on a directory of plain files emits nothing.
+        assert_eq!(seq(&of(S_IFREG | 0o644, FileType::Normal)), None);
+
+        // The three directory overloads, and their precedence.
+        assert_eq!(
+            seq(&of(S_IFDIR | 0o1777, FileType::Directory)),
+            Some(b"30;42".to_vec())
+        );
+        assert_eq!(
+            seq(&of(S_IFDIR | 0o0777, FileType::Directory)),
+            Some(b"34;42".to_vec())
+        );
+        assert_eq!(
+            seq(&of(S_IFDIR | 0o1755, FileType::Directory)),
+            Some(b"37;44".to_vec())
+        );
+
+        // `mh`, once it is switched on, outranks every one of them.
+        let mh = table("mh=04;44");
+        let mut linked = of(S_IFREG | 0o644, FileType::Normal);
+        linked.stat.nlink = 2;
+        assert_eq!(
+            get_color_indicator(&mh, &linked, false).map(<[u8]>::to_vec),
+            Some(b"04;44".to_vec())
+        );
+        // …but not for a directory, whose link count is always above one.
+        let mut dir = of(S_IFDIR | 0o755, FileType::Directory);
+        dir.stat.nlink = 4;
+        assert_eq!(
+            get_color_indicator(&mh, &dir, false).map(<[u8]>::to_vec),
+            Some(b"01;34".to_vec())
+        );
+    }
+
+    /// A symlink is `ln` by default, `or` when it dangles, and — with
+    /// `ln=target` — whatever its target is. `mi` is reachable from the
+    /// *target* text after the `->` and from nowhere else, which is why
+    /// upstream's `linkok` is a tri-state and not a `bool`.
+    #[test]
+    fn a_symlink_takes_its_own_colour_its_targets_or_the_orphan_one() {
+        let link = |ok: bool| FileInfo {
+            name: b"l".to_vec(),
+            linkname: Some(b"t".to_vec()),
+            stat_ok: true,
+            filetype: FileType::SymbolicLink,
+            link_ok: ok,
+            link_mode: S_IFDIR | 0o755,
+            stat: Stat {
+                mode: S_IFLNK | 0o777,
+                ..Stat::default()
+            },
+            ..FileInfo::default()
+        };
+
+        let colors = Colors::default();
+        assert_eq!(
+            get_color_indicator(&colors, &link(true), false).map(<[u8]>::to_vec),
+            Some(b"01;36".to_vec())
+        );
+        // `or` is unset by default, so a dangling link stays cyan.
+        assert_eq!(
+            get_color_indicator(&colors, &link(false), false).map(<[u8]>::to_vec),
+            Some(b"01;36".to_vec())
+        );
+        let orphaned = table("or=40;31;01");
+        assert_eq!(
+            get_color_indicator(&orphaned, &link(false), false).map(<[u8]>::to_vec),
+            Some(b"40;31;01".to_vec())
+        );
+
+        // `ln=target` paints the link as its target — a directory, here — and
+        // forces `or` when it dangles even though `or` is unset, because there
+        // is no target to take a colour from.
+        let target = table("ln=target");
+        assert!(target.symlink_as_referent);
+        assert_eq!(
+            get_color_indicator(&target, &link(true), false).map(<[u8]>::to_vec),
+            Some(b"01;34".to_vec())
+        );
+        assert_eq!(get_color_indicator(&target, &link(false), false), None);
+
+        // The target text after the `->` is the only caller that passes
+        // `symlink_target`, and the only one that can reach `mi`.
+        let mi = table("mi=05;41:ln=target");
+        assert_eq!(
+            get_color_indicator(&mi, &link(false), true).map(<[u8]>::to_vec),
+            Some(b"05;41".to_vec())
+        );
+    }
+
+    /// The first escape of a listing is preceded by a `prep_non_filename_text`,
+    /// because upstream's `used_color` latch is tested *before* it is set — so
+    /// a coloured listing opens with a stray reset. Measured, GNU ls 9.5:
+    ///
+    /// ```text
+    /// $ LS_COLORS='di=34' ls --color=always -1 d | cat -v
+    /// ^[[0m^[[34md^[[0m
+    /// ```
+    ///
+    /// The latch fires on the *attempt*, not on the bytes, so an `ec=` that
+    /// exists and is empty still opens the listing with it.
+    #[test]
+    fn the_first_escape_is_preceded_by_a_reset_and_only_the_first() {
+        let cfg = color_cfg(table("di=34"));
+        let dir = stated("d", S_IFDIR | 0o755, FileType::Directory);
+        assert_eq!(colored_name(&cfg, &dir, 0), r"\e[0m\e[34md\e[0m");
+
+        // Two names, one latch: the second gets no opening reset.
+        let mut out = Out::default();
+        print_name_with_quoting(&mut out, &cfg, false, &dir, false, Dired::No, 0);
+        print_name_with_quoting(&mut out, &cfg, false, &dir, false, Dired::No, 0);
+        assert_eq!(
+            String::from_utf8_lossy(&out.buf).replace('\u{1b}', "\\e"),
+            r"\e[0m\e[34md\e[0m\e[34md\e[0m"
+        );
+
+        // `ec` replaces the three-part end sequence wholesale, including the
+        // opening one.
+        let cfg = color_cfg(table(r"ec=\e[m:di=34"));
+        assert_eq!(colored_name(&cfg, &dir, 0), r"\e[m\e[34md\e[m");
+
+        // An `ec` that is present and empty still trips the latch, so the
+        // listing opens with nothing and ends each name with nothing — but the
+        // *colour* is still emitted.
+        let cfg = color_cfg(table("ec=:di=34"));
+        assert_eq!(colored_name(&cfg, &dir, 0), r"\e[34md");
+
+        // `lc` and `rc` are the brackets, and replacing them replaces them
+        // everywhere — including in the reset assembled from `lc`+`rs`+`rc`.
+        let cfg = color_cfg(table("lc=<:rc=>:di=34"));
+        assert_eq!(colored_name(&cfg, &dir, 0), "<0><34>d<0>");
+    }
+
+    /// `no` paints everything that is *not* a file name, so it is emitted
+    /// before the row and again in front of each name — and a name with no
+    /// colour of its own still ends with a reset, because the row's colour has
+    /// to stop somewhere. That is `used_color_this_time`'s second half.
+    #[test]
+    fn the_normal_colour_paints_the_row_and_every_name_resets_it() {
+        let cfg = color_cfg(table("no=01;37:di=34"));
+        let dir = stated("d", S_IFDIR | 0o755, FileType::Directory);
+        let plain = stated("p", S_IFREG | 0o644, FileType::Normal);
+
+        // `set_normal_color`, then the name's own colour — which is preceded
+        // by a `restore_default_color`, so that bold-from-`no` is not added to
+        // blue-from-`di`. That restore is `lc`+`rc` with *nothing* between
+        // them, which is `\033[m` and not `\033[0m`: the `rs` in the middle is
+        // what the end-of-name reset has and this one does not.
+        assert_eq!(
+            colored_name(&cfg, &dir, 0),
+            r"\e[0m\e[01;37m\e[m\e[34md\e[0m"
+        );
+        // A file the table says nothing about is still bracketed, because `no`
+        // is in effect.
+        assert_eq!(colored_name(&cfg, &plain, 0), r"\e[0m\e[01;37mp\e[0m");
+
+        // Without `no`, a file with no colour of its own emits nothing at all.
+        let cfg = color_cfg(table("di=34"));
+        assert_eq!(colored_name(&cfg, &plain, 0), "p");
+    }
+
+    /// `cl` is emitted after a coloured name that *might* have straddled a line
+    /// boundary, so that the colour does not paint the rest of the row on a
+    /// terminal that wrapped it. Upstream measures the straddle in **bytes**
+    /// rather than columns, deliberately — a byte count is never less than the
+    /// width it bounds, so the cheap test is the safe one.
+    #[test]
+    fn the_clear_to_end_of_line_follows_a_name_that_might_have_wrapped() {
+        let cfg = Config {
+            line_length: 10,
+            ..color_cfg(table("di=34"))
+        };
+        let dir = stated("dddd", S_IFDIR | 0o755, FileType::Directory);
+
+        // Wholly inside the first row: no `cl`.
+        assert_eq!(colored_name(&cfg, &dir, 0), r"\e[0m\e[34mdddd\e[0m");
+        // Ends on the last column of the row: still no `cl`, because the last
+        // *byte* is at index 9.
+        assert_eq!(colored_name(&cfg, &dir, 6), r"\e[0m\e[34mdddd\e[0m");
+        // One further along, and the name crosses into the next row.
+        assert_eq!(colored_name(&cfg, &dir, 7), r"\e[0m\e[34mdddd\e[0m\e[K");
+
+        // `-w 0` means "no limit", and upstream's `if (line_length …)` guard
+        // makes it mean "never emit `cl`" as well.
+        let cfg = Config {
+            line_length: 0,
+            ..color_cfg(table("di=34"))
+        };
+        assert_eq!(colored_name(&cfg, &dir, 7), r"\e[0m\e[34mdddd\e[0m");
+    }
+
+    /// Upstream's `put_indicator` writes with `fwrite` and does not touch
+    /// `dired_pos`, so `--dired`'s offsets do not count the colour escapes:
+    /// they point into the middle of one rather than at the name. It is a bug
+    /// upstream, and it is reproduced because the offsets are the output.
+    /// Measured, GNU ls 9.5 — the same listing with and without `--color`
+    /// reports the *same* offsets:
+    ///
+    /// ```text
+    /// $ ls --color=always -l --dired c | tail -1
+    /// //DIRED// 58 59 …
+    /// $ ls -l --dired c | tail -1
+    /// //DIRED// 58 59 …
+    /// ```
+    #[test]
+    fn the_dired_offsets_do_not_count_the_colour_escapes() {
+        let w = Widths {
+            nlink: 1,
+            owner: 6,
+            group: 6,
+            file_size: 1,
+            ..Widths::default()
+        };
+        let dir = stated("d", S_IFDIR | 0o755, FileType::Directory);
+
+        let offsets = |colors: Option<Box<Colors>>| {
+            let cfg = Config {
+                dired: true,
+                colors,
+                ..long_cfg()
+            };
+            let mut out = Out::default();
+            let mut times = Times::new(&cfg, localtime::Zone::utc(), frozen_clock);
+            out.set_normal_color(&cfg);
+            print_long_format(&mut out, &cfg, &inhahe(), &mut times, &w, false, &dir);
+            (
+                out.dired.clone(),
+                String::from_utf8_lossy(&out.buf).into_owned(),
+            )
+        };
+
+        let (plain_offsets, plain_line) = offsets(None);
+        assert!(plain_line.ends_with(" d"));
+        assert_eq!(
+            plain_offsets,
+            vec![plain_line.len() - 1, plain_line.len()],
+            "without colour the offsets are the real ones"
+        );
+
+        let (color_offsets, color_line) = offsets(Some(table("di=34")));
+        assert_eq!(color_offsets, plain_offsets);
+        // The line really did grow — the offsets are short by exactly that.
+        assert_eq!(
+            color_line.len(),
+            plain_line.len() + "\x1b[0m\x1b[34m\x1b[0m".len()
+        );
     }
 
     // ----------------------------------------------------- the column layouts ---

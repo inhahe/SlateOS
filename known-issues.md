@@ -50388,7 +50388,7 @@ commands that carry the colour in question, and assert the two renders agree.
 Candidates: anything drawn on the wallpaper, on a video surface, on a
 thumbnail, or on any other content the palette does not own.
 
-**Part 2 progress. 29 of 49 modules converted.**
+**Part 2 progress. 31 of 49 modules converted.**
 
 - [x] `security_dialog.rs` — 29 constants, done 2026-08-22. The method above
   survived contact: the sweep lives in `gui/desktop/src/palette_check.rs` as
@@ -51983,6 +51983,149 @@ thumbnail, or on any other content the palette does not own.
     value that actually changed: dropping the third window still leaves a
     badge (any count above one draws one) and still leaves it `p.red`, so only
     the digit test — which selects the text by its content, `"3"` — notices.
+- [x] `language_settings.rs` — 11 constants over three tabs, done 2026-08-23.
+  Forty-five tests in the module (twelve new, three reworked), harness defects
+  Ax39–Bx41 (fifty-four), all fifty-four caught, none escaped.
+  - **Tenth lesson for the width rule, and the most useful one so far:
+    *writing the defects is what finds the holes; reviewing the tests is not.***
+    This module was committed with 44 passing tests — a two-mode sweep, a
+    branch-coverage test, an accent count and six judgement tests — and read as
+    thorough. Then the defect list was enumerated one colour site at a time,
+    each asking "which test names this back?", and for three whole classes the
+    answer was *none*: the current-language card dropping to the list rows'
+    rung, the selected and unselected row rungs exchanged, and the fixture
+    selecting the row that is already current. All three are
+    **role-for-neighbouring-role** substitutions — both values are legal
+    members, so the membership sweep accepts either, and no count changes, so
+    the coverage test balances. The fix was a per-site table
+    (`every_site_draws_the_role_it_claims`) whose row assertions are a
+    *positional vector*, not a set: `{surface0, surface0, surface1}` is the
+    same multiset whichever row is raised. Three of the fifty-four defects are
+    caught by that table and nothing else. **Enumerate the defects before
+    declaring a module converted — the declaration list is the coverage
+    report, and it is the only one that cannot flatter itself.**
+  - **When the module doc enumerates N things, the test must enumerate the
+    same N.** The doc named three accent-carrying position marks including the
+    default currency's row; the accent count covered the Language and Formats
+    tabs and stopped, so the Region tab — and that currency row — was
+    unguarded. The doc was ahead of the test, which is what made the gap
+    findable at all. The count is now per tab (3 / 1 / 2), and the differing
+    counts are what stop three assertions from being one weak assertion
+    repeated. The doc was also miscounting in the other direction: there are
+    three *axes* but four *sites*, because the current language is marked
+    twice — a bar beside its row and the row's own name.
+  - **The `.take(12)` trap: a default dataset is not a fixture.** The stock
+    language list holds 20 entries, every incomplete one sits at index 12 or
+    beyond, and the list renders `.take(12)`. So the default fixture cannot
+    reach the "Partial" badge *at all* — the badge fill and its derived ink
+    would have been swept without ever being drawn, and every assertion about
+    them would have passed vacuously. The fixture builds its own three-language
+    list instead. Check that each branch you mean to sweep is reachable **from
+    the data you hand the renderer**, not merely present in the code.
+  - **A selector must discriminate on something only its target has.** The tab
+    strip was first selected by `height == 32.0` — which also matches the
+    current-language marker bar, 4×32 — so "three tabs are drawn" counted
+    four. It selects on `y == 60.0` now. Same family as the module-26 accent
+    trap: a discriminator shared with another site is not a discriminator.
+  - **A filtering fixture must match every row it wants rendered.** The search
+    query started as `"an"`, which does not match "English (United States)";
+    the current language dropped out of the list and took the marker bar and
+    the accented row label with it, silently. `"n"` matches all three rows.
+    Pinned as defect Wx40, which puts `"an"` back.
+  - **The `readable_on` endpoint blindness, twice, and the second is sharper
+    than any previous instance.** Defect Gx39 freezes the active tab's label to
+    `0x11111B`: the membership sweep allows it (it is an endpoint) and the
+    deleted-constants test excludes it (it is also Mocha `crust`), so only the
+    accent sweep sees it. Defect Ex40 freezes the badge's ink the same way —
+    and near-black is the *right* answer in the dark render, so the
+    branch-coverage test, which runs dark only, passes as well. Only the
+    two-mode comparison catches it. **A derived-ink site needs a test that
+    drives its input across a range or compares the two modes; a single-mode
+    assertion on such a site is structurally incapable of failing.**
+  - Judgements, for the record: the accent marks position only (selected tab,
+    current language, current currency); the "Partial" badge is a property of
+    the *data*, so it keeps `p.yellow` and must never follow the accent; ink on
+    a fill this module chose is derived (`readable_on(p.accent)`,
+    `readable_on(p.yellow)`); headings are a two-rung hierarchy (`p.lavender`
+    15pt Bold over `p.subtext1` 13pt Bold, the convention already set by
+    `datetime_settings` and `notification_settings`); and an absent value is
+    dimmer than a present one (`p.overlay0` placeholder, `p.text` query).
+  - The seven lavender headings looked at first like the same category error
+    as the taskbar's lavender underline and were investigated as such. They are
+    not: `p.lavender` at 15pt Bold is the established section-heading rung
+    across three already-converted modules, so the mapping is a straight
+    `LAVENDER → p.lavender`. The fourteen verbatim copies of that heading push
+    are logged separately as
+    `TD-C-EVERY-SECTION-HEADING-IS-WRITTEN-OUT-BY-HAND`; they cannot be
+    collapsed inside a per-module conversion without invalidating earlier
+    modules' harness patterns.
+- [x] `default_apps.rs` — 11 constants over 33 colour sites and three tabs,
+  done 2026-08-23. Thirty-five tests in the module (nine new), harness defects
+  Ax42–Rx44 (seventy), all seventy caught, none escaped.
+  - **The conversion found a real UI defect, and writing the judgement down is
+    what found it.** The module doc now says "the accent marks which app is in
+    force, and nothing else". Stating that as something refutable made it
+    obvious that the app name under each category card was drawn `p.accent`
+    *unconditionally* — including on the two cards that read "None set",
+    because `builtin_apps()` ships no web browser and no email client. So
+    twelve of twelve cards were accented, and a mark carried by everything
+    marks nothing; worse, the two cards that actually wanted the user's
+    attention looked exactly like the ten that were already settled. Fixed to
+    `p.overlay0` in a separate commit from the mechanical conversion, so the
+    harness proof of the conversion stays unambiguous. **A judgement you can
+    state in one sentence is a judgement you can check; the eleven constants
+    had been sitting on top of this bug for as long as they existed.**
+  - **The `readable_on`/`CRUST` collision, and the first module where it is
+    load-bearing rather than merely noted.** The ink on the current app's chip
+    used to be the constant `CRUST` (`0x11111B`). `readable_on` answers exactly
+    `0x11111B` for the *stock* accent, whose luma is 175 — so at the shipped
+    accent a leftover constant and the correct call produce the same pixel.
+    The membership sweep cannot help either, because it allows both
+    `readable_on` endpoints outright (`palette_check`'s documented hole). Only
+    sweeping the accent across all 21 roles separates them, because the
+    expected ink flips endpoints as the accent's luma crosses 140 and a frozen
+    value cannot flip. Defect Fx43 — the site naming `p.crust` instead of
+    calling `readable_on` — is caught by **that test and nothing else**, out of
+    thirty-five. The test closes with `seen.len() == 2` so that a palette which
+    happened to be all-dark could not quietly degrade it into a constant
+    comparison.
+  - **Four fixture traps in one default dataset, the `.take(12)` lesson
+    generalised.** `DefaultAppsSettings::default()` cannot exercise this module
+    at all: every category has exactly one handling app, so the chip `else`
+    arm never renders; nothing is customised, so *both* peach sites are dead;
+    and every builtin is a system app, so the third-party count is always 0 and
+    the `is_system` badge is never absent. One rival music player plus one
+    `.mp3` custom association turns all four branches on. **Check each branch
+    is reachable from the data you hand the renderer, not merely present in the
+    code** — and check it before writing the assertions, because an assertion
+    on a branch that never renders passes vacuously and looks like coverage.
+  - **Seven sites had no assertion, and only the defect enumeration found
+    them.** The module was committed with 26 tests reading as thorough. Writing
+    the defect list one colour site at a time — the module-30 lesson applied
+    rather than restated — turned up seven sites nothing named: the category
+    icon, both search-box fills, the extension rows, the *ordinary* (non-custom)
+    ink on a file-type row, an installed app's own name, and the join line under
+    it. Every one would have survived a swap to a neighbouring role. Two are
+    worth their own note. The File types search box and its extension rows are
+    both `width` × 32, so geometry cannot separate them — but `fills_sized`
+    preserves command order and the box is drawn first, which is enough to
+    index them. And the ordinary ink is the `else` of the peach branch:
+    **both arms of one `if` are two sites, and only one of them had a test.**
+  - **Two search boxes sharing one query field are still two sites.** They are
+    byte-identical in the source, which is exactly why the harness patterns for
+    them have to reach out to the placeholder string to disambiguate — and why
+    the test loops over both tabs. Checking only the File types box would have
+    left the Installed apps box free to draw anything.
+  - Judgements, for the record: the accent marks which one is in force and
+    nothing else (three sites, per-tab counts 12 / 1 / 1 — a dozen legitimate
+    accented marks are on screen at once, so the taskbar's "exactly one" test
+    cannot be borrowed and this needs a per-site table *plus* a count); peach
+    marks a departure from the shipped defaults, which is a state and not a
+    position, so it must hold still while the accent sweeps all 21 roles; the
+    content well is one rung below the panel, asserted as an *ordering* rather
+    than a pair of literals so it fails on a palette whose crust was made
+    lighter than its base; and ink on a fill this module chose is computed,
+    never named.
 
 **Trigger:** this is not blocked on anything. It is sequenced after the shell
 event loop (`TD-C-THE-SHELL-CAN-DRAW-ITSELF-AND-NOBODY-CAN-ASK-IT-TO`) only
@@ -51996,6 +52139,63 @@ defect observed from the settings end.
 picks Light gets a desktop that is light in five places and dark in every
 other, which reads as a broken theme rather than an unimplemented one — worse
 than having no setting at all.
+---
+
+### TD-C-EVERY-SECTION-HEADING-IS-WRITTEN-OUT-BY-HAND — 2026-08-23 — OPEN
+
+**In short.** A settings panel is divided into sections, and each section has a
+heading — "Date Format", "Measurement", "Notifications". Every one of those
+headings is eight lines of copied-out drawing code that differ only in the
+words. There are fourteen copies across three files today, and there will be
+one per section in every settings panel still to be converted. Nothing is
+*wrong* on screen; the cost is that the rule "a section heading looks like
+*this*" is recorded fourteen times instead of once, so the fifteenth copy is
+free to disagree with the other fourteen and nothing will notice.
+
+**Where:** `gui/desktop/src/language_settings.rs` (7 copies),
+`datetime_settings.rs` (4), `notification_settings.rs` (3). The shape is
+identical in all fourteen:
+
+```rust
+cmds.push(RenderCommand::Text {
+    x,
+    y: cy,
+    text: "Date Format".into(),
+    font_size: 15.0,
+    color: p.lavender,
+    font_weight: FontWeightHint::Bold,
+    max_width: Some(width),
+    overflow: TextOverflow::Ellipsis,
+});
+cy += 26.0;
+```
+
+**Proper fix:** one `fn section_heading(cmds, p, x, cy, width, text) -> f32`
+returning the advanced `cy`, somewhere all three modules can reach — the
+obvious home is beside `palette_check` in `gui/desktop/src`. The same argument
+applies to the sub-heading rung (`p.subtext1` at 13pt Bold) and to the
+label/value row, which is already a private helper duplicated per module.
+
+**Why it is not done inside a per-module palette conversion:** the
+reintroduction harness (`scripts/reintro-palette.py`) pins defects by *exact
+source text*. Rewriting these sites collapses the very strings that twenty-odd
+already-proved defects match on, in modules whose proofs are finished and
+merged. Folding the extraction into one module's conversion would silently
+invalidate earlier modules' evidence; doing it as its own change, across all
+modules at once, lets the harness be re-pointed in one deliberate edit and
+re-run to confirm the proofs still hold. That is a sequencing reason, not a
+cost one.
+
+**Trigger:** do it once the last settings panel is converted (part 2 of
+`TD-C-FORTY-NINE-SHELL-MODULES-CARRY-THEIR-OWN-COPY-OF-THE-PALETTE`), so the
+helper is extracted against the final set of call sites rather than a moving
+one.
+
+**If never fixed:** nothing breaks, but the heading convention stays
+unenforceable. The symptom to expect is drift — a panel written next month at
+14pt, or in `p.text` instead of `p.lavender`, sitting beside one written today,
+with no test able to state that they should match because there is no single
+place where the rule lives.
 ---
 
 ### TD-C-SWITCH-KNOBS-ARE-LOW-CONTRAST-ON-THE-ON-PILL — 2026-08-22 — OPEN

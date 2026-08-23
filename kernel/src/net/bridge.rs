@@ -24,6 +24,7 @@
 //! For link aggregation, multiple physical links are combined
 //! into a single logical interface for bandwidth and redundancy.
 
+use alloc::boxed::Box;
 use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -957,9 +958,66 @@ pub fn procfs_content() -> String {
 // Self-tests
 // ---------------------------------------------------------------------------
 
-/// Run bridge/bond self-tests.
+/// Run the module's self-test suite against state of its own.
+///
+/// The suite mutates module state and asserts exact contents, and it used to
+/// do that to the *live* state -- which, since it is also a kernel-shell
+/// subcommand, changed or destroyed whatever the user had here and then
+/// reported success.  It is moved aside for the duration and put back
+/// afterwards; `crate::fs::selftest` records why this shape rather than the
+/// alternatives.
+///
+/// Each pristine value is the `static`'s own initialiser, which is the one
+/// spelling of "what a fresh boot holds" that cannot drift away from it.
+///
+/// The bridge table goes through `with_pristine_swapped` rather than
+/// `with_pristine` because it is far too big to pass by value — see
+/// [`pristine_bridges`]. The bond table is 576 bytes and needs no such care.
 #[allow(dead_code)] // Public API.
 pub fn self_test() -> KernelResult<()> {
+    let _pristine_bridge_count = crate::fs::selftest::pristine_atomic(&BRIDGE_COUNT, 0);
+    let _pristine_bond_count = crate::fs::selftest::pristine_atomic(&BOND_COUNT, 0);
+    let mut bridges = pristine_bridges()?;
+    crate::fs::selftest::with_pristine_swapped(&BRIDGES, &mut bridges, || {
+        crate::fs::selftest::with_pristine(
+            &BONDS,
+            [const { BondInterface::empty() }; MAX_BONDS],
+            self_test_inner,
+        )
+    })
+}
+
+/// A pristine bridge table, on the heap.
+///
+/// `[Bridge; MAX_BRIDGES]` is **105 216 bytes** — every `Bridge` carries a
+/// 256-entry forwarding database — against a 64 KiB kernel task stack
+/// (`crate::sched::task::TASK_STACK_SIZE`). So it may not be built the obvious
+/// way: `[const { Bridge::empty() }; MAX_BRIDGES]` written as an argument, or
+/// inside a `Box::new(..)`, is materialised in this frame first and copied out
+/// of it afterwards, and either overruns the stack before the suite reaches an
+/// assertion. Clippy's `large_stack_arrays` is what caught it.
+///
+/// Filling the allocation a slot at a time keeps the largest thing in the
+/// frame down to one `Bridge` (6 576 bytes), since a large return value is
+/// written straight through the destination pointer. It also keeps the "no
+/// second spelling" property that is what makes a pristine value trustworthy:
+/// `Bridge::empty` is the same constructor the `static`'s own initialiser
+/// uses, and `[const { X }; N]` means precisely "N of them".
+fn pristine_bridges() -> KernelResult<Box<[Bridge; MAX_BRIDGES]>> {
+    let mut slots: Vec<Bridge> = Vec::new();
+    slots
+        .try_reserve_exact(MAX_BRIDGES)
+        .map_err(|_| KernelError::OutOfMemory)?;
+    for _ in 0..MAX_BRIDGES {
+        slots.push(Bridge::empty());
+    }
+    // Exactly `MAX_BRIDGES` pushes, so the length always matches. The
+    // conversion hands the `Vec` back rather than panicking when it does not,
+    // and `Bridge` is not `Debug`, so this is a `map_err` and not an `expect`.
+    Box::<[Bridge; MAX_BRIDGES]>::try_from(slots).map_err(|_| KernelError::InternalError)
+}
+
+fn self_test_inner() -> KernelResult<()> {
     crate::serial_println!("[bridge] Running bridge/bond self-tests...");
     let mut passed = 0u32;
 

@@ -933,60 +933,69 @@ fn parse_tcp_options(option_bytes: &[u8]) -> TcpOptions {
         sack_permitted: false,
         timestamp: None,
     };
-    let mut i = 0;
-    while i < option_bytes.len() {
-        let kind = option_bytes[i];
+    // Walked as a shrinking slice rather than an index, so "how much is
+    // left" is the slice's own length and cannot be got wrong.  These
+    // bytes come off the wire from an unauthenticated peer.
+    let mut rest = option_bytes;
+    loop {
+        let Some((&kind, tail)) = rest.split_first() else {
+            break;
+        };
         match kind {
             TCP_OPT_END => break,
             TCP_OPT_NOP => {
-                i = i.wrapping_add(1);
+                // Single-byte option: no length byte follows.
+                rest = tail;
                 continue;
             }
-            _ => {
-                // All other options have a length byte.
-                if i.wrapping_add(1) >= option_bytes.len() {
-                    break; // Truncated.
-                }
-                let len = option_bytes[i.wrapping_add(1)] as usize;
-                if len < 2 || i.wrapping_add(len) > option_bytes.len() {
-                    break; // Malformed.
-                }
-                match kind {
-                    TCP_OPT_MSS if len == 4 => {
-                        opts.mss = u16::from_be_bytes([
-                            option_bytes[i.wrapping_add(2)],
-                            option_bytes[i.wrapping_add(3)],
-                        ]);
-                    }
-                    TCP_OPT_WSCALE if len == 3 => {
-                        // RFC 7323 §2.3: shift count MUST be ≤ 14.
-                        let shift = option_bytes[i.wrapping_add(2)];
-                        opts.wscale = Some(if shift > 14 { 14 } else { shift });
-                    }
-                    TCP_OPT_SACK_PERM if len == 2 => {
-                        opts.sack_permitted = true;
-                    }
-                    TCP_OPT_TIMESTAMP if len == 10 => {
-                        // RFC 7323 §3.2: TSval (4 bytes) + TSecr (4 bytes).
-                        let tsval = u32::from_be_bytes([
-                            option_bytes[i.wrapping_add(2)],
-                            option_bytes[i.wrapping_add(3)],
-                            option_bytes[i.wrapping_add(4)],
-                            option_bytes[i.wrapping_add(5)],
-                        ]);
-                        let tsecr = u32::from_be_bytes([
-                            option_bytes[i.wrapping_add(6)],
-                            option_bytes[i.wrapping_add(7)],
-                            option_bytes[i.wrapping_add(8)],
-                            option_bytes[i.wrapping_add(9)],
-                        ]);
-                        opts.timestamp = Some((tsval, tsecr));
-                    }
-                    _ => {} // Unknown option — skip.
-                }
-                i = i.wrapping_add(len);
-            }
+            _ => {}
         }
+
+        // Every other option is kind, length, then length-2 payload bytes,
+        // where `length` counts the two header bytes too.
+        let Some(&declared) = tail.first() else {
+            break; // Truncated: a length byte was promised and is not there.
+        };
+        let len = declared as usize;
+        if len < 2 {
+            break; // Malformed: a length below the header size cannot advance.
+        }
+        let Some(option) = rest.get(..len) else {
+            break; // Malformed: the option runs off the end of the block.
+        };
+
+        // Matching the option against a *slice pattern* is what makes this
+        // safe rather than merely correct: the pattern's arity is the
+        // length check and the field extraction at once, so a wrong
+        // `len ==` guard and an out-of-range read are no longer two things
+        // that can disagree.  A known option carrying the wrong length
+        // falls to `_` and is skipped, exactly as before.
+        match (kind, option) {
+            (TCP_OPT_MSS, [_, _, hi, lo]) => {
+                opts.mss = u16::from_be_bytes([*hi, *lo]);
+            }
+            (TCP_OPT_WSCALE, [_, _, shift]) => {
+                // RFC 7323 §2.3: shift count MUST be ≤ 14.
+                opts.wscale = Some((*shift).min(14));
+            }
+            (TCP_OPT_SACK_PERM, [_, _]) => {
+                opts.sack_permitted = true;
+            }
+            // RFC 7323 §3.2: TSval (4 bytes) + TSecr (4 bytes).
+            (TCP_OPT_TIMESTAMP, [_, _, v0, v1, v2, v3, e0, e1, e2, e3]) => {
+                opts.timestamp = Some((
+                    u32::from_be_bytes([*v0, *v1, *v2, *v3]),
+                    u32::from_be_bytes([*e0, *e1, *e2, *e3]),
+                ));
+            }
+            _ => {} // Unknown option — skip.
+        }
+
+        let Some(next) = rest.get(len..) else {
+            break;
+        };
+        // `len >= 2`, so the slice strictly shrinks and the loop ends.
+        rest = next;
     }
     opts
 }

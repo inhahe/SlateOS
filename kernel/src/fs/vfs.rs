@@ -979,6 +979,31 @@ struct MountPoint {
     /// per-mount lock taken here is a *different* lock from the one guarding
     /// any lower-layer mount.  See design-decisions §43.
     fs: MountedFs,
+    /// The filesystem's type name (`"procfs"`, `"memfs"`, `"ext4"`, …), copied
+    /// out of [`FileSystem::fs_type`] at mount time.
+    ///
+    /// Cached here rather than fetched through `fs.lock().fs_type()` because
+    /// *enumerating the mount table must not lock any filesystem*. It looks
+    /// harmless — `fs_type` returns a constant and the per-mount lock is
+    /// released immediately — but the caller is frequently a filesystem that is
+    /// **already locked**, and then the "immediately" never arrives:
+    ///
+    /// ```text
+    /// Vfs::readdir("/proc")  ->  procfs mutex held by the VFS
+    ///   procfs readdir sizes every root file
+    ///     gen_mounts() -> Vfs::mounts_full()
+    ///       fs.lock() on each mount ... including procfs   <-- self-deadlock
+    /// ```
+    ///
+    /// That is not a hypothetical: it halted the kernel on `ls /proc` and on
+    /// `cat /proc/mounts`, and was found by the `sysdiag` self-test the first
+    /// time it ran at boot. design-decisions §43 makes the per-mount lock
+    /// re-entrant-safe for *stacked* filesystems, where the lower layer is a
+    /// different lock; it cannot help a filesystem that enumerates the table it
+    /// is itself in. The value is immutable for the life of the mount, so
+    /// caching costs one `String` per mount and removes the hazard by
+    /// construction rather than by asking every caller to be careful.
+    fs_type: String,
     /// Mount options (read-only, noatime, etc.).
     options: MountOptions,
     /// Stable, never-reused id for this mounted filesystem instance.
@@ -1472,9 +1497,11 @@ impl Vfs {
             opts_str,
         );
 
+        let fs_type = String::from(fs.fs_type());
         vfs.mounts.push(MountPoint {
             path: mount_path.to_path_buf(),
             fs: Arc::new(Mutex::new(fs)),
+            fs_type,
             options,
             // Stable, never-reused id for this mount instance (see FileId).
             fs_id: NEXT_FS_ID.fetch_add(1, Ordering::Relaxed),
@@ -1555,11 +1582,11 @@ impl Vfs {
         // (see known-issues TD-A-LOCKDEP-VIOLATION-REPORT-NAMES-NO-ADDRESS).
         // Cloning the `Arc` is the whole fix: it keeps the filesystem alive
         // across the unlocked window without keeping the mount table locked.
-        let (fs, fs_id) = {
+        let (fs, fs_id, fs_type) = {
             let vfs = VFS.lock();
             let idx = Self::unmount_index(&vfs, mount_path)?;
             let mp = vfs.mounts.get(idx).ok_or(KernelError::NotFound)?;
-            (Arc::clone(&mp.fs), mp.fs_id)
+            (Arc::clone(&mp.fs), mp.fs_id, mp.fs_type.clone())
         };
 
         // Sync with no VFS lock held.
@@ -1572,9 +1599,6 @@ impl Vfs {
             // Continue with unmount anyway — data loss is better than a
             // permanently stuck mount.
         }
-        // `fs_type` borrows from the guard, so copy it out while unlocked
-        // rather than reaching for it again under the VFS lock below.
-        let fs_type = String::from(fs.lock().fs_type());
 
         // Phase 2: re-acquire and re-check.  Nothing learned in phase 1 may be
         // reused, because the table can have changed while we were unlocked:
@@ -2872,36 +2896,25 @@ impl Vfs {
     /// List mount points that appear in the VFS.
     ///
     /// Returns a list of `(mount_path, fs_type)` pairs.
+    /// Safe to call from inside a mounted filesystem — it locks no filesystem
+    /// at all, only the global VFS lock, because the type name is cached in
+    /// [`MountPoint::fs_type`]. That is what `/proc/mounts` depends on.
     pub fn mounts() -> Vec<(PathBuf, String)> {
-        // Snapshot handles under the VFS lock, then read `fs_type` with it
-        // dropped — see `unmount` and design-decisions §43 for why a per-mount
-        // lock is never taken while the global VFS lock is held.
-        let snapshot: Vec<(PathBuf, MountedFs)> = {
-            let vfs = VFS.lock();
-            vfs.mounts
-                .iter()
-                .map(|mp| (mp.path.clone(), Arc::clone(&mp.fs)))
-                .collect()
-        };
-        snapshot
-            .into_iter()
-            .map(|(path, fs)| (path, String::from(fs.lock().fs_type())))
+        let vfs = VFS.lock();
+        vfs.mounts
+            .iter()
+            .map(|mp| (mp.path.clone(), mp.fs_type.clone()))
             .collect()
     }
 
     /// List all mount points with full information (path, fs type, options).
+    ///
+    /// Locks no filesystem — see [`Self::mounts`] and [`MountPoint::fs_type`].
     pub fn mounts_full() -> Vec<(PathBuf, String, MountOptions)> {
-        // Same two-phase shape as `mounts`, for the same lock-order reason.
-        let snapshot: Vec<(PathBuf, MountedFs, MountOptions)> = {
-            let vfs = VFS.lock();
-            vfs.mounts
-                .iter()
-                .map(|mp| (mp.path.clone(), Arc::clone(&mp.fs), mp.options))
-                .collect()
-        };
-        snapshot
-            .into_iter()
-            .map(|(path, fs, options)| (path, String::from(fs.lock().fs_type()), options))
+        let vfs = VFS.lock();
+        vfs.mounts
+            .iter()
+            .map(|mp| (mp.path.clone(), mp.fs_type.clone(), mp.options))
             .collect()
     }
 
@@ -3425,32 +3438,56 @@ impl Vfs {
 
     /// Return debug statistics for the filesystem mounted at `path`.
     pub fn debug_stats(path: impl AsRef<Path>) -> KernelResult<String> {
-        let path = path.as_ref();
-        // Clone the per-mount handle under a brief global lock, then query it
-        // lock-free (debug_stats may itself touch the VFS on stacked mounts).
-        let fs = {
-            let vfs = VFS.lock();
-            // Longest-prefix, not first-match.  `find` returned whichever
-            // covering mount sat earliest in the table, and the root mount is
-            // registered first and covers everything — so `debug_stats` for a
-            // path under any submount reported the *root* filesystem's stats.
-            // Every other mount lookup here scores by prefix length; this one
-            // did not.
-            let mut best: Option<&MountPoint> = None;
-            for mp in &vfs.mounts {
-                if !mount_matches(&mp.path, path) {
-                    continue;
-                }
-                if best.is_none_or(|b| mp.path.len() > b.path.len()) {
-                    best = Some(mp);
-                }
-            }
-            best.map(|mp| Arc::clone(&mp.fs))
-        };
-        match fs {
+        match Self::debug_stats_fs(path)? {
             Some(fs) => Ok(fs.lock().debug_stats()),
             None => Err(KernelError::NotFound),
         }
+    }
+
+    /// [`debug_stats`](Self::debug_stats), but never blocks on the per-mount
+    /// lock: `Ok(None)` means the filesystem is busy right now.
+    ///
+    /// This exists for callers that are themselves running *inside* a mounted
+    /// filesystem, where the blocking form is not slow but fatal.
+    /// `/proc/fsstats` walks every mount and asks it for stats, and one of
+    /// those mounts is the procfs the read is being served from — whose lock
+    /// the VFS is holding for the duration of that very read. The blocking
+    /// form deadlocks the kernel there, deterministically, on `cat
+    /// /proc/fsstats` and on `ls /proc`.
+    ///
+    /// Reporting "busy" rather than blocking is not a weaker answer in that
+    /// case, it is the only truthful one: a filesystem asked to describe its
+    /// own internals mid-operation would be describing a half-finished read.
+    pub fn debug_stats_nonblocking(path: impl AsRef<Path>) -> KernelResult<Option<String>> {
+        match Self::debug_stats_fs(path)? {
+            Some(fs) => Ok(fs.try_lock().map(|g| g.debug_stats())),
+            None => Err(KernelError::NotFound),
+        }
+    }
+
+    /// Find the filesystem whose mount point is the longest prefix of `path`.
+    ///
+    /// Clones the per-mount handle under a brief global lock so the caller can
+    /// query it with the VFS lock dropped (`debug_stats` may itself touch the
+    /// VFS on stacked mounts).
+    fn debug_stats_fs(path: impl AsRef<Path>) -> KernelResult<Option<MountedFs>> {
+        let path = path.as_ref();
+        let vfs = VFS.lock();
+        // Longest-prefix, not first-match.  `find` returned whichever covering
+        // mount sat earliest in the table, and the root mount is registered
+        // first and covers everything — so `debug_stats` for a path under any
+        // submount reported the *root* filesystem's stats.  Every other mount
+        // lookup here scores by prefix length; this one did not.
+        let mut best: Option<&MountPoint> = None;
+        for mp in &vfs.mounts {
+            if !mount_matches(&mp.path, path) {
+                continue;
+            }
+            if best.is_none_or(|b| mp.path.len() > b.path.len()) {
+                best = Some(mp);
+            }
+        }
+        Ok(best.map(|mp| Arc::clone(&mp.fs)))
     }
 
     /// Query filesystem space and configuration for the mount at `path`.

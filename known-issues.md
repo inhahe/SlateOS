@@ -50335,7 +50335,7 @@ commands that carry the colour in question, and assert the two renders agree.
 Candidates: anything drawn on the wallpaper, on a video surface, on a
 thumbnail, or on any other content the palette does not own.
 
-**Part 2 progress. 19 of 49 modules converted.**
+**Part 2 progress. 20 of 49 modules converted.**
 
 - [x] `security_dialog.rs` — 29 constants, done 2026-08-22. The method above
   survived contact: the sweep lives in `gui/desktop/src/palette_check.rs` as
@@ -51211,6 +51211,90 @@ thumbnail, or on any other content the palette does not own.
   - **Deliberate non-change:** the toggle knob stays `p.text` on the accent
     track, per `TD-C-SWITCH-KNOBS-ARE-LOW-CONTRAST-ON-THE-ON-PILL`. Changing it
     here would be a second change hiding inside this one.
+- [x] `overview.rs` — 12 constants, done 2026-08-22. Nine tests, harness
+  defects AAAAAAAAAAAAA–EEEEEEEEEEEEEE (thirty-one).
+  - **The wash rule, set here for the remaining modules: a wash is a role seen
+    through a veil, so the veil is the alpha and the role is everything else.**
+    This module has the first two translucent fills to be converted — the
+    overlay's backdrop (`mantle` under an animated alpha) and a card the search
+    query has dimmed (`surface0` under a fixed `100`). Each takes the *RGB* of
+    its role and keeps its *own* alpha; neither is a palette colour at full
+    strength and neither should be.
+  - **A wash is exactly the thing the membership sweep cannot check, so every
+    wash needs its own test.** `assert_drawn_from` compares RGB only — it has
+    to, because a role drawn at alpha 100 is still that role — which means
+    deleting the alpha entirely turns a wash into an opaque fill that the sweep
+    still passes. `a_wash_keeps_its_own_alpha_and_the_colour_of_its_role`
+    asserts all three parts separately: RGB equals the named role's RGB, the
+    alpha is the expected veil, and the alpha is below 255. The third assertion
+    is the one the sweep structurally cannot make. `widgets.rs` has ten washes
+    and inherits this rule.
+  - **A card's border carries two independent kinds of "current", and the
+    accent must not be allowed to collapse them.** Hover says *where you are
+    pointing*; focus says *which window has the keyboard*. They are orthogonal —
+    the focused window is usually not the one under the pointer — so painting
+    them alike loses a distinction silently, and **no membership sweep could
+    ever see it, because both would be palette roles.** The border is now a
+    three-rung ladder: `surface2` merely present, `subtext0` focused, `accent`
+    under the pointer, and `a_cards_border_says_both_where_you_point_and_what_
+    has_focus` asserts all three are mutually distinct across every safe accent.
+  - **`lavender` for focus was a category colour marking a state.** Focus is not
+    a category — it is a condition a card is in — and on a lavender-accented
+    desktop the focused card's border would have been the accent, i.e. the hover
+    colour, which is the collapse above arriving by a different road. `subtext0`
+    is within a few percent of the same pixel and, being a grey, cannot collide
+    with any accent the user can pick. This is the general form of the
+    module-18 lesson: **a colour that must stay distinct from the accent must be
+    achromatic, not merely a different hue.**
+  - **Two badges are frozen, and both their labels were wrong.** The minimised
+    marker's yellow and the close button's red report facts about a *window*,
+    not choices about the desktop; a close button that means destructive on one
+    desktop and matches the wallpaper on another has stopped saying anything, so
+    `neither_badge_follows_the_accent` pins them. Their `_` and `x` marks were
+    both Mocha `base` — the sixth instance of the near-black-picked-for-Mocha's-
+    pale-fill shape, and one that breaks on Latte in *both* directions at once,
+    since Latte's yellow and red are deep while its `base` is near-white. Each
+    is `readable_on()` of the fill it is actually drawn on.
+  - **One defect escaped the first proof run, and the hole it found is the
+    most general lesson this module produced: an expectation derived from the
+    palette asserts what a thing was *supposed* to be painted, not what it
+    *was*.** `each_badges_mark_can_be_read_on_the_badge` compared each mark
+    against `readable_on(p.yellow)` / `readable_on(p.red)` — the palette's
+    roles — rather than against the fill the render actually emitted. Two
+    separate failures followed from that one mistake. Reverting a *badge fill*
+    to its Mocha literal left the expectation unchanged, so the test that most
+    obviously owns the badges did not notice (it was caught by the sweep
+    instead). And the mark could be made to answer for the **other badge's**
+    fill with no test failing at all. Every expectation is now computed from
+    the emitted fill, which is the only form of the assertion that couples the
+    two the way the code does. **Where a test can read the thing it is checking
+    against out of the render, it must — a palette lookup is a second opinion
+    about the same question, and two opinions cannot disagree in a test.**
+  - **Neither shipped palette could tell the two badges apart, so the proof
+    needed a palette we do not ship.** `readable_on` returns one of two
+    endpoints, and Mocha's yellow and red are *both* pale while Latte's are
+    *both* deep — so in every mode that exists, `readable_on(yellow) ==
+    readable_on(red)`, and a mark answering for the wrong badge is
+    indistinguishable from one answering for its own. The test now also runs
+    two contrived palettes whose yellow and red straddle the threshold in
+    opposite directions, each with an assertion that the fixture *does*
+    straddle, so the fixture cannot silently stop discriminating. **A property
+    that happens to hold for both shipped configurations is not proved by
+    testing both shipped configurations; it needs a configuration chosen to
+    break the coincidence.** This is the same shape as the module-18 rule about
+    assertions whose truth depends on which accent the user picked, arrived at
+    from the opposite direction.
+  - **Two fixture bugs, both worth recording because both made a test pass
+    while proving nothing.** (1) `collect_thumbs_for_mode` returns only the
+    *current* desktop's lane in `AllWindows` mode, and the fixture had parked
+    the minimised window on desktop 1 — so the badge assertions were counting
+    zero badges and the card-border assertion two cards instead of three. **A
+    badge that is never drawn cannot fail an assertion about its colour**; the
+    fixture now puts all three window states on desktop 0 and keeps a fourth
+    window on desktop 1 purely so `AllDesktops` still has two lanes. (2) The
+    card extractor `w > 40.0 && h > 40.0 && w != 400.0` also matched the
+    1920×1080 backdrop, which is a mantle wash — so the "a card is `surface0`"
+    assertion was being handed the backdrop's `mantle`. Bounded with `w < SW`.
 
 **Trigger:** this is not blocked on anything. It is sequenced after the shell
 event loop (`TD-C-THE-SHELL-CAN-DRAW-ITSELF-AND-NOBODY-CAN-ASK-IT-TO`) only
@@ -62759,3 +62843,49 @@ mkfifo: mkfifo: invalid mode            (no colon, and the string is not quoted 
 
 `mkfifo`'s is not a typo in this entry — GNU really does drop the operand from
 that one message.
+---
+
+## CLOSED 2026-08-22 — the kernel has no `.unwrap()`/`.expect()` left in production paths, and a script to keep it that way
+
+`CLAUDE.md` has always said "every `unwrap`/`expect` in non-test code is a
+potential DoS if an attacker can shape the input." That was policy with no
+instrument. `scripts/scan-unwrap.py` is the instrument: it classifies every
+`.unwrap()`/`.expect()` site in `kernel/` as production or test and prints the
+production ones as `file:line: [fn name] source`.
+
+**It now reports 0, down from 71.** The removals are commits `4eba85262`,
+`a7e393361`, `10f4f6b01` and `69021e7f6`; the reasoning is `design-decisions.md`
+§282 (the fixes) and §283 (the classifier).
+
+### If you are adding kernel code
+
+Run `python scripts/scan-unwrap.py` before you commit. Zero is the expected
+output; anything else is a new way to kill the machine. The exit status is 1
+when it finds something, so it can gate a script.
+
+Test code is exempt and correctly detected — a panic on bad data in a test is
+the point. Detection walks a *stack* of enclosing functions, so a helper defined
+inside a `self_test` is still test code (§283 explains why two earlier versions
+got this wrong in opposite directions).
+
+### What this does NOT cover, and is still open
+
+Zero unwrap sites is not zero panics. Still present in kernel production paths,
+and **not** measured by this script:
+
+- `panic!` and `assert!`/`debug_assert!` called directly.
+- Indexing and slicing (`a[i]`, `&s[a..b]`), which panic out of range.
+- Unchecked arithmetic, which panics on overflow in debug builds.
+
+The defensive clippy lints that would surface those report roughly **18 000**
+warnings across `kernel/`, untriaged. That backlog is separate from the
+userspace-crate tally earlier in this file and has not been worked.
+
+Two smaller notes for whoever picks that up:
+
+- The three fix shapes that make a panic *unrepresentable* (see §282) apply just
+  as well to indexing: `.get()` returning `Option` is the "return the error"
+  shape, but a fixed-size array plus a `const` assertion is the "delete the
+  possibility" shape and leaves less behind.
+- Do not bulk-`allow` the lints in kernel modules to clear the count. The
+  userspace crates that did this are recorded above as a warning, not a model.

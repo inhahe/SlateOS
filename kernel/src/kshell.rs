@@ -14096,39 +14096,31 @@ fn cmd_fssnapshot(args: &str) {
                     return;
                 }
             };
-            // Target: either specified or use original root_path.
-            let target = if parts.len() >= 3 {
-                parts[2]
-            } else {
-                match snapshot::info(id) {
+            // Target: either specified or the snapshot's original root_path.
+            //
+            // This used to fetch `info(id)` twice -- once to print the path,
+            // then again to own it -- on the theory that "we can't borrow from
+            // KernelResult because the String is temporary".  That is not so:
+            // `info` returns `KernelResult<SnapshotInfo>` by value, so `Ok(i)`
+            // binds an owned `SnapshotInfo` and `i.root_path` can simply be
+            // moved out.  The second fetch existed only to be unwrapped, and
+            // forced the whole restore-and-report block to be duplicated in
+            // this arm.  `restore` takes `impl AsRef<Path>`, so one owned
+            // `PathBuf` covers both branches and the duplicate goes away.
+            let target: PathBuf = match parts.get(2) {
+                Some(t) => PathBuf::from(*t),
+                None => match snapshot::info(id) {
                     Ok(i) => {
-                        // We need to use the root_path, but we can't borrow from KernelResult
-                        // because the String is temporary. Use a fallback approach.
                         shell_println!("Restoring to original path: {}", i.root_path.display());
-                        // Re-fetch info for the path.
-                        let info = snapshot::info(id).expect("just checked");
-                        let target = info.root_path.clone();
-                        match snapshot::restore(id, &target) {
-                            Ok(r) => {
-                                shell_println!(
-                                    "Restored: {} files, {} dirs, {} symlinks, {} errors",
-                                    r.files_restored,
-                                    r.dirs_created,
-                                    r.symlinks_created,
-                                    r.errors,
-                                );
-                            }
-                            Err(e) => shell_println!("Error: {:?}", e),
-                        }
-                        return;
+                        i.root_path
                     }
                     Err(e) => {
                         shell_println!("Error: {:?}", e);
                         return;
                     }
-                }
+                },
             };
-            match snapshot::restore(id, target) {
+            match snapshot::restore(id, &target) {
                 Ok(r) => {
                     shell_println!(
                         "Restored: {} files, {} dirs, {} symlinks, {} errors",
@@ -15011,12 +15003,19 @@ fn cmd_fcompress(args: &str) {
                     let old_min = fcompress::min_size();
                     fcompress::set_enabled(true);
                     fcompress::set_min_size(0);
-                    fcompress::add_rule(fcompress::CompressionRule {
+                    // The rule table is finite, so this can genuinely fail on a
+                    // full table -- report it and stop rather than pressing on
+                    // to measure a compression that would not have happened.
+                    if let Err(e) = fcompress::add_rule(fcompress::CompressionRule {
                         path_prefix: path.clone(),
                         extensions: Vec::new(),
                         algorithm: algo,
-                    })
-                    .expect("add temp rule");
+                    }) {
+                        shell_println!("Error: could not add temporary rule: {:?}", e);
+                        fcompress::set_enabled(was_enabled);
+                        fcompress::set_min_size(old_min);
+                        return;
+                    }
 
                     match fcompress::compress_for_write(&path, &data) {
                         Some(compressed) => {
@@ -38121,7 +38120,15 @@ fn cmd_screenrec(args: &str) {
         }
         "start" | "rec" => match screenrec::start_recording() {
             Ok(id) => {
-                let rec = screenrec::get_recording(id).unwrap();
+                // `start_recording` just returned this id, so the lookup should
+                // succeed -- but the table is behind a lock this command does
+                // not hold across the two calls, so "should" is not "must", and
+                // the recording *did* start either way.  Report that much
+                // rather than killing the kernel over the detail lines.
+                let Ok(rec) = screenrec::get_recording(id) else {
+                    shell_println!("Recording #{} started (details unavailable).", id);
+                    return;
+                };
                 shell_println!("Recording #{} started ({}).", id, rec.state.label());
                 shell_println!("  File: {}", rec.file_path);
                 if rec.state == screenrec::RecordingState::Countdown {
@@ -40082,7 +40089,17 @@ fn cmd_notifprefs(args: &str) {
         }
         "app" => {
             if let Some(app_id) = parts.get(1) {
-                let pref = notifprefs::get_app_pref(app_id).unwrap();
+                // `app_id` is whatever the user typed, so this lookup failing
+                // is an ordinary outcome (unknown app, table full), not a bug.
+                // The old unwrap made `notifprefs app <anything-unregistered>`
+                // a one-line kernel panic typed at the shell prompt.
+                let pref = match notifprefs::get_app_pref(app_id) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        shell_println!("Error: no preferences for '{}': {:?}", app_id, e);
+                        return;
+                    }
+                };
                 shell_println!("App: {}", pref.app_id);
                 shell_println!("  Enabled    : {}", pref.enabled);
                 shell_println!("  Banner     : {}", pref.banner_style.label());
@@ -70260,15 +70277,22 @@ fn cmd_cfreq(args: &str) {
             }
         }
         "boost" => match parts.get(1).copied() {
+            // Reported, not unwrapped, to match `set_governor` above: the
+            // hardware may simply not support boost, which is a fact to print
+            // rather than a reason to take the kernel down.
             Some("on") | Some("enable") => {
                 cpufreq::init_defaults();
-                cpufreq::set_boost(true).expect("boost");
-                shell_println!("Boost enabled");
+                match cpufreq::set_boost(true) {
+                    Ok(()) => shell_println!("Boost enabled"),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
             }
             Some("off") | Some("disable") => {
                 cpufreq::init_defaults();
-                cpufreq::set_boost(false).expect("boost");
-                shell_println!("Boost disabled");
+                match cpufreq::set_boost(false) {
+                    Ok(()) => shell_println!("Boost disabled"),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
             }
             _ => {
                 shell_println!(
@@ -93167,13 +93191,20 @@ fn cmd_version() {
 
 /// `uname [-asnrvmo]` — print system information.
 ///
+/// Every field comes from [`crate::uname`], the same definition `uname(2)`
+/// reads, so this shell and a ring-3 `uname` cannot print different answers.
+/// The `-v` field used to append the RTC date, which made two boots of one
+/// kernel disagree; it now matches `uname(2)`'s `version` exactly.
+///
 /// Flags:
-/// - `-s`: kernel name ("MintOS")
+/// - `-s`: kernel name (`Linux` — the ABI personality, see [`crate::uname`])
 /// - `-n`: network hostname
-/// - `-r`: kernel release ("0.1.0")
-/// - `-v`: kernel version string (includes build date from RTC)
-/// - `-m`: machine hardware name ("x86_64")
-/// - `-o`: operating system ("MintOS")
+/// - `-r`: kernel release (`6.6.0-slateos`)
+/// - `-v`: kernel version string (`#1 SMP`)
+/// - `-m`: machine hardware name (`x86_64`)
+/// - `-o`: operating system (`SlateOS` — the product, not the ABI; this is the
+///   distinction GNU draws when `uname -s` says `Linux` and `-o` says
+///   `GNU/Linux`, and it is the one field where the product name belongs)
 /// - `-a`: all of the above
 /// - No flags: same as `-s`
 fn cmd_uname(args: &str) {
@@ -93228,28 +93259,22 @@ fn cmd_uname(args: &str) {
     let mut parts: alloc::vec::Vec<alloc::string::String> = alloc::vec::Vec::new();
 
     if show_s {
-        parts.push(alloc::string::String::from("MintOS"));
+        parts.push(alloc::string::String::from(crate::uname::SYSNAME));
     }
     if show_n {
         parts.push(crate::fs::sysfs::get_hostname());
     }
     if show_r {
-        parts.push(alloc::string::String::from("0.1.0"));
+        parts.push(alloc::string::String::from(crate::uname::RELEASE));
     }
     if show_v {
-        let dt = crate::rtc::read_datetime();
-        parts.push(alloc::format!(
-            "#1 SMP {:04}-{:02}-{:02}",
-            dt.year,
-            dt.month,
-            dt.day
-        ));
+        parts.push(alloc::string::String::from(crate::uname::VERSION));
     }
     if show_m {
-        parts.push(alloc::string::String::from("x86_64"));
+        parts.push(alloc::string::String::from(crate::uname::MACHINE));
     }
     if show_o {
-        parts.push(alloc::string::String::from("MintOS"));
+        parts.push(alloc::string::String::from(crate::uname::OPERATING_SYSTEM));
     }
 
     let line: alloc::string::String = parts.join(" ");
@@ -100128,7 +100153,13 @@ fn cmd_snapshot(args: &str) {
                 return;
             }
             ksnapshot::save(label);
-            let snap = ksnapshot::get(label).expect("just saved");
+            // `save` and `get` take the snapshot lock separately, so another
+            // CPU can overwrite the slot in between.  Rare, and harmless --
+            // the save did happen -- so say so and stop rather than panic.
+            let Some(snap) = ksnapshot::get(label) else {
+                shell_println!("Snapshot '{}' saved (contents unavailable).", label as char);
+                return;
+            };
             shell_println!(
                 "Snapshot '{}' saved (tick={}, free={}/{}, pressure={})",
                 label as char,
@@ -100550,7 +100581,13 @@ fn cmd_frag_history(args: &str) {
     match parts.first().copied().unwrap_or("") {
         "sample" => {
             frag_history::sample();
-            let snap = frag_history::latest().expect("just sampled");
+            // `sample` and `latest` take the history lock separately, so a
+            // concurrent `fraghist clear` can empty it in between.  The sample
+            // was still taken; report that rather than panicking.
+            let Some(snap) = frag_history::latest() else {
+                shell_println!("Fragmentation sample taken (history unavailable).");
+                return;
+            };
             shell_println!(
                 "Fragmentation sample taken: {}% (free={}, max_order={})",
                 snap.frag_pct,

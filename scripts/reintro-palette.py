@@ -68,6 +68,7 @@ NET_SET = "gui/desktop/src/network_settings.rs"
 STARTUP = "gui/desktop/src/startup_settings.rs"
 DTS = "gui/desktop/src/datetime_settings.rs"
 TPAD = "gui/desktop/src/touchpad.rs"
+OV = "gui/desktop/src/overview.rs"
 
 # (name, file, [(old, new), ...], [packages], [tests expected to fail])
 DEFECTS = [
@@ -3174,6 +3175,399 @@ DEFECTS = [
         ["desktop"],
         [
             'the_panel_draws_nothing_that_is_immediately_erased',
+        ],
+    ),
+    # ---- overview.rs (module 20 of 49) -------------------------------------
+    (
+        "AAAAAAAAAAAAA: the search bar keeps Mocha's surface0",
+        OV,
+        [
+            ('        height: bar_h,\n        color: p.surface0,',
+             '        height: bar_h,\n        color: Color::from_hex(0x313244),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_overlay_draws_comes_from_its_palette',
+            'the_overlays_own_surfaces_come_from_the_palette',
+        ],
+    ),
+    (
+        "BBBBBBBBBBBBB: an idle search bar's border keeps Mocha's surface1",
+        OV,
+        [
+            ('    let border_color = if state.search_query.is_empty() {\n        p.surface1',
+             '    let border_color = if state.search_query.is_empty() {\n        Color::from_hex(0x45475A)'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_overlay_draws_comes_from_its_palette',
+            'the_overlays_own_surfaces_come_from_the_palette',
+        ],
+    ),
+    (
+        "CCCCCCCCCCCCC: the search placeholder keeps Mocha's overlay0",
+        OV,
+        [
+            ('("Search windows...".to_string(), p.overlay0)',
+             '("Search windows...".to_string(), Color::from_hex(0x6C7086))'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_overlay_draws_comes_from_its_palette',
+        ],
+    ),
+    (
+        "DDDDDDDDDDDDD: the typed query keeps Mocha's text",
+        OV,
+        [
+            ('(state.search_query.clone(), p.text)',
+             '(state.search_query.clone(), Color::from_hex(0xCDD6F4))'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_overlay_draws_comes_from_its_palette',
+        ],
+    ),
+    (
+        "EEEEEEEEEEEEE: the current desktop's label keeps Mocha's text",
+        OV,
+        [
+            ('color: if lane.is_current { p.text } else { p.subtext0 },',
+             'color: if lane.is_current { Color::from_hex(0xCDD6F4) } else { p.subtext0 },'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_overlay_draws_comes_from_its_palette',
+        ],
+    ),
+    (
+        "FFFFFFFFFFFFF: another desktop's label keeps Mocha's subtext0",
+        OV,
+        [
+            ('color: if lane.is_current { p.text } else { p.subtext0 },',
+             'color: if lane.is_current { p.text } else { Color::from_hex(0xA6ADC8) },'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_overlay_draws_comes_from_its_palette',
+        ],
+    ),
+    (
+        "GGGGGGGGGGGGG: a card's background keeps Mocha's surface0",
+        OV,
+        [
+            ('    } else {\n        p.surface0\n    };',
+             '    } else {\n        Color::from_hex(0x313244)\n    };'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_overlay_draws_comes_from_its_palette',
+            'a_wash_keeps_its_own_alpha_and_the_colour_of_its_role',
+        ],
+    ),
+    (
+        "HHHHHHHHHHHHH: a dimmed card's title keeps Mocha's overlay0",
+        OV,
+        [
+            ('let title_color = if is_dimmed { p.overlay0 } else { p.text };',
+             'let title_color = if is_dimmed { Color::from_hex(0x6C7086) } else { p.text };'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_overlay_draws_comes_from_its_palette',
+        ],
+    ),
+    (
+        "IIIIIIIIIIIII: a card's title keeps Mocha's text",
+        OV,
+        [
+            ('let title_color = if is_dimmed { p.overlay0 } else { p.text };',
+             'let title_color = if is_dimmed { p.overlay0 } else { Color::from_hex(0xCDD6F4) };'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_overlay_draws_comes_from_its_palette',
+        ],
+    ),
+    (
+        "JJJJJJJJJJJJJ: a plain card's border keeps Mocha's surface2",
+        OV,
+        [
+            ('    } else if layout.is_focused {\n        p.subtext0\n    } else {\n        p.surface2\n    };',
+             '    } else if layout.is_focused {\n        p.subtext0\n    } else {\n        Color::from_hex(0x585B70)\n    };'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_overlay_draws_comes_from_its_palette',
+            'a_cards_border_says_both_where_you_point_and_what_has_focus',
+        ],
+    ),
+    (
+        "KKKKKKKKKKKKK: the focused card's border is Mocha's lavender again",
+        OV,
+        [
+            ('    } else if layout.is_focused {\n        p.subtext0',
+             '    } else if layout.is_focused {\n        Color::from_hex(0xB4BEFE)'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_overlay_draws_comes_from_its_palette',
+            'a_cards_border_says_both_where_you_point_and_what_has_focus',
+        ],
+    ),
+    (
+        "LLLLLLLLLLLLL: the minimised badge keeps Mocha's yellow",
+        OV,
+        [
+            ('            height: 16.0,\n            color: p.yellow,',
+             '            height: 16.0,\n            color: Color::from_hex(0xF9E2AF),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_overlay_draws_comes_from_its_palette',
+            'neither_badge_follows_the_accent',
+            'each_badges_mark_can_be_read_on_the_badge',
+        ],
+    ),
+    (
+        "MMMMMMMMMMMMM: the close button keeps Mocha's red",
+        OV,
+        [
+            ('            height: 18.0,\n            color: p.red,',
+             '            height: 18.0,\n            color: Color::from_hex(0xF38BA8),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_overlay_draws_comes_from_its_palette',
+            'neither_badge_follows_the_accent',
+            'each_badges_mark_can_be_read_on_the_badge',
+        ],
+    ),
+    (
+        "NNNNNNNNNNNNN: the backdrop keeps Mocha's mantle",
+        OV,
+        [
+            ('Color::rgba(p.mantle.r, p.mantle.g, p.mantle.b, alpha)',
+             'Color::rgba(0x18, 0x18, 0x25, alpha)'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_overlay_draws_comes_from_its_palette',
+            'the_overlays_own_surfaces_come_from_the_palette',
+            'a_wash_keeps_its_own_alpha_and_the_colour_of_its_role',
+        ],
+    ),
+    (
+        "OOOOOOOOOOOOO: a dimmed card keeps Mocha's surface0",
+        OV,
+        [
+            ('Color::rgba(p.surface0.r, p.surface0.g, p.surface0.b, 100)',
+             'Color::rgba(0x31, 0x32, 0x44, 100)'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_overlay_draws_comes_from_its_palette',
+            'a_wash_keeps_its_own_alpha_and_the_colour_of_its_role',
+        ],
+    ),
+    (
+        "PPPPPPPPPPPPP: an active search bar's border keeps its hardcoded blue",
+        OV,
+        [
+            ('    } else {\n        p.accent\n    };\n    cmds.push(RenderCommand::StrokeRect {',
+             '    } else {\n        Color::from_hex(0x89B4FA)\n    };\n    cmds.push(RenderCommand::StrokeRect {'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_overlay_draws_comes_from_its_palette',
+            'every_control_that_offers_something_follows_the_accent',
+        ],
+    ),
+    (
+        "QQQQQQQQQQQQQ: an active search bar's border is drawn like an idle one",
+        OV,
+        [
+            ('    } else {\n        p.accent\n    };\n    cmds.push(RenderCommand::StrokeRect {',
+             '    } else {\n        p.surface1\n    };\n    cmds.push(RenderCommand::StrokeRect {'),
+        ],
+        ["desktop"],
+        [
+            'every_control_that_offers_something_follows_the_accent',
+        ],
+    ),
+    (
+        "RRRRRRRRRRRRR: the current desktop's marker keeps its hardcoded blue",
+        OV,
+        [
+            ('                height: 24.0,\n                color: p.accent,',
+             '                height: 24.0,\n                color: Color::from_hex(0x89B4FA),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_overlay_draws_comes_from_its_palette',
+            'every_control_that_offers_something_follows_the_accent',
+        ],
+    ),
+    (
+        "SSSSSSSSSSSSS: the current desktop's marker is drawn in the body text colour",
+        OV,
+        [
+            ('                height: 24.0,\n                color: p.accent,',
+             '                height: 24.0,\n                color: p.text,'),
+        ],
+        ["desktop"],
+        [
+            'every_control_that_offers_something_follows_the_accent',
+            'nothing_else_moves_when_the_accent_does',
+        ],
+    ),
+    (
+        "TTTTTTTTTTTTT: a hovered card's border keeps its hardcoded blue",
+        OV,
+        [
+            ('    let border_color = if is_hovered {\n        p.accent',
+             '    let border_color = if is_hovered {\n        Color::from_hex(0x89B4FA)'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_overlay_draws_comes_from_its_palette',
+            'every_control_that_offers_something_follows_the_accent',
+            'a_cards_border_says_both_where_you_point_and_what_has_focus',
+        ],
+    ),
+    (
+        'UUUUUUUUUUUUU: pointing at a card looks the same as the card having focus',
+        OV,
+        [
+            ('    let border_color = if is_hovered {\n        p.accent',
+             '    let border_color = if is_hovered {\n        p.subtext0'),
+        ],
+        ["desktop"],
+        [
+            'every_control_that_offers_something_follows_the_accent',
+            'a_cards_border_says_both_where_you_point_and_what_has_focus',
+        ],
+    ),
+    (
+        "VVVVVVVVVVVVV: the focused card's border collapses into a plain one",
+        OV,
+        [
+            ('    } else if layout.is_focused {\n        p.subtext0',
+             '    } else if layout.is_focused {\n        p.surface2'),
+        ],
+        ["desktop"],
+        [
+            'a_cards_border_says_both_where_you_point_and_what_has_focus',
+        ],
+    ),
+    (
+        "WWWWWWWWWWWWW: the focused card's border collapses into the pointed-at one",
+        OV,
+        [
+            ('    } else if layout.is_focused {\n        p.subtext0',
+             '    } else if layout.is_focused {\n        p.accent'),
+        ],
+        ["desktop"],
+        [
+            'a_cards_border_says_both_where_you_point_and_what_has_focus',
+        ],
+    ),
+    (
+        "XXXXXXXXXXXXX: the minimised badge follows the desktop's accent",
+        OV,
+        [
+            ('            height: 16.0,\n            color: p.yellow,',
+             '            height: 16.0,\n            color: p.accent,'),
+        ],
+        ["desktop"],
+        [
+            'neither_badge_follows_the_accent',
+            'nothing_else_moves_when_the_accent_does',
+        ],
+    ),
+    (
+        "YYYYYYYYYYYYY: the close button follows the desktop's accent",
+        OV,
+        [
+            ('            height: 18.0,\n            color: p.red,',
+             '            height: 18.0,\n            color: p.accent,'),
+        ],
+        ["desktop"],
+        [
+            'neither_badge_follows_the_accent',
+            'nothing_else_moves_when_the_accent_does',
+        ],
+    ),
+    (
+        'ZZZZZZZZZZZZZ: the minimised mark is a fixed near-black again',
+        OV,
+        [
+            ('            color: readable_on(p.yellow),',
+             '            color: p.base,'),
+        ],
+        ["desktop"],
+        [
+            'each_badges_mark_can_be_read_on_the_badge',
+        ],
+    ),
+    (
+        'AAAAAAAAAAAAAA: the close mark is a fixed near-black again',
+        OV,
+        [
+            ('            color: readable_on(p.red),',
+             '            color: p.base,'),
+        ],
+        ["desktop"],
+        [
+            'each_badges_mark_can_be_read_on_the_badge',
+        ],
+    ),
+    (
+        "BBBBBBBBBBBBBB: the minimised mark answers for the close button's red instead",
+        OV,
+        [
+            ('            color: readable_on(p.yellow),',
+             '            color: readable_on(p.red),'),
+        ],
+        ["desktop"],
+        [
+            'each_badges_mark_can_be_read_on_the_badge',
+        ],
+    ),
+    (
+        'CCCCCCCCCCCCCC: the backdrop loses the opacity that makes it a wash',
+        OV,
+        [
+            ('Color::rgba(p.mantle.r, p.mantle.g, p.mantle.b, alpha)',
+             'p.mantle'),
+        ],
+        ["desktop"],
+        [
+            'a_wash_keeps_its_own_alpha_and_the_colour_of_its_role',
+        ],
+    ),
+    (
+        'DDDDDDDDDDDDDD: a search-dimmed card loses the veil that dims it',
+        OV,
+        [
+            ('Color::rgba(p.surface0.r, p.surface0.g, p.surface0.b, 100)',
+             'p.surface0'),
+        ],
+        ["desktop"],
+        [
+            'a_wash_keeps_its_own_alpha_and_the_colour_of_its_role',
+        ],
+    ),
+    (
+        'EEEEEEEEEEEEEE: a search-dimmed card is a veiled mantle rather than a veiled surface',
+        OV,
+        [
+            ('Color::rgba(p.surface0.r, p.surface0.g, p.surface0.b, 100)',
+             'Color::rgba(p.mantle.r, p.mantle.g, p.mantle.b, 100)'),
+        ],
+        ["desktop"],
+        [
+            'a_wash_keeps_its_own_alpha_and_the_colour_of_its_role',
         ],
     ),
 ]

@@ -1,5 +1,9 @@
 # `stamp-ancestry.py` can no longer succeed, so every boot test prints a false staleness warning
 
+**Status:** ✅ **DONE 2026-08-22 by lane A** — your option 1, with the passing-path
+warning re-pointed at `ctest-fixtures.py sysroot-check` rather than removed.
+`design-decisions.md` §277. See "Resolved by lane A" at the bottom.
+
 **Filed:** 2026-08-21 by Lane B.
 **Owner:** lane A (`scripts/stamp-ancestry.py`, `scripts/boot-test.sh`).
 **Severity:** no effect on correctness; a permanent false RED in the output every

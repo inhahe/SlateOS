@@ -108,9 +108,14 @@ pub fn init_defaults() {
                 read_only: false,
                 modified: false
             },
+            // `kernel.ostype` / `kernel.osrelease` are the sysctl spellings of
+            // the same two strings `/proc/sys/kernel/{ostype,osrelease}` and
+            // `uname(2)` publish, so they read the one definition in
+            // `crate::uname` rather than a third private copy — which is what
+            // they were until 2026-08-22 (`MintOS` / `0.1.0`).
             SysParam {
                 key: String::from("kernel.ostype"),
-                value: String::from("MintOS"),
+                value: String::from(crate::uname::SYSNAME),
                 param_type: ParamType::StringVal,
                 description: String::from("OS type"),
                 read_only: true,
@@ -118,7 +123,7 @@ pub fn init_defaults() {
             },
             SysParam {
                 key: String::from("kernel.osrelease"),
-                value: String::from("0.1.0"),
+                value: String::from(crate::uname::RELEASE),
                 param_type: ParamType::StringVal,
                 description: String::from("OS release version"),
                 read_only: true,

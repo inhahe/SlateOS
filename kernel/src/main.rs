@@ -187,6 +187,7 @@ mod timekeeping;
 mod tlb;
 mod tty;
 mod udriver;
+mod uname;
 mod unicode;
 mod userns;
 mod virtio;
@@ -6086,6 +6087,9 @@ extern "C" fn kernel_main() -> ! {
 
     // Unicode support self-test (UTF-8 decoding, box drawing, block elements).
     unicode::self_test();
+
+    // The uname strings: glibc's start-up version gate, and single-token fields.
+    uname::self_test();
 
     // Step 22e⅞++++f: Memory subsystem integration tests.
     // End-to-end tests exercising alloc→map→access→unmap→free pipeline.

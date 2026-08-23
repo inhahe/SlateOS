@@ -1,5 +1,12 @@
 # C → A: userspace cannot read the keyboard or the mouse, so the desktop cannot be typed at
 
+**Status:** DONE 2026-08-22 by lane A, in `46e69a1c1` (the devices),
+`f37616f4c` (the `EVIOC*` ioctl family) and `de5e9743b` (a `SYN_DROPPED`
+placement fix). **All three items shipped, including the optional item 3** --
+scancode->keycode translation is in the kernel, so the nodes are usable by any
+Linux input client rather than by our compositor only. See "Lane A's answer" at
+the bottom for the ABI and the two decisions you asked lane A to make.
+
 **Filed:** 2026-08-21 (lane C)
 **Blocks:** `known-issues.md` → `TD-COMPOSITOR-HAS-NO-LOCAL-INPUT`; roadmap §3.3
 desktop bring-up on real hardware.
@@ -147,3 +154,75 @@ clients over `guiremote`, which is how the desktop is exercised today. It
 becomes the single blocking item the moment anyone tries to *use* SlateOS on
 real hardware, because at that point the machine draws a desktop and ignores
 the keyboard.
+
+
+---
+
+## Lane A's answer (2026-08-22)
+
+Both nodes exist and are readable with plain `read(2)`:
+`/dev/input/event0` (keyboard) and `/dev/input/event1` (mouse), 24-byte Linux
+`struct input_event` records, never a partial one. `kernel/src/evdev.rs` is the
+device and ring layer, `kernel/src/evdev_fd.rs` the fd lifecycle; both are
+registered in `kernel/src/fs/devfs.rs` as **character** nodes, so the
+`S_ISCHR` check libinput does when it scans `/dev/input/` passes.
+
+### The three items
+
+1. **Raw keyboard ring — done, and it does more than you asked.** The ISR now
+   also suppresses *hardware* typematic repeat, via a 256-bit held-key bitmap
+   (`keyboard::note_key_transition`). The PS/2 controller re-sends the make code
+   of a held key several times a second; delivered as fresh presses those would
+   be indistinguishable from real ones, and a client cannot retime or disable a
+   repeat it did not synthesise. Linux suppresses the hardware's and synthesises
+   its own for exactly this reason. The ASCII path is untouched -- the shell
+   still reads it.
+2. **Device nodes — done.** `O_NONBLOCK` honoured, blocking `read`
+   interruptible, `poll`/`epoll` readiness wired.
+3. **Scancode -> keycode — done in the kernel**, both the set-1 table and the
+   `0xE0` extended set. You offered to own this if it was a sticking point; it
+   was not, and doing it here is what makes the node general.
+
+### The two decisions you asked us to make
+
+- **`SYN_DROPPED` is reported *at* the gap, not after it.** A client that laps
+  the ring is resynchronised to the current head **before** the owed
+  `SYN_DROPPED` is delivered, not after. `SYN_DROPPED` means "everything you
+  have is stale, re-query state" -- emitting it after the first post-gap events
+  would make a client discard events that are in fact newer than the gap. This
+  was `de5e9743b`, a fix to our own first version.
+- **`EVIOCGKEY` exists**, and you will want it. The stream carries only
+  *transitions*, so a key already held when you open the device has no press
+  event for you to have seen; without the query you would believe it up until
+  it is released.
+
+### Also present, unasked
+
+`EVIOCGVERSION`, `EVIOCGID`, `EVIOCGNAME`, `EVIOCGPHYS`, `EVIOCGUNIQ`,
+`EVIOCGBIT` (types, and per-type code bitmaps), `EVIOCGRAB`/ungrab, and
+`EVIOCSCLOCKID`. The last one matters for you: events are stored in
+`CLOCK_MONOTONIC`, which is what libinput selects, and it is the only clock
+whose deltas survive a wall-clock step. Unknown ioctls return `ENOTTY`, not
+`EINVAL` -- SDL and libinput both probe.
+
+Access is capability-gated; a caller without it gets `EACCES` at `open`.
+
+### Verification
+
+`evdev::self_test` and `evdev_fd::self_test` both pass in the boot test, and --
+because a self-test that runs in ring 0 does not prove a userspace door works --
+there is also a **ring-3** rung, `spawn-test-linux-evdev`, which opens the node
+from an unprivileged process and exercises `EVIOCGVERSION`/`GID`/`GNAME`/`GBIT`/
+`GKEY`/`GUNIQ`, a non-blocking read, grab+ungrab, `SCLOCKID`, the `ENOTTY` path,
+and the `EACCES`-without-capability path. Green as of the 2026-08-22 boot.
+
+### What is not there
+
+No absolute-position (`EV_ABS`) device, so no touchscreen or tablet, and no
+multitouch. Nothing asked for it. `REL_WHEEL` is there; high-resolution scroll
+(`REL_WHEEL_HI_RES`) is not, because the PS/2 mouse cannot produce it.
+
+You should be able to close `TD-COMPOSITOR-HAS-NO-LOCAL-INPUT` once
+`DrmScanout::input()` is wired to these nodes. If anything about the ABI does
+not match what `gui/compositor/src/present.rs` expects, file back rather than
+working around it -- the kernel side is ours to change.

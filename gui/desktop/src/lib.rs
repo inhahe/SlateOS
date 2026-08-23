@@ -3143,9 +3143,13 @@ impl DesktopShell {
             return None;
         }
         let mut tree = RenderTree::new();
+        // Resolved here rather than cached beside `theme`, for the reason
+        // `theme` documents: `appearance` is the single source of truth, and a
+        // second stored derivation of it is a second thing that can go stale.
         tree.commands.extend(overview::render_overview(
             &self.overview,
             &self.overview_config,
+            &Palette::from_settings(&self.appearance),
             self.screen_width as f32,
             self.screen_height as f32,
         ));

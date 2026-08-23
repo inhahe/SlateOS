@@ -37837,3 +37837,321 @@ in `known-issues.md` under
 `TD-B-THREE-UTILITIES-STILL-CARRY-THEIR-OWN-MODE-PARSER`, and
 `parse_symbolic_umask`'s own doc comment now carries the short form so nobody
 re-opens the question from the code alone.
+## §282 — The last 71 kernel panics reachable from ordinary inputs were removed by making the panic *impossible*, not by catching it
+
+**Date:** 2026-08-22
+**Decided by:** Claude (autonomous)
+
+**In short:** Scattered through the kernel were 71 places that said "if this
+step fails, crash the whole machine" — `unwrap()` and `expect()`, Rust's way of
+saying "I am certain this cannot fail." Some of them were wrong: you could
+crash the kernel by typing a shell command with a name that did not exist. They
+are now all gone. The interesting part is *how*: for most of them the right fix
+was not to handle the failure but to restructure the code so the failure has
+nowhere to occur, which leaves less code behind than catching it would.
+
+### What was wrong
+
+`CLAUDE.md` has said from the start that "every `unwrap`/`expect` in non-test
+code is a potential DoS if an attacker can shape the input." That was policy
+without enforcement. `scripts/scan-unwrap.py` (see §283 below on the classifier
+itself) made the count observable for the first time: **71 sites in production
+paths**, as against ~1900 in tests, where a panic on bad data is the point.
+
+At least one was reachable from a keyboard. `notifprefs app <anything>` at the
+kernel shell looked the app id up and unwrapped the result, so a typo — or a
+name that was simply never registered — was a one-line kernel panic typed at a
+prompt. Several more were reachable from an allocator that had run out of
+memory, which is a state the system is otherwise designed to survive.
+
+### The decision
+
+Four shapes of fix, chosen by what the site actually was, in preference order —
+each one preferred over the next because it leaves less code behind:
+
+| Shape | When it applies | Example |
+|---|---|---|
+| **Delete the possibility** | The failing call's inputs are compile-time constants | `Layout::from_size_align(64, 8).expect(…)` → `Layout::new::<[u64; 8]>()` |
+| **Delete the second copy of the fact** | The unwrap leans on two pieces of state agreeing | kchannel's `sent: Cell<bool>` restated "the cell is empty"; reading the cell once by value makes it structural |
+| **Construct on first use** | The `Option` is an initialization-order artifact, not a state | the five namespace/container tables |
+| **Return the error** | The failure is a genuine outcome | every kshell command; the bench suite |
+
+Only the fourth adds error-handling code. It was used least.
+
+### The alternative that was rejected
+
+**Wrap each site in a check and log.** This is the mechanical fix, and it is
+what "remove the unwraps" usually means. It was rejected because it treats 71
+unrelated sites as one problem. Of the four shapes above, three make the failure
+*unrepresentable*; a check would have preserved every one of those failures as a
+live branch, plus added a log line that can never fire. The 25 sites fixed by
+the first three shapes ended up **shorter** than they started.
+
+### Two things this exposed that a mechanical fix would have hidden
+
+1. **Converting a panic to an error exposes latent leaks.** Under `.expect()`
+   the panic ended everything, so a handle leaked on the way out did not matter.
+   A bare `?` in the same place leaks one handle *per iteration*. This bit twice
+   in the benchmark suite (`bench_service_connect` leaking a channel,
+   `bench_ipc_shm` leaking a 16 KiB mapping) and once in `bench_page_fault`,
+   which maps 220 pages in its timed loop and had to learn to tear down exactly
+   the prefix it had built.
+
+2. **A guard that exists only to dodge a panic is a band-aid, and removing the
+   panic retires the guard.** `netns::is_initialized()` had five callers. Four
+   were dodging the panic — one said so in a comment: *"netns accessors panic
+   (not `Err`) when the table is `None`; guard so a mis-ordered boot can't panic
+   here."* The fifth was load-bearing for a different reason (`net::init()` runs
+   first and pushes root interface config in), which is what forced `init()` to
+   become idempotent rather than merely leaving lazy accessors in place. Four
+   guards deleted; one real ordering constraint made explicit.
+
+### The benchmark harness got a fallible sibling
+
+`bench::run` cannot fail by construction. Eight benchmarks needed to, so
+`try_run` was added and `run` became a wrapper over it. Two details are load-
+bearing:
+
+- **The `Result` is inspected *after* `let end = rdtsc();`.** The added branch
+  therefore falls outside the measured window, so `run` and `try_run` time the
+  same instructions. `bench_page_fault`'s hand-rolled loop does the same.
+- **`run`'s unreachable `Err` arm returns an inert empty result, not a panic.**
+  A benchmark harness must not be the thing that panics the kernel. Its `seq` is
+  deliberately out of range, so if one ever *is* scored the mismatch is counted
+  and printed rather than silently crediting an unrelated window.
+
+`try_run`'s built-in warmup (`max(iterations / 10, 5)`) also retired four
+hand-written warmup blocks that existed only to be unwrapped twice more. One of
+them (pipe) used *blocking* `read` where the measured body used `try_read` — a
+warmup that can block is a warmup that can hang the boot.
+
+### `report()`, and why a skipped benchmark must say so
+
+`run_all` is the top-level driver and has nothing to propagate to, so each
+now-fallible benchmark is wrapped in `report(name, outcome)`, which logs
+`SKIPPED (<err>)` and continues. Two rejected alternatives:
+
+- **Propagate out of `run_all`.** A benchmark that could not allocate its
+  fixtures would cancel the twenty benchmarks after it.
+- **`let _ = bench_foo();`.** Worse than either. A suite that quietly stopped
+  measuring something reads *exactly* like one that measured it and found
+  nothing wrong.
+
+The same reasoning suppresses the verdict on the interleaved A/B allocator
+experiment when any round failed: a failed alloc returns much sooner than a
+successful one, so it drags `min` down on whichever arm hit it. Reporting PASS
+off such a window would be a silently wrong answer, which is worse than
+reporting nothing.
+
+### What this does not claim
+
+Zero `unwrap` sites in production code is not zero panics. `panic!`,
+`assert!`, indexing and unchecked arithmetic remain, and the defensive clippy
+lints that would surface them still report ~18 000 warnings tree-wide. This
+closes one enumerable category and leaves the scanner behind so it stays closed.
+
+---
+
+## §283 — The tool that counted the panics was wrong twice before it was right, and the count moving is not evidence that it got better
+
+**Date:** 2026-08-22
+**Decided by:** Claude (autonomous)
+
+**In short:** To remove every "crash the machine if this fails" site (§282) we
+first had to *find* them, and only the ones in real code — the same pattern in a
+test is correct and there are ~1900 of those. The script that sorted real code
+from test code got the sorting wrong twice, in opposite directions, and both
+times its own comments confidently explained why it was fine. This records what
+the bug actually was and the rule that came out of it.
+
+### The two failures
+
+Deciding "is this line inside a test?" means finding the function that encloses
+it. Both wrong versions found *a* function; neither found the right one.
+
+- **v1 tracked brace depth.** Braces appear in strings, in comments, and in
+  closures, so the depth drifted. It filed every site in `oci.rs::self_test` as
+  top-level code.
+- **v2 used the nearest preceding `fn`.** These self-tests routinely define
+  helpers inside themselves:
+
+  ```rust
+  pub fn self_test() {
+      fn case(...) { ... }        // <- nearest preceding fn
+      foo().expect("register");   // <- but this is still test code
+  }
+  ```
+
+  `case` is not named `*test*`, so everything after it was reported as
+  production. **25 sites across five files**, all false. v2's docstring
+  explicitly called this failure mode "safe."
+
+### The rule that fixes it
+
+What matters is not the nearest enclosing `fn` but whether **any** enclosing
+`fn` is a test. v3 keeps a *stack* of open functions and reports a site as test
+code if any frame is. Indentation is the nesting proxy — sound here because the
+tree is rustfmt-formatted, so a body is indented strictly further than its `fn`
+line and the closing `}` sits at exactly that line's indent.
+
+One subtlety, found by it breaking: pop with `<=` only when the line starts with
+`}`, otherwise pop with strict `<`. Without the distinction, a multi-line
+signature's `) -> Foo {` — at the same indent as its `fn` — pops the function
+that was just pushed.
+
+### The decision that matters more than the algorithm
+
+**A count from an unvalidated classifier is not a measurement.** The number went
+96 → 96 → 71 across three versions. It would have been easy to read the drop as
+progress; in fact v1 and v2 were wrong in ways that happened to nearly cancel.
+Every move was therefore justified by *reading the source at the disputed
+sites*, not by the count changing.
+
+The same discipline applied to the fix: after v3 cut 25 sites, a separate probe
+looked for the opposite error — sites now hidden because some enclosing function
+merely *looks* like a test. It found 14, under names that break the `*_test*`
+convention (`self_test_inner`, `cmd_selftest`, `with_self_test_freed_address`,
+and ten `self_test_*` in `syscall/linux.rs`). All were read; all are genuinely
+self-tests. A fix that is not checked for over-correction is half a fix.
+
+### Why a heuristic at all
+
+The exact answer needs a parser — `syn`, or rustc's own. Rejected: this runs on
+a `no_std` kernel tree from a plain Python script with no build step, and the
+heuristic is checkable in the way that matters, because its output is a list of
+file:line pairs that can be read. An exact tool that nobody runs is worth less
+than an approximate one whose every disagreement was resolved by hand.
+
+---
+
+## §284 — The system's name and version are defined once and read five times, rather than written five times and reconciled
+
+**Date:** 2026-08-22
+**Decided by:** Claude (autonomous) — implementing lane B's
+`requests/b-a-sysfs-says-mintos-while-procfs-says-linux.md`, whose suggested fix
+("ideally by calling into one shared helper rather than by copying the literals
+a third time") is the shape adopted here.
+
+**In short:** the kernel answers the question "what system is this?" through
+five different doors — the `uname` system call, two virtual files under
+`/proc`, two under `/sys`, a pair of tunable parameters, and the built-in
+shell's `uname` command. Each door had its own copy of the answer written into
+it by hand, and they had drifted apart: three different names (`Linux`,
+`MintOS`) and four different version numbers (`6.6.0-slateos`, `0.1.0-dev`,
+`0.1.0`) were all being reported by the same kernel at the same moment. The fix
+is not to correct the copies — it is to delete them, so that there is one
+definition and five readers of it.
+
+### What the five doors were saying
+
+| Door | Name | Version |
+|---|---|---|
+| `uname(2)` | `Linux` | `6.6.0-slateos` |
+| `/proc/sys/kernel/{ostype,osrelease,version}` | `Linux` | `6.6.0-slateos` |
+| `/sys/kernel/{ostype,osrelease,version}` | **`MintOS`** | **`0.1.0-dev`** |
+| `kernel.ostype` / `kernel.osrelease` sysctl | **`MintOS`** | **`0.1.0`** |
+| `/proc/version` | **`MintOS kernel 0.1.0 (Rust, x86_64, 16 KiB pages)`** | — |
+| kshell `uname -sr` | **`MintOS`** | **`0.1.0`** |
+
+Lane B reported the third row. The fourth, fifth and sixth were found while
+fixing it, and are the reason the fix is a module rather than three edited
+literals: three known-wrong copies out of six is not a typo, it is what copying
+does over time. Lane B had already found the identical shape on its own side —
+four userspace components each holding a private answer — and fixed it the same
+way (read the kernel, keep no independent value).
+
+### Why `Linux` is the honest answer here and not a lie
+
+Settled policy, user-directed 2026-06-10, recorded as `roadmap-detailed.md` §72
+"Version-surface policy". `uname(2)` is a Linux system call, and `/proc` and
+`/sys` are Linux inventions; native SlateOS code uses native APIs and never
+reads any of them. So the only programs that can see these strings are Linux
+binaries asking which Linux personality they are talking to, and `Linux` is the
+true answer to *that* question. The product name is not suppressed — it moves to
+the one field that is actually about the product (below).
+
+`osrelease` is the field with teeth, and it is why this was worth fixing before
+anything read the wrong copy. glibc's `__libc_start_main` parses the leading
+integer triple of the release string and aborts the process with
+`FATAL: kernel too old` if it is below the minimum glibc was built against.
+`6.6.0-slateos` clears that gate; `0.1.0-dev` does not. A future consumer
+picking the `/sys` copy over the `/proc` copy — a coin-flip for anyone who does
+not know this history — would have produced "this ported program aborts at
+start-up for no visible reason", which is close to the worst
+symptom-to-cause distance in the tree.
+
+### Where the product name belongs: `uname -o`, and one word
+
+`OPERATING_SYSTEM = "SlateOS"` is the sixth constant, and it is *not* a
+`struct utsname` field on Linux either — GNU's `uname -o` is a compile-time
+constant, which is exactly how GNU reports `Linux` for `-s` and `GNU/Linux` for
+`-o` without contradicting itself. That distinction is what makes the whole
+change non-lossy: the kernel still says what it is, in the field whose question
+is "what operating system is this?" rather than the one whose question is "what
+kernel ABI am I calling?".
+
+It is spelled without a space deliberately. `uname -a` prints the fields
+space-separated and callers routinely split it on whitespace, so a two-word
+value silently becomes two fields and shifts everything after it. Lane B's
+`userspace/coreutils/src/bin/uname.rs` reached the same spelling independently
+and for the same reason (its comment notes `Slate OS` "had a space in it"); the
+kernel constant matches it byte for byte so the in-kernel shell's `uname` and
+the ring-3 one cannot disagree.
+
+### `/proc/version` was reformatted, not just re-valued
+
+Linux builds `/proc/version` from `struct utsname` with a fixed banner
+(`fs/proc/version.c` → `linux_proc_banner`):
+
+```text
+%s version %s (COMPILE_BY@COMPILE_HOST) (COMPILER) %s\n
+ ^sysname    ^release                              ^version
+```
+
+Ours read `MintOS kernel 0.1.0 (Rust, x86_64, 16 KiB pages)`. The *shape* was
+wrong, not only the values: `Linux version (\S+)` — the regex every version
+sniffer uses — matched nothing, and a caller falling back to positional parsing
+got `0.1.0`. That is not hypothetical; our own `userspace/lsmod` takes the third
+whitespace token of `/proc/version`, which is where Linux puts the release. It
+happened to work only because `MintOS kernel 0.1.0` puts a version in slot three
+too — the right slot by accident, with the wrong value in it. The banner form
+fixes both at once and needs no change in lsmod.
+
+**Alternative considered: keep the descriptive text.** `(Rust, x86_64, 16 KiB
+pages)` is genuinely informative and appending it after the version field would
+be harmless to both parsing strategies, since Linux's own version field contains
+spaces and runs to the end of the line. Rejected because "harmless to the two
+parsers I thought of" is a weaker property than "identical in shape to the thing
+every parser was written against", and the 16 KiB page size is already reported
+where a program would look for it.
+
+### What was deliberately *not* touched
+
+The kernel says `MintOS` in about twenty other places — boot banners, the login
+screen's welcome message, the HTTP `Server:` header, LLDP system descriptions,
+the TLS self-signed certificate's CN, installer disk labels. None of those is an
+ABI surface answering "what system is this?"; they are branding, and branding is
+allowed to be a display name. The rule this entry establishes is narrow on
+purpose: *the doors that answer the same question must give the same answer*.
+Sweeping every occurrence of a product name into one constant would be a
+different and much less defensible change, because it would couple a window
+title to a glibc start-up gate.
+
+### The test that had to change, and why the old one was the problem
+
+`sysfs::self_test` asserted `ostype.starts_with(b"MintOS")`. That assertion is
+why the bug survived: a test written against one generator's own literal can
+only ever agree with it, so it certified the divergence rather than catching it.
+
+The replacement compares **generated bytes against generated bytes** — it
+constructs a `ProcFs` alongside the `SysFs` and reads the same three names out of
+both, requiring the two outputs and `crate::uname` to agree. That catches a
+drifting literal *and* a generator that quietly stops reading the shared module,
+which asserting the constant could not. `procfs::self_test` was likewise
+re-pointed at the constants rather than at a fourth copy of the strings.
+
+`uname::self_test` deliberately does **not** assert that the constants equal
+themselves — that passes by construction and would be a fifth copy. It checks
+the two properties a caller can actually be broken by: that `RELEASE` parses to
+at least 6.6 the way glibc parses it, and that every field except `VERSION` is a
+single whitespace-free token.

@@ -358,8 +358,15 @@ impl<T: Copy, const N: usize> KChannel<T, N> {
         }
 
         // Slow path: wait for space with timeout.
+        //
+        // The message is its own status flag.  It sits in `msg_cell` until the
+        // closure moves it into the buffer, and the closure's only way to take
+        // it is to push it — so "the cell is empty" *is* "the message was
+        // sent".  Tracking that in a separate `sent: Cell<bool>` would restate
+        // the same fact in a second place, and the two agreeing is exactly
+        // what the old `unwrap` here was leaning on.  Reading the cell once,
+        // by value, makes the invariant structural instead of asserted.
         let msg_cell: Cell<Option<T>> = Cell::new(Some(msg));
-        let sent = Cell::new(false);
         let _got_space = self.send_wq.wait_timeout_ns(
             || {
                 let mut buf = self.buffer.lock();
@@ -369,7 +376,6 @@ impl<T: Copy, const N: usize> KChannel<T, N> {
                 if !buf.is_full() {
                     if let Some(m) = msg_cell.replace(None) {
                         buf.push(m);
-                        sent.set(true);
                     }
                     return true;
                 }
@@ -378,18 +384,15 @@ impl<T: Copy, const N: usize> KChannel<T, N> {
             timeout_ns,
         );
 
-        if sent.get() {
-            self.total_sent.fetch_add(1, Ordering::Relaxed);
-            self.recv_wq.wake_one();
-            Ok(())
-        } else {
-            // Timeout expired or channel closed — return the unsent message.
-            // If sent=false, the message was never moved out of msg_cell.
-            // unwrap is safe here: the only path that sets msg_cell to None
-            // also sets sent=true.
-            #[allow(clippy::unwrap_used)]
-            let leftover = msg_cell.replace(None).unwrap();
-            Err(SendError::Closed(leftover))
+        match msg_cell.replace(None) {
+            // Still holding it: the timeout expired, or the channel closed
+            // before space appeared.  Hand the message back to the caller.
+            Some(leftover) => Err(SendError::Closed(leftover)),
+            None => {
+                self.total_sent.fetch_add(1, Ordering::Relaxed);
+                self.recv_wq.wake_one();
+                Ok(())
+            }
         }
     }
 

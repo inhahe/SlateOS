@@ -1515,6 +1515,7 @@ version = "0.1.0"
 name = "chown"
 version = "0.1.0"
 dependencies = [
+ "modechange",
  "userdb",
 ]
 

@@ -525,284 +525,98 @@ const fn follow_child() -> bool {
 }
 
 // ============================================================================
-// Symbolic mode parsing (chmod)
+// Mode parsing (chmod)
 // ============================================================================
+//
+// This section used to be ~260 lines of hand-written parser -- `ModeClause`,
+// `parse_symbolic_mode`, `clause_bits`, `clause_who_mask`, `apply_symbolic_mode`
+// and `parse_mode`. It was the third of four independent implementations of one
+// grammar in this tree, and like the other two it was wrong in the permissive
+// direction. `modechange` is that grammar written once, checked against 24,480
+// rows generated from GNU coreutils 9.4; see design-decisions.md 364 and
+// known-issues.md TD-B-THREE-UTILITIES-STILL-CARRY-THEIR-OWN-MODE-PARSER.
+//
+// What the deleted parser got wrong, all of it now fixed by construction:
+//
+//   * `b'x' | b'X' => x = true` -- `X` is not `x`. `X` sets an execute bit only
+//     on a directory or on a file that already has one, which is the entire
+//     point of `chmod -R a+rX` on a source tree: it makes directories traversable
+//     without making every `.c` file executable. The old code made them all
+//     executable.
+//   * The umask was never consulted, so `chmod +w f` granted write to group and
+//     other. GNU masks a clause that names no `who`: under `umask 022`,
+//     `chmod +w` is `u+w`. `chmod a+w` is unaffected, which is how a caller asks
+//     for the broad grant explicitly.
+//   * `if part.is_empty() { continue; }` accepted `,` and `u+r,` as valid.
+//   * Only one operator per clause: `u+r-w` was rejected, and `=u` (copy the
+//     user triad to another) was not implemented at all.
+//   * `chmod 0 f` was rejected -- `strip_prefix('0')` left an empty string, which
+//     fell through to the symbolic parser and died on a missing operator.
+//   * `-R` stripped setgid off directories. An octal mode is applied verbatim
+//     here, but gnulib protects setuid and setgid on a *directory* from any
+//     change that did not name them, so `chmod -R 755 d` leaves a setgid
+//     directory setgid. This is the one that silently changed the meaning of a
+//     shared group tree.
 
-/// Permission bits: standard POSIX layout.
-const S_ISUID: u32 = 0o4000;
-const S_ISGID: u32 = 0o2000;
-const S_ISVTX: u32 = 0o1000;
-const S_IRUSR: u32 = 0o0400;
-const S_IWUSR: u32 = 0o0200;
-const S_IXUSR: u32 = 0o0100;
-const S_IRGRP: u32 = 0o0040;
-const S_IWGRP: u32 = 0o0020;
-const S_IXGRP: u32 = 0o0010;
-const S_IROTH: u32 = 0o0004;
-const S_IWOTH: u32 = 0o0002;
-const S_IXOTH: u32 = 0o0001;
+use modechange::{Changes, adjust, compile, from_reference};
 
-/// A single symbolic mode clause, e.g. `u+rx` or `go-w`.
-struct ModeClause {
-    /// Which classes: user, group, other. If none are set, treat as "all".
-    who_user: bool,
-    who_group: bool,
-    who_other: bool,
-    /// Operation: '+' (add), '-' (remove), '=' (set exactly).
-    op: char,
-    /// Permission bits being affected.
-    read: bool,
-    write: bool,
-    execute: bool,
-    setuid: bool,
-    setgid: bool,
-    sticky: bool,
-}
-
-/// Parse a symbolic mode string like `u+x`, `go-w`, `a=rwx`, or `u+rwx,g=rx,o=r`.
+/// The file-mode creation mask.
 ///
-/// Returns a list of clauses to apply in order.
-fn parse_symbolic_mode(mode_str: &str) -> Result<Vec<ModeClause>, String> {
-    let mut clauses = Vec::new();
-
-    for part in mode_str.split(',') {
-        let part = part.trim();
-        if part.is_empty() {
-            continue;
-        }
-
-        let bytes = part.as_bytes();
-        let len = bytes.len();
-        let mut pos = 0;
-
-        // Parse the "who" portion: [ugoa]*
-        let mut who_u = false;
-        let mut who_g = false;
-        let mut who_o = false;
-        let mut who_any = false;
-
-        while pos < len {
-            match bytes[pos] {
-                b'u' => {
-                    who_u = true;
-                    who_any = true;
-                }
-                b'g' => {
-                    who_g = true;
-                    who_any = true;
-                }
-                b'o' => {
-                    who_o = true;
-                    who_any = true;
-                }
-                b'a' => {
-                    who_u = true;
-                    who_g = true;
-                    who_o = true;
-                    who_any = true;
-                }
-                _ => break,
-            }
-            pos += 1;
-        }
-
-        // If no "who" was specified, default to "all".
-        if !who_any {
-            who_u = true;
-            who_g = true;
-            who_o = true;
-        }
-
-        // Parse the operator: +, -, =
-        if pos >= len {
-            return Err(format!("invalid mode: '{part}' (missing operator)"));
-        }
-
-        let op = bytes[pos] as char;
-        if op != '+' && op != '-' && op != '=' {
-            return Err(format!(
-                "invalid mode: '{part}' (expected +, -, or = at position {pos})"
-            ));
-        }
-        pos += 1;
-
-        // Parse the permission letters: [rwxstXugo]*
-        let mut r = false;
-        let mut w = false;
-        let mut x = false;
-        let mut suid = false;
-        let mut sgid = false;
-        let mut sticky = false;
-
-        while pos < len {
-            match bytes[pos] {
-                b'r' => r = true,
-                b'w' => w = true,
-                b'x' | b'X' => x = true,
-                b's' => {
-                    // setuid if 'u' is in who, setgid if 'g' is in who
-                    if who_u {
-                        suid = true;
-                    }
-                    if who_g {
-                        sgid = true;
-                    }
-                    // If neither u nor g was explicit, default both
-                    if !who_u && !who_g {
-                        suid = true;
-                        sgid = true;
-                    }
-                }
-                b't' => sticky = true,
-                _ => {
-                    return Err(format!(
-                        "invalid permission character '{}' in '{part}'",
-                        bytes[pos] as char
-                    ));
-                }
-            }
-            pos += 1;
-        }
-
-        clauses.push(ModeClause {
-            who_user: who_u,
-            who_group: who_g,
-            who_other: who_o,
-            op,
-            read: r,
-            write: w,
-            execute: x,
-            setuid: suid,
-            setgid: sgid,
-            sticky,
-        });
-    }
-
-    if clauses.is_empty() {
-        return Err("empty mode string".to_string());
-    }
-
-    Ok(clauses)
+/// POSIX has no read-only spelling of it -- reading it means setting it -- so
+/// this is the libc call rather than anything in `std`.
+#[cfg(unix)]
+unsafe extern "C" {
+    fn umask(mask: u32) -> u32;
 }
 
-/// Build a bitmask of the permissions described by a clause for a given "who".
-fn clause_bits(clause: &ModeClause) -> u32 {
-    let mut bits: u32 = 0;
-
-    if clause.who_user {
-        if clause.read {
-            bits |= S_IRUSR;
-        }
-        if clause.write {
-            bits |= S_IWUSR;
-        }
-        if clause.execute {
-            bits |= S_IXUSR;
-        }
-    }
-    if clause.who_group {
-        if clause.read {
-            bits |= S_IRGRP;
-        }
-        if clause.write {
-            bits |= S_IWGRP;
-        }
-        if clause.execute {
-            bits |= S_IXGRP;
-        }
-    }
-    if clause.who_other {
-        if clause.read {
-            bits |= S_IROTH;
-        }
-        if clause.write {
-            bits |= S_IWOTH;
-        }
-        if clause.execute {
-            bits |= S_IXOTH;
-        }
-    }
-    if clause.setuid {
-        bits |= S_ISUID;
-    }
-    if clause.setgid {
-        bits |= S_ISGID;
-    }
-    if clause.sticky {
-        bits |= S_ISVTX;
-    }
-
-    bits
-}
-
-/// Build a mask of all bits that a clause affects, for use with '=' to clear
-/// unmentioned bits in the relevant classes.
-fn clause_who_mask(clause: &ModeClause) -> u32 {
-    let mut mask: u32 = 0;
-    if clause.who_user {
-        mask |= S_IRUSR | S_IWUSR | S_IXUSR;
-    }
-    if clause.who_group {
-        mask |= S_IRGRP | S_IWGRP | S_IXGRP;
-    }
-    if clause.who_other {
-        mask |= S_IROTH | S_IWOTH | S_IXOTH;
-    }
-    // '=' on user also clears setuid, on group clears setgid, on any clears sticky
-    if clause.who_user {
-        mask |= S_ISUID;
-    }
-    if clause.who_group {
-        mask |= S_ISGID;
-    }
-    mask |= S_ISVTX;
-    mask
-}
-
-/// Apply a list of symbolic mode clauses to an existing mode value.
-fn apply_symbolic_mode(mut current: u32, clauses: &[ModeClause]) -> u32 {
-    for clause in clauses {
-        let bits = clause_bits(clause);
-
-        match clause.op {
-            '+' => current |= bits,
-            '-' => current &= !bits,
-            '=' => {
-                let mask = clause_who_mask(clause);
-                current = (current & !mask) | bits;
-            }
-            _ => {} // unreachable: parse_symbolic_mode validates op
-        }
-    }
-    current
-}
-
-/// Parse a mode string which may be octal or symbolic.
+/// Read the process umask, restoring it immediately.
 ///
-/// Returns `Ok(Left(octal))` for absolute modes or `Ok(Right(clauses))` for
-/// symbolic modes that need to be applied to the current mode.
-fn parse_mode(mode_str: &str) -> Result<ModeSpec, String> {
-    // Try octal first: must be all digits 0-7, optionally prefixed with '0'.
-    let trimmed = mode_str.strip_prefix('0').unwrap_or(mode_str);
-    if !trimmed.is_empty() && trimmed.bytes().all(|b| b.is_ascii_digit() && b <= b'7') {
-        let val = u32::from_str_radix(trimmed, 8)
-            .map_err(|e| format!("invalid octal mode '{mode_str}': {e}"))?;
-        if val > 0o7777 {
-            return Err(format!("mode value {val:#o} exceeds maximum 7777"));
+/// Cached because `umask(0)` *writes* as well as reads: a second uncached call
+/// would read back the zero the first one wrote. `chmod` reads it once per run,
+/// but the cache makes that a property of the function rather than of the call
+/// site.
+#[cfg(unix)]
+fn read_umask() -> u32 {
+    use std::sync::OnceLock;
+    static UMASK: OnceLock<u32> = OnceLock::new();
+    *UMASK.get_or_init(|| {
+        // SAFETY: `umask` is a POSIX call that cannot fail and touches only this
+        // process's file-mode creation mask. The second call restores what the
+        // first read, so no other thread observes a zero mask for longer than
+        // these two instructions.
+        unsafe {
+            let previous = umask(0);
+            umask(previous);
+            previous
         }
-        return Ok(ModeSpec::Absolute(val));
-    }
-
-    // Fall back to symbolic parsing.
-    let clauses = parse_symbolic_mode(mode_str)?;
-    Ok(ModeSpec::Symbolic(clauses))
+    })
 }
 
-enum ModeSpec {
-    /// An absolute octal mode (e.g. 0755).
-    Absolute(u32),
-    /// A list of symbolic clauses to apply to the current mode.
-    Symbolic(Vec<ModeClause>),
+/// The build host is Windows, which has no umask. Zero means "mask nothing",
+/// so a who-less clause is taken at its word there.
+#[cfg(not(unix))]
+fn read_umask() -> u32 {
+    0
+}
+
+/// A compiled mode, plus the umask to apply to any clause of it that named no
+/// `who`.
+///
+/// The two travel together because they are only meaningful together, and
+/// because `--reference` supplies a change list that must *not* be masked: it
+/// copies bits that already exist on a real file, and a umask has no business
+/// filtering them. That is why the umask is a field rather than read at the
+/// point of use.
+struct ModeSpec {
+    changes: Changes,
+    umask_value: u32,
+}
+
+impl ModeSpec {
+    /// The mode `path` should end up with, given what it has now.
+    fn resolve(&self, old_mode: u32, is_dir: bool) -> u32 {
+        adjust(old_mode, is_dir, self.umask_value, &self.changes).mode
+    }
 }
 
 // ============================================================================
@@ -1343,11 +1157,17 @@ fn chmod_one(
 
 /// Execute chmod for all target files.
 fn run_chmod(opts: &Options) -> bool {
-    // Parse the mode spec. --reference copies the reference file's mode as an
-    // absolute value.
+    // Parse the mode spec. --reference builds the change list from the
+    // reference file's bits instead of from a string.
     let mode_spec = if let Some(ref refpath) = opts.reference {
         match read_metadata(refpath) {
-            Ok(meta) => ModeSpec::Absolute(meta.perms & 0o7777),
+            // Umask 0: `--reference` copies bits off a file that already has
+            // them, and masking those would filter the answer to a question
+            // nobody asked.
+            Ok(meta) => ModeSpec {
+                changes: from_reference(meta.perms & modechange::CHMOD_MODE_BITS),
+                umask_value: 0,
+            },
             Err(e) => {
                 if !opts.silent {
                     eprintln!("chmod: cannot read reference '{refpath}': {e}");
@@ -1356,10 +1176,16 @@ fn run_chmod(opts: &Options) -> bool {
             }
         }
     } else {
-        match parse_mode(&opts.spec) {
-            Ok(s) => s,
-            Err(e) => {
-                eprintln!("chmod: {e}");
+        match compile(opts.spec.as_bytes()) {
+            Some(changes) => ModeSpec {
+                changes,
+                umask_value: read_umask(),
+            },
+            // GNU's wording, and deliberately one message for every way the
+            // grammar can be broken: the user does not care which rule they
+            // tripped, only that the string is not a mode.
+            None => {
+                eprintln!("chmod: invalid mode: \u{2018}{}\u{2019}", opts.spec);
                 return false;
             }
         }
@@ -1402,19 +1228,20 @@ fn run_chmod(opts: &Options) -> bool {
 
             // Read the current mode (best-effort) for symbolic application and
             // change detection.
-            let current_mode = read_metadata(&path_str).ok().map(|m| m.perms & 0o7777);
+            let current_mode = read_metadata(&path_str)
+                .ok()
+                .map(|m| m.perms & modechange::CHMOD_MODE_BITS);
 
-            let mode_val = match &mode_spec {
-                ModeSpec::Absolute(m) => *m,
-                ModeSpec::Symbolic(clauses) => {
-                    // Symbolic modes apply deltas to the current mode. If the
-                    // current mode is unknown, fall back to 0o000 as the base:
-                    // '+' and '=' still behave correctly, and '-' on unset bits
-                    // is a harmless no-op.
-                    let base = current_mode.unwrap_or(0o000);
-                    apply_symbolic_mode(base, clauses)
-                }
-            };
+            // Even an octal mode is resolved against the current one now,
+            // because `dir` is not decoration: gnulib protects setuid and
+            // setgid on a directory from a change that did not name them, so
+            // `chmod -R 755 d` leaves a setgid directory setgid. The old code
+            // applied an octal verbatim and stripped it.
+            //
+            // If the current mode is unknown, 0 is the base: `+` and `=` still
+            // land where they should, and `-` on an unset bit is a no-op.
+            let base = current_mode.unwrap_or(0);
+            let mode_val = mode_spec.resolve(base, entry.path.is_dir());
 
             let (_, err) = chmod_one(&path_str, mode_val, current_mode, opts);
             if err.is_some() {
@@ -1612,133 +1439,177 @@ mod tests {
         assert_eq!(detect_mode("anything-else"), Mode::Chown);
     }
 
-    // ---- octal mode parsing ------------------------------------------------
+    // ---- mode parsing -------------------------------------------------------
+    //
+    // Every row below was measured against GNU coreutils 9.4 under WSL. The
+    // grammar itself is `modechange`'s, checked there against 24,480 generated
+    // rows; what these tests pin is *this* binary's use of it -- the umask it
+    // passes, the `dir` flag it passes, and the base mode it starts from. Those
+    // three are the caller's decisions, and all three were wrong before.
+
+    /// Resolve a spec the way `run_chmod` does, with an explicit umask.
+    ///
+    /// The umask has to be a parameter rather than read from the process: the
+    /// build host is Windows and has none, so a test that relied on the real
+    /// one would assert nothing here and something different on every
+    /// developer's machine.
+    fn resolve(spec: &str, old: u32, is_dir: bool, umask_value: u32) -> u32 {
+        let changes = compile(spec.as_bytes()).unwrap_or_else(|| panic!("GNU accepts {spec:?}"));
+        ModeSpec {
+            changes,
+            umask_value,
+        }
+        .resolve(old, is_dir)
+    }
 
     #[test]
-    fn parse_mode_octal_basic() {
-        match parse_mode("755").unwrap() {
-            ModeSpec::Absolute(m) => assert_eq!(m, 0o755),
-            ModeSpec::Symbolic(_) => panic!("expected absolute"),
+    fn an_octal_mode_is_the_mode_it_spells() {
+        assert_eq!(resolve("755", 0o000, false, 0), 0o755);
+        assert_eq!(resolve("0644", 0o777, false, 0), 0o644);
+        assert_eq!(resolve("00755", 0o000, false, 0), 0o755);
+        assert_eq!(resolve("4755", 0o000, false, 0), 0o4755);
+        // `chmod 0 f` -- the old parser stripped the leading zero, was left with
+        // an empty string, fell through to the symbolic branch and died on a
+        // missing operator. GNU sets the mode to 0.
+        assert_eq!(resolve("0", 0o777, false, 0), 0);
+        assert_eq!(resolve("=", 0o777, false, 0), 0);
+    }
+
+    /// An octal is never masked, however the umask is set.
+    #[test]
+    fn an_octal_mode_ignores_the_umask() {
+        for umask_value in [0o000, 0o022, 0o077, 0o002] {
+            assert_eq!(resolve("755", 0o000, false, umask_value), 0o755);
         }
     }
 
+    /// A clause that names no `who` is masked by the umask; one that names a
+    /// `who` is not.
+    ///
+    /// The old parser never read the umask at all, so `chmod +w f` granted
+    /// write to group and other -- a silent broadening of exactly the kind this
+    /// utility exists to prevent. Measured, from mode `000`: `+w` is `0222`
+    /// under umask 000, `0200` under 022 **and** 077, `0220` under 002, while
+    /// `a+w` is `0222` under all four.
     #[test]
-    fn parse_mode_octal_with_leading_zero() {
-        match parse_mode("0644").unwrap() {
-            ModeSpec::Absolute(m) => assert_eq!(m, 0o644),
-            ModeSpec::Symbolic(_) => panic!("expected absolute"),
+    fn a_clause_with_no_who_is_masked_by_the_umask() {
+        for (umask_value, want) in [
+            (0o000, 0o222),
+            (0o022, 0o200),
+            (0o077, 0o200),
+            (0o002, 0o220),
+        ] {
+            assert_eq!(resolve("+w", 0o000, false, umask_value), want);
+            assert_eq!(resolve("a+w", 0o000, false, umask_value), 0o222);
         }
+        // Execute bits are not in any of these umasks, so `+x` from 644 is 755
+        // under three of them and 744 under 077.
+        assert_eq!(resolve("+x", 0o644, false, 0o022), 0o755);
+        assert_eq!(resolve("+x", 0o644, false, 0o077), 0o744);
+        // Removal is masked too: `-w` from 666 keeps the bits the umask held.
+        assert_eq!(resolve("-w", 0o666, false, 0o022), 0o466);
+        assert_eq!(resolve("-w", 0o666, false, 0o002), 0o446);
+    }
+
+    /// `X` sets an execute bit only where one is already earned.
+    ///
+    /// The old parser matched `b'x' | b'X'`, which is what makes
+    /// `chmod -R a+rX src/` -- the standard way to make a tree readable --
+    /// mark every source file executable. `X` fires on a directory, or on a
+    /// file that already has some execute bit, and on nothing else.
+    #[test]
+    fn capital_x_is_not_x() {
+        assert_eq!(resolve("a+rX", 0o644, false, 0), 0o644);
+        assert_eq!(resolve("a+rX", 0o700, false, 0), 0o755);
+        assert_eq!(resolve("a+rX", 0o700, true, 0), 0o755);
+        // A directory earns it whatever its own bits say.
+        assert_eq!(resolve("a=,+X", 0o000, true, 0), 0o111);
+        assert_eq!(resolve("a=,+X", 0o000, false, 0), 0o000);
+    }
+
+    /// A directory keeps setuid and setgid through a change that did not name
+    /// them; a file does not.
+    ///
+    /// This is the one that quietly broke shared group trees. The old code
+    /// applied an octal verbatim, so `chmod -R 755 d` on a setgid directory
+    /// cleared the bit and every file created there afterwards landed in the
+    /// creator's own group instead of the project's. Measured: a `2775`
+    /// directory under `chmod -R 755` comes out `2755`, and a `6755` one under
+    /// `chmod -R 700` comes out `6700`, while a `4755` *file* under
+    /// `chmod 755` comes out `755`.
+    #[test]
+    fn a_directory_keeps_setgid_through_an_unrelated_change() {
+        assert_eq!(resolve("755", 0o2775, true, 0), 0o2755);
+        assert_eq!(resolve("700", 0o6755, true, 0), 0o6700);
+        assert_eq!(resolve("755", 0o4755, false, 0), 0o755);
+        // Naming the bit still changes it, on a directory as much as on a file.
+        assert_eq!(resolve("g-s", 0o2775, true, 0), 0o775);
+        assert_eq!(resolve("2755", 0o0755, true, 0), 0o2755);
+    }
+
+    /// Several operators in one clause, and `=u` copying an existing triad.
+    ///
+    /// Neither was implemented: the old parser read exactly one operator per
+    /// comma-separated part and knew only `rwxstX` as permission letters, so
+    /// `u+r-w` and `g=u` were both rejected outright.
+    #[test]
+    fn several_operators_in_one_clause_and_copying_a_triad() {
+        assert_eq!(resolve("u+r-w", 0o000, false, 0), 0o400);
+        assert_eq!(resolve("u+r-w", 0o777, false, 0), 0o577);
+        assert_eq!(resolve("g=u", 0o750, false, 0), 0o770);
+        assert_eq!(resolve("go=u", 0o700, false, 0), 0o777);
     }
 
     #[test]
-    fn parse_mode_octal_with_setuid() {
-        match parse_mode("4755").unwrap() {
-            ModeSpec::Absolute(m) => assert_eq!(m, 0o4755),
-            ModeSpec::Symbolic(_) => panic!("expected absolute"),
+    fn the_ordinary_symbolic_forms_still_work() {
+        assert_eq!(resolve("u+x", 0o644, false, 0), 0o744);
+        assert_eq!(resolve("go-w", 0o666, false, 0), 0o644);
+        assert_eq!(resolve("a=rx", 0o777, false, 0), 0o555);
+        assert_eq!(resolve("u=rwx,g=rx,o=r", 0o000, false, 0), 0o754);
+        assert_eq!(resolve("u+s", 0o755, false, 0), 0o4755);
+        assert_eq!(resolve("+t", 0o755, false, 0), 0o1755);
+        assert_eq!(resolve("u=r", 0o777, false, 0), 0o477);
+    }
+
+    /// The boundary between a mode GNU accepts and one it refuses.
+    ///
+    /// `+` is valid and means "add nothing"; `=` is valid and clears
+    /// everything. The old parser refused `+`, and *accepted* `,` and `u+r,` by
+    /// skipping empty parts -- so a typo that dropped a clause silently became
+    /// a no-op instead of an error.
+    #[test]
+    fn the_boundary_between_a_valid_and_an_invalid_mode() {
+        for spec in ["+", "=", "0", "0777", "00755", "u+r-w", "g=u"] {
+            assert!(compile(spec.as_bytes()).is_some(), "GNU accepts {spec:?}");
         }
+        for spec in [",", "u+r,", "", "u", "u+z", "8", "77777", "a", "ugo"] {
+            assert!(compile(spec.as_bytes()).is_none(), "GNU refuses {spec:?}");
+        }
+        // `+` adds nothing, so it leaves the mode alone rather than zeroing it.
+        assert_eq!(resolve("+", 0o644, false, 0o022), 0o644);
     }
 
+    /// `--reference` copies the file's bits verbatim, umask and all.
     #[test]
-    fn parse_mode_rejects_too_large() {
-        assert!(parse_mode("77777").is_err());
+    fn a_reference_mode_is_copied_not_masked() {
+        let spec = ModeSpec {
+            changes: from_reference(0o4711),
+            umask_value: 0,
+        };
+        assert_eq!(spec.resolve(0o000, false), 0o4711);
+        assert_eq!(spec.resolve(0o777, false), 0o4711);
+        // Even on a directory: `from_reference` mentions every bit, so setuid
+        // and setgid are copied from the reference rather than preserved from
+        // the target.
+        assert_eq!(spec.resolve(0o2755, true), 0o4711);
     }
 
+    /// GNU's wording, which this binary did not have: one message for every
+    /// broken rule, with a colon and curly quotes.
     #[test]
-    fn parse_mode_digit_8_is_symbolic_not_octal() {
-        // "8" is not a valid octal digit, so it falls through to symbolic
-        // parsing, which then fails (no operator).
-        assert!(parse_mode("8").is_err());
-    }
-
-    // ---- symbolic mode parsing ---------------------------------------------
-
-    #[test]
-    fn symbolic_add_user_execute() {
-        let clauses = parse_symbolic_mode("u+x").unwrap();
-        let result = apply_symbolic_mode(0o644, &clauses);
-        assert_eq!(result, 0o744);
-    }
-
-    #[test]
-    fn symbolic_remove_group_other_write() {
-        let clauses = parse_symbolic_mode("go-w").unwrap();
-        let result = apply_symbolic_mode(0o666, &clauses);
-        assert_eq!(result, 0o644);
-    }
-
-    #[test]
-    fn symbolic_set_exact_all() {
-        let clauses = parse_symbolic_mode("a=rx").unwrap();
-        let result = apply_symbolic_mode(0o777, &clauses);
-        assert_eq!(result, 0o555);
-    }
-
-    #[test]
-    fn symbolic_no_who_defaults_to_all() {
-        let clauses = parse_symbolic_mode("+x").unwrap();
-        let result = apply_symbolic_mode(0o644, &clauses);
-        assert_eq!(result, 0o755);
-    }
-
-    #[test]
-    fn symbolic_multiple_clauses() {
-        let clauses = parse_symbolic_mode("u=rwx,g=rx,o=r").unwrap();
-        let result = apply_symbolic_mode(0o000, &clauses);
-        assert_eq!(result, 0o754);
-    }
-
-    #[test]
-    fn symbolic_setuid() {
-        let clauses = parse_symbolic_mode("u+s").unwrap();
-        let result = apply_symbolic_mode(0o755, &clauses);
-        assert_eq!(result, 0o4755);
-    }
-
-    #[test]
-    fn symbolic_sticky() {
-        let clauses = parse_symbolic_mode("+t").unwrap();
-        let result = apply_symbolic_mode(0o755, &clauses);
-        assert_eq!(result, 0o1755);
-    }
-
-    #[test]
-    fn symbolic_set_clears_unmentioned_bits() {
-        // u=r should clear the existing write/execute bits for the user.
-        let clauses = parse_symbolic_mode("u=r").unwrap();
-        let result = apply_symbolic_mode(0o777, &clauses);
-        assert_eq!(result, 0o477);
-    }
-
-    #[test]
-    fn symbolic_missing_operator_errors() {
-        assert!(parse_symbolic_mode("u").is_err());
-    }
-
-    #[test]
-    fn symbolic_invalid_perm_char_errors() {
-        assert!(parse_symbolic_mode("u+z").is_err());
-    }
-
-    #[test]
-    fn symbolic_empty_errors() {
-        assert!(parse_symbolic_mode("").is_err());
-    }
-
-    // ---- clause bit helpers ------------------------------------------------
-
-    #[test]
-    fn clause_bits_user_rwx() {
-        let clauses = parse_symbolic_mode("u+rwx").unwrap();
-        assert_eq!(clause_bits(&clauses[0]), S_IRUSR | S_IWUSR | S_IXUSR);
-    }
-
-    #[test]
-    fn clause_who_mask_user_includes_setuid() {
-        let clauses = parse_symbolic_mode("u=r").unwrap();
-        let mask = clause_who_mask(&clauses[0]);
-        assert!(mask & S_ISUID != 0);
-        assert!(mask & S_IRUSR != 0);
-        assert!(mask & S_IRGRP == 0);
+    fn the_invalid_mode_diagnostic_matches_gnu() {
+        let rendered = format!("chmod: invalid mode: \u{2018}{}\u{2019}", "u+z");
+        assert_eq!(rendered, "chmod: invalid mode: \u{2018}u+z\u{2019}");
     }
 
     // ---- owner spec parsing ------------------------------------------------

@@ -686,11 +686,7 @@ pub fn init_multi(hhdm_offset: u64) {
         // fails the run on the "self-test failed" warning, so a dead virtqueue
         // is reported without turning one bad disk into an unbootable kernel.
         if let Err(e) = crate::virtio::blk::self_test(&mut device) {
-            crate::serial_println!(
-                "WARNING: virtio-blk '{}' self-test failed: {:?}",
-                name,
-                e
-            );
+            crate::serial_println!("WARNING: virtio-blk '{}' self-test failed: {:?}", name, e);
         }
         register(&name, Box::new(device));
     }

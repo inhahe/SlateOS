@@ -1433,7 +1433,9 @@ fn test_dispatch_rlimit_syscalls() -> KernelResult<()> {
         );
         if r.value != invalid {
             serial_println!("[syscall]     ({} gave {})", name, r.value);
-            return fail("a resource >= NUM_RLIMITS should be InvalidArgument, before the pid gate");
+            return fail(
+                "a resource >= NUM_RLIMITS should be InvalidArgument, before the pid gate",
+            );
         }
     }
 
@@ -1575,7 +1577,11 @@ fn test_dispatch_pty_syscalls() -> KernelResult<()> {
     ] {
         let got = dispatch(nr, &args_for(m.raw())).value;
         if got != invalid && got != no_proc {
-            serial_println!("[syscall]     ({} returned {} for an unowned handle)", name, got);
+            serial_println!(
+                "[syscall]     ({} returned {} for an unowned handle)",
+                name,
+                got
+            );
             let _ = pty::close(m);
             let _ = pty::close(s);
             return fail("a pty handle the caller does not own must be refused");
@@ -1636,7 +1642,11 @@ fn test_dispatch_pty_syscalls() -> KernelResult<()> {
         a.arg1 = 1;
         let got = dispatch(nr, &a).value;
         if got != invalid && got != no_proc {
-            serial_println!("[syscall]     ({} on an unowned handle returned {})", name, got);
+            serial_println!(
+                "[syscall]     ({} on an unowned handle returned {})",
+                name,
+                got
+            );
             let _ = pty::close(m);
             let _ = pty::close(s);
             return fail("an unowned handle must not name a terminal");
@@ -1658,7 +1668,10 @@ fn test_dispatch_pty_syscalls() -> KernelResult<()> {
     };
     let got = dispatch(SYS_PTY_CREATE, &none).value;
     if got != no_proc {
-        serial_println!("[syscall]     (SYS_PTY_CREATE returned {} from a kernel task)", got);
+        serial_println!(
+            "[syscall]     (SYS_PTY_CREATE returned {} from a kernel task)",
+            got
+        );
         let _ = pty::close(m);
         let _ = pty::close(s);
         return fail("SYS_PTY_CREATE from a kernel task should be NoSuchProcess (unregistered?)");
@@ -1692,7 +1705,11 @@ fn test_dispatch_pty_syscalls() -> KernelResult<()> {
     ] {
         let got = dispatch(nr, &args_for(m.raw())).value;
         if got != invalid && got != no_proc {
-            serial_println!("[syscall]     ({} returned {} for an unowned handle)", name, got);
+            serial_println!(
+                "[syscall]     ({} returned {} for an unowned handle)",
+                name,
+                got
+            );
             let _ = pty::close(m);
             let _ = pty::close(s);
             return fail("a terminal named by an unowned handle must be refused");
@@ -3121,9 +3138,7 @@ fn test_dispatch_getrandom() -> KernelResult<()> {
             return Err(KernelError::InternalError);
         }
         if sink != [0u8; 32] {
-            serial_println!(
-                "[syscall]   FAIL: getrandom failed but still wrote to the buffer"
-            );
+            serial_println!("[syscall]   FAIL: getrandom failed but still wrote to the buffer");
             return Err(KernelError::InternalError);
         }
         serial_println!(

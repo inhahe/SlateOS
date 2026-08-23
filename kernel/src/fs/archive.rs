@@ -858,7 +858,10 @@ fn test_detect_extension() {
         Some(ArchiveFormat::Tar)
     );
     // A non-UTF-8 byte in the suffix position is not one of our extensions.
-    assert_eq!(detect_from_extension(Path::new(&b"/tmp/x.\xFFip"[..])), None);
+    assert_eq!(
+        detect_from_extension(Path::new(&b"/tmp/x.\xFFip"[..])),
+        None
+    );
     serial_println!("[archive]   detect extension: ok");
 }
 

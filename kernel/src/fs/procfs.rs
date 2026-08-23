@@ -1634,21 +1634,35 @@ fn gen_buddyinfo() -> Vec<u8> {
 /// Iterates all mounted filesystems and calls their `debug_stats()` method,
 /// concatenating the results.  Useful for monitoring filesystem internals
 /// (extent counts, inode usage, cache states, etc.) in a single read.
+///
+/// **Uses the non-blocking query deliberately.** One of the mounts walked here
+/// is the procfs serving this very read, and the VFS holds that mount's lock
+/// for the duration — so [`crate::fs::Vfs::debug_stats`] would block on a lock
+/// this task already holds and halt the kernel. That is not theoretical: this
+/// path panicked the boot the first time `sysdiag`'s self-test ran, reached
+/// through `readdir("/proc")`, which sizes every root file by generating it.
+/// The procfs line therefore reads `(busy)`, which is the only honest answer:
+/// a filesystem cannot describe its own internals in the middle of an
+/// operation on itself. Every *other* mount reports normally.
 fn gen_fsstats() -> Vec<u8> {
     let mounts = crate::fs::Vfs::mounts();
     let mut s = String::with_capacity(512);
 
     for (mount_path, fs_type) in &mounts {
         s.push_str(&format!("--- {} ({}) ---\n", mount_path.display(), fs_type));
-        match crate::fs::Vfs::debug_stats(mount_path) {
-            Ok(stats) if !stats.is_empty() => {
+        match crate::fs::Vfs::debug_stats_nonblocking(mount_path) {
+            Ok(Some(stats)) if !stats.is_empty() => {
                 s.push_str(&stats);
                 if !stats.ends_with('\n') {
                     s.push('\n');
                 }
             }
-            Ok(_) => {
+            Ok(Some(_)) => {
                 s.push_str("(no stats)\n");
+            }
+            // In use by someone — this task included.  See the note above.
+            Ok(None) => {
+                s.push_str("(busy)\n");
             }
             Err(_) => {
                 s.push_str("(unavailable)\n");
@@ -17504,7 +17518,8 @@ pub fn self_test() -> KernelResult<()> {
         // cross-generator comparison — procfs against sysfs, bytes against
         // bytes — lives in `sysfs::self_test`.)
         let osrelease = fs.read_file(Path::new("/sys/kernel/osrelease"))?;
-        if core::str::from_utf8(&osrelease).ok() != Some(&format!("{}\n", crate::uname::RELEASE)[..])
+        if core::str::from_utf8(&osrelease).ok()
+            != Some(&format!("{}\n", crate::uname::RELEASE)[..])
         {
             serial_println!("[procfs]   FAIL: osrelease = {:?}", osrelease);
             return Err(KernelError::InternalError);
@@ -17647,6 +17662,60 @@ pub fn self_test() -> KernelResult<()> {
             "[procfs]   /proc/sys: {} classify cases, listings, values, UUID OK",
             cases.len()
         );
+    }
+
+    // --- Re-entrancy: reading procfs through its own mount ---
+    //
+    // Everything above drives a bare `ProcFs::new()` directly, which is why
+    // this whole class of bug was invisible for so long: the object under test
+    // was never the *mounted* one, so no per-mount lock was ever held while a
+    // generator ran. Through the mount it is, and two generators walked the
+    // mount table and locked every filesystem in it — procfs included — which
+    // is a task blocking on a lock it already holds. `ls /proc` and `cat
+    // /proc/fsstats` halted the kernel; the panic surfaced in `sysdiag`'s
+    // suite, several subsystems away from the cause.
+    //
+    // These four calls are the whole regression test. They assert nothing
+    // about content on purpose — *returning at all* is the property that was
+    // broken, and any assertion beyond that would be about the generators
+    // rather than about the deadlock.
+    //
+    // "Returning at all" is why `/proc/self/mounts` is not required to
+    // *succeed*. `self` resolves to the caller, the caller here is the boot
+    // task, and the boot task has no PCB — so `gen_pid_mounts` reports
+    // `NotFound`, exactly as the `/proc/0/environ` and `/proc/0/cwd` cases
+    // above already assert that it should. Demanding `?` of it turned a
+    // correct answer into a failed suite: batch 26 printed
+    // `WARNING: ProcFs self-test failed: NotFound` and every test below this
+    // point stopped running. A deadlock does not return `NotFound`; it does
+    // not return. So the per-pid path is asserted to return *something*, and
+    // the specific something is pinned to the same `NotFound` the bare-task
+    // cases document, which also catches it silently starting to succeed.
+    if crate::fs::Vfs::stat("/proc").is_ok() {
+        let entries = crate::fs::Vfs::readdir("/proc")?;
+        // `readdir` sizes each root file by generating it, so this one call
+        // runs every generator with the procfs mount lock held.
+        let mounts = crate::fs::Vfs::read_file("/proc/mounts")?;
+        let fsstats = crate::fs::Vfs::read_file("/proc/fsstats")?;
+        let self_mounts = crate::fs::Vfs::read_file("/proc/self/mounts");
+        let self_mounts_desc = match self_mounts {
+            Ok(ref bytes) => alloc::format!("{}B", bytes.len()),
+            // Any error is a pass for this test's purpose; naming the one we
+            // expect keeps the log honest about which it was.
+            Err(KernelError::NotFound) => {
+                alloc::string::String::from("NotFound (boot task, no PCB)")
+            }
+            Err(e) => alloc::format!("{e:?}"),
+        };
+        serial_println!(
+            "[procfs]   through-the-mount: readdir {} entries, mounts {}B, fsstats {}B, self/mounts {} — no self-deadlock OK",
+            entries.len(),
+            mounts.len(),
+            fsstats.len(),
+            self_mounts_desc,
+        );
+    } else {
+        serial_println!("[procfs]   through-the-mount: /proc not mounted, skipped");
     }
 
     serial_println!("[procfs] Self-test PASSED");

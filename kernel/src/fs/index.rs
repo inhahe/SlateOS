@@ -99,8 +99,16 @@ pub struct IndexStats {
     pub total_size: u64,
     /// Number of unique extensions in the index.
     pub extension_count: usize,
-    /// Timestamp (ns since boot) of the last full rebuild.
-    pub last_rebuild_ns: u64,
+    /// Timestamp (ns since boot) of the last full rebuild, or `None` if the
+    /// index has never been rebuilt.
+    ///
+    /// Not a `u64` with `0` meaning "never": this clock counts nanoseconds
+    /// since boot and starts *at* zero, so `0` is a legal instant — and it is
+    /// the instant an index built during early boot would carry. Under the old
+    /// encoding that rebuild reported itself as never having happened, which
+    /// is the one case where the distinction matters, since an index built
+    /// that early is the one most likely to be stale by the time anyone looks.
+    pub last_rebuild_ns: Option<u64>,
     /// How many full rebuilds have been performed.
     pub rebuild_count: u64,
     /// True if the last rebuild hit `max_entries` and stopped early.
@@ -136,7 +144,7 @@ static INDEX: Mutex<IndexInner> = Mutex::new(IndexInner {
         total_entries: 0,
         total_size: 0,
         extension_count: 0,
-        last_rebuild_ns: 0,
+        last_rebuild_ns: None,
         rebuild_count: 0,
         truncated: false,
         initialized: false,
@@ -233,7 +241,7 @@ pub fn rebuild() -> KernelResult<()> {
     idx.stats.total_entries = entry_count;
     idx.stats.total_size = total_size;
     idx.stats.extension_count = ext_count;
-    idx.stats.last_rebuild_ns = now;
+    idx.stats.last_rebuild_ns = Some(now);
     idx.stats.rebuild_count = idx.stats.rebuild_count.saturating_add(1);
     idx.stats.truncated = truncated;
 
@@ -585,6 +593,25 @@ pub fn search(
 /// Return a snapshot of the current index statistics.
 pub fn stats() -> IndexStats {
     INDEX.lock().stats
+}
+
+/// How long ago the index was last fully rebuilt, in nanoseconds.
+///
+/// `None` means it never has been — which is a different statement from
+/// "rebuilt just now", and the reason [`IndexStats::last_rebuild_ns`] is an
+/// `Option` rather than a `u64` with a zero sentinel.
+///
+/// This is the number that says whether a `locate` result can be trusted: the
+/// index is a snapshot, and nothing between rebuilds tells the caller how old
+/// that snapshot is. Incremental VFS hooks keep it roughly current for watched
+/// directories, but only a rebuild sees the rest of the tree.
+#[must_use]
+pub fn age_of_last_rebuild_ns() -> Option<u64> {
+    let last = INDEX.lock().stats.last_rebuild_ns?;
+    // Saturating rather than wrapping: the HPET is monotonic, so `now < last`
+    // should be impossible, and reporting an age of zero is a better failure
+    // than reporting one of several hundred years.
+    Some(crate::hpet::elapsed_ns().saturating_sub(last))
 }
 
 /// Return the total number of indexed entries.
@@ -969,8 +996,15 @@ pub fn self_test() -> KernelResult<()> {
             serial_println!("[index]   ERROR: rebuild_count not incremented");
             return Err(KernelError::InternalError);
         }
-        if st.last_rebuild_ns == 0 {
-            serial_println!("[index]   ERROR: last_rebuild_ns is 0");
+        if st.last_rebuild_ns.is_none() {
+            serial_println!("[index]   ERROR: last_rebuild_ns still None after a rebuild");
+            return Err(KernelError::InternalError);
+        }
+        // A rebuild that lands at uptime 0 is legal, and used to be
+        // indistinguishable from "never rebuilt". Check the age accessor
+        // agrees with the timestamp so the two cannot drift apart.
+        if age_of_last_rebuild_ns().is_none() {
+            serial_println!("[index]   ERROR: age_of_last_rebuild_ns disagrees with stats");
             return Err(KernelError::InternalError);
         }
         if st.total_entries == 0 {

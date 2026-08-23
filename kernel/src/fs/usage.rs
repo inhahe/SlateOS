@@ -529,20 +529,13 @@ fn walk(path: &Path, config: &UsageConfig, collector: &mut Collector, depth: usi
 // ---------------------------------------------------------------------------
 
 /// Format a byte count as a human-readable string.
+///
+/// Delegates to [`crate::bytesize::iec`]. This is where the canonical spelling
+/// came from: of the twenty-one copies, this one had both the IEC unit names
+/// and the scale-before-divide arithmetic right, so `bytesize` is this function
+/// generalised past GiB rather than a fresh design.
 pub fn format_size(bytes: u64) -> String {
-    if bytes < 1024 {
-        alloc::format!("{} B", bytes)
-    } else if bytes < 1024 * 1024 {
-        alloc::format!("{}.{} KiB", bytes / 1024, (bytes % 1024) * 10 / 1024)
-    } else if bytes < 1024 * 1024 * 1024 {
-        let mib = bytes / (1024 * 1024);
-        let frac = (bytes % (1024 * 1024)) * 10 / (1024 * 1024);
-        alloc::format!("{}.{} MiB", mib, frac)
-    } else {
-        let gib = bytes / (1024 * 1024 * 1024);
-        let frac = (bytes % (1024 * 1024 * 1024)) * 10 / (1024 * 1024 * 1024);
-        alloc::format!("{}.{} GiB", gib, frac)
-    }
+    crate::bytesize::iec(bytes)
 }
 
 // ---------------------------------------------------------------------------

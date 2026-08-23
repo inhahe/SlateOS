@@ -65951,6 +65951,137 @@ fix. Worth stating as a rule: when a never-run suite finally runs and fails,
 the assertion is a report, not a diagnosis — read the API it is asserting
 against before changing either.
 
+### 2026-08-23 — the 16 the first sweep could not see
+
+**Immediately after the 37 landed, a second-opinion pass found 16 more
+destructive suites of the same class.** Eleven of them are the interesting
+ones: they would have read as *safe to wire* under the survey that gated the
+first batch, and wiring them would have shipped eleven data-destroying
+suites into boot.
+
+`build/survey_destructive.py` classified each manual-only suite by grepping
+its body for a whole-table clear. That grep knew six spellings —
+`clear_all`, `reset_all`, `remove_all`, `delete_all`, `clear_history`,
+`wipe_all` — and anything it did not match fell into a bucket named
+`quiet`, described as "probably safe, still worth a glance." **A vocabulary
+list is the wrong shape of test for "does this destroy data", because the
+vocabulary is open.** Eleven suites emptied their tables under names not on
+it:
+
+| module | how it empties the table |
+|---|---|
+| `autofix` | `clear_resolved()` |
+| `cliphistory` | `clear()` |
+| `crashreport` | `clear_reports()` |
+| `datausage` | `reset_usage()` |
+| `dmevent` | `clear_events()` |
+| `dnssettings` | `flush_cache()` |
+| `hwmonitor` | `clear_alerts()` |
+| `nameservice` | `flush_cache()` |
+| `printmgr` | `clear_completed()` |
+| `startuprepair` | `reset_failed_boots()` |
+| `tracemon` | `clear_buffer()` |
+
+The remaining five (`dumpanalyzer`, `location`, `multiclip`,
+`recentsearch`, `sysresource`) *were* in the `wipes` bucket all along. They
+were missed for an unrelated reason: they are lazy-init
+(`static STATE: Mutex<Option<T>>`), and the converter written for the first
+53 only understood the eager shape. `build/sweep_lazy.py` handles them —
+their pristine value is literally `None`, which is what a fresh boot holds,
+so there is no constructor to extract.
+
+**What found the eleven was a structural property, not a longer word list.**
+`build/widen_check.py` flags any call that (a) has a destructive-sounding
+name and (b) **takes no arguments**. Taking no arguments is the tell: a
+function that destroys *one row* needs to be told which row, so a
+zero-argument destructive call acts on the whole table almost by definition.
+That test does not care what the author called it. It produced exactly one
+false positive across 161 modules — `colorblind::list_presets`, because
+"presets" contains "reset" — which is the right error to make.
+
+The rule, then, is not "add these eleven names to the regex." It is: **when
+a check enumerates the ways something can go wrong, assume the enumeration
+is short, and find a second check that keys on structure instead.** The
+first survey's `quiet: 155` was a number I nearly trusted.
+
+**A subtlety worth recording: `OPS` is a mirror, not a counter.** These
+modules do `state.ops += 1; OPS.store(state.ops, Ordering::Relaxed);` —
+`state.ops` lives *inside* the table, and `OPS` is a lock-free cached copy
+outside it for cheap reads. `with_pristine` restores the table, and so
+restores `state.ops`, but it cannot know about the mirror. Left alone, the
+two disagree permanently and `<module> stats` reports the suite's activity
+as the user's. Each wrapper therefore saves and restores `OPS` around the
+call. The first comment written for this said "`OPS` lives outside the
+table, so `with_pristine` cannot see it", which is true of the variable and
+false of the value — the correction is in `1c29294f3`.
+
+Converted in `1c29294f3`, wired in the commit that follows it.
+**Counts after this batch:** boot-reachable 933, manual-only 181, dead 0.
+
+### 2026-08-23 — "which of these are destructive?" was the wrong question all along
+
+**Of the 181 suites still manual-only, the survey called 8 destructive. 149
+of them permanently modify user state.** The gap is not a bug in the
+detector. It is the detector's premise.
+
+Both generations of the check looked for **deletion** — first by name
+(`clear_all`, `reset_all`, …), then, after that missed eleven, by the
+structural tell that a destructive call taking no arguments must act on the
+whole table. Both are real improvements and both are still looking for the
+wrong thing, because this is a self-test:
+
+```rust
+set_brightness(50);
+assert_eq!(get_brightness(), 50);
+```
+
+It deletes nothing. `set_brightness` is an ordinary mutating setter called
+exactly the way any caller would call it — there is no vocabulary tell and
+no arity tell, and there cannot be one, because nothing distinguishes the
+suite's call from a legitimate one except intent. `fs/brightness.rs` sat in
+the bucket labelled *"quiet — probably safe, still worth a glance"*, and
+typing `brightness test` at the kernel shell sets the user's screen
+brightness four times and leaves it wherever the last assertion put it.
+`colorscheme test` changes their accent colour and theme mode;
+`dpiscaling test` changes their display scale. All three were `quiet`.
+
+**The conclusion is not a fourth detector.** A self-test mutates its
+module's state because mutating state is what a self-test is for; the
+answer to "which of these are destructive?" is "essentially all of them",
+and the two suites that genuinely are not (`net/http`, `pciids` — pure
+parser tests over local values) are cheap to identify because they declare
+no module state at all. `with_pristine` restores whatever the suite did —
+a wipe and a settings change are the same operation to it — so **it can be
+applied without knowing which, and applying it everywhere is both cheaper
+and safer than any sequence of increasingly clever greps.**
+
+Generalising the rule: *when a safety check enumerates the ways something
+can go wrong, and each revision of the enumeration finds more cases than
+the last, stop revising it.* The enumeration is not converging on the
+answer; it is sampling an open set. Find the operation that is safe
+regardless — here, restore-after — and apply it unconditionally.
+
+**Measured shape of the remaining work** (`build/static_shapes.py`), which
+is what makes "convert everything" tractable rather than heroic:
+
+| shape | count | conversion |
+|---|---|---|
+| one lazy static (`Mutex<Option<T>>`) | 144 | mechanical; pristine value is `None` |
+| one eager static (`Mutex<T>`) | 22 | needs a `const fn new()` extracted from the initialiser |
+| two independent statics | 2 | `net/bridge`, `net/qos` — nested `with_pristine` |
+| no module state at all | 13 | nothing to do; these are the genuinely inert ones |
+
+The 13 with no state are *the same 13* the mutation scan independently
+found to mutate nothing, which is the only cross-check available here and
+it agrees.
+
+Superseded scripts: `build/survey_destructive.py` (name list, `fs/` only),
+`build/widen_check.py` (arity tell). `build/survey2.py` generalises both
+off the hardcoded `fs/` prefix — it was written to cover the 37 suites in
+`kernel/src/net/` and at the top of `kernel/src/` that the first survey
+literally could not open — and `build/mutation_check.py` is the scan that
+retired all of them.
+
 ---
 
 ## TD-A-SPARSE-FSTRIM-WRONG-DEVICE — hole punching queued discards for a nonexistent device at a file offset
@@ -66567,3 +66698,854 @@ build joins child paths with `\`. That last group is a harness artefact, not a
 grep bug: `Path::join` uses the host separator and the target's is `/`. `grep
 foo sub` — recursion's sibling that names no child path — is left unmarked as
 the control that proves the difference is the separator and nothing else.
+
+## TD-A-SELFTESTS-REACH-OUTSIDE-THEIR-OWN-MODULE — `with_pristine` restores one module, and a suite is not confined to one module
+
+**In short:** the fix for the destructive self-tests swaps a module's state
+for an empty one, runs the suite, and puts the real state back. That covers
+the module the wrapper is applied to and nothing else. A suite that calls
+into a *neighbour* — clearing the service registry, clearing the event log,
+writing files — still destroys what it touches, and now does so while
+wearing a wrapper that reads as if it is safe. Three of the 35 eager modules
+did exactly that. All three are fixed; the point of this entry is the class,
+and the check.
+
+**Lane A. Found 2026-08-23, before wiring the eager suites into the boot
+test.** Found by static survey, not by a boot panic — which matters, because
+at boot these tables are empty and every one of them would have gone green.
+
+**What was found:**
+
+| Suite | Reached into | Effect on a live machine |
+|---|---|---|
+| `svcstart` | `fs::servicemgr::clear_all()`, twice | deregisters every service on the machine |
+| `logpersist` | `eventlog::clear()` twice, and `flush()` | appends fabricated events to `/var/log/events/combined.jsonl` and can rotate genuine history off the end of it |
+| `eventlog` itself | its own ring, via `clear()` at the start of test 1 and again as "clean up" | discards the operator's whole event history |
+
+`eventlog` also carried a dead `let _saved_total = total_events();` — a
+save with no matching restore, i.e. someone had noticed this exact problem
+and left a stub of the fix.
+
+**Fixed in `d29938b53`** by giving `eventlog` and `fs::servicemgr` a
+`pub(crate) fn with_pristine_state<R>(body: impl FnOnce() -> R) -> R` and
+composing the wrappers. Exposing a *function* rather than the `static` is
+deliberate: both modules keep state outside the table (`GLOBAL_SEQ`, `OPS`)
+that has to be made pristine alongside it, and a caller holding the `Mutex`
+would have to know that. `logpersist` additionally redirects its log
+directory to `/tmp/logpersist-selftest` and removes it afterwards — the
+directory is chosen by whoever calls `init`, not by the state the `static`
+holds, so `with_pristine` could not have redirected it.
+
+**The check is `build/survey_reach.py`.** For each `self_test_inner` it
+reports every `crate::`/`super::` path in the body, plus every `use crate::…`
+imported name used bare there (which is not a refinement — `net::bridge`
+imports `MacAddress` and then writes `MacAddress::new(..)` with no `crate::`
+anywhere). It is a filter, not a verdict: a call that leaves the module
+through a helper *in* the module is invisible to it, so a clean report means
+"nothing obvious".
+
+**Deliberately not fixed: `net::traceroute`** advances
+`icmp::next_trace_seq` and `icmpv6::next_trace6_seq` by two and does not put
+them back. The counter is a correlation nonce, it is `wrapping_add`, the
+suite registers no probe under the numbers it burns, and the assertions are
+relative to what it read. Recorded in the wrapper so the next reader of
+`survey_reach.py`'s output does not re-investigate it.
+
+## TD-A-PRISTINE-STATE-CAN-BE-TOO-BIG-FOR-THE-STACK — `with_pristine` puts two whole tables in the caller's frame
+
+**In short:** the same fix moves a fresh copy of a module's state *in* and
+the saved copy *out*, both by value, so two of them sit in the calling
+function's stack frame at once. For the `Vec`-backed tables this is nothing.
+For one module it was 105 216 bytes each against a 64 KiB kernel stack —
+the swap would have overrun the stack three times over before the suite
+reached its first assertion, i.e. an instant triple fault at boot.
+
+**Lane A. Found 2026-08-23, by clippy, before the suite was wired.**
+
+`net::bridge`'s `[Bridge; MAX_BRIDGES]` is 105 216 bytes — 16 bridges each
+carrying a 256-entry forwarding database — against
+`sched::task::TASK_STACK_SIZE` of 64 KiB.
+
+**Two things about this generalise, and are why it has an entry:**
+
+- **Clippy under-reports it.** `large_stack_arrays` sees array
+  *expressions*. A `Mutex<State>` whose `State` merely *contains* a big
+  fixed-size table is invisible to it, and that is the more common shape.
+- **`Box::new([const { X }; N])` does not avoid it.** The array is built in
+  the caller's frame and only then copied into the box. Filling the
+  allocation slot by slot does avoid it, because a large return value is
+  written straight through the destination pointer.
+
+**Fixed in `71d7148ad`:** `fs::selftest::with_pristine_swapped` takes the
+pristine value by `&mut` and `core::mem::swap`s it into place, so no whole
+`T` is ever materialised in a frame; `net::bridge::pristine_bridges` builds
+the substitute on the heap one `Bridge` at a time.
+
+**Measure rather than guess: `build/size_probe.py`.** There is no `size_of`
+at the shell and no way to run code in a `no_std` kernel, so it appends
+`const _P: [u8; 0] = [0u8; core::mem::size_of::<T>()];` to each file and
+reads the size back out of rustc's E0308 ("expected an array with a size of
+0, found one with a size of N"). One `cargo check` yields every table's size
+at once. Across the 25 converted at the time, `net::bridge` was the only one
+over 16 KiB and the next largest was 1280 bytes.
+
+## TD-A-FORMAT-SIZE-PRINTED-A-TWO-DIGIT-TENTHS — `format_size(2047)` read "1.10 KiB"
+
+**In short:** the human-readable byte formatter used by the disk cleanup
+tool computed the digit after the decimal point by dividing, which gives
+**10** near the top of every unit. So sizes just under a boundary printed
+with two digits after the point — `1.10 KiB` — which also reads as *larger*
+than the `1.9 KiB` just below it.
+
+**Lane A. Found and fixed 2026-08-23 (`11825e56d`), while diagnosing the
+first boot panic from the newly-wired suites.**
+
+`kernel/src/fs/storageclean.rs::format_size` used
+`remainder / (unit / 10)`; `1023 / 100` is `10`. All three unit arms had
+it. Now `remainder * 10 / unit`, which is in `0..=9` by construction, in one
+shared helper.
+
+**How it surfaced is the interesting part.** The boot panicked on the
+suite's own `assert_eq!(format_size(512), "0.5 KiB")` — and that assertion
+was simply wrong, since under a KiB the count is exact and belongs in bytes.
+Reading the helper to decide which side to believe is what turned up the
+real defect behind it. The assertion had never been executed in its life;
+this is precisely the payoff argued for in TD-A-FS-SELFTESTS-NEVER-RUN. The
+suite now carries the boundary cases (1023, 2047, one below a MiB) that
+would have caught it.
+
+---
+
+### FIXED-A-PROCFS-SELF-DEADLOCKED-ENUMERATING-ITS-OWN-MOUNT-TABLE
+
+**Status:** fixed 2026-08-23 (lane A). Recorded because the *shape* recurs and
+the detection story is the interesting part.
+
+**Symptom.** `ls /proc` and `cat /proc/fsstats` halted the kernel outright —
+lockdep reported a self-deadlock, `sync.rs` panicked, the boot died. Found by
+`fs::sysdiag`'s self-test the first time it ever ran at boot (it had been a
+kshell-only suite until the de-fanging programme wired it in), and the panic
+surfaced two subsystems away from the cause: sysdiag → `Vfs::readdir("/proc")`
+→ procfs → `Vfs::mounts_full()` → `fs.lock()` on procfs.
+
+**Cause.** The VFS holds a mount's per-mount lock for the whole duration of a
+filesystem operation. Two procfs content generators walked the mount table and
+locked *every* filesystem in it:
+
+- `gen_mounts` (`/proc/mounts`, `/proc/<pid>/mounts`) → `Vfs::mounts_full()`,
+  which locked each mount just to call `fs_type()`.
+- `gen_fsstats` (`/proc/fsstats`) → `Vfs::debug_stats()` per mount.
+
+One of those mounts is the procfs serving the read. `sysfs`'s `mount_count`
+node had the same latent bug via `Vfs::mounts()`.
+
+`readdir` is the worst reachable path because it sizes every root file by
+*generating* it — so a bare `ls /proc` ran every generator with the lock held.
+
+design-decisions §43 makes the per-mount lock safe to re-enter for *stacked*
+filesystems, where the lower layer is a different lock. It cannot help a
+filesystem that enumerates the table it is itself in.
+
+**Fix.**
+1. `MountPoint` now caches `fs_type: String` at mount time, so `Vfs::mounts()`
+   and `Vfs::mounts_full()` lock no filesystem at all — only the global VFS
+   lock. This removes the hazard by construction for every present and future
+   caller, and is strictly faster. It fixes the sysfs node too, for free.
+2. `Vfs::debug_stats_nonblocking()` added for the case that genuinely needs a
+   per-fs lock; `/proc/fsstats` uses it and prints `(busy)` for the filesystem
+   it is being read through. That is the only truthful answer — a filesystem
+   cannot describe its internals mid-operation on itself.
+
+**Why it hid for so long, and the lesson.** `procfs::self_test()` drives a
+bare `ProcFs::new()` and calls its methods directly. The object under test was
+never the *mounted* one, so no per-mount lock was ever held and no generator
+ever re-entered. A virtual filesystem's suite must exercise it **through
+`Vfs::`**, not through a detached instance; the direct calls test the
+generators, not the filesystem. A four-call through-the-mount block now closes
+`procfs::self_test()`.
+
+**Not yet done (low priority).** `readdir` on a procfs directory generates the
+full content of every file in it to report a size. Linux reports `0` for these
+and readers read to EOF instead. Ours is O(entire /proc) on every `ls /proc`.
+Changing it is a visible behaviour change (sizes in `ls`), so it is left as
+tech debt rather than folded into a deadlock fix.
+
+### FIXED-A-TWENTY-ONE-BYTE-FORMATTERS-SIX-OF-THEM-WRONG
+
+**Status:** fixed. `kernel/src/bytesize.rs` is now the only byte formatter in
+the kernel; all twenty-one private copies delegate to it.
+
+**Symptom.** `TD-A-FORMAT-SIZE-PRINTED-A-TWO-DIGIT-TENTHS` — a size just under
+2 KiB printed as `1.10 KiB`: two digits after the point, reading as *larger*
+than the `1.9 KiB` below it. Found by a self-test that finally ran at boot.
+
+**Cause, and why the fix could not be local.** The tenths digit was computed as
+`remainder / (unit / 10)`. That is the obvious thing to write and it is off by
+one whole digit at the top of every unit — `1023 / 100` is `10`, not a digit.
+The same divisor appeared in **six** files, so fixing the one that had a
+self-test would have left five to be rediscovered one at a time, each by
+whoever next happened to look at a size near the top of a unit.
+
+Surveying for the divisor turned up twenty-one private byte formatters in all,
+disagreeing on more than arithmetic:
+
+| Fault | Copies | What a user saw |
+|---|---|---|
+| Tenths bug | 6 | `1.10 KiB` — two digits, sorts above `1.9 KiB` |
+| `KB`/`MB`/`GB` on 1024-based units | 6 | ~7% overstatement per unit |
+| `f64` division in kernel code | 7 | silently lossy above 2^53 bytes |
+| Stopped at GiB | 9 | `4096.0 GiB` instead of `4.0 TiB` |
+| Truncated to whole units | 3 | 1 GiB and 1.9 GiB of RAM read alike |
+| No KiB branch at all | 1 | `1048575 B` |
+
+`net/iperf.rs` had the tenths bug *squared*: `(bytes % 1024) / 10` reaches
+**102**, and with `{:02}` that printed `1.102 KB` — three digits in a
+two-digit field.
+
+**Fix.** One module, three entry points, integer arithmetic throughout:
+`iec` (`1.5 MiB`, the prose form, what almost everything uses), `iec2`
+(two digits, for throughput totals where a tenth of a GiB is 107 MB of slack),
+and `compact` (`1.5M`, the fixed-width column form — so `ls -h`, `df` and `du`
+finally agree, which they did not: `du` truncated to whole units and reported a
+1.9 MiB directory as `1M` while `ls -h` called the file inside it `1.9M`).
+`remainder * scale / unit` scales before dividing, so the fraction is in
+`0..scale` by construction rather than by choosing a divisor carefully. The
+hundredths path widens to `u128` because `(2^60 - 1) * 100` needs 67 bits.
+
+**The lesson, and what it cost.** Two of the copies were wrong in the same way
+and only one had a test. A formatter is exactly the kind of code that looks too
+small to share — and so gets rewritten from memory, with the same off-by-one
+each time. `bytesize`'s module doc argues explicitly that a *fourth* entry point
+must justify itself, because every difference between the twenty-one beyond the
+three real ones was accident.
+
+Two self-tests had been asserting the *wrong* behaviour and had to be corrected
+with the migration: `datausage` asserted `contains("MB")` for 1_500_000 bytes
+(which is 1.4 MiB), and `iperf` asserted `contains("MB")`/`contains("GB")`.
+Both passed only because the code they tested was mislabelling the unit. Both
+now assert the whole string, since `contains` would not have caught a wrong
+number either.
+
+### FIXED-A-SYSMAINT-NEVER-RUN-TASKS-WERE-NEVER-DUE
+
+**Status:** fixed. `MaintTask::last_run_ns` is `Option<u64>`; `None` is due.
+
+**Symptom.** `sysmaint due` on a freshly booted machine listed **nothing**.
+`sysmaint::self_test()` test 2 asserted 10 due tasks and got 0 — a boot-halting
+panic at `kernel/src/fs/sysmaint.rs:355` the first time the suite ran at boot.
+
+**Cause.** `last_run_ns: u64` used `0` as an in-band "never run" sentinel, and
+`0` is a *legal* uptime — it means "at boot". `check_schedule` computed
+`elapsed = hpet::elapsed_ns() - last_run_ns`, so for a never-run task that is
+simply the uptime, and the task became due only once the machine had been up
+for a whole interval. The seeded intervals are 12 to 720 hours, so:
+
+| Task | Interval | First run required |
+|---|---|---|
+| Update Check | 12 h | 12 h of unbroken uptime |
+| Index Rebuild, Temp Cleanup | 24 h | 1 day of unbroken uptime |
+| Disk Trim, Cache Cleanup, Log Rotation, Security Scan | 168 h | 1 week |
+| Integrity Scan, Performance Tune, Backup Verify | 720 h | **30 days** |
+
+Nothing persists a run history across reboots, so on any desktop that is ever
+rebooted or suspended, the monthly tasks would never have run once — not
+"late", never. The scheduler was not slow; it was inoperative for its three
+longest-interval tasks and unreliable for the rest.
+
+**Fix.** `last_run_ns: Option<u64>`, with `None` meaning never and always due.
+The in-band sentinel *was* the bug: nothing in the type said `0` was special,
+so the arithmetic quietly treated it as data. `check_schedule` now branches on
+the `Option` instead of subtracting. The interval multiply is `saturating_mul`
+as well — `interval_hours` is a `pub` field and a wrapped interval would mean
+"always due", failing in the direction that looks like it works.
+
+Safe because nothing runs maintenance automatically: `run_pending` is reachable
+only from the `sysmaint` shell command, so "every task is due at first boot"
+cannot become "the monthly scan fires on every boot".
+
+**What it cost, and why it hid.** The suite existed and asserted the right
+thing. It had never run — it was a `sysmaint test` shell subcommand only, and
+wiring it into the boot suite is what surfaced this. Second bug in this batch
+found the same way, after the procfs self-deadlock.
+
+**Related, not fixed:** the run history is in-memory only, so a reboot forgets
+when maintenance last ran and every task is due again. Making that durable
+needs a decision about wall-clock vs uptime as the stored basis (uptime is
+meaningless across boots; wall-clock needs an RTC that may be wrong), so it is
+left as tech debt rather than folded into a correctness fix.
+
+---
+
+### FIXED-A-SYSTEMSOUNDS-A-SUITE-ASSERTED-A-PLAY-COUNT-IT-COULD-NOT-REACH
+
+**Date:** 2026-08-23 · **Lane:** A · **Where:** `kernel/src/fs/systemsounds.rs`
+(test 8 of `self_test_inner`, and `play()` / `State::total_plays`)
+
+Boot batch 24 halted on:
+
+```
+panicked at kernel\src\fs\systemsounds.rs:424:5:
+assertion failed: plays >= 3
+```
+
+Tests 1–7 had all reported OK.
+
+**Diagnosis.** `total_plays` counts *audible* plays, not attempts. It is
+incremented beside the per-assignment `play_count`, inside the
+`assignment.enabled` branch and downstream of the `global_enabled` gate — so a
+muted event is not a play. That is the right semantic: a stats line that
+counted suppressed events would be reporting sounds the user never heard, and
+the per-assignment counter it sits next to plainly means "times this sound
+played".
+
+The suite calls `play()` six times, but four of them exist precisely to check
+that nothing is emitted:
+
+| Test | Call | Outcome |
+|---|---|---|
+| 2 | `Notification`, enabled | audible (+1) |
+| 3 | `Notification`, event disabled | silent |
+| 4 | `Error`, custom sound | audible (+1) |
+| 5 | `Startup`, `"Silent"` scheme (all assignments disabled) | silent |
+| 6 | `Startup`, global sound off | silent |
+
+The true count is 2. `>= 3` could never hold.
+
+**Fix.** The counter is correct; the assertion was fiction. It now reads
+`assert_eq!(plays, 2, "two of the six play() calls are audible")` — an
+equality rather than a bound, because the value is deterministic and an
+equality also catches the counter *over*-counting, which no `>=` would. The
+enumeration above is recorded as a comment at the assertion so the next reader
+does not have to re-derive it.
+
+**Why it hid, and what that says about the batch.** Nothing: the suite was a
+`systemsounds test` shell subcommand and had never executed. This is the
+fourth bug in this batch surfaced by wiring an *existing* suite into the boot
+path rather than by writing a new test — after the procfs self-deadlock, the
+twenty-one byte formatters, and sysmaint's never-due tasks.
+
+It is also the mildest of the four, and worth recording for exactly that
+reason: an assertion nobody ever ran is not a weaker test than no test, it is
+a *false* one. Until batch 24 the module reported "all 8 tests passed" to
+anyone who typed the subcommand — because the subcommand ran against live
+state where an earlier real play could push the count past 3. Against pristine
+state it never could. De-fanging the suite is what made it honest, and then
+immediately made it fail.
+
+### FIXED-A-VMGUEST-REPORTED-AN-EMPTY-HOSTNAME-TO-EVERY-HYPERVISOR
+
+**Date:** 2026-08-23 · **Lane:** A · **Where:** `kernel/src/vmguest.rs`
+(`GuestInfoData::hostname`, `guest_info()`, `procfs_content()`, and tests 3
+and 10 of `self_test_inner`)
+
+**In short:** the kernel tells the hypervisor what machine it is — OS name,
+version, CPU count, memory, hostname. The hostname it sent was always blank,
+because the field holding it was a private second copy that startup never
+filled in. Nothing noticed, because the one piece of code that ever wrote
+that field was the module's own test, which wrote it, checked it, and then
+"restored" it to a value nothing had ever put there.
+
+Boot batch 26 panicked at `vmguest.rs:1346`, `Should be initialized when in
+VM`. That was the test bug; the hostname was the product bug hiding behind
+it.
+
+**The test bug.** Test 3 called `stats()` and asserted `initialized`. That
+held only because the suite ran against live state, so it was observing the
+`init()` the boot sequence had called minutes earlier. It asserted that
+*something else* had run. Once the module was de-fanged — pristine `State`,
+`INITIALIZED` pinned to its initialiser `false` — there was no longer any
+such residue to observe, and the assertion failed correctly.
+
+The fix is to call `init()` and *then* assert, which is what the test should
+always have done: exercise the function rather than watch for its leavings.
+`init()` is safe inside the pristine window because it writes only `STATE`,
+`INITIALIZED` and `ACTIVE_FEATURES`, all three of which `self_test` saves,
+and its inputs (hypervisor detection, CPU count, frame stats) are read-only.
+
+**What that uncovered.** Tests 7, 8 and 9 are gated on `initialized` and on
+feature support. Against an uninitialised module all three evaluated their
+guard, took the else branch, and printed "skipped" — so five of the suite's
+thirteen tests had quietly stopped testing anything. Restoring `init()`
+turned them back on, and test 7's `assert!(!hostname.is_empty())` failed on
+the first real run it had ever had.
+
+`init()` populates `os_name`, `os_version`, `kernel_version`, `cpu_count` and
+`total_memory`. It does not populate `hostname`, and never did. `State::new`
+— which is the `static`'s own initialiser — leaves it `String::new()`. So on
+every real boot, `guest_info()` and `/proc/vmguest` reported `hostname: `.
+
+The field survived because the self-test maintained it. Test 10 called
+`set_hostname("test-host")`, asserted it had taken, then called
+`set_hostname("mintos")` under a `// Restore.` comment. That line restored
+nothing — it was the first and only write of a plausible value, and it made
+the module look correct for as long as anyone was watching.
+
+**Fix.** There is one system hostname and it already lives in `fs::sysfs`,
+behind `/sys/kernel/hostname`, with a `"mintos"` fallback. `vmguest` now
+reads it through `fs::sysfs::get_hostname()` at the moment it reports, and
+the private field and its `set_hostname` are gone. The read happens *before*
+`STATE` is locked, so neither function establishes a lock ordering between
+the two. Test 10 now asserts the invariant that replaced the field — what
+`/sys/kernel/hostname` holds is what leaves this module, through both
+`guest_info()` and `/proc` — which is also non-destructive, which the test it
+replaces was not.
+
+`GuestInfoData::new` was deleted in the same change: nothing called it, and
+it had drifted from `State::new` in three of its six fields (`os_name`,
+`os_version`, `hostname`), exactly the dead-constructor drift already
+documented on `State::new`.
+
+**The lesson, which is the same one twice now.** A duplicate that only the
+test maintains is worse than no duplicate at all: it makes the test pass and
+the product wrong, and it does so in the direction nobody checks. And a
+conditional test whose guard can go false is a test that can stop existing
+without ever reporting that it did — tests 7-9 printed "skipped" in a log
+nobody diffs. Prefer a guard that is *asserted* to hold over one that merely
+selects a branch.
+
+### TD-A-FOUR-INDEPENDENT-HOSTNAME-STORES
+
+**Date:** 2026-08-23 · **Lane:** A · **Where:** `kernel/src/fs/sysfs.rs:77`,
+`kernel/src/fs/netsettings.rs:662`, `kernel/src/fs/fileshare.rs:254`,
+`kernel/src/fs/nameservice.rs:160`
+
+**In short:** the kernel stores "the name of this machine" in four separate
+places that do not talk to each other. Change it in one and the other three
+keep the old value, so different parts of the system will disagree about what
+the computer is called.
+
+Found while fixing `FIXED-A-VMGUEST-REPORTED-AN-EMPTY-HOSTNAME-TO-EVERY-HYPERVISOR`
+above, which was a *fifth* copy — that one is now resolved by reading from
+`fs::sysfs`, but the other four remain:
+
+| Module | Storage | Reached via |
+|---|---|---|
+| `fs::sysfs` | `static HOSTNAME: Mutex<String>` | `/sys/kernel/hostname`, `get_hostname()` |
+| `fs::netsettings` | its own state | `set_hostname()` / `hostname()` |
+| `fs::fileshare` | its own state | `set_hostname()` / `hostname()` |
+| `fs::nameservice` | its own state | `set_hostname()` |
+
+(`ipc::namespace` and `container` also carry hostnames, but those are
+correct: a UTS namespace is *supposed* to hold a per-process override. They
+are not part of this issue.)
+
+**Why it matters concretely.** A user renames the machine in Settings. Which
+of the four gets written decides whether the change shows up in `/sys`, in
+the SMB browse list, in DNS registration, in what the hypervisor is told, or
+in some subset of those. Every combination is a bug and none of them is
+reported.
+
+**Proper fix.** `fs::sysfs::HOSTNAME` is the right home — it is the one with
+a filesystem path, a validator (non-empty, ≤ 253 bytes per the DNS limit) and
+a defined fallback. Make `fs::sysfs::set_hostname` public, delete the other
+three stores, and have those modules read through on demand as `vmguest` now
+does. Each has a `set_hostname` that must become either a write-through or a
+removal, decided per module: `nameservice`'s looks like a write-through,
+`fileshare`'s and `netsettings`'s look like they should just go.
+
+**Not done now** because it crosses four modules that other work is touching
+and is not on the path of any current boot failure. It is pure consolidation
+with no behavioural question in it, so it can be done whenever the boot suite
+is green.
+
+---
+
+### FIXED-A-CGROUPFS-DELETE-STRANDED-LIVE-TASKS-IN-THE-DELETED-GROUP (lane A)
+
+**Status:** FIXED 2026-08-23 (commit `660e86a61`) — awaiting a boot test on `main`.
+
+**In short:** If you put a program into a resource group (a "cgroup" — a
+container that caps how much memory and CPU the programs inside it may use)
+and then deleted that group, the program did not come back out. It stayed
+inside the deleted group forever: its memory kept being counted against a
+group you could no longer see, and the group's caps kept throttling it, until
+the machine rebooted. Deleting the group looked like it worked. Fixed by
+moving the group's members back to the root group before freeing it.
+
+**Where:** `kernel/src/fs/cgroupfs.rs` → `delete_group`.
+
+**What was wrong.** `delete_group` removed its own record of the group and
+then called `crate::cgroup::delete` on the backing kernel group, discarding
+the result with `let _ =`. The discard carried a comment justifying itself:
+
+> A failure here only leaks one of the 256 kernel cgroup slots until reboot,
+> never a correctness hazard, so we don't fail the frontend delete on it.
+
+That was wrong on the central point. `cgroup::delete` refuses a group whose
+`nr_tasks` is nonzero (`KernelError::NotEmpty`), and `add_pid` puts *real*
+tasks into that count via `sched::set_task_cgroup`. So the failure was not the
+rare case — it was the ordinary case of deleting a group that still had
+members. The leaked slot was the least of it; the stranded task was the bug.
+
+**How it was found.** Not directly. `cgroup::self_test` asserted
+`active_count() == 1, "only root at startup"`, which panicked boot batch 27
+with `left: 2`. The leaked slot was the second entry.
+
+**Why the self-test missed it.** The cgroupfs suite *did* delete a non-empty
+group — it used PIDs `100` and `200` and treated them as synthetic. By the
+time that suite runs, those are real, live task IDs (batch 27's log shows task
+100 spawned at line 1524 and task 200 at line 6441). So the suite was in fact
+reproducing the bug, on two unrelated tasks, and asserting nothing about it.
+This is the "synthetic constant that is not synthetic" trap: a literal chosen
+to mean "cannot exist" that quietly starts existing as the system grows.
+
+**The fix.** Evict the members first, then delete:
+
+- `delete_group` returns every PID in `g.processes` to `ROOT_CGROUP` before
+  calling `cgroup::delete`, so the delete actually succeeds.
+- If it still fails, something attached behind the frontend's back — an
+  anomaly the frontend cannot repair, so it now warns on serial instead of
+  passing silently.
+- Tests 5 and 6 use `u32::MAX` and `u32::MAX - 1`, which no task can have.
+- Test 7 makes *this* task a member immediately before the delete and asserts
+  both that the kernel cgroup was released and that the task came back to
+  root. A group holding only synthetic PIDs has `nr_tasks == 0` and deletes
+  cleanly with or without the fix, so it would prove nothing.
+
+---
+
+### TD-A-FRAMES-OUTLIVE-THEIR-CGROUP-AND-UNCHARGE-A-RECYCLED-SLOT (lane A)
+
+**Status:** OPEN — latent; no known way to trigger it during boot today.
+
+**In short:** Memory pages remember which resource group paid for them, so the
+right group gets credited when they are freed. But a group can be deleted
+while pages it paid for are still in use, and the group's slot number is then
+handed to a *different* group. When those pages are finally freed, the credit
+goes to whichever group now holds that slot number — a group that never
+allocated them. Its memory accounting drifts low, so its memory cap stops
+being enforced correctly.
+
+**Where:** `kernel/src/cgroup.rs` → `delete` / `create`, and
+`kernel/src/mm/frame.rs` → `uncharge_cgroup_free`.
+
+**The mechanism, precisely.**
+
+1. `charge_cgroup_alloc` records the charging cgroup's id in the per-frame
+   array `FRAME_CGROUP` at allocation time, so the right group is credited
+   even if a different task frees the frame later.
+2. `cgroup::delete` requires `nr_tasks == 0` and `nr_children == 0`. It does
+   **not** require `mem_usage == 0`. A group can therefore be deleted while
+   frames it paid for are still live and still name it in `FRAME_CGROUP`.
+3. `cgroup::create` finds a free slot and calls `node.init(parent)`, which
+   resets that slot's counters. Slot ids are small (`MAX_CGROUPS` is 256) and
+   `next_id` wraps, so reuse is routine, not exotic.
+4. When those older frames are eventually freed, `uncharge_cgroup_free` reads
+   the stale id and calls `mem_uncharge(cg, 1)` — debiting the *new* group.
+
+The result is under-accounting on the new group: `mem_usage` reads lower than
+its real usage, so its `MemLimit` admits allocations it should reject. It
+cannot panic or corrupt memory (`mem_uncharge` saturates at zero), which is
+why this is debt and not a live bug.
+
+**Not triggered today** because nothing deletes a memory-charged cgroup during
+boot. The `cgroup-e2e` task frees its frames before deleting its group, and
+the cgroupfs suite's group never allocates. It becomes reachable as soon as
+containers are created and destroyed at runtime, which is the point of the
+subsystem.
+
+**The proper fix** is generation-tagged ids: widen the per-frame record to
+carry a generation counter bumped by `init()`, and have `uncharge_cgroup_free`
+drop a charge whose generation no longer matches. That makes a stale reference
+detectable rather than silently misapplied. Two cheaper alternatives are worse
+and should not be taken: refusing to delete a group with `mem_usage > 0` makes
+deletion depend on unrelated tasks' page lifetimes (a group could become
+undeletable indefinitely), and walking `FRAME_CGROUP` on delete to clear stale
+entries is O(all RAM) per delete.
+
+---
+
+### FIXED-A-KSYMS-COULD-NEVER-HAVE-LOADED-THIS-KERNELS-SYMBOLS (lane A)
+
+**Status:** FIXED 2026-08-23 (commits `98fec0c94`, `0b43b6443`, `4143cf341`) —
+awaiting a boot test on `main`.
+
+**In short:** When the kernel crashes it prints a "backtrace" — the list of
+functions it was inside when it died. For an unknown length of time that list
+printed only raw numbers, with no function names, making every crash report
+far harder to act on. Two separate faults caused it, and the second was hidden
+behind the first. Both are fixed; backtraces name functions again.
+
+**Where:** `scripts/boot-test.sh` (the strip step) and `kernel/src/ksyms.rs`.
+
+**Fault 1 — the boot image had no symbol table at all.** `boot-test.sh` staged
+the kernel through `llvm-strip` with no flags. A bare strip removes `.symtab`,
+which is the only thing `ksyms` reads. Every boot logged
+
+```
+[ksyms] No symbol table found in kernel ELF
+```
+
+at serial line ~131 and carried on, so every panic backtrace in the project
+printed bare addresses. Fixed by using `--strip-debug`, which removes the
+DWARF debug info (the bulk: 215 MiB → 58 MiB, still 73% off) but keeps
+`.symtab`.
+
+**Fault 2 — revealed by fixing fault 1.** With `.symtab` present, `ksyms`
+reached its own parse for the first time in a long while and panicked boot
+batch 28 immediately:
+
+```
+memory allocation of 20160000 bytes failed
+```
+
+`parse_elf_symbols` sized both its buffers from `sym_count`, the *total*
+`.symtab` entry count:
+
+```rust
+let mut entries = Vec::with_capacity(sym_count / 2); // Roughly half are functions.
+let mut names   = Vec::with_capacity(sym_count * 20); // ~20 chars per name average.
+```
+
+This kernel's `.symtab` holds ~1,008,000 entries, dominated by the SECTION,
+FILE and NOTYPE entries every object file contributes; only ~12% (~126,000)
+survive the FUNC/OBJECT filter. So `names` reserved 19.2 MiB and `entries` a
+further 8 MiB, for data needing ~2 MiB.
+
+**The 19.2 MiB request could not have succeeded at any point in boot, with any
+amount of memory free.** `mm::heap` serves anything too big for a slab
+straight from the buddy allocator, and `MAX_ORDER` of 10 caps a single
+allocation at 2^10 × 16 KiB = **16 MiB**. 19.2 MiB rounds to order 11 and is
+refused on arithmetic, not on availability — the frame allocator had 2.9 GiB
+free at the moment of the panic. **Any future change here that reintroduces a
+single multi-megabyte allocation must respect that 16 MiB ceiling.**
+
+**The fix** removes the copy rather than resizing it. `name_offset` now indexes
+the kernel ELF's own `.strtab`, borrowed in place, so name data costs nothing.
+This is sound because Limine's kernel-file mapping is permanent: `mm::frame`
+seeds its free lists from `USABLE` regions only (lines 1765/1794), so the
+`BOOTLOADER_RECLAIMABLE` region holding the kernel file is never handed out
+and never reused. `entries` is now sized by a counting pass rather than a
+guess.
+
+**The lesson, and why it went unnoticed.** The module doc asserted "a typical
+kernel has ~2000-5000 functions … total ~100-200 KiB". It has ~124,000 — a
+25-60× error in a comment that read as settled fact, sitting directly above
+the code whose constants derived from it. Nothing re-derived it as the kernel
+grew two orders of magnitude, and fault 1 meant the code never ran to
+contradict it. **A stale capacity estimate in a doc comment is a latent bug
+with a plausible alibi.**
+
+Related: the same investigation added `ksyms::resolve_static` (lock-free,
+allocation-free) so panic/spin-stall/lockdep reporters can resolve symbols
+without re-entering the machinery they are diagnosing. See commit
+`0b43b6443`.
+
+### FIXED-A-LOGPERSIST-NEVER-PERSISTED-THE-SYSTEMS-FIRST-EVENT (lane A)
+
+**In short:** The kernel keeps a log of notable events and periodically
+writes new ones out to a file on disk. It remembered how far it had got by
+storing the number of the last event it wrote, and it started that counter
+at zero to mean "haven't written anything yet". But events are also numbered
+from zero — so the very first event the system ever recorded had the same
+number as the "nothing yet" marker, and the writer skipped it as already
+done. On every fresh boot, event number one was silently lost. It is the
+event most worth having: if a machine dies seconds into booting, that may be
+the only one it managed to record. Fixed.
+
+**Status:** FIXED 2026-08-23, commit `b66622ab6`.
+
+**Where:** `kernel/src/logpersist.rs` — `State::global_last_flushed`,
+`FlushCursor::last_flushed_seq`, and the two `EventFilter::after(..)` calls
+in `flush()`.
+
+**The defect.** `eventlog` assigns sequence numbers starting at 0
+(`kernel/src/eventlog.rs:647`, `let seq = self.total_written;`). `flush()`
+resumed from where it left off with `EventFilter::all().after(after_seq)`,
+and `after` is *strictly* greater (`eventlog.rs:916`, `if entry.seq <= after
+{ return false }`). With `global_last_flushed: u64` seeded to `0` to mean
+"nothing flushed yet", the first flush of every boot asked for "everything
+after 0" and thereby excluded sequence 0.
+
+This is the in-band-sentinel class again (see
+`FIXED-A-SYSMAINT-NEVER-RUN-TASKS-WERE-NEVER-DUE` and the `tasksched`
+`last_run_ns` fix): a `u64` field where one legal value is stolen to mean
+"unset". The distinguishing feature here is that **no** `u64` could have
+worked — `after(n)` has no value meaning "everything", because the range it
+excludes always includes at least sequence 0.
+
+**The fix.** `Option<u64>` for both cursors, and the first flush omits the
+`after` clause rather than passing a sentinel:
+
+```rust
+let base = EventFilter::all().min_severity(min_sev);
+let filter = match after_seq {
+    None => base,
+    Some(seq) => base.after(seq),
+};
+```
+
+Both display sites (`logpersist::format_stats` and `kshell`'s `logrotate
+stats`) now print `none (nothing flushed yet)` rather than `0`, which had
+claimed a flush that never happened.
+
+**How it was found.** logpersist's own self-test, which reported
+`expected 2 flushed, got 1` on boot batch 29 — the first boot after the
+suite was de-fanged and actually started running. This is the fourth
+product bug the de-fanging programme has surfaced, and the pattern holds:
+the suites were switched off *because* they failed, and they failed
+because they were right.
+
+The test now pins the cause rather than the symptom — it asserts that the
+post-`clear()` event really is sequence 0, that both events flush, that the
+resulting cursor is `Some(1)`, and that a freshly-initialised cursor reads
+`None` rather than `Some(0)`.
+
+### FIXED-A-BACKUP-FREQUENCY-WAS-RECORDED-DISPLAYED-AND-NEVER-OBEYED (lane A)
+
+**In short:** Backup schedules let you pick how often a backup should run —
+hourly, daily, weekly, monthly. That setting was saved, and shown back to
+you in the schedule list, but nothing anywhere in the system ever compared
+it against a clock. Every schedule therefore behaved as "manual": it ran
+only when someone explicitly asked, no matter what frequency was chosen.
+A second bug sat underneath it — the "when did this last run?" timestamp
+used zero to mean "never", but zero is also a real time (the instant the
+machine booted), so a backup that had never run looked like one that had
+just run. Fixed both.
+
+**Status:** FIXED 2026-08-23, commit `dc80769bf`.
+
+**Where:** `kernel/src/fs/backupsched.rs` — `BackupFrequency`,
+`BackupSchedule::last_run_ns`, new `due_schedules()`; display in
+`kernel/src/kshell.rs`'s `cmd_backupsched` `list` subcommand.
+
+**The defect, in two layers.**
+
+1. *Dead configuration.* `BackupSchedule::frequency` had a `label()` and
+   nothing else. No caller in the tree computed due-ness from it. The
+   companion state was equally inert: `last_run_ns` was written by
+   `run_now` and read by no one, in this module or any other.
+2. *In-band sentinel.* `last_run_ns: u64` used `0` for "never ran". `0` is
+   a legal uptime, so once a due-check existed it would have read a
+   never-run schedule as one that ran at boot. The failure direction is the
+   bad one: the schedule that had never once run is the one the scheduler
+   would have been most confident it could skip, for a full interval after
+   every reboot.
+
+**The fix.** `BackupFrequency::interval_ns() -> Option<u64>` (`None` for
+`Manual`, which genuinely never comes due on its own and so is not
+expressible as a large interval); `last_run_ns: Option<u64>`; and
+`due_schedules()` returning the enabled schedules whose interval has
+elapsed or which have never run. `bsched list` now shows the last-run time
+and a `DUE` marker, so the state is observable rather than merely stored.
+
+**Note on scope.** `interval_ns` treats a month as a flat 30 days. The
+kernel has an uptime counter, not a calendar, so "the same day-of-month
+next month" is not expressible here. Documented at the definition.
+
+**Not yet done:** nothing *calls* `due_schedules()` on a timer yet — this
+commit makes the frequency meaningful and observable, but automatic
+triggering needs a periodic task, which belongs with `tasksched`
+integration. Tracked below.
+
+### TD-A-BACKUP-DUE-SCHEDULES-HAS-NO-PERIODIC-CALLER (lane A)
+
+**In short:** Backup schedules can now correctly report which of them are
+overdue, but nothing checks that list on a timer, so an overdue backup is
+still not started automatically — you have to ask. The missing piece is a
+recurring task that polls the list and runs what it finds.
+
+**Status:** OPEN.
+
+**Where:** `kernel/src/fs/backupsched.rs::due_schedules` has no caller
+outside the self-test and `kshell`'s `list`.
+
+**Proper fix.** Register a `tasksched` interval task at init that calls
+`due_schedules()` and then `run_now()` for each id returned. `tasksched`
+already has the interval machinery and the `Option<u64>` last-run
+semantics (`kernel/src/fs/tasksched.rs:662`), so this is wiring, not new
+mechanism. It was left out of `dc80769bf` to keep that commit to one
+logical change.
+
+### FIXED-A-STORAGE-SENSE-SCHEDULE-WAS-A-SETTING-THAT-DECIDED-NOTHING (lane A)
+
+**In short:** Storage Sense is the automatic disk-cleanup feature. You
+could set it to "Daily", "Weekly", "Monthly" or "when the disk gets
+full", and the setting would be remembered and shown back to you forever
+— but nothing in the system ever looked at it. Cleanup ran only when you
+asked for it by hand. Fixed in `78cae81f5`: the schedule now determines
+whether cleanup is due, and `storagesense show` says so.
+
+**Status:** FIXED (`78cae81f5`).
+
+**Where:** `kernel/src/fs/storagesense.rs`.
+
+**What was wrong.** Three fields — `schedule`, `low_space_threshold_mb`
+and `last_run_ns` — were all written and none of them ever read. Two of
+the three were settable from the shell (`storagesense schedule daily`,
+and the threshold), so the feature presented a full configuration
+surface over machinery that did not exist. Dead configuration is worse
+than absent configuration: absent configuration tells the user to do it
+themselves, dead configuration tells them it is handled.
+
+**The second bug, hidden behind the first.** `last_run_ns` was a `u64`
+in which `0` meant "never run". The clock is nanoseconds-since-boot and
+starts *at* zero, so `0` is a legal instant. This could not misbehave
+while nothing read the field — and giving it a reader is precisely what
+would have armed it. A cleanup run that landed at uptime 0 would read
+back as never having run, so the new due-check would have declared
+cleanup due again immediately and deleted the same files a second time,
+on the one boot where the first pass had only just finished. It is now
+`Option<u64>`.
+
+**Note on the low-space path.** `due_reason()` releases the module lock
+before calling `Vfs::statvfs`, because `statvfs` descends into a
+filesystem driver and may take VFS locks of its own. A `statvfs` that
+fails yields "not due", never "low space": the remedy for low space is
+deleting the user's files, so an unknown free-space figure must not be
+treated as a low one.
+
+**Not yet done:** as with backup schedules, nothing polls `due_reason()`
+on a timer — see `TD-A-BACKUP-DUE-SCHEDULES-HAS-NO-PERIODIC-CALLER`,
+which is now the same gap in two modules and wants one `tasksched` task
+that services both.
+
+### FIXED-A-FILE-INDEX-BUILT-AT-BOOT-CLAIMED-NEVER-TO-HAVE-BEEN-BUILT (lane A)
+
+**In short:** The file index (what `locate` searches) recorded when it
+was last rebuilt, using `0` to mean "never". The clock it used counts
+from boot and starts at 0, so an index built very early in boot recorded
+the same value as one never built at all. Nothing displayed the field, so
+nobody could see either answer. Fixed in `50ad94e28`.
+
+**Status:** FIXED (`50ad94e28`).
+
+**Where:** `kernel/src/fs/index.rs` (`IndexStats::last_rebuild_ns`),
+displayed by `locate --stats` in `kernel/src/kshell.rs`.
+
+**What was wrong.** Same pair as Storage Sense above: an in-band sentinel
+(`0` = never, on a clock where `0` is real) in a field that had no reader
+outside the self-test's own `== 0` check. The field is now `Option<u64>`,
+and `age_of_last_rebuild_ns()` plus a "Last build: Ns ago / never" line
+give it the reader it was always for. The age of the snapshot is the only
+number on that stats screen that tells a user whether a `locate` hit can
+be trusted, and it was the one number missing.
+
+### TD-A-STORAGE-SENSE-CLEANUP-IS-SIMULATED (lane A)
+
+**In short:** Storage Sense reports freeing gigabytes, but it does not
+actually delete anything — it copies each category's *estimated* size
+into its "freed" figure. The numbers are made up, and always exactly
+match the estimate.
+
+**Status:** OPEN. Pre-existing; noticed while fixing the schedule.
+
+**Where:** `kernel/src/fs/storagesense.rs::run_cleanup` and
+`run_category` — `let freed = policy.estimated_bytes;` with the comment
+`// Simulate cleanup: free the estimated amount.` The per-category
+`estimated_bytes` values are themselves constants set in
+`default_policies()`, not measurements.
+
+**Why it matters more now.** Before `78cae81f5` the simulation could only
+run when the user explicitly asked. Now that the schedule is meaningful,
+the intended next step is a timer that runs cleanup automatically — and
+wiring a timer to a function that reports fictional results would make
+the fiction periodic and unattended. **The periodic caller must not be
+added until the cleanup is real.**
+
+**Proper fix.** Each category needs a real enumerate-and-delete pass
+against the VFS: `TempFiles` over `/tmp`, `RecycleBin` via
+`fs::recyclebin`, `Logs` over the log directory with `max_age_days`
+actually applied, and so on. `estimated_bytes` should become the result
+of a dry-run walk rather than a constant, so that estimate and result can
+disagree — which is the whole point of having both.

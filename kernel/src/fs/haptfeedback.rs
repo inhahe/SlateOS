@@ -387,7 +387,29 @@ pub fn stats() -> (usize, usize, u64, u64) {
 // Self-test
 // ---------------------------------------------------------------------------
 
+/// Run the module's self-test suite against a table of its own.
+///
+/// The suite mutates module state and asserts exact contents, and it used to
+/// do that to the *live* table -- which, since it is also a kernel-shell
+/// subcommand, changed or destroyed whatever the user had here and then
+/// reported success.  The live state is moved aside for the duration and put
+/// back afterwards; `crate::fs::selftest` records why this shape rather than
+/// the alternatives.
+///
+/// The pristine value is `None` rather than a table: this module initialises
+/// lazily, and `None` is exactly what a fresh boot holds.
 pub fn self_test() {
+    // `OPS` is a lock-free mirror of `state.ops`, which lives *inside* the
+    // table. `with_pristine` restores the table and so restores `state.ops`,
+    // but it cannot know about the mirror -- leave it and the two disagree
+    // permanently, with `<module> stats` reporting the suite's activity as
+    // the user's.
+    let saved_ops = OPS.load(Ordering::Relaxed);
+    crate::fs::selftest::with_pristine(&STATE, None, self_test_inner);
+    OPS.store(saved_ops, Ordering::Relaxed);
+}
+
+fn self_test_inner() {
     crate::serial_println!("haptfeedback::self_test() — running tests...");
     init_defaults();
 
@@ -435,10 +457,26 @@ pub fn self_test() {
     crate::serial_println!("  [7/8] global disable: OK");
 
     // 8: Stats.
+    //
+    // `total_fires` counts deliveries, not calls: `fire` returns early without
+    // incrementing when the event is disabled or the module is globally off.
+    // This asserted `fires >= 3` against the four `fire` calls above, which
+    // contradicted tests 5 and 7 — both of which assert their call delivers
+    // `HapticPattern::None`. Only tests 4 and 6 deliver, so the count is 2,
+    // and it failed the first time it was ever run.
+    //
+    // Stated exactly rather than as an inequality. The count is known, and
+    // `>= 3` would have gone on passing if a disabled event started firing —
+    // which is the regression tests 5 and 7 exist to catch.
     let (devs, maps, fires, ops) = stats();
     assert_eq!(devs, 1);
     assert_eq!(maps, 12);
-    assert!(fires >= 3);
+    assert_eq!(fires, 2, "only the two enabled Click fires are delivered");
+    assert_eq!(
+        list_devices().first().map(|d| d.fire_count),
+        Some(fires),
+        "the device saw every delivered fire"
+    );
     assert!(ops > 0);
     crate::serial_println!("  [8/8] stats: OK");
 

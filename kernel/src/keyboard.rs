@@ -1709,7 +1709,9 @@ fn read_outcome_self_test() -> Result<(), &'static str> {
         let now = crate::hrtimer::now_ns();
         match read_char_inner(Some(now), 0) {
             ReadOutcome::TimedOut => {}
-            ReadOutcome::Byte(_) => return Err("lapsed deadline returned a byte from an empty ring"),
+            ReadOutcome::Byte(_) => {
+                return Err("lapsed deadline returned a byte from an empty ring");
+            }
             ReadOutcome::Interrupted => {
                 return Err("kernel task (pid 0) reported Interrupted — signal check ignored pid");
             }

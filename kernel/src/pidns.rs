@@ -584,26 +584,36 @@ pub fn self_test() {
     serial_println!("[pidns] Running self-test...");
 
     // Test 1: Root namespace exists.
+    //
+    // The counts below are relative to `baseline`, not absolute. This suite
+    // runs at an arbitrary point in the boot sequence and does not own the
+    // global namespace count, so it must not assert a value for it -- an
+    // `assert_eq!(active_count(), 1)` here panics the kernel the moment any
+    // legitimate boot-time namespace exists. The cgroup suite had the
+    // identical assertion and it did exactly that once a real leak put a
+    // second cgroup in the table; this is the same shape, not yet fired.
+    // What the suite owns is its own net effect, which cleanup asserts.
     assert!(exists(ROOT_NS), "root namespace must exist");
-    assert_eq!(active_count(), 1, "only root at startup");
+    let baseline = active_count();
+    assert!(baseline >= 1, "root must be counted as active");
     serial_println!("[pidns]   Root exists: OK");
 
     // Test 2: Create child namespaces.
     let ns1 = create(ROOT_NS).expect("create ns1");
     assert!(ns1 > 0);
     assert!(exists(ns1));
-    assert_eq!(active_count(), 2);
+    assert_eq!(active_count(), baseline + 1);
 
     let ns2 = create(ROOT_NS).expect("create ns2");
     assert!(exists(ns2));
     assert_ne!(ns1, ns2);
-    assert_eq!(active_count(), 3);
+    assert_eq!(active_count(), baseline + 2);
     serial_println!("[pidns]   Create namespaces: OK");
 
     // Test 3: Create nested namespace.
     let ns1_child = create(ns1).expect("create ns1_child");
     assert!(exists(ns1_child));
-    assert_eq!(active_count(), 4);
+    assert_eq!(active_count(), baseline + 3);
     let s = stats(ns1).unwrap();
     assert_eq!(s.nr_children, 1);
     serial_println!("[pidns]   Nested namespace: OK");
@@ -728,7 +738,14 @@ pub fn self_test() {
     delete(nsa).expect("delete nsa");
     delete(nsb).expect("delete nsb");
     delete(ns2).expect("delete ns2");
-    assert_eq!(active_count(), 1, "only root remains");
+    // Net effect on the global table must be zero: every namespace the
+    // suite created has been deleted, and it created nothing it did not
+    // track.
+    assert_eq!(
+        active_count(),
+        baseline,
+        "self-test leaked namespaces (created some it never deleted)"
+    );
     serial_println!("[pidns]   Cleanup: OK");
 
     serial_println!("[pidns] Self-test PASSED (18 tests)");

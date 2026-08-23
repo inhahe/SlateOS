@@ -636,10 +636,7 @@ pub fn verify_transport_checksum(
     segment: &[u8],
 ) -> bool {
     let seg_len = segment.len() as u32;
-    let sum = checksum::sum_bytes(
-        checksum::pseudo_v6(src, dst, next_header, seg_len),
-        segment,
-    );
+    let sum = checksum::sum_bytes(checksum::pseudo_v6(src, dst, next_header, seg_len), segment);
     checksum::fold(sum) == checksum::VALID
 }
 

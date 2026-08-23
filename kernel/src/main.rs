@@ -77,6 +77,7 @@ mod bench;
 mod blkdev;
 mod boot;
 mod boot_timing;
+mod bytesize;
 mod bytestr;
 mod cap;
 mod cet;
@@ -634,7 +635,8 @@ extern "C" fn kernel_main() -> ! {
             // Limine.  This is the first and only call to frame::init.  We are
             // single-threaded with interrupts disabled.
             console::boot_step(console::BootStatus::Running, "Memory manager");
-            if let Err(e) = unsafe { mm::frame::init(boot_info.hhdm_offset, boot_info.memory_map) } {
+            if let Err(e) = unsafe { mm::frame::init(boot_info.hhdm_offset, boot_info.memory_map) }
+            {
                 serial_println!("FATAL: Frame allocator init failed: {}", e);
                 cpu::halt_loop();
             }
@@ -5190,6 +5192,16 @@ extern "C" fn kernel_main() -> ! {
             if let Err(e) = bytestr::self_test() {
                 serial_println!("WARNING: bytestr self-test failed: {:?}", e);
             }
+            // The one byte-size formatter, replacing twenty-one private copies.
+            // Two of those copies printed a two-digit tenths ("1.10 KiB", which
+            // reads as larger than the "1.9 KiB" below it) because they divided
+            // by `unit / 10`; six more labelled 1024-based units `GB`/`MB`/`KB`.
+            // Checked on every boot because it is pure arithmetic over literals —
+            // the whole suite is a handful of microseconds — and because the
+            // digit it gets wrong is the one that only appears at the top of a
+            // unit, which is exactly where a hand-written spot check does not
+            // look. See `bytesize`'s module docs.
+            bytesize::self_test();
             // The octal escaper that lets those byte paths be written into the
             // line-oriented text formats (/proc/mounts, the trash index). A bug here
             // corrupts a file rather than failing loudly, so it is checked on boot.
@@ -5620,7 +5632,10 @@ extern "C" fn kernel_main() -> ! {
                 serial_println!("WARNING: accessibility self-test failed: {:?}", e);
             }
             if let Err(e) = fs::appnotify::self_test() {
-                serial_println!("WARNING: per-app notification settings self-test failed: {:?}", e);
+                serial_println!(
+                    "WARNING: per-app notification settings self-test failed: {:?}",
+                    e
+                );
             }
             if let Err(e) = fs::autostart::self_test() {
                 serial_println!("WARNING: autostart self-test failed: {:?}", e);
@@ -5671,7 +5686,10 @@ extern "C" fn kernel_main() -> ! {
                 serial_println!("WARNING: keyboard layout self-test failed: {:?}", e);
             }
             if let Err(e) = fs::mmtune::self_test() {
-                serial_println!("WARNING: memory-management tuning self-test failed: {:?}", e);
+                serial_println!(
+                    "WARNING: memory-management tuning self-test failed: {:?}",
+                    e
+                );
             }
             if let Err(e) = fs::netindicator::self_test() {
                 serial_println!("WARNING: network indicator self-test failed: {:?}", e);
@@ -5726,6 +5744,416 @@ extern "C" fn kernel_main() -> ! {
             }
             if let Err(e) = fs::winsnap::self_test() {
                 serial_println!("WARNING: window snapping self-test failed: {:?}", e);
+            }
+        }
+        case();
+    }
+
+    {
+        // The second batch of suites that had to stop deleting the user's
+        // data before they could be wired -- see the block above for why the
+        // order matters.
+        //
+        // Eleven of the 16 were invisible to the survey that gated the first
+        // batch, which recognised a whole-table clear by name from a list of
+        // six spellings. These use ten others (`cliphistory::clear`,
+        // `crashreport::clear_reports`, `datausage::reset_usage`,
+        // `tracemon::clear_buffer`, ...) and so read as "quiet -- probably
+        // safe to wire". They were caught instead by a structural test:
+        // a destructive-sounding call that takes *no arguments* acts on the
+        // whole table almost by definition, since destroying one row requires
+        // being told which row. The other five were known to be destructive
+        // but are lazy-init (`Mutex<Option<T>>`), a shape the first
+        // converter did not handle.
+        //
+        // Each names nothing outside its own module except
+        // `sysresource`, which reads `hpet::elapsed_ns` -- a clock query,
+        // read-only. So none of them can damage state that
+        // `with_pristine` does not put back.
+        //
+        // These return `()` rather than `KernelResult<()>`, hence the bare
+        // calls.
+        #[inline(never)]
+        fn case() {
+            fs::autofix::self_test();
+            fs::cliphistory::self_test();
+            fs::crashreport::self_test();
+            fs::datausage::self_test();
+            fs::dmevent::self_test();
+            fs::dnssettings::self_test();
+            fs::dumpanalyzer::self_test();
+            fs::hwmonitor::self_test();
+            fs::location::self_test();
+            fs::multiclip::self_test();
+            fs::nameservice::self_test();
+            fs::printmgr::self_test();
+            fs::recentsearch::self_test();
+            fs::startuprepair::self_test();
+            fs::sysresource::self_test();
+            fs::tracemon::self_test();
+        }
+        case();
+    }
+
+    {
+        // De-fanged fs self-tests, batch 1 of 6.
+        //
+        // See the first such block above for why the order matters: these are
+        // kernel-shell subcommands too, so until `58117e72c` running one
+        // modified the user's own state -- `brightness test` set their screen
+        // brightness and left it there.  At boot the tables are empty, so that
+        // damage is invisible here and the boot test would have gone green
+        // either way.  De-fang first, wire second.
+        //
+        // These were converted without first classifying which were
+        // destructive, because that classification was the mistake: a suite
+        // that calls `set_brightness(50)` and asserts it took deletes nothing
+        // and is exactly as damaging, and no name or signature separates it
+        // from a legitimate call.  `with_pristine` restores either.
+        //
+        // These return `()` rather than `KernelResult<()>`, hence the bare
+        // calls.
+        #[inline(never)]
+        fn case() {
+            fs::appcompat::self_test();
+            fs::appdefaults::self_test();
+            fs::applaunch::self_test();
+            fs::apppermissions::self_test();
+            fs::appsandbox::self_test();
+            fs::appstore::self_test();
+            fs::audiodevice::self_test();
+            fs::audioeq::self_test();
+            fs::audiomux::self_test();
+            fs::backupsched::self_test();
+            fs::battery::self_test();
+            fs::blktrace::self_test();
+            fs::bluetooth::self_test();
+            fs::brightness::self_test();
+            fs::cgroupfs::self_test();
+            fs::clipaction::self_test();
+            fs::clipsync::self_test();
+            fs::colorblind::self_test();
+            fs::colorscheme::self_test();
+            fs::colortemp::self_test();
+            fs::coredump::self_test();
+            fs::cpuset::self_test();
+            fs::cputhr::self_test();
+            fs::defaultapps::self_test();
+        }
+        case();
+    }
+
+    {
+        // De-fanged fs self-tests, batch 2 of 6. See batch 1 above.
+        #[inline(never)]
+        fn case() {
+            fs::devicemgr::self_test();
+            fs::devpair::self_test();
+            fs::dictation::self_test();
+            fs::diskquota::self_test();
+            fs::disksmart::self_test();
+            fs::displayarrange::self_test();
+            fs::displaycal::self_test();
+            fs::displaycolor::self_test();
+            fs::dpiscaling::self_test();
+            fs::driverupdate::self_test();
+            fs::dynlock::self_test();
+            fs::energysaver::self_test();
+            fs::entropy::self_test();
+            fs::envvars::self_test();
+            fs::faceunlock::self_test();
+            fs::filelock::self_test();
+            fs::filerules::self_test();
+            fs::filetransfer::self_test();
+            fs::focusassist::self_test();
+            fs::focussession::self_test();
+            fs::fontpreview::self_test();
+            fs::fontsettings::self_test();
+            fs::fscache::self_test();
+            fs::fwsettings::self_test();
+        }
+        case();
+    }
+
+    {
+        // De-fanged fs self-tests, batch 3 of 6. See batch 1 above.
+        #[inline(never)]
+        fn case() {
+            fs::fwupdate::self_test();
+            fs::gamepadinput::self_test();
+            fs::gestures::self_test();
+            fs::groupmgr::self_test();
+            fs::haptfeedback::self_test();
+            fs::hdrdisplay::self_test();
+            fs::hotcorners::self_test();
+            fs::inputa11y::self_test();
+            fs::inputmethod::self_test();
+            fs::iosched::self_test();
+            fs::iotdevice::self_test();
+            fs::kbmacro::self_test();
+            fs::kbshortcuts::self_test();
+            fs::kconsole::self_test();
+            fs::kernlog::self_test();
+            fs::kernparam::self_test();
+            fs::kmod::self_test();
+            fs::langpack::self_test();
+            fs::loadavg::self_test();
+            fs::lockwallpaper::self_test();
+            fs::magnifier::self_test();
+            fs::mediakeys::self_test();
+            fs::mobilelink::self_test();
+            fs::monitors::self_test();
+        }
+        case();
+    }
+
+    {
+        // De-fanged fs self-tests, batch 4 of 6. See batch 1 above.
+        #[inline(never)]
+        fn case() {
+            fs::mousegestures::self_test();
+            fs::mousesettings::self_test();
+            fs::netdiag::self_test();
+            fs::netprofile::self_test();
+            fs::netproxy::self_test();
+            fs::netthrottle::self_test();
+            fs::networkbridge::self_test();
+            fs::nightlight::self_test();
+            fs::notifbadge::self_test();
+            fs::notiffilter::self_test();
+            fs::notifgroup::self_test();
+            fs::notifprefs::self_test();
+            fs::oobe::self_test();
+            fs::oomkiller::self_test();
+            fs::parental::self_test();
+            fs::parentaltime::self_test();
+            fs::peninput::self_test();
+            fs::pidfd::self_test();
+            fs::pkgmgr::self_test();
+            fs::playmedia::self_test();
+            fs::policyengine::self_test();
+            fs::powerprofile::self_test();
+            fs::printqueue::self_test();
+            fs::prochistory::self_test();
+        }
+        case();
+    }
+
+    {
+        // De-fanged fs self-tests, batch 5 of 6. See batch 1 above.
+        #[inline(never)]
+        fn case() {
+            fs::prociso::self_test();
+            fs::quicknote::self_test();
+            fs::quicksettings::self_test();
+            fs::raidmgr::self_test();
+            fs::remoteassist::self_test();
+            fs::remotedesktop::self_test();
+            fs::restorepoint::self_test();
+            fs::screenlock::self_test();
+            fs::screenreader::self_test();
+            fs::screensaver::self_test();
+            fs::secpolicy::self_test();
+            fs::secureboot::self_test();
+            fs::secureerase::self_test();
+            fs::sessionmgr::self_test();
+            fs::sharesheet::self_test();
+            fs::shmem::self_test();
+            fs::signalq::self_test();
+            fs::snaplayout::self_test();
+            fs::soundevents::self_test();
+            fs::spatialaudio::self_test();
+            fs::speechio::self_test();
+            fs::spellcheck::self_test();
+            fs::splitview::self_test();
+            fs::storageclean::self_test();
+        }
+        case();
+    }
+
+    {
+        // De-fanged fs self-tests, batch 6 of 6. See batch 1 above.
+        #[inline(never)]
+        fn case() {
+            fs::storagesense::self_test();
+            fs::surroundsound::self_test();
+            fs::sysanimations::self_test();
+            fs::sysdiag::self_test();
+            fs::syslog::self_test();
+            fs::sysmaint::self_test();
+            fs::sysrestore::self_test();
+            fs::sysrq::self_test();
+            fs::systemimage::self_test();
+            fs::systemsounds::self_test();
+            fs::tasksched::self_test();
+            fs::timesync::self_test();
+            fs::touchpad::self_test();
+            fs::touchscreen::self_test();
+            fs::updatemgr::self_test();
+            fs::usbmgr::self_test();
+            fs::usbpolicy::self_test();
+            fs::voicecontrol::self_test();
+            fs::volumeosd::self_test();
+            fs::vpnprofile::self_test();
+            fs::webcam::self_test();
+            fs::wifiscan::self_test();
+            fs::windowrules::self_test();
+            fs::wintiling::self_test();
+        }
+        case();
+    }
+
+    {
+        // De-fanged eager self-tests, batch 1 of 4.
+        //
+        // The six batches above are the *lazily*-initialised modules, whose
+        // state lives behind an `Option` or a `Vec` that starts empty.  These
+        // 35 hold theirs in a table that is fully formed the moment the
+        // `static` is const-initialised -- fixed-size arrays of interfaces,
+        // rings and rule tables, mostly under `net/` -- so the sweep that
+        // converted them had to lift each `static`'s own initialiser verbatim
+        // rather than reach for a `None`.  `crate::fs::selftest` records why
+        // the initialiser is the only spelling of "pristine" that cannot drift.
+        //
+        // Two hazards showed up here that the lazy ones never posed, and both
+        // are worth knowing before adding to these lists:
+        //
+        // * **Size.**  `with_pristine` moves the pristine value in and the
+        //   saved one out, so two whole tables sit in this frame at once.
+        //   `net::bridge`'s is 105 216 bytes against a 64 KiB task stack;
+        //   it uses `with_pristine_swapped` and builds its substitute on the
+        //   heap.  Clippy only sees array *expressions*, so measure.
+        //
+        // * **Reach.**  `with_pristine` restores the module's *own* state and
+        //   nothing else, so a suite that calls into a neighbour is still
+        //   destructive while wearing a wrapper that suggests otherwise.
+        //   Three did (`svcstart`, `logpersist`, `eventlog`) and were fixed in
+        //   `d29938b53`; `build/survey_reach.py` is the check.
+        //
+        // These return `()`, hence the bare calls.
+        #[inline(never)]
+        fn case() {
+            devhotplug::self_test();
+            devpower::self_test();
+            udriver::self_test();
+            vmguest::self_test();
+            net::upnp::self_test();
+        }
+        case();
+    }
+
+    {
+        // De-fanged eager self-tests, batch 2 of 4. See batch 1 above.
+        //
+        // These report failure as `false` rather than an `Err`, and each has
+        // already printed which assertion failed by the time it returns.
+        #[inline(never)]
+        fn case() {
+            if !initproc::self_test() {
+                serial_println!("WARNING: initproc self-test failed");
+            }
+            if !reslimit::self_test() {
+                serial_println!("WARNING: reslimit self-test failed");
+            }
+            if !syshealth::self_test() {
+                serial_println!("WARNING: syshealth self-test failed");
+            }
+        }
+        case();
+    }
+
+    {
+        // De-fanged eager self-tests, batch 3 of 4. See batch 1 above.
+        #[inline(never)]
+        fn case() {
+            if let Err(e) = drvmon::self_test() {
+                serial_println!("WARNING: drvmon self-test failed: {:?}", e);
+            }
+            if let Err(e) = logpersist::self_test() {
+                serial_println!("WARNING: logpersist self-test failed: {:?}", e);
+            }
+            if let Err(e) = svcstart::self_test() {
+                serial_println!("WARNING: svcstart self-test failed: {:?}", e);
+            }
+            if let Err(e) = fs::toolbar::self_test() {
+                serial_println!("WARNING: toolbar self-test failed: {:?}", e);
+            }
+            if let Err(e) = net::bridge::self_test() {
+                serial_println!("WARNING: net::bridge self-test failed: {:?}", e);
+            }
+            if let Err(e) = net::dhcpv6::self_test() {
+                serial_println!("WARNING: net::dhcpv6 self-test failed: {:?}", e);
+            }
+            if let Err(e) = net::ftp::self_test() {
+                serial_println!("WARNING: net::ftp self-test failed: {:?}", e);
+            }
+            if let Err(e) = net::http::self_test() {
+                serial_println!("WARNING: net::http self-test failed: {:?}", e);
+            }
+            if let Err(e) = net::igmp::self_test() {
+                serial_println!("WARNING: net::igmp self-test failed: {:?}", e);
+            }
+            if let Err(e) = net::iperf::self_test() {
+                serial_println!("WARNING: net::iperf self-test failed: {:?}", e);
+            }
+            if let Err(e) = net::lldp::self_test() {
+                serial_println!("WARNING: net::lldp self-test failed: {:?}", e);
+            }
+            if let Err(e) = net::mdns::self_test() {
+                serial_println!("WARNING: net::mdns self-test failed: {:?}", e);
+            }
+            if let Err(e) = net::mld::self_test() {
+                serial_println!("WARNING: net::mld self-test failed: {:?}", e);
+            }
+            if let Err(e) = net::ndisc::self_test() {
+                serial_println!("WARNING: net::ndisc self-test failed: {:?}", e);
+            }
+        }
+        case();
+    }
+
+    {
+        // De-fanged eager self-tests, batch 4 of 4. See batch 1 above.
+        #[inline(never)]
+        fn case() {
+            if let Err(e) = net::netcat::self_test() {
+                serial_println!("WARNING: net::netcat self-test failed: {:?}", e);
+            }
+            if let Err(e) = net::netstat::self_test() {
+                serial_println!("WARNING: net::netstat self-test failed: {:?}", e);
+            }
+            if let Err(e) = net::ntp::self_test() {
+                serial_println!("WARNING: net::ntp self-test failed: {:?}", e);
+            }
+            if let Err(e) = net::pcap::self_test() {
+                serial_println!("WARNING: net::pcap self-test failed: {:?}", e);
+            }
+            if let Err(e) = net::qos::self_test() {
+                serial_println!("WARNING: net::qos self-test failed: {:?}", e);
+            }
+            if let Err(e) = net::smtp::self_test() {
+                serial_println!("WARNING: net::smtp self-test failed: {:?}", e);
+            }
+            if let Err(e) = net::snmp::self_test() {
+                serial_println!("WARNING: net::snmp self-test failed: {:?}", e);
+            }
+            if let Err(e) = net::socks::self_test() {
+                serial_println!("WARNING: net::socks self-test failed: {:?}", e);
+            }
+            if let Err(e) = net::telnet::self_test() {
+                serial_println!("WARNING: net::telnet self-test failed: {:?}", e);
+            }
+            if let Err(e) = net::tftp::self_test() {
+                serial_println!("WARNING: net::tftp self-test failed: {:?}", e);
+            }
+            if let Err(e) = net::traceroute::self_test() {
+                serial_println!("WARNING: net::traceroute self-test failed: {:?}", e);
+            }
+            if let Err(e) = net::vlan::self_test() {
+                serial_println!("WARNING: net::vlan self-test failed: {:?}", e);
+            }
+            if let Err(e) = net::wol::self_test() {
+                serial_println!("WARNING: net::wol self-test failed: {:?}", e);
             }
         }
         case();
@@ -6705,7 +7133,9 @@ extern "C" fn kernel_main() -> ! {
                             sched::yield_now();
                             spins = spins.saturating_add(1);
                             if spins >= 2_000_000 {
-                                serial_println!("[boot] WARNING: cgroup e2e task did not finish in time");
+                                serial_println!(
+                                    "[boot] WARNING: cgroup e2e task did not finish in time"
+                                );
                                 break;
                             }
                         }

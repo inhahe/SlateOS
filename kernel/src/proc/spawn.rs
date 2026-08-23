@@ -24481,7 +24481,11 @@ pub fn self_test_cpython_on_slateos_libc() -> KernelResult<()> {
             }
         }
         Err(e) => {
-            serial_println!("[spawn]   cpython: SKIP (reading {} failed: {:?})", SRC_PY, e);
+            serial_println!(
+                "[spawn]   cpython: SKIP (reading {} failed: {:?})",
+                SRC_PY,
+                e
+            );
             return Ok(());
         }
     }
@@ -24489,7 +24493,11 @@ pub fn self_test_cpython_on_slateos_libc() -> KernelResult<()> {
     let exe_elf = match crate::fs::Vfs::read_file(DST_PY) {
         Ok(b) => b,
         Err(e) => {
-            serial_println!("[spawn]   cpython: SKIP (re-read {} failed: {:?})", DST_PY, e);
+            serial_println!(
+                "[spawn]   cpython: SKIP (re-read {} failed: {:?})",
+                DST_PY,
+                e
+            );
             return Ok(());
         }
     };
@@ -29099,11 +29107,10 @@ fn stage_hosted_cc_support() -> KernelResult<Option<alloc::string::String>> {
     let _ = crate::fs::Vfs::mkdir_all("/bin");
     let _ = crate::fs::Vfs::mkdir_all("/usr/lib/x86_64-linux-gnu");
     let _ = crate::fs::Vfs::mkdir_all(&libdir);
-    for (src, dst) in STAGE
-        .iter()
-        .map(|(s, d)| (*s, *d))
-        .chain(core::iter::once((libtcc1_src.as_str(), libtcc1_dst.as_str())))
-    {
+    for (src, dst) in STAGE.iter().map(|(s, d)| (*s, *d)).chain(core::iter::once((
+        libtcc1_src.as_str(),
+        libtcc1_dst.as_str(),
+    ))) {
         match crate::fs::Vfs::read_file(src) {
             Ok(bytes) => {
                 if let Err(e) = crate::fs::Vfs::write_file(dst, &bytes) {
@@ -31347,9 +31354,12 @@ fn test_spawn_inherits_parent_capabilities() -> KernelResult<()> {
     // an address space, a thread, or to have ever run.
     let parent = pcb::create("spawn-test-cap-parent", 0);
     let marker_id = 0xC0FF_EE01_u64;
-    if let Err(e) =
-        pcb::grant_capability(parent, ResourceType::File, marker_id, Rights::READ | Rights::WRITE)
-    {
+    if let Err(e) = pcb::grant_capability(
+        parent,
+        ResourceType::File,
+        marker_id,
+        Rights::READ | Rights::WRITE,
+    ) {
         serial_println!("[spawn]   FAIL: could not grant to test parent: {:?}", e);
         pcb::destroy(parent);
         return Err(KernelError::InternalError);
@@ -31378,8 +31388,7 @@ fn test_spawn_inherits_parent_capabilities() -> KernelResult<()> {
 
     // `has_capability_for` asks the same question the syscall gates ask, rather
     // than counting entries: a count can be satisfied by the wrong capability.
-    let inherited =
-        pcb::has_capability_for(heir.pid, ResourceType::File, marker_id, Rights::READ);
+    let inherited = pcb::has_capability_for(heir.pid, ResourceType::File, marker_id, Rights::READ);
     // Rights must survive the copy too — a capability narrowed to nothing would
     // still be present and still fail every gate that reads it.
     let kept_write =

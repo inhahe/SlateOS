@@ -550,8 +550,8 @@ pub fn pending_bytes(id: TtyId) -> usize {
 /// how a program detects "size unknown".
 #[must_use]
 pub fn get_winsize(id: TtyId) -> WinSize {
-    let (stored, backend) = with_device(id, |d| (d.winsize, d.backend))
-        .unwrap_or((WinSize::default(), Backend::Pty));
+    let (stored, backend) =
+        with_device(id, |d| (d.winsize, d.backend)).unwrap_or((WinSize::default(), Backend::Pty));
     if stored.ws_row != 0 || stored.ws_col != 0 || backend != Backend::Console {
         return stored;
     }
@@ -1599,7 +1599,11 @@ pub fn self_test() {
         // ECHOE rubs out the erased character, two columns for a `^X`.
         let mut e = LineBuf::new();
         let _ = step(&mut e, b'a', &t);
-        assert_eq!(feed(&mut e, 127, &t).1, Echo::Erase(1), "erase a plain byte");
+        assert_eq!(
+            feed(&mut e, 127, &t).1,
+            Echo::Erase(1),
+            "erase a plain byte"
+        );
         // ^A is only *stored* (rather than generating a signal) with ISIG
         // cleared, which is the configuration that lets us erase it.
         let mut ctrl = Termios::sane_default();

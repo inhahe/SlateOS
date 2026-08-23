@@ -146,10 +146,12 @@ static MODE: PreemptSpinMutex<TrimMode> = PreemptSpinMutex::named(TrimMode::Peri
 static PERIOD_NS: AtomicU64 = AtomicU64::new(DEFAULT_PERIOD_NS);
 
 /// Pending discard queue.
-static DISCARD_QUEUE: PreemptSpinMutex<Vec<DiscardRange>> = PreemptSpinMutex::named(Vec::new(), b"DISCARD_QUEUE");
+static DISCARD_QUEUE: PreemptSpinMutex<Vec<DiscardRange>> =
+    PreemptSpinMutex::named(Vec::new(), b"DISCARD_QUEUE");
 
 /// Registered device capabilities.
-static DEVICE_INFO: PreemptSpinMutex<Vec<DeviceTrimInfo>> = PreemptSpinMutex::named(Vec::new(), b"DEVICE_INFO");
+static DEVICE_INFO: PreemptSpinMutex<Vec<DeviceTrimInfo>> =
+    PreemptSpinMutex::named(Vec::new(), b"DEVICE_INFO");
 
 /// Last flush timestamp.
 static LAST_FLUSH_NS: AtomicU64 = AtomicU64::new(0);

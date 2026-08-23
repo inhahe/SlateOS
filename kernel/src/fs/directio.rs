@@ -96,7 +96,8 @@ struct DioPathEntry {
 // ---------------------------------------------------------------------------
 
 /// Paths registered for automatic direct I/O.
-static DIO_PATHS: PreemptSpinMutex<Vec<DioPathEntry>> = PreemptSpinMutex::named(Vec::new(), b"DIO_PATHS");
+static DIO_PATHS: PreemptSpinMutex<Vec<DioPathEntry>> =
+    PreemptSpinMutex::named(Vec::new(), b"DIO_PATHS");
 
 /// Statistics.
 static DIO_READ_COUNT: AtomicU64 = AtomicU64::new(0);
@@ -131,7 +132,11 @@ fn align_up(val: u64) -> u64 {
 /// Offset and length should be aligned to 512 bytes for optimal
 /// performance. Unaligned operations fall back to buffered I/O
 /// but still invalidate the cache afterward.
-pub fn dio_read(path: impl AsRef<Path>, offset: u64, len: usize) -> KernelResult<(Vec<u8>, DioResult)> {
+pub fn dio_read(
+    path: impl AsRef<Path>,
+    offset: u64,
+    len: usize,
+) -> KernelResult<(Vec<u8>, DioResult)> {
     use crate::fs::Vfs;
 
     let path = path.as_ref();

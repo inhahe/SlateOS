@@ -616,15 +616,22 @@ pub fn self_test() {
     serial_println!("[netns] Running self-test...");
 
     // Test 1: Root namespace exists.
+    //
+    // Counts below are relative to `baseline`: this suite runs at an
+    // arbitrary point in boot and does not own the global namespace count,
+    // so asserting an absolute value for it panics the kernel the moment
+    // any legitimate boot-time namespace exists. See the cgroup suite,
+    // where the identical assertion did exactly that.
     assert!(exists(ROOT_NS));
-    assert_eq!(active_count(), 1);
+    let baseline = active_count();
+    assert!(baseline >= 1, "root must be counted as active");
     serial_println!("[netns]   Root exists: OK");
 
     // Test 2: Create namespace.
     let ns1 = create().expect("create ns1");
     assert!(ns1 > 0);
     assert!(exists(ns1));
-    assert_eq!(active_count(), 2);
+    assert_eq!(active_count(), baseline + 1);
     serial_println!("[netns]   Create namespace: OK");
 
     // Test 3: New namespace starts unconfigured.
@@ -837,7 +844,11 @@ pub fn self_test() {
     delete(ns1).expect("delete ns1");
     delete(ns2).expect("delete ns2");
     delete(ns3).expect("delete ns3");
-    assert_eq!(active_count(), 1);
+    assert_eq!(
+        active_count(),
+        baseline,
+        "self-test leaked namespaces (created some it never deleted)"
+    );
     serial_println!("[netns]   Cleanup: OK");
 
     serial_println!("[netns] Self-test PASSED (18 tests)");

@@ -581,20 +581,9 @@ pub fn os_version() -> String {
 // Format helpers
 // ---------------------------------------------------------------------------
 
+/// See [`crate::bytesize`] for why this is no longer written out here.
 fn format_size(bytes: u64) -> String {
-    if bytes >= 1_073_741_824 {
-        format!(
-            "{}.{} GB",
-            bytes / 1_073_741_824,
-            (bytes % 1_073_741_824) / 107_374_182
-        )
-    } else if bytes >= 1_048_576 {
-        format!("{}.{} MB", bytes / 1_048_576, (bytes % 1_048_576) / 104_857)
-    } else if bytes >= 1024 {
-        format!("{}.{} KB", bytes / 1024, (bytes % 1024) / 102)
-    } else {
-        format!("{} B", bytes)
-    }
+    crate::bytesize::iec(bytes)
 }
 
 /// Format size for external use.
@@ -626,8 +615,29 @@ pub fn stats() -> (usize, usize, String, &'static str, bool, u64) {
 // Self-tests
 // ---------------------------------------------------------------------------
 
-/// Run self-tests for the update manager module.
+/// Run the module's self-test suite against a table of its own.
+///
+/// The suite mutates module state and asserts exact contents, and it used to
+/// do that to the *live* table -- which, since it is also a kernel-shell
+/// subcommand, changed or destroyed whatever the user had here and then
+/// reported success.  The live state is moved aside for the duration and put
+/// back afterwards; `crate::fs::selftest` records why this shape rather than
+/// the alternatives.
+///
+/// The pristine value is `None` rather than a table: this module initialises
+/// lazily, and `None` is exactly what a fresh boot holds.
 pub fn self_test() {
+    // `OPS` is a lock-free mirror of `state.ops`, which lives *inside* the
+    // table. `with_pristine` restores the table and so restores `state.ops`,
+    // but it cannot know about the mirror -- leave it and the two disagree
+    // permanently, with `<module> stats` reporting the suite's activity as
+    // the user's.
+    let saved_ops = OPS.load(Ordering::Relaxed);
+    crate::fs::selftest::with_pristine(&STATE, None, self_test_inner);
+    OPS.store(saved_ops, Ordering::Relaxed);
+}
+
+fn self_test_inner() {
     use crate::serial_println;
 
     serial_println!("[updatemgr] Running self-tests...");

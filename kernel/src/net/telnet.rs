@@ -809,11 +809,38 @@ pub fn procfs_content() -> String {
 // Self-tests
 // ---------------------------------------------------------------------------
 
-/// Run telnet server self-tests.
-// Self-tests deliberately runtime-assert telnet protocol constants
-// (IAC byte, command codes, port number) as living documentation.
-#[allow(clippy::assertions_on_constants)]
+/// Run the module's self-test suite against state of its own.
+///
+/// The suite mutates module state and asserts exact contents, and it used to
+/// do that to the *live* state -- which, since it is also a kernel-shell
+/// subcommand, changed or destroyed whatever the user had here and then
+/// reported success.  It is moved aside for the duration and put back
+/// afterwards; `crate::fs::selftest` records why this shape rather than the
+/// alternatives.
+///
+/// Each pristine value is the `static`'s own initialiser, which is the one
+/// spelling of "what a fresh boot holds" that cannot drift away from it.
 pub fn self_test() -> KernelResult<()> {
+    let _pristine_initialized = crate::fs::selftest::pristine_atomic(&INITIALIZED, false);
+    let _pristine_enabled = crate::fs::selftest::pristine_atomic(&ENABLED, false);
+    let _pristine_listen_port = crate::fs::selftest::pristine_atomic(&LISTEN_PORT, DEFAULT_PORT);
+    let _pristine_last_tick = crate::fs::selftest::pristine_atomic(&LAST_TICK, 0);
+    let _pristine_total_connections = crate::fs::selftest::pristine_atomic(&TOTAL_CONNECTIONS, 0);
+    let _pristine_total_commands = crate::fs::selftest::pristine_atomic(&TOTAL_COMMANDS, 0);
+    let _pristine_total_bytes_tx = crate::fs::selftest::pristine_atomic(&TOTAL_BYTES_TX, 0);
+    let _pristine_total_bytes_rx = crate::fs::selftest::pristine_atomic(&TOTAL_BYTES_RX, 0);
+    let _pristine_rejected_connections =
+        crate::fs::selftest::pristine_atomic(&REJECTED_CONNECTIONS, 0);
+    crate::fs::selftest::with_pristine(&STATE, TelnetState::new(), self_test_inner)
+}
+
+#[allow(clippy::assertions_on_constants)]
+// `KernelResult` is `self_test`'s signature, which the shell's dispatch table
+// fixes; this body has no failing path of its own and never had one. The lint
+// fires only because the split moved that body into a *private* function, and
+// private is the visibility it inspects -- the code itself is unchanged.
+#[allow(clippy::unnecessary_wraps)]
+fn self_test_inner() -> KernelResult<()> {
     crate::serial_println!("[telnet] Running telnet server self-tests...");
     let mut passed = 0u32;
 
@@ -876,12 +903,28 @@ pub fn self_test() -> KernelResult<()> {
 
     // --- Test 6: Stats with no server ---
     {
+        // Every field is asserted exactly, which this test could not do until
+        // the suite was de-fanged. It used to run against whatever the live
+        // server was doing, so all it could honestly claim was
+        // `port == DEFAULT_PORT || port > 0` -- a disjunction whose left half
+        // is subsumed by its right, since DEFAULT_PORT is 23 -- and a
+        // `let _ = s.active_sessions;` with a comment explaining that the
+        // count could not be checked at all. Now `self_test` pins every atomic
+        // and installs a fresh `TelnetState`, so "no server" is a state with
+        // exactly one description, and the test can assert it.
+        //
+        // Test 5 above builds its own local `TelnetState`, so it leaves no
+        // sessions behind here.
         let s = stats();
-        // Stats should work even when server hasn't been initialized.
-        assert!(s.port == DEFAULT_PORT || s.port > 0, "port valid");
-        // active_sessions should be >= 0 (it's usize, so always true, but
-        // verify the function doesn't panic).
-        let _ = s.active_sessions;
+        assert!(!s.initialized, "no server has been initialized");
+        assert!(!s.enabled, "and it is not enabled");
+        assert_eq!(s.port, DEFAULT_PORT, "an uninitialized server reports 23");
+        assert_eq!(s.active_sessions, 0, "no server, no sessions");
+        assert_eq!(s.total_connections, 0);
+        assert_eq!(s.total_commands, 0);
+        assert_eq!(s.total_bytes_tx, 0);
+        assert_eq!(s.total_bytes_rx, 0);
+        assert_eq!(s.rejected_connections, 0);
 
         passed = passed.saturating_add(1);
         crate::serial_println!("[telnet]   test 6 (stats without init) PASSED");

@@ -570,7 +570,10 @@ pub fn self_test() -> KernelResult<()> {
             255,
             "should back up to the character boundary before the limit"
         );
-        assert!(cut.chars().all(|c| c == 'a'), "should keep only whole chars");
+        assert!(
+            cut.chars().all(|c| c == 'a'),
+            "should keep only whole chars"
+        );
 
         // And it survives the full path, not just the helper.
         let id_evil = request_capability(

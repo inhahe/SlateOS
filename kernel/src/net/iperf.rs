@@ -531,24 +531,20 @@ pub fn format_bandwidth(bps: u64) -> String {
     }
 }
 
-/// Format bytes as human-readable size.
+/// Format bytes as human-readable size, two digits after the point.
+///
+/// Delegates to [`crate::bytesize::iec2`] — the two-digit form — because a
+/// transfer total is the one place where one digit is genuinely too coarse: at
+/// GiB scale a tenth is 107 MB, wider than most of the transfers being measured.
+///
+/// The private copy this replaced had the tenths bug squared. `(bytes % 1024)
+/// / 10` reaches **102**, and with `{:02}` that printed `1.102 KB` — three
+/// digits in a two-digit field, and larger-looking than the `1.99 KB` below it.
+/// It also labelled 1024-based units `KB`/`MB`/`GB`, overstating each by ~7%,
+/// which in a *throughput* tool is the one mislabelling a user might act on.
 #[allow(dead_code)] // Public API.
 pub fn format_bytes(bytes: u64) -> String {
-    if bytes >= 1_073_741_824 {
-        let gb = bytes / 1_048_576;
-        let frac = (bytes % 1_073_741_824) / 10_737_418;
-        format!("{}.{:02} GB", gb / 1024, frac)
-    } else if bytes >= 1_048_576 {
-        let mb = bytes / 1024;
-        let frac = (bytes % 1_048_576) / 10_485;
-        format!("{}.{:02} MB", mb / 1024, frac)
-    } else if bytes >= 1024 {
-        let kb = bytes;
-        let frac = (bytes % 1024) / 10;
-        format!("{}.{:02} KB", kb / 1024, frac)
-    } else {
-        format!("{} B", bytes)
-    }
+    crate::bytesize::iec2(bytes)
 }
 
 /// Format duration in nanoseconds as human-readable time.
@@ -639,12 +635,37 @@ pub fn procfs_content() -> String {
 // Self-tests
 // ---------------------------------------------------------------------------
 
-/// Run iperf self-tests.
+/// Run the module's self-test suite against state of its own.
+///
+/// The suite mutates module state and asserts exact contents, and it used to
+/// do that to the *live* state -- which, since it is also a kernel-shell
+/// subcommand, changed or destroyed whatever the user had here and then
+/// reported success.  It is moved aside for the duration and put back
+/// afterwards; `crate::fs::selftest` records why this shape rather than the
+/// alternatives.
+///
+/// Each pristine value is the `static`'s own initialiser, which is the one
+/// spelling of "what a fresh boot holds" that cannot drift away from it.
 // Self-tests deliberately runtime-assert protocol constants as
 // living documentation.
 #[allow(dead_code)] // Public API.
-#[allow(clippy::assertions_on_constants)]
 pub fn self_test() -> KernelResult<()> {
+    let _pristine_tests_run = crate::fs::selftest::pristine_atomic(&TESTS_RUN, 0);
+    let _pristine_tcp_tests = crate::fs::selftest::pristine_atomic(&TCP_TESTS, 0);
+    let _pristine_udp_tests = crate::fs::selftest::pristine_atomic(&UDP_TESTS, 0);
+    let _pristine_server_sessions = crate::fs::selftest::pristine_atomic(&SERVER_SESSIONS, 0);
+    let _pristine_total_bytes_tx = crate::fs::selftest::pristine_atomic(&TOTAL_BYTES_TX, 0);
+    let _pristine_total_bytes_rx = crate::fs::selftest::pristine_atomic(&TOTAL_BYTES_RX, 0);
+    self_test_inner()
+}
+
+#[allow(clippy::assertions_on_constants)]
+// `KernelResult` is `self_test`'s signature, which the shell's dispatch table
+// fixes; this body has no failing path of its own and never had one. The lint
+// fires only because the split moved that body into a *private* function, and
+// private is the visibility it inspects -- the code itself is unchanged.
+#[allow(clippy::unnecessary_wraps)]
+fn self_test_inner() -> KernelResult<()> {
     crate::serial_println!("[iperf] Running iperf self-tests...");
     let mut passed = 0u32;
 
@@ -663,8 +684,17 @@ pub fn self_test() -> KernelResult<()> {
     {
         assert!(format_bytes(0) == "0 B", "0 bytes");
         assert!(format_bytes(500) == "500 B", "500 bytes");
-        assert!(format_bytes(1_048_576).contains("MB"), "1 MB");
-        assert!(format_bytes(1_073_741_824).contains("GB"), "1 GB");
+        // IEC names, not SI: these are 1024-based units, and calling 1 MiB
+        // "1 MB" overstates it by ~5%. Two digits after the point because a
+        // transfer total at GiB scale needs finer than a 107 MB step.
+        assert!(format_bytes(1_048_576) == "1.00 MiB", "1 MiB");
+        assert!(format_bytes(1_073_741_824) == "1.00 GiB", "1 GiB");
+        // The case the private copy got wrong: `(bytes % 1024) / 10` reached
+        // 102 here and printed "1.102 KB" — three digits in a two-digit field.
+        assert!(
+            format_bytes(2047) == "1.99 KiB",
+            "top of KiB stays two digits"
+        );
 
         passed = passed.saturating_add(1);
         crate::serial_println!("[iperf]   test 2 (byte formatting) PASSED");

@@ -22,11 +22,11 @@
 //! ```
 
 use super::fpu::FpuState;
-use alloc::boxed::Box;
 use crate::error::{KernelError, KernelResult};
 use crate::mm::frame::{self, FRAME_SIZE};
 use crate::mm::page_table;
 use crate::serial_println;
+use alloc::boxed::Box;
 use core::ptr;
 use core::sync::atomic::{AtomicU64, Ordering};
 
@@ -869,7 +869,10 @@ impl Task {
         }
         // Word just below the current record's boundary.  Clamped to offset 8
         // so the canary itself is never mistaken for stack payload.
-        let Some(offset) = TASK_STACK_SIZE.checked_sub(bytes).and_then(|o| o.checked_sub(8)) else {
+        let Some(offset) = TASK_STACK_SIZE
+            .checked_sub(bytes)
+            .and_then(|o| o.checked_sub(8))
+        else {
             // `bytes` already covers the whole stack; nothing can beat it.
             return false;
         };
@@ -879,8 +882,7 @@ impl Task {
         // SAFETY: `offset` is in [8, TASK_STACK_SIZE - 8] by the checks above,
         // so the address lies inside this task's mapped stack, and is 8-byte
         // aligned because TASK_STACK_SIZE and the subtrahends are.
-        let word =
-            unsafe { ptr::read_volatile((self.stack_bottom + offset as u64) as *const u64) };
+        let word = unsafe { ptr::read_volatile((self.stack_bottom + offset as u64) as *const u64) };
         word != STACK_SENTINEL
     }
 
@@ -1397,22 +1399,19 @@ impl Task {
 
         // Watermark: how deep did this task's stack actually get?
         if let (Some(used), Some(pct)) = (self.stack_usage_bytes(), self.stack_usage_pct()) {
-            serial_println!("  watermark: {} bytes used of {} ({}%)", used, TASK_STACK_SIZE, pct);
+            serial_println!(
+                "  watermark: {} bytes used of {} ({}%)",
+                used,
+                TASK_STACK_SIZE,
+                pct
+            );
         }
 
         // Composition of the two ends of the stack.  See the doc comment:
         // this is what tells a genuine overflow from a recycled slot.
         let (bz, bs, bo) = self.scan_region(8, 512);
-        let (tz, ts, to) = self.scan_region(
-            (TASK_STACK_SIZE as u64).saturating_sub(512),
-            512,
-        );
-        serial_println!(
-            "  bottom 512B: {} zero, {} sentinel, {} other",
-            bz,
-            bs,
-            bo
-        );
+        let (tz, ts, to) = self.scan_region((TASK_STACK_SIZE as u64).saturating_sub(512), 512);
+        serial_println!("  bottom 512B: {} zero, {} sentinel, {} other", bz, bs, bo);
         serial_println!("  top    512B: {} zero, {} sentinel, {} other", tz, ts, to);
         if to == 0 && bo == 0 {
             serial_println!(

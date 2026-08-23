@@ -492,8 +492,16 @@ fn test_get_validation() {
     // 1. Source does not exist -> `Vfs::metadata` errors -> "cannot tell", so
     //    the entry stays trusted and is returned. An unreadable source must
     //    never be mistaken for a changed one.
-    store("/no/such/file.png", ThumbSize::Small, 8, 8, vec![0u8; 64], 1000, 5000)
-        .expect("store missing-source thumb");
+    store(
+        "/no/such/file.png",
+        ThumbSize::Small,
+        8,
+        8,
+        vec![0u8; 64],
+        1000,
+        5000,
+    )
+    .expect("store missing-source thumb");
     assert_eq!(count(), 1);
     assert!(
         get("/no/such/file.png", ThumbSize::Small).is_some(),
@@ -510,15 +518,31 @@ fn test_get_validation() {
     //    in place, so every later lookup re-failed validation (re-paying the
     //    metadata call) and its bytes stayed counted until LRU evicted it.
     let before = memory_used();
-    store("/tmp/thumb_test/img.png", ThumbSize::Small, 8, 8, vec![0u8; 128], 1, 1)
-        .expect("store stale thumb");
+    store(
+        "/tmp/thumb_test/img.png",
+        ThumbSize::Small,
+        8,
+        8,
+        vec![0u8; 128],
+        1,
+        1,
+    )
+    .expect("store stale thumb");
     assert_eq!(memory_used(), before.saturating_add(128));
     assert!(
         get("/tmp/thumb_test/img.png", ThumbSize::Small).is_none(),
         "a changed source must miss"
     );
-    assert_eq!(count(), 0, "a stale entry must be dropped, not just reported as a miss");
-    assert_eq!(memory_used(), before, "dropping a stale entry must return its bytes");
+    assert_eq!(
+        count(),
+        0,
+        "a stale entry must be dropped, not just reported as a miss"
+    );
+    assert_eq!(
+        memory_used(),
+        before,
+        "dropping a stale entry must return its bytes"
+    );
 
     // 3. Source unchanged -> hit, and the entry survives the drop/re-acquire
     //    that phases 2 and 3 do around the unlocked metadata call.

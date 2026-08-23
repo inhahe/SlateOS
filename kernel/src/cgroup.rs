@@ -1233,26 +1233,35 @@ pub fn self_test() {
 /// Inner self-test body, called with interrupts disabled.
 fn self_test_inner() {
     // Test 1: Root cgroup exists by default.
+    //
+    // The counts below are relative to `baseline`, not absolute. This suite
+    // runs at an arbitrary point in the boot sequence, long after other
+    // subsystems have had the chance to create cgroups of their own, so it
+    // does not own the global count and must not assert a value for it --
+    // an `assert_eq!(active_count(), 1)` here panics the kernel the moment
+    // any legitimate boot-time cgroup exists. What this suite *can* own is
+    // its own net effect, which the final cleanup check asserts is zero.
     assert!(exists(ROOT_CGROUP), "root cgroup must exist");
-    assert_eq!(active_count(), 1, "only root at startup");
+    let baseline = active_count();
+    assert!(baseline >= 1, "root must be counted as active");
     serial_println!("[cgroup]   Root exists: OK");
 
     // Test 2: Create child cgroups.
     let child1 = create(ROOT_CGROUP).expect("create child1");
     assert!(child1 > 0, "child ID should be > 0");
     assert!(exists(child1));
-    assert_eq!(active_count(), 2);
+    assert_eq!(active_count(), baseline + 1);
 
     let child2 = create(ROOT_CGROUP).expect("create child2");
     assert!(exists(child2));
     assert_ne!(child1, child2);
-    assert_eq!(active_count(), 3);
+    assert_eq!(active_count(), baseline + 2);
     serial_println!("[cgroup]   Create children: OK");
 
     // Test 3: Create grandchild (hierarchical).
     let grandchild = create(child1).expect("create grandchild");
     assert!(exists(grandchild));
-    assert_eq!(active_count(), 4);
+    assert_eq!(active_count(), baseline + 3);
 
     // Verify parent's child count.
     let s = stats(child1).expect("stats child1");
@@ -1503,6 +1512,12 @@ fn self_test_inner() {
     delete(inner).expect("delete inner");
     delete(child1).expect("delete child1");
     delete(child2).expect("delete child2");
-    assert_eq!(active_count(), 1, "only root remains");
+    // The suite's net effect on the global table must be zero: every cgroup
+    // it created has been deleted, and it created nothing it did not track.
+    assert_eq!(
+        active_count(),
+        baseline,
+        "self-test leaked cgroups (created some it never deleted)"
+    );
     serial_println!("[cgroup]   Cleanup: OK");
 }

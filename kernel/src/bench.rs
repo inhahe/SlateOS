@@ -2732,10 +2732,7 @@ fn report_canary(start: ArmSample) {
     let (end_nop, end_store) = (end.nop, end.store);
     // Guard the division: a missing start means the calibration itself failed,
     // and the run's budgets are already untrustworthy in that case.
-    let (start, end) = (
-        start.measured.unwrap_or(0),
-        end.measured.unwrap_or(0),
-    );
+    let (start, end) = (start.measured.unwrap_or(0), end.measured.unwrap_or(0));
     let pct = if start > 0 {
         end.saturating_mul(100) / start
     } else {
@@ -6409,7 +6406,9 @@ fn bench_lock_primitives() {
         "[bench]   nested acquire: {}ns for 2 nested vs {}ns for 2 flat = {}ns of lockdep dependency work per nested acquire",
         nested.min_ns,
         tracked.min_ns.saturating_mul(2),
-        nested.min_ns.saturating_sub(tracked.min_ns.saturating_mul(2))
+        nested
+            .min_ns
+            .saturating_sub(tracked.min_ns.saturating_mul(2))
     );
     // Lockdep's per-acquire cost used to be O(registered classes) — a linear
     // scan run twice per lock operation — so this number was the multiplier on

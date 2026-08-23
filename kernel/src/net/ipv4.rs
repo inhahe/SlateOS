@@ -43,8 +43,8 @@ use core::sync::atomic::{AtomicU16, Ordering};
 
 use crate::error::{KernelError, KernelResult};
 
-use super::ethernet::{self, ETHERTYPE_IPV4};
 use super::checksum;
+use super::ethernet::{self, ETHERTYPE_IPV4};
 use super::interface::{self, Ipv4Addr};
 use crate::virtio::net::MacAddress;
 
@@ -323,10 +323,7 @@ pub fn verify_transport_checksum(
     }
 
     let seg_len = segment.len() as u16;
-    let sum = checksum::sum_bytes(
-        checksum::pseudo_v4(src, dst, protocol, seg_len),
-        segment,
-    );
+    let sum = checksum::sum_bytes(checksum::pseudo_v4(src, dst, protocol, seg_len), segment);
 
     // Valid checksum folds to 0xFFFF (since the checksum field is
     // included in the computation, the complement is zero).

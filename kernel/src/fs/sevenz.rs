@@ -579,9 +579,7 @@ fn parse_substreams_info(
                 // were bounded.
                 let total_ss = num_unpack_streams_in_folder
                     .iter()
-                    .try_fold(0usize, |acc, &n| {
-                        acc.checked_add(usize::try_from(n).ok()?)
-                    })
+                    .try_fold(0usize, |acc, &n| acc.checked_add(usize::try_from(n).ok()?))
                     .filter(|&t| t <= reader.remaining())
                     .ok_or(KernelError::CorruptedData)?;
                 let defined = reader.read_bool_vector(total_ss)?;

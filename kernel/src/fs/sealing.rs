@@ -165,7 +165,8 @@ struct SealEntry {
 }
 
 /// Sealed file table.
-static SEAL_TABLE: PreemptSpinMutex<Vec<SealEntry>> = PreemptSpinMutex::named(Vec::new(), b"SEAL_TABLE");
+static SEAL_TABLE: PreemptSpinMutex<Vec<SealEntry>> =
+    PreemptSpinMutex::named(Vec::new(), b"SEAL_TABLE");
 
 /// Statistics.
 static SEAL_OPS: AtomicU64 = AtomicU64::new(0);

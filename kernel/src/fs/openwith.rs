@@ -372,8 +372,14 @@ pub fn self_test() -> KernelResult<()> {
         register_app("/usr/bin/editor", "Text Editor")?;
         register_app("/usr/bin/viewer", "Image Viewer")?;
         let apps = list_apps();
-        assert!(apps.iter().any(|(p, _)| p.as_path() == Path::new("/usr/bin/editor")));
-        assert!(apps.iter().any(|(p, _)| p.as_path() == Path::new("/usr/bin/viewer")));
+        assert!(
+            apps.iter()
+                .any(|(p, _)| p.as_path() == Path::new("/usr/bin/editor"))
+        );
+        assert!(
+            apps.iter()
+                .any(|(p, _)| p.as_path() == Path::new("/usr/bin/viewer"))
+        );
         serial_println!("[openwith] test 1 passed: register apps");
     }
 
@@ -396,9 +402,11 @@ pub fn self_test() -> KernelResult<()> {
 
         // Check recent was recorded.
         let recent = recent_for_type("text/plain");
-        assert!(recent
-            .iter()
-            .any(|(p, _, _)| p.as_path() == Path::new("/usr/bin/editor")));
+        assert!(
+            recent
+                .iter()
+                .any(|(p, _, _)| p.as_path() == Path::new("/usr/bin/editor"))
+        );
         serial_println!("[openwith] test 3 passed: open with + recent");
     }
 
@@ -433,7 +441,11 @@ pub fn self_test() -> KernelResult<()> {
         unregister_app("/usr/bin/editor")?;
         unregister_app("/usr/bin/viewer")?;
         let apps = list_apps();
-        assert!(!apps.iter().any(|(p, _)| p.as_path() == Path::new("/usr/bin/editor")));
+        assert!(
+            !apps
+                .iter()
+                .any(|(p, _)| p.as_path() == Path::new("/usr/bin/editor"))
+        );
         serial_println!("[openwith] test 6 passed: unregister apps");
     }
 
@@ -461,8 +473,14 @@ pub fn self_test() -> KernelResult<()> {
         register_app(app_b, "Editor B")?;
         let apps = list_apps();
         // Two distinct entries, not one deduplicated one.
-        assert!(apps.iter().any(|(p, n)| p.as_path() == app_a && n == "Editor A"));
-        assert!(apps.iter().any(|(p, n)| p.as_path() == app_b && n == "Editor B"));
+        assert!(
+            apps.iter()
+                .any(|(p, n)| p.as_path() == app_a && n == "Editor A")
+        );
+        assert!(
+            apps.iter()
+                .any(|(p, n)| p.as_path() == app_b && n == "Editor B")
+        );
 
         // The opened file's path round-trips byte-exactly.
         let result = open_with(file, app_a, "Editor A", false)?;

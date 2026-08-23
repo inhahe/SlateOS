@@ -568,20 +568,13 @@ fn current_time_secs() -> u64 {
 }
 
 /// Format a byte count as a human-readable string (e.g., "1.5 MiB").
+///
+/// Delegates to [`crate::bytesize::iec`]. This copy had the arithmetic right —
+/// it scaled before dividing, so it was one of the few without the tenths bug —
+/// but it stopped at GiB, and a disk quota on a multi-terabyte volume is
+/// exactly where a four-digit GiB number is least readable.
 pub fn format_bytes(bytes: u64) -> String {
-    if bytes < 1024 {
-        alloc::format!("{} B", bytes)
-    } else if bytes < 1024 * 1024 {
-        alloc::format!("{}.{} KiB", bytes / 1024, (bytes % 1024) * 10 / 1024)
-    } else if bytes < 1024 * 1024 * 1024 {
-        let mib = bytes / (1024 * 1024);
-        let frac = (bytes % (1024 * 1024)) * 10 / (1024 * 1024);
-        alloc::format!("{}.{} MiB", mib, frac)
-    } else {
-        let gib = bytes / (1024 * 1024 * 1024);
-        let frac = (bytes % (1024 * 1024 * 1024)) * 10 / (1024 * 1024 * 1024);
-        alloc::format!("{}.{} GiB", gib, frac)
-    }
+    crate::bytesize::iec(bytes)
 }
 
 // ---------------------------------------------------------------------------

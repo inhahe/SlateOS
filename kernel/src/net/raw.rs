@@ -271,7 +271,9 @@ fn check_dead_owner_self_heals(dead_pid: ProcessId) -> KernelResult<()> {
     CLAIMED.store(true, Ordering::SeqCst);
 
     if is_claimed() {
-        crate::serial_println!("[net-raw]   FAIL: claim by dead PID {dead_pid} still reported live");
+        crate::serial_println!(
+            "[net-raw]   FAIL: claim by dead PID {dead_pid} still reported live"
+        );
         return Err(KernelError::InternalError);
     }
     // The repair must be durable, not just a `false` return.

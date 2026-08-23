@@ -456,7 +456,36 @@ pub fn stats() -> (usize, usize, u64, u64, usize, u64) {
 // Self-test
 // ---------------------------------------------------------------------------
 
+/// Run the suite against pristine state, then put the user's versioning back.
+///
+/// The suite used to run against whatever the module already held, which left
+/// it two conditions it could not test under and had to skip on: a pre-existing
+/// watch covering the fixture (whose retention policy would decide the version
+/// counts asserted in tests 4, 9 and 10, instead of the default policy's), and
+/// versioning disabled for the fixture's subtree (which makes every capture
+/// fail). Both are ordinary user configurations, and either silently removed
+/// all twelve tests — on the shell path only, so a green boot never showed the
+/// gap.
+///
+/// Neither can arise against a table the suite owns: pristine state has no
+/// watches and no policy overrides, so the fixture is covered by the default
+/// policy by construction. That is the difference between working around the
+/// user's configuration and not being subject to it.
+///
+/// The pristine value is `None` rather than a table: this module initialises
+/// lazily, and `None` is exactly what a fresh boot holds.
 pub fn self_test() {
+    // `OPS` is a lock-free mirror of `state.ops`, which lives *inside* the
+    // table. `with_pristine` restores the table and so restores `state.ops`,
+    // but it cannot know about the mirror -- leave it and the two disagree
+    // permanently, with `fversion stats` reporting the suite's activity as the
+    // user's.
+    let saved_ops = OPS.load(Ordering::Relaxed);
+    crate::fs::selftest::with_pristine(&STATE, None, self_test_inner);
+    OPS.store(saved_ops, Ordering::Relaxed);
+}
+
+fn self_test_inner() {
     crate::serial_println!("fileversion::self_test() — running tests...");
 
     init_defaults();
@@ -469,19 +498,18 @@ pub fn self_test() {
     const FIXTURE: &str = "/tmp/.fileversion-selftest/a.txt";
     const WATCH_DIR: &str = "/tmp/.fileversion-selftest/docs";
 
-    // A pre-existing watch covering the fixture would impose its own retention
-    // policy on the captures below, so the exact version counts in tests 4, 9
-    // and 10 would be the user's policy's counts rather than the default's.
-    // That is a configuration the suite cannot test under, not a failure.
-    if list_watches()
-        .iter()
-        .any(|w| crate::fs::pathutil::path_in_subtree(FIXTURE, &w.path))
-    {
-        crate::serial_println!(
-            "fileversion::self_test() — skipped: an existing watch covers {FIXTURE}"
-        );
-        return;
-    }
+    // A watch covering the fixture would impose its own retention policy on the
+    // captures below, so the exact version counts in tests 4, 9 and 10 would be
+    // that policy's rather than the default's. Against pristine state there are
+    // no watches, so this is now an invariant to check rather than a condition
+    // to skip on — and checking it guards the invariant itself, catching an
+    // `init_defaults` that starts seeding watches.
+    assert!(
+        !list_watches()
+            .iter()
+            .any(|w| crate::fs::pathutil::path_in_subtree(FIXTURE, &w.path)),
+        "pristine state must have no watch covering {FIXTURE}"
+    );
 
     // Baseline.
     //
@@ -497,16 +525,16 @@ pub fn self_test() {
     //
     // A user can turn versioning off globally, or put a `Disabled` policy on a
     // subtree covering the fixture, and either makes every capture below fail.
-    // Neither is a defect for the suite to report, so detect it and skip.
+    // The suite used to detect that and skip; against pristine state it cannot
+    // happen, so a `NotSupported` here now means versioning is off in the
+    // module's *own defaults* — a real defect, and one the skip was hiding.
     let data = b"Hello, world!";
     let id1 = match capture_version(FIXTURE, data, 1000) {
         Ok(id) => id,
-        Err(KernelError::NotSupported) => {
-            crate::serial_println!(
-                "fileversion::self_test() — skipped: versioning is disabled for {FIXTURE}"
-            );
-            return;
-        }
+        Err(KernelError::NotSupported) => panic!(
+            "capture v1: versioning is disabled for {FIXTURE} in pristine state — \
+             init_defaults must leave capture enabled"
+        ),
         Err(e) => panic!("capture v1: {e:?}"),
     };
     assert!(id1 > 0);
@@ -577,7 +605,7 @@ pub fn self_test() {
     let (ver_count, _file_count, captured, restored, watch_count, ops) = stats();
     assert_eq!(ver_count, base_versions);
     assert!(captured >= base_captured + 2);
-    assert!(restored >= base_restored + 1);
+    assert!(restored > base_restored);
     assert_eq!(watch_count, base_watches + 1);
     assert!(ops > 0);
     crate::serial_println!("  [11/12] stats: OK");

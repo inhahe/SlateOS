@@ -1377,8 +1377,29 @@ pub fn procfs_content() -> String {
 // Self-tests
 // ---------------------------------------------------------------------------
 
-/// Run mDNS self-tests.
+/// Run the module's self-test suite against state of its own.
+///
+/// The suite mutates module state and asserts exact contents, and it used to
+/// do that to the *live* state -- which, since it is also a kernel-shell
+/// subcommand, changed or destroyed whatever the user had here and then
+/// reported success.  It is moved aside for the duration and put back
+/// afterwards; `crate::fs::selftest` records why this shape rather than the
+/// alternatives.
+///
+/// Each pristine value is the `static`'s own initialiser, which is the one
+/// spelling of "what a fresh boot holds" that cannot drift away from it.
 pub fn self_test() -> KernelResult<()> {
+    let _pristine_initialized = crate::fs::selftest::pristine_atomic(&INITIALIZED, false);
+    let _pristine_last_cache_tick = crate::fs::selftest::pristine_atomic(&LAST_CACHE_TICK, 0);
+    let _pristine_queries_sent = crate::fs::selftest::pristine_atomic(&QUERIES_SENT, 0);
+    let _pristine_responses_sent = crate::fs::selftest::pristine_atomic(&RESPONSES_SENT, 0);
+    let _pristine_records_received = crate::fs::selftest::pristine_atomic(&RECORDS_RECEIVED, 0);
+    let _pristine_cache_hits = crate::fs::selftest::pristine_atomic(&CACHE_HITS, 0);
+    let _pristine_cache_misses = crate::fs::selftest::pristine_atomic(&CACHE_MISSES, 0);
+    crate::fs::selftest::with_pristine(&STATE, MdnsState::new(), self_test_inner)
+}
+
+fn self_test_inner() -> KernelResult<()> {
     crate::serial_println!("[mdns] Running mDNS self-tests...");
     let mut passed = 0u32;
 

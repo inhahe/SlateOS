@@ -94,6 +94,23 @@ pub enum FixStatus {
 }
 
 impl FixStatus {
+    /// Whether the issue is still outstanding — detected and not yet resolved.
+    ///
+    /// Named rather than open-coded because three call sites need this exact
+    /// pair and a fourth got it wrong: `scan`'s duplicate suppression tested
+    /// `== Detected` alone, while `scan` itself records new issues as
+    /// `FixAvailable`, so the check matched nothing it was meant to match and
+    /// every scan re-added every issue it had already found. `fix` and
+    /// `fix_all` had the pair right; centralising it leaves one spelling to
+    /// get right rather than four.
+    ///
+    /// `Fixed` and `Ignored` are deliberately excluded: an issue that recurs
+    /// after being resolved is a genuinely new finding and should be reported
+    /// again rather than suppressed.
+    pub fn is_outstanding(self) -> bool {
+        matches!(self, Self::Detected | Self::FixAvailable)
+    }
+
     pub fn label(self) -> &'static str {
         match self {
             Self::Detected => "Detected",
@@ -189,11 +206,11 @@ pub fn scan() -> KernelResult<usize> {
         ];
         let mut found = 0;
         for (cat, sev, desc) in &simulated {
-            // Don't re-add if same category already detected and not fixed.
+            // Don't re-add if the same category is already outstanding.
             if state
                 .issues
                 .iter()
-                .any(|i| i.category == *cat && i.status == FixStatus::Detected)
+                .any(|i| i.category == *cat && i.status.is_outstanding())
             {
                 continue;
             }
@@ -224,6 +241,11 @@ pub fn fix(issue_id: u32) -> KernelResult<()> {
             .iter_mut()
             .find(|i| i.id == issue_id)
             .ok_or(KernelError::NotFound)?;
+        // Deliberately an exhaustive match rather than `is_outstanding()`:
+        // the question here is "can this transition to Fixed", which also
+        // admits `Ignored`, so the two predicates only look alike. The match
+        // also means a new `FixStatus` variant fails to compile here rather
+        // than silently taking a default branch.
         match issue.status {
             FixStatus::FixAvailable | FixStatus::Detected => {
                 issue.status = FixStatus::Fixed;
@@ -246,7 +268,7 @@ pub fn fix_all() -> KernelResult<usize> {
     with_state(|state| {
         let mut fixed = 0;
         for issue in state.issues.iter_mut() {
-            if issue.status == FixStatus::FixAvailable || issue.status == FixStatus::Detected {
+            if issue.status.is_outstanding() {
                 issue.status = FixStatus::Fixed;
                 state.total_fixes += 1;
                 fixed += 1;
@@ -311,7 +333,29 @@ pub fn stats() -> (usize, u64, u64, u64, u64) {
 // Self-test
 // ---------------------------------------------------------------------------
 
+/// Run the module's self-test suite against a table of its own.
+///
+/// The suite asserts exact table contents, and it used to get a table it could
+/// make those claims about by emptying the live one -- which, since it is also
+/// a kernel-shell subcommand, destroyed whatever the user had here and then
+/// reported success.  The live state is moved aside for the duration and put
+/// back afterwards; `crate::fs::selftest` records why this shape rather than
+/// the alternatives.
+///
+/// The pristine value is `None` rather than a table: this module initialises
+/// lazily, and `None` is exactly what a fresh boot holds.
 pub fn self_test() {
+    // `OPS` is a lock-free mirror of `state.ops`, which lives *inside* the
+    // table. `with_pristine` restores the table and so restores `state.ops`,
+    // but it cannot know about the mirror -- leave it and the two disagree
+    // permanently, with `<module> stats` reporting the suite's activity as
+    // the user's.
+    let saved_ops = OPS.load(Ordering::Relaxed);
+    crate::fs::selftest::with_pristine(&STATE, None, self_test_inner);
+    OPS.store(saved_ops, Ordering::Relaxed);
+}
+
+fn self_test_inner() {
     crate::serial_println!("autofix::self_test() — running tests...");
     init_defaults();
 
@@ -350,15 +394,51 @@ pub fn self_test() {
     crate::serial_println!("  [6/8] clear: OK");
 
     // 7: Re-scan doesn't duplicate.
+    //
+    // This is the assertion that caught the dedup being dead: `scan` recorded
+    // new issues as `FixAvailable` while the suppression check tested for
+    // `Detected`, so it matched nothing and a second scan re-added all three.
+    // It failed the first time it was ever run, having been correct and unrun
+    // for as long as it existed.
+    //
+    // Both halves of the predicate are covered now. Suppression is about the
+    // table, not the return value — a `scan` that returned 0 while still
+    // pushing rows would satisfy the old assertion — so the length is checked
+    // too. And the exclusion is checked as well: resolving an issue must let
+    // a later scan report it again, since a fault that recurs is a new
+    // finding rather than a duplicate.
     let found = scan().expect("scan2");
     assert_eq!(found, 3);
+    let after_first = list_issues(None).len();
     let found2 = scan().expect("scan3");
-    assert_eq!(found2, 0); // Already detected.
+    assert_eq!(found2, 0, "outstanding issues are not re-detected");
+    assert_eq!(
+        list_issues(None).len(),
+        after_first,
+        "and no rows were added behind the count"
+    );
+    // Resolve one, and it becomes re-detectable.
+    let outstanding = list_issues(None);
+    fix(outstanding[0].id).expect("fix for re-detect");
+    assert_eq!(
+        scan().expect("scan4"),
+        1,
+        "a resolved issue is reported again if it recurs"
+    );
     crate::serial_println!("  [7/8] no duplicates: OK");
 
     // 8: Stats.
+    //
+    // `stats` reports `issues.len()`, i.e. every row including resolved ones,
+    // so this tracks whatever test 7 left rather than restating a constant:
+    // the three from its first scan plus the one its re-detect step added.
     let (issues, scans, fixes, ignored, ops) = stats();
-    assert_eq!(issues, 3);
+    assert_eq!(
+        issues,
+        list_issues(None).len(),
+        "stats agrees with the table"
+    );
+    assert_eq!(issues, 4);
     assert!(scans >= 3);
     assert!(fixes >= 2);
     assert_eq!(ignored, 1);

@@ -1081,12 +1081,33 @@ pub fn procfs_content() -> String {
 // Self-tests
 // ---------------------------------------------------------------------------
 
-/// Run DHCPv6 self-tests.
-// Self-tests deliberately runtime-assert RFC-defined constants
-// (port numbers, message-type codes) as living documentation; those
-// trigger clippy::assertions_on_constants.
-#[allow(clippy::assertions_on_constants)]
+/// Run the module's self-test suite against state of its own.
+///
+/// The suite mutates module state and asserts exact contents, and it used to
+/// do that to the *live* state -- which, since it is also a kernel-shell
+/// subcommand, changed or destroyed whatever the user had here and then
+/// reported success.  It is moved aside for the duration and put back
+/// afterwards; `crate::fs::selftest` records why this shape rather than the
+/// alternatives.
+///
+/// Each pristine value is the `static`'s own initialiser, which is the one
+/// spelling of "what a fresh boot holds" that cannot drift away from it.
 pub fn self_test() -> KernelResult<()> {
+    let _pristine_solicits_sent = crate::fs::selftest::pristine_atomic(&SOLICITS_SENT, 0);
+    let _pristine_requests_sent = crate::fs::selftest::pristine_atomic(&REQUESTS_SENT, 0);
+    let _pristine_info_requests_sent = crate::fs::selftest::pristine_atomic(&INFO_REQUESTS_SENT, 0);
+    let _pristine_replies_received = crate::fs::selftest::pristine_atomic(&REPLIES_RECEIVED, 0);
+    let _pristine_errors = crate::fs::selftest::pristine_atomic(&ERRORS, 0);
+    crate::fs::selftest::with_pristine(&STATE, Dhcpv6ClientState::new(), self_test_inner)
+}
+
+#[allow(clippy::assertions_on_constants)]
+// `KernelResult` is `self_test`'s signature, which the shell's dispatch table
+// fixes; this body has no failing path of its own and never had one. The lint
+// fires only because the split moved that body into a *private* function, and
+// private is the visibility it inspects -- the code itself is unchanged.
+#[allow(clippy::unnecessary_wraps)]
+fn self_test_inner() -> KernelResult<()> {
     crate::serial_println!("[dhcpv6] Running DHCPv6 self-tests...");
     let mut passed = 0u32;
 

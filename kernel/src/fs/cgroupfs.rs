@@ -223,27 +223,52 @@ pub fn delete_group(path: &str) -> KernelResult<()> {
         if path == "/" {
             return Err(KernelError::PermissionDenied);
         }
-        // Capture the backing kernel group before removing the frontend
-        // entry so we can release it too.
-        let kernel_id = state
+        // Capture the backing kernel group *and its members* before removing
+        // the frontend entry, so we can release both.
+        let doomed = state
             .groups
             .iter()
             .find(|g| g.path == path)
-            .map(|g| g.kernel_id);
+            .map(|g| (g.kernel_id, g.processes.clone()));
         let before = state.groups.len();
         state.groups.retain(|g| g.path != path);
         if state.groups.len() == before {
             return Err(KernelError::NotFound);
         }
 
-        // Release the backing kernel cgroup.  This is best-effort: the
-        // kernel controller refuses to delete a group that still has
-        // tasks or child groups, whereas the cgroupfs frontend has
-        // looser semantics.  A failure here only leaks one of the 256
-        // kernel cgroup slots until reboot, never a correctness hazard,
-        // so we don't fail the frontend delete on it.
-        if let Some(id) = kernel_id {
-            let _ = crate::cgroup::delete(id);
+        if let Some((id, members)) = doomed {
+            // Return every task this group still holds to the root cgroup
+            // *before* asking the kernel to free the group.
+            //
+            // This is not merely tidiness. `cgroup::delete` refuses a group
+            // whose `nr_tasks` is nonzero, so skipping this step used to
+            // leave the frontend entry gone but the kernel group alive with
+            // live tasks still pointing at it: their memory kept being
+            // billed to a group the user had deleted and can no longer see,
+            // and the deleted group's limits kept throttling them, until
+            // reboot. The frontend knows exactly who those tasks are --
+            // `processes` is the list `add_pid` built -- so evicting them
+            // here makes the delete below actually succeed.
+            //
+            // Best-effort per task for the same reason `add_pid` is: a PID
+            // with no live scheduler task yields `InvalidArgument`, which
+            // just means there was nothing to move.
+            for pid in members {
+                let _ = crate::sched::set_task_cgroup(u64::from(pid), crate::cgroup::ROOT_CGROUP);
+            }
+
+            // With the members evicted this should now succeed. If it does
+            // not, some other subsystem attached tasks or child groups to
+            // our kernel group behind the frontend's back -- an anomaly the
+            // frontend cannot repair (its own entry is already gone), but
+            // one that must not pass silently, since it strands a task in
+            // an invisible group and burns one of the 256 kernel slots.
+            if let Err(e) = crate::cgroup::delete(id) {
+                crate::serial_println!(
+                    "[cgroupfs] WARNING: deleted group {path} but kernel cgroup {id} \
+                     would not release ({e:?}); a task may still be billed to it"
+                );
+            }
         }
         state.total_deleted += 1;
         Ok(())
@@ -380,7 +405,29 @@ pub fn stats() -> (usize, u64, u64, u64, u64) {
 // Self-test
 // ---------------------------------------------------------------------------
 
+/// Run the module's self-test suite against a table of its own.
+///
+/// The suite mutates module state and asserts exact contents, and it used to
+/// do that to the *live* table -- which, since it is also a kernel-shell
+/// subcommand, changed or destroyed whatever the user had here and then
+/// reported success.  The live state is moved aside for the duration and put
+/// back afterwards; `crate::fs::selftest` records why this shape rather than
+/// the alternatives.
+///
+/// The pristine value is `None` rather than a table: this module initialises
+/// lazily, and `None` is exactly what a fresh boot holds.
 pub fn self_test() {
+    // `OPS` is a lock-free mirror of `state.ops`, which lives *inside* the
+    // table. `with_pristine` restores the table and so restores `state.ops`,
+    // but it cannot know about the mirror -- leave it and the two disagree
+    // permanently, with `<module> stats` reporting the suite's activity as
+    // the user's.
+    let saved_ops = OPS.load(Ordering::Relaxed);
+    crate::fs::selftest::with_pristine(&STATE, None, self_test_inner);
+    OPS.store(saved_ops, Ordering::Relaxed);
+}
+
+fn self_test_inner() {
     crate::serial_println!("cgroupfs::self_test() — running tests...");
     init_defaults();
 
@@ -410,11 +457,21 @@ pub fn self_test() {
     crate::serial_println!("  [4/8] memory: OK");
 
     // 5: Add PIDs.
-    add_pid("/app", 100).expect("add1");
-    add_pid("/app", 200).expect("add2");
+    //
+    // These are deliberately PIDs that no task can ever have. The previous
+    // version used the literals 100 and 200, which by the time this suite
+    // runs are *real, live* task IDs -- so `add_pid`'s "best-effort"
+    // `set_task_cgroup` actually moved two unrelated tasks into the test's
+    // cgroup, and test 7 then deleted that cgroup out from under one of
+    // them. Frontend bookkeeping is what tests 5 and 6 are about; the live
+    // attach/detach path is exercised deliberately in test 7 instead.
+    const SYNTHETIC_A: u32 = u32::MAX;
+    const SYNTHETIC_B: u32 = u32::MAX - 1;
+    add_pid("/app", SYNTHETIC_A).expect("add1");
+    add_pid("/app", SYNTHETIC_B).expect("add2");
     let g = get_group("/app").expect("get3");
     assert_eq!(g.pids_current, 2);
-    assert!(add_pid("/app", 100).is_err());
+    assert!(add_pid("/app", SYNTHETIC_A).is_err());
     crate::serial_println!("  [5/8] add pid: OK");
 
     // 6: PID limit.
@@ -423,9 +480,40 @@ pub fn self_test() {
     crate::serial_println!("  [6/8] pid limit: OK");
 
     // 7: Remove PID and delete.
-    remove_pid("/app", 100).expect("rmpid");
+    //
+    // The group is deleted with a *live* task still a member -- this task.
+    // That is the case that used to strand a task: `delete_group` dropped
+    // the frontend entry, `cgroup::delete` refused to free a group whose
+    // `nr_tasks` was nonzero, and the failure was discarded, leaving the
+    // task billed to (and throttled by) a group the user could no longer
+    // see, until reboot. A group holding only synthetic PIDs has
+    // `nr_tasks == 0` and so would delete cleanly either way, proving
+    // nothing; naming our own task is what makes the assertions below bite.
+    //
+    // Membership is granted immediately before the delete and no allocating
+    // operation intervenes, so no frames get charged to a group that is
+    // about to be freed.
+    remove_pid("/app", SYNTHETIC_B).expect("rmpid");
+    let self_pid = u32::try_from(crate::sched::current_task_id()).unwrap_or(SYNTHETIC_B);
+    let cgroup_before = crate::sched::current_task_cgroup();
+    add_pid("/app", self_pid).expect("add self");
+    let doomed = get_group("/app").expect("get before delete").kernel_id;
     delete_group("/app").expect("delete");
     assert_eq!(list_groups().len(), 1);
+    assert!(
+        !crate::cgroup::exists(doomed),
+        "delete_group must release the backing kernel cgroup, not leak the slot"
+    );
+    assert_eq!(
+        crate::sched::current_task_cgroup(),
+        crate::cgroup::ROOT_CGROUP,
+        "delete_group must return its member tasks to the root cgroup"
+    );
+    // Eviction unconditionally lands members in root; put this task back
+    // wherever it actually was, so the suite leaves no trace.
+    if cgroup_before != crate::cgroup::ROOT_CGROUP {
+        let _ = crate::sched::set_task_cgroup(crate::sched::current_task_id(), cgroup_before);
+    }
     assert!(delete_group("/").is_err()); // Can't delete root.
     crate::serial_println!("  [7/8] delete: OK");
 

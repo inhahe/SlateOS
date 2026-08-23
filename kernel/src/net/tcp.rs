@@ -1493,10 +1493,7 @@ fn take_conn_slot(conns: &mut [TcpConnection], why: &str) -> KernelResult<usize>
 /// away from taking the machine down, which is why they are worth the
 /// `?` rather than an audit that concludes they are all reachable only
 /// with valid handles today.
-fn conn_mut(
-    conns: &mut [TcpConnection],
-    handle: usize,
-) -> KernelResult<&mut TcpConnection> {
+fn conn_mut(conns: &mut [TcpConnection], handle: usize) -> KernelResult<&mut TcpConnection> {
     conns.get_mut(handle).ok_or(KernelError::InvalidArgument)
 }
 
@@ -2009,18 +2006,7 @@ fn tx_buffer_trim(conn: &mut TcpConnection, bytes_acked: u32) {
 /// local port, remote address, remote port, sequence, ack, window, the
 /// MSS-sized payload buffer with its length, whether timestamps are in
 /// use, and the echo value to put in them.
-type RetxInfo = (
-    u16,
-    IpAddr,
-    u16,
-    u32,
-    u32,
-    u16,
-    [u8; MSS],
-    usize,
-    bool,
-    u32,
-);
+type RetxInfo = (u16, IpAddr, u16, u32, u32, u16, [u8; MSS], usize, bool, u32);
 
 /// Retransmit the first unacknowledged segment from the retransmit buffer.
 ///
@@ -2036,10 +2022,7 @@ fn retransmit_from_buffer(conn: &TcpConnection) -> Option<RetxInfo> {
     // rather than from a `1460` that would silently start truncating if
     // `MSS` were ever raised.
     let mut data = [0u8; MSS];
-    let (Some(dst), Some(src)) = (
-        data.get_mut(..retx_len),
-        conn.tx_buffer.get(..retx_len),
-    ) else {
+    let (Some(dst), Some(src)) = (data.get_mut(..retx_len), conn.tx_buffer.get(..retx_len)) else {
         return None;
     };
     dst.copy_from_slice(src);
@@ -4069,8 +4052,25 @@ struct TcpHeaderView<'a> {
 fn parse_tcp_header(data: &[u8]) -> Option<TcpHeaderView<'_>> {
     // One refutable pattern makes the length check and the field
     // extraction the same operation, so they cannot drift apart.
-    let &[sp_hi, sp_lo, dp_hi, dp_lo, sq0, sq1, sq2, sq3, ak0, ak1, ak2, ak3, off_nibble, flags, wnd_hi, wnd_lo, ..] =
-        data
+    let &[
+        sp_hi,
+        sp_lo,
+        dp_hi,
+        dp_lo,
+        sq0,
+        sq1,
+        sq2,
+        sq3,
+        ak0,
+        ak1,
+        ak2,
+        ak3,
+        off_nibble,
+        flags,
+        wnd_hi,
+        wnd_lo,
+        ..,
+    ] = data
     else {
         return None;
     };
@@ -5820,10 +5820,7 @@ fn test_v4_pseudo_header_unchanged() -> KernelResult<()> {
         ),
         // All-ones and all-zeros: the carry-heavy and carry-free extremes.
         (Ipv4Addr([0xFF, 0xFF, 0xFF, 0xFF]), Ipv4Addr([0, 0, 0, 0])),
-        (
-            Ipv4Addr([10, 0, 0, 1]),
-            Ipv4Addr([192, 168, 255, 254]),
-        ),
+        (Ipv4Addr([10, 0, 0, 1]), Ipv4Addr([192, 168, 255, 254])),
     ];
     // 0 and 65535 bracket the 16-bit length field; 1461 is odd and realistic;
     // 65536 checks that a length past the field's width truncates the way the
@@ -5862,7 +5859,9 @@ fn test_v4_pseudo_header_unchanged() -> KernelResult<()> {
     );
     // A segment carrying a correct checksum sums to zero over its own fields.
     if tcp_checksum(&seg, src, dst) != 0 {
-        crate::serial_println!("[tcp]   FAIL: v4 segment did not verify after pseudo-header rewrite");
+        crate::serial_println!(
+            "[tcp]   FAIL: v4 segment did not verify after pseudo-header rewrite"
+        );
         return Err(KernelError::InternalError);
     }
 
@@ -6062,10 +6061,7 @@ fn test_parse_tcp_options() -> KernelResult<()> {
         ("all NOP", &[1, 1, 1, 1][..]),
     ] {
         let opts = parse_tcp_options(bytes);
-        if opts.mss != 0
-            || opts.wscale.is_some()
-            || opts.sack_permitted
-            || opts.timestamp.is_some()
+        if opts.mss != 0 || opts.wscale.is_some() || opts.sack_permitted || opts.timestamp.is_some()
         {
             crate::serial_println!(
                 "[tcp]   FAIL: malformed options ({}) parsed something: \
@@ -6166,9 +6162,7 @@ fn test_build_options_roundtrip() -> KernelResult<()> {
 
     // ...and the edges must survive the trip byte-for-byte.
     for (chunk, want) in edges.chunks_exact(4).zip([100u32, 200, 300, 400, 500, 600]) {
-        let bytes: [u8; 4] = chunk
-            .try_into()
-            .map_err(|_| KernelError::InternalError)?;
+        let bytes: [u8; 4] = chunk.try_into().map_err(|_| KernelError::InternalError)?;
         if u32::from_be_bytes(bytes) != want {
             crate::serial_println!(
                 "[tcp]   FAIL: SACK edge expected {}, got {}",

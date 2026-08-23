@@ -204,9 +204,10 @@ pub fn atomic_check(dev: &DrmDevice, state: &AtomicState) -> KernelResult<()> {
                             .any(|e| e.id == *eid && (e.possible_crtcs & bit) != 0)
                     });
                     routable
-                        && conn.modes.iter().any(|m| {
-                            m.hdisplay == mode.hdisplay && m.vdisplay == mode.vdisplay
-                        })
+                        && conn
+                            .modes
+                            .iter()
+                            .any(|m| m.hdisplay == mode.hdisplay && m.vdisplay == mode.vdisplay)
                 })
             });
             if !advertised {
@@ -472,7 +473,12 @@ fn crtc_target_fb(
     state: &AtomicState,
     crtc_id: DrmObjectId,
 ) -> (Option<DrmObjectId>, u32, u32) {
-    let Some(primary) = dev.crtcs().iter().find(|c| c.id == crtc_id).map(|c| c.primary_plane) else {
+    let Some(primary) = dev
+        .crtcs()
+        .iter()
+        .find(|c| c.id == crtc_id)
+        .map(|c| c.primary_plane)
+    else {
         return (None, 0, 0);
     };
     let pending = state.plane_changes.iter().find(|ps| ps.id == primary);
@@ -480,9 +486,10 @@ fn crtc_target_fb(
     let fb = pending
         .and_then(|ps| ps.fb_id)
         .unwrap_or_else(|| current.and_then(|p| p.fb));
-    let (x, y) = pending
-        .and_then(|ps| ps.src_rect)
-        .map_or_else(|| current.map_or((0, 0), |p| (p.src_x, p.src_y)), |r| (r.x, r.y));
+    let (x, y) = pending.and_then(|ps| ps.src_rect).map_or_else(
+        || current.map_or((0, 0), |p| (p.src_x, p.src_y)),
+        |r| (r.x, r.y),
+    );
     (fb, x, y)
 }
 

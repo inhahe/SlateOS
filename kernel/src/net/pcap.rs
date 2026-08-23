@@ -610,11 +610,35 @@ pub fn procfs_content() -> String {
 // Self-tests
 // ---------------------------------------------------------------------------
 
-/// Run pcap self-tests.
-// Self-tests deliberately runtime-assert pcap-format constants
-// (magic numbers, link-type codes) as living documentation.
-#[allow(clippy::assertions_on_constants)]
+/// Run the module's self-test suite against state of its own.
+///
+/// The suite mutates module state and asserts exact contents, and it used to
+/// do that to the *live* state -- which, since it is also a kernel-shell
+/// subcommand, changed or destroyed whatever the user had here and then
+/// reported success.  It is moved aside for the duration and put back
+/// afterwards; `crate::fs::selftest` records why this shape rather than the
+/// alternatives.
+///
+/// Each pristine value is the `static`'s own initialiser, which is the one
+/// spelling of "what a fresh boot holds" that cannot drift away from it.
 pub fn self_test() -> KernelResult<()> {
+    let _pristine_capturing = crate::fs::selftest::pristine_atomic(&CAPTURING, false);
+    let _pristine_snaplen = crate::fs::selftest::pristine_atomic(&SNAPLEN, MAX_SNAPLEN as u32);
+    let _pristine_total_captured = crate::fs::selftest::pristine_atomic(&TOTAL_CAPTURED, 0);
+    let _pristine_total_dropped = crate::fs::selftest::pristine_atomic(&TOTAL_DROPPED, 0);
+    let _pristine_total_filtered = crate::fs::selftest::pristine_atomic(&TOTAL_FILTERED, 0);
+    let _pristine_rx_captured = crate::fs::selftest::pristine_atomic(&RX_CAPTURED, 0);
+    let _pristine_tx_captured = crate::fs::selftest::pristine_atomic(&TX_CAPTURED, 0);
+    crate::fs::selftest::with_pristine(&STATE, CaptureState::new(), self_test_inner)
+}
+
+#[allow(clippy::assertions_on_constants)]
+// `KernelResult` is `self_test`'s signature, which the shell's dispatch table
+// fixes; this body has no failing path of its own and never had one. The lint
+// fires only because the split moved that body into a *private* function, and
+// private is the visibility it inspects -- the code itself is unchanged.
+#[allow(clippy::unnecessary_wraps)]
+fn self_test_inner() -> KernelResult<()> {
     crate::serial_println!("[pcap] Running pcap self-tests...");
     let mut passed = 0u32;
 

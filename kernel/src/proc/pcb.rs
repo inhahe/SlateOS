@@ -2962,13 +2962,7 @@ pub fn ctty_acquire(pid: ProcessId, tty: u32) -> KernelResult<()> {
     if map.values().any(|s| s.tty == tty) {
         return Err(KernelError::PermissionDenied);
     }
-    map.insert(
-        sid,
-        CttyState {
-            tty,
-            fg_pgrp: pgid,
-        },
-    );
+    map.insert(sid, CttyState { tty, fg_pgrp: pgid });
     Ok(())
 }
 

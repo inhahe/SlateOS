@@ -548,6 +548,22 @@ pub fn clear_all() {
     *guard = None;
 }
 
+/// Run `body` against an empty service table, then put the real one back.
+///
+/// The pristine value is `None` rather than a `State`: this module initialises
+/// lazily, so `None` is exactly what a fresh boot holds.  `OPS` mirrors
+/// `state.ops` (see the store in `save_state`) and so has to be made pristine
+/// alongside the table, not merely restored afterwards.
+///
+/// Exposed because a self-test in another module that calls into this one is
+/// still destroying this one's table — `crate::fs::selftest`'s guarantee covers
+/// only the module it is applied to.  `crate::svcstart`'s suite called
+/// `clear_all()` twice for its empty table and is the caller that forced this.
+pub(crate) fn with_pristine_state<R>(body: impl FnOnce() -> R) -> R {
+    let _pristine_ops = crate::fs::selftest::pristine_atomic(&OPS, 0);
+    crate::fs::selftest::with_pristine(&STATE, None, body)
+}
+
 // ---------------------------------------------------------------------------
 // Self-tests
 // ---------------------------------------------------------------------------
@@ -562,14 +578,11 @@ pub fn clear_all() {
 /// the alternatives.
 ///
 /// The pristine value here is `None` rather than a `State`: this module inits
-/// lazily, and `None` is exactly what a fresh boot holds.
+/// lazily, and `None` is exactly what a fresh boot holds.  See
+/// [`with_pristine_state`], which is the same thing named so that other
+/// modules' suites can ask for it too.
 pub fn self_test() -> KernelResult<()> {
-    // This counter lives outside the table, so `with_pristine` cannot see it;
-    // save and restore it here so a run leaves no trace.
-    let saved_ops = OPS.load(Ordering::Relaxed);
-    let result = crate::fs::selftest::with_pristine(&STATE, None, self_test_inner);
-    OPS.store(saved_ops, Ordering::Relaxed);
-    result
+    with_pristine_state(self_test_inner)
 }
 
 fn self_test_inner() -> KernelResult<()> {

@@ -20,15 +20,55 @@
 //!
 //! ## Memory Usage
 //!
-//! A typical kernel has ~2000-5000 functions.  Each symbol entry costs
-//! ~24 bytes (address, size, name index), plus the string table.
-//! Total: ~100-200 KiB — acceptable for better diagnostics.
+//! One heap allocation, sized exactly: 16 bytes (address, size, name index)
+//! per indexed symbol, ~126,000 of them, so ~2 MiB.
+//!
+//! **Names are not copied.** `name_offset` indexes the kernel ELF's own
+//! `.strtab`, which the table borrows in place. This is not a micro-
+//! optimisation: names dominate a symbol table, and concatenating them into
+//! an owned buffer asked the heap for ~19 MiB in a single allocation and
+//! panicked the kernel outright
+//! (`memory allocation of 20160000 bytes failed`).
+//!
+//! That request could never have succeeded, at any point in boot and with
+//! any amount of free memory. `mm::heap` serves anything too big for a slab
+//! straight from the buddy allocator, whose `MAX_ORDER` of 10 caps one
+//! allocation at 2^10 x 16 KiB = **16 MiB**; 19 MiB rounds to order 11 and
+//! is refused on arithmetic, not on availability. The frame allocator had
+//! 2.9 GiB free at the time. Any future change here that reintroduces a
+//! single multi-megabyte allocation must respect that ceiling.
+//!
+//! Borrowing is sound because Limine's kernel-file mapping is permanent —
+//! see [`SymbolTable`].
+//!
+//! The old estimate here read "a typical kernel has ~2000-5000 functions …
+//! total ~100-200 KiB". This kernel has ~124,000, and that 25-60x error is
+//! precisely what hid the allocation problem until `.symtab` was restored to
+//! the boot image and this module ran for the first time in a long while.
+//!
+//! Both function symbols (`STT_FUNC`) and data symbols (`STT_OBJECT`) are
+//! indexed. Data symbols are what turn a reported lock *address* into a lock
+//! *name*: most locks in the tree take `sync::Mutex::new`'s default name of
+//! `"?"`, so `lockdep`'s violation reports and `sync`'s spin-stall reports
+//! identify a lock by the address of the static it lives in, and without a
+//! data symbol that address resolves to nothing. They are also cheap — this
+//! kernel has ~124k function symbols and ~2.3k data symbols, so including
+//! them costs under 2% more entries and, since names are borrowed rather
+//! than copied, nothing at all beyond that.
+//!
+//! Mixing the two in one address-ordered table is safe because [`lookup`]
+//! bounds each hit by the symbol's own `st_size`: an address inside `.text`
+//! cannot land on a `.data` symbol, and one inside `.data` cannot land on
+//! the last function of `.text`.
+//!
+//! [`lookup`]: SymbolTable::lookup
 //!
 //! ## Limitations
 //!
-//! - Only function symbols (`STT_FUNC`) are loaded (not data symbols).
 //! - Symbols without a size are given a default size of 1 byte.
-//! - If the kernel is stripped, no symbols will be available.
+//! - If the kernel is stripped, no symbols will be available. Note that a
+//!   bare `llvm-strip` does this: `scripts/boot-test.sh` must use
+//!   `--strip-debug`, which drops DWARF but keeps `.symtab`.
 //!
 //! ## References
 //!
@@ -97,6 +137,7 @@ const SHT_SYMTAB: u32 = 2;
 const SHT_STRTAB: u32 = 3;
 
 // ELF symbol types (low 4 bits of st_info).
+const STT_OBJECT: u8 = 1;
 const STT_FUNC: u8 = 2;
 
 // ---------------------------------------------------------------------------
@@ -110,12 +151,40 @@ struct KernelSymbol {
     addr: u64,
     /// Size in bytes (0 if unknown).
     size: u32,
-    /// Index into the name buffer.
+    /// Byte index of this symbol's name in the kernel ELF's `.strtab`.
+    ///
+    /// An index into the ELF itself, not into any copy of it — see
+    /// [`SymbolTable::strtab`].
     name_offset: u32,
 }
 
 /// Global symbol table.
 static SYMBOLS: Mutex<SymbolTable> = Mutex::new(SymbolTable::empty());
+
+/// Lock-free view of [`SYMBOLS`], published once the table is filled and
+/// valid for the rest of the kernel's life.
+///
+/// [`resolve`] takes `SYMBOLS.lock()` and returns an allocated `String`.
+/// Neither is permissible in the places that most need a symbol name — the
+/// panic handler, the spin-stall reporter, and lockdep's violation reporter
+/// — because each of those runs *while a lock is held or contended*, so
+/// both `Mutex::lock` and the heap's own lock re-enter the very machinery
+/// being reported on.
+///
+/// lockdep is the sharpest case. `SYMBOLS.lock()` called from inside
+/// `report_violation` would register a new acquisition in the dependency
+/// graph currently being walked; if that acquisition itself raised a
+/// violation, `report_violation` would recurse with `SYMBOLS` already held
+/// and spin forever — a hang in the one code path whose entire job is to
+/// diagnose hangs.
+///
+/// The pointer is safe to follow without a lock because the table is
+/// **write-once**: [`parse_elf_symbols`] fills it exactly once and nothing
+/// mutates it afterwards, so the `Vec` buffers never reallocate and the
+/// pointer never dangles. It addresses the interior of a `static`, which
+/// outlives every caller.
+static SNAPSHOT: core::sync::atomic::AtomicPtr<SymbolTable> =
+    core::sync::atomic::AtomicPtr::new(core::ptr::null_mut());
 
 /// Whether symbols have been loaded.
 static LOADED: AtomicBool = AtomicBool::new(false);
@@ -126,30 +195,46 @@ static SYMBOL_COUNT: AtomicUsize = AtomicUsize::new(0);
 struct SymbolTable {
     /// Sorted by address (for binary search).
     entries: Vec<KernelSymbol>,
-    /// All symbol names concatenated (null-separated).
-    names: Vec<u8>,
+    /// The kernel ELF's `.strtab`, borrowed in place — **not** copied.
+    ///
+    /// Names are the overwhelming bulk of a symbol table: the kernel ELF's
+    /// `.symtab` holds ~1,008,000 entries, and even the ~126,000 that survive
+    /// this module's filter carry Rust-mangled names averaging well over a
+    /// hundred bytes. Concatenating them into an owned `Vec<u8>` (which is
+    /// what this used to do) asked the *early-boot* heap for ~19 MiB in one
+    /// allocation and panicked the kernel with
+    /// `memory allocation of 20160000 bytes failed`.
+    ///
+    /// Borrowing is sound because Limine's kernel-file mapping is permanent:
+    /// the frame allocator seeds its free lists from `USABLE` regions only
+    /// (see `mm::frame`), so `BOOTLOADER_RECLAIMABLE` — which is where the
+    /// kernel file lives — is never handed out and never reused. `'static`
+    /// is therefore honest, not a convenience cast.
+    strtab: &'static [u8],
 }
 
 impl SymbolTable {
     const fn empty() -> Self {
         Self {
             entries: Vec::new(),
-            names: Vec::new(),
+            strtab: &[],
         }
     }
 
     /// Get the name for a symbol entry.
-    fn name_of(&self, sym: &KernelSymbol) -> &str {
+    ///
+    /// `name_offset` indexes the ELF's own `.strtab`, where names are
+    /// NUL-terminated, so the terminator scan is over borrowed bytes.
+    fn name_of(&self, sym: &KernelSymbol) -> &'static str {
         let start = sym.name_offset as usize;
-        if start >= self.names.len() {
+        let Some(rest) = self.strtab.get(start..) else {
             return "<invalid>";
-        }
-        // Find the null terminator.
-        let end = self.names[start..]
-            .iter()
-            .position(|&b| b == 0)
-            .map_or(self.names.len(), |p| start + p);
-        core::str::from_utf8(&self.names[start..end]).unwrap_or("<invalid utf8>")
+        };
+        let end = rest.iter().position(|&b| b == 0).unwrap_or(rest.len());
+        let Some(bytes) = rest.get(..end) else {
+            return "<invalid>";
+        };
+        core::str::from_utf8(bytes).unwrap_or("<invalid utf8>")
     }
 
     /// Binary search for the symbol containing `addr`.
@@ -211,11 +296,17 @@ pub fn init() {
         return;
     }
 
-    // SAFETY: Limine guarantees the kernel file mapping is valid.
-    let elf_bytes = unsafe { core::slice::from_raw_parts(base as *const u8, size) };
+    // SAFETY: Limine guarantees the kernel file mapping is valid, and it is
+    // *permanent*: the mapping lives in a `BOOTLOADER_RECLAIMABLE` region,
+    // and the frame allocator seeds its free lists from `USABLE` regions
+    // only (`mm::frame`), so this memory is never handed out and never
+    // overwritten. `'static` is therefore accurate — which matters, because
+    // the symbol table borrows names out of this slice rather than copying
+    // them.
+    let elf_bytes: &'static [u8] = unsafe { core::slice::from_raw_parts(base as *const u8, size) };
 
     // Validate ELF magic.
-    if &elf_bytes[0..4] != b"\x7fELF" {
+    if elf_bytes.get(0..4) != Some(b"\x7fELF") {
         serial_println!("[ksyms] Kernel file is not a valid ELF");
         return;
     }
@@ -224,7 +315,7 @@ pub fn init() {
         Some(count) => {
             LOADED.store(true, Ordering::Release);
             SYMBOL_COUNT.store(count, Ordering::Relaxed);
-            serial_println!("[ksyms] Loaded {} function symbols", count);
+            serial_println!("[ksyms] Loaded {count} code and data symbols");
         }
         None => {
             serial_println!("[ksyms] No symbol table found in kernel ELF");
@@ -251,6 +342,38 @@ pub fn resolve(addr: u64) -> Option<String> {
             alloc::format!("{}+{:#x}", name, offset)
         }
     })
+}
+
+/// Resolve a kernel address to a symbol name and offset **without taking a
+/// lock and without allocating**.
+///
+/// This is the form to use from a panic handler, a spin-stall report, or a
+/// lockdep violation report — anywhere that runs while a lock is held or
+/// contended, where [`resolve`]'s `SYMBOLS.lock()` and `String` allocation
+/// would re-enter the machinery being diagnosed. See [`SNAPSHOT`] for why
+/// reading the table unlocked is sound.
+///
+/// Returns `(name, offset_from_symbol_start)`, or `None` if symbols were
+/// never loaded or the address falls in no known symbol.
+#[must_use]
+pub fn resolve_static(addr: u64) -> Option<(&'static str, u64)> {
+    if !LOADED.load(Ordering::Acquire) {
+        return None;
+    }
+    let ptr = SNAPSHOT.load(Ordering::Acquire);
+    if ptr.is_null() {
+        return None;
+    }
+    // SAFETY: `SNAPSHOT` is non-null only after `parse_elf_symbols` stored
+    // the address of `SYMBOLS`' interior with Release ordering, which this
+    // Acquire load synchronises with. `SYMBOLS` is a `static`, so the
+    // pointee outlives `'static`; and the table is never mutated after that
+    // single store, so no `&mut` alias can exist and the `Vec` buffers the
+    // returned `&str` borrows from can never reallocate.
+    let table: &'static SymbolTable = unsafe { &*ptr };
+    table
+        .lookup(addr)
+        .map(|(sym, offset)| (table.name_of(sym), offset))
 }
 
 /// Resolve an address and format it for display.
@@ -288,7 +411,7 @@ pub fn nearest(_addr: u64) -> Option<(&'static str, u64, u64)> {
 // ---------------------------------------------------------------------------
 
 /// Parse function symbols from the kernel ELF.
-fn parse_elf_symbols(elf: &[u8]) -> Option<usize> {
+fn parse_elf_symbols(elf: &'static [u8]) -> Option<usize> {
     // SAFETY (group — covers all ELF pointer casts below): each cast is
     // preceded by a bounds check ensuring offset + struct_size <= elf.len(),
     // so the pointer is within the valid slice.  ELF structs are repr(C)
@@ -354,11 +477,36 @@ fn parse_elf_symbols(elf: &[u8]) -> Option<usize> {
     }
 
     let sym_count = sym_size / sym_entsize;
-    let strtab = &elf[strtab_offset..strtab_offset + strtab_size];
+    let Some(strtab) = elf.get(strtab_offset..strtab_offset + strtab_size) else {
+        return None;
+    };
 
-    // Extract function symbols.
-    let mut entries = Vec::with_capacity(sym_count / 2); // Roughly half are functions.
-    let mut names = Vec::with_capacity(sym_count * 20); // ~20 chars per name average.
+    // Size `entries` by counting what will actually be kept, rather than
+    // guessing from `sym_count`.
+    //
+    // The guess used to be `sym_count / 2`, on the reasoning that "roughly
+    // half are functions". It is not close: `.symtab` is dominated by
+    // SECTION, FILE and NOTYPE entries contributed by every object file, and
+    // only ~12% of its ~1,008,000 entries survive the filter below. The old
+    // guess reserved ~8 MiB for ~2 MiB of data, on the early-boot heap, for
+    // no benefit. A counting pass is one linear scan of memory that is
+    // already resident, and it also avoids the doubling reallocations a
+    // too-small guess would cause — which transiently need the old buffer
+    // and the new one at once, the worst case for a heap this young.
+    let mut keep = 0usize;
+    for i in 0..sym_count {
+        let entry_offset = sym_offset + i * sym_entsize;
+        if entry_offset + sym_entsize > elf.len() {
+            break;
+        }
+        let sym = unsafe { &*(elf.as_ptr().add(entry_offset) as *const Elf64Sym) };
+        let sym_type = sym.st_info & 0xF;
+        if (sym_type == STT_FUNC || sym_type == STT_OBJECT) && sym.st_value != 0 {
+            keep = keep.saturating_add(1);
+        }
+    }
+
+    let mut entries = Vec::with_capacity(keep);
 
     for i in 0..sym_count {
         let entry_offset = sym_offset + i * sym_entsize;
@@ -367,39 +515,33 @@ fn parse_elf_symbols(elf: &[u8]) -> Option<usize> {
         }
         let sym = unsafe { &*(elf.as_ptr().add(entry_offset) as *const Elf64Sym) };
 
-        // Only include function symbols with a valid address.
+        // Include code and data, but nothing else: SECTION and FILE symbols
+        // carry addresses that would shadow real ones in the table, and
+        // NOTYPE covers assembler labels whose extent is unknown.
         let sym_type = sym.st_info & 0xF;
-        if sym_type != STT_FUNC || sym.st_value == 0 {
+        if (sym_type != STT_FUNC && sym_type != STT_OBJECT) || sym.st_value == 0 {
             continue;
         }
 
-        // Get the symbol name from the string table.
+        // Reference the name where it already lives, in the ELF's own
+        // string table. `name_offset` is an index into `.strtab`, not into
+        // a copy of it; skipping the copy is what keeps this parse within
+        // the early heap's means.
         let name_idx = sym.st_name as usize;
-        if name_idx >= strtab.len() {
+        let Some(rest) = strtab.get(name_idx..) else {
+            continue;
+        };
+        // An empty name (the entry points straight at a NUL) names nothing
+        // and would only pad the table.
+        if rest.first().is_none_or(|&b| b == 0) {
             continue;
         }
-
-        // Find the end of the name (null-terminated).
-        let name_end = strtab[name_idx..]
-            .iter()
-            .position(|&b| b == 0)
-            .map_or(strtab.len() - name_idx, |p| p);
-
-        let name = &strtab[name_idx..name_idx + name_end];
-        if name.is_empty() {
-            continue;
-        }
-
-        // Store the name in our concatenated buffer.
-        let name_offset = names.len();
-        names.extend_from_slice(name);
-        names.push(0); // Null terminator.
 
         #[allow(clippy::cast_possible_truncation)]
         entries.push(KernelSymbol {
             addr: sym.st_value,
             size: sym.st_size as u32,
-            name_offset: name_offset as u32,
+            name_offset: name_idx as u32,
         });
     }
 
@@ -415,7 +557,16 @@ fn parse_elf_symbols(elf: &[u8]) -> Option<usize> {
     // Store in the global table.
     let mut table = SYMBOLS.lock();
     table.entries = entries;
-    table.names = names;
+    table.strtab = strtab;
+
+    // Publish the lock-free view. This is the only write the table ever
+    // receives, so from here on the pointer is stable and the data behind
+    // it immutable — the invariant `resolve_static` relies on. Released
+    // before the guard drops so no reader can observe a half-filled table.
+    SNAPSHOT.store(
+        core::ptr::from_ref::<SymbolTable>(&table).cast_mut(),
+        Ordering::Release,
+    );
 
     Some(count)
 }

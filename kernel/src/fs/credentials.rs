@@ -521,15 +521,28 @@ pub fn confirm_identity(user_id: &str) {
     STORE.lock().verify_times.insert(String::from(user_id), now);
 }
 
-/// Get time since last verification for a user (nanoseconds, 0 if never).
-pub fn time_since_verify(user_id: &str) -> u64 {
+/// Time since a user last verified their identity, or `None` if they never
+/// have.
+///
+/// `Option`, not "0 if never". `0` is the *most recently verified* value this
+/// function can return — it reads as "verified this instant" — so a caller
+/// writing the obvious `time_since_verify(u) < THRESHOLD` would treat a user
+/// who has never authenticated as one who just did. That is a security
+/// inversion, and it is the same in-band-sentinel mistake that made
+/// `sysmaint`'s never-run tasks never due (`known-issues.md` →
+/// `FIXED-A-SYSMAINT-NEVER-RUN-TASKS-WERE-NEVER-DUE`), except that here the
+/// failure direction is "grants access" rather than "skips maintenance".
+///
+/// There are no callers yet, which is exactly why this is worth fixing now:
+/// the trap is being removed before anything springs it.
+#[must_use]
+pub fn time_since_verify(user_id: &str) -> Option<u64> {
     let now = crate::timekeeping::clock_monotonic();
     let state = STORE.lock();
     state
         .verify_times
         .get(user_id)
         .map(|&t| now.saturating_sub(t))
-        .unwrap_or(0)
 }
 
 // ---------------------------------------------------------------------------
@@ -681,8 +694,17 @@ fn self_test_inner() -> KernelResult<()> {
     // Test 5: Identity verification with debounce.
     serial_println!("  credentials::test 5: identity debounce");
     assert!(!check_debounce("user1"));
+    // Never verified is `None`, not `Some(0)`. `Some(0)` would mean "verified
+    // this instant" — the strongest possible claim — for a user who has never
+    // authenticated at all.
+    assert_eq!(time_since_verify("user1"), None);
     confirm_identity("user1");
     assert!(check_debounce("user1")); // Just verified, debounce active.
+    assert!(
+        time_since_verify("user1").is_some_and(|ns| ns < VERIFY_DEBOUNCE_NS),
+        "a just-verified user reports an elapsed time inside the debounce"
+    );
+    assert_eq!(time_since_verify("nobody-ever-verified"), None);
 
     // Test 6: Search.
     serial_println!("  credentials::test 6: search");

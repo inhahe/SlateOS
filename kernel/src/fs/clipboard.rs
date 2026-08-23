@@ -169,10 +169,12 @@ struct Watcher {
 // ---------------------------------------------------------------------------
 
 /// Current clipboard content (most recent entry).
-static CURRENT: PreemptSpinMutex<Option<ClipboardEntry>> = PreemptSpinMutex::named(None, b"CURRENT");
+static CURRENT: PreemptSpinMutex<Option<ClipboardEntry>> =
+    PreemptSpinMutex::named(None, b"CURRENT");
 
 /// Clipboard history.
-static HISTORY: PreemptSpinMutex<Vec<ClipboardEntry>> = PreemptSpinMutex::named(Vec::new(), b"HISTORY");
+static HISTORY: PreemptSpinMutex<Vec<ClipboardEntry>> =
+    PreemptSpinMutex::named(Vec::new(), b"HISTORY");
 
 /// Registered watchers.
 static WATCHERS: PreemptSpinMutex<Vec<Watcher>> = PreemptSpinMutex::named(Vec::new(), b"WATCHERS");

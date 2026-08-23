@@ -722,6 +722,32 @@ pub fn self_test() -> KernelResult<()> {
     }
     serial_println!("[devfs]   readdir /null=NotADirectory, /nosuchdir=NotFound OK");
 
+    // Through the mount, not through a detached instance.
+    //
+    // Same reasoning as the sysfs and procfs blocks: everything above drives a
+    // bare `DevFs`, so the VFS never holds this filesystem's per-mount lock
+    // while one of its handlers runs. devfs has no handler that re-enters the
+    // VFS today, and this block is how that stays true -- a future `/dev` node
+    // backed by a VFS query (a `/dev/disk/by-uuid` symlink farm is the obvious
+    // one) would deadlock here, in a suite, rather than in whatever first ran
+    // `ls /dev`.
+    if crate::fs::Vfs::stat("/dev").is_ok() {
+        let entries = crate::fs::Vfs::readdir("/dev")?;
+        // /dev/null reads as EOF. Going through the VFS exercises the mount
+        // lookup and the per-mount lock, which the direct calls above do not.
+        let nul = crate::fs::Vfs::read_file("/dev/null")?;
+        if !nul.is_empty() {
+            serial_println!("[devfs]   FAIL: /dev/null read {} bytes, want 0", nul.len());
+            return Err(KernelError::InternalError);
+        }
+        serial_println!(
+            "[devfs]   through-the-mount: readdir {} entries, /dev/null EOF, no self-deadlock OK",
+            entries.len()
+        );
+    } else {
+        serial_println!("[devfs]   through-the-mount: /dev not mounted, skipped");
+    }
+
     serial_println!("[devfs] Self-test PASSED");
     Ok(())
 }

@@ -737,9 +737,7 @@ fn create_resource_3d(dev: &mut VirtioGpuDevice, width: u32, height: u32) -> Ker
         resource_id,
         target: VIRGL_TARGET_TEXTURE_2D,
         format: VIRTIO_GPU_FORMAT_B8G8R8A8_UNORM,
-        bind: VIRGL_RES_BIND_RENDER_TARGET
-            | VIRGL_RES_BIND_SAMPLER_VIEW
-            | VIRGL_RES_BIND_SCANOUT,
+        bind: VIRGL_RES_BIND_RENDER_TARGET | VIRGL_RES_BIND_SAMPLER_VIEW | VIRGL_RES_BIND_SCANOUT,
         width,
         height,
         depth: 1,
@@ -1351,8 +1349,7 @@ struct Resource {
 }
 
 /// All live render-node resources.  See the lock-order note above.
-static RESOURCES: spin::Mutex<alloc::vec::Vec<Resource>> =
-    spin::Mutex::new(alloc::vec::Vec::new());
+static RESOURCES: spin::Mutex<alloc::vec::Vec<Resource>> = spin::Mutex::new(alloc::vec::Vec::new());
 
 /// What [`resource_info`] reports about a live resource.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1473,16 +1470,21 @@ pub fn resource_create_2d(width: u32, height: u32, format: u32) -> KernelResult<
             core::mem::size_of::<VirtioGpuResourceCreate2d>(),
         )
     };
-    let created = send_ctrl_cmd(dev, req_bytes, 512, core::mem::size_of::<VirtioGpuCtrlHdr>())
-        .and_then(|resp| {
-            if resp == VIRTIO_GPU_RESP_OK_NODATA {
-                Ok(())
-            } else {
-                serial_println!("[virtio-gpu] render RESOURCE_CREATE_2D: resp={:#x}", resp);
-                Err(KernelError::IoError)
-            }
-        })
-        .and_then(|()| attach_backing_addrs(dev, id, &addrs));
+    let created = send_ctrl_cmd(
+        dev,
+        req_bytes,
+        512,
+        core::mem::size_of::<VirtioGpuCtrlHdr>(),
+    )
+    .and_then(|resp| {
+        if resp == VIRTIO_GPU_RESP_OK_NODATA {
+            Ok(())
+        } else {
+            serial_println!("[virtio-gpu] render RESOURCE_CREATE_2D: resp={:#x}", resp);
+            Err(KernelError::IoError)
+        }
+    })
+    .and_then(|()| attach_backing_addrs(dev, id, &addrs));
 
     if let Err(e) = created {
         // The host may or may not hold a resource by now -- CREATE can succeed
@@ -1530,7 +1532,12 @@ fn resource_unref_locked(dev: &mut VirtioGpuDevice, id: u32) -> KernelResult<()>
             core::mem::size_of::<VirtioGpuResourceUnref>(),
         )
     };
-    let resp = send_ctrl_cmd(dev, req_bytes, 512, core::mem::size_of::<VirtioGpuCtrlHdr>())?;
+    let resp = send_ctrl_cmd(
+        dev,
+        req_bytes,
+        512,
+        core::mem::size_of::<VirtioGpuCtrlHdr>(),
+    )?;
     if resp == VIRTIO_GPU_RESP_OK_NODATA {
         Ok(())
     } else {
@@ -1827,7 +1834,10 @@ pub fn resource_self_test() -> KernelResult<()> {
             return Err(KernelError::InternalError);
         }
     };
-    check!(info.width == 64 && info.height == 64, "geometry round-trips");
+    check!(
+        info.width == 64 && info.height == 64,
+        "geometry round-trips"
+    );
     check!(info.bytes == 64 * 64 * 4, "logical size is width*height*4");
     check!(
         info.mapped_bytes == FRAME_SIZE,
@@ -1928,4 +1938,3 @@ pub fn resource_self_test() -> KernelResult<()> {
 const fn align_up(value: usize, align: usize) -> usize {
     (value + align - 1) & !(align - 1)
 }
-

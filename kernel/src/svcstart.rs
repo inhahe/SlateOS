@@ -31,9 +31,16 @@
 //!   → svcstart::report_crash(service_id)
 //!     → record failure timestamp
 //!     → if auto_restart && retries < max:
-//!         compute backoff, schedule restart
+//!         compute backoff, arm a ktimer for it
+//!           → (backoff elapses) → servicemgr::restart_service(id)
 //!     → else: mark permanently failed
 //! ```
+//!
+//! The restart is genuinely deferred: `report_crash` returns as soon as the
+//! timer is armed, and `ktimer` runs the restart on the workqueue once the
+//! backoff expires. This is load-bearing rather than incidental — a service
+//! that fails on startup would otherwise respawn as fast as it can die, which
+//! is the failure the backoff exists to bound.
 //!
 //! ## Integration
 //!
@@ -100,8 +107,15 @@ struct CrashRecord {
     name: String,
     /// Consecutive failure count (resets on successful long-running period).
     consecutive_failures: u32,
-    /// Timestamp of most recent crash (ns since boot).
-    last_crash_ns: u64,
+    /// Timestamp of most recent crash (ns since boot), or `None` if the
+    /// service has not crashed since this record was created.
+    ///
+    /// Not a `u64` with `0` meaning "never": the clock counts nanoseconds
+    /// since boot and starts *at* zero, so `0` is a legal instant — and a
+    /// service crashing at uptime 0 is not a hypothetical, it is a service
+    /// that fails during boot, which is exactly the case this record exists
+    /// to track.
+    last_crash_ns: Option<u64>,
     /// Current backoff delay (doubles each failure, caps at max).
     current_backoff_ns: u64,
     /// Whether the service has been permanently marked as failed.
@@ -110,6 +124,38 @@ struct CrashRecord {
     total_crashes: u64,
     /// Timestamps of last N crashes for debugging.
     crash_history: Vec<u64>,
+    /// The timer that will perform the pending restart, if one is armed.
+    ///
+    /// Held so the restart can be cancelled — by [`cancel_pending_restarts`]
+    /// when the crash records are torn down, and by a second crash report
+    /// before the first restart has fired. Without it a fired-and-forgotten
+    /// timer would restart a service whose record no longer exists.
+    pending_restart: Option<crate::ktimer::TimerHandle>,
+}
+
+/// A public snapshot of one service's crash history.
+///
+/// A named struct rather than the tuple this used to be: the tuple had five
+/// positional fields of which three were integers, so every caller
+/// destructured by position and any new field silently shifted the meaning of
+/// the ones after it. That is a bad trade at three fields and an untenable one
+/// at seven.
+#[derive(Debug, Clone)]
+pub struct CrashInfo {
+    /// Service name.
+    pub name: String,
+    /// Consecutive failures since the last reset.
+    pub consecutive_failures: u32,
+    /// Lifetime crash count.
+    pub total_crashes: u64,
+    /// Current backoff delay, in milliseconds.
+    pub backoff_ms: u64,
+    /// Whether the service has been given up on.
+    pub permanently_failed: bool,
+    /// When the service last crashed (ns since boot); `None` if it has not.
+    pub last_crash_ns: Option<u64>,
+    /// Whether a backoff restart is currently armed and waiting to fire.
+    pub restart_pending: bool,
 }
 
 /// An entry in the startup app list.
@@ -610,11 +656,12 @@ pub fn report_crash(service_id: u32) -> KernelResult<u64> {
             service_id,
             name: info.name.clone(),
             consecutive_failures: 0,
-            last_crash_ns: 0,
+            last_crash_ns: None,
             current_backoff_ns: config.initial_backoff_ns,
             permanently_failed: false,
             total_crashes: 0,
             crash_history: Vec::new(),
+            pending_restart: None,
         });
         // Safe: we just pushed, so last() is Some.
         state
@@ -627,9 +674,17 @@ pub fn report_crash(service_id: u32) -> KernelResult<u64> {
         return Err(KernelError::NotSupported);
     }
 
+    // A crash arriving while a restart is still pending supersedes it. Leaving
+    // the old timer armed would fire a restart on top of the one this report
+    // is about to schedule, at the *previous* (shorter) backoff — turning a
+    // doubling delay into two overlapping restarts.
+    if let Some(handle) = record.pending_restart.take() {
+        crate::ktimer::cancel(handle);
+    }
+
     // Update crash record.
     record.consecutive_failures = record.consecutive_failures.saturating_add(1);
-    record.last_crash_ns = now;
+    record.last_crash_ns = Some(now);
     #[allow(clippy::arithmetic_side_effects)]
     {
         record.total_crashes += 1;
@@ -666,6 +721,25 @@ pub fn report_crash(service_id: u32) -> KernelResult<u64> {
     }
     record.current_backoff_ns = delay;
 
+    // Arm the restart for `delay` from now, rather than performing it here.
+    //
+    // This is what makes the backoff a backoff. It was previously computed,
+    // logged to the operator as "restart in N ms", and then discarded: the
+    // restart happened immediately on this very call. A service that crashes
+    // on startup therefore respawned as fast as it could die, five times in a
+    // row, burning a core and flooding the log inside a few milliseconds --
+    // which is the precise failure mode exponential backoff exists to prevent.
+    // The delay was not merely unused; it was contradicted by the code
+    // directly beneath the message that announced it.
+    //
+    // `ktimer` runs the callback on the workqueue, in process context, so the
+    // restart may allocate and block. The argument is the service id, which is
+    // looked up again when the timer fires: nothing may be held across the
+    // delay, since the service can be stopped or removed in the meantime.
+    let handle =
+        crate::ktimer::schedule_after_ns(restart_after_backoff, u64::from(service_id), delay);
+    record.pending_restart = handle;
+
     // Capture values before the record borrow ends so we can update
     // state-level fields (can't mutate state while record borrows crash_records).
     let consec = record.consecutive_failures;
@@ -676,28 +750,110 @@ pub fn report_crash(service_id: u32) -> KernelResult<u64> {
     }
 
     let delay_ms = delay / 1_000_000;
-    crate::syslog!(
-        "service.crash",
-        Warning,
-        "Service '{}' crashed (attempt {}/{}), restart in {} ms",
-        info.name,
-        consec,
-        config.max_retries,
-        delay_ms
-    );
-
-    // In a real system, we'd schedule a timer callback here.
-    // For now, we attempt the restart immediately (the backoff delay
-    // is recorded for the timer system to use once available).
-    drop(state);
-
-    // Attempt restart via servicemgr.
-    let _ = servicemgr::restart_service(service_id);
+    if handle.is_some() {
+        crate::syslog!(
+            "service.crash",
+            Warning,
+            "Service '{}' crashed (attempt {}/{}), restart in {} ms",
+            info.name,
+            consec,
+            config.max_retries,
+            delay_ms
+        );
+        drop(state);
+    } else {
+        // The timer table is full. Restarting immediately is the wrong
+        // behaviour -- it is exactly the behaviour this change removed -- but
+        // it beats never restarting the service at all, so do it and say so.
+        // Silently falling back would recreate the original bug in a form that
+        // only appears under load, which is worse than the original.
+        crate::syslog!(
+            "service.crash",
+            Error,
+            "Service '{}' crashed (attempt {}/{}): no timer slot for a {} ms backoff, restarting immediately",
+            info.name,
+            consec,
+            config.max_retries,
+            delay_ms
+        );
+        drop(state);
+        let _ = servicemgr::restart_service(service_id);
+    }
 
     Ok(delay)
 }
 
+/// Timer callback: perform a restart whose backoff has now elapsed.
+///
+/// Runs on the workqueue worker task, so allocation and blocking are
+/// permitted. Takes the service id rather than any borrowed state, because the
+/// backoff may be a full minute and nothing about the service is guaranteed to
+/// still be true when it expires.
+fn restart_after_backoff(arg: u64) {
+    #[allow(clippy::cast_possible_truncation)]
+    let service_id = arg as u32;
+
+    // Clear the handle first. The timer has fired, so the stored handle is
+    // stale; leaving it would let a later `cancel_pending_restarts` report a
+    // cancellation that did not happen.
+    {
+        let mut state = STATE.lock();
+        if let Some(record) = state
+            .crash_records
+            .iter_mut()
+            .find(|r| r.service_id == service_id)
+        {
+            record.pending_restart = None;
+            // A service marked permanently failed between the crash report and
+            // now must not be resurrected by an in-flight timer.
+            if record.permanently_failed {
+                return;
+            }
+        } else {
+            // The record is gone (records were cleared, or the service was
+            // removed). Restarting on the strength of a record that no longer
+            // exists would act on a decision nothing stands behind.
+            return;
+        }
+    }
+
+    if let Err(e) = servicemgr::restart_service(service_id) {
+        crate::syslog!(
+            "service.crash",
+            Error,
+            "Backoff restart of service id={} failed: {:?}",
+            service_id,
+            e
+        );
+    }
+}
+
+/// Cancel every pending backoff restart, returning how many were cancelled.
+///
+/// Needed wherever the crash records are discarded — teardown and the
+/// self-test's pristine-state swap — because a timer outlives the record that
+/// armed it. A restart firing against a discarded record would either act on a
+/// service id that has been reused, or resurrect a service the caller had
+/// just finished tearing down.
+pub fn cancel_pending_restarts() -> usize {
+    let mut state = STATE.lock();
+    let mut cancelled = 0usize;
+    for record in &mut state.crash_records {
+        if let Some(handle) = record.pending_restart.take() {
+            if crate::ktimer::cancel(handle) {
+                cancelled = cancelled.saturating_add(1);
+            }
+        }
+    }
+    cancelled
+}
+
 /// Reset a service's crash counter (e.g., after running successfully for a while).
+///
+/// Also disarms any pending backoff restart. The counter is reset because the
+/// service is now considered healthy, and a queued restart is a decision made
+/// on the strength of the crash history this call has just declared void —
+/// firing it would bounce a running service for a crash that no longer counts.
 pub fn reset_crash_count(service_id: u32) {
     let mut state = STATE.lock();
     let initial_backoff = state.config.initial_backoff_ns;
@@ -706,6 +862,9 @@ pub fn reset_crash_count(service_id: u32) {
         .iter_mut()
         .find(|r| r.service_id == service_id)
     {
+        if let Some(handle) = record.pending_restart.take() {
+            crate::ktimer::cancel(handle);
+        }
         record.consecutive_failures = 0;
         record.current_backoff_ns = initial_backoff;
         record.permanently_failed = false;
@@ -856,19 +1015,19 @@ pub fn stats() -> StartupStats {
 }
 
 /// Get crash records for display.
-pub fn crash_records() -> Vec<(String, u32, u64, u64, bool)> {
+pub fn crash_records() -> Vec<CrashInfo> {
     let state = STATE.lock();
     state
         .crash_records
         .iter()
-        .map(|r| {
-            (
-                r.name.clone(),
-                r.consecutive_failures,
-                r.total_crashes,
-                r.current_backoff_ns / 1_000_000,
-                r.permanently_failed,
-            )
+        .map(|r| CrashInfo {
+            name: r.name.clone(),
+            consecutive_failures: r.consecutive_failures,
+            total_crashes: r.total_crashes,
+            backoff_ms: r.current_backoff_ns / 1_000_000,
+            permanently_failed: r.permanently_failed,
+            last_crash_ns: r.last_crash_ns,
+            restart_pending: r.pending_restart.is_some(),
         })
         .collect()
 }
@@ -910,14 +1069,23 @@ pub fn procfs_content() -> String {
     if !crashes.is_empty() {
         out.push_str(&format!("\nCrash Records ({}):\n", crashes.len()));
         out.push_str(&format!(
-            "  {:16} {:>6} {:>8} {:>8} {:>8}\n",
+            "  {:16} {:>6} {:>8} {:>8} {:>10}\n",
             "Service", "Consec", "Total", "Backoff", "Status"
         ));
-        for (name, consec, total, backoff_ms, perm) in &crashes {
-            let status = if *perm { "FAILED" } else { "active" };
+        for c in &crashes {
+            // "restarting" is distinct from "active": it says the backoff is
+            // running right now, which is the state an operator watching a
+            // flapping service most needs to see and previously could not.
+            let status = if c.permanently_failed {
+                "FAILED"
+            } else if c.restart_pending {
+                "restarting"
+            } else {
+                "active"
+            };
             out.push_str(&format!(
-                "  {:16} {:>6} {:>8} {:>5} ms {:>8}\n",
-                name, consec, total, backoff_ms, status
+                "  {:16} {:>6} {:>8} {:>5} ms {:>10}\n",
+                c.name, c.consecutive_failures, c.total_crashes, c.backoff_ms, status
             ));
         }
     }
@@ -949,8 +1117,48 @@ pub fn procfs_content() -> String {
 // Self-tests
 // ---------------------------------------------------------------------------
 
-/// Run self-tests for the startup orchestrator.
+/// Run the module's self-test suite against state of its own.
+///
+/// The suite mutates module state and asserts exact contents, and it used to
+/// do that to the *live* state -- which, since it is also a kernel-shell
+/// subcommand, changed or destroyed whatever the user had here and then
+/// reported success.  It is moved aside for the duration and put back
+/// afterwards; `crate::fs::selftest` records why this shape rather than the
+/// alternatives.
+///
+/// Each pristine value is the `static`'s own initialiser, which is the one
+/// spelling of "what a fresh boot holds" that cannot drift away from it.
+///
+/// The suite needs an empty *service manager* too — it calls `init_defaults`
+/// and then asserts the exact set of services that produces — and it used to
+/// get one by calling `servicemgr::clear_all()`, which deregisters every
+/// service on the machine.  `with_pristine` would not have caught that: its
+/// guarantee is that *this* module's state comes back, and it says nothing
+/// about anything the suite reaches into.  So the service table is moved aside
+/// as well, by [`servicemgr::with_pristine_state`].
+/// A backoff restart is a `ktimer`, and a timer is not part of `STATE`: it
+/// lives in the global timer table, so restoring the state on the way out
+/// leaves it armed, pointing at a service id from the *pristine* registry that
+/// no longer exists — or worse, one that has been reused by the real registry
+/// the restore brings back. `with_pristine` cannot know about it, exactly as
+/// it cannot know about a module's lock-free counter mirror. Disarm what the
+/// suite armed, and do it inside the pristine window while the ids still mean
+/// what the suite thinks they mean.
 pub fn self_test() -> KernelResult<()> {
+    servicemgr::with_pristine_state(|| {
+        crate::fs::selftest::with_pristine(&STATE, State::new(), || {
+            let result = self_test_inner();
+            let cancelled = cancel_pending_restarts();
+            crate::serial_println!(
+                "[svcstart]   cleanup: disarmed {} pending backoff restart(s)",
+                cancelled
+            );
+            result
+        })
+    })
+}
+
+fn self_test_inner() -> KernelResult<()> {
     crate::serial_println!("[svcstart] Running service startup self-tests...");
 
     // Clean slate.
@@ -1043,6 +1251,30 @@ pub fn self_test() -> KernelResult<()> {
             );
             return Err(KernelError::InternalError);
         }
+
+        // The delay must be *armed*, not merely returned. Checking only the
+        // return value is how this went wrong: the number was correct, and
+        // the code beneath the log line that announced it restarted the
+        // service immediately anyway. A test that inspects the computation
+        // rather than the effect keeps inert machinery green indefinitely.
+        let records = crash_records();
+        let net_record = records
+            .iter()
+            .find(|r| r.name == "network")
+            .ok_or(KernelError::InternalError)?;
+        if !net_record.restart_pending {
+            crate::serial_println!(
+                "[svcstart]   FAIL: backoff computed but no restart timer armed"
+            );
+            return Err(KernelError::InternalError);
+        }
+        if net_record.last_crash_ns.is_none() {
+            crate::serial_println!(
+                "[svcstart]   FAIL: last_crash_ns is None after a crash report \
+                 (`0` is a legal uptime, not `never`)"
+            );
+            return Err(KernelError::InternalError);
+        }
     }
     crate::serial_println!("[svcstart]   4. Exponential backoff: OK");
 
@@ -1061,14 +1293,28 @@ pub fn self_test() -> KernelResult<()> {
             );
             return Err(KernelError::InternalError);
         }
-        // Verify it's marked permanently failed.
+        // Verify it's marked permanently failed.  `ok_or` rather than
+        // `if let`: an absent record used to pass this test silently, so the
+        // one outcome that would mean the crash tracking had stopped working
+        // entirely was indistinguishable from success.
         let records = crash_records();
-        let net_record = records.iter().find(|r| r.0 == "network");
-        if let Some((_name, _consec, _total, _backoff, perm)) = net_record {
-            if !perm {
-                crate::serial_println!("[svcstart]   FAIL: expected permanently_failed=true");
-                return Err(KernelError::InternalError);
-            }
+        let net_record = records
+            .iter()
+            .find(|r| r.name == "network")
+            .ok_or(KernelError::InternalError)?;
+        if !net_record.permanently_failed {
+            crate::serial_println!("[svcstart]   FAIL: expected permanently_failed=true");
+            return Err(KernelError::InternalError);
+        }
+        // Giving up on a service must also disarm the restart it was waiting
+        // on. Otherwise the timer armed by the *previous* crash fires after
+        // the verdict and brings the service back, which would make
+        // "permanently failed" mean nothing at all.
+        if net_record.restart_pending {
+            crate::serial_println!(
+                "[svcstart]   FAIL: permanently-failed service still has a restart armed"
+            );
+            return Err(KernelError::InternalError);
         }
     }
     crate::serial_println!("[svcstart]   5. Max retries → permanent failure: OK");
@@ -1078,12 +1324,17 @@ pub fn self_test() -> KernelResult<()> {
         let net = servicemgr::find_by_name("network")?;
         reset_crash_count(net.id);
         let records = crash_records();
-        let net_record = records.iter().find(|r| r.0 == "network");
-        if let Some((_name, consec, _total, _backoff, perm)) = net_record {
-            if *consec != 0 || *perm {
-                crate::serial_println!("[svcstart]   FAIL: crash count not reset");
-                return Err(KernelError::InternalError);
-            }
+        let net_record = records
+            .iter()
+            .find(|r| r.name == "network")
+            .ok_or(KernelError::InternalError)?;
+        if net_record.consecutive_failures != 0 || net_record.permanently_failed {
+            crate::serial_println!("[svcstart]   FAIL: crash count not reset");
+            return Err(KernelError::InternalError);
+        }
+        if net_record.restart_pending {
+            crate::serial_println!("[svcstart]   FAIL: reset_crash_count left a restart armed");
+            return Err(KernelError::InternalError);
         }
     }
     crate::serial_println!("[svcstart]   6. Reset crash count: OK");
@@ -1153,12 +1404,9 @@ pub fn self_test() -> KernelResult<()> {
     }
     crate::serial_println!("[svcstart]   10. Stats and procfs: OK");
 
-    // Clean up.
-    servicemgr::clear_all();
-    {
-        let mut state = STATE.lock();
-        *state = State::new();
-    }
+    // No clean-up: `self_test` runs this against substitutes for both this
+    // module's state and the service manager's, and both are dropped on the way
+    // out along with everything registered above.
 
     crate::serial_println!("[svcstart] All 10 self-tests passed.");
     Ok(())

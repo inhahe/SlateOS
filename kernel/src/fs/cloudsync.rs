@@ -452,7 +452,34 @@ pub fn stats() -> (usize, u64, u64, usize, u64) {
 // Self-test
 // ---------------------------------------------------------------------------
 
+/// Run the suite against pristine state, then put the user's registry back.
+///
+/// The suite used to run against whatever the module already held, and so had
+/// to **decline to run** when the account table was too full to fit its two
+/// fixtures (`base_accts + 2 > MAX_ACCOUNTS`, with `MAX_ACCOUNTS` = 10). That
+/// skip lost all twelve tests on exactly the machines most likely to want them
+/// — a user with nine cloud accounts configured is a user with a lot to lose —
+/// and it could only ever happen on the shell path, so a green boot never
+/// revealed the gap.
+///
+/// Moving the live state aside removes the trade-off rather than picking a side
+/// of it: the suite gets a table it owns entirely, so it can neither collide
+/// with the user's accounts nor be crowded out by them.
+///
+/// The pristine value is `None` rather than a table: this module initialises
+/// lazily, and `None` is exactly what a fresh boot holds.
 pub fn self_test() {
+    // `OPS` is a lock-free mirror of `state.ops`, which lives *inside* the
+    // table. `with_pristine` restores the table and so restores `state.ops`,
+    // but it cannot know about the mirror -- leave it and the two disagree
+    // permanently, with `cloudsync stats` reporting the suite's activity as
+    // the user's.
+    let saved_ops = OPS.load(Ordering::Relaxed);
+    crate::fs::selftest::with_pristine(&STATE, None, self_test_inner);
+    OPS.store(saved_ops, Ordering::Relaxed);
+}
+
+fn self_test_inner() {
     crate::serial_println!("cloudsync::self_test() — running tests...");
     init_defaults();
 
@@ -473,18 +500,22 @@ pub fn self_test() {
     let (base_accts, base_syncs, base_conflicts, base_active, _) = stats();
     let base_conflict_rows = list_conflicts().len();
     let base_excludes = list_excludes().len();
-    if base_accts + 2 > MAX_ACCOUNTS {
-        // Refuse to evict a user's configuration in order to test.  A skipped
-        // suite is a visible gap; a suite that deletes cloud accounts to make
-        // room is a data-loss bug wearing a test's clothes.
-        crate::serial_println!(
-            "cloudsync::self_test() — skipped: {}/{} account slots in use, suite needs 2 free",
-            base_accts,
-            MAX_ACCOUNTS
-        );
-        return;
-    }
+    // The suite runs against pristine state, so the account table is its own
+    // and is empty. The old code could not say this: it ran against the user's
+    // registry, and so had to skip entirely when fewer than two of the ten
+    // slots were free rather than evict a real account to make room. Stating
+    // the exact value is worth more than the relative one — it catches an
+    // `init_defaults` that starts seeding accounts, which `base_accts` as an
+    // opaque baseline never could.
+    assert_eq!(
+        base_accts, 0,
+        "init_defaults must not seed accounts; the suite owns this table"
+    );
     assert_eq!(list_accounts().len(), base_accts);
+    assert!(
+        base_accts + 2 <= MAX_ACCOUNTS,
+        "pristine state must leave room for the suite's two fixtures"
+    );
     crate::serial_println!("  [1/12] baseline ({} accounts): OK", base_accts);
 
     // 2: Add account.
@@ -577,8 +608,8 @@ pub fn self_test() {
     // contributed.  `active` is a live count and is exact.
     let (accts, syncs, conflicts, active, ops) = stats();
     assert_eq!(accts, base_accts + 1);
-    assert!(syncs >= base_syncs + 1);
-    assert!(conflicts >= base_conflicts + 1);
+    assert!(syncs > base_syncs);
+    assert!(conflicts > base_conflicts);
     assert_eq!(active, base_active + 1);
     assert!(ops > 0);
     crate::serial_println!("  [11/12] stats: OK");

@@ -402,16 +402,12 @@ pub fn reset_stats() {
 }
 
 /// Format a byte count for human-readable display.
+///
+/// Delegates to [`crate::bytesize::iec`]. Splice counters are cumulative and
+/// run past GiB on any long-lived system, which is where the private copy this
+/// replaced ran out of units.
 fn format_bytes(bytes: u64) -> String {
-    if bytes >= 1024 * 1024 * 1024 {
-        alloc::format!("{:.1} GiB", bytes as f64 / (1024.0 * 1024.0 * 1024.0))
-    } else if bytes >= 1024 * 1024 {
-        alloc::format!("{:.1} MiB", bytes as f64 / (1024.0 * 1024.0))
-    } else if bytes >= 1024 {
-        alloc::format!("{:.1} KiB", bytes as f64 / 1024.0)
-    } else {
-        alloc::format!("{} B", bytes)
-    }
+    crate::bytesize::iec(bytes)
 }
 
 /// Human-readable summary of all splice statistics.

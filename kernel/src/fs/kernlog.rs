@@ -233,7 +233,29 @@ pub fn stats() -> (usize, u64, u64, u64) {
 // Self-test
 // ---------------------------------------------------------------------------
 
+/// Run the module's self-test suite against a table of its own.
+///
+/// The suite mutates module state and asserts exact contents, and it used to
+/// do that to the *live* table -- which, since it is also a kernel-shell
+/// subcommand, changed or destroyed whatever the user had here and then
+/// reported success.  The live state is moved aside for the duration and put
+/// back afterwards; `crate::fs::selftest` records why this shape rather than
+/// the alternatives.
+///
+/// The pristine value is `None` rather than a table: this module initialises
+/// lazily, and `None` is exactly what a fresh boot holds.
 pub fn self_test() {
+    // `OPS` is a lock-free mirror of `state.ops`, which lives *inside* the
+    // table. `with_pristine` restores the table and so restores `state.ops`,
+    // but it cannot know about the mirror -- leave it and the two disagree
+    // permanently, with `<module> stats` reporting the suite's activity as
+    // the user's.
+    let saved_ops = OPS.load(Ordering::Relaxed);
+    crate::fs::selftest::with_pristine(&STATE, None, self_test_inner);
+    OPS.store(saved_ops, Ordering::Relaxed);
+}
+
+fn self_test_inner() {
     crate::serial_println!("kernlog::self_test() — running tests...");
     init_defaults();
 
@@ -257,8 +279,14 @@ pub fn self_test() {
     crate::serial_println!("  [3/8] levels: OK");
 
     // 4: Read from seq.
+    //
+    // `seq` is 1 — the first sequence `log` hands out, since `next_seq` starts
+    // at 1 while the boot message is seq 0 — so this is every entry bar the
+    // boot message: exactly the four the suite logged. Stated exactly rather
+    // than as `>= 4`, which is true of any ring that has ever been written to
+    // and so says nothing about `read_from`'s filtering.
     let recent = read_from(seq);
-    assert!(recent.len() >= 4);
+    assert_eq!(recent.len(), 4, "everything after the boot message");
     crate::serial_println!("  [4/8] read from: OK");
 
     // 5: Tail.
@@ -279,10 +307,21 @@ pub fn self_test() {
     crate::serial_println!("  [7/8] filter source: OK");
 
     // 8: Stats.
+    //
+    // `total_logged` is 5, not 6: `init_defaults` pushes the boot message and
+    // sets the counter to 1, and the suite logs four more. This asserted
+    // `>= 6` and failed the first time it was ever run — the boot message got
+    // counted twice, which nothing caught because on the live table the suite
+    // ran against before `58117e72c` the counter was already far past 6.
+    //
+    // `total_dropped` is 0 and is worth saying so rather than discarding:
+    // `log` only drops once the ring reaches RING_SIZE (4096), so a non-zero
+    // count here would mean the ring is not the size it claims. That is the
+    // one thing this test can tell us that `count()` cannot.
     let (msg_count, total, dropped, ops) = stats();
     assert_eq!(msg_count, 5);
-    assert!(total >= 6);
-    let _ = dropped;
+    assert_eq!(total, 5, "the boot message plus the four the suite logged");
+    assert_eq!(dropped, 0, "five entries cannot overflow a 4096-slot ring");
     assert!(ops > 0);
     crate::serial_println!("  [8/8] stats: OK");
 

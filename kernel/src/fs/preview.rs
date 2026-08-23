@@ -168,7 +168,8 @@ static FAIL_COUNT: AtomicU64 = AtomicU64::new(0);
 static TOTAL_BYTES: AtomicU64 = AtomicU64::new(0);
 static GEN_COUNTER: AtomicU64 = AtomicU64::new(1);
 
-static CUSTOM_GENERATORS: PreemptSpinMutex<Vec<CustomGenerator>> = PreemptSpinMutex::named(Vec::new(), b"CUSTOM_GENERATORS");
+static CUSTOM_GENERATORS: PreemptSpinMutex<Vec<CustomGenerator>> =
+    PreemptSpinMutex::named(Vec::new(), b"CUSTOM_GENERATORS");
 
 // ---------------------------------------------------------------------------
 // Public API

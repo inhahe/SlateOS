@@ -275,6 +275,138 @@ _RECEIVER = re.compile(r"\s*[&*]*\s*(?P<root>[A-Za-z_][A-Za-z0-9_]*)\s*(?=[.\[])
 # value that can be chased.
 _NOT_A_VALUE = {"if", "match", "while", "for", "loop", "return", "Some", "Ok"}
 
+# `Some(e)` and `Ok(e)` carry `e` unchanged, and the `let Some(x) = …` that
+# takes it back out is already understood, so the wrapper is transparent both
+# ways. `locale`'s `localedef` stores its positional argument as
+# `locale_name = Some(other.to_string())` and reads it back with
+# `let Some(name) = locale_name else`; without this the trail stops at a
+# constructor that did nothing but box a value.
+#
+# Only these two. Chasing into the arguments of calls in general would make
+# the tool claim provenance through any function at all, including ones that
+# discard their argument -- which is the difference between following a value
+# and merely noticing that argv was mentioned nearby.
+_WRAPPER = re.compile(r"\s*(?:Some|Ok)\s*\(")
+
+
+def _unwrap(expr: str) -> str | None:
+    """`e` from `Some(e)`/`Ok(e)`, or `None` if that is not the whole of it."""
+    m = _WRAPPER.match(expr)
+    if m is None:
+        return None
+    bl = blank(expr)
+    close = _match_brackets(bl, m.end() - 1, "(", ")")
+    if expr[close:].strip():
+        return None  # `Some(x).unwrap_or(y)` is not a bare wrapper
+    return expr[m.end() : close - 1]
+
+
+def _brace_groups(bl: str) -> list[tuple[int, int]]:
+    """`(open, close)` offsets of the top-level `{...}` groups in `bl`."""
+    out: list[tuple[int, int]] = []
+    depth = par = 0
+    start = -1
+    for i, c in enumerate(bl):
+        if c in "([":
+            par += 1
+        elif c in ")]":
+            par -= 1
+        elif par == 0 and c == "{":
+            if depth == 0:
+                start = i
+            depth += 1
+        elif par == 0 and c == "}":
+            depth -= 1
+            if depth == 0 and start >= 0:
+                out.append((start, i))
+                start = -1
+    return out
+
+
+def _last_stmt(bl: str, src: str) -> str:
+    """A block body's tail expression: whatever follows its last top-level `;`."""
+    depth, cut = 0, 0
+    for i, c in enumerate(bl):
+        if c in "([{":
+            depth += 1
+        elif c in ")]}":
+            depth -= 1
+        elif depth == 0 and c == ";":
+            cut = i + 1
+    return src[cut:].strip()
+
+
+def _arm_bodies(bl: str, src: str) -> list[str]:
+    """The right-hand sides of a `match` block's arms."""
+    out: list[str] = []
+    depth = i = 0
+    while i < len(bl):
+        c = bl[i]
+        if c in "([{":
+            depth += 1
+        elif c in ")]}":
+            depth -= 1
+        elif depth == 0 and bl.startswith("=>", i):
+            j = i + 2
+            while j < len(bl) and bl[j].isspace():
+                j += 1
+            if j < len(bl) and bl[j] == "{":
+                end = _match_brackets(bl, j, "{", "}")
+                out.append(src[j:end])
+                i = end
+            else:
+                k, d = j, 0
+                while k < len(bl):
+                    if bl[k] in "([{":
+                        d += 1
+                    elif bl[k] in ")]}":
+                        d -= 1
+                    elif d == 0 and bl[k] == ",":
+                        break
+                    k += 1
+                out.append(src[j:k])
+                i = k
+            continue
+        i += 1
+    return out
+
+
+_MATCH_HEAD = re.compile(r"\s*match\b")
+
+
+def _tail_exprs(expr: str) -> list[str]:
+    """The expressions a block-valued expression can actually evaluate to.
+
+    The value of `if c { a } else { b }` is `a` or `b` and never `c`; the
+    value of a `match` is one of its arm bodies and never the scrutinee.
+    Returning the tails -- and *only* the tails -- is what lets the trace step
+    through `rake-cli`'s
+
+        let run_tasks = if tasks.is_empty() { vec!["default"] } else { tasks };
+
+    and reach `tasks`, without also claiming provenance from the condition
+    that was merely tested along the way. Scanning the whole block for a
+    mention of argv would "resolve" this one too, and would equally resolve a
+    block that tests argv and returns a constant -- which is the difference
+    between following the value and noticing argv in the neighbourhood.
+    """
+    e = expr.strip()
+    bl = blank(e)
+    if _BLOCK_EXPR.match(bl) is None:
+        return []
+    groups = _brace_groups(bl)
+    if not groups:
+        return []
+    if _MATCH_HEAD.match(bl) is not None:
+        s, t = groups[0]
+        return [a for a in _arm_bodies(bl[s + 1 : t], e[s + 1 : t]) if a.strip()]
+    out = []
+    for s, t in groups:
+        tail = _last_stmt(bl[s + 1 : t], e[s + 1 : t])
+        if tail:
+            out.append(tail)
+    return out
+
 
 def _root_of(expr: str) -> str | None:
     """The identifier an expression is *about*, or `None` if it is not one."""
@@ -429,10 +561,27 @@ class Tracer:
             return False
         stack = [(expr, fn)]
         seen: set[tuple[int, str]] = set()
+        # `seen` bounds only the *named* values visited; a block expression is
+        # decomposed into its tails without ever becoming a name, so it needs
+        # its own bound. Each decomposition yields strictly shorter text, so
+        # this cannot run away -- but a match with many arms inside a match
+        # multiplies, and a budget is cheaper than reasoning about the product.
+        steps = 0
         while stack:
+            steps += 1
+            if steps > MAX_IDENTS * 16:
+                return False
             e, f = stack.pop()
             root = _root_of(e)
             if root is None:
+                inner = _unwrap(e)
+                if inner is not None:
+                    stack.append((inner, f))
+                    continue
+                tails = _tail_exprs(e)
+                if tails:
+                    stack += [(t, f) for t in tails]
+                    continue
                 # Not decomposable. Accept only if the expression itself
                 # reaches argv; see the module docstring on what that is worth.
                 if _ARGV.search(e):
@@ -447,7 +596,12 @@ class Tracer:
             if len(seen) > MAX_IDENTS:
                 return False
             for b, bf in self.bindings(root, f):
-                if _ARGV.search(b):
+                # A block-valued binding is *not* accepted on a bare mention of
+                # argv: `if args.is_empty() { "none" } else { "some" }` mentions
+                # it and yields neither branch from it. Push it instead, so the
+                # next turn of the loop reduces it to the branches that really
+                # are the value.
+                if _ARGV.search(b) and not _tail_exprs(b):
                     return True
                 stack.append((b, bf))
         return False
@@ -636,6 +790,44 @@ def selftest() -> int:
         "}\n",
         True,
     )
+    # rake-cli: the block's tail is the argv-derived branch, and the name it
+    # is bound to is then walked by a `for`. The previous version stopped at
+    # the block because the whole `if ...` mentions no `args`.
+    check(
+        "block-tails-reach-the-argv-branch",
+        "fn run(args: &[String]) {\n"
+        "    let tasks: Vec<&str> = args.iter().map(|s| s.as_str()).collect();\n"
+        '    let run_tasks = if tasks.is_empty() { vec!["default"] } else { tasks };\n'
+        "    for task in &run_tasks {\n"
+        '        println!("rake: task {} completed", quoteaf_os(&task));\n'
+        "    }\n"
+        "}\n",
+        True,
+    )
+    # The inverse, and the reason the tails are taken rather than the block:
+    # argv appears in the *condition*, and in no branch that produces a value.
+    check(
+        "a-tested-argv-is-not-a-source",
+        "fn run(args: &[String]) {\n"
+        '    let label = if args.is_empty() { "none" } else { "some" };\n'
+        '        println!("state {}", quoteaf_os(&label));\n'
+        "}\n",
+        False,
+    )
+    # A `match` yields its arm bodies, never its scrutinee: here the scrutinee
+    # is program-owned and one arm is not.
+    check(
+        "match-arms-are-the-value-not-the-scrutinee",
+        "fn run(args: &[String]) {\n"
+        "    let mode = compute();\n"
+        "    let shown = match mode {\n"
+        '        Mode::Fixed => "fixed".to_string(),\n'
+        '        Mode::Given => args[1].clone(),\n'
+        "    };\n"
+        '    println!("mode {}", quoteaf_os(&shown));\n'
+        "}\n",
+        True,
+    )
     # cgroup again: the arm that collects a positional argument carries a
     # guard, which sits between the binder and the `=>`.
     check(
@@ -656,6 +848,34 @@ def selftest() -> int:
         "}\n",
         True,
     )
+    # locale: the value is stored through `Some(...)` and taken back out by
+    # `let Some(x) = … else`, so the wrapper has to be transparent both ways
+    # or the trail stops at a constructor that only boxed a value.
+    check(
+        "through-an-option-wrapper",
+        "fn run_localedef(args: &[String]) {\n"
+        "    let mut locale_name: Option<String> = None;\n"
+        "    let mut i = 0;\n"
+        "    while i < args.len() {\n"
+        "        match args[i].as_str() {\n"
+        '            "-h" => return,\n'
+        "            other => {\n"
+        "                locale_name = Some(other.to_string());\n"
+        "            }\n"
+        "        }\n"
+        "        i += 1;\n"
+        "    }\n"
+        "    let Some(name) = locale_name else { return; };\n"
+        '    println!("localedef: locale {} created", quoteaf_os(&name));\n'
+        "}\n",
+        True,
+    )
+    # But a wrapper is transparent only when it is the whole expression: a
+    # value that is thrown away by the tail of the same expression has not
+    # reached the diagnostic.
+    if _unwrap('Some(args[1]).map_or("built-in", |_| "x")') is not None:
+        print("FAIL wrapper-with-a-tail-is-not-transparent", file=sys.stderr)
+        fails += 1
     # cheat-sh: a method call *with* arguments still passes its receiver's
     # value on.
     check(

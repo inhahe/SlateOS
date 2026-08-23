@@ -6778,7 +6778,6 @@ DEFECTS = [
         ["desktop"],
         [
             'every_choice_this_panel_makes_hands_over_the_role_it_claims',
-            'nothing_that_reports_a_permission_state_follows_the_accent',
         ],
     ),
     (
@@ -6878,7 +6877,6 @@ DEFECTS = [
         ["desktop"],
         [
             'every_choice_this_panel_makes_hands_over_the_role_it_claims',
-            'nothing_that_reports_a_permission_state_follows_the_accent',
         ],
     ),
     (

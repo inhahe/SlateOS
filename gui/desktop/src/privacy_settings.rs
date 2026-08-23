@@ -1565,176 +1565,288 @@ mod tests {
         hits[0]
     }
 
+    /// The palettes the role tables assert against.
+    ///
+    /// Both modes, and in each an accent that is deliberately **not** a member
+    /// of either palette. Rendering only Mocha with the stock accent leaves a
+    /// table blind to the two mistakes this conversion is most likely to make:
+    /// a constant frozen back to its Mocha value is identical to the role that
+    /// replaced it *when viewed in Mocha*, and a site naming `p.blue` instead
+    /// of following the accent is identical to the stock accent, which is
+    /// blue. Both then fall through to the membership sweep, which reports
+    /// "some colour is not in the palette" rather than naming the site.
+    fn table_palettes() -> Vec<(String, Palette)> {
+        [false, true]
+            .into_iter()
+            .map(|light| {
+                let mut p = Palette::for_mode(light);
+                p.accent = Color::from_hex(0x00FF_8C1A);
+                (format!("light={light}"), p)
+            })
+            .collect()
+    }
+
     #[test]
     fn every_text_this_panel_draws_is_in_the_role_it_claims() {
-        // ONE ENTRY PER SOURCE SITE. Not one per kind of site, and not one per
-        // rendered row -- a loop that draws ten app rows from a single
-        // `color:` expression is ONE site, but two expressions that happen to
-        // name the same role are TWO. Shortening this table by grouping is how
-        // modules 21 and 22 lost five defects between them; do not do it.
-        let p = mocha();
-        let over = draw("overview: disabled, allowed, empty", &p);
-        let bare = draw("detail: no apps", &p);
-        let full = draw("detail: one app per state, enabled", &p);
-        let none = draw("activity: empty", &p);
-        let act = draw("activity: allowed and denied", &p);
-        let tab2 = draw("general: level 0, toggles true", &p);
+        for (mode, p) in table_palettes() {
+            // ONE ENTRY PER SOURCE SITE. Not one per kind of site, and not one per
+            // rendered row -- a loop that draws ten app rows from a single
+            // `color:` expression is ONE site, but two expressions that happen to
+            // name the same role are TWO. Shortening this table by grouping is how
+            // modules 21 and 22 lost five defects between them; do not do it.
+            let over = draw("overview: disabled, allowed, empty", &p);
+            let bare = draw("detail: no apps", &p);
+            let full = draw("detail: one app per state, enabled", &p);
+            let none = draw("activity: empty", &p);
+            let act = draw("activity: allowed and denied", &p);
+            let tab2 = draw("general: level 0, toggles true", &p);
 
-        let kind0 = PermissionKind::ALL[0];
+            let kind0 = PermissionKind::ALL[0];
 
-        // render
-        assert_eq!(
-            rgb(text_containing(&over, "Privacy & Permissions")),
-            rgb(p.text)
-        );
-        // render_permissions_tab, detail arm
-        assert_eq!(rgb(text_containing(&bare, kind0.label())), rgb(p.lavender));
-        assert_eq!(
-            rgb(text_containing(&bare, kind0.description())),
-            rgb(p.subtext0)
-        );
-        assert_eq!(
-            rgb(text_containing(&bare, "No apps have requested")),
-            rgb(p.overlay0)
-        );
-        assert_eq!(rgb(text_containing(&full, "App 0")), rgb(p.text));
-        assert_eq!(rgb(text_containing(&full, "0\u{d7}")), rgb(p.overlay0));
-        // The app-state label defers to `PermissionState::color`. Asserting
-        // that method in isolation (as the choice table does) does not prove
-        // this call site still asks it -- swapping `app.state.color(p)` for a
-        // flat `p.text` leaves the method, and that table, untouched.
-        assert_eq!(
-            rgb(text_containing(&full, PermissionState::Allowed.label())),
-            rgb(PermissionState::Allowed.color(&p))
-        );
-        assert_eq!(
-            rgb(text_containing(&full, PermissionState::NotDecided.label())),
-            rgb(PermissionState::NotDecided.color(&p))
-        );
-        // render_permissions_tab, overview arm
-        assert_eq!(
-            rgb(text_containing(&over, PermissionKind::Camera.label())),
-            rgb(p.text)
-        );
-        assert_eq!(
-            rgb(text_containing(&over, PermissionKind::Camera.description())),
-            rgb(p.overlay0)
-        );
-        // render_activity_tab
-        assert_eq!(
-            rgb(text_containing(&none, "No activity recorded")),
-            rgb(p.overlay0)
-        );
-        assert_eq!(
-            rgb(text_containing(&act, "recent access events")),
-            rgb(p.text)
-        );
-        // render_general_tab
-        assert_eq!(rgb(text_containing(&tab2, "Telemetry")), rgb(p.lavender));
-        assert_eq!(rgb(text_containing(&tab2, "Other")), rgb(p.lavender));
-        // render_toggle
-        assert_eq!(
-            rgb(text_containing(&tab2, "Prompt on first access")),
-            rgb(p.subtext0)
-        );
+            // render
+            assert_eq!(
+                rgb(text_containing(&over, "Privacy & Permissions")),
+                rgb(p.text),
+                "{mode}"
+            );
+            // render_permissions_tab, detail arm
+            assert_eq!(
+                rgb(text_containing(&bare, kind0.label())),
+                rgb(p.lavender),
+                "{mode}"
+            );
+            assert_eq!(
+                rgb(text_containing(&bare, kind0.description())),
+                rgb(p.subtext0),
+                "{mode}"
+            );
+            assert_eq!(
+                rgb(text_containing(&bare, "No apps have requested")),
+                rgb(p.overlay0),
+                "{mode}"
+            );
+            assert_eq!(rgb(text_containing(&full, "App 0")), rgb(p.text), "{mode}");
+            assert_eq!(
+                rgb(text_containing(&full, "0\u{d7}")),
+                rgb(p.overlay0),
+                "{mode}"
+            );
+            // The app-state label defers to `PermissionState::color`. Asserting
+            // that method in isolation (as the choice table does) does not prove
+            // this call site still asks it -- swapping `app.state.color(p)` for a
+            // flat `p.text` leaves the method, and that table, untouched.
+            assert_eq!(
+                rgb(text_containing(&full, PermissionState::Allowed.label())),
+                rgb(PermissionState::Allowed.color(&p)),
+                "{mode}"
+            );
+            assert_eq!(
+                rgb(text_containing(&full, PermissionState::NotDecided.label())),
+                rgb(PermissionState::NotDecided.color(&p)),
+                "{mode}"
+            );
+            // render_permissions_tab, overview arm
+            assert_eq!(
+                rgb(text_containing(&over, PermissionKind::Camera.label())),
+                rgb(p.text),
+                "{mode}"
+            );
+            assert_eq!(
+                rgb(text_containing(&over, PermissionKind::Camera.description())),
+                rgb(p.overlay0),
+                "{mode}"
+            );
+            // render_activity_tab
+            assert_eq!(
+                rgb(text_containing(&none, "No activity recorded")),
+                rgb(p.overlay0),
+                "{mode}"
+            );
+            assert_eq!(
+                rgb(text_containing(&act, "recent access events")),
+                rgb(p.text),
+                "{mode}"
+            );
+            // render_general_tab
+            assert_eq!(
+                rgb(text_containing(&tab2, "Telemetry")),
+                rgb(p.lavender),
+                "{mode}"
+            );
+            assert_eq!(
+                rgb(text_containing(&tab2, "Other")),
+                rgb(p.lavender),
+                "{mode}"
+            );
+            // render_toggle
+            assert_eq!(
+                rgb(text_containing(&tab2, "Prompt on first access")),
+                rgb(p.subtext0),
+                "{mode}"
+            );
+        }
     }
 
     #[test]
     fn every_rectangle_this_panel_draws_is_in_the_role_it_claims() {
-        // ONE ENTRY PER SOURCE SITE -- see the note on the text table above.
-        //
-        // Note that the activity row and the telemetry row are both 468x28.
-        // They are told apart by fixture, not by size: they live on different
-        // tabs and are never in one render.
-        let p = mocha();
-        let over = draw("overview: disabled, allowed, empty", &p);
-        let full = draw("detail: one app per state, enabled", &p);
-        let act = draw("activity: allowed and denied", &p);
-        let tab2 = draw("general: level 0, toggles true", &p);
+        for (mode, p) in table_palettes() {
+            // ONE ENTRY PER SOURCE SITE -- see the note on the text table above.
+            //
+            // Note that the activity row and the telemetry row are both 468x28.
+            // They are told apart by fixture, not by size: they live on different
+            // tabs and are never in one render.
+            let over = draw("overview: disabled, allowed, empty", &p);
+            let full = draw("detail: one app per state, enabled", &p);
+            let act = draw("activity: allowed and denied", &p);
+            let tab2 = draw("general: level 0, toggles true", &p);
 
-        // render: the panel background.
-        assert_eq!(rgb(fills(&over, 500.0, 900.0)[0]), rgb(p.base));
-        // render_permissions_tab: an app row.
-        assert!(
-            fills(&full, 468.0, 32.0)
-                .iter()
-                .all(|c| rgb(*c) == rgb(p.mantle))
-        );
-        // render_permissions_tab: an overview row.
-        assert!(
-            fills(&over, 468.0, 40.0)
-                .iter()
-                .all(|c| rgb(*c) == rgb(p.mantle))
-        );
-        // render_activity_tab: a log row.
-        assert!(
-            fills(&act, 468.0, 28.0)
-                .iter()
-                .all(|c| rgb(*c) == rgb(p.mantle))
-        );
-        // render_toggle: the knob.
-        assert!(
-            fills(&tab2, 16.0, 16.0)
-                .iter()
-                .all(|c| rgb(*c) == rgb(p.text))
-        );
+            // render: the panel background.
+            assert_eq!(rgb(fills(&over, 500.0, 900.0)[0]), rgb(p.base), "{mode}");
+            // render_permissions_tab: an app row.
+            assert!(
+                fills(&full, 468.0, 32.0)
+                    .iter()
+                    .all(|c| rgb(*c) == rgb(p.mantle)),
+                "{mode}"
+            );
+            // render_permissions_tab: an overview row.
+            assert!(
+                fills(&over, 468.0, 40.0)
+                    .iter()
+                    .all(|c| rgb(*c) == rgb(p.mantle)),
+                "{mode}"
+            );
+            // render_activity_tab: a log row.
+            assert!(
+                fills(&act, 468.0, 28.0)
+                    .iter()
+                    .all(|c| rgb(*c) == rgb(p.mantle)),
+                "{mode}"
+            );
+            // render_toggle: the knob.
+            assert!(
+                fills(&tab2, 16.0, 16.0)
+                    .iter()
+                    .all(|c| rgb(*c) == rgb(p.text)),
+                "{mode}"
+            );
+        }
     }
 
     #[test]
     fn every_choice_this_panel_makes_hands_over_the_role_it_claims() {
-        // The sweep cannot see any of these and neither role table can reach
-        // them: every arm names a role, and a role is a member of BOTH
-        // palettes, so swapping one arm for another is invisible to a
-        // membership check. A per-source-site table does not help either --
-        // these sites choose a colour rather than drawing one, and the table
-        // only ever sees whichever arm its fixture happened to take.
-        //
-        // So: one assertion per ARM, both sides of every choice.
-        let p = mocha();
+        for (mode, p) in table_palettes() {
+            // The sweep cannot see any of these and neither role table can reach
+            // them: every arm names a role, and a role is a member of BOTH
+            // palettes, so swapping one arm for another is invisible to a
+            // membership check. A per-source-site table does not help either --
+            // these sites choose a colour rather than drawing one, and the table
+            // only ever sees whichever arm its fixture happened to take.
+            //
+            // So: one assertion per ARM, both sides of every choice.
 
-        // PermissionState::color -- three arms.
-        assert_eq!(rgb(PermissionState::Allowed.color(&p)), rgb(p.green));
-        assert_eq!(rgb(PermissionState::Denied.color(&p)), rgb(p.red));
-        assert_eq!(rgb(PermissionState::NotDecided.color(&p)), rgb(p.overlay0));
+            // PermissionState::color -- three arms.
+            assert_eq!(
+                rgb(PermissionState::Allowed.color(&p)),
+                rgb(p.green),
+                "{mode}"
+            );
+            assert_eq!(rgb(PermissionState::Denied.color(&p)), rgb(p.red), "{mode}");
+            assert_eq!(
+                rgb(PermissionState::NotDecided.color(&p)),
+                rgb(p.overlay0),
+                "{mode}"
+            );
 
-        // render: the tab strip, fill and label, selected and not.
-        let over = draw("overview: disabled, allowed, empty", &p);
-        let tabs = fills(&over, 154.0, 30.0);
-        assert_eq!(rgb(tabs[0]), rgb(p.surface0), "the selected tab's fill");
-        assert_eq!(rgb(tabs[1]), rgb(p.mantle), "an unselected tab's fill");
-        assert_eq!(rgb(text_exact(&over, "Permissions")), rgb(p.accent));
-        assert_eq!(rgb(text_exact(&over, "Activity")), rgb(p.subtext0));
+            // render: the tab strip, fill and label, selected and not.
+            let over = draw("overview: disabled, allowed, empty", &p);
+            let tabs = fills(&over, 154.0, 30.0);
+            assert_eq!(
+                rgb(tabs[0]),
+                rgb(p.surface0),
+                "the selected tab's fill ({mode})"
+            );
+            assert_eq!(
+                rgb(tabs[1]),
+                rgb(p.mantle),
+                "an unselected tab's fill ({mode})"
+            );
+            assert_eq!(
+                rgb(text_exact(&over, "Permissions")),
+                rgb(p.accent),
+                "{mode}"
+            );
+            assert_eq!(
+                rgb(text_exact(&over, "Activity")),
+                rgb(p.subtext0),
+                "{mode}"
+            );
 
-        // render_permissions_tab: the overview status line, all three ways.
-        assert_eq!(rgb(text_containing(&over, "Disabled")), rgb(p.red));
-        assert_eq!(rgb(text_containing(&over, "apps allowed")), rgb(p.green));
-        assert_eq!(rgb(text_containing(&over, "No apps")), rgb(p.green));
+            // render_permissions_tab: the overview status line, all three ways.
+            assert_eq!(
+                rgb(text_containing(&over, "Disabled")),
+                rgb(p.red),
+                "{mode}"
+            );
+            assert_eq!(
+                rgb(text_containing(&over, "apps allowed")),
+                rgb(p.green),
+                "{mode}"
+            );
+            assert_eq!(
+                rgb(text_containing(&over, "No apps")),
+                rgb(p.green),
+                "{mode}"
+            );
 
-        // render_activity_tab: an allowed event and a denied one.
-        let act = draw("activity: allowed and denied", &p);
-        assert_eq!(rgb(text_containing(&act, "\u{2713}")), rgb(p.green));
-        assert_eq!(rgb(text_containing(&act, "\u{2715}")), rgb(p.red));
+            // render_activity_tab: an allowed event and a denied one.
+            let act = draw("activity: allowed and denied", &p);
+            assert_eq!(
+                rgb(text_containing(&act, "\u{2713}")),
+                rgb(p.green),
+                "{mode}"
+            );
+            assert_eq!(rgb(text_containing(&act, "\u{2715}")), rgb(p.red), "{mode}");
 
-        // render_general_tab: the radio row, fill and label, both ways.
-        let tab2 = draw("general: level 0, toggles true", &p);
-        let rows = fills(&tab2, 468.0, 28.0);
-        assert_eq!(rgb(rows[0]), rgb(p.surface0), "the selected level's row");
-        assert_eq!(rgb(rows[1]), rgb(p.mantle), "an unselected level's row");
-        assert_eq!(rgb(text_containing(&tab2, "\u{25CF} ")), rgb(p.accent));
-        assert_eq!(rgb(text_containing(&tab2, "\u{25CB} ")), rgb(p.text));
+            // render_general_tab: the radio row, fill and label, both ways.
+            let tab2 = draw("general: level 0, toggles true", &p);
+            let rows = fills(&tab2, 468.0, 28.0);
+            assert_eq!(
+                rgb(rows[0]),
+                rgb(p.surface0),
+                "the selected level's row ({mode})"
+            );
+            assert_eq!(
+                rgb(rows[1]),
+                rgb(p.mantle),
+                "an unselected level's row ({mode})"
+            );
+            assert_eq!(
+                rgb(text_containing(&tab2, "\u{25CF} ")),
+                rgb(p.accent),
+                "{mode}"
+            );
+            assert_eq!(
+                rgb(text_containing(&tab2, "\u{25CB} ")),
+                rgb(p.text),
+                "{mode}"
+            );
 
-        // render_toggle: the pill, both ways.
-        let off = draw("general: level 0, toggles false", &p);
-        assert!(
-            fills(&tab2, 40.0, 20.0)
-                .iter()
-                .all(|c| rgb(*c) == rgb(p.green))
-        );
-        assert!(
-            fills(&off, 40.0, 20.0)
-                .iter()
-                .all(|c| rgb(*c) == rgb(p.surface1))
-        );
+            // render_toggle: the pill, both ways.
+            let off = draw("general: level 0, toggles false", &p);
+            assert!(
+                fills(&tab2, 40.0, 20.0)
+                    .iter()
+                    .all(|c| rgb(*c) == rgb(p.green)),
+                "{mode}"
+            );
+            assert!(
+                fills(&off, 40.0, 20.0)
+                    .iter()
+                    .all(|c| rgb(*c) == rgb(p.surface1)),
+                "{mode}"
+            );
+        }
     }
 
     #[test]

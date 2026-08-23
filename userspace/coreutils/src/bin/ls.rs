@@ -62,7 +62,7 @@ use coreutils::fnmatch::{Flags, fnmatch};
 use coreutils::getopt::{self, Opt, Program, Takes};
 use coreutils::human::{Opts, default_block_size, human_readable};
 use coreutils::pathname::{base_len, last_component, last_component_offset};
-use coreutils::quote::{Mb, Style, next_mb, os_bytes, quote, quoteaf};
+use coreutils::quote::{Mb, Style, next_mb, os_bytes, quote, quoteaf, quotef};
 use coreutils::vercmp::version;
 use coreutils::xnum::{self, Status, strtol_fatal};
 use modechange::{S_IFBLK, S_IFCHR, S_IFDIR, S_IFIFO, S_IFLNK, S_IFMT, S_IFREG, S_IFSOCK};
@@ -230,6 +230,15 @@ enum FileType {
     Normal,
     SymbolicLink,
     Sock,
+    /// A union-mount tombstone: the entry that hides a file of the same name
+    /// in a lower layer. `-l` prints it as `w`.
+    ///
+    /// Never constructed here, and it cannot be: upstream builds it from
+    /// `readdir`'s `DT_WHT`, and `std::fs::FileType` exposes no such
+    /// predicate and no way to reach the raw `d_type`. The variant is kept
+    /// because it holds this enum's discriminants in `filetype_letter`'s
+    /// order, and dropping it would silently move `arg_directory`'s letter.
+    #[cfg_attr(unix, expect(dead_code, reason = "std exposes no DT_WHT"))]
     Whiteout,
     /// A directory named on the command line and being listed *as a file* —
     /// `ls -d`, or the header line a recursive listing prints for it.
@@ -942,7 +951,28 @@ fn parse_args(
             }
             Flag::Ignore => cfg.ignore_patterns.push(arg.to_vec()),
             Flag::Hide => cfg.hide_patterns.push(arg.to_vec()),
-            Flag::Dired => cfg.dired = true,
+            Flag::Dired => {
+                // `-D` is three switches in one, and the first two are not
+                // documented in its `--help` line: it also selects the long
+                // format and cancels `--hyperlink`. Measured, GNU ls 9.5, on
+                // a directory of three files:
+                //
+                // ```text
+                // ls --dired              ->  total 8 / drwxr-xr-x … a / …
+                //                             //DIRED// 57 58 …
+                // ls --dired --hyperlink  ->  the same rows, with no indent,
+                //                             and no //DIRED// line at all
+                // ```
+                //
+                // The first shows `-D` turning on the long format by itself
+                // — nothing else on that command line asked for it. The
+                // second shows that the cancelling is only a *default*: a
+                // later `--hyperlink` sets the flag again, and `finish`'s
+                // `dired && !print_hyperlink` then withdraws `dired`.
+                set.format_opt = Some(Format::Long);
+                set.print_hyperlink = false;
+                cfg.dired = true;
+            }
             Flag::Classify => {
                 let when = match raw.as_deref() {
                     // `--classify` with no argument means `--classify=always`;
@@ -1342,10 +1372,8 @@ fn filename_extra(style: Style, indicator: Indicator) -> Vec<u8> {
 /// the end, or a character with no width. One unprintable character does not
 /// cost its own width; it costs the width of the name.
 ///
-/// Every caller in `ls` immediately clamps the -1 to zero — see
-/// [`display_width`] — so a name holding a stray byte is laid out as if it
-/// were empty. That is GNU's behaviour and it is why `ls` in a terminal
-/// defaults to `-q`, which replaces such bytes before this is ever asked.
+/// The -1 does *not* become a zero at the call site — see [`display_width`] for
+/// what it becomes instead, and why.
 ///
 /// The one place we knowingly differ from GNU is the unprintable test:
 /// `c32width` asks glibc's `iswprint`, a table generated from a particular
@@ -1377,10 +1405,47 @@ fn mbs_width(text: &[u8]) -> Option<usize> {
     Some(width)
 }
 
-/// [`mbs_width`] with GNU's `MAX (0, …)` applied: a name it refuses occupies
-/// no columns at all.
+/// [`mbs_width`] with GNU's `MAX (0, …)` applied — which does nothing, so a
+/// name it refuses is [`usize::MAX`] columns wide.
+///
+/// Upstream writes
+///
+/// ```c
+/// size_t displayed_width IF_LINT ( = 0);
+/// …
+/// displayed_width = mbsnwidth (buf, len, MBSWIDTH_FLAGS);
+/// displayed_width = MAX (0, displayed_width);
+/// ```
+///
+/// The clamp is plainly meant to turn the -1 into a 0, and it cannot: the
+/// variable is a `size_t`, so the -1 has already become `SIZE_MAX` by the time
+/// `MAX` sees it, and `MAX (0, SIZE_MAX)` is `SIZE_MAX`. Every width the layout
+/// code then computes from it wraps.
+///
+/// **This is reproduced deliberately, and it is observable.** Measured on a
+/// directory holding `\abell`, `AAAA`, `BBBB` and `CCCC`, laid out `-CU` in
+/// that order:
+///
+/// ```text
+/// ls 9.4  ->  \abell··AAAA··BBBB··CCCC      (24 bytes)
+/// ls 9.5  ->  \abellAAAA··BBBB··CCCC        (22 bytes)
+/// ```
+///
+/// and with the refused name second instead of first, 9.5 emits a tab and a
+/// space where the column asks for three spaces. 9.4 measured `\abell` as four
+/// columns (its `mbsnwidth` flags let a control character cost nothing);
+/// 9.5 refuses the name outright and then underflows. It is not a passing
+/// regression either — coreutils master still has both lines verbatim, checked
+/// 2026-08-22 — so this is GNU's behaviour from 9.5 onwards, not a slip in one
+/// release. See `design-decisions.md` §367.
+///
+/// The blast radius is small: it takes a name holding a control character or a
+/// byte that is not valid UTF-8, printed in a column format to something that
+/// is not a terminal. On a terminal `ls` defaults to `-q`, which replaces those
+/// bytes with `?` before any of this is asked.
 fn display_width(text: &[u8]) -> usize {
-    mbs_width(text).unwrap_or(0)
+    // `MAX (0, …)` on a `size_t`, spelled honestly.
+    mbs_width(text).unwrap_or(usize::MAX)
 }
 
 /// `-q`: replace every character that will not print with a single `?`.
@@ -1653,12 +1718,17 @@ fn extension(name: &[u8]) -> &[u8] {
 }
 
 /// The cached width, or the width computed now — GNU's `fileinfo_name_width`.
+///
+/// The `+ pad` wraps rather than saturates because upstream's is a `size_t`
+/// addition and the width it is added to may be [`usize::MAX`]; see
+/// [`display_width`]. Saturating here would quietly repair GNU's underflow in
+/// one place and not the eight others, which is worse than either answer.
 fn name_width(cfg: &Config, cwd_some_quoted: bool, f: &FileInfo) -> usize {
     if let Some(width) = f.width {
         return width;
     }
     let out = quote_name(cfg, &cfg.filename_extra, cwd_some_quoted, &f.name, f.quoted);
-    out.width.saturating_add(usize::from(out.pad))
+    out.width.wrapping_add(usize::from(out.pad))
 }
 
 /// The comparison for one sort key, before `-r` and
@@ -1688,9 +1758,37 @@ fn key_cmp(cfg: &Config, cwd_some_quoted: bool, a: &FileInfo, b: &FileInfo) -> O
         Sort::Extension => extension(&a.name)
             .cmp(extension(&b.name))
             .then_with(by_name),
-        Sort::Width => name_width(cfg, cwd_some_quoted, a)
-            .cmp(&name_width(cfg, cwd_some_quoted, b))
-            .then_with(by_name),
+        // Upstream is `int diff = fileinfo_name_width (a) -
+        // fileinfo_name_width (b); return diff ? diff : cmp (…)`, and both
+        // conversions in that first line are load-bearing: the subtraction
+        // wraps in `size_t`, and the 64-bit result is then narrowed to a
+        // 32-bit `int`. For ordinary widths the pair is just a subtraction,
+        // but a name [`display_width`] refused is `usize::MAX` wide, and
+        // `SIZE_MAX - 4` narrows to -5 — so the *widest* name in the listing
+        // sorts first. Measured, GNU ls 9.5, on `ab`, `abc`, `一一` and
+        // `a\177bcd`:
+        //
+        // ```text
+        // $ ls --sort=width -1
+        // a\177bcd
+        // ab
+        // abc
+        // 一一
+        // ```
+        Sort::Width => {
+            let diff = name_width(cfg, cwd_some_quoted, a).wrapping_sub(name_width(
+                cfg,
+                cwd_some_quoted,
+                b,
+            ));
+            #[expect(
+                clippy::cast_possible_truncation,
+                clippy::cast_possible_wrap,
+                reason = "C's implicit size_t -> int narrowing, reproduced deliberately"
+            )]
+            let diff = diff as u32 as i32;
+            if diff == 0 { by_name() } else { diff.cmp(&0) }
+        }
         // Largest first, newest first: the key is compared the other way
         // round, not the pair.
         Sort::Size => b.stat.size.cmp(&a.stat.size).then_with(by_name),
@@ -1734,7 +1832,9 @@ fn sort_files(cfg: &Config, cwd_some_quoted: bool, files: &mut [FileInfo]) {
     {
         for f in files.iter_mut() {
             let out = quote_name(cfg, &cfg.filename_extra, cwd_some_quoted, &f.name, f.quoted);
-            f.width = Some(out.width.saturating_add(usize::from(out.pad)));
+            // Wrapping, to match [`name_width`]: the cache must hold exactly
+            // what the uncached path would have computed.
+            f.width = Some(out.width.wrapping_add(usize::from(out.pad)));
         }
     }
     if cfg.sort == Sort::None {
@@ -1906,10 +2006,20 @@ struct Pending {
 /// recursive listing shows a subdirectory as a row under its parent and again
 /// as a heading of its own.
 ///
-/// Upstream walks the files backwards and prepends to the queue, so the two
-/// reversals cancel and the queue ends up in listing order. Pushing forwards
-/// onto a `Vec` we then drain from the front is the same order, so the
-/// backwards walk is not reproduced.
+/// The queue is a **stack**, not a FIFO, and that is what makes `-R`
+/// depth-first: the children `print_dir` discovers are taken up before the
+/// siblings queued alongside their parent. Upstream gets this from a
+/// singly-linked list that `queue_directory` prepends to and the driver drains
+/// from the head; here `pending` is a `Vec` pushed and popped at the back,
+/// which is the same discipline. So the walk over the files is backwards and
+/// the marker goes on *first* — exactly upstream's order — and the pops come
+/// back out as the marker last, after every child it is marking the end of.
+///
+/// ```text
+/// $ ls -R          ->  .  a  a/x  a/y  b  b/z
+/// ```
+///
+/// A queue drained from the front would give `. a b a/x a/y b/z` instead.
 fn extract_dirs_from_files(
     dirname: Option<&[u8]>,
     command_line_arg: bool,
@@ -1929,7 +2039,7 @@ fn extract_dirs_from_files(
         });
     }
 
-    for f in files.iter() {
+    for f in files.iter().rev() {
         let is_dir = matches!(f.filetype, FileType::Directory | FileType::ArgDirectory);
         if !is_dir || (dirname.is_some() && basename_is_dot_or_dotdot(&f.name)) {
             continue;
@@ -2865,12 +2975,17 @@ fn length_of_file_name_and_frills(
         len = len.saturating_add(1).saturating_add(own);
     }
 
-    len = len.saturating_add(name_width(cfg, cwd_some_quoted, f));
+    // Wrapping, not saturating: the name's width is `usize::MAX` when GNU's
+    // `mbsnwidth` refused it, and every length derived from it wraps in
+    // upstream's `size_t` arithmetic. See [`display_width`].
+    len = len.wrapping_add(name_width(cfg, cwd_some_quoted, f));
 
     if cfg.indicator_style != Indicator::None
         && get_type_indicator(cfg, f.stat_ok, f.stat.mode, f.filetype).is_some()
     {
-        len = len.saturating_add(1);
+        // Wrapping for the same reason: `-F` on a name of width `usize::MAX`
+        // gives width 0, which is what GNU's `len += (c != 0)` gives.
+        len = len.wrapping_add(1);
     }
     len
 }
@@ -2942,14 +3057,20 @@ fn calculate_columns(cfg: &Config, lengths: &[usize], by_columns: bool) -> (usiz
             } else {
                 filesno % cols
             };
-            let real_length = name_length.saturating_add(if idx == i { 0 } else { 2 });
+            // Wrapping, twice, because upstream's is `size_t` arithmetic on a
+            // width that may be `usize::MAX` — see [`display_width`]. It is
+            // this line that produces the visible effect: a refused name in a
+            // non-final column has `real_length` 1, which never beats
+            // `MIN_COLUMN_WIDTH`, so its column stays three wide while the name
+            // itself is measured as `usize::MAX` when the time comes to pad it.
+            let real_length = name_length.wrapping_add(if idx == i { 0 } else { 2 });
             let Some(slot) = candidate.col_arr.get_mut(idx) else {
                 continue;
             };
             if *slot < real_length {
                 candidate.line_len = candidate
                     .line_len
-                    .saturating_add(real_length.saturating_sub(*slot));
+                    .wrapping_add(real_length.wrapping_sub(*slot));
                 *slot = real_length;
                 candidate.valid_len = candidate.line_len < cfg.line_length;
             }
@@ -3027,10 +3148,14 @@ fn print_many_per_line(
             if filesno >= n {
                 break;
             }
+            // `pos + name_length` wraps: a name GNU's `mbsnwidth` refused is
+            // `usize::MAX` wide, so this lands one column *before* `pos` and
+            // [`indent`] pads one more than the column asks — or, at `pos` 0,
+            // lands past `to` and pads nothing at all. See [`display_width`].
             indent(
                 &mut out.buf,
                 cfg.tabsize,
-                pos.saturating_add(name_length),
+                pos.wrapping_add(name_length),
                 pos.saturating_add(max_name_length),
             );
             pos = pos.saturating_add(max_name_length);
@@ -3062,10 +3187,11 @@ fn print_horizontal(
             out.buf.push(cfg.eolbyte);
             pos = 0;
         } else {
+            // Wrapping for the same reason as in `print_many_per_line`.
             indent(
                 &mut out.buf,
                 cfg.tabsize,
-                pos.saturating_add(name_length),
+                pos.wrapping_add(name_length),
                 pos.saturating_add(max_name_length),
             );
             pos = pos.saturating_add(max_name_length);
@@ -3106,13 +3232,25 @@ fn print_with_separator(
         };
 
         if filesno != 0 {
+            // Upstream's guard is
+            //
+            // ```c
+            // (pos + len + 2 < line_length) && (pos <= SIZE_MAX - len - 2)
+            // ```
+            //
+            // and both halves are wrapping `size_t` arithmetic, so the second
+            // is not the overflow check it reads as: a `len` of `usize::MAX`
+            // (see [`display_width`]) makes `SIZE_MAX - len - 2` wrap to
+            // `SIZE_MAX - 1`, which almost every `pos` is below, while the
+            // first half becomes `pos + 1 < line_length`. The pair therefore
+            // *passes* for a refused name where a real overflow check would
+            // fail it, and the line does not wrap. Translated literally rather
+            // than repaired, for the reason given in [`display_width`].
             let fits = cfg.line_length == 0
-                || pos
-                    .checked_add(len)
-                    .and_then(|s| s.checked_add(2))
-                    .is_some_and(|s| s < cfg.line_length);
+                || (pos.wrapping_add(len).wrapping_add(2) < cfg.line_length
+                    && pos <= usize::MAX.wrapping_sub(len).wrapping_sub(2));
             let separator = if fits {
-                pos = pos.saturating_add(2);
+                pos = pos.wrapping_add(2);
                 b' '
             } else {
                 pos = 0;
@@ -3123,7 +3261,7 @@ fn print_with_separator(
         }
 
         print_file_name_and_frills(out, cfg, w, cwd_some_quoted, f);
-        pos = pos.saturating_add(len);
+        pos = pos.wrapping_add(len);
     }
     out.buf.push(cfg.eolbyte);
 }
@@ -3196,8 +3334,20 @@ trait Tree {
     fn lstat(&self, path: &[u8]) -> std::io::Result<Stat>;
     fn read_link(&self, path: &[u8]) -> std::io::Result<Vec<u8>>;
     /// One directory's entries, in the order the filesystem gives them.
-    fn read_dir(&self, path: &[u8]) -> std::io::Result<Vec<Entry>>;
+    ///
+    /// An **iterator** and not a `Vec`, for two reasons that are both
+    /// upstream's. The outer [`Result`] is `opendir` failing and the inner one
+    /// is `readdir` failing part-way through, and `ls` prints a different
+    /// sentence for each — `cannot open directory` against
+    /// `reading directory` — so collapsing them would lose a message. And the
+    /// one-name-at-a-time case in [`Listing::print_dir`] exists precisely to
+    /// list a directory of millions of entries in constant memory, which a
+    /// `Vec` of every entry would defeat.
+    fn read_dir<'t>(&'t self, path: &[u8]) -> std::io::Result<DirIter<'t>>;
 }
+
+/// What [`Tree::read_dir`] hands back: `readdir` until it stops.
+type DirIter<'t> = Box<dyn Iterator<Item = std::io::Result<Entry>> + 't>;
 
 /// One `readdir` result: `(name, type, inode)`.
 ///
@@ -3431,8 +3581,735 @@ fn is_enoent_or_eloop(error: &std::io::Error) -> bool {
     error.kind() == std::io::ErrorKind::NotFound || error.raw_os_error() == Some(40)
 }
 
+// -------------------------------------------------------------- the walk ---
+
+/// Everything the listing carries from one directory to the next: upstream's
+/// file-scope variables, gathered so that a whole run is one value and a test
+/// can drive it against a [`Tree`] that is not a filesystem.
+///
+/// `first`, `print_dir_name` and `pending` are the three that upstream keeps as
+/// globals *and mutates from two different functions*, which is what makes the
+/// `dir:` headings come out where they do.
+struct Listing<'a> {
+    tree: &'a dyn Tree,
+    cfg: &'a Config,
+    names: &'a Names,
+    times: Times,
+    out: Out,
+    err: &'a mut dyn Write,
+    status: Exit,
+    /// The directory currently being read. GNU's `cwd_file` and its widths.
+    cwd: Cwd,
+    /// GNU's `pending_dirs`, a **stack** — see [`extract_dirs_from_files`].
+    pending: Vec<Pending>,
+    /// GNU's `active_dir_set`: the `(dev, ino)` of every directory on the path
+    /// from the operand down to the one being read, so that a symlink pointing
+    /// back up is caught rather than followed forever.
+    ///
+    /// A `Vec` rather than a hash table because it holds one entry per level of
+    /// nesting, not one per file — a depth of thirty is a deep tree, and a
+    /// linear scan of thirty pairs is faster than hashing one.
+    active: Vec<(u64, u64)>,
+    /// GNU's `static bool first` inside `print_dir`: whether any heading has
+    /// been printed yet, which is what decides that the blank line goes
+    /// *before* each heading but not before the first.
+    first: bool,
+    /// GNU's `print_dir_name`. It starts true, is cleared for the lone
+    /// directory of a single-operand run, and is set again after every listed
+    /// directory — so `ls dir` prints no heading but `ls dir1 dir2` prints two.
+    print_dir_name: bool,
+}
+
+impl Listing<'_> {
+    /// GNU's `LOOP_DETECT`, which is `!!active_dir_set`, and the set is
+    /// allocated exactly when `-R` was asked for.
+    const fn loop_detect(&self) -> bool {
+        self.cfg.recursive
+    }
+
+    /// GNU's `file_failure`: one `ls: <sentence> <name>: <strerror>` line, and
+    /// the exit status raised to match where the name came from.
+    fn file_failure(
+        &mut self,
+        command_line_arg: bool,
+        sentence: &str,
+        name: &[u8],
+        e: &std::io::Error,
+    ) {
+        // A diagnostic that cannot be written has nowhere left to be reported.
+        let _ = writeln!(
+            self.err,
+            "ls: {sentence} {}: {}",
+            quoteaf(name),
+            strerror(e)
+        );
+        self.status.fail(command_line_arg);
+    }
+
+    /// GNU's `print_dir`: read one directory and print it.
+    fn print_dir(&mut self, name: &[u8], realname: Option<&[u8]>, command_line_arg: bool) {
+        let mut total_blocks = 0u64;
+
+        let entries = match self.tree.read_dir(name) {
+            Ok(entries) => entries,
+            Err(e) => {
+                self.file_failure(command_line_arg, "cannot open directory", name, &e);
+                return;
+            }
+        };
+
+        if self.loop_detect() {
+            // Upstream stats the *open descriptor* and falls back to the path
+            // only if `dirfd` failed. There is no descriptor to reach through
+            // this trait, so the path is always used; the two differ only if
+            // the directory is renamed between the open and the stat, which
+            // upstream's own fallback path has the same hole in.
+            let dir_stat = match self.tree.stat(name) {
+                Ok(stat) => stat,
+                Err(e) => {
+                    let sentence = "cannot determine device and inode of";
+                    self.file_failure(command_line_arg, sentence, name, &e);
+                    return;
+                }
+            };
+            let pair = (dir_stat.dev, dir_stat.ino);
+            if self.active.contains(&pair) {
+                // Not `file_failure`: there is no `errno` to report, so the
+                // sentence stands alone and the name is quoted the *other*
+                // way — `quotef`, which leaves a plain name unquoted.
+                let _ = writeln!(
+                    self.err,
+                    "ls: {}: not listing already-listed directory",
+                    quotef(name)
+                );
+                self.status.fail(true);
+                return;
+            }
+            self.active.push(pair);
+        }
+
+        self.cwd = Cwd::default();
+
+        if self.cfg.recursive || self.print_dir_name {
+            if !self.first {
+                self.out.buf.push(b'\n');
+            }
+            self.first = false;
+            self.out.indent(self.cfg);
+            // The heading quotes under `DIRNAME_EXTRA` rather than the file
+            // set, is never measured for the shortcut (upstream's `-1`), and
+            // is never padded — `clear_files` has just cleared
+            // `cwd_some_quoted`, so there is nothing to align against.
+            let rendered = quote_name(
+                self.cfg,
+                DIRNAME_EXTRA,
+                false,
+                realname.unwrap_or(name),
+                None,
+            );
+            self.out.mark(self.cfg, Dired::Headers);
+            self.out.buf.extend_from_slice(&rendered.bytes);
+            self.out.mark(self.cfg, Dired::Headers);
+            self.out.buf.extend_from_slice(b":\n");
+        }
+
+        // The one-name-at-a-time case: with nothing to sort, no widths to
+        // agree on and no recursion, a name can be printed the moment it is
+        // read, and a directory of millions of entries costs one row of
+        // memory instead of millions. It is observable and not merely an
+        // optimisation — the inode column is then padded to each name's own
+        // width rather than to the directory's widest. Measured, GNU ls 9.5,
+        // on `/dev`:
+        //
+        // ```text
+        // ls -i  /dev  ->  .164 autofs   ..11 console
+        // ls -iU /dev  ->  164 autofs    11 console
+        // ```
+        let one_at_a_time = self.cfg.format == Format::OnePerLine
+            && self.cfg.sort == Sort::None
+            && !self.cfg.print_block_size
+            && !self.cfg.recursive;
+
+        for entry in entries {
+            let (child, kind, ino) = match entry {
+                Ok(entry) => entry,
+                Err(e) => {
+                    self.file_failure(command_line_arg, "reading directory", name, &e);
+                    break;
+                }
+            };
+            if file_ignored(self.cfg, &child) {
+                continue;
+            }
+            total_blocks = total_blocks.saturating_add(gobble_file(
+                self.tree,
+                self.cfg,
+                self.names,
+                &mut self.cwd,
+                &mut self.status,
+                self.err,
+                &child,
+                kind,
+                ino,
+                false,
+                name,
+            ));
+            if one_at_a_time {
+                // `sort_files` still runs: even under `--sort=none` it is what
+                // establishes the order the printer walks.
+                sort_files(self.cfg, self.cwd.some_quoted, &mut self.cwd.files);
+                self.print_current_files();
+                self.cwd = Cwd::default();
+            }
+        }
+
+        sort_files(self.cfg, self.cwd.some_quoted, &mut self.cwd.files);
+
+        if self.cfg.recursive {
+            extract_dirs_from_files(
+                Some(name),
+                false,
+                self.loop_detect(),
+                &mut self.cwd.files,
+                &mut self.pending,
+            );
+        }
+
+        if self.cfg.format == Format::Long || self.cfg.print_block_size {
+            let total = human_readable(
+                total_blocks,
+                self.cfg.human_output_opts,
+                ST_NBLOCKSIZE,
+                self.cfg.output_block_size,
+            );
+            self.out.indent(self.cfg);
+            self.out.buf.extend_from_slice(b"total ");
+            self.out.buf.extend_from_slice(total.as_bytes());
+            self.out.buf.push(self.cfg.eolbyte);
+        }
+
+        if !self.cwd.files.is_empty() {
+            self.print_current_files();
+        }
+    }
+
+    /// [`print_current_files`] against the directory currently held, which is
+    /// the only way it is ever called. The caller has already sorted.
+    fn print_current_files(&mut self) {
+        let files: Vec<&FileInfo> = self.cwd.files.iter().collect();
+        print_current_files(
+            &mut self.out,
+            self.cfg,
+            self.names,
+            &mut self.times,
+            &self.cwd.widths,
+            self.cwd.some_quoted,
+            &files,
+        );
+    }
+
+    /// The tail of GNU's `main`: gobble the operands, then drain the queue.
+    fn run(&mut self, operands: &[Vec<u8>]) {
+        if operands.is_empty() {
+            if self.cfg.immediate_dirs {
+                self.gobble_operand(b".", FileType::Directory);
+            } else {
+                self.pending.push(Pending {
+                    name: Some(b".".to_vec()),
+                    realname: None,
+                    command_line_arg: true,
+                });
+            }
+        } else {
+            for operand in operands {
+                self.gobble_operand(operand, FileType::Unknown);
+            }
+        }
+
+        if !self.cwd.files.is_empty() {
+            sort_files(self.cfg, self.cwd.some_quoted, &mut self.cwd.files);
+            if !self.cfg.immediate_dirs {
+                // `None`, so `.` and `..` are operands to be listed rather
+                // than the entries that would make a walk cycle.
+                extract_dirs_from_files(
+                    None,
+                    true,
+                    self.loop_detect(),
+                    &mut self.cwd.files,
+                    &mut self.pending,
+                );
+            }
+        }
+
+        if self.cwd.files.is_empty() {
+            // The single-directory case, which is the common one: `ls dir`
+            // prints the contents with no `dir:` heading, but `ls dir1 dir2`
+            // heads both. Upstream tests `pending_dirs->next == 0` — exactly
+            // one entry — and not "one operand", because an operand that is a
+            // *file* leaves a row behind and takes the branch above.
+            if operands.len() <= 1 && self.pending.len() == 1 {
+                self.print_dir_name = false;
+            }
+        } else {
+            self.print_current_files();
+            if !self.pending.is_empty() {
+                self.out.buf.push(b'\n');
+            }
+        }
+
+        while let Some(next) = self.pending.pop() {
+            let Some(name) = next.name else {
+                // The marker `extract_dirs_from_files` queued behind a
+                // directory's children: that directory is finished, so it
+                // stops being on the path and a later link to it is no longer
+                // a cycle.
+                self.active.pop();
+                continue;
+            };
+            self.print_dir(&name, next.realname.as_deref(), next.command_line_arg);
+            self.print_dir_name = true;
+        }
+
+        if self.cfg.dired {
+            // An *empty* obstack prints no line at all — not an empty one.
+            // `ls --dired` of a directory with no files prints only the
+            // `//DIRED-OPTIONS//` line.
+            let names = std::mem::take(&mut self.out.dired);
+            let headers = std::mem::take(&mut self.out.subdired);
+            dump_dired(&mut self.out.buf, b"//DIRED//", &names);
+            dump_dired(&mut self.out.buf, b"//SUBDIRED//", &headers);
+            self.out
+                .buf
+                .extend_from_slice(b"//DIRED-OPTIONS// --quoting-style=");
+            self.out
+                .buf
+                .extend_from_slice(self.cfg.quoting_style_name.as_bytes());
+            self.out.buf.push(b'\n');
+        }
+    }
+
+    /// One command-line operand, which differs from a directory entry in three
+    /// ways: it is stated with no `d_type` and no `d_ino` to save the call, its
+    /// failures are status 2, and a directory among them becomes a *heading*
+    /// rather than a row.
+    fn gobble_operand(&mut self, name: &[u8], kind: FileType) {
+        gobble_file(
+            self.tree,
+            self.cfg,
+            self.names,
+            &mut self.cwd,
+            &mut self.status,
+            self.err,
+            name,
+            kind,
+            NOT_AN_INODE_NUMBER,
+            true,
+            b"",
+        );
+    }
+}
+
+/// GNU's `dired_dump_obstack`: `//DIRED// 12 17 30 34`, or nothing at all when
+/// there is nothing to report.
+fn dump_dired(out: &mut Vec<u8>, prefix: &[u8], offsets: &[usize]) {
+    if offsets.is_empty() {
+        return;
+    }
+    out.extend_from_slice(prefix);
+    for offset in offsets {
+        out.extend_from_slice(format!(" {offset}").as_bytes());
+    }
+    out.push(b'\n');
+}
+
+// ------------------------------------------------------------------- main ---
+
+/// GNU 9.5's `--help`, verbatim, minus the four-line GNU-project footer that
+/// none of these utilities carry (it points at `info` pages this system has
+/// none of).
+fn help_text() -> String {
+    "\
+Usage: ls [OPTION]... [FILE]...
+List information about the FILEs (the current directory by default).
+Sort entries alphabetically if none of -cftuvSUX nor --sort is specified.
+
+Mandatory arguments to long options are mandatory for short options too.
+  -a, --all                  do not ignore entries starting with .
+  -A, --almost-all           do not list implied . and ..
+      --author               with -l, print the author of each file
+  -b, --escape               print C-style escapes for nongraphic characters
+      --block-size=SIZE      with -l, scale sizes by SIZE when printing them;
+                             e.g., '--block-size=M'; see SIZE format below
+
+  -B, --ignore-backups       do not list implied entries ending with ~
+  -c                         with -lt: sort by, and show, ctime (time of last
+                             change of file status information);
+                             with -l: show ctime and sort by name;
+                             otherwise: sort by ctime, newest first
+
+  -C                         list entries by columns
+      --color[=WHEN]         color the output WHEN; more info below
+  -d, --directory            list directories themselves, not their contents
+  -D, --dired                generate output designed for Emacs' dired mode
+  -f                         do not sort, enable -aU, disable -ls --color
+  -F, --classify[=WHEN]      append indicator (one of */=>@|) to entries WHEN
+      --file-type            likewise, except do not append '*'
+      --format=WORD          across -x, commas -m, horizontal -x, long -l,
+                             single-column -1, verbose -l, vertical -C
+
+      --full-time            like -l --time-style=full-iso
+  -g                         like -l, but do not list owner
+      --group-directories-first
+                             group directories before files;
+                             can be augmented with a --sort option, but any
+                             use of --sort=none (-U) disables grouping
+
+  -G, --no-group             in a long listing, don't print group names
+  -h, --human-readable       with -l and -s, print sizes like 1K 234M 2G etc.
+      --si                   likewise, but use powers of 1000 not 1024
+  -H, --dereference-command-line
+                             follow symbolic links listed on the command line
+      --dereference-command-line-symlink-to-dir
+                             follow each command line symbolic link
+                             that points to a directory
+
+      --hide=PATTERN         do not list implied entries matching shell PATTERN
+                             (overridden by -a or -A)
+
+      --hyperlink[=WHEN]     hyperlink file names WHEN
+      --indicator-style=WORD
+                             append indicator with style WORD to entry names:
+                             none (default), slash (-p),
+                             file-type (--file-type), classify (-F)
+
+  -i, --inode                print the index number of each file
+  -I, --ignore=PATTERN       do not list implied entries matching shell PATTERN
+  -k, --kibibytes            default to 1024-byte blocks for file system usage;
+                             used only with -s and per directory totals
+
+  -l                         use a long listing format
+  -L, --dereference          when showing file information for a symbolic
+                             link, show information for the file the link
+                             references rather than for the link itself
+
+  -m                         fill width with a comma separated list of entries
+  -n, --numeric-uid-gid      like -l, but list numeric user and group IDs
+  -N, --literal              print entry names without quoting
+  -o                         like -l, but do not list group information
+  -p, --indicator-style=slash
+                             append / indicator to directories
+  -q, --hide-control-chars   print ? instead of nongraphic characters
+      --show-control-chars   show nongraphic characters as-is (the default,
+                             unless program is 'ls' and output is a terminal)
+
+  -Q, --quote-name           enclose entry names in double quotes
+      --quoting-style=WORD   use quoting style WORD for entry names:
+                             literal, locale, shell, shell-always,
+                             shell-escape, shell-escape-always, c, escape
+                             (overrides QUOTING_STYLE environment variable)
+
+  -r, --reverse              reverse order while sorting
+  -R, --recursive            list subdirectories recursively
+  -s, --size                 print the allocated size of each file, in blocks
+  -S                         sort by file size, largest first
+      --sort=WORD            sort by WORD instead of name: none (-U), size (-S),
+                             time (-t), version (-v), extension (-X), width
+
+      --time=WORD            select which timestamp used to display or sort;
+                               access time (-u): atime, access, use;
+                               metadata change time (-c): ctime, status;
+                               modified time (default): mtime, modification;
+                               birth time: birth, creation;
+                             with -l, WORD determines which time to show;
+                             with --sort=time, sort by WORD (newest first)
+
+      --time-style=TIME_STYLE
+                             time/date format with -l; see TIME_STYLE below
+  -t                         sort by time, newest first; see --time
+  -T, --tabsize=COLS         assume tab stops at each COLS instead of 8
+  -u                         with -lt: sort by, and show, access time;
+                             with -l: show access time and sort by name;
+                             otherwise: sort by access time, newest first
+
+  -U                         do not sort; list entries in directory order
+  -v                         natural sort of (version) numbers within text
+  -w, --width=COLS           set output width to COLS.  0 means no limit
+  -x                         list entries by lines instead of by columns
+  -X                         sort alphabetically by entry extension
+  -Z, --context              print any security context of each file
+      --zero                 end each output line with NUL, not newline
+  -1                         list one file per line
+      --help        display this help and exit
+      --version     output version information and exit
+
+The SIZE argument is an integer and optional unit (example: 10K is 10*1024).
+Units are K,M,G,T,P,E,Z,Y,R,Q (powers of 1024) or KB,MB,... (powers of 1000).
+Binary prefixes can be used, too: KiB=K, MiB=M, and so on.
+
+The TIME_STYLE argument can be full-iso, long-iso, iso, locale, or +FORMAT.
+FORMAT is interpreted like in date(1).  If FORMAT is FORMAT1<newline>FORMAT2,
+then FORMAT1 applies to non-recent files and FORMAT2 to recent files.
+TIME_STYLE prefixed with 'posix-' takes effect only outside the POSIX locale.
+Also the TIME_STYLE environment variable sets the default style to use.
+
+The WHEN argument defaults to 'always' and can also be 'auto' or 'never'.
+
+Using color to distinguish file types is disabled both by default and
+with --color=never.  With --color=auto, ls emits color codes only when
+standard output is connected to a terminal.  The LS_COLORS environment
+variable can change the settings.  Use the dircolors(1) command to set it.
+
+Exit status:
+ 0  if OK,
+ 1  if minor problems (e.g., cannot access subdirectory),
+ 2  if serious trouble (e.g., cannot access command-line argument).
+"
+    .to_string()
+}
+
+#[cfg(not(unix))]
 fn main() -> ExitCode {
-    ExitCode::SUCCESS
+    eprintln!("ls: unix-only utility; not supported on this platform");
+    ExitCode::from(2)
+}
+
+/// The real filesystem.
+#[cfg(unix)]
+struct RealTree;
+
+/// Only the real filesystem turns a byte path back into an `OsString`; every
+/// other use of a path in this file stays in bytes.
+#[cfg(unix)]
+use coreutils::quote::os_from_bytes;
+
+#[cfg(unix)]
+impl Tree for RealTree {
+    fn stat(&self, path: &[u8]) -> std::io::Result<Stat> {
+        Ok(stat_of(&std::fs::metadata(os_from_bytes(path))?))
+    }
+
+    fn lstat(&self, path: &[u8]) -> std::io::Result<Stat> {
+        Ok(stat_of(&std::fs::symlink_metadata(os_from_bytes(path))?))
+    }
+
+    fn read_link(&self, path: &[u8]) -> std::io::Result<Vec<u8>> {
+        Ok(os_bytes(std::fs::read_link(os_from_bytes(path))?.as_os_str()).into_owned())
+    }
+
+    /// `readdir`, plus the two entries `std::fs::read_dir` filters out.
+    ///
+    /// `.` and `..` are real directory entries and `ls -a` lists them; std
+    /// hides them because almost every other caller is walking a tree and
+    /// would recurse forever. They are put back at the front — which is a
+    /// **choice, and a wrong one on ext4**, because std does not report where
+    /// the directory actually returned them and there is nothing left to
+    /// recover it from.
+    ///
+    /// The position is observable under `-U`, `-f` and `--sort=none`, the
+    /// three listings whose order is the directory's own. Measured on WSL's
+    /// ext4, a raw `readdir(3)` loop over a directory of twelve entries and
+    /// GNU ls 9.5 agree exactly, and both disagree with us:
+    ///
+    /// ```text
+    /// readdir(3), and ls -f      ours -f
+    /// y.tar.gz                   .
+    /// ..                         ..
+    /// x                          y.tar.gz
+    /// …                          x
+    /// .hidden                    …
+    /// .                          .hidden
+    /// ```
+    ///
+    /// ext4's hashed directory index puts `.` last here; a different directory
+    /// puts it somewhere else again. Under every *sorted* listing — which is
+    /// every listing but those three — the dots sort to the front regardless
+    /// and the choice is invisible. See `known-issues.md`
+    /// `TD-B-LS-INVENTS-A-POSITION-FOR-THE-DOT-ENTRIES`.
+    fn read_dir<'t>(&'t self, path: &[u8]) -> std::io::Result<DirIter<'t>> {
+        let entries = std::fs::read_dir(os_from_bytes(path))?;
+        let dots = [b".".to_vec(), b"..".to_vec()]
+            .into_iter()
+            .map(|name| Ok((name, FileType::Directory, NOT_AN_INODE_NUMBER)));
+        Ok(Box::new(dots.chain(entries.map(|entry| {
+            let entry = entry?;
+            let name = os_bytes(&entry.file_name()).into_owned();
+            // `DirEntry::file_type` falls back to an `lstat` where `readdir`
+            // returned `DT_UNKNOWN`, which GNU would instead carry through as
+            // `unknown` and let `gobble_file` decide about. The listing is the
+            // same either way; the difference is a syscall this port makes on
+            // a filesystem — XFS without `ftype`, and some network ones — that
+            // does not fill `d_type` in.
+            let kind = entry.file_type().map_or(FileType::Unknown, |t| {
+                if t.is_symlink() {
+                    FileType::SymbolicLink
+                } else if t.is_dir() {
+                    FileType::Directory
+                } else if t.is_file() {
+                    FileType::Normal
+                } else {
+                    dirent_kind(&t)
+                }
+            });
+            // The inode `readdir` reported is deliberately thrown away.
+            // Upstream's `RELIABLE_D_INO` reduces to `NOT_AN_INODE_NUMBER`
+            // unconditionally — `READDIR_LIES_ABOUT_MOUNTPOINT_D_INO`
+            // defaults to 1 and nothing ever clears it — because for an entry
+            // that is a mount point `d_ino` is the inode of the *covered*
+            // directory, not of what is mounted there. So `ls -i` always
+            // stats, and a `d_ino` passed on here would print a number that
+            // disagrees with `stat` on exactly the entries a user is most
+            // likely to be checking.
+            Ok((name, kind, NOT_AN_INODE_NUMBER))
+        }))))
+    }
+}
+
+/// The four file types `std::fs::FileType` only exposes through its Unix
+/// extension trait.
+#[cfg(unix)]
+fn dirent_kind(kind: &std::fs::FileType) -> FileType {
+    use std::os::unix::fs::FileTypeExt;
+    if kind.is_fifo() {
+        FileType::Fifo
+    } else if kind.is_char_device() {
+        FileType::Chardev
+    } else if kind.is_block_device() {
+        FileType::Blockdev
+    } else if kind.is_socket() {
+        FileType::Sock
+    } else {
+        FileType::Unknown
+    }
+}
+
+/// `struct stat` as `ls` reads it. The birth time is
+/// [`Ts::UNKNOWN`] where the filesystem has none, which is what makes
+/// `--time=birth` print `?` rather than the epoch.
+#[cfg(unix)]
+fn stat_of(meta: &std::fs::Metadata) -> Stat {
+    use std::os::unix::fs::MetadataExt;
+    let btime = meta.created().map_or(Ts::UNKNOWN, |t| {
+        t.duration_since(std::time::UNIX_EPOCH)
+            .map_or(Ts::UNKNOWN, |d| Ts {
+                sec: i64::try_from(d.as_secs()).unwrap_or(i64::MAX),
+                nsec: i64::from(d.subsec_nanos()),
+            })
+    });
+    Stat {
+        mode: meta.mode(),
+        nlink: meta.nlink(),
+        uid: meta.uid(),
+        gid: meta.gid(),
+        size: meta.size().try_into().unwrap_or(i64::MAX),
+        blocks: meta.blocks(),
+        rdev: meta.rdev(),
+        ino: meta.ino(),
+        dev: meta.dev(),
+        atime: Ts {
+            sec: meta.atime(),
+            nsec: meta.atime_nsec(),
+        },
+        mtime: Ts {
+            sec: meta.mtime(),
+            nsec: meta.mtime_nsec(),
+        },
+        ctime: Ts {
+            sec: meta.ctime(),
+            nsec: meta.ctime_nsec(),
+        },
+        btime,
+    }
+}
+
+#[cfg(unix)]
+fn main() -> ExitCode {
+    use std::io::IsTerminal;
+
+    let argv: Vec<OsString> = std::env::args_os().skip(1).collect();
+    let var = |name: &str| std::env::var_os(name).map(|v| os_bytes(&v).into_owned());
+    let env = Environment {
+        columns: var("COLUMNS"),
+        tabsize: var("TABSIZE"),
+        quoting_style: var("QUOTING_STYLE"),
+        time_style: var("TIME_STYLE"),
+        ls_block_size: var("LS_BLOCK_SIZE"),
+        block_size: var("BLOCK_SIZE"),
+        posixly_correct: std::env::var_os("POSIXLY_CORRECT").is_some(),
+        stdout_isatty: std::io::stdout().is_terminal(),
+        // `hard_locale (LC_TIME)`: false for exactly `C` and `POSIX`, and the
+        // three variables are consulted in the order the C library does.
+        hard_locale_time: !matches!(
+            var("LC_ALL")
+                .or_else(|| var("LC_TIME"))
+                .or_else(|| var("LANG"))
+                .unwrap_or_default()
+                .as_slice(),
+            b"" | b"C" | b"POSIX"
+        ),
+    };
+
+    let mut err = std::io::stderr();
+    let request = match parse_args(&argv, &env, &mut err) {
+        Ok(request) => request,
+        Err(refusal) => {
+            refusal.print(&mut err);
+            return ExitCode::from(u8::try_from(refusal.status).unwrap_or(2));
+        }
+    };
+
+    let (cfg, operands) = match request {
+        Request::Help => {
+            print!("{}", help_text());
+            return ExitCode::SUCCESS;
+        }
+        Request::Version => {
+            println!("ls (SlateOS coreutils) 0.1.0");
+            return ExitCode::SUCCESS;
+        }
+        Request::Run(cfg, operands) => (cfg, operands),
+    };
+
+    // The two lookups the long format needs. Both are skipped entirely when
+    // nothing will ask them: `-n` never resolves an id to a name, and a
+    // listing with no time column never resolves a zone.
+    let names = Names {
+        db: if cfg.numeric_ids || cfg.format != Format::Long {
+            pwdb::Db::default()
+        } else {
+            pwdb::Db::load()
+        },
+        numeric: cfg.numeric_ids,
+    };
+    let times = Times::new(&cfg, localtime::Zone::from_env(), system_clock);
+
+    let tree = RealTree;
+    let mut listing = Listing {
+        tree: &tree,
+        cfg: &cfg,
+        names: &names,
+        times,
+        out: Out::default(),
+        err: &mut err,
+        status: Exit::default(),
+        cwd: Cwd::default(),
+        pending: Vec::new(),
+        active: Vec::new(),
+        first: true,
+        print_dir_name: true,
+    };
+    listing.run(&operands);
+    let (bytes, status) = (listing.out.buf, listing.status);
+
+    // One write for the whole listing. `--dired` forces the bytes to be held
+    // anyway — an offset is only knowable once the text in front of it exists
+    // — so there is no arrangement in which this streams, and buffering it
+    // deliberately is cheaper than a `BufWriter` that would flush at
+    // arbitrary points.
+    let mut out = std::io::stdout().lock();
+    if out.write_all(&bytes).is_err() || out.flush().is_err() {
+        return ExitCode::from(2);
+    }
+    ExitCode::from(status.0)
 }
 
 #[cfg(test)]
@@ -3482,6 +4359,11 @@ mod tests {
     /// $ ls -N -C -w 40        # a b c d n<ff>ameXXXXXXXXXXXXXXXXXXXX
     /// a  b  c  d  n<ff>ameXXXXXXXXXXXXXXXXXXXX
     /// ```
+    ///
+    /// 9.5 refuses the *same* names and then hands the refusal on as
+    /// `usize::MAX` rather than as zero, which is what [`display_width`]
+    /// reproduces and what
+    /// [`a_refused_name_is_laid_out_as_usize_max_columns_wide`] measures.
     #[test]
     fn a_name_with_one_unprintable_byte_has_no_width_at_all() {
         assert_eq!(mbs_width(b""), Some(0));
@@ -3495,8 +4377,9 @@ mod tests {
         assert_eq!(mbs_width(b"caf\xc3"), None);
         assert_eq!(mbs_width(b"a\x7fb"), None);
         assert_eq!(mbs_width(b"a\tb"), None);
-        // …and every caller clamps that to zero rather than to the name.
-        assert_eq!(display_width(b"n\xffame"), 0);
+        // …and the caller's `MAX (0, …)` leaves it alone, because by then it
+        // is a `size_t`.
+        assert_eq!(display_width(b"n\xffame"), usize::MAX);
         assert_eq!(display_width(b"plain"), 5);
     }
 
@@ -3636,15 +4519,16 @@ mod tests {
             ..Config::default()
         };
         assert_eq!(rendered(&escape, false, b"n\xffame").0, "n\\377ame");
-        // …and with the pass off, the raw byte survives and costs the whole
-        // name its width.
+        // …and with the pass off, the raw byte survives and takes the whole
+        // name's width with it — to `usize::MAX`, not to zero, because the
+        // clamp meant to catch it is a no-op. See [`display_width`].
         let raw = Config {
             quoting_style: Style::Literal,
             ..Config::default()
         };
         let out = quote_name(&raw, b"", false, b"n\xffame", None);
         assert_eq!(out.bytes, b"n\xffame");
-        assert_eq!(out.width, 0);
+        assert_eq!(out.width, usize::MAX);
     }
 
     // ------------------------------------------------------------ sorting ---
@@ -3873,8 +4757,21 @@ mod tests {
     }
 
     /// `--sort=width` orders by the *screen* width of the rendered name, so a
-    /// name holding a two-column character is wider than its character count
-    /// and a name holding an unprintable byte has no width at all.
+    /// name holding a two-column character is wider than its character count —
+    /// and a name holding an unprintable byte sorts first, even though its
+    /// width is [`usize::MAX`].
+    ///
+    /// That last one is not a contradiction, it is a second truncation on top
+    /// of the first: the comparator is `int diff = width (a) - width (b)`, so
+    /// `SIZE_MAX - 2` comes back as -3. Measured, GNU ls 9.5:
+    ///
+    /// ```text
+    /// $ ls --sort=width -1     # ab, abc, 一一, a\177bcd
+    /// a\177bcd
+    /// ab
+    /// abc
+    /// 一一
+    /// ```
     #[test]
     fn width_order_measures_the_rendering_and_not_the_bytes() {
         let cfg = Config {
@@ -3884,8 +4781,8 @@ mod tests {
         let files = vec![
             file("abc"),
             // Five characters, one of them DEL: `mbsnwidth` refuses the whole
-            // name and `ls` clamps that to zero, so it sorts as the narrowest
-            // thing here despite being the longest.
+            // name, which makes it `usize::MAX` columns wide — and the
+            // comparator's narrowing to `int` turns that into "narrowest".
             file("a\u{7f}bcd"),
             file("\u{4e00}\u{4e00}"),
             file("ab"),
@@ -4112,14 +5009,22 @@ mod tests {
         extract_dirs_from_files(None, true, false, &mut files, &mut pending);
         assert_eq!(files.len(), 1);
         assert_eq!(files.first().unwrap().name, b"a.txt");
-        assert_eq!(pending.first().unwrap().name.as_deref(), Some(&b"dirA"[..]));
+        assert_eq!(queue_order(&pending), [Some(&b"dirA"[..])]);
 
         let mut files = vec![file("x"), dir("dirA"), dir("dirZ")];
         let mut pending = Vec::new();
         extract_dirs_from_files(Some(b"."), false, false, &mut files, &mut pending);
         assert_eq!(files.len(), 3, "-R leaves the subdirectory in the listing");
-        let queued: Vec<&[u8]> = pending.iter().filter_map(|p| p.name.as_deref()).collect();
-        assert_eq!(queued, [&b"./dirA"[..], &b"./dirZ"[..]]);
+        assert_eq!(
+            queue_order(&pending),
+            [Some(&b"./dirA"[..]), Some(&b"./dirZ"[..])]
+        );
+    }
+
+    /// The order the driver will take entries out of the queue. `pending` is a
+    /// stack, so that is the reverse of the order they went in.
+    fn queue_order(pending: &[Pending]) -> Vec<Option<&[u8]>> {
+        pending.iter().rev().map(|p| p.name.as_deref()).collect()
     }
 
     /// Inside a recursive listing `.` and `..` are the entries that would make
@@ -4132,10 +5037,9 @@ mod tests {
         let mut files = subdirs();
         let mut pending = Vec::new();
         extract_dirs_from_files(Some(b"top"), false, false, &mut files, &mut pending);
-        let queued: Vec<&[u8]> = pending.iter().filter_map(|p| p.name.as_deref()).collect();
         assert_eq!(
-            queued,
-            [&b"top/sub"[..]],
+            queue_order(&pending),
+            [Some(&b"top/sub"[..])],
             "a/.. ends in .. and is a cycle too"
         );
 
@@ -4145,23 +5049,23 @@ mod tests {
         assert_eq!(pending.len(), 4);
     }
 
-    /// `-R` puts a marker in the queue ahead of a directory's children, so the
+    /// `-R` puts a marker in the queue *behind* a directory's children, so the
     /// loop that reads the queue knows when the directory is finished and can
     /// stop guarding against a cycle through it. It carries no name, which is
     /// how it is told apart from a directory to open.
     #[test]
     fn recursion_marks_the_end_of_a_directory_in_the_queue_itself() {
-        let mut files = vec![dir("sub")];
+        let mut files = vec![dir("sub"), dir("tub")];
         let mut pending = Vec::new();
         extract_dirs_from_files(Some(b"top"), false, true, &mut files, &mut pending);
-        assert_eq!(pending.first().unwrap().name, None);
+        assert_eq!(
+            queue_order(&pending),
+            [Some(&b"top/sub"[..]), Some(&b"top/tub"[..]), None],
+            "both children come out before the marker that ends their parent"
+        );
         assert_eq!(
             pending.first().unwrap().realname.as_deref(),
             Some(&b"top"[..])
-        );
-        assert_eq!(
-            pending.get(1).unwrap().name.as_deref(),
-            Some(&b"top/sub"[..])
         );
 
         // Without `-R` there is no cycle to detect and no marker.
@@ -5323,6 +6227,105 @@ mod tests {
         assert_eq!(calculate_columns(&cfg(200), &[3], true).0, 1);
     }
 
+    /// A name GNU's `mbsnwidth` refuses is [`usize::MAX`] columns wide, not
+    /// zero (see [`display_width`]), and every width derived from it wraps.
+    /// The result is not a subtle one column out — it is visible in the byte
+    /// count of every format.
+    ///
+    /// Measured, GNU ls 9.5, `-U` on a directory holding `AAAA`, `BBBB`,
+    /// `CCCC` and the two-name-long control-character names `\abell` and
+    /// `\acell` (`.` for a space, `>` for a tab; byte counts from `wc -c`):
+    ///
+    /// ```text
+    /// $ ls -C -U \abell AAAA BBBB CCCC     \abellAAAA..BBBB..CCCC          22
+    /// $ ls -x -U \abell AAAA BBBB CCCC     \abellAAAA..BBBB..CCCC          22
+    /// $ ls -m -U \abell AAAA BBBB CCCC     \abell,\nAAAA,.BBBB,.CCCC       24
+    /// $ ls -m -w12 -U  (same order)        \abell,\nAAAA,.BBBB,\nCCCC      24
+    /// $ ls -C -U AAAA \abell BBBB CCCC     AAAA..\abell>.BBBB..CCCC        24
+    /// $ ls -C -U AAAA BBBB \abell CCCC     AAAA..BBBB..\abell....CCCC      26
+    /// $ ls -C -U \abell \acell AAAA BBBB   \abell\acell....AAAA..BBBB      25
+    /// ```
+    ///
+    /// Three separate consequences of the same underflow are visible there:
+    ///
+    /// * **A refused name in the first column is followed by nothing.**
+    ///   `indent` is called with `from = pos + usize::MAX`, which at `pos == 0`
+    ///   is `usize::MAX` — past the `to` it is padding towards — so it emits no
+    ///   padding at all and `AAAA` butts straight up against `\abell`.
+    /// * **A refused name anywhere else is followed by one column too many.**
+    ///   `from` lands one column *before* `pos`, so the gap is three wide
+    ///   where the column asks for two — a tab and a space in the second-column
+    ///   case, four spaces in the third.
+    /// * **`-m` breaks the line after it.** The wrap guard's second half,
+    ///   `pos <= SIZE_MAX - len - 2`, is the one that fails: `pos` is already
+    ///   `usize::MAX` from the refused name, and `SIZE_MAX - len - 2` wrapped
+    ///   to `SIZE_MAX - 1`.
+    ///
+    /// The column *widths* are untouched by any of this, because
+    /// `calculate_columns` charges the wrapped `real_length` of 1, which never
+    /// beats `MIN_COLUMN_WIDTH`. Only the padding underflows.
+    #[test]
+    fn a_refused_name_is_laid_out_as_usize_max_columns_wide() {
+        let w = Widths::default();
+        let files = |names: &[&str]| -> Vec<FileInfo> {
+            names
+                .iter()
+                .map(|n| stated(n, S_IFREG | 0o644, FileType::Normal))
+                .collect()
+        };
+
+        // First column: the padding vanishes entirely.
+        let first = files(&["\x07bell", "AAAA", "BBBB", "CCCC"]);
+        assert_eq!(
+            laid_out(&layout_cfg(Format::ManyPerLine, 80), &w, &first),
+            "\x07bellAAAA  BBBB  CCCC\n"
+        );
+        assert_eq!(
+            laid_out(&layout_cfg(Format::Horizontal, 80), &w, &first),
+            "\x07bellAAAA  BBBB  CCCC\n"
+        );
+
+        // Second and third: one column of padding too many.
+        assert_eq!(
+            laid_out(
+                &layout_cfg(Format::ManyPerLine, 80),
+                &w,
+                &files(&["AAAA", "\x07bell", "BBBB", "CCCC"])
+            ),
+            "AAAA  \x07bell\t BBBB  CCCC\n"
+        );
+        assert_eq!(
+            laid_out(
+                &layout_cfg(Format::ManyPerLine, 80),
+                &w,
+                &files(&["AAAA", "BBBB", "\x07bell", "CCCC"])
+            ),
+            "AAAA  BBBB  \x07bell    CCCC\n"
+        );
+
+        // Two of them in a row: the first eats its padding, the second
+        // overpays, and the two effects do not cancel.
+        assert_eq!(
+            laid_out(
+                &layout_cfg(Format::ManyPerLine, 80),
+                &w,
+                &files(&["\x07bell", "\x07cell", "AAAA", "BBBB"])
+            ),
+            "\x07bell\x07cell    AAAA  BBBB\n"
+        );
+
+        // `-m` wraps after it, on a screen it is nowhere near filling…
+        assert_eq!(
+            laid_out(&layout_cfg(Format::WithCommas, 80), &w, &first),
+            "\x07bell,\nAAAA, BBBB, CCCC\n"
+        );
+        // …and goes on wrapping the rest of the line normally.
+        assert_eq!(
+            laid_out(&layout_cfg(Format::WithCommas, 12), &w, &first),
+            "\x07bell,\nAAAA, BBBB,\nCCCC\n"
+        );
+    }
+
     // ------------------------------------------------------ reading the files ---
 
     /// A filesystem made of three maps: what `lstat` answers, where a symlink
@@ -5384,8 +6387,9 @@ mod tests {
             self.targets.get(path).cloned().ok_or_else(enoent)
         }
 
-        fn read_dir(&self, path: &[u8]) -> std::io::Result<Vec<Entry>> {
-            self.dirs.get(path).cloned().ok_or_else(enoent)
+        fn read_dir<'t>(&'t self, path: &[u8]) -> std::io::Result<DirIter<'t>> {
+            let entries = self.dirs.get(path).ok_or_else(enoent)?;
+            Ok(Box::new(entries.iter().cloned().map(Ok)))
         }
     }
 

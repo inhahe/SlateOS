@@ -38625,3 +38625,95 @@ produce two correct-looking answers that contradict each other — which is
 exactly what happened here, across two commits, before the contradiction
 surfaced. Pin the version, name the binary, and read the source of the version
 you named.
+
+---
+
+## §367 — GNU `ls` 9.5's width underflow is reproduced, bug and all, rather than repaired
+
+**Date:** 2026-08-22
+**Decided by:** Claude (autonomous)
+
+**In short:** GNU `ls` measures how wide a filename is so it can line up
+columns. For a name holding a byte it cannot display — a control character, or
+a byte that is not valid text — the measuring routine answers "I cannot measure
+this", which it signals by returning **-1**. `ls` then tries to turn that -1
+into a 0, and fails to, because of a C type mistake: the -1 has already become
+the largest number the machine can hold, about 18 quintillion. Every column
+calculation done from that number then wraps around, and the output visibly
+shifts — a name gets no padding after it at all, or one space too many, or the
+line breaks early. Our `ls` copies that behaviour exactly. The alternative was
+to do what GNU obviously *meant* to do and pad such a name as if it were empty.
+
+### The mistake, in GNU's own source
+
+`src/ls.c`, in `quote_name_buf`, unchanged from 9.5 through master:
+
+```c
+size_t displayed_width IF_LINT ( = 0);
+…
+displayed_width = mbsnwidth (buf, len, MBSWIDTH_FLAGS);
+displayed_width = MAX (0, displayed_width);
+```
+
+`mbsnwidth` returns `int`, and returns `-1` when
+`MBSW_REJECT_INVALID | MBSW_REJECT_UNPRINTABLE` makes it refuse the string (see
+§366 for what triggers that). The assignment to a `size_t` converts the -1 to
+`SIZE_MAX` **before** `MAX` runs, so `MAX (0, SIZE_MAX)` is `SIZE_MAX` and the
+clamp is a no-op. The line reads as defensive and does nothing.
+
+Nine call sites downstream do `size_t` arithmetic on that value, and all of
+them wrap. Three effects are visible, all measured on GNU `ls` 9.5 with names
+`\abell`/`\acell` (a BEL byte followed by four letters) beside `AAAA BBBB CCCC`
+(`.` = space, `>` = tab):
+
+| Order | 9.5 output | Why |
+|---|---|---|
+| `\abell AAAA BBBB CCCC` | `\abellAAAA..BBBB..CCCC` | `indent (pos + SIZE_MAX, …)` at `pos == 0` starts *past* its target, so it pads nothing |
+| `AAAA \abell BBBB CCCC` | `AAAA..\abell>.BBBB..CCCC` | elsewhere it starts one column *before* `pos`, so it pads one column too many |
+| `-m`, refused name first | `\abell,` then a line break | the wrap guard's `pos <= SIZE_MAX - len - 2` fails once `pos` is `SIZE_MAX` |
+
+The column *widths* are unaffected: `calculate_columns` charges
+`SIZE_MAX + 2 == 1`, which never beats `MIN_COLUMN_WIDTH` of 3. Only the
+padding underflows, which is why the damage is a byte or two rather than a
+screen of garbage.
+
+### Why reproduce it
+
+* **Byte-identity with the pinned 9.5 binary is the acceptance test.** The
+  whole `ls` rewrite is measured by diffing our output against
+  `coreutils-9.5/src/ls` over a few hundred invocations. A "fix" is a diff, and
+  a diff is a failure — there is no way for the harness to distinguish a repair
+  we chose from a bug we introduced.
+* **It is not a transient regression.** It was checked against upstream master
+  on 2026-08-22 and both lines are still there verbatim. This is GNU's
+  behaviour from 9.5 onward, not a slip that 9.6 will quietly undo.
+* **Repairing it means choosing a different wrong answer.** The obvious repair
+  (clamp to 0) reproduces *9.4*, which we deliberately rejected in §366. The
+  other repair — measure the name honestly, as if the flags were 0 — matches no
+  GNU version at all. There is no repair that is also "what GNU does".
+* **The blast radius is tiny.** It needs a name holding a control character or
+  an invalid byte, printed in a column format, to something that is not a
+  terminal. On a terminal `ls` defaults to `-q`, which turns those bytes into
+  `?` before any width is asked for.
+
+### Why one might not
+
+Reproducing a bug means our `ls` is wrong on purpose, and a future reader who
+finds `wrapping_add` in nine places may "fix" them one at a time and get a
+listing that matches neither GNU nor itself. Two things guard against that: the
+arithmetic is spelled `wrapping_*` rather than plain `+`, which is a compile-time
+marker that the wrap is intended, and every one of the nine sites carries a
+comment pointing at `display_width`, which points here. The regression test
+`a_refused_name_is_laid_out_as_usize_max_columns_wide` pins all seven measured
+byte strings, so a partial repair fails the suite rather than shipping.
+
+### The rule this is an instance of
+
+**When the acceptance criterion is "byte-identical to a named binary", the
+binary's bugs are part of the specification.** A bug that is reachable, stable
+across releases, and observable in the output is not a defect in the reference
+— it *is* the reference. The place to record disagreement with it is a
+document like this one, not a divergence in the code. The moment we start
+repairing the reference, the diff harness stops being able to tell us anything,
+and the only remaining oracle is our own reading of GNU's source — which §366
+records getting the wrong answer twice.

@@ -542,7 +542,11 @@ fn self_test_inner() {
 
     delete_schedule(manual).expect("cleanup manual");
     delete_schedule(hourly).expect("cleanup hourly");
-    assert_eq!(list_schedules().len(), 1, "test 10 must clean up after itself");
+    assert_eq!(
+        list_schedules().len(),
+        1,
+        "test 10 must clean up after itself"
+    );
     crate::serial_println!("  [10/10] frequency gating: OK");
 
     crate::serial_println!("backupsched::self_test() — all 10 tests passed");

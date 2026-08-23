@@ -68673,9 +68673,10 @@ fn cmd_backupsched(args: &str) {
                     // same as one that ran at uptime zero.
                     let last = match s.last_run_ns {
                         None => alloc::string::String::from("never"),
-                        Some(ns) => alloc::format!("{}s ago", crate::hpet::elapsed_ns()
-                            .saturating_sub(ns)
-                            / 1_000_000_000),
+                        Some(ns) => alloc::format!(
+                            "{}s ago",
+                            crate::hpet::elapsed_ns().saturating_sub(ns) / 1_000_000_000
+                        ),
                     };
                     let due_mark = if due.contains(&s.id) { " DUE" } else { "" };
                     shell_println!(

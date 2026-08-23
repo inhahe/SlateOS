@@ -1094,7 +1094,10 @@ fn self_test_inner() -> KernelResult<()> {
         );
         return Err(KernelError::InternalError);
     }
-    crate::serial_println!("[logpersist]   2. Flush events (incl. seq 0): OK (flushed {})", flushed);
+    crate::serial_println!(
+        "[logpersist]   2. Flush events (incl. seq 0): OK (flushed {})",
+        flushed
+    );
 
     // Test 3: Verify stats updated.
     let st = stats();

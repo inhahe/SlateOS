@@ -4,11 +4,16 @@
 //!
 //! Multi-personality: `gnat`, `gnatmake`, `gprbuild`, `gnatls`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_gnat(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
@@ -62,7 +67,7 @@ fn run_gnat(args: &[String]) -> i32 {
             println!("  Statements: 42");
             println!("  Declarations: 15");
         }
-        _ => println!("gnat: '{}' completed", subcmd),
+        _ => println!("gnat: {} completed", quoteaf_os(subcmd)),
     }
     0
 }
@@ -81,7 +86,8 @@ fn run_gprbuild(args: &[String]) -> i32 {
         println!("GPRbuild 24.0.0");
         return 0;
     }
-    let project = args.windows(2)
+    let project = args
+        .windows(2)
         .find(|w| w[0] == "-P")
         .map(|w| w[1].as_str())
         .unwrap_or("default.gpr");
@@ -110,17 +116,28 @@ fn run_gnatls(args: &[String]) -> i32 {
         println!("  /usr/lib/gcc/x86_64-slateos/14/adalib/");
         return 0;
     }
-    let unit = args.iter().find(|a| !a.starts_with('-')).map(|s| s.as_str()).unwrap_or("main");
+    let unit = args
+        .iter()
+        .find(|a| !a.starts_with('-'))
+        .map(|s| s.as_str())
+        .unwrap_or("main");
     println!("{}   OK   main.adb", unit);
     0
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "gnat".to_string());
+    let prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "gnat".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = match prog.as_str() {
-        "gnatmake" => { let mut a = vec!["make".to_string()]; a.extend(rest.iter().cloned()); run_gnat(&a) }
+        "gnatmake" => {
+            let mut a = vec!["make".to_string()];
+            a.extend(rest.iter().cloned());
+            run_gnat(&a)
+        }
         "gprbuild" => run_gprbuild(&rest),
         "gnatls" => run_gnatls(&rest),
         _ => run_gnat(&rest),
@@ -130,7 +147,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_gnat};
+    use super::{basename, run_gnat, strip_ext};
 
     #[test]
     fn basename_strips_path() {

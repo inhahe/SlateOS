@@ -4,6 +4,7 @@
 //!
 //! Single personality: `coinbase`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -71,7 +72,11 @@ fn run_coinbase(args: Vec<String>) -> i32 {
         }
         "buy" => {
             let currency = args.get(1).map(|s| s.as_str()).unwrap_or("BTC");
-            let amount = args.windows(2).find(|w| w[0] == "--amount").map(|w| w[1].as_str()).unwrap_or("100.00");
+            let amount = args
+                .windows(2)
+                .find(|w| w[0] == "--amount")
+                .map(|w| w[1].as_str())
+                .unwrap_or("100.00");
             println!("✔ Buy order placed");
             println!("  Currency: {}", currency);
             println!("  Amount:   ${}", amount);
@@ -81,7 +86,11 @@ fn run_coinbase(args: Vec<String>) -> i32 {
         }
         "sell" => {
             let currency = args.get(1).map(|s| s.as_str()).unwrap_or("BTC");
-            let amount = args.windows(2).find(|w| w[0] == "--amount").map(|w| w[1].as_str()).unwrap_or("0.01");
+            let amount = args
+                .windows(2)
+                .find(|w| w[0] == "--amount")
+                .map(|w| w[1].as_str())
+                .unwrap_or("0.01");
             println!("✔ Sell order placed");
             println!("  Currency: {}", currency);
             println!("  Amount:   {} {}", amount, currency);
@@ -91,8 +100,16 @@ fn run_coinbase(args: Vec<String>) -> i32 {
         }
         "send" => {
             let currency = args.get(1).map(|s| s.as_str()).unwrap_or("BTC");
-            let to = args.windows(2).find(|w| w[0] == "--to").map(|w| w[1].as_str()).unwrap_or("1A1zP1...");
-            let amount = args.windows(2).find(|w| w[0] == "--amount").map(|w| w[1].as_str()).unwrap_or("0.001");
+            let to = args
+                .windows(2)
+                .find(|w| w[0] == "--to")
+                .map(|w| w[1].as_str())
+                .unwrap_or("1A1zP1...");
+            let amount = args
+                .windows(2)
+                .find(|w| w[0] == "--amount")
+                .map(|w| w[1].as_str())
+                .unwrap_or("0.001");
             println!("✔ Send initiated");
             println!("  Currency: {}", currency);
             println!("  Amount:   {} {}", amount, currency);
@@ -130,7 +147,7 @@ fn run_coinbase(args: Vec<String>) -> i32 {
             if cmd.is_empty() {
                 eprintln!("Usage: coinbase <command>. See --help.");
             } else {
-                eprintln!("Error: unknown command '{}'. See --help.", cmd);
+                eprintln!("Error: unknown command {}. See --help.", quoteaf_os(cmd));
             }
             1
         }
@@ -146,7 +163,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_coinbase};
+    use super::run_coinbase;
 
     #[test]
     fn help_exits_zero() {

@@ -4,6 +4,7 @@
 //!
 //! Single personality: `cmake`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -32,15 +33,23 @@ fn run_cmake(args: Vec<String>) -> i32 {
     }
 
     if args.iter().any(|a| a == "--build") {
-        let dir = args.windows(2).find(|w| w[0] == "--build")
-            .map(|w| w[1].as_str()).unwrap_or("build");
-        let target = args.windows(2).find(|w| w[0] == "--target")
+        let dir = args
+            .windows(2)
+            .find(|w| w[0] == "--build")
+            .map(|w| w[1].as_str())
+            .unwrap_or("build");
+        let target = args
+            .windows(2)
+            .find(|w| w[0] == "--target")
             .map(|w| w[1].as_str());
-        let parallel = args.windows(2).find(|w| w[0] == "-j")
-            .map(|w| w[1].as_str()).unwrap_or("4");
+        let parallel = args
+            .windows(2)
+            .find(|w| w[0] == "-j")
+            .map(|w| w[1].as_str())
+            .unwrap_or("4");
         println!("[{}/build] Building with {} threads...", dir, parallel);
         if let Some(t) = target {
-            println!("[  0%] Building target '{}'", t);
+            println!("[  0%] Building target {}", quoteaf_os(t));
         }
         println!("[  8%] Building CXX object src/CMakeFiles/main.dir/main.cpp.o");
         println!("[ 33%] Building CXX object src/CMakeFiles/main.dir/utils.cpp.o");
@@ -52,10 +61,16 @@ fn run_cmake(args: Vec<String>) -> i32 {
     }
 
     if args.iter().any(|a| a == "--install") {
-        let dir = args.windows(2).find(|w| w[0] == "--install")
-            .map(|w| w[1].as_str()).unwrap_or("build");
-        let prefix = args.windows(2).find(|w| w[0] == "--prefix")
-            .map(|w| w[1].as_str()).unwrap_or("/usr/local");
+        let dir = args
+            .windows(2)
+            .find(|w| w[0] == "--install")
+            .map(|w| w[1].as_str())
+            .unwrap_or("build");
+        let prefix = args
+            .windows(2)
+            .find(|w| w[0] == "--prefix")
+            .map(|w| w[1].as_str())
+            .unwrap_or("/usr/local");
         println!("-- Installing from {}", dir);
         println!("-- Install configuration: Release");
         println!("-- Installing: {}/bin/myapp", prefix);
@@ -65,12 +80,21 @@ fn run_cmake(args: Vec<String>) -> i32 {
     }
 
     // Configure step
-    let source = args.windows(2).find(|w| w[0] == "-S")
-        .map(|w| w[1].as_str()).unwrap_or(".");
-    let build = args.windows(2).find(|w| w[0] == "-B")
-        .map(|w| w[1].as_str()).unwrap_or("build");
-    let generator = args.windows(2).find(|w| w[0] == "-G")
-        .map(|w| w[1].as_str()).unwrap_or("Unix Makefiles");
+    let source = args
+        .windows(2)
+        .find(|w| w[0] == "-S")
+        .map(|w| w[1].as_str())
+        .unwrap_or(".");
+    let build = args
+        .windows(2)
+        .find(|w| w[0] == "-B")
+        .map(|w| w[1].as_str())
+        .unwrap_or("build");
+    let generator = args
+        .windows(2)
+        .find(|w| w[0] == "-G")
+        .map(|w| w[1].as_str())
+        .unwrap_or("Unix Makefiles");
 
     println!("-- The CXX compiler identification is Clang 17.0.0");
     println!("-- Detecting CXX compiler ABI info");
@@ -93,7 +117,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_cmake};
+    use super::run_cmake;
 
     #[test]
     fn help_exits_zero() {

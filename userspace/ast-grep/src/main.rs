@@ -4,6 +4,7 @@
 //!
 //! Single personality: `sg` (ast-grep)
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -47,24 +48,30 @@ fn run_sg(args: Vec<String>) -> i32 {
                 return 0;
             }
 
-            let pattern = args.windows(2)
+            let pattern = args
+                .windows(2)
                 .find(|w| w[0] == "-p" || w[0] == "--pattern")
                 .map(|w| w[1].as_str())
                 .unwrap_or("$A.unwrap()");
 
-            let lang = args.windows(2)
+            let lang = args
+                .windows(2)
                 .find(|w| w[0] == "-l" || w[0] == "--lang")
                 .map(|w| w[1].as_str())
                 .unwrap_or("rust");
 
             let json_out = args.iter().any(|a| a == "--json");
-            let rewrite = args.windows(2)
+            let rewrite = args
+                .windows(2)
                 .find(|w| w[0] == "-r" || w[0] == "--rewrite")
                 .map(|w| w[1].as_str());
 
             if json_out {
                 println!("[");
-                println!("  {{\"file\":\"src/main.rs\",\"range\":{{\"start\":{{\"line\":10,\"column\":4}},\"end\":{{\"line\":10,\"column\":20}}}},\"text\":\"result.unwrap()\",\"language\":\"{}\"}}",lang);
+                println!(
+                    "  {{\"file\":\"src/main.rs\",\"range\":{{\"start\":{{\"line\":10,\"column\":4}},\"end\":{{\"line\":10,\"column\":20}}}},\"text\":\"result.unwrap()\",\"language\":\"{}\"}}",
+                    lang
+                );
                 println!("]");
             } else {
                 println!("Language: {}", lang);
@@ -133,7 +140,7 @@ fn run_sg(args: Vec<String>) -> i32 {
             0
         }
         _ => {
-            eprintln!("Error: unknown command '{}'. See --help.", cmd);
+            eprintln!("Error: unknown command {}. See --help.", quoteaf_os(cmd));
             1
         }
     }
@@ -148,7 +155,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_sg};
+    use super::run_sg;
 
     #[test]
     fn help_exits_zero() {

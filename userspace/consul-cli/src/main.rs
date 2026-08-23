@@ -4,6 +4,7 @@
 //!
 //! Single personality: `consul`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -121,7 +122,7 @@ fn run_consul(args: Vec<String>) -> i32 {
             if cmd.is_empty() {
                 eprintln!("Usage: consul <command>. See --help.");
             } else {
-                eprintln!("Error: unknown command '{}'. See --help.", cmd);
+                eprintln!("Error: unknown command {}. See --help.", quoteaf_os(cmd));
             }
             1
         }
@@ -137,7 +138,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_consul};
+    use super::run_consul;
 
     #[test]
     fn help_exits_zero() {

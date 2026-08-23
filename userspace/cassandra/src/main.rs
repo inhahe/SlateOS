@@ -4,6 +4,7 @@
 //!
 //! Multi-personality: `cassandra` (server), `cqlsh` (CQL shell), `nodetool` (admin)
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -23,13 +24,27 @@ fn run_cassandra(args: Vec<String>) -> i32 {
         println!("5.0.0 (Slate OS)");
         return 0;
     }
-    println!("INFO  [main] 2025-05-22 10:00:00,000 CassandraDaemon.java:661 - Cassandra version: 5.0.0 (Slate OS)");
-    println!("INFO  [main] 2025-05-22 10:00:00,100 Config.java:505 - Data files directories: [/var/lib/cassandra/data]");
-    println!("INFO  [main] 2025-05-22 10:00:00,200 Config.java:506 - Commit log directory: /var/lib/cassandra/commitlog");
-    println!("INFO  [main] 2025-05-22 10:00:00,500 DatabaseDescriptor.java:415 - Disk access mode: mmap");
-    println!("INFO  [main] 2025-05-22 10:00:01,000 StorageService.java:706 - Loading persisted ring state");
-    println!("INFO  [main] 2025-05-22 10:00:02,000 Gossiper.java:2048 - Node localhost/127.0.0.1:7000 state jump to NORMAL");
-    println!("INFO  [main] 2025-05-22 10:00:02,500 CassandraDaemon.java:780 - Startup complete — listening on port 9042 (native) and 7000 (gossip)");
+    println!(
+        "INFO  [main] 2025-05-22 10:00:00,000 CassandraDaemon.java:661 - Cassandra version: 5.0.0 (Slate OS)"
+    );
+    println!(
+        "INFO  [main] 2025-05-22 10:00:00,100 Config.java:505 - Data files directories: [/var/lib/cassandra/data]"
+    );
+    println!(
+        "INFO  [main] 2025-05-22 10:00:00,200 Config.java:506 - Commit log directory: /var/lib/cassandra/commitlog"
+    );
+    println!(
+        "INFO  [main] 2025-05-22 10:00:00,500 DatabaseDescriptor.java:415 - Disk access mode: mmap"
+    );
+    println!(
+        "INFO  [main] 2025-05-22 10:00:01,000 StorageService.java:706 - Loading persisted ring state"
+    );
+    println!(
+        "INFO  [main] 2025-05-22 10:00:02,000 Gossiper.java:2048 - Node localhost/127.0.0.1:7000 state jump to NORMAL"
+    );
+    println!(
+        "INFO  [main] 2025-05-22 10:00:02,500 CassandraDaemon.java:780 - Startup complete — listening on port 9042 (native) and 7000 (gossip)"
+    );
     0
 }
 
@@ -51,7 +66,9 @@ fn run_cqlsh(args: Vec<String>) -> i32 {
         return 0;
     }
 
-    let exec_stmt = args.iter().position(|a| a == "-e" || a == "--execute")
+    let exec_stmt = args
+        .iter()
+        .position(|a| a == "-e" || a == "--execute")
         .and_then(|i| args.get(i + 1));
 
     if let Some(stmt) = exec_stmt {
@@ -76,7 +93,11 @@ fn run_cqlsh(args: Vec<String>) -> i32 {
     }
 
     // Interactive mode
-    let host = args.iter().find(|a| !a.starts_with('-')).map(|s| s.as_str()).unwrap_or("127.0.0.1");
+    let host = args
+        .iter()
+        .find(|a| !a.starts_with('-'))
+        .map(|s| s.as_str())
+        .unwrap_or("127.0.0.1");
     println!("Connected to Test Cluster at {}:9042", host);
     println!("[cqlsh 6.2.0 | Cassandra 5.0.0 | CQL spec 3.4.7 | Native protocol v5]");
     println!("Use HELP for help.");
@@ -122,8 +143,12 @@ fn run_nodetool(args: Vec<String>) -> i32 {
             println!("===============");
             println!("Status=Up/Down");
             println!("|/ State=Normal/Leaving/Joining/Moving");
-            println!("--  Address       Load       Tokens  Owns    Host ID                               Rack");
-            println!("UN  127.0.0.1    256.42 KiB  256     100.0%  a1b2c3d4-e5f6-7890-abcd-ef1234567890  rack1");
+            println!(
+                "--  Address       Load       Tokens  Owns    Host ID                               Rack"
+            );
+            println!(
+                "UN  127.0.0.1    256.42 KiB  256     100.0%  a1b2c3d4-e5f6-7890-abcd-ef1234567890  rack1"
+            );
             0
         }
         "info" => {
@@ -146,7 +171,9 @@ fn run_nodetool(args: Vec<String>) -> i32 {
             println!("Datacenter: dc1");
             println!("==========");
             println!("Address     Rack     Status  State   Load        Owns    Token");
-            println!("127.0.0.1   rack1    Up      Normal  256.42 KiB  100.00% -9223372036854775808");
+            println!(
+                "127.0.0.1   rack1    Up      Normal  256.42 KiB  100.00% -9223372036854775808"
+            );
             0
         }
         "describecluster" => {
@@ -173,11 +200,26 @@ fn run_nodetool(args: Vec<String>) -> i32 {
             println!("GossipStage                  0        0         8923        0");
             0
         }
-        "flush" => { println!("Flushing all keyspaces... done."); 0 }
-        "repair" => { println!("Starting repair... complete."); 0 }
-        "cleanup" => { println!("Cleanup complete."); 0 }
-        "drain" => { println!("Draining node... done."); 0 }
-        other => { eprintln!("nodetool: unknown command '{}'", other); 1 }
+        "flush" => {
+            println!("Flushing all keyspaces... done.");
+            0
+        }
+        "repair" => {
+            println!("Starting repair... complete.");
+            0
+        }
+        "cleanup" => {
+            println!("Cleanup complete.");
+            0
+        }
+        "drain" => {
+            println!("Draining node... done.");
+            0
+        }
+        other => {
+            eprintln!("nodetool: unknown command {}", quoteaf_os(other));
+            1
+        }
     }
 }
 
@@ -188,7 +230,9 @@ fn main() {
         let bytes = s.as_bytes();
         let mut last_sep = 0;
         for (i, &b) in bytes.iter().enumerate() {
-            if b == b'/' || b == b'\\' { last_sep = i + 1; }
+            if b == b'/' || b == b'\\' {
+                last_sep = i + 1;
+            }
         }
         let base = &s[last_sep..];
         base.strip_suffix(".exe").unwrap_or(base).to_string()
@@ -204,7 +248,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_cassandra};
+    use super::run_cassandra;
 
     #[test]
     fn help_exits_zero() {

@@ -4,6 +4,10 @@ version = "0.1.0"
 edition = "2024"
 description = "SlateOS ar/ranlib/strip - archive and object file tools"
 [dependencies]
+# It interpolates `name` into "ar: {}: no such member". That value is an
+# argv word, so it is whatever the user typed and not text this program
+# chose.
+quoting = { path = "../quoting" }
 
 [lints]
 workspace = true

@@ -4,6 +4,7 @@
 //!
 //! Single personality: `cosign`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -58,7 +59,10 @@ fn run_cosign(args: Vec<String>) -> i32 {
             println!("The following checks were performed on each of these signatures:");
             println!("  - The cosign claims were validated");
             println!("  - The signatures were verified against the specified public key");
-            println!("[{{\"critical\":{{\"identity\":{{\"docker-reference\":\"{}\"}}}},\"optional\":{{}}}}]", image);
+            println!(
+                "[{{\"critical\":{{\"identity\":{{\"docker-reference\":\"{}\"}}}},\"optional\":{{}}}}]",
+                image
+            );
         }
         "sign-blob" => println!("Blob signed and signature written to stdout (simulated)"),
         "verify-blob" => println!("Verified OK"),
@@ -70,7 +74,7 @@ fn run_cosign(args: Vec<String>) -> i32 {
             println!("└── sha256:def456... (attestation)");
         }
         _ => {
-            eprintln!("Unknown command '{}'. Use --help.", cmd);
+            eprintln!("Unknown command {}. Use --help.", quoteaf_os(cmd));
             return 1;
         }
     }
@@ -86,7 +90,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_cosign};
+    use super::run_cosign;
 
     #[test]
     fn help_exits_zero() {

@@ -4,6 +4,7 @@
 //!
 //! Single personality: `cosign`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -42,25 +43,37 @@ fn run_cosign(args: Vec<String>) -> i32 {
             0
         }
         "sign" => {
-            let image = args.get(1).map(|s| s.as_str()).unwrap_or("myregistry/myimage:latest");
+            let image = args
+                .get(1)
+                .map(|s| s.as_str())
+                .unwrap_or("myregistry/myimage:latest");
             println!("Signing image: {}", image);
             println!("  Pushing signature to: {}", image);
             println!("  tlog entry created with index: 12345678");
             0
         }
         "verify" => {
-            let image = args.get(1).map(|s| s.as_str()).unwrap_or("myregistry/myimage:latest");
+            let image = args
+                .get(1)
+                .map(|s| s.as_str())
+                .unwrap_or("myregistry/myimage:latest");
             println!("Verification for {}:", image);
             println!("  The following checks were performed:");
             println!("  - Signature verified against key");
             println!("  - Transparency log inclusion verified");
             println!("  - Claim validated");
             println!();
-            println!("[{{\"critical\":{{\"identity\":{{\"docker-reference\":\"{}\"}}}},\"optional\":{{}}}}]", image);
+            println!(
+                "[{{\"critical\":{{\"identity\":{{\"docker-reference\":\"{}\"}}}},\"optional\":{{}}}}]",
+                image
+            );
             0
         }
         "tree" => {
-            let image = args.get(1).map(|s| s.as_str()).unwrap_or("myregistry/myimage:latest");
+            let image = args
+                .get(1)
+                .map(|s| s.as_str())
+                .unwrap_or("myregistry/myimage:latest");
             println!("📦 Supply Chain Security for {}", image);
             println!("└── 🔐 Signatures for digest: sha256:abc123...");
             println!("    └── 🍒 sha256:def456... (cosign.sig)");
@@ -70,7 +83,7 @@ fn run_cosign(args: Vec<String>) -> i32 {
             if cmd.is_empty() {
                 eprintln!("Usage: cosign <command>. See --help.");
             } else {
-                eprintln!("Error: unknown command '{}'. See --help.", cmd);
+                eprintln!("Error: unknown command {}. See --help.", quoteaf_os(cmd));
             }
             1
         }
@@ -86,7 +99,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_cosign};
+    use super::run_cosign;
 
     #[test]
     fn help_exits_zero() {

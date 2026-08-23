@@ -4,6 +4,7 @@
 //!
 //! Multi-personality: `argocd`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -37,10 +38,18 @@ fn run_argocd(args: &[String]) -> i32 {
             let cmd = args.get(1).map(|s| s.as_str()).unwrap_or("list");
             match cmd {
                 "list" => {
-                    println!("NAME         CLUSTER    NAMESPACE  PROJECT  STATUS   HEALTH   SYNCPOLICY  CONDITIONS");
-                    println!("webapp       in-cluster default    default  Synced   Healthy  Auto-Prune  <none>");
-                    println!("api-server   in-cluster api        default  Synced   Healthy  Auto-Prune  <none>");
-                    println!("monitoring   in-cluster monitor    ops      OutOfSync Healthy Manual      <none>");
+                    println!(
+                        "NAME         CLUSTER    NAMESPACE  PROJECT  STATUS   HEALTH   SYNCPOLICY  CONDITIONS"
+                    );
+                    println!(
+                        "webapp       in-cluster default    default  Synced   Healthy  Auto-Prune  <none>"
+                    );
+                    println!(
+                        "api-server   in-cluster api        default  Synced   Healthy  Auto-Prune  <none>"
+                    );
+                    println!(
+                        "monitoring   in-cluster monitor    ops      OutOfSync Healthy Manual      <none>"
+                    );
                 }
                 "get" => {
                     let app = args.get(2).map(|s| s.as_str()).unwrap_or("webapp");
@@ -48,7 +57,10 @@ fn run_argocd(args: &[String]) -> i32 {
                     println!("Project:            default");
                     println!("Server:             https://kubernetes.default.svc");
                     println!("Namespace:          default");
-                    println!("URL:                https://argocd.slateos.local/applications/{}", app);
+                    println!(
+                        "URL:                https://argocd.slateos.local/applications/{}",
+                        app
+                    );
                     println!("Repo:               https://github.com/slateos/{}.git", app);
                     println!("Target:             HEAD");
                     println!("Path:               k8s/");
@@ -58,11 +70,19 @@ fn run_argocd(args: &[String]) -> i32 {
                 }
                 "sync" => {
                     let app = args.get(2).map(|s| s.as_str()).unwrap_or("webapp");
-                    println!("TIMESTAMP   GROUP  KIND        NAMESPACE  NAME       STATUS   HEALTH   HOOK  MESSAGE");
-                    println!("12:00:00           Deployment  default    {}     Synced   Healthy        deployment.apps/{} configured", app, app);
-                    println!("12:00:01           Service     default    {}     Synced   Healthy        service/{} unchanged", app, app);
+                    println!(
+                        "TIMESTAMP   GROUP  KIND        NAMESPACE  NAME       STATUS   HEALTH   HOOK  MESSAGE"
+                    );
+                    println!(
+                        "12:00:00           Deployment  default    {}     Synced   Healthy        deployment.apps/{} configured",
+                        app, app
+                    );
+                    println!(
+                        "12:00:01           Service     default    {}     Synced   Healthy        service/{} unchanged",
+                        app, app
+                    );
                     println!();
-                    println!("Name:      {}",app);
+                    println!("Name:      {}", app);
                     println!("Sync Status: Synced");
                     println!("Health Status: Healthy");
                 }
@@ -80,7 +100,7 @@ fn run_argocd(args: &[String]) -> i32 {
         }
         "login" => println!("'admin:login' logged in successfully"),
         "logout" => println!("Logged out from 'https://argocd.slateos.local'"),
-        _ => println!("argocd: command '{}' completed", subcmd),
+        _ => println!("argocd: command {} completed", quoteaf_os(subcmd)),
     }
     0
 }
@@ -94,7 +114,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_argocd};
+    use super::run_argocd;
 
     #[test]
     fn help_exits_zero() {

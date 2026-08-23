@@ -4,11 +4,16 @@
 //!
 //! Multi-personality: `avro`, `avro-tools`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_avro(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
@@ -31,11 +36,13 @@ fn run_avro(args: &[String]) -> i32 {
     match subcmd {
         "--version" => println!("avro 1.11.3 (Slate OS)"),
         "compile" => {
-            let lang = args.windows(2)
+            let lang = args
+                .windows(2)
                 .find(|w| w[0] == "-l" || w[0] == "--language")
                 .map(|w| w[1].as_str())
                 .unwrap_or("java");
-            let schema = args.iter()
+            let schema = args
+                .iter()
                 .find(|a| a.ends_with(".avsc") || a.ends_with(".avdl"))
                 .map(|s| s.as_str())
                 .unwrap_or("schema.avsc");
@@ -50,11 +57,13 @@ fn run_avro(args: &[String]) -> i32 {
             println!("  2 records converted");
         }
         "fromjson" => {
-            let schema = args.windows(2)
+            let schema = args
+                .windows(2)
                 .find(|w| w[0] == "--schema")
                 .map(|w| w[1].as_str())
                 .unwrap_or("schema.avsc");
-            let file = args.iter()
+            let file = args
+                .iter()
                 .find(|a| a.ends_with(".json"))
                 .map(|s| s.as_str())
                 .unwrap_or("data.json");
@@ -64,7 +73,9 @@ fn run_avro(args: &[String]) -> i32 {
         "getschema" => {
             let file = args.get(1).map(|s| s.as_str()).unwrap_or("data.avro");
             println!("avro getschema: {}", file);
-            println!("  {{\"type\": \"record\", \"name\": \"Example\", \"fields\": [{{\"name\": \"id\", \"type\": \"long\"}}]}}");
+            println!(
+                "  {{\"type\": \"record\", \"name\": \"Example\", \"fields\": [{{\"name\": \"id\", \"type\": \"long\"}}]}}"
+            );
         }
         "getmeta" => {
             let file = args.get(1).map(|s| s.as_str()).unwrap_or("data.avro");
@@ -73,7 +84,8 @@ fn run_avro(args: &[String]) -> i32 {
             println!("  avro.codec: deflate");
         }
         "cat" => {
-            let files: Vec<&str> = args.iter()
+            let files: Vec<&str> = args
+                .iter()
                 .filter(|a| a.ends_with(".avro"))
                 .map(|s| s.as_str())
                 .collect();
@@ -90,7 +102,7 @@ fn run_avro(args: &[String]) -> i32 {
             let file = args.get(1).map(|s| s.as_str()).unwrap_or("protocol.avdl");
             println!("avro idl: {} -> protocol.avpr", file);
         }
-        _ => println!("avro: '{}' completed", subcmd),
+        _ => println!("avro: {} completed", quoteaf_os(subcmd)),
     }
     0
 }
@@ -106,7 +118,10 @@ fn run_avro_tools(args: &[String]) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "avro".to_string());
+    let prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "avro".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = match prog.as_str() {
         "avro-tools" => run_avro_tools(&rest),
@@ -117,7 +132,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_avro};
+    use super::{basename, run_avro, strip_ext};
 
     #[test]
     fn basename_strips_path() {

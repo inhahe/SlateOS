@@ -7,6 +7,7 @@
 //! - `age` (default) — encrypt/decrypt files
 //! - `age-keygen` — generate age key pairs
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -63,7 +64,8 @@ struct KeyPair {
 fn generate_keypair() -> KeyPair {
     KeyPair {
         public_key: "age1ql3z7hjy54pw3hyww5ayyfg7zqgvc7w3j2elw8zmrj2kg5sfn9aqmcac8p".to_string(),
-        secret_key: "AGE-SECRET-KEY-1QVAHC9TQPAZ4GTWKXN8NK5MJNW274N6GH2AYLJ9V4TMZCV9FYYQRHES4K".to_string(),
+        secret_key: "AGE-SECRET-KEY-1QVAHC9TQPAZ4GTWKXN8NK5MJNW274N6GH2AYLJ9V4TMZCV9FYYQRHES4K"
+            .to_string(),
         _created: "2025-05-22T10:30:00Z".to_string(),
     }
 }
@@ -104,22 +106,33 @@ fn run_age(args: Vec<String>) -> i32 {
             "-a" | "--armor" => opts.armor = true,
             "-r" | "--recipient" => {
                 i += 1;
-                if i < args.len() { opts.recipients.push(args[i].clone()); }
+                if i < args.len() {
+                    opts.recipients.push(args[i].clone());
+                }
             }
             "-R" | "--recipients-file" => {
                 i += 1;
-                if i < args.len() { opts._recipient_files.push(args[i].clone()); }
+                if i < args.len() {
+                    opts._recipient_files.push(args[i].clone());
+                }
             }
             "-i" | "--identity" => {
                 i += 1;
-                if i < args.len() { opts.identity_files.push(args[i].clone()); }
+                if i < args.len() {
+                    opts.identity_files.push(args[i].clone());
+                }
             }
             "-o" | "--output" => {
                 i += 1;
-                if i < args.len() { opts.output = Some(args[i].clone()); }
+                if i < args.len() {
+                    opts.output = Some(args[i].clone());
+                }
             }
             s if !s.starts_with('-') => opts.files.push(s.to_string()),
-            _ => { eprintln!("age: unknown option '{}'", args[i]); return 1; }
+            _ => {
+                eprintln!("age: unknown option {}", quoteaf_os(&args[i]));
+                return 1;
+            }
         }
         i += 1;
     }
@@ -156,7 +169,11 @@ fn age_encrypt(opts: &AgeOptions) -> i32 {
 
     if !opts.recipients.is_empty() {
         for r in &opts.recipients {
-            eprintln!("age: encrypting {} for recipient {}...", input, &r[..20.min(r.len())]);
+            eprintln!(
+                "age: encrypting {} for recipient {}...",
+                input,
+                &r[..20.min(r.len())]
+            );
         }
     } else {
         eprintln!("age: encrypting {} with passphrase", input);
@@ -206,7 +223,9 @@ fn run_age_keygen(args: Vec<String>) -> i32 {
             }
             "-o" | "--output" => {
                 i += 1;
-                if i < args.len() { output = Some(args[i].clone()); }
+                if i < args.len() {
+                    output = Some(args[i].clone());
+                }
             }
             _ => {}
         }
@@ -240,7 +259,9 @@ fn main() {
         let bytes = s.as_bytes();
         let mut last_sep = 0;
         for (i, &b) in bytes.iter().enumerate() {
-            if b == b'/' || b == b'\\' { last_sep = i + 1; }
+            if b == b'/' || b == b'\\' {
+                last_sep = i + 1;
+            }
         }
         let base = &s[last_sep..];
         let base = base.strip_suffix(".exe").unwrap_or(base);

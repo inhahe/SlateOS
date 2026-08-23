@@ -4,11 +4,16 @@
 //!
 //! Multi-personality: `caddy`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_caddy(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
@@ -75,7 +80,9 @@ fn run_caddy(args: &[String]) -> i32 {
             println!("          \"listen\": [\":443\"],");
             println!("          \"routes\": [{{");
             println!("            \"match\": [{{\"host\": [\"example.com\"]}}],");
-            println!("            \"handle\": [{{\"handler\": \"reverse_proxy\", \"upstreams\": [{{\"dial\": \"localhost:8080\"}}]}}]");
+            println!(
+                "            \"handle\": [{{\"handler\": \"reverse_proxy\", \"upstreams\": [{{\"dial\": \"localhost:8080\"}}]}}]"
+            );
             println!("          }}]");
             println!("        }}");
             println!("      }}");
@@ -84,14 +91,26 @@ fn run_caddy(args: &[String]) -> i32 {
             println!("}}");
         }
         "run" | "start" => {
-            println!("{{\"level\":\"info\",\"msg\":\"using provided configuration\",\"config_file\":\"Caddyfile\"}}");
-            println!("{{\"level\":\"info\",\"msg\":\"admin endpoint started\",\"address\":\"localhost:2019\"}}");
-            println!("{{\"level\":\"info\",\"msg\":\"tls.obtain: acquiring lock\",\"identifier\":\"example.com\"}}");
-            println!("{{\"level\":\"info\",\"msg\":\"certificate obtained successfully\",\"identifier\":\"example.com\"}}");
-            println!("{{\"level\":\"info\",\"msg\":\"autosaved config\",\"file\":\"/var/lib/caddy/autosave.json\"}}");
+            println!(
+                "{{\"level\":\"info\",\"msg\":\"using provided configuration\",\"config_file\":\"Caddyfile\"}}"
+            );
+            println!(
+                "{{\"level\":\"info\",\"msg\":\"admin endpoint started\",\"address\":\"localhost:2019\"}}"
+            );
+            println!(
+                "{{\"level\":\"info\",\"msg\":\"tls.obtain: acquiring lock\",\"identifier\":\"example.com\"}}"
+            );
+            println!(
+                "{{\"level\":\"info\",\"msg\":\"certificate obtained successfully\",\"identifier\":\"example.com\"}}"
+            );
+            println!(
+                "{{\"level\":\"info\",\"msg\":\"autosaved config\",\"file\":\"/var/lib/caddy/autosave.json\"}}"
+            );
             println!("{{\"level\":\"info\",\"msg\":\"serving initial configuration\"}}");
             if subcmd == "start" {
-                println!("Successfully started Caddy (pid=1234) - Caddy is running in the background");
+                println!(
+                    "Successfully started Caddy (pid=1234) - Caddy is running in the background"
+                );
             }
         }
         "stop" => println!("{{\"level\":\"info\",\"msg\":\"Caddy stopped\"}}"),
@@ -101,18 +120,25 @@ fn run_caddy(args: &[String]) -> i32 {
             println!("Caddy proxying :443 -> {}", to);
         }
         "file-server" => {
-            let root = args.windows(2).find(|w| w[0] == "--root").map(|w| w[1].as_str()).unwrap_or(".");
+            let root = args
+                .windows(2)
+                .find(|w| w[0] == "--root")
+                .map(|w| w[1].as_str())
+                .unwrap_or(".");
             println!("Caddy serving files from {} on :80", root);
         }
         "hash-password" => println!("$2a$14$abcdefghijklmnopqrstuvwxyz012345678901234567890123456"),
-        _ => println!("caddy: command '{}' completed", subcmd),
+        _ => println!("caddy: command {} completed", quoteaf_os(subcmd)),
     }
     0
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "caddy".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "caddy".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_caddy(&rest);
     process::exit(code);
@@ -120,7 +146,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_caddy};
+    use super::{basename, run_caddy, strip_ext};
 
     #[test]
     fn basename_strips_path() {

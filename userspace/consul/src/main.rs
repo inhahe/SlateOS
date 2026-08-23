@@ -4,6 +4,7 @@
 //!
 //! Single personality: `consul`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -41,7 +42,9 @@ fn run_consul(args: Vec<String>) -> i32 {
         "agent" => {
             let is_server = cmd_args.iter().any(|a| a == "-server");
             let is_dev = cmd_args.iter().any(|a| a == "-dev");
-            let bind = cmd_args.iter().position(|a| a == "-bind")
+            let bind = cmd_args
+                .iter()
+                .position(|a| a == "-bind")
                 .and_then(|i| cmd_args.get(i + 1))
                 .map(|s| s.as_str())
                 .unwrap_or("127.0.0.1");
@@ -56,14 +59,26 @@ fn run_consul(args: Vec<String>) -> i32 {
             } else {
                 println!("            Server: false");
             }
-            println!("       Client Addr: [{}] (HTTP: 8500, HTTPS: -1, gRPC: 8502, DNS: 8600)", bind);
+            println!(
+                "       Client Addr: [{}] (HTTP: 8500, HTTPS: -1, gRPC: 8502, DNS: 8600)",
+                bind
+            );
             println!("      Cluster Addr: {} (LAN: 8301, WAN: 8302)", bind);
             println!();
             println!("==> Log data will now stream in:");
             println!();
-            println!("    [INFO]  agent: Started DNS server addr={}:8600 network=udp", bind);
-            println!("    [INFO]  agent: Started HTTP server addr={}:8500 network=tcp", bind);
-            println!("    [INFO]  agent: Started gRPC server addr={}:8502 network=tcp", bind);
+            println!(
+                "    [INFO]  agent: Started DNS server addr={}:8600 network=udp",
+                bind
+            );
+            println!(
+                "    [INFO]  agent: Started HTTP server addr={}:8500 network=tcp",
+                bind
+            );
+            println!(
+                "    [INFO]  agent: Started gRPC server addr={}:8502 network=tcp",
+                bind
+            );
             if is_dev {
                 println!("    [INFO]  agent: dev mode enabled — data will not be persisted");
             }
@@ -71,8 +86,12 @@ fn run_consul(args: Vec<String>) -> i32 {
             0
         }
         "members" => {
-            println!("Node           Address          Status  Type    Build   Protocol  DC   Partition  Segment");
-            println!("slateos-node-1   127.0.0.1:8301   alive   server  1.18.1  2         dc1  default    <all>");
+            println!(
+                "Node           Address          Status  Type    Build   Protocol  DC   Partition  Segment"
+            );
+            println!(
+                "slateos-node-1   127.0.0.1:8301   alive   server  1.18.1  2         dc1  default    <all>"
+            );
             0
         }
         "catalog" => {
@@ -86,8 +105,12 @@ fn run_consul(args: Vec<String>) -> i32 {
                     println!("postgres");
                 }
                 "nodes" => {
-                    println!("Node           ID                                    Address      DC");
-                    println!("slateos-node-1   a1b2c3d4-e5f6-7890-abcd-ef1234567890  127.0.0.1    dc1");
+                    println!(
+                        "Node           ID                                    Address      DC"
+                    );
+                    println!(
+                        "slateos-node-1   a1b2c3d4-e5f6-7890-abcd-ef1234567890  127.0.0.1    dc1"
+                    );
                 }
                 "datacenters" => println!("dc1"),
                 _ => println!("Usage: consul catalog <services|nodes|datacenters>"),
@@ -165,9 +188,18 @@ fn run_consul(args: Vec<String>) -> i32 {
             println!("[INFO]  agent: Synced check service:web");
             0
         }
-        "reload" => { println!("Configuration reload triggered"); 0 }
-        "leave" => { println!("Graceful leave complete"); 0 }
-        other => { eprintln!("consul: unknown command '{}'", other); 1 }
+        "reload" => {
+            println!("Configuration reload triggered");
+            0
+        }
+        "leave" => {
+            println!("Graceful leave complete");
+            0
+        }
+        other => {
+            eprintln!("consul: unknown command {}", quoteaf_os(other));
+            1
+        }
     }
 }
 
@@ -180,7 +212,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_consul};
+    use super::run_consul;
 
     #[test]
     fn help_exits_zero() {

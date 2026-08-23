@@ -4,6 +4,7 @@
 //!
 //! Multi-personality: `cmus`, `cmus-remote`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -72,14 +73,21 @@ fn run_cmus_remote(args: Vec<String>) -> i32 {
     }
 
     // Execute command
-    let cmd_name = if args.iter().any(|a| a == "-p" || a == "--play") { "play" }
-        else if args.iter().any(|a| a == "-u" || a == "--pause") { "pause" }
-        else if args.iter().any(|a| a == "-s" || a == "--stop") { "stop" }
-        else if args.iter().any(|a| a == "-n" || a == "--next") { "next" }
-        else if args.iter().any(|a| a == "-r" || a == "--prev") { "prev" }
-        else { "unknown" };
+    let cmd_name = if args.iter().any(|a| a == "-p" || a == "--play") {
+        "play"
+    } else if args.iter().any(|a| a == "-u" || a == "--pause") {
+        "pause"
+    } else if args.iter().any(|a| a == "-s" || a == "--stop") {
+        "stop"
+    } else if args.iter().any(|a| a == "-n" || a == "--next") {
+        "next"
+    } else if args.iter().any(|a| a == "-r" || a == "--prev") {
+        "prev"
+    } else {
+        "unknown"
+    };
     if cmd_name != "unknown" {
-        println!("(sent '{}' command to cmus)", cmd_name);
+        println!("(sent {} command to cmus)", quoteaf_os(cmd_name));
     }
     0
 }
@@ -91,7 +99,9 @@ fn main() {
         let bytes = s.as_bytes();
         let mut last_sep = 0;
         for (i, &b) in bytes.iter().enumerate() {
-            if b == b'/' || b == b'\\' { last_sep = i + 1; }
+            if b == b'/' || b == b'\\' {
+                last_sep = i + 1;
+            }
         }
         let base = &s[last_sep..];
         base.strip_suffix(".exe").unwrap_or(base).to_string()
@@ -106,7 +116,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_cmus};
+    use super::run_cmus;
 
     #[test]
     fn help_exits_zero() {

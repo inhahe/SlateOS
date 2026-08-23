@@ -4,6 +4,7 @@
 //!
 //! Single personality: `celery`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -32,10 +33,16 @@ fn run_celery(args: Vec<String>) -> i32 {
     let cmd = args.first().map(|s| s.as_str()).unwrap_or("");
     match cmd {
         "worker" => {
-            let concurrency = args.windows(2).find(|w| w[0] == "-c" || w[0] == "--concurrency")
-                .map(|w| w[1].as_str()).unwrap_or("4");
-            let queue = args.windows(2).find(|w| w[0] == "-Q" || w[0] == "--queues")
-                .map(|w| w[1].as_str()).unwrap_or("celery");
+            let concurrency = args
+                .windows(2)
+                .find(|w| w[0] == "-c" || w[0] == "--concurrency")
+                .map(|w| w[1].as_str())
+                .unwrap_or("4");
+            let queue = args
+                .windows(2)
+                .find(|w| w[0] == "-Q" || w[0] == "--queues")
+                .map(|w| w[1].as_str())
+                .unwrap_or("celery");
             println!(" -------------- celery@myhost v5.3.6 (emerald-rush)");
             println!("--- ***** -----");
             println!("-- ******* ---- Slate OS x86_64");
@@ -48,7 +55,10 @@ fn run_celery(args: Vec<String>) -> i32 {
             println!("-- ******* ---- .> task events: OFF");
             println!("--- ***** -----");
             println!(" -------------- [queues]");
-            println!("                .> {}        exchange={}(direct) key={}", queue, queue, queue);
+            println!(
+                "                .> {}        exchange={}(direct) key={}",
+                queue, queue, queue
+            );
             println!();
             println!("[tasks]");
             println!("  . myapp.tasks.send_email");
@@ -78,8 +88,12 @@ fn run_celery(args: Vec<String>) -> i32 {
                 "stats" => {
                     println!("-> celery@myhost: OK");
                     println!("    {{");
-                    println!("      \"total\": {{\"myapp.tasks.process_order\": 1234, \"myapp.tasks.send_email\": 5678}}");
-                    println!("      \"pool\": {{\"max-concurrency\": 4, \"processes\": [1234, 1235, 1236, 1237]}}");
+                    println!(
+                        "      \"total\": {{\"myapp.tasks.process_order\": 1234, \"myapp.tasks.send_email\": 5678}}"
+                    );
+                    println!(
+                        "      \"pool\": {{\"max-concurrency\": 4, \"processes\": [1234, 1235, 1236, 1237]}}"
+                    );
                     println!("    }}");
                 }
                 "registered" => {
@@ -88,7 +102,9 @@ fn run_celery(args: Vec<String>) -> i32 {
                     println!("    * myapp.tasks.process_order");
                     println!("    * myapp.tasks.generate_report");
                 }
-                _ => { println!("Inspect: {}", sub); }
+                _ => {
+                    println!("Inspect: {}", sub);
+                }
             }
             0
         }
@@ -99,13 +115,19 @@ fn run_celery(args: Vec<String>) -> i32 {
             0
         }
         "call" => {
-            let task = args.get(1).map(|s| s.as_str()).unwrap_or("myapp.tasks.process_order");
+            let task = args
+                .get(1)
+                .map(|s| s.as_str())
+                .unwrap_or("myapp.tasks.process_order");
             println!("Calling task: {}", task);
             println!("  Task ID: abc123-def456-ghi789-jkl012");
             0
         }
         "result" => {
-            let task_id = args.get(1).map(|s| s.as_str()).unwrap_or("abc123-def456-ghi789-jkl012");
+            let task_id = args
+                .get(1)
+                .map(|s| s.as_str())
+                .unwrap_or("abc123-def456-ghi789-jkl012");
             println!("Task {}: SUCCESS", task_id);
             println!("  Result: {{\"status\": \"completed\", \"processed\": 42}}");
             0
@@ -116,8 +138,11 @@ fn run_celery(args: Vec<String>) -> i32 {
             0
         }
         "flower" => {
-            let port = args.windows(2).find(|w| w[0] == "--port")
-                .map(|w| w[1].as_str()).unwrap_or("5555");
+            let port = args
+                .windows(2)
+                .find(|w| w[0] == "--port")
+                .map(|w| w[1].as_str())
+                .unwrap_or("5555");
             println!("Flower monitoring at http://localhost:{}", port);
             println!("  Broker: amqp://guest:**@localhost:5672//");
             0
@@ -126,7 +151,7 @@ fn run_celery(args: Vec<String>) -> i32 {
             if cmd.is_empty() {
                 eprintln!("Usage: celery <command>. See --help.");
             } else {
-                eprintln!("Error: unknown command '{}'. See --help.", cmd);
+                eprintln!("Error: unknown command {}. See --help.", quoteaf_os(cmd));
             }
             1
         }
@@ -142,7 +167,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_celery};
+    use super::run_celery;
 
     #[test]
     fn help_exits_zero() {

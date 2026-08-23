@@ -4,6 +4,7 @@
 //!
 //! Multi-personality: `bluetoothctl`, `hcitool`, `hciconfig`, `btmon`, `sdptool`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -61,7 +62,10 @@ fn run_bluetoothctl(args: &[String]) -> i32 {
             println!("Changing power {}... succeeded", state);
         }
         "pair" | "connect" | "trust" => {
-            let addr = args.get(1).map(|s| s.as_str()).unwrap_or("11:22:33:44:55:66");
+            let addr = args
+                .get(1)
+                .map(|s| s.as_str())
+                .unwrap_or("11:22:33:44:55:66");
             println!("Attempting to {} {}...", subcmd, addr);
             println!("{} successful", subcmd);
         }
@@ -106,14 +110,15 @@ fn run_hcitool(args: &[String]) -> i32 {
             println!("11:22:33:44:55:66 (unknown)");
             println!("11:22:33:44:55:66 WH-1000XM5");
         }
-        _ => println!("hcitool: command '{}' completed", subcmd),
+        _ => println!("hcitool: command {} completed", quoteaf_os(subcmd)),
     }
     0
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first()
+    let prog = args
+        .first()
         .map(|s| strip_ext(basename(s)).to_string())
         .unwrap_or_else(|| "bluetoothctl".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
@@ -121,8 +126,16 @@ fn main() {
     let code = match prog.as_str() {
         "hcitool" => run_hcitool(&rest),
         "hciconfig" => run_hciconfig(&rest),
-        "btmon" => { println!("Bluetooth monitor ver 5.72 (Slate OS)"); println!("= Open Index: AA:BB:CC:DD:EE:FF"); 0 }
-        "sdptool" => { println!("Inquiring..."); println!("Service Name: Audio Sink"); 0 }
+        "btmon" => {
+            println!("Bluetooth monitor ver 5.72 (Slate OS)");
+            println!("= Open Index: AA:BB:CC:DD:EE:FF");
+            0
+        }
+        "sdptool" => {
+            println!("Inquiring...");
+            println!("Service Name: Audio Sink");
+            0
+        }
         _ => run_bluetoothctl(&rest),
     };
     process::exit(code);
@@ -130,7 +143,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_bluetoothctl};
+    use super::{basename, run_bluetoothctl, strip_ext};
 
     #[test]
     fn basename_strips_path() {

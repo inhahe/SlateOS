@@ -1,6 +1,7 @@
 #![deny(clippy::all)]
 //! bunny-cli — Slate OS Bunny.net / BunnyCDN personality CLI.
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -285,7 +286,7 @@ fn run_bunny(args: &[String], prog: &str) -> i32 {
         "help" | "--help" | "-h" => print_help(prog),
         "version" | "--version" | "-V" => print_version(),
         other => {
-            eprintln!("{prog}: unknown subcommand '{other}'");
+            eprintln!("{prog}: unknown subcommand {}", quoteaf_os(other));
             eprintln!("Try '{prog} help' for the list of subcommands.");
             return 2;
         }

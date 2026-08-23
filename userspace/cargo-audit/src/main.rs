@@ -4,6 +4,7 @@
 //!
 //! Single personality: `cargo-audit`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -80,7 +81,10 @@ fn run_cargo_audit(args: Vec<String>) -> i32 {
             0
         }
         "bin" => {
-            let binary = subargs.get(1).map(|s| s.as_str()).unwrap_or("target/release/app");
+            let binary = subargs
+                .get(1)
+                .map(|s| s.as_str())
+                .unwrap_or("target/release/app");
             println!("    Auditing binary: {}", binary);
             println!("    Detecting embedded dependency info...");
             println!("    Found 42 crates");
@@ -89,7 +93,7 @@ fn run_cargo_audit(args: Vec<String>) -> i32 {
             0
         }
         _ => {
-            eprintln!("Error: unknown command '{}'. See --help.", cmd);
+            eprintln!("Error: unknown command {}. See --help.", quoteaf_os(cmd));
             1
         }
     }
@@ -104,7 +108,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_cargo_audit};
+    use super::run_cargo_audit;
 
     #[test]
     fn help_exits_zero() {

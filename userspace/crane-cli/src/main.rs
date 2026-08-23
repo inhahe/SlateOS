@@ -4,6 +4,7 @@
 //!
 //! Single personality: `crane`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -66,7 +67,9 @@ fn run_crane(args: Vec<String>) -> i32 {
             println!("    \"digest\": \"sha256:abc123...\"");
             println!("  }},");
             println!("  \"layers\": [");
-            println!("    {{\"mediaType\": \"application/vnd.docker.image.rootfs.diff.tar.gzip\", \"size\": 33674240, \"digest\": \"sha256:def456...\"}}");
+            println!(
+                "    {{\"mediaType\": \"application/vnd.docker.image.rootfs.diff.tar.gzip\", \"size\": 33674240, \"digest\": \"sha256:def456...\"}}"
+            );
             println!("  ]");
             println!("}}");
             let _ = image;
@@ -74,13 +77,19 @@ fn run_crane(args: Vec<String>) -> i32 {
         }
         "copy" => {
             let src = args.get(1).map(|s| s.as_str()).unwrap_or("nginx:latest");
-            let dst = args.get(2).map(|s| s.as_str()).unwrap_or("myregistry/nginx:latest");
+            let dst = args
+                .get(2)
+                .map(|s| s.as_str())
+                .unwrap_or("myregistry/nginx:latest");
             println!("Copying {} -> {}", src, dst);
             println!("  Done.");
             0
         }
         "catalog" => {
-            let registry = args.get(1).map(|s| s.as_str()).unwrap_or("registry.example.com");
+            let registry = args
+                .get(1)
+                .map(|s| s.as_str())
+                .unwrap_or("registry.example.com");
             println!("Repositories in {}:", registry);
             println!("  myapp");
             println!("  nginx");
@@ -97,7 +106,7 @@ fn run_crane(args: Vec<String>) -> i32 {
             if cmd.is_empty() {
                 eprintln!("Usage: crane <command>. See --help.");
             } else {
-                eprintln!("Error: unknown command '{}'. See --help.", cmd);
+                eprintln!("Error: unknown command {}. See --help.", quoteaf_os(cmd));
             }
             1
         }
@@ -113,7 +122,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_crane};
+    use super::run_crane;
 
     #[test]
     fn help_exits_zero() {

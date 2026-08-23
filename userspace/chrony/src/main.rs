@@ -14,6 +14,7 @@
 //! - `chronyd` (default) — chrony NTP daemon
 //! - `chronyc` — chrony command-line client
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -123,22 +124,37 @@ fn read_sources() -> Vec<NtpSource> {
             name: "time.cloudflare.com".to_string(),
             mode: SourceMode::Server,
             state: SourceState::Synced,
-            stratum: 3, poll_interval: 6, reach: 377, last_rx_secs: 12,
-            offset_us: -234.5, _delay_us: 15800.0, _jitter_us: 123.4,
+            stratum: 3,
+            poll_interval: 6,
+            reach: 377,
+            last_rx_secs: 12,
+            offset_us: -234.5,
+            _delay_us: 15800.0,
+            _jitter_us: 123.4,
         },
         NtpSource {
             name: "ntp.ubuntu.com".to_string(),
             mode: SourceMode::Server,
             state: SourceState::Reachable,
-            stratum: 2, poll_interval: 6, reach: 377, last_rx_secs: 45,
-            offset_us: 567.8, _delay_us: 32100.0, _jitter_us: 456.7,
+            stratum: 2,
+            poll_interval: 6,
+            reach: 377,
+            last_rx_secs: 45,
+            offset_us: 567.8,
+            _delay_us: 32100.0,
+            _jitter_us: 456.7,
         },
         NtpSource {
             name: "pool.ntp.org".to_string(),
             mode: SourceMode::Server,
             state: SourceState::Reachable,
-            stratum: 2, poll_interval: 7, reach: 377, last_rx_secs: 120,
-            offset_us: -89.1, _delay_us: 28500.0, _jitter_us: 234.5,
+            stratum: 2,
+            poll_interval: 7,
+            reach: 377,
+            last_rx_secs: 120,
+            offset_us: -89.1,
+            _delay_us: 28500.0,
+            _jitter_us: 234.5,
         },
     ]
 }
@@ -173,7 +189,10 @@ fn run_chronyd(args: Vec<String>) -> i32 {
             println!("Chrony NTP daemon.");
             println!();
             println!("Options:");
-            println!("  -f FILE     Configuration file (default: {})", _CHRONY_CONF);
+            println!(
+                "  -f FILE     Configuration file (default: {})",
+                _CHRONY_CONF
+            );
             println!("  -d          Don't daemonize (run in foreground)");
             println!("  -q          Set clock once and exit");
             println!("  -Q          Print offset and exit (no set)");
@@ -181,7 +200,10 @@ fn run_chronyd(args: Vec<String>) -> i32 {
             println!("  --version   Show version");
             0
         }
-        "--version" | "-V" => { println!("chronyd 0.1.0 (Slate OS)"); 0 }
+        "--version" | "-V" => {
+            println!("chronyd 0.1.0 (Slate OS)");
+            0
+        }
         "-q" => {
             println!("chronyd: clock set mode");
             println!("  Querying time.cloudflare.com...");
@@ -198,7 +220,10 @@ fn run_chronyd(args: Vec<String>) -> i32 {
             let foreground = args.iter().any(|a| a == "-d");
             println!("chronyd: starting NTP daemon");
             println!("  Config: {}", _CHRONY_CONF);
-            println!("  Mode: {}", if foreground { "foreground" } else { "daemon" });
+            println!(
+                "  Mode: {}",
+                if foreground { "foreground" } else { "daemon" }
+            );
             println!();
             let sources = read_sources();
             println!("  Loaded {} NTP sources", sources.len());
@@ -215,7 +240,10 @@ fn run_chronyd(args: Vec<String>) -> i32 {
 // ── chronyc personality ───────────────────────────────────────────────
 
 fn run_chronyc(args: Vec<String>) -> i32 {
-    let cmd = args.first().cloned().unwrap_or_else(|| "tracking".to_string());
+    let cmd = args
+        .first()
+        .cloned()
+        .unwrap_or_else(|| "tracking".to_string());
     let cmd_args: Vec<String> = args.into_iter().skip(1).collect();
 
     match cmd.as_str() {
@@ -238,7 +266,10 @@ fn run_chronyc(args: Vec<String>) -> i32 {
             println!("  version         Show version");
             0
         }
-        "version" | "--version" | "-V" => { println!("chronyc 0.1.0 (Slate OS)"); 0 }
+        "version" | "--version" | "-V" => {
+            println!("chronyc 0.1.0 (Slate OS)");
+            0
+        }
         "tracking" => chronyc_tracking(),
         "sources" => chronyc_sources(cmd_args.iter().any(|a| a == "-v")),
         "sourcestats" => chronyc_sourcestats(),
@@ -252,7 +283,7 @@ fn run_chronyc(args: Vec<String>) -> i32 {
             0
         }
         other => {
-            eprintln!("chronyc: unknown command '{}'", other);
+            eprintln!("chronyc: unknown command {}", quoteaf_os(other));
             1
         }
     }
@@ -263,7 +294,10 @@ fn chronyc_tracking() -> i32 {
     println!("Reference ID    : 162.159.200.123 ({})", t.reference);
     println!("Stratum         : {}", t.stratum);
     println!("Ref time (UTC)  : {}", t.ref_time_utc);
-    println!("System time     : {:.6} seconds fast of NTP time", t.system_time_offset);
+    println!(
+        "System time     : {:.6} seconds fast of NTP time",
+        t.system_time_offset
+    );
     println!("Last offset     : {:+.6} seconds", t.last_offset);
     println!("RMS offset      : {:.6} seconds", t.rms_offset);
     println!("Frequency       : {:.3} ppm slow", t.frequency);
@@ -288,10 +322,17 @@ fn chronyc_sources(verbose: bool) -> i32 {
     println!("===============================================================================");
 
     for s in &sources {
-        println!("{}{} {:<25} {:>5} {:>4} {:>5} {:>6} {:>+8.1}us",
-            s.mode, s.state.marker(), s.name,
-            s.stratum, s.poll_interval, s.reach, s.last_rx_secs,
-            s.offset_us);
+        println!(
+            "{}{} {:<25} {:>5} {:>4} {:>5} {:>6} {:>+8.1}us",
+            s.mode,
+            s.state.marker(),
+            s.name,
+            s.stratum,
+            s.poll_interval,
+            s.reach,
+            s.last_rx_secs,
+            s.offset_us
+        );
     }
     0
 }
@@ -302,8 +343,10 @@ fn chronyc_sourcestats() -> i32 {
     println!("===============================================================================");
 
     for s in &sources {
-        println!("{:<25} {:>4} {:>3} {:>5} {:>+10.3} {:>10.3} {:>+8.1}us {:>7.1}us",
-            s.name, 8, 4, "255m", -12.345, 0.123, s.offset_us, s._jitter_us);
+        println!(
+            "{:<25} {:>4} {:>3} {:>5} {:>+10.3} {:>10.3} {:>+8.1}us {:>7.1}us",
+            s.name, 8, 4, "255m", -12.345, 0.123, s.offset_us, s._jitter_us
+        );
     }
     0
 }
@@ -318,8 +361,15 @@ fn chronyc_ntpdata() -> i32 {
         println!("Version         : 4");
         println!("Mode            : Server");
         println!("Stratum         : {}", s.stratum);
-        println!("Poll interval   : {} ({}s)", s.poll_interval, 1 << s.poll_interval);
-        println!("Offset          : {:+.6} seconds", s.offset_us / 1_000_000.0);
+        println!(
+            "Poll interval   : {} ({}s)",
+            s.poll_interval,
+            1 << s.poll_interval
+        );
+        println!(
+            "Offset          : {:+.6} seconds",
+            s.offset_us / 1_000_000.0
+        );
         println!();
     }
     0
@@ -362,7 +412,9 @@ fn main() {
         let bytes = s.as_bytes();
         let mut last_sep = 0;
         for (i, &b) in bytes.iter().enumerate() {
-            if b == b'/' || b == b'\\' { last_sep = i + 1; }
+            if b == b'/' || b == b'\\' {
+                last_sep = i + 1;
+            }
         }
         let base = &s[last_sep..];
         let base = base.strip_suffix(".exe").unwrap_or(base);
@@ -415,7 +467,10 @@ mod tests {
     #[test]
     fn test_leap_status_display() {
         assert_eq!(format!("{}", LeapStatus::Normal), "Normal");
-        assert_eq!(format!("{}", LeapStatus::_NotSynchronized), "Not synchronised");
+        assert_eq!(
+            format!("{}", LeapStatus::_NotSynchronized),
+            "Not synchronised"
+        );
     }
 
     #[test]

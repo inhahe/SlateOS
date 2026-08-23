@@ -1,6 +1,7 @@
 #![deny(clippy::all)]
 //! contentful-cli — Slate OS Contentful headless CMS personality CLI.
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -248,7 +249,7 @@ fn cmd_customers() {
     println!();
     println!("Pattern:");
     println!("  Heavy in:");
-    println!("    - Multinational consumer brands (multi-locale, multi-region")  ;
+    println!("    - Multinational consumer brands (multi-locale, multi-region");
     println!("      content needs match Contentful sweet spot)");
     println!("    - Enterprise B2B (sales sites + developer docs)");
     println!("    - Direct-to-consumer ecommerce");
@@ -319,7 +320,7 @@ fn run_contentful(args: &[String], prog: &str) -> i32 {
         "help" | "--help" | "-h" => print_help(prog),
         "version" | "--version" | "-V" => print_version(),
         other => {
-            eprintln!("{prog}: unknown subcommand '{other}'");
+            eprintln!("{prog}: unknown subcommand {}", quoteaf_os(other));
             eprintln!("Try '{prog} help' for the list of subcommands.");
             return 2;
         }

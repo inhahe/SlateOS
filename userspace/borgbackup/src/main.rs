@@ -4,6 +4,7 @@
 //!
 //! Single personality: `borg`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -44,10 +45,18 @@ fn run_borg(args: Vec<String>) -> i32 {
         "create" => {
             println!("Creating archive...");
             println!("Archive name: backup-2025-05-22T10:00:00");
-            println!("------------------------------------------------------------------------------");
-            println!("                       Original size      Compressed size    Deduplicated size");
-            println!("This archive:                2.50 GB              1.80 GB            450.00 MB");
-            println!("All archives:               12.50 GB              9.00 GB              2.50 GB");
+            println!(
+                "------------------------------------------------------------------------------"
+            );
+            println!(
+                "                       Original size      Compressed size    Deduplicated size"
+            );
+            println!(
+                "This archive:                2.50 GB              1.80 GB            450.00 MB"
+            );
+            println!(
+                "All archives:               12.50 GB              9.00 GB              2.50 GB"
+            );
             println!("                       Unique chunks         Total chunks");
             println!("Chunk index:                   45678               234567");
         }
@@ -55,7 +64,9 @@ fn run_borg(args: Vec<String>) -> i32 {
             let repo = args.get(1).map(|s| s.as_str()).unwrap_or("");
             if repo.contains("::") {
                 println!("drwxr-xr-x root   root          0 Thu, 2025-05-22 10:00:00 home/user");
-                println!("-rw-r--r-- root   root    1234567 Thu, 2025-05-22 09:59:00 home/user/file.txt");
+                println!(
+                    "-rw-r--r-- root   root    1234567 Thu, 2025-05-22 09:59:00 home/user/file.txt"
+                );
             } else {
                 println!("backup-2025-05-22T10:00:00            Thu, 2025-05-22 10:00:00 [abc123]");
                 println!("backup-2025-05-21T10:00:00            Wed, 2025-05-21 10:00:00 [def456]");
@@ -69,8 +80,12 @@ fn run_borg(args: Vec<String>) -> i32 {
             println!("Cache: /home/user/.cache/borg");
             println!("Security dir: /home/user/.config/borg/security");
             println!();
-            println!("                       Original size      Compressed size    Deduplicated size");
-            println!("All archives:               12.50 GB              9.00 GB              2.50 GB");
+            println!(
+                "                       Original size      Compressed size    Deduplicated size"
+            );
+            println!(
+                "All archives:               12.50 GB              9.00 GB              2.50 GB"
+            );
         }
         "prune" => {
             println!("Keeping archive: backup-2025-05-22T10:00:00");
@@ -79,11 +94,12 @@ fn run_borg(args: Vec<String>) -> i32 {
         }
         "compact" => println!("Compacting repository... freed 120 MB."),
         "check" => println!("Starting repository check... completed, no issues found."),
-        "extract" | "delete" | "diff" | "rename" | "mount" | "umount" | "key" | "config" | "export-tar" => {
+        "extract" | "delete" | "diff" | "rename" | "mount" | "umount" | "key" | "config"
+        | "export-tar" => {
             println!("({} — simulated)", cmd);
         }
         _ => {
-            eprintln!("Unknown command '{}'. Use --help.", cmd);
+            eprintln!("Unknown command {}. Use --help.", quoteaf_os(cmd));
             return 1;
         }
     }
@@ -99,7 +115,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_borg};
+    use super::run_borg;
 
     #[test]
     fn help_exits_zero() {

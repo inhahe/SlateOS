@@ -4,6 +4,7 @@
 //!
 //! Single personality: `beet`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -87,7 +88,7 @@ fn run_beet(args: Vec<String>) -> i32 {
             println!("({} — simulated)", cmd);
         }
         _ => {
-            eprintln!("Unknown command '{}'. Use --help.", cmd);
+            eprintln!("Unknown command {}. Use --help.", quoteaf_os(cmd));
             return 1;
         }
     }
@@ -103,7 +104,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_beet};
+    use super::run_beet;
 
     #[test]
     fn help_exits_zero() {

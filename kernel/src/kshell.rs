@@ -19447,7 +19447,7 @@ fn cmd_contextmenu(args: &str) {
             shell_println!(
                 "Context menu for {:?} on '{}':",
                 menu.target,
-                menu.target_path
+                menu.target_path.display()
             );
             for item in &menu.items {
                 if item.separator {

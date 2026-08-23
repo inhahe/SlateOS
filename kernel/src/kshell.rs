@@ -34227,8 +34227,8 @@ fn cmd_kernelbuild(args: &str) {
                         shell_println!("ID:          {}", c.id);
                         shell_println!("Name:        {}", c.name);
                         shell_println!("Type:        {:?}", c.comp_type);
-                        shell_println!("Source:      {}", c.source_dir);
-                        shell_println!("Output:      {}", c.output_path);
+                        shell_println!("Source:      {}", c.source_dir.display());
+                        shell_println!("Output:      {}", c.output_path.display());
                         shell_println!("Status:      {:?}", c.status);
                         shell_println!("Opt level:   {:?}", c.opt_level);
                         shell_println!("Builds:      {}", c.build_count);

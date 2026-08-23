@@ -5551,6 +5551,14 @@ extern "C" fn kernel_main() -> ! {
             // `None` at both ends, which is what a fresh boot has -- nothing
             // calls `init_defaults()` outside the `pinnedapps` commands.
             fs::pinnedapps::self_test();
+            // kernelbuild was reachable only from a `kshell` subcommand
+            // (TD-A-FS-SELFTESTS-NEVER-RUN). Safe here: it declines to run
+            // against a populated registry rather than clearing it, and at
+            // boot the registry is empty -- `init_defaults()` is reachable
+            // only from `kbuild init`.
+            if let Err(e) = fs::kernelbuild::self_test() {
+                serial_println!("WARNING: kernelbuild self-test failed: {:?}", e);
+            }
             if let Err(e) = crate::sockact::self_test() {
                 serial_println!("WARNING: socket-activation self-test failed: {:?}", e);
             }

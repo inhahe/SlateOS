@@ -38,10 +38,10 @@
 
 #![allow(dead_code)]
 
-use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
 
+use super::path::{Path, PathBuf};
 use crate::error::KernelResult;
 use crate::serial_println;
 use crate::sync::PreemptSpinMutex;
@@ -105,7 +105,11 @@ impl AccessAdvice {
 /// An active advice entry.
 #[derive(Debug, Clone)]
 struct AdviceEntry {
-    path: String,
+    /// A `PathBuf`, not a `String`: the key must be able to hold any name the
+    /// filesystem can, and ours allow every byte but `/` and NUL. A `String`
+    /// key silently makes advice unsettable for the very files whose names
+    /// are unusual. See `design-decisions.md` §261.
+    path: PathBuf,
     advice: AccessAdvice,
     /// Nanosecond timestamp when advice was set (for LRU eviction).
     timestamp_ns: u64,
@@ -143,7 +147,8 @@ static PREFETCH_BYTES: AtomicU64 = AtomicU64::new(0);
 ///
 /// The advice remains active until overridden or the entry is evicted
 /// by LRU when the table is full.
-pub fn advise(path: &str, advice: AccessAdvice) {
+pub fn advise(path: impl AsRef<Path>, advice: AccessAdvice) {
+    let path = path.as_ref();
     ADVISE_COUNT.fetch_add(1, Ordering::Relaxed);
     let now = crate::timekeeping::clock_monotonic();
 
@@ -151,7 +156,7 @@ pub fn advise(path: &str, advice: AccessAdvice) {
 
     // Update existing entry or find free slot.
     for entry in table.iter_mut() {
-        if entry.path == path {
+        if entry.path.as_path() == path {
             entry.advice = advice;
             entry.timestamp_ns = now;
             return;
@@ -172,17 +177,18 @@ pub fn advise(path: &str, advice: AccessAdvice) {
     }
 
     table.push(AdviceEntry {
-        path: String::from(path),
+        path: path.to_path_buf(),
         advice,
         timestamp_ns: now,
     });
 }
 
 /// Get current advice for a path. Returns Normal if no advice is set.
-pub fn get_advice(path: &str) -> AccessAdvice {
+pub fn get_advice(path: impl AsRef<Path>) -> AccessAdvice {
+    let path = path.as_ref();
     let table = ADVICE_TABLE.lock();
     for entry in table.iter() {
-        if entry.path == path {
+        if entry.path.as_path() == path {
             return entry.advice;
         }
     }
@@ -190,10 +196,11 @@ pub fn get_advice(path: &str) -> AccessAdvice {
 }
 
 /// Clear advice for a specific path.
-pub fn clear_advice(path: &str) -> bool {
+pub fn clear_advice(path: impl AsRef<Path>) -> bool {
+    let path = path.as_ref();
     let mut table = ADVICE_TABLE.lock();
     let len_before = table.len();
-    table.retain(|e| e.path != path);
+    table.retain(|e| e.path.as_path() != path);
     table.len() < len_before
 }
 
@@ -206,9 +213,10 @@ pub fn clear_all() {
 ///
 /// Reads the specified range (or entire file if offset=0 and len=0)
 /// to warm the cache for subsequent reads.
-pub fn prefetch(path: &str, offset: u64, len: u64) -> KernelResult<PrefetchResult> {
+pub fn prefetch(path: impl AsRef<Path>, offset: u64, len: u64) -> KernelResult<PrefetchResult> {
     use crate::fs::Vfs;
 
+    let path = path.as_ref();
     PREFETCH_COUNT.fetch_add(1, Ordering::Relaxed);
 
     if len == 0 && offset == 0 {
@@ -238,7 +246,7 @@ pub fn prefetch(path: &str, offset: u64, len: u64) -> KernelResult<PrefetchResul
 }
 
 /// List all active advice entries.
-pub fn list_active() -> Vec<(String, AccessAdvice)> {
+pub fn list_active() -> Vec<(PathBuf, AccessAdvice)> {
     let table = ADVICE_TABLE.lock();
     table.iter().map(|e| (e.path.clone(), e.advice)).collect()
 }
@@ -264,11 +272,12 @@ pub fn self_test() -> KernelResult<()> {
     test_advice_parse();
     test_advise_get();
     test_clear();
+    test_non_utf8_path();
     test_prefetch_file();
     test_lru_eviction();
     test_multiplier();
 
-    serial_println!("[prefetch] Self-test passed (6 tests).");
+    serial_println!("[prefetch] Self-test passed (7 tests).");
     Ok(())
 }
 
@@ -325,6 +334,34 @@ fn test_clear() {
     // Clear nonexistent returns false.
     assert!(!clear_advice("/test/nonexistent"));
     serial_println!("[prefetch]   clear: ok");
+}
+
+/// A path that is not valid UTF-8 must be storable, findable, and clearable.
+///
+/// This is the whole point of keying the table on `PathBuf` rather than
+/// `String`, and it is not observable from any of the tests above: every one
+/// of them uses an ASCII name, which a `String` key handles perfectly well.
+/// The two names below differ only in a byte that cannot appear in UTF-8, so
+/// a table that lost or folded that byte would report the advice set on the
+/// first when asked about the second.
+fn test_non_utf8_path() {
+    let a = Path::new(&b"/tmp/\xFFa"[..]);
+    let b = Path::new(&b"/tmp/\xFEa"[..]);
+
+    advise(a, AccessAdvice::Sequential);
+    assert_eq!(get_advice(a), AccessAdvice::Sequential);
+    // Distinct invalid bytes must not collide -- a lossy key would map both
+    // to U+FFFD and make this read back `Sequential`.
+    assert_eq!(get_advice(b), AccessAdvice::Normal);
+
+    advise(b, AccessAdvice::Random);
+    assert_eq!(get_advice(a), AccessAdvice::Sequential);
+    assert_eq!(get_advice(b), AccessAdvice::Random);
+
+    assert!(clear_advice(a));
+    assert!(clear_advice(b));
+    assert_eq!(get_advice(a), AccessAdvice::Normal);
+    serial_println!("[prefetch]   non_utf8_path: ok");
 }
 
 fn test_prefetch_file() {

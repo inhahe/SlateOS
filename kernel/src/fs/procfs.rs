@@ -4677,7 +4677,7 @@ fn gen_prefetch() -> Vec<u8> {
     } else {
         out.push_str(&format!("{:40} {}\n", "PATH", "ADVICE"));
         for (path, advice) in &entries {
-            out.push_str(&format!("{:40} {}\n", path, advice.label()));
+            out.push_str(&format!("{:40} {}\n", path.display(), advice.label()));
         }
     }
 

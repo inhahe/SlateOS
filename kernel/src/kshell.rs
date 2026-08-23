@@ -17544,7 +17544,7 @@ fn cmd_prefetch(args: &str) {
                 shell_println!("  {:40} {}", "PATH", "ADVICE");
                 shell_println!("  {}", "-".repeat(52));
                 for (path, advice) in &entries {
-                    shell_println!("  {:40} {}", path, advice.label());
+                    shell_println!("  {:40} {}", path.display(), advice.label());
                 }
             }
         }

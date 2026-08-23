@@ -1945,6 +1945,17 @@ mod tests {
                      drawn on top of it"
                 );
                 assert_eq!(washes[i].a, BADGE_WASH_ALPHA, "the {badge} wash");
+                // Not only "fainter than the ink" — faint enough to be a tint.
+                // The line above compares the wash to the constant that
+                // produced it and so cannot notice that constant moving; this
+                // one can. A wash at, say, 200 still passes "the label is more
+                // solid", but by then the label is being read against its own
+                // hue rather than against the row it is sitting on.
+                assert!(
+                    washes[i].a <= 64,
+                    "a wash at alpha {} is a fill, not a tint",
+                    washes[i].a
+                );
                 assert!(
                     ink.a > washes[i].a,
                     "the {badge} label must be more solid than the wash under \

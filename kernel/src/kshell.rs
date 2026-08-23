@@ -11209,6 +11209,16 @@ fn cmd_locate(args: &str) {
         crate::console_println!("  Total size:  {} bytes", st.total_size);
         crate::console_println!("  Extensions:  {}", st.extension_count);
         crate::console_println!("  Rebuilds:    {}", st.rebuild_count);
+        // How old the snapshot is decides whether a `locate` hit can be
+        // trusted. The index recorded this from the start but nothing ever
+        // showed it, so the one question a user of a cached index actually has
+        // was the one the stats screen could not answer.
+        match index::age_of_last_rebuild_ns() {
+            None => crate::console_println!("  Last build:  never"),
+            Some(age_ns) => {
+                crate::console_println!("  Last build:  {}s ago", age_ns / 1_000_000_000)
+            }
+        }
         crate::console_println!("  Truncated:   {}", st.truncated);
         crate::console_println!("  Initialized: {}", st.initialized);
         return;

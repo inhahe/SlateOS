@@ -63112,3 +63112,70 @@ caller happened to arrange (§285) — and it is worth checking for directly,
 because in all three cases the code read correctly and only the *wiring* was
 missing. Two questions catch it: does anything call this, and does anyone
 check what it returns?
+
+### 2026-08-22 — sweep 1 of that backlog: `drm/edid.rs` 100 → 0, and six blanket allows with it
+
+First file off the attacker-facing list above. `kernel/src/drm/edid.rs` parses
+the 128-byte block a monitor volunteers over the DDC wire — a surface with real
+CVE history in Linux — and it is now at **zero** `indexing_slicing` and
+**zero** `arithmetic_side_effects` findings, with **no `#[allow]` left anywhere
+in the file**. Whole-kernel total 18 173 → 18 122.
+
+That second clause is the part worth reading twice. The file's clippy count
+*already* read zero for `arithmetic_side_effects` before this work, because six
+blanket `#[allow(clippy::arithmetic_side_effects)]` attributes sat on the
+functions that do the arithmetic. **A zero produced by a suppression looks
+exactly like a zero produced by a fix**, and only one of them survives the next
+edit — a blanket allow on a function blesses whatever arithmetic a later change
+adds *inside* it. Neutralising the six (temporarily, via
+`#[cfg_attr(never_set, allow(…))]`) exposed 17 hidden sites. None was a live
+bug — every one was provably in range given u8/u16/u32 widths — but "provably
+in range" was an argument in a comment, not a property of the code.
+
+**The fix shape, in two kinds.** They are genuinely different and were treated
+differently rather than with one blanket rewrite:
+
+| kind | example | fix |
+|---|---|---|
+| bound is *known* — a fixed offset into a fixed-size block | 19 `data[N]` reads, the four 18-byte descriptor slots, the fixture builder | put the bound in the **type**: `&[u8; 128]`, `&[u8; 18]`, `[u8; 128]`. Clippy does not fire on a constant index *or a constant range* into an array — verified empirically, it was the one thing I was unsure of when planning this |
+| bound is *attacker-derived* — read out of the monitor's own bytes | the CEA data-block walk (`pos`, `length`, `dtd_offset`) | `get` / `checked_*` / `saturating_*`, with the guard folded **into** the operation |
+
+Concretely, on the second kind: `parse_detailed_timing` had
+`if htotal > 0 && vtotal > 0 { … if denom > 0 { numer / denom } else { 60 } }`
+— a correct guard standing *next* to the division. It is now
+`numer.checked_div(denom)…unwrap_or(60)`, where the check and the division are
+one operation and cannot drift apart. Same move in `decode_manufacturer_id`:
+`if c1 > 0 && c1 <= 26 { b'A' + c1 - 1 }` became `field.checked_sub(1)`, since
+0 is both "not a letter" and the value that would underflow — one operation
+decides both, and it replaced three copies of the guarded expression.
+
+Two incidental finds, neither a lint issue:
+
+- `EdidInfo::name_str` sliced `&name[..self.monitor_name_len]` on a **`pub`**
+  field. The parser never sets it past 13; a caller building an `EdidInfo` by
+  hand can. Now `get(..len).unwrap_or(name)` — a truncated name in the display
+  path beats a panic.
+- The self-test asked `modes.is_empty()` and then indexed `modes[0]`. Splitting
+  one question into two checks is what forced the index; `modes.first()` in a
+  `let … else` answers both.
+
+**Fixture code counts too, and the array move is why.** `build_test_edid` built
+into a `vec![0u8; 128]`, so ~48 constant-offset writes were flagged. Changing
+one line — the `Vec` to `[u8; EDID_BLOCK_SIZE]` — cleared all of them, along
+with the sixth blanket allow, which turned out to be dead afterwards. This is
+the cheapest ratio in the sweep and the same lesson as `proc/elf.rs` above,
+read the other way: those fixtures are not dangerous, but they are *free* to
+fix when the container can carry its own length.
+
+**Method note for the remaining files.** Grep the file for `#[allow(` before
+believing its count, and re-measure after the change rather than assuming —
+the count here moved 100 → 51 → 0 across three passes, and the middle number
+was only visible because the paths in `--message-format=short` use backslashes
+on Windows and my first `grep 'drm/edid.rs'` silently matched nothing. **A
+grep that returns zero and a file that is clean are indistinguishable until
+you check the total.**
+
+Next on the list, unchanged: the decompressors (`fs/zstd.rs` 299, `fs/xz.rs`
+144, `fs/compress.rs` 110, `fs/sevenz.rs` 92, `fs/bzip2.rs` 88), the wire
+parsers (`net/tcp.rs` 182, `net/ssh.rs` 104, `net/tls.rs` 99,
+`net/firewall.rs` 87), then `fs/fat.rs` 140 and `fs/ext4/driver.rs` 104.

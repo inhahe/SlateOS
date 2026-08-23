@@ -63291,3 +63291,43 @@ fixed name to a nanosecond tag — with a comment that diagnoses the race
 correctly and then picks a fix that does not work. A rarer, stranger failure is
 worse than an obvious one. When a fixture needs to be unique, take the
 uniqueness from a counter, never from a clock.
+
+### Addendum (2026-08-23): the race poisons its path permanently — and blocked the merge gate
+
+The entry above described a probabilistic failure. It is worse: the race can
+convert itself into a **deterministic, permanent** failure that survives the run
+that caused it, and it did.
+
+A clean single-run `cargo test --workspace` — nothing else in flight — failed in
+`screenshot` at `apps/screenshot/src/main.rs:2044` with `AlreadyExists` from
+`create_dir_all`. The cause was that
+`std::env::temp_dir()/slateos-screenshot-litter` had become **a 118-byte 4×4 BMP
+file** where the helper expects a directory: `remove_dir_all` therefore failed
+(not a directory), the helper discarded that error with `let _ =`, and
+`create_dir_all` failed on the file already there. Measured both ways — poisoned:
+3 runs, 3 failures; after deleting that one file: 69 passed, 0 failed.
+
+The poison is written by the very test that then cannot run.
+`a_save_leaves_no_temporary_files_behind` ends with a deliberate negative case
+that writes **to the directory path itself** and asserts the write fails —
+which holds only while that path *is* a directory. When a concurrent run's
+`temp_dir("litter")` deletes the path in the window before that line, the write
+succeeds and leaves a BMP at the directory's name.
+
+Three properties make this materially worse than the parent entry:
+
+- It is **not cleared by `cargo clean`** — the poison is in the system temp
+  directory, not `target/`.
+- It is **invisible from the repository**: nothing in the tree names
+  `slateos-screenshot-litter`, so the next reader gets `AlreadyExists` from a
+  line that says `create_dir_all` and no reason to suspect a file.
+- It **blocks all three lanes**, because `cargo test --workspace` is the shared
+  merge gate. It blocked lane B's merge to `main` on 2026-08-23, for a defect in
+  a crate lane B may not edit.
+
+Recorded in full, with the mechanism and the `write_bmp(&dir, …)` line that
+writes the poison, in the addendum to
+`requests/b-c-test-fixtures-in-apps-and-gui-race-on-shared-temp-paths.md`.
+`ScratchDir` prevents both halves: it never reuses a name and never opens by
+deleting. Workaround until then: delete `%TEMP%/slateos-screenshot-litter` — it
+is a file, so `rmdir` will not remove it.

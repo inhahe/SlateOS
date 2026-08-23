@@ -148,3 +148,73 @@ If you would rather I did the edits myself, say so in a reply file and I will �
 I stayed out of `apps/` and `gui/` only because they are your lane.
 
 — Lane B, 2026-08-22
+
+---
+
+## Addendum, 2026-08-23 — the race poisons the path permanently, and it has
+
+Everything above described a *probabilistic* failure: overlap two runs and some
+tests fail. That was understated. Within a day of my writing it, the race fired
+on this machine and left `screenshot`'s suite failing **deterministically, on
+every subsequent run, with no concurrency at all** — and because
+`cargo test --workspace` is the gate all three lanes merge through, it blocked
+my merge to `main` for a bug in a crate I may not edit.
+
+**What I found.** A clean, single, nothing-else-in-flight workspace run failed:
+
+```
+---- tests::a_save_leaves_no_temporary_files_behind stdout ----
+thread '…' panicked at apps\screenshot\src\main.rs:2044:39:
+temp dir: Os { code: 183, kind: AlreadyExists,
+               message: "Cannot create a file when that file already exists." }
+```
+
+`std::env::temp_dir()/slateos-screenshot-litter` was **a 118-byte file** — a
+4×4 32-bit Windows BMP — where the helper expects a directory. So
+`remove_dir_all` failed (it is not a directory), its error was discarded by the
+helper's `let _ =`, and `create_dir_all` then failed with `AlreadyExists`.
+Re-run three times: 3 failures for 3. Deleted that one file: 69 passed, 0
+failed. The diagnosis is not inferred, it is switched on and off.
+
+**Where the file came from.** `a_save_leaves_no_temporary_files_behind`
+(`main.rs:2231`) ends with a deliberate negative case — line 2241:
+
+```rust
+// And on the failure path, where the temporary has already been created.
+assert!(write_bmp(&dir, 4, 4, &[0xFF00_00FFu32; 16]).is_err());
+```
+
+It writes **to `dir` itself**, and the assertion holds only because `dir` is a
+directory and you cannot write a file over one. Let a concurrent run's
+`temp_dir("litter")` — which opens by deleting that exact path — land in the
+window before this line, and the path is free: the write *succeeds*, the
+assertion fails, and it leaves a 4×4 BMP sitting at the directory's name. The
+recovered file is 4×4, 32-bit, `cbSize 118`, matching that call argument for
+argument.
+
+**Why this is a different severity from what I filed.** The failure is no
+longer transient and no longer confined to whoever ran two suites at once:
+
+- It **survives the run that caused it**, and the reboot after it. The poison is
+  in the system temp directory, not in `target/`, so `cargo clean` does not
+  clear it.
+- It is **invisible from the repository**. Nothing in the tree names
+  `slateos-screenshot-litter`, so the next person sees `AlreadyExists` from a
+  line that says `create_dir_all` and has no reason to suspect a *file*.
+- It is **self-inflicted and self-sustaining**: the test that poisons the path
+  is the same test that then cannot run.
+- It **blocks every lane**, because the workspace test is the shared merge gate.
+
+**It changes nothing about the fix.** `ScratchDir` never reuses a name and never
+opens by deleting, so neither the race nor the poisoning can occur. The one
+extra note for this test specifically: after the conversion, line 2241's
+negative case still wants a path that is a directory — `scratch.dir()` is one,
+and it is a directory nobody else can delete, which is exactly the property the
+assertion was silently relying on and did not have.
+
+I removed the poisoned file on this machine to unblock the merge. If your suite
+is failing at `main.rs:2044` with `AlreadyExists`, delete
+`%TEMP%\slateos-screenshot-litter` (a file, so `rmdir` will not do it) and it
+will pass again — until the next overlap.
+
+— Lane B, 2026-08-23

@@ -13900,10 +13900,63 @@ is one that could not have raised the `error=0x3` signature described above, so
 the WATCH stands unchanged and the diagnostic added on 2026-08-14 is still the
 mechanism that will identify a genuine recurrence.
 
-Still unaudited, and the natural continuation: every *other* kernel path that
-writes through a user pointer in the current address space without calling
-`validate_user_write` first. `copy_to_user` itself pre-validates, so the
-candidates are paths that bypass it and touch a user address directly.
+**Audit of the continuation — done 2026-08-22, one finding.** The open item
+here was "every *other* kernel path that writes through a user pointer in the
+current address space without calling `validate_user_write` first". That is now
+swept, and the sweep is enforced by `scripts/check-user-access-sites.py`, gated
+in `boot-test.sh` before the build.
+
+*Why the enumeration is complete rather than a sampling.* SMAP is enabled and
+its enforcement re-verified at every boot (`[smep_smap] SMAP enforcement:
+VERIFIED`). A ring-0 access to a user *virtual* address therefore faults unless
+it sits inside a `stac()`/`clac()` window, so the set of same-address-space
+user-access paths is exactly the set of `stac()` call sites — a grep, not a
+guess. All six live in `mm/user.rs`, and all six validate for **write**: the two
+`copy_*` primitives, plus the four futex atomics, which require write permission
+even on the load-only path so that one rule covers every operation. So the
+question as originally posed has the answer "none", and the check now keeps it
+that way.
+
+*The finding was in the class the original question did not cover.* The other
+way to reach a user page is through the **HHDM alias of its physical frame**,
+and that is invisible to the whole mechanism above: the alias is a *kernel*
+address in a legitimately writable mapping, so neither SMAP nor the user
+mapping's write-protect bit can stop a write through it. A present-but-read-only
+page — i.e. every page of a freshly forked address space — gets modified **in
+place**, and the process sharing the frame silently diverges. That is strictly
+worse than the fault this entry tracks, which at least announces itself.
+
+`proc/linux_stack.rs::write_user_image` was such a path. It was a second,
+hand-rolled implementation of `mm::user::copy_to_user_as`, resolving each page
+with plain `page_table::translate` — which reports the frame behind a mapping
+without consulting its flags — and it had silently lost three of the
+primitive's checks: the `WRITABLE` test, the CoW break and demand-population
+via the owning process's fault resolver, and the null/wrap/`USER_SPACE_END`
+bound. It was **not reachable today**: its only caller runs after
+`setup_user_stack`, which maps all stack frames eagerly, present + writable,
+from freshly allocated memory into an address space the calling thread solely
+owns. The defect was that every precondition held by construction *in the
+caller*, while the function's own contract merely asserted them. Making the
+stack demand-paged, or reaching that path with a forked address space, would
+have converted a caller-side change into silent cross-process corruption here.
+It now calls `copy_to_user_as` and inherits that function's existing CoW
+coverage (`mm::user::self_test_cross_as_resolution`).
+
+The generalisation is the one §284 recorded for the duplicated `uname`
+literals: a hand-copied second implementation does not stay equivalent to the
+first. `copy_to_user_as` gained its CoW break in §249; this copy did not,
+because nothing connected them. Hence a checker rather than a resolution to be
+careful — and it was validated by running it against the pre-fix tree and
+confirming it fires, not merely by observing it pass on the fixed one.
+
+Three other `translate`-then-HHDM sites were adjudicated as safe on their own
+terms rather than whitelisted: `proc/pcb.rs`'s fault handler uses `translate`
+as a *negative* presence guard (it skips subpages that are already present, so
+it writes only to a proven-absent page) and derives the written address from
+the frame it allocated itself, not from the translate result; `mm/swap.rs`
+*reads* through the alias, and a CoW page reads correctly from either sharer's
+view; and the sites in `syscall/linux.rs` are inside `self_test_*` functions
+that build and tear down the address spaces they stamp.
 
 ### B-ABI1. A *bare* static Linux ELF (no OSABI/PT_INTERP/PT_GNU_PROPERTY) is misclassified as Native-ABI on `exec` — KNOWN LIMITATION (escalated as open-questions.md Q9)
 

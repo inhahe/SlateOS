@@ -18,6 +18,7 @@
 
 #![deny(clippy::all)]
 
+use quoting::quoteaf_os;
 use std::collections::HashMap;
 use std::env;
 use std::fmt;
@@ -1114,7 +1115,7 @@ fn cmd_setenforce(args: &[String]) -> i32 {
         "enforcing" | "1" => EnforceMode::Enforcing,
         "permissive" | "0" => EnforceMode::Permissive,
         other => {
-            eprintln!("setenforce: invalid mode '{}'", other);
+            eprintln!("setenforce: invalid mode {}", quoteaf_os(other));
             return 1;
         }
     };
@@ -1209,7 +1210,7 @@ fn cmd_semanage(args: &[String]) -> i32 {
             0
         }
         other => {
-            eprintln!("semanage: unknown subcommand '{}'", other);
+            eprintln!("semanage: unknown subcommand {}", quoteaf_os(other));
             print_semanage_usage();
             1
         }
@@ -1365,7 +1366,7 @@ fn semanage_port(args: &[String]) -> i32 {
     }
 
     if Protocol::from_str(proto_str).is_none() {
-        eprintln!("semanage port: invalid protocol '{}'", proto_str);
+        eprintln!("semanage port: invalid protocol {}", quoteaf_os(proto_str));
         return 1;
     }
 
@@ -1477,7 +1478,10 @@ fn semanage_fcontext(args: &[String]) -> i32 {
                         }
                     }
                     None => {
-                        eprintln!("semanage fcontext: invalid file type '{}'", file_type_str);
+                        eprintln!(
+                            "semanage fcontext: invalid file type {}",
+                            quoteaf_os(file_type_str)
+                        );
                         return 1;
                     }
                 }
@@ -1736,8 +1740,8 @@ fn cmd_setsebool(args: &[String]) -> i32 {
         "off" | "0" | "false" => false,
         _ => {
             eprintln!(
-                "setsebool: invalid value '{}' (use on/off, 1/0, true/false)",
-                value_str
+                "setsebool: invalid value {} (use on/off, 1/0, true/false)",
+                quoteaf_os(value_str)
             );
             return 1;
         }
@@ -1961,7 +1965,7 @@ fn cmd_chcon(args: &[String]) -> i32 {
             match SecurityContext::parse(full_context) {
                 Some(c) => c,
                 None => {
-                    eprintln!("chcon: invalid context '{}'", full_context);
+                    eprintln!("chcon: invalid context {}", quoteaf_os(full_context));
                     return 1;
                 }
             }
@@ -1999,7 +2003,7 @@ fn chcon_apply(path: &str, ctx: &SecurityContext, recursive: bool, verbose: bool
     let mut errors = 0;
 
     if verbose {
-        println!("changing security context of '{}'", path);
+        println!("changing security context of {}", quoteaf_os(path));
     }
 
     if let Err(e) = set_file_context(path, ctx) {
@@ -2075,7 +2079,7 @@ fn cmd_seinfo(args: &[String]) -> i32 {
                         .collect();
                     println!("  Referenced in {} rules", related.len());
                 } else {
-                    eprintln!("seinfo: type '{}' not found", name);
+                    eprintln!("seinfo: type {} not found", quoteaf_os(name));
                     return 1;
                 }
             } else {
@@ -2097,7 +2101,7 @@ fn cmd_seinfo(args: &[String]) -> i32 {
                         println!("    {}", u.name);
                     }
                 } else {
-                    eprintln!("seinfo: role '{}' not found", name);
+                    eprintln!("seinfo: role {} not found", quoteaf_os(name));
                     return 1;
                 }
             } else {
@@ -2116,7 +2120,7 @@ fn cmd_seinfo(args: &[String]) -> i32 {
                     println!("  Level: {}", u.mls_level);
                     println!("  Range: {}", u.mls_range);
                 } else {
-                    eprintln!("seinfo: user '{}' not found", name);
+                    eprintln!("seinfo: user {} not found", quoteaf_os(name));
                     return 1;
                 }
             } else {
@@ -2134,7 +2138,7 @@ fn cmd_seinfo(args: &[String]) -> i32 {
                     println!("  Active: {}", if b.active { "on" } else { "off" });
                     println!("  Pending: {}", if b.pending { "on" } else { "off" });
                 } else {
-                    eprintln!("seinfo: boolean '{}' not found", name);
+                    eprintln!("seinfo: boolean {} not found", quoteaf_os(name));
                     return 1;
                 }
             } else {
@@ -2154,7 +2158,7 @@ fn cmd_seinfo(args: &[String]) -> i32 {
                         db.rules.iter().filter(|r| r.class == *name).collect();
                     println!("  Used in {} rules", rules_using.len());
                 } else {
-                    eprintln!("seinfo: class '{}' not found", name);
+                    eprintln!("seinfo: class {} not found", quoteaf_os(name));
                     return 1;
                 }
             } else {
@@ -2187,7 +2191,7 @@ fn cmd_seinfo(args: &[String]) -> i32 {
             eprintln!("  -c [CLASS]   List classes or show class info");
         }
         other => {
-            eprintln!("seinfo: unknown option '{}'", other);
+            eprintln!("seinfo: unknown option {}", quoteaf_os(other));
             return 1;
         }
     }
@@ -2245,7 +2249,7 @@ fn cmd_sesearch(args: &[String]) -> i32 {
                 return 0;
             }
             other => {
-                eprintln!("sesearch: unknown option '{}'", other);
+                eprintln!("sesearch: unknown option {}", quoteaf_os(other));
                 print_sesearch_usage();
                 return 1;
             }
@@ -2362,7 +2366,7 @@ fn cmd_audit2allow(args: &[String]) -> i32 {
         match fs::read_to_string(path) {
             Ok(content) => content.lines().map(String::from).collect(),
             Err(e) => {
-                eprintln!("audit2allow: cannot read '{}': {}", path, e);
+                eprintln!("audit2allow: cannot read {}: {}", quoteaf_os(path), e);
                 return 1;
             }
         }
@@ -2492,8 +2496,8 @@ fn main() {
         "audit2allow" => cmd_audit2allow(&rest),
         other => {
             eprintln!(
-                "selinux: unknown personality '{}', defaulting to getenforce",
-                other
+                "selinux: unknown personality {}, defaulting to getenforce",
+                quoteaf_os(other)
             );
             cmd_getenforce(&rest)
         }

@@ -3,3 +3,9 @@ name = "selinux"
 version = "0.1.0"
 edition = "2024"
 [dependencies]
+# One rendering of untrusted text inside a diagnostic. Security contexts, type
+# and boolean names, and the audit-log paths these tools are pointed at are all
+# argv words or text read out of a log, and both may hold a newline -- so a
+# message that pastes one in raw lets whoever supplied it write extra lines of
+# this program's output. See `userspace/quoting`.
+quoting = { path = "../quoting" }

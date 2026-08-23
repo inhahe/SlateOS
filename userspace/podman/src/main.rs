@@ -11,6 +11,7 @@
 #![deny(clippy::all)]
 #![allow(dead_code)]
 
+use quoting::quoteaf_os;
 use std::collections::HashMap;
 use std::env;
 use std::fmt;
@@ -1001,7 +1002,7 @@ fn run_podman(args: &[String]) -> i32 {
             0
         }
         _ => {
-            eprintln!("podman: unknown command '{}'", subcmd);
+            eprintln!("podman: unknown command {}", quoteaf_os(subcmd));
             eprintln!("Run 'podman --help' for usage.");
             1
         }
@@ -1139,8 +1140,9 @@ fn cmd_podman_exec(args: &[String]) -> i32 {
     let container_ref = &args[0];
     let command = args[1..].join(" ");
     println!(
-        "exec: would execute '{}' in container '{}'",
-        command, container_ref
+        "exec: would execute {} in container {}",
+        quoteaf_os(&command),
+        quoteaf_os(container_ref)
     );
     0
 }
@@ -1261,7 +1263,7 @@ fn cmd_podman_build(args: &[String]) -> i32 {
     println!("STEP 1: FROM base");
     println!("STEP 2: RUN build commands");
     println!("COMMIT {}", tag);
-    println!("--> built image from context '{}'", context);
+    println!("--> built image from context {}", quoteaf_os(&context));
     0
 }
 
@@ -1582,7 +1584,7 @@ fn cmd_podman_pod(args: &[String]) -> i32 {
             0
         }
         other => {
-            eprintln!("podman pod: unknown command '{}'", other);
+            eprintln!("podman pod: unknown command {}", quoteaf_os(other));
             1
         }
     }
@@ -1628,7 +1630,7 @@ fn cmd_podman_volume(args: &[String]) -> i32 {
             0
         }
         other => {
-            eprintln!("podman volume: unknown command '{}'", other);
+            eprintln!("podman volume: unknown command {}", quoteaf_os(other));
             1
         }
     }
@@ -1705,7 +1707,7 @@ fn cmd_podman_network(args: &[String]) -> i32 {
             0
         }
         other => {
-            eprintln!("podman network: unknown command '{}'", other);
+            eprintln!("podman network: unknown command {}", quoteaf_os(other));
             1
         }
     }
@@ -1760,7 +1762,7 @@ fn cmd_podman_system(args: &[String]) -> i32 {
             0
         }
         other => {
-            eprintln!("podman system: unknown command '{}'", other);
+            eprintln!("podman system: unknown command {}", quoteaf_os(other));
             1
         }
     }
@@ -1874,7 +1876,7 @@ fn cmd_podman_generate(args: &[String]) -> i32 {
             0
         }
         other => {
-            eprintln!("podman generate: unknown command '{}'", other);
+            eprintln!("podman generate: unknown command {}", quoteaf_os(other));
             1
         }
     }
@@ -1917,7 +1919,7 @@ fn run_buildah(args: &[String]) -> i32 {
             0
         }
         _ => {
-            eprintln!("buildah: unknown command '{}'", subcmd);
+            eprintln!("buildah: unknown command {}", quoteaf_os(subcmd));
             eprintln!("Run 'buildah --help' for usage.");
             1
         }
@@ -1989,7 +1991,11 @@ fn cmd_buildah_run(args: &[String]) -> i32 {
     }
     let container = &args[0];
     let command = args[1..].join(" ");
-    println!("run: executing '{}' in {}", command, container);
+    println!(
+        "run: executing {} in {}",
+        quoteaf_os(&command),
+        quoteaf_os(container)
+    );
     0
 }
 
@@ -2170,7 +2176,7 @@ fn run_skopeo(args: &[String]) -> i32 {
             0
         }
         _ => {
-            eprintln!("skopeo: unknown command '{}'", subcmd);
+            eprintln!("skopeo: unknown command {}", quoteaf_os(subcmd));
             eprintln!("Run 'skopeo --help' for usage.");
             1
         }
@@ -2200,14 +2206,14 @@ fn cmd_skopeo_copy(args: &[String]) -> i32 {
     let src_ref = match ImageRef::parse(src) {
         Some(r) => r,
         None => {
-            eprintln!("Error: invalid source reference '{}'", src);
+            eprintln!("Error: invalid source reference {}", quoteaf_os(src));
             return 1;
         }
     };
     let dst_ref = match ImageRef::parse(dst) {
         Some(r) => r,
         None => {
-            eprintln!("Error: invalid destination reference '{}'", dst);
+            eprintln!("Error: invalid destination reference {}", quoteaf_os(dst));
             return 1;
         }
     };
@@ -2238,7 +2244,7 @@ fn cmd_skopeo_inspect(args: &[String]) -> i32 {
     let img_ref = match ImageRef::parse(&image_str) {
         Some(r) => r,
         None => {
-            eprintln!("Error: invalid image reference '{}'", image_str);
+            eprintln!("Error: invalid image reference {}", quoteaf_os(&image_str));
             return 1;
         }
     };
@@ -2278,7 +2284,7 @@ fn cmd_skopeo_delete(args: &[String]) -> i32 {
     let img_ref = match ImageRef::parse(&args[0]) {
         Some(r) => r,
         None => {
-            eprintln!("Error: invalid image reference '{}'", args[0]);
+            eprintln!("Error: invalid image reference {}", quoteaf_os(&args[0]));
             return 1;
         }
     };
@@ -2294,7 +2300,10 @@ fn cmd_skopeo_list_tags(args: &[String]) -> i32 {
     let img_ref = match ImageRef::parse(&args[0]) {
         Some(r) => r,
         None => {
-            eprintln!("Error: invalid repository reference '{}'", args[0]);
+            eprintln!(
+                "Error: invalid repository reference {}",
+                quoteaf_os(&args[0])
+            );
             return 1;
         }
     };

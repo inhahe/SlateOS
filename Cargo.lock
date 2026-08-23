@@ -328,6 +328,9 @@ version = "0.1.0"
 [[package]]
 name = "apparmor"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "apparmor-cli"
@@ -8172,6 +8175,9 @@ dependencies = [
 [[package]]
 name = "podman"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "podman-cli"
@@ -9435,6 +9441,9 @@ version = "0.1.0"
 [[package]]
 name = "selinux"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "selinux-cli"

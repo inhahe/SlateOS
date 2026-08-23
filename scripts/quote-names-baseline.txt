@@ -19,7 +19,7 @@
 # 71 real sites. If a number rises in a commit that also edits code, the
 # code is what raised it.
 #
-# 1639 sites across 776 files.
+# 1591 sites across 773 files.
 
 init/servicebus/src/main.rs:8
 userspace/abduco-cli/src/main.rs:5
@@ -40,7 +40,6 @@ userspace/ansible-cli/src/main.rs:1
 userspace/ansible/src/main.rs:3
 userspace/apigee-cli/src/main.rs:1
 userspace/apk-cli/src/main.rs:1
-userspace/apparmor/src/main.rs:16
 userspace/ar/src/main.rs:1
 userspace/argocd-cli/src/main.rs:1
 userspace/argocd/src/main.rs:1
@@ -516,7 +515,6 @@ userspace/plivo-cli/src/main.rs:1
 userspace/plymouth/src/main.rs:5
 userspace/pnpm-cli/src/main.rs:2
 userspace/podman-cli/src/main.rs:1
-userspace/podman/src/main.rs:16
 userspace/poetry-cli/src/main.rs:2
 userspace/polkit-cli/src/main.rs:1
 userspace/polkit/src/main.rs:6
@@ -614,7 +612,6 @@ userspace/seccomp-cli/src/main.rs:1
 userspace/segment-cli/src/main.rs:1
 userspace/seldon-cli/src/main.rs:5
 userspace/selenium-cli/src/main.rs:1
-userspace/selinux/src/main.rs:16
 userspace/semgrep-cli/src/main.rs:1
 userspace/sendgrid-cli/src/main.rs:1
 userspace/sentry-cli/src/main.rs:1

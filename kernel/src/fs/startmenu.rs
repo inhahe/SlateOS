@@ -40,6 +40,7 @@
 
 #![allow(dead_code)]
 
+use crate::fs::path::{Path, PathBuf};
 use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -219,7 +220,10 @@ pub struct AppEntry {
     /// Icon name.
     pub icon: String,
     /// Executable path.
-    pub exec_path: String,
+    ///
+    /// A `PathBuf`, not a `String`; see design-decisions.md §261 and the note
+    /// on `appregistry::AppInfo::exec_path`, which this mirrors.
+    pub exec_path: PathBuf,
 }
 
 /// A search result.
@@ -617,7 +621,21 @@ pub fn clear_all() {
 pub fn self_test() -> KernelResult<()> {
     use crate::serial_println;
 
-    clear_all();
+    // The suite needs an empty menu: its assertions are exact counts ("two
+    // favorites", "two quick links"). Clearing a populated menu to make room
+    // would throw away the pinned apps and quick links the user arranged, so
+    // decline instead. At boot the menu is genuinely empty -- nothing
+    // populates it outside the `startmenu` shell commands.
+    {
+        let occupied = {
+            let menu = MENU.lock();
+            !menu.favorites.is_empty() || !menu.quick_links.is_empty() || !menu.recent.is_empty()
+        };
+        if occupied {
+            serial_println!("[startmenu] self-test skipped: the menu is already populated");
+            return Ok(());
+        }
+    }
     reset_stats();
 
     // Test 1: add and list favorites.
@@ -681,7 +699,7 @@ pub fn self_test() -> KernelResult<()> {
             id: String::from("test.search"),
             name: String::from("Search Test App"),
             description: String::from("A test for searching"),
-            exec_path: String::from("/usr/bin/test-search"),
+            exec_path: PathBuf::from("/usr/bin/test-search"),
             icon: String::from("icon-test"),
             categories: alloc::vec![super::appregistry::AppCategory::Accessories],
             mime_types: Vec::new(),
@@ -740,9 +758,54 @@ pub fn self_test() -> KernelResult<()> {
         serial_println!("[startmenu] test 7 passed: remove/clear");
     }
 
+    // Test 8: non-UTF-8 executable paths survive the menu projection (§261).
+    //
+    // `build_menu` copies each app's executable path out of the registry into
+    // an `AppEntry`, and that entry is what a launcher would act on. Under the
+    // old `String` typing the copy went through a lossy decode, so an app
+    // installed at a path holding a byte with no UTF-8 spelling appeared in
+    // the menu pointing at a file that does not exist.
+    {
+        super::appregistry::register(super::appregistry::AppInfo {
+            id: String::from("test.rawmenu"),
+            name: String::from("Raw Path Menu App"),
+            description: String::new(),
+            exec_path: Path::new(b"/usr/bin/pl\xFFyer").to_path_buf(),
+            icon: String::from("icon-test"),
+            categories: alloc::vec![super::appregistry::AppCategory::Accessories],
+            mime_types: Vec::new(),
+            keywords: Vec::new(),
+            show_in_menu: true,
+            tray_icon: false,
+            start_hidden: false,
+            version: String::from("1.0"),
+            installed_ns: 0,
+        })?;
+
+        let sections = build_menu();
+        let entry = sections
+            .iter()
+            .find_map(|s| match s {
+                MenuSection::AllApps(groups) => groups
+                    .iter()
+                    .flat_map(|g| g.apps.iter())
+                    .find(|a| a.app_id == "test.rawmenu"),
+                _ => None,
+            })
+            .expect("the registered app must appear in the menu");
+        assert_eq!(
+            entry.exec_path.as_path().as_bytes(),
+            &b"/usr/bin/pl\xFFyer"[..],
+            "the menu entry must carry the executable path through byte-for-byte"
+        );
+
+        let _ = super::appregistry::unregister("test.rawmenu");
+        serial_println!("[startmenu] test 8 passed: non-UTF-8 exec paths");
+    }
+
     clear_all();
     reset_stats();
 
-    serial_println!("[startmenu] all 7 self-tests passed");
+    serial_println!("[startmenu] all 8 self-tests passed");
     Ok(())
 }

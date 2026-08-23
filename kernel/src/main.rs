@@ -5535,6 +5535,17 @@ extern "C" fn kernel_main() -> ! {
             // otherwise reachable only from `screenrec init`. It records
             // session *metadata* only; nothing touches the framebuffer.
             fs::screenrec::self_test();
+            // appregistry and startmenu were reachable only from `kshell`
+            // subcommands (TD-A-FS-SELFTESTS-NEVER-RUN). Both decline to run
+            // against a populated store rather than clearing it, and both end
+            // at the empty state a fresh boot has -- nothing outside their
+            // shell commands populates either.
+            if let Err(e) = fs::appregistry::self_test() {
+                serial_println!("WARNING: appregistry self-test failed: {:?}", e);
+            }
+            if let Err(e) = fs::startmenu::self_test() {
+                serial_println!("WARNING: startmenu self-test failed: {:?}", e);
+            }
             if let Err(e) = crate::sockact::self_test() {
                 serial_println!("WARNING: socket-activation self-test failed: {:?}", e);
             }

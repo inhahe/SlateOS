@@ -5620,7 +5620,11 @@ fn gen_appregistry() -> Vec<u8> {
         for (cat, entries) in &tree {
             out.push_str(&format!("[{}]\n", cat.label()));
             for entry in entries {
-                out.push_str(&format!("  {} ({})\n", entry.name, entry.exec_path));
+                out.push_str(&format!(
+                    "  {} ({})\n",
+                    entry.name,
+                    entry.exec_path.display()
+                ));
             }
         }
     }

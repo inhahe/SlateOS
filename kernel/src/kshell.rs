@@ -21780,7 +21780,7 @@ fn cmd_appregistry(args: &str) {
                 id: String::from(id),
                 name: String::from(name),
                 description: String::new(),
-                exec_path: String::from(exec_path),
+                exec_path: PathBuf::from(exec_path),
                 icon: String::new(),
                 categories,
                 mime_types: Vec::new(),
@@ -21817,7 +21817,7 @@ fn cmd_appregistry(args: &str) {
                     shell_println!("ID:          {}", app.id);
                     shell_println!("Name:        {}", app.name);
                     shell_println!("Description: {}", app.description);
-                    shell_println!("Exec:        {}", app.exec_path);
+                    shell_println!("Exec:        {}", app.exec_path.display());
                     shell_println!("Icon:        {}", app.icon);
                     shell_println!("Version:     {}", app.version);
                     shell_println!(
@@ -21847,7 +21847,7 @@ fn cmd_appregistry(args: &str) {
                 shell_println!("{} applications:", apps.len());
                 shell_println!("{:32} {:20} {}", "ID", "NAME", "EXEC");
                 for app in &apps {
-                    shell_println!("{:32} {:20} {}", app.id, app.name, app.exec_path);
+                    shell_println!("{:32} {:20} {}", app.id, app.name, app.exec_path.display());
                 }
             }
         }
@@ -21871,7 +21871,7 @@ fn cmd_appregistry(args: &str) {
                     } else {
                         shell_println!("{} — {} apps:", cat.label(), apps.len());
                         for app in &apps {
-                            shell_println!("  {} — {}", app.name, app.exec_path);
+                            shell_println!("  {} — {}", app.name, app.exec_path.display());
                         }
                     }
                 }
@@ -21890,7 +21890,7 @@ fn cmd_appregistry(args: &str) {
             } else {
                 shell_println!("{} handlers for {}:", handlers.len(), mime);
                 for app in &handlers {
-                    shell_println!("  {} ({}) — {}", app.name, app.id, app.exec_path);
+                    shell_println!("  {} ({}) — {}", app.name, app.id, app.exec_path.display());
                 }
             }
         }
@@ -21902,7 +21902,7 @@ fn cmd_appregistry(args: &str) {
                 for (cat, entries) in &tree {
                     shell_println!("[{}]", cat.label());
                     for entry in entries {
-                        shell_println!("  {} — {}", entry.name, entry.exec_path);
+                        shell_println!("  {} — {}", entry.name, entry.exec_path.display());
                     }
                 }
             }
@@ -21935,7 +21935,7 @@ fn cmd_appregistry(args: &str) {
                     } else {
                         ""
                     };
-                    shell_println!("  {} — {}{}", app.name, app.exec_path, hidden);
+                    shell_println!("  {} — {}{}", app.name, app.exec_path.display(), hidden);
                 }
             }
         }

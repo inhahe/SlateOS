@@ -33040,7 +33040,7 @@ fn cmd_vpn(args: &str) {
                     shell_println!(
                         "  {} ({}) — {} [{}]",
                         t.app_name,
-                        t.app_path,
+                        t.app_path.display(),
                         if t.connected {
                             "connected"
                         } else {
@@ -33068,9 +33068,9 @@ fn cmd_vpn(args: &str) {
                     shell_println!("Transport:     {:?}", p.transport);
                     shell_println!("Auth:          {:?}", p.auth);
                     shell_println!("Username:      {}", p.username);
-                    shell_println!("Cert:          {}", p.cert_path);
-                    shell_println!("Key:           {}", p.key_path);
-                    shell_println!("CA:            {}", p.ca_path);
+                    shell_println!("Cert:          {}", p.cert_path.display());
+                    shell_println!("Key:           {}", p.key_path.display());
+                    shell_println!("CA:            {}", p.ca_path.display());
                     shell_println!("DNS:           {:?}", p.dns_servers);
                     shell_println!("Route all:     {}", p.route_all);
                     shell_println!("Kill switch:   {}", p.kill_switch);

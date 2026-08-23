@@ -5470,6 +5470,14 @@ extern "C" fn kernel_main() -> ! {
             if let Err(e) = fs::usage::self_test() {
                 serial_println!("WARNING: disk-usage self-test failed: {:?}", e);
             }
+            // vpn was reachable only from a `kshell` subcommand, so its suite
+            // had never run in the boot test (TD-A-FS-SELFTESTS-NEVER-RUN).
+            // Safe here: `clear_all()` at entry, mid and exit, and it asserts
+            // that `init_defaults()` seeds *no* profiles, so it neither relies
+            // on nor leaves fabricated VPN configuration behind.
+            if let Err(e) = fs::vpn::self_test() {
+                serial_println!("WARNING: vpn self-test failed: {:?}", e);
+            }
             // wallpaper was reachable only from a `kshell` subcommand, so its
             // suite had never run in the boot test (TD-A-FS-SELFTESTS-NEVER-RUN).
             // It is safe to run here: it calls `clear_all()` and `reset_stats()`

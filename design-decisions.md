@@ -35867,6 +35867,12 @@ B-Q7 is open. Priced properly, it is not cheap and it is not honest:
   `B-BCS-COMMAND-LINE-EXITED-0-ON-EVERY-KIND-OF-FAILURE`). Widening it is not a
   side-fix: `scripts/quote-names-scope.py` prices a tree-wide version at 1796
   call sites in 777 crates (`TD-B-THE-QUOTE-NAMES-TEST-READS-ONE-DIRECTORY-OF-EIGHTY`).
+  *(Amended 2026-08-23: that script is superseded by `scripts/quote-names.py` —
+  the same two detectors plus a baseline, a `--check` and a `--selftest`, wired
+  in as pre-push gate 8. This bullet is now weaker than when it was written: a
+  standalone crate is no longer outside all mechanical checking, only outside
+  the strict-zero one. The 1796 sites remain unrepaired; what changed is that
+  they can no longer grow.)*
 - **It needs a dependency edge nobody has drawn yet.** After the 2026-08-22
   rewrite `bc` uses `coreutils`'s `getopt`, `quote` and `errmsg`. A standalone
   `userspace/bc` must either depend on the library inside the bundle §8 retires,

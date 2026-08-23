@@ -61807,7 +61807,7 @@ a pure function returning a `Request` rather than left as statements inside
 
 ---
 
-## TD-B-THE-QUOTE-NAMES-TEST-READS-ONE-DIRECTORY-OF-EIGHTY (lane B, 2026-08-22) — OPEN
+## TD-B-THE-QUOTE-NAMES-TEST-READS-ONE-DIRECTORY-OF-EIGHTY (lane B, 2026-08-22) — GATED 2026-08-23, backlog OPEN
 
 **In short:** We have a test that reads our own source code looking for error
 messages that print a file's name without quoting it. Unquoted names are a real
@@ -61889,6 +61889,59 @@ point where one test's failure output is actionable. Two better shapes:
 
 Doing (1) without (2) is still a clear win — it is the difference between a
 backlog and a growing backlog.
+
+### Fix (1) landed, 2026-08-23 — the backlog can no longer grow
+
+`scripts/quote-names.py` replaces `quote-names-scope.py` (the pricing tool is
+subsumed by its default report; keeping two copies of the same two detectors
+was an invitation for them to drift apart). It adds `--check`,
+`--write-baseline` and `--selftest`, and is wired into `scripts/hooks/pre-push`
+as **gate 8**, bypass `ALLOW_UNQUOTED_NAMES=1`.
+
+```
+$ python scripts/quote-names.py --check
+ok -- 1798 known sites in 777 files (0 improved)
+```
+
+Three differences from the scope tool's 1796, all deliberate:
+
+| change | effect |
+|---|---|
+| scans `services/`, `init/` and `posix/` as well as `userspace/` | +4 — all in `init/servicebus/src/main.rs`, all hand-written `'{name}'` around a **bus name**, which is supplied by whoever connects |
+| the test's own fixture strings are in an `IGNORE` table, not the baseline | −4 |
+| `posix/`, `services/` otherwise clean | ±0 — worth knowing, and now guarded |
+
+`apps/` and `gui/` are outside the scan on purpose: they are lane C's, and a
+gate that fails another lane's push for another lane's code is a gate that lane
+switches off. If lane C wants the same guarantee it can add its roots to
+`ROOTS`, which is a one-line change.
+
+**The baseline is keyed on file + *count*, not on the line number.** The three
+candidate keys and why this one:
+
+* `path:line` — exact, and stale on the next commit that inserts a line above
+  the site. A baseline that goes red for unrelated edits gets bypassed.
+* `path:<source text>` — stable under line movement, but not under `rustfmt`,
+  which rewraps argument lists routinely. Same failure, different trigger.
+* `path:<count>` — immune to both, and catches the case that actually happens:
+  a *new* site added to a file that already has some.
+
+The residual gap is a 1-for-1 swap inside one file (fix one, add another, same
+commit, same file) — the count is unchanged and the gate stays green. That is
+rare enough to be worth the two cry-wolf failure modes it avoids, and
+`coreutils/src/bin` is still covered exactly by the Rust test, which is where
+most of the traffic is.
+
+The `--selftest` is not decoration. This detector's signal lives *inside* a
+string literal, so the natural way to make it "more correct" — reach for a Rust
+lexer, as the sibling checkers do — would blank out precisely the text it
+searches and report the whole tree clean. Gate 8 therefore runs `--selftest`
+before `--check` and refuses the push if the checker cannot pass its own 23
+cases, exactly as gate 6 does for the same reason.
+
+**Part (2) — the burn-down — remains open**, and the risk ranking in the
+section above is unchanged: `btrfs` 46, `pulseaudio` 38, `cups` 36, `flatpak`
+34, `timeout` 19, `snapper` 18, `loginctl` 17, `stat` 17.
 
 ### Interaction with B-Q7
 

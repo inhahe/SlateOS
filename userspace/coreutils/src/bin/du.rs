@@ -2081,6 +2081,10 @@ mod tests {
     /// Only the ordering distinguishes this from a pre-scan, which is why the
     /// test interleaves rather than merely counting the diagnostics: it is the
     /// difference the harness caught.
+    // The tabs in that transcript are the tabs `du` actually writes between the
+    // size and the name. Widening them to spaces, as the lint asks, would make
+    // the recorded output a paraphrase rather than a measurement.
+    #[allow(clippy::tabs_in_doc_comments)]
     #[test]
     fn an_empty_name_is_reported_where_it_stands_in_the_list() {
         let cfg = bytes();

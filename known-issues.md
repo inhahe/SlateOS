@@ -50388,7 +50388,7 @@ commands that carry the colour in question, and assert the two renders agree.
 Candidates: anything drawn on the wallpaper, on a video surface, on a
 thumbnail, or on any other content the palette does not own.
 
-**Part 2 progress. 27 of 49 modules converted.**
+**Part 2 progress. 28 of 49 modules converted.**
 
 - [x] `security_dialog.rs` — 29 constants, done 2026-08-22. The method above
   survived contact: the sweep lives in `gui/desktop/src/palette_check.rs` as
@@ -51805,6 +51805,91 @@ thumbnail, or on any other content the palette does not own.
     black-out test catches it, which is the test that owns that property.
     Generally: the two endpoint values are sweep-transparent, so a defect that
     happens to land on one is only ever caught by a property test.
+- [x] `login_screen.rs` — 11 constants, done 2026-08-23. Sixteen new tests (50
+  in the module), harness defects Ax33–Lx35 (sixty-four), all sixty-four
+  caught, none escaped.
+  - **Eighth lesson for the width rule: the sweep is blind to the two
+    `readable_on` endpoints, and this module draws one of them nearly
+    everywhere.** Most of what a greeter draws sits on a background the shell
+    did not choose — a photograph, a gradient, a colour a user picked — so no
+    palette role is legible on all of them. The answer (the `icons.rs`
+    precedent) is `on_wallpaper()` plus a hard `text_shadow()` at +1/+1. But
+    `on_wallpaper()` is the constant `LIGHT_EXTREME` = `#EFF1F5`, which is
+    *also* the light `readable_on` endpoint, which the sweep allows
+    unconditionally in **both** modes. So a site that took `on_wallpaper()`
+    where it owed `p.text`, or the reverse, is invisible to the sweep — and it
+    is a legibility bug that looks perfect in every screenshot taken against
+    the default background. Five defects reproduce exactly that confusion
+    (Kx33, Ox33, Dx34, Vx34, Xx34) and the sweep caught none of them.
+  - **The fix was to make the boundary a shape, not a colour.** Text on the
+    background goes through one helper, `push_on_background`, which emits *two*
+    commands; text on a panel this module filled is pushed directly and emits
+    *one*. The test helpers mirror that exactly — `panel_text` asserts one
+    command, `floating_text` asserts two with the shadow one pixel down-right —
+    so a site that changes sides fails whichever helper names it, without any
+    colour comparison being involved. `exactly_seven_things_in_the_full_render_sit_on_the_background`
+    then counts the shadows, so a *new* floating site nobody named is caught
+    too. That is lesson 6 (count them, don't recognise them) applied to a
+    property the sweep structurally cannot see.
+  - **Sharpest measurement of the session: the wallpaper-ink tests cannot
+    detect a module that ignores its palette entirely.** Defect Ix35 makes
+    `render` shadow its parameter with `Palette::for_mode(false)` — the exact
+    failure this whole conversion exists to prevent. Nine tests caught it. The
+    two wallpaper-ink tests did not, and could not: `on_wallpaper()` is a
+    constant, `on_wallpaper_dim()` is that constant at alpha 200, and
+    `text_shadow()` is black, so all three are mode-independent *by
+    construction* and a frozen render still draws them correctly. The corollary
+    is a rule for every later module: **a site whose colour does not vary with
+    the mode contributes nothing to the "did this module read its palette at
+    all" question, and needs a separate site that does.** Here that is the role
+    tables on the panels.
+  - **A near-miss with the same root cause, found by the harness rather than
+    reasoned out.** Defect Cx33 resolves the theme background to `p.base`
+    instead of `p.crust`, and unexpectedly tripped the floating-text count —
+    because Latte `base` *is* `LIGHT_EXTREME`, so the background fill was
+    counted as a seventh piece of wallpaper ink. Harmless here, but it means
+    the counting test is coupled to which role the background takes; if a later
+    edit makes the login background `base`, that test needs re-reading rather
+    than re-baselining.
+  - **`Default` could not name a colour, so it stopped trying.** The default
+    background was `SolidColor(CRUST)` with `CRUST` a Mocha literal in this
+    file — a default that had already made the choice the palette exists to
+    make, and the direct cause of the greeter staying black for a user who had
+    asked for the light theme. `Default::default` takes no arguments and so can
+    never be handed a `Palette`; the fix is a payload-free `Theme` variant
+    resolved at render time. `the_default_background_defers_its_colour_to_the_palette`
+    pins that the default carries *no* payload, which is not a restatement of
+    the code: it is what stops a future edit reintroducing a literal by
+    changing an argument. The `match` in `render_background` names the three
+    colourless variants explicitly rather than using `_`, so adding a variant
+    is a compile error instead of a silent dark rectangle.
+  - **Three judgements about the accent, consistent with modules 19–27.** A
+    *default action* is an invitation, so Sign In takes the accent and its label
+    is `on_accent()` — derived, and proved derived by sweeping the accent from
+    `0x00` to `0xF0` and requiring both `readable_on` endpoints to be observed.
+    A *selection marker* is position, so the chosen avatar carries the accent in
+    the row list and keeps it in the password panel. A *refusal* is neither, so
+    the error border and message stay `p.red` and the lockout notice stays
+    `p.yellow` under every accent. Note that defect Ox34 — freezing the Sign In
+    label to `#11111B` — is caught by **one** test only: the sweep allows it (it
+    is an endpoint), the deleted-constants test exempts it (it is `CRUST`), and
+    the role table passes it (under the off-palette accent, `readable_on`
+    genuinely answers `#11111B`). Only the accent-sweep test sees it. A module
+    that draws a coloured button and has no such test has no check on that
+    label at all.
+  - **The sweep found a real rendering bug that nobody put there.** It rejected
+    `#CBA5F7` — one step off Mocha `mauve` — in a gradient whose two endpoints
+    were *both* `mauve`. The band arithmetic truncated rather than rounded, and
+    `a*(1-t) + a*t` lands a hair below `a` in `f32` for most `t`, so a flat
+    "gradient" came out as twenty stripes alternating between the colour the
+    user chose and one darker, and every real gradient was biased a step dark
+    along its whole length — invisible there, because a gradient is expected to
+    change. Extracted as `lerp_channel` with `.round().clamp(0.0, 255.0)` and
+    pinned by two tests, one for the flat case and one for the midpoint (127.5
+    rounds to 128 and truncates to 127, so the fix cannot be "special-case
+    equal endpoints"). Worth recording as evidence for the method: a membership
+    sweep written to catch a missed *constant* caught an arithmetic error in
+    code that had nothing to do with the conversion.
 
 **Trigger:** this is not blocked on anything. It is sequenced after the shell
 event loop (`TD-C-THE-SHELL-CAN-DRAW-ITSELF-AND-NOBODY-CAN-ASK-IT-TO`) only

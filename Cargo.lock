@@ -8501,6 +8501,9 @@ version = "0.1.0"
 [[package]]
 name = "pulseaudio"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "pulsemixer-cli"

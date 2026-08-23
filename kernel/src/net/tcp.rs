@@ -5904,6 +5904,80 @@ fn test_parse_tcp_options() -> KernelResult<()> {
         return Err(KernelError::InternalError);
     }
 
+    // Timestamps: kind=8, len=10, TSval=0x01020304, TSecr=0x05060708.
+    // Previously untested despite being the longest option and the only
+    // one whose payload is read as two separate multi-byte fields.
+    let ts = [8, 10, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08];
+    let opts = parse_tcp_options(&ts);
+    if opts.timestamp != Some((0x0102_0304, 0x0506_0708)) {
+        crate::serial_println!(
+            "[tcp]   FAIL: timestamp expected Some((0x01020304, 0x05060708)), got {:?}",
+            opts.timestamp
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // --- Malformed input ---------------------------------------------------
+    //
+    // Everything above is a well-formed option block, which is the half an
+    // attacker does not send.  These bytes arrive from an unauthenticated
+    // peer before any connection exists, so the parser's behaviour on
+    // garbage is part of its contract, not an edge case.  Each case below
+    // asserts the same thing: parsing terminates and yields nothing.
+    for (what, bytes) in [
+        // A kind byte promising a length byte that is not there.
+        ("truncated header", &[2u8][..]),
+        // Length below the two header bytes.  This is the one that matters
+        // most: the length is also the loop's stride, so a guard that let
+        // 0 or 1 through would advance by zero and spin forever — a kernel
+        // hang from a single crafted segment.
+        ("zero length", &[2, 0][..]),
+        ("length 1", &[2, 1][..]),
+        // A well-formed header whose body runs off the end of the block.
+        ("body overruns block", &[2, 4, 0x05][..]),
+        ("timestamp overruns block", &[8, 10, 1, 2, 3][..]),
+        // A known option carrying a length it never has.  Must be skipped
+        // rather than read at the length the parser expected.
+        ("MSS with wrong length", &[2, 6, 0, 0, 0, 0][..]),
+        ("wscale with wrong length", &[3, 4, 7, 0][..]),
+        // END terminates parsing even with valid options behind it.
+        ("options after END", &[0, 2, 4, 0x05, 0xB4][..]),
+        // Padding only.  Must terminate rather than loop on the NOPs.
+        ("all NOP", &[1, 1, 1, 1][..]),
+    ] {
+        let opts = parse_tcp_options(bytes);
+        if opts.mss != 0
+            || opts.wscale.is_some()
+            || opts.sack_permitted
+            || opts.timestamp.is_some()
+        {
+            crate::serial_println!(
+                "[tcp]   FAIL: malformed options ({}) parsed something: \
+                 mss={} wscale={:?} sack={} ts={:?}",
+                what,
+                opts.mss,
+                opts.wscale,
+                opts.sack_permitted,
+                opts.timestamp
+            );
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // An unknown option must be skipped by its *declared* length, so a
+    // valid option behind it still parses.  This is the one malformed-ish
+    // case with a non-empty expected result, and it is what proves the
+    // walk advances by the length field rather than by a fixed step.
+    let unknown_then_mss = [99, 4, 0xAA, 0xBB, 2, 4, 0x05, 0xB4];
+    let opts = parse_tcp_options(&unknown_then_mss);
+    if opts.mss != 1460 {
+        crate::serial_println!(
+            "[tcp]   FAIL: option after unknown option: mss expected 1460, got {}",
+            opts.mss
+        );
+        return Err(KernelError::InternalError);
+    }
+
     crate::serial_println!("[tcp]   TCP option parsing: OK");
     Ok(())
 }

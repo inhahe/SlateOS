@@ -442,14 +442,46 @@ pub fn self_test() {
     crate::serial_println!("cloudsync::self_test() — running tests...");
     init_defaults();
 
-    // 1: No accounts initially.
-    assert!(list_accounts().is_empty());
-    crate::serial_println!("  [1/11] empty initial: OK");
+    // A pattern no user would plausibly have configured, so test 8 can add it
+    // and take it away again without touching a real exclusion.
+    const TEST_EXCLUDE: &str = "*.cloudsync-selftest.bak";
+
+    // 1: Baseline.
+    //
+    // Deliberately *not* `assert!(list_accounts().is_empty())`.  This suite is
+    // reachable from the `cloudsync test` shell command, so a user can run it
+    // twice -- and the previous version left account `id1`, its conflict and
+    // an extra exclude behind, so the second run panicked the kernel on this
+    // very line.  (`init_defaults` early-returns once state exists, so it
+    // cannot restore the fresh-boot condition the old assertion assumed.)
+    // Everything below is stated relative to what the module already held,
+    // and the tail restores it exactly.
+    let (base_accts, base_syncs, base_conflicts, base_active, _) = stats();
+    let base_conflict_rows = list_conflicts().len();
+    let base_excludes = list_excludes().len();
+    if base_accts + 2 > MAX_ACCOUNTS {
+        // Refuse to evict a user's configuration in order to test.  A skipped
+        // suite is a visible gap; a suite that deletes cloud accounts to make
+        // room is a data-loss bug wearing a test's clothes.
+        crate::serial_println!(
+            "cloudsync::self_test() — skipped: {}/{} account slots in use, suite needs 2 free",
+            base_accts,
+            MAX_ACCOUNTS
+        );
+        return;
+    }
+    assert_eq!(list_accounts().len(), base_accts);
+    crate::serial_println!("  [1/11] baseline ({} accounts): OK", base_accts);
 
     // 2: Add account.
+    //
+    // Account names are in the reserved `.invalid` TLD and carry a `selftest`
+    // marker: `add_account` rejects a duplicate (provider, account_name), so a
+    // plausible-looking fixture such as `user@cloud.example` risks colliding
+    // with something the user really configured and failing here.
     let id1 = add_account(
         CloudProvider::NextCloud,
-        "user@cloud.example",
+        "cloudsync-selftest-a@invalid",
         "/home/user/sync",
         "/",
     )
@@ -460,18 +492,18 @@ pub fn self_test() {
     // 3: Add second account.
     let id2 = add_account(
         CloudProvider::Dropbox,
-        "user@dropbox.com",
+        "cloudsync-selftest-b@invalid",
         "/home/user/dropbox",
         "/",
     )
     .expect("add dbx");
-    assert_eq!(list_accounts().len(), 2);
+    assert_eq!(list_accounts().len(), base_accts + 2);
     crate::serial_println!("  [3/11] multiple accounts: OK");
 
     // 4: Duplicate rejected.
     let r = add_account(
         CloudProvider::NextCloud,
-        "user@cloud.example",
+        "cloudsync-selftest-a@invalid",
         "/dup",
         "/dup",
     );
@@ -487,8 +519,7 @@ pub fn self_test() {
 
     // 6: Report conflict.
     report_conflict(id1, "/docs/readme.txt", 100, 200).expect("conflict");
-    let conflicts = list_conflicts();
-    assert_eq!(conflicts.len(), 1);
+    assert_eq!(list_conflicts().len(), base_conflict_rows + 1);
     crate::serial_println!("  [6/11] report conflict: OK");
 
     // 7: Set conflict strategy.
@@ -498,10 +529,20 @@ pub fn self_test() {
     crate::serial_println!("  [7/11] conflict strategy: OK");
 
     // 8: Exclude patterns.
-    let excludes = list_excludes();
-    assert!(excludes.len() >= 6);
-    add_exclude("*.bak").expect("add exclude");
-    assert!(list_excludes().len() > excludes.len());
+    //
+    // The old version asserted `list_excludes().len() >= 6` -- the count of the
+    // defaults.  That is a user-mutable set (`remove_exclude` is a public API and
+    // a shell command), so it is not a property of this module; the property that
+    // *is* one is that a pattern added is visible and a pattern removed is gone.
+    // `*.bak` was also a poor choice of fixture: a user may well have it already,
+    // in which case the old `len() > excludes.len()` never held.
+    assert!(
+        !list_excludes().iter().any(|e| e == TEST_EXCLUDE),
+        "TEST_EXCLUDE must not already be configured"
+    );
+    add_exclude(TEST_EXCLUDE).expect("add exclude");
+    assert_eq!(list_excludes().len(), base_excludes + 1);
+    assert!(list_excludes().iter().any(|e| e == TEST_EXCLUDE));
     crate::serial_println!("  [8/11] excludes: OK");
 
     // 9: Disable account.
@@ -512,17 +553,43 @@ pub fn self_test() {
 
     // 10: Remove account.
     remove_account(id2).expect("remove");
-    assert_eq!(list_accounts().len(), 1);
+    assert_eq!(list_accounts().len(), base_accts + 1);
     crate::serial_println!("  [10/11] remove account: OK");
 
     // 11: Stats.
+    //
+    // `total_syncs`/`total_conflicts` are lifetime counters with no reset, so
+    // they can only be asserted as having advanced by at least what this suite
+    // contributed.  `active` is a live count and is exact.
     let (accts, syncs, conflicts, active, ops) = stats();
-    assert_eq!(accts, 1);
-    assert!(syncs >= 1);
-    assert!(conflicts >= 1);
-    assert_eq!(active, 1);
+    assert_eq!(accts, base_accts + 1);
+    assert!(syncs >= base_syncs + 1);
+    assert!(conflicts >= base_conflicts + 1);
+    assert_eq!(active, base_active + 1);
     assert!(ops > 0);
     crate::serial_println!("  [11/11] stats: OK");
+
+    // Cleanup: put the sync registry back exactly as it was found, so a second
+    // `cloudsync test` sees the same baseline this one did.  `remove_account`
+    // also drops that account's conflict rows, which is what restores the
+    // conflict list.
+    remove_account(id1).expect("cleanup: remove id1");
+    remove_exclude(TEST_EXCLUDE).expect("cleanup: remove exclude");
+    assert_eq!(
+        list_accounts().len(),
+        base_accts,
+        "self_test must leave the sync registry as it found it"
+    );
+    assert_eq!(
+        list_conflicts().len(),
+        base_conflict_rows,
+        "self_test must leave the conflict list as it found it"
+    );
+    assert_eq!(
+        list_excludes().len(),
+        base_excludes,
+        "self_test must leave the exclude list as it found it"
+    );
 
     crate::serial_println!("cloudsync::self_test() — all 11 tests passed");
 }

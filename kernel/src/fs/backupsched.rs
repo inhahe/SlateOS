@@ -51,6 +51,28 @@ impl BackupFrequency {
             Self::Manual => "Manual",
         }
     }
+
+    /// How long to wait between runs, in nanoseconds.
+    ///
+    /// `None` means the frequency never comes due on its own — `Manual`
+    /// schedules run only when the operator asks. That is a genuinely
+    /// different state from "due after a very long time", so it is not
+    /// expressible as a large interval and callers must handle it.
+    ///
+    /// `Monthly` is a flat 30 days. There is no calendar here — the kernel
+    /// has an uptime counter, not a date — so a month is a fixed span rather
+    /// than "the same day-of-month next month".
+    #[must_use]
+    pub fn interval_ns(self) -> Option<u64> {
+        const HOUR_NS: u64 = 3_600 * 1_000_000_000;
+        match self {
+            Self::Hourly => Some(HOUR_NS),
+            Self::Daily => Some(24 * HOUR_NS),
+            Self::Weekly => Some(7 * 24 * HOUR_NS),
+            Self::Monthly => Some(30 * 24 * HOUR_NS),
+            Self::Manual => None,
+        }
+    }
 }
 
 /// Backup type.
@@ -117,7 +139,16 @@ pub struct BackupSchedule {
     pub frequency: BackupFrequency,
     pub retention_count: u32,
     pub enabled: bool,
-    pub last_run_ns: u64,
+    /// Uptime at which this schedule last ran, or `None` if it never has.
+    ///
+    /// This is deliberately not a `u64` with `0` meaning "never": `0` is a
+    /// *legal* uptime — the first nanoseconds after boot — so the sentinel
+    /// and a real timestamp are indistinguishable. With the old encoding a
+    /// never-run schedule looked like one that ran at boot, which made
+    /// [`due_schedules`] report it as "ran recently, not due" for a full
+    /// interval after every reboot: the backup that had never happened was
+    /// the one the scheduler was most confident it could skip.
+    pub last_run_ns: Option<u64>,
     pub run_count: u64,
 }
 
@@ -172,7 +203,7 @@ pub fn init_defaults() {
             frequency: BackupFrequency::Daily,
             retention_count: 30,
             enabled: true,
-            last_run_ns: 0,
+            last_run_ns: None,
             run_count: 0,
         },],
         history: Vec::new(),
@@ -209,7 +240,7 @@ pub fn create_schedule(
             frequency: freq,
             retention_count: retention,
             enabled: true,
-            last_run_ns: 0,
+            last_run_ns: None,
             run_count: 0,
         });
         Ok(id)
@@ -250,7 +281,7 @@ pub fn run_now(id: u32, result: RunResult, bytes: u64, files: u64) -> KernelResu
             .iter_mut()
             .find(|s| s.id == id)
             .ok_or(KernelError::NotFound)?;
-        sched.last_run_ns = now;
+        sched.last_run_ns = Some(now);
         sched.run_count += 1;
 
         if state.history.len() >= MAX_HISTORY {
@@ -299,6 +330,46 @@ pub fn list_schedules() -> Vec<BackupSchedule> {
         .lock()
         .as_ref()
         .map_or(Vec::new(), |s| s.schedules.clone())
+}
+
+/// Ids of the enabled schedules whose configured frequency has come due.
+///
+/// A schedule is due when it is enabled, its frequency has an interval at all
+/// (`Manual` never comes due by itself), and either it has never run or at
+/// least one interval has elapsed since it last did.
+///
+/// Until this existed, [`BackupSchedule::frequency`] was recorded, displayed,
+/// and never acted on: every schedule was effectively `Manual` regardless of
+/// what the operator set, because nothing in the tree ever compared a
+/// frequency against a clock.
+#[must_use]
+pub fn due_schedules() -> Vec<u32> {
+    let now_ns = crate::hpet::elapsed_ns();
+    let guard = STATE.lock();
+    let Some(state) = guard.as_ref() else {
+        return Vec::new();
+    };
+    state
+        .schedules
+        .iter()
+        .filter(|s| {
+            if !s.enabled {
+                return false;
+            }
+            let Some(interval_ns) = s.frequency.interval_ns() else {
+                return false;
+            };
+            match s.last_run_ns {
+                // Never run: due now. This is the case the `Option` exists
+                // for — the old `0` sentinel made a never-run schedule look
+                // like one that ran at uptime zero, so it stayed "not due"
+                // for a whole interval after each boot.
+                None => true,
+                Some(last) => now_ns.saturating_sub(last) >= interval_ns,
+            }
+        })
+        .map(|s| s.id)
+        .collect()
 }
 
 /// Statistics: (schedule_count, history_size, total_runs, total_successful, total_failed, total_bytes, ops).
@@ -350,7 +421,16 @@ fn self_test_inner() {
 
     // 1: Default schedule.
     assert_eq!(list_schedules().len(), 1);
-    crate::serial_println!("  [1/8] defaults: OK");
+    let seeded = list_schedules();
+    assert_eq!(
+        seeded[0].last_run_ns, None,
+        "a seeded schedule has never run; `0` is a legal uptime, not `never`"
+    );
+    assert!(
+        due_schedules().contains(&1),
+        "an enabled schedule that has never run is due immediately"
+    );
+    crate::serial_println!("  [1/10] defaults: OK");
 
     // 2: Create schedule.
     let id = create_schedule(
@@ -363,37 +443,37 @@ fn self_test_inner() {
     )
     .expect("create");
     assert_eq!(list_schedules().len(), 2);
-    crate::serial_println!("  [2/8] create: OK");
+    crate::serial_println!("  [2/10] create: OK");
 
     // 3: Run backup.
     run_now(id, RunResult::Success, 500_000_000, 1500).expect("run");
     let hist = get_history(id, 10);
     assert_eq!(hist.len(), 1);
     assert_eq!(hist[0].result, RunResult::Success);
-    crate::serial_println!("  [3/8] run: OK");
+    crate::serial_println!("  [3/10] run: OK");
 
     // 4: Multiple runs.
     run_now(1, RunResult::Success, 100_000_000, 200).expect("run2");
     run_now(1, RunResult::Failed, 0, 0).expect("run3");
     let hist = get_history(1, 10);
     assert_eq!(hist.len(), 2);
-    crate::serial_println!("  [4/8] multiple runs: OK");
+    crate::serial_println!("  [4/10] multiple runs: OK");
 
     // 5: Disable.
     set_enabled(id, false).expect("disable");
     let scheds = list_schedules();
     let s = scheds.iter().find(|s| s.id == id).expect("find");
     assert!(!s.enabled);
-    crate::serial_println!("  [5/8] disable: OK");
+    crate::serial_println!("  [5/10] disable: OK");
 
     // 6: Enable.
     set_enabled(id, true).expect("enable");
-    crate::serial_println!("  [6/8] enable: OK");
+    crate::serial_println!("  [6/10] enable: OK");
 
     // 7: Delete.
     delete_schedule(id).expect("delete");
     assert_eq!(list_schedules().len(), 1);
-    crate::serial_println!("  [7/8] delete: OK");
+    crate::serial_println!("  [7/10] delete: OK");
 
     // 8: Stats.
     let (scheds, hist, runs, success, failed, bytes, ops) = stats();
@@ -404,7 +484,66 @@ fn self_test_inner() {
     assert_eq!(failed, 1);
     assert!(bytes > 0);
     assert!(ops > 0);
-    crate::serial_println!("  [8/8] stats: OK");
+    crate::serial_println!("  [8/10] stats: OK");
 
-    crate::serial_println!("backupsched::self_test() — all 8 tests passed");
+    // 9: Running a schedule clears its due-ness for one interval.
+    //
+    // Schedule 1 is Daily and was run in test 4, so unless this machine has
+    // been up for a day it is not due again. The test asserts the transition
+    // rather than a fixed answer: never-run was due in test 1, and the same
+    // schedule is not due now.
+    assert!(
+        list_schedules()[0].last_run_ns.is_some(),
+        "run_now must record when it ran"
+    );
+    assert!(
+        !due_schedules().contains(&1),
+        "a Daily schedule run moments ago is not due again yet"
+    );
+    crate::serial_println!("  [9/10] run clears due: OK");
+
+    // 10: Frequency actually gates. A Manual schedule never comes due on its
+    // own, and a disabled one never comes due at all -- both regardless of
+    // having never run, which is the condition that makes every other
+    // schedule due.
+    let manual = create_schedule(
+        "On Demand",
+        "/srv",
+        "/backup/manual",
+        BackupType::Mirror,
+        BackupFrequency::Manual,
+        1,
+    )
+    .expect("create manual");
+    assert_eq!(BackupFrequency::Manual.interval_ns(), None);
+    assert!(
+        !due_schedules().contains(&manual),
+        "a Manual schedule is never due on its own, even having never run"
+    );
+
+    let hourly = create_schedule(
+        "Hourly Var",
+        "/var",
+        "/backup/hourly",
+        BackupType::Incremental,
+        BackupFrequency::Hourly,
+        4,
+    )
+    .expect("create hourly");
+    assert!(
+        due_schedules().contains(&hourly),
+        "an enabled Hourly schedule that has never run is due"
+    );
+    set_enabled(hourly, false).expect("disable hourly");
+    assert!(
+        !due_schedules().contains(&hourly),
+        "a disabled schedule is never due"
+    );
+
+    delete_schedule(manual).expect("cleanup manual");
+    delete_schedule(hourly).expect("cleanup hourly");
+    assert_eq!(list_schedules().len(), 1, "test 10 must clean up after itself");
+    crate::serial_println!("  [10/10] frequency gating: OK");
+
+    crate::serial_println!("backupsched::self_test() — all 10 tests passed");
 }

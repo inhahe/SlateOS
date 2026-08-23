@@ -45674,7 +45674,12 @@ fn cmd_logpersist(args: &str) {
             shell_println!("  Files compressed: {}", st.files_compressed);
             shell_println!("  Bytes saved:    {} bytes", st.bytes_saved_by_compression);
             shell_println!("  Total pruned:   {} files", st.total_pruned);
-            shell_println!("  Last seq:       {}", st.global_last_flushed_seq);
+            // Sequence 0 is a real event, so "nothing flushed yet" must not
+            // print as 0 — that would claim a flush that never happened.
+            match st.global_last_flushed_seq {
+                None => shell_println!("  Last seq:       none (nothing flushed yet)"),
+                Some(seq) => shell_println!("  Last seq:       {}", seq),
+            }
             if !st.cursors.is_empty() {
                 shell_println!();
                 shell_println!(
@@ -68659,11 +68664,22 @@ fn cmd_backupsched(args: &str) {
             if scheds.is_empty() {
                 shell_println!("No backup schedules");
             } else {
+                let due = backupsched::due_schedules();
                 shell_println!("{} schedule(s):", scheds.len());
                 for s in &scheds {
                     let status = if s.enabled { "on" } else { "off" };
+                    // "never" is printed as such rather than as an elapsed
+                    // time, because a schedule that has not run is not the
+                    // same as one that ran at uptime zero.
+                    let last = match s.last_run_ns {
+                        None => alloc::string::String::from("never"),
+                        Some(ns) => alloc::format!("{}s ago", crate::hpet::elapsed_ns()
+                            .saturating_sub(ns)
+                            / 1_000_000_000),
+                    };
+                    let due_mark = if due.contains(&s.id) { " DUE" } else { "" };
                     shell_println!(
-                        "  [{}] {} ({} {}) {} → {} [{}] runs={}",
+                        "  [{}] {} ({} {}) {} → {} [{}] runs={} last={}{}",
                         s.id,
                         s.name,
                         s.backup_type.label(),
@@ -68671,7 +68687,9 @@ fn cmd_backupsched(args: &str) {
                         s.source_path,
                         s.destination,
                         status,
-                        s.run_count
+                        s.run_count,
+                        last,
+                        due_mark
                     );
                 }
             }

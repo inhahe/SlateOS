@@ -393,7 +393,28 @@ pub fn xdectoumax(
     valid_suffixes: Option<&[u8]>,
     what: &str,
 ) -> Result<u64, String> {
-    let (value, status) = xstrtoumax(text, valid_suffixes);
+    xnumtoumax(text, 10, min, max, valid_suffixes, what)
+}
+
+/// gnulib's `xnumtoumax`: [`xdectoumax`] in a base other than ten.
+///
+/// Upstream's `xdectoumax` is a macro over this, fixing `base` at 10; the two
+/// are one function there and one function here for the same reason. The
+/// callers that want the other bases want base *zero*, which is C's prefix
+/// rule — `ls -T 0x10` is sixteen — so the distinction is not decorative.
+///
+/// # Errors
+///
+/// As [`xdectoumax`].
+pub fn xnumtoumax(
+    text: &[u8],
+    base: u32,
+    min: u64,
+    max: u64,
+    valid_suffixes: Option<&[u8]>,
+    what: &str,
+) -> Result<u64, String> {
+    let (value, status) = xstrtoumax_base(text, base, valid_suffixes);
     let tail = match status {
         Status::Ok => {
             if value >= min && value <= max {

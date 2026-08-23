@@ -25,6 +25,27 @@ search-and-replace is not good enough — if a patch half-applied, or a formatte
 ran, or the process died between the write and the undo, a reverse replace
 silently leaves the tree modified while claiming success.
 
+Three modes, cheapest first.
+
+- `--check` matches every defect's pattern against the snapshot and builds
+  nothing. Seconds, no toolchain, and it answers the only question that rots
+  on its own: has a rename or a rustfmt pass stopped this defect applying?
+- `--compile [names…]` applies each defect and runs `cargo check --all-targets`
+  on its packages. This is the question `--check` *cannot* answer, and the
+  distinction is not academic: a pattern can be findable, unambiguous and
+  non-no-op and still leave source that is not Rust. Module 36 wrote four
+  defects that replaced the wrong line of a two-line anchor, emitted two
+  `color:` fields apiece, and were discovered an hour into the run they had
+  already invalidated — see known-issues.md lesson 19. `--check` had passed
+  all four.
+- No flag: the real sweep. Apply, run the tests, restore, report.
+
+`--compile` is a preflight, not a correctness gate. The full run detects a
+broken defect too (`DID NOT COMPILE`); what the preflight buys is learning it
+in minutes rather than at the end of an hour, before the run whose result it
+spoils has been started. Filter it with the same names the real run takes, so a
+new module's defects can be vetted without rebuilding against the older ones.
+
 One finding is recorded here rather than as a defect, because it cannot be one.
 Defect Q — a window's close button following the accent — went *uncaught* on
 the first run, and the reason was not the test: `DecorationColors::from_settings`
@@ -82,6 +103,10 @@ LANG = "gui/desktop/src/language_settings.rs"
 DAPP = "gui/desktop/src/default_apps.rs"
 LAUN = "gui/desktop/src/launcher.rs"
 RESMON = "gui/desktop/src/resmon.rs"
+MOUSESET = "gui/desktop/src/mouse_settings.rs"
+HOTKEYS = "gui/desktop/src/hotkeys.rs"
+SCRCAP = "gui/desktop/src/screen_capture.rs"
+SNAP = "gui/desktop/src/snap.rs"
 
 # (name, file, [(old, new), ...], [packages], [tests expected to fail])
 DEFECTS = [
@@ -13004,6 +13029,2490 @@ DEFECTS = [
             'a_metric_is_one_colour_wherever_it_appears',
         ],
     ),
+    (
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA: the panel background keeps Catppuccin Mocha's own base",
+        MOUSESET,
+        [
+            ('            height: 900.0,\n            color: p.base,',
+             '            height: 900.0,\n            color: guitk::color::Color::from_hex(0x1E1E2E),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_panel_draws_comes_from_its_palette',
+            'none_of_the_ten_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        'BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB: the panel title keeps Mocha text',
+        MOUSESET,
+        [
+            ('            font_size: 20.0,\n            color: p.text,',
+             '            font_size: 20.0,\n            color: guitk::color::Color::from_hex(0xCDD6F4),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_panel_draws_comes_from_its_palette',
+            'none_of_the_ten_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC: the open section's header keeps Mocha surface0",
+        MOUSESET,
+        [
+            ('                color: if expanded { p.surface0 } else { p.mantle },',
+             '                color: if expanded { guitk::color::Color::from_hex(0x313244) } else { p.mantle },'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_panel_draws_comes_from_its_palette',
+            'none_of_the_ten_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+            'exactly_one_section_reads_as_open',
+        ],
+    ),
+    (
+        "DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD: the closed sections' headers keep Mocha mantle",
+        MOUSESET,
+        [
+            ('                color: if expanded { p.surface0 } else { p.mantle },',
+             '                color: if expanded { p.surface0 } else { guitk::color::Color::from_hex(0x181825) },'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_panel_draws_comes_from_its_palette',
+            'none_of_the_ten_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+            'exactly_one_section_reads_as_open',
+        ],
+    ),
+    (
+        "EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE: the open section's heading keeps Mocha blue, which is the very substitution the stock accent hides",
+        MOUSESET,
+        [
+            ('                color: if expanded { p.accent } else { p.text },',
+             '                color: if expanded { guitk::color::Color::from_hex(0x89B4FA) } else { p.text },'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_panel_draws_comes_from_its_palette',
+            'none_of_the_ten_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+            'exactly_one_section_reads_as_open',
+            'only_what_is_in_force_is_accented',
+            'only_what_is_in_force_moves_when_the_accent_moves',
+        ],
+    ),
+    (
+        "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF: the closed sections' headings keep Mocha text",
+        MOUSESET,
+        [
+            ('                color: if expanded { p.accent } else { p.text },',
+             '                color: if expanded { p.accent } else { guitk::color::Color::from_hex(0xCDD6F4) },'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_panel_draws_comes_from_its_palette',
+            'none_of_the_ten_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+            'exactly_one_section_reads_as_open',
+        ],
+    ),
+    (
+        'GGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGG: the unsaved-changes banner keeps Mocha surface0',
+        MOUSESET,
+        [
+            ('                height: 36.0,\n                color: p.surface0,',
+             '                height: 36.0,\n                color: guitk::color::Color::from_hex(0x313244),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_panel_draws_comes_from_its_palette',
+            'none_of_the_ten_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        'HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH: the unsaved-changes warning keeps Mocha yellow',
+        MOUSESET,
+        [
+            ('                color: p.yellow,',
+             '                color: guitk::color::Color::from_hex(0xF9E2AF),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_panel_draws_comes_from_its_palette',
+            'none_of_the_ten_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+            'a_state_is_not_a_position',
+        ],
+    ),
+    (
+        "IIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIII: a setting's label keeps Mocha subtext0",
+        MOUSESET,
+        [
+            ('            color: p.subtext0,\n            font_weight: FontWeightHint::Regular,\n            max_width: Some(width * 0.5),',
+             '            color: guitk::color::Color::from_hex(0xA6ADC8),\n            font_weight: FontWeightHint::Regular,\n            max_width: Some(width * 0.5),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_panel_draws_comes_from_its_palette',
+            'none_of_the_ten_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "JJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJ: a setting's value keeps Mocha text",
+        MOUSESET,
+        [
+            ('            color: p.text,\n            font_weight: FontWeightHint::Regular,\n            max_width: Some(width * 0.4),',
+             '            color: guitk::color::Color::from_hex(0xCDD6F4),\n            font_weight: FontWeightHint::Regular,\n            max_width: Some(width * 0.4),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_panel_draws_comes_from_its_palette',
+            'none_of_the_ten_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "KKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKK: a switch's label keeps Mocha subtext0",
+        MOUSESET,
+        [
+            ('            color: p.subtext0,\n            font_weight: FontWeightHint::Regular,\n            max_width: Some(width * 0.6),',
+             '            color: guitk::color::Color::from_hex(0xA6ADC8),\n            font_weight: FontWeightHint::Regular,\n            max_width: Some(width * 0.6),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_panel_draws_comes_from_its_palette',
+            'none_of_the_ten_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        'LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLL: a switched-on pill keeps Mocha green',
+        MOUSESET,
+        [
+            ('        let bg = if on { p.green } else { p.surface1 };',
+             '        let bg = if on { guitk::color::Color::from_hex(0xA6E3A1) } else { p.surface1 };'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_panel_draws_comes_from_its_palette',
+            'none_of_the_ten_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+            'a_state_is_not_a_position',
+        ],
+    ),
+    (
+        'MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM: a switched-off pill keeps Mocha surface1',
+        MOUSESET,
+        [
+            ('        let bg = if on { p.green } else { p.surface1 };',
+             '        let bg = if on { p.green } else { guitk::color::Color::from_hex(0x45475A) };'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_panel_draws_comes_from_its_palette',
+            'none_of_the_ten_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        'NNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNN: the switch knob keeps Mocha text',
+        MOUSESET,
+        [
+            ('            height: 16.0,\n            color: p.text,',
+             '            height: 16.0,\n            color: guitk::color::Color::from_hex(0xCDD6F4),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_panel_draws_comes_from_its_palette',
+            'none_of_the_ten_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+            'the_knob_is_the_same_ink_on_both_pills',
+        ],
+    ),
+    (
+        'OOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOO: the slider track keeps Mocha surface1',
+        MOUSESET,
+        [
+            ('            height: track_h,\n            color: p.surface1,',
+             '            height: track_h,\n            color: guitk::color::Color::from_hex(0x45475A),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_panel_draws_comes_from_its_palette',
+            'none_of_the_ten_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        'PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPP: the slider fill keeps Mocha blue',
+        MOUSESET,
+        [
+            ('            // Judgement 1: how much of this control is set.\n            color: p.accent,',
+             '            // Judgement 1: how much of this control is set.\n            color: guitk::color::Color::from_hex(0x89B4FA),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_panel_draws_comes_from_its_palette',
+            'none_of_the_ten_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+            'only_what_is_in_force_is_accented',
+        ],
+    ),
+    (
+        'QQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQ: the slider thumb keeps Mocha lavender',
+        MOUSESET,
+        [
+            ('            color: emphasized(p.accent),',
+             '            color: guitk::color::Color::from_hex(0xB4BEFE),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_panel_draws_comes_from_its_palette',
+            'none_of_the_ten_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+            'the_thumb_is_derived_from_the_fill_it_ends',
+        ],
+    ),
+    (
+        'RRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRR: the panel background is drawn a rung up, on the same surface as the header that is meant to stand proud of it',
+        MOUSESET,
+        [
+            ('            height: 900.0,\n            color: p.base,',
+             '            height: 900.0,\n            color: p.surface0,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "SSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSS: the panel title is drawn at a label's dimness",
+        MOUSESET,
+        [
+            ('            font_size: 20.0,\n            color: p.text,',
+             '            font_size: 20.0,\n            color: p.subtext0,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        'TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT: the section headers are the wrong way round, so the four you are not editing stand proud and the one you are recedes',
+        MOUSESET,
+        [
+            ('                color: if expanded { p.surface0 } else { p.mantle },',
+             '                color: if expanded { p.mantle } else { p.surface0 },'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'exactly_one_section_reads_as_open',
+        ],
+    ),
+    (
+        'UUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUU: the section headings are the wrong way round, so four sections claim to be in force and the open one does not',
+        MOUSESET,
+        [
+            ('                color: if expanded { p.accent } else { p.text },',
+             '                color: if expanded { p.text } else { p.accent },'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'exactly_one_section_reads_as_open',
+            'only_what_is_in_force_is_accented',
+            'only_what_is_in_force_moves_when_the_accent_moves',
+        ],
+    ),
+    (
+        'VVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVV: the unsaved-changes warning is accented, so a fact about the whole panel reads as the section you are looking at',
+        MOUSESET,
+        [
+            ('                color: p.yellow,',
+             '                color: p.accent,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'a_state_is_not_a_position',
+            'only_what_is_in_force_is_accented',
+            'only_what_is_in_force_moves_when_the_accent_moves',
+            'ui_render_with_dirty',
+        ],
+    ),
+    (
+        "WWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWW: a switched-on pill is accented, so 'switched on' and 'where you are' become one colour",
+        MOUSESET,
+        [
+            ('        let bg = if on { p.green } else { p.surface1 };',
+             '        let bg = if on { p.accent } else { p.surface1 };'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'a_state_is_not_a_position',
+            'only_what_is_in_force_is_accented',
+            'only_what_is_in_force_moves_when_the_accent_moves',
+        ],
+    ),
+    (
+        "XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX: a setting's label and its value swap, so the name is brighter than the number the user came to read",
+        MOUSESET,
+        [
+            ('            color: p.subtext0,\n            font_weight: FontWeightHint::Regular,\n            max_width: Some(width * 0.5),',
+             '            color: p.text,\n            font_weight: FontWeightHint::Regular,\n            max_width: Some(width * 0.5),'),
+            ('            color: p.text,\n            font_weight: FontWeightHint::Regular,\n            max_width: Some(width * 0.4),',
+             '            color: p.subtext0,\n            font_weight: FontWeightHint::Regular,\n            max_width: Some(width * 0.4),'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "YYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYY: the slider fill is pinned to blue, so how much is set stops following the user's accent",
+        MOUSESET,
+        [
+            ('            // Judgement 1: how much of this control is set.\n            color: p.accent,',
+             '            // Judgement 1: how much of this control is set.\n            color: p.blue,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'only_what_is_in_force_is_accented',
+        ],
+    ),
+    (
+        "ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ: the open section's heading is pinned to blue — legal, invisible at the stock theme, and wrong at every other",
+        MOUSESET,
+        [
+            ('                color: if expanded { p.accent } else { p.text },',
+             '                color: if expanded { p.blue } else { p.text },'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'exactly_one_section_reads_as_open',
+            'only_what_is_in_force_is_accented',
+            'only_what_is_in_force_moves_when_the_accent_moves',
+        ],
+    ),
+    (
+        'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA: the slider thumb is pinned to lavender again, the named-beside-it shape this conversion existed to remove',
+        MOUSESET,
+        [
+            ('            color: emphasized(p.accent),',
+             '            color: p.lavender,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'the_thumb_is_derived_from_the_fill_it_ends',
+        ],
+    ),
+    (
+        "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB: the slider thumb is the fill's own colour, so there is no handle to see",
+        MOUSESET,
+        [
+            ('            color: emphasized(p.accent),',
+             '            color: p.accent,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'the_thumb_is_derived_from_the_fill_it_ends',
+            'only_what_is_in_force_is_accented',
+        ],
+    ),
+    (
+        'CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC: the switch knob follows its pill, so the thing that marks the position changes meaning with the state',
+        MOUSESET,
+        [
+            ('            height: 16.0,\n            color: p.text,',
+             '            height: 16.0,\n            color: bg,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'the_knob_is_the_same_ink_on_both_pills',
+        ],
+    ),
+    (
+        'DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD: the slider track is accented along its whole length, so every control reads as fully set',
+        MOUSESET,
+        [
+            ('            height: track_h,\n            color: p.surface1,',
+             '            height: track_h,\n            color: p.accent,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'only_what_is_in_force_is_accented',
+        ],
+    ),
+    (
+        'EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE: the section header stops depending on state, so nothing in the strip says which section is open',
+        MOUSESET,
+        [
+            ('                color: if expanded { p.surface0 } else { p.mantle },',
+             '                color: p.surface0,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'exactly_one_section_reads_as_open',
+        ],
+    ),
+    (
+        'FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF: the section heading stops depending on state, so all five sections claim to be in force at once',
+        MOUSESET,
+        [
+            ('                color: if expanded { p.accent } else { p.text },',
+             '                color: p.accent,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'exactly_one_section_reads_as_open',
+            'only_what_is_in_force_is_accented',
+            'only_what_is_in_force_moves_when_the_accent_moves',
+        ],
+    ),
+    (
+        'GGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGG: the toggle pill stops depending on state, so every switch looks on',
+        MOUSESET,
+        [
+            ('        let bg = if on { p.green } else { p.surface1 };',
+             '        let bg = p.green;'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH: a switch's label is drawn at a value's brightness, so the two halves of a row disagree about which is the reading",
+        MOUSESET,
+        [
+            ('            color: p.subtext0,\n            font_weight: FontWeightHint::Regular,\n            max_width: Some(width * 0.6),',
+             '            color: p.text,\n            font_weight: FontWeightHint::Regular,\n            max_width: Some(width * 0.6),'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        'IIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIII: the panel background itself is accented, so the accent stops meaning anything at all',
+        MOUSESET,
+        [
+            ('            height: 900.0,\n            color: p.base,',
+             '            height: 900.0,\n            color: p.accent,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'only_what_is_in_force_is_accented',
+            'only_what_is_in_force_moves_when_the_accent_moves',
+        ],
+    ),
+    (
+        'JJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJ: the slider thumb is emphasized off blue rather than off the fill, so it is derived from a colour the track never uses',
+        MOUSESET,
+        [
+            ('            color: emphasized(p.accent),',
+             '            color: emphasized(p.blue),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_panel_draws_comes_from_its_palette',
+            'every_site_draws_the_role_it_claims',
+            'the_thumb_is_derived_from_the_fill_it_ends',
+        ],
+    ),
+    (
+        "KKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKK: the switch knob is drawn at a label's dimness",
+        MOUSESET,
+        [
+            ('            height: 16.0,\n            color: p.text,',
+             '            height: 16.0,\n            color: p.subtext0,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'the_knob_is_the_same_ink_on_both_pills',
+        ],
+    ),
+    (
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA: the drop shadow keeps its own alpha instead of the palette's",
+        HOTKEYS,
+        [
+            ('        color: p.shadow(),\n        corner_radii: radii,',
+             '        color: guitk::color::Color::rgba(0, 0, 0, 100),\n        corner_radii: radii,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'the_panel_is_as_transparent_as_the_user_asked',
+        ],
+    ),
+    (
+        "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB: the panel background keeps Mocha base with its alpha soldered on",
+        HOTKEYS,
+        [
+            ('        color: p.panel_bg(),',
+             '        color: guitk::color::Color::rgba(30, 30, 46, 240),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_panel_draws_comes_from_its_palette',
+            'none_of_the_ten_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+            'the_panel_is_as_transparent_as_the_user_asked',
+            'a_key_badge_stands_off_the_panel_it_sits_on',
+        ],
+    ),
+    (
+        "CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC: the panel border keeps Catppuccin Mocha's own surface2",
+        HOTKEYS,
+        [
+            ('        color: p.surface2,',
+             '        color: guitk::color::Color::from_hex(0x585B70),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_panel_draws_comes_from_its_palette',
+            'none_of_the_ten_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD: the header keeps Catppuccin Mocha's own text",
+        HOTKEYS,
+        [
+            ('        color: p.text,\n        font_size: HEADER_FONT_SIZE,',
+             '        color: guitk::color::Color::from_hex(0xCDD6F4),\n        font_size: HEADER_FONT_SIZE,'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_panel_draws_comes_from_its_palette',
+            'none_of_the_ten_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+            'a_key_badge_stands_off_the_panel_it_sits_on',
+        ],
+    ),
+    (
+        "EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE: the header separator keeps Catppuccin Mocha's own surface1",
+        HOTKEYS,
+        [
+            ('        color: p.surface1,\n        width: 1.0,',
+             '        color: guitk::color::Color::from_hex(0x45475A),\n        width: 1.0,'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_panel_draws_comes_from_its_palette',
+            'none_of_the_ten_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF: the selection highlight keeps Catppuccin Mocha's own surface0",
+        HOTKEYS,
+        [
+            ('                color: p.surface0,',
+             '                color: guitk::color::Color::from_hex(0x313244),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_panel_draws_comes_from_its_palette',
+            'none_of_the_ten_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+            'a_selected_row_is_said_twice',
+        ],
+    ),
+    (
+        "GGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGG: a selected row's label keeps Catppuccin Mocha's own text",
+        HOTKEYS,
+        [
+            ('        let label_color = if is_selected { p.text } else { p.subtext1 };',
+             '        let label_color = if is_selected { guitk::color::Color::from_hex(0xCDD6F4) } else { p.subtext1 };'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_panel_draws_comes_from_its_palette',
+            'none_of_the_ten_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+            'a_selected_row_is_said_twice',
+        ],
+    ),
+    (
+        "HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH: an unselected row's label keeps Catppuccin Mocha's own subtext1",
+        HOTKEYS,
+        [
+            ('        let label_color = if is_selected { p.text } else { p.subtext1 };',
+             '        let label_color = if is_selected { p.text } else { guitk::color::Color::from_hex(0xBAC2DE) };'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_panel_draws_comes_from_its_palette',
+            'none_of_the_ten_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+            'a_selected_row_is_said_twice',
+        ],
+    ),
+    (
+        "IIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIII: the app name beside an action keeps Catppuccin Mocha's own overlay0",
+        HOTKEYS,
+        [
+            ('                color: p.overlay0,',
+             '                color: guitk::color::Color::from_hex(0x6C7086),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_panel_draws_comes_from_its_palette',
+            'none_of_the_ten_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "JJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJ: a key badge keeps Catppuccin Mocha's own mantle",
+        HOTKEYS,
+        [
+            ('                color: p.mantle,',
+             '                color: guitk::color::Color::from_hex(0x181825),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_panel_draws_comes_from_its_palette',
+            'none_of_the_ten_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "KKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKK: a key badge's border keeps Catppuccin Mocha's own surface1",
+        HOTKEYS,
+        [
+            ('                color: p.surface1,\n                line_width: 1.0,',
+             '                color: guitk::color::Color::from_hex(0x45475A),\n                line_width: 1.0,'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_panel_draws_comes_from_its_palette',
+            'none_of_the_ten_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLL: a key badge's lettering keeps Catppuccin Mocha's own subtext0",
+        HOTKEYS,
+        [
+            ('                color: p.subtext0,',
+             '                color: guitk::color::Color::from_hex(0xA6ADC8),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_panel_draws_comes_from_its_palette',
+            'none_of_the_ten_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+            'a_key_badge_stands_off_the_panel_it_sits_on',
+        ],
+    ),
+    (
+        "MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM: the panel border and the header separator trade rungs (border)",
+        HOTKEYS,
+        [
+            ('        color: p.surface2,',
+             '        color: p.surface1,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "NNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNN: the panel border and the header separator trade rungs (separator)",
+        HOTKEYS,
+        [
+            ('        color: p.surface1,\n        width: 1.0,',
+             '        color: p.surface2,\n        width: 1.0,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "OOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOO: the header is lettered as quietly as a key badge",
+        HOTKEYS,
+        [
+            ('        color: p.text,\n        font_size: HEADER_FONT_SIZE,',
+             '        color: p.subtext0,\n        font_size: HEADER_FONT_SIZE,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'a_key_badge_stands_off_the_panel_it_sits_on',
+        ],
+    ),
+    (
+        "PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPP: the selection highlight is one rung too high",
+        HOTKEYS,
+        [
+            ('                color: p.surface0,',
+             '                color: p.surface1,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'a_selected_row_is_said_twice',
+        ],
+    ),
+    (
+        "QQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQ: a selected row's label is lettered in subtext0",
+        HOTKEYS,
+        [
+            ('        let label_color = if is_selected { p.text } else { p.subtext1 };',
+             '        let label_color = if is_selected { p.subtext0 } else { p.subtext1 };'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'a_selected_row_is_said_twice',
+        ],
+    ),
+    (
+        "RRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRR: an unselected row's label sinks to overlay0",
+        HOTKEYS,
+        [
+            ('        let label_color = if is_selected { p.text } else { p.subtext1 };',
+             '        let label_color = if is_selected { p.text } else { p.overlay0 };'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'a_selected_row_is_said_twice',
+        ],
+    ),
+    (
+        "SSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSS: the app name is lettered as loudly as the action it qualifies",
+        HOTKEYS,
+        [
+            ('                color: p.overlay0,',
+             '                color: p.subtext1,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'a_key_badge_stands_off_the_panel_it_sits_on',
+        ],
+    ),
+    (
+        "TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT: a key badge is cut one rung too deep",
+        HOTKEYS,
+        [
+            ('                color: p.mantle,',
+             '                color: p.crust,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "UUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUU: a key badge is the same colour as the card it sits on",
+        HOTKEYS,
+        [
+            ('                color: p.mantle,',
+             '                color: p.base,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'a_key_badge_stands_off_the_panel_it_sits_on',
+        ],
+    ),
+    (
+        "VVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVV: a key badge's border is the same colour as its fill",
+        HOTKEYS,
+        [
+            ('                color: p.surface1,\n                line_width: 1.0,',
+             '                color: p.mantle,\n                line_width: 1.0,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'a_key_badge_stands_off_the_panel_it_sits_on',
+        ],
+    ),
+    (
+        "WWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWW: a key badge is lettered as loudly as the heading",
+        HOTKEYS,
+        [
+            ('                color: p.subtext0,',
+             '                color: p.text,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'a_key_badge_stands_off_the_panel_it_sits_on',
+        ],
+    ),
+    (
+        "XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX: the panel background stops following the transparency setting",
+        HOTKEYS,
+        [
+            ('        color: p.panel_bg(),',
+             '        color: p.base,'),
+        ],
+        ["desktop"],
+        [
+            'the_panel_is_as_transparent_as_the_user_asked',
+        ],
+    ),
+    (
+        "YYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYY: the panel background is drawn from the hover rung",
+        HOTKEYS,
+        [
+            ('        color: p.panel_bg(),',
+             '        color: p.panel_hover(),'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'the_panel_is_as_transparent_as_the_user_asked',
+        ],
+    ),
+    (
+        "ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ: the selection highlight is repainted with the accent",
+        HOTKEYS,
+        [
+            ('                color: p.surface0,',
+             '                color: p.accent,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'nothing_in_this_panel_is_accented',
+            'a_selected_row_is_said_twice',
+        ],
+    ),
+    (
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA: a selected row's label is repainted with the accent",
+        HOTKEYS,
+        [
+            ('        let label_color = if is_selected { p.text } else { p.subtext1 };',
+             '        let label_color = if is_selected { p.accent } else { p.subtext1 };'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'nothing_in_this_panel_is_accented',
+            'a_selected_row_is_said_twice',
+        ],
+    ),
+    (
+        "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB: an unselected row's label is repainted with the accent",
+        HOTKEYS,
+        [
+            ('        let label_color = if is_selected { p.text } else { p.subtext1 };',
+             '        let label_color = if is_selected { p.text } else { p.accent };'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'nothing_in_this_panel_is_accented',
+            'a_selected_row_is_said_twice',
+        ],
+    ),
+    (
+        "CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC: a key badge's border is repainted with the accent",
+        HOTKEYS,
+        [
+            ('                color: p.surface1,\n                line_width: 1.0,',
+             '                color: p.accent,\n                line_width: 1.0,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'nothing_in_this_panel_is_accented',
+        ],
+    ),
+    (
+        "DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD: the header is repainted with the accent",
+        HOTKEYS,
+        [
+            ('        color: p.text,\n        font_size: HEADER_FONT_SIZE,',
+             '        color: p.accent,\n        font_size: HEADER_FONT_SIZE,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'nothing_in_this_panel_is_accented',
+            'a_key_badge_stands_off_the_panel_it_sits_on',
+        ],
+    ),
+    (
+        "EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE: a key badge's lettering is repainted with the accent",
+        HOTKEYS,
+        [
+            ('                color: p.subtext0,',
+             '                color: p.accent,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'nothing_in_this_panel_is_accented',
+            'a_key_badge_stands_off_the_panel_it_sits_on',
+        ],
+    ),
+    (
+        "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF: the panel background is repainted with the accent",
+        HOTKEYS,
+        [
+            ('        color: p.panel_bg(),',
+             '        color: p.accent,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'nothing_in_this_panel_is_accented',
+            'the_panel_is_as_transparent_as_the_user_asked',
+            'a_key_badge_stands_off_the_panel_it_sits_on',
+        ],
+    ),
+    (
+        "GGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGG: the header separator is repainted with the accent",
+        HOTKEYS,
+        [
+            ('        color: p.surface1,\n        width: 1.0,',
+             '        color: p.accent,\n        width: 1.0,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'nothing_in_this_panel_is_accented',
+        ],
+    ),
+    (
+        "HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH: the app name beside an action is repainted with the accent",
+        HOTKEYS,
+        [
+            ('                color: p.overlay0,',
+             '                color: p.accent,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'nothing_in_this_panel_is_accented',
+            'a_key_badge_stands_off_the_panel_it_sits_on',
+        ],
+    ),
+    (
+        "IIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIII: a key badge is repainted with the accent",
+        HOTKEYS,
+        [
+            ('                color: p.mantle,',
+             '                color: p.accent,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'nothing_in_this_panel_is_accented',
+        ],
+    ),
+    (
+        "JJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJ: the label branch collapses to the unselected ink",
+        HOTKEYS,
+        [
+            ('        let label_color = if is_selected { p.text } else { p.subtext1 };',
+             '        let label_color = p.subtext1;'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'a_selected_row_is_said_twice',
+        ],
+    ),
+    (
+        "KKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKK: the label branch collapses to the selected ink",
+        HOTKEYS,
+        [
+            ('        let label_color = if is_selected { p.text } else { p.subtext1 };',
+             '        let label_color = p.text;'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'a_selected_row_is_said_twice',
+        ],
+    ),
+    (
+        "LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLL: the label branch is inverted",
+        HOTKEYS,
+        [
+            ('        let label_color = if is_selected { p.text } else { p.subtext1 };',
+             '        let label_color = if is_selected { p.subtext1 } else { p.text };'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'a_selected_row_is_said_twice',
+        ],
+    ),
+    (
+        "MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM: every row draws the selection highlight",
+        HOTKEYS,
+        [
+            ('        // Selection highlight.\n        if is_selected {',
+             '        // Selection highlight.\n        if true {'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'a_selected_row_is_said_twice',
+        ],
+    ),
+    (
+        "NNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNN: the selection lands one row past the one asked for",
+        HOTKEYS,
+        [
+            ('        let is_selected = selected_index == Some(i);',
+             '        let is_selected = selected_index == Some(i.wrapping_add(1));'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'a_selected_row_is_said_twice',
+        ],
+    ),
+    (
+        "OOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOO: the selection highlight is drawn a row below its label",
+        HOTKEYS,
+        [
+            ('                y: row_y + 2.0,',
+             '                y: row_y + 2.0 + ROW_HEIGHT,'),
+        ],
+        ["desktop"],
+        [
+            'a_selected_row_is_said_twice',
+        ],
+    ),
+    (
+        "PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPP: a key badge's border and lettering trade roles",
+        HOTKEYS,
+        [
+            ('                color: p.surface1,\n                line_width: 1.0,',
+             '                color: p.subtext0,\n                line_width: 1.0,'),
+            # Anchored on the line *below* as well, because the edit above has
+            # just manufactured a second `color: p.subtext0,` at a lower file
+            # offset. A one-line pattern would land on that copy, revert the
+            # first edit, and leave the file untouched — the defect would be a
+            # no-op reported as `NO TEST FAILED`. See `check()`'s NO-OP branch.
+            ('                color: p.subtext0,\n                font_size: KEY_FONT_SIZE,',
+             '                color: p.surface1,\n                font_size: KEY_FONT_SIZE,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'a_key_badge_stands_off_the_panel_it_sits_on',
+        ],
+    ),
+    (
+        "QQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQ: the header and a key badge trade lettering",
+        HOTKEYS,
+        [
+            ('        color: p.text,\n        font_size: HEADER_FONT_SIZE,',
+             '        color: p.subtext0,\n        font_size: HEADER_FONT_SIZE,'),
+            ('                color: p.subtext0,',
+             '                color: p.text,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'a_key_badge_stands_off_the_panel_it_sits_on',
+        ],
+    ),
+    (
+        "RRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRR: the drop shadow is drawn at the scrim's weight",
+        HOTKEYS,
+        [
+            ('        color: p.shadow(),\n        corner_radii: radii,',
+             '        color: p.scrim(),\n        corner_radii: radii,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'the_panel_is_as_transparent_as_the_user_asked',
+        ],
+    ),
+    (
+        "SSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSS: the selection highlight and a key badge trade rungs",
+        HOTKEYS,
+        [
+            ('                color: p.surface0,',
+             '                color: p.mantle,'),
+            # As in P: the edit above manufactures a second `color: p.mantle,`
+            # at a lower file offset, so this one has to name the badge fill's
+            # own next line to reach the badge rather than undo its partner.
+            ('                color: p.mantle,\n                corner_radii: CornerRadii::all(KEY_BADGE_RADIUS),',
+             '                color: p.surface0,\n                corner_radii: CornerRadii::all(KEY_BADGE_RADIUS),'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'a_selected_row_is_said_twice',
+        ],
+    ),
+    (
+        "TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT: the panel background reads the right role and freezes the alpha again",
+        HOTKEYS,
+        [
+            ('        color: p.panel_bg(),',
+             '        color: guitk::color::Color::rgba(p.base.r, p.base.g, p.base.b, 240),'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'the_panel_is_as_transparent_as_the_user_asked',
+        ],
+    ),
+    (
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA: MOCHA_BASE survives the conversion at the pill site",
+        SCRCAP,
+        [
+            ('        color: p.panel_bg(),',
+             '        color: guitk::color::Color::from_hex(0x1E1E2E),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_both_renderers_draw_comes_from_their_palette',
+            'every_site_draws_the_role_it_claims',
+            'none_of_the_ten_deleted_constants_is_still_drawn',
+            'the_indicator_pill_is_as_transparent_as_the_user_asked',
+        ],
+    ),
+    (
+        "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB: MOCHA_MANTLE survives the conversion at the ctrlbg site",
+        SCRCAP,
+        [
+            # Anchored on the comment *above* rather than the `corner_radii`
+            # line below, so the colour line is the last line of the pattern.
+            # An anchor whose colour line is not last invites a replacement
+            # that rewrites the wrong line — which is how the first four
+            # versions of these four defects came to emit two `color:` fields
+            # and fail to compile. See known-issues.md lesson 19.
+            ('        // laid on the desktop rather than a sheet of it.\n        color: p.mantle,',
+             '        // laid on the desktop rather than a sheet of it.\n        color: guitk::color::Color::from_hex(0x181825),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_both_renderers_draw_comes_from_their_palette',
+            'every_site_draws_the_role_it_claims',
+            'none_of_the_ten_deleted_constants_is_still_drawn',
+        ],
+    ),
+    (
+        "CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC: MOCHA_TEXT survives the conversion at the title site",
+        SCRCAP,
+        [
+            ('        text: "Screen Recorder".to_string(),\n        font_size: 13.0,\n        color: p.text,',
+             '        text: "Screen Recorder".to_string(),\n        font_size: 13.0,\n        color: guitk::color::Color::from_hex(0xCDD6F4),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_both_renderers_draw_comes_from_their_palette',
+            'every_site_draws_the_role_it_claims',
+            'none_of_the_ten_deleted_constants_is_still_drawn',
+        ],
+    ),
+    (
+        "DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD: MOCHA_SUBTEXT0 survives the conversion at the statelbl site",
+        SCRCAP,
+        [
+            ('        // word is a label on it.\n        color: p.subtext0,',
+             '        // word is a label on it.\n        color: guitk::color::Color::from_hex(0xA6ADC8),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_both_renderers_draw_comes_from_their_palette',
+            'every_site_draws_the_role_it_claims',
+            'none_of_the_ten_deleted_constants_is_still_drawn',
+        ],
+    ),
+    (
+        "EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE: MOCHA_RED survives the conversion at the recfill site",
+        SCRCAP,
+        [
+            ('                width: 80.0,\n                height: btn_h,\n                color: p.red,',
+             '                width: 80.0,\n                height: btn_h,\n                color: guitk::color::Color::from_hex(0xF38BA8),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_both_renderers_draw_comes_from_their_palette',
+            'every_site_draws_the_role_it_claims',
+            'none_of_the_ten_deleted_constants_is_still_drawn',
+        ],
+    ),
+    (
+        "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF: MOCHA_YELLOW survives the conversion at the pausefill site",
+        SCRCAP,
+        [
+            ('                width: 70.0,\n                height: btn_h,\n                color: p.yellow,',
+             '                width: 70.0,\n                height: btn_h,\n                color: guitk::color::Color::from_hex(0xF9E2AF),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_both_renderers_draw_comes_from_their_palette',
+            'every_site_draws_the_role_it_claims',
+            'none_of_the_ten_deleted_constants_is_still_drawn',
+        ],
+    ),
+    (
+        "GGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGG: MOCHA_GREEN survives the conversion at the resumefill site",
+        SCRCAP,
+        [
+            ('                width: 80.0,\n                height: btn_h,\n                color: p.green,',
+             '                width: 80.0,\n                height: btn_h,\n                color: guitk::color::Color::from_hex(0xA6E3A1),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_both_renderers_draw_comes_from_their_palette',
+            'every_site_draws_the_role_it_claims',
+            'none_of_the_ten_deleted_constants_is_still_drawn',
+        ],
+    ),
+    (
+        "HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH: MOCHA_SURFACE1 survives the conversion at the stop1fill site",
+        SCRCAP,
+        [
+            ('                // a plain surface rung rather than a fourth hue.\n                color: p.surface1,',
+             '                // a plain surface rung rather than a fourth hue.\n                color: guitk::color::Color::from_hex(0x45475A),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_both_renderers_draw_comes_from_their_palette',
+            'every_site_draws_the_role_it_claims',
+            'none_of_the_ten_deleted_constants_is_still_drawn',
+        ],
+    ),
+    (
+        "IIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIII: MOCHA_PEACH survives the conversion at the fallback site",
+        SCRCAP,
+        [
+            ('                color: p.peach,',
+             '                color: guitk::color::Color::from_hex(0xFAB387),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_both_renderers_draw_comes_from_their_palette',
+            'every_site_draws_the_role_it_claims',
+            'none_of_the_ten_deleted_constants_is_still_drawn',
+        ],
+    ),
+    (
+        "JJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJ: MOCHA_OVERLAY0 survives the conversion at the dot_idle site",
+        SCRCAP,
+        [
+            ('        _ => p.overlay0,',
+             '        _ => guitk::color::Color::from_hex(0x6C7086),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_both_renderers_draw_comes_from_their_palette',
+            'every_site_draws_the_role_it_claims',
+            'none_of_the_ten_deleted_constants_is_still_drawn',
+            'the_recording_dot_says_the_state_and_only_the_state',
+        ],
+    ),
+    (
+        "KKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKK: the Record and Pause buttons trade fills",
+        SCRCAP,
+        [
+            ('                width: 80.0,\n                height: btn_h,\n                color: p.red,',
+             '                width: 80.0,\n                height: btn_h,\n                color: p.yellow,'),
+            ('                width: 70.0,\n                height: btn_h,\n                color: p.yellow,',
+             '                width: 70.0,\n                height: btn_h,\n                color: p.red,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLL: the Resume button and the Stop beside it trade fills",
+        SCRCAP,
+        [
+            ('                width: 80.0,\n                height: btn_h,\n                color: p.green,',
+             '                width: 80.0,\n                height: btn_h,\n                color: p.surface1,'),
+            ('                // a plain surface rung rather than a fourth hue.\n                color: p.surface1,',
+             '                // a plain surface rung rather than a fourth hue.\n                color: p.green,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM: the panel title and its telemetry trade ink",
+        SCRCAP,
+        [
+            ('        text: "Screen Recorder".to_string(),\n        font_size: 13.0,\n        color: p.text,',
+             '        text: "Screen Recorder".to_string(),\n        font_size: 13.0,\n        color: p.subtext0,'),
+            ('            // Telemetry, quieter than the title it sits beside.\n            color: p.subtext0,',
+             '            // Telemetry, quieter than the title it sits beside.\n            color: p.text,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "NNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNN: the indicator pill and the controls bar trade backgrounds",
+        SCRCAP,
+        [
+            ('        color: p.panel_bg(),',
+             '        color: p.mantle,'),
+            ('        // laid on the desktop rather than a sheet of it.\n        color: p.mantle,',
+             '        // laid on the desktop rather than a sheet of it.\n        color: p.panel_bg(),'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'the_indicator_pill_is_as_transparent_as_the_user_asked',
+        ],
+    ),
+    (
+        "OOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOO: the recording and paused dots trade colours",
+        SCRCAP,
+        [
+            ('        RecordingState::Recording => p.red,',
+             '        RecordingState::Recording => p.yellow,'),
+            ('        RecordingState::Paused => p.yellow,',
+             '        RecordingState::Paused => p.red,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'the_recording_dot_says_the_state_and_only_the_state',
+        ],
+    ),
+    (
+        "PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPP: the recording dot and the inactive dot trade colours",
+        SCRCAP,
+        [
+            ('        RecordingState::Recording => p.red,',
+             '        RecordingState::Recording => p.overlay0,'),
+            ('        _ => p.overlay0,',
+             '        _ => p.red,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'the_recording_dot_says_the_state_and_only_the_state',
+        ],
+    ),
+    (
+        "QQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQ: the indicator's clock and its state word trade ink",
+        SCRCAP,
+        [
+            ('        text: recorder.stats.elapsed_display(),\n        font_size: 13.0,\n        color: p.text,',
+             '        text: recorder.stats.elapsed_display(),\n        font_size: 13.0,\n        color: p.subtext0,'),
+            ('        // word is a label on it.\n        color: p.subtext0,',
+             '        // word is a label on it.\n        color: p.text,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "RRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRR: the transient-state word and the panel title trade ink",
+        SCRCAP,
+        [
+            ('                color: p.peach,',
+             '                color: p.text,'),
+            ('        text: "Screen Recorder".to_string(),\n        font_size: 13.0,\n        color: p.text,',
+             '        text: "Screen Recorder".to_string(),\n        font_size: 13.0,\n        color: p.peach,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "SSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSS: the indicator pill is painted with the accent",
+        SCRCAP,
+        [
+            ('        color: p.panel_bg(),',
+             '        color: p.accent,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'nothing_in_the_recorder_is_accented',
+            'the_indicator_pill_is_as_transparent_as_the_user_asked',
+        ],
+    ),
+    (
+        "TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT: the controls bar is painted with the accent",
+        SCRCAP,
+        [
+            ('        // laid on the desktop rather than a sheet of it.\n        color: p.mantle,',
+             '        // laid on the desktop rather than a sheet of it.\n        color: p.accent,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'nothing_in_the_recorder_is_accented',
+        ],
+    ),
+    (
+        "UUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUU: the panel title is painted with the accent",
+        SCRCAP,
+        [
+            ('        text: "Screen Recorder".to_string(),\n        font_size: 13.0,\n        color: p.text,',
+             '        text: "Screen Recorder".to_string(),\n        font_size: 13.0,\n        color: p.accent,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'nothing_in_the_recorder_is_accented',
+        ],
+    ),
+    (
+        "VVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVV: the Record button is painted with the accent",
+        SCRCAP,
+        [
+            ('                width: 80.0,\n                height: btn_h,\n                color: p.red,',
+             '                width: 80.0,\n                height: btn_h,\n                color: p.accent,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'nothing_in_the_recorder_is_accented',
+        ],
+    ),
+    (
+        "WWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWW: the Pause button is painted with the accent",
+        SCRCAP,
+        [
+            ('                width: 70.0,\n                height: btn_h,\n                color: p.yellow,',
+             '                width: 70.0,\n                height: btn_h,\n                color: p.accent,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'nothing_in_the_recorder_is_accented',
+        ],
+    ),
+    (
+        "XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX: the Resume button is painted with the accent",
+        SCRCAP,
+        [
+            ('                width: 80.0,\n                height: btn_h,\n                color: p.green,',
+             '                width: 80.0,\n                height: btn_h,\n                color: p.accent,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'nothing_in_the_recorder_is_accented',
+        ],
+    ),
+    (
+        "YYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYY: the Stop button is painted with the accent",
+        SCRCAP,
+        [
+            ('                // a plain surface rung rather than a fourth hue.\n                color: p.surface1,',
+             '                // a plain surface rung rather than a fourth hue.\n                color: p.accent,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'nothing_in_the_recorder_is_accented',
+        ],
+    ),
+    (
+        "ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ: the transient-state word is painted with the accent",
+        SCRCAP,
+        [
+            ('                color: p.peach,',
+             '                color: p.accent,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'nothing_in_the_recorder_is_accented',
+        ],
+    ),
+    (
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA: the recording dot is painted with the accent",
+        SCRCAP,
+        [
+            ('        RecordingState::Recording => p.red,',
+             '        RecordingState::Recording => p.accent,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'nothing_in_the_recorder_is_accented',
+            'the_recording_dot_says_the_state_and_only_the_state',
+        ],
+    ),
+    (
+        "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB: the telemetry is painted with the accent",
+        SCRCAP,
+        [
+            ('            // Telemetry, quieter than the title it sits beside.\n            color: p.subtext0,',
+             '            // Telemetry, quieter than the title it sits beside.\n            color: p.accent,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'nothing_in_the_recorder_is_accented',
+        ],
+    ),
+    (
+        "CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC: the Stop button sits a rung too high",
+        SCRCAP,
+        [
+            ('                // a plain surface rung rather than a fourth hue.\n                color: p.surface1,',
+             '                // a plain surface rung rather than a fourth hue.\n                color: p.surface2,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD: the other Stop button sits a rung too low",
+        SCRCAP,
+        [
+            ('                // As in the Recording arm: the same button, the same rung.\n                color: p.surface1,',
+             '                // As in the Recording arm: the same button, the same rung.\n                color: p.surface0,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE: the controls bar drops to the lowest rung there is",
+        SCRCAP,
+        [
+            ('        // laid on the desktop rather than a sheet of it.\n        color: p.mantle,',
+             '        // laid on the desktop rather than a sheet of it.\n        color: p.crust,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF: the drop-rate line is brighter than the two beside it",
+        SCRCAP,
+        [
+            ('                recorder.stats.drop_rate_pct(),\n            ),\n            font_size: 10.0,\n            color: p.subtext0,',
+             '                recorder.stats.drop_rate_pct(),\n            ),\n            font_size: 10.0,\n            color: p.subtext1,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "GGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGG: the elapsed-time line is dimmer than the two beside it",
+        SCRCAP,
+        [
+            ('            text: format!("Time: {}", recorder.stats.elapsed_display()),\n            font_size: 10.0,\n            color: p.subtext0,',
+             '            text: format!("Time: {}", recorder.stats.elapsed_display()),\n            font_size: 10.0,\n            color: p.overlay0,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH: the Record button's lettering is named instead of computed",
+        SCRCAP,
+        [
+            ('                color: readable_on(p.red),',
+             '                color: p.base,'),
+        ],
+        ["desktop"],
+        [
+            'a_transport_button_is_lettered_for_its_own_fill',
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "IIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIII: the Pause button's lettering is named instead of computed",
+        SCRCAP,
+        [
+            ('                color: readable_on(p.yellow),',
+             '                color: p.base,'),
+        ],
+        ["desktop"],
+        [
+            'a_transport_button_is_lettered_for_its_own_fill',
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "JJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJ: the Resume button's lettering is named instead of computed",
+        SCRCAP,
+        [
+            ('                color: readable_on(p.green),',
+             '                color: p.base,'),
+        ],
+        ["desktop"],
+        [
+            'a_transport_button_is_lettered_for_its_own_fill',
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "KKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKK: the Record button's lettering is pinned to the dark endpoint",
+        SCRCAP,
+        [
+            ('                color: readable_on(p.red),',
+             '                color: guitk::color::Color::from_hex(0x11111B),'),
+        ],
+        ["desktop"],
+        [
+            'a_transport_button_is_lettered_for_its_own_fill',
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLL: the Pause button reads its lettering off the wrong fill",
+        SCRCAP,
+        [
+            ('                color: readable_on(p.yellow),',
+             '                color: readable_on(p.surface1),'),
+        ],
+        ["desktop"],
+        [
+            'a_transport_button_is_lettered_for_its_own_fill',
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM: the indicator pill drops the transparency setting",
+        SCRCAP,
+        [
+            ('        color: p.panel_bg(),',
+             '        color: p.base,'),
+        ],
+        ["desktop"],
+        [
+            'the_indicator_pill_is_as_transparent_as_the_user_asked',
+        ],
+    ),
+    (
+        "NNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNN: the indicator pill freezes an alpha onto the right role",
+        SCRCAP,
+        [
+            ('        color: p.panel_bg(),',
+             '        color: guitk::color::Color::rgba(p.base.r, p.base.g, p.base.b, 220),'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'the_indicator_pill_is_as_transparent_as_the_user_asked',
+        ],
+    ),
+    (
+        "OOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOO: the inactive dot collides with the recording dot",
+        SCRCAP,
+        [
+            ('        _ => p.overlay0,',
+             '        _ => p.red,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'the_recording_dot_says_the_state_and_only_the_state',
+        ],
+    ),
+    (
+        "PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPP: the indicator's state word is as loud as its clock",
+        SCRCAP,
+        [
+            ('        // word is a label on it.\n        color: p.subtext0,',
+             '        // word is a label on it.\n        color: p.text,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "QQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQ: the Stop button's lettering is computed off its own rung",
+        SCRCAP,
+        [
+            ('                font_size: 12.0,\n                color: p.text,',
+             '                font_size: 12.0,\n                color: readable_on(p.surface1),'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "RRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRR: the indicator's clock is as quiet as its state word",
+        SCRCAP,
+        [
+            ('        text: recorder.stats.elapsed_display(),\n        font_size: 13.0,\n        color: p.text,',
+             '        text: recorder.stats.elapsed_display(),\n        font_size: 13.0,\n        color: p.subtext0,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "SSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSS: the Record button is a hue that means nothing",
+        SCRCAP,
+        [
+            ('                width: 80.0,\n                height: btn_h,\n                color: p.red,',
+             '                width: 80.0,\n                height: btn_h,\n                color: p.mauve,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT: the transient-state word borrows the pause colour",
+        SCRCAP,
+        [
+            ('                color: p.peach,',
+             '                color: p.yellow,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "UUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUU: the recording dot thins out with the panel behind it",
+        SCRCAP,
+        [
+            ('        color: dot_color,',
+             '        color: guitk::color::Color::rgba(\n            dot_color.r,\n            dot_color.g,\n            dot_color.b,\n            p.panel_alpha,\n        ),'),
+        ],
+        ["desktop"],
+        [
+            'the_indicator_pill_is_as_transparent_as_the_user_asked',
+        ],
+    ),
+    (
+        "VVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVV: the indicator draws in every state, including the three that are not recording",
+        SCRCAP,
+        [
+            ('    if !recorder.state.is_active() && !matches!(recorder.state, RecordingState::Processing) {\n        return cmds;\n    }',
+             '    if false {\n        return cmds;\n    }'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'test_indicator_idle_empty',
+            'the_indicator_is_silent_unless_something_is_happening',
+        ],
+    ),
+    (
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA: MOCHA_SURFACE0 survives at the picker's border",
+        SNAP,
+        [
+            ('            height: picker_h,\n            color: p.surface0,',
+             '            height: picker_h,\n            color: guitk::color::Color::from_hex(0x313244),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_all_three_renderers_draw_comes_from_their_palette',
+            'none_of_the_ten_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB: MOCHA_SURFACE0 survives at a thumbnail's background",
+        SNAP,
+        [
+            ('                height: THUMB_SIZE,\n                color: p.surface0,',
+             '                height: THUMB_SIZE,\n                color: guitk::color::Color::from_hex(0x313244),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_all_three_renderers_draw_comes_from_their_palette',
+            'none_of_the_ten_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC: ZONE_FILL survives at the resting zone's fill",
+        SNAP,
+        [
+            ('                // Judgement 1: a zone at rest is a selection at rest.\n                color: p.selection_fill(),',
+             '                // Judgement 1: a zone at rest is a selection at rest.\n                color: guitk::color::Color::rgba(137, 180, 250, 50),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_all_three_renderers_draw_comes_from_their_palette',
+            'none_of_the_ten_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD: ZONE_BORDER survives at the resting zone's border",
+        SNAP,
+        [
+            ('                // drift closing, not a change of intent.\n                color: p.selection_border(),',
+             '                // drift closing, not a change of intent.\n                color: guitk::color::Color::rgba(137, 180, 250, 160),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_all_three_renderers_draw_comes_from_their_palette',
+            'none_of_the_ten_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE: ZONE_HIGHLIGHT survives at the hovered zone's fill",
+        SNAP,
+        [
+            ('            // Judgement 1, one rung louder than the zones at rest.\n            color: p.highlight_fill(),',
+             '            // Judgement 1, one rung louder than the zones at rest.\n            color: guitk::color::Color::rgba(137, 180, 250, 90),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_all_three_renderers_draw_comes_from_their_palette',
+            'none_of_the_ten_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+            'the_zone_under_the_cursor_out_reads_the_zones_at_rest',
+        ],
+    ),
+    (
+        "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF: MOCHA_BLUE survives at the hovered zone's border",
+        SNAP,
+        [
+            ('            // out-read the eight at rest that are already wearing that wash.\n            color: p.accent,',
+             '            // out-read the eight at rest that are already wearing that wash.\n            color: guitk::color::Color::from_hex(0x89B4FA),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_all_three_renderers_draw_comes_from_their_palette',
+            'none_of_the_ten_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "GGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGG: MOCHA_LAVENDER survives at the picker's title",
+        SNAP,
+        [
+            ('            // the accented thumbnail below it that actually means something.\n            color: p.lavender,',
+             '            // the accented thumbnail below it that actually means something.\n            color: guitk::color::Color::from_hex(0xB4BEFE),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_all_three_renderers_draw_comes_from_their_palette',
+            'none_of_the_ten_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH: MOCHA_LAVENDER survives at an inactive thumbnail",
+        SNAP,
+        [
+            ('                    } else {\n                        p.overlay0',
+             '                    } else {\n                        guitk::color::Color::from_hex(0xB4BEFE)'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_all_three_renderers_draw_comes_from_their_palette',
+            'none_of_the_ten_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+            'an_inactive_preset_is_never_the_accent_the_user_chose',
+        ],
+    ),
+    (
+        "IIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIII: MOCHA_TEXT survives at a resting zone's label",
+        SNAP,
+        [
+            ('                // be dark-on-dark under the light theme.\n                color: readable_on(p.scrim()),',
+             '                // be dark-on-dark under the light theme.\n                color: guitk::color::Color::from_hex(0xCDD6F4),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_all_three_renderers_draw_comes_from_their_palette',
+            'none_of_the_ten_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+            'a_zone_label_is_lettered_for_the_scrim_and_not_for_the_mode',
+        ],
+    ),
+    (
+        "JJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJ: Color::WHITE survives at the hovered zone's label",
+        SNAP,
+        [
+            ('            // because both are read off the same scrim, not by coincidence.\n            color: readable_on(p.scrim()),',
+             '            // because both are read off the same scrim, not by coincidence.\n            color: Color::WHITE,'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_all_three_renderers_draw_comes_from_their_palette',
+            'every_site_draws_the_role_it_claims',
+            'a_zone_label_is_lettered_for_the_scrim_and_not_for_the_mode',
+        ],
+    ),
+    (
+        "KKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKK: OVERLAY_SCRIM survives, tint and all",
+        SNAP,
+        [
+            ('            // the desktop in light mode instead of pushing it back.\n            color: p.scrim(),',
+             '            // the desktop in light mode instead of pushing it back.\n            color: guitk::color::Color::rgba(30, 30, 46, 140),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_all_three_renderers_draw_comes_from_their_palette',
+            'none_of_the_ten_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+            'the_scrim_is_black_in_both_modes',
+            'the_picker_is_as_transparent_as_the_user_asked',
+        ],
+    ),
+    (
+        "LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLL: PICKER_BG survives, frozen alpha and all",
+        SNAP,
+        [
+            ('            // Judgement 3: the transparency setting, not a frozen 230.\n            color: p.panel_bg(),',
+             '            // Judgement 3: the transparency setting, not a frozen 230.\n            color: guitk::color::Color::rgba(30, 30, 46, 230),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_all_three_renderers_draw_comes_from_their_palette',
+            'none_of_the_ten_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+            'the_picker_is_as_transparent_as_the_user_asked',
+        ],
+    ),
+    (
+        "MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM: PICKER_HOVER survives, frozen alpha and all",
+        SNAP,
+        [
+            ('                    // at a frozen 200.\n                    color: p.panel_hover(),',
+             '                    // at a frozen 200.\n                    color: guitk::color::Color::rgba(69, 71, 90, 200),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_all_three_renderers_draw_comes_from_their_palette',
+            'none_of_the_ten_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+            'the_picker_is_as_transparent_as_the_user_asked',
+        ],
+    ),
+    (
+        "NNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNN: the resting zone's fill and the hovered zone's fill trade places",
+        SNAP,
+        [
+            ('                // Judgement 1: a zone at rest is a selection at rest.\n                color: p.selection_fill(),',
+             '                // Judgement 1: a zone at rest is a selection at rest.\n                color: p.highlight_fill(),'),
+            ('            // Judgement 1, one rung louder than the zones at rest.\n            color: p.highlight_fill(),',
+             '            // Judgement 1, one rung louder than the zones at rest.\n            color: p.selection_fill(),'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'the_zone_under_the_cursor_out_reads_the_zones_at_rest',
+        ],
+    ),
+    (
+        "OOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOO: the resting zone's border and the hovered zone's border trade places",
+        SNAP,
+        [
+            ('                // drift closing, not a change of intent.\n                color: p.selection_border(),',
+             '                // drift closing, not a change of intent.\n                color: p.accent,'),
+            ('            // out-read the eight at rest that are already wearing that wash.\n            color: p.accent,',
+             '            // out-read the eight at rest that are already wearing that wash.\n            color: p.selection_border(),'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'the_zone_under_the_cursor_out_reads_the_zones_at_rest',
+        ],
+    ),
+    (
+        "PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPP: the picker's background and its hover rung trade places",
+        SNAP,
+        [
+            ('            // Judgement 3: the transparency setting, not a frozen 230.\n            color: p.panel_bg(),',
+             '            // Judgement 3: the transparency setting, not a frozen 230.\n            color: p.panel_hover(),'),
+            ('                    // at a frozen 200.\n                    color: p.panel_hover(),',
+             '                    // at a frozen 200.\n                    color: p.panel_bg(),'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'the_picker_is_as_transparent_as_the_user_asked',
+        ],
+    ),
+    (
+        "QQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQ: the picker's title and a zone's label trade inks",
+        SNAP,
+        [
+            ('            // the accented thumbnail below it that actually means something.\n            color: p.lavender,',
+             '            // the accented thumbnail below it that actually means something.\n            color: readable_on(p.scrim()),'),
+            ('                // be dark-on-dark under the light theme.\n                color: readable_on(p.scrim()),',
+             '                // be dark-on-dark under the light theme.\n                color: p.lavender,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'a_zone_label_is_lettered_for_the_scrim_and_not_for_the_mode',
+        ],
+    ),
+    (
+        "RRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRR: the scrim and the picker's shadow trade alphas",
+        SNAP,
+        [
+            ('            // the desktop in light mode instead of pushing it back.\n            color: p.scrim(),',
+             '            // the desktop in light mode instead of pushing it back.\n            color: Color::rgba(0, 0, 0, 100),'),
+            ('            // picker is a small popup rather than a window.\n            color: Color::rgba(0, 0, 0, 100),',
+             '            // picker is a small popup rather than a window.\n            color: p.scrim(),'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'the_scrim_is_black_in_both_modes',
+            'the_picker_is_as_transparent_as_the_user_asked',
+        ],
+    ),
+    (
+        "SSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSS: the active thumbnail and the inactive ones trade colours",
+        SNAP,
+        [
+            ('                    color: if self.active_preset == preset {\n                        p.accent',
+             '                    color: if self.active_preset == preset {\n                        p.overlay0'),
+            ('                    } else {\n                        p.overlay0',
+             '                    } else {\n                        p.accent'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT: the thumbnail background and the picker's title trade colours",
+        SNAP,
+        [
+            ('                height: THUMB_SIZE,\n                color: p.surface0,',
+             '                height: THUMB_SIZE,\n                color: p.lavender,'),
+            ('            // the accented thumbnail below it that actually means something.\n            color: p.lavender,',
+             '            // the accented thumbnail below it that actually means something.\n            color: p.surface0,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "UUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUU: the picker's border and its title trade colours",
+        SNAP,
+        [
+            ('            height: picker_h,\n            color: p.surface0,',
+             '            height: picker_h,\n            color: p.lavender,'),
+            ('            // the accented thumbnail below it that actually means something.\n            color: p.lavender,',
+             '            // the accented thumbnail below it that actually means something.\n            color: p.surface0,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "VVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVV: a resting zone is washed in a fixed blue rather than the accent",
+        SNAP,
+        [
+            ('                // Judgement 1: a zone at rest is a selection at rest.\n                color: p.selection_fill(),',
+             '                // Judgement 1: a zone at rest is a selection at rest.\n                color: guitk::color::Color::rgba(p.blue.r, p.blue.g, p.blue.b, 50),'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "WWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWW: a resting zone's border is a fixed blue rather than the accent",
+        SNAP,
+        [
+            ('                // drift closing, not a change of intent.\n                color: p.selection_border(),',
+             '                // drift closing, not a change of intent.\n                color: guitk::color::Color::rgba(p.blue.r, p.blue.g, p.blue.b, 150),'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX: the hovered zone's border is a fixed blue rather than the accent",
+        SNAP,
+        [
+            ('            // out-read the eight at rest that are already wearing that wash.\n            color: p.accent,',
+             '            // out-read the eight at rest that are already wearing that wash.\n            color: p.blue,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "YYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYY: the active thumbnail's mini-zones are a fixed blue",
+        SNAP,
+        [
+            ('                    color: if self.active_preset == preset {\n                        p.accent',
+             '                    color: if self.active_preset == preset {\n                        p.blue'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ: the active preset's marker is a fixed blue",
+        SNAP,
+        [
+            ('                    height: THUMB_SIZE,\n                    color: p.accent,',
+             '                    height: THUMB_SIZE,\n                    color: p.blue,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA: the inactive thumbnails go back to lavender, the collision judgement 5 names",
+        SNAP,
+        [
+            ('                    } else {\n                        p.overlay0',
+             '                    } else {\n                        p.lavender'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'an_inactive_preset_is_never_the_accent_the_user_chose',
+        ],
+    ),
+    (
+        "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB: the inactive thumbnails are accented too, so nothing says which is active",
+        SNAP,
+        [
+            ('                    } else {\n                        p.overlay0',
+             '                    } else {\n                        p.accent'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'an_inactive_preset_is_never_the_accent_the_user_chose',
+        ],
+    ),
+    (
+        "CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC: the picker's title is accented and competes with the thumbnail that matters",
+        SNAP,
+        [
+            ('            // the accented thumbnail below it that actually means something.\n            color: p.lavender,',
+             '            // the accented thumbnail below it that actually means something.\n            color: p.accent,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD: the picker's border is accented",
+        SNAP,
+        [
+            ('            height: picker_h,\n            color: p.surface0,',
+             '            height: picker_h,\n            color: p.accent,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE: a resting zone's label follows the mode instead of the scrim",
+        SNAP,
+        [
+            ('                // be dark-on-dark under the light theme.\n                color: readable_on(p.scrim()),',
+             '                // be dark-on-dark under the light theme.\n                color: p.text,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'a_zone_label_is_lettered_for_the_scrim_and_not_for_the_mode',
+        ],
+    ),
+    (
+        "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF: the hovered zone's label follows the mode instead of the scrim",
+        SNAP,
+        [
+            ('            // because both are read off the same scrim, not by coincidence.\n            color: readable_on(p.scrim()),',
+             '            // because both are read off the same scrim, not by coincidence.\n            color: p.text,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'a_zone_label_is_lettered_for_the_scrim_and_not_for_the_mode',
+        ],
+    ),
+    (
+        "GGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGG: a resting zone's label is read off the panel base rather than the scrim",
+        SNAP,
+        [
+            ('                // be dark-on-dark under the light theme.\n                color: readable_on(p.scrim()),',
+             '                // be dark-on-dark under the light theme.\n                color: readable_on(p.base),'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'a_zone_label_is_lettered_for_the_scrim_and_not_for_the_mode',
+        ],
+    ),
+    (
+        "HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH: the hovered zone's label is read off the accent under it",
+        SNAP,
+        [
+            ('            // because both are read off the same scrim, not by coincidence.\n            color: readable_on(p.scrim()),',
+             '            // because both are read off the same scrim, not by coincidence.\n            color: readable_on(p.accent),'),
+        ],
+        ["desktop"],
+        [
+            'a_zone_label_is_lettered_for_the_scrim_and_not_for_the_mode',
+        ],
+    ),
+    (
+        "IIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIII: the scrim is tinted with the mode's base again",
+        SNAP,
+        [
+            ('            // the desktop in light mode instead of pushing it back.\n            color: p.scrim(),',
+             '            // the desktop in light mode instead of pushing it back.\n            color: guitk::color::Color::rgba(p.base.r, p.base.g, p.base.b, 140),'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'the_scrim_is_black_in_both_modes',
+            'the_picker_is_as_transparent_as_the_user_asked',
+        ],
+    ),
+    (
+        "JJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJ: the scrim is the panel background rather than an absence of light",
+        SNAP,
+        [
+            ('            // the desktop in light mode instead of pushing it back.\n            color: p.scrim(),',
+             '            // the desktop in light mode instead of pushing it back.\n            color: p.panel_bg(),'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'the_scrim_is_black_in_both_modes',
+            'the_picker_is_as_transparent_as_the_user_asked',
+        ],
+    ),
+    (
+        "KKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKK: the picker's shadow is tinted with the mode's crust",
+        SNAP,
+        [
+            ('            // picker is a small popup rather than a window.\n            color: Color::rgba(0, 0, 0, 100),',
+             '            // picker is a small popup rather than a window.\n            color: guitk::color::Color::rgba(p.crust.r, p.crust.g, p.crust.b, 100),'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'the_picker_is_as_transparent_as_the_user_asked',
+        ],
+    ),
+    (
+        "LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLL: the picker's background drops the transparency setting",
+        SNAP,
+        [
+            ('            // Judgement 3: the transparency setting, not a frozen 230.\n            color: p.panel_bg(),',
+             '            // Judgement 3: the transparency setting, not a frozen 230.\n            color: p.base,'),
+        ],
+        ["desktop"],
+        [
+            'the_picker_is_as_transparent_as_the_user_asked',
+        ],
+    ),
+    (
+        "MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM: the picker's hover rung drops the transparency setting",
+        SNAP,
+        [
+            ('                    // at a frozen 200.\n                    color: p.panel_hover(),',
+             '                    // at a frozen 200.\n                    color: p.surface1,'),
+        ],
+        ["desktop"],
+        [
+            'the_picker_is_as_transparent_as_the_user_asked',
+        ],
+    ),
+    (
+        "NNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNN: the picker's background freezes an alpha onto the right role",
+        SNAP,
+        [
+            ('            // Judgement 3: the transparency setting, not a frozen 230.\n            color: p.panel_bg(),',
+             '            // Judgement 3: the transparency setting, not a frozen 230.\n            color: guitk::color::Color::rgba(p.base.r, p.base.g, p.base.b, 230),'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'the_picker_is_as_transparent_as_the_user_asked',
+        ],
+    ),
+    (
+        "OOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOO: the picker's hover rung freezes an alpha onto the right role",
+        SNAP,
+        [
+            ('                    // at a frozen 200.\n                    color: p.panel_hover(),',
+             '                    // at a frozen 200.\n                    color: guitk::color::Color::rgba(p.surface1.r, p.surface1.g, p.surface1.b, 200),'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'the_picker_is_as_transparent_as_the_user_asked',
+        ],
+    ),
+    (
+        "PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPP: the picker's shadow thins out with the panel behind it",
+        SNAP,
+        [
+            ('            // picker is a small popup rather than a window.\n            color: Color::rgba(0, 0, 0, 100),',
+             '            // picker is a small popup rather than a window.\n            color: guitk::color::Color::rgba(0, 0, 0, p.panel_alpha),'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'the_picker_is_as_transparent_as_the_user_asked',
+        ],
+    ),
+    (
+        "QQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQ: the scrim thins out with the panel setting",
+        SNAP,
+        [
+            ('            // the desktop in light mode instead of pushing it back.\n            color: p.scrim(),',
+             '            // the desktop in light mode instead of pushing it back.\n            color: guitk::color::Color::rgba(0, 0, 0, p.panel_alpha),'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'the_picker_is_as_transparent_as_the_user_asked',
+            'the_scrim_is_black_in_both_modes',
+        ],
+    ),
+    (
+        "RRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRR: the picker's shadow is the window shadow, one rung too heavy",
+        SNAP,
+        [
+            ('            // picker is a small popup rather than a window.\n            color: Color::rgba(0, 0, 0, 100),',
+             '            // picker is a small popup rather than a window.\n            color: p.shadow(),'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'the_picker_is_as_transparent_as_the_user_asked',
+        ],
+    ),
+    (
+        "SSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSS: the hovered zone is washed no louder than the eight at rest",
+        SNAP,
+        [
+            ('            // Judgement 1, one rung louder than the zones at rest.\n            color: p.highlight_fill(),',
+             '            // Judgement 1, one rung louder than the zones at rest.\n            color: p.selection_fill(),'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'the_zone_under_the_cursor_out_reads_the_zones_at_rest',
+        ],
+    ),
+    (
+        "TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT: the hovered zone's border is washed rather than solid",
+        SNAP,
+        [
+            ('            // out-read the eight at rest that are already wearing that wash.\n            color: p.accent,',
+             '            // out-read the eight at rest that are already wearing that wash.\n            color: p.selection_border(),'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'the_zone_under_the_cursor_out_reads_the_zones_at_rest',
+        ],
+    ),
+    (
+        "UUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUU: the resting zones are washed as loudly as the hovered one",
+        SNAP,
+        [
+            ('                // Judgement 1: a zone at rest is a selection at rest.\n                color: p.selection_fill(),',
+             '                // Judgement 1: a zone at rest is a selection at rest.\n                color: p.highlight_fill(),'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'the_zone_under_the_cursor_out_reads_the_zones_at_rest',
+        ],
+    ),
+    (
+        "VVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVV: the picker's border drops to the lowest rung there is",
+        SNAP,
+        [
+            ('            height: picker_h,\n            color: p.surface0,',
+             '            height: picker_h,\n            color: p.crust,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "WWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWW: a thumbnail's background drops a rung",
+        SNAP,
+        [
+            ('                height: THUMB_SIZE,\n                color: p.surface0,',
+             '                height: THUMB_SIZE,\n                color: p.mantle,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX: the inactive thumbnails climb a rung and lose the thumbnail behind them",
+        SNAP,
+        [
+            ('                    } else {\n                        p.overlay0',
+             '                    } else {\n                        p.surface2'),
+        ],
+        ["desktop"],
+        [
+            'an_inactive_preset_is_never_the_accent_the_user_chose',
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "YYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYY: the picker's title is as quiet as body text",
+        SNAP,
+        [
+            ('            // the accented thumbnail below it that actually means something.\n            color: p.lavender,',
+             '            // the accented thumbnail below it that actually means something.\n            color: p.subtext0,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
 ]
 
 
@@ -13045,8 +15554,10 @@ def check(snap):
     """
     bad = 0
     amb = 0
+    noop = 0
     for name, path, edits, _pkgs, _expect in DEFECTS:
         text = snap[path].decode("utf-8")
+        original = text
         # A defect may list the same edit twice on purpose, to wound both of an
         # identical pair; only an ambiguity the defect does *not* acknowledge
         # is a problem, so count the listed copies and subtract them.
@@ -13068,8 +15579,138 @@ def check(snap):
                     print(f"AMBIGUOUS ({n} matches, {listed[old]} listed)  {name}")
                     amb += 1
             text = text.replace(old, new, 1)
-    print(f"\n{len(DEFECTS)} defects, {bad} stale, {amb} ambiguous")
-    return 1 if bad or amb else 0
+        # A multi-edit defect can undo itself. `str.replace(old, new, 1)` takes
+        # the *first* match, so if one edit creates the pattern a later edit
+        # looks for, and the created copy sits earlier in the file, the later
+        # edit reverts it and the pair cancels. Module 35 wrote two such
+        # defects — a badge's border and lettering trading roles, and the
+        # selection highlight trading rungs with a badge — and both came back
+        # from a 25-minute run as `NO TEST FAILED`.
+        #
+        # That verdict is not merely unhelpful, it is the *opposite* of the
+        # truth: it reads as "the suite has a hole here" when what happened is
+        # "the defect was never introduced, so nothing was asked of the
+        # suite". A harness whose whole purpose is to stop a test being
+        # trusted on faith must not itself report an unasked question as an
+        # unanswered one. Checking it here rather than mid-run also means the
+        # authoring mistake surfaces in the seconds-long preflight instead of
+        # after the run it invalidates.
+        if text == original:
+            print(f"NO-OP  {name}\n    every edit was undone by a later one")
+            noop += 1
+    print(f"\n{len(DEFECTS)} defects, {bad} stale, {amb} ambiguous, {noop} no-op")
+    return 1 if bad or amb or noop else 0
+
+
+def apply_to(snap, path, edits):
+    """`(patched_text, None)`, or `(None, why)` if the defect cannot be put in.
+
+    One implementation of "apply this defect", shared by the preflights and
+    the real run, so that what a preflight vets is what the run runs. The two
+    refusals are the ones `check()` names — a pattern that is gone, and a set
+    of edits that cancels out — and both must be refusals rather than silent
+    successes: writing unmodified source and then asking the suite about it
+    produces `NO TEST FAILED`, which reads as a hole in the tests for a
+    question they were never asked.
+
+    They are reported apart rather than together because they mean different
+    things to whoever fixes them: a missing pattern is source that moved under
+    the defect, while a no-op is the defect arguing with itself (lesson 18).
+    """
+    original = snap[path].decode("utf-8")
+    text = original
+    for old, new in edits:
+        if old not in text:
+            return None, "PATTERN NOT FOUND"
+        text = text.replace(old, new, 1)
+    if text == original:
+        return None, "*** PATCH IS A NO-OP ***"
+    return text, None
+
+
+def cargo_check(pkg):
+    """`None` if `pkg` builds, else the compiler's first error lines.
+
+    `--all-targets` rather than a bare check: a defect reinstates a constant
+    that the *tests* are the only remaining reader of in several modules, so
+    checking only the lib would miss exactly the errors these defects cause.
+    """
+    r = subprocess.run(
+        ["cargo", "check", "-p", pkg, "--target", TARGET, "--all-targets"],
+        cwd=ROOT, capture_output=True, text=True, errors="replace",
+    )
+    if r.returncode == 0:
+        return None
+    out = r.stdout + r.stderr
+    why = [
+        ln.rstrip()
+        for ln in out.splitlines()
+        if ln.startswith("error[") or ln.startswith("error:")
+    ]
+    return "; ".join(why[:3]) if why else "no error line found"
+
+
+def compile_check(snap, only):
+    """Apply each selected defect, `cargo check` it, restore, report.
+
+    See the module docstring for why this exists: `--check` proves an anchor
+    is *findable*, not that the file it produces is Rust. An anchor's last
+    line must be the line being replaced — anything else invites a
+    replacement that rewrites the wrong line — and this is the pass that
+    notices when it was not.
+
+    Restores after every defect rather than at the end, so that an interrupted
+    preflight leaves at most one file patched and the caller's `finally` puts
+    even that back.
+    """
+    broken, skipped, ok = [], [], 0
+    for name, path, edits, pkgs, _expect in DEFECTS:
+        if only and name.split(":", 1)[0] not in only:
+            continue
+        text, why = apply_to(snap, path, edits)
+        if text is None:
+            # Not this pass's finding, but report it rather than skipping
+            # silently: a defect that never went in was not vetted, and a
+            # preflight that says nothing about it would be read as clearance.
+            skipped.append(name)
+            print(f"NOT APPLIED  {name}\n    {why}", flush=True)
+            continue
+        (ROOT / path).write_text(text, encoding="utf-8", newline="")
+        try:
+            why = None
+            for pkg in pkgs:
+                why = cargo_check(pkg)
+                if why:
+                    why = f"{pkg}: {why}"
+                    break
+        finally:
+            (ROOT / path).write_bytes(snap[path])
+        if why:
+            broken.append(name)
+            print(f"DOES NOT COMPILE  {name}\n    {why}", flush=True)
+        else:
+            ok += 1
+            print(f"builds  {name}", flush=True)
+    print(
+        f"\n{ok + len(broken) + len(skipped)} defects: {ok} build, "
+        f"{len(broken)} do not, {len(skipped)} not applied"
+    )
+    if broken:
+        print(f"\nfix before running the sweep: {broken}")
+    return 1 if broken or skipped else 0
+
+
+def restore(files, snap, digest):
+    """Write every snapshotted file back and prove it is byte-identical."""
+    bad = []
+    for f in files:
+        (ROOT / f).write_bytes(snap[f])
+        if hashlib.sha256((ROOT / f).read_bytes()).hexdigest() != digest[f]:
+            bad.append(f)
+    if bad:
+        print(f"!!! NOT RESTORED: {bad}")
+        sys.exit(2)
+    print("restored: all files match their recorded SHA-256")
 
 
 def main():
@@ -13084,6 +15725,16 @@ def main():
     if sys.argv[1:2] == ["--check"]:
         sys.exit(check(snap))
 
+    if sys.argv[1:2] == ["--compile"]:
+        # Its own `finally`: `compile_check` writes to the tree, so a Ctrl-C
+        # between the patch and the per-defect restore must still be caught by
+        # the same SHA-256-verified rewrite the real run gets.
+        try:
+            rc = compile_check(snap, sys.argv[2:])
+        finally:
+            restore(files, snap, digest)
+        sys.exit(rc)
+
     only = sys.argv[1:]
     verdicts = []
     try:
@@ -13092,16 +15743,17 @@ def main():
             # past Z, so `"AA"[0]` would select defect A as well.
             if only and name.split(":", 1)[0] not in only:
                 continue
-            text = snap[path].decode("utf-8")
-            ok = True
-            for old, new in edits:
-                if old not in text:
-                    ok = False
-                    break
-                text = text.replace(old, new, 1)
-            if not ok:
-                verdicts.append((name, "PATTERN NOT FOUND"))
-                print(f"{name}\n    PATTERN NOT FOUND\n", flush=True)
+            # `apply_to` folds together the two refusals: a pattern that no
+            # longer matches, and (see `check()`) a multi-edit defect that
+            # cancels itself out. Running the suite against unmodified source
+            # would report `NO TEST FAILED` — an accusation against the tests
+            # for a question they were never asked. Which of the two it was is
+            # `--check`'s to report, in seconds and without a toolchain; here
+            # the only thing that matters is that the suite is not consulted.
+            text, why = apply_to(snap, path, edits)
+            if text is None:
+                verdicts.append((name, why))
+                print(f"{name}\n    {why}\n", flush=True)
                 continue
             (ROOT / path).write_text(text, encoding="utf-8", newline="")
 
@@ -13150,15 +15802,7 @@ def main():
             verdicts.append((name, verdict))
             print(f"{name}\n    {verdict}\n", flush=True)
     finally:
-        bad = []
-        for f in files:
-            (ROOT / f).write_bytes(snap[f])
-            if hashlib.sha256((ROOT / f).read_bytes()).hexdigest() != digest[f]:
-                bad.append(f)
-        if bad:
-            print(f"!!! NOT RESTORED: {bad}")
-            sys.exit(2)
-        print("restored: all files match their recorded SHA-256")
+        restore(files, snap, digest)
 
     print("\n=== summary ===")
     for name, verdict in verdicts:
@@ -13167,10 +15811,27 @@ def main():
     def tally(mark):
         return sum(1 for _, v in verdicts if mark in v)
 
-    escaped = tally("NO TEST FAILED") + tally("DID NOT COMPILE")
+    # The only verdict that is evidence *against* the suite: the defect was
+    # introduced, the suite ran, and the suite said nothing.
+    escaped = tally("NO TEST FAILED")
+    # None of these three asked the suite anything, so none is evidence about
+    # it. Counting them as "caught" would inflate the sweep with defects that
+    # were never introduced; counting them as "escaped" would blame the tests
+    # for the harness's own authoring error. They get their own column.
+    #
+    # `DID NOT COMPILE` belongs here and not with `escaped` for exactly the
+    # reason the no-op does: a patch that fails to build never reaches a test
+    # binary, so no test had the opportunity to fail. It is a defect in the
+    # *defect*, not in the suite — see known-issues.md lesson 19, where four
+    # module-36 defects emitted two `color:` fields and were reported as
+    # escapes by an earlier version of this line.
+    unasked = (
+        tally("PATCH IS A NO-OP") + tally("PATTERN NOT FOUND") + tally("DID NOT COMPILE")
+    )
     print(
-        f"\n{len(verdicts)} defects: {len(verdicts) - escaped} caught, "
-        f"{escaped} escaped, {tally('[MISSING:')} under-caught, "
+        f"\n{len(verdicts)} defects: {len(verdicts) - escaped - unasked} caught, "
+        f"{escaped} escaped, {unasked} never asked, "
+        f"{tally('[MISSING:')} under-caught, "
         f"{tally('[UNDECLARED:')} under-declared"
     )
 

@@ -50388,7 +50388,20 @@ commands that carry the colour in question, and assert the two renders agree.
 Candidates: anything drawn on the wallpaper, on a video surface, on a
 thumbnail, or on any other content the palette does not own.
 
-**Part 2 progress. 33 of 49 modules converted.**
+**A procedural note about the workspace gate, learned the hard way on module
+36.** It is safe to *edit* source while `cargo test --workspace` is running,
+once its build phase has finished — every test binary is already on disk and
+nothing will be recompiled. It is **not** safe to *build*. Cargo holds the
+target-directory lock only during a build, and releases it while the test
+binaries execute, so a `cargo fmt` or `cargo test -p <crate>` fired during that
+window acquires the lock and rewrites artefacts the in-flight gate is still
+walking through. Nothing failed on the occasion this was discovered — the gate
+came back 67,835 passed, 0 failed — but that was luck about ordering, not a
+guarantee, and on Windows the failure mode would be a sharing violation in
+whichever of the two processes lost the race. Wait for `[run-timeout] child
+exited` before running any cargo command against the same target directory.
+
+**Part 2 progress. 37 of 49 modules converted.**
 
 - [x] `security_dialog.rs` — 29 constants, done 2026-08-22. The method above
   survived contact: the sweep lives in `gui/desktop/src/palette_check.rs` as
@@ -52256,6 +52269,456 @@ thumbnail, or on any other content the palette does not own.
     currently plotted so that graphing GPU later cannot quietly make it
     ambiguous; and a metric's label and sparkline are one colour said twice,
     derived at each site rather than named beside it.
+- [x] `mouse_settings.rs` — 10 constants over 14 colour sites, done 2026-08-23.
+  Twenty-three tests in the module (nine new), harness defects Ax50–Kx51
+  (thirty-seven), all thirty-seven caught, none escaped, none under-caught,
+  none under-declared.
+  - **The first module in the conversion to come back clean on the first run**,
+    and the reason is that the last two modules' lessons were applied *before*
+    writing the tests rather than discovered by writing the defects. Module 32
+    taught that a branch the fixture does not render is a branch the test does
+    not check, so all three state-dependent sites here — the header background,
+    the heading ink and the toggle pill — are rendered both ways at every
+    section from the start. Module 33 taught that a test doing two jobs cannot
+    be read as a coverage claim about either, so each test here makes exactly
+    one claim and every *pin* lives in the pinning table. That is worth
+    recording because it is the first evidence the method is transferable
+    rather than a sequence of one-off saves.
+  - **Seventeen of the thirty-seven defects are invisible to both sweeps.**
+    Membership caught 20 and the deleted-constant list caught 20 — the same 20,
+    every one of them a leftover Mocha literal. Every *permutation* defect (a
+    legal role in the wrong place) passes both, and six of them are caught by
+    `every_site_draws_the_role_it_claims` **alone**: the panel drawn a rung up
+    on `surface0`, the title at a label's dimness, the label and value swapped,
+    the switch label at a value's brightness, and the pill with its branches
+    collapsed so every switch looks on. n source sites still need n assertions;
+    nothing else has ever caught these.
+  - **The one defect the shipped theme would hide, stated as its own defect.**
+    The open section's heading pinned to `p.blue` rather than the accent is
+    legal (blue is a role), survives both sweeps, and is caught by four tests —
+    *all four of which would pass under the stock palette*, because the stock
+    accent **is** blue. The off-palette magenta fixture is the only reason any
+    of them can see it. Third module in a row where the accent/role collision
+    is the load-bearing part of the fixture rather than a detail of it.
+  - **The thumb is asserted from both sides, and the second side is the
+    load-bearing one.** `emphasized(p.accent)` replaces a `LAVENDER` that sat
+    beside a `BLUE` fill with nothing connecting them — the same shape as
+    `launcher.rs`'s two self-comparing alphas. The test asserts both that the
+    handle *is* the derivation and that it equals **no role at all**, across
+    three different accents. The first half alone would pass a future edit that
+    pinned the thumb to whichever role happened to match under one accent; the
+    second half is also what makes the membership sweep's `derived` list honest,
+    since a derived colour that turned out to be a role would be waved through
+    by `Palette::roles()` without the declaration doing any work. Defect
+    "thumb is `emphasized(p.blue)`" is caught by the sweep for exactly that
+    reason: (107, 139, 194) is in neither palette and is not what was declared.
+  - **A count is what makes "the accent means one thing" falsifiable.** The
+    pinning table names fourteen sites and by construction cannot notice a
+    fifteenth, and "the accent is used tastefully" is not a property a command
+    list carries. So judgement 1 is a table of exact counts per (section,
+    switches) — one heading plus one fill per slider on show — written out by
+    hand rather than derived from the same `if` the renderer uses, which would
+    have made the test agree with any answer. It catches eleven defects,
+    including every one that *adds* an accent: the banner, a switched-on pill,
+    the track along its whole length, the thumb, and the panel background.
+  - **The retheme test is narrow, and that is why it could be declared
+    precisely.** `only_what_is_in_force_moves_when_the_accent_moves` renders the
+    whole panel under two different accents and asks which commands differ —
+    the question a user asks by changing their accent and glancing at the
+    screen. It caught seven defects and, correctly, said nothing about the ten
+    that swap one fixed role for another: those render identically under both
+    accents. A whole-list test that fired on everything would have been an
+    under-declared mess; this one fires only on sites that gain or lose their
+    dependence on the accent.
+  - **The low-contrast knob is left alone on purpose.** `text` on a `green`
+    pill is two light values —
+    `TD-C-SWITCH-KNOBS-ARE-LOW-CONTRAST-ON-THE-ON-PILL`, being fixed across the
+    shell in one pass so every switch reaches the same answer. What *is*
+    asserted here is the separable half: the knob is the same ink on both
+    pills, because it marks a position and a position does not change meaning
+    when the state does. The docstring names the debt so the next reader does
+    not mistake a deferred fix for an unnoticed one.
+  - Judgements, for the record: the accent says what is in force and says
+    nothing else; a state is not a position, so the on-pill and the unsaved
+    banner keep named hues that survive a retheme; the thumb is derived from
+    its fill rather than named beside it; and three sites choose by state, so
+    every test renders both branches.
+- [x] `hotkeys.rs` — 10 constants over 12 colour sites, done 2026-08-23.
+  Sixty-eight tests in the module (seven new), harness defects Ax52–Tx53
+  (forty-six): 44 caught on the first run, the other two never actually
+  introduced — see the last bullet — and caught once the harness was fixed.
+  - **The first module where a constant turned out to be a *setting*.** The
+    panel background was `Color::rgba(30, 30, 46, 240)` — Mocha `base` with an
+    alpha soldered onto it. That is not a colour someone forgot to convert; it
+    is the transparency setting, frozen. It was wrong in both directions at
+    once: a user who had turned transparency **off** still saw the wallpaper
+    through their hotkey list, and one who had turned it up to Full got a panel
+    noticeably more solid than every neighbouring popup on the same screen.
+    `panel_bg()` is `base` at the palette's own `panel_alpha`, and the test
+    renders at three of them and reads the alpha back.
+    - The same test asserts the shadow does **not** move, and that half is the
+      load-bearing one. A fix that made *everything* follow `panel_alpha` would
+      be as wrong as the constant was — a shadow is an absence of light and does
+      not thin out when the thing casting it does. Without that clause, "the
+      panel follows the setting" is satisfied by a renderer that dissolves the
+      whole panel including its shadow.
+    - **Two defects exist only because of this judgement, and each is caught by
+      exactly one test.** `panel_bg()` reverting to plain `p.base` is invisible
+      to the membership sweep (base *is* a role), invisible to the deleted-
+      constant list, and invisible to the pinning table — because at
+      `Palette::for_mode`, `panel_alpha` is 255 and `p.base == p.panel_bg()`.
+      Only the transparency test, which sets the field to 200 and 160, can see
+      it. Likewise the alpha-refreezing defect
+      (`Color::rgba(p.base.r, p.base.g, p.base.b, 240)`) reads the *right* role
+      and still reintroduces the whole bug. A conversion audited only by "is
+      every colour a role?" would have shipped both.
+  - **Nothing on this panel is accented, and that had to be asserted as a
+    count.** A hotkey card is *read*, not operated: the selected row marks where
+    the user is looking, not what is in force. So the selection moves a rung
+    (`surface0` over the panel, ink from `subtext1` up to `text`) rather than
+    changing hue — which also matches `launcher.rs`, the shell's other
+    keyboard-driven list, where the surface fills the row and the accent is
+    spent on a separate marker bar. "Nothing is accented" is not something a
+    pinning table can check, because a table names *n* sites and by construction
+    cannot notice the *n+1*th; only a count over the whole render can. Ten
+    defects paint the accent onto a site that should not have it, and the count
+    is what sees them — and it only means anything because the fixture's accent
+    is off-palette. Under the shipped theme the accent **is** `blue`, so every
+    one of those ten would have been indistinguishable from a legal role.
+  - **The selection is said twice, and a test that checked one saying would
+    certify the other.** A fill appears *and* the label brightens; either alone
+    is a one-bit signal that a low-contrast display or poor colour
+    discrimination can lose. Six defects collapse, invert or misplace one of the
+    two sayings, and the one that moves the highlight a row below its own label
+    is caught by **that test alone** — the pinning table reads colours, not
+    coordinates, so an off-by-one between the highlight's `y` and the label's is
+    exactly the failure a colour-only conversion audit cannot see.
+  - **Judgement 4 is stated as relations rather than literals, because the
+    literals are what the conversion is deleting.** "The badge is `#181825`" is
+    true in Mocha and false in Latte, so it is not the claim worth testing. What
+    holds in both modes is that a badge is *visibly a badge*: a different colour
+    from the card it sits on, outlined in something different again, and
+    lettered more quietly than the heading. "Quieter" had to be defined as
+    *distance from the panel* rather than absolute darkness — in Latte the
+    dimmer ink is the **lighter** one, so a luma comparison written the obvious
+    way passes in Mocha and inverts in Latte. That test fires on fourteen of the
+    forty-six defects, including a badge painted the same colour as the card and
+    a badge lettered as loudly as the heading.
+  - **Every catcher list was predicted exactly** — of the 44 defects the run
+    actually introduced, not one was caught by a test that had not declared it
+    and not one escaped a test that had, including the badge-contrast
+    predictions, which needed the Latte luma of every role worked out by hand
+    first. The lessons applied before writing a line of test code: render every
+    branch the renderer selects a colour in (four here: selection on/off crossed
+    with the empty and default registries); make each test one claim so its
+    catcher list is a coverage statement; use an off-palette accent so an accent
+    assertion is falsifiable; and index anything positional by index rather than
+    counting it.
+  - **But two defects escaped, and the fault was the harness's, not the
+    suite's** — which is the more useful finding of the two. `reintro-palette.py`
+    applies each edit with `str.replace(old, new, 1)`, which takes the *first*
+    match. Both escapes were role *swaps* written as two edits, and in both the
+    first edit manufactured a fresh copy of the string the second edit was
+    looking for, at a lower file offset. The second edit landed on that copy and
+    undid the first. The pair was a no-op; the file was byte-identical to the
+    original; the suite was run against unmodified source and — correctly —
+    passed.
+    - The harness reported that as `*** NO TEST FAILED ***`, which is not
+      merely unhelpful but the **exact opposite** of the truth. It reads as "the
+      suite has a hole here", when what happened is "the suite was never asked
+      anything". A tool whose entire purpose is to stop a test being trusted on
+      faith must not itself convert an unasked question into an unanswered one,
+      because that verdict costs a full re-run of the suite to disbelieve.
+    - Fixed in three places rather than by re-anchoring the two defects and
+      moving on. `--check` now compares the patched text against the snapshot
+      and reports `NO-OP`, so an authoring mistake of this shape surfaces in the
+      seconds-long preflight instead of after the twenty-five-minute run it
+      invalidates. The run itself refuses to write a file it did not change and
+      names the failure `*** PATCH IS A NO-OP ***`. And the summary line counts
+      these in their own column — `n never introduced` — because folding them
+      into `caught` would inflate the sweep with defects that never existed,
+      and folding them into `escaped` blames the tests for the harness's error.
+    - The general lesson, which applies to every remaining module: **a
+      multi-edit defect can undo itself, and the way to prevent it is to anchor
+      each edit on a neighbouring line the other edit cannot forge.** Both were
+      re-anchored that way (on `font_size: KEY_FONT_SIZE,` and on
+      `corner_radii: CornerRadii::all(KEY_BADGE_RADIUS),`), after which both are
+      caught by the tests that declared them.
+- [x] `screen_capture.rs` — 10 constants over 22 colour sites in two public
+  renderers, done 2026-08-23. Fifty-eight tests in the module (eight new),
+  harness defects Ax54–Vx55 (forty-eight). Forty-four caught on the first run
+  with **zero under-caught and zero under-declared** — every catcher list
+  predicted exactly, for the second module running — and the other four never
+  compiled, which was a bug in the defect generator rather than in the suite;
+  see lesson 19 below and the 48/48 line at the end of this entry.
+  - **The catcher census**, which is the part worth keeping: the ordered pin
+    table `every_site_draws_the_role_it_claims` caught 42 of 48 and was the
+    sole catcher of 14; `nothing_in_the_recorder_is_accented`,
+    `none_of_the_ten_deleted_constants_is_still_drawn` and the two-mode sweep
+    `every_colour_both_renderers_draw_comes_from_their_palette` caught 9 each
+    and were sole catcher of none; `the_recording_dot_says_the_state_and_only_
+    the_state`, `the_indicator_pill_is_as_transparent_as_the_user_asked` and
+    `a_transport_button_is_lettered_for_its_own_fill` caught 5 each, with the
+    transparency test alone on 2. The pre-existing `test_indicator_idle_empty`
+    caught 1, which is the only evidence in this sweep that the module had any
+    colour coverage before the conversion.
+  - **The only module so far whose conversion fixes a bug a user could already
+    see.** The Record, Pause and Resume buttons were lettered `MOCHA_BASE` — a
+    near-black — which is legible on Mocha's *pale* red, yellow and green and
+    illegible on the light theme's, where all three of those fills are dark.
+    The lumas are 78, 104 and 91 against `readable_on`'s threshold of 140, so
+    in Latte all three want near-**white** ink and were getting near-black on
+    dark. Naming the ink beside the fill is what allowed the two to disagree;
+    `readable_on(fill)` cannot.
+    - The test pins the endpoints **by hand** — near-black in dark mode,
+      near-white in light — rather than calling `readable_on`. A test that
+      called the same function the renderer calls would agree with it however
+      wrong both were, which is the tautology lesson from module 32 applied
+      before writing the test instead of after.
+    - It also asserts the two modes' inks *differ*. That is the claim a pinned
+      constant provably cannot satisfy, and it is what distinguishes "the ink
+      is computed" from "the ink happens to be right in the mode I tested".
+  - **The frozen-transparency finding from `hotkeys.rs` recurred verbatim**, in
+    a module written by a different hand: the indicator pill was
+    `Color::rgba(MOCHA_BASE.r, MOCHA_BASE.g, MOCHA_BASE.b, 220)`. Two
+    occurrences in two consecutive modules is enough to expect it in the
+    remaining thirteen, so it is now a thing to look for rather than a thing to
+    discover — grep for `rgba(` in a module's constant block before converting
+    it.
+    - Two of the forty-eight defects are single-catcher because of this, and
+      both are invisible to the membership sweep, the deleted-constant list
+      **and** the pin table at once: the pill reverting to plain `p.base`, and
+      the recording dot fading with `panel_alpha`. `Palette::for_mode` always
+      sets `panel_alpha` to 255, so at the default palette
+      `p.base == p.panel_bg()` and every table-shaped test agrees with the bug.
+      Only a test that *varies* the setting sees it.
+    - The third of the three, re-freezing an alpha onto the *right* role, was
+      caught by the pin table too — and the distinction is worth keeping,
+      because it is the line between what a table can and cannot do. A table
+      compares `Color`s including alpha, so it sees a value that is wrong at
+      the default setting; what it cannot see is a value that is *right* at
+      the default setting and wrong at every other. Dropping the setting is
+      exactly that, which is why it needs a test that changes the setting and
+      why predicting it as single-catcher was right for one defect out of the
+      two I expected.
+    - The dot clause is the load-bearing half. A fix that made everything
+      follow `panel_alpha` would satisfy "the pill answers the setting" and
+      still be wrong — a recording indicator that fades until it cannot be seen
+      has failed at the one thing it is for.
+  - **The transport colours are a code, not a theme, and the count is what
+    proves it.** Red records, yellow pauses, green resumes, grey means neither;
+    a user reads those the way they read a traffic light, so they keep named
+    roles across a retheme rather than following the accent. Ten defects paint
+    the accent onto a site, and the count over the whole render is what sees
+    them — a pin table names *n* sites and by construction cannot notice the
+    *n+1*th. As always it only means anything because the fixture's accent is
+    off-palette; under the shipped theme the accent **is** `blue`.
+  - **The pin table compares the ordered vector, not the set.** Eight defects
+    are two sites trading roles, which leaves the multiset of colours drawn
+    byte-identical — the module-29 lesson, and the reason the expected value is
+    a `Vec<Color>` in draw order per state per mode rather than a membership
+    table.
+  - **Six states, and four of them draw no indicator at all**, while three
+    reach only the controls panel's fallback arm. Every colour test therefore
+    iterates the states explicitly; a test that rendered "the recorder" would
+    have been exercising two states out of six and reporting on all of them.
+    That is module 32's unrendered-branch lesson and module 33's whole-display-
+    mode lesson, applied before the tests were written rather than after a
+    proof run found the hole.
+  - **Lesson 19: `--check` proves an anchor is *findable*, not that the patched
+    file is Rust.** The preflight compares patterns against the unmodified
+    snapshot and reports `PATTERN NOT FOUND` / `AMBIGUOUS` / `NO-OP`. All
+    forty-eight passed it — `1171 defects, 0 stale, 0 ambiguous, 0 no-op` — and
+    four of them then failed to compile.
+    - The cause was in the generator, not the harness. Its substitution helper
+      assumed the `color:` line is the *last* line of an anchor, because in
+      twenty-three of the twenty-four anchors it is. The controls bar's anchor
+      put it first and used `corner_radii: CornerRadii::all(8.0),` as the
+      disambiguating tail, so the helper rewrote the `corner_radii` line and
+      the struct literal ended up with two `color:` fields —
+      `error[E0062]: field 'color' specified more than once`. All four affected
+      defects were the four built on that one anchor.
+    - Fixed by re-anchoring on the two comment lines *above* the colour instead
+      of the `corner_radii` line below it, restoring the colour-last shape the
+      generator assumes. That is the general rule now: **an anchor's last line
+      is the line being replaced**, and any disambiguation goes above it.
+    - The reporting was wrong too, and in the same way the no-op reporting was
+      wrong before module 35 fixed it: `DID NOT COMPILE` was tallied under
+      `escaped`. A patch that fails to build never reaches a test binary, so no
+      test had the opportunity to fail — calling that an escape blames the
+      suite for the harness's own authoring error. It now sits with
+      `PATCH IS A NO-OP` and `PATTERN NOT FOUND` in a column renamed from
+      `never introduced` to `never asked`, which is the property the three
+      actually share.
+    - The pattern across lessons 18 and 19 is one thing said twice: **the
+      preflight can only check the property it models.** It models "does this
+      pattern occur exactly once in the original file", which catches a stale
+      anchor and, since module 35, a self-cancelling edit pair — but says
+      nothing about whether the *result* parses. A defect that does not compile
+      is caught within minutes by the run itself, so the preflight is a way to
+      avoid wasting an hour, not a correctness gate; treating it as the latter
+      is what made four failures a surprise.
+    - Re-run after the fix: **4 caught, 0 escaped, 0 never asked, 0
+      under-caught, 0 under-declared**, and each of the four was caught by
+      exactly the tests it declared — so module 36 closes at **48/48**. The
+      catcher census above is unchanged by it: the four add three more to the
+      pin table, one each to the two-mode sweep, the deleted-constant list, the
+      accent count and the transparency test.
+- [x] `snap.rs` — 10 constants over 16 colour sites in three public renderers,
+  done 2026-08-23. Thirty-six tests in the module (eight new), harness defects
+  Ax56–Yx57 (fifty-one).
+  - **This module is where the palette's own numbers came from, which makes it
+    the one module that could be converted by accident.** `mod theme` here held
+    `ZONE_FILL` at alpha 50, `ZONE_HIGHLIGHT` at 90 and `ZONE_BORDER` at 160,
+    and `appearance::wash` ships `FILL = 50`, `HIGHLIGHT = 90`, `EDGE = 150` —
+    `Palette::selection_border`'s doc comment names snap zones as its caller.
+    So three of the ten constants were *already* the palette rung, written out
+    by hand, and one (160 against 150) was the copy having drifted ten units
+    from the original. The conversion closes that drift rather than preserving
+    it: a copy that agrees is still a copy, and this one had already begun to
+    disagree.
+  - **Five judgements, recorded in the module's own `# Colour` doc section**,
+    because each is a place where "read it from the palette" does not by itself
+    say *which* role:
+    1. **A snap zone follows the accent.** It is a selection — the thing the
+       drop will land in — so it moves with the user's accent, and the three
+       rungs become `selection_fill`, `selection_border` and `highlight_fill`.
+       This is the **opposite** answer from `screen_capture`'s transport
+       buttons one module earlier, and deliberately so: red-records is a code a
+       user decodes, a highlighted drop target is a selection a user points at.
+       The distinction is "does the colour *mean* something specific" versus
+       "does this colour mean *this one is chosen*".
+    2. **The zone labels are lettered for the scrim, not for the mode.** They
+       sit on `p.scrim()`, which is black in both modes on purpose (§525
+       decision 3), so `readable_on(p.scrim())` is the correct ink and `p.text`
+       is the plausible wrong one — it would put dark grey on near-black under
+       the light theme. The test pins the near-white endpoint by hand and
+       asserts `ink != p.text`, which is module 32's tautology lesson and
+       module 36's endpoint-pinning practice applied together.
+    3. **The picker is a panel and obeys the transparency setting.** Its
+       background was frozen at `rgba(30, 30, 46, 230)` and its hover at
+       `rgba(69, 71, 90, 200)` — the frozen-transparency finding for the
+       **third** consecutive module, after `hotkeys.rs` and `screen_capture.rs`.
+       Both become `panel_bg()` / `panel_hover()`.
+    4. **The scrim was tinted and should not have been.** `OVERLAY_SCRIM` was
+       `rgba(30, 30, 46, 140)` — Mocha `base` at the scrim alpha — so in light
+       mode the backdrop behind the zone grid would have *lightened* the
+       desktop instead of pushing it back. `p.scrim()` is `rgba(0, 0, 0, 140)`
+       and does the job in both modes. This is the same class of bug as module
+       36's near-black lettering: a value that is right in the palette it was
+       written in and wrong in the other one, invisible until the other one
+       exists.
+    5. **A hue against a rung, never a hue against a hue.** The picker's active
+       preset is `p.accent` and its inactive presets are `p.overlay0` — a grey
+       rung, not `p.lavender`. `AccentColor` offers Lavender, so an inactive
+       marker in lavender would be *identical* to an active one for any user
+       who picked that accent. The test iterates all fourteen named accents in
+       both modes and asserts the two are present and distinct; a fixture with
+       a single off-palette accent would pass while the shipped Lavender broke.
+  - The picker's drop shadow stays `rgba(0, 0, 0, 100)` rather than
+    `p.shadow()`'s 120, and that is a deliberate keep: the picker is a small
+    popup, not a window, and the lighter shadow is a size judgement rather than
+    a copy of the palette. It is declared in the module docs so the next reader
+    does not "fix" it.
+  - **The transparency test pins what must *not* follow the setting**, not only
+    what must. Sweeping `panel_alpha` across 255 / 200 / 160 and asserting the
+    background and hover track it is half the claim; the other half is that the
+    shadow (`rgba(0,0,0,100)`) and the scrim (`rgba(0,0,0,140)`) do **not**.
+    Module 36's dot clause is the same shape — a fix that made everything
+    follow the setting would satisfy the first half and be wrong.
+  - **Lesson 19 is now closed in the harness rather than in a habit.**
+    `scripts/reintro-palette.py` grew a third mode, `--compile [names…]`, which
+    applies each selected defect, runs `cargo check -p <pkg> --all-targets`,
+    restores, and reports `builds` / `DOES NOT COMPILE` / `NOT APPLIED`. That
+    is precisely the question `--check` cannot answer — module 36's four broken
+    defects passed `--check` and were found an hour into the run they had
+    already invalidated. Minutes instead of an hour, and it is a preflight for
+    every future module rather than a rule someone has to remember.
+    - `--all-targets` and not a bare `cargo check`: several defects reinstate a
+      constant whose only remaining reader is the test module, so checking the
+      lib alone would miss exactly the errors these defects cause.
+    - Applying a defect is now one function, `apply_to`, shared by all three
+      modes — so what a preflight vets is literally what the run runs, rather
+      than a second implementation that can drift from it. It returns the
+      *reason* a defect could not be introduced, which keeps `PATTERN NOT
+      FOUND` and `PATCH IS A NO-OP` reported apart: a missing pattern is source
+      that moved under the defect, a no-op is the defect arguing with itself.
+    - `--compile` restores after **each** defect rather than at the end, and
+      still runs under the same SHA-256-verified whole-snapshot rewrite in a
+      `finally`. An interrupted preflight therefore leaves at most one file
+      patched, and that one gets put back too.
+    - It is a preflight, not a gate. The real run still detects a broken defect
+      (`DID NOT COMPILE`); what this buys is learning it before the run whose
+      result it would spoil has been started.
+    - First use, on this module's fifty-one: **51 build, 0 do not, 0 not
+      applied**, tree restored byte-clean, in a fraction of the sweep's time.
+  - **The catcher census.** The ordered pin table
+    `every_site_draws_the_role_it_claims` caught 48 of 51 and was sole catcher
+    of 13; `the_picker_is_as_transparent_as_the_user_asked` 15 and sole on 2;
+    the two-mode sweep
+    `every_colour_all_three_renderers_draw_comes_from_their_palette` 13;
+    `none_of_the_ten_deleted_constants_is_still_drawn` 12;
+    `the_zone_under_the_cursor_out_reads_the_zones_at_rest` and
+    `a_zone_label_is_lettered_for_the_scrim_and_not_for_the_mode` 6 each;
+    `the_scrim_is_black_in_both_modes` 5;
+    `an_inactive_preset_is_never_the_accent_the_user_chose` 4 — the last five
+    sole catcher of nothing. **No pre-existing test in the module caught a
+    single defect**, which is the plainest statement available that a module
+    with thirty-six tests can have no colour coverage whatever.
+  - **Lesson 20: an off-palette accent is the right fixture for "did this
+    follow the accent" and the wrong one for anything that is a *function of*
+    the accent.** One defect escaped all fifty-one — the hovered zone's label
+    lettered `readable_on(p.accent)` instead of `readable_on(p.scrim())` — and
+    the reason is arithmetic, not oversight. `readable_on` is a step function
+    with its threshold at luma 140; the fixture accent `#FF00FF` has luma 105,
+    so it falls on the *same* side as the black scrim and the wrong expression
+    returns the right answer. Every colour test in the module used that one
+    accent, so all of them agreed with the bug.
+    - It is a real bug and not a hypothetical: Yellow, Peach, Rosewater and
+      Flamingo are all above the threshold, so a user on any of those four
+      would get near-black labels on a black scrim — invisible.
+    - The rule that follows is sharper than "vary the fixture". A fixture
+      value is a *sample*, and one sample characterises a function only if the
+      function is constant. `readable_on` is a step, judgement 5's hue-vs-hue
+      collision is an equality — both have exactly one interesting input among
+      the fourteen, and a spot check finds it with probability 1/14 and 4/14
+      respectively. Where the property under test is a function of the accent,
+      **walk the fourteen**; where it is "is this site accented at all", the
+      single off-palette magenta remains correct and cheaper.
+    - Fixed by walking `OFFERED` in the label test as
+      `an_inactive_preset_is_never_the_accent_the_user_chose` already did, and
+      by lifting the fourteen-accent table and a `wearing(light, accent)`
+      helper to the top of the test module so the next test that needs a
+      sweep does not re-derive one.
+    - Note which test the fix belongs in. The pin table cannot be made to
+      catch this: it compares a vector of colours against expectations built
+      from the same palette, so it would have to walk the fourteen accents
+      *and* recompute the expected ink per accent — which is the tautology of
+      module 32. The claim "the ink is the scrim's, whatever the accent" is a
+      different claim from "each site draws the role it claims", and it needs
+      its own test.
+  - **Five declarations were wrong in two directions**, after two consecutive
+    modules of predicting every catcher exactly. Two were under-caught: a
+    fully-opaque `MOCHA_BLUE` at a *border* slot does not trip the
+    hovered-out-reads-resting test, because that test compares alphas and 255
+    beats 150; and two inks trading places is invisible to the membership
+    sweep, because both inks are members. Three were under-declared: the
+    transparency test pins both rungs the picker's background and hover traded,
+    the scrim test pins the scrim's alpha so a setting-driven one trips it, and
+    climbing to the active marker's rung is precisely what the inactive-preset
+    test forbids. All five are now reconciled in the harness — the declarations
+    are the only record of what each test proves, and a wrong one is a
+    misleading record rather than a harmless one.
+    - Two modules of perfect prediction did not mean the method had stopped
+      needing the run. What it meant is that modules 35 and 36 were shaped like
+      the ones before them; this one has three renderers, a threshold function
+      and a scrim, and the predictions went wrong in both directions the first
+      time the shape changed.
+  - **Re-run of the six after the fix and the reconciliation: 6 caught, 0
+    escaped, 0 under-caught, 0 under-declared**, and the escaped defect is now
+    caught by exactly one test — the accent-walking label test, which is the
+    only test that can see it. Module 37 closes at **51/51**. The census above
+    gains one to that test, taking it to 7 catches and its first sole catch.
 
 **Trigger:** this is not blocked on anything. It is sequenced after the shell
 event loop (`TD-C-THE-SHELL-CAN-DRAW-ITSELF-AND-NOBODY-CAN-ASK-IT-TO`) only

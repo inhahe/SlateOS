@@ -1343,7 +1343,11 @@ fn is_key_authorized(username: &str, pubkey: &[u8; 32]) -> bool {
         .map(|u| u.home_dir.clone())
         .unwrap_or_default();
     if !home.is_empty() {
-        let path = alloc::format!("{}/.ssh/authorized_keys", home);
+        // `join`, not `format!("{}/…")`: `Vfs::read_file` already takes a byte
+        // path, so the concatenation was the only thing here that could lose a
+        // non-UTF-8 home. `join` also collapses a trailing `/` that the old
+        // form would have doubled. See design-decisions.md §261.
+        let path = home.join(".ssh/authorized_keys");
         if let Ok(data) = crate::fs::vfs::Vfs::read_file(&path) {
             // Parse: one hex-encoded 32-byte key per line.
             if let Ok(text) = core::str::from_utf8(&data) {

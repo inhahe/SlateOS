@@ -27648,7 +27648,7 @@ fn cmd_useracct(args: &str) {
                             u.username,
                             t,
                             s,
-                            u.home_dir
+                            u.home_dir.display()
                         );
                     }
                 }
@@ -27724,16 +27724,13 @@ fn cmd_useracct(args: &str) {
                             shell_println!("  Display name: {}", u.display_name);
                             shell_println!("  Type:         {}", t);
                             shell_println!("  Login method: {}", m);
-                            shell_println!("  Home:         {}", u.home_dir);
-                            shell_println!("  Shell:        {}", u.shell);
-                            shell_println!(
-                                "  Avatar:       {}",
-                                if u.avatar.is_empty() {
-                                    "(default)"
-                                } else {
-                                    &u.avatar
-                                }
-                            );
+                            shell_println!("  Home:         {}", u.home_dir.display());
+                            shell_println!("  Shell:        {}", u.shell.display());
+                            if u.avatar.is_empty() {
+                                shell_println!("  Avatar:       (default)");
+                            } else {
+                                shell_println!("  Avatar:       {}", u.avatar.display());
+                            }
                             shell_println!("  Auto-login:   {}", u.auto_login);
                             shell_println!("  Enabled:      {}", u.enabled);
                             shell_println!("  Locked:       {}", u.locked);
@@ -27913,22 +27910,31 @@ fn cmd_useracct(args: &str) {
             }
             case(&parts);
         }
-        "avatar" => {
+        "avatar" | "home" | "shell" => {
             #[inline(never)]
-            fn case(parts: &[&str]) {
+            fn case(sub: &str, parts: &[&str]) {
                 if parts.len() < 3 {
-                    shell_println!("Usage: useracct avatar <uid> <path>");
-                } else {
-                    match parts[1].parse::<u64>() {
-                        Ok(uid) => match useracct::set_avatar(uid, parts[2]) {
-                            Ok(()) => shell_println!("Set avatar for uid={}", uid),
-                            Err(e) => shell_println!("Error: {:?}", e),
-                        },
-                        Err(_) => shell_println!("Invalid uid"),
-                    }
+                    shell_println!("Usage: useracct {} <uid> <path>", sub);
+                    return;
+                }
+                let Ok(uid) = parts[1].parse::<u64>() else {
+                    shell_println!("Invalid uid");
+                    return;
+                };
+                // Rejoin the tail so a path containing spaces survives the
+                // whitespace split that produced `parts`.
+                let path = parts[2..].join(" ");
+                let r = match sub {
+                    "home" => useracct::set_home_dir(uid, &path),
+                    "shell" => useracct::set_shell(uid, &path),
+                    _ => useracct::set_avatar(uid, &path),
+                };
+                match r {
+                    Ok(()) => shell_println!("Set {} for uid={}", sub, uid),
+                    Err(e) => shell_println!("Error: {:?}", e),
                 }
             }
-            case(&parts);
+            case(sub, &parts);
         }
         "autologin" => {
             #[inline(never)]
@@ -28080,7 +28086,9 @@ fn cmd_useracct(args: &str) {
                 shell_println!("  unlock <uid>     Unlock account");
                 shell_println!("  type <uid> <t>   Set account type");
                 shell_println!("  display <uid> <n> Set display name");
-                shell_println!("  avatar <uid> <p> Set avatar path");
+                shell_println!("  avatar <uid> <p> Set avatar path ('' = default)");
+                shell_println!("  home <uid> <p>   Set home directory (absolute)");
+                shell_println!("  shell <uid> <p>  Set login shell (absolute)");
                 shell_println!("  autologin <uid> <on|off>  Toggle auto-login");
                 shell_println!("  groups           List groups");
                 shell_println!("  addgroup <name>  Create group");

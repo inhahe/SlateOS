@@ -30,6 +30,7 @@ use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::error::{KernelError, KernelResult};
+use crate::fs::path::{Path, PathBuf};
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -106,11 +107,21 @@ pub struct UserAccount {
     pub account_type: AccountType,
     pub login_method: LoginMethod,
     /// Home directory path.
-    pub home_dir: String,
+    ///
+    /// A [`PathBuf`], not a `String`: this names the root of everything the
+    /// account owns, and a filesystem name may hold any byte but `/` and NUL.
+    /// Held as text, a home directory whose bytes are not valid UTF-8 either
+    /// fails to round-trip or folds to a *different* directory — one that may
+    /// exist and belong to somebody else. See design-decisions.md §261.
+    pub home_dir: PathBuf,
     /// Default shell.
-    pub shell: String,
+    ///
+    /// [`PathBuf`] for the same reason as `home_dir`: this is the program the
+    /// login path executes, so a silently-substituted spelling is a
+    /// silently-substituted program.
+    pub shell: PathBuf,
     /// Avatar image path (empty = default).
-    pub avatar: String,
+    pub avatar: PathBuf,
     /// Whether auto-login is enabled for this user.
     pub auto_login: bool,
     /// Whether the account is enabled.
@@ -211,7 +222,9 @@ pub fn create_user(
     }
     let uid = NEXT_UID.fetch_add(1, Ordering::Relaxed);
     let ts = crate::hpet::elapsed_ns();
-    let home = alloc::format!("/home/{}", username);
+    // `join`, not `format!("/home/{}", …)`: it carries the username's bytes
+    // through unchanged and collapses the separator correctly.
+    let home = Path::new("/home").join(username);
     let login_method = if password.is_empty() {
         LoginMethod::NoPassword
     } else {
@@ -224,8 +237,8 @@ pub fn create_user(
         account_type,
         login_method,
         home_dir: home,
-        shell: String::from("/bin/kshell"),
-        avatar: String::new(),
+        shell: PathBuf::from("/bin/kshell"),
+        avatar: PathBuf::new(),
         auto_login: false,
         enabled: true,
         locked: false,
@@ -295,15 +308,66 @@ pub fn set_display_name(uid: u64, name: &str) -> KernelResult<()> {
     Ok(())
 }
 
-/// Set avatar path.
-pub fn set_avatar(uid: u64, path: &str) -> KernelResult<()> {
+/// Set avatar path. An empty path restores the default avatar.
+///
+/// Takes `impl AsRef<Path>` so a caller holding raw filesystem bytes can pass
+/// them straight through; `&str` still coerces.
+///
+/// # Errors
+/// [`KernelError::NotFound`] if no account has this UID.
+pub fn set_avatar(uid: u64, path: impl AsRef<Path>) -> KernelResult<()> {
+    let path = path.as_ref();
     let mut state = STATE.lock();
     let u = state
         .users
         .iter_mut()
         .find(|u| u.uid == uid)
         .ok_or(KernelError::NotFound)?;
-    u.avatar = String::from(path);
+    u.avatar = path.to_path_buf();
+    Ok(())
+}
+
+/// Set the account's home directory.
+///
+/// The path must be absolute. `Path::is_absolute` is false for the empty
+/// path, so one check rejects both an empty and a relative home — neither of
+/// which the login path could chdir into.
+///
+/// # Errors
+/// [`KernelError::InvalidArgument`] if `dir` is not absolute;
+/// [`KernelError::NotFound`] if no account has this UID.
+pub fn set_home_dir(uid: u64, dir: impl AsRef<Path>) -> KernelResult<()> {
+    let dir = dir.as_ref();
+    if !dir.is_absolute() {
+        return Err(KernelError::InvalidArgument);
+    }
+    let mut state = STATE.lock();
+    let u = state
+        .users
+        .iter_mut()
+        .find(|u| u.uid == uid)
+        .ok_or(KernelError::NotFound)?;
+    u.home_dir = dir.to_path_buf();
+    Ok(())
+}
+
+/// Set the account's login shell.
+///
+/// # Errors
+/// [`KernelError::InvalidArgument`] if `shell` is not absolute;
+/// [`KernelError::NotFound`] if no account has this UID.
+pub fn set_shell(uid: u64, shell: impl AsRef<Path>) -> KernelResult<()> {
+    let shell = shell.as_ref();
+    if !shell.is_absolute() {
+        return Err(KernelError::InvalidArgument);
+    }
+    let mut state = STATE.lock();
+    let u = state
+        .users
+        .iter_mut()
+        .find(|u| u.uid == uid)
+        .ok_or(KernelError::NotFound)?;
+    u.shell = shell.to_path_buf();
     Ok(())
 }
 
@@ -554,9 +618,9 @@ pub fn init_defaults() {
         display_name: String::from("System Administrator"),
         account_type: AccountType::System,
         login_method: LoginMethod::Password,
-        home_dir: String::from("/root"),
-        shell: String::from("/bin/kshell"),
-        avatar: String::new(),
+        home_dir: PathBuf::from("/root"),
+        shell: PathBuf::from("/bin/kshell"),
+        avatar: PathBuf::new(),
         auto_login: false,
         enabled: true,
         locked: false,
@@ -573,9 +637,9 @@ pub fn init_defaults() {
         display_name: String::from("Default User"),
         account_type: AccountType::Administrator,
         login_method: LoginMethod::Password,
-        home_dir: String::from("/home/user"),
-        shell: String::from("/bin/kshell"),
-        avatar: String::new(),
+        home_dir: PathBuf::from("/home/user"),
+        shell: PathBuf::from("/bin/kshell"),
+        avatar: PathBuf::new(),
         auto_login: true,
         enabled: true,
         locked: false,
@@ -634,71 +698,198 @@ pub fn clear_all() {
 // Self-tests
 // ---------------------------------------------------------------------------
 
+/// Fixture account name. Deliberately unusable as a real login: no operator
+/// creates an account called this, so a leftover from a crashed run is
+/// unambiguously ours to delete.
+const FIXTURE_USER: &str = "useracct-selftest";
+/// Fixture group name, same reasoning.
+const FIXTURE_GROUP: &str = "useracct-selftest-grp";
+
+/// Run the module's self-tests.
+///
+/// **This suite used to open and close with `clear_all()`.** That made it
+/// idempotent, and it made the opening `list_users()` assertion true by
+/// construction — by deleting every account, every group and every session on
+/// the machine. `useracct test` is a shell command; a user typing it expects
+/// to be told whether the subsystem works, not to be logged out of a machine
+/// whose accounts have all been erased. See `known-issues.md` →
+/// `TD-A-SELFTESTS-NOT-IDEMPOTENT`.
+///
+/// It is now baseline-relative and cleans up after itself, with one guard the
+/// other converted suites do not need: it **declines to run while anybody is
+/// logged in**. Authenticating deactivates every other session and moves
+/// `current_uid`, so unlike a table of rows this is state the suite cannot
+/// restore by deleting what it created.
+///
+/// # Errors
+/// Propagates any [`KernelError`] from the operations under test.
 pub fn self_test() -> KernelResult<()> {
     use crate::serial_println;
-    clear_all();
-    reset_stats();
 
-    // Test 1: Init defaults.
+    if !list_sessions().is_empty() {
+        serial_println!(
+            "  useracct: self-test skipped: {} session(s) live",
+            list_sessions().len()
+        );
+        return Ok(());
+    }
+
+    // Restored on the way out: a self-test must not spend the machine's login
+    // counter or leave a stale "current user" behind it.
+    let saved_current_uid = STATE.lock().current_uid;
+    let baseline_logins = LOGIN_COUNT.load(Ordering::Relaxed);
+
+    // A crashed earlier run can leave the fixtures behind. They are ours by
+    // name, so reclaiming them is correct — unlike clearing the whole table.
+    if let Ok(stale) = get_user_by_name(FIXTURE_USER) {
+        remove_user(stale.uid)?;
+    }
+    if let Some(stale) = list_groups().iter().find(|g| g.name == FIXTURE_GROUP) {
+        remove_group(stale.gid)?;
+    }
+
+    let baseline_users = list_users().len();
+    let baseline_groups = list_groups().len();
+
+    // Test 1: Init defaults, and that a second call does not duplicate them.
     serial_println!("  useracct::self_test 1: init defaults");
     init_defaults();
-    assert!(list_users().len() >= 2);
-    assert!(list_groups().len() >= 6);
+    assert!(!list_users().is_empty(), "init_defaults left no users");
+    assert!(!list_groups().is_empty(), "init_defaults left no groups");
+    let after_first = (list_users().len(), list_groups().len());
+    init_defaults();
+    assert_eq!(
+        (list_users().len(), list_groups().len()),
+        after_first,
+        "init_defaults must be idempotent, not additive"
+    );
+    let base_users = list_users().len();
+    let base_groups = list_groups().len();
 
     // Test 2: Create user.
     serial_println!("  useracct::self_test 2: create user");
-    let uid = create_user("alice", "Alice Smith", "pass123", AccountType::Standard)?;
-    let alice = get_user(uid)?;
-    assert_eq!(alice.username, "alice");
-    assert_eq!(alice.home_dir, "/home/alice");
+    let uid = create_user(
+        FIXTURE_USER,
+        "Self-Test Account",
+        "pass123",
+        AccountType::Standard,
+    )?;
+    let acct = get_user(uid)?;
+    assert_eq!(acct.username, FIXTURE_USER);
+    assert_eq!(
+        acct.home_dir.as_path(),
+        Path::new("/home/useracct-selftest"),
+        "home must be derived from the username"
+    );
 
     // Test 3: Authentication.
     serial_println!("  useracct::self_test 3: authentication");
-    let sid = authenticate("alice", "pass123")?;
-    assert!(current_user().is_some());
-    assert_eq!(current_user().unwrap().username, "alice");
-    let sessions = list_sessions();
-    assert!(!sessions.is_empty());
+    let sid = authenticate(FIXTURE_USER, "pass123")?;
+    assert_eq!(
+        current_user().map(|u| u.username).as_deref(),
+        Some(FIXTURE_USER)
+    );
+    assert!(!list_sessions().is_empty());
 
     // Test 4: Bad password.
     serial_println!("  useracct::self_test 4: bad password");
-    assert!(authenticate("alice", "wrongpass").is_err());
+    assert!(authenticate(FIXTURE_USER, "wrongpass").is_err());
 
     // Test 5: Logout.
     serial_println!("  useracct::self_test 5: logout");
     logout(sid)?;
-    assert!(list_sessions().is_empty());
+    assert!(
+        list_sessions().is_empty(),
+        "our session must be the last one"
+    );
 
     // Test 6: Groups.
     serial_println!("  useracct::self_test 6: groups");
-    let gid = create_group("developers", "Software developers", false)?;
+    let gid = create_group(FIXTURE_GROUP, "Self-test group", false)?;
     add_to_group(uid, gid)?;
-    let alice2 = get_user(uid)?;
-    assert!(alice2.groups.contains(&gid));
+    assert!(get_user(uid)?.groups.contains(&gid));
     remove_from_group(uid, gid)?;
     remove_group(gid)?;
+    assert_eq!(list_groups().len(), base_groups, "group table restored");
 
     // Test 7: Account management.
     serial_println!("  useracct::self_test 7: account management");
-    set_display_name(uid, "Alice B. Smith")?;
-    set_avatar(uid, "/avatars/alice.png")?;
+    set_display_name(uid, "Self-Test Account (renamed)")?;
+    set_avatar(uid, "/avatars/selftest.png")?;
     set_enabled(uid, false)?;
-    assert!(authenticate("alice", "pass123").is_err()); // Disabled.
+    assert!(
+        authenticate(FIXTURE_USER, "pass123").is_err(),
+        "a disabled account must not authenticate"
+    );
     set_enabled(uid, true)?;
     change_password(uid, "newpass")?;
-    let sid2 = authenticate("alice", "newpass")?;
+    let sid2 = authenticate(FIXTURE_USER, "newpass")?;
     assert!(current_user().is_some());
     logout(sid2)?;
+
+    // Test 8: non-UTF-8 home, shell and avatar (design-decisions.md §261).
+    // 0xFF and 0xFE are the two bytes that can never begin a UTF-8 sequence,
+    // so a path holding either is legal on disk and unrepresentable as text.
+    serial_println!("  useracct::self_test 8: non-UTF-8 home, shell and avatar");
+    set_home_dir(uid, Path::new(b"/home/us\xFFr"))?;
+    set_shell(uid, Path::new(b"/bin/k\xFEsh"))?;
+    set_avatar(uid, Path::new(b"/avatars/us\xFFr.png"))?;
+    let weird = get_user(uid)?;
+    assert_eq!(
+        weird.home_dir.as_bytes(),
+        &b"/home/us\xFFr"[..],
+        "home directory must round-trip byte-for-byte"
+    );
+    assert_eq!(
+        weird.shell.as_bytes(),
+        &b"/bin/k\xFEsh"[..],
+        "login shell must round-trip byte-for-byte"
+    );
+    assert_eq!(
+        weird.avatar.as_bytes(),
+        &b"/avatars/us\xFFr.png"[..],
+        "avatar path must round-trip byte-for-byte"
+    );
+    // The failure a String field hides: two homes differing only in a byte
+    // with no UTF-8 spelling both become U+FFFD, so the account silently
+    // points at a directory that is not the one that was set.
+    set_home_dir(uid, Path::new(b"/home/us\xFEr"))?;
+    assert_ne!(
+        get_user(uid)?.home_dir.as_path(),
+        Path::new(b"/home/us\xFFr"),
+        "0xFE and 0xFF homes must not fold together"
+    );
+    // Neither an empty nor a relative path is a directory login can enter.
+    assert!(set_home_dir(uid, "").is_err(), "empty home rejected");
+    assert!(
+        set_home_dir(uid, "home/relative").is_err(),
+        "relative home rejected"
+    );
+    assert!(set_shell(uid, "bin/sh").is_err(), "relative shell rejected");
+    // An empty avatar is meaningful, though: it selects the default.
+    set_avatar(uid, "")?;
+    assert!(get_user(uid)?.avatar.is_empty(), "empty avatar clears");
+
+    // Test 9: Cleanup and stats.
+    serial_println!("  useracct::self_test 9: cleanup and stats");
     remove_user(uid)?;
-
     let (uc, gc, sc, logins) = stats();
-    assert!(uc >= 2);
-    assert!(gc >= 6);
-    assert_eq!(sc, 0);
-    assert!(logins > 0);
+    assert_eq!(uc, base_users, "user table restored");
+    assert_eq!(gc, base_groups, "group table restored");
+    assert_eq!(sc, 0, "no session left behind");
+    assert!(
+        logins > baseline_logins,
+        "the three successful logins must have been counted"
+    );
+    assert!(
+        baseline_users <= base_users && baseline_groups <= base_groups,
+        "init_defaults must not remove pre-existing users or groups"
+    );
 
-    clear_all();
-    reset_stats();
-    serial_println!("  useracct: all tests passed");
+    // Hand the machine back exactly as it was found.
+    LOGIN_COUNT.store(baseline_logins, Ordering::Relaxed);
+    STATE.lock().current_uid = saved_current_uid;
+
+    serial_println!("  useracct: all 9 tests passed");
     Ok(())
 }

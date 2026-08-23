@@ -3077,6 +3077,74 @@ pub fn ctty_set_fg_pgrp(pid: ProcessId, pgid: ProcessId) -> KernelResult<()> {
     Ok(())
 }
 
+/// Set the foreground process group of terminal `tty`, whoever holds it.
+///
+/// The counterpart of [`ctty_fg_pgrp`] on the writing side, and it exists for
+/// the same reason: a caller holding a **pty master** is operating on a
+/// terminal that is emphatically not its own controlling terminal — it is the
+/// other side of the wire — so [`ctty_set_fg_pgrp`], which resolves the
+/// session from the *caller*, cannot express the operation at all.
+///
+/// # The validation follows the terminal, not the caller
+///
+/// POSIX requires the named group to be in the session **associated with the
+/// terminal**. For [`ctty_set_fg_pgrp`] those are the same session, which is
+/// why it can get away with reading it off the caller; here they are
+/// different by construction. Validating against the caller's session instead
+/// would be both too strict and too lax at once: it would reject every group
+/// actually running on the pty (they are in the slave's session, not the
+/// emulator's), and it would accept groups from the emulator's own unrelated
+/// session — which is the terminal-stealing case the rule exists to prevent,
+/// merely pointed the other way.
+///
+/// Authority to name the terminal at all is the caller's pty handle, checked
+/// by the syscall layer before this is reached. This function's job is only
+/// the POSIX group rule.
+///
+/// # Errors
+/// - [`KernelError::InvalidArgument`] if `pgid` is 0.
+/// - [`KernelError::NotSupported`] (ENOTTY) if no session holds `tty` — a pty
+///   whose slave has not yet run `TIOCSCTTY` has no foreground group to set,
+///   and inventing one would be a value nothing consults.
+/// - [`KernelError::PermissionDenied`] if `pgid` names no live process group
+///   in the session holding `tty`.
+pub fn ctty_set_fg_pgrp_on(tty: u32, pgid: ProcessId) -> KernelResult<()> {
+    if pgid == 0 {
+        return Err(KernelError::InvalidArgument);
+    }
+
+    // Three short critical sections rather than one, because the two locks may
+    // never be held together (see the note on `CTTY_FG_PGRP`) and this needs
+    // both: the ctty map to learn *which* session to validate against, then
+    // the process table to do the validating, then the ctty map again to
+    // write. The final lookup is by `tty` again rather than by the `sid` read
+    // in step one, so a session that released the terminal in between gets
+    // ENOTTY instead of having its stale slot written.
+    let sid = {
+        let map = CTTY_FG_PGRP.lock();
+        map.iter().find(|(_, s)| s.tty == tty).map(|(sid, _)| *sid)
+    }
+    .ok_or(KernelError::NotSupported)?;
+
+    let group_ok = {
+        let table = PROCESS_TABLE.lock();
+        table
+            .values()
+            .any(|p| p.pgid == pgid && p.sid == sid && p.state != ProcessState::Zombie)
+    };
+    if !group_ok {
+        return Err(KernelError::PermissionDenied);
+    }
+
+    let mut map = CTTY_FG_PGRP.lock();
+    let slot = map
+        .values_mut()
+        .find(|s| s.tty == tty)
+        .ok_or(KernelError::NotSupported)?;
+    slot.fg_pgrp = pgid;
+    Ok(())
+}
+
 /// Terminal `tty`'s foreground process group, whoever owns it — or `None` if
 /// no session currently holds that terminal.
 ///
@@ -8105,6 +8173,56 @@ fn test_controlling_terminal() -> KernelResult<()> {
             &[shell, job, stranger],
         );
     }
+
+    // (5b) The terminal-keyed setter, which is what a pty *master* holder uses:
+    //      it has no controlling terminal of its own to resolve, so it names
+    //      the device. What is being pinned here is that the POSIX group rule
+    //      follows the **terminal's** session and not any caller's, because
+    //      that is the one thing that cannot be got right by reusing
+    //      `ctty_set_fg_pgrp` with a different pid.
+    ctty_set_fg_pgrp_on(crate::tty::CONSOLE, shell)?;
+    if ctty_fg_pgrp(crate::tty::CONSOLE) != Some(shell) || ctty_get_fg_pgrp(shell) != Ok(shell) {
+        return fail(
+            "a terminal-keyed handoff did not reach the session's own slot",
+            &[shell, job, stranger],
+        );
+    }
+    // The stranger's group is live, and it would be accepted by a check that
+    // asked "is this group real?" — but it belongs to a different session from
+    // the one holding the console, which is the terminal-theft case pointed
+    // the other way round.
+    if ctty_set_fg_pgrp_on(crate::tty::CONSOLE, stranger) != Err(KernelError::PermissionDenied) {
+        return fail(
+            "a terminal was handed to a group outside its own session",
+            &[shell, job, stranger],
+        );
+    }
+    if ctty_set_fg_pgrp_on(crate::tty::CONSOLE, 0) != Err(KernelError::InvalidArgument) {
+        return fail(
+            "terminal-keyed tcsetpgrp(0) should be EINVAL",
+            &[shell, job, stranger],
+        );
+    }
+    // A terminal no session holds has no foreground group to read or write.
+    // This is the live case for a freshly created pty whose slave has not run
+    // TIOCSCTTY yet, and ENOTTY is what its master must be told — not 0, which
+    // the caller could mistake for a pgid and try to signal.
+    const UNHELD_TTY: u32 = 9_999;
+    if ctty_fg_pgrp(UNHELD_TTY).is_some() {
+        return fail(
+            "a terminal nobody holds reported a foreground group",
+            &[shell, job, stranger],
+        );
+    }
+    if ctty_set_fg_pgrp_on(UNHELD_TTY, shell) != Err(KernelError::NotSupported) {
+        return fail(
+            "setting the foreground group of an unheld terminal should be ENOTTY",
+            &[shell, job, stranger],
+        );
+    }
+    // Put the terminal back where step (5) left it so the steps below still
+    // describe the state they were written against.
+    ctty_set_fg_pgrp(shell, job)?;
 
     // (6) A zombie group member does not keep the group eligible. Kill the
     //     job's group off and confirm the terminal cannot be handed to it.

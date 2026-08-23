@@ -177,7 +177,9 @@ impl Guid {
         let mut state = seed;
         let mut bytes = [0u8; 16];
         for b in &mut bytes {
-            state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             *b = (state >> 33) as u8;
         }
         // Set version 4 and variant bits
@@ -313,9 +315,7 @@ fn name_to_guid(name: &str) -> Option<Guid> {
         "fat32" | "ntfs" | "basic data" | "msftdata" => {
             Guid::from_str_hex("EBD0A0A2-B9E5-4433-87C0-68B6B72699C7")
         }
-        "efi" | "esp" | "efi system" => {
-            Guid::from_str_hex("C12A7328-F81F-11D2-BA4B-00A0C93EC93B")
-        }
+        "efi" | "esp" | "efi system" => Guid::from_str_hex("C12A7328-F81F-11D2-BA4B-00A0C93EC93B"),
         "linux" | "ext4" | "ext3" | "ext2" | "xfs" | "btrfs" => {
             Guid::from_str_hex("0FC63DAF-8483-4772-8E79-3D69D8477DE4")
         }
@@ -324,9 +324,7 @@ fn name_to_guid(name: &str) -> Option<Guid> {
         }
         "lvm" => Guid::from_str_hex("E6D6D379-F507-44C2-A23C-238F2A3DF928"),
         "raid" => Guid::from_str_hex("A19D880F-05FC-4D3B-A006-743F0F84911E"),
-        "bios_grub" | "bios boot" => {
-            Guid::from_str_hex("21686148-6449-6E6F-744E-656564454649")
-        }
+        "bios_grub" | "bios boot" => Guid::from_str_hex("21686148-6449-6E6F-744E-656564454649"),
         "msftres" | "microsoft reserved" => {
             Guid::from_str_hex("E3C9E316-0B5C-4DB8-817D-F92DF00215AE")
         }
@@ -358,44 +356,158 @@ struct MbrTypeEntry {
 }
 
 const MBR_TYPES: &[MbrTypeEntry] = &[
-    MbrTypeEntry { code: 0x00, name: "Empty" },
-    MbrTypeEntry { code: 0x01, name: "FAT12" },
-    MbrTypeEntry { code: 0x04, name: "FAT16 <32M" },
-    MbrTypeEntry { code: 0x05, name: "Extended" },
-    MbrTypeEntry { code: 0x06, name: "FAT16" },
-    MbrTypeEntry { code: 0x07, name: "HPFS/NTFS" },
-    MbrTypeEntry { code: 0x0B, name: "W95 FAT32" },
-    MbrTypeEntry { code: 0x0C, name: "W95 FAT32 (LBA)" },
-    MbrTypeEntry { code: 0x0E, name: "W95 FAT16 (LBA)" },
-    MbrTypeEntry { code: 0x0F, name: "W95 Ext'd (LBA)" },
-    MbrTypeEntry { code: 0x11, name: "Hidden FAT12" },
-    MbrTypeEntry { code: 0x14, name: "Hidden FAT16 <32M" },
-    MbrTypeEntry { code: 0x16, name: "Hidden FAT16" },
-    MbrTypeEntry { code: 0x17, name: "Hidden HPFS/NTFS" },
-    MbrTypeEntry { code: 0x1B, name: "Hidden W95 FAT32" },
-    MbrTypeEntry { code: 0x1C, name: "Hidden W95 FAT32 (LBA)" },
-    MbrTypeEntry { code: 0x1E, name: "Hidden W95 FAT16 (LBA)" },
-    MbrTypeEntry { code: 0x27, name: "Hidden NTFS WinRE" },
-    MbrTypeEntry { code: 0x39, name: "Plan 9" },
-    MbrTypeEntry { code: 0x3C, name: "PartitionMagic" },
-    MbrTypeEntry { code: 0x42, name: "SFS / LDM" },
-    MbrTypeEntry { code: 0x7F, name: "Chromium OS kernel" },
-    MbrTypeEntry { code: 0x82, name: "Linux swap" },
-    MbrTypeEntry { code: 0x83, name: "Linux" },
-    MbrTypeEntry { code: 0x85, name: "Linux extended" },
-    MbrTypeEntry { code: 0x8E, name: "Linux LVM" },
-    MbrTypeEntry { code: 0xA5, name: "FreeBSD" },
-    MbrTypeEntry { code: 0xA6, name: "OpenBSD" },
-    MbrTypeEntry { code: 0xA8, name: "Darwin UFS" },
-    MbrTypeEntry { code: 0xAB, name: "Darwin boot" },
-    MbrTypeEntry { code: 0xAF, name: "Apple HFS+" },
-    MbrTypeEntry { code: 0xBE, name: "Solaris boot" },
-    MbrTypeEntry { code: 0xBF, name: "Solaris" },
-    MbrTypeEntry { code: 0xEE, name: "GPT protective" },
-    MbrTypeEntry { code: 0xEF, name: "EFI System" },
-    MbrTypeEntry { code: 0xFB, name: "VMware VMFS" },
-    MbrTypeEntry { code: 0xFC, name: "VMware swap" },
-    MbrTypeEntry { code: 0xFD, name: "Linux RAID" },
+    MbrTypeEntry {
+        code: 0x00,
+        name: "Empty",
+    },
+    MbrTypeEntry {
+        code: 0x01,
+        name: "FAT12",
+    },
+    MbrTypeEntry {
+        code: 0x04,
+        name: "FAT16 <32M",
+    },
+    MbrTypeEntry {
+        code: 0x05,
+        name: "Extended",
+    },
+    MbrTypeEntry {
+        code: 0x06,
+        name: "FAT16",
+    },
+    MbrTypeEntry {
+        code: 0x07,
+        name: "HPFS/NTFS",
+    },
+    MbrTypeEntry {
+        code: 0x0B,
+        name: "W95 FAT32",
+    },
+    MbrTypeEntry {
+        code: 0x0C,
+        name: "W95 FAT32 (LBA)",
+    },
+    MbrTypeEntry {
+        code: 0x0E,
+        name: "W95 FAT16 (LBA)",
+    },
+    MbrTypeEntry {
+        code: 0x0F,
+        name: "W95 Ext'd (LBA)",
+    },
+    MbrTypeEntry {
+        code: 0x11,
+        name: "Hidden FAT12",
+    },
+    MbrTypeEntry {
+        code: 0x14,
+        name: "Hidden FAT16 <32M",
+    },
+    MbrTypeEntry {
+        code: 0x16,
+        name: "Hidden FAT16",
+    },
+    MbrTypeEntry {
+        code: 0x17,
+        name: "Hidden HPFS/NTFS",
+    },
+    MbrTypeEntry {
+        code: 0x1B,
+        name: "Hidden W95 FAT32",
+    },
+    MbrTypeEntry {
+        code: 0x1C,
+        name: "Hidden W95 FAT32 (LBA)",
+    },
+    MbrTypeEntry {
+        code: 0x1E,
+        name: "Hidden W95 FAT16 (LBA)",
+    },
+    MbrTypeEntry {
+        code: 0x27,
+        name: "Hidden NTFS WinRE",
+    },
+    MbrTypeEntry {
+        code: 0x39,
+        name: "Plan 9",
+    },
+    MbrTypeEntry {
+        code: 0x3C,
+        name: "PartitionMagic",
+    },
+    MbrTypeEntry {
+        code: 0x42,
+        name: "SFS / LDM",
+    },
+    MbrTypeEntry {
+        code: 0x7F,
+        name: "Chromium OS kernel",
+    },
+    MbrTypeEntry {
+        code: 0x82,
+        name: "Linux swap",
+    },
+    MbrTypeEntry {
+        code: 0x83,
+        name: "Linux",
+    },
+    MbrTypeEntry {
+        code: 0x85,
+        name: "Linux extended",
+    },
+    MbrTypeEntry {
+        code: 0x8E,
+        name: "Linux LVM",
+    },
+    MbrTypeEntry {
+        code: 0xA5,
+        name: "FreeBSD",
+    },
+    MbrTypeEntry {
+        code: 0xA6,
+        name: "OpenBSD",
+    },
+    MbrTypeEntry {
+        code: 0xA8,
+        name: "Darwin UFS",
+    },
+    MbrTypeEntry {
+        code: 0xAB,
+        name: "Darwin boot",
+    },
+    MbrTypeEntry {
+        code: 0xAF,
+        name: "Apple HFS+",
+    },
+    MbrTypeEntry {
+        code: 0xBE,
+        name: "Solaris boot",
+    },
+    MbrTypeEntry {
+        code: 0xBF,
+        name: "Solaris",
+    },
+    MbrTypeEntry {
+        code: 0xEE,
+        name: "GPT protective",
+    },
+    MbrTypeEntry {
+        code: 0xEF,
+        name: "EFI System",
+    },
+    MbrTypeEntry {
+        code: 0xFB,
+        name: "VMware VMFS",
+    },
+    MbrTypeEntry {
+        code: 0xFC,
+        name: "VMware swap",
+    },
+    MbrTypeEntry {
+        code: 0xFD,
+        name: "Linux RAID",
+    },
 ];
 
 fn mbr_type_name(code: u8) -> &'static str {
@@ -694,16 +806,16 @@ impl PartitionFlag {
     /// GPT attribute bit for this flag
     fn gpt_attribute_bit(&self) -> Option<u64> {
         match self {
-            PartitionFlag::Boot => Some(1 << 2),  // Legacy BIOS bootable
-            PartitionFlag::Esp => None,            // Use type GUID instead
+            PartitionFlag::Boot => Some(1 << 2), // Legacy BIOS bootable
+            PartitionFlag::Esp => None,          // Use type GUID instead
             PartitionFlag::Hidden => Some(1 << 62),
-            PartitionFlag::MsftData => None,       // Type GUID
-            PartitionFlag::MsftRes => None,        // Type GUID
-            PartitionFlag::BiosGrub => None,       // Type GUID
-            PartitionFlag::Swap => None,           // Type GUID
-            PartitionFlag::Raid => None,           // Type GUID
-            PartitionFlag::Lvm => None,            // Type GUID
-            _ => Some(0),                          // Not applicable
+            PartitionFlag::MsftData => None, // Type GUID
+            PartitionFlag::MsftRes => None,  // Type GUID
+            PartitionFlag::BiosGrub => None, // Type GUID
+            PartitionFlag::Swap => None,     // Type GUID
+            PartitionFlag::Raid => None,     // Type GUID
+            PartitionFlag::Lvm => None,      // Type GUID
+            _ => Some(0),                    // Not applicable
         }
     }
 
@@ -808,8 +920,7 @@ impl GptHeader {
 
         let header_crc_stored = u32::from_le_bytes([data[16], data[17], data[18], data[19]]);
         // Verify CRC: zero out the CRC field and recalculate
-        let header_size =
-            u32::from_le_bytes([data[12], data[13], data[14], data[15]]) as usize;
+        let header_size = u32::from_le_bytes([data[12], data[13], data[14], data[15]]) as usize;
         if header_size > data.len() || header_size < GPT_HEADER_SIZE as usize {
             return None;
         }
@@ -995,62 +1106,56 @@ impl GptEntry {
         match flag {
             PartitionFlag::Esp => {
                 if on {
-                    self.type_guid =
-                        Guid::from_str_hex("C12A7328-F81F-11D2-BA4B-00A0C93EC93B")
-                            .unwrap_or(Guid::ZERO);
+                    self.type_guid = Guid::from_str_hex("C12A7328-F81F-11D2-BA4B-00A0C93EC93B")
+                        .unwrap_or(Guid::ZERO);
                 }
             }
             PartitionFlag::BiosGrub => {
                 if on {
-                    self.type_guid =
-                        Guid::from_str_hex("21686148-6449-6E6F-744E-656564454649")
-                            .unwrap_or(Guid::ZERO);
+                    self.type_guid = Guid::from_str_hex("21686148-6449-6E6F-744E-656564454649")
+                        .unwrap_or(Guid::ZERO);
                 }
             }
             PartitionFlag::Swap => {
                 if on {
-                    self.type_guid =
-                        Guid::from_str_hex("0657FD6D-A4AB-43C4-84E5-0933C84B4F4F")
-                            .unwrap_or(Guid::ZERO);
+                    self.type_guid = Guid::from_str_hex("0657FD6D-A4AB-43C4-84E5-0933C84B4F4F")
+                        .unwrap_or(Guid::ZERO);
                 }
             }
             PartitionFlag::Raid => {
                 if on {
-                    self.type_guid =
-                        Guid::from_str_hex("A19D880F-05FC-4D3B-A006-743F0F84911E")
-                            .unwrap_or(Guid::ZERO);
+                    self.type_guid = Guid::from_str_hex("A19D880F-05FC-4D3B-A006-743F0F84911E")
+                        .unwrap_or(Guid::ZERO);
                 }
             }
             PartitionFlag::Lvm => {
                 if on {
-                    self.type_guid =
-                        Guid::from_str_hex("E6D6D379-F507-44C2-A23C-238F2A3DF928")
-                            .unwrap_or(Guid::ZERO);
+                    self.type_guid = Guid::from_str_hex("E6D6D379-F507-44C2-A23C-238F2A3DF928")
+                        .unwrap_or(Guid::ZERO);
                 }
             }
             PartitionFlag::MsftData => {
                 if on {
-                    self.type_guid =
-                        Guid::from_str_hex("EBD0A0A2-B9E5-4433-87C0-68B6B72699C7")
-                            .unwrap_or(Guid::ZERO);
+                    self.type_guid = Guid::from_str_hex("EBD0A0A2-B9E5-4433-87C0-68B6B72699C7")
+                        .unwrap_or(Guid::ZERO);
                 }
             }
             PartitionFlag::MsftRes => {
                 if on {
-                    self.type_guid =
-                        Guid::from_str_hex("E3C9E316-0B5C-4DB8-817D-F92DF00215AE")
-                            .unwrap_or(Guid::ZERO);
+                    self.type_guid = Guid::from_str_hex("E3C9E316-0B5C-4DB8-817D-F92DF00215AE")
+                        .unwrap_or(Guid::ZERO);
                 }
             }
             _ => {
                 if let Some(bit) = flag.gpt_attribute_bit()
-                    && bit != 0 {
-                        if on {
-                            self.attributes |= bit;
-                        } else {
-                            self.attributes &= !bit;
-                        }
+                    && bit != 0
+                {
+                    if on {
+                        self.attributes |= bit;
+                    } else {
+                        self.attributes &= !bit;
                     }
+                }
             }
         }
     }
@@ -1072,7 +1177,7 @@ impl GptEntry {
 
 #[derive(Clone, Debug)]
 struct MbrPartitionEntry {
-    status: u8,           // 0x80 = bootable, 0x00 = inactive
+    status: u8, // 0x80 = bootable, 0x00 = inactive
     chs_start: [u8; 3],
     partition_type: u8,
     chs_end: [u8; 3],
@@ -1219,8 +1324,8 @@ impl Mbr {
         ];
         for i in 0..4 {
             let offset = MBR_PARTITION_OFFSET + i * MBR_PARTITION_ENTRY_SIZE;
-            partitions[i] =
-                MbrPartitionEntry::parse(&data[offset..offset + 16]).unwrap_or(MbrPartitionEntry::new());
+            partitions[i] = MbrPartitionEntry::parse(&data[offset..offset + 16])
+                .unwrap_or(MbrPartitionEntry::new());
         }
 
         Some(Mbr {
@@ -1394,30 +1499,31 @@ impl DiskInfo {
                 break;
             }
             if let Some(entry) = GptEntry::parse(&data[offset..])
-                && !entry.is_empty() {
-                    let type_name = guid_to_name(&entry.type_guid).to_string();
-                    let flags: Vec<PartitionFlag> = PartitionFlag::all()
-                        .iter()
-                        .filter(|f| entry.has_flag(**f))
-                        .copied()
-                        .collect();
-                    disk.partitions.push(Partition {
-                        number: part_num,
-                        first_lba: entry.first_lba,
-                        last_lba: entry.last_lba,
-                        size_sectors: entry.size_sectors(),
-                        name: entry.name.clone(),
-                        type_name,
-                        flags,
-                        type_guid: Some(entry.type_guid),
-                        unique_guid: Some(entry.unique_guid),
-                        attributes: entry.attributes,
-                        mbr_type: None,
-                        mbr_role: None,
-                        bootable: false,
-                    });
-                    part_num += 1;
-                }
+                && !entry.is_empty()
+            {
+                let type_name = guid_to_name(&entry.type_guid).to_string();
+                let flags: Vec<PartitionFlag> = PartitionFlag::all()
+                    .iter()
+                    .filter(|f| entry.has_flag(**f))
+                    .copied()
+                    .collect();
+                disk.partitions.push(Partition {
+                    number: part_num,
+                    first_lba: entry.first_lba,
+                    last_lba: entry.last_lba,
+                    size_sectors: entry.size_sectors(),
+                    name: entry.name.clone(),
+                    type_name,
+                    flags,
+                    type_guid: Some(entry.type_guid),
+                    unique_guid: Some(entry.unique_guid),
+                    attributes: entry.attributes,
+                    mbr_type: None,
+                    mbr_role: None,
+                    bootable: false,
+                });
+                part_num += 1;
+            }
         }
 
         disk.gpt_header = Some(header);
@@ -1687,10 +1793,9 @@ impl DiskEditor {
             }
         }
 
-        let type_guid = name_to_guid(fs_type)
-            .unwrap_or_else(|| {
-                Guid::from_str_hex("0FC63DAF-8483-4772-8E79-3D69D8477DE4").unwrap_or(Guid::ZERO)
-            });
+        let type_guid = name_to_guid(fs_type).unwrap_or_else(|| {
+            Guid::from_str_hex("0FC63DAF-8483-4772-8E79-3D69D8477DE4").unwrap_or(Guid::ZERO)
+        });
         let part_num = self.disk.partitions.len() as u32 + 1;
         let unique_guid = Guid::generate(start_sector ^ end_sector ^ part_num as u64);
 
@@ -1759,7 +1864,8 @@ impl DiskEditor {
             .partitions
             .iter()
             .filter(|p| {
-                p.mbr_role == Some(MbrPartRole::Primary) || p.mbr_role == Some(MbrPartRole::Extended)
+                p.mbr_role == Some(MbrPartRole::Primary)
+                    || p.mbr_role == Some(MbrPartRole::Extended)
             })
             .count();
 
@@ -1814,21 +1920,22 @@ impl DiskEditor {
 
         // Update MBR if primary/extended
         if matches!(role, MbrPartRole::Primary | MbrPartRole::Extended)
-            && let Some(ref mut mbr) = self.disk.mbr {
-                for i in 0..4 {
-                    if mbr.partitions[i].is_empty() {
-                        mbr.partitions[i] = MbrPartitionEntry {
-                            status: 0,
-                            chs_start: MbrPartitionEntry::lba_to_chs(start_sector as u32),
-                            partition_type: type_code,
-                            chs_end: MbrPartitionEntry::lba_to_chs(end_sector as u32),
-                            lba_start: start_sector as u32,
-                            lba_size: size_sectors as u32,
-                        };
-                        break;
-                    }
+            && let Some(ref mut mbr) = self.disk.mbr
+        {
+            for i in 0..4 {
+                if mbr.partitions[i].is_empty() {
+                    mbr.partitions[i] = MbrPartitionEntry {
+                        status: 0,
+                        chs_start: MbrPartitionEntry::lba_to_chs(start_sector as u32),
+                        partition_type: type_code,
+                        chs_end: MbrPartitionEntry::lba_to_chs(end_sector as u32),
+                        lba_start: start_sector as u32,
+                        lba_size: size_sectors as u32,
+                    };
+                    break;
                 }
             }
+        }
 
         self.modified = true;
         Ok(part_num)
@@ -2046,9 +2153,17 @@ impl DiskEditor {
         output.push_str(&format!(
             "Disk {}: {}\n",
             disk.path,
-            format_size(disk.size_bytes, self.unit, disk.size_bytes, disk.sector_size)
+            format_size(
+                disk.size_bytes,
+                self.unit,
+                disk.size_bytes,
+                disk.sector_size
+            )
         ));
-        output.push_str(&format!("Sector size (logical/physical): {}B/{}B\n", disk.sector_size, disk.sector_size));
+        output.push_str(&format!(
+            "Sector size (logical/physical): {}B/{}B\n",
+            disk.sector_size, disk.sector_size
+        ));
         output.push_str(&format!(
             "Partition Table: {}\n",
             disk.table_type
@@ -2068,7 +2183,9 @@ impl DiskEditor {
                 output.push_str("Number  Start       End         Size        File system  Name                  Flags\n");
             }
             _ => {
-                output.push_str("Number  Start   End     Size    File system  Name                  Flags\n");
+                output.push_str(
+                    "Number  Start   End     Size    File system  Name                  Flags\n",
+                );
             }
         }
 
@@ -2162,21 +2279,18 @@ impl DiskEditor {
         }
 
         // Partition entries
-        let mut entries_data =
-            vec![0u8; GPT_MAX_ENTRIES as usize * GPT_ENTRY_SIZE as usize];
+        let mut entries_data = vec![0u8; GPT_MAX_ENTRIES as usize * GPT_ENTRY_SIZE as usize];
         for (i, entry) in self.gpt_entries.iter().enumerate() {
             let offset = i * GPT_ENTRY_SIZE as usize;
             let serialized = entry.serialize();
-            entries_data[offset..offset + GPT_ENTRY_SIZE as usize]
-                .copy_from_slice(&serialized);
+            entries_data[offset..offset + GPT_ENTRY_SIZE as usize].copy_from_slice(&serialized);
         }
         let entries_crc = crc32(&entries_data);
 
         // Write entries at LBA 2
         let entry_offset = 2 * SECTOR_SIZE as usize;
         if data.len() >= entry_offset + entries_data.len() {
-            data[entry_offset..entry_offset + entries_data.len()]
-                .copy_from_slice(&entries_data);
+            data[entry_offset..entry_offset + entries_data.len()].copy_from_slice(&entries_data);
         }
 
         // GPT Header
@@ -2209,19 +2323,56 @@ impl DiskEditor {
 
 #[derive(Debug)]
 enum PartedCommand {
-    Print { list_all: bool, free: bool },
-    MkLabel { label_type: String },
-    MkPart { part_type: String, fs_type: String, start: String, end: String },
-    Rm { number: u32 },
-    Name { number: u32, name: String },
-    Set { number: u32, flag: String, state: String },
-    Toggle { number: u32, flag: String },
-    ResizePart { number: u32, end: String },
-    Move { number: u32, start: String },
-    Unit { unit: String },
-    AlignCheck { align_type: String, number: u32 },
-    Select { device: String },
-    Help { command: Option<String> },
+    Print {
+        list_all: bool,
+        free: bool,
+    },
+    MkLabel {
+        label_type: String,
+    },
+    MkPart {
+        part_type: String,
+        fs_type: String,
+        start: String,
+        end: String,
+    },
+    Rm {
+        number: u32,
+    },
+    Name {
+        number: u32,
+        name: String,
+    },
+    Set {
+        number: u32,
+        flag: String,
+        state: String,
+    },
+    Toggle {
+        number: u32,
+        flag: String,
+    },
+    ResizePart {
+        number: u32,
+        end: String,
+    },
+    Move {
+        number: u32,
+        start: String,
+    },
+    Unit {
+        unit: String,
+    },
+    AlignCheck {
+        align_type: String,
+        number: u32,
+    },
+    Select {
+        device: String,
+    },
+    Help {
+        command: Option<String>,
+    },
     Version,
     Quit,
 }
@@ -2292,12 +2443,12 @@ fn parse_parted_command(args: &[String]) -> Option<PartedCommand> {
             Some(PartedCommand::Unit { unit })
         }
         "align-check" => {
-            let align_type = args.get(1).cloned().unwrap_or_else(|| "optimal".to_string());
+            let align_type = args
+                .get(1)
+                .cloned()
+                .unwrap_or_else(|| "optimal".to_string());
             let number: u32 = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(0);
-            Some(PartedCommand::AlignCheck {
-                align_type,
-                number,
-            })
+            Some(PartedCommand::AlignCheck { align_type, number })
         }
         "select" => {
             let device = args.get(1).cloned().unwrap_or_default();
@@ -2327,60 +2478,41 @@ fn print_help(command: Option<&str>) -> String {
              free   Show free space as well\n"
                 .to_string()
         }
-        Some("mklabel") | Some("mktable") => {
-            "mklabel LABEL-TYPE  Create a new partition table\n\
+        Some("mklabel") | Some("mktable") => "mklabel LABEL-TYPE  Create a new partition table\n\
              \n\
              Label types: gpt, msdos (mbr)\n"
-                .to_string()
-        }
-        Some("mkpart") => {
-            "mkpart PART-TYPE [FS-TYPE] START END\n\
+            .to_string(),
+        Some("mkpart") => "mkpart PART-TYPE [FS-TYPE] START END\n\
              \n\
              Create a new partition.\n\
              For MBR: PART-TYPE is primary, extended, or logical\n\
              For GPT: PART-TYPE is the partition name\n\
              FS-TYPE: ext4, fat32, ntfs, linux-swap, etc.\n\
              START/END: size with unit (e.g., 1MiB, 50%, 2048s)\n"
-                .to_string()
-        }
-        Some("rm") | Some("remove") => {
-            "rm NUMBER  Remove partition NUMBER\n".to_string()
-        }
+            .to_string(),
+        Some("rm") | Some("remove") => "rm NUMBER  Remove partition NUMBER\n".to_string(),
         Some("name") => {
             "name NUMBER NAME  Set the name of partition NUMBER to NAME (GPT only)\n".to_string()
         }
-        Some("set") => {
-            "set NUMBER FLAG STATE  Set FLAG on partition NUMBER to STATE (on/off)\n\
+        Some("set") => "set NUMBER FLAG STATE  Set FLAG on partition NUMBER to STATE (on/off)\n\
              \n\
              Flags: boot, esp, swap, raid, lvm, hidden, msftdata, msftres, bios_grub\n"
-                .to_string()
-        }
-        Some("toggle") => {
-            "toggle NUMBER FLAG  Toggle FLAG on partition NUMBER\n".to_string()
-        }
+            .to_string(),
+        Some("toggle") => "toggle NUMBER FLAG  Toggle FLAG on partition NUMBER\n".to_string(),
         Some("resizepart") => {
             "resizepart NUMBER END  Resize partition NUMBER to end at END\n".to_string()
         }
-        Some("move") => {
-            "move NUMBER START  Move partition NUMBER to start at START\n".to_string()
-        }
-        Some("unit") => {
-            "unit UNIT  Set the display unit\n\
+        Some("move") => "move NUMBER START  Move partition NUMBER to start at START\n".to_string(),
+        Some("unit") => "unit UNIT  Set the display unit\n\
              \n\
              Units: s (sectors), B (bytes), kB, MB, GB, TB, % (percent), compact\n"
-                .to_string()
-        }
-        Some("align-check") => {
-            "align-check TYPE NUMBER  Check partition alignment\n\
+            .to_string(),
+        Some("align-check") => "align-check TYPE NUMBER  Check partition alignment\n\
              \n\
              Types: minimal, optimal\n"
-                .to_string()
-        }
-        Some("select") => {
-            "select DEVICE  Select a different disk device\n".to_string()
-        }
-        _ => {
-            "Commands:\n\
+            .to_string(),
+        Some("select") => "select DEVICE  Select a different disk device\n".to_string(),
+        _ => "Commands:\n\
              align-check TYPE N                    check partition N alignment\n\
              help [COMMAND]                        show help\n\
              mklabel,mktable LABEL-TYPE            create partition table\n\
@@ -2396,8 +2528,7 @@ fn print_help(command: Option<&str>) -> String {
              toggle NUMBER FLAG                    toggle partition flag\n\
              unit UNIT                             set display unit\n\
              version                               show version\n"
-                .to_string()
-        }
+            .to_string(),
     }
 }
 
@@ -2473,19 +2604,17 @@ fn execute_parted_command(editor: &mut DiskEditor, cmd: &PartedCommand) -> i32 {
             }
             0
         }
-        PartedCommand::MkLabel { label_type } => {
-            match TableType::from_str(label_type) {
-                Some(tt) => {
-                    editor.create_label(tt);
-                    println!("Created {} partition table on {}", tt, editor.disk.path);
-                    0
-                }
-                None => {
-                    eprintln!("Error: Unknown label type '{}'", label_type);
-                    1
-                }
+        PartedCommand::MkLabel { label_type } => match TableType::from_str(label_type) {
+            Some(tt) => {
+                editor.create_label(tt);
+                println!("Created {} partition table on {}", tt, editor.disk.path);
+                0
             }
-        }
+            None => {
+                eprintln!("Error: Unknown label type '{}'", label_type);
+                1
+            }
+        },
         PartedCommand::MkPart {
             part_type,
             fs_type,
@@ -2552,30 +2681,26 @@ fn execute_parted_command(editor: &mut DiskEditor, cmd: &PartedCommand) -> i32 {
                 }
             }
         }
-        PartedCommand::Rm { number } => {
-            match editor.rm_partition(*number) {
-                Ok(()) => {
-                    println!("Removed partition {}", number);
-                    0
-                }
-                Err(e) => {
-                    eprintln!("Error: {}", e);
-                    1
-                }
+        PartedCommand::Rm { number } => match editor.rm_partition(*number) {
+            Ok(()) => {
+                println!("Removed partition {}", number);
+                0
             }
-        }
-        PartedCommand::Name { number, name } => {
-            match editor.name_partition(*number, name) {
-                Ok(()) => {
-                    println!("Set name of partition {} to '{}'", number, name);
-                    0
-                }
-                Err(e) => {
-                    eprintln!("Error: {}", e);
-                    1
-                }
+            Err(e) => {
+                eprintln!("Error: {}", e);
+                1
             }
-        }
+        },
+        PartedCommand::Name { number, name } => match editor.name_partition(*number, name) {
+            Ok(()) => {
+                println!("Set name of partition {} to '{}'", number, name);
+                0
+            }
+            Err(e) => {
+                eprintln!("Error: {}", e);
+                1
+            }
+        },
         PartedCommand::Set {
             number,
             flag,
@@ -2662,22 +2787,17 @@ fn execute_parted_command(editor: &mut DiskEditor, cmd: &PartedCommand) -> i32 {
                 }
             }
         }
-        PartedCommand::Unit { unit } => {
-            match DisplayUnit::from_str(unit) {
-                Some(u) => {
-                    editor.unit = u;
-                    0
-                }
-                None => {
-                    eprintln!("Error: Unknown unit '{}'", unit);
-                    1
-                }
+        PartedCommand::Unit { unit } => match DisplayUnit::from_str(unit) {
+            Some(u) => {
+                editor.unit = u;
+                0
             }
-        }
-        PartedCommand::AlignCheck {
-            align_type,
-            number,
-        } => {
+            None => {
+                eprintln!("Error: Unknown unit '{}'", unit);
+                1
+            }
+        },
+        PartedCommand::AlignCheck { align_type, number } => {
             match editor.check_alignment(*number, align_type) {
                 Ok(aligned) => {
                     if aligned {
@@ -2892,9 +3012,10 @@ fn run_partx(args: &[String]) -> i32 {
 
             // Filter by nr range
             if let (Some(start), Some(end)) = (nr_start, nr_end)
-                && verbose {
-                    println!("Filtering partitions {} to {}", start, end);
-                }
+                && verbose
+            {
+                println!("Filtering partitions {} to {}", start, end);
+            }
             0
         }
         PartxAction::Add => {
@@ -3312,10 +3433,7 @@ mod tests {
 
     #[test]
     fn test_parse_size_gb() {
-        assert_eq!(
-            parse_size("1GB", 512, 100_000_000_000),
-            Some(1_000_000_000)
-        );
+        assert_eq!(parse_size("1GB", 512, 100_000_000_000), Some(1_000_000_000));
     }
 
     #[test]
@@ -3341,10 +3459,7 @@ mod tests {
 
     #[test]
     fn test_parse_size_percent() {
-        assert_eq!(
-            parse_size("50%", 512, 1_000_000_000),
-            Some(500_000_000)
-        );
+        assert_eq!(parse_size("50%", 512, 1_000_000_000), Some(500_000_000));
     }
 
     #[test]
@@ -3525,19 +3640,10 @@ mod tests {
 
     #[test]
     fn test_partition_flag_from_str() {
-        assert_eq!(
-            PartitionFlag::from_str("boot"),
-            Some(PartitionFlag::Boot)
-        );
+        assert_eq!(PartitionFlag::from_str("boot"), Some(PartitionFlag::Boot));
         assert_eq!(PartitionFlag::from_str("esp"), Some(PartitionFlag::Esp));
-        assert_eq!(
-            PartitionFlag::from_str("swap"),
-            Some(PartitionFlag::Swap)
-        );
-        assert_eq!(
-            PartitionFlag::from_str("raid"),
-            Some(PartitionFlag::Raid)
-        );
+        assert_eq!(PartitionFlag::from_str("swap"), Some(PartitionFlag::Swap));
+        assert_eq!(PartitionFlag::from_str("raid"), Some(PartitionFlag::Raid));
         assert_eq!(PartitionFlag::from_str("lvm"), Some(PartitionFlag::Lvm));
     }
 
@@ -3740,8 +3846,7 @@ mod tests {
     #[test]
     fn test_gpt_entry_flags_esp() {
         let mut e = GptEntry::new();
-        e.type_guid =
-            Guid::from_str_hex("C12A7328-F81F-11D2-BA4B-00A0C93EC93B").unwrap();
+        e.type_guid = Guid::from_str_hex("C12A7328-F81F-11D2-BA4B-00A0C93EC93B").unwrap();
         assert!(e.has_flag(PartitionFlag::Esp));
         assert!(!e.has_flag(PartitionFlag::Swap));
     }
@@ -3756,8 +3861,7 @@ mod tests {
     #[test]
     fn test_gpt_entry_set_flag_boot() {
         let mut e = GptEntry::new();
-        e.type_guid =
-            Guid::from_str_hex("0FC63DAF-8483-4772-8E79-3D69D8477DE4").unwrap();
+        e.type_guid = Guid::from_str_hex("0FC63DAF-8483-4772-8E79-3D69D8477DE4").unwrap();
         e.set_flag(PartitionFlag::Boot, true);
         assert!(e.has_flag(PartitionFlag::Boot));
     }
@@ -3765,8 +3869,7 @@ mod tests {
     #[test]
     fn test_gpt_entry_toggle_boot() {
         let mut e = GptEntry::new();
-        e.type_guid =
-            Guid::from_str_hex("0FC63DAF-8483-4772-8E79-3D69D8477DE4").unwrap();
+        e.type_guid = Guid::from_str_hex("0FC63DAF-8483-4772-8E79-3D69D8477DE4").unwrap();
         assert!(!e.has_flag(PartitionFlag::Boot));
         e.set_flag(PartitionFlag::Boot, true);
         assert!(e.has_flag(PartitionFlag::Boot));
@@ -4061,7 +4164,11 @@ mod tests {
         let _ = editor.mkpart_gpt("root", "linux", MIB, 100 * GIB);
         let result = editor.set_flag(1, PartitionFlag::Boot, true);
         assert!(result.is_ok());
-        assert!(editor.disk.partitions[0].flags.contains(&PartitionFlag::Boot));
+        assert!(
+            editor.disk.partitions[0]
+                .flags
+                .contains(&PartitionFlag::Boot)
+        );
     }
 
     #[test]
@@ -4071,9 +4178,17 @@ mod tests {
         editor.create_label(TableType::Gpt);
         let _ = editor.mkpart_gpt("root", "linux", MIB, 100 * GIB);
         let _ = editor.toggle_flag(1, PartitionFlag::Boot);
-        assert!(editor.disk.partitions[0].flags.contains(&PartitionFlag::Boot));
+        assert!(
+            editor.disk.partitions[0]
+                .flags
+                .contains(&PartitionFlag::Boot)
+        );
         let _ = editor.toggle_flag(1, PartitionFlag::Boot);
-        assert!(!editor.disk.partitions[0].flags.contains(&PartitionFlag::Boot));
+        assert!(
+            !editor.disk.partitions[0]
+                .flags
+                .contains(&PartitionFlag::Boot)
+        );
     }
 
     #[test]
@@ -4165,8 +4280,7 @@ mod tests {
         assert_eq!(data[511], 0xAA);
         // Should have GPT signature
         let gpt_sig = u64::from_le_bytes([
-            data[512], data[513], data[514], data[515], data[516], data[517], data[518],
-            data[519],
+            data[512], data[513], data[514], data[515], data[516], data[517], data[518], data[519],
         ]);
         assert_eq!(gpt_sig, GPT_SIGNATURE);
     }
@@ -4286,11 +4400,7 @@ mod tests {
 
     #[test]
     fn test_parse_command_name() {
-        let args = vec![
-            "name".to_string(),
-            "1".to_string(),
-            "mypart".to_string(),
-        ];
+        let args = vec!["name".to_string(), "1".to_string(), "mypart".to_string()];
         if let Some(PartedCommand::Name { number, name }) = parse_parted_command(&args) {
             assert_eq!(number, 1);
             assert_eq!(name, "mypart");
@@ -4323,11 +4433,7 @@ mod tests {
 
     #[test]
     fn test_parse_command_toggle() {
-        let args = vec![
-            "toggle".to_string(),
-            "2".to_string(),
-            "lvm".to_string(),
-        ];
+        let args = vec!["toggle".to_string(), "2".to_string(), "lvm".to_string()];
         if let Some(PartedCommand::Toggle { number, flag }) = parse_parted_command(&args) {
             assert_eq!(number, 2);
             assert_eq!(flag, "lvm");
@@ -4353,11 +4459,7 @@ mod tests {
 
     #[test]
     fn test_parse_command_move() {
-        let args = vec![
-            "move".to_string(),
-            "1".to_string(),
-            "50GB".to_string(),
-        ];
+        let args = vec!["move".to_string(), "1".to_string(), "50GB".to_string()];
         if let Some(PartedCommand::Move { number, start }) = parse_parted_command(&args) {
             assert_eq!(number, 1);
             assert_eq!(start, "50GB");
@@ -4383,10 +4485,7 @@ mod tests {
             "optimal".to_string(),
             "1".to_string(),
         ];
-        if let Some(PartedCommand::AlignCheck {
-            align_type,
-            number,
-        }) = parse_parted_command(&args)
+        if let Some(PartedCommand::AlignCheck { align_type, number }) = parse_parted_command(&args)
         {
             assert_eq!(align_type, "optimal");
             assert_eq!(number, 1);
@@ -4778,7 +4877,11 @@ mod tests {
         let disk = DiskInfo::new("/dev/sda", 500 * GB);
         let mut editor = DiskEditor::new(disk);
         editor.create_label(TableType::Gpt);
-        assert!(editor.mkpart_gpt("bad", "linux", 200 * GIB, 100 * GIB).is_err());
+        assert!(
+            editor
+                .mkpart_gpt("bad", "linux", 200 * GIB, 100 * GIB)
+                .is_err()
+        );
     }
 
     #[test]

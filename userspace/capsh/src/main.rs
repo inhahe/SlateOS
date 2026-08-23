@@ -290,10 +290,7 @@ impl CapMask {
         if caps.is_empty() {
             return String::from("(none)");
         }
-        caps.iter()
-            .map(|c| c.name())
-            .collect::<Vec<_>>()
-            .join(",")
+        caps.iter().map(|c| c.name()).collect::<Vec<_>>().join(",")
     }
 }
 
@@ -587,7 +584,10 @@ fn find_operator(token: &str) -> Result<(CapSpecOp, usize), String> {
             _ => {}
         }
     }
-    Err(format!("no operator (=, +, -) found in cap spec '{}'", token))
+    Err(format!(
+        "no operator (=, +, -) found in cap spec '{}'",
+        token
+    ))
 }
 
 fn parse_cap_names(s: &str) -> Result<Vec<Cap>, String> {
@@ -724,16 +724,15 @@ fn apply_cap_specs_to_process(specs: &[CapSpec], pcaps: &mut ProcessCaps) {
 
 /// Path to the xattr sidecar directory for simulating `security.capability`.
 fn xattr_dir() -> PathBuf {
-    let base = env::var("SLATEOS_XATTR_DIR")
-        .unwrap_or_else(|_| String::from("/var/lib/slateos/xattrs"));
+    let base =
+        env::var("SLATEOS_XATTR_DIR").unwrap_or_else(|_| String::from("/var/lib/slateos/xattrs"));
     PathBuf::from(base)
 }
 
 /// Compute the sidecar path for a given file.
 fn xattr_path_for(file: &Path) -> PathBuf {
     // Use a hash-like encoding of the absolute path to avoid collisions.
-    let abs = fs::canonicalize(file)
-        .unwrap_or_else(|_| file.to_path_buf());
+    let abs = fs::canonicalize(file).unwrap_or_else(|_| file.to_path_buf());
     let encoded = abs
         .to_string_lossy()
         .replace('/', "_SLASH_")
@@ -774,10 +773,10 @@ fn read_file_caps(file: &Path) -> io::Result<Option<FileCaps>> {
         ));
     }
 
-    let permitted = CapMask::from_hex(lines[0])
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-    let inheritable = CapMask::from_hex(lines[1])
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+    let permitted =
+        CapMask::from_hex(lines[0]).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+    let inheritable =
+        CapMask::from_hex(lines[1]).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
     let effective = lines[2] == "1";
 
     Ok(Some(FileCaps {
@@ -804,8 +803,7 @@ fn remove_file_caps(file: &Path) -> io::Result<()> {
 /// Read process capabilities from `/proc/<pid>/status`.
 fn read_proc_caps(pid: &str) -> Result<ProcessCaps, String> {
     let path = format!("/proc/{}/status", pid);
-    let content = fs::read_to_string(&path)
-        .map_err(|e| format!("cannot read {}: {}", path, e))?;
+    let content = fs::read_to_string(&path).map_err(|e| format!("cannot read {}: {}", path, e))?;
 
     let mut caps = ProcessCaps::default();
 
@@ -1000,7 +998,8 @@ fn run_capsh(args: &[String]) -> i32 {
             println!("capsh: would chroot to '{}'", dir);
         } else if let Some(hex) = arg.strip_prefix("--secbits=") {
             match u32::from_str_radix(
-                hex.strip_prefix("0x").unwrap_or(hex.strip_prefix("0X").unwrap_or(hex)),
+                hex.strip_prefix("0x")
+                    .unwrap_or(hex.strip_prefix("0X").unwrap_or(hex)),
                 16,
             ) {
                 Ok(bits) => state.securebits = bits,
@@ -1379,7 +1378,12 @@ fn run_captest(args: &[String]) -> i32 {
     }
 
     println!();
-    println!("Summary: {} passed, {} failed, {} total", pass_count, fail_count, tests.len());
+    println!(
+        "Summary: {} passed, {} failed, {} total",
+        pass_count,
+        fail_count,
+        tests.len()
+    );
 
     if fail_count > 0 { 1 } else { 0 }
 }
@@ -1387,9 +1391,18 @@ fn run_captest(args: &[String]) -> i32 {
 fn build_cap_tests(caps: &ProcessCaps) -> Vec<CapTestResult> {
     let descs: [(Cap, &'static str); CAP_COUNT] = [
         (Cap::Chown, "change file ownership"),
-        (Cap::DacOverride, "override file read/write/execute permission checks"),
-        (Cap::DacReadSearch, "override read/search permission on directories"),
-        (Cap::Fowner, "bypass permission checks on file owner operations"),
+        (
+            Cap::DacOverride,
+            "override file read/write/execute permission checks",
+        ),
+        (
+            Cap::DacReadSearch,
+            "override read/search permission on directories",
+        ),
+        (
+            Cap::Fowner,
+            "bypass permission checks on file owner operations",
+        ),
         (Cap::Fsetid, "set setuid/setgid bits on files"),
         (Cap::Kill, "send signals to arbitrary processes"),
         (Cap::Setgid, "set process GID"),
@@ -1573,11 +1586,7 @@ mod tests {
     fn test_cap_bit_unique() {
         let mut seen = std::collections::HashSet::new();
         for &cap in &ALL_CAPS {
-            assert!(
-                seen.insert(cap.bit()),
-                "duplicate bit for {:?}",
-                cap
-            );
+            assert!(seen.insert(cap.bit()), "duplicate bit for {:?}", cap);
         }
     }
 
@@ -1852,7 +1861,10 @@ mod tests {
 
     #[test]
     fn test_file_caps_not_empty_with_effective() {
-        let f = FileCaps { effective: true, ..FileCaps::default() };
+        let f = FileCaps {
+            effective: true,
+            ..FileCaps::default()
+        };
         // effective flag alone does not make it non-empty if masks are empty
         // Actually per our definition it does: effective=true counts.
         assert!(!f.is_empty());
@@ -2289,10 +2301,7 @@ mod tests {
                 m.set(cap_j);
                 let hex = m.to_hex();
                 let decoded = CapMask::from_hex(&hex).unwrap();
-                assert_eq!(
-                    decoded, m,
-                    "hex roundtrip failed for {cap_i:?}+{cap_j:?}",
-                );
+                assert_eq!(decoded, m, "hex roundtrip failed for {cap_i:?}+{cap_j:?}",);
             }
         }
     }
@@ -2547,7 +2556,10 @@ mod tests {
 
     #[test]
     fn test_lookup_dac_read_search() {
-        assert_eq!(Cap::from_name("cap_dac_read_search"), Some(Cap::DacReadSearch));
+        assert_eq!(
+            Cap::from_name("cap_dac_read_search"),
+            Some(Cap::DacReadSearch)
+        );
     }
 
     #[test]
@@ -2567,12 +2579,18 @@ mod tests {
 
     #[test]
     fn test_lookup_linux_immutable() {
-        assert_eq!(Cap::from_name("cap_linux_immutable"), Some(Cap::LinuxImmutable));
+        assert_eq!(
+            Cap::from_name("cap_linux_immutable"),
+            Some(Cap::LinuxImmutable)
+        );
     }
 
     #[test]
     fn test_lookup_net_bind_service() {
-        assert_eq!(Cap::from_name("cap_net_bind_service"), Some(Cap::NetBindService));
+        assert_eq!(
+            Cap::from_name("cap_net_bind_service"),
+            Some(Cap::NetBindService)
+        );
     }
 
     #[test]
@@ -2642,7 +2660,10 @@ mod tests {
 
     #[test]
     fn test_lookup_sys_tty_config() {
-        assert_eq!(Cap::from_name("cap_sys_tty_config"), Some(Cap::SysTtyConfig));
+        assert_eq!(
+            Cap::from_name("cap_sys_tty_config"),
+            Some(Cap::SysTtyConfig)
+        );
     }
 
     #[test]
@@ -2712,7 +2733,10 @@ mod tests {
 
     #[test]
     fn test_lookup_checkpoint_restore() {
-        assert_eq!(Cap::from_name("cap_checkpoint_restore"), Some(Cap::CheckpointRestore));
+        assert_eq!(
+            Cap::from_name("cap_checkpoint_restore"),
+            Some(Cap::CheckpointRestore)
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -2799,7 +2823,10 @@ mod tests {
 
     #[test]
     fn test_capsh_noamb() {
-        assert_eq!(run_capsh(&[String::from("--noamb"), String::from("--print")]), 0);
+        assert_eq!(
+            run_capsh(&[String::from("--noamb"), String::from("--print")]),
+            0
+        );
     }
 
     #[test]
@@ -2856,7 +2883,10 @@ mod tests {
     #[test]
     fn test_capsh_drop_known() {
         assert_eq!(
-            run_capsh(&[String::from("--drop=cap_sys_admin"), String::from("--print")]),
+            run_capsh(&[
+                String::from("--drop=cap_sys_admin"),
+                String::from("--print")
+            ]),
             0
         );
     }

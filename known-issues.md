@@ -50388,7 +50388,7 @@ commands that carry the colour in question, and assert the two renders agree.
 Candidates: anything drawn on the wallpaper, on a video surface, on a
 thumbnail, or on any other content the palette does not own.
 
-**Part 2 progress. 31 of 49 modules converted.**
+**Part 2 progress. 32 of 49 modules converted.**
 
 - [x] `security_dialog.rs` — 29 constants, done 2026-08-22. The method above
   survived contact: the sweep lives in `gui/desktop/src/palette_check.rs` as
@@ -52126,6 +52126,65 @@ thumbnail, or on any other content the palette does not own.
     than a pair of literals so it fails on a palette whose crust was made
     lighter than its base; and ink on a fill this module chose is computed,
     never named.
+- [x] `launcher.rs` — 14 constants over 15 colour sites, done 2026-08-23.
+  Thirty-seven tests in the module (eight new), harness defects Ax45–Fx47
+  (fifty-eight), all fifty-eight caught, none escaped.
+  - **The deleted-constants test rendered one of the module's three states, and
+    only the harness noticed.** The launcher draws three different trees: an
+    empty field (placeholder, no query), a typed one (query, rows), and a typed
+    one that matches nothing (query, "No results found", no rows). The test
+    swept the first only — so a Mocha constant frozen into the *query* branch
+    was a constant it could never reach. Defect Rx45 was caught by three tests
+    and missed by that one. This is the module-30 lesson in its sharpest form
+    yet: the test read as complete, the module had thirty-seven passing tests,
+    and the hole was found by writing a defect rather than by reading anything.
+    **A branch the fixture does not render is a branch the test does not
+    check** — the same shape as `default_apps`'s four fixture traps, but here it
+    was the *test's* choice of state rather than the data's.
+  - **The module where the accent and a category hue are the same pixel.** The
+    stock accent *is* `blue`, and `Category::Application` is also blue — so
+    before the conversion one constant `BLUE` served two unrelated meanings at
+    four sites (the caret, the selection bar, every App icon and every App
+    badge) and nothing in the module could tell "where you are" from "what this
+    is". That is not a hypothetical: an assertion written at the stock accent
+    cannot fail, because the two answers agree. Every accent claim here
+    therefore runs against an off-palette magenta accent, which is what makes
+    the caret follow it while an App badge holds still. Defect Ux45 — the caret
+    written as `p.blue` — is the exact edit the pre-conversion code could not
+    distinguish from correct, and it is caught only because the fixture moved
+    the accent off blue.
+  - **A permutation of a set is invisible to a set-membership check, again.**
+    The five category hues had a distinctness test and a test that each badge
+    matched `Category::color`. Both pass under a *rotation* of all five hues:
+    five distinct colours are still five distinct colours, and asking
+    `Category::color` what a badge should be is asking the code under test what
+    it meant. Only a table naming each category's role — App/blue, Sys/red,
+    Set/peach, File/green, Cmd/mauve — can fail. This is the module-29 lesson
+    arriving in a module that already had two tests over the same five values.
+  - **Two constants compared only against themselves.** `DIALOG_ALPHA` and
+    `BADGE_WASH_ALPHA` were each asserted as `drawn.a == THE_CONSTANT`, which is
+    a tautology the moment the constant moves. Both now carry a bound as well:
+    the wash must be `<= 64` (a tint, not a fill — at 200 the label is read
+    against its own hue rather than against the row) and the dialog `>= 224`
+    (translucent enough to float, solid enough that the wallpaper does not read
+    through the results). Defects Fx45 and DDx46 exist precisely to prove those
+    two bounds do something, and before they were added both escaped.
+  - **The sweep runs over the shipped app database as well as the fixture.**
+    The five-row fixture was built to reach every category, and a fixture built
+    to reach everything is exactly the thing that cannot notice a row shape only
+    the real data produces. Sweeping `builtin_app_database()` too costs one line
+    and is the only check here that sees production data.
+  - **One more shadow consolidated.** This was the third of the three popups
+    that each picked their own drop-shadow alpha (100 here, against 120 and 160
+    elsewhere); it now reads `p.shadow()`, and the test asserts the shadow is
+    black in *both* modes rather than equal to any role, because a shadow is an
+    absence of light and must not flip with the theme.
+  - Judgements, for the record: the accent marks where you are and never what a
+    thing is (exactly two accented marks on screen — the caret and the selected
+    row's bar); five categories are five distinct hues in either mode; a badge's
+    wash is its own hue at a lower alpha, derived rather than named, so adding a
+    category cannot leave a stale wash behind; and the dialog floats, which is
+    one byte of alpha nothing else in the module would have noticed.
 
 **Trigger:** this is not blocked on anything. It is sequenced after the shell
 event loop (`TD-C-THE-SHELL-CAN-DRAW-ITSELF-AND-NOBODY-CAN-ASK-IT-TO`) only

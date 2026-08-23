@@ -1704,7 +1704,24 @@ mod tests {
         ];
 
         let p = accented(true);
-        let cmds = five_categories().render(&p);
+
+        // All three states, not just the one. The launcher draws three
+        // different trees and this test used to render only the first: an
+        // empty field draws the placeholder and no query at all, so a constant
+        // frozen into the *query* branch was a constant this test could never
+        // reach. The harness said so — defect Rx45 was caught by three tests
+        // and missed by this one, which is exactly the shape of a hole that a
+        // reading of the test cannot find.
+        let mut cmds = five_categories().render(&p);
+        let mut typed = five_categories();
+        "alpha".clone_into(&mut typed.query);
+        typed.update_results();
+        cmds.extend(typed.render(&p));
+        let mut none = five_categories();
+        "zzzzzzzz".clone_into(&mut none.query);
+        none.update_results();
+        cmds.extend(none.render(&p));
+
         for c in all_colors(&cmds) {
             let rgb = (u32::from(c.r) << 16) | (u32::from(c.g) << 8) | u32::from(c.b);
             for (name, deleted) in DELETED {

@@ -77,6 +77,7 @@ PRIV = "gui/desktop/src/privacy_settings.rs"
 PRINTMGR = "gui/desktop/src/print_manager.rs"
 POWER = "gui/desktop/src/power.rs"
 LOGIN = "gui/desktop/src/login_screen.rs"
+TB = "gui/desktop/src/taskbar.rs"
 
 # (name, file, [(old, new), ...], [packages], [tests expected to fail])
 DEFECTS = [
@@ -9263,6 +9264,896 @@ DEFECTS = [
         ["desktop"],
         [
             'the_default_background_defers_its_colour_to_the_palette',
+        ],
+    ),
+    # ---- taskbar.rs (module 29 of 49) ----
+    (
+        'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA: the bar background is frozen back to Mocha base',
+        TB,
+        [
+            ('            height: bar_height,\n            color: p.base,',
+             '            height: bar_height,\n            color: Color::from_hex(0x1E1E2E),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_taskbar_draws_comes_from_its_palette',
+            'every_colour_on_the_bar_is_in_the_role_it_claims',
+            # NOT test_render_empty_taskbar: it asserts the bar's *geometry*
+            # (one full-width rect exists), never its colour. Declared here
+            # originally on the strength of its name.
+            'none_of_the_ten_deleted_constants_is_still_drawn',
+        ],
+    ),
+    (
+        "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB: the bar background resolves to the desktop's own surface",
+        TB,
+        [
+            ('            height: bar_height,\n            color: p.base,',
+             '            height: bar_height,\n            color: p.crust,'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_on_the_bar_is_in_the_role_it_claims',
+            'test_render_empty_taskbar',
+        ],
+    ),
+    (
+        'CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC: the whole bar takes the accent',
+        TB,
+        [
+            ('            height: bar_height,\n            color: p.base,',
+             '            height: bar_height,\n            color: p.accent,'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_on_the_bar_is_in_the_role_it_claims',
+            'test_render_empty_taskbar',
+            'exactly_one_thing_on_the_taskbar_carries_the_accent',
+        ],
+    ),
+    (
+        'DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD: the bar background sits one step behind itself',
+        TB,
+        [
+            ('            height: bar_height,\n            color: p.base,',
+             '            height: bar_height,\n            color: p.mantle,'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_on_the_bar_is_in_the_role_it_claims',
+            'test_render_empty_taskbar',
+        ],
+    ),
+    (
+        'EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE: the top border is frozen back to Mocha surface0',
+        TB,
+        [
+            ('            y2: 0.0,\n            color: p.surface0,',
+             '            y2: 0.0,\n            color: Color::from_hex(0x313244),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_taskbar_draws_comes_from_its_palette',
+            'every_colour_on_the_bar_is_in_the_role_it_claims',
+            'none_of_the_ten_deleted_constants_is_still_drawn',
+        ],
+    ),
+    (
+        'FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF: the top border takes the separator role the divider uses',
+        TB,
+        [
+            ('            y2: 0.0,\n            color: p.surface0,',
+             '            y2: 0.0,\n            color: p.overlay0,'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_on_the_bar_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        'GGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGG: the section divider goes back to being a raised surface',
+        TB,
+        [
+            ("                    // Judgement 6: a separator, which is `overlay0`'s job.\n                    color: p.overlay0,",
+             '                    color: p.surface2,'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_on_the_bar_is_in_the_role_it_claims',
+            'test_render_divider_between_pinned_and_running',
+        ],
+    ),
+    (
+        'HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH: the section divider is frozen back to Mocha surface2',
+        TB,
+        [
+            ("                    // Judgement 6: a separator, which is `overlay0`'s job.\n                    color: p.overlay0,",
+             '                    color: Color::from_hex(0x585B70),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_taskbar_draws_comes_from_its_palette',
+            'every_colour_on_the_bar_is_in_the_role_it_claims',
+            'test_render_divider_between_pinned_and_running',
+            'none_of_the_ten_deleted_constants_is_still_drawn',
+        ],
+    ),
+    (
+        'IIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIII: the section divider is never drawn',
+        TB,
+        [
+            ('            if i == pinned_count && pinned_count > 0 && i < self.buttons.len() {',
+             '            if i == pinned_count && pinned_count > 0 && i > self.buttons.len() {'),
+        ],
+        ["desktop"],
+        [
+            'the_fixture_takes_every_branch_this_module_has',
+            'every_colour_on_the_bar_is_in_the_role_it_claims',
+            'test_render_divider_between_pinned_and_running',
+        ],
+    ),
+    (
+        'JJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJ: the drop caret takes the accent, so it cannot be told from the focus mark',
+        TB,
+        [
+            ('                        color: p.green,',
+             '                        color: p.accent,'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_on_the_bar_is_in_the_role_it_claims',
+            'exactly_one_thing_on_the_taskbar_carries_the_accent',
+            'the_drop_caret_is_never_the_same_hue_as_the_focus_underline',
+        ],
+    ),
+    (
+        'KKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKK: the drop caret is frozen back to Mocha blue',
+        TB,
+        [
+            ('                        color: p.green,',
+             '                        color: Color::from_hex(0x89B4FA),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_taskbar_draws_comes_from_its_palette',
+            'every_colour_on_the_bar_is_in_the_role_it_claims',
+            'none_of_the_ten_deleted_constants_is_still_drawn',
+        ],
+    ),
+    (
+        "LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLL: the drop caret takes drop_target's alpha as well as its hue, and vanishes",
+        TB,
+        [
+            ('                        color: p.green,',
+             '                        color: with_alpha(p.green, 60),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_on_the_bar_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        'MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM: the dragged ghost is opaque, so it stops reading as a ghost',
+        TB,
+        [
+            ('                        color: with_alpha(p.surface1, 180),',
+             '                        color: p.surface1,'),
+        ],
+        ["desktop"],
+        [
+            'the_fixture_takes_every_branch_this_module_has',
+            'each_button_state_draws_the_background_its_role_names',
+        ],
+    ),
+    (
+        'NNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNN: the dragged ghost is frozen back to its Mocha rgba triple',
+        TB,
+        [
+            ('                        color: with_alpha(p.surface1, 180),',
+             '                        color: Color::rgba(69, 71, 90, 180),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_taskbar_draws_comes_from_its_palette',
+            'each_button_state_draws_the_background_its_role_names',
+            'none_of_the_ten_deleted_constants_is_still_drawn',
+        ],
+    ),
+    (
+        'OOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOO: the dragged ghost is built from the hover rung instead of the resting one',
+        TB,
+        [
+            ('                        color: with_alpha(p.surface1, 180),',
+             '                        color: with_alpha(p.surface2, 180),'),
+        ],
+        ["desktop"],
+        [
+            'each_button_state_draws_the_background_its_role_names',
+        ],
+    ),
+    (
+        'PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPP: the hover rung goes back to where the focus rung belongs',
+        TB,
+        [
+            ('                (_, true) => p.surface2,',
+             '                (_, true) => p.surface1,'),
+        ],
+        ["desktop"],
+        [
+            'each_button_state_draws_the_background_its_role_names',
+        ],
+    ),
+    (
+        'QQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQ: the hover and focus rungs of the ladder are exchanged',
+        TB,
+        [
+            ('                (_, true) => p.surface2,',
+             '                (_, true) => p.surface1,'),
+            ('                (ButtonState::Focused, false) => p.surface1,',
+             '                (ButtonState::Focused, false) => p.surface2,'),
+        ],
+        ["desktop"],
+        [
+            'each_button_state_draws_the_background_its_role_names',
+        ],
+    ),
+    (
+        'RRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRR: the focused button drops a rung to surface0',
+        TB,
+        [
+            ('                (ButtonState::Focused, false) => p.surface1,',
+             '                (ButtonState::Focused, false) => p.surface0,'),
+        ],
+        ["desktop"],
+        [
+            'each_button_state_draws_the_background_its_role_names',
+        ],
+    ),
+    (
+        "SSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSS: the running button's background loses its transparency",
+        TB,
+        [
+            ('                (ButtonState::Running, false) => with_alpha(p.surface0, 128),',
+             '                (ButtonState::Running, false) => p.surface0,'),
+        ],
+        ["desktop"],
+        [
+            'each_button_state_draws_the_background_its_role_names',
+        ],
+    ),
+    (
+        'TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT: an idle button paints a background it should not have',
+        TB,
+        [
+            ('                (ButtonState::Idle, false) => Color::TRANSPARENT,',
+             '                (ButtonState::Idle, false) => p.base,'),
+        ],
+        ["desktop"],
+        [
+            'the_fixture_takes_every_branch_this_module_has',
+            'each_button_state_draws_the_background_its_role_names',
+        ],
+    ),
+    (
+        'UUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUU: the hover rung is frozen back to Mocha surface1',
+        TB,
+        [
+            ('                (_, true) => p.surface2,',
+             '                (_, true) => Color::from_hex(0x45475A),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_taskbar_draws_comes_from_its_palette',
+            'each_button_state_draws_the_background_its_role_names',
+            'none_of_the_ten_deleted_constants_is_still_drawn',
+        ],
+    ),
+    (
+        "VVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVV: the focused button's background takes the accent",
+        TB,
+        [
+            ('                (ButtonState::Focused, false) => p.surface1,',
+             '                (ButtonState::Focused, false) => p.accent,'),
+        ],
+        ["desktop"],
+        [
+            'each_button_state_draws_the_background_its_role_names',
+            'exactly_one_thing_on_the_taskbar_carries_the_accent',
+        ],
+    ),
+    (
+        "WWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWW: the focus underline reaches for blue, which is the stock accent's twin",
+        TB,
+        [
+            ('                let indicator_color = if button.state == ButtonState::Focused {\n                    p.accent\n                } else {\n                    p.subtext0\n                };',
+             '                let indicator_color = if button.state == ButtonState::Focused {\n                    p.blue\n                } else {\n                    p.subtext0\n                };'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_on_the_bar_is_in_the_role_it_claims',
+            'exactly_one_thing_on_the_taskbar_carries_the_accent',
+        ],
+    ),
+    (
+        'XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX: the focus underline is frozen back to Mocha blue',
+        TB,
+        [
+            ('                let indicator_color = if button.state == ButtonState::Focused {\n                    p.accent\n                } else {\n                    p.subtext0\n                };',
+             '                let indicator_color = if button.state == ButtonState::Focused {\n                    Color::from_hex(0x89B4FA)\n                } else {\n                    p.subtext0\n                };'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_taskbar_draws_comes_from_its_palette',
+            'every_colour_on_the_bar_is_in_the_role_it_claims',
+            'exactly_one_thing_on_the_taskbar_carries_the_accent',
+            'none_of_the_ten_deleted_constants_is_still_drawn',
+        ],
+    ),
+    (
+        'YYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYY: a merely-running app claims the accent too',
+        TB,
+        [
+            ('                let indicator_color = if button.state == ButtonState::Focused {\n                    p.accent\n                } else {\n                    p.subtext0\n                };',
+             '                let indicator_color = if button.state == ButtonState::Focused {\n                    p.accent\n                } else {\n                    p.accent\n                };'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_on_the_bar_is_in_the_role_it_claims',
+            'exactly_one_thing_on_the_taskbar_carries_the_accent',
+            # This one was written before the conversion and only checks that
+            # *some* 3px-high bar is drawn in `p.subtext0`; a merely-running
+            # app taking the accent leaves no such bar, so it fails too. Worth
+            # keeping declared — it is the oldest guard on this site.
+            'test_render_shows_indicator_for_running',
+        ],
+    ),
+    (
+        'ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ: the running underline goes back to lavender',
+        TB,
+        [
+            ('                let indicator_color = if button.state == ButtonState::Focused {\n                    p.accent\n                } else {\n                    p.subtext0\n                };',
+             '                let indicator_color = if button.state == ButtonState::Focused {\n                    p.accent\n                } else {\n                    p.lavender\n                };'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_on_the_bar_is_in_the_role_it_claims',
+            'test_render_shows_indicator_for_running',
+        ],
+    ),
+    (
+        'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA: the running underline is frozen back to Mocha lavender',
+        TB,
+        [
+            ('                let indicator_color = if button.state == ButtonState::Focused {\n                    p.accent\n                } else {\n                    p.subtext0\n                };',
+             '                let indicator_color = if button.state == ButtonState::Focused {\n                    p.accent\n                } else {\n                    Color::from_hex(0xB4BEFE)\n                };'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_taskbar_draws_comes_from_its_palette',
+            'every_colour_on_the_bar_is_in_the_role_it_claims',
+            'test_render_shows_indicator_for_running',
+            'none_of_the_ten_deleted_constants_is_still_drawn',
+        ],
+    ),
+    (
+        'BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB: nothing on the bar says which window you are in',
+        TB,
+        [
+            ('                let indicator_color = if button.state == ButtonState::Focused {\n                    p.accent\n                } else {\n                    p.subtext0\n                };',
+             '                let indicator_color = if button.state == ButtonState::Focused {\n                    p.subtext0\n                } else {\n                    p.subtext0\n                };'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_on_the_bar_is_in_the_role_it_claims',
+            'exactly_one_thing_on_the_taskbar_carries_the_accent',
+        ],
+    ),
+    (
+        'CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC: the two underline widths are exchanged',
+        TB,
+        [
+            ('                let indicator_w = if button.state == ButtonState::Focused {\n                    16.0\n                } else {\n                    8.0\n                };',
+             '                let indicator_w = if button.state == ButtonState::Focused {\n                    8.0\n                } else {\n                    16.0\n                };'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_on_the_bar_is_in_the_role_it_claims',
+            'the_focus_underline_is_wider_than_the_running_one',
+            # Exchanging the widths also swaps which bar the caret test finds
+            # as "the focus underline" (it selects by width, 16x3), so it ends
+            # up comparing the caret's hue against `subtext0` instead of the
+            # accent. It fails for the right reason: after this edit there is
+            # no 16x3 accent bar at all.
+            'the_drop_caret_is_never_the_same_hue_as_the_focus_underline',
+        ],
+    ),
+    (
+        'DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD: the window count follows the accent, so it means something different per machine',
+        TB,
+        [
+            ('                    color: p.red,',
+             '                    color: p.accent,'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_on_the_bar_is_in_the_role_it_claims',
+            'exactly_one_thing_on_the_taskbar_carries_the_accent',
+            'the_count_badge_does_not_follow_the_accent',
+            'the_badge_digit_is_computed_from_the_badge_it_sits_on',
+            'test_render_shows_badge_for_multiple_windows',
+        ],
+    ),
+    (
+        'EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE: the window count is drawn in the wrong named hue',
+        TB,
+        [
+            ('                    color: p.red,',
+             '                    color: p.yellow,'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_on_the_bar_is_in_the_role_it_claims',
+            'the_count_badge_does_not_follow_the_accent',
+            # NOT the_badge_digit test: it compares the digit against
+            # `readable_on(badge as actually drawn)`, so swapping the badge to
+            # another role keeps the pair consistent. Mocha yellow and Mocha
+            # red are both light enough to want the same near-black ink, so it
+            # does not even shift the value. A consistency check cannot see a
+            # change that moves both sides.
+            'test_render_shows_badge_for_multiple_windows',
+        ],
+    ),
+    (
+        'FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF: the window count is frozen back to Mocha red',
+        TB,
+        [
+            ('                    color: p.red,',
+             '                    color: Color::from_hex(0xF38BA8),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_taskbar_draws_comes_from_its_palette',
+            'every_colour_on_the_bar_is_in_the_role_it_claims',
+            'the_badge_digit_is_computed_from_the_badge_it_sits_on',
+            # The role table is what actually names the badge `p.red`, so a
+            # frozen Mocha literal fails it in the light render. Not declared
+            # originally because the defect looked like a sweep case.
+            'the_count_badge_does_not_follow_the_accent',
+            # NOT test_render_shows_badge_for_multiple_windows: it asserts a
+            # 12x12 rect exists, and a frozen colour is still a rect.
+            'none_of_the_ten_deleted_constants_is_still_drawn',
+        ],
+    ),
+    (
+        'GGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGG: the badge digit is named again, as the Mocha mantle it used to be',
+        TB,
+        [
+            ('                    color: readable_on(p.red),',
+             '                    color: Color::from_hex(0x181825),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_taskbar_draws_comes_from_its_palette',
+            'every_colour_on_the_bar_is_in_the_role_it_claims',
+            'the_badge_digit_is_computed_from_the_badge_it_sits_on',
+            'none_of_the_ten_deleted_constants_is_still_drawn',
+        ],
+    ),
+    (
+        'HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH: the badge digit is a role instead of a reading of its own fill',
+        TB,
+        [
+            ('                    color: readable_on(p.red),',
+             '                    color: p.text,'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_on_the_bar_is_in_the_role_it_claims',
+            'the_badge_digit_is_computed_from_the_badge_it_sits_on',
+        ],
+    ),
+    (
+        'IIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIII: the badge digit is read off the accent rather than off the badge',
+        TB,
+        [
+            ('                    color: readable_on(p.red),',
+             '                    color: p.on_accent(),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_on_the_bar_is_in_the_role_it_claims',
+            'the_badge_digit_is_computed_from_the_badge_it_sits_on',
+        ],
+    ),
+    (
+        'JJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJ: the badge digit is frozen to the pale legibility endpoint',
+        TB,
+        [
+            ('                    color: readable_on(p.red),',
+             '                    color: Color::from_hex(0xEFF1F5),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_on_the_bar_is_in_the_role_it_claims',
+            'the_badge_digit_is_computed_from_the_badge_it_sits_on',
+        ],
+    ),
+    (
+        'KKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKK: a button being carried is drawn at full strength',
+        TB,
+        [
+            ('            with_alpha(p.text, 140)',
+             '            p.text'),
+        ],
+        ["desktop"],
+        [
+            'button_ink_follows_the_button_state',
+        ],
+    ),
+    (
+        "LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLL: the carried button's ink is frozen back to its Mocha rgba triple",
+        TB,
+        [
+            ('            with_alpha(p.text, 140)',
+             '            Color::rgba(205, 214, 244, 140)'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_taskbar_draws_comes_from_its_palette',
+            'button_ink_follows_the_button_state',
+            'none_of_the_ten_deleted_constants_is_still_drawn',
+        ],
+    ),
+    (
+        "MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM: an idle button's icon is as loud as a running one's",
+        TB,
+        [
+            ('                ButtonState::Idle => p.subtext0,',
+             '                ButtonState::Idle => p.text,'),
+        ],
+        ["desktop"],
+        [
+            'button_ink_follows_the_button_state',
+        ],
+    ),
+    (
+        'NNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNN: the idle icon is frozen back to Mocha subtext0',
+        TB,
+        [
+            ('                ButtonState::Idle => p.subtext0,',
+             '                ButtonState::Idle => Color::from_hex(0xA6ADC8),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_taskbar_draws_comes_from_its_palette',
+            'button_ink_follows_the_button_state',
+            'none_of_the_ten_deleted_constants_is_still_drawn',
+        ],
+    ),
+    (
+        "OOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOO: a running button's icon drops to the secondary heading role",
+        TB,
+        [
+            ('                ButtonState::Running | ButtonState::Focused => p.text,',
+             '                ButtonState::Running | ButtonState::Focused => p.subtext1,'),
+        ],
+        ["desktop"],
+        [
+            'button_ink_follows_the_button_state',
+        ],
+    ),
+    (
+        'PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPP: the running icon is frozen back to Mocha text',
+        TB,
+        [
+            ('                ButtonState::Running | ButtonState::Focused => p.text,',
+             '                ButtonState::Running | ButtonState::Focused => Color::from_hex(0xCDD6F4),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_taskbar_draws_comes_from_its_palette',
+            'button_ink_follows_the_button_state',
+            'none_of_the_ten_deleted_constants_is_still_drawn',
+        ],
+    ),
+    (
+        "QQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQ: the label stops sharing the icon's colour and names Mocha text",
+        TB,
+        [
+            ('                text: button.display_name.clone(),\n                color: icon_color,',
+             '                text: button.display_name.clone(),\n                color: Color::from_hex(0xCDD6F4),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_taskbar_draws_comes_from_its_palette',
+            'button_ink_follows_the_button_state',
+            'none_of_the_ten_deleted_constants_is_still_drawn',
+        ],
+    ),
+    (
+        "RRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRR: the label stops sharing the icon's colour and is always secondary",
+        TB,
+        [
+            ('                text: button.display_name.clone(),\n                color: icon_color,',
+             '                text: button.display_name.clone(),\n                color: p.subtext0,'),
+        ],
+        ["desktop"],
+        [
+            'button_ink_follows_the_button_state',
+        ],
+    ),
+    (
+        "SSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSS: the menu's shadow becomes a colour, so it flips with the mode",
+        TB,
+        [
+            ('            color: p.shadow(),',
+             '            color: with_alpha(p.crust, 120),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_in_the_context_menu_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        "TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT: the menu's shadow goes back to this file's private alpha",
+        TB,
+        [
+            ('            color: p.shadow(),',
+             '            color: Color::rgba(0, 0, 0, 80),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_in_the_context_menu_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        'UUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUU: the menu stops floating and ignores the transparency setting',
+        TB,
+        [
+            ('            color: p.panel_bg(),',
+             '            color: p.base,'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_in_the_context_menu_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        'VVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVV: the menu panel is frozen back to Mocha surface0',
+        TB,
+        [
+            ('            color: p.panel_bg(),',
+             '            color: Color::from_hex(0x313244),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_taskbar_draws_comes_from_its_palette',
+            'every_colour_in_the_context_menu_is_in_the_role_it_claims',
+            'none_of_the_ten_deleted_constants_is_still_drawn',
+        ],
+    ),
+    (
+        'WWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWW: the menu panel is a flat raised surface again',
+        TB,
+        [
+            ('            color: p.panel_bg(),',
+             '            color: p.surface0,'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_in_the_context_menu_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        "XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX: the menu's outline drops to the separator role",
+        TB,
+        [
+            ('            color: p.surface2,\n            line_width: 1.0,',
+             '            color: p.overlay0,\n            line_width: 1.0,'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_in_the_context_menu_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        "YYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYY: the menu's outline is frozen back to Mocha surface2",
+        TB,
+        [
+            ('            color: p.surface2,\n            line_width: 1.0,',
+             '            color: Color::from_hex(0x585B70),\n            line_width: 1.0,'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_taskbar_draws_comes_from_its_palette',
+            'every_colour_in_the_context_menu_is_in_the_role_it_claims',
+            'none_of_the_ten_deleted_constants_is_still_drawn',
+        ],
+    ),
+    (
+        "ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ: the menu's items are drawn in secondary ink",
+        TB,
+        [
+            ('                text: label.to_string(),\n                color: p.text,',
+             '                text: label.to_string(),\n                color: p.subtext0,'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_in_the_context_menu_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA: the menu's items are frozen back to Mocha text",
+        TB,
+        [
+            ('                text: label.to_string(),\n                color: p.text,',
+             '                text: label.to_string(),\n                color: Color::from_hex(0xCDD6F4),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_taskbar_draws_comes_from_its_palette',
+            'every_colour_in_the_context_menu_is_in_the_role_it_claims',
+            'none_of_the_ten_deleted_constants_is_still_drawn',
+        ],
+    ),
+    (
+        'BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB: the taskbar throws away the palette it was handed and resolves its own',
+        TB,
+        [
+            ('        let mut cmds = Vec::new();\n\n        // Background.',
+             '        let p = &Palette::for_mode(false);\n\n        let mut cmds = Vec::new();\n\n        // Background.'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_taskbar_draws_comes_from_its_palette',
+            'every_colour_on_the_bar_is_in_the_role_it_claims',
+            'each_button_state_draws_the_background_its_role_names',
+            'button_ink_follows_the_button_state',
+            'every_colour_in_the_context_menu_is_in_the_role_it_claims',
+            'exactly_one_thing_on_the_taskbar_carries_the_accent',
+            'the_badge_digit_is_computed_from_the_badge_it_sits_on',
+            # A frozen dark render draws Mocha red where the light palette
+            # names Latte red, so the badge's role table fails too. This is
+            # the defect the whole conversion exists to prevent, and it should
+            # be declared against every table that reads a role in both modes.
+            'the_count_badge_does_not_follow_the_accent',
+            'the_render_is_not_the_same_in_both_modes',
+            'none_of_the_ten_deleted_constants_is_still_drawn',
+        ],
+    ),
+    (
+        "CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC: the probe palette's accent collides with a role again",
+        TB,
+        [
+            ('        p.accent = Color::from_hex(0xFF00FF);',
+             '        p.accent = p.blue;'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_taskbar_draws_comes_from_its_palette',
+            'the_fixture_takes_every_branch_this_module_has',
+            'every_colour_on_the_bar_is_in_the_role_it_claims',
+            'each_button_state_draws_the_background_its_role_names',
+            'button_ink_follows_the_button_state',
+            'every_colour_in_the_context_menu_is_in_the_role_it_claims',
+            'exactly_one_thing_on_the_taskbar_carries_the_accent',
+            'the_drop_caret_is_never_the_same_hue_as_the_focus_underline',
+            'the_count_badge_does_not_follow_the_accent',
+            'the_badge_digit_is_computed_from_the_badge_it_sits_on',
+            'the_focus_underline_is_wider_than_the_running_one',
+            # Every test in this module builds its palette with `accented()`,
+            # whose guard assertions this defect trips, so the pre-conversion
+            # tests fail too.
+            'test_render_shows_indicator_for_running',
+            'the_render_is_not_the_same_in_both_modes',
+            'none_of_the_ten_deleted_constants_is_still_drawn',
+        ],
+    ),
+    (
+        'DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD: the probe palette goes back to a fully opaque panel',
+        TB,
+        [
+            ('        p.panel_alpha = 200;',
+             '        p.panel_alpha = 255;'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_taskbar_draws_comes_from_its_palette',
+            'the_fixture_takes_every_branch_this_module_has',
+            'every_colour_on_the_bar_is_in_the_role_it_claims',
+            'each_button_state_draws_the_background_its_role_names',
+            'button_ink_follows_the_button_state',
+            'every_colour_in_the_context_menu_is_in_the_role_it_claims',
+            'exactly_one_thing_on_the_taskbar_carries_the_accent',
+            'the_drop_caret_is_never_the_same_hue_as_the_focus_underline',
+            'the_count_badge_does_not_follow_the_accent',
+            'the_badge_digit_is_computed_from_the_badge_it_sits_on',
+            'the_focus_underline_is_wider_than_the_running_one',
+            # Every test in this module builds its palette with `accented()`,
+            # whose guard assertions this defect trips, so the pre-conversion
+            # tests fail too.
+            'test_render_shows_indicator_for_running',
+            'the_render_is_not_the_same_in_both_modes',
+            'none_of_the_ten_deleted_constants_is_still_drawn',
+        ],
+    ),
+    (
+        "EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE: the fixture's drag never becomes active, so the ghost and caret go unchecked",
+        TB,
+        [
+            ('            start_y: 20.0,\n            active: true,',
+             '            start_y: 20.0,\n            active: false,'),
+        ],
+        ["desktop"],
+        [
+            'the_fixture_takes_every_branch_this_module_has',
+            'every_colour_on_the_bar_is_in_the_role_it_claims',
+            'each_button_state_draws_the_background_its_role_names',
+            'button_ink_follows_the_button_state',
+            'the_drop_caret_is_never_the_same_hue_as_the_focus_underline',
+        ],
+    ),
+    (
+        "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF: the fixture's context menu is closed, so the popup goes unchecked",
+        TB,
+        [
+            ('            x: 200.0,\n            y: 300.0,\n            visible: true,',
+             '            x: 200.0,\n            y: 300.0,\n            visible: false,'),
+        ],
+        ["desktop"],
+        [
+            'the_fixture_takes_every_branch_this_module_has',
+            'every_colour_in_the_context_menu_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        "GGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGG: the fixture's third window is gone, so the count badge goes unchecked",
+        TB,
+        [
+            ('        s.add_running_window(WindowId(12), "many", "Many 3");\n',
+             ''),
+        ],
+        ["desktop"],
+        [
+            'the_fixture_takes_every_branch_this_module_has',
+            'every_colour_on_the_bar_is_in_the_role_it_claims',
+            'the_badge_digit_is_computed_from_the_badge_it_sits_on',
+            # NOT the_count_badge test: dropping the third window leaves two,
+            # and a badge is drawn for any count above one — so the badge is
+            # still there and still `p.red`. Only the digit test notices,
+            # because it selects the text by its content ("3"). A defect that
+            # weakens a fixture is caught by whichever test reads the value
+            # that changed, not by every test that touches the site.
+        ],
+    ),
+    (
+        'HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH: nothing in the fixture is hovered, so the top rung of the ladder goes unchecked',
+        TB,
+        [
+            ('        s.hover_index = Some(3);',
+             '        s.hover_index = None;'),
+        ],
+        ["desktop"],
+        [
+            'the_fixture_takes_every_branch_this_module_has',
+            'each_button_state_draws_the_background_its_role_names',
+        ],
+    ),
+    (
+        'IIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIII: the fixture stops being in label mode, so the label site goes unchecked',
+        TB,
+        [
+            ('        let mut s = TaskbarState::new(TaskbarConfig {\n            icon_only: false,',
+             '        let mut s = TaskbarState::new(TaskbarConfig {\n            icon_only: true,'),
+        ],
+        ["desktop"],
+        [
+            'the_fixture_takes_every_branch_this_module_has',
+            'button_ink_follows_the_button_state',
+            # The pre-conversion label test uses the same fixture, so it goes
+            # first — it looks for the literal text "Terminal", which an
+            # icon-only bar never draws.
+            'test_render_label_mode',
         ],
     ),
 ]

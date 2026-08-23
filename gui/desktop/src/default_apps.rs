@@ -3,27 +3,50 @@
 //! Manages which applications open by default for various content types
 //! including web browsers, email clients, music players, video players,
 //! image viewers, document readers, and custom file type associations.
+//!
+//! # Colour
+//!
+//! Every colour is read from the [`Palette`] handed to [`DefaultAppsUI::render`]
+//! — this module used to carry its own eleven Mocha constants, which is the
+//! defect `TD-C-FORTY-NINE-SHELL-MODULES-CARRY-THEIR-OWN-COPY-OF-THE-PALETTE`
+//! names. Four judgements were made in the course of that conversion, and each
+//! is a claim a test in this file has to be able to refute:
+//!
+//! 1. **The accent marks which one is in force, and nothing else.** Three
+//!    sites take `p.accent`: which tab is open, the default app named under
+//!    each category card, and — in an expanded card — the fill of the chip
+//!    for the app that is currently the default. The last two are one fact
+//!    drawn in two places, so the count of accented things is not fixed:
+//!    the Categories tab carries a dozen of them at once. This module
+//!    therefore cannot borrow the taskbar's "exactly one thing carries the
+//!    accent" test, and checks a per-site table plus a per-tab count
+//!    instead.
+//! 2. **Peach marks a departure from the defaults, which is a state and not
+//!    a position.** The "Reset all" button, an app name reached through a
+//!    custom association, and the "Custom" badge beside it are all peach.
+//!    That is a *category* mark — it says "this is not how it shipped" —
+//!    so it must not follow the accent, and a test pins it against an
+//!    accent swept through the whole palette.
+//! 3. **The content well is `crust`, one rung below the panel it sits in.**
+//!    The panel is `base`; the well is the recess drawn inside it. In both
+//!    Mocha and Latte `crust` is the deeper of the two, so this survives the
+//!    mode flip as a *relationship* rather than as a pair of values, and the
+//!    test asserts the relationship.
+//! 4. **The ink on the current chip is computed from the chip, never named.**
+//!    It is [`readable_on`] of the accent, because the chip is a filled
+//!    accent-coloured pill and its label has to stay legible on whatever
+//!    the accent happens to be. This site is the module's one real trap:
+//!    the stock accent is blue, whose luma is 175, so `readable_on` answers
+//!    `0x11111B` — which *is* Mocha `crust`, the very constant that used to
+//!    be written here. A leftover literal would therefore be invisible both
+//!    to the membership sweep (which allows the endpoints outright) and to
+//!    any test run at the stock accent. Only an off-palette accent exposes
+//!    it, which is why the fixture uses one.
 
-use guitk::color::Color;
+use appearance::{Palette, readable_on};
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::text;
-
-// ============================================================================
-// Catppuccin Mocha palette
-// ============================================================================
-
-const BASE: Color = Color::from_hex(0x1E1E2E);
-const CRUST: Color = Color::from_hex(0x11111B);
-const SURFACE0: Color = Color::from_hex(0x313244);
-const SURFACE1: Color = Color::from_hex(0x45475A);
-const TEXT: Color = Color::from_hex(0xCDD6F4);
-const SUBTEXT0: Color = Color::from_hex(0xA6ADC8);
-const SUBTEXT1: Color = Color::from_hex(0xBAC2DE);
-const BLUE: Color = Color::from_hex(0x89B4FA);
-const PEACH: Color = Color::from_hex(0xFAB387);
-const LAVENDER: Color = Color::from_hex(0xB4BEFE);
-const OVERLAY0: Color = Color::from_hex(0x6C7086);
 
 // ============================================================================
 // Content categories
@@ -673,7 +696,17 @@ impl DefaultAppsUI {
     }
 
     /// Render the settings panel.
-    pub fn render(&self, x: f32, y: f32, width: f32, height: f32) -> Vec<RenderCommand> {
+    ///
+    /// `p` is the resolved palette; nothing below reads a colour from
+    /// anywhere else.
+    pub fn render(
+        &self,
+        p: &Palette,
+        x: f32,
+        y: f32,
+        width: f32,
+        height: f32,
+    ) -> Vec<RenderCommand> {
         let mut cmds = Vec::new();
 
         // Panel background
@@ -682,7 +715,7 @@ impl DefaultAppsUI {
             y,
             width,
             height,
-            color: BASE,
+            color: p.base,
             corner_radii: CornerRadii::all(8.0),
         });
 
@@ -692,7 +725,7 @@ impl DefaultAppsUI {
             y: y + 20.0,
             text: "Default Applications".to_string(),
             font_size: 22.0,
-            color: TEXT,
+            color: p.text,
             font_weight: FontWeightHint::Bold,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -712,7 +745,7 @@ impl DefaultAppsUI {
                     y: tab_y,
                     width: tw,
                     height: 32.0,
-                    color: SURFACE0,
+                    color: p.surface0,
                     corner_radii: CornerRadii::all(6.0),
                 });
             }
@@ -722,7 +755,7 @@ impl DefaultAppsUI {
                 y: tab_y + 8.0,
                 text: label.to_string(),
                 font_size: 13.0,
-                color: if is_active { BLUE } else { SUBTEXT0 },
+                color: if is_active { p.accent } else { p.subtext0 },
                 font_weight: if is_active {
                     FontWeightHint::Bold
                 } else {
@@ -744,7 +777,10 @@ impl DefaultAppsUI {
             y: content_y,
             width: width - 16.0,
             height: content_h,
-            color: CRUST,
+            // The well is a recess *inside* the panel, so it takes the rung
+            // below `base`. Both Mocha and Latte order crust deeper than
+            // base, so this reads as a recess in either mode.
+            color: p.crust,
             corner_radii: CornerRadii::all(6.0),
         });
 
@@ -754,13 +790,13 @@ impl DefaultAppsUI {
 
         match self.active_tab {
             DefaultAppsTab::Categories => {
-                self.render_categories_tab(&mut cmds, cx, cy, cw);
+                self.render_categories_tab(&mut cmds, p, cx, cy, cw);
             }
             DefaultAppsTab::FileTypes => {
-                self.render_filetypes_tab(&mut cmds, cx, cy, cw);
+                self.render_filetypes_tab(&mut cmds, p, cx, cy, cw);
             }
             DefaultAppsTab::AppsList => {
-                self.render_apps_tab(&mut cmds, cx, cy, cw);
+                self.render_apps_tab(&mut cmds, p, cx, cy, cw);
             }
         }
 
@@ -768,7 +804,14 @@ impl DefaultAppsUI {
     }
 
     /// Render the categories tab.
-    fn render_categories_tab(&self, cmds: &mut Vec<RenderCommand>, x: f32, y: f32, width: f32) {
+    fn render_categories_tab(
+        &self,
+        cmds: &mut Vec<RenderCommand>,
+        p: &Palette,
+        x: f32,
+        y: f32,
+        width: f32,
+    ) {
         let mut row_y = y;
 
         cmds.push(RenderCommand::Text {
@@ -776,7 +819,7 @@ impl DefaultAppsUI {
             y: row_y,
             text: "Choose default apps for each type of content".to_string(),
             font_size: 12.0,
-            color: SUBTEXT0,
+            color: p.subtext0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(width),
             overflow: TextOverflow::Ellipsis,
@@ -789,7 +832,7 @@ impl DefaultAppsUI {
             y: row_y - 20.0,
             width: 100.0,
             height: 24.0,
-            color: SURFACE1,
+            color: p.surface1,
             corner_radii: CornerRadii::all(4.0),
         });
         cmds.push(RenderCommand::Text {
@@ -797,7 +840,9 @@ impl DefaultAppsUI {
             y: row_y - 16.0,
             text: "Reset all".to_string(),
             font_size: 11.0,
-            color: PEACH,
+            // Peach, not the accent: this is about undoing a departure from
+            // the shipped defaults, which is a state rather than a position.
+            color: p.peach,
             font_weight: FontWeightHint::Regular,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -813,7 +858,7 @@ impl DefaultAppsUI {
                 y: row_y,
                 width,
                 height: card_h,
-                color: SURFACE0,
+                color: p.surface0,
                 corner_radii: CornerRadii::all(6.0),
             });
 
@@ -823,7 +868,7 @@ impl DefaultAppsUI {
                 y: row_y + 10.0,
                 text: category.icon().to_string(),
                 font_size: 20.0,
-                color: TEXT,
+                color: p.text,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
                 overflow: TextOverflow::Clip,
@@ -835,7 +880,7 @@ impl DefaultAppsUI {
                 y: row_y + 8.0,
                 text: category.label().to_string(),
                 font_size: 14.0,
-                color: TEXT,
+                color: p.text,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
                 overflow: TextOverflow::Clip,
@@ -848,7 +893,7 @@ impl DefaultAppsUI {
                 y: row_y + 30.0,
                 text: app_name.to_string(),
                 font_size: 12.0,
-                color: BLUE,
+                color: p.accent,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
                 overflow: TextOverflow::Clip,
@@ -860,7 +905,7 @@ impl DefaultAppsUI {
                 y: row_y + 16.0,
                 text: if is_expanded { "\u{25B2}" } else { "\u{25BC}" }.to_string(),
                 font_size: 12.0,
-                color: OVERLAY0,
+                color: p.overlay0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
                 overflow: TextOverflow::Clip,
@@ -884,7 +929,7 @@ impl DefaultAppsUI {
                         y: alt_y,
                         width: chip_w,
                         height: 28.0,
-                        color: if is_current { BLUE } else { SURFACE1 },
+                        color: if is_current { p.accent } else { p.surface1 },
                         corner_radii: CornerRadii::all(14.0),
                     });
 
@@ -893,7 +938,14 @@ impl DefaultAppsUI {
                         y: alt_y + 7.0,
                         text: app.name.clone(),
                         font_size: 11.0,
-                        color: if is_current { CRUST } else { TEXT },
+                        // Computed from the pill under it, never named: the
+                        // accent is user-settable, so the only correct ink is
+                        // whichever endpoint stays legible on it.
+                        color: if is_current {
+                            readable_on(p.accent)
+                        } else {
+                            p.text
+                        },
                         font_weight: if is_current {
                             FontWeightHint::Bold
                         } else {
@@ -912,7 +964,14 @@ impl DefaultAppsUI {
     }
 
     /// Render the file types tab.
-    fn render_filetypes_tab(&self, cmds: &mut Vec<RenderCommand>, x: f32, y: f32, width: f32) {
+    fn render_filetypes_tab(
+        &self,
+        cmds: &mut Vec<RenderCommand>,
+        p: &Palette,
+        x: f32,
+        y: f32,
+        width: f32,
+    ) {
         let mut row_y = y;
 
         // Search bar
@@ -921,7 +980,7 @@ impl DefaultAppsUI {
             y: row_y,
             width,
             height: 32.0,
-            color: SURFACE0,
+            color: p.surface0,
             corner_radii: CornerRadii::all(6.0),
         });
 
@@ -937,9 +996,9 @@ impl DefaultAppsUI {
             text: search_text,
             font_size: 12.0,
             color: if self.search_query.is_empty() {
-                OVERLAY0
+                p.overlay0
             } else {
-                TEXT
+                p.text
             },
             font_weight: FontWeightHint::Regular,
             max_width: Some(width - 24.0),
@@ -956,7 +1015,7 @@ impl DefaultAppsUI {
                 self.settings.custom_association_count()
             ),
             font_size: 12.0,
-            color: SUBTEXT0,
+            color: p.subtext0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -989,7 +1048,7 @@ impl DefaultAppsUI {
                 y: row_y,
                 text: category.label().to_string(),
                 font_size: 13.0,
-                color: SUBTEXT1,
+                color: p.subtext1,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
                 overflow: TextOverflow::Clip,
@@ -1009,7 +1068,7 @@ impl DefaultAppsUI {
                     y: row_y,
                     width,
                     height: 32.0,
-                    color: SURFACE0,
+                    color: p.surface0,
                     corner_radii: CornerRadii::all(4.0),
                 });
 
@@ -1019,7 +1078,7 @@ impl DefaultAppsUI {
                     y: row_y + 6.0,
                     width: 48.0,
                     height: 20.0,
-                    color: SURFACE1,
+                    color: p.surface1,
                     corner_radii: CornerRadii::all(3.0),
                 });
                 cmds.push(RenderCommand::Text {
@@ -1027,7 +1086,7 @@ impl DefaultAppsUI {
                     y: row_y + 9.0,
                     text: format!(".{ext}"),
                     font_size: 11.0,
-                    color: LAVENDER,
+                    color: p.lavender,
                     font_weight: FontWeightHint::Bold,
                     max_width: None,
                     overflow: TextOverflow::Clip,
@@ -1039,7 +1098,7 @@ impl DefaultAppsUI {
                     y: row_y + 9.0,
                     text: app.map_or("(none)", |a| a.name.as_str()).to_string(),
                     font_size: 12.0,
-                    color: if is_custom { PEACH } else { TEXT },
+                    color: if is_custom { p.peach } else { p.text },
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
                     overflow: TextOverflow::Clip,
@@ -1052,7 +1111,7 @@ impl DefaultAppsUI {
                         y: row_y + 10.0,
                         text: "Custom".to_string(),
                         font_size: 10.0,
-                        color: PEACH,
+                        color: p.peach,
                         font_weight: FontWeightHint::Regular,
                         max_width: None,
                         overflow: TextOverflow::Clip,
@@ -1067,7 +1126,14 @@ impl DefaultAppsUI {
     }
 
     /// Render the installed apps tab.
-    fn render_apps_tab(&self, cmds: &mut Vec<RenderCommand>, x: f32, y: f32, width: f32) {
+    fn render_apps_tab(
+        &self,
+        cmds: &mut Vec<RenderCommand>,
+        p: &Palette,
+        x: f32,
+        y: f32,
+        width: f32,
+    ) {
         let mut row_y = y;
 
         let total = self.settings.installed_apps.len();
@@ -1078,7 +1144,7 @@ impl DefaultAppsUI {
             y: row_y,
             text: format!("{total} installed apps ({third_party} third-party)"),
             font_size: 12.0,
-            color: SUBTEXT0,
+            color: p.subtext0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -1091,7 +1157,7 @@ impl DefaultAppsUI {
             y: row_y,
             width,
             height: 32.0,
-            color: SURFACE0,
+            color: p.surface0,
             corner_radii: CornerRadii::all(6.0),
         });
 
@@ -1107,9 +1173,9 @@ impl DefaultAppsUI {
             text: search_text,
             font_size: 12.0,
             color: if self.search_query.is_empty() {
-                OVERLAY0
+                p.overlay0
             } else {
-                TEXT
+                p.text
             },
             font_weight: FontWeightHint::Regular,
             max_width: Some(width - 24.0),
@@ -1136,7 +1202,7 @@ impl DefaultAppsUI {
                 y: row_y,
                 width,
                 height: 56.0,
-                color: SURFACE0,
+                color: p.surface0,
                 corner_radii: CornerRadii::all(6.0),
             });
 
@@ -1146,7 +1212,7 @@ impl DefaultAppsUI {
                 y: row_y + 8.0,
                 text: app.name.clone(),
                 font_size: 14.0,
-                color: TEXT,
+                color: p.text,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
                 overflow: TextOverflow::Clip,
@@ -1158,7 +1224,7 @@ impl DefaultAppsUI {
                 y: row_y + 28.0,
                 text: app.description.clone(),
                 font_size: 11.0,
-                color: SUBTEXT0,
+                color: p.subtext0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width - 120.0),
                 overflow: TextOverflow::Ellipsis,
@@ -1171,7 +1237,7 @@ impl DefaultAppsUI {
                     y: row_y + 8.0,
                     width: 52.0,
                     height: 18.0,
-                    color: SURFACE1,
+                    color: p.surface1,
                     corner_radii: CornerRadii::all(3.0),
                 });
                 cmds.push(RenderCommand::Text {
@@ -1179,7 +1245,7 @@ impl DefaultAppsUI {
                     y: row_y + 10.0,
                     text: "System".to_string(),
                     font_size: 10.0,
-                    color: OVERLAY0,
+                    color: p.overlay0,
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
                     overflow: TextOverflow::Clip,
@@ -1195,7 +1261,7 @@ impl DefaultAppsUI {
                     y: row_y + 42.0,
                     text: categories.join(", "),
                     font_size: 10.0,
-                    color: OVERLAY0,
+                    color: p.overlay0,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(width - 32.0),
                     overflow: TextOverflow::Ellipsis,
@@ -1478,7 +1544,7 @@ mod tests {
     #[test]
     fn test_ui_render_produces_commands() {
         let ui = DefaultAppsUI::new();
-        let cmds = ui.render(0.0, 0.0, 600.0, 800.0);
+        let cmds = ui.render(&Palette::for_mode(false), 0.0, 0.0, 600.0, 800.0);
         assert!(!cmds.is_empty());
     }
 
@@ -1496,5 +1562,602 @@ mod tests {
             .unwrap();
         assert!(music.handles_mime("audio/mpeg"));
         assert!(!music.handles_mime("video/mp4"));
+    }
+
+    // ========================================================================
+    // Palette conversion
+    //
+    // The tests below exist to refute the four judgements in the module docs.
+    // ========================================================================
+
+    use guitk::color::Color;
+
+    /// The panel size every render below is taken at.
+    ///
+    /// Named because half the assertions select a command by its size, and a
+    /// size that drifted from the render would silently select nothing.
+    const W: f32 = 600.0;
+    const H: f32 = 800.0;
+
+    /// A palette whose accent is in no palette at all.
+    ///
+    /// This matters more than it looks. The stock accent *is* `blue`, so a
+    /// site that still drew the deleted `BLUE` constant would be
+    /// indistinguishable from one correctly reading `p.accent` — every
+    /// assertion about the accent would pass while the bug was present.
+    /// Magenta is in neither Mocha nor Latte, which separates the two.
+    ///
+    /// It is also chosen for its *luma*: at 105 it sits below `readable_on`'s
+    /// threshold of 140, so ink computed from it is the light endpoint rather
+    /// than `0x11111B`. Since `0x11111B` is exactly the Mocha `CRUST` that
+    /// used to be written at the chip-ink site, the stock accent would make a
+    /// leftover constant there indistinguishable from the correct answer —
+    /// see judgement 4.
+    fn accented(light: bool) -> Palette {
+        let mut p = Palette::for_mode(light);
+        p.accent = Color::from_hex(0xFF00FF);
+        for (name, role) in p.roles() {
+            assert!(
+                name == "accent"
+                    || (role.r, role.g, role.b) != (p.accent.r, p.accent.g, p.accent.b),
+                "the fixture accent collides with role {name}, so an assertion \
+                 about the accent could pass while reading the wrong role"
+            );
+        }
+        p
+    }
+
+    /// A UI whose data reaches the branches the shipped defaults never do.
+    ///
+    /// Three properties of `DefaultAppsSettings::default()` make it unusable
+    /// as a fixture, and each one hides a colour site rather than merely
+    /// narrowing what is covered:
+    ///
+    /// - **every category has exactly one handling app**, so the alternatives
+    ///   chip is always the current one and the `surface1`/`text` arm of the
+    ///   two chip sites never renders at all;
+    /// - **nothing is customised**, so both peach sites — the custom app name
+    ///   and the "Custom" badge — never render;
+    /// - **every builtin is a system app**, so the third-party count is
+    ///   always zero and reads the same whether or not it is computed.
+    ///
+    /// Adding one rival music player and pointing `.mp3` at it turns all of
+    /// those on. The category is left expanded because the chips only exist
+    /// in an expanded card.
+    fn exercised() -> DefaultAppsUI {
+        let mut ui = DefaultAppsUI::new();
+        ui.settings.register_app(AppInfo {
+            id: "org.example.rival".to_string(),
+            name: "Rival Player".to_string(),
+            description: "A rival music player".to_string(),
+            executable: "/usr/bin/rival".to_string(),
+            icon_name: "rival".to_string(),
+            supported_categories: vec![ContentCategory::MusicPlayer],
+            supported_extensions: vec!["mp3".into()],
+            supported_mime_types: vec![],
+            is_system: false,
+        });
+        ui.settings
+            .set_extension_handler("mp3", "org.example.rival");
+        ui.expanded_category = Some(ContentCategory::MusicPlayer);
+        ui
+    }
+
+    /// Every colour `cmds` puts on the screen.
+    fn all_colors(cmds: &[RenderCommand]) -> Vec<Color> {
+        cmds.iter()
+            .filter_map(|c| match c {
+                RenderCommand::FillRect { color, .. }
+                | RenderCommand::StrokeRect { color, .. }
+                | RenderCommand::Text { color, .. }
+                | RenderCommand::Line { color, .. }
+                | RenderCommand::BoxShadow { color, .. } => Some(*color),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The colours of every `Text` command whose text is exactly `s`.
+    fn text_colors(cmds: &[RenderCommand], s: &str) -> Vec<Color> {
+        cmds.iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, color, .. } if text == s => Some(*color),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The colour of the one `Text` command reading `s`.
+    ///
+    /// Panics when there is not exactly one, because an assertion that
+    /// silently picked the first of several matches would be checking a
+    /// different site than the one it names.
+    fn text_color(cmds: &[RenderCommand], s: &str) -> Color {
+        let found = text_colors(cmds, s);
+        assert_eq!(found.len(), 1, "expected exactly one command reading {s:?}");
+        found[0]
+    }
+
+    /// The colours of every `FillRect` of exactly `w` x `h`.
+    fn fills_sized(cmds: &[RenderCommand], w: f32, h: f32) -> Vec<Color> {
+        cmds.iter()
+            .filter_map(|c| match c {
+                RenderCommand::FillRect {
+                    width,
+                    height,
+                    color,
+                    ..
+                } if *width == w && *height == h => Some(*color),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The colour of the one `Text` command reading `s` at `size` points.
+    ///
+    /// Needed wherever the same string is drawn twice at different sizes —
+    /// an app's name appears both as the default under its category card and
+    /// as the label on its own chip, and the two are different sites.
+    fn text_color_sized(cmds: &[RenderCommand], s: &str, size: f32) -> Color {
+        let found: Vec<Color> = cmds
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text {
+                    text,
+                    color,
+                    font_size,
+                    ..
+                } if text == s && *font_size == size => Some(*color),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            found.len(),
+            1,
+            "expected exactly one command reading {s:?} at {size}pt"
+        );
+        found[0]
+    }
+
+    /// The colours of every `FillRect` of height `h`, whatever its width.
+    ///
+    /// The alternatives chips are sized to their own labels, so they cannot
+    /// be selected by width.
+    fn fills_high(cmds: &[RenderCommand], h: f32) -> Vec<Color> {
+        cmds.iter()
+            .filter_map(|c| match c {
+                RenderCommand::FillRect { height, color, .. } if *height == h => Some(*color),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Each tab, rendered, paired with the tab it is.
+    fn every_tab(p: &Palette) -> Vec<(DefaultAppsTab, Vec<RenderCommand>)> {
+        DefaultAppsTab::all()
+            .iter()
+            .map(|t| {
+                let mut ui = exercised();
+                ui.active_tab = *t;
+                (*t, ui.render(p, 0.0, 0.0, W, H))
+            })
+            .collect()
+    }
+
+    /// Nothing this panel draws comes from outside the palette it was given.
+    ///
+    /// Both modes and all three tabs, because the sweep is only ever as wide
+    /// as the render handed to it: a tab that is never rendered is a tab
+    /// whose colours are never checked.
+    #[test]
+    fn every_colour_this_panel_draws_comes_from_its_palette() {
+        for light in [false, true] {
+            let p = accented(light);
+            for (tab, cmds) in every_tab(&p) {
+                // No `derived` list: the only computed colour here is
+                // `readable_on(p.accent)`, and the sweep allows both of that
+                // function's endpoints outright.
+                crate::palette_check::assert_drawn_from(&p, &cmds, &[], &format!("{tab:?}"));
+            }
+        }
+    }
+
+    /// None of the eleven deleted constants is still being drawn.
+    ///
+    /// This is the check the module conversion actually turns on, and it runs
+    /// in **light** mode for the reason the sweep's own docs give: every
+    /// deleted constant was a Mocha value, Latte contains none of them, so a
+    /// leftover names itself. Run in dark it would be worthless — nine of the
+    /// eleven would still equal the role that replaced them.
+    ///
+    /// It also closes the sweep's documented blind spot. `assert_drawn_from`
+    /// cannot reject `0x11111B`, because that is one of `readable_on`'s two
+    /// answers; but with an accent below the luma threshold, `readable_on`
+    /// returns the *other* endpoint, so `0x11111B` should not appear at all.
+    #[test]
+    fn none_of_the_eleven_deleted_constants_is_still_drawn() {
+        const DELETED: [(&str, u32); 11] = [
+            ("BASE", 0x001E_1E2E),
+            ("CRUST", 0x0011_111B),
+            ("SURFACE0", 0x0031_3244),
+            ("SURFACE1", 0x0045_475A),
+            ("TEXT", 0x00CD_D6F4),
+            ("SUBTEXT0", 0x00A6_ADC8),
+            ("SUBTEXT1", 0x00BA_C2DE),
+            ("BLUE", 0x0089_B4FA),
+            ("PEACH", 0x00FA_B387),
+            ("LAVENDER", 0x00B4_BEFE),
+            ("OVERLAY0", 0x006C_7086),
+        ];
+
+        let p = accented(true);
+        for (tab, cmds) in every_tab(&p) {
+            for c in all_colors(&cmds) {
+                let rgb = (u32::from(c.r) << 16) | (u32::from(c.g) << 8) | u32::from(c.b);
+                for (name, deleted) in DELETED {
+                    assert_ne!(
+                        rgb, deleted,
+                        "the {tab:?} tab still draws the deleted constant \
+                         {name} (#{deleted:06X}) in a light render"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Every site, named one at a time, in the role this module claims for it.
+    ///
+    /// The sweep above proves only *membership*, and membership cannot see a
+    /// swap: a card painted `surface1` instead of `surface0` draws a legal
+    /// colour, and so does a well painted `base` instead of `crust`. Neither
+    /// changes any count either, so a coverage test that tallied roles would
+    /// pass both. n source sites need n assertions, so this is that table.
+    ///
+    /// Every command is selected by a size, a y, or a literal string the
+    /// renderer writes — never by the colour under test, which would make the
+    /// expectation a restatement of the code and unable to fail.
+    #[test]
+    fn every_site_draws_the_role_it_claims() {
+        for light in [false, true] {
+            let p = accented(light);
+            let by_tab = every_tab(&p);
+            let cats = &by_tab[0].1;
+
+            assert_eq!(fills_sized(cats, W, H), vec![p.base], "panel");
+            assert_eq!(text_color(cats, "Default Applications"), p.text, "title");
+
+            // The well is the recess inside the panel: 584 x 684 at this size.
+            assert_eq!(fills_sized(cats, 584.0, 684.0), vec![p.crust], "well");
+
+            // Tab strip: one fill behind the active tab, and three labels of
+            // which exactly the active one is accented.
+            assert_eq!(
+                fills_high(cats, 32.0),
+                vec![p.surface0],
+                "only the active tab is filled"
+            );
+            assert_eq!(text_color(cats, "Default apps"), p.accent, "active tab");
+            assert_eq!(text_color(cats, "File types"), p.subtext0, "idle tab");
+            assert_eq!(
+                text_color(cats, "Installed apps"),
+                p.subtext0,
+                "the other idle tab"
+            );
+
+            assert_eq!(
+                fills_sized(cats, 100.0, 24.0),
+                vec![p.surface1],
+                "reset button"
+            );
+            assert_eq!(text_color(cats, "Reset all"), p.peach, "reset label");
+            assert_eq!(
+                text_color(cats, "Choose default apps for each type of content"),
+                p.subtext0,
+                "the tab's own subtitle"
+            );
+
+            // Twelve category cards, one of them expanded and so taller.
+            // Indexed rather than counted: `{surface0 x 12}` is the same
+            // multiset however the rungs are permuted.
+            let short = fills_sized(cats, 552.0, 56.0);
+            let tall = fills_sized(cats, 552.0, 100.0);
+            assert_eq!(short.len(), 11, "eleven collapsed category cards");
+            assert_eq!(tall.len(), 1, "one expanded category card");
+            assert!(
+                short.iter().chain(tall.iter()).all(|c| *c == p.surface0),
+                "every category card sits on the same rung, expanded or not"
+            );
+
+            assert_eq!(
+                text_color(cats, "Web browser"),
+                p.text,
+                "a category's own name"
+            );
+            assert_eq!(
+                text_colors(cats, "\u{25BC}").len(),
+                11,
+                "eleven collapsed cards each carry a chevron"
+            );
+            assert!(
+                text_colors(cats, "\u{25BC}")
+                    .iter()
+                    .chain(text_colors(cats, "\u{25B2}").iter())
+                    .all(|c| *c == p.overlay0),
+                "a chevron is the dimmest thing on the card"
+            );
+
+            // The Installed apps tab: the rows, the badge, and the two dim
+            // lines under each app's name.
+            let apps = &by_tab[2].1;
+            assert!(
+                fills_sized(apps, 552.0, 56.0)
+                    .iter()
+                    .all(|c| *c == p.surface0),
+                "app rows"
+            );
+            assert_eq!(
+                text_color(apps, "A rival music player"),
+                p.subtext0,
+                "an app's description"
+            );
+            assert_eq!(
+                text_color(apps, "11 installed apps (1 third-party)"),
+                p.subtext0,
+                "the count line"
+            );
+            assert_eq!(
+                fills_sized(apps, 52.0, 18.0).len(),
+                10,
+                "ten of the eleven apps are system apps and get a badge"
+            );
+            assert!(
+                fills_sized(apps, 52.0, 18.0)
+                    .iter()
+                    .all(|c| *c == p.surface1),
+                "the System badge is a raised pill"
+            );
+            assert!(
+                text_colors(apps, "System").iter().all(|c| *c == p.overlay0),
+                "the System badge's own label is dimmer than the pill"
+            );
+
+            // The File types tab: the extension pill and its lavender token.
+            let types = &by_tab[1].1;
+            assert!(
+                fills_sized(types, 48.0, 20.0)
+                    .iter()
+                    .all(|c| *c == p.surface1),
+                "extension pills"
+            );
+            assert_eq!(text_color(types, ".flac"), p.lavender, "extension token");
+            assert_eq!(
+                text_color(types, "1 custom associations"),
+                p.subtext0,
+                "the custom-association count"
+            );
+            assert_eq!(
+                text_color(types, "Music player"),
+                p.subtext1,
+                "a file-type group heading is a rung above the body text"
+            );
+        }
+    }
+
+    /// Judgement 1: the accent marks which one is in force, and only that.
+    ///
+    /// This module cannot borrow the taskbar's "exactly one thing carries the
+    /// accent" test, because the marks are on independent axes and a dozen of
+    /// them are legitimately on screen at once. So the check is a per-site
+    /// table *plus* a per-tab count — the table catches the accent moving to
+    /// the wrong site, and the count catches it appearing at a site nobody
+    /// named.
+    #[test]
+    fn the_accent_marks_which_app_is_in_force_and_nothing_else() {
+        for light in [false, true] {
+            let p = accented(light);
+            let by_tab = every_tab(&p);
+
+            // Categories: the open tab, the app named under each of the
+            // twelve cards, and the current app's chip in the expanded one.
+            let cats = &by_tab[0].1;
+            assert_eq!(text_color(cats, "Default apps"), p.accent, "the open tab");
+            assert_eq!(
+                text_color_sized(cats, "Music Player", 12.0),
+                p.accent,
+                "the app in force for a category is named in the accent"
+            );
+            let chips = fills_high(cats, 28.0);
+            assert_eq!(chips.len(), 2, "one chip per app that handles the category");
+            assert_eq!(
+                chips[0], p.accent,
+                "the current app's chip is the filled one"
+            );
+            assert_eq!(
+                chips[1], p.surface1,
+                "a rival app's chip is merely raised, not accented"
+            );
+            let on_cats = all_colors(cats).iter().filter(|c| **c == p.accent).count();
+            assert_eq!(
+                on_cats, 14,
+                "the Categories tab should accent its own tab, the app named \
+                 under each of the twelve cards, and the current chip — \
+                 found {on_cats}"
+            );
+
+            // The other two tabs accent their own tab and nothing else.
+            for (i, name) in [(1, "File types"), (2, "Installed apps")] {
+                let cmds = &by_tab[i].1;
+                assert_eq!(text_color(cmds, name), p.accent, "the open tab");
+                let n = all_colors(cmds).iter().filter(|c| **c == p.accent).count();
+                assert_eq!(
+                    n, 1,
+                    "the {name} tab has nothing in force to mark, so its own \
+                     tab should be the only accented thing — found {n}"
+                );
+            }
+        }
+    }
+
+    /// Judgement 2: peach marks a departure from the defaults, not a position.
+    ///
+    /// So it must hold still while the accent moves. Sweeping the accent
+    /// through every role — rather than checking one off-palette value — is
+    /// what makes this able to fail: a site that read `p.accent` would track
+    /// the sweep, and a site frozen to Mocha peach would be caught by the
+    /// light half of the loop.
+    #[test]
+    fn peach_marks_a_departure_from_the_defaults_and_does_not_follow_the_accent() {
+        for light in [false, true] {
+            let base = Palette::for_mode(light);
+            for (role, accent) in base.roles() {
+                let mut p = Palette::for_mode(light);
+                p.accent = accent;
+                let by_tab = every_tab(&p);
+
+                let cats = &by_tab[0].1;
+                assert_eq!(
+                    text_color(cats, "Reset all"),
+                    p.peach,
+                    "undoing a customisation stayed peach with accent={role}"
+                );
+
+                let types = &by_tab[1].1;
+                assert_eq!(
+                    text_color_sized(types, "Rival Player", 12.0),
+                    p.peach,
+                    "an app reached through a custom association stayed peach \
+                     with accent={role}"
+                );
+                assert_eq!(
+                    text_color(types, "Custom"),
+                    p.peach,
+                    "the Custom badge stayed peach with accent={role}"
+                );
+            }
+        }
+    }
+
+    /// Judgement 3: the well is a recess, which is a relationship not a pair.
+    ///
+    /// Asserting the two literal values would be the weaker test: it would
+    /// pass on a palette whose crust had been made *lighter* than its base,
+    /// which is the one thing that would actually break the appearance. So
+    /// assert the ordering, and separately that the two sites do not collapse
+    /// onto one colour.
+    #[test]
+    fn the_content_well_is_deeper_than_the_panel_it_sits_in() {
+        fn luma(c: Color) -> f32 {
+            0.299 * f32::from(c.r) + 0.587 * f32::from(c.g) + 0.114 * f32::from(c.b)
+        }
+        for light in [false, true] {
+            let p = accented(light);
+            let cmds = exercised().render(&p, 0.0, 0.0, W, H);
+            let panel = fills_sized(&cmds, W, H)[0];
+            let well = fills_sized(&cmds, 584.0, 684.0)[0];
+            assert!(
+                luma(well) < luma(panel),
+                "the well is not deeper than the panel in {} mode: well {:?} \
+                 vs panel {:?}",
+                if light { "light" } else { "dark" },
+                well,
+                panel
+            );
+        }
+    }
+
+    /// Judgement 4: the current chip's ink is computed, never named.
+    ///
+    /// This is the module's one real trap, and it is worth stating plainly.
+    /// The site used to read the constant `CRUST`, `0x11111B` — which is also
+    /// exactly what `readable_on` answers for the *stock* accent, whose luma
+    /// is 175. So at the stock accent a leftover constant and the correct
+    /// call produce the same pixel, and the membership sweep cannot help
+    /// either, because it allows both `readable_on` endpoints outright.
+    ///
+    /// Sweeping the accent across the palette is what breaks the tie: the
+    /// expected ink flips between the two endpoints as the accent's luma
+    /// crosses 140, and a frozen value cannot flip. The final assertion
+    /// insists the sweep actually saw both endpoints, so that a palette which
+    /// happened to be all-dark could not quietly turn this into a constant
+    /// check.
+    #[test]
+    fn the_current_chips_ink_is_computed_from_the_accent_under_it() {
+        for light in [false, true] {
+            let mut seen = Vec::new();
+            let base = Palette::for_mode(light);
+            for (role, accent) in base.roles() {
+                let mut p = Palette::for_mode(light);
+                p.accent = accent;
+                let cmds = exercised().render(&p, 0.0, 0.0, W, H);
+                let ink = text_color_sized(&cmds, "Music Player", 11.0);
+                assert_eq!(
+                    ink,
+                    readable_on(accent),
+                    "the current chip's ink was not computed from the chip \
+                     under it when the accent was {role}"
+                );
+                assert_eq!(
+                    text_color_sized(&cmds, "Rival Player", 11.0),
+                    p.text,
+                    "a chip that is not the current one takes ordinary ink"
+                );
+                if !seen.contains(&ink) {
+                    seen.push(ink);
+                }
+            }
+            assert_eq!(
+                seen.len(),
+                2,
+                "the accent sweep never crossed readable_on's threshold, so \
+                 this test degenerated into comparing one frozen value"
+            );
+        }
+    }
+
+    /// An empty search box is dimmer than one with a query in it.
+    ///
+    /// Both modes, and **both tabs**. The two search boxes share one query
+    /// field but are two separate source sites, and n source sites need n
+    /// assertions — checking only the one on the File types tab would leave
+    /// the Installed apps box free to draw anything it liked.
+    ///
+    /// The two-mode loop is not decoration either: `p.text` in Mocha is
+    /// exactly the `0xCDD6F4` these constants were converted from, so a
+    /// frozen query ink compared against `p.text` in dark would be comparing
+    /// a constant against itself.
+    #[test]
+    fn an_empty_search_box_is_dimmer_than_a_typed_query() {
+        for light in [false, true] {
+            let p = accented(light);
+            for (tab, placeholder) in [
+                (DefaultAppsTab::FileTypes, "Search file types..."),
+                (DefaultAppsTab::AppsList, "Search apps..."),
+            ] {
+                let mut ui = exercised();
+                ui.active_tab = tab;
+                ui.search_query = String::new();
+                let empty = ui.render(&p, 0.0, 0.0, W, H);
+                assert_eq!(
+                    text_color(&empty, placeholder),
+                    p.overlay0,
+                    "{tab:?}'s placeholder"
+                );
+
+                let mut ui = exercised();
+                ui.active_tab = tab;
+                "mp3".clone_into(&mut ui.search_query);
+                let typed = ui.render(&p, 0.0, 0.0, W, H);
+                assert_eq!(
+                    text_color_sized(&typed, "mp3", 12.0),
+                    p.text,
+                    "{tab:?}'s typed query"
+                );
+            }
+            assert_ne!(
+                p.overlay0, p.text,
+                "if these were equal a user could not tell a placeholder from \
+                 a query they had typed"
+            );
+        }
     }
 }

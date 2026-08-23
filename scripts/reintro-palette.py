@@ -76,6 +76,7 @@ OSD = "gui/desktop/src/osd.rs"
 PRIV = "gui/desktop/src/privacy_settings.rs"
 PRINTMGR = "gui/desktop/src/print_manager.rs"
 POWER = "gui/desktop/src/power.rs"
+LOGIN = "gui/desktop/src/login_screen.rs"
 
 # (name, file, [(old, new), ...], [packages], [tests expected to fail])
 DEFECTS = [
@@ -8374,6 +8375,877 @@ DEFECTS = [
         ["desktop"],
         [
             'every_colour_the_screen_saver_draws_is_a_dark_role_or_one_of_its_two_ramps',
+        ],
+    ),
+    # ---- login_screen.rs (module 28 of 49) ----
+    (
+        'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA: the theme background is frozen back to Mocha crust',
+        LOGIN,
+        [
+            ('                    height: self.screen_height,\n                    color: p.crust,',
+             '                    height: self.screen_height,\n                    color: Color::from_hex(0x11111B),'),
+        ],
+        ["desktop"],
+        [
+            'a_background_with_no_colour_of_its_own_takes_the_theme',
+        ],
+    ),
+    (
+        'BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB: the theme background takes the accent',
+        LOGIN,
+        [
+            ('                    height: self.screen_height,\n                    color: p.crust,',
+             '                    height: self.screen_height,\n                    color: p.accent,'),
+        ],
+        ["desktop"],
+        [
+            'a_background_with_no_colour_of_its_own_takes_the_theme',
+            'exactly_two_things_in_the_password_panel_carry_the_accent',
+        ],
+    ),
+    (
+        'CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC: the theme background resolves to base instead of the deepest surface',
+        LOGIN,
+        [
+            ('                    height: self.screen_height,\n                    color: p.crust,',
+             '                    height: self.screen_height,\n                    color: p.base,'),
+        ],
+        ["desktop"],
+        [
+            'a_background_with_no_colour_of_its_own_takes_the_theme',
+        ],
+    ),
+    (
+        'DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD: a solid background the user chose is re-themed',
+        LOGIN,
+        [
+            ('                    height: self.screen_height,\n                    color: *color,',
+             '                    height: self.screen_height,\n                    color: p.crust,'),
+        ],
+        ["desktop"],
+        [
+            'a_user_chosen_background_is_never_re_themed',
+        ],
+    ),
+    (
+        'EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE: the gradient band truncates again instead of rounding',
+        LOGIN,
+        [
+            ('        v.round().clamp(0.0, 255.0) as u8',
+             '        v.clamp(0.0, 255.0) as u8'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_login_screen_draws_comes_from_its_palette',
+            'a_gradient_between_a_colour_and_itself_is_flat',
+            'a_gradient_band_rounds_to_the_nearest_step',
+        ],
+    ),
+    (
+        "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF: the gradient's far endpoint is re-themed",
+        LOGIN,
+        [
+            ('                    let r = lerp_channel(top.r, bottom.r, t);',
+             '                    let r = lerp_channel(top.r, p.base.r, t);'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_login_screen_draws_comes_from_its_palette',
+            'a_user_chosen_background_is_never_re_themed',
+            'a_gradient_between_a_colour_and_itself_is_flat',
+            'a_gradient_band_rounds_to_the_nearest_step',
+        ],
+    ),
+    (
+        'GGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGG: text on the login background loses its shadow',
+        LOGIN,
+        [
+            ('    commands.push(RenderCommand::Text {\n        x: x + 1.0,\n        y: y + 1.0,\n        text: body.clone(),\n        font_size: *font_size,\n        color: p.text_shadow(),\n        font_weight: *font_weight,\n        max_width: *max_width,\n        overflow: *overflow,\n    });\n    commands.push(text);',
+             '    let _ = (p, body, font_size, font_weight, max_width, overflow, x, y);\n    commands.push(text);'),
+        ],
+        ["desktop"],
+        [
+            'the_clock_and_the_status_lines_are_wallpaper_ink',
+            'every_colour_in_the_password_entry_is_in_the_role_it_claims',
+            'exactly_seven_things_in_the_full_render_sit_on_the_background',
+        ],
+    ),
+    (
+        'HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH: the shadow is drawn exactly under the ink, so it never shows',
+        LOGIN,
+        [
+            ('        x: x + 1.0,\n        y: y + 1.0,',
+             '        x: *x,\n        y: *y,'),
+        ],
+        ["desktop"],
+        [
+            'the_clock_and_the_status_lines_are_wallpaper_ink',
+            'every_colour_in_the_password_entry_is_in_the_role_it_claims',
+            'exactly_seven_things_in_the_full_render_sit_on_the_background',
+        ],
+    ),
+    (
+        'IIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIII: the shadow is a theme role rather than black',
+        LOGIN,
+        [
+            ('        color: p.text_shadow(),',
+             '        color: p.crust,'),
+        ],
+        ["desktop"],
+        [
+            'exactly_seven_things_in_the_full_render_sit_on_the_background',
+        ],
+    ),
+    (
+        'JJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJ: the clock is frozen back to Mocha text',
+        LOGIN,
+        [
+            ('                font_size: 64.0,\n                color: p.on_wallpaper(),',
+             '                font_size: 64.0,\n                color: Color::from_hex(0xCDD6F4),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_login_screen_draws_comes_from_its_palette',
+            'the_clock_and_the_status_lines_are_wallpaper_ink',
+            'none_of_the_eleven_deleted_constants_is_still_drawn',
+            'exactly_seven_things_in_the_full_render_sit_on_the_background',
+        ],
+    ),
+    (
+        'KKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKK: the clock takes panel ink on a background the shell did not choose',
+        LOGIN,
+        [
+            ('                font_size: 64.0,\n                color: p.on_wallpaper(),',
+             '                font_size: 64.0,\n                color: p.text,'),
+        ],
+        ["desktop"],
+        [
+            'the_clock_and_the_status_lines_are_wallpaper_ink',
+            'exactly_seven_things_in_the_full_render_sit_on_the_background',
+        ],
+    ),
+    (
+        'LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLL: the clock is dimmed to the level of the date under it',
+        LOGIN,
+        [
+            ('                font_size: 64.0,\n                color: p.on_wallpaper(),',
+             '                font_size: 64.0,\n                color: p.on_wallpaper_dim(),'),
+        ],
+        ["desktop"],
+        [
+            'the_clock_and_the_status_lines_are_wallpaper_ink',
+            'exactly_seven_things_in_the_full_render_sit_on_the_background',
+        ],
+    ),
+    (
+        'MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM: the date is frozen back to Mocha subtext0',
+        LOGIN,
+        [
+            ('\n                    color: p.on_wallpaper_dim(),',
+             '\n                    color: Color::from_hex(0xA6ADC8),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_login_screen_draws_comes_from_its_palette',
+            'the_clock_and_the_status_lines_are_wallpaper_ink',
+            'none_of_the_eleven_deleted_constants_is_still_drawn',
+            'exactly_seven_things_in_the_full_render_sit_on_the_background',
+        ],
+    ),
+    (
+        'NNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNN: the date is promoted to the same strength as the time',
+        LOGIN,
+        [
+            ('\n                    color: p.on_wallpaper_dim(),',
+             '\n                    color: p.on_wallpaper(),'),
+        ],
+        ["desktop"],
+        [
+            'the_clock_and_the_status_lines_are_wallpaper_ink',
+            'exactly_seven_things_in_the_full_render_sit_on_the_background',
+        ],
+    ),
+    (
+        'OOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOO: the date takes panel ink on the background',
+        LOGIN,
+        [
+            ('\n                    color: p.on_wallpaper_dim(),',
+             '\n                    color: p.subtext0,'),
+        ],
+        ["desktop"],
+        [
+            'the_clock_and_the_status_lines_are_wallpaper_ink',
+            'exactly_seven_things_in_the_full_render_sit_on_the_background',
+        ],
+    ),
+    (
+        'PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPP: the selected row is frozen back to Mocha surface0',
+        LOGIN,
+        [
+            ('                color: if selected {\n                    p.surface0',
+             '                color: if selected {\n                    Color::from_hex(0x313244)'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_login_screen_draws_comes_from_its_palette',
+            'every_colour_in_the_user_list_is_in_the_role_it_claims',
+            'none_of_the_eleven_deleted_constants_is_still_drawn',
+        ],
+    ),
+    (
+        'QQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQ: the selected row fills with the accent instead of a surface',
+        LOGIN,
+        [
+            ('                color: if selected {\n                    p.surface0',
+             '                color: if selected {\n                    p.accent'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_in_the_user_list_is_in_the_role_it_claims',
+            'exactly_two_things_in_the_password_panel_carry_the_accent',
+        ],
+    ),
+    (
+        'RRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRR: an unselected row is frozen back to Mocha base',
+        LOGIN,
+        [
+            ('                    Color::rgba(p.base.r, p.base.g, p.base.b, 180)',
+             '                    Color::rgba(0x1E, 0x1E, 0x2E, 180)'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_login_screen_draws_comes_from_its_palette',
+            'every_colour_in_the_user_list_is_in_the_role_it_claims',
+            'none_of_the_eleven_deleted_constants_is_still_drawn',
+        ],
+    ),
+    (
+        'SSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSS: an unselected row loses the transparency that sets it apart',
+        LOGIN,
+        [
+            ('                    Color::rgba(p.base.r, p.base.g, p.base.b, 180)',
+             '                    p.base'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_in_the_user_list_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        'TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT: the selected avatar is frozen back to Mocha blue',
+        LOGIN,
+        [
+            ('                color: if selected { p.accent } else { p.subtext0 },',
+             '                color: if selected { Color::from_hex(0x89B4FA) } else { p.subtext0 },'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_login_screen_draws_comes_from_its_palette',
+            'every_colour_in_the_user_list_is_in_the_role_it_claims',
+            'none_of_the_eleven_deleted_constants_is_still_drawn',
+            'exactly_two_things_in_the_password_panel_carry_the_accent',
+        ],
+    ),
+    (
+        'UUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUU: no avatar is accented, so nothing marks which row you are on',
+        LOGIN,
+        [
+            ('                color: if selected { p.accent } else { p.subtext0 },',
+             '                color: p.subtext0,'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_in_the_user_list_is_in_the_role_it_claims',
+            'exactly_two_things_in_the_password_panel_carry_the_accent',
+        ],
+    ),
+    (
+        'VVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVV: every avatar is accented, so the accent marks nothing',
+        LOGIN,
+        [
+            ('                color: if selected { p.accent } else { p.subtext0 },',
+             '                color: if selected { p.accent } else { p.accent },'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_in_the_user_list_is_in_the_role_it_claims',
+            'exactly_two_things_in_the_password_panel_carry_the_accent',
+        ],
+    ),
+    (
+        'WWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWW: a row name is frozen back to Mocha text',
+        LOGIN,
+        [
+            ('                text: user.display_name.clone(),\n                font_size: 16.0,\n                color: p.text,',
+             '                text: user.display_name.clone(),\n                font_size: 16.0,\n                color: Color::from_hex(0xCDD6F4),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_login_screen_draws_comes_from_its_palette',
+            'every_colour_in_the_user_list_is_in_the_role_it_claims',
+            'none_of_the_eleven_deleted_constants_is_still_drawn',
+        ],
+    ),
+    (
+        'XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX: a row name takes the accent',
+        LOGIN,
+        [
+            ('                text: user.display_name.clone(),\n                font_size: 16.0,\n                color: p.text,',
+             '                text: user.display_name.clone(),\n                font_size: 16.0,\n                color: p.accent,'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_in_the_user_list_is_in_the_role_it_claims',
+            'exactly_two_things_in_the_password_panel_carry_the_accent',
+        ],
+    ),
+    (
+        'YYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYY: the account type is frozen back to Mocha overlay0',
+        LOGIN,
+        [
+            ('                font_size: 11.0,\n                color: p.overlay0,',
+             '                font_size: 11.0,\n                color: Color::from_hex(0x6C7086),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_login_screen_draws_comes_from_its_palette',
+            'every_colour_in_the_user_list_is_in_the_role_it_claims',
+            'none_of_the_eleven_deleted_constants_is_still_drawn',
+        ],
+    ),
+    (
+        'ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ: the account type is promoted to primary text',
+        LOGIN,
+        [
+            ('                font_size: 11.0,\n                color: p.overlay0,',
+             '                font_size: 11.0,\n                color: p.text,'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_in_the_user_list_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA: the signing-in user's avatar is frozen back to Mocha blue",
+        LOGIN,
+        [
+            ('                    font_size: 48.0,\n                    color: p.accent,',
+             '                    font_size: 48.0,\n                    color: Color::from_hex(0x89B4FA),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_login_screen_draws_comes_from_its_palette',
+            'every_colour_in_the_password_entry_is_in_the_role_it_claims',
+            'none_of_the_eleven_deleted_constants_is_still_drawn',
+            'exactly_two_things_in_the_password_panel_carry_the_accent',
+        ],
+    ),
+    (
+        "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB: the signing-in user's avatar loses the accent it carried in the list",
+        LOGIN,
+        [
+            ('                    font_size: 48.0,\n                    color: p.accent,',
+             '                    font_size: 48.0,\n                    color: p.on_wallpaper(),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_in_the_password_entry_is_in_the_role_it_claims',
+            'exactly_two_things_in_the_password_panel_carry_the_accent',
+            'exactly_seven_things_in_the_full_render_sit_on_the_background',
+        ],
+    ),
+    (
+        'CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC: the name over the password field is frozen back to Mocha text',
+        LOGIN,
+        [
+            ('                    font_size: 18.0,\n                    color: p.on_wallpaper(),',
+             '                    font_size: 18.0,\n                    color: Color::from_hex(0xCDD6F4),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_login_screen_draws_comes_from_its_palette',
+            'every_colour_in_the_password_entry_is_in_the_role_it_claims',
+            'none_of_the_eleven_deleted_constants_is_still_drawn',
+            'exactly_seven_things_in_the_full_render_sit_on_the_background',
+        ],
+    ),
+    (
+        'DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD: the name over the password field takes panel ink',
+        LOGIN,
+        [
+            ('                    font_size: 18.0,\n                    color: p.on_wallpaper(),',
+             '                    font_size: 18.0,\n                    color: p.text,'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_in_the_password_entry_is_in_the_role_it_claims',
+            'exactly_seven_things_in_the_full_render_sit_on_the_background',
+        ],
+    ),
+    (
+        'EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE: the rejected-password border is frozen back to Mocha red',
+        LOGIN,
+        [
+            ('            let border_color = if self.error_message.is_some() {\n                p.red',
+             '            let border_color = if self.error_message.is_some() {\n                Color::from_hex(0xF38BA8)'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_login_screen_draws_comes_from_its_palette',
+            'every_colour_in_the_password_entry_is_in_the_role_it_claims',
+            'none_of_the_eleven_deleted_constants_is_still_drawn',
+        ],
+    ),
+    (
+        'FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF: the rejected-password border takes the accent, so a refusal is decoration',
+        LOGIN,
+        [
+            ('            let border_color = if self.error_message.is_some() {\n                p.red',
+             '            let border_color = if self.error_message.is_some() {\n                p.accent'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_in_the_password_entry_is_in_the_role_it_claims',
+            'exactly_two_things_in_the_password_panel_carry_the_accent',
+        ],
+    ),
+    (
+        'GGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGG: the border at rest is frozen back to Mocha surface1',
+        LOGIN,
+        [
+            ('            } else {\n                p.surface1\n            };',
+             '            } else {\n                Color::from_hex(0x45475A)\n            };'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_login_screen_draws_comes_from_its_palette',
+            'every_colour_in_the_password_entry_is_in_the_role_it_claims',
+            'none_of_the_eleven_deleted_constants_is_still_drawn',
+        ],
+    ),
+    (
+        'HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH: the password field is frozen back to Mocha surface0',
+        LOGIN,
+        [
+            ('                height: field_h,\n                color: p.surface0,',
+             '                height: field_h,\n                color: Color::from_hex(0x313244),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_login_screen_draws_comes_from_its_palette',
+            'every_colour_in_the_password_entry_is_in_the_role_it_claims',
+            'none_of_the_eleven_deleted_constants_is_still_drawn',
+        ],
+    ),
+    (
+        'IIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIII: the placeholder is frozen back to Mocha overlay0',
+        LOGIN,
+        [
+            ('                color: if self.password_input.is_empty() {\n                    p.overlay0',
+             '                color: if self.password_input.is_empty() {\n                    Color::from_hex(0x6C7086)'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_login_screen_draws_comes_from_its_palette',
+            'every_colour_in_the_password_entry_is_in_the_role_it_claims',
+            'none_of_the_eleven_deleted_constants_is_still_drawn',
+        ],
+    ),
+    (
+        'JJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJ: the typed password is frozen back to Mocha text',
+        LOGIN,
+        [
+            ('                } else {\n                    p.text\n                },',
+             '                } else {\n                    Color::from_hex(0xCDD6F4)\n                },'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_login_screen_draws_comes_from_its_palette',
+            'every_colour_in_the_password_entry_is_in_the_role_it_claims',
+            'none_of_the_eleven_deleted_constants_is_still_drawn',
+        ],
+    ),
+    (
+        'KKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKK: the typed password is drawn at placeholder strength',
+        LOGIN,
+        [
+            ('                } else {\n                    p.text\n                },',
+             '                } else {\n                    p.overlay0\n                },'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_in_the_password_entry_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        'LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLL: the reveal toggle is frozen back to Mocha subtext0',
+        LOGIN,
+        [
+            ('                }\n                .to_string(),\n                font_size: 14.0,\n                color: p.subtext0,',
+             '                }\n                .to_string(),\n                font_size: 14.0,\n                color: Color::from_hex(0xA6ADC8),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_login_screen_draws_comes_from_its_palette',
+            'every_colour_in_the_password_entry_is_in_the_role_it_claims',
+            'none_of_the_eleven_deleted_constants_is_still_drawn',
+        ],
+    ),
+    (
+        'MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM: the Sign In fill is frozen back to Mocha blue',
+        LOGIN,
+        [
+            ('                width: 100.0,\n                height: 32.0,\n                color: p.accent,',
+             '                width: 100.0,\n                height: 32.0,\n                color: Color::from_hex(0x89B4FA),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_login_screen_draws_comes_from_its_palette',
+            'every_colour_in_the_password_entry_is_in_the_role_it_claims',
+            'none_of_the_eleven_deleted_constants_is_still_drawn',
+            'exactly_two_things_in_the_password_panel_carry_the_accent',
+        ],
+    ),
+    (
+        'NNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNN: the Sign In fill drops to a surface, so the default action stops inviting',
+        LOGIN,
+        [
+            ('                width: 100.0,\n                height: 32.0,\n                color: p.accent,',
+             '                width: 100.0,\n                height: 32.0,\n                color: p.surface0,'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_in_the_password_entry_is_in_the_role_it_claims',
+            'exactly_two_things_in_the_password_panel_carry_the_accent',
+        ],
+    ),
+    (
+        'OOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOO: the Sign In label is named rather than derived from the fill under it',
+        LOGIN,
+        [
+            ('                text: "Sign In".to_string(),\n                font_size: 13.0,\n                color: p.on_accent(),',
+             '                text: "Sign In".to_string(),\n                font_size: 13.0,\n                color: Color::from_hex(0x11111B),'),
+        ],
+        ["desktop"],
+        [
+            'the_sign_in_label_follows_the_accent_it_sits_on',
+        ],
+    ),
+    (
+        'PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPP: the Sign In label takes a role instead of the ink its fill demands',
+        LOGIN,
+        [
+            ('                text: "Sign In".to_string(),\n                font_size: 13.0,\n                color: p.on_accent(),',
+             '                text: "Sign In".to_string(),\n                font_size: 13.0,\n                color: p.text,'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_in_the_password_entry_is_in_the_role_it_claims',
+            'the_sign_in_label_follows_the_accent_it_sits_on',
+        ],
+    ),
+    (
+        'QQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQ: the error message is frozen back to Mocha red',
+        LOGIN,
+        [
+            ('                        font_size: 12.0,\n                        color: p.red,',
+             '                        font_size: 12.0,\n                        color: Color::from_hex(0xF38BA8),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_login_screen_draws_comes_from_its_palette',
+            'every_colour_in_the_password_entry_is_in_the_role_it_claims',
+            'none_of_the_eleven_deleted_constants_is_still_drawn',
+        ],
+    ),
+    (
+        'RRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRR: the error message takes the accent',
+        LOGIN,
+        [
+            ('                        font_size: 12.0,\n                        color: p.red,',
+             '                        font_size: 12.0,\n                        color: p.accent,'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_in_the_password_entry_is_in_the_role_it_claims',
+            'exactly_two_things_in_the_password_panel_carry_the_accent',
+        ],
+    ),
+    (
+        'SSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSS: the lockout notice is frozen back to Mocha yellow',
+        LOGIN,
+        [
+            ('                        font_size: 12.0,\n                        color: p.yellow,',
+             '                        font_size: 12.0,\n                        color: Color::from_hex(0xF9E2AF),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_login_screen_draws_comes_from_its_palette',
+            'every_colour_in_the_password_entry_is_in_the_role_it_claims',
+            'none_of_the_eleven_deleted_constants_is_still_drawn',
+        ],
+    ),
+    (
+        'TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT: the lockout notice takes the accent',
+        LOGIN,
+        [
+            ('                        font_size: 12.0,\n                        color: p.yellow,',
+             '                        font_size: 12.0,\n                        color: p.accent,'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_in_the_password_entry_is_in_the_role_it_claims',
+            'exactly_two_things_in_the_password_panel_carry_the_accent',
+        ],
+    ),
+    (
+        'UUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUU: the back arrow is frozen back to Mocha subtext0',
+        LOGIN,
+        [
+            ('                        font_size: 20.0,\n                        color: p.on_wallpaper_dim(),',
+             '                        font_size: 20.0,\n                        color: Color::from_hex(0xA6ADC8),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_login_screen_draws_comes_from_its_palette',
+            'every_colour_in_the_password_entry_is_in_the_role_it_claims',
+            'none_of_the_eleven_deleted_constants_is_still_drawn',
+            'exactly_seven_things_in_the_full_render_sit_on_the_background',
+        ],
+    ),
+    (
+        'VVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVV: the back arrow takes panel ink on the background',
+        LOGIN,
+        [
+            ('                        font_size: 20.0,\n                        color: p.on_wallpaper_dim(),',
+             '                        font_size: 20.0,\n                        color: p.subtext0,'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_in_the_password_entry_is_in_the_role_it_claims',
+            'exactly_seven_things_in_the_full_render_sit_on_the_background',
+        ],
+    ),
+    (
+        'WWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWW: the authenticating notice is frozen back to Mocha text',
+        LOGIN,
+        [
+            ('                text: "Signing in...".to_string(),\n                font_size: 16.0,\n                color: p.on_wallpaper(),',
+             '                text: "Signing in...".to_string(),\n                font_size: 16.0,\n                color: Color::from_hex(0xCDD6F4),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_login_screen_draws_comes_from_its_palette',
+            'the_clock_and_the_status_lines_are_wallpaper_ink',
+            'none_of_the_eleven_deleted_constants_is_still_drawn',
+        ],
+    ),
+    (
+        'XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX: the greeting takes panel ink on the background',
+        LOGIN,
+        [
+            ('                    text: format!("Welcome, {}!", user.display_name),\n                    font_size: 20.0,\n                    color: p.on_wallpaper(),',
+             '                    text: format!("Welcome, {}!", user.display_name),\n                    font_size: 20.0,\n                    color: p.text,'),
+        ],
+        ["desktop"],
+        [
+            'the_clock_and_the_status_lines_are_wallpaper_ink',
+        ],
+    ),
+    (
+        'YYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYY: the bottom bar is frozen back to Mocha crust',
+        LOGIN,
+        [
+            ('            color: Color::rgba(p.crust.r, p.crust.g, p.crust.b, 180),',
+             '            color: Color::rgba(0x11, 0x11, 0x1B, 180),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_in_the_bar_and_the_power_menu_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        'ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ: the bottom bar loses its transparency',
+        LOGIN,
+        [
+            ('            color: Color::rgba(p.crust.r, p.crust.g, p.crust.b, 180),',
+             '            color: p.crust,'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_in_the_bar_and_the_power_menu_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA: the keyboard-layout indicator is frozen back to Mocha subtext0',
+        LOGIN,
+        [
+            ('                text: self.keyboard_layout.clone(),\n                font_size: 12.0,\n                color: p.subtext0,',
+             '                text: self.keyboard_layout.clone(),\n                font_size: 12.0,\n                color: Color::from_hex(0xA6ADC8),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_login_screen_draws_comes_from_its_palette',
+            'every_colour_in_the_bar_and_the_power_menu_is_in_the_role_it_claims',
+            'none_of_the_eleven_deleted_constants_is_still_drawn',
+        ],
+    ),
+    (
+        "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB: the bar's power button is frozen back to Mocha subtext0",
+        LOGIN,
+        [
+            ('                text: "\\u{23FB}".to_string(),\n                font_size: 16.0,\n                color: p.subtext0,',
+             '                text: "\\u{23FB}".to_string(),\n                font_size: 16.0,\n                color: Color::from_hex(0xA6ADC8),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_login_screen_draws_comes_from_its_palette',
+            'every_colour_in_the_bar_and_the_power_menu_is_in_the_role_it_claims',
+            'none_of_the_eleven_deleted_constants_is_still_drawn',
+        ],
+    ),
+    (
+        'CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC: the accessibility button takes the accent',
+        LOGIN,
+        [
+            ('                text: "\\u{267F}".to_string(),\n                font_size: 16.0,\n                color: p.subtext0,',
+             '                text: "\\u{267F}".to_string(),\n                font_size: 16.0,\n                color: p.accent,'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_in_the_bar_and_the_power_menu_is_in_the_role_it_claims',
+            'exactly_two_things_in_the_password_panel_carry_the_accent',
+        ],
+    ),
+    (
+        'DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD: the on-screen-keyboard button is frozen back to Mocha subtext0',
+        LOGIN,
+        [
+            ('                text: "\\u{2328}".to_string(),\n                font_size: 16.0,\n                color: p.subtext0,',
+             '                text: "\\u{2328}".to_string(),\n                font_size: 16.0,\n                color: Color::from_hex(0xA6ADC8),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_login_screen_draws_comes_from_its_palette',
+            'every_colour_in_the_bar_and_the_power_menu_is_in_the_role_it_claims',
+            'none_of_the_eleven_deleted_constants_is_still_drawn',
+        ],
+    ),
+    (
+        'EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE: the power menu is frozen back to Mocha mantle',
+        LOGIN,
+        [
+            ('            width: menu_w,\n            height: menu_h,\n            color: p.mantle,',
+             '            width: menu_w,\n            height: menu_h,\n            color: Color::from_hex(0x181825),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_login_screen_draws_comes_from_its_palette',
+            'every_colour_in_the_bar_and_the_power_menu_is_in_the_role_it_claims',
+            'none_of_the_eleven_deleted_constants_is_still_drawn',
+        ],
+    ),
+    (
+        "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF: the power menu's border is frozen back to Mocha surface1",
+        LOGIN,
+        [
+            ('            width: menu_w,\n            height: menu_h,\n            color: p.surface1,',
+             '            width: menu_w,\n            height: menu_h,\n            color: Color::from_hex(0x45475A),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_login_screen_draws_comes_from_its_palette',
+            'every_colour_in_the_bar_and_the_power_menu_is_in_the_role_it_claims',
+            'none_of_the_eleven_deleted_constants_is_still_drawn',
+        ],
+    ),
+    (
+        'GGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGG: a power-menu icon is frozen back to Mocha subtext0',
+        LOGIN,
+        [
+            ('                text: icon.to_string(),\n                font_size: 14.0,\n                color: p.subtext0,',
+             '                text: icon.to_string(),\n                font_size: 14.0,\n                color: Color::from_hex(0xA6ADC8),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_login_screen_draws_comes_from_its_palette',
+            'every_colour_in_the_bar_and_the_power_menu_is_in_the_role_it_claims',
+            'none_of_the_eleven_deleted_constants_is_still_drawn',
+        ],
+    ),
+    (
+        'HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH: a power-menu label takes the accent',
+        LOGIN,
+        [
+            ('                text: label.to_string(),\n                font_size: 13.0,\n                color: p.text,',
+             '                text: label.to_string(),\n                font_size: 13.0,\n                color: p.accent,'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_in_the_bar_and_the_power_menu_is_in_the_role_it_claims',
+            'exactly_two_things_in_the_password_panel_carry_the_accent',
+        ],
+    ),
+    (
+        'IIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIII: the whole screen ignores the palette it is handed',
+        LOGIN,
+        [
+            ('    pub fn render(&self, p: &Palette) -> Vec<RenderCommand> {\n        let mut commands = Vec::new();',
+             '    pub fn render(&self, p: &Palette) -> Vec<RenderCommand> {\n        let p = &Palette::for_mode(false);\n        let mut commands = Vec::new();'),
+        ],
+        ["desktop"],
+        [
+            'the_render_is_not_the_same_in_both_modes',
+            'every_colour_the_login_screen_draws_comes_from_its_palette',
+            'every_colour_in_the_user_list_is_in_the_role_it_claims',
+            'every_colour_in_the_password_entry_is_in_the_role_it_claims',
+            'every_colour_in_the_bar_and_the_power_menu_is_in_the_role_it_claims',
+            'the_clock_and_the_status_lines_are_wallpaper_ink',
+            'a_background_with_no_colour_of_its_own_takes_the_theme',
+            'exactly_two_things_in_the_password_panel_carry_the_accent',
+            'the_sign_in_label_follows_the_accent_it_sits_on',
+            'none_of_the_eleven_deleted_constants_is_still_drawn',
+            'exactly_seven_things_in_the_full_render_sit_on_the_background',
+        ],
+    ),
+    (
+        'JJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJ: the power-menu fixture is dropped from the sweep',
+        LOGIN,
+        [
+            ('        let mut s = base();\n        s.power_menu_open = true;\n        v.push(("power menu".to_string(), s));',
+             '        let mut s = base();\n        s.power_menu_open = true;\n        let _ = s;'),
+        ],
+        ["desktop"],
+        [
+            'the_fixtures_take_every_branch_this_module_has',
+        ],
+    ),
+    (
+        'KKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKK: the no-user fixture is dropped from the sweep',
+        LOGIN,
+        [
+            ('        s.phase = LoginPhase::PasswordEntry;\n        v.push(("no user".to_string(), s));',
+             '        s.phase = LoginPhase::PasswordEntry;\n        let _ = s;'),
+        ],
+        ["desktop"],
+        [
+            'the_fixtures_take_every_branch_this_module_has',
+        ],
+    ),
+    (
+        'LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLL: the default background names a colour again',
+        LOGIN,
+        [
+            ('#[derive(Clone, Debug, Default, PartialEq)]\npub enum LoginBackground {',
+             '#[derive(Clone, Debug, PartialEq)]\npub enum LoginBackground {'),
+            ('    #[default]\n    Theme,',
+             '    Theme,'),
+            ('    Gradient { top: Color, bottom: Color },\n}',
+             '    Gradient { top: Color, bottom: Color },\n}\n\nimpl Default for LoginBackground {\n    fn default() -> Self {\n        Self::SolidColor(Color::from_hex(0x11111B))\n    }\n}'),
+        ],
+        ["desktop"],
+        [
+            'the_default_background_defers_its_colour_to_the_palette',
         ],
     ),
 ]

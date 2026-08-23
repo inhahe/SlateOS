@@ -28141,9 +28141,9 @@ fn cmd_progmgr(args: &str) {
                             };
                             shell_println!("Program: {} ({})", p.name, p.app_id);
                             shell_println!("  Version:    {}", p.version);
-                            shell_println!("  Install:    {}", p.install_dir);
-                            shell_println!("  Settings:   {}", p.settings_dir);
-                            shell_println!("  Data:       {}", p.data_dir);
+                            shell_println!("  Install:    {}", p.install_dir.display());
+                            shell_println!("  Settings:   {}", p.settings_dir.display());
+                            shell_println!("  Data:       {}", p.data_dir.display());
                             shell_println!("  Priority:   {}", prio);
                             shell_println!("  Caps:       {}", p.capabilities.len());
                             shell_println!("  Notifs:     {}", p.notifications.len());
@@ -28562,7 +28562,7 @@ fn cmd_progmgr(args: &str) {
                     shell_println!("Usage: progmgr wipedata <app_id>");
                 } else {
                     match progmgr::wipe_data(parts[1]) {
-                        Ok(dir) => shell_println!("Wiped data directory: {}", dir),
+                        Ok(dir) => shell_println!("Wiped data directory: {}", dir.display()),
                         Err(e) => shell_println!("Error: {:?}", e),
                     }
                 }
@@ -28576,7 +28576,9 @@ fn cmd_progmgr(args: &str) {
                     shell_println!("Usage: progmgr wipesettings <app_id>");
                 } else {
                     match progmgr::wipe_settings(parts[1]) {
-                        Ok(dir) => shell_println!("Wiped settings directory: {}", dir),
+                        Ok(dir) => {
+                            shell_println!("Wiped settings directory: {}", dir.display());
+                        }
                         Err(e) => shell_println!("Error: {:?}", e),
                     }
                 }

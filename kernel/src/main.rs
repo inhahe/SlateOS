@@ -5470,6 +5470,14 @@ extern "C" fn kernel_main() -> ! {
             if let Err(e) = fs::usage::self_test() {
                 serial_println!("WARNING: disk-usage self-test failed: {:?}", e);
             }
+            // progmgr was reachable only from a `kshell` subcommand, so its
+            // suite had never run in the boot test (TD-A-FS-SELFTESTS-NEVER-RUN).
+            // Safe here: `clear_all()` at both ends, and it registers only its
+            // own `test.*` app ids, so it neither depends on nor leaves behind
+            // the four built-in program entries `init_defaults()` seeds.
+            if let Err(e) = fs::progmgr::self_test() {
+                serial_println!("WARNING: progmgr self-test failed: {:?}", e);
+            }
             // vpn was reachable only from a `kshell` subcommand, so its suite
             // had never run in the boot test (TD-A-FS-SELFTESTS-NEVER-RUN).
             // Safe here: `clear_all()` at entry, mid and exit, and it asserts

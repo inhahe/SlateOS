@@ -58,7 +58,68 @@
 //!     send(WindowRequest::new(window_id, ShellControlAction::SnapToZone(slot)));
 //! }
 //! ```
+//!
+//! # Colour
+//!
+//! The three renderers take a [`Palette`] rather than reading a `theme`
+//! submodule of hand-written Mocha constants, which is part 2 of
+//! `TD-C-FORTY-NINE-SHELL-MODULES-CARRY-THEIR-OWN-COPY-OF-THE-PALETTE`. This
+//! module is the sharpest illustration of that defect in the tree, because the
+//! answer had already been written down *for it*: [`Palette::selection_fill`],
+//! [`Palette::highlight_fill`] and [`Palette::selection_border`] exist, the
+//! last one's doc comment says "the outline of a selection **or of a
+//! highlighted snap zone**", and their alphas are 50 / 90 / 150 against this
+//! module's 50 / 90 / 160. The palette was derived from these constants and
+//! nobody wired it back, so the copy sat here and drifted by ten in one alpha.
+//! Four judgements are worth stating.
+//!
+//! **1. A snap zone is a selection, so it follows the accent.** The zone
+//! previews, the hovered zone and the active preset's marker were all Mocha
+//! `blue`; they are now the accent, because "the one you are about to pick" is
+//! what an accent is for. This is the opposite answer from
+//! [`screen_capture`](crate::screen_capture), whose red/yellow/green transport
+//! buttons are a code the user reads and must *not* follow the accent — same
+//! roles, opposite conclusions, and the difference is whether the colour
+//! carries meaning of its own or only says "this one".
+//!
+//! **2. The labels follow the scrim, not the mode.** This is the one place a
+//! naive conversion would have introduced a bug. `render_overlay` lays a scrim
+//! over the whole work area first, and a scrim is black in both modes
+//! (§525 decision 3) — so whatever the theme, the zone labels are drawn on a
+//! *darkened* backdrop. Turning their `MOCHA_TEXT` into `p.text` would put
+//! Latte's `#4C4F69` on that in light mode and lose the label. They are
+//! [`readable_on`] of [`Palette::scrim`] instead, which is near-white in both
+//! modes because a scrim's RGB is `(0, 0, 0)` in both. The hovered zone's
+//! label, previously a raw `Color::WHITE`, is the same value by the same
+//! argument rather than by coincidence.
+//!
+//! **3. The picker is a panel and obeys the transparency setting.** Its
+//! background and hover rung were `rgba(30, 30, 46, 230)` and
+//! `rgba(69, 71, 90, 200)` — `base` and `surface1` with an alpha frozen into
+//! the literal, which is a *setting* written down as a colour. They are
+//! [`Palette::panel_bg`] and [`Palette::panel_hover`], so a user who turns
+//! transparency off gets an opaque picker.
+//!
+//! **4. The scrim was tinted and should not have been.** It was
+//! `rgba(30, 30, 46, 140)` — Mocha `base` at an alpha. The alpha matches
+//! [`Palette::scrim`] exactly; the tint is the bug, and it is the one the
+//! `scrim` doc comment was written to prevent: Latte's base is `#EFF1F5`, so a
+//! base-tinted scrim in light mode would have *lightened* the desktop it was
+//! meant to push back.
+//!
+//! **5. A hue against a rung, never a hue against a hue.** The picker's
+//! thumbnails drew the active preset's mini-zones in `blue` and every other
+//! preset's in `lavender`. Once judgement 1 makes the active one the accent,
+//! that pair stops distinguishing anything for a user whose accent *is*
+//! lavender — and [`AccentColor::Lavender`](appearance::AccentColor::Lavender)
+//! is one of the fourteen the settings page offers. The inactive presets are
+//! [`Palette::overlay0`] instead: a surface rung cannot collide with any
+//! accent, so the thumbnail says which layout is active under every theme the
+//! user can choose rather than under thirteen of fourteen. This one is not a
+//! conversion at all — it is a bug the conversion exposed, because it is
+//! invisible while the accent is hard-coded to blue.
 
+use appearance::{Palette, readable_on};
 use guitk::color::Color;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
@@ -73,32 +134,6 @@ use std::num::NonZeroUsize;
 pub use guiremote::zones::{
     SnapLayout, SnapLayoutPreset, SnapSlot, SnapZone, WorkArea, ZONE_GAP, ZoneId,
 };
-
-// ============================================================================
-// Theme -- Catppuccin Mocha palette
-// ============================================================================
-
-mod theme {
-    use guitk::color::Color;
-
-    pub const SURFACE0: Color = Color::from_hex(0x313244);
-    pub const BLUE: Color = Color::from_hex(0x89B4FA);
-    pub const LAVENDER: Color = Color::from_hex(0xB4BEFE);
-    pub const TEXT: Color = Color::from_hex(0xCDD6F4);
-
-    /// Semi-transparent blue fill for zone previews.
-    pub const ZONE_FILL: Color = Color::rgba(137, 180, 250, 50);
-    /// Slightly more opaque blue for the hovered/highlighted zone.
-    pub const ZONE_HIGHLIGHT: Color = Color::rgba(137, 180, 250, 90);
-    /// Border colour for zone outlines.
-    pub const ZONE_BORDER: Color = Color::rgba(137, 180, 250, 160);
-    /// Overlay backdrop (dark scrim behind the zone grid).
-    pub const OVERLAY_SCRIM: Color = Color::rgba(30, 30, 46, 140);
-    /// Layout picker background.
-    pub const PICKER_BG: Color = Color::rgba(30, 30, 46, 230);
-    /// Picker item hover.
-    pub const PICKER_HOVER: Color = Color::rgba(69, 71, 90, 200);
-}
 
 // ============================================================================
 // Constants
@@ -361,7 +396,7 @@ impl SnapManager {
 
     /// Render the full snap zone overlay (semi-transparent zone
     /// previews over the entire screen).
-    pub fn render_overlay(&self) -> Vec<RenderCommand> {
+    pub fn render_overlay(&self, p: &Palette) -> Vec<RenderCommand> {
         if !self.overlay_visible {
             return Vec::new();
         }
@@ -378,7 +413,10 @@ impl SnapManager {
             y: self.area.y,
             width: self.area.width,
             height: self.area.height,
-            color: theme::OVERLAY_SCRIM,
+            // Judgement 4: black, not a tinted base. Latte's base is
+            // `#EFF1F5`, so the constant this replaces would have lightened
+            // the desktop in light mode instead of pushing it back.
+            color: p.scrim(),
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -389,7 +427,8 @@ impl SnapManager {
                 y: zone.y,
                 width: zone.width,
                 height: zone.height,
-                color: theme::ZONE_FILL,
+                // Judgement 1: a zone at rest is a selection at rest.
+                color: p.selection_fill(),
                 corner_radii: CornerRadii::all(8.0),
             });
 
@@ -399,7 +438,10 @@ impl SnapManager {
                 y: zone.y,
                 width: zone.width,
                 height: zone.height,
-                color: theme::ZONE_BORDER,
+                // The helper whose doc comment already named this site. Its
+                // alpha is 150 where the deleted constant's was 160 — the
+                // drift closing, not a change of intent.
+                color: p.selection_border(),
                 line_width: 2.0,
                 corner_radii: CornerRadii::all(8.0),
             });
@@ -410,7 +452,10 @@ impl SnapManager {
                 x: text::center_x(zone.label, cx, 13.0, FontWeightHint::Regular),
                 y: cy - 7.0,
                 text: zone.label.to_string(),
-                color: theme::TEXT,
+                // Judgement 2: the label sits on the scrim above, which is
+                // black in both modes, so its ink is too. `p.text` here would
+                // be dark-on-dark under the light theme.
+                color: readable_on(p.scrim()),
                 font_size: 13.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(zone.width - 16.0),
@@ -423,7 +468,7 @@ impl SnapManager {
 
     /// Render a highlight for a single zone (the one the cursor is
     /// hovering over).
-    pub fn render_zone_highlight(&self, zone_id: ZoneId) -> Vec<RenderCommand> {
+    pub fn render_zone_highlight(&self, p: &Palette, zone_id: ZoneId) -> Vec<RenderCommand> {
         let zone = match self.zone_by_id(zone_id) {
             Some(z) => z,
             None => return Vec::new(),
@@ -437,7 +482,8 @@ impl SnapManager {
             y: zone.y,
             width: zone.width,
             height: zone.height,
-            color: theme::ZONE_HIGHLIGHT,
+            // Judgement 1, one rung louder than the zones at rest.
+            color: p.highlight_fill(),
             corner_radii: CornerRadii::all(8.0),
         });
 
@@ -447,7 +493,10 @@ impl SnapManager {
             y: zone.y,
             width: zone.width,
             height: zone.height,
-            color: theme::BLUE,
+            // The accent at full strength rather than `selection_border`'s
+            // wash: this is the one zone the drop will land in, and it has to
+            // out-read the eight at rest that are already wearing that wash.
+            color: p.accent,
             line_width: 3.0,
             corner_radii: CornerRadii::all(8.0),
         });
@@ -458,7 +507,11 @@ impl SnapManager {
             x: text::center_x(zone.label, cx, 14.0, FontWeightHint::Bold),
             y: cy - 8.0,
             text: zone.label.to_string(),
-            color: Color::WHITE,
+            // Judgement 2 again, and the reason it is stated as a rule: this
+            // was a raw `Color::WHITE`, which is the right *value* reached by
+            // the wrong argument. It agrees with the labels beneath it now
+            // because both are read off the same scrim, not by coincidence.
+            color: readable_on(p.scrim()),
             font_size: 14.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(zone.width - 16.0),
@@ -563,7 +616,7 @@ impl SnapManager {
     }
 
     /// Render the layout picker popup.
-    pub fn render_picker(&self) -> Vec<RenderCommand> {
+    pub fn render_picker(&self, p: &Palette) -> Vec<RenderCommand> {
         if !self.picker_visible {
             return Vec::new();
         }
@@ -585,6 +638,11 @@ impl SnapManager {
             offset_y: 4.0,
             blur: 16.0,
             spread: 0.0,
+            // Left as a black at an alpha rather than routed through the
+            // palette: a drop shadow is an absence of light, so it does not
+            // flip with the mode (§525 decision 3). `p.shadow()` is the same
+            // black at 120; this one is deliberately lighter because the
+            // picker is a small popup rather than a window.
             color: Color::rgba(0, 0, 0, 100),
             corner_radii: CornerRadii::all(10.0),
         });
@@ -595,7 +653,8 @@ impl SnapManager {
             y: py,
             width: PICKER_WIDTH,
             height: picker_h,
-            color: theme::PICKER_BG,
+            // Judgement 3: the transparency setting, not a frozen 230.
+            color: p.panel_bg(),
             corner_radii: CornerRadii::all(10.0),
         });
 
@@ -605,7 +664,7 @@ impl SnapManager {
             y: py,
             width: PICKER_WIDTH,
             height: picker_h,
-            color: theme::SURFACE0,
+            color: p.surface0,
             line_width: 1.0,
             corner_radii: CornerRadii::all(10.0),
         });
@@ -615,7 +674,10 @@ impl SnapManager {
             x: px + PICKER_PADDING,
             y: py + PICKER_PADDING,
             text: "Snap Layout".into(),
-            color: theme::LAVENDER,
+            // Kept as a hue rather than promoted to the accent: the title is
+            // decoration on a panel, and an accented title would compete with
+            // the accented thumbnail below it that actually means something.
+            color: p.lavender,
             font_size: 13.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(PICKER_WIDTH - 2.0 * PICKER_PADDING),
@@ -633,7 +695,9 @@ impl SnapManager {
                     y: iy - 2.0,
                     width: THUMB_SIZE + 4.0,
                     height: THUMB_SIZE + 4.0,
-                    color: theme::PICKER_HOVER,
+                    // Judgement 3: `surface1` at the transparency setting, not
+                    // at a frozen 200.
+                    color: p.panel_hover(),
                     corner_radii: CornerRadii::all(6.0),
                 });
             }
@@ -644,7 +708,7 @@ impl SnapManager {
                 y: iy,
                 width: THUMB_SIZE,
                 height: THUMB_SIZE,
-                color: theme::SURFACE0,
+                color: p.surface0,
                 corner_radii: CornerRadii::all(4.0),
             });
 
@@ -664,10 +728,17 @@ impl SnapManager {
                     y: zone.y,
                     width: zone.width,
                     height: zone.height,
+                    // Judgement 5: the *active* preset is accented, and the
+                    // rest drop to a surface rung rather than to a second hue.
+                    // They used to be blue and lavender, which is a pair that
+                    // stops distinguishing anything the moment a user picks
+                    // lavender as their accent — and lavender is one of the
+                    // accents the settings page offers. A hue against a rung
+                    // cannot collide with any accent.
                     color: if self.active_preset == preset {
-                        theme::BLUE
+                        p.accent
                     } else {
-                        theme::LAVENDER
+                        p.overlay0
                     },
                     corner_radii: CornerRadii::all(2.0),
                 });
@@ -680,7 +751,7 @@ impl SnapManager {
                     y: iy,
                     width: THUMB_SIZE,
                     height: THUMB_SIZE,
-                    color: theme::BLUE,
+                    color: p.accent,
                     line_width: 2.0,
                     corner_radii: CornerRadii::all(4.0),
                 });
@@ -709,6 +780,29 @@ mod tests {
     )]
 
     use super::*;
+    use crate::palette_check::assert_drawn_from;
+    use appearance::AccentColor;
+
+    /// A palette for `light` whose accent is off-palette.
+    ///
+    /// The stock accent **is** `blue`, so a fixture built with
+    /// `Palette::for_mode` cannot tell "this site follows the accent" from
+    /// "this site is hard-coded blue" — which is the exact defect this module
+    /// was converted to remove, and the one judgement 5 turned out to be
+    /// hiding. Magenta is in neither Mocha nor Latte, and the guard below says
+    /// so rather than trusting that it stays true.
+    fn accented(light: bool) -> Palette {
+        let mut p = Palette::for_mode(light);
+        p.accent = Color::from_hex(0xFF00FF);
+        assert!(
+            !p.roles()
+                .iter()
+                .any(|(n, r)| *n != "accent" && r.r == 255 && r.g == 0 && r.b == 255),
+            "the fixture's accent collided with a role, so accent tests would \
+             pass for the wrong reason"
+        );
+        p
+    }
 
     /// A 1080p screen with nothing subtracted.
     ///
@@ -937,14 +1031,14 @@ mod tests {
     #[test]
     fn render_overlay_empty_when_hidden() {
         let mgr = make_manager();
-        assert!(mgr.render_overlay().is_empty());
+        assert!(mgr.render_overlay(&accented(false)).is_empty());
     }
 
     #[test]
     fn render_overlay_nonempty_when_visible() {
         let mut mgr = make_manager();
         mgr.show_overlay();
-        let cmds = mgr.render_overlay();
+        let cmds = mgr.render_overlay(&accented(false));
         // Scrim + (fill + stroke + text) * 2 zones = 7.
         assert!(cmds.len() >= 7);
     }
@@ -952,14 +1046,14 @@ mod tests {
     #[test]
     fn render_zone_highlight_returns_commands() {
         let mgr = make_manager();
-        let cmds = mgr.render_zone_highlight(0);
+        let cmds = mgr.render_zone_highlight(&accented(false), 0);
         assert_eq!(cmds.len(), 3); // fill + stroke + text
     }
 
     #[test]
     fn render_zone_highlight_invalid_zone_empty() {
         let mgr = make_manager();
-        assert!(mgr.render_zone_highlight(99).is_empty());
+        assert!(mgr.render_zone_highlight(&accented(false), 99).is_empty());
     }
 
     // ======================================================================
@@ -969,16 +1063,393 @@ mod tests {
     #[test]
     fn render_picker_empty_when_hidden() {
         let mgr = make_manager();
-        assert!(mgr.render_picker().is_empty());
+        assert!(mgr.render_picker(&accented(false)).is_empty());
     }
 
     #[test]
     fn render_picker_nonempty_when_visible() {
         let mut mgr = make_manager();
         mgr.show_picker();
-        let cmds = mgr.render_picker();
+        let cmds = mgr.render_picker(&accented(false));
         // At least shadow + bg + border + title + 7 thumbnails.
         assert!(cmds.len() >= 11);
+    }
+
+    // ======================================================================
+    // Rendering -- colour
+    //
+    // Part 2 of the palette conversion (known-issues.md
+    // `TD-C-FORTY-NINE-SHELL-MODULES-CARRY-THEIR-OWN-COPY-OF-THE-PALETTE`).
+    // Every test below renders in *both* modes, because a conversion tested
+    // only in the palette it was converted from cannot fail.
+    // ======================================================================
+
+    /// Every colour a command will put on the screen, in draw order.
+    fn colors(cmds: &[RenderCommand]) -> Vec<Color> {
+        cmds.iter()
+            .filter_map(|c| match c {
+                RenderCommand::FillRect { color, .. }
+                | RenderCommand::StrokeRect { color, .. }
+                | RenderCommand::Text { color, .. }
+                | RenderCommand::BoxShadow { color, .. } => Some(*color),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// How many mini-zones a preset's thumbnail draws.
+    ///
+    /// The *count* is reproduced from the production expression, the
+    /// *colours* are not — so the pin table below can say what the picker
+    /// draws without becoming a copy of the code that draws it.
+    fn mini_zone_count(preset: SnapLayoutPreset) -> usize {
+        preset
+            .build(WorkArea::new(0.0, 0.0, THUMB_SIZE - 8.0, THUMB_SIZE - 8.0))
+            .zones
+            .len()
+    }
+
+    /// A manager with the overlay up, the picker up and a zone hovered.
+    fn everything_showing() -> SnapManager {
+        let mut mgr = SnapManager::new(DESK);
+        mgr.show_overlay();
+        mgr.show_picker();
+        mgr
+    }
+
+    #[test]
+    fn every_colour_all_three_renderers_draw_comes_from_their_palette() {
+        let mut drawn = 0;
+        for light in [false, true] {
+            let p = accented(light);
+            for &preset in SnapLayoutPreset::all() {
+                let mut mgr = everything_showing();
+                mgr.set_layout(preset);
+                for (i, _) in SnapLayoutPreset::all().iter().enumerate() {
+                    let (ix, iy) = mgr.thumb_origin(i);
+                    mgr.update_picker_hover(ix + THUMB_SIZE / 2.0, iy + THUMB_SIZE / 2.0);
+                    let mut cmds = mgr.render_overlay(&p);
+                    cmds.extend(mgr.render_picker(&p));
+                    for zone in &mgr.layout.zones {
+                        cmds.extend(mgr.render_zone_highlight(&p, zone.id));
+                    }
+                    drawn += colors(&cmds).len();
+                    // Nothing is declared derived: every value this module
+                    // draws is a role, a role at an alpha, black, or a
+                    // `readable_on` endpoint. A module that needed an
+                    // exception here would be one that still computes a
+                    // colour of its own.
+                    assert_drawn_from(&p, &cmds, &[], "snap");
+                }
+            }
+        }
+        // The sweep is worthless if the fixtures drew nothing.
+        assert!(drawn > 500, "only {drawn} colours were swept");
+    }
+
+    #[test]
+    fn none_of_the_ten_deleted_constants_is_still_drawn() {
+        // Rendered in *light* mode on purpose: every deleted constant was a
+        // Mocha value, the light palette contains none of them, and so a
+        // leftover names itself. Compared on RGB because three of the ten
+        // differed only in alpha.
+        const DELETED: [(&str, u32); 10] = [
+            ("SURFACE0", 0x0031_3244),
+            ("BLUE", 0x0089_B4FA),
+            ("LAVENDER", 0x00B4_BEFE),
+            ("TEXT", 0x00CD_D6F4),
+            ("ZONE_FILL", 0x0089_B4FA),
+            ("ZONE_HIGHLIGHT", 0x0089_B4FA),
+            ("ZONE_BORDER", 0x0089_B4FA),
+            ("OVERLAY_SCRIM", 0x001E_1E2E),
+            ("PICKER_BG", 0x001E_1E2E),
+            ("PICKER_HOVER", 0x0045_475A),
+        ];
+        let p = accented(true);
+        let mut mgr = everything_showing();
+        mgr.update_picker_hover(
+            mgr.thumb_origin(0).0 + THUMB_SIZE / 2.0,
+            mgr.thumb_origin(0).1 + THUMB_SIZE / 2.0,
+        );
+        let mut cmds = mgr.render_overlay(&p);
+        cmds.extend(mgr.render_picker(&p));
+        cmds.extend(mgr.render_zone_highlight(&p, 0));
+        for c in colors(&cmds) {
+            let rgb = (u32::from(c.r) << 16) | (u32::from(c.g) << 8) | u32::from(c.b);
+            for (name, hex) in DELETED {
+                assert_ne!(
+                    rgb, hex,
+                    "the light render still draws Mocha {name}, so its constant \
+                     survived the conversion"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn every_site_draws_the_role_it_claims() {
+        // A membership sweep cannot see two sites *trading* colours — the set
+        // drawn is identical either way (module 29's lesson). So compare the
+        // ordered vector, per renderer, per mode.
+        for light in [false, true] {
+            let p = accented(light);
+            let mode = if light { "light" } else { "dark" };
+
+            let mut mgr = everything_showing();
+            mgr.set_layout(SnapLayoutPreset::TwoEqualHalves);
+
+            // --- overlay: scrim, then (fill, border, label) per zone ---
+            let mut want = vec![p.scrim()];
+            for _ in &mgr.layout.zones {
+                want.extend([
+                    p.selection_fill(),
+                    p.selection_border(),
+                    readable_on(p.scrim()),
+                ]);
+            }
+            assert_eq!(
+                colors(&mgr.render_overlay(&p)),
+                want,
+                "the {mode} overlay drew something other than what it claims"
+            );
+
+            // --- highlight: fill, border, label ---
+            assert_eq!(
+                colors(&mgr.render_zone_highlight(&p, 0)),
+                vec![p.highlight_fill(), p.accent, readable_on(p.scrim())],
+                "the {mode} zone highlight drew something other than what it claims"
+            );
+
+            // --- picker, with the third thumbnail hovered ---
+            let hovered = 2;
+            let (hx, hy) = mgr.thumb_origin(hovered);
+            mgr.update_picker_hover(hx + THUMB_SIZE / 2.0, hy + THUMB_SIZE / 2.0);
+            let mut want = vec![
+                Color::rgba(0, 0, 0, 100),
+                p.panel_bg(),
+                p.surface0,
+                p.lavender,
+            ];
+            for (i, &preset) in SnapLayoutPreset::all().iter().enumerate() {
+                let active = mgr.active_preset == preset;
+                if i == hovered {
+                    want.push(p.panel_hover());
+                }
+                want.push(p.surface0);
+                want.extend(std::iter::repeat_n(
+                    if active { p.accent } else { p.overlay0 },
+                    mini_zone_count(preset),
+                ));
+                if active {
+                    want.push(p.accent);
+                }
+            }
+            assert_eq!(
+                colors(&mgr.render_picker(&p)),
+                want,
+                "the {mode} picker drew something other than what it claims"
+            );
+        }
+    }
+
+    #[test]
+    fn a_zone_label_is_lettered_for_the_scrim_and_not_for_the_mode() {
+        // The overlay lays a scrim over the work area before it draws a
+        // label, and a scrim is black in both modes -- so the backdrop under
+        // these labels does not change with the theme and neither may the
+        // ink. `p.text` would be `#4C4F69` in light mode, on black.
+        //
+        // Pinned by hand rather than by calling `readable_on`: a test that
+        // called the function the renderer calls would agree with it however
+        // wrong both were (module 32's tautology lesson).
+        const NEAR_WHITE: u32 = 0x00EF_F1F5;
+        let mut seen = Vec::new();
+        for light in [false, true] {
+            let p = accented(light);
+            let mut mgr = everything_showing();
+            mgr.set_layout(SnapLayoutPreset::TwoEqualHalves);
+
+            let overlay = colors(&mgr.render_overlay(&p));
+            let highlight = colors(&mgr.render_zone_highlight(&p, 0));
+            // The zone label is the third of each zone's three commands; the
+            // highlight's is its third and last.
+            for (what, ink) in [
+                ("a resting zone", overlay[3]),
+                ("the hovered zone", highlight[2]),
+            ] {
+                let rgb = (u32::from(ink.r) << 16) | (u32::from(ink.g) << 8) | u32::from(ink.b);
+                assert_eq!(
+                    rgb,
+                    NEAR_WHITE,
+                    "{what}'s label is #{rgb:06X} in {} mode, but it sits on a \
+                     black scrim in both",
+                    if light { "light" } else { "dark" }
+                );
+                assert_ne!(
+                    ink, p.text,
+                    "{what}'s label took the mode's body ink, which is what \
+                     loses it on the scrim under the light theme"
+                );
+                seen.push(rgb);
+            }
+        }
+        assert_eq!(seen, vec![NEAR_WHITE; 4], "a label changed with the mode");
+    }
+
+    #[test]
+    fn the_scrim_is_black_in_both_modes() {
+        // §525 decision 3: a scrim is an absence of light, not a colour. The
+        // constant this replaced was Mocha `base` at alpha 140, and Latte's
+        // base is `#EFF1F5` -- so under the light theme it would have
+        // *lightened* the desktop it exists to push back.
+        for light in [false, true] {
+            let p = accented(light);
+            let mut mgr = SnapManager::new(DESK);
+            mgr.show_overlay();
+            assert_eq!(
+                colors(&mgr.render_overlay(&p))[0],
+                Color::rgba(0, 0, 0, 140),
+                "the {} overlay's scrim is not black",
+                if light { "light" } else { "dark" }
+            );
+        }
+    }
+
+    #[test]
+    fn an_inactive_preset_is_never_the_accent_the_user_chose() {
+        // Judgement 5, and the reason it is a test rather than a comment: the
+        // thumbnails used to say "active" with blue and "inactive" with
+        // lavender, and `AccentColor::Lavender` is one of the fourteen accents
+        // the settings page offers. Under that accent the picker stopped
+        // saying which layout was active at all.
+        //
+        // This walks all fourteen rather than one, because a pair of hues
+        // collides for exactly one of them and a spot check picks the other
+        // thirteen with probability 13/14.
+        const OFFERED: [AccentColor; 14] = [
+            AccentColor::Blue,
+            AccentColor::Lavender,
+            AccentColor::Teal,
+            AccentColor::Green,
+            AccentColor::Yellow,
+            AccentColor::Peach,
+            AccentColor::Pink,
+            AccentColor::Mauve,
+            AccentColor::Red,
+            AccentColor::Rosewater,
+            AccentColor::Flamingo,
+            AccentColor::Maroon,
+            AccentColor::Sky,
+            AccentColor::Sapphire,
+        ];
+        for light in [false, true] {
+            for accent in OFFERED {
+                let mut p = Palette::for_mode(light);
+                p.accent = if light {
+                    accent.color_light()
+                } else {
+                    accent.color()
+                };
+                let mut mgr = SnapManager::new(DESK);
+                mgr.show_picker();
+                mgr.set_layout(SnapLayoutPreset::TwoEqualHalves);
+                let cols = colors(&mgr.render_picker(&p));
+                assert!(
+                    cols.contains(&p.accent),
+                    "{accent:?}: the active preset is not marked at all"
+                );
+                assert!(
+                    cols.contains(&p.overlay0),
+                    "{accent:?}: no thumbnail is drawn as inactive"
+                );
+                assert_ne!(
+                    p.accent,
+                    p.overlay0,
+                    "{accent:?} in {} mode collides with the rung the inactive \
+                     thumbnails use, so the picker cannot say which layout is \
+                     active",
+                    if light { "light" } else { "dark" }
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_picker_is_as_transparent_as_the_user_asked() {
+        // The two constants this replaced froze an alpha into the literal --
+        // `rgba(30, 30, 46, 230)` and `rgba(69, 71, 90, 200)` -- which is a
+        // *setting* written down as a colour. `Palette::for_mode` pins
+        // `panel_alpha` at 255, so at the default palette `p.base ==
+        // p.panel_bg()` and every table-shaped test above agrees with that
+        // bug. Only varying the setting sees it.
+        let mut seen = Vec::new();
+        for alpha in [255_u8, 200, 160] {
+            let mut p = accented(false);
+            p.panel_alpha = alpha;
+            let mut mgr = SnapManager::new(DESK);
+            mgr.show_overlay();
+            mgr.show_picker();
+            let (hx, hy) = mgr.thumb_origin(0);
+            mgr.update_picker_hover(hx + THUMB_SIZE / 2.0, hy + THUMB_SIZE / 2.0);
+
+            let picker = colors(&mgr.render_picker(&p));
+            let bg = picker[1];
+            assert_eq!((bg.r, bg.g, bg.b), (p.base.r, p.base.g, p.base.b));
+            assert_eq!(bg.a, alpha, "the picker's background ignored the setting");
+            let hover = picker[4];
+            assert_eq!(
+                (hover.r, hover.g, hover.b),
+                (p.surface1.r, p.surface1.g, p.surface1.b)
+            );
+            assert_eq!(hover.a, alpha, "the picker's hover ignored the setting");
+
+            // The two that must *not* follow it. A shadow and a scrim are
+            // absences of light rather than panels; a picker that cast a
+            // fainter shadow as it grew more transparent would be reporting
+            // the setting twice, and a scrim that faded with it would stop
+            // dimming the desktop the overlay is drawn over.
+            assert_eq!(
+                picker[0],
+                Color::rgba(0, 0, 0, 100),
+                "the shadow followed the setting"
+            );
+            assert_eq!(
+                colors(&mgr.render_overlay(&p))[0],
+                Color::rgba(0, 0, 0, 140),
+                "the scrim followed the setting"
+            );
+            seen.push((bg.a, hover.a));
+        }
+        assert_eq!(seen, vec![(255, 255), (200, 200), (160, 160)]);
+    }
+
+    #[test]
+    fn the_zone_under_the_cursor_out_reads_the_zones_at_rest() {
+        // Both are the accent, so the only thing separating "one of eight
+        // places this could go" from "the place it will go" is weight: a
+        // louder wash and an opaque border against a washed one. A conversion
+        // that gave both the same helper would compile, pass the membership
+        // sweep, and leave the user unable to see where the window lands.
+        for light in [false, true] {
+            let p = accented(light);
+            let mut mgr = SnapManager::new(DESK);
+            mgr.show_overlay();
+            let rest = colors(&mgr.render_overlay(&p));
+            let hot = colors(&mgr.render_zone_highlight(&p, 0));
+            assert!(
+                hot[0].a > rest[1].a,
+                "the hovered zone's fill is no louder than a resting one's"
+            );
+            assert!(
+                hot[1].a > rest[2].a,
+                "the hovered zone's border is no louder than a resting one's"
+            );
+            assert_eq!(
+                (hot[0].r, hot[0].g, hot[0].b),
+                (p.accent.r, p.accent.g, p.accent.b),
+                "the hovered zone is not the accent"
+            );
+        }
     }
 
     // ======================================================================

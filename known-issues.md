@@ -63237,3 +63237,57 @@ Next on the list, unchanged: the decompressors (`fs/zstd.rs` 299, `fs/xz.rs`
 144, `fs/compress.rs` 110, `fs/sevenz.rs` 92, `fs/bzip2.rs` 88), the wire
 parsers (`net/tcp.rs` 182, `net/ssh.rs` 104, `net/tls.rs` 99,
 `net/firewall.rs` 87), then `fs/fat.rs` 140 and `fs/ext4/driver.rs` 104.
+
+## B-TEST-FIXTURES-SHARE-TEMP-PATHS-ACROSS-CONCURRENT-RUNS (lane B, 2026-08-22) — lane B's half FIXED, lane C's half FILED
+
+**In short:** a test that names its scratch directory after a fixed string, or
+after the clock, shares that path with every other copy of the suite running at
+the same time. Two `cargo test` runs overlapping is ordinary, not exotic, so the
+tests delete and overwrite each other's fixtures. The failures land on the code
+under test — `du: cannot access …`, `save: Io(NotFound)` — which is why they
+were not recognised as fixture bugs for as long as they were.
+
+**How it was found.** A workspace run of mine failed two `apps/screenshot` tests
+while a second workspace run was still in flight. Chasing that rather than
+re-running it turned up the same defect in twelve crates.
+
+**Why the clock is not a fix, only a disguise.** The system clock is refreshed
+on a timer interrupt rather than recomputed per read, so two threads reading it
+inside one tick get the same value however many digits it carries — and `cargo
+test` runs a suite's tests as threads of one process. Lane C measured 2133
+collisions in 16000 draws (13%); the figure is recorded in
+`userspace/scratchdir/src/lib.rs`. Adding the pid separates concurrent *runs*
+and does nothing for concurrent *threads*. `userspace/scratchdir` draws from the
+pid **and** a process-wide `AtomicU64`, which covers both axes by construction.
+
+**Measured, 2026-08-22** — six copies of one test binary, run at once, no source
+changes:
+
+| suite | runs failing (of 6) | distinct tests |
+|---|---|---|
+| `screenshot` (lane C) | 6 | 6 |
+| `explorer` (lane C) | 3 | 2 |
+| `imageviewer` (lane C) | 1 | 1 |
+| `du` (lane B, before the fix) | 1 | 1 |
+
+**Lane B — fixed.** `ca36f3e47` (du, 3 sites) and `d733787ee` (crond2 4, userdb
+2, vi 2, polkit 1). All now use `ScratchDir`; the hand-written cleanup tails are
+gone with them, since `Drop` covers the failing test that a trailing
+`remove_dir_all` structurally cannot reach. Re-measured at 15 binaries running
+at once: green.
+
+Deliberately left alone, and sound as they stand: `fio` (pid plus a distinct
+per-test tag), `filekind` and `tail` (pid plus `ThreadId`, which Rust guarantees
+is never reused).
+
+**Lane C — filed**, not fixed, because `apps/**` and `gui/**` are not mine to
+edit: `requests/b-c-test-fixtures-in-apps-and-gui-race-on-shared-temp-paths.md`
+lists 6 fixed-name sites and 12 clock-tagged ones with file and line, the
+one-command reproduction, and the conversion. `apps/installer/src/grub.rs`
+already does it correctly and is left alone.
+
+**The lesson worth keeping.** `polkit` had already been fixed once — from a
+fixed name to a nanosecond tag — with a comment that diagnoses the race
+correctly and then picks a fix that does not work. A rarer, stranger failure is
+worse than an obvious one. When a fixture needs to be unique, take the
+uniqueness from a counter, never from a clock.

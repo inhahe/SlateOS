@@ -148,6 +148,23 @@ fn show(bytes: &[u8]) -> String {
     String::from_utf8_lossy(bytes).into_owned()
 }
 
+/// gnulib's `quote_these_too` as `ls` sets it for a **file name** — which is
+/// what every row of the fixture is.
+///
+/// `decode_switches` calls `set_char_quoting (filename_quoting_options, ' ',
+/// 1)` for the `escape` style and no other, so that a name holding a space
+/// cannot end the word in a rendering that has no quotes to hold it together.
+/// It is not part of the style: the *directory header* gets its own options,
+/// with `:` in the set and no space, and `ls -b` prints a directory called
+/// `d e` as `d e:` while printing a file called `a b` as `a\ b`.
+///
+/// The probe passes neither `-F` nor `--file-type`, so the indicator
+/// characters are not in the set for any row here. See
+/// [`coreutils::quote::Style::quote_with`].
+fn ls_filename_set(style: Style) -> &'static [u8] {
+    if style == Style::Escape { b" " } else { b"" }
+}
+
 #[test]
 fn matches_gnu_ls_row_for_row() {
     let mut checked = 0usize;
@@ -160,7 +177,7 @@ fn matches_gnu_ls_row_for_row() {
     for row in rows() {
         let odd = contains_char(&row.name, DIVERGENT);
         for (column, (&style, want)) in COLUMNS.iter().zip(&row.want).enumerate() {
-            let got = style.quote(&row.name);
+            let got = style.quote_with(&row.name, ls_filename_set(style));
             checked = checked.saturating_add(1);
             if odd && must_differ(style, &row.name) {
                 let entry = divergent.entry(column).or_default();
@@ -279,7 +296,8 @@ fn the_empty_name_is_rendered_by_hand_because_it_cannot_be_a_file() {
     // Every one of these is the style's own general case with no bytes in it:
     // `literal` and `escape` copy nothing, the quoting styles emit their
     // delimiters around nothing, and `shell` cannot elide the quotes because
-    // an empty word without them is not a word at all.
+    // an empty word without them is not a word at all. `quote_these_too` is
+    // irrelevant here whatever it holds, since there are no bytes to match it.
     let cases: &[(Style, &[u8])] = &[
         (Style::Literal, b""),
         (Style::Shell, b"''"),

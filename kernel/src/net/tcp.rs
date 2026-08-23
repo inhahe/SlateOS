@@ -677,7 +677,6 @@ const EPHEMERAL_TCP_END: u16 = 65000;
 ///
 /// Must be called while holding the CONNECTIONS lock — the caller passes
 /// a slice of connections to check against.
-#[allow(clippy::arithmetic_side_effects)]
 fn alloc_port_for(
     conns: &[TcpConnection; MAX_CONNECTIONS],
     _ns_id: NetNsId,
@@ -706,7 +705,7 @@ fn alloc_port_for(
             *port_guard = if candidate >= EPHEMERAL_TCP_END {
                 EPHEMERAL_TCP_START
             } else {
-                candidate + 1
+                candidate.saturating_add(1)
             };
             return Ok(candidate);
         }
@@ -715,7 +714,7 @@ fn alloc_port_for(
         candidate = if candidate >= EPHEMERAL_TCP_END {
             EPHEMERAL_TCP_START
         } else {
-            candidate + 1
+            candidate.saturating_add(1)
         };
 
         // If we've wrapped all the way around, no port is available.
@@ -738,8 +737,26 @@ fn generate_isn() -> u32 {
 // TCP segment building
 // ---------------------------------------------------------------------------
 
+/// Patch the checksum into the two placeholder bytes at `offset`.
+///
+/// The checksum covers the segment including its own field, so every
+/// builder pushes two zero bytes, computes over the finished segment, and
+/// comes back here.  All three did that with a pair of indexed stores and
+/// a `+ 1`; one helper writing both bytes from `to_be_bytes` cannot get
+/// the byte order or the second offset wrong in one builder and right in
+/// the others.
+///
+/// `offset` is always a position the caller has just pushed two bytes at,
+/// so the range is present; the `if let` is what makes that structural
+/// fact cost nothing instead of being asserted with a panic.
+fn write_checksum(seg: &mut [u8], offset: usize, checksum: u16) {
+    let end = offset.saturating_add(2);
+    if let Some(dst) = seg.get_mut(offset..end) {
+        dst.copy_from_slice(&checksum.to_be_bytes());
+    }
+}
+
 /// Build a TCP segment (header + payload).
-#[allow(clippy::arithmetic_side_effects, clippy::cast_possible_truncation)]
 fn build_segment(
     src_port: u16,
     dst_port: u16,
@@ -752,8 +769,7 @@ fn build_segment(
     dst_ip: IpAddr,
 ) -> Vec<u8> {
     let header_words: u8 = 5; // 20 bytes, no options.
-    let total_len = TCP_HEADER_SIZE + payload.len();
-    let mut seg = Vec::with_capacity(total_len);
+    let mut seg = Vec::with_capacity(TCP_HEADER_SIZE.saturating_add(payload.len()));
 
     // Source port.
     seg.extend_from_slice(&src_port.to_be_bytes());
@@ -779,8 +795,7 @@ fn build_segment(
 
     // Compute TCP checksum (includes IPv4 or IPv6 pseudo-header).
     let checksum = tcp_checksum_ip(&seg, src_ip, dst_ip);
-    seg[checksum_offset] = (checksum >> 8) as u8;
-    seg[checksum_offset + 1] = checksum as u8;
+    write_checksum(&mut seg, checksum_offset, checksum);
 
     seg
 }
@@ -789,7 +804,7 @@ fn build_segment(
 ///
 /// `options` is the raw option bytes to place between the fixed header
 /// and the payload.  Must be padded to a 4-byte boundary.
-#[allow(clippy::arithmetic_side_effects, clippy::cast_possible_truncation)]
+#[allow(clippy::cast_possible_truncation)]
 fn build_segment_with_options(
     src_port: u16,
     dst_port: u16,
@@ -802,12 +817,13 @@ fn build_segment_with_options(
     src_ip: IpAddr,
     dst_ip: IpAddr,
 ) -> Vec<u8> {
-    // Pad options to 4-byte boundary.
-    let opt_padded = (options.len() + 3) & !3;
-    let header_len = TCP_HEADER_SIZE + opt_padded;
+    // Pad options to a 4-byte boundary.  `options` is at most the 40-byte
+    // TCP option space, so the round-up cannot wrap; `saturating_add`
+    // states that without relying on the reader to check it.
+    let opt_padded = options.len().saturating_add(3) & !3;
+    let header_len = TCP_HEADER_SIZE.saturating_add(opt_padded);
     let header_words = (header_len / 4) as u8;
-    let total_len = header_len + payload.len();
-    let mut seg = Vec::with_capacity(total_len);
+    let mut seg = Vec::with_capacity(header_len.saturating_add(payload.len()));
 
     seg.extend_from_slice(&src_port.to_be_bytes());
     seg.extend_from_slice(&dst_port.to_be_bytes());
@@ -824,7 +840,8 @@ fn build_segment_with_options(
     seg.extend_from_slice(options);
     // Pad with NOP/END to 4-byte boundary.
     seg.resize(
-        seg.len() + opt_padded.saturating_sub(options.len()),
+        seg.len()
+            .saturating_add(opt_padded.saturating_sub(options.len())),
         TCP_OPT_END,
     );
 
@@ -832,8 +849,7 @@ fn build_segment_with_options(
     seg.extend_from_slice(payload);
 
     let checksum = tcp_checksum_ip(&seg, src_ip, dst_ip);
-    seg[checksum_offset] = (checksum >> 8) as u8;
-    seg[checksum_offset + 1] = checksum as u8;
+    write_checksum(&mut seg, checksum_offset, checksum);
 
     seg
 }
@@ -926,7 +942,6 @@ const OUR_WSCALE: u8 = 0;
 /// Uses the monotonic clock divided to milliseconds, truncated to
 /// 32 bits.  This wraps every ~49.7 days — fine for PAWS since the
 /// window for detecting old duplicates is much shorter.
-#[allow(clippy::arithmetic_side_effects)]
 fn tcp_now_ms() -> u32 {
     (crate::hrtimer::now_ns() / 1_000_000) as u32
 }
@@ -1009,10 +1024,7 @@ fn parse_tcp_options(option_bytes: &[u8]) -> TcpOptions {
     // left" is the slice's own length and cannot be got wrong.  These
     // bytes come off the wire from an unauthenticated peer.
     let mut rest = option_bytes;
-    loop {
-        let Some((&kind, tail)) = rest.split_first() else {
-            break;
-        };
+    while let Some((&kind, tail)) = rest.split_first() {
         match kind {
             TCP_OPT_END => break,
             TCP_OPT_NOP => {
@@ -1086,7 +1098,6 @@ fn parse_tcp_options(option_bytes: &[u8]) -> TcpOptions {
 ///   NOP(kind=1)                                         =  1 byte
 ///   Timestamp(kind=8, len=10, TSval=4, TSecr=4)         = 10 bytes
 ///   Total options: 24 bytes → header is 44 bytes (11 words).
-#[allow(clippy::arithmetic_side_effects)]
 fn build_segment_with_syn_options(
     src_port: u16,
     dst_port: u16,
@@ -1104,9 +1115,8 @@ fn build_segment_with_syn_options(
     // Options: MSS(4) + NOP(1) + WScale(3) + NOP(1) + NOP(1) + SACK-Perm(2)
     //        + NOP(1) + NOP(1) + Timestamp(10) = 24 bytes.
     let header_words: u8 = 11; // (20 + 24) / 4 = 11 words.
-    let header_len = (header_words as usize) * 4;
-    let total_len = header_len + payload.len();
-    let mut seg = Vec::with_capacity(total_len);
+    let header_len = usize::from(header_words).saturating_mul(4);
+    let mut seg = Vec::with_capacity(header_len.saturating_add(payload.len()));
 
     // Standard TCP header fields (first 20 bytes).
     seg.extend_from_slice(&src_port.to_be_bytes());
@@ -1158,8 +1168,7 @@ fn build_segment_with_syn_options(
 
     // Compute TCP checksum (IPv4 or IPv6 pseudo-header).
     let checksum = tcp_checksum_ip(&seg, src_ip, dst_ip);
-    seg[checksum_offset] = (checksum >> 8) as u8;
-    seg[checksum_offset + 1] = checksum as u8;
+    write_checksum(&mut seg, checksum_offset, checksum);
 
     seg
 }
@@ -1474,6 +1483,23 @@ fn take_conn_slot(conns: &mut [TcpConnection], why: &str) -> KernelResult<usize>
     Ok(idx)
 }
 
+/// The connection a handle names, or `InvalidArgument` if it names none.
+///
+/// A handle is an index into a fixed-size array, so `conns[handle]` is
+/// what this code kept saying.  That is a panic — a kernel halt — for
+/// any handle a caller gets wrong, and the syscall layer hands these out
+/// to userspace, so "a caller gets it wrong" includes "a process passes
+/// a number it made up".  Every such site is one bad `write()` argument
+/// away from taking the machine down, which is why they are worth the
+/// `?` rather than an audit that concludes they are all reachable only
+/// with valid handles today.
+fn conn_mut(
+    conns: &mut [TcpConnection],
+    handle: usize,
+) -> KernelResult<&mut TcpConnection> {
+    conns.get_mut(handle).ok_or(KernelError::InvalidArgument)
+}
+
 /// Open a TCP connection to the given address and port.
 ///
 /// `ns_id` identifies the network namespace; connections in different
@@ -1482,7 +1508,6 @@ fn take_conn_slot(conns: &mut [TcpConnection], why: &str) -> KernelResult<usize>
 ///
 /// Performs the 3-way handshake (SYN → SYN-ACK → ACK).
 /// Returns a connection handle on success.
-#[allow(clippy::arithmetic_side_effects)]
 pub fn connect(ns_id: NetNsId, remote_ip: IpAddr, remote_port: u16) -> KernelResult<usize> {
     let isn = generate_isn();
 
@@ -1617,7 +1642,10 @@ pub fn connect(ns_id: NetNsId, remote_ip: IpAddr, remote_port: u16) -> KernelRes
         for _ in 0..polls {
             super::poll();
 
-            let state = CONNECTIONS.lock()[handle].state;
+            let state = {
+                let mut conns = CONNECTIONS.lock();
+                conn_mut(&mut conns[..], handle)?.state
+            };
             if state == TcpState::Established {
                 crate::serial_println!(
                     "[tcp] Connection established to {}:{}",
@@ -1638,9 +1666,11 @@ pub fn connect(ns_id: NetNsId, remote_ip: IpAddr, remote_port: u16) -> KernelRes
 
     // All attempts exhausted — clean up.
     let mut conns = CONNECTIONS.lock();
-    conns[handle].last_error = TCP_ERR_TIMEDOUT;
-    conns[handle].active = false;
-    conns[handle].state = TcpState::Closed;
+    let conn = conn_mut(&mut conns[..], handle)?;
+    // `last_error` first: `deactivate` deliberately preserves it, so the
+    // caller can still learn *why* the slot went away.
+    conn.last_error = TCP_ERR_TIMEDOUT;
+    conn.deactivate();
     Err(KernelError::TimedOut)
 }
 
@@ -1663,7 +1693,6 @@ pub fn connect(ns_id: NetNsId, remote_ip: IpAddr, remote_port: u16) -> KernelRes
 /// Returns `(handle, KernelError::WouldBlock)` — the WouldBlock is the
 /// expected "in progress" signal, not an error.  The caller should map
 /// this to EINPROGRESS at the POSIX layer.
-#[allow(clippy::arithmetic_side_effects)]
 pub fn connect_start(ns_id: NetNsId, remote_ip: IpAddr, remote_port: u16) -> KernelResult<usize> {
     let isn = generate_isn();
 
@@ -1768,7 +1797,6 @@ pub fn connect_start(ns_id: NetNsId, remote_ip: IpAddr, remote_port: u16) -> Ker
 /// If window scaling is active, the true window is right-shifted by
 /// `rcv_wnd_scale` before being placed in the header (the peer
 /// left-shifts it back).
-#[allow(clippy::arithmetic_side_effects)]
 fn advertised_window(conn: &TcpConnection) -> u16 {
     let free = MAX_RX_BUFFER.saturating_sub(conn.rx_buffer.len());
     // True window — up to 64 KiB for our buffer size.
@@ -1782,7 +1810,6 @@ fn advertised_window(conn: &TcpConnection) -> u16 {
 /// Update RTT estimate from a new measurement (Jacobson/Karels, RFC 6298).
 ///
 /// `sample_ns` is the measured round-trip time in nanoseconds.
-#[allow(clippy::arithmetic_side_effects)]
 fn update_rtt(conn: &mut TcpConnection, sample_ns: u64) {
     if !conn.rtt_initialized {
         // First measurement (RFC 6298 §2.2):
@@ -1856,7 +1883,6 @@ fn try_rtt_sample(conn: &mut TcpConnection, ack: u32) -> bool {
 ///
 /// This provides a sample on every ACK, much better than timing a single
 /// segment per flight (which is the fallback when timestamps aren't available).
-#[allow(clippy::arithmetic_side_effects)]
 fn try_rtt_sample_ts(conn: &mut TcpConnection, tsecr: u32) {
     if tsecr == 0 {
         return; // No echo yet (e.g. pure SYN-ACK response).
@@ -1921,7 +1947,6 @@ fn effective_mss(conn: &TcpConnection) -> usize {
 
 /// Called when an ACK arrives — updates congestion window (slow-start or
 /// congestion avoidance, RFC 5681 §3.1).
-#[allow(clippy::arithmetic_side_effects)]
 fn on_ack_congestion(conn: &mut TcpConnection, bytes_acked: u32) {
     if bytes_acked == 0 {
         return;
@@ -1933,8 +1958,15 @@ fn on_ack_congestion(conn: &mut TcpConnection, bytes_acked: u32) {
     } else {
         // Congestion avoidance: increase cwnd by MSS * MSS / cwnd per ACK
         // (approximately 1 MSS per RTT).
-        let inc = (mss as u64).saturating_mul(bytes_acked as u64) / (conn.cwnd as u64).max(1);
-        conn.cwnd = conn.cwnd.saturating_add(inc.min(mss as u64) as u32);
+        // `max(1)` already ruled out the divide-by-zero, but `checked_div`
+        // puts that guarantee at the operation instead of one line above
+        // it, so a later edit cannot drop the clamp and leave behind a
+        // division that halts the kernel on a zero congestion window.
+        let inc = u64::from(mss)
+            .saturating_mul(u64::from(bytes_acked))
+            .checked_div(u64::from(conn.cwnd))
+            .unwrap_or(0);
+        conn.cwnd = conn.cwnd.saturating_add(inc.min(u64::from(mss)) as u32);
     }
 }
 
@@ -1957,7 +1989,6 @@ fn on_loss_congestion(conn: &mut TcpConnection) {
 ///
 /// Called when `snd_una` advances.  `bytes_acked` is the number of bytes
 /// newly acknowledged.  Keeps `tx_buf_seq` in sync with `snd_una`.
-#[allow(clippy::arithmetic_side_effects)]
 fn tx_buffer_trim(conn: &mut TcpConnection, bytes_acked: u32) {
     let trim = (bytes_acked as usize).min(conn.tx_buffer.len());
     if trim > 0 {
@@ -1974,12 +2005,10 @@ fn tx_buffer_trim(conn: &mut TcpConnection, bytes_acked: u32) {
     }
 }
 
-/// Retransmit the first unacknowledged segment from the retransmit buffer.
-///
-/// Sends up to `effective_mss(conn)` bytes from `tx_buffer[0..]`
-/// (sequence `snd_una`).
-#[allow(clippy::arithmetic_side_effects)]
-/// Retransmit info tuple.
+/// Everything `retransmit_from_buffer` needs to hand to `send_segment`:
+/// local port, remote address, remote port, sequence, ack, window, the
+/// MSS-sized payload buffer with its length, whether timestamps are in
+/// use, and the echo value to put in them.
 type RetxInfo = (
     u16,
     IpAddr,
@@ -1987,19 +2016,33 @@ type RetxInfo = (
     u32,
     u32,
     u16,
-    [u8; 1460],
+    [u8; MSS],
     usize,
     bool,
     u32,
 );
 
+/// Retransmit the first unacknowledged segment from the retransmit buffer.
+///
+/// Sends up to `effective_mss(conn)` bytes from `tx_buffer[0..]`
+/// (sequence `snd_una`).  `None` when there is nothing unacknowledged.
 fn retransmit_from_buffer(conn: &TcpConnection) -> Option<RetxInfo> {
     let retx_len = conn.tx_buffer.len().min(effective_mss(conn));
     if retx_len == 0 {
         return None;
     }
-    let mut data = [0u8; 1460]; // MSS-sized stack buffer.
-    data[..retx_len].copy_from_slice(&conn.tx_buffer[..retx_len]);
+    // `effective_mss` returns `MSS.min(peer_mss)`, so `retx_len` cannot
+    // exceed `MSS` — which is why the buffer is sized from the constant
+    // rather than from a `1460` that would silently start truncating if
+    // `MSS` were ever raised.
+    let mut data = [0u8; MSS];
+    let (Some(dst), Some(src)) = (
+        data.get_mut(..retx_len),
+        conn.tx_buffer.get(..retx_len),
+    ) else {
+        return None;
+    };
+    dst.copy_from_slice(src);
     Some((
         conn.local_port,
         conn.remote_ip,
@@ -2024,7 +2067,6 @@ fn retransmit_from_buffer(conn: &TcpConnection) -> Option<RetxInfo> {
 /// one past the last byte.  If the new range overlaps or is adjacent to
 /// an existing block, they are merged.  The block list is sorted by
 /// `left_edge` and capped at `MAX_SACK_BLOCKS`.
-#[allow(clippy::arithmetic_side_effects)]
 fn sack_insert(conn: &mut TcpConnection, left: u32, right: u32) {
     // Merge with existing blocks that overlap or are adjacent.
     let mut new_left = left;
@@ -2081,7 +2123,6 @@ fn sack_insert(conn: &mut TcpConnection, left: u32, right: u32) {
 /// After `rcv_nxt` advances (because in-order or OOO-delivered data was
 /// accepted), removes SACK blocks whose left edge is at or below
 /// `rcv_nxt` (they're covered by the cumulative ACK).
-#[allow(clippy::arithmetic_side_effects)]
 fn sack_advance(conn: &mut TcpConnection) {
     // Remove blocks that are now below rcv_nxt (already acknowledged
     // by the cumulative ACK).
@@ -2120,7 +2161,6 @@ const MAX_OOO_BUF: usize = MAX_RX_BUFFER;
 /// `seq` is the segment's starting sequence number, `data` is the
 /// payload.  Data is written into `ooo_buf` at offset `seq - ooo_base`.
 /// The buffer is grown as needed (bounded by `MAX_OOO_BUF`).
-#[allow(clippy::arithmetic_side_effects)]
 fn ooo_store(conn: &mut TcpConnection, seq: u32, data: &[u8]) {
     if data.is_empty() {
         return;
@@ -2175,7 +2215,6 @@ fn ooo_store(conn: &mut TcpConnection, seq: u32, data: &[u8]) {
 ///
 /// Called before `sack_advance` so the SACK blocks are still present
 /// for lookup.
-#[allow(clippy::arithmetic_side_effects)]
 fn ooo_deliver(conn: &mut TcpConnection) {
     if conn.ooo_buf.is_empty() {
         return;
@@ -2396,7 +2435,6 @@ fn build_sack_option(conn: &TcpConnection) -> ([u8; SACK_OPT_BUF], usize) {
 /// delays small segments when unacknowledged data is in flight.
 ///
 /// Returns `Ok(())` even if the effective window truncated the send.
-#[allow(clippy::arithmetic_side_effects)]
 pub fn send(handle: usize, data: &[u8]) -> KernelResult<usize> {
     let (
         local_port,
@@ -2559,8 +2597,10 @@ pub fn send(handle: usize, data: &[u8]) -> KernelResult<usize> {
     };
 
     while offset < send_data.len() {
-        let chunk_end = (offset + eff_mss).min(send_data.len());
-        let chunk = &send_data[offset..chunk_end];
+        let chunk_end = offset.saturating_add(eff_mss).min(send_data.len());
+        let Some(chunk) = send_data.get(offset..chunk_end) else {
+            break;
+        };
 
         let send_seq = seq.wrapping_add(offset as u32);
         send_data_with_ts(
@@ -2587,7 +2627,7 @@ pub fn send(handle: usize, data: &[u8]) -> KernelResult<usize> {
     // Update snd_nxt, buffer sent data for retransmission, and reset keepalive.
     {
         let mut conns = CONNECTIONS.lock();
-        let conn = &mut conns[handle];
+        let conn = conn_mut(&mut conns[..], handle)?;
         conn.snd_nxt = seq.wrapping_add(sendable as u32);
         let now = crate::hrtimer::now_ns();
         conn.last_activity_ns = now;
@@ -2598,8 +2638,8 @@ pub fn send(handle: usize, data: &[u8]) -> KernelResult<usize> {
         // bound memory usage.
         let space = MAX_TX_BUFFER.saturating_sub(conn.tx_buffer.len());
         let copy_len = sendable.min(space);
-        if copy_len > 0 {
-            conn.tx_buffer.extend_from_slice(&send_data[..copy_len]);
+        if let Some(copy) = send_data.get(..copy_len) {
+            conn.tx_buffer.extend_from_slice(copy);
         }
         // Record send time for RTO-based retransmit.
         if conn.tx_last_send_ns == 0 {
@@ -3007,7 +3047,6 @@ pub fn read_blocking(handle: usize, timeout_polls: u32, max_bytes: usize) -> Ker
 ///
 /// If `rst` is true, send RST instead of FIN (abortive close, e.g.,
 /// when SO_LINGER timeout is 0 or unread data exists in rx_buffer).
-#[allow(clippy::arithmetic_side_effects)]
 pub fn close(handle: usize) -> KernelResult<()> {
     let (local_port, remote_ip, remote_port, seq, ack, state, has_unread) = {
         let conns = CONNECTIONS.lock();
@@ -3047,7 +3086,7 @@ pub fn close(handle: usize) -> KernelResult<()> {
             remote_port
         );
         let mut conns = CONNECTIONS.lock();
-        conns[handle].deactivate();
+        conn_mut(&mut conns[..], handle)?.deactivate();
         return Ok(());
     }
 
@@ -3064,15 +3103,19 @@ pub fn close(handle: usize) -> KernelResult<()> {
                 &[],
             )?;
             let mut conns = CONNECTIONS.lock();
-            conns[handle].state = TcpState::FinWait1;
-            conns[handle].snd_nxt = seq.wrapping_add(1);
-            conns[handle].last_activity_ns = crate::hrtimer::now_ns();
+            let conn = conn_mut(&mut conns[..], handle)?;
+            conn.state = TcpState::FinWait1;
+            conn.snd_nxt = seq.wrapping_add(1);
+            conn.last_activity_ns = crate::hrtimer::now_ns();
 
             // Brief wait for FIN-ACK (non-blocking).
             drop(conns);
             for _ in 0..500 {
                 super::poll();
-                let state = CONNECTIONS.lock()[handle].state;
+                let state = {
+                    let mut conns = CONNECTIONS.lock();
+                    conn_mut(&mut conns[..], handle)?.state
+                };
                 if state == TcpState::Closed || state == TcpState::TimeWait {
                     break;
                 }
@@ -3086,9 +3129,9 @@ pub fn close(handle: usize) -> KernelResult<()> {
             // TimeWait cleanup and FIN retransmission for in-progress
             // teardowns are handled by tick_retransmit / tick_time_wait_cleanup.
             let mut conns = CONNECTIONS.lock();
-            let final_state = conns[handle].state;
-            if final_state == TcpState::Closed {
-                conns[handle].deactivate();
+            let conn = conn_mut(&mut conns[..], handle)?;
+            if conn.state == TcpState::Closed {
+                conn.deactivate();
             }
             // If still FinWait1/FinWait2/TimeWait, leave slot active for
             // the timer-based handlers (FIN retransmit, TIME_WAIT cleanup).
@@ -3105,21 +3148,22 @@ pub fn close(handle: usize) -> KernelResult<()> {
                 &[],
             )?;
             let mut conns = CONNECTIONS.lock();
-            conns[handle].state = TcpState::LastAck;
-            conns[handle].snd_nxt = seq.wrapping_add(1);
-            conns[handle].last_activity_ns = crate::hrtimer::now_ns();
+            let conn = conn_mut(&mut conns[..], handle)?;
+            conn.state = TcpState::LastAck;
+            conn.snd_nxt = seq.wrapping_add(1);
+            conn.last_activity_ns = crate::hrtimer::now_ns();
             // Leave slot active — tick_retransmit() handles FIN retransmission
             // if the ACK is lost, and deactivation happens when the ACK arrives.
         }
         TcpState::SynSent => {
             // Connection never established — just deactivate.
             let mut conns = CONNECTIONS.lock();
-            conns[handle].deactivate();
+            conn_mut(&mut conns[..], handle)?.deactivate();
         }
         _ => {
             // Already closing or other state — force deactivate.
             let mut conns = CONNECTIONS.lock();
-            conns[handle].deactivate();
+            conn_mut(&mut conns[..], handle)?.deactivate();
         }
     }
 
@@ -3138,7 +3182,6 @@ pub fn close(handle: usize) -> KernelResult<()> {
 ///
 /// Unlike `close()`, the connection slot remains active for the
 /// remaining half that is still open.
-#[allow(clippy::arithmetic_side_effects)]
 pub fn shutdown(handle: usize, how: u32) -> KernelResult<()> {
     let shut_rd = how == 0 || how == 2;
     let shut_wr = how == 1 || how == 2;
@@ -3188,9 +3231,10 @@ pub fn shutdown(handle: usize, how: u32) -> KernelResult<()> {
                     &[],
                 )?;
                 let mut conns = CONNECTIONS.lock();
-                conns[handle].state = TcpState::FinWait1;
-                conns[handle].snd_nxt = seq.wrapping_add(1);
-                conns[handle].local_write_closed = true;
+                let conn = conn_mut(&mut conns[..], handle)?;
+                conn.state = TcpState::FinWait1;
+                conn.snd_nxt = seq.wrapping_add(1);
+                conn.local_write_closed = true;
             }
             TcpState::CloseWait => {
                 // Remote already sent FIN; our FIN completes the close.
@@ -3204,19 +3248,20 @@ pub fn shutdown(handle: usize, how: u32) -> KernelResult<()> {
                     &[],
                 )?;
                 let mut conns = CONNECTIONS.lock();
-                conns[handle].state = TcpState::LastAck;
-                conns[handle].snd_nxt = seq.wrapping_add(1);
-                conns[handle].local_write_closed = true;
+                let conn = conn_mut(&mut conns[..], handle)?;
+                conn.state = TcpState::LastAck;
+                conn.snd_nxt = seq.wrapping_add(1);
+                conn.local_write_closed = true;
             }
             TcpState::SynSent | TcpState::SynReceived => {
                 // Not yet established — just mark write closed.
                 let mut conns = CONNECTIONS.lock();
-                conns[handle].local_write_closed = true;
+                conn_mut(&mut conns[..], handle)?.local_write_closed = true;
             }
             _ => {
                 // Already in a closing state (FinWait1, FinWait2, etc.).
                 let mut conns = CONNECTIONS.lock();
-                conns[handle].local_write_closed = true;
+                conn_mut(&mut conns[..], handle)?.local_write_closed = true;
             }
         }
     }
@@ -3694,7 +3739,6 @@ pub fn close_listener(listener_handle: usize) -> KernelResult<()> {
 ///
 /// `syn_flags` is the full TCP flags byte from the SYN segment, used to
 /// detect ECN negotiation (RFC 3168 §6.1.1: ECE+CWR in SYN).
-#[allow(clippy::arithmetic_side_effects)]
 fn handle_incoming_syn(
     ns_id: NetNsId,
     remote_ip: IpAddr,
@@ -4260,9 +4304,13 @@ fn process_tcp_common(
     // Skip for SynSent (receive window not yet established — we're waiting
     // for SYN-ACK) and SynReceived (handshake still in progress).
     if conn.state != TcpState::SynSent && conn.state != TcpState::SynReceived {
-        let seg_len = payload.len() as u32
-            + if flags & TCP_SYN != 0 { 1 } else { 0 }
-            + if flags & TCP_FIN != 0 { 1 } else { 0 };
+        // RFC 793: SYN and FIN each occupy one sequence number.  The
+        // payload is bounded by the MTU, so this cannot approach `u32`
+        // — but it is computed from a peer-supplied segment, which is
+        // reason enough not to leave a bare `+` on the path.
+        let seg_len = (payload.len() as u32)
+            .saturating_add(u32::from(flags & TCP_SYN != 0))
+            .saturating_add(u32::from(flags & TCP_FIN != 0));
         let rcv_wnd = (advertised_window(conn) as u32) << (conn.rcv_wnd_scale as u32);
         let acceptable = if rcv_wnd == 0 {
             // Zero window: only accept zero-length segment at exactly rcv_nxt.
@@ -4911,7 +4959,6 @@ pub fn set_keepalive_params(
 ///   resumes.
 ///
 /// Called from the same periodic tick as `tick_keepalive`.
-#[allow(clippy::arithmetic_side_effects)]
 pub fn tick_persist() {
     let now = crate::hrtimer::now_ns();
     let mut conns = CONNECTIONS.lock();
@@ -5000,7 +5047,6 @@ pub fn tick_persist() {
 /// Scans all established connections with keepalive enabled.  For each
 /// idle connection, either sends a probe or declares the connection dead
 /// if the probe limit has been reached.
-#[allow(clippy::arithmetic_side_effects)]
 pub fn tick_keepalive() {
     let now = crate::hrtimer::now_ns();
     let mut conns = CONNECTIONS.lock();
@@ -5824,7 +5870,7 @@ fn test_v4_pseudo_header_unchanged() -> KernelResult<()> {
     Ok(())
 }
 
-/// Test 1: bind and close a listener.
+/// Test: bind and close a listener.
 fn test_bind_close() -> KernelResult<()> {
     let handle = bind(crate::netns::ROOT_NS, 9999)?;
 
@@ -5852,7 +5898,7 @@ fn test_bind_close() -> KernelResult<()> {
     Ok(())
 }
 
-/// Test 2: binding the same port twice is rejected.
+/// Test: binding the same port twice is rejected.
 fn test_bind_duplicate_rejected() -> KernelResult<()> {
     let handle = bind(crate::netns::ROOT_NS, 8888)?;
 
@@ -5876,7 +5922,7 @@ fn test_bind_duplicate_rejected() -> KernelResult<()> {
     Ok(())
 }
 
-/// Test 3: try_accept on empty backlog returns WouldBlock.
+/// Test: try_accept on empty backlog returns WouldBlock.
 fn test_try_accept_empty() -> KernelResult<()> {
     let handle = bind(crate::netns::ROOT_NS, 7777)?;
 
@@ -5894,7 +5940,7 @@ fn test_try_accept_empty() -> KernelResult<()> {
     Ok(())
 }
 
-/// Test 4: TCP option parsing (MSS, WScale, NOP, END).
+/// Test: TCP option parsing (MSS, WScale, NOP, END).
 fn test_parse_tcp_options() -> KernelResult<()> {
     // Empty options.
     let opts = parse_tcp_options(&[]);
@@ -6346,7 +6392,7 @@ fn test_sack_blocks() -> KernelResult<()> {
     Ok(())
 }
 
-/// Test 6: seq_lt() modular 32-bit sequence number comparison.
+/// Test: seq_lt() modular 32-bit sequence number comparison.
 fn test_seq_lt() -> KernelResult<()> {
     // Basic ordering.
     if !seq_lt(0, 1) {
@@ -6410,7 +6456,7 @@ fn test_seq_lt() -> KernelResult<()> {
     Ok(())
 }
 
-/// Test 7: IPv6 TCP checksum computation.
+/// Test: IPv6 TCP checksum computation.
 ///
 /// Validates the TCP checksum with IPv6 pseudo-header by computing a
 /// checksum over a known segment and verifying it with the IPv6
@@ -6474,7 +6520,7 @@ fn test_ipv6_checksum() -> KernelResult<()> {
     Ok(())
 }
 
-/// Test 8: dual-stack IpAddr in connection matching.
+/// Test: dual-stack IpAddr in connection matching.
 ///
 /// Validates that IPv4 and IPv6 connections with the same port numbers
 /// are distinguished by address family (IpAddr::V4 != IpAddr::V6).
@@ -6520,7 +6566,7 @@ fn test_dual_stack_ip_addr() -> KernelResult<()> {
     Ok(())
 }
 
-/// Test 9: namespace isolation — same port can be bound in different namespaces.
+/// Test: namespace isolation — same port can be bound in different namespaces.
 fn test_namespace_isolation() -> KernelResult<()> {
     let ns0 = crate::netns::ROOT_NS;
     let ns1: NetNsId = 42; // Fake non-root namespace (doesn't need to exist in netns table).

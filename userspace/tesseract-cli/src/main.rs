@@ -4,6 +4,7 @@
 //!
 //! Single personality: `tesseract`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -58,7 +59,8 @@ fn run_tesseract(args: Vec<String>) -> i32 {
         return 0;
     }
 
-    let positional: Vec<&str> = args.iter()
+    let positional: Vec<&str> = args
+        .iter()
         .filter(|a| !a.starts_with('-'))
         .map(|s| s.as_str())
         .collect();
@@ -71,12 +73,14 @@ fn run_tesseract(args: Vec<String>) -> i32 {
     let image = positional[0];
     let output = positional.get(1).unwrap_or(&"stdout");
 
-    let lang = args.windows(2)
+    let lang = args
+        .windows(2)
         .find(|w| w[0] == "-l")
         .map(|w| w[1].as_str())
         .unwrap_or("eng");
 
-    let psm = args.windows(2)
+    let psm = args
+        .windows(2)
         .find(|w| w[0] == "--psm")
         .map(|w| w[1].as_str())
         .unwrap_or("3");
@@ -85,7 +89,16 @@ fn run_tesseract(args: Vec<String>) -> i32 {
     let has_hocr = positional.contains(&"hocr");
 
     println!("Tesseract Open Source OCR Engine v5.3.4 with Leptonica");
-    println!("Processing '{}' (lang={}, psm={})", image, lang, psm);
+    // Three argv values -- the image operand and whatever followed `-l` and
+    // `--psm`. Neither option is parsed, so `lang` and `psm` are as forgeable
+    // as the file name is, and the hand-written quotes around the one of them
+    // that was already quoted quoted nothing.
+    println!(
+        "Processing {} (lang={}, psm={})",
+        quoteaf_os(image),
+        quoteaf_os(lang),
+        quoteaf_os(psm)
+    );
 
     if has_pdf {
         println!("  Output: {}.pdf (searchable PDF)", output);
@@ -107,7 +120,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_tesseract};
+    use super::run_tesseract;
 
     #[test]
     fn help_exits_zero() {

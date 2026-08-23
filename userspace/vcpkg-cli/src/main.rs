@@ -4,11 +4,15 @@
 //!
 //! Single personality: `vcpkg`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
 fn run_vcpkg(args: Vec<String>) -> i32 {
-    if args.iter().any(|a| a == "--help" || a == "-h" || a == "help") {
+    if args
+        .iter()
+        .any(|a| a == "--help" || a == "-h" || a == "help")
+    {
         println!("Usage: vcpkg <COMMAND> [OPTIONS]");
         println!();
         println!("vcpkg — C/C++ package manager (Slate OS).");
@@ -31,9 +35,12 @@ fn run_vcpkg(args: Vec<String>) -> i32 {
     let cmd = args.first().map(|s| s.as_str()).unwrap_or("");
     match cmd {
         "install" => {
-            let pkgs: Vec<&str> = args.iter().skip(1)
+            let pkgs: Vec<&str> = args
+                .iter()
+                .skip(1)
                 .filter(|a| !a.starts_with('-'))
-                .map(|s| s.as_str()).collect();
+                .map(|s| s.as_str())
+                .collect();
             let pkg = if pkgs.is_empty() { "zlib" } else { pkgs[0] };
             println!("Computing installation plan...");
             println!("The following packages will be built and installed:");
@@ -88,12 +95,16 @@ fn run_vcpkg(args: Vec<String>) -> i32 {
             match sub {
                 "install" => {
                     println!("Applied user-wide integration for this vcpkg root.");
-                    println!("CMake projects should use: -DCMAKE_TOOLCHAIN_FILE=/home/user/vcpkg/scripts/buildsystems/vcpkg.cmake");
+                    println!(
+                        "CMake projects should use: -DCMAKE_TOOLCHAIN_FILE=/home/user/vcpkg/scripts/buildsystems/vcpkg.cmake"
+                    );
                 }
                 "remove" => {
                     println!("User-wide integration removed.");
                 }
-                _ => { println!("Integrate: {}", sub); }
+                _ => {
+                    println!("Integrate: {}", sub);
+                }
             }
             0
         }
@@ -101,7 +112,7 @@ fn run_vcpkg(args: Vec<String>) -> i32 {
             if cmd.is_empty() {
                 eprintln!("Usage: vcpkg <command>. See --help.");
             } else {
-                eprintln!("Error: unknown command '{}'. See --help.", cmd);
+                eprintln!("Error: unknown command {}. See --help.", quoteaf_os(cmd));
             }
             1
         }
@@ -117,7 +128,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_vcpkg};
+    use super::run_vcpkg;
 
     #[test]
     fn help_exits_zero() {

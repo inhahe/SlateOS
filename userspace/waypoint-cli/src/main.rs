@@ -4,6 +4,7 @@
 //!
 //! Multi-personality: `waypoint`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -112,7 +113,7 @@ fn run_waypoint(args: &[String]) -> i32 {
         "ui" => {
             println!("Opening Waypoint UI: https://localhost:9702");
         }
-        _ => println!("waypoint: '{}' completed", subcmd),
+        _ => println!("waypoint: {} completed", quoteaf_os(subcmd)),
     }
     0
 }
@@ -126,7 +127,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_waypoint};
+    use super::run_waypoint;
 
     #[test]
     fn help_exits_zero() {

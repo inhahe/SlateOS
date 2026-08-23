@@ -4,6 +4,7 @@
 //!
 //! Single personality: `vault`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -64,7 +65,10 @@ fn run_vault(args: Vec<String>) -> i32 {
             let sub = args.get(1).map(|s| s.as_str()).unwrap_or("");
             match sub {
                 "get" => {
-                    let path = args.get(2).map(|s| s.as_str()).unwrap_or("secret/data/myapp");
+                    let path = args
+                        .get(2)
+                        .map(|s| s.as_str())
+                        .unwrap_or("secret/data/myapp");
                     println!("====== Secret Path ======");
                     println!("{}", path);
                     println!();
@@ -81,7 +85,10 @@ fn run_vault(args: Vec<String>) -> i32 {
                     println!("api_key          sk-abc123def456");
                 }
                 "put" => {
-                    let path = args.get(2).map(|s| s.as_str()).unwrap_or("secret/data/myapp");
+                    let path = args
+                        .get(2)
+                        .map(|s| s.as_str())
+                        .unwrap_or("secret/data/myapp");
                     println!("Success! Data written to: {}", path);
                 }
                 "list" => {
@@ -94,7 +101,10 @@ fn run_vault(args: Vec<String>) -> i32 {
                     let _ = path;
                 }
                 "delete" => {
-                    let path = args.get(2).map(|s| s.as_str()).unwrap_or("secret/data/myapp");
+                    let path = args
+                        .get(2)
+                        .map(|s| s.as_str())
+                        .unwrap_or("secret/data/myapp");
                     println!("Success! Data deleted (if it existed) at: {}", path);
                 }
                 _ => println!("Usage: vault kv <get|put|list|delete|metadata|rollback|undelete>"),
@@ -149,7 +159,7 @@ fn run_vault(args: Vec<String>) -> i32 {
             if cmd.is_empty() {
                 eprintln!("Usage: vault <command>. See --help.");
             } else {
-                eprintln!("Error: unknown command '{}'. See --help.", cmd);
+                eprintln!("Error: unknown command {}. See --help.", quoteaf_os(cmd));
             }
             1
         }
@@ -165,7 +175,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_vault};
+    use super::run_vault;
 
     #[test]
     fn help_exits_zero() {

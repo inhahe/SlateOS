@@ -4,11 +4,16 @@
 //!
 //! Multi-personality: `uat`, `unreal-build`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_uat(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
@@ -34,10 +39,14 @@ fn run_uat(args: &[String]) -> i32 {
     let subcmd = args.first().map(|s| s.as_str()).unwrap_or("help");
     match subcmd {
         "BuildCookRun" => {
-            let project = args.iter().find(|a| a.starts_with("-project="))
+            let project = args
+                .iter()
+                .find(|a| a.starts_with("-project="))
                 .map(|a| a.trim_start_matches("-project="))
                 .unwrap_or("MyProject.uproject");
-            let platform = args.iter().find(|a| a.starts_with("-platform="))
+            let platform = args
+                .iter()
+                .find(|a| a.starts_with("-platform="))
                 .map(|a| a.trim_start_matches("-platform="))
                 .unwrap_or("Linux");
             println!("BuildCookRun for {} on {}", project, platform);
@@ -60,7 +69,7 @@ fn run_uat(args: &[String]) -> i32 {
             println!("  Generated IDE project files.");
         }
         _ => {
-            println!("UAT: Running '{}'...", subcmd);
+            println!("UAT: Running {}...", quoteaf_os(subcmd));
             println!("  Completed.");
         }
     }
@@ -69,7 +78,10 @@ fn run_uat(args: &[String]) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "uat".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "uat".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_uat(&rest);
     process::exit(code);
@@ -77,7 +89,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_uat};
+    use super::{basename, run_uat, strip_ext};
 
     #[test]
     fn basename_strips_path() {

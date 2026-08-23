@@ -4,6 +4,7 @@
 //!
 //! Single personality: `unison`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -36,7 +37,8 @@ fn run_unison(args: Vec<String>) -> i32 {
         return 0;
     }
 
-    let roots: Vec<&str> = args.iter()
+    let roots: Vec<&str> = args
+        .iter()
         .filter(|a| !a.starts_with('-'))
         .map(|s| s.as_str())
         .collect();
@@ -66,7 +68,7 @@ fn run_unison(args: Vec<String>) -> i32 {
             println!("Proceed with propagating updates? [yes] ");
         }
     } else if roots.len() == 1 {
-        println!("Loading profile '{}'...", roots[0]);
+        println!("Loading profile {}...", quoteaf_os(roots[0]));
         println!("Profile loaded. Synchronizing...");
         println!("Nothing to do: replicas are in sync.");
     } else {
@@ -89,7 +91,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_unison};
+    use super::run_unison;
 
     #[test]
     fn help_exits_zero() {

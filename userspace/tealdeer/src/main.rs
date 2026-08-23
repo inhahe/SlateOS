@@ -4,6 +4,7 @@
 //!
 //! Single personality: `tldr`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -59,7 +60,8 @@ fn run_tldr(args: Vec<String>) -> i32 {
         return 0;
     }
 
-    let command: Vec<&str> = args.iter()
+    let command: Vec<&str> = args
+        .iter()
         .filter(|a| !a.starts_with('-'))
         .map(|s| s.as_str())
         .collect();
@@ -105,7 +107,7 @@ fn run_tldr(args: Vec<String>) -> i32 {
         }
         _ => {
             println!("  {}", cmd);
-            println!("  (Summary for '{}' — simulated)", cmd);
+            println!("  (Summary for {} — simulated)", quoteaf_os(&cmd));
             println!();
             println!("  - Common usage:");
             println!("    {} {{arguments}}", cmd);
@@ -126,7 +128,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_tldr};
+    use super::run_tldr;
 
     #[test]
     fn help_exits_zero() {

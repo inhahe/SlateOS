@@ -10,6 +10,7 @@
 
 #![deny(clippy::all)]
 
+use quoting::quoteaf_os;
 use std::env;
 use std::fs;
 use std::io::{self, Write};
@@ -713,7 +714,7 @@ fn update_alternatives_main(args: &[String]) -> i32 {
             0
         }
         other => {
-            eprintln!("update-alternatives: unknown command '{other}'");
+            eprintln!("update-alternatives: unknown command {}", quoteaf_os(other));
             1
         }
     }

@@ -4,6 +4,7 @@
 //!
 //! Single personality: `xdotool`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -54,7 +55,12 @@ fn run_xdotool(args: Vec<String>) -> i32 {
 
     match cmd {
         "search" => {
-            let pattern = args.iter().skip(1).find(|a| !a.starts_with('-')).map(|s| s.as_str()).unwrap_or("*");
+            let pattern = args
+                .iter()
+                .skip(1)
+                .find(|a| !a.starts_with('-'))
+                .map(|s| s.as_str())
+                .unwrap_or("*");
             let _ = pattern;
             println!("12345678");
             println!("23456789");
@@ -85,7 +91,7 @@ fn run_xdotool(args: Vec<String>) -> i32 {
         "sleep" => {}
         "set_window" => {}
         _ => {
-            eprintln!("xdotool: unknown command '{}'. See --help.", cmd);
+            eprintln!("xdotool: unknown command {}. See --help.", quoteaf_os(cmd));
             return 1;
         }
     }
@@ -101,7 +107,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_xdotool};
+    use super::run_xdotool;
 
     #[test]
     fn help_exits_zero() {

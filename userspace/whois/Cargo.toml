@@ -4,6 +4,9 @@ version = "0.1.0"
 edition = "2024"
 description = "SlateOS WHOIS domain/IP lookup"
 [dependencies]
+# It interpolates `query` into "whois: {}: {e}". That value is an argv word,
+# so it is whatever the user typed and not text this program chose.
+quoting = { path = "../quoting" }
 
 [lints]
 workspace = true

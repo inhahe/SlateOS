@@ -4,11 +4,16 @@
 //!
 //! Multi-personality: `zwave-js`, `zwcli`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_zwcli(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
@@ -63,7 +68,7 @@ fn run_zwcli(args: &[String]) -> i32 {
             println!("  Firmware: 3.5");
             println!("  Neighbors: 1, 3, 4");
         }
-        _ => println!("zwcli: '{}' completed", subcmd),
+        _ => println!("zwcli: {} completed", quoteaf_os(subcmd)),
     }
     0
 }
@@ -80,7 +85,11 @@ fn run_zwave_js(args: &[String]) -> i32 {
         println!("Z-Wave JS 12.4.0 (Slate OS)");
         return 0;
     }
-    let port = args.windows(2).find(|w| w[0] == "--port").map(|w| w[1].as_str()).unwrap_or("/dev/ttyACM0");
+    let port = args
+        .windows(2)
+        .find(|w| w[0] == "--port")
+        .map(|w| w[1].as_str())
+        .unwrap_or("/dev/ttyACM0");
     println!("Z-Wave JS 12.4.0 starting...");
     println!("  Port: {}", port);
     println!("  Controller: Aeotec Z-Stick 7");
@@ -92,7 +101,10 @@ fn run_zwave_js(args: &[String]) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "zwcli".to_string());
+    let prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "zwcli".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = match prog.as_str() {
         "zwave-js" => run_zwave_js(&rest),
@@ -103,7 +115,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_zwcli};
+    use super::{basename, run_zwcli, strip_ext};
 
     #[test]
     fn basename_strips_path() {

@@ -1,6 +1,7 @@
 #![deny(clippy::all)]
 //! wso2-cli — Slate OS WSO2 open-source integration platform personality CLI.
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -18,7 +19,9 @@ fn print_help(prog: &str) {
     println!();
     println!("SUBCOMMANDS:");
     println!("    about           WSO2's Sri Lanka origin and Apache roots");
-    println!("    products        API Manager, Identity Server, Micro Integrator, Choreo, Ballerina");
+    println!(
+        "    products        API Manager, Identity Server, Micro Integrator, Choreo, Ballerina"
+    );
     println!("    apim            WSO2 API Manager deep dive");
     println!("    ballerina       The Ballerina integration language");
     println!("    choreo          WSO2 Choreo iPaaS");
@@ -268,22 +271,53 @@ fn print_critique() {
 }
 
 fn run_wso2(args: &[String], prog: &str) -> i32 {
-    if args.is_empty() { print_help(prog); return 0; }
+    if args.is_empty() {
+        print_help(prog);
+        return 0;
+    }
     match args[0].as_str() {
-        "help" | "--help" | "-h" => { print_help(prog); 0 }
-        "version" | "--version" | "-V" => {
-            println!("{prog} 0.1.0 (Slate OS personality CLI)"); 0
+        "help" | "--help" | "-h" => {
+            print_help(prog);
+            0
         }
-        "about" => { print_about(); 0 }
-        "products" => { print_products(); 0 }
-        "apim" => { print_apim(); 0 }
-        "ballerina" => { print_ballerina(); 0 }
-        "choreo" => { print_choreo(); 0 }
-        "customers" => { print_customers(); 0 }
-        "differentiator" | "diff" => { print_differentiator(); 0 }
-        "critique" => { print_critique(); 0 }
+        "version" | "--version" | "-V" => {
+            println!("{prog} 0.1.0 (Slate OS personality CLI)");
+            0
+        }
+        "about" => {
+            print_about();
+            0
+        }
+        "products" => {
+            print_products();
+            0
+        }
+        "apim" => {
+            print_apim();
+            0
+        }
+        "ballerina" => {
+            print_ballerina();
+            0
+        }
+        "choreo" => {
+            print_choreo();
+            0
+        }
+        "customers" => {
+            print_customers();
+            0
+        }
+        "differentiator" | "diff" => {
+            print_differentiator();
+            0
+        }
+        "critique" => {
+            print_critique();
+            0
+        }
         other => {
-            eprintln!("{prog}: unknown subcommand '{other}'");
+            eprintln!("{prog}: unknown subcommand {}", quoteaf_os(other));
             eprintln!("Try '{prog} help' for usage.");
             2
         }
@@ -292,7 +326,8 @@ fn run_wso2(args: &[String], prog: &str) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first()
+    let prog = args
+        .first()
         .map(|s| strip_ext(basename(s)).to_string())
         .unwrap_or_else(|| "wso2".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
@@ -302,8 +337,20 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[test] fn t_basename() { assert_eq!(basename("/usr/bin/wso2"), "wso2"); }
-    #[test] fn t_strip() { assert_eq!(strip_ext("wso2.exe"), "wso2"); }
-    #[test] fn t_help() { assert_eq!(run_wso2(&[], "wso2"), 0); }
-    #[test] fn t_unknown() { assert_eq!(run_wso2(&["xx".to_string()], "wso2"), 2); }
+    #[test]
+    fn t_basename() {
+        assert_eq!(basename("/usr/bin/wso2"), "wso2");
+    }
+    #[test]
+    fn t_strip() {
+        assert_eq!(strip_ext("wso2.exe"), "wso2");
+    }
+    #[test]
+    fn t_help() {
+        assert_eq!(run_wso2(&[], "wso2"), 0);
+    }
+    #[test]
+    fn t_unknown() {
+        assert_eq!(run_wso2(&["xx".to_string()], "wso2"), 2);
+    }
 }

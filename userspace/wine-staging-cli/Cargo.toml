@@ -2,3 +2,9 @@
 name = "wine-staging-cli"
 version = "0.1.0"
 edition = "2024"
+
+[dependencies]
+# It interpolates `prog_name` into "wine-staging: launching {} with staging
+# patches...". That value is an argv word, so it is whatever the user typed
+# and not text this program chose.
+quoting = { path = "../quoting" }

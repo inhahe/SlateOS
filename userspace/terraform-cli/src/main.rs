@@ -4,11 +4,15 @@
 //!
 //! Single personality: `terraform`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
 fn run_terraform(args: Vec<String>) -> i32 {
-    if args.iter().any(|a| a == "--help" || a == "-h" || a == "-help") {
+    if args
+        .iter()
+        .any(|a| a == "--help" || a == "-h" || a == "-help")
+    {
         println!("Usage: terraform [global options] <subcommand> [args]");
         println!();
         println!("Main commands:");
@@ -63,7 +67,9 @@ fn run_terraform(args: Vec<String>) -> i32 {
         }
         "plan" => {
             let auto_approve = args.iter().any(|a| a == "-auto-approve");
-            println!("Terraform used the selected providers to generate the following execution plan.");
+            println!(
+                "Terraform used the selected providers to generate the following execution plan."
+            );
             println!();
             println!("  # aws_instance.web will be created");
             println!("  + resource \"aws_instance\" \"web\" {{");
@@ -135,7 +141,10 @@ fn run_terraform(args: Vec<String>) -> i32 {
                     println!("aws_security_group.web");
                 }
                 "show" => {
-                    let resource = args.get(2).map(|s| s.as_str()).unwrap_or("aws_instance.web");
+                    let resource = args
+                        .get(2)
+                        .map(|s| s.as_str())
+                        .unwrap_or("aws_instance.web");
                     println!("# {}:", resource);
                     println!("resource \"aws_instance\" \"web\" {{");
                     println!("    ami           = \"ami-0c55b159cbfafe1f0\"");
@@ -173,7 +182,7 @@ fn run_terraform(args: Vec<String>) -> i32 {
             if cmd.is_empty() {
                 eprintln!("Usage: terraform <subcommand>. See --help.");
             } else {
-                eprintln!("Error: unknown command '{}'. See --help.", cmd);
+                eprintln!("Error: unknown command {}. See --help.", quoteaf_os(cmd));
             }
             1
         }
@@ -189,7 +198,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_terraform};
+    use super::run_terraform;
 
     #[test]
     fn help_exits_zero() {

@@ -4,6 +4,7 @@
 //!
 //! Single personality: `vegeta`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -45,7 +46,9 @@ fn run_vegeta(args: Vec<String>) -> i32 {
             println!("Attacking... (simulated)");
             println!("Requests      [total, rate, throughput]  300, 50.00, 49.95");
             println!("Duration      [total, attack, wait]     6.001s, 5.98s, 20.99ms");
-            println!("Latencies     [min, mean, 50, 90, 95, 99, max]  1.2ms, 21ms, 18ms, 35ms, 42ms, 89ms, 120ms");
+            println!(
+                "Latencies     [min, mean, 50, 90, 95, 99, max]  1.2ms, 21ms, 18ms, 35ms, 42ms, 89ms, 120ms"
+            );
             println!("Bytes In      [total, mean]             450000, 1500.00");
             println!("Bytes Out     [total, mean]             0, 0.00");
             println!("Success       [ratio]                   100.00%");
@@ -61,7 +64,9 @@ fn run_vegeta(args: Vec<String>) -> i32 {
             }
             println!("Requests      [total, rate, throughput]  300, 50.00, 49.95");
             println!("Duration      [total, attack, wait]     6.001s, 5.98s, 20.99ms");
-            println!("Latencies     [min, mean, 50, 90, 95, 99, max]  1.2ms, 21ms, 18ms, 35ms, 42ms, 89ms, 120ms");
+            println!(
+                "Latencies     [min, mean, 50, 90, 95, 99, max]  1.2ms, 21ms, 18ms, 35ms, 42ms, 89ms, 120ms"
+            );
             println!("Success       [ratio]                   100.00%");
             println!("Status Codes  [code:count]              200:300");
         }
@@ -77,7 +82,7 @@ fn run_vegeta(args: Vec<String>) -> i32 {
             println!("1716368400040000000,200,25000000,1500,0,0.0.0.0:0->127.0.0.1:8080");
         }
         _ => {
-            eprintln!("Unknown command '{}'. Use --help.", cmd);
+            eprintln!("Unknown command {}. Use --help.", quoteaf_os(cmd));
             return 1;
         }
     }
@@ -93,7 +98,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_vegeta};
+    use super::run_vegeta;
 
     #[test]
     fn help_exits_zero() {

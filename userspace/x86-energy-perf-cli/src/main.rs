@@ -4,11 +4,16 @@
 //!
 //! Single personality: `x86_energy_perf_policy`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_x86_energy_perf(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -28,9 +33,15 @@ fn run_x86_energy_perf(args: &[String], _prog: &str) -> i32 {
         println!("  --version      Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("x86_energy_perf_policy v2024.01 (Slate OS)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("x86_energy_perf_policy v2024.01 (Slate OS)");
+        return 0;
+    }
     if let Some(policy) = args.iter().find(|a| !a.starts_with('-')) {
-        println!("x86_energy_perf_policy: setting policy to '{}'", policy);
+        println!(
+            "x86_energy_perf_policy: setting policy to {}",
+            quoteaf_os(policy)
+        );
         println!("  Applied to all CPUs");
     } else {
         println!("cpu0: EPB 6 (balance-performance)");
@@ -43,7 +54,10 @@ fn run_x86_energy_perf(args: &[String], _prog: &str) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "x86_energy_perf_policy".to_string());
+    let prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "x86_energy_perf_policy".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_x86_energy_perf(&rest, &prog);
     process::exit(code);
@@ -51,12 +65,15 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_x86_energy_perf};
+    use super::{basename, run_x86_energy_perf, strip_ext};
 
     #[test]
     fn basename_strips_path() {
         assert_eq!(basename("/usr/bin/x86-energy-perf"), "x86-energy-perf");
-        assert_eq!(basename(r"C:\bin\x86-energy-perf.exe"), "x86-energy-perf.exe");
+        assert_eq!(
+            basename(r"C:\bin\x86-energy-perf.exe"),
+            "x86-energy-perf.exe"
+        );
         assert_eq!(basename("plain"), "plain");
     }
 
@@ -68,8 +85,14 @@ mod tests {
 
     #[test]
     fn help_exits_zero() {
-        assert_eq!(run_x86_energy_perf(&["--help".to_string()], "x86-energy-perf"), 0);
-        assert_eq!(run_x86_energy_perf(&["-h".to_string()], "x86-energy-perf"), 0);
+        assert_eq!(
+            run_x86_energy_perf(&["--help".to_string()], "x86-energy-perf"),
+            0
+        );
+        assert_eq!(
+            run_x86_energy_perf(&["-h".to_string()], "x86-energy-perf"),
+            0
+        );
         let _ = run_x86_energy_perf(&["--version".to_string()], "x86-energy-perf");
     }
 

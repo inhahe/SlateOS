@@ -7,6 +7,7 @@
 
 #![allow(unexpected_cfgs)]
 
+use quoting::quoteaf_os;
 use std::env;
 use std::io::{self, Write};
 use std::process;
@@ -21,10 +22,7 @@ enum Mode {
 }
 
 fn detect_mode(argv0: &str) -> Mode {
-    let name = argv0
-        .rsplit(['/', '\\'])
-        .next()
-        .unwrap_or(argv0);
+    let name = argv0.rsplit(['/', '\\']).next().unwrap_or(argv0);
     let name = name.strip_suffix(".exe").unwrap_or(name);
     let lower = name.to_ascii_lowercase();
     match lower.as_str() {
@@ -86,9 +84,9 @@ impl TermCaps {
             "ri" | "sr" => Some("\x1BM".to_string()),
 
             // Screen manipulation
-            "ed" | "cd" => Some("\x1B[J".to_string()),    // Clear to end of screen
-            "el" | "ce" => Some("\x1B[K".to_string()),    // Clear to end of line
-            "el1" | "cb" => Some("\x1B[1K".to_string()),  // Clear to beginning of line
+            "ed" | "cd" => Some("\x1B[J".to_string()), // Clear to end of screen
+            "el" | "ce" => Some("\x1B[K".to_string()), // Clear to end of line
+            "el1" | "cb" => Some("\x1B[1K".to_string()), // Clear to beginning of line
             "smcup" | "ti" => Some("\x1B[?1049h".to_string()), // Enter alternate screen
             "rmcup" | "te" => Some("\x1B[?1049l".to_string()), // Exit alternate screen
 
@@ -134,7 +132,7 @@ impl TermCaps {
             "rc" => Some("\x1B8".to_string()),
 
             // Terminal reset
-            "rs1" | "r1" => Some("\x1Bc".to_string()),  // Full reset
+            "rs1" | "r1" => Some("\x1Bc".to_string()), // Full reset
             "rs2" | "r2" => Some("\x1B[!p\x1B[?3;4l\x1B[4l\x1B>".to_string()),
 
             _ => None,
@@ -182,17 +180,17 @@ impl TermCaps {
         }
 
         match cap {
-            "am" => true,     // Auto-margin (line wrap)
-            "bce" => true,    // Background color erase
-            "bw" => false,    // Backspace wraps
-            "eo" => true,     // Can erase overstrikes
-            "hs" => false,    // Has status line
-            "hz" => false,    // Hazeltine bug
-            "km" => true,     // Has meta key
-            "mir" => true,    // Move in insert mode
-            "msgr" => true,   // Move in standout mode
-            "xenl" => true,   // Newline glitch
-            "xon" => true,    // Uses XON/XOFF
+            "am" => true,                              // Auto-margin (line wrap)
+            "bce" => true,                             // Background color erase
+            "bw" => false,                             // Backspace wraps
+            "eo" => true,                              // Can erase overstrikes
+            "hs" => false,                             // Has status line
+            "hz" => false,                             // Hazeltine bug
+            "km" => true,                              // Has meta key
+            "mir" => true,                             // Move in insert mode
+            "msgr" => true,                            // Move in standout mode
+            "xenl" => true,                            // Newline glitch
+            "xon" => true,                             // Uses XON/XOFF
             "ccc" => self.term_type.contains("xterm"), // Can change colors
             _ => false,
         }
@@ -204,9 +202,10 @@ impl TermCaps {
 fn get_terminal_cols() -> i32 {
     // Try COLUMNS env var first
     if let Ok(val) = env::var("COLUMNS")
-        && let Ok(n) = val.parse::<i32>() {
-            return n;
-        }
+        && let Ok(n) = val.parse::<i32>()
+    {
+        return n;
+    }
 
     // Try ioctl on Slate OS
     #[cfg(target_os = "slateos")]
@@ -222,9 +221,10 @@ fn get_terminal_cols() -> i32 {
 fn get_terminal_lines() -> i32 {
     // Try LINES env var first
     if let Ok(val) = env::var("LINES")
-        && let Ok(n) = val.parse::<i32>() {
-            return n;
-        }
+        && let Ok(n) = val.parse::<i32>()
+    {
+        return n;
+    }
 
     #[cfg(target_os = "slateos")]
     {
@@ -483,10 +483,15 @@ fn run_tput() -> Result<(), String> {
                 // Read capabilities from stdin
                 let stdin = io::stdin();
                 let mut line = String::new();
-                while stdin.read_line(&mut line).map_err(|e| format!("read: {e}"))? > 0 {
+                while stdin
+                    .read_line(&mut line)
+                    .map_err(|e| format!("read: {e}"))?
+                    > 0
+                {
                     let trimmed = line.trim().to_string();
                     if !trimmed.is_empty() {
-                        let parts: Vec<String> = trimmed.split_whitespace().map(String::from).collect();
+                        let parts: Vec<String> =
+                            trimmed.split_whitespace().map(String::from).collect();
                         if !parts.is_empty() {
                             let name = parts[0].clone();
                             let params = parts[1..].to_vec();
@@ -531,7 +536,9 @@ fn run_tput() -> Result<(), String> {
             "init" => {
                 // Initialize terminal
                 if let Some(seq) = caps.get_string("smkx") {
-                    stdout.write_all(seq.as_bytes()).map_err(|e| format!("write: {e}"))?;
+                    stdout
+                        .write_all(seq.as_bytes())
+                        .map_err(|e| format!("write: {e}"))?;
                 }
             }
             "reset" => {
@@ -587,7 +594,7 @@ fn run_tput() -> Result<(), String> {
                 }
 
                 // Unknown capability
-                eprintln!("tput: unknown terminfo capability '{cap_name}'");
+                eprintln!("tput: unknown terminfo capability {}", quoteaf_os(cap_name));
                 exit_code = 1;
             }
         }
@@ -645,10 +652,7 @@ fn main() {
     };
 
     if let Err(e) = result {
-        let name = argv0
-            .rsplit(['/', '\\'])
-            .next()
-            .unwrap_or(&argv0);
+        let name = argv0.rsplit(['/', '\\']).next().unwrap_or(&argv0);
         eprintln!("{name}: {e}");
         process::exit(1);
     }

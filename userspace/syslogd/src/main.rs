@@ -25,6 +25,7 @@
 //! syslogd clean [days]        Remove logs older than N days (default 30)
 //! ```
 
+use quoting::quoteaf_os;
 use std::env;
 use std::fs;
 use std::io::{self, Write};
@@ -44,7 +45,9 @@ const MAX_LOG_SIZE: u64 = 5 * 1024 * 1024;
 /// Maximum number of rotated log files to keep.
 const MAX_ROTATED_FILES: u32 = 10;
 /// Severity levels (RFC 5424 compatible).
-const LEVELS: &[&str] = &["emerg", "alert", "crit", "error", "warn", "notice", "info", "debug"];
+const LEVELS: &[&str] = &[
+    "emerg", "alert", "crit", "error", "warn", "notice", "info", "debug",
+];
 
 // ============================================================================
 // Time helpers
@@ -149,7 +152,10 @@ impl LogEntry {
     fn to_json(&self) -> String {
         let mut parts = Vec::new();
         parts.push(format!("\"ts\":{}", self.timestamp));
-        parts.push(format!("\"time\":\"{}\"", json_escape(&format_timestamp(self.timestamp))));
+        parts.push(format!(
+            "\"time\":\"{}\"",
+            json_escape(&format_timestamp(self.timestamp))
+        ));
         parts.push(format!("\"level\":\"{}\"", json_escape(&self.level)));
         parts.push(format!("\"service\":\"{}\"", json_escape(&self.service)));
         parts.push(format!("\"msg\":\"{}\"", json_escape(&self.message)));
@@ -183,7 +189,9 @@ impl LogEntry {
 
         while pos < bytes.len() {
             // Skip whitespace and commas.
-            while pos < bytes.len() && (bytes[pos] == b' ' || bytes[pos] == b',' || bytes[pos] == b'\t') {
+            while pos < bytes.len()
+                && (bytes[pos] == b' ' || bytes[pos] == b',' || bytes[pos] == b'\t')
+            {
                 pos += 1;
             }
             if pos >= bytes.len() {
@@ -235,7 +243,10 @@ impl LogEntry {
     fn display_short(&self) -> String {
         let time_str = format_timestamp(self.timestamp);
         let level_padded = format!("{:<6}", self.level);
-        format!("{} {} [{}] {}", time_str, level_padded, self.service, self.message)
+        format!(
+            "{} {} [{}] {}",
+            time_str, level_padded, self.service, self.message
+        )
     }
 }
 
@@ -251,12 +262,30 @@ fn parse_json_string(s: &str, pos: &mut usize) -> Option<String> {
     while *pos < bytes.len() {
         if bytes[*pos] == b'\\' && *pos + 1 < bytes.len() {
             match bytes[*pos + 1] {
-                b'"' => { result.push('"'); *pos += 2; }
-                b'\\' => { result.push('\\'); *pos += 2; }
-                b'n' => { result.push('\n'); *pos += 2; }
-                b'r' => { result.push('\r'); *pos += 2; }
-                b't' => { result.push('\t'); *pos += 2; }
-                _ => { result.push(bytes[*pos] as char); *pos += 1; }
+                b'"' => {
+                    result.push('"');
+                    *pos += 2;
+                }
+                b'\\' => {
+                    result.push('\\');
+                    *pos += 2;
+                }
+                b'n' => {
+                    result.push('\n');
+                    *pos += 2;
+                }
+                b'r' => {
+                    result.push('\r');
+                    *pos += 2;
+                }
+                b't' => {
+                    result.push('\t');
+                    *pos += 2;
+                }
+                _ => {
+                    result.push(bytes[*pos] as char);
+                    *pos += 1;
+                }
             }
         } else if bytes[*pos] == b'"' {
             *pos += 1; // skip closing "
@@ -387,10 +416,11 @@ fn cmd_daemon() {
     loop {
         // Periodic maintenance: check file size, rotate if needed.
         if let Ok(meta) = fs::metadata(log_file_path())
-            && meta.len() > MAX_LOG_SIZE {
-                println!("syslogd: rotating logs (size {})", meta.len());
-                rotate_logs();
-            }
+            && meta.len() > MAX_LOG_SIZE
+        {
+            println!("syslogd: rotating logs (size {})", meta.len());
+            rotate_logs();
+        }
 
         std::thread::sleep(std::time::Duration::from_secs(60));
     }
@@ -400,7 +430,7 @@ fn cmd_log(level: &str, service: &str, message: &str, extra: &[(String, String)]
     // Validate level.
     let level_lower = level.to_lowercase();
     if !LEVELS.contains(&level_lower.as_str()) {
-        eprintln!("warning: unknown level '{}', using 'info'", level);
+        eprintln!("warning: unknown level {}, using 'info'", quoteaf_os(level));
     }
 
     let entry = LogEntry {
@@ -442,13 +472,14 @@ fn cmd_query(filters: &QueryFilters) {
     let mut matches = 0usize;
     for line in content.lines() {
         if let Some(entry) = LogEntry::from_json(line)
-            && filters.matches(&entry) {
-                println!("{}", entry.display_short());
-                matches += 1;
-                if matches >= filters.limit {
-                    break;
-                }
+            && filters.matches(&entry)
+        {
+            println!("{}", entry.display_short());
+            matches += 1;
+            if matches >= filters.limit {
+                break;
             }
+        }
     }
 
     if matches == 0 {
@@ -459,11 +490,12 @@ fn cmd_query(filters: &QueryFilters) {
 }
 
 fn cmd_follow() {
-    println!("syslogd: following {} (Ctrl+C to stop)", log_file_path().display());
+    println!(
+        "syslogd: following {} (Ctrl+C to stop)",
+        log_file_path().display()
+    );
 
-    let mut last_size = fs::metadata(log_file_path())
-        .map(|m| m.len())
-        .unwrap_or(0);
+    let mut last_size = fs::metadata(log_file_path()).map(|m| m.len()).unwrap_or(0);
 
     loop {
         std::thread::sleep(std::time::Duration::from_millis(500));
@@ -512,7 +544,10 @@ fn cmd_stats() {
             rotated_size += meta.len();
         }
     }
-    println!("  Rotated:     {rotated} files ({} total)", format_size(rotated_size));
+    println!(
+        "  Rotated:     {rotated} files ({} total)",
+        format_size(rotated_size)
+    );
     println!("  Max size:    {} per file", format_size(MAX_LOG_SIZE));
     println!("  Max files:   {MAX_ROTATED_FILES}");
 
@@ -613,14 +648,16 @@ impl QueryFilters {
 
     fn matches(&self, entry: &LogEntry) -> bool {
         if let Some(ref level) = self.level
-            && entry.level != *level {
-                return false;
-            }
+            && entry.level != *level
+        {
+            return false;
+        }
 
         if let Some(ref svc) = self.service
-            && !entry.service.contains(svc.as_str()) {
-                return false;
-            }
+            && !entry.service.contains(svc.as_str())
+        {
+            return false;
+        }
 
         if let Some(ref substr) = self.message_contains {
             let msg_lower = entry.message.to_lowercase();
@@ -631,14 +668,16 @@ impl QueryFilters {
         }
 
         if let Some(since) = self.since
-            && entry.timestamp < since {
-                return false;
-            }
+            && entry.timestamp < since
+        {
+            return false;
+        }
 
         if let Some(until) = self.until
-            && entry.timestamp > until {
-                return false;
-            }
+            && entry.timestamp > until
+        {
+            return false;
+        }
 
         true
     }
@@ -649,35 +688,32 @@ impl QueryFilters {
 
         while i < args.len() {
             match args[i].as_str() {
-                "--level" | "-l"
-                    if i + 1 < args.len() => {
-                        filters.level = Some(args[i + 1].to_lowercase());
-                        i += 2;
+                "--level" | "-l" if i + 1 < args.len() => {
+                    filters.level = Some(args[i + 1].to_lowercase());
+                    i += 2;
+                }
+                "--service" | "-s" if i + 1 < args.len() => {
+                    filters.service = Some(args[i + 1].clone());
+                    i += 2;
+                }
+                "--msg" | "-m" if i + 1 < args.len() => {
+                    filters.message_contains = Some(args[i + 1].clone());
+                    i += 2;
+                }
+                "--since" if i + 1 < args.len() => {
+                    // Parse as hours ago.
+                    if let Ok(hours) = args[i + 1].parse::<u64>() {
+                        filters.since = Some(now_secs().saturating_sub(hours * 3600));
                     }
-                "--service" | "-s"
-                    if i + 1 < args.len() => {
-                        filters.service = Some(args[i + 1].clone());
-                        i += 2;
-                    }
-                "--msg" | "-m"
-                    if i + 1 < args.len() => {
-                        filters.message_contains = Some(args[i + 1].clone());
-                        i += 2;
-                    }
-                "--since"
-                    if i + 1 < args.len() => {
-                        // Parse as hours ago.
-                        if let Ok(hours) = args[i + 1].parse::<u64>() {
-                            filters.since = Some(now_secs().saturating_sub(hours * 3600));
-                        }
-                        i += 2;
-                    }
-                "--limit" | "-n"
-                    if i + 1 < args.len() => {
-                        filters.limit = args[i + 1].parse().unwrap_or(100);
-                        i += 2;
-                    }
-                _ => { i += 1; }
+                    i += 2;
+                }
+                "--limit" | "-n" if i + 1 < args.len() => {
+                    filters.limit = args[i + 1].parse().unwrap_or(100);
+                    i += 2;
+                }
+                _ => {
+                    i += 1;
+                }
             }
         }
 

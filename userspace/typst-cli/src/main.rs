@@ -4,6 +4,7 @@
 //!
 //! Multi-personality: `typst`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -41,7 +42,10 @@ fn run_typst(args: &[String]) -> i32 {
             println!("  Watching for changes...");
         }
         "init" => {
-            let tmpl = args.get(1).map(|s| s.as_str()).unwrap_or("@preview/basic:0.1.0");
+            let tmpl = args
+                .get(1)
+                .map(|s| s.as_str())
+                .unwrap_or("@preview/basic:0.1.0");
             println!("Initializing from template: {}", tmpl);
             println!("  Created: main.typ");
             println!("  Project initialized.");
@@ -62,7 +66,7 @@ fn run_typst(args: &[String]) -> i32 {
             println!("Querying {} for {}", file, selector);
             println!("  [{{\"value\": \"Introduction\"}}, {{\"value\": \"Methods\"}}]");
         }
-        _ => println!("typst: '{}' completed", subcmd),
+        _ => println!("typst: {} completed", quoteaf_os(subcmd)),
     }
     0
 }
@@ -76,7 +80,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_typst};
+    use super::run_typst;
 
     #[test]
     fn help_exits_zero() {

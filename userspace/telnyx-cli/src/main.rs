@@ -1,6 +1,7 @@
 #![deny(clippy::all)]
 //! telnyx-cli — Slate OS personality CLI for Telnyx, the owned-network CPaaS.
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -94,8 +95,7 @@ fn cmd_network() {
     println!("  Oceania. Each PoP runs edge compute capable of serving voice,");
     println!("  SMS, and now inference workloads (see below).");
     println!();
-    println!("THE NETWORK MATTERS FOR AI")
-    ;
+    println!("THE NETWORK MATTERS FOR AI");
     println!("  The same private backbone that carries voice + SMS now");
     println!("  carries tokens between Telnyx Inference customers and");
     println!("  GPU clusters at PoP-adjacent data centers, giving low,");
@@ -111,8 +111,7 @@ fn cmd_apis() {
     println!("  shortcode, 10DLC for US A2P. Auto-segmentation, Unicode,");
     println!("  delivery receipts. Messaging Profile groups numbers + rules.");
     println!();
-    println!("VOICE")
-    ;
+    println!("VOICE");
     println!("  Call Control API (REST + webhooks) or Call Commands inside");
     println!("  a TeXML (Telnyx XML, TwiML-compatible) flow. Inbound, outbound,");
     println!("  SIP trunking, IVR, recording, transcription. Programmable");
@@ -123,8 +122,7 @@ fn cmd_apis() {
     println!("  (auto-disconnected call where the caller ID is the OTP).");
     println!("  Per-success pricing similar to Vonage Verify.");
     println!();
-    println!("WIRELESS")
-    ;
+    println!("WIRELESS");
     println!("  IoT eSIM provisioning + cellular connectivity. Buy a Telnyx");
     println!("  SIM (eSIM or physical), bind it to an account, get usage");
     println!("  via API. Useful for IoT projects (fleet, sensors, kiosks).");
@@ -134,8 +132,7 @@ fn cmd_apis() {
     println!("  especially in US healthcare. T.38 + G.711 fallback,");
     println!("  inbound + outbound, PDF in/out via API.");
     println!();
-    println!("MISSION CONTROL")
-    ;
+    println!("MISSION CONTROL");
     println!("  The unified portal where all of the above are configured,");
     println!("  numbers purchased, A2P registrations submitted, traffic");
     println!("  monitored, and reports run.");
@@ -223,8 +220,7 @@ fn cmd_pricing() {
     println!("WIRELESS (SIM/eSIM)");
     println!("  $2/mo per active SIM + per-MB data tiered by region.");
     println!();
-    println!("INFERENCE")
-    ;
+    println!("INFERENCE");
     println!("  Per million input tokens + per million output tokens.");
     println!("  Pricing competitive with OpenAI API for equivalent models;");
     println!("  major savings for high-volume voice-AI workloads vs.");
@@ -258,17 +254,47 @@ fn run_telnyx(args: &[String], prog: &str) -> i32 {
         return 0;
     };
     match sub.as_str() {
-        "help" | "-h" | "--help" => { print_help(prog); 0 }
-        "version" | "-V" | "--version" => { print_version(); 0 }
-        "about" => { cmd_about(); 0 }
-        "network" => { cmd_network(); 0 }
-        "apis" => { cmd_apis(); 0 }
-        "inference" => { cmd_inference(); 0 }
-        "storage" => { cmd_storage(); 0 }
-        "pricing" => { cmd_pricing(); 0 }
-        "customers" => { cmd_customers(); 0 }
+        "help" | "-h" | "--help" => {
+            print_help(prog);
+            0
+        }
+        "version" | "-V" | "--version" => {
+            print_version();
+            0
+        }
+        "about" => {
+            cmd_about();
+            0
+        }
+        "network" => {
+            cmd_network();
+            0
+        }
+        "apis" => {
+            cmd_apis();
+            0
+        }
+        "inference" => {
+            cmd_inference();
+            0
+        }
+        "storage" => {
+            cmd_storage();
+            0
+        }
+        "pricing" => {
+            cmd_pricing();
+            0
+        }
+        "customers" => {
+            cmd_customers();
+            0
+        }
         other => {
-            eprintln!("{prog}: unknown subcommand '{other}'. Try '{prog} help'.");
+            eprintln!(
+                "{prog}: unknown subcommand {}. Try '{prog} help'.",
+                quoteaf_os(other)
+            );
             2
         }
     }

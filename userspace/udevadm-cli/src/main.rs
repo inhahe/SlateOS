@@ -4,6 +4,7 @@
 //!
 //! Multi-personality: `udevadm`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -42,16 +43,21 @@ fn run_udevadm(args: &[String]) -> i32 {
 
     match subcmd {
         "info" => {
-            let device = rest.iter()
+            let device = rest
+                .iter()
                 .find(|a| a.starts_with('/') || a.starts_with("--name") || a.starts_with("--path"))
                 .map(|s| s.as_str())
                 .unwrap_or("/dev/sda");
-            println!("P: /devices/pci0000:00/0000:00:17.0/ata1/host0/target0:0:0/0:0:0:0/block/sda");
+            println!(
+                "P: /devices/pci0000:00/0000:00:17.0/ata1/host0/target0:0:0/0:0:0:0/block/sda"
+            );
             println!("N: sda");
             println!("L: 0");
             println!("S: disk/by-id/ata-Samsung_SSD_870_EVO_1TB_S1234567890");
             println!("S: disk/by-path/pci-0000:00:17.0-ata-1");
-            println!("E: DEVPATH=/devices/pci0000:00/0000:00:17.0/ata1/host0/target0:0:0/0:0:0:0/block/sda");
+            println!(
+                "E: DEVPATH=/devices/pci0000:00/0000:00:17.0/ata1/host0/target0:0:0/0:0:0:0/block/sda"
+            );
             println!("E: DEVNAME={}", device);
             println!("E: DEVTYPE=disk");
             println!("E: MAJOR=8");
@@ -64,7 +70,8 @@ fn run_udevadm(args: &[String]) -> i32 {
             println!("E: ID_BUS=ata");
         }
         "trigger" => {
-            let action = rest.iter()
+            let action = rest
+                .iter()
                 .find(|a| a.starts_with("--action="))
                 .and_then(|a| a.strip_prefix("--action="))
                 .unwrap_or("change");
@@ -89,13 +96,24 @@ fn run_udevadm(args: &[String]) -> i32 {
             println!("UDEV - the event which udev sends out after rule processing");
             println!("KERNEL - the kernel uevent");
             println!();
-            println!("KERNEL[1234.567890] add      /devices/pci0000:00/0000:00:14.0/usb1/1-2 (usb)");
-            println!("UDEV  [1234.568901] add      /devices/pci0000:00/0000:00:14.0/usb1/1-2 (usb)");
-            println!("KERNEL[1234.569012] add      /devices/pci0000:00/0000:00:14.0/usb1/1-2/1-2:1.0 (usb)");
-            println!("UDEV  [1234.570123] add      /devices/pci0000:00/0000:00:14.0/usb1/1-2/1-2:1.0 (usb)");
+            println!(
+                "KERNEL[1234.567890] add      /devices/pci0000:00/0000:00:14.0/usb1/1-2 (usb)"
+            );
+            println!(
+                "UDEV  [1234.568901] add      /devices/pci0000:00/0000:00:14.0/usb1/1-2 (usb)"
+            );
+            println!(
+                "KERNEL[1234.569012] add      /devices/pci0000:00/0000:00:14.0/usb1/1-2/1-2:1.0 (usb)"
+            );
+            println!(
+                "UDEV  [1234.570123] add      /devices/pci0000:00/0000:00:14.0/usb1/1-2/1-2:1.0 (usb)"
+            );
         }
         "test" => {
-            let path = rest.first().map(|s| s.as_str()).unwrap_or("/sys/class/block/sda");
+            let path = rest
+                .first()
+                .map(|s| s.as_str())
+                .unwrap_or("/sys/class/block/sda");
             println!("calling: test");
             println!("version 255");
             println!("This program is for debugging only, it does not run any program");
@@ -115,7 +133,7 @@ fn run_udevadm(args: &[String]) -> i32 {
             }
         }
         _ => {
-            eprintln!("udevadm: unknown command '{}'", subcmd);
+            eprintln!("udevadm: unknown command {}", quoteaf_os(subcmd));
             return 1;
         }
     }
@@ -124,7 +142,8 @@ fn run_udevadm(args: &[String]) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first()
+    let _prog = args
+        .first()
         .map(|s| strip_ext(basename(s)).to_string())
         .unwrap_or_else(|| "udevadm".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
@@ -135,7 +154,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_udevadm};
+    use super::{basename, run_udevadm, strip_ext};
 
     #[test]
     fn basename_strips_path() {

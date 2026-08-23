@@ -2,3 +2,10 @@
 name = "xh"
 version = "0.1.0"
 edition = "2024"
+
+[dependencies]
+# It interpolates `method` and `display_url` into "curl -X {} {}". Both come
+# from the positional argv words, and the line is a shell command a reader
+# may paste, so an unquoted `'` in either ends the quoting and starts a
+# second command.
+quoting = { path = "../quoting" }

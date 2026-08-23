@@ -87,6 +87,9 @@ version = "0.1.0"
 [[package]]
 name = "ada-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "adagios-cli"
@@ -115,6 +118,9 @@ version = "0.1.0"
 [[package]]
 name = "adyen-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "aerc-cli"
@@ -139,6 +145,9 @@ version = "0.1.0"
 [[package]]
 name = "age"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "age-cli"
@@ -147,6 +156,9 @@ version = "0.1.0"
 [[package]]
 name = "airbyte-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "aircrack-cli"
@@ -174,6 +186,9 @@ version = "0.1.0"
 [[package]]
 name = "alacritty-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "alarmclock"
@@ -246,6 +261,9 @@ version = "0.1.0"
 [[package]]
 name = "ambassador-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "amber"
@@ -254,6 +272,9 @@ version = "0.1.0"
 [[package]]
 name = "amp-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "amplitude-cli"
@@ -304,6 +325,9 @@ dependencies = [
 [[package]]
 name = "ansible-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "ansys-cli"
@@ -340,6 +364,9 @@ version = "0.1.0"
 [[package]]
 name = "apigee-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "apisix-cli"
@@ -348,6 +375,9 @@ version = "0.1.0"
 [[package]]
 name = "apk-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "apparmor"
@@ -388,6 +418,9 @@ version = "0.1.0"
 [[package]]
 name = "ar"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "arc-cli"
@@ -419,10 +452,16 @@ version = "0.1.0"
 [[package]]
 name = "argocd"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "argocd-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "argyll-cli"
@@ -451,10 +490,16 @@ version = "0.1.0"
 [[package]]
 name = "arrow-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "artillery-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "asana-cli"
@@ -488,6 +533,9 @@ version = "0.1.0"
 [[package]]
 name = "ast-grep"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "asteroids"
@@ -554,6 +602,9 @@ dependencies = [
 [[package]]
 name = "audacity-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "audit"
@@ -569,6 +620,9 @@ version = "0.1.0"
 [[package]]
 name = "augeas-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "auphonic-cli"
@@ -624,6 +678,9 @@ dependencies = [
 [[package]]
 name = "avahi-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "avast-cli"
@@ -640,10 +697,16 @@ version = "0.1.0"
 [[package]]
 name = "avrdude-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "avro-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "aweber-cli"
@@ -656,6 +719,9 @@ version = "0.1.0"
 [[package]]
 name = "aws-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "axel-cli"
@@ -668,6 +734,9 @@ version = "0.1.0"
 [[package]]
 name = "axway-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "az-cli"
@@ -679,6 +748,9 @@ dependencies = [
 [[package]]
 name = "azion-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "azote-cli"
@@ -687,6 +759,9 @@ version = "0.1.0"
 [[package]]
 name = "azure-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "azuredatastudio-cli"
@@ -724,10 +799,16 @@ dependencies = [
 [[package]]
 name = "backuppc-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "bacula-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "badblocks-cli"
@@ -810,6 +891,9 @@ dependencies = [
 [[package]]
 name = "bazel-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "bc-cli"
@@ -826,10 +910,16 @@ version = "0.1.0"
 [[package]]
 name = "bcftools-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "bedtools-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "beekeeper-cli"
@@ -838,6 +928,9 @@ version = "0.1.0"
 [[package]]
 name = "beets"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "bemenu-cli"
@@ -853,6 +946,9 @@ dependencies = [
 [[package]]
 name = "benthos-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "bentoml-cli"
@@ -919,6 +1015,9 @@ version = "0.1.0"
 [[package]]
 name = "bind-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "binwalk-cli"
@@ -965,6 +1064,9 @@ version = "0.1.0"
 [[package]]
 name = "blender-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "blkid"
@@ -1008,6 +1110,9 @@ dependencies = [
 [[package]]
 name = "bluez-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "bluez-tools-cli"
@@ -1035,10 +1140,16 @@ dependencies = [
 [[package]]
 name = "bore"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "borg"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "borg-cli"
@@ -1050,10 +1161,16 @@ dependencies = [
 [[package]]
 name = "borgbackup"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "borgbackup-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "borgmatic"
@@ -1081,6 +1198,9 @@ dependencies = [
 [[package]]
 name = "bowtie-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "bowtie2-cli"
@@ -1093,6 +1213,9 @@ version = "0.1.0"
 [[package]]
 name = "braintree-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "brave-cli"
@@ -1148,6 +1271,9 @@ version = "0.1.0"
 [[package]]
 name = "broot-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "brownie-cli"
@@ -1156,6 +1282,9 @@ version = "0.1.0"
 [[package]]
 name = "bruno-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "bson-cli"
@@ -1200,6 +1329,9 @@ version = "0.1.0"
 [[package]]
 name = "buck-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "budibase-cli"
@@ -1212,10 +1344,16 @@ version = "0.1.0"
 [[package]]
 name = "buildah"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "buildah-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "buildbox-cli"
@@ -1253,6 +1391,9 @@ dependencies = [
 [[package]]
 name = "bunny-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "bup-cli"
@@ -1291,14 +1432,23 @@ version = "0.1.0"
 [[package]]
 name = "cadabra-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "caddy"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "caddy-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "cage-cli"
@@ -1329,6 +1479,9 @@ dependencies = [
 [[package]]
 name = "calibre-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "calico-cli"
@@ -1368,6 +1521,9 @@ version = "0.1.0"
 [[package]]
 name = "capnproto-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "capsh"
@@ -1391,6 +1547,9 @@ version = "0.1.0"
 [[package]]
 name = "cargo-audit"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "cargo-bloat"
@@ -1403,10 +1562,16 @@ version = "0.1.0"
 [[package]]
 name = "cargo-make-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "cargo-nextest"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "cargo-watch"
@@ -1423,6 +1588,9 @@ version = "0.1.0"
 [[package]]
 name = "cassandra"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "cassandra-cli"
@@ -1458,10 +1626,16 @@ version = "0.1.0"
 [[package]]
 name = "cdist-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "cdk8s-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "cdktf-cli"
@@ -1473,10 +1647,16 @@ dependencies = [
 [[package]]
 name = "cdn77-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "celery-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "celestia-cli"
@@ -1524,6 +1704,9 @@ version = "0.1.0"
 [[package]]
 name = "certbot-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "cfengine-cli"
@@ -1532,6 +1715,9 @@ version = "0.1.0"
 [[package]]
 name = "cfssl"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "cfssl-cli"
@@ -1540,10 +1726,16 @@ version = "0.1.0"
 [[package]]
 name = "cgroup"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "chafa-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "chage"
@@ -1556,6 +1748,9 @@ version = "0.1.0"
 [[package]]
 name = "chargebee-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "charles-cli"
@@ -1579,6 +1774,9 @@ version = "0.1.0"
 [[package]]
 name = "cheat-sh"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "checkers"
@@ -1594,6 +1792,9 @@ version = "0.1.0"
 [[package]]
 name = "checkout-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "checkov-cli"
@@ -1657,6 +1858,9 @@ version = "0.1.0"
 [[package]]
 name = "chrony"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "chroot"
@@ -1733,6 +1937,9 @@ version = "0.1.0"
 [[package]]
 name = "clickup-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "clipboard"
@@ -1760,6 +1967,9 @@ version = "0.1.0"
 [[package]]
 name = "cloud-init-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "cloudbeaver-cli"
@@ -1780,6 +1990,9 @@ version = "0.1.0"
 [[package]]
 name = "cmake-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "cml-cli"
@@ -1798,6 +2011,9 @@ dependencies = [
 [[package]]
 name = "cmus"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "cmus-cli"
@@ -1828,6 +2044,9 @@ dependencies = [
 [[package]]
 name = "cockroachdb"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "cockroachdb-cli"
@@ -1852,6 +2071,9 @@ version = "0.1.0"
 [[package]]
 name = "coinbase-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "collectd-cli"
@@ -1986,10 +2208,16 @@ version = "0.1.0"
 [[package]]
 name = "consul"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "consul-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "contacts"
@@ -2001,10 +2229,16 @@ dependencies = [
 [[package]]
 name = "containerd-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "contentful-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "context-cli"
@@ -2033,6 +2267,9 @@ version = "0.1.0"
 [[package]]
 name = "coredumpctl"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "coreutils"
@@ -2070,10 +2307,16 @@ version = "0.1.0"
 [[package]]
 name = "cosign"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "cosign-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "couchbase-cli"
@@ -2082,6 +2325,9 @@ version = "0.1.0"
 [[package]]
 name = "cpdf-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "cpio"
@@ -2093,18 +2339,30 @@ dependencies = [
 [[package]]
 name = "cpupower"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "cpupower-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "cqlsh-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "crane-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "crda-cli"
@@ -2138,6 +2396,9 @@ version = "0.1.0"
 [[package]]
 name = "cri-tools"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "cribl-cli"
@@ -2146,6 +2407,9 @@ version = "0.1.0"
 [[package]]
 name = "crio-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "cron"
@@ -2154,6 +2418,9 @@ version = "0.1.0"
 [[package]]
 name = "cron-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "crond"
@@ -2300,6 +2567,9 @@ version = "0.1.0"
 [[package]]
 name = "cypress-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "d-cli"
@@ -2399,6 +2669,9 @@ version = "0.1.0"
 [[package]]
 name = "dbmate"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "dbmate-cli"
@@ -2490,10 +2763,16 @@ version = "0.1.0"
 [[package]]
 name = "deno"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "deno-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "descope-cli"
@@ -2574,6 +2853,9 @@ dependencies = [
 [[package]]
 name = "diesel-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "diff"
@@ -2609,18 +2891,30 @@ version = "0.1.0"
 [[package]]
 name = "directus-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "direnv-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "dirvish-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "discord-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "diskanalyzer"
@@ -2649,6 +2943,9 @@ dependencies = [
 [[package]]
 name = "diskonaut-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "diskutil"
@@ -2718,10 +3015,16 @@ version = "0.1.0"
 [[package]]
 name = "dnsimple-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "dnsmadeeasy-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "dnsmasq"
@@ -2737,6 +3040,7 @@ version = "0.1.0"
 dependencies = [
  "authlib",
  "posix",
+ "quoting",
  "scratchdir",
 ]
 
@@ -2750,6 +3054,9 @@ dependencies = [
 [[package]]
 name = "docker-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "docspell-cli"
@@ -2758,6 +3065,9 @@ version = "0.1.0"
 [[package]]
 name = "doctl"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "doctl-cli"
@@ -2766,6 +3076,9 @@ version = "0.1.0"
 [[package]]
 name = "docusaurus-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "dog"
@@ -2809,6 +3122,9 @@ dependencies = [
 [[package]]
 name = "dovecot"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "dovecot-cli"
@@ -2827,10 +3143,16 @@ dependencies = [
 [[package]]
 name = "doxygen-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "dracut-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "draftsight-cli"
@@ -2894,6 +3216,9 @@ version = "0.1.0"
 [[package]]
 name = "dunst-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "duo-cli"
@@ -2914,6 +3239,9 @@ version = "0.1.0"
 [[package]]
 name = "duplicity-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "duply-cli"
@@ -2952,6 +3280,9 @@ version = "0.1.0"
 [[package]]
 name = "dynadot-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "dynamics365-cli"
@@ -2979,14 +3310,23 @@ version = "0.1.0"
 [[package]]
 name = "earlyoom"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "earthly-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "easydns-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "easyeda-cli"
@@ -3014,6 +3354,9 @@ version = "0.1.0"
 [[package]]
 name = "edgio-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "editor"
@@ -3068,6 +3411,9 @@ version = "0.1.0"
 [[package]]
 name = "elasticsearch"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "elasticsearch-cli"
@@ -3096,6 +3442,9 @@ version = "0.1.0"
 [[package]]
 name = "elixir-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "elmer-cli"
@@ -3136,6 +3485,9 @@ version = "0.1.0"
 [[package]]
 name = "enchant-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "energia-cli"
@@ -3163,10 +3515,16 @@ version = "0.1.0"
 [[package]]
 name = "envoy"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "envoy-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "epicgames-cli"
@@ -3194,6 +3552,9 @@ version = "0.1.0"
 [[package]]
 name = "espeak-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "espeak-ng-cli"
@@ -3202,6 +3563,9 @@ version = "0.1.0"
 [[package]]
 name = "esphome-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "etcd"
@@ -3251,6 +3615,9 @@ version = "0.1.0"
 [[package]]
 name = "evolution-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "eww-cli"
@@ -3314,6 +3681,9 @@ version = "0.1.0"
 [[package]]
 name = "fabric-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "fail2ban"
@@ -3330,6 +3700,9 @@ version = "0.1.0"
 [[package]]
 name = "fastapi-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "fastfetch-cli"
@@ -3396,10 +3769,16 @@ dependencies = [
 [[package]]
 name = "ffmpeg-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "ffplay-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "fftw-cli"
@@ -3574,6 +3953,9 @@ dependencies = [
 [[package]]
 name = "flavours-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "flax-cli"
@@ -3626,10 +4008,16 @@ version = "0.1.0"
 [[package]]
 name = "flux"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "flux-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "fly-cli"
@@ -3638,6 +4026,9 @@ version = "0.1.0"
 [[package]]
 name = "flyctl"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "flyctl-cli"
@@ -3646,6 +4037,9 @@ version = "0.1.0"
 [[package]]
 name = "flyway-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "fmt"
@@ -3706,6 +4100,9 @@ version = "0.1.0"
 [[package]]
 name = "fonttools"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "fonttools-cli"
@@ -3718,6 +4115,9 @@ version = "0.1.0"
 [[package]]
 name = "foreman-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "forge-cli"
@@ -3945,6 +4345,9 @@ version = "0.1.0"
 [[package]]
 name = "gatk-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "gatling-cli"
@@ -3968,10 +4371,16 @@ dependencies = [
 [[package]]
 name = "gcloud-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "gcore-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "gcov-cli"
@@ -3980,6 +4389,9 @@ version = "0.1.0"
 [[package]]
 name = "gdal-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "gdb"
@@ -3996,6 +4408,9 @@ version = "0.1.0"
 [[package]]
 name = "gdu-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "geary-cli"
@@ -4008,6 +4423,9 @@ version = "0.1.0"
 [[package]]
 name = "geneanet-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "genius-cli"
@@ -4052,6 +4470,9 @@ version = "0.1.0"
 [[package]]
 name = "getopt"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "getresponse-cli"
@@ -4075,6 +4496,9 @@ version = "0.1.0"
 [[package]]
 name = "gh-actions-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "ghdl-cli"
@@ -4090,10 +4514,16 @@ version = "0.1.0"
 [[package]]
 name = "ghost-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "ghostscript"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "ghostscript-cli"
@@ -4102,6 +4532,9 @@ version = "0.1.0"
 [[package]]
 name = "ghostty-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "gifski"
@@ -4110,6 +4543,9 @@ version = "0.1.0"
 [[package]]
 name = "gimp-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "git"
@@ -4125,6 +4561,9 @@ version = "0.1.0"
 [[package]]
 name = "git-branchless"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "git-cliff"
@@ -4144,6 +4583,9 @@ dependencies = [
 [[package]]
 name = "gitea"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "gitea-cli"
@@ -4156,6 +4598,9 @@ version = "0.1.0"
 [[package]]
 name = "gitlab-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "gitlab-runner-cli"
@@ -4164,6 +4609,9 @@ version = "0.1.0"
 [[package]]
 name = "gitleaks-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "gitui"
@@ -4244,6 +4692,9 @@ version = "0.1.0"
 [[package]]
 name = "gnuplot-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "gnuradio-cli"
@@ -4268,6 +4719,9 @@ version = "0.1.0"
 [[package]]
 name = "godaddy-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "godoc-cli"
@@ -4276,6 +4730,9 @@ version = "0.1.0"
 [[package]]
 name = "godot-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "gog-cli"
@@ -4318,6 +4775,9 @@ version = "0.1.0"
 [[package]]
 name = "gparted-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "gpg"
@@ -4337,6 +4797,9 @@ version = "0.1.0"
 [[package]]
 name = "gprof-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "gqrx-cli"
@@ -4357,6 +4820,9 @@ version = "0.1.0"
 [[package]]
 name = "grafana"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "grafana-cli"
@@ -4369,6 +4835,9 @@ version = "0.1.0"
 [[package]]
 name = "graphql-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "graphviz"
@@ -4381,10 +4850,16 @@ version = "0.1.0"
 [[package]]
 name = "grass-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "gravitee-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "graylog-cli"
@@ -4397,6 +4872,9 @@ version = "0.1.0"
 [[package]]
 name = "grbl-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "grex"
@@ -4437,6 +4915,9 @@ version = "0.1.0"
 [[package]]
 name = "grpc-tools"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "grpcurl-cli"
@@ -4445,6 +4926,9 @@ version = "0.1.0"
 [[package]]
 name = "grub-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "grub2"
@@ -4550,6 +5034,9 @@ version = "0.1.0"
 [[package]]
 name = "haproxy-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "hardhat-cli"
@@ -4639,14 +5126,23 @@ version = "0.1.0"
 [[package]]
 name = "helix-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "helm"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "helm-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "helpcrunch-cli"
@@ -4667,6 +5163,9 @@ version = "0.1.0"
 [[package]]
 name = "heroku-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "hetzner-cli"
@@ -4773,6 +5272,9 @@ version = "0.1.0"
 [[package]]
 name = "hover-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "howdoi"
@@ -4821,10 +5323,16 @@ version = "0.1.0"
 [[package]]
 name = "huggingface-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "hugo-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "humio-cli"
@@ -4842,6 +5350,7 @@ version = "0.1.0"
 name = "hwclock"
 version = "0.1.0"
 dependencies = [
+ "quoting",
  "tzrules",
 ]
 
@@ -4879,6 +5388,9 @@ dependencies = [
 [[package]]
 name = "hyprpaper-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "i2c-tools-cli"
@@ -4926,6 +5438,9 @@ version = "0.1.0"
 [[package]]
 name = "ifconfig"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "iftop-cli"
@@ -4996,6 +5511,9 @@ dependencies = [
 [[package]]
 name = "influxdb"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "influxdb-cli"
@@ -5112,6 +5630,9 @@ version = "0.1.0"
 [[package]]
 name = "ip"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "ipcalc"
@@ -5136,6 +5657,9 @@ version = "0.1.0"
 [[package]]
 name = "ipsec-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "iptables"
@@ -5198,6 +5722,9 @@ version = "0.1.0"
 [[package]]
 name = "iverilog-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "iw"
@@ -5217,6 +5744,9 @@ version = "0.1.0"
 [[package]]
 name = "jack-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "jack2"
@@ -5229,6 +5759,9 @@ version = "0.1.0"
 [[package]]
 name = "jaeger-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "jami-cli"
@@ -5245,6 +5778,9 @@ version = "0.1.0"
 [[package]]
 name = "jekyll-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "jellyfin"
@@ -5301,6 +5837,9 @@ dependencies = [
 [[package]]
 name = "joplin-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "journalbeat-cli"
@@ -5321,6 +5860,9 @@ version = "0.1.0"
 [[package]]
 name = "jsdelivr-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "jsonnet-cli"
@@ -5344,6 +5886,9 @@ version = "0.1.0"
 [[package]]
 name = "julia-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "jumpcloud-cli"
@@ -5352,6 +5897,9 @@ version = "0.1.0"
 [[package]]
 name = "jupyter-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "just"
@@ -5372,10 +5920,16 @@ version = "0.1.0"
 [[package]]
 name = "k6"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "k6-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "k9s-cli"
@@ -5384,6 +5938,9 @@ version = "0.1.0"
 [[package]]
 name = "kafka"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "kafka-cli"
@@ -5410,6 +5967,9 @@ version = "0.1.0"
 [[package]]
 name = "kakoune-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "kalgebra-cli"
@@ -5445,6 +6005,9 @@ version = "0.1.0"
 [[package]]
 name = "kcat-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "kcharselect-cli"
@@ -5473,6 +6036,9 @@ version = "0.1.0"
 [[package]]
 name = "keras-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "kerberos-cli"
@@ -5512,6 +6078,9 @@ dependencies = [
 [[package]]
 name = "keycdn-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "keychain-cli"
@@ -5520,6 +6089,9 @@ version = "0.1.0"
 [[package]]
 name = "keycloak"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "keycloak-cli"
@@ -5548,6 +6120,9 @@ version = "0.1.0"
 [[package]]
 name = "kicad-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "kickoff-cli"
@@ -5579,6 +6154,9 @@ version = "0.1.0"
 [[package]]
 name = "kitty-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "klarna-cli"
@@ -5638,6 +6216,9 @@ version = "0.1.0"
 [[package]]
 name = "kopia-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "kops-cli"
@@ -5650,6 +6231,9 @@ version = "0.1.0"
 [[package]]
 name = "krakend-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "krdc-cli"
@@ -5678,6 +6262,9 @@ version = "0.1.0"
 [[package]]
 name = "kubectl-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "kubectx-cli"
@@ -5712,6 +6299,9 @@ dependencies = [
 [[package]]
 name = "kvantum-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "kvmtool-cli"
@@ -5768,6 +6358,9 @@ version = "0.1.0"
 [[package]]
 name = "lapce-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "laptop-mode-cli"
@@ -5835,6 +6428,9 @@ version = "0.1.0"
 [[package]]
 name = "ldd"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "ldd-cli"
@@ -5851,6 +6447,9 @@ version = "0.1.0"
 [[package]]
 name = "lemonsqueezy-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "lemur-cli"
@@ -5871,6 +6470,9 @@ version = "0.1.0"
 [[package]]
 name = "lf-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "libchewing-cli"
@@ -6012,6 +6614,9 @@ version = "0.1.0"
 [[package]]
 name = "lite-xl-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "litecli"
@@ -6052,10 +6657,16 @@ version = "0.1.0"
 [[package]]
 name = "locale"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "locale-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "localectl"
@@ -6182,14 +6793,23 @@ version = "0.1.0"
 [[package]]
 name = "loki"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "loki-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "look"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "looker-cli"
@@ -6198,6 +6818,9 @@ version = "0.1.0"
 [[package]]
 name = "loops-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "losetup"
@@ -6210,6 +6833,9 @@ dependencies = [
 [[package]]
 name = "lottie-player"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "lout-cli"
@@ -6277,6 +6903,9 @@ version = "0.1.0"
 [[package]]
 name = "lsusb"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "lsusb-cli"
@@ -6319,6 +6948,9 @@ version = "0.1.0"
 [[package]]
 name = "luigi-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "lumion-cli"
@@ -6335,6 +6967,9 @@ version = "0.1.0"
 [[package]]
 name = "lvm-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "lvm2-cli"
@@ -6347,6 +6982,9 @@ version = "0.1.0"
 [[package]]
 name = "lxc-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "lxpolkit-cli"
@@ -6359,6 +6997,9 @@ version = "0.1.0"
 [[package]]
 name = "lynis"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "lytics-cli"
@@ -6444,18 +7085,30 @@ version = "0.1.0"
 [[package]]
 name = "mailerlite-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "mailersend-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "mailgun-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "mailjet-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "mailspring-cli"
@@ -6464,6 +7117,9 @@ version = "0.1.0"
 [[package]]
 name = "maim-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "make"
@@ -6488,6 +7144,9 @@ version = "0.1.0"
 [[package]]
 name = "mame-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "man"
@@ -6506,6 +7165,9 @@ dependencies = [
 [[package]]
 name = "mangohud-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "manticore-cli"
@@ -6610,6 +7272,9 @@ version = "0.1.0"
 [[package]]
 name = "matplotlib-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "matrix-cli"
@@ -6717,6 +7382,9 @@ version = "0.1.0"
 [[package]]
 name = "mdbook"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "mdbook-cli"
@@ -6747,6 +7415,9 @@ version = "0.1.0"
 [[package]]
 name = "mednafen-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "megahit-cli"
@@ -6791,6 +7462,9 @@ dependencies = [
 [[package]]
 name = "memphis-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "mercury-cli"
@@ -6811,6 +7485,9 @@ version = "0.1.0"
 [[package]]
 name = "meshio-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "meshlab-cli"
@@ -6826,6 +7503,9 @@ dependencies = [
 [[package]]
 name = "meson-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "messagebird-cli"
@@ -6942,10 +7622,16 @@ version = "0.1.0"
 [[package]]
 name = "minio"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "minio-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "miniserve"
@@ -7005,6 +7691,9 @@ version = "0.1.0"
 [[package]]
 name = "mkdocs-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "mkfs"
@@ -7099,6 +7788,9 @@ version = "0.1.0"
 [[package]]
 name = "mollie-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "monctl"
@@ -7107,6 +7799,9 @@ version = "0.1.0"
 [[package]]
 name = "monday-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "monero-cli"
@@ -7211,10 +7906,16 @@ version = "0.1.0"
 [[package]]
 name = "mqtt-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "msgpack-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "msmtp-cli"
@@ -7301,6 +8002,9 @@ version = "0.1.0"
 [[package]]
 name = "mysql"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "mysql-cli"
@@ -7324,10 +8028,16 @@ version = "0.1.0"
 [[package]]
 name = "nagios-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "namecheap-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "nannou-cli"
@@ -7344,14 +8054,23 @@ version = "0.1.0"
 [[package]]
 name = "nats"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "nats-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "navi"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "navi-cli"
@@ -7390,6 +8109,9 @@ dependencies = [
 [[package]]
 name = "neo4j"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "neo4j-cli"
@@ -7442,6 +8164,9 @@ version = "0.1.0"
 [[package]]
 name = "netlify-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "netmaker-cli"
@@ -7501,6 +8226,9 @@ dependencies = [
 [[package]]
 name = "newman-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "newrelic-cli"
@@ -7512,6 +8240,9 @@ dependencies = [
 [[package]]
 name = "nextcloud"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "nextcloud-cli"
@@ -7520,6 +8251,9 @@ version = "0.1.0"
 [[package]]
 name = "nextjs-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "nextpnr-cli"
@@ -7631,6 +8365,9 @@ version = "0.1.0"
 [[package]]
 name = "nnn-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "node"
@@ -7650,6 +8387,9 @@ version = "0.1.0"
 [[package]]
 name = "nomad-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "nonogram"
@@ -7665,6 +8405,9 @@ version = "0.1.0"
 [[package]]
 name = "notary"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "notepadpp-cli"
@@ -7713,6 +8456,9 @@ version = "0.1.0"
 [[package]]
 name = "ns1-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "nsd-cli"
@@ -7725,6 +8471,9 @@ version = "0.1.0"
 [[package]]
 name = "nsenter-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "nslookup"
@@ -7733,6 +8482,9 @@ version = "0.1.0"
 [[package]]
 name = "nsq-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "ntopng-cli"
@@ -7741,6 +8493,9 @@ version = "0.1.0"
 [[package]]
 name = "ntp-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "ntpd"
@@ -8029,6 +8784,9 @@ version = "0.1.0"
 [[package]]
 name = "openocd-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "openresty-cli"
@@ -8064,6 +8822,9 @@ dependencies = [
 [[package]]
 name = "openssl-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "openssl-tool"
@@ -8155,6 +8916,9 @@ version = "0.1.0"
 [[package]]
 name = "osmium-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "osquery-cli"
@@ -8213,6 +8977,9 @@ version = "0.1.0"
 [[package]]
 name = "ox-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "oxipng"
@@ -8221,6 +8988,9 @@ version = "0.1.0"
 [[package]]
 name = "oxipng-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "oysterhr-cli"
@@ -8233,10 +9003,16 @@ version = "0.1.0"
 [[package]]
 name = "packer"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "packer-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "pacman"
@@ -8249,6 +9025,9 @@ dependencies = [
 [[package]]
 name = "paddle-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "pads-cli"
@@ -8257,6 +9036,9 @@ version = "0.1.0"
 [[package]]
 name = "pagerduty-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "paint"
@@ -8282,6 +9064,9 @@ version = "0.1.0"
 [[package]]
 name = "pandas-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "pandoc"
@@ -8302,6 +9087,9 @@ version = "0.1.0"
 [[package]]
 name = "pants-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "papaya-cli"
@@ -8389,6 +9177,9 @@ dependencies = [
 [[package]]
 name = "pastel"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "pastel-cli"
@@ -8417,6 +9208,9 @@ version = "0.1.0"
 [[package]]
 name = "payload-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "paylocity-cli"
@@ -8429,6 +9223,9 @@ version = "0.1.0"
 [[package]]
 name = "paypal-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "pbrt-cli"
@@ -8457,6 +9254,9 @@ version = "0.1.0"
 [[package]]
 name = "pdfcpu-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "pdfgrep-cli"
@@ -8488,6 +9288,9 @@ dependencies = [
 [[package]]
 name = "pdftotext-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "pdfunite-cli"
@@ -8530,6 +9333,9 @@ version = "0.1.0"
 [[package]]
 name = "perf"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "perf-cli"
@@ -8604,6 +9410,9 @@ version = "0.1.0"
 [[package]]
 name = "phpstan-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "phpunit-cli"
@@ -8612,6 +9421,9 @@ version = "0.1.0"
 [[package]]
 name = "picard-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "picocom-cli"
@@ -8624,6 +9436,9 @@ version = "0.1.0"
 [[package]]
 name = "pidgin-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "pihole-cli"
@@ -8686,6 +9501,9 @@ dependencies = [
 [[package]]
 name = "pipx-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "pixelmator-cli"
@@ -8707,10 +9525,16 @@ dependencies = [
 [[package]]
 name = "pkg-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "pkgconf"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "pktgen-cli"
@@ -8741,10 +9565,16 @@ version = "0.1.0"
 [[package]]
 name = "playwright-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "plivo-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "plymouth"
@@ -8781,6 +9611,9 @@ dependencies = [
 [[package]]
 name = "podman-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "poetry-cli"
@@ -8806,6 +9639,9 @@ dependencies = [
 [[package]]
 name = "polkit-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "polkit-dumb-agent-cli"
@@ -8822,6 +9658,9 @@ version = "0.1.0"
 [[package]]
 name = "polybar-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "pomfort-cli"
@@ -8848,14 +9687,23 @@ version = "0.1.0"
 [[package]]
 name = "poppler-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "porkbun-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "portage-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "posix"
@@ -8871,10 +9719,16 @@ version = "0.1.0"
 [[package]]
 name = "postfix"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "postfix-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "postgis-cli"
@@ -8898,10 +9752,16 @@ version = "0.1.0"
 [[package]]
 name = "postman-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "postmark-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "potrace-cli"
@@ -8921,6 +9781,9 @@ version = "0.1.0"
 [[package]]
 name = "power-profiles-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "power-profiles-daemon-cli"
@@ -8937,6 +9800,9 @@ version = "0.1.0"
 [[package]]
 name = "powerctl"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "powerdns-cli"
@@ -8945,6 +9811,9 @@ version = "0.1.0"
 [[package]]
 name = "powertop"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "powertop-cli"
@@ -8964,6 +9833,9 @@ dependencies = [
 [[package]]
 name = "premake-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "premiere-cli"
@@ -8980,10 +9852,16 @@ version = "0.1.0"
 [[package]]
 name = "prisma-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "prismic-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "prlimit"
@@ -9024,6 +9902,9 @@ version = "0.1.0"
 [[package]]
 name = "prometheus"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "prometheus-cli"
@@ -9055,6 +9936,9 @@ version = "0.1.0"
 [[package]]
 name = "protobuf-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "proton-cli"
@@ -9086,6 +9970,9 @@ version = "0.1.0"
 [[package]]
 name = "proxychains-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "prtg-cli"
@@ -9106,6 +9993,9 @@ version = "0.1.0"
 [[package]]
 name = "psalm-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "psensor-cli"
@@ -9121,6 +10011,9 @@ dependencies = [
 [[package]]
 name = "pstree"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "pubsub-cli"
@@ -9136,6 +10029,9 @@ dependencies = [
 [[package]]
 name = "pulsar-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "pulseaudio"
@@ -9151,6 +10047,9 @@ version = "0.1.0"
 [[package]]
 name = "pulumi"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "pulumi-cli"
@@ -9192,6 +10091,9 @@ version = "0.1.0"
 [[package]]
 name = "pydoc-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "pyephem-cli"
@@ -9246,6 +10148,9 @@ dependencies = [
 [[package]]
 name = "qgis-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "qlik-cli"
@@ -9254,6 +10159,9 @@ version = "0.1.0"
 [[package]]
 name = "qpdf-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "qpdfview-cli"
@@ -9341,6 +10249,9 @@ dependencies = [
 [[package]]
 name = "rabbitmq-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "rabbitmqctl-cli"
@@ -9367,6 +10278,9 @@ dependencies = [
 [[package]]
 name = "rails-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "railway-cli"
@@ -9375,6 +10289,9 @@ version = "0.1.0"
 [[package]]
 name = "rake-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "ramp-cli"
@@ -9428,6 +10345,9 @@ version = "0.1.0"
 [[package]]
 name = "razorpay-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "rbw-cli"
@@ -9436,6 +10356,9 @@ version = "0.1.0"
 [[package]]
 name = "rclone"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "rclone-backup-cli"
@@ -9465,10 +10388,16 @@ version = "0.1.0"
 [[package]]
 name = "readelf"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "readelf-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "reamaze-cli"
@@ -9489,6 +10418,9 @@ version = "0.1.0"
 [[package]]
 name = "recurly-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "redcine-cli"
@@ -9501,14 +10433,23 @@ version = "0.1.0"
 [[package]]
 name = "redis-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "redis-cli-tool"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "redoc-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "redpanda-cli"
@@ -9591,6 +10532,9 @@ version = "0.1.0"
 [[package]]
 name = "resend-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "resolvectl"
@@ -9607,10 +10551,16 @@ version = "0.1.0"
 [[package]]
 name = "restic"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "restic-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "restic-rest-server"
@@ -9654,6 +10604,9 @@ version = "0.1.0"
 [[package]]
 name = "rex-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "rfkill"
@@ -9665,6 +10618,9 @@ dependencies = [
 [[package]]
 name = "rfkill-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "rhino-cli"
@@ -9677,6 +10633,9 @@ version = "0.1.0"
 [[package]]
 name = "rio-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "ripgrep"
@@ -9767,6 +10726,9 @@ version = "0.1.0"
 [[package]]
 name = "route53-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "rpcs3-cli"
@@ -9786,6 +10748,9 @@ dependencies = [
 [[package]]
 name = "rsmq-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "rspec-cli"
@@ -9808,6 +10773,9 @@ dependencies = [
 [[package]]
 name = "rsyslog-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "rtl-sdr-cli"
@@ -9831,6 +10799,9 @@ dependencies = [
 [[package]]
 name = "rudder-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "rudderstack-cli"
@@ -9839,10 +10810,16 @@ version = "0.1.0"
 [[package]]
 name = "ruff-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "runc-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "rundeck-cli"
@@ -9862,6 +10839,9 @@ version = "0.1.0"
 [[package]]
 name = "rustdoc-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "rustic-cli"
@@ -9889,6 +10869,9 @@ version = "0.1.0"
 [[package]]
 name = "sage-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "sagemath-cli"
@@ -9937,6 +10920,9 @@ version = "0.1.0"
 [[package]]
 name = "samtools-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "sane-cli"
@@ -9949,6 +10935,9 @@ version = "0.1.0"
 [[package]]
 name = "sanity-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "sap-cli"
@@ -9979,6 +10968,9 @@ dependencies = [
 [[package]]
 name = "sccache"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "schemacrawler-cli"
@@ -10003,10 +10995,16 @@ version = "0.1.0"
 [[package]]
 name = "scipy-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "scons-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "scp"
@@ -10023,6 +11021,9 @@ version = "0.1.0"
 [[package]]
 name = "screen"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "screen-cli"
@@ -10088,6 +11089,9 @@ version = "0.1.0"
 [[package]]
 name = "sea-orm-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "seafile-cli"
@@ -10108,6 +11112,9 @@ version = "0.1.0"
 [[package]]
 name = "seccomp-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "secret-tool-cli"
@@ -10139,6 +11146,9 @@ dependencies = [
 [[package]]
 name = "selenium-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "selinux"
@@ -10162,10 +11172,16 @@ version = "0.1.0"
 [[package]]
 name = "semgrep-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "sendgrid-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "sendmail-cli"
@@ -10251,6 +11267,9 @@ version = "0.1.0"
 [[package]]
 name = "ses-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "setBfree-cli"
@@ -10465,14 +11484,23 @@ version = "0.1.0"
 [[package]]
 name = "sklearn-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "skopeo"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "skopeo-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "skype-cli"
@@ -10551,6 +11579,9 @@ version = "0.1.0"
 [[package]]
 name = "snap-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "snapper"
@@ -10566,6 +11597,9 @@ version = "0.1.0"
 [[package]]
 name = "snapper2"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "snapraid-cli"
@@ -10643,6 +11677,9 @@ version = "0.1.0"
 [[package]]
 name = "solana-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "solidworks-cli"
@@ -10695,6 +11732,9 @@ version = "0.1.0"
 [[package]]
 name = "sops-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "sort"
@@ -10750,6 +11790,9 @@ version = "0.1.0"
 [[package]]
 name = "sparkpost-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "sparrow-cli"
@@ -10766,6 +11809,9 @@ version = "0.1.0"
 [[package]]
 name = "spectral-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "speech-dispatcher-cli"
@@ -10774,6 +11820,9 @@ version = "0.1.0"
 [[package]]
 name = "speechd-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "speedtest"
@@ -10825,6 +11874,9 @@ dependencies = [
 [[package]]
 name = "spotify-tui-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "spreadsheet"
@@ -10856,6 +11908,9 @@ version = "0.1.0"
 [[package]]
 name = "sqlitebrowser-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "sqlmap-cli"
@@ -10872,6 +11927,9 @@ version = "0.1.0"
 [[package]]
 name = "sqlx-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "sqs-cli"
@@ -10884,6 +11942,9 @@ version = "0.1.0"
 [[package]]
 name = "square-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "squarespace-cli"
@@ -10900,6 +11961,9 @@ version = "0.1.0"
 [[package]]
 name = "squid-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "ss"
@@ -10938,6 +12002,9 @@ version = "0.1.0"
 [[package]]
 name = "stackpath-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "stackstorm-cli"
@@ -10973,6 +12040,9 @@ dependencies = [
 [[package]]
 name = "starship-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "startupmanager"
@@ -10996,6 +12066,9 @@ version = "0.1.0"
 [[package]]
 name = "statsd-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "statsig-cli"
@@ -11020,10 +12093,16 @@ version = "0.1.0"
 [[package]]
 name = "step-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "step3d-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "stickynotes"
@@ -11050,6 +12129,9 @@ dependencies = [
 [[package]]
 name = "storyblok-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "strace"
@@ -11065,6 +12147,9 @@ version = "0.1.0"
 [[package]]
 name = "strapi-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "stratis-cli"
@@ -11093,6 +12178,9 @@ version = "0.1.0"
 [[package]]
 name = "stripe-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "strongswan-cli"
@@ -11109,14 +12197,23 @@ version = "0.1.0"
 [[package]]
 name = "stunnel-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "stylix-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "stytch-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "su"
@@ -11190,6 +12287,9 @@ version = "0.1.0"
 [[package]]
 name = "surrealdb-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "svelte-cli"
@@ -11209,6 +12309,9 @@ version = "0.1.0"
 [[package]]
 name = "svgo-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "svox-cli"
@@ -11217,6 +12320,9 @@ version = "0.1.0"
 [[package]]
 name = "swagger-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "swapon"
@@ -11271,6 +12377,9 @@ dependencies = [
 [[package]]
 name = "swww-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "syft-cli"
@@ -11287,6 +12396,9 @@ version = "0.1.0"
 [[package]]
 name = "sympy-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "syn"
@@ -11317,6 +12429,9 @@ version = "0.1.0"
 [[package]]
 name = "sysctl"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "sysctl-cli"
@@ -11344,6 +12459,9 @@ version = "0.1.0"
 [[package]]
 name = "syslogd"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "sysmonitor"
@@ -11375,10 +12493,16 @@ version = "0.1.0"
 [[package]]
 name = "systemctl-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "systemd-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "systemd-resolved"
@@ -11405,10 +12529,16 @@ version = "0.1.0"
 [[package]]
 name = "tac"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "tailscale-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "tantivy-cli"
@@ -11424,6 +12554,9 @@ dependencies = [
 [[package]]
 name = "task-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "taskscheduler"
@@ -11455,6 +12588,9 @@ version = "0.1.0"
 [[package]]
 name = "tealdeer"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "tealium-cli"
@@ -11497,6 +12633,9 @@ version = "0.1.0"
 [[package]]
 name = "telegram-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "telegram-desktop-cli"
@@ -11517,6 +12656,9 @@ version = "0.1.0"
 [[package]]
 name = "telnyx-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "tempo"
@@ -11525,10 +12667,16 @@ version = "0.1.0"
 [[package]]
 name = "tempo-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "temporal-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "tenable-cli"
@@ -11574,6 +12722,9 @@ version = "0.1.0"
 [[package]]
 name = "terraform-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "terragrunt-cli"
@@ -11593,6 +12744,9 @@ version = "0.1.0"
 [[package]]
 name = "tesseract-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "testdisk-cli"
@@ -11642,6 +12796,9 @@ version = "0.1.0"
 [[package]]
 name = "threescale-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "thrift-cli"
@@ -11689,6 +12846,9 @@ version = "0.1.0"
 [[package]]
 name = "tigervnc"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "tigervnc-cli"
@@ -11732,6 +12892,9 @@ version = "0.1.0"
 [[package]]
 name = "timg-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "timidity-cli"
@@ -11763,10 +12926,16 @@ dependencies = [
 [[package]]
 name = "tlp-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "tmux"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "tmux-app"
@@ -11813,10 +12982,16 @@ version = "0.1.0"
 [[package]]
 name = "tor-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "torch-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "torrent"
@@ -11843,6 +13018,9 @@ version = "0.1.0"
 [[package]]
 name = "tpm-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "tpm2"
@@ -11851,6 +13029,9 @@ version = "0.1.0"
 [[package]]
 name = "tput"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "tr"
@@ -11926,6 +13107,9 @@ version = "0.1.0"
 [[package]]
 name = "trivy"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "trivy-cli"
@@ -11952,6 +13136,9 @@ dependencies = [
 [[package]]
 name = "ttfautohint-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "ttfdump-cli"
@@ -11982,6 +13169,9 @@ version = "0.1.0"
 [[package]]
 name = "twilio-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "twinmotion-cli"
@@ -12013,6 +13203,9 @@ dependencies = [
 [[package]]
 name = "typst-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "tzrules"
@@ -12025,6 +13218,9 @@ version = "0.1.0"
 [[package]]
 name = "udevadm-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "udevd"
@@ -12058,6 +13254,9 @@ dependencies = [
 [[package]]
 name = "unbound"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "unbound-cli"
@@ -12086,6 +13285,9 @@ dependencies = [
 [[package]]
 name = "unison-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "unitconverter"
@@ -12116,6 +13318,9 @@ version = "0.1.0"
 [[package]]
 name = "unreal-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "unrealengine-cli"
@@ -12137,6 +13342,7 @@ name = "update-alternatives"
 version = "0.1.0"
 dependencies = [
  "embed-manifest",
+ "quoting",
 ]
 
 [[package]]
@@ -12220,6 +13426,9 @@ version = "0.1.0"
 [[package]]
 name = "uvtool-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "v-cli"
@@ -12273,10 +13482,16 @@ version = "0.1.0"
 [[package]]
 name = "vault"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "vault-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "vcftools-cli"
@@ -12285,6 +13500,9 @@ version = "0.1.0"
 [[package]]
 name = "vcpkg-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "vcvrack-cli"
@@ -12313,10 +13531,16 @@ version = "0.1.0"
 [[package]]
 name = "vegeta"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "vegeta-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "velero-cli"
@@ -12325,6 +13549,9 @@ version = "0.1.0"
 [[package]]
 name = "vercel-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "verilator-cli"
@@ -12356,6 +13583,9 @@ dependencies = [
 [[package]]
 name = "victoria-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "victoriametrics-cli"
@@ -12456,6 +13686,9 @@ version = "0.1.0"
 [[package]]
 name = "vmstat"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "vmware-cli"
@@ -12464,6 +13697,9 @@ version = "0.1.0"
 [[package]]
 name = "vonage-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "vorbis-tools"
@@ -12491,6 +13727,9 @@ version = "0.1.0"
 [[package]]
 name = "vuepress-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "vulkan-cli"
@@ -12507,10 +13746,16 @@ version = "0.1.0"
 [[package]]
 name = "waf-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "wall"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "wandb-cli"
@@ -12588,6 +13833,9 @@ version = "0.1.0"
 [[package]]
 name = "waypoint-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "wayst-cli"
@@ -12654,6 +13902,9 @@ version = "0.1.0"
 [[package]]
 name = "wezterm-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "wf-recorder-cli"
@@ -12704,6 +13955,9 @@ version = "0.1.0"
 [[package]]
 name = "whois"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "wikijs-cli"
@@ -12731,6 +13985,9 @@ version = "0.1.0"
 [[package]]
 name = "wine-staging-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "winecfg-cli"
@@ -12739,6 +13996,9 @@ version = "0.1.0"
 [[package]]
 name = "winetricks-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "wings3d-cli"
@@ -12762,6 +14022,9 @@ dependencies = [
 [[package]]
 name = "wireguard-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "wireguard-tools"
@@ -12813,6 +14076,9 @@ version = "0.1.0"
 [[package]]
 name = "wl-protocols-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "wl-screencast-cli"
@@ -12837,6 +14103,9 @@ version = "0.1.0"
 [[package]]
 name = "wlrctl-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "wlsunset-cli"
@@ -12923,6 +14192,9 @@ version = "0.1.0"
 [[package]]
 name = "wpaperd-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "wps-cli"
@@ -12958,6 +14230,9 @@ version = "0.1.0"
 [[package]]
 name = "wso2-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "wtype-cli"
@@ -12986,6 +14261,9 @@ version = "0.1.0"
 [[package]]
 name = "x86-energy-perf-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "xargs"
@@ -13056,6 +14334,9 @@ version = "0.1.0"
 [[package]]
 name = "xdotool-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "xelatex-cli"
@@ -13092,6 +14373,9 @@ version = "0.1.0"
 [[package]]
 name = "xh"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "xh-cli"
@@ -13100,6 +14384,9 @@ version = "0.1.0"
 [[package]]
 name = "xkbcomp-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "xlsxio-cli"
@@ -13120,6 +14407,9 @@ version = "0.1.0"
 [[package]]
 name = "xplr-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "xprop-cli"
@@ -13221,6 +14511,9 @@ version = "0.1.0"
 [[package]]
 name = "yard-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "yarn-cli"
@@ -13287,6 +14580,9 @@ version = "0.1.0"
 [[package]]
 name = "zathura-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "zbrush-cli"
@@ -13295,6 +14591,9 @@ version = "0.1.0"
 [[package]]
 name = "zed-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "zellij-cli"
@@ -13346,10 +14645,16 @@ version = "0.1.0"
 [[package]]
 name = "zfs-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "zig"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "zig-tools"
@@ -13358,6 +14663,9 @@ version = "0.1.0"
 [[package]]
 name = "zigbee-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "zimbra-cli"
@@ -13377,6 +14685,9 @@ dependencies = [
 [[package]]
 name = "zipkin-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "zitadel-cli"
@@ -13405,6 +14716,9 @@ version = "0.1.0"
 [[package]]
 name = "zookeeper-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "zoom-cli"
@@ -13417,6 +14731,9 @@ version = "0.1.0"
 [[package]]
 name = "zoxide"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "zram"
@@ -13439,6 +14756,9 @@ dependencies = [
 [[package]]
 name = "zuplo-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "zutty-cli"
@@ -13451,6 +14771,9 @@ version = "0.1.0"
 [[package]]
 name = "zwave-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "zynaddsubfx-cli"
@@ -13459,3 +14782,6 @@ version = "0.1.0"
 [[package]]
 name = "zypper-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]

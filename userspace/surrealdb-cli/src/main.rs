@@ -4,11 +4,16 @@
 //!
 //! Multi-personality: `surreal`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_surreal(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
@@ -30,10 +35,16 @@ fn run_surreal(args: &[String]) -> i32 {
     match subcmd {
         "version" | "--version" => println!("surreal 2.0.0 for slateos on x86_64"),
         "start" => {
-            let bind = args.windows(2).find(|w| w[0] == "--bind")
-                .map(|w| w[1].as_str()).unwrap_or("0.0.0.0:8000");
-            let path = args.windows(2).find(|w| w[0] == "--path" || w[0] == "file:")
-                .map(|w| w[1].as_str()).unwrap_or("memory");
+            let bind = args
+                .windows(2)
+                .find(|w| w[0] == "--bind")
+                .map(|w| w[1].as_str())
+                .unwrap_or("0.0.0.0:8000");
+            let path = args
+                .windows(2)
+                .find(|w| w[0] == "--path" || w[0] == "file:")
+                .map(|w| w[1].as_str())
+                .unwrap_or("memory");
             println!("SurrealDB 2.0.0");
             println!("  Listening on: {}", bind);
             println!("  Storage: {}", path);
@@ -41,12 +52,21 @@ fn run_surreal(args: &[String]) -> i32 {
             println!("  Started successfully.");
         }
         "sql" => {
-            let conn = args.windows(2).find(|w| w[0] == "--conn")
-                .map(|w| w[1].as_str()).unwrap_or("ws://localhost:8000");
-            let ns = args.windows(2).find(|w| w[0] == "--ns")
-                .map(|w| w[1].as_str()).unwrap_or("test");
-            let db = args.windows(2).find(|w| w[0] == "--db")
-                .map(|w| w[1].as_str()).unwrap_or("test");
+            let conn = args
+                .windows(2)
+                .find(|w| w[0] == "--conn")
+                .map(|w| w[1].as_str())
+                .unwrap_or("ws://localhost:8000");
+            let ns = args
+                .windows(2)
+                .find(|w| w[0] == "--ns")
+                .map(|w| w[1].as_str())
+                .unwrap_or("test");
+            let db = args
+                .windows(2)
+                .find(|w| w[0] == "--db")
+                .map(|w| w[1].as_str())
+                .unwrap_or("test");
             println!("Connected to {} (ns: {}, db: {})", conn, ns, db);
             println!("surreal> ");
         }
@@ -72,14 +92,17 @@ fn run_surreal(args: &[String]) -> i32 {
             println!("Backing up to {}...", dst);
             println!("Backup complete.");
         }
-        _ => println!("surreal: '{}' completed", subcmd),
+        _ => println!("surreal: {} completed", quoteaf_os(subcmd)),
     }
     0
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "surreal".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "surreal".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_surreal(&rest);
     process::exit(code);
@@ -87,7 +110,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_surreal};
+    use super::{basename, run_surreal, strip_ext};
 
     #[test]
     fn basename_strips_path() {

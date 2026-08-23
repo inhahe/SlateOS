@@ -37,6 +37,7 @@
 //! net.ipv4.ip_forward = 1
 //! ```
 
+use quoting::quoteaf_os;
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -64,7 +65,11 @@ enum Action {
     /// List every parameter under both trees.
     ListAll,
     /// Read one parameter by name.
-    Read { name: String, quiet: bool, value_only: bool },
+    Read {
+        name: String,
+        quiet: bool,
+        value_only: bool,
+    },
     /// Write a value to a parameter.
     Write { name: String, value: String },
     /// Load key=value pairs from a config file.
@@ -139,9 +144,10 @@ fn path_to_name(path: &Path) -> String {
             name.push('.');
         }
         if let std::path::Component::Normal(os) = component
-            && let Some(s) = os.to_str() {
-                name.push_str(s);
-            }
+            && let Some(s) = os.to_str()
+        {
+            name.push_str(s);
+        }
     }
     name
 }
@@ -157,7 +163,10 @@ fn read_param(path: &Path) -> Result<String, String> {
     }
 
     if path.is_dir() {
-        return Err(format!("{} is a directory, not a parameter", path.display()));
+        return Err(format!(
+            "{} is a directory, not a parameter",
+            path.display()
+        ));
     }
 
     fs::read_to_string(path)
@@ -172,7 +181,10 @@ fn write_param(path: &Path, value: &str) -> Result<(), String> {
     }
 
     if path.is_dir() {
-        return Err(format!("{} is a directory, not a parameter", path.display()));
+        return Err(format!(
+            "{} is a directory, not a parameter",
+            path.display()
+        ));
     }
 
     fs::write(path, value)
@@ -290,16 +302,17 @@ fn search_params(pattern: &str) {
         for path in walk_params(root) {
             let name = path_to_name(&path);
             if name.to_lowercase().contains(&pattern_lower)
-                && let Ok(value) = read_param(&path) {
-                    let display_val = collapse_value(&value);
-                    println!("{name} = {display_val}");
-                    found += 1;
-                }
+                && let Ok(value) = read_param(&path)
+            {
+                let display_val = collapse_value(&value);
+                println!("{name} = {display_val}");
+                found += 1;
+            }
         }
     }
 
     if found == 0 {
-        eprintln!("sysctl: no parameters matching '{pattern}'");
+        eprintln!("sysctl: no parameters matching {}", quoteaf_os(pattern));
         process::exit(1);
     }
 }
@@ -354,15 +367,13 @@ fn load_config(path: &str) {
 
         // Resolve the parameter path.
         match name_to_path(key) {
-            Some(param_path) => {
-                match write_param(&param_path, value) {
-                    Ok(()) => println!("{key} = {value}"),
-                    Err(e) => {
-                        eprintln!("sysctl: {e}");
-                        errors = errors.saturating_add(1);
-                    }
+            Some(param_path) => match write_param(&param_path, value) {
+                Ok(()) => println!("{key} = {value}"),
+                Err(e) => {
+                    eprintln!("sysctl: {e}");
+                    errors = errors.saturating_add(1);
                 }
-            }
+            },
             None => {
                 eprintln!("sysctl: unknown parameter: {key}");
                 errors = errors.saturating_add(1);
@@ -418,7 +429,9 @@ fn parse_args(args: &[String]) -> Action {
                     eprintln!("sysctl: --search requires a pattern argument");
                     process::exit(1);
                 }
-                return Action::Search { pattern: args[i + 1].clone() };
+                return Action::Search {
+                    pattern: args[i + 1].clone(),
+                };
             }
 
             "-w" | "--write" => {
@@ -447,12 +460,13 @@ fn parse_args(args: &[String]) -> Action {
             _ => {
                 // Check for inline assignment: name=value
                 if let Some((name, value)) = arg.split_once('=')
-                    && !name.is_empty() {
-                        return Action::Write {
-                            name: name.to_string(),
-                            value: value.to_string(),
-                        };
-                    }
+                    && !name.is_empty()
+                {
+                    return Action::Write {
+                        name: name.to_string(),
+                        value: value.to_string(),
+                    };
+                }
 
                 // Otherwise treat as a read request.
                 return Action::Read {
@@ -521,7 +535,11 @@ fn main() {
             list_all();
         }
 
-        Action::Read { name, quiet, value_only } => {
+        Action::Read {
+            name,
+            quiet,
+            value_only,
+        } => {
             let path = match name_to_path(&name) {
                 Some(p) => p,
                 None => {

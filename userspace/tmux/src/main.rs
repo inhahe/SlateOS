@@ -4,6 +4,7 @@
 //!
 //! Single personality: `tmux`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -19,9 +20,24 @@ struct _Session {
 
 fn _sample_sessions() -> Vec<_Session> {
     vec![
-        _Session { name: "main".to_string(), windows: 3, _created: "Thu May 22 10:00:00 2025".to_string(), _attached: true },
-        _Session { name: "dev".to_string(), windows: 2, _created: "Thu May 22 10:30:00 2025".to_string(), _attached: false },
-        _Session { name: "monitor".to_string(), windows: 1, _created: "Thu May 22 11:00:00 2025".to_string(), _attached: false },
+        _Session {
+            name: "main".to_string(),
+            windows: 3,
+            _created: "Thu May 22 10:00:00 2025".to_string(),
+            _attached: true,
+        },
+        _Session {
+            name: "dev".to_string(),
+            windows: 2,
+            _created: "Thu May 22 10:30:00 2025".to_string(),
+            _attached: false,
+        },
+        _Session {
+            name: "monitor".to_string(),
+            windows: 1,
+            _created: "Thu May 22 11:00:00 2025".to_string(),
+            _attached: false,
+        },
     ]
 }
 
@@ -56,9 +72,14 @@ fn run_tmux(args: Vec<String>) -> i32 {
             println!("  -V                        Show version");
             0
         }
-        "-V" | "--version" => { println!("tmux 3.4 (Slate OS)"); 0 }
+        "-V" | "--version" => {
+            println!("tmux 3.4 (Slate OS)");
+            0
+        }
         "new-session" | "new" => {
-            let name = cmd_args.iter().position(|a| a == "-s")
+            let name = cmd_args
+                .iter()
+                .position(|a| a == "-s")
                 .and_then(|i| cmd_args.get(i + 1))
                 .map(|s| s.as_str())
                 .unwrap_or("0");
@@ -66,25 +87,36 @@ fn run_tmux(args: Vec<String>) -> i32 {
             0
         }
         "attach-session" | "attach" | "a" => {
-            let target = cmd_args.iter().position(|a| a == "-t")
+            let target = cmd_args
+                .iter()
+                .position(|a| a == "-t")
                 .and_then(|i| cmd_args.get(i + 1))
                 .map(|s| s.as_str())
                 .unwrap_or("main");
             println!("[attached to session: {}]", target);
             0
         }
-        "detach-client" | "detach" => { println!("[detached (from session main)]"); 0 }
+        "detach-client" | "detach" => {
+            println!("[detached (from session main)]");
+            0
+        }
         "list-sessions" | "ls" => {
             let sessions = _sample_sessions();
             for s in &sessions {
-                println!("{}: {} windows (created {}){}",
-                    s.name, s.windows, s._created,
-                    if s._attached { " (attached)" } else { "" });
+                println!(
+                    "{}: {} windows (created {}){}",
+                    s.name,
+                    s.windows,
+                    s._created,
+                    if s._attached { " (attached)" } else { "" }
+                );
             }
             0
         }
         "kill-session" => {
-            let target = cmd_args.iter().position(|a| a == "-t")
+            let target = cmd_args
+                .iter()
+                .position(|a| a == "-t")
                 .and_then(|i| cmd_args.get(i + 1))
                 .map(|s| s.as_str())
                 .unwrap_or("0");
@@ -92,7 +124,9 @@ fn run_tmux(args: Vec<String>) -> i32 {
             0
         }
         "new-window" | "neww" => {
-            let name = cmd_args.iter().position(|a| a == "-n")
+            let name = cmd_args
+                .iter()
+                .position(|a| a == "-n")
                 .and_then(|i| cmd_args.get(i + 1))
                 .map(|s| s.as_str());
             match name {
@@ -109,11 +143,20 @@ fn run_tmux(args: Vec<String>) -> i32 {
         }
         "split-window" | "splitw" => {
             let horizontal = cmd_args.iter().any(|a| a == "-h");
-            println!("[split {} (simulated)]", if horizontal { "horizontally" } else { "vertically" });
+            println!(
+                "[split {} (simulated)]",
+                if horizontal {
+                    "horizontally"
+                } else {
+                    "vertically"
+                }
+            );
             0
         }
         "select-pane" | "selectp" => {
-            let target = cmd_args.iter().position(|a| a == "-t")
+            let target = cmd_args
+                .iter()
+                .position(|a| a == "-t")
                 .and_then(|i| cmd_args.get(i + 1))
                 .map(|s| s.as_str())
                 .unwrap_or("0");
@@ -126,7 +169,10 @@ fn run_tmux(args: Vec<String>) -> i32 {
             0
         }
         "source-file" | "source" => {
-            let file = cmd_args.first().map(|s| s.as_str()).unwrap_or("~/.tmux.conf");
+            let file = cmd_args
+                .first()
+                .map(|s| s.as_str())
+                .unwrap_or("~/.tmux.conf");
             println!("[sourced: {}]", file);
             0
         }
@@ -162,10 +208,22 @@ fn run_tmux(args: Vec<String>) -> i32 {
             println!("bind-key    [   copy-mode");
             0
         }
-        "resize-pane" | "resizep" => { println!("[pane resized (simulated)]"); 0 }
-        "capture-pane" | "capturep" => { println!("[pane captured to buffer (simulated)]"); 0 }
-        "kill-server" => { println!("kill server (simulated)"); 0 }
-        other => { eprintln!("tmux: unknown command '{}'", other); 1 }
+        "resize-pane" | "resizep" => {
+            println!("[pane resized (simulated)]");
+            0
+        }
+        "capture-pane" | "capturep" => {
+            println!("[pane captured to buffer (simulated)]");
+            0
+        }
+        "kill-server" => {
+            println!("kill server (simulated)");
+            0
+        }
+        other => {
+            eprintln!("tmux: unknown command {}", quoteaf_os(other));
+            1
+        }
     }
 }
 

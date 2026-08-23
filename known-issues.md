@@ -50401,7 +50401,7 @@ guarantee, and on Windows the failure mode would be a sharing violation in
 whichever of the two processes lost the race. Wait for `[run-timeout] child
 exited` before running any cargo command against the same target directory.
 
-**Part 2 progress. 38 of 49 modules converted.**
+**Part 2 progress. 39 of 49 modules converted.**
 
 - [x] `security_dialog.rs` — 29 constants, done 2026-08-22. The method above
   survived contact: the sweep lives in `gui/desktop/src/palette_check.rs` as
@@ -52817,6 +52817,77 @@ exited` before running any cargo command against the same target directory.
       the instrument colours are *declared to the sweep as derived*, so the
       sweep is structurally blind to them and the pinning tests are the entire
       coverage. A membership test cannot check a value it was told to accept.
+
+- [x] `accessibility_settings.rs` — 9 constants over 14 colour sites, done
+  2026-08-23. Thirty-seven tests in the module (nine new), harness defects
+  Ax60–Zx61 (fifty-two).
+  - **The near-black-on-accent bug, found for the third time, on the
+    accessibility page.** The selected tab was lettered `CRUST` (`#11111B`) on
+    `BLUE`, which measures 8.91:1 in Mocha and is excellent. The same pair in
+    Latte is near-black on `#1D62EC` and measures **3.58:1** — below the 4.5:1
+    floor, on the one page in the shell whose subject is people who cannot read
+    low-contrast text. The ink is now `p.on_accent()`, computed from the fill.
+    That this recurs module after module is the point: a constant named for a
+    colour cannot record that it was chosen *for* another colour, so every copy
+    of it silently re-asserts a contrast measurement that was only ever taken
+    once, in one theme.
+  - **The deleted `GREEN` and `BLUE` are the state/selection split again, and
+    here getting it wrong would have broken the widget's meaning outright.**
+    `GREEN` appeared at two sites — the "*n* features active" line and the
+    toggle switch's on-pill — and both encode **state**, a code the user
+    decodes, so both stay `p.green` and do not follow the accent. `BLUE` on the
+    tab pill encoded **selection**, which is what the accent is for, so it
+    becomes `p.accent`. Rewriting both the same way would have given a user
+    with a green accent a settings page on which *every switch reads "on"*.
+    Two sites, one deleted constant, two different answers.
+  - **Lesson 22: a locator derived from the renderer's own list cannot see a
+    permutation of that list.** The one wrong declaration in the set was defect
+    `Z`, which reorders `A11yTab::ALL`. Four tests read the tab bar; only two
+    caught it. The two that missed walk `A11yTab::ALL.iter().enumerate()` and
+    index the render by the same `i`, so permuting the list permutes the
+    expectation identically and the defect is invisible to them by
+    construction.
+    - This is a blind spot *inside* the structural-locator discipline, not a
+      lapse from it. That rule says an index into a render is a claim about
+      layout, so locate by the property being asserted — and these two tests
+      obey it, by deriving the index from the renderer's list rather than
+      writing `[3]`. The refinement is that a locator taken from the code under
+      test moves *with* the code under test. Only an expectation written out
+      independently can see an ordering defect: here the ordered-vector pin
+      (lesson 9) and the green/accent test, which reads `tabs(&cmds)[0]`
+      outright. Coverage was never in question — the defect was caught twice,
+      deterministically — but the declaration is the only record of what each
+      test proves, and a wrong one is a misleading record.
+  - **Preflight then sweep: 52 build / 0 do not / 0 not applied, then 52
+    caught, 0 escaped, 0 never asked, 1 under-caught, 0 under-declared**;
+    reconciled and re-run, `Z` now caught by exactly the two tests that can see
+    it. The pre-sweep declaration review — module 38's institutionalised
+    lesson — again earned its keep in the other direction, catching one
+    *under*-declaration by reading: the same `Z` also trips the green/accent
+    test, because that test reads `tabs(&cmds)[0]` after choosing Visual, and
+    with the order permuted index 0 is the unchosen Input tab.
+  - **The catcher census**, from the fifty-two:
+    `every_site_draws_the_role_it_claims` 46 and **sole on 8**;
+    `green_means_on_and_the_accent_means_chosen` 17, sole on none;
+    `none_of_the_nine_deleted_constants_is_still_drawn` 16, sole on none;
+    `every_site_changes_when_the_mode_does` 15, sole on none;
+    `every_colour_the_panel_draws_comes_from_its_palette` 14, sole on none;
+    `exactly_one_tab_is_accented_and_it_is_the_chosen_one` 12, sole on none;
+    `the_selected_tab_is_lettered_for_its_own_fill` 11, sole on none;
+    `the_active_feature_line_is_green_and_only_drawn_when_there_is_one` 7 and
+    sole on 1; `the_section_headings_keep_their_hue_in_both_modes` 7 and **sole
+    on 4**. **No pre-existing test caught anything**, for the fifth
+    consecutive module.
+    - The ordered-vector pin caught 46 of 52 and was sole catcher of 8, which
+      is the highest share any single test has reached across all thirty-nine
+      modules. That is a property of the *module*, not of the test: fourteen
+      colour sites in five tab bodies, almost all of them plain role reads with
+      no derived value and no instrument, is precisely the shape an ordered pin
+      covers completely. The reading to resist is "the ordered pin is the only
+      test worth writing" — it was sole on 8 here and on 6 in module 38, but in
+      module 38 the four narrowest tests were sole on 8 between them, and here
+      the two narrowest are sole on 5. The broad test finds that *something*
+      moved; only the narrow one says the switch stopped meaning "on".
 
 **Trigger:** this is not blocked on anything. It is sequenced after the shell
 event loop (`TD-C-THE-SHELL-CAN-DRAW-ITSELF-AND-NOBODY-CAN-ASK-IT-TO`) only

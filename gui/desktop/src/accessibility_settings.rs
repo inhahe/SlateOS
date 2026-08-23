@@ -4,25 +4,44 @@
 //! color filters, text scaling), input assistance (sticky keys, filter
 //! keys, mouse keys), and audio accessibility (visual alerts, mono audio,
 //! captions). Extends the core a11y module with a full settings UI.
+//!
+//! # Colour
+//!
+//! Every colour here is read from the [`Palette`] the caller supplies. The
+//! nine Mocha constants this module used to hold are gone, which is what
+//! makes it follow the light/dark switch and the accent at all. Three of the
+//! substitutions were judgements rather than lookups, and they are worth
+//! stating because a later reader would otherwise reasonably "correct" them
+//! back.
+//!
+//! 1. **The selected tab's lettering is no longer near-black.** It was
+//!    `CRUST` (`#11111B`) drawn on `BLUE`, which in Mocha measures 8.91:1 —
+//!    excellent. But the same pair in Latte is near-black on `#1D62EC`, which
+//!    measures **3.58:1** and fails the 4.5:1 floor. A constant that is
+//!    correct in the palette it was written for and wrong in the other one is
+//!    exactly the defect this conversion exists to remove, and it is least
+//!    forgivable *here*, on the page a low-vision user opens first. The ink
+//!    is now [`Palette::on_accent`], which reads the fill's brightness and
+//!    answers near-black or near-white accordingly.
+//!
+//! 2. **Green means "on"; the accent means "chosen".** The deleted `GREEN`
+//!    appeared at two sites that look alike and are not: the "*n* features
+//!    active" line and the toggle switch's pill both encode **state**, a code
+//!    the user decodes, so they stay `p.green` and do not follow the accent.
+//!    The tab pill's `BLUE` encoded **selection**, which is what the accent
+//!    is for, so it becomes `p.accent`. Had both been rewritten the same way,
+//!    a user with a green accent would find every switch reading "on".
+//!
+//! 3. **The section headings keep their hue.** `p.lavender` at 15pt Bold is
+//!    the heading convention across the settings pages, and it survives the
+//!    mode change on the numbers: 9.17:1 on Mocha `base`, 4.65:1 on Latte
+//!    `base`. Both clear the floor, so there was no reason to demote them to
+//!    `p.text`.
 
-use guitk::color::Color;
+use appearance::Palette;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::text;
-
-// ============================================================================
-// Catppuccin Mocha palette
-// ============================================================================
-
-const BASE: Color = Color::from_hex(0x1E1E2E);
-const CRUST: Color = Color::from_hex(0x11111B);
-const SURFACE0: Color = Color::from_hex(0x313244);
-const SURFACE2: Color = Color::from_hex(0x585B70);
-const TEXT: Color = Color::from_hex(0xCDD6F4);
-const SUBTEXT0: Color = Color::from_hex(0xA6ADC8);
-const BLUE: Color = Color::from_hex(0x89B4FA);
-const GREEN: Color = Color::from_hex(0xA6E3A1);
-const LAVENDER: Color = Color::from_hex(0xB4BEFE);
 
 // ============================================================================
 // Visual settings
@@ -496,6 +515,19 @@ pub enum A11yTab {
 }
 
 impl A11yTab {
+    /// Every tab, in the order the bar draws them.
+    ///
+    /// Kept next to the variants rather than inline in `render` so a test can
+    /// walk the same list the renderer walks — a test that hard-codes its own
+    /// copy of the order stops testing the bar the moment a tab is added.
+    pub const ALL: [Self; 5] = [
+        Self::Visual,
+        Self::Input,
+        Self::Audio,
+        Self::Reader,
+        Self::Magnifier,
+    ];
+
     fn label(self) -> &'static str {
         match self {
             Self::Visual => "Visual",
@@ -524,7 +556,7 @@ impl AccessibilitySettingsUI {
         self.active_tab = tab;
     }
 
-    pub fn render(&self, width: f32, height: f32) -> Vec<RenderCommand> {
+    pub fn render(&self, p: &Palette, width: f32, height: f32) -> Vec<RenderCommand> {
         let mut cmds = Vec::new();
 
         cmds.push(RenderCommand::FillRect {
@@ -532,7 +564,7 @@ impl AccessibilitySettingsUI {
             y: 0.0,
             width,
             height,
-            color: BASE,
+            color: p.base,
             corner_radii: CornerRadii::all(8.0),
         });
 
@@ -541,13 +573,14 @@ impl AccessibilitySettingsUI {
             y: 24.0,
             text: "Accessibility".into(),
             font_size: 22.0,
-            color: TEXT,
+            color: p.text,
             font_weight: FontWeightHint::Bold,
             max_width: Some(width - 48.0),
             overflow: TextOverflow::Ellipsis,
         });
 
-        // Active features count
+        // Active features count. Green because it reports a *state* — see the
+        // module's `# Colour` note; it deliberately does not follow the accent.
         let active = self.settings.active_feature_count();
         if active > 0 {
             cmds.push(RenderCommand::Text {
@@ -555,7 +588,7 @@ impl AccessibilitySettingsUI {
                 y: 50.0,
                 text: format!("{} accessibility features active", active),
                 font_size: 12.0,
-                color: GREEN,
+                color: p.green,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width - 48.0),
                 overflow: TextOverflow::Ellipsis,
@@ -563,16 +596,9 @@ impl AccessibilitySettingsUI {
         }
 
         // Tabs
-        let tabs = [
-            A11yTab::Visual,
-            A11yTab::Input,
-            A11yTab::Audio,
-            A11yTab::Reader,
-            A11yTab::Magnifier,
-        ];
         let tab_y = 68.0;
         let mut tx = 24.0;
-        for &tab in &tabs {
+        for &tab in &A11yTab::ALL {
             let active_tab = tab == self.active_tab;
             let tw = text::padded_width_any_weight(tab.label(), 9.0, 12.0);
             cmds.push(RenderCommand::FillRect {
@@ -580,7 +606,7 @@ impl AccessibilitySettingsUI {
                 y: tab_y,
                 width: tw,
                 height: 30.0,
-                color: if active_tab { BLUE } else { SURFACE0 },
+                color: if active_tab { p.accent } else { p.surface0 },
                 corner_radii: CornerRadii::all(6.0),
             });
             cmds.push(RenderCommand::Text {
@@ -588,7 +614,13 @@ impl AccessibilitySettingsUI {
                 y: tab_y + 7.0,
                 text: tab.label().into(),
                 font_size: 12.0,
-                color: if active_tab { CRUST } else { SUBTEXT0 },
+                // Read off the fill rather than fixed near-black: the old
+                // `CRUST` measured 3.58:1 on the light accent.
+                color: if active_tab {
+                    p.on_accent()
+                } else {
+                    p.subtext0
+                },
                 font_weight: if active_tab {
                     FontWeightHint::Bold
                 } else {
@@ -604,28 +636,44 @@ impl AccessibilitySettingsUI {
         let cw = width - 48.0;
 
         match self.active_tab {
-            A11yTab::Visual => self.render_visual(&mut cmds, 24.0, cy, cw),
-            A11yTab::Input => self.render_input(&mut cmds, 24.0, cy, cw),
-            A11yTab::Audio => self.render_audio(&mut cmds, 24.0, cy, cw),
-            A11yTab::Reader => self.render_reader(&mut cmds, 24.0, cy, cw),
-            A11yTab::Magnifier => self.render_magnifier(&mut cmds, 24.0, cy, cw),
+            A11yTab::Visual => self.render_visual(&mut cmds, p, 24.0, cy, cw),
+            A11yTab::Input => self.render_input(&mut cmds, p, 24.0, cy, cw),
+            A11yTab::Audio => self.render_audio(&mut cmds, p, 24.0, cy, cw),
+            A11yTab::Reader => self.render_reader(&mut cmds, p, 24.0, cy, cw),
+            A11yTab::Magnifier => self.render_magnifier(&mut cmds, p, 24.0, cy, cw),
         }
 
         cmds
     }
 
-    fn render_visual(&self, cmds: &mut Vec<RenderCommand>, x: f32, y: f32, width: f32) {
+    fn render_visual(
+        &self,
+        cmds: &mut Vec<RenderCommand>,
+        p: &Palette,
+        x: f32,
+        y: f32,
+        width: f32,
+    ) {
         let mut cy = y;
         let v = &self.settings.visual;
 
-        self.render_label_value(cmds, x, cy, width, "Contrast", v.contrast_mode.label());
-        cy += 28.0;
-        self.render_label_value(cmds, x, cy, width, "Color Filter", v.color_filter.label());
-        cy += 28.0;
-        self.render_label_value(cmds, x, cy, width, "Text Size", v.text_scale.label());
+        self.render_label_value(cmds, p, x, cy, width, "Contrast", v.contrast_mode.label());
         cy += 28.0;
         self.render_label_value(
             cmds,
+            p,
+            x,
+            cy,
+            width,
+            "Color Filter",
+            v.color_filter.label(),
+        );
+        cy += 28.0;
+        self.render_label_value(cmds, p, x, cy, width, "Text Size", v.text_scale.label());
+        cy += 28.0;
+        self.render_label_value(
+            cmds,
+            p,
             x,
             cy,
             width,
@@ -635,6 +683,7 @@ impl AccessibilitySettingsUI {
         cy += 28.0;
         self.render_label_value(
             cmds,
+            p,
             x,
             cy,
             width,
@@ -643,10 +692,11 @@ impl AccessibilitySettingsUI {
         );
         cy += 36.0;
 
-        self.render_toggle_row(cmds, x, cy, width, "Reduce Motion", v.reduce_motion);
+        self.render_toggle_row(cmds, p, x, cy, width, "Reduce Motion", v.reduce_motion);
         cy += 32.0;
         self.render_toggle_row(
             cmds,
+            p,
             x,
             cy,
             width,
@@ -656,6 +706,7 @@ impl AccessibilitySettingsUI {
         cy += 32.0;
         self.render_toggle_row(
             cmds,
+            p,
             x,
             cy,
             width,
@@ -666,6 +717,7 @@ impl AccessibilitySettingsUI {
 
         self.render_label_value(
             cmds,
+            p,
             x,
             cy,
             width,
@@ -675,6 +727,7 @@ impl AccessibilitySettingsUI {
         cy += 28.0;
         self.render_label_value(
             cmds,
+            p,
             x,
             cy,
             width,
@@ -684,7 +737,7 @@ impl AccessibilitySettingsUI {
         let _ = cy;
     }
 
-    fn render_input(&self, cmds: &mut Vec<RenderCommand>, x: f32, y: f32, width: f32) {
+    fn render_input(&self, cmds: &mut Vec<RenderCommand>, p: &Palette, x: f32, y: f32, width: f32) {
         let mut cy = y;
 
         // Sticky keys
@@ -693,7 +746,7 @@ impl AccessibilitySettingsUI {
             y: cy,
             text: "Sticky Keys".into(),
             font_size: 15.0,
-            color: LAVENDER,
+            color: p.lavender,
             font_weight: FontWeightHint::Bold,
             max_width: Some(width),
             overflow: TextOverflow::Ellipsis,
@@ -701,6 +754,7 @@ impl AccessibilitySettingsUI {
         cy += 24.0;
         self.render_toggle_row(
             cmds,
+            p,
             x,
             cy,
             width,
@@ -710,6 +764,7 @@ impl AccessibilitySettingsUI {
         cy += 28.0;
         self.render_toggle_row(
             cmds,
+            p,
             x,
             cy,
             width,
@@ -719,6 +774,7 @@ impl AccessibilitySettingsUI {
         cy += 28.0;
         self.render_toggle_row(
             cmds,
+            p,
             x,
             cy,
             width,
@@ -733,7 +789,7 @@ impl AccessibilitySettingsUI {
             y: cy,
             text: "Filter Keys".into(),
             font_size: 15.0,
-            color: LAVENDER,
+            color: p.lavender,
             font_weight: FontWeightHint::Bold,
             max_width: Some(width),
             overflow: TextOverflow::Ellipsis,
@@ -741,6 +797,7 @@ impl AccessibilitySettingsUI {
         cy += 24.0;
         self.render_toggle_row(
             cmds,
+            p,
             x,
             cy,
             width,
@@ -750,6 +807,7 @@ impl AccessibilitySettingsUI {
         cy += 28.0;
         self.render_label_value(
             cmds,
+            p,
             x,
             cy,
             width,
@@ -759,6 +817,7 @@ impl AccessibilitySettingsUI {
         cy += 28.0;
         self.render_label_value(
             cmds,
+            p,
             x,
             cy,
             width,
@@ -773,7 +832,7 @@ impl AccessibilitySettingsUI {
             y: cy,
             text: "Mouse Keys".into(),
             font_size: 15.0,
-            color: LAVENDER,
+            color: p.lavender,
             font_weight: FontWeightHint::Bold,
             max_width: Some(width),
             overflow: TextOverflow::Ellipsis,
@@ -781,6 +840,7 @@ impl AccessibilitySettingsUI {
         cy += 24.0;
         self.render_toggle_row(
             cmds,
+            p,
             x,
             cy,
             width,
@@ -790,6 +850,7 @@ impl AccessibilitySettingsUI {
         cy += 28.0;
         self.render_label_value(
             cmds,
+            p,
             x,
             cy,
             width,
@@ -801,6 +862,7 @@ impl AccessibilitySettingsUI {
         // Other
         self.render_toggle_row(
             cmds,
+            p,
             x,
             cy,
             width,
@@ -810,6 +872,7 @@ impl AccessibilitySettingsUI {
         cy += 28.0;
         self.render_toggle_row(
             cmds,
+            p,
             x,
             cy,
             width,
@@ -819,15 +882,15 @@ impl AccessibilitySettingsUI {
         let _ = cy;
     }
 
-    fn render_audio(&self, cmds: &mut Vec<RenderCommand>, x: f32, y: f32, width: f32) {
+    fn render_audio(&self, cmds: &mut Vec<RenderCommand>, p: &Palette, x: f32, y: f32, width: f32) {
         let mut cy = y;
         let a = &self.settings.audio;
 
-        self.render_toggle_row(cmds, x, cy, width, "Visual Alerts", a.visual_alerts);
+        self.render_toggle_row(cmds, p, x, cy, width, "Visual Alerts", a.visual_alerts);
         cy += 32.0;
-        self.render_toggle_row(cmds, x, cy, width, "Flash Screen", a.flash_screen);
+        self.render_toggle_row(cmds, p, x, cy, width, "Flash Screen", a.flash_screen);
         cy += 32.0;
-        self.render_toggle_row(cmds, x, cy, width, "Mono Audio", a.mono_audio);
+        self.render_toggle_row(cmds, p, x, cy, width, "Mono Audio", a.mono_audio);
         cy += 36.0;
 
         cmds.push(RenderCommand::Text {
@@ -835,16 +898,17 @@ impl AccessibilitySettingsUI {
             y: cy,
             text: "Captions".into(),
             font_size: 15.0,
-            color: LAVENDER,
+            color: p.lavender,
             font_weight: FontWeightHint::Bold,
             max_width: Some(width),
             overflow: TextOverflow::Ellipsis,
         });
         cy += 24.0;
-        self.render_toggle_row(cmds, x, cy, width, "Show Captions", a.show_captions);
+        self.render_toggle_row(cmds, p, x, cy, width, "Show Captions", a.show_captions);
         cy += 28.0;
         self.render_label_value(
             cmds,
+            p,
             x,
             cy,
             width,
@@ -852,19 +916,27 @@ impl AccessibilitySettingsUI {
             &format!("{:.0}pt", a.caption_font_size),
         );
         cy += 28.0;
-        self.render_toggle_row(cmds, x, cy, width, "Background", a.caption_background);
+        self.render_toggle_row(cmds, p, x, cy, width, "Background", a.caption_background);
         let _ = cy;
     }
 
-    fn render_reader(&self, cmds: &mut Vec<RenderCommand>, x: f32, y: f32, width: f32) {
+    fn render_reader(
+        &self,
+        cmds: &mut Vec<RenderCommand>,
+        p: &Palette,
+        x: f32,
+        y: f32,
+        width: f32,
+    ) {
         let mut cy = y;
         let r = &self.settings.screen_reader;
 
-        self.render_toggle_row(cmds, x, cy, width, "Screen Reader", r.enabled);
+        self.render_toggle_row(cmds, p, x, cy, width, "Screen Reader", r.enabled);
         cy += 36.0;
 
         self.render_label_value(
             cmds,
+            p,
             x,
             cy,
             width,
@@ -872,15 +944,16 @@ impl AccessibilitySettingsUI {
             &format!("{}%", r.speech_rate),
         );
         cy += 28.0;
-        self.render_label_value(cmds, x, cy, width, "Pitch", &format!("{}%", r.pitch));
+        self.render_label_value(cmds, p, x, cy, width, "Pitch", &format!("{}%", r.pitch));
         cy += 28.0;
-        self.render_label_value(cmds, x, cy, width, "Volume", &format!("{}%", r.volume));
+        self.render_label_value(cmds, p, x, cy, width, "Volume", &format!("{}%", r.volume));
         cy += 28.0;
-        self.render_label_value(cmds, x, cy, width, "Verbosity", r.verbosity.label());
+        self.render_label_value(cmds, p, x, cy, width, "Verbosity", r.verbosity.label());
         cy += 36.0;
 
         self.render_toggle_row(
             cmds,
+            p,
             x,
             cy,
             width,
@@ -888,10 +961,19 @@ impl AccessibilitySettingsUI {
             r.read_typed_chars,
         );
         cy += 28.0;
-        self.render_toggle_row(cmds, x, cy, width, "Read Typed Words", r.read_typed_words);
+        self.render_toggle_row(
+            cmds,
+            p,
+            x,
+            cy,
+            width,
+            "Read Typed Words",
+            r.read_typed_words,
+        );
         cy += 28.0;
         self.render_toggle_row(
             cmds,
+            p,
             x,
             cy,
             width,
@@ -901,15 +983,23 @@ impl AccessibilitySettingsUI {
         let _ = cy;
     }
 
-    fn render_magnifier(&self, cmds: &mut Vec<RenderCommand>, x: f32, y: f32, width: f32) {
+    fn render_magnifier(
+        &self,
+        cmds: &mut Vec<RenderCommand>,
+        p: &Palette,
+        x: f32,
+        y: f32,
+        width: f32,
+    ) {
         let mut cy = y;
         let m = &self.settings.magnifier;
 
-        self.render_toggle_row(cmds, x, cy, width, "Magnifier", m.enabled);
+        self.render_toggle_row(cmds, p, x, cy, width, "Magnifier", m.enabled);
         cy += 36.0;
 
         self.render_label_value(
             cmds,
+            p,
             x,
             cy,
             width,
@@ -919,6 +1009,7 @@ impl AccessibilitySettingsUI {
         cy += 28.0;
         self.render_label_value(
             cmds,
+            p,
             x,
             cy,
             width,
@@ -927,19 +1018,28 @@ impl AccessibilitySettingsUI {
         );
         cy += 36.0;
 
-        self.render_toggle_row(cmds, x, cy, width, "Follow Cursor", m.follow_cursor);
+        self.render_toggle_row(cmds, p, x, cy, width, "Follow Cursor", m.follow_cursor);
         cy += 28.0;
-        self.render_toggle_row(cmds, x, cy, width, "Follow Focus", m.follow_focus);
+        self.render_toggle_row(cmds, p, x, cy, width, "Follow Focus", m.follow_focus);
         cy += 28.0;
-        self.render_toggle_row(cmds, x, cy, width, "Smooth Scrolling", m.smooth_scrolling);
+        self.render_toggle_row(
+            cmds,
+            p,
+            x,
+            cy,
+            width,
+            "Smooth Scrolling",
+            m.smooth_scrolling,
+        );
         cy += 28.0;
-        self.render_toggle_row(cmds, x, cy, width, "Invert Colors", m.invert_colors);
+        self.render_toggle_row(cmds, p, x, cy, width, "Invert Colors", m.invert_colors);
         let _ = cy;
     }
 
     fn render_toggle_row(
         &self,
         cmds: &mut Vec<RenderCommand>,
+        p: &Palette,
         x: f32,
         y: f32,
         width: f32,
@@ -951,7 +1051,7 @@ impl AccessibilitySettingsUI {
             y: y + 4.0,
             text: label.into(),
             font_size: 14.0,
-            color: TEXT,
+            color: p.text,
             font_weight: FontWeightHint::Regular,
             max_width: Some(width - 80.0),
             overflow: TextOverflow::Ellipsis,
@@ -962,7 +1062,7 @@ impl AccessibilitySettingsUI {
             y: y + 2.0,
             width: 40.0,
             height: 22.0,
-            color: if enabled { GREEN } else { SURFACE2 },
+            color: if enabled { p.green } else { p.surface2 },
             corner_radii: CornerRadii::all(11.0),
         });
         let knob_x = if enabled { sw_x + 20.0 } else { sw_x + 2.0 };
@@ -971,7 +1071,7 @@ impl AccessibilitySettingsUI {
             y: y + 4.0,
             width: 18.0,
             height: 18.0,
-            color: TEXT,
+            color: p.text,
             corner_radii: CornerRadii::all(9.0),
         });
     }
@@ -979,6 +1079,7 @@ impl AccessibilitySettingsUI {
     fn render_label_value(
         &self,
         cmds: &mut Vec<RenderCommand>,
+        p: &Palette,
         x: f32,
         y: f32,
         width: f32,
@@ -990,7 +1091,7 @@ impl AccessibilitySettingsUI {
             y,
             text: label.into(),
             font_size: 13.0,
-            color: SUBTEXT0,
+            color: p.subtext0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(width * 0.5),
             overflow: TextOverflow::Ellipsis,
@@ -1000,7 +1101,7 @@ impl AccessibilitySettingsUI {
             y,
             text: value.into(),
             font_size: 13.0,
-            color: TEXT,
+            color: p.text,
             font_weight: FontWeightHint::Regular,
             max_width: Some(width * 0.45),
             overflow: TextOverflow::Ellipsis,
@@ -1036,6 +1137,175 @@ mod tests {
     #![allow(clippy::float_cmp)]
 
     use super::*;
+    use crate::palette_check::assert_drawn_from;
+    use appearance::{AccentColor, readable_on};
+    use guitk::color::Color;
+
+    /// A palette whose accent is a member of neither mode's roles.
+    ///
+    /// The shipped accent *is* `blue`, so a fixture that leaves it alone
+    /// cannot tell "this site followed the accent" from "this site drew the
+    /// blue role" — the two are the same value. Magenta is in neither
+    /// palette, and unlike module 38's calibration page there are no
+    /// instruments here for it to collide with.
+    ///
+    /// It is also chosen for its *brightness*: `readable_on(#FF00FF)` is
+    /// 105 luma, below the 140 threshold, so [`Palette::on_accent`] answers
+    /// near-**white** in both modes. That is what lets
+    /// [`none_of_the_nine_deleted_constants_is_still_drawn`] name `CRUST`
+    /// among the forbidden values — with a pale accent the same near-black
+    /// would be the *correct* answer and the check would have to drop it.
+    fn accented(light: bool) -> Palette {
+        let mut p = Palette::for_mode(light);
+        p.accent = Color::from_hex(0x00FF_00FF);
+        assert!(
+            !p.roles()
+                .iter()
+                .any(|(n, r)| *n != "accent" && *r == p.accent),
+            "the fixture's accent collided with a role, so accent tests would \
+             pass for the wrong reason"
+        );
+        assert_eq!(
+            p.on_accent(),
+            Color::from_hex(0x00EF_F1F5),
+            "the fixture accent stopped being a dark one, so the \
+             deleted-constant table can no longer forbid CRUST"
+        );
+        p
+    }
+
+    /// The accents the appearance page actually offers, minus `Custom`.
+    ///
+    /// [`Palette::on_accent`] is a *step* function of the accent's
+    /// brightness, so one fixture accent samples one side of the step and
+    /// says nothing about the other. Walking the real menu is what makes
+    /// "the lettering is read off the fill" a claim about the function
+    /// rather than about one sample of it.
+    const OFFERED: [AccentColor; 14] = [
+        AccentColor::Blue,
+        AccentColor::Lavender,
+        AccentColor::Teal,
+        AccentColor::Green,
+        AccentColor::Yellow,
+        AccentColor::Peach,
+        AccentColor::Pink,
+        AccentColor::Mauve,
+        AccentColor::Red,
+        AccentColor::Rosewater,
+        AccentColor::Flamingo,
+        AccentColor::Maroon,
+        AccentColor::Sky,
+        AccentColor::Sapphire,
+    ];
+
+    fn wearing(light: bool, accent: AccentColor) -> Palette {
+        let mut p = Palette::for_mode(light);
+        p.accent = if light {
+            accent.color_light()
+        } else {
+            accent.color()
+        };
+        p
+    }
+
+    /// A panel with every tab reachable and at least one feature switched on.
+    ///
+    /// The "*n* features active" line is drawn only when the count is
+    /// non-zero, so a fixture at defaults would leave one of the nine
+    /// converted sites unrendered and therefore unchecked.
+    fn busy() -> AccessibilitySettingsUI {
+        let mut ui = AccessibilitySettingsUI::new();
+        ui.settings.visual.reduce_motion = true;
+        ui.settings.screen_reader.enabled = true;
+        ui
+    }
+
+    /// Every colour `cmds` puts on the screen, in draw order.
+    fn colors(cmds: &[RenderCommand]) -> Vec<Color> {
+        cmds.iter()
+            .filter_map(|c| match c {
+                RenderCommand::FillRect { color, .. }
+                | RenderCommand::StrokeRect { color, .. }
+                | RenderCommand::Text { color, .. } => Some(*color),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The `(fill, lettering)` of every tab in the bar, in draw order.
+    ///
+    /// Found structurally — a 30-pixel-high fill and the `Text` right after
+    /// it — rather than by index. An index into a render is a claim about
+    /// layout, and this bar's tab widths depend on the label text, so the
+    /// day a tab is renamed an index-based locator starts testing the wrong
+    /// command while still passing.
+    fn tabs(cmds: &[RenderCommand]) -> Vec<(Color, Color)> {
+        let mut out = Vec::new();
+        for pair in cmds.windows(2) {
+            if let (
+                RenderCommand::FillRect {
+                    height,
+                    color: fill,
+                    ..
+                },
+                RenderCommand::Text { color: ink, .. },
+            ) = (&pair[0], &pair[1])
+                && *height == 30.0
+            {
+                out.push((*fill, *ink));
+            }
+        }
+        assert_eq!(
+            out.len(),
+            A11yTab::ALL.len(),
+            "not every tab was found in the render"
+        );
+        out
+    }
+
+    /// Every toggle switch's `(pill, knob)`, in draw order.
+    ///
+    /// A switch is the 40x22 pill immediately followed by the 18x18 knob.
+    fn switches(cmds: &[RenderCommand]) -> Vec<(Color, Color)> {
+        let mut out = Vec::new();
+        for pair in cmds.windows(2) {
+            if let (
+                RenderCommand::FillRect {
+                    width: pw,
+                    height: ph,
+                    color: pill,
+                    ..
+                },
+                RenderCommand::FillRect {
+                    width: kw,
+                    color: knob,
+                    ..
+                },
+            ) = (&pair[0], &pair[1])
+                && *pw == 40.0
+                && *ph == 22.0
+                && *kw == 18.0
+            {
+                out.push((*pill, *knob));
+            }
+        }
+        out
+    }
+
+    /// The colours of the 15pt Bold runs, which is what a section heading is.
+    fn headings(cmds: &[RenderCommand]) -> Vec<Color> {
+        cmds.iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text {
+                    font_size,
+                    font_weight: FontWeightHint::Bold,
+                    color,
+                    ..
+                } if *font_size == 15.0 => Some(*color),
+                _ => None,
+            })
+            .collect()
+    }
 
     #[test]
     fn test_contrast_mode_labels() {
@@ -1283,7 +1553,7 @@ mod tests {
     #[test]
     fn test_ui_render_visual() {
         let ui = AccessibilitySettingsUI::new();
-        let cmds = ui.render(600.0, 800.0);
+        let cmds = ui.render(&accented(false), 600.0, 800.0);
         assert!(!cmds.is_empty());
     }
 
@@ -1291,7 +1561,7 @@ mod tests {
     fn test_ui_render_input() {
         let mut ui = AccessibilitySettingsUI::new();
         ui.set_tab(A11yTab::Input);
-        let cmds = ui.render(600.0, 800.0);
+        let cmds = ui.render(&accented(false), 600.0, 800.0);
         assert!(!cmds.is_empty());
     }
 
@@ -1299,7 +1569,7 @@ mod tests {
     fn test_ui_render_audio() {
         let mut ui = AccessibilitySettingsUI::new();
         ui.set_tab(A11yTab::Audio);
-        let cmds = ui.render(600.0, 800.0);
+        let cmds = ui.render(&accented(false), 600.0, 800.0);
         assert!(!cmds.is_empty());
     }
 
@@ -1307,7 +1577,7 @@ mod tests {
     fn test_ui_render_reader() {
         let mut ui = AccessibilitySettingsUI::new();
         ui.set_tab(A11yTab::Reader);
-        let cmds = ui.render(600.0, 800.0);
+        let cmds = ui.render(&accented(false), 600.0, 800.0);
         assert!(!cmds.is_empty());
     }
 
@@ -1315,7 +1585,7 @@ mod tests {
     fn test_ui_render_magnifier() {
         let mut ui = AccessibilitySettingsUI::new();
         ui.set_tab(A11yTab::Magnifier);
-        let cmds = ui.render(600.0, 800.0);
+        let cmds = ui.render(&accented(false), 600.0, 800.0);
         assert!(!cmds.is_empty());
     }
 
@@ -1324,7 +1594,7 @@ mod tests {
         let mut ui = AccessibilitySettingsUI::new();
         ui.settings.visual.reduce_motion = true;
         ui.settings.screen_reader.enabled = true;
-        let cmds = ui.render(600.0, 800.0);
+        let cmds = ui.render(&accented(false), 600.0, 800.0);
         assert!(!cmds.is_empty());
     }
 
@@ -1335,5 +1605,351 @@ mod tests {
         assert_eq!(A11yTab::Audio.label(), "Audio");
         assert_eq!(A11yTab::Reader.label(), "Reader");
         assert_eq!(A11yTab::Magnifier.label(), "Magnifier");
+    }
+
+    // ------------------------------------------------------------------
+    // The conversion off this module's own copy of the palette
+    // ------------------------------------------------------------------
+
+    /// Every value the nine deleted constants held, with the name it had.
+    ///
+    /// Written out rather than read from `Palette::for_mode(false)` on
+    /// purpose: the point is to compare against something the code under
+    /// test did not produce.
+    const DELETED: [(u32, &str); 9] = [
+        (0x001E_1E2E, "BASE"),
+        (0x0011_111B, "CRUST"),
+        (0x0031_3244, "SURFACE0"),
+        (0x0058_5B70, "SURFACE2"),
+        (0x00CD_D6F4, "TEXT"),
+        (0x00A6_ADC8, "SUBTEXT0"),
+        (0x0089_B4FA, "BLUE"),
+        (0x00A6_E3A1, "GREEN"),
+        (0x00B4_BEFE, "LAVENDER"),
+    ];
+
+    /// The broad sweep: no command carries a colour the palette cannot
+    /// account for, on any tab, in either mode.
+    ///
+    /// `derived` is empty because this module computes nothing — every
+    /// colour it draws is a role or [`Palette::on_accent`], and `on_accent`
+    /// answers a `readable_on` endpoint, which the sweep already allows.
+    #[test]
+    fn every_colour_the_panel_draws_comes_from_its_palette() {
+        for light in [false, true] {
+            let p = accented(light);
+            for &tab in &A11yTab::ALL {
+                for mut ui in [AccessibilitySettingsUI::new(), busy()] {
+                    ui.set_tab(tab);
+                    let cmds = ui.render(&p, 600.0, 800.0);
+                    assert_drawn_from(&p, &cmds, &[], "accessibility_settings");
+                }
+            }
+        }
+    }
+
+    /// The narrow sweep the broad one cannot do: `CRUST`.
+    ///
+    /// `assert_drawn_from` has to allow `#11111B` — it is one of the two
+    /// answers `readable_on` gives, so a light-mode button with a pale fill
+    /// legitimately draws it. That makes the membership sweep structurally
+    /// blind to a leftover literal `CRUST`, which is exactly the constant
+    /// this module used for its selected-tab lettering. Naming the nine
+    /// values explicitly closes the hole, and the fixture's accent is dark
+    /// (see [`accented`]) so near-black is never the right answer here.
+    #[test]
+    fn none_of_the_nine_deleted_constants_is_still_drawn() {
+        let p = accented(true);
+        for &tab in &A11yTab::ALL {
+            let mut ui = busy();
+            ui.set_tab(tab);
+            for c in colors(&ui.render(&p, 600.0, 800.0)) {
+                let rgb = (u32::from(c.r) << 16) | (u32::from(c.g) << 8) | u32::from(c.b);
+                for (hex, name) in DELETED {
+                    assert_ne!(
+                        rgb, hex,
+                        "the light render of the {tab:?} tab still draws Mocha \
+                         {name} — a constant survived the conversion"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Every site draws the role it claims, in the order it claims it.
+    ///
+    /// A set-membership table cannot see a *permutation*: swap the label's
+    /// colour with the value's and the set of colours on the panel is
+    /// unchanged. Pinning the ordered vector is what makes a traded pair
+    /// fail, and it costs a literal that has to be re-derived whenever the
+    /// layout genuinely changes — which is the point, not the price.
+    #[test]
+    fn every_site_draws_the_role_it_claims() {
+        for light in [false, true] {
+            let p = accented(light);
+
+            let mut ui = busy();
+            ui.set_tab(A11yTab::Visual);
+            let mut want = vec![p.base, p.text, p.green];
+            // The tab bar: Visual is chosen, so it is first.
+            want.extend([p.accent, p.on_accent()]);
+            for _ in 1..A11yTab::ALL.len() {
+                want.extend([p.surface0, p.subtext0]);
+            }
+            // Contrast, Color Filter, Text Size, Cursor Indicator, Cursor Size.
+            for _ in 0..5 {
+                want.extend([p.subtext0, p.text]);
+            }
+            // Reduce Motion is on in `busy()`; the other two are off.
+            want.extend([p.text, p.green, p.text]);
+            want.extend([p.text, p.surface2, p.text]);
+            want.extend([p.text, p.surface2, p.text]);
+            // Focus Indicator, Text Cursor.
+            for _ in 0..2 {
+                want.extend([p.subtext0, p.text]);
+            }
+            assert_eq!(
+                colors(&ui.render(&p, 600.0, 800.0)),
+                want,
+                "the Visual tab's colours are not the roles it claims, in order"
+            );
+
+            let mut ui = busy();
+            ui.set_tab(A11yTab::Audio);
+            let mut want = vec![p.base, p.text, p.green];
+            // Audio is the third tab, so two unchosen pairs precede it.
+            for _ in 0..2 {
+                want.extend([p.surface0, p.subtext0]);
+            }
+            want.extend([p.accent, p.on_accent()]);
+            for _ in 3..A11yTab::ALL.len() {
+                want.extend([p.surface0, p.subtext0]);
+            }
+            // Visual Alerts, Flash Screen, Mono Audio — all off by default.
+            for _ in 0..3 {
+                want.extend([p.text, p.surface2, p.text]);
+            }
+            // The "Captions" heading sits between the switches, which is the
+            // position a heading-shaped permutation would move.
+            want.push(p.lavender);
+            want.extend([p.text, p.surface2, p.text]);
+            want.extend([p.subtext0, p.text]);
+            // `caption_background` is the one audio default that is on.
+            want.extend([p.text, p.green, p.text]);
+            assert_eq!(
+                colors(&ui.render(&p, 600.0, 800.0)),
+                want,
+                "the Audio tab's colours are not the roles it claims, in order"
+            );
+        }
+    }
+
+    /// The selected tab's lettering is read off its own fill.
+    ///
+    /// This is the module's real bug fix. The deleted `CRUST` was 8.91:1 on
+    /// Mocha `blue` and 3.58:1 on Latte's — below the 4.5:1 floor, on the
+    /// accessibility page of all places. Walking the whole accent menu, in
+    /// both modes, is what makes this a claim about the *function*:
+    /// `readable_on` is a step, and one accent samples one side of it.
+    #[test]
+    fn the_selected_tab_is_lettered_for_its_own_fill() {
+        let mut saw_dark_ink = false;
+        let mut saw_light_ink = false;
+        for light in [false, true] {
+            for accent in OFFERED {
+                let p = wearing(light, accent);
+                for (i, &tab) in A11yTab::ALL.iter().enumerate() {
+                    let mut ui = busy();
+                    ui.set_tab(tab);
+                    let (fill, ink) = tabs(&ui.render(&p, 600.0, 800.0))[i];
+                    assert_eq!(fill, p.accent, "the chosen tab is not the accent");
+                    assert_eq!(
+                        ink,
+                        readable_on(fill),
+                        "with the {accent:?} accent the chosen tab's lettering \
+                         is not the one legible on its own fill"
+                    );
+                    if ink == Color::from_hex(0x0011_111B) {
+                        saw_dark_ink = true;
+                    } else {
+                        saw_light_ink = true;
+                    }
+                }
+            }
+        }
+        assert!(
+            saw_dark_ink && saw_light_ink,
+            "the offered accents produced only one of readable_on's two \
+             answers, so this test would still pass if the lettering were a \
+             constant — the fixture set, not the code, needs widening"
+        );
+    }
+
+    /// Exactly one tab is accented, and it is the chosen one.
+    #[test]
+    fn exactly_one_tab_is_accented_and_it_is_the_chosen_one() {
+        for light in [false, true] {
+            let p = accented(light);
+            for (i, &tab) in A11yTab::ALL.iter().enumerate() {
+                let mut ui = busy();
+                ui.set_tab(tab);
+                let bar = tabs(&ui.render(&p, 600.0, 800.0));
+                let lit: Vec<usize> = bar
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, (fill, _))| *fill == p.accent)
+                    .map(|(j, _)| j)
+                    .collect();
+                assert_eq!(
+                    lit,
+                    vec![i],
+                    "with {tab:?} chosen, the accented tabs were {lit:?}"
+                );
+                for (j, (fill, ink)) in bar.iter().enumerate() {
+                    if j != i {
+                        assert_eq!(*fill, p.surface0, "unchosen tab {j} is not surface0");
+                        assert_eq!(*ink, p.subtext0, "unchosen tab {j} is not subtext0");
+                    }
+                }
+            }
+        }
+    }
+
+    /// Green reports *state*; the accent reports *selection*. They are not
+    /// the same thing and must not move together.
+    ///
+    /// A switch that followed the accent would read "on" to every user who
+    /// picked a green accent, and would stop reading "on" to everyone else.
+    #[test]
+    fn green_means_on_and_the_accent_means_chosen() {
+        for light in [false, true] {
+            let magenta = accented(light);
+            let mauve = wearing(light, AccentColor::Mauve);
+            let mut ui = busy();
+            ui.set_tab(A11yTab::Visual);
+            let with_magenta = ui.render(&magenta, 600.0, 800.0);
+            let with_mauve = ui.render(&mauve, 600.0, 800.0);
+
+            let pills =
+                |c: &[RenderCommand]| -> Vec<Color> { switches(c).iter().map(|s| s.0).collect() };
+            assert_eq!(
+                pills(&with_magenta),
+                pills(&with_mauve),
+                "a switch changed colour because the accent changed, so \
+                 \"on\" and \"chosen\" have been conflated"
+            );
+
+            let sw = switches(&with_magenta);
+            assert_eq!(sw.len(), 3, "the Visual tab has three switches");
+            assert_eq!(sw[0].0, magenta.green, "Reduce Motion is on and not green");
+            assert_eq!(sw[1].0, magenta.surface2, "an off switch is not surface2");
+            assert!(
+                sw.iter().all(|(_, knob)| *knob == magenta.text),
+                "a switch knob is not p.text"
+            );
+
+            // The selected tab, by contrast, must move with the accent.
+            assert_ne!(
+                tabs(&with_magenta)[0].0,
+                tabs(&with_mauve)[0].0,
+                "the chosen tab did not follow the accent"
+            );
+        }
+    }
+
+    /// The "*n* features active" line is green, and is absent at zero.
+    ///
+    /// Located by its text rather than its index: an index into a render is
+    /// a claim about layout, and this line's presence is conditional, so
+    /// everything after it shifts when it disappears.
+    #[test]
+    fn the_active_feature_line_is_green_and_only_drawn_when_there_is_one() {
+        for light in [false, true] {
+            let p = accented(light);
+            let quiet = AccessibilitySettingsUI::new();
+            assert_eq!(
+                quiet.settings.active_feature_count(),
+                0,
+                "the default panel gained an active feature, so this test no \
+                 longer checks the zero case"
+            );
+            assert!(
+                !colors(&quiet.render(&p, 600.0, 800.0)).contains(&p.green),
+                "a panel with no features enabled still drew something green"
+            );
+
+            let line = busy()
+                .render(&p, 600.0, 800.0)
+                .into_iter()
+                .find_map(|c| match c {
+                    RenderCommand::Text { text, color, .. }
+                        if text.ends_with("features active") =>
+                    {
+                        Some(color)
+                    }
+                    _ => None,
+                })
+                .expect("the active-feature line was not drawn");
+            assert_eq!(line, p.green, "the active-feature count is not green");
+        }
+    }
+
+    /// Every section heading is `p.lavender` at 15pt Bold, on every tab that
+    /// has one — and the tabs without headings do not grow any.
+    #[test]
+    fn the_section_headings_keep_their_hue_in_both_modes() {
+        for light in [false, true] {
+            let p = accented(light);
+            for (tab, want) in [
+                (A11yTab::Visual, 0),
+                (A11yTab::Input, 3),
+                (A11yTab::Audio, 1),
+                (A11yTab::Reader, 0),
+                (A11yTab::Magnifier, 0),
+            ] {
+                let mut ui = busy();
+                ui.set_tab(tab);
+                let h = headings(&ui.render(&p, 600.0, 800.0));
+                assert_eq!(
+                    h.len(),
+                    want,
+                    "the {tab:?} tab drew {} section headings, expected {want}",
+                    h.len()
+                );
+                assert!(
+                    h.iter().all(|c| *c == p.lavender),
+                    "a section heading on the {tab:?} tab is not lavender: {h:?}"
+                );
+            }
+        }
+    }
+
+    /// No site is mode-invariant.
+    ///
+    /// Stronger than the deleted-constant table, which only catches the nine
+    /// *Mocha* values: this catches any site left reading a constant at all,
+    /// including one that happens to be a Latte value. It holds because
+    /// every role differs between the two palettes, and the fixture accent
+    /// differs too.
+    #[test]
+    fn every_site_changes_when_the_mode_does() {
+        for &tab in &A11yTab::ALL {
+            let mut ui = busy();
+            ui.set_tab(tab);
+            let dark = colors(&ui.render(&wearing(false, AccentColor::Mauve), 600.0, 800.0));
+            let lite = colors(&ui.render(&wearing(true, AccentColor::Mauve), 600.0, 800.0));
+            assert_eq!(
+                dark.len(),
+                lite.len(),
+                "the two modes drew different numbers of coloured commands"
+            );
+            for (i, (d, l)) in dark.iter().zip(&lite).enumerate() {
+                assert_ne!(
+                    d, l,
+                    "colour {i} of the {tab:?} tab is identical in both modes, \
+                     so that site is not reading the palette"
+                );
+            }
+        }
     }
 }

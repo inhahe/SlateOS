@@ -50388,7 +50388,7 @@ commands that carry the colour in question, and assert the two renders agree.
 Candidates: anything drawn on the wallpaper, on a video surface, on a
 thumbnail, or on any other content the palette does not own.
 
-**Part 2 progress. 34 of 49 modules converted.**
+**Part 2 progress. 35 of 49 modules converted.**
 
 - [x] `security_dialog.rs` — 29 constants, done 2026-08-22. The method above
   survived contact: the sweep lives in `gui/desktop/src/palette_check.rs` as
@@ -52330,6 +52330,107 @@ thumbnail, or on any other content the palette does not own.
     banner keep named hues that survive a retheme; the thumb is derived from
     its fill rather than named beside it; and three sites choose by state, so
     every test renders both branches.
+- [x] `hotkeys.rs` — 10 constants over 12 colour sites, done 2026-08-23.
+  Sixty-eight tests in the module (seven new), harness defects Ax52–Tx53
+  (forty-six): 44 caught on the first run, the other two never actually
+  introduced — see the last bullet — and caught once the harness was fixed.
+  - **The first module where a constant turned out to be a *setting*.** The
+    panel background was `Color::rgba(30, 30, 46, 240)` — Mocha `base` with an
+    alpha soldered onto it. That is not a colour someone forgot to convert; it
+    is the transparency setting, frozen. It was wrong in both directions at
+    once: a user who had turned transparency **off** still saw the wallpaper
+    through their hotkey list, and one who had turned it up to Full got a panel
+    noticeably more solid than every neighbouring popup on the same screen.
+    `panel_bg()` is `base` at the palette's own `panel_alpha`, and the test
+    renders at three of them and reads the alpha back.
+    - The same test asserts the shadow does **not** move, and that half is the
+      load-bearing one. A fix that made *everything* follow `panel_alpha` would
+      be as wrong as the constant was — a shadow is an absence of light and does
+      not thin out when the thing casting it does. Without that clause, "the
+      panel follows the setting" is satisfied by a renderer that dissolves the
+      whole panel including its shadow.
+    - **Two defects exist only because of this judgement, and each is caught by
+      exactly one test.** `panel_bg()` reverting to plain `p.base` is invisible
+      to the membership sweep (base *is* a role), invisible to the deleted-
+      constant list, and invisible to the pinning table — because at
+      `Palette::for_mode`, `panel_alpha` is 255 and `p.base == p.panel_bg()`.
+      Only the transparency test, which sets the field to 200 and 160, can see
+      it. Likewise the alpha-refreezing defect
+      (`Color::rgba(p.base.r, p.base.g, p.base.b, 240)`) reads the *right* role
+      and still reintroduces the whole bug. A conversion audited only by "is
+      every colour a role?" would have shipped both.
+  - **Nothing on this panel is accented, and that had to be asserted as a
+    count.** A hotkey card is *read*, not operated: the selected row marks where
+    the user is looking, not what is in force. So the selection moves a rung
+    (`surface0` over the panel, ink from `subtext1` up to `text`) rather than
+    changing hue — which also matches `launcher.rs`, the shell's other
+    keyboard-driven list, where the surface fills the row and the accent is
+    spent on a separate marker bar. "Nothing is accented" is not something a
+    pinning table can check, because a table names *n* sites and by construction
+    cannot notice the *n+1*th; only a count over the whole render can. Ten
+    defects paint the accent onto a site that should not have it, and the count
+    is what sees them — and it only means anything because the fixture's accent
+    is off-palette. Under the shipped theme the accent **is** `blue`, so every
+    one of those ten would have been indistinguishable from a legal role.
+  - **The selection is said twice, and a test that checked one saying would
+    certify the other.** A fill appears *and* the label brightens; either alone
+    is a one-bit signal that a low-contrast display or poor colour
+    discrimination can lose. Six defects collapse, invert or misplace one of the
+    two sayings, and the one that moves the highlight a row below its own label
+    is caught by **that test alone** — the pinning table reads colours, not
+    coordinates, so an off-by-one between the highlight's `y` and the label's is
+    exactly the failure a colour-only conversion audit cannot see.
+  - **Judgement 4 is stated as relations rather than literals, because the
+    literals are what the conversion is deleting.** "The badge is `#181825`" is
+    true in Mocha and false in Latte, so it is not the claim worth testing. What
+    holds in both modes is that a badge is *visibly a badge*: a different colour
+    from the card it sits on, outlined in something different again, and
+    lettered more quietly than the heading. "Quieter" had to be defined as
+    *distance from the panel* rather than absolute darkness — in Latte the
+    dimmer ink is the **lighter** one, so a luma comparison written the obvious
+    way passes in Mocha and inverts in Latte. That test fires on fourteen of the
+    forty-six defects, including a badge painted the same colour as the card and
+    a badge lettered as loudly as the heading.
+  - **Every catcher list was predicted exactly** — of the 44 defects the run
+    actually introduced, not one was caught by a test that had not declared it
+    and not one escaped a test that had, including the badge-contrast
+    predictions, which needed the Latte luma of every role worked out by hand
+    first. The lessons applied before writing a line of test code: render every
+    branch the renderer selects a colour in (four here: selection on/off crossed
+    with the empty and default registries); make each test one claim so its
+    catcher list is a coverage statement; use an off-palette accent so an accent
+    assertion is falsifiable; and index anything positional by index rather than
+    counting it.
+  - **But two defects escaped, and the fault was the harness's, not the
+    suite's** — which is the more useful finding of the two. `reintro-palette.py`
+    applies each edit with `str.replace(old, new, 1)`, which takes the *first*
+    match. Both escapes were role *swaps* written as two edits, and in both the
+    first edit manufactured a fresh copy of the string the second edit was
+    looking for, at a lower file offset. The second edit landed on that copy and
+    undid the first. The pair was a no-op; the file was byte-identical to the
+    original; the suite was run against unmodified source and — correctly —
+    passed.
+    - The harness reported that as `*** NO TEST FAILED ***`, which is not
+      merely unhelpful but the **exact opposite** of the truth. It reads as "the
+      suite has a hole here", when what happened is "the suite was never asked
+      anything". A tool whose entire purpose is to stop a test being trusted on
+      faith must not itself convert an unasked question into an unanswered one,
+      because that verdict costs a full re-run of the suite to disbelieve.
+    - Fixed in three places rather than by re-anchoring the two defects and
+      moving on. `--check` now compares the patched text against the snapshot
+      and reports `NO-OP`, so an authoring mistake of this shape surfaces in the
+      seconds-long preflight instead of after the twenty-five-minute run it
+      invalidates. The run itself refuses to write a file it did not change and
+      names the failure `*** PATCH IS A NO-OP ***`. And the summary line counts
+      these in their own column — `n never introduced` — because folding them
+      into `caught` would inflate the sweep with defects that never existed,
+      and folding them into `escaped` blames the tests for the harness's error.
+    - The general lesson, which applies to every remaining module: **a
+      multi-edit defect can undo itself, and the way to prevent it is to anchor
+      each edit on a neighbouring line the other edit cannot forge.** Both were
+      re-anchored that way (on `font_size: KEY_FONT_SIZE,` and on
+      `corner_radii: CornerRadii::all(KEY_BADGE_RADIUS),`), after which both are
+      caught by the tests that declared them.
 
 **Trigger:** this is not blocked on anything. It is sequenced after the shell
 event loop (`TD-C-THE-SHELL-CAN-DRAW-ITSELF-AND-NOBODY-CAN-ASK-IT-TO`) only

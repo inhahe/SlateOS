@@ -83,6 +83,7 @@ DAPP = "gui/desktop/src/default_apps.rs"
 LAUN = "gui/desktop/src/launcher.rs"
 RESMON = "gui/desktop/src/resmon.rs"
 MOUSESET = "gui/desktop/src/mouse_settings.rs"
+HOTKEYS = "gui/desktop/src/hotkeys.rs"
 
 # (name, file, [(old, new), ...], [packages], [tests expected to fail])
 DEFECTS = [
@@ -13525,6 +13526,639 @@ DEFECTS = [
             'the_knob_is_the_same_ink_on_both_pills',
         ],
     ),
+    (
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA: the drop shadow keeps its own alpha instead of the palette's",
+        HOTKEYS,
+        [
+            ('        color: p.shadow(),\n        corner_radii: radii,',
+             '        color: guitk::color::Color::rgba(0, 0, 0, 100),\n        corner_radii: radii,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'the_panel_is_as_transparent_as_the_user_asked',
+        ],
+    ),
+    (
+        "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB: the panel background keeps Mocha base with its alpha soldered on",
+        HOTKEYS,
+        [
+            ('        color: p.panel_bg(),',
+             '        color: guitk::color::Color::rgba(30, 30, 46, 240),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_panel_draws_comes_from_its_palette',
+            'none_of_the_ten_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+            'the_panel_is_as_transparent_as_the_user_asked',
+            'a_key_badge_stands_off_the_panel_it_sits_on',
+        ],
+    ),
+    (
+        "CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC: the panel border keeps Catppuccin Mocha's own surface2",
+        HOTKEYS,
+        [
+            ('        color: p.surface2,',
+             '        color: guitk::color::Color::from_hex(0x585B70),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_panel_draws_comes_from_its_palette',
+            'none_of_the_ten_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD: the header keeps Catppuccin Mocha's own text",
+        HOTKEYS,
+        [
+            ('        color: p.text,\n        font_size: HEADER_FONT_SIZE,',
+             '        color: guitk::color::Color::from_hex(0xCDD6F4),\n        font_size: HEADER_FONT_SIZE,'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_panel_draws_comes_from_its_palette',
+            'none_of_the_ten_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+            'a_key_badge_stands_off_the_panel_it_sits_on',
+        ],
+    ),
+    (
+        "EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE: the header separator keeps Catppuccin Mocha's own surface1",
+        HOTKEYS,
+        [
+            ('        color: p.surface1,\n        width: 1.0,',
+             '        color: guitk::color::Color::from_hex(0x45475A),\n        width: 1.0,'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_panel_draws_comes_from_its_palette',
+            'none_of_the_ten_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF: the selection highlight keeps Catppuccin Mocha's own surface0",
+        HOTKEYS,
+        [
+            ('                color: p.surface0,',
+             '                color: guitk::color::Color::from_hex(0x313244),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_panel_draws_comes_from_its_palette',
+            'none_of_the_ten_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+            'a_selected_row_is_said_twice',
+        ],
+    ),
+    (
+        "GGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGG: a selected row's label keeps Catppuccin Mocha's own text",
+        HOTKEYS,
+        [
+            ('        let label_color = if is_selected { p.text } else { p.subtext1 };',
+             '        let label_color = if is_selected { guitk::color::Color::from_hex(0xCDD6F4) } else { p.subtext1 };'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_panel_draws_comes_from_its_palette',
+            'none_of_the_ten_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+            'a_selected_row_is_said_twice',
+        ],
+    ),
+    (
+        "HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH: an unselected row's label keeps Catppuccin Mocha's own subtext1",
+        HOTKEYS,
+        [
+            ('        let label_color = if is_selected { p.text } else { p.subtext1 };',
+             '        let label_color = if is_selected { p.text } else { guitk::color::Color::from_hex(0xBAC2DE) };'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_panel_draws_comes_from_its_palette',
+            'none_of_the_ten_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+            'a_selected_row_is_said_twice',
+        ],
+    ),
+    (
+        "IIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIII: the app name beside an action keeps Catppuccin Mocha's own overlay0",
+        HOTKEYS,
+        [
+            ('                color: p.overlay0,',
+             '                color: guitk::color::Color::from_hex(0x6C7086),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_panel_draws_comes_from_its_palette',
+            'none_of_the_ten_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "JJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJ: a key badge keeps Catppuccin Mocha's own mantle",
+        HOTKEYS,
+        [
+            ('                color: p.mantle,',
+             '                color: guitk::color::Color::from_hex(0x181825),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_panel_draws_comes_from_its_palette',
+            'none_of_the_ten_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "KKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKK: a key badge's border keeps Catppuccin Mocha's own surface1",
+        HOTKEYS,
+        [
+            ('                color: p.surface1,\n                line_width: 1.0,',
+             '                color: guitk::color::Color::from_hex(0x45475A),\n                line_width: 1.0,'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_panel_draws_comes_from_its_palette',
+            'none_of_the_ten_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLL: a key badge's lettering keeps Catppuccin Mocha's own subtext0",
+        HOTKEYS,
+        [
+            ('                color: p.subtext0,',
+             '                color: guitk::color::Color::from_hex(0xA6ADC8),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_panel_draws_comes_from_its_palette',
+            'none_of_the_ten_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+            'a_key_badge_stands_off_the_panel_it_sits_on',
+        ],
+    ),
+    (
+        "MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM: the panel border and the header separator trade rungs (border)",
+        HOTKEYS,
+        [
+            ('        color: p.surface2,',
+             '        color: p.surface1,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "NNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNN: the panel border and the header separator trade rungs (separator)",
+        HOTKEYS,
+        [
+            ('        color: p.surface1,\n        width: 1.0,',
+             '        color: p.surface2,\n        width: 1.0,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "OOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOO: the header is lettered as quietly as a key badge",
+        HOTKEYS,
+        [
+            ('        color: p.text,\n        font_size: HEADER_FONT_SIZE,',
+             '        color: p.subtext0,\n        font_size: HEADER_FONT_SIZE,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'a_key_badge_stands_off_the_panel_it_sits_on',
+        ],
+    ),
+    (
+        "PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPP: the selection highlight is one rung too high",
+        HOTKEYS,
+        [
+            ('                color: p.surface0,',
+             '                color: p.surface1,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'a_selected_row_is_said_twice',
+        ],
+    ),
+    (
+        "QQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQ: a selected row's label is lettered in subtext0",
+        HOTKEYS,
+        [
+            ('        let label_color = if is_selected { p.text } else { p.subtext1 };',
+             '        let label_color = if is_selected { p.subtext0 } else { p.subtext1 };'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'a_selected_row_is_said_twice',
+        ],
+    ),
+    (
+        "RRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRR: an unselected row's label sinks to overlay0",
+        HOTKEYS,
+        [
+            ('        let label_color = if is_selected { p.text } else { p.subtext1 };',
+             '        let label_color = if is_selected { p.text } else { p.overlay0 };'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'a_selected_row_is_said_twice',
+        ],
+    ),
+    (
+        "SSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSS: the app name is lettered as loudly as the action it qualifies",
+        HOTKEYS,
+        [
+            ('                color: p.overlay0,',
+             '                color: p.subtext1,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'a_key_badge_stands_off_the_panel_it_sits_on',
+        ],
+    ),
+    (
+        "TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT: a key badge is cut one rung too deep",
+        HOTKEYS,
+        [
+            ('                color: p.mantle,',
+             '                color: p.crust,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "UUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUU: a key badge is the same colour as the card it sits on",
+        HOTKEYS,
+        [
+            ('                color: p.mantle,',
+             '                color: p.base,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'a_key_badge_stands_off_the_panel_it_sits_on',
+        ],
+    ),
+    (
+        "VVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVV: a key badge's border is the same colour as its fill",
+        HOTKEYS,
+        [
+            ('                color: p.surface1,\n                line_width: 1.0,',
+             '                color: p.mantle,\n                line_width: 1.0,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'a_key_badge_stands_off_the_panel_it_sits_on',
+        ],
+    ),
+    (
+        "WWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWW: a key badge is lettered as loudly as the heading",
+        HOTKEYS,
+        [
+            ('                color: p.subtext0,',
+             '                color: p.text,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'a_key_badge_stands_off_the_panel_it_sits_on',
+        ],
+    ),
+    (
+        "XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX: the panel background stops following the transparency setting",
+        HOTKEYS,
+        [
+            ('        color: p.panel_bg(),',
+             '        color: p.base,'),
+        ],
+        ["desktop"],
+        [
+            'the_panel_is_as_transparent_as_the_user_asked',
+        ],
+    ),
+    (
+        "YYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYY: the panel background is drawn from the hover rung",
+        HOTKEYS,
+        [
+            ('        color: p.panel_bg(),',
+             '        color: p.panel_hover(),'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'the_panel_is_as_transparent_as_the_user_asked',
+        ],
+    ),
+    (
+        "ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ: the selection highlight is repainted with the accent",
+        HOTKEYS,
+        [
+            ('                color: p.surface0,',
+             '                color: p.accent,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'nothing_in_this_panel_is_accented',
+            'a_selected_row_is_said_twice',
+        ],
+    ),
+    (
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA: a selected row's label is repainted with the accent",
+        HOTKEYS,
+        [
+            ('        let label_color = if is_selected { p.text } else { p.subtext1 };',
+             '        let label_color = if is_selected { p.accent } else { p.subtext1 };'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'nothing_in_this_panel_is_accented',
+            'a_selected_row_is_said_twice',
+        ],
+    ),
+    (
+        "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB: an unselected row's label is repainted with the accent",
+        HOTKEYS,
+        [
+            ('        let label_color = if is_selected { p.text } else { p.subtext1 };',
+             '        let label_color = if is_selected { p.text } else { p.accent };'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'nothing_in_this_panel_is_accented',
+            'a_selected_row_is_said_twice',
+        ],
+    ),
+    (
+        "CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC: a key badge's border is repainted with the accent",
+        HOTKEYS,
+        [
+            ('                color: p.surface1,\n                line_width: 1.0,',
+             '                color: p.accent,\n                line_width: 1.0,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'nothing_in_this_panel_is_accented',
+        ],
+    ),
+    (
+        "DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD: the header is repainted with the accent",
+        HOTKEYS,
+        [
+            ('        color: p.text,\n        font_size: HEADER_FONT_SIZE,',
+             '        color: p.accent,\n        font_size: HEADER_FONT_SIZE,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'nothing_in_this_panel_is_accented',
+            'a_key_badge_stands_off_the_panel_it_sits_on',
+        ],
+    ),
+    (
+        "EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE: a key badge's lettering is repainted with the accent",
+        HOTKEYS,
+        [
+            ('                color: p.subtext0,',
+             '                color: p.accent,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'nothing_in_this_panel_is_accented',
+            'a_key_badge_stands_off_the_panel_it_sits_on',
+        ],
+    ),
+    (
+        "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF: the panel background is repainted with the accent",
+        HOTKEYS,
+        [
+            ('        color: p.panel_bg(),',
+             '        color: p.accent,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'nothing_in_this_panel_is_accented',
+            'the_panel_is_as_transparent_as_the_user_asked',
+            'a_key_badge_stands_off_the_panel_it_sits_on',
+        ],
+    ),
+    (
+        "GGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGG: the header separator is repainted with the accent",
+        HOTKEYS,
+        [
+            ('        color: p.surface1,\n        width: 1.0,',
+             '        color: p.accent,\n        width: 1.0,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'nothing_in_this_panel_is_accented',
+        ],
+    ),
+    (
+        "HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH: the app name beside an action is repainted with the accent",
+        HOTKEYS,
+        [
+            ('                color: p.overlay0,',
+             '                color: p.accent,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'nothing_in_this_panel_is_accented',
+            'a_key_badge_stands_off_the_panel_it_sits_on',
+        ],
+    ),
+    (
+        "IIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIII: a key badge is repainted with the accent",
+        HOTKEYS,
+        [
+            ('                color: p.mantle,',
+             '                color: p.accent,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'nothing_in_this_panel_is_accented',
+        ],
+    ),
+    (
+        "JJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJ: the label branch collapses to the unselected ink",
+        HOTKEYS,
+        [
+            ('        let label_color = if is_selected { p.text } else { p.subtext1 };',
+             '        let label_color = p.subtext1;'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'a_selected_row_is_said_twice',
+        ],
+    ),
+    (
+        "KKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKK: the label branch collapses to the selected ink",
+        HOTKEYS,
+        [
+            ('        let label_color = if is_selected { p.text } else { p.subtext1 };',
+             '        let label_color = p.text;'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'a_selected_row_is_said_twice',
+        ],
+    ),
+    (
+        "LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLL: the label branch is inverted",
+        HOTKEYS,
+        [
+            ('        let label_color = if is_selected { p.text } else { p.subtext1 };',
+             '        let label_color = if is_selected { p.subtext1 } else { p.text };'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'a_selected_row_is_said_twice',
+        ],
+    ),
+    (
+        "MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM: every row draws the selection highlight",
+        HOTKEYS,
+        [
+            ('        // Selection highlight.\n        if is_selected {',
+             '        // Selection highlight.\n        if true {'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'a_selected_row_is_said_twice',
+        ],
+    ),
+    (
+        "NNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNN: the selection lands one row past the one asked for",
+        HOTKEYS,
+        [
+            ('        let is_selected = selected_index == Some(i);',
+             '        let is_selected = selected_index == Some(i.wrapping_add(1));'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'a_selected_row_is_said_twice',
+        ],
+    ),
+    (
+        "OOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOO: the selection highlight is drawn a row below its label",
+        HOTKEYS,
+        [
+            ('                y: row_y + 2.0,',
+             '                y: row_y + 2.0 + ROW_HEIGHT,'),
+        ],
+        ["desktop"],
+        [
+            'a_selected_row_is_said_twice',
+        ],
+    ),
+    (
+        "PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPP: a key badge's border and lettering trade roles",
+        HOTKEYS,
+        [
+            ('                color: p.surface1,\n                line_width: 1.0,',
+             '                color: p.subtext0,\n                line_width: 1.0,'),
+            # Anchored on the line *below* as well, because the edit above has
+            # just manufactured a second `color: p.subtext0,` at a lower file
+            # offset. A one-line pattern would land on that copy, revert the
+            # first edit, and leave the file untouched — the defect would be a
+            # no-op reported as `NO TEST FAILED`. See `check()`'s NO-OP branch.
+            ('                color: p.subtext0,\n                font_size: KEY_FONT_SIZE,',
+             '                color: p.surface1,\n                font_size: KEY_FONT_SIZE,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'a_key_badge_stands_off_the_panel_it_sits_on',
+        ],
+    ),
+    (
+        "QQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQ: the header and a key badge trade lettering",
+        HOTKEYS,
+        [
+            ('        color: p.text,\n        font_size: HEADER_FONT_SIZE,',
+             '        color: p.subtext0,\n        font_size: HEADER_FONT_SIZE,'),
+            ('                color: p.subtext0,',
+             '                color: p.text,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'a_key_badge_stands_off_the_panel_it_sits_on',
+        ],
+    ),
+    (
+        "RRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRR: the drop shadow is drawn at the scrim's weight",
+        HOTKEYS,
+        [
+            ('        color: p.shadow(),\n        corner_radii: radii,',
+             '        color: p.scrim(),\n        corner_radii: radii,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'the_panel_is_as_transparent_as_the_user_asked',
+        ],
+    ),
+    (
+        "SSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSS: the selection highlight and a key badge trade rungs",
+        HOTKEYS,
+        [
+            ('                color: p.surface0,',
+             '                color: p.mantle,'),
+            # As in P: the edit above manufactures a second `color: p.mantle,`
+            # at a lower file offset, so this one has to name the badge fill's
+            # own next line to reach the badge rather than undo its partner.
+            ('                color: p.mantle,\n                corner_radii: CornerRadii::all(KEY_BADGE_RADIUS),',
+             '                color: p.surface0,\n                corner_radii: CornerRadii::all(KEY_BADGE_RADIUS),'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'a_selected_row_is_said_twice',
+        ],
+    ),
+    (
+        "TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT: the panel background reads the right role and freezes the alpha again",
+        HOTKEYS,
+        [
+            ('        color: p.panel_bg(),',
+             '        color: guitk::color::Color::rgba(p.base.r, p.base.g, p.base.b, 240),'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'the_panel_is_as_transparent_as_the_user_asked',
+        ],
+    ),
 ]
 
 
@@ -13566,8 +14200,10 @@ def check(snap):
     """
     bad = 0
     amb = 0
+    noop = 0
     for name, path, edits, _pkgs, _expect in DEFECTS:
         text = snap[path].decode("utf-8")
+        original = text
         # A defect may list the same edit twice on purpose, to wound both of an
         # identical pair; only an ambiguity the defect does *not* acknowledge
         # is a problem, so count the listed copies and subtract them.
@@ -13589,8 +14225,27 @@ def check(snap):
                     print(f"AMBIGUOUS ({n} matches, {listed[old]} listed)  {name}")
                     amb += 1
             text = text.replace(old, new, 1)
-    print(f"\n{len(DEFECTS)} defects, {bad} stale, {amb} ambiguous")
-    return 1 if bad or amb else 0
+        # A multi-edit defect can undo itself. `str.replace(old, new, 1)` takes
+        # the *first* match, so if one edit creates the pattern a later edit
+        # looks for, and the created copy sits earlier in the file, the later
+        # edit reverts it and the pair cancels. Module 35 wrote two such
+        # defects — a badge's border and lettering trading roles, and the
+        # selection highlight trading rungs with a badge — and both came back
+        # from a 25-minute run as `NO TEST FAILED`.
+        #
+        # That verdict is not merely unhelpful, it is the *opposite* of the
+        # truth: it reads as "the suite has a hole here" when what happened is
+        # "the defect was never introduced, so nothing was asked of the
+        # suite". A harness whose whole purpose is to stop a test being
+        # trusted on faith must not itself report an unasked question as an
+        # unanswered one. Checking it here rather than mid-run also means the
+        # authoring mistake surfaces in the seconds-long preflight instead of
+        # after the run it invalidates.
+        if text == original:
+            print(f"NO-OP  {name}\n    every edit was undone by a later one")
+            noop += 1
+    print(f"\n{len(DEFECTS)} defects, {bad} stale, {amb} ambiguous, {noop} no-op")
+    return 1 if bad or amb or noop else 0
 
 
 def main():
@@ -13623,6 +14278,14 @@ def main():
             if not ok:
                 verdicts.append((name, "PATTERN NOT FOUND"))
                 print(f"{name}\n    PATTERN NOT FOUND\n", flush=True)
+                continue
+            # See `check()`: a multi-edit defect can cancel itself out. Running
+            # the suite against unmodified source would report `NO TEST FAILED`
+            # — an accusation against the tests for a question they were never
+            # asked. Refuse to run instead, and give the failure its own name.
+            if text == snap[path].decode("utf-8"):
+                verdicts.append((name, "*** PATCH IS A NO-OP ***"))
+                print(f"{name}\n    *** PATCH IS A NO-OP ***\n", flush=True)
                 continue
             (ROOT / path).write_text(text, encoding="utf-8", newline="")
 
@@ -13689,9 +14352,15 @@ def main():
         return sum(1 for _, v in verdicts if mark in v)
 
     escaped = tally("NO TEST FAILED") + tally("DID NOT COMPILE")
+    # Neither of these asked the suite anything, so neither is evidence about
+    # it. Counting them as "caught" would inflate the sweep with defects that
+    # were never introduced; counting them as "escaped" would blame the tests
+    # for the harness's own authoring error. They get their own column.
+    unasked = tally("PATCH IS A NO-OP") + tally("PATTERN NOT FOUND")
     print(
-        f"\n{len(verdicts)} defects: {len(verdicts) - escaped} caught, "
-        f"{escaped} escaped, {tally('[MISSING:')} under-caught, "
+        f"\n{len(verdicts)} defects: {len(verdicts) - escaped - unasked} caught, "
+        f"{escaped} escaped, {unasked} never introduced, "
+        f"{tally('[MISSING:')} under-caught, "
         f"{tally('[UNDECLARED:')} under-declared"
     )
 

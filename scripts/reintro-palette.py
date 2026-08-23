@@ -5656,6 +5656,7 @@ DEFECTS = [
         [
             'the_fixtures_take_every_branch_the_osd_has',
             'every_text_the_osd_draws_is_in_the_role_it_claims',
+            'osd_text_is_bounded_by_width_not_pre_truncated',
         ],
     ),
     (
@@ -5909,6 +5910,7 @@ DEFECTS = [
         ["desktop"],
         [
             'every_kind_draws_its_icon_in_the_colour_that_kind_claims',
+            'every_text_the_osd_draws_is_in_the_role_it_claims',
         ],
     ),
     (
@@ -5922,6 +5924,7 @@ DEFECTS = [
         [
             'every_colour_the_osd_draws_comes_from_its_palette',
             'every_kind_draws_its_icon_in_the_colour_that_kind_claims',
+            'every_text_the_osd_draws_is_in_the_role_it_claims',
         ],
     ),
     (
@@ -5947,6 +5950,7 @@ DEFECTS = [
         ["desktop"],
         [
             'every_kind_draws_its_icon_in_the_colour_that_kind_claims',
+            'every_pair_this_module_uses_to_tell_things_apart_stays_apart',
         ],
     ),
     (
@@ -6210,7 +6214,6 @@ DEFECTS = [
         ],
         ["desktop"],
         [
-            'the_fixtures_take_every_branch_the_osd_has',
             'the_settings_panel_has_exactly_three_accent_sites',
             'every_rectangle_the_osd_draws_is_in_the_role_it_claims',
         ],

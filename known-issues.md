@@ -50388,7 +50388,7 @@ commands that carry the colour in question, and assert the two renders agree.
 Candidates: anything drawn on the wallpaper, on a video surface, on a
 thumbnail, or on any other content the palette does not own.
 
-**Part 2 progress. 23 of 49 modules converted.**
+**Part 2 progress. 24 of 49 modules converted.**
 
 - [x] `security_dialog.rs` — 29 constants, done 2026-08-22. The method above
   survived contact: the sweep lives in `gui/desktop/src/palette_check.rs` as
@@ -51552,6 +51552,68 @@ thumbnail, or on any other content the palette does not own.
     restore, leaving the in-flight defect patched on disk; `run_dialog.rs` was
     left modified by that kill. **After any stop of a harness run, `git status`
     must be checked and the damaged file restored with `git checkout --`.**
+- [x] `osd.rs` — 11 constants, done 2026-08-23. Eleven tests, harness defects
+  Ax22–Ax25 (ninety-eight). **98/98 caught, zero escapes.**
+  - **The width rule has a third gap, and this module is where it showed.**
+    Modules 21 and 22 taught that the sweep is only as wide as the render it is
+    given, and that a per-*kind* assertion table is not a per-*site* one. Both
+    were applied here up front — and both still missed a whole class. A
+    per-source-site *text* table and a per-source-site *rectangle* table check
+    the colours that reach the renderer; neither can see the **choice** sites,
+    the `match`/`if` expressions that decide *which* role gets handed to a
+    shared renderer. `render_content` makes 15 such decisions and `icon_info`
+    another 10, and not one was reachable: the sweep waves them through
+    (every arm names a role, and a role is a member of both palettes) and the
+    two role tables render only two fixtures. That is 25 sites checked by
+    nothing, which is worse than modules 21 and 22 lost combined. The fix is an
+    eleventh test, `every_kind_draws_its_icon_in_the_colour_that_kind_claims`,
+    which spells out all 25 mappings. **Generalised: n source sites means n
+    assertions — and a site that only *selects* a colour is a source site too,
+    even though it draws nothing itself.**
+  - **An OSD overlay takes no accent at all — the deliberate mirror of module
+    23.** Module 23's rule was "the accent marks what you can move, not what
+    you are being told"; a volume *bar* is draggable so it takes the accent.
+    The volume *overlay* is the same subject and the opposite answer: it is
+    pure feedback that appears, reports and fades, and nothing in it is
+    touchable. So zero of the overlay's sites follow the accent, held by
+    `no_colour_the_overlay_draws_ever_follows_the_accent`. The settings panel
+    below it *is* interactive and has exactly three accent sites, held by a
+    test that counts them — a count, not a list, so a fourth site added later
+    fails rather than passing unnoticed.
+  - **Volume-blue and brightness-yellow are a category pair, so both freeze.**
+    Tempting to give volume the accent since it is the most-shown overlay; that
+    would make the two indistinguishable on a blue desktop and identical on a
+    yellow one. The pair is what carries the meaning, so neither half may move
+    independently, and `volume_and_brightness_stay_a_pair_you_can_tell_apart`
+    says exactly that.
+  - **Proving ink is *derived* needs the accent to vary, and the stock accents
+    are all too similar to do it.** `ink_drawn_on_a_coloured_fill_is_readable_
+    in_both_modes` originally used the four `SAFE_ACCENTS`, which are all
+    pastel — `readable_on` answers the same dark endpoint for every one of
+    them, so a hard-coded constant passed. The test only bites once it renders
+    a deliberately dark accent (`0x0020_3050`) *and* a deliberately pale one
+    (`0x00F5_D0E0`) and demands the ink flip between them. Any future
+    `on_accent`/`readable_on` test needs the same treatment; four similar
+    fixtures prove nothing about a derivation.
+  - **`text_saying` — one source site, many rendered instances.** The helper
+    first asserted exactly one match and failed, because the settings panel
+    draws four ticks from one `"✓"` expression. The correct question is not
+    "which one" but "do they all agree": at least one match, and all matches
+    the same colour. If they ever disagree the site has grown a branch that
+    needs naming, so the assertion catches that too rather than silently
+    reporting whichever came first.
+  - **The under-declaration audit found four, and over-declaration one.** Four
+    defects were caught by tests their declaration did not name (an album
+    branch-killer also trips the text-bounding test; two battery defects also
+    trip the text-role table; the Success-icon defect also trips the
+    pair-distinctness test). One declared a test that did *not* fire — recolouring
+    the selected position dot changes no branch, so
+    `the_fixtures_take_every_branch_the_osd_has` was wrong to list. The harness
+    reports only that second direction, which is the rarer one; the audit
+    script is what catches the first.
+  - **clippy trap: `unusual_byte_groupings`.** `Color::from_hex(0x2030_50)` is
+    rejected — hex digits must group in equal-size runs. Write the full eight
+    (`0x0020_3050`), which is what the rest of the file does anyway.
 
 **Trigger:** this is not blocked on anything. It is sequenced after the shell
 event loop (`TD-C-THE-SHELL-CAN-DRAW-ITSELF-AND-NOBODY-CAN-ASK-IT-TO`) only

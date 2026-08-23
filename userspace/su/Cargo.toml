@@ -17,6 +17,9 @@ description = "SlateOS user switch"
 # limit: an attacker refused at the console simply runs `su` instead.
 # See `design-decisions.md` §354.
 [dependencies]
+# su names the target account and the shell it will exec. It runs setuid, so
+# a forged line in its output is a forged line from a privileged program.
+quoting = { path = "../quoting" }
 authlib = { path = "../authlib" }
 userdb = { path = "../userdb" }
 

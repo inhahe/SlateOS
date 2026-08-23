@@ -4,6 +4,9 @@ version = "0.1.0"
 edition = "2024"
 description = "SlateOS install - copy files and set attributes"
 [dependencies]
+# install names its source and destination paths and the strip program it
+# was told to run, every one of them from the command line.
+quoting = { path = "../quoting" }
 modechange = { path = "../modechange" }
 
 [build-dependencies]

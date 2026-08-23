@@ -4,6 +4,9 @@ version = "0.1.0"
 edition = "2024"
 description = "SlateOS losetup utility"
 [dependencies]
+# losetup names loop devices and the backing files bound to them; the
+# backing file is an arbitrary path the caller supplied.
+quoting = { path = "../quoting" }
 
 [build-dependencies]
 embed-manifest = "1.5.0"

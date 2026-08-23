@@ -4,6 +4,7 @@
 //!
 //! Single personality: `virsh`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -68,27 +69,27 @@ fn run_virsh(args: Vec<String>) -> i32 {
         }
         "start" => {
             let domain = rest.first().unwrap_or(&"vm1");
-            println!("Domain '{}' started", domain);
+            println!("Domain {} started", quoteaf_os(domain));
         }
         "shutdown" => {
             let domain = rest.first().unwrap_or(&"vm1");
-            println!("Domain '{}' is being shutdown", domain);
+            println!("Domain {} is being shutdown", quoteaf_os(domain));
         }
         "destroy" => {
             let domain = rest.first().unwrap_or(&"vm1");
-            println!("Domain '{}' destroyed", domain);
+            println!("Domain {} destroyed", quoteaf_os(domain));
         }
         "reboot" => {
             let domain = rest.first().unwrap_or(&"vm1");
-            println!("Domain '{}' is being rebooted", domain);
+            println!("Domain {} is being rebooted", quoteaf_os(domain));
         }
         "suspend" => {
             let domain = rest.first().unwrap_or(&"vm1");
-            println!("Domain '{}' suspended", domain);
+            println!("Domain {} suspended", quoteaf_os(domain));
         }
         "resume" => {
             let domain = rest.first().unwrap_or(&"vm1");
-            println!("Domain '{}' resumed", domain);
+            println!("Domain {} resumed", quoteaf_os(domain));
         }
         "dominfo" => {
             let domain = rest.first().unwrap_or(&"vm1");
@@ -131,7 +132,7 @@ fn run_virsh(args: Vec<String>) -> i32 {
             println!("</domain>");
         }
         _ => {
-            eprintln!("virsh: unknown command '{}'. See --help.", cmd);
+            eprintln!("virsh: unknown command {}. See --help.", quoteaf_os(cmd));
             return 1;
         }
     }

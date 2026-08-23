@@ -25,6 +25,7 @@
 //!       --version             Output version information and exit
 //! ```
 
+use quoting::quoteaf_os;
 use std::env;
 use std::fs::{self, File};
 use std::io::{self, BufRead, BufReader, Read, Write};
@@ -157,7 +158,7 @@ fn parse_args(args: &[String]) -> ParseResult {
             } else if prefix.is_none() {
                 prefix = Some(arg.clone());
             } else {
-                eprintln!("split: extra operand '{arg}'");
+                eprintln!("split: extra operand {}", quoteaf_os(arg));
                 eprintln!("Try 'split --help' for more information.");
                 process::exit(1);
             }
@@ -219,7 +220,7 @@ fn parse_args(args: &[String]) -> ParseResult {
                     filter = Some(v.to_string());
                 }
                 _ => {
-                    eprintln!("split: unrecognized option '{arg}'");
+                    eprintln!("split: unrecognized option {}", quoteaf_os(arg));
                     eprintln!("Try 'split --help' for more information.");
                     process::exit(1);
                 }
@@ -267,7 +268,7 @@ fn parse_args(args: &[String]) -> ParseResult {
                     break;
                 }
                 _ => {
-                    eprintln!("split: invalid option -- '{ch}'");
+                    eprintln!("split: invalid option -- {}", quoteaf_os(ch.to_string()));
                     eprintln!("Try 'split --help' for more information.");
                     process::exit(1);
                 }
@@ -309,7 +310,7 @@ fn collect_or_next(
     }
     *i += 1;
     if *i >= args.len() {
-        eprintln!("split: option '{flag}' requires an argument");
+        eprintln!("split: option {} requires an argument", quoteaf_os(flag));
         eprintln!("Try 'split --help' for more information.");
         process::exit(1);
     }
@@ -333,7 +334,7 @@ fn parse_positive(s: &str, flag: &str) -> u64 {
     match s.parse::<u64>() {
         Ok(n) if n > 0 => n,
         _ => {
-            eprintln!("split: invalid number of {flag}: '{s}'");
+            eprintln!("split: invalid number of {flag}: {}", quoteaf_os(s));
             process::exit(1);
         }
     }
@@ -344,7 +345,10 @@ fn parse_byte_val(s: &str, flag: &str) -> u64 {
     match parse_byte_size(s) {
         Some(n) if n > 0 => n,
         _ => {
-            eprintln!("split: invalid number of bytes for {flag}: '{s}'");
+            eprintln!(
+                "split: invalid number of bytes for {flag}: {}",
+                quoteaf_os(s)
+            );
             process::exit(1);
         }
     }
@@ -398,7 +402,7 @@ fn output_name(config: &Config, idx: u64) -> Option<String> {
 /// Create (or truncate) an output file and optionally print a diagnostic.
 fn open_output(path: &str, verbose: bool) -> io::Result<File> {
     if verbose {
-        eprintln!("creating file '{path}'");
+        eprintln!("creating file {}", quoteaf_os(path));
     }
     File::create(path)
 }

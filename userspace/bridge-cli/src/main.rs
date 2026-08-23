@@ -4,6 +4,7 @@
 //!
 //! Multi-personality: `bridge`, `brctl`, `bondctl`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -42,7 +43,7 @@ fn run_bridge(args: &[String]) -> i32 {
                     );
                 }
                 "set" => println!("bridge: link set completed"),
-                _ => println!("bridge: link command '{}' completed", cmd),
+                _ => println!("bridge: link command {} completed", quoteaf_os(cmd)),
             }
         }
         "fdb" => {
@@ -62,7 +63,7 @@ fn run_bridge(args: &[String]) -> i32 {
                         .unwrap_or("00:00:00:00:00:00");
                     println!("bridge: fdb {} {} completed", cmd, addr);
                 }
-                _ => println!("bridge: fdb command '{}' completed", cmd),
+                _ => println!("bridge: fdb command {} completed", quoteaf_os(cmd)),
             }
         }
         "mdb" => {
@@ -82,11 +83,11 @@ fn run_bridge(args: &[String]) -> i32 {
                     println!("br0\t 1 PVID Egress Untagged");
                 }
                 "add" | "del" => println!("bridge: vlan {} completed", cmd),
-                _ => println!("bridge: vlan command '{}' completed", cmd),
+                _ => println!("bridge: vlan command {} completed", quoteaf_os(cmd)),
             }
         }
         "monitor" => println!("Listening for bridge events..."),
-        _ => println!("bridge: unknown object '{}'", obj),
+        _ => println!("bridge: unknown object {}", quoteaf_os(obj)),
     }
     0
 }
@@ -136,7 +137,7 @@ fn run_brctl(args: &[String]) -> i32 {
             println!("brctl: STP for {} set to {}", br, state);
         }
         _ => {
-            eprintln!("brctl: unknown command '{}'", subcmd);
+            eprintln!("brctl: unknown command {}", quoteaf_os(subcmd));
             return 1;
         }
     }
@@ -205,7 +206,7 @@ fn run_bondctl(args: &[String]) -> i32 {
             println!("bondctl: set mode for {} to {}", bond, mode);
         }
         _ => {
-            eprintln!("bondctl: unknown command '{}'", subcmd);
+            eprintln!("bondctl: unknown command {}", quoteaf_os(subcmd));
             return 1;
         }
     }

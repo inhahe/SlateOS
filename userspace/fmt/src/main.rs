@@ -23,6 +23,7 @@
 //!       --version         Output version information and exit
 //! ```
 
+use quoting::{quoteaf_os, quotef_os};
 use std::env;
 use std::fs::File;
 use std::io::{self, BufRead, BufReader, Write};
@@ -127,7 +128,7 @@ fn parse_args(args: &[String]) -> ParseResult {
                 match val_str.parse::<usize>() {
                     Ok(n) => width = Some(n),
                     Err(_) => {
-                        eprintln!("fmt: invalid width: '{val_str}'");
+                        eprintln!("fmt: invalid width: {}", quoteaf_os(&val_str));
                         process::exit(1);
                     }
                 }
@@ -145,7 +146,7 @@ fn parse_args(args: &[String]) -> ParseResult {
                 match val_str.parse::<usize>() {
                     Ok(n) => goal = Some(n),
                     Err(_) => {
-                        eprintln!("fmt: invalid goal: '{val_str}'");
+                        eprintln!("fmt: invalid goal: {}", quoteaf_os(&val_str));
                         process::exit(1);
                     }
                 }
@@ -162,7 +163,7 @@ fn parse_args(args: &[String]) -> ParseResult {
                 };
                 prefix = Some(val_str);
             } else {
-                eprintln!("fmt: unrecognized option '{arg}'");
+                eprintln!("fmt: unrecognized option {}", quoteaf_os(arg));
                 eprintln!("Try 'fmt --help' for more information.");
                 process::exit(1);
             }
@@ -203,7 +204,7 @@ fn parse_args(args: &[String]) -> ParseResult {
                     match val_str.parse::<usize>() {
                         Ok(n) => width = Some(n),
                         Err(_) => {
-                            eprintln!("fmt: invalid width: '{val_str}'");
+                            eprintln!("fmt: invalid width: {}", quoteaf_os(&val_str));
                             process::exit(1);
                         }
                     }
@@ -224,7 +225,7 @@ fn parse_args(args: &[String]) -> ParseResult {
                     match val_str.parse::<usize>() {
                         Ok(n) => goal = Some(n),
                         Err(_) => {
-                            eprintln!("fmt: invalid goal: '{val_str}'");
+                            eprintln!("fmt: invalid goal: {}", quoteaf_os(&val_str));
                             process::exit(1);
                         }
                     }
@@ -246,7 +247,7 @@ fn parse_args(args: &[String]) -> ParseResult {
                     break;
                 }
                 _ => {
-                    eprintln!("fmt: invalid option -- '{ch}'");
+                    eprintln!("fmt: invalid option -- {}", quoteaf_os(ch.to_string()));
                     eprintln!("Try 'fmt --help' for more information.");
                     process::exit(1);
                 }
@@ -583,7 +584,7 @@ fn run(config: &Config) -> io::Result<i32> {
                     read_all(&mut reader)?
                 }
                 Err(e) => {
-                    eprintln!("fmt: {path}: {e}");
+                    eprintln!("fmt: {}: {e}", quotef_os(path));
                     exit_code = 1;
                     continue;
                 }

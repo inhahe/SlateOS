@@ -23,6 +23,7 @@
 //!       --version             Output version information and exit
 //! ```
 
+use quoting::{quoteaf_os, quotef_os};
 use std::env;
 use std::fs::{File, OpenOptions};
 use std::io::{self, Read, Write};
@@ -144,7 +145,7 @@ fn parse_args(args: &[String]) -> ParseResult {
                     "exit" => OutputErrorMode::Exit,
                     "exit-nopipe" => OutputErrorMode::ExitNopipe,
                     _ => {
-                        eprintln!("tee: invalid output error mode '{mode_str}'");
+                        eprintln!("tee: invalid output error mode {}", quoteaf_os(&mode_str));
                         eprintln!("Valid modes: warn, warn-nopipe, exit, exit-nopipe");
                         eprintln!("Try 'tee --help' for more information.");
                         process::exit(1);
@@ -152,7 +153,7 @@ fn parse_args(args: &[String]) -> ParseResult {
                 };
                 output_error_set = true;
             } else {
-                eprintln!("tee: unrecognized option '{arg}'");
+                eprintln!("tee: unrecognized option {}", quoteaf_os(arg));
                 eprintln!("Try 'tee --help' for more information.");
                 process::exit(1);
             }
@@ -168,7 +169,7 @@ fn parse_args(args: &[String]) -> ParseResult {
                 'i' => ignore_interrupts = true,
                 'p' => diagnose_nonpipe = true,
                 _ => {
-                    eprintln!("tee: invalid option -- '{ch}'");
+                    eprintln!("tee: invalid option -- {}", quoteaf_os(ch.to_string()));
                     eprintln!("Try 'tee --help' for more information.");
                     process::exit(1);
                 }
@@ -243,7 +244,7 @@ fn open_files(config: &Config) -> (Vec<(String, File)>, bool) {
         match result {
             Ok(f) => files.push((path.clone(), f)),
             Err(e) => {
-                eprintln!("tee: {path}: {e}");
+                eprintln!("tee: {}: {e}", quotef_os(path));
                 all_ok = false;
             }
         }
@@ -300,7 +301,7 @@ fn run(config: &Config) -> i32 {
             if let Err(e) = file.write_all(chunk) {
                 all_ok = false;
                 if should_warn(config.output_error, &e) {
-                    eprintln!("tee: {path}: {e}");
+                    eprintln!("tee: {}: {e}", quotef_os(&path));
                 }
                 if should_exit(config.output_error, &e) {
                     return 1;
@@ -330,7 +331,7 @@ fn run(config: &Config) -> i32 {
     // Flush all output files.
     for (path, mut file) in files {
         if let Err(e) = file.flush() {
-            eprintln!("tee: {path}: {e}");
+            eprintln!("tee: {}: {e}", quotef_os(&path));
             all_ok = false;
         }
     }

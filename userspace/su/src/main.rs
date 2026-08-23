@@ -45,6 +45,7 @@
 //! and a fallback marker to `/tmp/.users/` so that `who`/`w` can
 //! report the logged-in user.
 
+use quoting::quoteaf_os;
 use std::env;
 use std::fs;
 use std::io::{self, Write};
@@ -167,7 +168,7 @@ fn authenticate(
     }
 
     if record.is_locked() {
-        eprintln!("{who}: account '{name}' is locked");
+        eprintln!("{who}: account {} is locked", quoteaf_os(&name));
         return false;
     }
 
@@ -175,14 +176,14 @@ fn authenticate(
     // "the stored password is the empty string": the first answers
     // `NoPassword`, the second `Accepted`, and only the first is refused here.
     if record.check_password("") == Auth::NoPassword {
-        eprintln!("{who}: account '{name}' has no password set");
+        eprintln!("{who}: account {} has no password set", quoteaf_os(&name));
         return false;
     }
 
     if record.has_legacy_password() {
         eprintln!(
-            "{who}: account '{name}' has a password stored in a format this \
-             system can no longer verify; run `useradm passwd {name}` as root"
+            "{who}: account {} has a password stored in a format this system can no longer verify; run `useradm passwd {name}` as root",
+            quoteaf_os(&name)
         );
         return false;
     }
@@ -494,7 +495,7 @@ fn parse_su_args(args: &[String]) -> Result<SuOptions, i32> {
             }
             "-c" | "--command" => {
                 let Some(value) = rest.next() else {
-                    eprintln!("su: option '{arg}' requires an argument");
+                    eprintln!("su: option {} requires an argument", quoteaf_os(arg));
                     return Err(1);
                 };
                 opts.command = Some(value.clone());
@@ -504,7 +505,7 @@ fn parse_su_args(args: &[String]) -> Result<SuOptions, i32> {
             }
             "-s" | "--shell" => {
                 let Some(value) = rest.next() else {
-                    eprintln!("su: option '{arg}' requires an argument");
+                    eprintln!("su: option {} requires an argument", quoteaf_os(arg));
                     return Err(1);
                 };
                 opts.shell = Some(value.clone());
@@ -575,7 +576,7 @@ fn run_su(args: &[String]) -> i32 {
     };
 
     if target.is_locked() {
-        eprintln!("su: account '{}' is locked", name_of(target));
+        eprintln!("su: account {} is locked", quoteaf_os(name_of(target)));
         return 1;
     }
 

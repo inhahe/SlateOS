@@ -4,6 +4,7 @@
 //!
 //! Multi-personality: `dagster`, `dagit`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -50,7 +51,7 @@ fn run_dagster(args: &[String], is_dagit: bool) -> i32 {
                 }
                 "execute" => {
                     let job = args.get(2).map(|s| s.as_str()).unwrap_or("etl_pipeline");
-                    println!("Launching run for job '{}'...", job);
+                    println!("Launching run for job {}...", quoteaf_os(job));
                     println!("  Run ID: abc123-def456");
                     println!("  Status: STARTED");
                     println!("  Step: extract — SUCCESS (1.2s)");
@@ -58,7 +59,7 @@ fn run_dagster(args: &[String], is_dagit: bool) -> i32 {
                     println!("  Step: load — SUCCESS (0.8s)");
                     println!("  Run completed: SUCCESS (5.4s)");
                 }
-                _ => println!("dagster job: '{}' completed", sub),
+                _ => println!("dagster job: {} completed", quoteaf_os(sub)),
             }
         }
         "asset" => {
@@ -74,7 +75,7 @@ fn run_dagster(args: &[String], is_dagit: bool) -> i32 {
                 println!("  clean_users: SUCCESS");
                 println!("Done.");
             } else {
-                println!("dagster asset: '{}' completed", sub);
+                println!("dagster asset: {} completed", quoteaf_os(sub));
             }
         }
         "schedule" => {
@@ -84,24 +85,24 @@ fn run_dagster(args: &[String], is_dagit: bool) -> i32 {
                 println!("hourly_etl        0 * * * *        RUNNING  in 23 min");
                 println!("daily_report      0 8 * * *        RUNNING  in 14h");
             } else {
-                println!("dagster schedule: '{}' completed", sub);
+                println!("dagster schedule: {} completed", quoteaf_os(sub));
             }
         }
         "project" => {
             let sub = args.get(1).map(|s| s.as_str()).unwrap_or("scaffold");
             if sub == "scaffold" {
                 let name = args.get(2).map(|s| s.as_str()).unwrap_or("my_project");
-                println!("Creating Dagster project '{}'...", name);
+                println!("Creating Dagster project {}...", quoteaf_os(name));
                 println!("  Created: {}/", name);
                 println!("  Created: {}/assets.py", name);
                 println!("  Created: {}/definitions.py", name);
                 println!("  Created: setup.py");
                 println!("Done.");
             } else {
-                println!("dagster project: '{}' completed", sub);
+                println!("dagster project: {} completed", quoteaf_os(sub));
             }
         }
-        _ => println!("dagster: '{}' completed", subcmd),
+        _ => println!("dagster: {} completed", quoteaf_os(subcmd)),
     }
     0
 }

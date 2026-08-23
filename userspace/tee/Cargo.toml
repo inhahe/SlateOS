@@ -4,3 +4,5 @@ version = "0.1.0"
 edition = "2024"
 description = "SlateOS tee - read stdin, write to stdout and files"
 [dependencies]
+# tee names each file it is writing to, taken from the command line.
+quoting = { path = "../quoting" }

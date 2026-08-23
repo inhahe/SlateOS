@@ -149,6 +149,9 @@ version = "0.1.0"
 [[package]]
 name = "airflow-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "airtable-cli"
@@ -1057,6 +1060,9 @@ version = "0.1.0"
 [[package]]
 name = "bridge-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "brlcad-cli"
@@ -2075,6 +2081,9 @@ version = "0.1.0"
 [[package]]
 name = "ctags"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "cubase-cli"
@@ -2150,6 +2159,9 @@ version = "0.1.0"
 [[package]]
 name = "dagster-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "dapr-cli"
@@ -3050,6 +3062,9 @@ version = "0.1.0"
 [[package]]
 name = "expand"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "expensify-cli"
@@ -3397,6 +3412,9 @@ version = "0.1.0"
 [[package]]
 name = "fmt"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "fnott-cli"
@@ -3617,6 +3635,9 @@ version = "0.1.0"
 [[package]]
 name = "fwupd"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "fwupd-cli"
@@ -3796,6 +3817,9 @@ version = "0.1.0"
 [[package]]
 name = "ghdl-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "ghidra-cli"
@@ -4006,6 +4030,9 @@ version = "0.1.0"
 [[package]]
 name = "gopass-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "goproxy-cli"
@@ -4298,6 +4325,9 @@ version = "0.1.0"
 [[package]]
 name = "head"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "headscale-cli"
@@ -4725,6 +4755,7 @@ version = "0.1.0"
 dependencies = [
  "embed-manifest",
  "modechange",
+ "quoting",
 ]
 
 [[package]]
@@ -5542,6 +5573,9 @@ version = "0.1.0"
 [[package]]
 name = "libvirt-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "life"
@@ -5821,6 +5855,7 @@ name = "losetup"
 version = "0.1.0"
 dependencies = [
  "embed-manifest",
+ "quoting",
 ]
 
 [[package]]
@@ -6223,6 +6258,9 @@ version = "0.1.0"
 [[package]]
 name = "mattermost-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "maven"
@@ -8233,6 +8271,7 @@ name = "polkit"
 version = "0.1.0"
 dependencies = [
  "authlib",
+ "quoting",
  "scratchdir",
  "userdb",
 ]
@@ -8385,6 +8424,9 @@ version = "0.1.0"
 [[package]]
 name = "prefect-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "premake-cli"
@@ -9532,6 +9574,9 @@ version = "0.1.0"
 [[package]]
 name = "seq"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "seqkit-cli"
@@ -10116,6 +10161,9 @@ version = "0.1.0"
 [[package]]
 name = "split"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "split-cli"
@@ -10423,6 +10471,7 @@ name = "su"
 version = "0.1.0"
 dependencies = [
  "authlib",
+ "quoting",
  "userdb",
 ]
 
@@ -10759,6 +10808,9 @@ version = "0.1.0"
 [[package]]
 name = "tee"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "tekton-cli"
@@ -12165,6 +12217,9 @@ version = "0.1.0"
 [[package]]
 name = "xargs"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "xata-cli"

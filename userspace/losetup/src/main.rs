@@ -10,6 +10,7 @@
 
 #![deny(clippy::all)]
 
+use quoting::{quoteaf_os, quotef_os};
 use std::env;
 use std::fs;
 use std::io::{self, Write};
@@ -561,14 +562,14 @@ fn do_show_device(device: &str, json: bool) {
     let number: u32 = match num_str.parse() {
         Ok(n) => n,
         Err(_) => {
-            eprintln!("losetup: {device}: invalid loop device");
+            eprintln!("losetup: {}: invalid loop device", quotef_os(device));
             process::exit(1);
         }
     };
 
     let info = read_loop_info(number);
     if info.backing_file.is_empty() {
-        eprintln!("losetup: {device}: not attached");
+        eprintln!("losetup: {}: not attached", quotef_os(device));
         process::exit(1);
     }
 
@@ -640,14 +641,18 @@ fn do_setup(opts: &SetupOptions, verbose: bool) {
     match fs::write(LOOP_CONTROL, &setup_cmd) {
         Ok(()) => {
             if verbose {
-                eprintln!("losetup: {device}: attached to {}", opts.file);
+                eprintln!(
+                    "losetup: {}: attached to {}",
+                    quotef_os(&device),
+                    quoteaf_os(&opts.file)
+                );
             }
             if opts.show {
                 println!("{device}");
             }
         }
         Err(e) => {
-            eprintln!("losetup: {device}: failed to set up: {e}");
+            eprintln!("losetup: {}: failed to set up: {e}", quotef_os(&device));
             process::exit(1);
         }
     }
@@ -657,18 +662,21 @@ fn do_detach(device: &str, verbose: bool) {
     // Refuse to detach a device that is backing an active swap area: tearing
     // it down would yank memory out from under the kernel's swap subsystem.
     if is_swap_active(device) {
-        eprintln!("losetup: {device}: in use as swap, refusing to detach");
+        eprintln!(
+            "losetup: {}: in use as swap, refusing to detach",
+            quotef_os(device)
+        );
         process::exit(1);
     }
     let detach_cmd = format!("detach {device}");
     match fs::write(LOOP_CONTROL, &detach_cmd) {
         Ok(()) => {
             if verbose {
-                eprintln!("losetup: {device}: detached");
+                eprintln!("losetup: {}: detached", quotef_os(device));
             }
         }
         Err(e) => {
-            eprintln!("losetup: {device}: failed to detach: {e}");
+            eprintln!("losetup: {}: failed to detach: {e}", quotef_os(device));
             process::exit(1);
         }
     }

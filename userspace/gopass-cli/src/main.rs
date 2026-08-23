@@ -4,6 +4,7 @@
 //!
 //! Single personality: `gopass`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -109,8 +110,8 @@ fn run_gopass(args: Vec<String>) -> i32 {
                 .map(|s| s.as_str())
                 .unwrap_or("git@github.com:team/pass-store.git");
             let name = args.get(2).map(|s| s.as_str()).unwrap_or("team");
-            println!("Cloning {} as '{}' ...", url, name);
-            println!("  Mounted at '{}'", name);
+            println!("Cloning {} as {} ...", quoteaf_os(url), quoteaf_os(name));
+            println!("  Mounted at {}", quoteaf_os(name));
             println!("  12 entries found");
             0
         }
@@ -123,11 +124,11 @@ fn run_gopass(args: Vec<String>) -> i32 {
                 }
                 "add" => {
                     let name = args.get(2).map(|s| s.as_str()).unwrap_or("shared");
-                    println!("Mounted store as '{}'", name);
+                    println!("Mounted store as {}", quoteaf_os(name));
                 }
                 "remove" => {
                     let name = args.get(2).map(|s| s.as_str()).unwrap_or("old-mount");
-                    println!("Unmounted '{}'", name);
+                    println!("Unmounted {}", quoteaf_os(name));
                 }
                 _ => {
                     println!("Mount operation: {}", sub);
@@ -179,14 +180,14 @@ fn run_gopass(args: Vec<String>) -> i32 {
         }
         "find" | "search" => {
             let term = args.get(1).map(|s| s.as_str()).unwrap_or("email");
-            println!("Found entries matching '{}':", term);
+            println!("Found entries matching {}:", quoteaf_os(term));
             println!("  email/personal");
             println!("  email/work");
             0
         }
         _ => {
             // Bare name treated as "show"
-            println!("(showing '{}')", cmd);
+            println!("(showing {})", quoteaf_os(cmd));
             println!("p4ssw0rd-placeholder");
             0
         }

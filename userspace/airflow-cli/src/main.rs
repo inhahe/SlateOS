@@ -4,6 +4,7 @@
 //!
 //! Multi-personality: `airflow`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -57,31 +58,31 @@ fn run_airflow(args: &[String]) -> i32 {
                 }
                 "trigger" => {
                     let dag = args.get(2).map(|s| s.as_str()).unwrap_or("etl_pipeline");
-                    println!("Triggered dag run for DAG '{}'", dag);
+                    println!("Triggered dag run for DAG {}", quoteaf_os(dag));
                     println!("  Run ID: manual__2024-01-15T10:00:00+00:00");
                 }
                 "test" => {
                     let dag = args.get(2).map(|s| s.as_str()).unwrap_or("etl_pipeline");
-                    println!("Testing DAG '{}'...", dag);
+                    println!("Testing DAG {}...", quoteaf_os(dag));
                     println!("  DAG loaded successfully.");
                     println!("  Task count: 5");
                     println!("  No import errors.");
                 }
-                _ => println!("airflow dags: '{}' completed", sub),
+                _ => println!("airflow dags: {} completed", quoteaf_os(sub)),
             }
         }
         "tasks" => {
             let sub = args.get(1).map(|s| s.as_str()).unwrap_or("list");
             if sub == "list" {
                 let dag = args.get(2).map(|s| s.as_str()).unwrap_or("etl_pipeline");
-                println!("Tasks in DAG '{}':", dag);
+                println!("Tasks in DAG {}:", quoteaf_os(dag));
                 println!("  extract_data");
                 println!("  transform_data");
                 println!("  validate_data");
                 println!("  load_data");
                 println!("  notify");
             } else {
-                println!("airflow tasks: '{}' completed", sub);
+                println!("airflow tasks: {} completed", quoteaf_os(sub));
             }
         }
         "db" => {
@@ -96,7 +97,7 @@ fn run_airflow(args: &[String]) -> i32 {
                     println!("  Applied 3 migrations.");
                     println!("Database up to date.");
                 }
-                _ => println!("airflow db: '{}' completed", sub),
+                _ => println!("airflow db: {} completed", quoteaf_os(sub)),
             }
         }
         "webserver" => {
@@ -107,7 +108,7 @@ fn run_airflow(args: &[String]) -> i32 {
             println!("Starting Airflow scheduler...");
             println!("  Scheduler running.");
         }
-        _ => println!("airflow: '{}' completed", subcmd),
+        _ => println!("airflow: {} completed", quoteaf_os(subcmd)),
     }
     0
 }

@@ -30,6 +30,7 @@
 #![cfg_attr(not(test), no_main)]
 #![cfg_attr(test, allow(dead_code))]
 
+use quoting::quoteaf_os;
 use std::collections::HashMap;
 use std::env;
 use std::fs;
@@ -285,7 +286,7 @@ fn authenticate_admin(users: &UserDb) -> bool {
     let username = username.trim();
 
     let Some(admin) = admins.iter().find(|u| name_of(u) == username) else {
-        eprintln!("polkit: user '{username}' is not an admin");
+        eprintln!("polkit: user {} is not an admin", quoteaf_os(username));
         return false;
     };
 
@@ -948,7 +949,7 @@ fn run_polkitd(args: &[String]) -> i32 {
                 break;
             }
             _ => {
-                println!("ERR: unknown command '{command}'");
+                println!("ERR: unknown command {}", quoteaf_os(command));
             }
         }
         let _ = io::stdout().flush();
@@ -1085,7 +1086,11 @@ fn run_pkexec(args: &[String]) -> i32 {
     match result {
         AuthResult::Yes => exec_command(&command_args, &target_user, &users),
         AuthResult::No => {
-            eprintln!("pkexec: not authorized to execute '{command_path}' as '{target_user}'");
+            eprintln!(
+                "pkexec: not authorized to execute {} as {}",
+                quoteaf_os(&command_path),
+                quoteaf_os(&target_user)
+            );
             126
         }
         AuthResult::AuthAdmin => {
@@ -1173,7 +1178,7 @@ fn exec_command(command_args: &[String], target_user: &str, users: &UserDb) -> i
     match cmd.status() {
         Ok(status) => status.code().unwrap_or(1),
         Err(e) => {
-            eprintln!("pkexec: failed to execute '{program}': {e}");
+            eprintln!("pkexec: failed to execute {}: {e}", quoteaf_os(program));
             127
         }
     }
@@ -1263,7 +1268,7 @@ fn run_pkaction(args: &[String]) -> i32 {
 
     if actions.is_empty() {
         if let Some(ref filter) = action_id_filter {
-            eprintln!("pkaction: no action matching '{filter}'");
+            eprintln!("pkaction: no action matching {}", quoteaf_os(filter));
         } else {
             eprintln!("pkaction: no actions registered");
         }
@@ -1587,7 +1592,7 @@ fn run_main() -> i32 {
         "pkaction" => run_pkaction(&sub_args),
         "pkcheck" => run_pkcheck(&sub_args),
         _ => {
-            eprintln!("polkit: unknown personality '{personality}'");
+            eprintln!("polkit: unknown personality {}", quoteaf_os(personality));
             1
         }
     }

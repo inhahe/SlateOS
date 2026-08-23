@@ -4,6 +4,7 @@
 //!
 //! Multi-personality: `prefect`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -41,7 +42,7 @@ fn run_prefect(args: &[String]) -> i32 {
                 println!("  API: http://127.0.0.1:4200/api");
                 println!("  UI:  http://127.0.0.1:4200");
             } else {
-                println!("prefect server: '{}' completed", sub);
+                println!("prefect server: {} completed", quoteaf_os(sub));
             }
         }
         "flow" => {
@@ -51,7 +52,7 @@ fn run_prefect(args: &[String]) -> i32 {
                 println!("etl-pipeline          abc123-def456-ghi789                   2024-01-15");
                 println!("data-validation       jkl012-mno345-pqr678                   2024-01-14");
             } else {
-                println!("prefect flow: '{}' completed", sub);
+                println!("prefect flow: {} completed", quoteaf_os(sub));
             }
         }
         "deployment" => {
@@ -64,7 +65,7 @@ fn run_prefect(args: &[String]) -> i32 {
                 }
                 "run" => {
                     let name = args.get(2).map(|s| s.as_str()).unwrap_or("etl-daily");
-                    println!("Creating flow run for deployment '{}'...", name);
+                    println!("Creating flow run for deployment {}...", quoteaf_os(name));
                     println!("Flow run created: run-xyz123");
                 }
                 "build" => {
@@ -72,7 +73,7 @@ fn run_prefect(args: &[String]) -> i32 {
                     println!("  Created deployment manifest.");
                     println!("  Apply with: prefect deployment apply");
                 }
-                _ => println!("prefect deployment: '{}' completed", sub),
+                _ => println!("prefect deployment: {} completed", quoteaf_os(sub)),
             }
         }
         "agent" => {
@@ -81,10 +82,10 @@ fn run_prefect(args: &[String]) -> i32 {
                 println!("Starting agent connected to http://127.0.0.1:4200/api...");
                 println!("Agent started! Looking for work from work queue 'default'...");
             } else {
-                println!("prefect agent: '{}' completed", sub);
+                println!("prefect agent: {} completed", quoteaf_os(sub));
             }
         }
-        _ => println!("prefect: '{}' completed", subcmd),
+        _ => println!("prefect: {} completed", quoteaf_os(subcmd)),
     }
     0
 }

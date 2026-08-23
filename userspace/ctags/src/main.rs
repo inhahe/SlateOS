@@ -36,6 +36,7 @@
 
 #![cfg_attr(not(test), no_main)]
 
+use quoting::quoteaf_os;
 use std::collections::BTreeSet;
 #[cfg(not(test))]
 use std::env;
@@ -251,7 +252,7 @@ fn parse_args(args: &[String]) -> ParseResult {
                 if i < args.len() {
                     config.output_file = Some(args[i].clone());
                 } else {
-                    eprintln!("ctags: option '{arg}' requires an argument");
+                    eprintln!("ctags: option {} requires an argument", quoteaf_os(arg));
                     std::process::exit(1);
                 }
             }
@@ -263,7 +264,7 @@ fn parse_args(args: &[String]) -> ParseResult {
                     "no" | "0" => SortMode::No,
                     "foldcase" => SortMode::Foldcase,
                     _ => {
-                        eprintln!("ctags: unknown sort mode '{val}'");
+                        eprintln!("ctags: unknown sort mode {}", quoteaf_os(val));
                         std::process::exit(1);
                     }
                 };
@@ -383,7 +384,10 @@ fn collect_files(config: &Config) -> Vec<String> {
                 result.push(f.clone());
             }
         } else if !p.exists() {
-            eprintln!("ctags: cannot open '{}': No such file or directory", f);
+            eprintln!(
+                "ctags: cannot open {}: No such file or directory",
+                quoteaf_os(f)
+            );
         }
     }
 
@@ -396,7 +400,7 @@ fn collect_dir(dir: &Path, excludes: &[String], out: &mut Vec<String>) {
     let entries = match fs::read_dir(dir) {
         Ok(e) => e,
         Err(e) => {
-            eprintln!("ctags: cannot read directory '{}': {}", dir.display(), e);
+            eprintln!("ctags: cannot read directory {}: {e}", quoteaf_os(dir));
             return;
         }
     };
@@ -1655,7 +1659,7 @@ fn extract_tags_from_file(path: &str) -> Vec<Tag> {
     let content = match fs::read_to_string(path) {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("ctags: cannot read '{}': {}", path, e);
+            eprintln!("ctags: cannot read {}: {e}", quoteaf_os(path));
             return Vec::new();
         }
     };
@@ -2029,7 +2033,7 @@ fn run(config: &Config) -> i32 {
                 result
             }
             Err(e) => {
-                eprintln!("ctags: cannot open '{}': {}", output_name, e);
+                eprintln!("ctags: cannot open {}: {e}", quoteaf_os(&output_name));
                 return 1;
             }
         }

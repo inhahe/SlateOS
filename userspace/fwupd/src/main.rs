@@ -9,6 +9,7 @@
 //! - `fwupd` — firmware update daemon
 //! - `fwupdtool` — firmware update debugging/testing tool
 
+use quoting::quoteaf_os;
 use std::collections::BTreeMap;
 use std::env;
 use std::process;
@@ -345,9 +346,9 @@ fn cmd_refresh(args: &[String]) {
     for r in &remotes {
         if r.enabled {
             if force {
-                println!("Refreshing remote '{}' (forced)...", r.id);
+                println!("Refreshing remote {} (forced)...", quoteaf_os(&r.id));
             } else {
-                println!("Refreshing remote '{}'...", r.id);
+                println!("Refreshing remote {}...", quoteaf_os(&r.id));
             }
             println!("  Downloading metadata... done.");
         }
@@ -390,7 +391,7 @@ fn cmd_install(args: &[String]) {
     let cab_file = &args[0];
     let device_id = args.get(1);
 
-    println!("Installing firmware from '{}'...", cab_file);
+    println!("Installing firmware from {}...", quoteaf_os(cab_file));
     if let Some(dev) = device_id {
         println!("  Target device: {}", dev);
     }
@@ -415,7 +416,7 @@ fn cmd_enable_remote(args: &[String]) {
             process::exit(1);
         }
     };
-    println!("Enabled remote '{}'.", remote_id);
+    println!("Enabled remote {}.", quoteaf_os(remote_id));
 }
 
 fn cmd_disable_remote(args: &[String]) {
@@ -426,7 +427,7 @@ fn cmd_disable_remote(args: &[String]) {
             process::exit(1);
         }
     };
-    println!("Disabled remote '{}'.", remote_id);
+    println!("Disabled remote {}.", quoteaf_os(remote_id));
 }
 
 fn cmd_get_history() {
@@ -469,7 +470,7 @@ fn cmd_security() {
 fn cmd_downgrade(args: &[String]) {
     let device_filter = args.iter().find(|a| !a.starts_with('-'));
     match device_filter {
-        Some(dev) => println!("Looking for downgrades for '{}'...", dev),
+        Some(dev) => println!("Looking for downgrades for {}...", quoteaf_os(dev)),
         None => println!("Looking for downgrades for all devices..."),
     }
     println!("No downgrades available.");

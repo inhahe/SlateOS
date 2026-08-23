@@ -45,6 +45,7 @@
 //!       --version           Output version information and exit
 //! ```
 
+use quoting::quoteaf_os;
 use std::collections::VecDeque;
 use std::env;
 use std::fs::File;
@@ -311,7 +312,10 @@ fn parse_args(args: &[String]) -> ParseResult {
                         "name" => follow = FollowMode::Name,
                         "descriptor" => follow = FollowMode::Descriptor,
                         _ => {
-                            eprintln!("{tool_name}: invalid argument '{eq_val}' for '--follow'");
+                            eprintln!(
+                                "{tool_name}: invalid argument {} for '--follow'",
+                                quoteaf_os(eq_val)
+                            );
                             process::exit(1);
                         }
                     }
@@ -336,7 +340,7 @@ fn parse_args(args: &[String]) -> ParseResult {
                 match val_str.parse::<u32>() {
                     Ok(pid) => follow_pid = Some(pid),
                     Err(_) => {
-                        eprintln!("{tool_name}: invalid PID: '{val_str}'");
+                        eprintln!("{tool_name}: invalid PID: {}", quoteaf_os(&val_str));
                         process::exit(1);
                     }
                 }
@@ -358,12 +362,15 @@ fn parse_args(args: &[String]) -> ParseResult {
                 match val_str.parse::<f64>() {
                     Ok(secs) if secs >= 0.0 => follow_sleep = secs,
                     _ => {
-                        eprintln!("{tool_name}: invalid sleep interval: '{val_str}'");
+                        eprintln!(
+                            "{tool_name}: invalid sleep interval: {}",
+                            quoteaf_os(&val_str)
+                        );
                         process::exit(1);
                     }
                 }
             } else {
-                eprintln!("{tool_name}: unrecognized option '{arg}'");
+                eprintln!("{tool_name}: unrecognized option {}", quoteaf_os(arg));
                 eprintln!("Try '{tool_name} --help' for more information.");
                 process::exit(1);
             }
@@ -419,14 +426,20 @@ fn parse_args(args: &[String]) -> ParseResult {
                     match val_str.parse::<f64>() {
                         Ok(secs) if secs >= 0.0 => follow_sleep = secs,
                         _ => {
-                            eprintln!("{tool_name}: invalid sleep interval: '{val_str}'");
+                            eprintln!(
+                                "{tool_name}: invalid sleep interval: {}",
+                                quoteaf_os(&val_str)
+                            );
                             process::exit(1);
                         }
                     }
                     ci = chars.len();
                 }
                 _ => {
-                    eprintln!("{tool_name}: invalid option -- '{ch}'");
+                    eprintln!(
+                        "{tool_name}: invalid option -- {}",
+                        quoteaf_os(ch.to_string())
+                    );
                     eprintln!("Try '{tool_name} --help' for more information.");
                     process::exit(1);
                 }
@@ -471,7 +484,10 @@ fn rest_or_next_arg(
         // Consume the next argument.
         *arg_idx += 1;
         if *arg_idx >= args.len() {
-            eprintln!("{tool_name}: option requires an argument -- '{opt_char}'");
+            eprintln!(
+                "{tool_name}: option requires an argument -- {}",
+                quoteaf_os(opt_char.to_string())
+            );
             process::exit(1);
         }
         args[*arg_idx].clone()

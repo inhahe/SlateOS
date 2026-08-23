@@ -2,3 +2,8 @@
 name = "mattermost-cli"
 version = "0.1.0"
 edition = "2024"
+
+[dependencies]
+# mattermost-cli names teams, channels and users -- strings chosen on the
+# server side by whoever created them, not by this tool.
+quoting = { path = "../quoting" }

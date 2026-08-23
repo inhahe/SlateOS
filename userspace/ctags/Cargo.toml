@@ -4,3 +4,6 @@ version = "0.1.0"
 edition = "2024"
 description = "SlateOS ctags - code tag generator (ctags/etags)"
 [dependencies]
+# ctags names every source file it indexes and the tag file it writes; it is
+# normally run recursively over a whole tree, so the names are the tree's.
+quoting = { path = "../quoting" }

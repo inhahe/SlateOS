@@ -2,3 +2,8 @@
 name = "dagster-cli"
 version = "0.1.0"
 edition = "2024"
+
+[dependencies]
+# dagster-cli echoes the subcommand and the job, asset and schedule names it
+# was handed on the command line; every word it names back came from argv.
+quoting = { path = "../quoting" }

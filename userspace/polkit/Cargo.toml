@@ -15,6 +15,10 @@ description = "SlateOS polkit - authorization framework (polkitd/pkexec/pkaction
 # *administrator's* password, and helpfully prints the list of names to try
 # first. See `design-decisions.md` §354.
 [dependencies]
+# polkit names actions, subjects and policy files. It is an authorization
+# component, so a word it prints unquoted is a word an unprivileged caller
+# can steer into a privileged program's output.
+quoting = { path = "../quoting" }
 authlib = { path = "../authlib" }
 userdb = { path = "../userdb" }
 

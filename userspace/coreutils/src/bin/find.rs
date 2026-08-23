@@ -1167,6 +1167,26 @@ impl<'a> Parser<'a> {
         }
     }
 
+    /// The *second* argument of a two-argument primary, whose absence upstream
+    /// reports differently from the first one's.
+    ///
+    /// `find t -fprintf` complains ``missing argument to `-fprintf'``, but
+    /// `find t -fprintf FILE` complains ``invalid argument `FILE' to
+    /// `-fprintf'`` — the driver has already stepped past the file, so the
+    /// token it names is the argument that *was* given rather than the one that
+    /// was not. It reads oddly and it is what 4.9.0 does; measured, not
+    /// inferred. `-fprintf` is the only primary taking two arguments, so this
+    /// has exactly one caller.
+    fn second_arg(&mut self, name: &[u8], first: &[u8]) -> Parsed<Vec<u8>> {
+        match self.argv.get(self.i) {
+            Some(a) => {
+                self.i = self.i.saturating_add(1);
+                Ok(a.clone())
+            }
+            None => Err(Self::bad_arg(name, first)),
+        }
+    }
+
     fn bad_arg(name: &[u8], arg: &[u8]) -> Fatal {
         Fatal::new(format!(
             "invalid argument `{}' to `{}'",
@@ -1486,10 +1506,17 @@ fn compile_regex(pattern: &[u8], extended: bool, ci: bool) -> Parsed<ere::Regex>
         ere::bre::compile(pattern, ci)
     };
     result.map_err(|e| {
+        // `e.message()`, not `e.detail`: upstream hands the pattern to GNU
+        // regex and prints straight back whatever `re_compile_pattern`
+        // returned, so the sentence after the colon is one of glibc's fourteen
+        // fixed strings and never findutils' own words. `ere`'s `detail` is
+        // more specific and more useful — and it is not what a script that
+        // greps this line was written against. The `-regex` block in
+        // `scripts/find-diff.sh` pins every code this can produce.
         Fatal::new(format!(
             "failed to compile regular expression '{}': {}",
-            String::from_utf8_lossy(pattern),
-            String::from_utf8_lossy(&e.0)
+            quote::escape_unprintable(pattern),
+            e.message()
         ))
     })
 }
@@ -1769,7 +1796,18 @@ impl Parser<'_> {
                 let arg = self.arg(tok)?;
                 let (cmp, ts) =
                     get_relative_timestamp(&arg, Ts::default(), DAYSECS).ok_or_else(|| {
-                        Fatal::new(format!("Invalid argument {} to -used", quote(&arg)))
+                        // Unquoted, unlike almost every other name in this
+                        // file: upstream's `parse_used` passes the argument to
+                        // `error` as a bare `%s`, so `-used x` complains about
+                        // `x` and not about `‘x’`. Through `escape_unprintable`
+                        // rather than raw, because an argument holding a
+                        // newline would otherwise forge a second diagnostic
+                        // line — an improvement on upstream that no argument a
+                        // user could sensibly type can tell apart.
+                        Fatal::new(format!(
+                            "Invalid argument {} to -used",
+                            quote::escape_unprintable(&arg)
+                        ))
                     })?;
                 self.push_prim(
                     tok,
@@ -1914,7 +1952,7 @@ impl Parser<'_> {
             }
             b"fprintf" => {
                 let path = self.arg(tok)?;
-                let fmt = self.arg(tok)?;
+                let fmt = self.second_arg(tok, &path)?;
                 let sink = self.sink(&path)?;
                 let segs = compile_format(&fmt, &mut self.warnings)?;
                 self.no_default_print = true;
@@ -1974,10 +2012,22 @@ impl Parser<'_> {
     }
 
     /// `stat` a file named on the command line, for `-newer`/`-samefile`.
+    ///
+    /// Through `options.xstat`, which is whichever of `optionp_stat`,
+    /// `optionl_stat` and `optionh_stat` the `-P`/`-L`/`-H` in force selected —
+    /// so the reference file is dereferenced exactly when the walk would
+    /// dereference a name given on the command line. `-H` derefs here because
+    /// its rule is "arguments only" and this *is* an argument.
+    ///
+    /// Observable: `find t -samefile t/link` matches the symlink itself, while
+    /// `find -L t -samefile t/link` matches what it points at, along with every
+    /// other name for that inode.
     fn stat_arg(&self, path: &[u8]) -> Parsed<Meta> {
-        self.tree
-            .stat(path)
-            .map_err(|e| Fatal::new(format!("{}: {}", quote(path), strerror(&e))))
+        let r = match self.follow {
+            Follow::Never => self.tree.lstat(path),
+            Follow::Always | Follow::CommandLine => self.tree.stat(path),
+        };
+        r.map_err(|e| Fatal::new(format!("{}: {}", quote(path), strerror(&e))))
     }
 
     fn parse_time(&self, tok: &[u8], arg: &[u8], field: TimeField) -> Parsed<Prim> {
@@ -2041,8 +2091,8 @@ fn parse_size(arg: &[u8]) -> Parsed<Prim> {
     let n = xstrtoumax(digits).ok_or_else(|| {
         Fatal::new(format!(
             "Invalid argument `{}{}' to -size",
-            String::from_utf8_lossy(body),
-            String::from_utf8_lossy(suffix)
+            quote::escape_unprintable(body),
+            quote::escape_unprintable(suffix)
         ))
     })?;
     Ok(Prim::Size { cmp, n, unit })
@@ -3822,8 +3872,23 @@ impl Ctx<'_> {
     /// POSIX asks for and what upstream does everywhere except the two places
     /// noted at their call sites.
     fn fail(&mut self, msg: &str) {
-        eprintln!("find: {msg}");
+        self.warn(msg);
         self.status = 1;
+    }
+
+    /// A diagnostic that leaves the exit status alone.
+    ///
+    /// It flushes first, and that is not tidiness: findutils reports through
+    /// gnulib's `error`, which begins `fflush (stdout)`. Without it the two
+    /// streams are ordered by their buffering rather than by the walk — every
+    /// diagnostic would surface *before* all of the output when stdout is a
+    /// pipe, and interleaved correctly only when it is a terminal. Measured
+    /// against GNU, this one line accounted for fifteen differing cases in
+    /// `scripts/find-diff.sh`, including `find t nosuchfile`, where the
+    /// complaint belongs after the tree it managed to walk.
+    fn warn(&mut self, msg: &str) {
+        self.flush();
+        eprintln!("find: {msg}");
     }
 
     /// `following_links()`: whether the walk dereferenced this item's own name.
@@ -3930,7 +3995,15 @@ impl Ctx<'_> {
             Ok(ok) => ok,
             Err(e) => {
                 let name = argv.first().map_or_else(Vec::new, Clone::clone);
-                self.fail(&format!(
+                // `warn`, not `fail`. Upstream's complaint about a command that
+                // will not start is made by the *child*, after `execvp` has
+                // returned and just before `_exit (1)` — so all the parent ever
+                // learns is that the command exited non-zero, which is the same
+                // thing it learns from a command that ran and failed. Neither
+                // moves `state.exit_status`: `find t -exec nosuchprogram \;`
+                // reports the failure and still exits 0. The `+` form differs,
+                // and does so in `flush_exec`, where the reason is written down.
+                self.warn(&format!(
                     "{}: {}",
                     quote::quote(&name),
                     errmsg::strerror(&e)
@@ -4189,7 +4262,7 @@ impl Ctx<'_> {
                     if sets_status {
                         self.fail(&msg);
                     } else {
-                        eprintln!("find: {msg}");
+                        self.warn(&msg);
                     }
                 }
                 true
@@ -4210,7 +4283,7 @@ impl Ctx<'_> {
                 if let Some(msg) = err {
                     // Not `fail`: `list_file` has no way to tell its caller,
                     // so upstream leaves the exit status alone here.
-                    eprintln!("find: {msg}");
+                    self.warn(&msg);
                 }
                 true
             }
@@ -4746,34 +4819,47 @@ Other common options:
 
 /// The tail of `usage`, which is the same list `-D help` prints followed by
 /// the bug-reporting block.
+///
+/// The block is ours, not upstream's, for the reason given on [`VERSION`]:
+/// upstream's text asks the reader to report bugs in *this* binary to the GNU
+/// findutils tracker, and a bug in this file is not a bug they can act on. It
+/// would waste the reporter's effort and a maintainer's attention on a program
+/// neither of them has. GNU's manual is still cited, because it does describe
+/// the interface this program implements — the citation is true; the
+/// bug address was not.
 const HELP_TAIL: &str = "\
 Use '-D help' for a description of the options, or see find(1)
 
-Please see also the documentation at https://www.gnu.org/software/findutils/.
-You can report (and track progress on fixing) bugs in the \"find\"
-program via the GNU findutils bug-reporting page at
-https://savannah.gnu.org/bugs/?group=findutils or, if
-you have no web access, by sending email to <bug-findutils@gnu.org>.
+This is SlateOS coreutils' reimplementation of the findutils interface.
+It is not GNU findutils, so please report bugs in this program against
+SlateOS coreutils and not to the GNU project. The interface itself is
+documented at https://www.gnu.org/software/findutils/.
 ";
 
 /// `--version`.
 ///
-/// The `Features enabled:` line is transcribed rather than derived. Three of
-/// the four claims are true of this port — `d_type` is read, `O_NOFOLLOW` is
-/// available, and the child-order optimisation level is the same 2 that is
-/// then discarded. `LEAF_OPTIMISATION` is not implemented here; it is a
-/// promise about how many `stat` calls happen, which nothing observable
-/// depends on, and the line is matched rather than corrected for the same
-/// reason [`HELP`] is. Recorded in `known-issues.md`.
+/// Deliberately *not* GNU's banner, and this is the one message in the port
+/// where matching upstream byte-for-byte would be the wrong answer. Everything
+/// else here imitates findutils 4.9.0 because a script that parses `find`'s
+/// output should not be able to tell the difference; but `--version` exists to
+/// tell the user *which program is running*, so a copy of GNU's banner would
+/// make this binary answer that one question with a falsehood — naming authors
+/// who did not write it and a version whose bug-reporting address does not want
+/// our bug reports. `du` and every other bin in this crate answer the same way,
+/// and `scripts/du-diff.sh` marks `du --version` as an expected difference for
+/// exactly this reason.
+///
+/// The `Features enabled:` line is kept because it is a factual claim about
+/// this build rather than an identity: `d_type` is read, `O_NOFOLLOW` is
+/// available, and the child-order optimisation level is the same 2 that is then
+/// discarded. `LEAF_OPTIMISATION` is *not* implemented here, so it is dropped
+/// rather than transcribed — under our own name there is nobody else's output
+/// to match, so an untrue entry would be untrue for nothing. Recorded in
+/// `known-issues.md`.
 const VERSION: &str = "\
-find (GNU findutils) 4.9.0
-Copyright (C) 2022 Free Software Foundation, Inc.
-License GPLv3+: GNU GPL version 3 or later <https://gnu.org/licenses/gpl.html>.
-This is free software: you are free to change and redistribute it.
-There is NO WARRANTY, to the extent permitted by law.
-
-Written by Eric B. Decker, James Youngman, and Kevin Dalley.
-Features enabled: D_TYPE O_NOFOLLOW(enabled) LEAF_OPTIMISATION FTS(FTS_CWDFD) CBO(level=2) \n";
+find (SlateOS coreutils) 0.1.0
+A byte-path reimplementation of the GNU findutils 4.9.0 interface.
+Features enabled: D_TYPE O_NOFOLLOW(enabled) FTS(FTS_CWDFD) CBO(level=2)\n";
 
 /// `show_valid_debug_options`, which appears twice: on its own for `-D help`
 /// and embedded in [`HELP`] between the option list and the tail.
@@ -5053,16 +5139,16 @@ fn process_all_startpoints(
         if name.is_empty() {
             // fts fails immediately on an empty name without looking at the
             // rest, so these are reported and skipped before it sees them.
-            match &quoted_from {
+            let msg = match &quoted_from {
                 // The record number is 1-based and counts the empty record
                 // itself, which is why an empty *first* record is `:1:`.
-                Some(q) => eprintln!(
-                    "find: {q}:{}: invalid zero-length file name",
-                    n.saturating_add(1)
-                ),
-                None => eprintln!("find: {}: No such file or directory", quote(name)),
-            }
-            walk.ctx.status = 1;
+                Some(q) => format!("{q}:{}: invalid zero-length file name", n.saturating_add(1)),
+                None => format!("{}: No such file or directory", quote(name)),
+            };
+            // Through `fail` rather than `eprintln!` for the flush it does:
+            // a name list whose bad record is in the middle must complain
+            // between the names either side of it, not before both.
+            walk.ctx.fail(&msg);
             continue;
         }
         walk.start(name);
@@ -6107,6 +6193,13 @@ mod tests {
         let h = help_text();
         assert!(h.starts_with("Usage: find"), "{h}");
         assert!(h.contains("-name"), "{h}");
-        assert!(VERSION.starts_with("find (GNU findutils)"), "{VERSION}");
+        // Deliberately asserted the other way round from every other message
+        // in this file: `--version` must *not* claim to be GNU's, and neither
+        // text may send a reader to GNU's bug tracker for a bug in this file.
+        // See the doc comment on `VERSION`.
+        assert!(VERSION.starts_with("find (SlateOS coreutils)"), "{VERSION}");
+        assert!(!VERSION.contains("GNU findutils)"), "{VERSION}");
+        assert!(!h.contains("bug-findutils@gnu.org"), "{h}");
+        assert!(!h.contains("savannah.gnu.org"), "{h}");
     }
 }

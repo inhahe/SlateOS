@@ -76260,7 +76260,7 @@ fn cmd_inodestat(args: &str) {
             for f in inodestat::fs_stats() {
                 shell_println!(
                     "{} ({}): active={} alloc={} free={} evict={} dirty={}",
-                    f.mount_point,
+                    f.mount_point.display(),
                     f.fs_type.label(),
                     f.active,
                     f.allocated,

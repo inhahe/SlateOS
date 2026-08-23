@@ -12040,7 +12040,7 @@ fn gen_inodestat() -> Vec<u8> {
     for f in crate::fs::inodestat::fs_stats() {
         out.push_str(&format!(
             "{} ({}): active={} alloc={} free={} evict={} dirty={}\n",
-            f.mount_point,
+            f.mount_point.display(),
             f.fs_type.label(),
             f.active,
             f.allocated,

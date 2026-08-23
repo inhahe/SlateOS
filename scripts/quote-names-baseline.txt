@@ -19,7 +19,7 @@
 # 71 real sites. If a number rises in a commit that also edits code, the
 # code is what raised it.
 #
-# 1711 sites across 780 files.
+# 1691 sites across 779 files.
 
 init/servicebus/src/main.rs:8
 userspace/abduco-cli/src/main.rs:5
@@ -701,7 +701,6 @@ userspace/texlive-cli/src/main.rs:2
 userspace/thanos-cli/src/main.rs:3
 userspace/threescale-cli/src/main.rs:1
 userspace/tigervnc/src/main.rs:1
-userspace/timeout/src/main.rs:20
 userspace/timg-cli/src/main.rs:1
 userspace/tlp-cli/src/main.rs:1
 userspace/tlp/src/main.rs:2

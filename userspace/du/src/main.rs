@@ -1242,56 +1242,24 @@ mod tests {
 
     // -- Integration-style test using a temp directory --
 
-    /// A directory of this test run's own, removed however the test ends.
-    ///
-    /// These tests used a fixed name each — `du_test_walk` and friends — and
-    /// began each run by deleting it. That is a race, not a cleanup: two test
-    /// binaries alive at once (two `cargo test --workspace` runs, or a
-    /// workspace run overlapping a single-crate one) share `%TEMP%`, so one
-    /// would delete the tree the other was midway through walking. It showed up
-    /// as `du: cannot access …: The system cannot find the file specified` and
-    /// a `write skip: NotFound` — failures that reproduce only under
-    /// concurrency and look like `walk` bugs.
-    ///
-    /// The process id makes the name unique between binaries and the counter
-    /// between tests within one, so no two live directories can collide. `Drop`
-    /// does the removal, which a panicking assertion cannot skip the way a
-    /// trailing `remove_dir_all` could — a failed test used to leave its tree
-    /// behind for the next run to trip over.
-    struct Scratch(std::path::PathBuf);
-
-    impl Scratch {
-        fn new(tag: &str) -> Self {
-            use std::sync::atomic::{AtomicU32, Ordering};
-            static NEXT: AtomicU32 = AtomicU32::new(0);
-            let serial = NEXT.fetch_add(1, Ordering::Relaxed);
-            let dir =
-                std::env::temp_dir().join(format!("du-test-{}-{serial}-{tag}", std::process::id()));
-            // Not `remove_dir_all` first: the name is ours alone, so an
-            // existing one would be a bug we want to hear about, not tidy away.
-            stdfs::create_dir_all(&dir).expect("create scratch dir");
-            Self(dir)
-        }
-
-        fn path(&self) -> &std::path::Path {
-            &self.0
-        }
-    }
-
-    impl Drop for Scratch {
-        fn drop(&mut self) {
-            // Ignored: the test's verdict is already decided, and on Windows a
-            // removal can lose to a virus scanner still holding a handle.
-            // Leaking one directory under `%TEMP%` is not worth masking that
-            // verdict with a second panic.
-            let _ = stdfs::remove_dir_all(&self.0);
-        }
-    }
+    // These three tests used a fixed name each — `du_test_walk` and friends —
+    // and began each run by deleting it. That is a race, not a cleanup: two
+    // test binaries alive at once (two `cargo test --workspace` runs, or a
+    // workspace run overlapping a single-crate one) share the system temp
+    // directory, so one would delete the tree the other was midway through
+    // walking. It showed up as `du: cannot access …: The system cannot find the
+    // file specified` and a `write skip: NotFound` — failures that reproduce
+    // only under concurrency and point at `walk`, which is innocent.
+    //
+    // `ScratchDir` is the tree's answer to exactly this; see its module docs
+    // and design-decisions.md §349 for why it is a crate rather than a private
+    // copy per suite. This suite is not entitled to be the exception.
+    use scratchdir::ScratchDir;
 
     #[test]
     fn walk_temp_dir() {
-        let scratch = Scratch::new("walk");
-        let dir = scratch.path();
+        let scratch = ScratchDir::new("du_test_walk");
+        let dir = scratch.dir();
         stdfs::create_dir_all(dir.join("sub")).expect("create dirs");
 
         // Write some data.
@@ -1321,8 +1289,8 @@ mod tests {
 
     #[test]
     fn walk_temp_dir_apparent_size() {
-        let scratch = Scratch::new("apparent");
-        let dir = scratch.path();
+        let scratch = ScratchDir::new("du_test_apparent");
+        let dir = scratch.dir();
 
         stdfs::write(dir.join("a.txt"), "12345").expect("write");
 
@@ -1349,8 +1317,8 @@ mod tests {
 
     #[test]
     fn walk_with_exclude() {
-        let scratch = Scratch::new("exclude");
-        let dir = scratch.path();
+        let scratch = ScratchDir::new("du_test_exclude");
+        let dir = scratch.dir();
 
         stdfs::write(dir.join("keep.txt"), "data").expect("write keep");
         stdfs::write(dir.join("skip.tmp"), "data").expect("write skip");

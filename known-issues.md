@@ -63720,3 +63720,305 @@ the unchecked offset is the bug.
 **Sweep status for `net/tcp.rs`:** 182 → 110 → 56 distinct sites, all now
 `indexing_slicing`; all 22 blanket `arithmetic_side_effects` allows removed
 (`953f828c0`), of which only seven functions had any arithmetic at all.
+
+---
+
+## Unauthenticated peers could grow the in-kernel SSH receive buffer without bound (lane A)
+
+**Status:** FIXED 2026-08-23 — boot-tested on `lane-a`.
+
+**In short:** the SSH server runs inside the kernel. Its packet reader could
+not tell "I have not received the whole packet yet" from "these bytes can
+never *be* a packet", and reported both as "wait for more". So a peer that
+sent four bytes of garbage length and then streamed filler was never
+disconnected, and its data piled up in kernel memory forever. Enough of it
+exhausts the kernel heap and takes the whole machine down — not just that
+connection, and without ever logging in.
+
+### What was wrong
+
+`try_read_packet_plain` returned `Option<Vec<u8>>`:
+
+```rust
+if packet_length > MAX_PACKET_SIZE || packet_length < 2 {
+    return None; // Invalid.
+}
+let total = 4 + packet_length;
+if recv_buf.len() < total {
+    return None; // Incomplete.
+}
+```
+
+Two different situations, one return value. The caller is a loop:
+
+```rust
+while let Some(payload) = try_read_packet_plain(&mut session.recv_buf) {
+```
+
+`None` ends the loop, and the buffer is only ever drained by a *successful*
+parse (`*recv_buf = recv_buf.split_off(total)`). So an unframeable length
+field parks the bytes permanently: every poll re-reads the same four bytes,
+re-rejects them, and returns to a caller that appends still more.
+
+Nothing capped the accumulation either — `session.recv_buf.extend_from_slice(&data)`
+ran unconditionally on every poll.
+
+### Why it survived review
+
+Three things hid it:
+
+- **It produces no lint.** It is not an index, not an unwrap, not an
+  arithmetic op. A clippy sweep of this file walks straight past it. This is
+  the concrete vindication of the note above: the file was on the sweep list
+  with 104 sites, and *none of them was this bug*.
+- **The correct shape was already in the file, twelve lines below.**
+  `try_read_packet_encrypted` returns `KernelResult<Option<Vec<u8>>>` and does
+  return `Err` for a bad length. The two functions are read as a pair and
+  look alike; only the return types differ, which is exactly the sort of
+  difference the eye completes rather than notices.
+- **The comments were correct and still misleading.** `return None; // Invalid.`
+  and `return None; // Incomplete.` each accurately describe their own line.
+  Nothing in the function says those two must be *distinguishable*, because
+  the type had already decided they were not.
+
+### The fix
+
+`try_read_packet_plain` now returns `KernelResult<Option<Vec<u8>>>`, matching
+its encrypted twin: `Ok(Some)` consumed a packet, `Ok(None)` is a legal
+prefix, `Err` is unframeable and closes the session. The caller became a
+three-arm `loop`/`match`. Also tightened while there: `packet_length` must be
+at least `MIN_PADDING + 1`, and `padding_length` must meet the RFC 4253
+minimum of four — neither was checked, though our own builder emits both.
+
+Separately, a backstop at the append site drops any session whose buffer
+passes `MAX_RECV_BUF` (`4 + MAX_PACKET_SIZE + POLY1305_TAG_LEN`, the largest
+thing that can legitimately be in flight). A `const _: () = assert!(...)`
+pins that it stays above `MAX_PACKET_SIZE`, so a later edit to either
+constant fails the build rather than silently truncating legal traffic.
+`Session::reset` does `*self = Self::new()`, so the buffer is genuinely
+freed on close — checked, because a cap that only defers the exhaustion
+would be worse than none.
+
+Self-test `1b` covers what was broken rather than what was written: legal
+prefixes of 0/1/4/5/8 bytes must be *held* and not consumed, oversize and
+undersize lengths and out-of-range padding must all be `Err`.
+
+### What this says about the remaining sweep
+
+The generalisation in the entry above was right about *where* to look and
+understated *what* to look for. "A header field used as an offset without a
+lower bound" was the TCP shape. The SSH shape is a level up: **a parser whose
+return type cannot express the difference between a recoverable and an
+unrecoverable failure.** Both are invisible to lints, and both are found by
+reading the framing layer and asking what a peer gains by lying.
+
+For `net/tls.rs` and `net/firewall.rs`, the questions to carry over:
+
+1. Can a length or offset field be rejected in a way that leaves the bytes
+   buffered and the connection open?
+2. Is there any accumulating buffer fed from the wire with no absolute cap?
+3. Where two sibling parsers exist (plain/encrypted, v4/v6), do their return
+   types agree? A divergence is where the weaker one is wrong.
+
+---
+
+## Wire-fed buffer audit of `kernel/src/net` — complete (lane A, 2026-08-23)
+
+**In short:** after finding two places where a remote machine could make the
+kernel allocate memory forever, I checked every other place in the networking
+code that stores incoming data, to see whether the same mistake was hiding
+anywhere else. It was not. Ten such buffers exist; two were broken and are now
+fixed, and the other eight were already correct. This entry records the list so
+nobody has to repeat the search.
+
+**Status:** DONE. No action outstanding.
+
+### Method
+
+The failure being hunted is not a lint and not a crash. It is: *a buffer fed
+from the network that has no ceiling, or that has one but cannot say so.* The
+three questions from the SSH entry above, applied to every file in
+`kernel/src/net`:
+
+1. Can a length or offset field be rejected in a way that leaves the bytes
+   buffered and the connection open?
+2. Is there an accumulating buffer fed from the wire with no absolute cap?
+3. Where two sibling parsers exist (plain/encrypted, v4/v6, client/server), do
+   their return types and their bounds agree? A divergence is where the weaker
+   one is wrong.
+
+Question 3 is the cheap one and it earns its place: both bugs found were a
+sibling pair where one half was right and the other was not.
+
+### Every wire-fed buffer, and its bound
+
+| Buffer | Bound | Verdict |
+|---|---|---|
+| `ssh.rs` `Session::recv_buf` | *none* | **was broken** — fixed, `MAX_RECV_BUF` |
+| `tls.rs` `hs_buf` (handshake reassembly) | u24, i.e. 16 MiB | **was broken** — fixed, `MAX_HANDSHAKE_MSG_SIZE` |
+| `tcp.rs` `TcpConnection::rx_buffer` | `MAX_RX_BUFFER`, clamped at every append, and it drives the advertised window | correct |
+| `tcp.rs` `TcpConnection::tx_buffer` | fed by the local application, not the wire | n/a |
+| `udp.rs` `rx_queue` / `rx_queue_v6` | `MAX_QUEUED` (64), silent drop — right for UDP | correct, and the two agree |
+| `veth.rs` `rx_queue` | `VETH_QUEUE_DEPTH`, returns `ChannelFull` and counts the drop | correct |
+| `frag.rs` v4 and v6 reassembly `buffer` | `MAX_PAYLOAD_V4`/`_V6` checked *before* `resize`, 8 slots, 30 s/60 s timeouts | correct, and the two agree |
+| `telnet.rs` `line_buf` | `MAX_LINE_LEN` | correct |
+| `ssh.rs` `Channel::line_buf` | 1024 | correct, though see below |
+| `tls.rs` `recv_buf` (client and server) | holds one record's unread remainder; the reader drains before it refills, so ≤ `MAX_PLAINTEXT_SIZE` | correct, and the two agree |
+
+`firewall.rs` has no accumulating buffer at all — its conntrack tables are
+fixed-size arrays, and its v4 and v6 paths call the *same* `extract_ports`
+helper, so they cannot drift apart. That is the structure the rest of this
+table is trying to achieve by inspection.
+
+### The one nit left
+
+`ssh.rs`'s `Channel::line_buf` caps at a bare `1024` rather than a named
+constant. It is a correct bound, so this is not a bug and is deliberately not
+being "fixed" into a churn commit — but if that file is touched again, the
+literal should become a `const` next to `MAX_RECV_BUF`. A magic number is a
+bound nobody can find when they go looking for bounds, which is exactly the
+search this entry documents.
+
+### What did not work
+
+Grepping for the *symptom* found nothing, twice. Both bugs are invisible to
+`cargo clippy`: no index, no unwrap, no arithmetic. `net/ssh.rs` was sitting on
+the sweep list with 104 clippy sites and the denial of service was not one of
+them. The audit that worked was reading each framing layer and asking what a
+peer gains by lying about a length — which is a different activity from
+lowering a warning count, and the warning count is not a proxy for it.
+
+
+## A count field could allocate memory the archive never contained (lane A, 2026-08-23)
+
+**Status: FIXED** -- `kernel/src/fs/sevenz.rs`, `kernel/src/fs/zstd.rs`.
+
+### In short
+
+Two archive parsers took a number out of a file and used it to reserve memory
+before checking whether the file was big enough to contain that much. A 9-byte
+7z header could claim four billion files; a 14-byte zstd header could claim it
+decompressed to 256 MiB. In a normal program the allocation just fails and you
+get an error. In a kernel it does not fail -- it halts the machine. Both
+parsers are reachable from a shell command on a file the user supplies, so
+"the user opened a bad archive" and "the machine stopped" were the same event.
+
+### Why an unchecked count is worse than an unchecked loop
+
+The usual unbounded-growth bug is a loop that appends without a ceiling; it
+takes an attacker some traffic to exploit and it degrades before it dies. A
+count field is worse in every dimension, because of *where the number lands*:
+
+    Vec::with_capacity(n)      // n from the file
+    vec![x; n]
+    resize_with(n, ..)
+
+None of these can report failure. There is no `Result` to propagate -- on
+failure the allocator calls `handle_alloc_error`, and in a kernel that is a
+halt. So the check cannot be "handle the allocation error"; it has to happen
+*before* the allocation, or it does not happen at all. One malformed header,
+one halt, no traffic required.
+
+### The two instances
+
+| Parser | The claim | What it cost |
+|---|---|---|
+| `sevenz.rs` | every count was a raw `read_vli()` -- up to `u64::MAX` -- with **no guard of any kind**; `MAX_OUTPUT` was the module's only constant | `num_files` fed `resize_with` directly, so a 9-byte header sized a `Vec<FileInfo>` at four billion |
+| `zstd.rs` | `content_size` is an 8-byte frame-header field, clamped **only** to `MAX_OUTPUT_SIZE` | a 14-byte frame reserved 256 MiB before one byte of compressed data was read |
+
+Reachability was checked, not assumed. `un7z`: `archive.rs:391`,
+`archive.rs:478`, `kshell.rs:104454`. `unzstd`: `fcompress.rs:529`,
+`kshell.rs:102859`, `kshell.rs:104108`, `kshell.rs:105962`. Several of those
+are shell commands taking a path from the user.
+
+An earlier pass had wrongly cleared zstd as unreachable, on a grep for
+`zstd::decompress`. The public entry point is `unzstd`, and it has four
+callers. A reachability check that greps for a guessed name and concludes
+"no callers" is not a check; the export list is the thing to read.
+
+### The fixes, and why they use different bounds
+
+They look like the same bug and they are, but the right bound differs because
+the two numbers mean different things.
+
+**7z counts bound themselves against the input.** Every counted item costs at
+least one byte somewhere in the archive, so a count larger than the bytes
+remaining is a lie *whatever it is counting* -- no invented constant needed.
+That is generous (real entries cost far more than a byte each) and it is exact
+in the direction that matters: it can never reject an archive that could
+actually have been parsed. `read_count()` applies it at the four count sites.
+Two further places needed separate reasoning: the per-folder substream **sum**
+(each part was bounded, but `sum()` on `usize` panics on overflow under the
+kernel's overflow checks, and a non-overflowing total still sizes a
+`vec![_; n]`), and `read_bool_vector` itself, whose all-defined branch
+allocates while consuming no input at all -- the one place a count becomes
+memory with nothing to check it against.
+
+**A zstd content size cannot be bounded that way**, because decompression is
+supposed to produce more output than input; bytes-remaining is not a valid
+ceiling. But the reservation is only a *performance hint*, which is what makes
+it cheap to cap: `MAX_INITIAL_RESERVE` (1 MiB) bounds what is reserved up
+front, while `MAX_OUTPUT_SIZE` stays the real ceiling, enforced incrementally
+as blocks actually append bytes. A frame that genuinely decodes to 256 MiB now
+costs eight geometric regrowths -- negligible against the decode -- and memory
+is committed in proportion to bytes *produced* rather than bytes *claimed*.
+
+### Two things the fixes deliberately also test
+
+- **That the bound does not reject valid input.** Rejecting the malformed case
+  is only half the property; a bound that also refused parseable archives
+  would be a worse bug than the one it fixed. Both self-tests pin both sides.
+- **That the clamp did not replace the validation.** zstd still verifies the
+  declared content size against the real output at the end of the frame. The
+  test asserts an inflated claim is still `CorruptedData` and not merely
+  survived -- otherwise a future reader could conclude the clamp made the
+  check redundant and delete it.
+
+`initial_output_capacity` was split out of `decompress_frame` purely so the
+bound is reachable from a test. A clamp inside a function that also does the
+decoding can only be exercised by allocating whatever it failed to clamp,
+which is precisely the thing being prevented.
+
+Both constants carry `const _: () = assert!(..)` invariants, so an edit that
+reintroduces the hazard fails the build rather than the boot.
+
+### Where this leaves the audit
+
+`kernel/src/net` is closed (see the entry above), and with this pass
+`kernel/src/fs` is closed for **this class** too. Every allocation in the
+archive and decompression parsers whose size could come from the file was
+traced to its source. Two were broken; the rest were already right:
+
+| File | Verdict |
+|---|---|
+| `sevenz.rs` | **was broken** -- no count guard of any kind. Fixed. |
+| `zstd.rs` | **was broken** -- `content_size` clamped only to `MAX_OUTPUT_SIZE`. Fixed. |
+| `compress.rs` | correct -- `with_capacity(len.saturating_mul(2).min(MAX_OUTPUT))` |
+| `bzip2.rs` | correct -- `n_selectors` <= 18002, `max_block` <= `MAX_BLOCK_SIZE`, `alpha_size` <= 258; `with_capacity(max_block.min(65536))` at line 715 is the pattern zstd should have had. The `block_len` at lines 313/326 is `mtf_decoded.len()` -- an already-materialised length, not a claim. |
+| `xz.rs` | correct -- and the strongest case: it makes *no* speculative reservation, growing `output` only as bytes are produced. `lc`/`lp`/`pb` are validated (`lc<=8, lp<=4, pb<=4`) before `1usize << (lc+lp)`, which matters more than it looks: an unvalidated shift there is not a big allocation but a shift-overflow panic, i.e. a halt. |
+| `zip.rs` | correct -- `with_capacity(total_entries.min(4096))` |
+| `tar.rs` | correct -- capacities derive from slice lengths already in memory |
+| `cpio.rs`, `ar.rs` | correct -- writer-side padding and fixed field widths only |
+| `rar.rs` | no allocation of this shape at all |
+
+The distinction the table keeps drawing is the one that matters: a size taken
+from a buffer that **already exists** is a fact, and a size taken from a header
+that **describes** a buffer is a claim. Both look like `usize` at the
+allocation site.
+
+The question that finds this class quickly is: **does a number read from the
+file reach an allocation before anything has confirmed the file is big enough
+to contain what it describes?** Grep is a poor tool for it -- none of these
+produce a clippy warning, and there is no index, unwrap or arithmetic to match
+on. Reading each `with_capacity` / `vec![_; n]` / `resize*` call and asking
+where its argument came from is what worked, and there are few enough of them
+per file to do exhaustively.
+
+### A smaller finding, left alone deliberately
+
+zstd's literals decoder allocates `regen_size` bytes from a 20-bit wire field
+(`zstd.rs:1293`, `:1404`, `:1462`), so ~1 MiB from three bytes of input. That
+is the same shape but two orders of magnitude smaller -- bounded by the field
+width, survivable, and the same order as the reserve cap now applied at frame
+level. Noted rather than changed, so a future reader who spots it knows it was
+seen and judged, not missed.

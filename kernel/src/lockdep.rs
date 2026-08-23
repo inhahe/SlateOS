@@ -32,7 +32,7 @@
 
 use crate::serial_println;
 use crate::smp;
-use core::sync::atomic::{AtomicBool, AtomicU16, AtomicU32, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU16, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -123,6 +123,89 @@ static CLASS_COUNT: AtomicU32 = AtomicU32::new(0);
 /// `AtomicBool` field would take that away. Keeping the flag alongside costs one
 /// byte per class and leaves the hot read shape untouched.
 static CLASS_READY: [AtomicBool; MAX_CLASSES] = [const { AtomicBool::new(false) }; MAX_CLASSES];
+
+/// Instruction pointer of the most recent acquisition of each class, or `0`.
+///
+/// A lock class is keyed by the lock's *address*, which `ksyms` can turn back
+/// into a name only when the lock lives in a `static`. A heap-allocated lock —
+/// a per-mount filesystem lock, a per-connection lock — resolves to nothing, so
+/// a violation involving one names one participant and leaves the other a bare
+/// hex address. That is exactly the shape of the inversion this array was added
+/// for: `fs::handle::OPEN_FILES` (a static, resolvable) against a heap lock at
+/// `0xffff80007d6e8f20` (not).
+///
+/// Recording *where the lock was taken* fixes that, because the acquiring code
+/// is always in `.text` and therefore always resolvable. It is the more useful
+/// half of the answer in any case: knowing a lock sits at some heap address
+/// does not tell you what to change, and knowing which function took it does.
+///
+/// Most-recent rather than first: for the lock currently *held* at the moment
+/// of a violation, the most recent acquisition is precisely the one still in
+/// force, so the report describes the live situation rather than a historical
+/// one.
+///
+/// A separate array rather than a field on [`LockClass`], for the same reason
+/// as [`CLASS_READY`]: `LockClass` is `Copy` so a slot can be snapshotted in a
+/// single indexing operation, and an atomic field would take that away.
+/// `Relaxed` throughout — this is a diagnostic hint, not a synchronisation
+/// point, and no other state is published through it.
+static CLASS_SITE: [AtomicUsize; MAX_CLASSES] = [const { AtomicUsize::new(0) }; MAX_CLASSES];
+
+/// The return address of the caller of [`lock_acquire`].
+///
+/// Walks exactly two frames of the RBP chain: this helper's own frame, then
+/// `lock_acquire`'s. Both are guaranteed to exist — we are executing inside
+/// them — and the kernel is built with `-C force-frame-pointers=yes`
+/// (`.cargo/config.toml`), so neither can have been omitted. That is why this
+/// does no range validation the way [`crate::backtrace::walk_from`] must: that
+/// walker follows a chain of *arbitrary* length into frames that may be
+/// corrupt, whereas these two are ours.
+///
+/// `#[inline(never)]` is load-bearing: an inlined body would have no frame of
+/// its own and the walk would start one level too high.
+///
+/// The address returned is inside `Mutex::<T>::lock` when that call was not
+/// inlined — which still identifies the guarded type through the monomorphised
+/// symbol name — and inside the true calling function when it was.
+#[inline(never)]
+fn caller_ip() -> usize {
+    let rbp: u64;
+    // SAFETY: Reading RBP is always safe in ring 0.
+    unsafe {
+        core::arch::asm!("mov {}, rbp", out(reg) rbp, options(nomem, nostack));
+    }
+    // Defensive despite the argument above: a zero or misaligned RBP would mean
+    // the frame-pointer guarantee has been broken, and reading through it would
+    // fault inside a diagnostic path. Returning 0 degrades the report to what
+    // it printed before this array existed, which is the right failure.
+    if rbp == 0 || !rbp.is_multiple_of(8) {
+        return 0;
+    }
+    // SAFETY: `rbp` is this function's own frame pointer, established by its
+    // prologue, so `[rbp]` — the saved caller RBP — is in-bounds and
+    // initialised.
+    let parent_rbp: u64 = unsafe { core::ptr::read_volatile(rbp as *const u64) };
+    if parent_rbp == 0 || !parent_rbp.is_multiple_of(8) {
+        return 0;
+    }
+    // SAFETY: `parent_rbp` is `lock_acquire`'s frame pointer, likewise
+    // established by its prologue, so `[parent_rbp + 8]` is its return-address
+    // slot — in-bounds and initialised by the `call` that reached it.
+    #[allow(clippy::arithmetic_side_effects)]
+    let ret: u64 = unsafe { core::ptr::read_volatile((parent_rbp + 8) as *const u64) };
+    #[allow(clippy::cast_possible_truncation)]
+    {
+        ret as usize
+    }
+}
+
+/// The recorded acquisition site for class `idx`, if one has been captured.
+fn class_site(idx: u16) -> Option<usize> {
+    match CLASS_SITE.get(idx as usize)?.load(Ordering::Relaxed) {
+        0 => None,
+        ip => Some(ip),
+    }
+}
 
 /// Whether class slot `idx` is fully written and safe to read.
 ///
@@ -456,6 +539,13 @@ pub fn lock_acquire(lock_addr: usize, name: &[u8]) {
         return;
     };
 
+    // Record where this acquisition came from, before any report can be
+    // emitted below — a violation involving this class should describe the
+    // acquisition that provoked it, not the one before.
+    if let Some(slot) = CLASS_SITE.get(class_idx as usize) {
+        slot.store(caller_ip(), Ordering::Relaxed);
+    }
+
     // SAFETY: Only this CPU accesses its held stack (called with lock
     // not yet acquired, so no preemption concern for the stack itself).
     let held = unsafe { &mut HELD[cpu] };
@@ -778,12 +868,25 @@ pub fn dump_held_locks(cpu: usize) {
         // `sync::report_spin_stall` prints, so "am I already holding the lock I am
         // stalled on?" -- the entire question a recursive self-deadlock turns
         // on -- becomes a comparison instead of a guess.
-        serial_println!(
-            "[lockdep]     [{}] {} @ {:#x}",
-            i,
-            core::str::from_utf8(n).unwrap_or("<non-utf8>"),
-            id
-        );
+        // The address goes through `AddrDesc` so a lock living in a `static`
+        // resolves to that static's name, and the recorded acquisition site is
+        // appended so a heap lock — which resolves to nothing — is still
+        // identified, by the code that took it.
+        match class_site(stack[i]) {
+            Some(ip) => serial_println!(
+                "[lockdep]     [{}] {} @ {}, taken at {}",
+                i,
+                core::str::from_utf8(n).unwrap_or("<non-utf8>"),
+                AddrDesc(id),
+                AddrDesc(ip)
+            ),
+            None => serial_println!(
+                "[lockdep]     [{}] {} @ {}",
+                i,
+                core::str::from_utf8(n).unwrap_or("<non-utf8>"),
+                AddrDesc(id)
+            ),
+        }
     }
 }
 
@@ -1010,6 +1113,19 @@ fn report_violation(held_class: u16, acquired_class: u16, cpu: usize) {
         AddrDesc(class_addr(acquired_class)),
         acquired_class
     );
+    // Where each lock was taken. For a heap-allocated lock this is the only
+    // identifying information there is — its address resolves to no symbol —
+    // and it is what a reader needs even when the address does resolve, since
+    // the fix is always a change to one of these two call paths.
+    match (class_site(held_class), class_site(acquired_class)) {
+        (Some(h), Some(a)) => {
+            serial_println!("[lockdep]     held taken at:  {}", AddrDesc(h));
+            serial_println!("[lockdep]     acquiring at:   {}", AddrDesc(a));
+        }
+        (Some(h), None) => serial_println!("[lockdep]     held taken at:  {}", AddrDesc(h)),
+        (None, Some(a)) => serial_println!("[lockdep]     acquiring at:   {}", AddrDesc(a)),
+        (None, None) => {}
+    }
     serial_println!("[lockdep]   But the reverse order was observed previously.");
     serial_println!("[lockdep]   This means a deadlock is possible under different scheduling.");
 }
@@ -1302,6 +1418,40 @@ pub fn self_test() {
         "unpublished class slot reported a name"
     );
     serial_println!("[lockdep]   Slot publication (ready flags vs count): OK");
+
+    // Test 9b: acquisition-site capture. A heap-allocated lock's address
+    // resolves to no symbol, so for those the recorded site is the *only*
+    // identifying information a violation report can offer. Verify it is
+    // actually captured, and that it points into kernel text rather than at
+    // whatever an off-by-one frame walk would produce.
+    {
+        const SITE_PROBE: usize = 0xdead_5117;
+        lock_acquire(SITE_PROBE, b"site-probe");
+        let idx = find_or_register_class(SITE_PROBE, b"site-probe")
+            .expect("site probe class must be registered");
+        let site = class_site(idx).expect("acquiring a lock must record where from");
+        assert!(
+            site >= 0xFFFF_FFFF_8000_0000,
+            "recorded site {site:#x} is not a kernel text address — the frame walk in \
+             caller_ip() is off by a frame, or a frame pointer was omitted"
+        );
+        // The site must resolve to *this* function: `caller_ip` walks to
+        // `lock_acquire`'s caller, and that caller is the self-test. A name
+        // from anywhere else means the walk depth is wrong. `resolve_static`
+        // yields nothing before ksyms has loaded, which is not a failure —
+        // the address check above still holds.
+        if let Some((name, _)) = crate::ksyms::resolve_static(site as u64) {
+            assert!(
+                name.contains("lockdep"),
+                "recorded site resolved to {name}, which is not the calling self-test"
+            );
+        }
+        lock_release(SITE_PROBE);
+        serial_println!(
+            "[lockdep]   Acquisition-site capture: OK ({})",
+            AddrDesc(site)
+        );
+    }
 
     // Test 10: the edge bitmap. `record_edge` answers "is this edge new?" on
     // every nested acquire, so the property that matters is that it says "new"

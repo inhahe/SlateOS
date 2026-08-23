@@ -53,10 +53,126 @@ fn sources() -> Vec<(String, String)> {
 /// text and quoting them again would be wrong.
 const NOT_A_NAME: &[&str] = &["msg", "e", "err", "error", "message", "reason"];
 
+/// How many physical lines one wrapped macro call may span before
+/// [`logical_lines`] gives up on it. A bound is required because the scanner
+/// does not model every Rust literal form — a raw string would defeat it — and
+/// an unbounded join would then swallow the rest of the file, turning one
+/// unrecognised line into a silent hole over everything below it. 40 is far
+/// above the longest real call in `src/bin`.
+const MAX_JOIN_LINES: usize = 40;
+
+/// Net bracket depth of `src`, ignoring brackets inside string and char
+/// literals; `None` if a string literal is still open at the end.
+///
+/// Skipping literals is not an optimisation. A format string is full of `{`
+/// and `}` and often contains a paren of its own — `purged {n} job(s)` — so
+/// counting those would leave every such call permanently unbalanced and it
+/// would never be joined.
+fn bracket_delta(src: &str) -> Option<isize> {
+    let b = src.as_bytes();
+    let mut depth: isize = 0;
+    let mut k = 0usize;
+    while k < b.len() {
+        match b[k] {
+            b'"' => {
+                k += 1;
+                while k < b.len() && b[k] != b'"' {
+                    k += if b[k] == b'\\' { 2 } else { 1 };
+                }
+                if k >= b.len() {
+                    return None;
+                }
+            }
+            // `'x'` and `'\n'` are char literals and can hide a bracket; `'a`
+            // is a lifetime and must be stepped over one byte at a time.
+            b'\'' => {
+                if k + 2 < b.len() && b[k + 1] == b'\\' {
+                    if let Some(end) = b[k + 2..].iter().position(|&c| c == b'\'') {
+                        k += 2 + end;
+                    }
+                } else if k + 2 < b.len() && b[k + 2] == b'\'' {
+                    k += 2;
+                }
+            }
+            b'(' | b'[' | b'{' => depth += 1,
+            b')' | b']' | b'}' => depth -= 1,
+            _ => {}
+        }
+        k += 1;
+    }
+    Some(depth)
+}
+
+/// The lines of `text`, but with a `println!`/`eprintln!` that rustfmt split
+/// across several of them rejoined into one.
+///
+/// Both detectors below match a *line*, and rustfmt routinely breaks a long
+/// call so that the name lands on a line with no macro name on it:
+///
+/// ```text
+/// eprintln!(
+///     "tar: {}: unsupported entry type '{}'; skipped",
+///     quotef_os(&name),
+///     char::from(other)
+/// );
+/// ```
+///
+/// Without this, that call is invisible to both — and it was: the line above
+/// is the real `tar.rs` site that this test passed over for as long as it
+/// existed, while a crafted archive could set the type byte to `\n` and forge
+/// a line of `tar`'s stderr. A checker that a formatter can silence reports a
+/// clean tree for a dirty one.
+///
+/// Returns `(first physical line number, source)`, so a report still points at
+/// the line a reader would go to.
+fn logical_lines(text: &str) -> Vec<(usize, String)> {
+    let lines: Vec<&str> = text.lines().collect();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < lines.len() {
+        let line = lines[i];
+        // `eprintln!(` contains `println!(`, so take the earliest match rather
+        // than whichever is looked for first.
+        let start = match (line.find("eprintln!("), line.find("println!(")) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (Some(a), None) | (None, Some(a)) => Some(a),
+            (None, None) => None,
+        };
+        let Some(start) = start else {
+            out.push((i + 1, line.to_string()));
+            i += 1;
+            continue;
+        };
+        let mut joined = line.to_string();
+        let mut j = i;
+        while !matches!(bracket_delta(&joined[start..]), Some(d) if d <= 0) {
+            j += 1;
+            if j >= lines.len() || j - i >= MAX_JOIN_LINES {
+                j = i;
+                joined = line.to_string();
+                break;
+            }
+            joined.push(' ');
+            joined.push_str(lines[j].trim());
+        }
+        out.push((i + 1, joined));
+        i = j + 1;
+    }
+    out
+}
+
 /// `eprintln!("prog: {ident}: ...")` — the shape where `ident` ends up as a
 /// bare name in the message, which is what `quotef` exists to prevent.
 fn bare_interpolated_name(line: &str) -> Option<&str> {
-    let after_prog = line.split_once("eprintln!(\"")?.1.split_once(": {")?;
+    // Whitespace is allowed between `(` and `"` because `line` may be a call
+    // that [`logical_lines`] reassembled, which leaves the space rustfmt's
+    // line break used to be.
+    let after_prog = line
+        .split_once("eprintln!(")?
+        .1
+        .trim_start()
+        .strip_prefix('"')?
+        .split_once(": {")?;
     // The program name must be a plain word: `eprintln!("cut: {path}: ...")`.
     if !after_prog
         .0
@@ -120,14 +236,57 @@ fn the_detector_finds_what_the_sweep_removed() {
 }
 
 #[test]
+fn the_detector_sees_a_call_rustfmt_wrapped() {
+    // The regression this exists for. `tar.rs` really did contain the call
+    // below, and both detectors walked straight past it for as long as they
+    // read physical lines — while the byte it interpolates comes out of the
+    // archive header, so `\n` there forged a line of `tar`'s stderr.
+    let wrapped = "            eprintln!(\n\
+                   \x20               \"tar: {}: unsupported entry type '{}'; skipped\",\n\
+                   \x20               quotef_os(&name),\n\
+                   \x20               char::from(other)\n\
+                   \x20           );\n";
+    let joined = logical_lines(wrapped);
+    assert_eq!(joined.len(), 1, "call not joined: {joined:?}");
+    assert_eq!(joined[0].0, 1, "must report the first physical line");
+    assert!(
+        joined[0].1.contains("'{") && joined[0].1.contains("}'"),
+        "hand-written quotes lost in the join: {:?}",
+        joined[0].1
+    );
+
+    // The bare-name shape, wrapped so the format string is alone on its line.
+    let bare = "eprintln!(\n    \"cut: {path}: {e}\"\n);\n";
+    let joined = logical_lines(bare);
+    assert_eq!(joined.len(), 1);
+    assert_eq!(bare_interpolated_name(&joined[0].1), Some("path"));
+
+    // A paren inside the format string is text, not structure: counting it
+    // would leave the call unbalanced and the join would run away.
+    let parens = "println!(\"cancel: purged {n} job(s) on '{p}'\");\nlet y = 2;\n";
+    let joined = logical_lines(parens);
+    assert_eq!(joined.len(), 2, "over-joined past a paren in a literal");
+
+    // And an unparseable line must not swallow what follows it, or one odd
+    // line would blind the test to every call below it in the file.
+    let unterminated = "let s = \"oops;\neprintln!(\"cut: {path}: {e}\");\n";
+    let joined = logical_lines(unterminated);
+    assert!(
+        joined
+            .iter()
+            .any(|(_, l)| bare_interpolated_name(l).is_some()),
+        "a call after an unterminated literal was swallowed: {joined:?}"
+    );
+}
+
+#[test]
 fn no_diagnostic_interpolates_a_bare_file_name() {
     let mut found = Vec::new();
     for (file, text) in sources() {
-        for (i, line) in text.lines().enumerate() {
-            if let Some(ident) = bare_interpolated_name(line) {
+        for (line_no, line) in logical_lines(&text) {
+            if let Some(ident) = bare_interpolated_name(&line) {
                 found.push(format!(
-                    "  {file}:{}: {{{ident}}} goes into the message unquoted\n    {}",
-                    i + 1,
+                    "  {file}:{line_no}: {{{ident}}} goes into the message unquoted\n    {}",
                     line.trim()
                 ));
             }
@@ -152,12 +311,12 @@ fn no_diagnostic_hand_writes_quotes_around_a_name() {
     // what `quoteaf` is for.
     let mut found = Vec::new();
     for (file, text) in sources() {
-        for (i, line) in text.lines().enumerate() {
+        for (line_no, line) in logical_lines(&text) {
             if !line.contains("eprintln!(") && !line.contains("println!(") {
                 continue;
             }
             if line.contains("'{") && line.contains("}'") {
-                found.push(format!("  {file}:{}: {}", i + 1, line.trim()));
+                found.push(format!("  {file}:{line_no}: {}", line.trim()));
             }
         }
     }

@@ -1599,6 +1599,18 @@ mod tests {
         );
         assert_eq!(rgb(text_containing(&full, "App 0")), rgb(p.text));
         assert_eq!(rgb(text_containing(&full, "0\u{d7}")), rgb(p.overlay0));
+        // The app-state label defers to `PermissionState::color`. Asserting
+        // that method in isolation (as the choice table does) does not prove
+        // this call site still asks it -- swapping `app.state.color(p)` for a
+        // flat `p.text` leaves the method, and that table, untouched.
+        assert_eq!(
+            rgb(text_containing(&full, PermissionState::Allowed.label())),
+            rgb(PermissionState::Allowed.color(&p))
+        );
+        assert_eq!(
+            rgb(text_containing(&full, PermissionState::NotDecided.label())),
+            rgb(PermissionState::NotDecided.color(&p))
+        );
         // render_permissions_tab, overview arm
         assert_eq!(
             rgb(text_containing(&over, PermissionKind::Camera.label())),

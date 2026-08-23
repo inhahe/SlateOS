@@ -73,6 +73,7 @@ CTX = "gui/desktop/src/context_ext.rs"
 WID = "gui/desktop/src/widgets.rs"
 SND = "gui/desktop/src/sound_settings.rs"
 OSD = "gui/desktop/src/osd.rs"
+PRIV = "gui/desktop/src/privacy_settings.rs"
 
 # (name, file, [(old, new), ...], [packages], [tests expected to fail])
 DEFECTS = [
@@ -6501,6 +6502,661 @@ DEFECTS = [
         [
             'every_text_the_osd_draws_is_in_the_role_it_claims',
             'ink_drawn_on_a_coloured_fill_is_readable_in_both_modes',
+        ],
+    ),
+
+    # ---- privacy_settings.rs (module 25 of 49) ----
+    (
+        'AAAAAAAAAAAAAAAAAAAAAAAAAA: the panel background is frozen back to Mocha base',
+        PRIV,
+        [
+            ('height: 900.0,\n            color: p.base,',
+             'height: 900.0,\n            color: Color::from_hex(0x1E1E2E),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_panel_draws_comes_from_its_palette',
+            'every_rectangle_this_panel_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        'BBBBBBBBBBBBBBBBBBBBBBBBBB: the panel background sinks to the recessed role',
+        PRIV,
+        [
+            ('height: 900.0,\n            color: p.base,',
+             'height: 900.0,\n            color: p.mantle,'),
+        ],
+        ["desktop"],
+        [
+            'every_rectangle_this_panel_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        'CCCCCCCCCCCCCCCCCCCCCCCCCC: the panel title is frozen back to Mocha text',
+        PRIV,
+        [
+            ('font_size: 20.0,\n            color: p.text,',
+             'font_size: 20.0,\n            color: Color::from_hex(0xCDD6F4),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_panel_draws_comes_from_its_palette',
+            'every_text_this_panel_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        'DDDDDDDDDDDDDDDDDDDDDDDDDD: the panel title drops to secondary text',
+        PRIV,
+        [
+            ('font_size: 20.0,\n            color: p.text,',
+             'font_size: 20.0,\n            color: p.subtext0,'),
+        ],
+        ["desktop"],
+        [
+            'every_text_this_panel_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        'EEEEEEEEEEEEEEEEEEEEEEEEEE: the tab strip highlights every tab except the one you are on',
+        PRIV,
+        [
+            ('height: 30.0,\n                color: if active { p.surface0 } else { p.mantle },',
+             'height: 30.0,\n                color: if active { p.mantle } else { p.surface0 },'),
+        ],
+        ["desktop"],
+        [
+            'every_choice_this_panel_makes_hands_over_the_role_it_claims',
+        ],
+    ),
+    (
+        "FFFFFFFFFFFFFFFFFFFFFFFFFF: the selected tab's fill takes the accent as well as its label",
+        PRIV,
+        [
+            ('height: 30.0,\n                color: if active { p.surface0 } else { p.mantle },',
+             'height: 30.0,\n                color: if active { p.accent } else { p.mantle },'),
+        ],
+        ["desktop"],
+        [
+            'every_choice_this_panel_makes_hands_over_the_role_it_claims',
+            'only_the_two_selection_labels_follow_the_accent',
+        ],
+    ),
+    (
+        "GGGGGGGGGGGGGGGGGGGGGGGGGG: the active tab's label is frozen back to Mocha blue",
+        PRIV,
+        [
+            ('font_size: 12.0,\n                color: if active { p.accent } else { p.subtext0 },',
+             'font_size: 12.0,\n                color: if active { Color::from_hex(0x89B4FA) } else { p.subtext0 },'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_panel_draws_comes_from_its_palette',
+            'every_choice_this_panel_makes_hands_over_the_role_it_claims',
+            'only_the_two_selection_labels_follow_the_accent',
+        ],
+    ),
+    (
+        "HHHHHHHHHHHHHHHHHHHHHHHHHH: the active tab's label names blue instead of following the accent",
+        PRIV,
+        [
+            ('font_size: 12.0,\n                color: if active { p.accent } else { p.subtext0 },',
+             'font_size: 12.0,\n                color: if active { p.blue } else { p.subtext0 },'),
+        ],
+        ["desktop"],
+        [
+            'every_choice_this_panel_makes_hands_over_the_role_it_claims',
+            'only_the_two_selection_labels_follow_the_accent',
+        ],
+    ),
+    (
+        'IIIIIIIIIIIIIIIIIIIIIIIIII: every tab but the active one reads as selected',
+        PRIV,
+        [
+            ('font_size: 12.0,\n                color: if active { p.accent } else { p.subtext0 },',
+             'font_size: 12.0,\n                color: if active { p.subtext0 } else { p.accent },'),
+        ],
+        ["desktop"],
+        [
+            'every_choice_this_panel_makes_hands_over_the_role_it_claims',
+            'only_the_two_selection_labels_follow_the_accent',
+        ],
+    ),
+    (
+        'JJJJJJJJJJJJJJJJJJJJJJJJJJ: the resource heading is frozen back to Mocha lavender',
+        PRIV,
+        [
+            ('font_size: 16.0,\n                color: p.lavender,',
+             'font_size: 16.0,\n                color: Color::from_hex(0xB4BEFE),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_panel_draws_comes_from_its_palette',
+            'every_text_this_panel_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        'KKKKKKKKKKKKKKKKKKKKKKKKKK: the resource heading takes the accent, so a category reads as a position',
+        PRIV,
+        [
+            ('font_size: 16.0,\n                color: p.lavender,',
+             'font_size: 16.0,\n                color: p.accent,'),
+        ],
+        ["desktop"],
+        [
+            'every_text_this_panel_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        'LLLLLLLLLLLLLLLLLLLLLLLLLL: the resource description drops to the dimmest role',
+        PRIV,
+        [
+            ('font_size: 12.0,\n                color: p.subtext0,',
+             'font_size: 12.0,\n                color: p.overlay0,'),
+        ],
+        ["desktop"],
+        [
+            'every_text_this_panel_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        'MMMMMMMMMMMMMMMMMMMMMMMMMM: the no-apps notice is frozen back to Mocha overlay0',
+        PRIV,
+        [
+            ('font_size: 12.0,\n                    color: p.overlay0,',
+             'font_size: 12.0,\n                    color: Color::from_hex(0x6C7086),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_panel_draws_comes_from_its_palette',
+            'every_text_this_panel_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        'NNNNNNNNNNNNNNNNNNNNNNNNNN: the no-apps notice is promoted to ordinary secondary text',
+        PRIV,
+        [
+            ('font_size: 12.0,\n                    color: p.overlay0,',
+             'font_size: 12.0,\n                    color: p.subtext0,'),
+        ],
+        ["desktop"],
+        [
+            'every_text_this_panel_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        "OOOOOOOOOOOOOOOOOOOOOOOOOO: an app row's background rises out of its well",
+        PRIV,
+        [
+            ('height: 32.0,\n                        color: p.mantle,',
+             'height: 32.0,\n                        color: p.surface0,'),
+        ],
+        ["desktop"],
+        [
+            'every_rectangle_this_panel_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        "PPPPPPPPPPPPPPPPPPPPPPPPPP: an app's name is frozen back to Mocha text",
+        PRIV,
+        [
+            ('text: app.app_name.clone(),\n                        font_size: 13.0,\n                        color: p.text,',
+             'text: app.app_name.clone(),\n                        font_size: 13.0,\n                        color: Color::from_hex(0xCDD6F4),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_panel_draws_comes_from_its_palette',
+            'every_text_this_panel_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        "QQQQQQQQQQQQQQQQQQQQQQQQQQ: an app's name drops to secondary text",
+        PRIV,
+        [
+            ('text: app.app_name.clone(),\n                        font_size: 13.0,\n                        color: p.text,',
+             'text: app.app_name.clone(),\n                        font_size: 13.0,\n                        color: p.subtext0,'),
+        ],
+        ["desktop"],
+        [
+            'every_text_this_panel_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        "RRRRRRRRRRRRRRRRRRRRRRRRRR: an app's permission state stops being drawn in that state's colour",
+        PRIV,
+        [
+            ('color: app.state.color(p),',
+             'color: p.text,'),
+        ],
+        ["desktop"],
+        [
+            'every_text_this_panel_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        'SSSSSSSSSSSSSSSSSSSSSSSSSS: the access counter is promoted to secondary text',
+        PRIV,
+        [
+            ('font_size: 11.0,\n                        color: p.overlay0,',
+             'font_size: 11.0,\n                        color: p.subtext0,'),
+        ],
+        ["desktop"],
+        [
+            'every_text_this_panel_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        "TTTTTTTTTTTTTTTTTTTTTTTTTT: an overview row's background rises out of its well",
+        PRIV,
+        [
+            ('height: 40.0,\n                    color: p.mantle,',
+             'height: 40.0,\n                    color: p.surface0,'),
+        ],
+        ["desktop"],
+        [
+            'every_rectangle_this_panel_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        "UUUUUUUUUUUUUUUUUUUUUUUUUU: an overview row's resource name drops to secondary text",
+        PRIV,
+        [
+            ('font_size: 14.0,\n                    color: p.text,',
+             'font_size: 14.0,\n                    color: p.subtext0,'),
+        ],
+        ["desktop"],
+        [
+            'every_text_this_panel_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        'VVVVVVVVVVVVVVVVVVVVVVVVVV: the overview status line reports allowed as denied and denied as allowed',
+        PRIV,
+        [
+            ('color: if enabled { p.green } else { p.red },',
+             'color: if enabled { p.red } else { p.green },'),
+        ],
+        ["desktop"],
+        [
+            'every_choice_this_panel_makes_hands_over_the_role_it_claims',
+            'nothing_that_reports_a_permission_state_follows_the_accent',
+        ],
+    ),
+    (
+        'WWWWWWWWWWWWWWWWWWWWWWWWWW: an enabled resource reports its state in the accent',
+        PRIV,
+        [
+            ('color: if enabled { p.green } else { p.red },',
+             'color: if enabled { p.accent } else { p.red },'),
+        ],
+        ["desktop"],
+        [
+            'every_choice_this_panel_makes_hands_over_the_role_it_claims',
+            'nothing_that_reports_a_permission_state_follows_the_accent',
+        ],
+    ),
+    (
+        'XXXXXXXXXXXXXXXXXXXXXXXXXX: the overview status line is frozen back to Mocha green',
+        PRIV,
+        [
+            ('color: if enabled { p.green } else { p.red },',
+             'color: if enabled { Color::from_hex(0xA6E3A1) } else { p.red },'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_panel_draws_comes_from_its_palette',
+            'every_choice_this_panel_makes_hands_over_the_role_it_claims',
+        ],
+    ),
+    (
+        'YYYYYYYYYYYYYYYYYYYYYYYYYY: the overview description is promoted to secondary text',
+        PRIV,
+        [
+            ('font_size: 10.0,\n                    color: p.overlay0,',
+             'font_size: 10.0,\n                    color: p.subtext0,'),
+        ],
+        ["desktop"],
+        [
+            'every_text_this_panel_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        'ZZZZZZZZZZZZZZZZZZZZZZZZZZ: the empty-log notice is frozen back to Mocha overlay0',
+        PRIV,
+        [
+            ('text: "No activity recorded yet.".into(),\n                font_size: 13.0,\n                color: p.overlay0,',
+             'text: "No activity recorded yet.".into(),\n                font_size: 13.0,\n                color: Color::from_hex(0x6C7086),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_panel_draws_comes_from_its_palette',
+            'every_text_this_panel_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        'AAAAAAAAAAAAAAAAAAAAAAAAAAA: the empty-log notice is promoted to secondary text',
+        PRIV,
+        [
+            ('text: "No activity recorded yet.".into(),\n                font_size: 13.0,\n                color: p.overlay0,',
+             'text: "No activity recorded yet.".into(),\n                font_size: 13.0,\n                color: p.subtext0,'),
+        ],
+        ["desktop"],
+        [
+            'every_text_this_panel_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        'BBBBBBBBBBBBBBBBBBBBBBBBBBB: the activity count heading drops to secondary text',
+        PRIV,
+        [
+            ('text: format!("{} recent access events", log.len()),\n            font_size: 13.0,\n            color: p.text,',
+             'text: format!("{} recent access events", log.len()),\n            font_size: 13.0,\n            color: p.subtext0,'),
+        ],
+        ["desktop"],
+        [
+            'every_text_this_panel_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        "CCCCCCCCCCCCCCCCCCCCCCCCCCC: an activity row's background rises out of its well",
+        PRIV,
+        [
+            ('height: 28.0,\n                color: p.mantle,',
+             'height: 28.0,\n                color: p.surface0,'),
+        ],
+        ["desktop"],
+        [
+            'every_rectangle_this_panel_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        'DDDDDDDDDDDDDDDDDDDDDDDDDDD: the activity log reports allowed accesses as denied and denied as allowed',
+        PRIV,
+        [
+            ('let color = if entry.allowed { p.green } else { p.red };',
+             'let color = if entry.allowed { p.red } else { p.green };'),
+        ],
+        ["desktop"],
+        [
+            'every_choice_this_panel_makes_hands_over_the_role_it_claims',
+            'nothing_that_reports_a_permission_state_follows_the_accent',
+        ],
+    ),
+    (
+        'EEEEEEEEEEEEEEEEEEEEEEEEEEE: an allowed access is logged in the accent instead of green',
+        PRIV,
+        [
+            ('let color = if entry.allowed { p.green } else { p.red };',
+             'let color = if entry.allowed { p.accent } else { p.red };'),
+        ],
+        ["desktop"],
+        [
+            'every_choice_this_panel_makes_hands_over_the_role_it_claims',
+            'nothing_that_reports_a_permission_state_follows_the_accent',
+        ],
+    ),
+    (
+        'FFFFFFFFFFFFFFFFFFFFFFFFFFF: the Telemetry heading takes the accent, so a category reads as a position',
+        PRIV,
+        [
+            ('text: "Telemetry".into(),\n            font_size: 14.0,\n            color: p.lavender,',
+             'text: "Telemetry".into(),\n            font_size: 14.0,\n            color: p.accent,'),
+        ],
+        ["desktop"],
+        [
+            'every_text_this_panel_draws_is_in_the_role_it_claims',
+            'only_the_two_selection_labels_follow_the_accent',
+        ],
+    ),
+    (
+        'GGGGGGGGGGGGGGGGGGGGGGGGGGG: the Telemetry heading is frozen back to Mocha lavender',
+        PRIV,
+        [
+            ('text: "Telemetry".into(),\n            font_size: 14.0,\n            color: p.lavender,',
+             'text: "Telemetry".into(),\n            font_size: 14.0,\n            color: Color::from_hex(0xB4BEFE),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_panel_draws_comes_from_its_palette',
+            'every_text_this_panel_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        'HHHHHHHHHHHHHHHHHHHHHHHHHHH: every telemetry level looks selected except the one that is',
+        PRIV,
+        [
+            ('height: 28.0,\n                color: if active { p.surface0 } else { p.mantle },',
+             'height: 28.0,\n                color: if active { p.mantle } else { p.surface0 },'),
+        ],
+        ["desktop"],
+        [
+            'every_choice_this_panel_makes_hands_over_the_role_it_claims',
+        ],
+    ),
+    (
+        "IIIIIIIIIIIIIIIIIIIIIIIIIII: the selected telemetry row's fill takes the accent as well as its label",
+        PRIV,
+        [
+            ('height: 28.0,\n                color: if active { p.surface0 } else { p.mantle },',
+             'height: 28.0,\n                color: if active { p.accent } else { p.mantle },'),
+        ],
+        ["desktop"],
+        [
+            'every_choice_this_panel_makes_hands_over_the_role_it_claims',
+            'only_the_two_selection_labels_follow_the_accent',
+        ],
+    ),
+    (
+        'JJJJJJJJJJJJJJJJJJJJJJJJJJJ: every telemetry label reads as selected except the one that is',
+        PRIV,
+        [
+            ('font_size: 13.0,\n                color: if active { p.accent } else { p.text },',
+             'font_size: 13.0,\n                color: if active { p.text } else { p.accent },'),
+        ],
+        ["desktop"],
+        [
+            'every_choice_this_panel_makes_hands_over_the_role_it_claims',
+            'only_the_two_selection_labels_follow_the_accent',
+        ],
+    ),
+    (
+        'KKKKKKKKKKKKKKKKKKKKKKKKKKK: the selected telemetry label names blue instead of following the accent',
+        PRIV,
+        [
+            ('font_size: 13.0,\n                color: if active { p.accent } else { p.text },',
+             'font_size: 13.0,\n                color: if active { p.blue } else { p.text },'),
+        ],
+        ["desktop"],
+        [
+            'every_choice_this_panel_makes_hands_over_the_role_it_claims',
+            'only_the_two_selection_labels_follow_the_accent',
+        ],
+    ),
+    (
+        'LLLLLLLLLLLLLLLLLLLLLLLLLLL: the Other heading drops to secondary text',
+        PRIV,
+        [
+            ('text: "Other".into(),\n            font_size: 14.0,\n            color: p.lavender,',
+             'text: "Other".into(),\n            font_size: 14.0,\n            color: p.subtext0,'),
+        ],
+        ["desktop"],
+        [
+            'every_text_this_panel_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        "MMMMMMMMMMMMMMMMMMMMMMMMMMM: a toggle's label is promoted to primary text",
+        PRIV,
+        [
+            ('text: label.into(),\n            font_size: 13.0,\n            color: p.subtext0,',
+             'text: label.into(),\n            font_size: 13.0,\n            color: p.text,'),
+        ],
+        ["desktop"],
+        [
+            'every_text_this_panel_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        'NNNNNNNNNNNNNNNNNNNNNNNNNNN: every toggle pill reports the opposite of its switch',
+        PRIV,
+        [
+            ('let bg = if on { p.green } else { p.surface1 };',
+             'let bg = if on { p.surface1 } else { p.green };'),
+        ],
+        ["desktop"],
+        [
+            'every_choice_this_panel_makes_hands_over_the_role_it_claims',
+        ],
+    ),
+    (
+        'OOOOOOOOOOOOOOOOOOOOOOOOOOO: a switched-on toggle reports its state in the accent',
+        PRIV,
+        [
+            ('let bg = if on { p.green } else { p.surface1 };',
+             'let bg = if on { p.accent } else { p.surface1 };'),
+        ],
+        ["desktop"],
+        [
+            'every_choice_this_panel_makes_hands_over_the_role_it_claims',
+            'nothing_that_reports_a_permission_state_follows_the_accent',
+        ],
+    ),
+    (
+        'PPPPPPPPPPPPPPPPPPPPPPPPPPP: the on-pill is frozen back to Mocha green',
+        PRIV,
+        [
+            ('let bg = if on { p.green } else { p.surface1 };',
+             'let bg = if on { Color::from_hex(0xA6E3A1) } else { p.surface1 };'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_panel_draws_comes_from_its_palette',
+            'every_choice_this_panel_makes_hands_over_the_role_it_claims',
+        ],
+    ),
+    (
+        'QQQQQQQQQQQQQQQQQQQQQQQQQQQ: the toggle knob is frozen back to Mocha text',
+        PRIV,
+        [
+            ('height: 16.0,\n            color: p.text,',
+             'height: 16.0,\n            color: Color::from_hex(0xCDD6F4),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_panel_draws_comes_from_its_palette',
+            'every_rectangle_this_panel_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        'RRRRRRRRRRRRRRRRRRRRRRRRRRR: the toggle knob dims to secondary text',
+        PRIV,
+        [
+            ('height: 16.0,\n            color: p.text,',
+             'height: 16.0,\n            color: p.subtext0,'),
+        ],
+        ["desktop"],
+        [
+            'every_rectangle_this_panel_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        'SSSSSSSSSSSSSSSSSSSSSSSSSSS: an allowed permission stops being green',
+        PRIV,
+        [
+            ('Self::Allowed => p.green,',
+             'Self::Allowed => p.blue,'),
+        ],
+        ["desktop"],
+        [
+            'every_choice_this_panel_makes_hands_over_the_role_it_claims',
+            'every_text_this_panel_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        'TTTTTTTTTTTTTTTTTTTTTTTTTTT: a denied permission is reported in the same green as an allowed one',
+        PRIV,
+        [
+            ('Self::Denied => p.red,',
+             'Self::Denied => p.green,'),
+        ],
+        ["desktop"],
+        [
+            'every_choice_this_panel_makes_hands_over_the_role_it_claims',
+            'allowed_and_denied_stay_apart_under_every_accent_and_mode',
+        ],
+    ),
+    (
+        'UUUUUUUUUUUUUUUUUUUUUUUUUUU: an undecided permission is dressed up as an ordinary secondary label',
+        PRIV,
+        [
+            ('Self::NotDecided => p.overlay0,',
+             'Self::NotDecided => p.subtext0,'),
+        ],
+        ["desktop"],
+        [
+            'every_choice_this_panel_makes_hands_over_the_role_it_claims',
+            'every_text_this_panel_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        'VVVVVVVVVVVVVVVVVVVVVVVVVVV: an allowed permission follows the accent instead of meaning allowed',
+        PRIV,
+        [
+            ('Self::Allowed => p.green,',
+             'Self::Allowed => p.accent,'),
+        ],
+        ["desktop"],
+        [
+            'every_choice_this_panel_makes_hands_over_the_role_it_claims',
+            'allowed_and_denied_stay_apart_under_every_accent_and_mode',
+            'nothing_that_reports_a_permission_state_follows_the_accent',
+        ],
+    ),
+    (
+        'WWWWWWWWWWWWWWWWWWWWWWWWWWW: the detail view never shows its no-apps notice',
+        PRIV,
+        [
+            ('if apps.is_empty() {',
+             'if false {'),
+        ],
+        ["desktop"],
+        [
+            'the_fixtures_take_every_branch_this_panel_has',
+        ],
+    ),
+    (
+        'XXXXXXXXXXXXXXXXXXXXXXXXXXX: the activity tab never shows its empty state',
+        PRIV,
+        [
+            ('if log.is_empty() {',
+             'if false {'),
+        ],
+        ["desktop"],
+        [
+            'the_fixtures_take_every_branch_this_panel_has',
+        ],
+    ),
+    (
+        'YYYYYYYYYYYYYYYYYYYYYYYYYYY: the overview never reports how many apps are allowed',
+        PRIV,
+        [
+            ('} else if count > 0 {',
+             '} else if false {'),
+        ],
+        ["desktop"],
+        [
+            'the_fixtures_take_every_branch_this_panel_has',
+        ],
+    ),
+    (
+        'ZZZZZZZZZZZZZZZZZZZZZZZZZZZ: a denied access is logged with the tick of an allowed one',
+        PRIV,
+        [
+            ('let status = if entry.allowed { "✓" } else { "✕" };',
+             'let status = if entry.allowed { "✓" } else { "✓" };'),
+        ],
+        ["desktop"],
+        [
+            'the_fixtures_take_every_branch_this_panel_has',
         ],
     ),
 ]

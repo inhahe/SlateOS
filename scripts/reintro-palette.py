@@ -7720,7 +7720,6 @@ DEFECTS = [
         ],
         ["desktop"],
         [
-            'every_colour_the_taskbar_and_settings_draw_comes_from_their_palette',
             'every_text_this_module_draws_is_in_the_role_it_claims',
             'nothing_this_module_draws_moves_when_the_accent_does',
         ],
@@ -7759,7 +7758,6 @@ DEFECTS = [
         ],
         ["desktop"],
         [
-            'every_colour_the_taskbar_and_settings_draw_comes_from_their_palette',
             'every_rectangle_this_module_draws_is_in_the_role_it_claims',
             'nothing_this_module_draws_moves_when_the_accent_does',
         ],
@@ -7798,7 +7796,6 @@ DEFECTS = [
         ],
         ["desktop"],
         [
-            'every_colour_the_taskbar_and_settings_draw_comes_from_their_palette',
             'every_rectangle_this_module_draws_is_in_the_role_it_claims',
             'nothing_this_module_draws_moves_when_the_accent_does',
         ],
@@ -7812,8 +7809,8 @@ DEFECTS = [
         ],
         ["desktop"],
         [
-            'every_colour_the_taskbar_and_settings_draw_comes_from_their_palette',
             'every_choice_this_module_makes_hands_over_the_role_it_claims',
+            'every_colour_the_taskbar_and_settings_draw_comes_from_their_palette',
         ],
     ),
     (
@@ -7825,8 +7822,8 @@ DEFECTS = [
         ],
         ["desktop"],
         [
-            'the_fixtures_take_every_branch_this_module_has',
             'every_choice_this_module_makes_hands_over_the_role_it_claims',
+            'the_fixtures_take_every_branch_this_module_has',
         ],
     ),
     (
@@ -7838,9 +7835,9 @@ DEFECTS = [
         ],
         ["desktop"],
         [
-            'every_colour_the_taskbar_and_settings_draw_comes_from_their_palette',
             'every_choice_this_module_makes_hands_over_the_role_it_claims',
             'nothing_this_module_draws_moves_when_the_accent_does',
+            'the_fixtures_take_every_branch_this_module_has',
         ],
     ),
     (
@@ -7852,8 +7849,8 @@ DEFECTS = [
         ],
         ["desktop"],
         [
-            'every_colour_the_taskbar_and_settings_draw_comes_from_their_palette',
             'every_choice_this_module_makes_hands_over_the_role_it_claims',
+            'every_colour_the_taskbar_and_settings_draw_comes_from_their_palette',
         ],
     ),
     (
@@ -7865,8 +7862,8 @@ DEFECTS = [
         ],
         ["desktop"],
         [
-            'the_fixtures_take_every_branch_this_module_has',
             'every_choice_this_module_makes_hands_over_the_role_it_claims',
+            'the_fixtures_take_every_branch_this_module_has',
         ],
     ),
     (
@@ -7878,9 +7875,9 @@ DEFECTS = [
         ],
         ["desktop"],
         [
-            'every_colour_the_taskbar_and_settings_draw_comes_from_their_palette',
             'every_choice_this_module_makes_hands_over_the_role_it_claims',
             'nothing_this_module_draws_moves_when_the_accent_does',
+            'the_fixtures_take_every_branch_this_module_has',
         ],
     ),
     (
@@ -7892,8 +7889,8 @@ DEFECTS = [
         ],
         ["desktop"],
         [
-            'every_colour_the_taskbar_and_settings_draw_comes_from_their_palette',
             'every_choice_this_module_makes_hands_over_the_role_it_claims',
+            'every_colour_the_taskbar_and_settings_draw_comes_from_their_palette',
         ],
     ),
     (
@@ -7905,8 +7902,8 @@ DEFECTS = [
         ],
         ["desktop"],
         [
-            'the_fixtures_take_every_branch_this_module_has',
             'every_choice_this_module_makes_hands_over_the_role_it_claims',
+            'the_fixtures_take_every_branch_this_module_has',
         ],
     ),
     (
@@ -7918,9 +7915,9 @@ DEFECTS = [
         ],
         ["desktop"],
         [
-            'every_colour_the_taskbar_and_settings_draw_comes_from_their_palette',
             'every_choice_this_module_makes_hands_over_the_role_it_claims',
             'nothing_this_module_draws_moves_when_the_accent_does',
+            'the_fixtures_take_every_branch_this_module_has',
         ],
     ),
     (
@@ -7932,8 +7929,8 @@ DEFECTS = [
         ],
         ["desktop"],
         [
-            'every_colour_the_taskbar_and_settings_draw_comes_from_their_palette',
             'every_choice_this_module_makes_hands_over_the_role_it_claims',
+            'every_colour_the_taskbar_and_settings_draw_comes_from_their_palette',
         ],
     ),
     (
@@ -7945,8 +7942,8 @@ DEFECTS = [
         ],
         ["desktop"],
         [
-            'the_fixtures_take_every_branch_this_module_has',
             'every_choice_this_module_makes_hands_over_the_role_it_claims',
+            'the_fixtures_take_every_branch_this_module_has',
         ],
     ),
     (
@@ -7958,7 +7955,6 @@ DEFECTS = [
         ],
         ["desktop"],
         [
-            'every_colour_the_taskbar_and_settings_draw_comes_from_their_palette',
             'every_choice_this_module_makes_hands_over_the_role_it_claims',
             'nothing_this_module_draws_moves_when_the_accent_does',
         ],
@@ -7997,7 +7993,6 @@ DEFECTS = [
         ],
         ["desktop"],
         [
-            'every_colour_the_taskbar_and_settings_draw_comes_from_their_palette',
             'every_text_this_module_draws_is_in_the_role_it_claims',
             'nothing_this_module_draws_moves_when_the_accent_does',
         ],
@@ -8036,7 +8031,6 @@ DEFECTS = [
         ],
         ["desktop"],
         [
-            'every_colour_the_taskbar_and_settings_draw_comes_from_their_palette',
             'every_text_this_module_draws_is_in_the_role_it_claims',
             'nothing_this_module_draws_moves_when_the_accent_does',
         ],
@@ -8050,8 +8044,9 @@ DEFECTS = [
         ],
         ["desktop"],
         [
-            'every_colour_the_taskbar_and_settings_draw_comes_from_their_palette',
             'every_choice_this_module_makes_hands_over_the_role_it_claims',
+            'every_colour_the_taskbar_and_settings_draw_comes_from_their_palette',
+            'every_text_this_module_draws_is_in_the_role_it_claims',
         ],
     ),
     (
@@ -8064,6 +8059,7 @@ DEFECTS = [
         ["desktop"],
         [
             'every_choice_this_module_makes_hands_over_the_role_it_claims',
+            'every_text_this_module_draws_is_in_the_role_it_claims',
         ],
     ),
     (
@@ -8075,8 +8071,8 @@ DEFECTS = [
         ],
         ["desktop"],
         [
-            'every_colour_the_taskbar_and_settings_draw_comes_from_their_palette',
             'every_choice_this_module_makes_hands_over_the_role_it_claims',
+            'every_text_this_module_draws_is_in_the_role_it_claims',
             'nothing_this_module_draws_moves_when_the_accent_does',
         ],
     ),
@@ -8089,8 +8085,8 @@ DEFECTS = [
         ],
         ["desktop"],
         [
-            'every_colour_the_taskbar_and_settings_draw_comes_from_their_palette',
             'every_choice_this_module_makes_hands_over_the_role_it_claims',
+            'every_colour_the_taskbar_and_settings_draw_comes_from_their_palette',
         ],
     ),
     (
@@ -8114,7 +8110,6 @@ DEFECTS = [
         ],
         ["desktop"],
         [
-            'every_colour_the_taskbar_and_settings_draw_comes_from_their_palette',
             'every_choice_this_module_makes_hands_over_the_role_it_claims',
             'nothing_this_module_draws_moves_when_the_accent_does',
         ],
@@ -8128,8 +8123,8 @@ DEFECTS = [
         ],
         ["desktop"],
         [
-            'every_colour_the_taskbar_and_settings_draw_comes_from_their_palette',
             'every_choice_this_module_makes_hands_over_the_role_it_claims',
+            'every_colour_the_taskbar_and_settings_draw_comes_from_their_palette',
         ],
     ),
     (
@@ -8153,7 +8148,6 @@ DEFECTS = [
         ],
         ["desktop"],
         [
-            'every_colour_the_taskbar_and_settings_draw_comes_from_their_palette',
             'every_choice_this_module_makes_hands_over_the_role_it_claims',
             'nothing_this_module_draws_moves_when_the_accent_does',
         ],
@@ -8167,8 +8161,8 @@ DEFECTS = [
         ],
         ["desktop"],
         [
-            'every_colour_the_taskbar_and_settings_draw_comes_from_their_palette',
             'every_choice_this_module_makes_hands_over_the_role_it_claims',
+            'every_colour_the_taskbar_and_settings_draw_comes_from_their_palette',
         ],
     ),
     (
@@ -8192,7 +8186,6 @@ DEFECTS = [
         ],
         ["desktop"],
         [
-            'every_colour_the_taskbar_and_settings_draw_comes_from_their_palette',
             'every_choice_this_module_makes_hands_over_the_role_it_claims',
             'nothing_this_module_draws_moves_when_the_accent_does',
         ],
@@ -8256,8 +8249,8 @@ DEFECTS = [
         ["desktop"],
         [
             'every_colour_the_screen_saver_draws_is_a_dark_role_or_one_of_its_two_ramps',
-            'every_text_this_module_draws_is_in_the_role_it_claims',
             'every_rectangle_this_module_draws_is_in_the_role_it_claims',
+            'every_text_this_module_draws_is_in_the_role_it_claims',
         ],
     ),
     (
@@ -8319,7 +8312,6 @@ DEFECTS = [
         ],
         ["desktop"],
         [
-            'every_colour_the_screen_saver_draws_is_a_dark_role_or_one_of_its_two_ramps',
             'the_screen_saver_blacks_out_the_display_in_every_style_it_draws',
         ],
     ),

@@ -2635,8 +2635,12 @@ mod tests {
             );
         }
 
-        // The saver's two labels, against its own pinned palette.
-        let sp = screen_palette();
+        // The saver's two labels. The expected values name `Palette::for_mode`
+        // directly rather than `screen_palette()` — lesson 5: an expectation
+        // computed by the code under test moves when that code does, so a
+        // `screen_palette` that started returning the light palette would take
+        // both sides of the comparison with it and this test would not notice.
+        let sp = Palette::for_mode(false);
         let mut clock = ScreenSaver::new(ScreenSaverStyle::Clock, 800, 600);
         let cmds = clock.render_frame();
         assert_eq!(rgb(text_exact(&cmds, "12:00", 72.0)), rgb(sp.lavender));
@@ -2683,8 +2687,9 @@ mod tests {
             }
         }
 
-        // The saver's logo plate.
-        let sp = screen_palette();
+        // The saver's logo plate, against the dark palette by name — see the
+        // note on lesson 5 in the text table.
+        let sp = Palette::for_mode(false);
         let mut logo = ScreenSaver::new(ScreenSaverStyle::BouncingLogo, 800, 600);
         let cmds = logo.render_frame();
         assert_eq!(rgb(fill_of_height(&cmds, 60.0)), rgb(sp.blue));

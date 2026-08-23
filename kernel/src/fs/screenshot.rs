@@ -298,7 +298,15 @@ fn record_capture(
     // hold bytes with no UTF-8 spelling (design-decisions.md §261), which a
     // formatted concatenation cannot carry, and `join` additionally collapses a
     // trailing `/` that the concatenation would have doubled.
-    let name = alloc::format!("screenshot_{}.{}", id, state.config.format.label());
+    // The configured stem, or `screenshot` when unset.  `clear_all`/`State::new`
+    // leave it empty, and an empty stem would produce the bare name `_7.png`.
+    let mut name = if state.config.filename_pattern.is_empty() {
+        b"screenshot".to_vec()
+    } else {
+        state.config.filename_pattern.clone()
+    };
+    name.extend_from_slice(alloc::format!("_{}.{}", id, state.config.format.label()).as_bytes());
+    let name = PathBuf::from_vec(name);
     let path = if state.config.save_dir.is_empty() {
         Path::new("/tmp").join(&name)
     } else {
@@ -382,6 +390,29 @@ pub fn set_save_dir(dir: impl AsRef<Path>) -> KernelResult<()> {
         return Err(KernelError::InvalidArgument);
     }
     STATE.lock().config.save_dir = dir.to_path_buf();
+    Ok(())
+}
+
+/// Set the filename stem prefix, e.g. `holiday` -> `holiday_7.png`.
+///
+/// Rejects a pattern containing `/` or NUL. This is a *filename component*,
+/// not a path: allowing `/` would let a "pattern" such as `../../etc/passwd`
+/// steer a capture out of the configured save directory, and NUL cannot appear
+/// in a name at all. An empty pattern restores the `screenshot` default.
+///
+/// # Errors
+///
+/// `InvalidArgument` if the pattern is longer than `MAX_PATH_LEN` or contains
+/// a separator or NUL byte.
+pub fn set_filename_pattern(pattern: impl AsRef<[u8]>) -> KernelResult<()> {
+    let pattern = pattern.as_ref();
+    if pattern.len() > MAX_PATH_LEN {
+        return Err(KernelError::InvalidArgument);
+    }
+    if pattern.iter().any(|&b| b == b'/' || b == 0) {
+        return Err(KernelError::InvalidArgument);
+    }
+    STATE.lock().config.filename_pattern = pattern.to_vec();
     Ok(())
 }
 
@@ -582,6 +613,47 @@ pub fn self_test() -> KernelResult<()> {
     assert!(
         !s7.path.as_path().as_bytes().windows(2).any(|w| w == b"//"),
         "join must collapse the trailing separator"
+    );
+
+    // Test 9: Filename pattern.
+    //
+    // The pattern was pure dead config until this was wired up: it had no
+    // setter and `record_capture` hard-coded the stem `screenshot`, so the
+    // documented "e.g. screenshot_%Y%m%d" was a promise nothing kept.
+    serial_println!("  screenshot::self_test 9: filename pattern");
+    set_save_dir("/tmp/ss")?;
+    set_filename_pattern("holiday")?;
+    let id8 = capture_full(100, 100)?;
+    let s8 = get(id8).ok_or(KernelError::NotFound)?;
+    assert_eq!(
+        s8.path.as_path(),
+        Path::new(&alloc::format!("/tmp/ss/holiday_{id8}.png"))
+    );
+
+    // A pattern is a name, so it is byte-typed like every other name here.
+    set_filename_pattern(&b"ur\xFFlaub"[..])?;
+    let id9 = capture_full(100, 100)?;
+    let s9 = get(id9).ok_or(KernelError::NotFound)?;
+    let mut want = b"/tmp/ss/ur\xFFlaub_".to_vec();
+    want.extend_from_slice(alloc::format!("{id9}.png").as_bytes());
+    assert_eq!(s9.path.as_path().as_bytes(), &want[..]);
+
+    // A pattern is a *component*: `/` would let it escape the save directory,
+    // and NUL cannot appear in a name at all.  Both must be refused, and a
+    // refusal must not have disturbed the pattern already in place.
+    assert!(set_filename_pattern("../../etc/passwd").is_err());
+    assert!(set_filename_pattern("a/b").is_err());
+    assert!(set_filename_pattern(&b"nul\0byte"[..]).is_err());
+    assert_eq!(config().filename_pattern, b"ur\xFFlaub".to_vec());
+
+    // An empty pattern falls back to the default stem rather than producing
+    // the bare name `_10.png`.
+    set_filename_pattern("")?;
+    let id10 = capture_full(100, 100)?;
+    let s10 = get(id10).ok_or(KernelError::NotFound)?;
+    assert_eq!(
+        s10.path.as_path(),
+        Path::new(&alloc::format!("/tmp/ss/screenshot_{id10}.png"))
     );
 
     clear_all();

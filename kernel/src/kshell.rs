@@ -24818,6 +24818,29 @@ fn cmd_screenshot(args: &str) {
                 }
             }
         }
+        "pattern" | "name" => {
+            let pat = parts.get(1).copied().unwrap_or("");
+            if parts.len() < 2 {
+                let cfg = screenshot::config();
+                if cfg.filename_pattern.is_empty() {
+                    shell_println!("Filename pattern: screenshot (default)");
+                } else {
+                    shell_println!(
+                        "Filename pattern: {}",
+                        crate::fs::path::Path::new(&cfg.filename_pattern[..]).display()
+                    );
+                }
+            } else {
+                match screenshot::set_filename_pattern(pat) {
+                    // An explicit empty argument is how the default is restored.
+                    Ok(()) if pat.is_empty() => {
+                        shell_println!("Filename pattern: screenshot (default)");
+                    }
+                    Ok(()) => shell_println!("Filename pattern: {}", pat),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            }
+        }
         "format" | "fmt" => {
             if let Some(f) = parts
                 .get(1)
@@ -24906,7 +24929,7 @@ fn cmd_screenshot(args: &str) {
         }
         _ => {
             shell_println!(
-                "screenshot: full/window/region/monitor/get/history/recent/delete/clear/dir/format/quality/cursor/sound/delay/clipboard/init/test/stats/reset"
+                "screenshot: full/window/region/monitor/get/history/recent/delete/clear/dir/pattern/format/quality/cursor/sound/delay/clipboard/init/test/stats/reset"
             );
         }
     }

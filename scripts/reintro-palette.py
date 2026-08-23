@@ -84,6 +84,7 @@ LAUN = "gui/desktop/src/launcher.rs"
 RESMON = "gui/desktop/src/resmon.rs"
 MOUSESET = "gui/desktop/src/mouse_settings.rs"
 HOTKEYS = "gui/desktop/src/hotkeys.rs"
+SCRCAP = "gui/desktop/src/screen_capture.rs"
 
 # (name, file, [(old, new), ...], [packages], [tests expected to fail])
 DEFECTS = [
@@ -14157,6 +14158,644 @@ DEFECTS = [
         [
             'every_site_draws_the_role_it_claims',
             'the_panel_is_as_transparent_as_the_user_asked',
+        ],
+    ),
+    (
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA: MOCHA_BASE survives the conversion at the pill site",
+        SCRCAP,
+        [
+            ('        color: p.panel_bg(),',
+             '        color: guitk::color::Color::from_hex(0x1E1E2E),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_both_renderers_draw_comes_from_their_palette',
+            'every_site_draws_the_role_it_claims',
+            'none_of_the_ten_deleted_constants_is_still_drawn',
+            'the_indicator_pill_is_as_transparent_as_the_user_asked',
+        ],
+    ),
+    (
+        "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB: MOCHA_MANTLE survives the conversion at the ctrlbg site",
+        SCRCAP,
+        [
+            ('        color: p.mantle,\n        corner_radii: CornerRadii::all(8.0),',
+             '        color: p.mantle,\n        color: guitk::color::Color::from_hex(0x181825),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_both_renderers_draw_comes_from_their_palette',
+            'every_site_draws_the_role_it_claims',
+            'none_of_the_ten_deleted_constants_is_still_drawn',
+        ],
+    ),
+    (
+        "CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC: MOCHA_TEXT survives the conversion at the title site",
+        SCRCAP,
+        [
+            ('        text: "Screen Recorder".to_string(),\n        font_size: 13.0,\n        color: p.text,',
+             '        text: "Screen Recorder".to_string(),\n        font_size: 13.0,\n        color: guitk::color::Color::from_hex(0xCDD6F4),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_both_renderers_draw_comes_from_their_palette',
+            'every_site_draws_the_role_it_claims',
+            'none_of_the_ten_deleted_constants_is_still_drawn',
+        ],
+    ),
+    (
+        "DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD: MOCHA_SUBTEXT0 survives the conversion at the statelbl site",
+        SCRCAP,
+        [
+            ('        // word is a label on it.\n        color: p.subtext0,',
+             '        // word is a label on it.\n        color: guitk::color::Color::from_hex(0xA6ADC8),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_both_renderers_draw_comes_from_their_palette',
+            'every_site_draws_the_role_it_claims',
+            'none_of_the_ten_deleted_constants_is_still_drawn',
+        ],
+    ),
+    (
+        "EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE: MOCHA_RED survives the conversion at the recfill site",
+        SCRCAP,
+        [
+            ('                width: 80.0,\n                height: btn_h,\n                color: p.red,',
+             '                width: 80.0,\n                height: btn_h,\n                color: guitk::color::Color::from_hex(0xF38BA8),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_both_renderers_draw_comes_from_their_palette',
+            'every_site_draws_the_role_it_claims',
+            'none_of_the_ten_deleted_constants_is_still_drawn',
+        ],
+    ),
+    (
+        "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF: MOCHA_YELLOW survives the conversion at the pausefill site",
+        SCRCAP,
+        [
+            ('                width: 70.0,\n                height: btn_h,\n                color: p.yellow,',
+             '                width: 70.0,\n                height: btn_h,\n                color: guitk::color::Color::from_hex(0xF9E2AF),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_both_renderers_draw_comes_from_their_palette',
+            'every_site_draws_the_role_it_claims',
+            'none_of_the_ten_deleted_constants_is_still_drawn',
+        ],
+    ),
+    (
+        "GGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGG: MOCHA_GREEN survives the conversion at the resumefill site",
+        SCRCAP,
+        [
+            ('                width: 80.0,\n                height: btn_h,\n                color: p.green,',
+             '                width: 80.0,\n                height: btn_h,\n                color: guitk::color::Color::from_hex(0xA6E3A1),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_both_renderers_draw_comes_from_their_palette',
+            'every_site_draws_the_role_it_claims',
+            'none_of_the_ten_deleted_constants_is_still_drawn',
+        ],
+    ),
+    (
+        "HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH: MOCHA_SURFACE1 survives the conversion at the stop1fill site",
+        SCRCAP,
+        [
+            ('                // a plain surface rung rather than a fourth hue.\n                color: p.surface1,',
+             '                // a plain surface rung rather than a fourth hue.\n                color: guitk::color::Color::from_hex(0x45475A),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_both_renderers_draw_comes_from_their_palette',
+            'every_site_draws_the_role_it_claims',
+            'none_of_the_ten_deleted_constants_is_still_drawn',
+        ],
+    ),
+    (
+        "IIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIII: MOCHA_PEACH survives the conversion at the fallback site",
+        SCRCAP,
+        [
+            ('                color: p.peach,',
+             '                color: guitk::color::Color::from_hex(0xFAB387),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_both_renderers_draw_comes_from_their_palette',
+            'every_site_draws_the_role_it_claims',
+            'none_of_the_ten_deleted_constants_is_still_drawn',
+        ],
+    ),
+    (
+        "JJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJ: MOCHA_OVERLAY0 survives the conversion at the dot_idle site",
+        SCRCAP,
+        [
+            ('        _ => p.overlay0,',
+             '        _ => guitk::color::Color::from_hex(0x6C7086),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_both_renderers_draw_comes_from_their_palette',
+            'every_site_draws_the_role_it_claims',
+            'none_of_the_ten_deleted_constants_is_still_drawn',
+            'the_recording_dot_says_the_state_and_only_the_state',
+        ],
+    ),
+    (
+        "KKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKK: the Record and Pause buttons trade fills",
+        SCRCAP,
+        [
+            ('                width: 80.0,\n                height: btn_h,\n                color: p.red,',
+             '                width: 80.0,\n                height: btn_h,\n                color: p.yellow,'),
+            ('                width: 70.0,\n                height: btn_h,\n                color: p.yellow,',
+             '                width: 70.0,\n                height: btn_h,\n                color: p.red,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLL: the Resume button and the Stop beside it trade fills",
+        SCRCAP,
+        [
+            ('                width: 80.0,\n                height: btn_h,\n                color: p.green,',
+             '                width: 80.0,\n                height: btn_h,\n                color: p.surface1,'),
+            ('                // a plain surface rung rather than a fourth hue.\n                color: p.surface1,',
+             '                // a plain surface rung rather than a fourth hue.\n                color: p.green,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM: the panel title and its telemetry trade ink",
+        SCRCAP,
+        [
+            ('        text: "Screen Recorder".to_string(),\n        font_size: 13.0,\n        color: p.text,',
+             '        text: "Screen Recorder".to_string(),\n        font_size: 13.0,\n        color: p.subtext0,'),
+            ('            // Telemetry, quieter than the title it sits beside.\n            color: p.subtext0,',
+             '            // Telemetry, quieter than the title it sits beside.\n            color: p.text,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "NNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNN: the indicator pill and the controls bar trade backgrounds",
+        SCRCAP,
+        [
+            ('        color: p.panel_bg(),',
+             '        color: p.mantle,'),
+            ('        color: p.mantle,\n        corner_radii: CornerRadii::all(8.0),',
+             '        color: p.mantle,\n        color: p.panel_bg(),'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'the_indicator_pill_is_as_transparent_as_the_user_asked',
+        ],
+    ),
+    (
+        "OOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOO: the recording and paused dots trade colours",
+        SCRCAP,
+        [
+            ('        RecordingState::Recording => p.red,',
+             '        RecordingState::Recording => p.yellow,'),
+            ('        RecordingState::Paused => p.yellow,',
+             '        RecordingState::Paused => p.red,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'the_recording_dot_says_the_state_and_only_the_state',
+        ],
+    ),
+    (
+        "PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPP: the recording dot and the inactive dot trade colours",
+        SCRCAP,
+        [
+            ('        RecordingState::Recording => p.red,',
+             '        RecordingState::Recording => p.overlay0,'),
+            ('        _ => p.overlay0,',
+             '        _ => p.red,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'the_recording_dot_says_the_state_and_only_the_state',
+        ],
+    ),
+    (
+        "QQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQ: the indicator's clock and its state word trade ink",
+        SCRCAP,
+        [
+            ('        text: recorder.stats.elapsed_display(),\n        font_size: 13.0,\n        color: p.text,',
+             '        text: recorder.stats.elapsed_display(),\n        font_size: 13.0,\n        color: p.subtext0,'),
+            ('        // word is a label on it.\n        color: p.subtext0,',
+             '        // word is a label on it.\n        color: p.text,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "RRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRR: the transient-state word and the panel title trade ink",
+        SCRCAP,
+        [
+            ('                color: p.peach,',
+             '                color: p.text,'),
+            ('        text: "Screen Recorder".to_string(),\n        font_size: 13.0,\n        color: p.text,',
+             '        text: "Screen Recorder".to_string(),\n        font_size: 13.0,\n        color: p.peach,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "SSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSS: the indicator pill is painted with the accent",
+        SCRCAP,
+        [
+            ('        color: p.panel_bg(),',
+             '        color: p.accent,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'nothing_in_the_recorder_is_accented',
+            'the_indicator_pill_is_as_transparent_as_the_user_asked',
+        ],
+    ),
+    (
+        "TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT: the controls bar is painted with the accent",
+        SCRCAP,
+        [
+            ('        color: p.mantle,\n        corner_radii: CornerRadii::all(8.0),',
+             '        color: p.mantle,\n        color: p.accent,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'nothing_in_the_recorder_is_accented',
+        ],
+    ),
+    (
+        "UUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUU: the panel title is painted with the accent",
+        SCRCAP,
+        [
+            ('        text: "Screen Recorder".to_string(),\n        font_size: 13.0,\n        color: p.text,',
+             '        text: "Screen Recorder".to_string(),\n        font_size: 13.0,\n        color: p.accent,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'nothing_in_the_recorder_is_accented',
+        ],
+    ),
+    (
+        "VVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVV: the Record button is painted with the accent",
+        SCRCAP,
+        [
+            ('                width: 80.0,\n                height: btn_h,\n                color: p.red,',
+             '                width: 80.0,\n                height: btn_h,\n                color: p.accent,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'nothing_in_the_recorder_is_accented',
+        ],
+    ),
+    (
+        "WWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWW: the Pause button is painted with the accent",
+        SCRCAP,
+        [
+            ('                width: 70.0,\n                height: btn_h,\n                color: p.yellow,',
+             '                width: 70.0,\n                height: btn_h,\n                color: p.accent,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'nothing_in_the_recorder_is_accented',
+        ],
+    ),
+    (
+        "XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX: the Resume button is painted with the accent",
+        SCRCAP,
+        [
+            ('                width: 80.0,\n                height: btn_h,\n                color: p.green,',
+             '                width: 80.0,\n                height: btn_h,\n                color: p.accent,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'nothing_in_the_recorder_is_accented',
+        ],
+    ),
+    (
+        "YYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYY: the Stop button is painted with the accent",
+        SCRCAP,
+        [
+            ('                // a plain surface rung rather than a fourth hue.\n                color: p.surface1,',
+             '                // a plain surface rung rather than a fourth hue.\n                color: p.accent,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'nothing_in_the_recorder_is_accented',
+        ],
+    ),
+    (
+        "ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ: the transient-state word is painted with the accent",
+        SCRCAP,
+        [
+            ('                color: p.peach,',
+             '                color: p.accent,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'nothing_in_the_recorder_is_accented',
+        ],
+    ),
+    (
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA: the recording dot is painted with the accent",
+        SCRCAP,
+        [
+            ('        RecordingState::Recording => p.red,',
+             '        RecordingState::Recording => p.accent,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'nothing_in_the_recorder_is_accented',
+            'the_recording_dot_says_the_state_and_only_the_state',
+        ],
+    ),
+    (
+        "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB: the telemetry is painted with the accent",
+        SCRCAP,
+        [
+            ('            // Telemetry, quieter than the title it sits beside.\n            color: p.subtext0,',
+             '            // Telemetry, quieter than the title it sits beside.\n            color: p.accent,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'nothing_in_the_recorder_is_accented',
+        ],
+    ),
+    (
+        "CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC: the Stop button sits a rung too high",
+        SCRCAP,
+        [
+            ('                // a plain surface rung rather than a fourth hue.\n                color: p.surface1,',
+             '                // a plain surface rung rather than a fourth hue.\n                color: p.surface2,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD: the other Stop button sits a rung too low",
+        SCRCAP,
+        [
+            ('                // As in the Recording arm: the same button, the same rung.\n                color: p.surface1,',
+             '                // As in the Recording arm: the same button, the same rung.\n                color: p.surface0,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE: the controls bar drops to the lowest rung there is",
+        SCRCAP,
+        [
+            ('        color: p.mantle,\n        corner_radii: CornerRadii::all(8.0),',
+             '        color: p.mantle,\n        color: p.crust,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF: the drop-rate line is brighter than the two beside it",
+        SCRCAP,
+        [
+            ('                recorder.stats.drop_rate_pct(),\n            ),\n            font_size: 10.0,\n            color: p.subtext0,',
+             '                recorder.stats.drop_rate_pct(),\n            ),\n            font_size: 10.0,\n            color: p.subtext1,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "GGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGG: the elapsed-time line is dimmer than the two beside it",
+        SCRCAP,
+        [
+            ('            text: format!("Time: {}", recorder.stats.elapsed_display()),\n            font_size: 10.0,\n            color: p.subtext0,',
+             '            text: format!("Time: {}", recorder.stats.elapsed_display()),\n            font_size: 10.0,\n            color: p.overlay0,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH: the Record button's lettering is named instead of computed",
+        SCRCAP,
+        [
+            ('                color: readable_on(p.red),',
+             '                color: p.base,'),
+        ],
+        ["desktop"],
+        [
+            'a_transport_button_is_lettered_for_its_own_fill',
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "IIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIII: the Pause button's lettering is named instead of computed",
+        SCRCAP,
+        [
+            ('                color: readable_on(p.yellow),',
+             '                color: p.base,'),
+        ],
+        ["desktop"],
+        [
+            'a_transport_button_is_lettered_for_its_own_fill',
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "JJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJ: the Resume button's lettering is named instead of computed",
+        SCRCAP,
+        [
+            ('                color: readable_on(p.green),',
+             '                color: p.base,'),
+        ],
+        ["desktop"],
+        [
+            'a_transport_button_is_lettered_for_its_own_fill',
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "KKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKK: the Record button's lettering is pinned to the dark endpoint",
+        SCRCAP,
+        [
+            ('                color: readable_on(p.red),',
+             '                color: guitk::color::Color::from_hex(0x11111B),'),
+        ],
+        ["desktop"],
+        [
+            'a_transport_button_is_lettered_for_its_own_fill',
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLL: the Pause button reads its lettering off the wrong fill",
+        SCRCAP,
+        [
+            ('                color: readable_on(p.yellow),',
+             '                color: readable_on(p.surface1),'),
+        ],
+        ["desktop"],
+        [
+            'a_transport_button_is_lettered_for_its_own_fill',
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM: the indicator pill drops the transparency setting",
+        SCRCAP,
+        [
+            ('        color: p.panel_bg(),',
+             '        color: p.base,'),
+        ],
+        ["desktop"],
+        [
+            'the_indicator_pill_is_as_transparent_as_the_user_asked',
+        ],
+    ),
+    (
+        "NNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNN: the indicator pill freezes an alpha onto the right role",
+        SCRCAP,
+        [
+            ('        color: p.panel_bg(),',
+             '        color: guitk::color::Color::rgba(p.base.r, p.base.g, p.base.b, 220),'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'the_indicator_pill_is_as_transparent_as_the_user_asked',
+        ],
+    ),
+    (
+        "OOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOO: the inactive dot collides with the recording dot",
+        SCRCAP,
+        [
+            ('        _ => p.overlay0,',
+             '        _ => p.red,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'the_recording_dot_says_the_state_and_only_the_state',
+        ],
+    ),
+    (
+        "PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPP: the indicator's state word is as loud as its clock",
+        SCRCAP,
+        [
+            ('        // word is a label on it.\n        color: p.subtext0,',
+             '        // word is a label on it.\n        color: p.text,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "QQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQ: the Stop button's lettering is computed off its own rung",
+        SCRCAP,
+        [
+            ('                font_size: 12.0,\n                color: p.text,',
+             '                font_size: 12.0,\n                color: readable_on(p.surface1),'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "RRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRR: the indicator's clock is as quiet as its state word",
+        SCRCAP,
+        [
+            ('        text: recorder.stats.elapsed_display(),\n        font_size: 13.0,\n        color: p.text,',
+             '        text: recorder.stats.elapsed_display(),\n        font_size: 13.0,\n        color: p.subtext0,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "SSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSS: the Record button is a hue that means nothing",
+        SCRCAP,
+        [
+            ('                width: 80.0,\n                height: btn_h,\n                color: p.red,',
+             '                width: 80.0,\n                height: btn_h,\n                color: p.mauve,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT: the transient-state word borrows the pause colour",
+        SCRCAP,
+        [
+            ('                color: p.peach,',
+             '                color: p.yellow,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "UUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUU: the recording dot thins out with the panel behind it",
+        SCRCAP,
+        [
+            ('        color: dot_color,',
+             '        color: guitk::color::Color::rgba(\n            dot_color.r,\n            dot_color.g,\n            dot_color.b,\n            p.panel_alpha,\n        ),'),
+        ],
+        ["desktop"],
+        [
+            'the_indicator_pill_is_as_transparent_as_the_user_asked',
+        ],
+    ),
+    (
+        "VVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVV: the indicator draws in every state, including the three that are not recording",
+        SCRCAP,
+        [
+            ('    if !recorder.state.is_active() && !matches!(recorder.state, RecordingState::Processing) {\n        return cmds;\n    }',
+             '    if false {\n        return cmds;\n    }'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'test_indicator_idle_empty',
+            'the_indicator_is_silent_unless_something_is_happening',
         ],
     ),
 ]

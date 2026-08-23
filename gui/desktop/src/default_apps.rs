@@ -1728,6 +1728,26 @@ mod tests {
         found[0]
     }
 
+    /// The colours of every `Text` command reading `s` at `size` points.
+    ///
+    /// The plural of [`text_color_sized`], for the sites that legitimately
+    /// repeat: one file-type row per extension, one join line per installed
+    /// app. Selecting by size as well as text is what separates the app name
+    /// on a file-type row (12pt) from the same name on its own card.
+    fn text_colors_sized(cmds: &[RenderCommand], s: &str, size: f32) -> Vec<Color> {
+        cmds.iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text {
+                    text,
+                    color,
+                    font_size,
+                    ..
+                } if text == s && *font_size == size => Some(*color),
+                _ => None,
+            })
+            .collect()
+    }
+
     /// The colours of every `FillRect` of height `h`, whatever its width.
     ///
     /// The alternatives chips are sized to their own labels, so they cannot
@@ -1882,6 +1902,14 @@ mod tests {
                 p.text,
                 "a category's own name"
             );
+            // The icon is drawn at the same rung as the name it labels. It is
+            // its own site in the source and so needs its own assertion — the
+            // name being right says nothing about the glyph beside it.
+            assert_eq!(
+                text_color(cats, "\u{1F310}"),
+                p.text,
+                "a category's icon reads as brightly as its name"
+            );
             assert_eq!(
                 text_colors(cats, "\u{25BC}").len(),
                 11,
@@ -1905,9 +1933,28 @@ mod tests {
                 "app rows"
             );
             assert_eq!(
+                text_color_sized(apps, "Rival Player", 14.0),
+                p.text,
+                "an app's own name is the brightest thing on its row"
+            );
+            assert_eq!(
                 text_color(apps, "A rival music player"),
                 p.subtext0,
                 "an app's description"
+            );
+            // The join line under each row names the categories the app can
+            // handle. It is the dimmest of the three lines, and repeats once
+            // per app, so it is asserted as a set rather than singly.
+            let joins = text_colors(apps, "Music player");
+            assert!(joins.len() >= 2, "at least two apps handle music");
+            assert!(
+                joins.iter().all(|c| *c == p.overlay0),
+                "the categories an app handles are the dimmest line on its row"
+            );
+            assert_eq!(
+                fills_sized(apps, 552.0, 32.0),
+                vec![p.surface0],
+                "the Installed apps search box"
             );
             assert_eq!(
                 text_color(apps, "11 installed apps (1 third-party)"),
@@ -1939,6 +1986,33 @@ mod tests {
                 "extension pills"
             );
             assert_eq!(text_color(types, ".flac"), p.lavender, "extension token");
+            // The search box and the extension rows are both `width` x 32, so
+            // geometry cannot tell them apart — but `fills_sized` preserves
+            // command order and the box is drawn first, which is enough to
+            // index them. Both sit on the same rung; a swap at either site
+            // puts a foreign colour in this list.
+            let types_rows = fills_sized(types, 552.0, 32.0);
+            assert!(
+                types_rows.len() >= 2,
+                "a search box and at least one extension row"
+            );
+            assert_eq!(types_rows[0], p.surface0, "the File types search box");
+            assert!(
+                types_rows[1..].iter().all(|c| *c == p.surface0),
+                "every extension row sits on the same rung as the box above it"
+            );
+            // An extension whose handler is the shipped default takes ordinary
+            // ink; the peach reading is the *custom* case and belongs to its
+            // own test. Both branches of one `if` are two sites.
+            let ordinary = text_colors_sized(types, "Music Player", 12.0);
+            assert!(
+                ordinary.len() >= 2,
+                "several music extensions still resolve to the builtin player"
+            );
+            assert!(
+                ordinary.iter().all(|c| *c == p.text),
+                "an extension left at its default is not marked as changed"
+            );
             assert_eq!(
                 text_color(types, "1 custom associations"),
                 p.subtext0,

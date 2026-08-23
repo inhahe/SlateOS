@@ -52,12 +52,12 @@
 use charwidth::char_width;
 use coreutils::fnmatch::{Flags, fnmatch};
 use coreutils::getopt::{self, Opt, Program, Takes};
-use coreutils::human::{Opts, default_block_size};
+use coreutils::human::{Opts, default_block_size, human_readable};
 use coreutils::pathname::{base_len, last_component, last_component_offset};
 use coreutils::quote::{Mb, Style, next_mb, os_bytes, quote};
 use coreutils::vercmp::version;
 use coreutils::xnum::{self, Status, strtol_fatal};
-use modechange::{S_IFDIR, S_IFMT};
+use modechange::{S_IFBLK, S_IFCHR, S_IFDIR, S_IFMT};
 use std::cmp::Ordering;
 use std::ffi::OsString;
 use std::io::Write;
@@ -575,7 +575,12 @@ impl Default for Config {
             quoting_style_name: "literal",
             align_variable_outer_quotes: false,
             human_output_opts: Opts::NONE,
-            output_block_size: 0,
+            // What `finish` computes with no options and an empty environment.
+            // Upstream leaves a 0 here to mean "not yet chosen" and fills it in
+            // after the option loop; that marker now lives in
+            // `Settings::block_size_specified`, so this field is a block size at
+            // every moment and `human_readable` can never divide by it.
+            output_block_size: 1024,
             file_human_output_opts: Opts::NONE,
             file_output_block_size: 1,
             long_time_format: [b"%b %e  %Y".to_vec(), b"%b %e %H:%M".to_vec()],
@@ -713,6 +718,13 @@ fn first_line(sentence: &str) -> &str {
 /// The option loop's own locals, handed to [`finish`] in one piece.
 struct Settings {
     kibibytes_specified: bool,
+    /// Whether `-h`, `--si` or `--block-size=…` chose a block size. Upstream
+    /// spells this `! output_block_size`, using zero in the field itself as a
+    /// "not yet chosen" marker; here the marker lives outside the field so that
+    /// a `Config` can never hold a block size that `human_readable` would
+    /// divide by. Nothing else can produce the marker: GNU rejects
+    /// `--block-size=0` outright (`ls: invalid --block-size argument '0'`).
+    block_size_specified: bool,
     format_opt: Option<Format>,
     hide_control_chars_opt: Option<bool>,
     quoting_style_opt: Option<Style>,
@@ -747,6 +759,7 @@ fn parse_args(
     // what the environment and the tty are allowed to contribute.
     let mut set = Settings {
         kibibytes_specified: false,
+        block_size_specified: false,
         format_opt: None,
         hide_control_chars_opt: None,
         quoting_style_opt: None,
@@ -822,12 +835,14 @@ fn parse_args(
                 cfg.human_output_opts = Opts::AUTOSCALE | Opts::SI | Opts::BASE_1024;
                 cfg.file_human_output_opts = cfg.human_output_opts;
                 cfg.output_block_size = 1;
+                set.block_size_specified = true;
                 cfg.file_output_block_size = 1;
             }
             Flag::Si => {
                 cfg.human_output_opts = Opts::AUTOSCALE | Opts::SI;
                 cfg.file_human_output_opts = cfg.human_output_opts;
                 cfg.output_block_size = 1;
+                set.block_size_specified = true;
                 cfg.file_output_block_size = 1;
             }
             Flag::Inode => cfg.print_inode = true,
@@ -973,6 +988,7 @@ fn parse_args(
                 }
                 cfg.human_output_opts = opts;
                 cfg.output_block_size = size;
+                set.block_size_specified = true;
                 cfg.file_human_output_opts = opts;
                 cfg.file_output_block_size = size;
             }
@@ -997,7 +1013,9 @@ fn parse_args(
 ///
 /// It is separate from [`parse_args`] only because the loop is already long;
 /// the two are one function upstream, and the split is at upstream's own
-/// `if (! output_block_size)`.
+/// `if (! output_block_size)` — spelled here as
+/// `if !set.block_size_specified`, which is the same test on a flag rather
+/// than on a zero stored in the field itself.
 #[expect(
     clippy::too_many_lines,
     reason = "upstream's post-loop block, in upstream's order; the order is load-bearing"
@@ -1012,7 +1030,7 @@ fn finish(
     // them being *set* also moves the `-l` size column onto the same footing,
     // which `-h` alone does not do; and `-k` overrides the pair, but only for
     // the block-count columns and not for the file sizes.
-    if cfg.output_block_size == 0 {
+    if !set.block_size_specified {
         let spec = env.ls_block_size.as_deref().or(env.block_size.as_deref());
         let (size, opts) = block_size_options(spec, env.posixly_correct);
         cfg.output_block_size = size;
@@ -1911,6 +1929,273 @@ fn extract_dirs_from_files(
     files.retain(|f| f.filetype != FileType::ArgDirectory);
 }
 
+// -------------------------------------------- the columns of a long line ---
+
+/// gnulib's `mbsnwidth` with **no** flags, the other of the two width
+/// functions `ls` uses.
+///
+/// [`mbs_width`] is called with `MBSWIDTH_FLAGS` and refuses a whole string
+/// that holds anything invalid or unprintable; this one is called with `0` and
+/// cannot fail. An invalid byte is one column, a truncated sequence at the end
+/// is one column, and an unprintable character is one column unless it is a
+/// control character, which is none.
+///
+/// `ls` measures *file names* with the strict one, because a name it cannot
+/// measure would misalign the whole page, and the `-q` default already
+/// replaced the offending bytes. It measures the fields it did not choose —
+/// a user name out of `/etc/passwd`, a size rendered by `human_readable` —
+/// with this one, because refusing those would blank a column rather than
+/// widen it.
+///
+/// The `unwrap_or(0)` is gnulib's `else if (!c32iscntrl (wc)) width++;`:
+/// [`char_width`] is `None` for exactly the control characters (C0, DEL and
+/// C1), so the branch that would add a column can never be taken. See
+/// `design-decisions.md` §357 for where that parts company with glibc.
+fn lenient_width(text: &[u8]) -> usize {
+    let mut width = 0usize;
+    let mut rest = text;
+    while let Some(&first) = rest.first() {
+        if (0x20..0x7f).contains(&first) {
+            width = width.saturating_add(1);
+            rest = rest.get(1..).unwrap_or_default();
+            continue;
+        }
+        match next_mb(rest) {
+            // Unreachable: `rest` is not empty.
+            None => break,
+            Some(Mb::Invalid) => {
+                width = width.saturating_add(1);
+                rest = rest.get(1..).unwrap_or_default();
+            }
+            // An incomplete sequence swallows the rest of the string, so it is
+            // one column however many bytes are left.
+            Some(Mb::Incomplete) => return width.saturating_add(1),
+            Some(Mb::Char(c, len)) => {
+                width = width.saturating_add(char_width(c).unwrap_or(0));
+                rest = rest.get(len..).unwrap_or_default();
+            }
+        }
+    }
+    width
+}
+
+/// The `/etc/passwd` and `/etc/group` lookups the owner and group columns do,
+/// and `-n`'s decision not to do them.
+struct Names {
+    db: pwdb::Db,
+    /// `-n`. It is held here rather than read from the [`Config`] because it
+    /// is the *only* thing about the config these lookups depend on, and
+    /// because it turns every lookup off — the files are then not read at all.
+    numeric: bool,
+}
+
+impl Names {
+    /// [`None`] means "print the number instead", which is what `-n` asks for
+    /// and also what an id with no entry in the file gets.
+    fn user(&self, uid: u32) -> Option<&[u8]> {
+        (!self.numeric)
+            .then(|| self.db.user_by_uid(uid))
+            .flatten()
+            .map(|u| u.name.as_slice())
+    }
+
+    fn group(&self, gid: u32) -> Option<&[u8]> {
+        (!self.numeric)
+            .then(|| self.db.group_by_gid(gid))
+            .flatten()
+            .map(|g| g.name.as_slice())
+    }
+}
+
+/// GNU's `format_user_or_group`: one owner or group column, with its trailing
+/// separator.
+///
+/// The two branches align *differently*, which is upstream's and is visible in
+/// any listing of a directory with mixed owners:
+///
+/// ```text
+/// $ ls -l  /var/lib   ->  drwxr-xr-x 3 root      root      ...
+/// $ ls -ln /var/lib   ->  drwxr-xr-x 3    0   0            ...
+/// ```
+///
+/// A name is padded on the right, a number on the left. So a single id with no
+/// `/etc/passwd` entry does not merely print as a number — it prints
+/// right-aligned in a column of left-aligned names.
+///
+/// Both branches emit one space *beyond* `width`; upstream's `do … while
+/// (pad--)` runs once more than `pad`, and the numeric branch has the space in
+/// its format string. That space is the field separator, so the caller does
+/// not add one.
+fn format_user_or_group(out: &mut Vec<u8>, name: Option<&[u8]>, id: u64, width: usize) {
+    match name {
+        Some(name) => {
+            let pad = width.saturating_sub(lenient_width(name));
+            out.extend_from_slice(name);
+            out.resize(out.len().saturating_add(pad).saturating_add(1), b' ');
+        }
+        None => {
+            let text = id.to_string();
+            let pad = width.saturating_sub(text.len());
+            out.resize(out.len().saturating_add(pad), b' ');
+            out.extend_from_slice(text.as_bytes());
+            out.push(b' ');
+        }
+    }
+}
+
+/// The width [`format_user_or_group`] will take, not counting the separator.
+fn format_user_or_group_width(name: Option<&[u8]>, id: u64) -> usize {
+    name.map_or_else(|| id.to_string().len(), lenient_width)
+}
+
+/// GNU's `format_inode`: the `-i` column.
+///
+/// `?` where the number is not known — a file whose `stat` failed, and a
+/// filesystem whose `readdir` gives no inode. It is a *byte*, not a number, so
+/// it does not widen the column: upstream never observes its width.
+fn format_inode(f: &FileInfo) -> Vec<u8> {
+    if f.stat_ok {
+        f.stat.ino.to_string().into_bytes()
+    } else {
+        b"?".to_vec()
+    }
+}
+
+/// The per-directory running maxima that make `-l`'s columns line up.
+///
+/// They are *per directory*, not per listing: [`clear_files`](Widths::default)
+/// resets them between directories, which is why `ls -lR` can give two
+/// directories different column widths. Each is the widest value **seen so
+/// far**, so they are complete only once every file has been gobbled — which
+/// is why `ls -l` cannot start printing until it has read the whole directory.
+#[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
+struct Widths {
+    inode: usize,
+    block_size: usize,
+    nlink: usize,
+    owner: usize,
+    group: usize,
+    author: usize,
+    scontext: usize,
+    major_device: usize,
+    minor_device: usize,
+    file_size: usize,
+}
+
+impl Widths {
+    /// The columns that need a successful `stat`, observed in upstream's
+    /// order.
+    ///
+    /// A device gets `major, minor` where a file gets its size, and the
+    /// *size* column has to be wide enough for both — upstream widens
+    /// `file_size_width` to `major + 2 + minor` for a device, counting the
+    /// `, ` between them. That is why one character device in a directory
+    /// widens every regular file's size column.
+    fn observe_stated(&mut self, cfg: &Config, names: &Names, f: &FileInfo, blocks: u64) {
+        if cfg.format == Format::Long || cfg.print_block_size {
+            let text = human_readable(
+                blocks,
+                cfg.human_output_opts,
+                ST_NBLOCKSIZE,
+                cfg.output_block_size,
+            );
+            self.block_size = self.block_size.max(lenient_width(text.as_bytes()));
+        }
+
+        if cfg.format == Format::Long {
+            if cfg.print_owner {
+                let w = format_user_or_group_width(names.user(f.stat.uid), u64::from(f.stat.uid));
+                self.owner = self.owner.max(w);
+            }
+            if cfg.print_group {
+                let w = format_user_or_group_width(names.group(f.stat.gid), u64::from(f.stat.gid));
+                self.group = self.group.max(w);
+            }
+            if cfg.print_author {
+                // GNU/Hurd's `st_author`. There is no such field on Linux or
+                // on SlateOS, and upstream's `fstat-nofollow` shim defines it
+                // as `st_uid`, so `--author` repeats the owner column.
+                let w = format_user_or_group_width(names.user(f.stat.uid), u64::from(f.stat.uid));
+                self.author = self.author.max(w);
+            }
+        }
+
+        if cfg.print_scontext {
+            self.scontext = self.scontext.max(SCONTEXT_UNKNOWN.len());
+        }
+
+        if cfg.format == Format::Long {
+            self.nlink = self.nlink.max(f.stat.nlink.to_string().len());
+
+            let kind = f.stat.mode & S_IFMT;
+            if kind == S_IFCHR || kind == S_IFBLK {
+                let major = major_of(f.stat.rdev).to_string().len();
+                let minor = minor_of(f.stat.rdev).to_string().len();
+                self.major_device = self.major_device.max(major);
+                self.minor_device = self.minor_device.max(minor);
+                let together = self
+                    .major_device
+                    .saturating_add(2)
+                    .saturating_add(self.minor_device);
+                self.file_size = self.file_size.max(together);
+            } else {
+                let text = human_readable(
+                    unsigned_file_size(f.stat.size),
+                    cfg.file_human_output_opts,
+                    1,
+                    cfg.file_output_block_size,
+                );
+                self.file_size = self.file_size.max(lenient_width(text.as_bytes()));
+            }
+        }
+    }
+
+    /// The inode column, observed for every file that survives to the end of
+    /// `gobble_file`.
+    ///
+    /// It is outside the stat branch, so `ls -i` widens this from the inode
+    /// `readdir` supplied without stating anything; but a file whose `stat`
+    /// *failed* returns early and never reaches here, so a `?` does not widen
+    /// it either.
+    fn observe_inode(&mut self, cfg: &Config, f: &FileInfo) {
+        if cfg.print_inode {
+            self.inode = self.inode.max(f.stat.ino.to_string().len());
+        }
+    }
+}
+
+/// `ST_NBLOCKSIZE`: the unit `st_blocks` counts in, fixed at 512 bytes by
+/// POSIX regardless of the filesystem's own block size.
+const ST_NBLOCKSIZE: u64 = 512;
+
+/// The security context of a file whose label could not be read — and, here,
+/// of every file, since SlateOS has no SELinux. `ls -Z` prints it.
+const SCONTEXT_UNKNOWN: &[u8] = b"?";
+
+/// The major device number, Linux's encoding of `dev_t`.
+const fn major_of(dev: u64) -> u64 {
+    ((dev >> 8) & 0xfff) | ((dev >> 32) & !0xfff)
+}
+
+/// The minor device number, Linux's encoding of `dev_t`.
+const fn minor_of(dev: u64) -> u64 {
+    (dev & 0xff) | ((dev >> 12) & !0xff)
+}
+
+/// GNU's `unsigned_file_size`: POSIX requires a size to print without a sign.
+///
+/// A negative `st_size` is assumed to be a positive one that wrapped, so it is
+/// reinterpreted rather than clamped — which is what `as u64` does here, and
+/// what upstream's `size + (size < 0) * (OFF_T_MAX - OFF_T_MIN + 1)` does
+/// there.
+#[expect(
+    clippy::cast_sign_loss,
+    reason = "the reinterpretation is the specified behaviour, not an accident"
+)]
+const fn unsigned_file_size(size: i64) -> u64 {
+    size as u64
+}
+
 fn main() -> ExitCode {
     ExitCode::SUCCESS
 }
@@ -1922,6 +2207,7 @@ fn main() -> ExitCode {
 )]
 mod tests {
     use super::*;
+    use modechange::S_IFREG;
 
     // ------------------------------------------------- names and widths ---
 
@@ -2648,5 +2934,280 @@ mod tests {
         let mut pending = Vec::new();
         extract_dirs_from_files(Some(b"top"), false, false, &mut files, &mut pending);
         assert_eq!(pending.len(), 1);
+    }
+
+    // ------------------------------------------ the columns of a long line ---
+
+    fn no_names() -> Names {
+        Names {
+            db: pwdb::Db::from_bytes(b"", b""),
+            numeric: false,
+        }
+    }
+
+    fn named(passwd: &[u8], group: &[u8]) -> Names {
+        Names {
+            db: pwdb::Db::from_bytes(passwd, group),
+            numeric: false,
+        }
+    }
+
+    /// Linux's `makedev`, so a test can name a device the way `ls` prints it.
+    const fn makedev(major: u64, minor: u64) -> u64 {
+        ((major & 0xfff) << 8) | (minor & 0xff) | ((major & !0xfff) << 32) | ((minor & !0xff) << 12)
+    }
+
+    /// `ls` has two width functions and uses each where the other would be
+    /// wrong. A file name with a stray byte is refused outright, because a
+    /// mismeasured name misaligns the page; the same byte in a user name is
+    /// one column, because refusing it would blank the column instead.
+    #[test]
+    fn a_name_ls_chose_is_measured_strictly_and_one_it_was_given_leniently() {
+        assert_eq!(mbs_width(b"ab"), Some(2));
+        assert_eq!(lenient_width(b"ab"), 2);
+
+        assert_eq!(mbs_width(b"a\xffb"), None);
+        assert_eq!(lenient_width(b"a\xffb"), 3);
+
+        // A truncated sequence swallows the tail, so it is one column however
+        // many bytes are left.
+        assert_eq!(mbs_width(b"a\xe4\xb8"), None);
+        assert_eq!(lenient_width(b"a\xe4\xb8"), 2);
+
+        // A control character has no width either way — strictly it refuses,
+        // leniently it contributes nothing.
+        assert_eq!(mbs_width(b"a\x7fb"), None);
+        assert_eq!(lenient_width(b"a\x7fb"), 2);
+
+        // And a wide character is two columns in both.
+        assert_eq!(mbs_width("\u{4e00}".as_bytes()), Some(2));
+        assert_eq!(lenient_width("\u{4e00}".as_bytes()), 2);
+    }
+
+    /// A name is padded on the right and a number on the left, so `-n` does not
+    /// merely swap the text in the column — it swaps the alignment too.
+    /// Measured, GNU ls 9.4:
+    ///
+    /// ```text
+    /// $ ls -l  /var/lib  ->  drwxr-xr-x 3 root      root      4096 ...
+    ///                        drwxr-xr-x 3 landscape landscape 4096 ...
+    /// $ ls -ln /var/lib  ->  drwxr-xr-x 3   0   0            4096 ...
+    ///                        drwxr-xr-x 3 104 105            4096 ...
+    /// ```
+    #[test]
+    fn a_name_is_padded_on_the_right_and_an_id_on_the_left() {
+        let mut out = Vec::new();
+        format_user_or_group(&mut out, Some(b"root"), 0, 9);
+        assert_eq!(out, b"root      ");
+        assert_eq!(out.len(), 10, "nine columns plus the field separator");
+
+        let mut out = Vec::new();
+        format_user_or_group(&mut out, Some(b"landscape"), 104, 9);
+        assert_eq!(out, b"landscape ");
+
+        let mut out = Vec::new();
+        format_user_or_group(&mut out, None, 0, 3);
+        assert_eq!(out, b"  0 ");
+
+        let mut out = Vec::new();
+        format_user_or_group(&mut out, None, 104, 3);
+        assert_eq!(out, b"104 ");
+
+        // A name wider than the column is not truncated; it still gets its
+        // separator, and the row it is on is simply longer than the others.
+        let mut out = Vec::new();
+        format_user_or_group(&mut out, Some(b"averylongname"), 0, 4);
+        assert_eq!(out, b"averylongname ");
+    }
+
+    /// `-n` turns the lookups off, and so does an id with no entry in the
+    /// file — the two are the same code path, which is why one unknown owner
+    /// in a directory prints right-aligned among left-aligned names.
+    #[test]
+    fn an_id_with_no_entry_prints_exactly_as_dash_n_would() {
+        let db = named(b"root:x:0:0:::\n", b"disk:x:6:\n");
+        assert_eq!(db.user(0), Some(&b"root"[..]));
+        assert_eq!(db.group(6), Some(&b"disk"[..]));
+        assert_eq!(db.user(4000), None);
+        assert_eq!(db.group(4001), None);
+
+        let numeric = Names {
+            db: pwdb::Db::from_bytes(b"root:x:0:0:::\n", b"disk:x:6:\n"),
+            numeric: true,
+        };
+        assert_eq!(numeric.user(0), None);
+        assert_eq!(numeric.group(6), None);
+
+        assert_eq!(format_user_or_group_width(Some(b"root"), 0), 4);
+        assert_eq!(format_user_or_group_width(None, 4000), 4);
+        assert_eq!(format_user_or_group_width(None, 0), 1);
+    }
+
+    /// The size column has to hold both a size and a `major, minor`, so one
+    /// device in a directory widens every regular file's size column.
+    /// Measured, GNU ls 9.4, on `/dev` — where the widest major is `229` and
+    /// the widest minor is `235`, giving `3 + 2 + 3 = 8`, and the widest plain
+    /// size is `4096`:
+    ///
+    /// ```text
+    /// crw-r--r-- 1 root root     10, 235 Aug 20 19:35 autofs
+    /// drwxr-xr-x 2 root root        2940 Aug 20 19:38 char
+    ///                          |-- 8 --|
+    /// ```
+    ///
+    /// (The wider-looking gap in that listing is the *group* column, which
+    /// `/dev` widens to 7 for `dialout`.)
+    #[test]
+    fn one_device_widens_the_size_column_for_every_file_beside_it() {
+        let cfg = Config {
+            format: Format::Long,
+            ..Config::default()
+        };
+        let names = no_names();
+
+        let device = |major: u64, minor: u64| FileInfo {
+            stat_ok: true,
+            stat: Stat {
+                mode: S_IFCHR | 0o644,
+                nlink: 1,
+                rdev: makedev(major, minor),
+                ..Stat::default()
+            },
+            ..file("dev")
+        };
+        let plain = |size: i64| FileInfo {
+            stat_ok: true,
+            stat: Stat {
+                mode: S_IFREG | 0o644,
+                nlink: 1,
+                size,
+                ..Stat::default()
+            },
+            ..file("f")
+        };
+
+        let mut w = Widths::default();
+        w.observe_stated(&cfg, &names, &plain(4096), 8);
+        assert_eq!(w.file_size, 4);
+        w.observe_stated(&cfg, &names, &device(229, 0), 0);
+        assert_eq!(w.major_device, 3);
+        assert_eq!(w.minor_device, 1);
+        w.observe_stated(&cfg, &names, &device(10, 235), 0);
+        assert_eq!(w.minor_device, 3);
+        assert_eq!(w.file_size, 8, "3 + 2 + 3, wider than any plain size here");
+
+        // The encoding round-trips, which is the only reason the widths above
+        // mean anything.
+        assert_eq!(major_of(makedev(229, 0)), 229);
+        assert_eq!(minor_of(makedev(10, 235)), 235);
+        // Linux splits both numbers across the word, so a large minor is not
+        // simply the low byte.
+        assert_eq!(major_of(makedev(4095, 1048575)), 4095);
+        assert_eq!(minor_of(makedev(4095, 1048575)), 1048575);
+    }
+
+    /// The maxima are per directory and each is the widest value *seen so
+    /// far*, which is why `ls -l` cannot print a single row until it has read
+    /// the whole directory — and why `ls -lR` can give two directories
+    /// different column widths.
+    #[test]
+    fn every_column_is_as_wide_as_the_widest_thing_in_this_directory_alone() {
+        let cfg = Config {
+            format: Format::Long,
+            print_inode: true,
+            print_scontext: true,
+            print_author: true,
+            ..Config::default()
+        };
+        let names = named(b"root:x:0:0:::\nlandscape:x:104:105:::\n", b"disk:x:6:\n");
+
+        let entry = |nlink: u64, uid: u32, gid: u32, size: i64, ino: u64| FileInfo {
+            stat_ok: true,
+            stat: Stat {
+                mode: S_IFREG | 0o644,
+                nlink,
+                uid,
+                gid,
+                size,
+                ino,
+                ..Stat::default()
+            },
+            ..file("f")
+        };
+
+        let mut w = Widths::default();
+        let a = entry(1, 0, 6, 7, 12);
+        w.observe_stated(&cfg, &names, &a, 8);
+        w.observe_inode(&cfg, &a);
+        assert_eq!(
+            w,
+            Widths {
+                inode: 2,
+                block_size: 1,
+                nlink: 1,
+                owner: 4,
+                group: 4,
+                author: 4,
+                scontext: 1,
+                file_size: 1,
+                ..Widths::default()
+            }
+        );
+
+        let b = entry(1234, 104, 4001, 999_999, 3);
+        w.observe_stated(&cfg, &names, &b, 2048);
+        w.observe_inode(&cfg, &b);
+        assert_eq!(w.nlink, 4);
+        assert_eq!(w.owner, 9, "landscape");
+        assert_eq!(w.group, 4, "gid 4001 has no entry, so its four digits");
+        assert_eq!(w.file_size, 6);
+        // 2048 blocks of 512 bytes, reported in the default 1 KiB unit.
+        assert_eq!(w.block_size, 4);
+        assert_eq!(w.inode, 2, "the narrower inode did not shrink the column");
+    }
+
+    /// `-i` widens its column from the inode `readdir` supplied, with no stat
+    /// at all — but a file whose stat *failed* prints `?` and does not widen
+    /// it, because upstream returns before the width is observed.
+    #[test]
+    fn a_file_with_no_inode_prints_a_question_mark_and_widens_nothing() {
+        let cfg = Config {
+            print_inode: true,
+            ..Config::default()
+        };
+        let known = FileInfo {
+            stat_ok: true,
+            stat: Stat {
+                ino: 636_031,
+                ..Stat::default()
+            },
+            ..file("a")
+        };
+        assert_eq!(format_inode(&known), b"636031");
+
+        let failed = FileInfo {
+            stat_ok: false,
+            ..file("b")
+        };
+        assert_eq!(format_inode(&failed), b"?");
+
+        let mut w = Widths::default();
+        w.observe_inode(&cfg, &known);
+        assert_eq!(w.inode, 6);
+
+        // And nothing is observed at all when `-i` was not asked for.
+        let mut w = Widths::default();
+        w.observe_inode(&Config::default(), &known);
+        assert_eq!(w.inode, 0);
+    }
+
+    /// POSIX requires a size to print without a sign, so a negative `st_size`
+    /// is read as the positive one that wrapped rather than clamped to zero.
+    #[test]
+    fn a_size_that_wrapped_prints_as_the_number_it_wrapped_from() {
+        assert_eq!(unsigned_file_size(0), 0);
+        assert_eq!(unsigned_file_size(4096), 4096);
+        assert_eq!(unsigned_file_size(-1), u64::MAX);
+        assert_eq!(unsigned_file_size(i64::MIN), 1 << 63);
     }
 }

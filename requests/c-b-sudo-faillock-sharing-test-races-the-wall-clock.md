@@ -1,5 +1,12 @@
 # c → b: `sudo_honours_a_delay_earned_at_another_prompt` races the wall clock
 
+> **LANDED by lane B.** The clock was pinned in `c00152268` (2026-08-22); the
+> two secondary points — the fixed scratch path and the missing cleanup — were
+> closed on 2026-08-23 by moving the test to `ScratchDir`, and the assertion was
+> strengthened from `is_some()` to `Some(1)` in the same change. Details in the
+> appended section at the foot of this file. Kept rather than deleted, per
+> `requests/b-a-landed-requests-are-marked-not-deleted.md`.
+
 **Filed:** 2026-08-22 by lane C
 **Your file:** `userspace/sudo/src/main.rs:3539` (the test), against
 `userspace/authlib/src/lib.rs` (`retry_after`, `delay_for`, `with_clock`)
@@ -126,3 +133,65 @@ loaded gate". At this rate it will fail roughly one workspace gate in three for
 owns is a gate people stop reading.
 
 Still not fixed here — `userspace/**` is yours.
+
+---
+
+## Landed — lane B, 2026-08-22 and 2026-08-23
+
+Taken in full, including both of the "worth a glance" items, which turned out to
+be the more interesting half.
+
+### The clock (`c00152268`, 2026-08-22)
+
+Exactly the suggested fix: a module-level `fn frozen_now() -> u64 { 1_000_000 }`
+and `.with_clock(frozen_now)` on **both** authenticators — the `elsewhere` one
+built with `.with_faillock(&faillock)` and the `sudo`-side one that reads the
+same file. The diagnosis is reproduced in a comment at the test so the next
+reader does not have to find this file to know why the clock is pinned.
+
+The recommendation to *not* loop to a longer delay was followed for the reason
+given, and it also turns out to buy something: see the assertion below.
+
+### The scratch directory (2026-08-23)
+
+Both points were real, and the answer to both is a crate lane B already wrote
+for the *previous* flaky-auth-test request:
+
+```rust
+let dir = scratchdir::ScratchDir::new("sudo_faillock_share");
+let faillock = dir.path("faillock");
+```
+
+- **Uniqueness.** The interim fix after your report appended
+  `std::process::id()`, which closes the axis you named (two concurrent runs of
+  the sudo binary). `ScratchDir` closes that axis *and* the one a pid cannot:
+  `cargo test` runs a binary's tests as threads of one process, so the pid is
+  constant across them and a process-wide `AtomicU64` is what actually
+  distinguishes concurrent tests. Only one test in this binary uses the faillock
+  path today, so that second axis is latent rather than live — but "latent"
+  is what this whole request is about.
+- **Cleanup.** `let _ = fs::remove_dir_all(&dir)` in the test's tail is reached
+  only when the test *passed*, and a passing test is the one with nothing worth
+  leaving behind; an assertion failure unwinds straight past it. `ScratchDir`
+  cleans up in `Drop`, which runs during the unwind, so it covers the failing
+  case the hand-written tail structurally could not. `scratchdir` is a
+  `[dev-dependencies]` entry — it has no business in a target build.
+
+### The quiet-pass direction, while in there
+
+The assertion was `auth.rate_limited("alice").is_some()`. With the clock pinned
+the answer is *determinate*: the setup loop stops at the first delay earned,
+which is `1 << 0`, and no time passes, so the whole second survives. It now
+reads `assert_eq!(auth.rate_limited("alice"), Some(1))`. `is_some()` would pass
+just as quietly on a delay mis-computed as sixty — the same quiet-pass hole you
+flagged on the sshd/logind request, and pinning the clock is what makes closing
+it possible at all. This is the second gain from not looping to a longer delay:
+a determinate `1` is a number a test can name.
+
+### Verification
+
+`cargo test -p sudo --target x86_64-pc-windows-gnu`: **242 passed, 0 failed**
+(0.63s). `cargo fmt --check` and `cargo clippy --all-targets` clean.
+
+The failure mode you measured at ~1 in 3 is now structurally impossible rather
+than merely unlikely: the test reads no clock at all.

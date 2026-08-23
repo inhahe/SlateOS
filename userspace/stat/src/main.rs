@@ -249,79 +249,39 @@ fn detect_personality(argv0: &str) -> Personality {
 // File type helpers
 // ============================================================================
 
-const S_IFMT: u64 = 0o170000;
-const S_IFBLK: u64 = 0o060000;
-const S_IFCHR: u64 = 0o020000;
-const S_IFDIR: u64 = 0o040000;
-const S_IFIFO: u64 = 0o010000;
-const S_IFLNK: u64 = 0o120000;
-const S_IFREG: u64 = 0o100000;
-const S_IFSOCK: u64 = 0o140000;
+// The file-type field, its values and the two renderings of them have one
+// definition, in `modechange` — the crate that owns mode words — because
+// `stat -c %F`, `stat -c %A`, `ls -l`'s first column and `chmod -v`'s report
+// all read the same integer, and a disagreement between them shows up in a
+// single terminal. This crate carries modes as `u64`, so the widening is here
+// rather than there.
+const S_IFMT: u64 = modechange::S_IFMT as u64;
+const S_IFBLK: u64 = modechange::S_IFBLK as u64;
+const S_IFCHR: u64 = modechange::S_IFCHR as u64;
+const S_IFLNK: u64 = modechange::S_IFLNK as u64;
+#[cfg(test)]
+const S_IFDIR: u64 = modechange::S_IFDIR as u64;
+#[cfg(test)]
+const S_IFIFO: u64 = modechange::S_IFIFO as u64;
+#[cfg(test)]
+const S_IFREG: u64 = modechange::S_IFREG as u64;
+#[cfg(test)]
+const S_IFSOCK: u64 = modechange::S_IFSOCK as u64;
 
+/// GNU's `%F`. A type with no name of its own is `weird file` — gnulib's
+/// wording, and a fix: this used to answer `unknown`, which no `stat` prints.
 fn file_type_name(mode: u64) -> &'static str {
-    match mode & S_IFMT {
-        S_IFREG => "regular file",
-        S_IFDIR => "directory",
-        S_IFLNK => "symbolic link",
-        S_IFCHR => "character special file",
-        S_IFBLK => "block special file",
-        S_IFIFO => "fifo",
-        S_IFSOCK => "socket",
-        _ => "unknown",
-    }
+    modechange::file_type_name(mode as u32)
 }
 
+#[cfg(test)]
 fn file_type_letter(mode: u64) -> char {
-    match mode & S_IFMT {
-        S_IFREG => '-',
-        S_IFDIR => 'd',
-        S_IFLNK => 'l',
-        S_IFCHR => 'c',
-        S_IFBLK => 'b',
-        S_IFIFO => 'p',
-        S_IFSOCK => 's',
-        _ => '?',
-    }
+    char::from(modechange::file_type_letter(mode as u32))
 }
 
 /// Format mode bits as rwxrwxrwx string (10 chars with leading type char).
 fn format_rwx(mode: u64) -> String {
-    let mut s = String::with_capacity(10);
-    s.push(file_type_letter(mode));
-
-    let m = mode as u32;
-    // User
-    s.push(if m & 0o400 != 0 { 'r' } else { '-' });
-    s.push(if m & 0o200 != 0 { 'w' } else { '-' });
-    s.push(if m & 0o4000 != 0 {
-        if m & 0o100 != 0 { 's' } else { 'S' }
-    } else if m & 0o100 != 0 {
-        'x'
-    } else {
-        '-'
-    });
-    // Group
-    s.push(if m & 0o040 != 0 { 'r' } else { '-' });
-    s.push(if m & 0o020 != 0 { 'w' } else { '-' });
-    s.push(if m & 0o2000 != 0 {
-        if m & 0o010 != 0 { 's' } else { 'S' }
-    } else if m & 0o010 != 0 {
-        'x'
-    } else {
-        '-'
-    });
-    // Other
-    s.push(if m & 0o004 != 0 { 'r' } else { '-' });
-    s.push(if m & 0o002 != 0 { 'w' } else { '-' });
-    s.push(if m & 0o1000 != 0 {
-        if m & 0o001 != 0 { 't' } else { 'T' }
-    } else if m & 0o001 != 0 {
-        'x'
-    } else {
-        '-'
-    });
-
-    s
+    modechange::mode_string(mode as u32)
 }
 
 /// Format a timestamp (seconds since epoch) as an ISO-like date string.

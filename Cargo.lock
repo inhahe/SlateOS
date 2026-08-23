@@ -1886,7 +1886,9 @@ dependencies = [
  "bignum",
  "charwidth",
  "ere",
+ "localtime",
  "modechange",
+ "pwdb",
  "sha2",
 ]
 
@@ -1925,6 +1927,9 @@ version = "0.1.0"
 [[package]]
 name = "cpio"
 version = "0.1.0"
+dependencies = [
+ "modechange",
+]
 
 [[package]]
 name = "cpupower"
@@ -5641,6 +5646,13 @@ name = "localectl"
 version = "0.1.0"
 
 [[package]]
+name = "localtime"
+version = "0.1.0"
+dependencies = [
+ "tzrules",
+]
+
+[[package]]
 name = "lockscreen"
 version = "0.1.0"
 dependencies = [
@@ -6531,6 +6543,9 @@ version = "0.1.0"
 [[package]]
 name = "mkinitramfs"
 version = "0.1.0"
+dependencies = [
+ "modechange",
+]
 
 [[package]]
 name = "mkswap"
@@ -10194,6 +10209,9 @@ dependencies = [
 [[package]]
 name = "stat"
 version = "0.1.0"
+dependencies = [
+ "modechange",
+]
 
 [[package]]
 name = "statping-cli"

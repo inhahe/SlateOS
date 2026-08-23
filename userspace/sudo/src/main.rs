@@ -3544,10 +3544,6 @@ mod tests {
         );
     }
 
-    /// The point of the whole exercise: a delay earned at another prompt is
-    /// honoured here. `Authenticator::with_faillock` is what `login`, `su` and
-    /// the greeter share on a real system; two authenticators pointed at one
-    /// file stand in for two programs.
     /// A clock that does not move, for the test below.
     ///
     /// It has to be a `fn()` because that is what `with_clock` takes, and it
@@ -3559,16 +3555,17 @@ mod tests {
         1_000_000
     }
 
+    /// The point of the whole exercise: a delay earned at another prompt is
+    /// honoured here. `Authenticator::with_faillock` is what `login`, `su` and
+    /// the greeter share on a real system; two authenticators pointed at one
+    /// file stand in for two programs.
     #[test]
     fn sudo_honours_a_delay_earned_at_another_prompt() {
-        // A unique directory per process: two lanes routinely build at once,
-        // and a fixed path would have two concurrent runs of this binary
-        // deleting each other's faillock file mid-test.
-        let dir =
-            std::env::temp_dir().join(format!("sudo-faillock-share-test-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("a scratch directory under the temp dir");
-        let faillock = dir.join("faillock");
+        // A directory unique per process *and* per thread, removed when `dir`
+        // drops — including on an unwind out of a failed assertion below, which
+        // is the case a cleanup line in the test's tail can never cover.
+        let dir = scratchdir::ScratchDir::new("sudo_faillock_share");
+        let faillock = dir.path("faillock");
         let missing = std::path::Path::new("/nonexistent/sudo-tests");
 
         // Both halves read one frozen clock. Against the real one this test
@@ -3598,16 +3595,20 @@ mod tests {
         let mut auth = authlib::Authenticator::with_stores(missing, missing)
             .with_faillock(&faillock)
             .with_clock(frozen_now);
-        assert!(
-            auth.rate_limited("alice").is_some(),
-            "a delay earned at another prompt must be honoured here"
+        // Naming the number, not just `is_some()`: the loop above stops at the
+        // *first* delay earned, which is `1 << 0`, so with the clock pinned the
+        // whole of it survives and the answer is determinate. `is_some()` would
+        // pass just as quietly on a delay mis-computed as sixty — the
+        // quiet-pass direction lane C flagged alongside the flake.
+        assert_eq!(
+            auth.rate_limited("alice"),
+            Some(1),
+            "a delay earned at another prompt must be honoured here, in full"
         );
         assert!(
             authenticate_against(&mut auth, &db, "alice", "hunter2").is_err(),
             "the correct password must not skip a wait earned elsewhere"
         );
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     // -- Personality detection tests --

@@ -209,4 +209,5 @@ pub mod pathname;
 pub mod quote;
 pub mod shell;
 pub mod tabstops;
+pub mod vercmp;
 pub mod xnum;

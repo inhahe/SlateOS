@@ -32,3 +32,13 @@ modechange = { path = "../modechange" }
 # private copy: the whole output of that utility is a digest another machine
 # will compare against its own.
 sha2 = { path = "../../sha2" }
+# One `/etc/passwd` and `/etc/group` reader, shared with `id`, `chown`, `su` and
+# the login path. A utility that prints a *name* for a uid has to agree with the
+# utility that resolved that name to a uid, or `chown "$(stat -c %U f)" f` stops
+# being a no-op. See `userspace/pwdb`.
+pwdb = { path = "../pwdb" }
+# One TZ resolution and one `strftime`, shared with `date`, `touch` and the
+# shell's prompt expansion. `ls -l` renders a timestamp in the machine's zone;
+# so does `date`; three private copies had disagreed about what an unset `TZ`
+# means (it is `/etc/localtime`, not UTC). See `userspace/localtime`.
+localtime = { path = "../localtime" }

@@ -466,6 +466,147 @@ fn format_fixed(value: f64, precision: usize) -> String {
     format!("{value:.precision$}")
 }
 
+// ------------------------------------------------------------ block sizes ---
+//
+// The other half of gnulib `lib/human.c`: the parser that turns a
+// `--block-size` spec, or an environment variable, into the divisor and the
+// [`Opts`] that [`human_readable`] above is then called with. `du -B`, `ls
+// --block-size`, `df -B`, `LS_BLOCK_SIZE`, `DU_BLOCK_SIZE` and `BLOCK_SIZE` all
+// go through it, and they must agree: `BLOCK_SIZE=K` in a profile has to mean
+// the same thing to every utility that reads it, or one column of a `du | ls`
+// comparison is in different units from the other.
+
+/// The two words a block-size spec accepts instead of a number, in `argmatch`
+/// order.
+pub const BLOCK_SIZE_WORDS: [&[u8]; 2] = [b"human-readable", b"si"];
+
+/// The suffix letters `humblock` hands to [`crate::xnum::xstrtoumax`].
+///
+/// Note what is *absent*: no `R`, no `Q`, and no `B`. `-B R` is therefore
+/// `invalid -B argument 'R'` rather than a ronnabyte, even though `du --help`
+/// advertises `R` in the SIZE paragraph — the paragraph describes `-t`'s list,
+/// which is a different one.
+pub const BLOCK_SIZE_SUFFIXES: &[u8] = b"eEgGkKmMpPtTyYzZ0";
+
+/// gnulib's `argmatch` against [`BLOCK_SIZE_WORDS`]: an unambiguous prefix, or
+/// nothing.
+///
+/// The empty string is a prefix of both, so it is *ambiguous* rather than a
+/// match — which is why `-B ''` falls through to the number parser and comes
+/// back as `invalid -B argument ''` rather than as `human-readable`.
+fn block_size_word(spec: &[u8]) -> Option<usize> {
+    let mut found = None;
+    for (index, word) in BLOCK_SIZE_WORDS.iter().enumerate() {
+        if !word.starts_with(spec) {
+            continue;
+        }
+        if spec == *word {
+            return Some(index);
+        }
+        if found.is_some() {
+            return None;
+        }
+        found = Some(index);
+    }
+    found
+}
+
+/// gnulib's `humblock`: read a block-size spec into a divisor and a set of
+/// [`Opts`].
+///
+/// The rule that surprises everyone is the last one. After the number is
+/// parsed, gnulib walks the spec looking for a digit; if it reaches the end
+/// without finding one, the spec was a bare unit like `K` or `KiB`, and the
+/// *suffix is switched on in the output* as well as applied as a divisor. That
+/// single `for` loop is the whole difference between these two, measured on a
+/// 3153920-byte tree:
+///
+/// ```text
+/// $ du -s -B 1K  t   ->  3080
+/// $ du -s -B K   t   ->  3080K
+/// $ du -s -B KB  t   ->  3154kB
+/// $ du -s -B KiB t   ->  3080KiB
+/// $ du -s -B G   t   ->  1G
+/// ```
+///
+/// A leading `'` is consumed and means "group the digits"; it is the reason
+/// `-B '1048576` is a valid spec and `-B 1'024` is not.
+#[must_use]
+pub fn humblock(spec: &[u8]) -> (u64, Opts, crate::xnum::Status) {
+    use crate::xnum::{Status, xstrtoumax_base};
+
+    let mut opts = Opts::NONE;
+    let rest = match spec.split_first() {
+        Some((b'\'', tail)) => {
+            opts = opts | Opts::GROUP_DIGITS;
+            tail
+        }
+        _ => spec,
+    };
+
+    match block_size_word(rest) {
+        Some(0) => (
+            1,
+            opts | Opts::AUTOSCALE | Opts::SI | Opts::BASE_1024,
+            Status::Ok,
+        ),
+        Some(1) => (1, opts | Opts::AUTOSCALE | Opts::SI, Status::Ok),
+        _ => {
+            let (value, status) = xstrtoumax_base(rest, 0, Some(BLOCK_SIZE_SUFFIXES));
+            if status != Status::Ok {
+                return (value, opts, status);
+            }
+            if !rest.iter().any(u8::is_ascii_digit) {
+                let last = rest.last().copied();
+                let before = rest
+                    .len()
+                    .checked_sub(2)
+                    .and_then(|index| rest.get(index))
+                    .copied();
+                opts = opts | Opts::SI;
+                if last == Some(b'B') {
+                    opts = opts | Opts::B;
+                }
+                if last != Some(b'B') || before == Some(b'i') {
+                    opts = opts | Opts::BASE_1024;
+                }
+            }
+            (value, opts, status)
+        }
+    }
+}
+
+/// gnulib's `default_block_size`: 512 under `POSIXLY_CORRECT`, else 1024.
+#[must_use]
+pub const fn default_block_size(posixly_correct: bool) -> u64 {
+    if posixly_correct { 512 } else { 1024 }
+}
+
+/// gnulib's `human_options`: [`humblock`] plus the rule that a block size of
+/// zero is not a block size.
+///
+/// The zero rule is why `-B 0` says `invalid -B argument '0'` — the *number*
+/// parsed perfectly, so the diagnostic cannot have come from the number parser.
+/// It is also why `DU_BLOCK_SIZE=0` is silently the default rather than a
+/// division by zero: the environment caller discards the status this returns
+/// and keeps the repaired block size, and only the `-B` caller makes it fatal.
+///
+/// The returned [`Opts`] are kept even when the status is bad, which is
+/// upstream's behaviour and is observable: `LS_BLOCK_SIZE=0` leaves the
+/// autoscaling off but the block size at the default.
+#[must_use]
+pub fn human_options(spec: &[u8], posixly_correct: bool) -> (u64, Opts, crate::xnum::Status) {
+    let (block_size, opts, status) = humblock(spec);
+    if block_size == 0 {
+        return (
+            default_block_size(posixly_correct),
+            opts,
+            crate::xnum::Status::Invalid,
+        );
+    }
+    (block_size, opts, status)
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::panic)]
 mod tests {

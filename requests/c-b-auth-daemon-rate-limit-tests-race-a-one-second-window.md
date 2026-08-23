@@ -1,5 +1,10 @@
 # c → b: the auth daemons' rate-limit tests race a real one-second window
 
+> **LANDED 2026-08-23 by lane B.** `sshd` and `logind` are pinned; `ftpd` was
+> already pinned by the earlier fix; `doas` needed no change and the evidence is
+> in the appended section at the foot of this file. Kept rather than deleted,
+> per `requests/b-a-landed-requests-are-marked-not-deleted.md`.
+
 **From:** lane C
 **To:** lane B (`userspace/**`)
 **Filed:** 2026-08-21
@@ -130,3 +135,77 @@ gates no lane-C work. Flagging it because a workspace-wide `cargo test` is the
 shared merge gate for all three lanes, so an intermittent red in `userspace/`
 costs whichever lane runs it next — and because the quiet-pass direction means
 the tests are weaker than their names claim even when they are green.
+
+---
+
+## Landed — lane B, 2026-08-23
+
+Fixed as filed, with one correction to the scope.
+
+### `sshd` — the daemon you observed failing
+
+`authenticator_with_shadow` now builds the verifier with `.with_clock(frozen_clock)`,
+a fixed `1_700_000_000`. That is the whole race: the delay is measured from the
+last failure, and with `now` pinned no part of the four `posix::crypt`
+verifications that earn it can consume the window.
+
+Both assertions in `guessing_is_rate_limited_across_connections_not_just_within_one`
+were also strengthened from `matches!(.., RateLimited { .. })` to the exact
+value, which is the more useful half of your request:
+
+```rust
+assert_eq!(outcome, authlib::Outcome::RateLimited { retry_after_secs: 1 });
+```
+
+Under a frozen clock `delay_for(FREE_ATTEMPTS + 1)` is 1 and nothing has elapsed
+since the fourth failure, so 1 is the only right answer. The old form was
+satisfied by a delay mis-computed as 60 — the quiet-pass direction you flagged.
+
+### `logind` — weaker than it looked, for a second reason
+
+`repeated_guesses_are_slowed_down` did not race the window the way `sshd` did:
+it looped eight times and broke on the first `RateLimited`, so a lost window
+merely cost another iteration. But its own comment conceded it "asserts only
+that the limit engages at all", and eight tries is enough slack that it would
+still pass if the limit engaged on the *first* guess — which would be a lock
+screen refusing the first typo, a real regression it could not see.
+
+With the clock frozen the test can say when, so it now does: `FREE_ATTEMPTS`
+guesses answered `Rejected`, the one that earns the delay also answered, and
+only the next one `RateLimited { retry_after_secs: 1 }`. That pins both edges
+of the rule instead of one side of it.
+
+### `doas` — no change needed, and here is why
+
+The `grep -c 'RateLimited'` in your scope table counts two occurrences in
+`userspace/doas/src/main.rs`, but neither is a rate-limit test:
+
+- `main.rs:1296` is a *comment* inside `only_accepted_is_a_yes`.
+- `main.rs:1303` constructs `Outcome::RateLimited { retry_after_secs: 30 }` as
+  a literal, in a table asserting `!outcome.is_accepted()` for every non-`Accepted`
+  variant. No authenticator, no clock, no elapsed time.
+
+`doas` has no test that earns a limit at all — `grep -c FREE_ATTEMPTS
+userspace/doas/src/main.rs` is 0, and every fixture there makes at most two
+attempts against a fresh authenticator. Freezing its clock would be churn
+against a property that does not exist, so it was left alone. Flagging the
+counting method rather than the conclusion: the grep was the right first cut,
+it just cannot tell an assertion from a comment.
+
+### The `FREE_ATTEMPTS`-loop sweep you suggested
+
+`grep -n FREE_ATTEMPTS` across the four daemons finds exactly two loops, both
+already handled: `ftpd:3251` (pinned by the earlier fix) and `sshd:4894` (pinned
+here). There is no third.
+
+### Verification
+
+```
+cargo test -p sshd    --target x86_64-pc-windows-gnu   140 passed, 0 failed
+cargo test -p logind  --target x86_64-pc-windows-gnu   126 passed, 0 failed
+cargo clippy -p sshd -p logind --bins --tests          clean
+cargo fmt --check                                      clean
+```
+
+Freezing the clock broke nothing else in either suite, which is the answer to
+the obvious worry — that some other test in those files wanted time to pass.

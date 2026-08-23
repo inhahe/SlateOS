@@ -63913,6 +63913,330 @@ seen, every crate-wide sweep pays for them, and the day someone wires one up is
 the day they discover what it assumed. Nothing breaks in the meantime, which is
 exactly why it has gone unnoticed for so long — a module nobody draws also
 never looks wrong.
+
+## TD-B-FIVE-COPIES-OF-THE-FILE-TYPE-HALF-OF-A-MODE-WORD (lane B, 2026-08-22) — RESOLVED 2026-08-22
+
+**In short:** A file's *mode* is one integer holding two unrelated things: what
+kind of file it is (regular, directory, symlink, pipe, socket, device) and who
+may read, write and run it. Five utilities each wrote out the seven "what kind"
+values by hand. Two of them got it wrong in a way a user could see. They now
+share one definition, in `userspace/modechange` — the crate that already owned
+the other half of the same integer.
+
+**The two real bugs, not just the duplication:**
+
+1. **`userspace/stat` printed `unknown` where GNU prints `weird file`.** `%F` is
+   the format `stat -c %F` uses to name a file's type, and a type this system
+   has no name for is `weird file` in gnulib's wording (`lib/c-file-type.c`).
+   A script matching on the GNU wording matched nothing.
+2. **`mkinitramfs` tested the type as if it were a bit field.** Its test filter
+   was `e.mode & 0o040000 != 0`, which is wrong because the `S_IF*` values are
+   *not* flags: `S_IFCHR | S_IFDIR == S_IFBLK`, exactly. That filter counts a
+   block device (`0o060000`) and a socket (`0o140000`) as directories. It only
+   escaped notice because the fixture it ran on has neither. Now
+   `mode & S_IFMT == S_IFDIR`.
+
+**Where it lived, and what it is now:**
+
+| Site | Before | After |
+|---|---|---|
+| `userspace/coreutils/src/bin/stat.rs` | own `S_IFMT` + two 7-arm matches | `modechange::{S_IFMT, S_IFREG, file_type_name, mode_string}` |
+| `userspace/stat/src/main.rs` | own 8 `u64` constants + two 7-arm matches + a hand-written `strmode` | `modechange`, widened to `u64` at the boundary |
+| `userspace/cpio/src/main.rs` | own 4 constants | `modechange::{S_IFDIR, S_IFLNK, S_IFMT, S_IFREG}` |
+| `userspace/mkinitramfs/src/main.rs` | 5 bare octal literals | `modechange::{S_IFCHR, S_IFDIR, S_IFLNK, S_IFREG}` |
+| `userspace/coreutils/src/bin/ls.rs` | (being written) | `modechange::{S_IFDIR, S_IFMT}` |
+
+**What `modechange` gained:** `S_IFMT` and the seven type values, plus
+`file_type_letter` (gnulib's `ftypelet` — the first character of `ls -l`'s mode
+column), `file_type_name` (GNU `stat`'s `%F` wording) and `mode_string` (the
+whole ten-character `-rw-r--r--`, which is `file_type_letter` followed by the
+existing `permission_string`). Every value measured against GNU coreutils 9.4:
+
+```text
+$ stat -c '%A %F' reg d sym pipe sock /dev/null /dev/loop0
+-rw-r--r-- regular file        drwxr-xr-x directory
+lrwxrwxrwx symbolic link       prw-r--r-- fifo
+srwxr-xr-x socket              crw-rw-rw- character special file
+brw-rw---- block special file
+```
+
+`userspace/stat` and `userspace/coreutils`' `stat` remain two separate binaries
+with the same name; that duplication is a different item and is blocked on
+question B-Q7. This entry is only about the seven numbers they both needed.
+
+---
+
+### [B] TD-B-LS-INVENTS-A-POSITION-FOR-THE-DOT-ENTRIES — 2026-08-22 — OPEN (tech debt)
+
+**What it is.** `ls -a` has to list `.` and `..`, and `std::fs::read_dir`
+discards them. `RealTree::read_dir` in `userspace/coreutils/src/bin/ls.rs`
+puts them back at the front of the stream. That position is a guess, and on
+ext4 it is the wrong one.
+
+**How to see it.** Under `-U`, `-f` or `--sort=none` — the three listings whose
+order is the directory's own and not a sort — we disagree with GNU. Measured on
+WSL's ext4, in a directory of twelve entries built by `touch`:
+
+```text
+$ ls -f t          (GNU 9.5, and a raw readdir(3) loop, byte for byte)
+y.tar.gz  ..  x  a  dir  f9  z.txt  f2  f10  bb  .hidden  .
+
+$ ls -f t          (ours)
+.  ..  y.tar.gz  x  a  dir  f9  z.txt  f2  f10  bb  .hidden
+```
+
+ext4's hashed directory index put `.` last in that directory; another
+directory puts it somewhere else again. Under every *sorted* listing the dots
+sort to the front regardless, so the default `ls -a` is unaffected — this is
+visible only with the three order-preserving flags.
+
+**Why it is not simply fixed.** There is nothing to recover the position from.
+`std::fs::read_dir` filters the dot entries out inside the iterator, so by the
+time we see the stream the information is gone. The fix has to read the
+directory below std:
+
+- a raw `getdents64` on Linux and on SlateOS, `cfg`-forked per target, with the
+  `unsafe` that implies; or
+- a `libc` dependency — **rejected**, and worth writing down why: `libc` has no
+  `x86_64-slateos` support, so it would have to be a
+  `[target.'cfg(target_os = "linux")'.dependencies]` entry. That fixes the
+  measurement harness and leaves the shipping binary exactly as wrong, which is
+  strictly worse than the current state: the harness would go green while the
+  bug stayed.
+
+**What the proper fix looks like.** Give `Tree::read_dir` a real directory read
+that yields the dot entries in their own positions. The natural home is not
+`ls` — `find`, `du` and the shell's globber all walk directories — so it wants
+to be a small crate (`userspace/dirread`, say) with one `getdents64` per
+supported target behind a safe iterator, in the same shape as `pwdb` and
+`localtime`. Until then `ls -aU` on SlateOS reports SlateOS's own readdir order
+with the dots prepended, which is self-consistent and merely not GNU's.
+
+**Trigger:** do it when a second utility needs the dot entries, or when
+`ls -f`'s order starts mattering to something (a test, a script in the image).
+
+### [B] TD-B-LS-WRITES-A-DIAGNOSTIC-WITHOUT-FLUSHING-THE-LISTING-FIRST — 2026-08-22 — FIXED 2026-08-22
+
+**What it is.** `ls` accumulates its whole listing in `Out::buf` and writes it
+once, at the end of `main`. Diagnostics go to stderr the moment they happen. So
+when both streams land in the same place — `ls -R t 2>&1 | …`, or a terminal —
+every diagnostic appears *before* the entire listing instead of at the point in
+it where the failure occurred.
+
+GNU does not do this: gnulib's `error()` calls `fflush (stdout)` before it
+writes, so a message lands between the lines already printed and the ones still
+to come.
+
+**How to see it.** With an unreadable subdirectory `t/noperm`:
+
+```text
+$ ls -R t 2>&1
+GNU:   …23 lines of t's listing…  ls: cannot open directory 't/noperm': …
+ours:  ls: cannot open directory 't/noperm': …  …23 lines of t's listing…
+```
+
+It is the one remaining non-deliberate failure in `scripts/ls-diff.sh`.
+
+**What the proper fix looks like.** `Out` gains a `flushed: usize` (bytes
+already written) and a sink, `Out::mark` uses `flushed + buf.len()` so
+`--dired`'s offsets are unaffected, and every write to stderr flushes first.
+The four diagnostic sites are `Listing::file_failure`, the
+`not listing already-listed directory` branch in `Listing::print_dir`, and
+`gobble_file`'s two — the last needs the sink plumbed in beside its existing
+`err`, which is the only awkward part.
+
+Flushing *more* often than GNU is unobservable (the bytes and their order are
+identical), so the fix does not have to match gnulib's flush points — only to
+guarantee that no stderr write happens while stdout has unflushed bytes.
+
+**Fixed 2026-08-22**, exactly as described above. `Out` became `Out<'a>` with a
+`sink: Option<&'a mut dyn Write>`, a `flushed: usize` and a `broken: bool`;
+`Out::mark` counts from `flushed + buf.len()`; `Out::flush` writes the buffer
+and clears it. `gobble_file` took an `out` parameter beside `err`, and all four
+diagnostic sites flush first. `main` holds the stdout lock, flushes once at the
+end, and exits 2 if the sink ever refused a write — a listing that could not be
+written is an exit status, because the only place to report it is the stream
+that just failed.
+
+Two tests cover it:
+`a_diagnostic_lands_where_it_happened_and_not_in_front_of_the_listing` points
+both streams at one buffer and asserts the byte-for-byte interleaving, and
+`flushing_does_not_move_the_dired_offsets` asserts a flush between two `mark`s
+leaves `--dired`'s offsets where they were. `scripts/ls-diff.sh`'s `ls -R t`
+case dropped its `!` deferral and now passes: 159 cases, 148 passed, 0 differed.
+
+One measurement corrected while writing the test: there is **no blank line**
+before the diagnostic. `print_dir` emits the separating newline only in front
+of a heading it is about to print, and `t/noperm` never gets one, because the
+`opendir` that would have led to that heading is the thing that failed. GNU
+9.5, `ls -R t 2>&1 | cat -A`, prints `t:$ a$ noperm$ z$` then the message. The
+exit status is **1**, not 2: `t/noperm` was reached by recursing rather than
+named on the command line, and GNU reserves 2 for the latter.
+
+### [B] TD-B-OUR-WIDTH-TABLE-IS-BASHS-AND-COREUTILS-9.5S-IS-NOT — 2026-08-22 — OPEN (tech debt, blocked on B-Q8)
+
+**What it is.** `userspace/charwidth` holds the system's only table of terminal
+column widths, and it was generated and verified against **bash 5.2.37**, which
+gets its widths from glibc's `wcwidth`. Coreutils **9.5** does not use glibc's
+`wcwidth`: gnulib's `lib/wcwidth.c` *defines* `wcwidth` itself and, in any
+UTF-8 locale, returns `uc_width()` from its own Unicode 15.1.0 tables —
+
+```c
+int wcwidth (wchar_t wc)
+#undef wcwidth
+{
+  if (is_locale_utf8_cached ())
+    return uc_width (wc, "UTF-8");
+  ...
+}
+```
+
+— so `ls`, `wc -L`, `sort`, `pr`, `df` and `numfmt` all measure with gnulib's
+table while bash measures with glibc's. Coreutils **9.4 did not** do this; the
+override arrived in 9.5, which is the version we pin. The two tables disagree
+on **626 code points in 71 ranges**.
+
+**How to measure it (exact, no recall).** In WSL, against the cached reference
+tree `$HOME/.cache/slateos-ls-diff/coreutils-9.5`:
+
+```c
+/* Dump the oracle ls actually uses, per code point. Link libcoreutils.a;
+   do NOT put lib/ on the include path -- gnulib's replacement headers
+   shadow the system ones and refuse to compile without config.h. */
+extern int mbsnwidth (const char *buf, size_t nbytes, int flags);
+/* encode cp as UTF-8 into b, then: mbsnwidth (b, n, 3) */
+```
+
+`gcc -o mw2 mw2.c "$C/lib/libcoreutils.a"`, run under `LC_ALL=C.UTF-8`, and
+collapse to ranges. The result is identical to `uc_width` (912 ranges vs 911,
+differing only on the surrogates, which no UTF-8 sequence can carry) and
+differs from a direct glibc `wcwidth` sweep on the 626 code points below.
+
+**The 71 ranges.** Four kinds:
+
+| Kind | Examples | ours | gnulib |
+|---|---|---|---|
+| `Cf` policy — gnulib zeroes *every* format character | `00AD` | 1 | 0 |
+| `Cf` carve-outs gnulib makes and we do not (prepended concatenation marks) | `0600–0605`, `06DD`, `070F`, `0890–0891`, `0897`, `08E2`, `110BD`, `110CD`, `11A07–11A08`, … | 0 | 1 |
+| conjoining Jamo, extended blocks | `D7B0–D7C6`, `D7CB–D7FB` | 1 | 0 |
+| Unicode-version drift, and gnulib rounding *unassigned* code points inside East Asian blocks up to 2 | `2630–2637`, `2E9A`, `3040`, `4DC0–4DFF`, `1F203–1F20F`, `1F6DC`, `1FA75–1FA77`, `2FFFE–2FFFF`, … | 1 or 2 | 2 or 1 |
+
+**Why it is not simply fixed.** `charwidth` is deliberately the *only* copy, so
+changing it changes `ls`, `wc -L`, `expand`, `fold`, `nl`, `column` and osh's
+`select` menu together. Matching gnulib wins the `ls` byte-diff and loses the
+osh-versus-bash byte-diff (`userspace/oils/tests/gen_display_width.py
+--diff-osh`), which passes today. That is a user-visible layout choice, so it
+is the operator's: **`open-questions.md` B-Q8**.
+
+**What the proper fix looks like**, if B-Q8 answers "follow gnulib": replace
+`gen_display_width.py`'s derivation from Python's `unicodedata` with the
+measured dump above — the project's own rule is to measure the reference rather
+than re-derive its rule — regenerate `ZERO_WIDTH` and `WIDE`, rewrite the
+module doc that claims a bash provenance, repoint `--check` at the dump, and
+drop the two `!` cases and the `y/` fixture from `scripts/ls-diff.sh`.
+
+**Where it shows.** `scripts/ls-diff.sh` fixture `y/`, cases
+`ls --sort=width -1 y` and `ls -C -w 20 y`, both marked `!`.
+
+### [B] TD-B-LS-ACCEPTS-HYPERLINK-WITHOUT-EMITTING-IT — 2026-08-22 — OPEN (tech debt)
+
+**What it is.** `ls --hyperlink[=WHEN]` parses, validates its argument and sets
+`Settings::print_hyperlink`, and then nothing reads it. GNU wraps each name in
+an OSC 8 escape — `\033]8;;file://HOST/ABS/PATH\a` before it and `\033]8;;\a`
+after — so a terminal that understands the sequence turns the listing into
+links. We print the bare names.
+
+The flag is not inert, though: it already suppresses `--dired`, because
+upstream's `dired` is `dired && format == long_format && !print_hyperlink`.
+So `ls -l --dired --hyperlink=always` correctly prints no `//DIRED//` line on
+both sides, which is the one observable thing the flag does here.
+
+**How to see it.** `scripts/ls-diff.sh`, the two cases marked
+`!hyperlinks are not implemented`:
+
+```text
+$ ls --hyperlink=always t | cat -v
+GNU:   ^[]8;;file:///tmp/…/t/a^Ga^[]8;;^G  …
+ours:  a  …
+```
+
+**Why it was not done with the colour half.** The escape carries an *absolute*
+path and a hostname, and both are missing pieces rather than missing code:
+
+- The path is upstream's `f->absolute_name`, built by gnulib's `canonicalize_filename_mode
+  (name, CAN_MISSING)` when the operand is relative. We have no `canonicalize`
+  and no `getcwd` wrapper in `userspace/coreutils`; the nearest thing is
+  `coreutils::pathname`, which is pure string work and deliberately does not
+  touch the filesystem.
+- The hostname is `xgethostname()`, i.e. `gethostname(2)`. SlateOS has no
+  syscall for it yet and no `/etc/hostname` convention settled, so there is
+  nothing to read.
+
+Doing it without those two would mean emitting a link that resolves to the
+wrong file, which is worse than emitting none: a terminal would offer to open
+something the user did not list.
+
+**What the proper fix looks like.** Three pieces, in order:
+
+1. A `getcwd` + `canonicalize` pair. The natural home is a small
+   `userspace/canonpath` crate (the same shape as `pwdb` and `localtime`),
+   because `readlink -f`, `realpath`, `pwd -P` and `find` all want it and none
+   of them has it either.
+2. A hostname source — a syscall, or `/etc/hostname` with the empty string as
+   the documented fallback (GNU's `xgethostname` cannot fail, and an empty host
+   in a `file://` URI means "this machine", which is exactly right).
+3. In `ls.rs`: set `FileInfo::absolute_name` in `gobble_file` when
+   `print_hyperlink` is on, and in `print_name_with_quoting` emit the two
+   escapes around the name. The `skip_quotes` branch goes with it — when outer
+   quotes are being aligned, upstream puts the opening quote *outside* the link
+   so the underline starts at the name — and both escapes must go through
+   `Out::put_str` so that they do not advance `Out::pos`, for the same reason
+   the colour escapes do not.
+
+**Trigger:** do it when `userspace/canonpath` exists for another reason, or
+when a terminal in the image starts honouring OSC 8.
+
+**Where it shows.** `scripts/ls-diff.sh`, cases `ls --hyperlink=always t` and
+`ls --hyperlink=always -l t`, both marked `!`.
+
+### [B] TD-B-LS-CANNOT-RESTORE-THE-TERMINAL-ON-AN-ABNORMAL-EXIT — 2026-08-22 — OPEN (tech debt)
+
+**What it is.** GNU `ls --color` installs signal handlers the first time it
+writes a colour escape, so that a run killed or suspended part-way through
+puts the terminal back before it dies. `put_indicator` does it:
+
+```c
+      /* If the standard output is a controlling terminal, watch out
+         for signals, so that the colors can be restored to the
+         default state if "ls" is suspended or interrupted.  */
+      if (0 <= tcgetpgrp (STDOUT_FILENO))
+        signal_init ();
+```
+
+`Out::put_str` in `userspace/coreutils/src/bin/ls.rs` is that function and does
+not, because SlateOS has no Unix signals and `design.txt` forbids adding them
+("No Unix signals for process control", "Hardware exceptions → language-level
+exceptions"). There is no mechanism to hook.
+
+**How to see it.** Interrupt a coloured listing of a large directory:
+`ls --color=always -R / ` then Ctrl-C. GNU's terminal comes back white; ours
+stays in whatever colour the escape that was in flight had selected, and every
+subsequent prompt is painted until `reset` or `tput sgr0`.
+
+It cannot appear in `scripts/ls-diff.sh`: that harness measures completed runs.
+
+**What the proper fix looks like.** Not signals — a terminal-restore hook that
+SlateOS's own process-teardown path runs. The shell wants the same thing for
+its own reasons (raw mode, bracketed paste, the alternate screen), so this
+belongs wherever that lands rather than in `ls`. When it exists, `Out::put_str`
+registers `restore_default_color`'s bytes with it at the moment the `used_color`
+latch fires, which is exactly where GNU calls `signal_init`.
+
+**Trigger:** do it when the terminal layer grows an abnormal-exit hook, or when
+a second program in the image starts leaving the terminal in a modified state.
+
+Recorded in `design-decisions.md` §368.
+
 ---
 
 ## A malformed Data Offset injected the TCP header into the receive stream (lane A)

@@ -355,10 +355,23 @@ def violations(text: str) -> list[tuple[int, str, str]]:
 # the match to end the lead in the middle of a string, because the only
 # alternative that can pass an opening quote is the one that also consumes the
 # closing one. A pattern of `"a println!(b"` is therefore harmless.
+#
+# `lead` may also end in `{`, and `tail` may follow the terminator, because an
+# arm whose body is a *block* is just as common as one whose body is a bare
+# expression:
+#
+#     other => { eprintln!("npm: unknown command '{}'", other); 1 }
+#
+# Nine sites in this tree are that exact line with a different program name.
+# Neither piece is parsed -- both are reproduced byte for byte around the
+# rewritten call -- so allowing them cannot change what the surrounding code
+# does. `tail` therefore does not have to *match* the brace in `lead`: an
+# unpaired one is text this rewrite copies through untouched either way.
 _ARM_ATOM = r"""(?:[^"'{};]|"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*')"""
 _CALL = re.compile(
-    rf'^(?P<lead>\s*(?:{_ARM_ATOM}*=>\s*)?)(?P<mac>e?println!)'
-    r'\(\s*"(?P<fmt>(?:[^"\\]|\\.)*)"(?P<args>.*?)\s*\)(?P<end>[;,])$'
+    rf'^(?P<lead>\s*(?:{_ARM_ATOM}*=>\s*)?(?:\{{\s*)?)(?P<mac>e?println!)'
+    r'\(\s*"(?P<fmt>(?:[^"\\]|\\.)*)"(?P<args>.*?)\s*\)(?P<end>[;,])'
+    r'(?P<tail>[^"\'{}]*\})?$'
 )
 
 # `'{ident}'` -- the hand-written-quote shape, with a plain identifier inside.
@@ -439,7 +452,7 @@ def fix_line(line: str) -> tuple[str | None, str]:
         tail = "".join(f", {a}" for a in new_args)
         return (
             f'{m.group("lead")}{m.group("mac")}("{new_fmt}"{tail})'
-            f'{m.group("end")}'
+            f'{m.group("end")}{m.group("tail") or ""}'
         )
 
     ident = bare_interpolated_name(line)
@@ -807,6 +820,21 @@ def selftest() -> int:
         "arm-pattern-containing-the-macro-text",
         "        \"say println!(\" => println!(\"tool: got '{}'\", w),",
         '        "say println!(" => println!("tool: got {}", quoteaf_os(&w)),',
+    )
+    # An arm whose body is a *block*, which is how a wrapper returns an exit
+    # code from the same arm that prints the complaint. Nine sites in this tree
+    # are this line with a different program name in it.
+    expect_fix(
+        "match-arm-with-a-block-body",
+        "        other => { eprintln!(\"npm: unknown command '{}'\", other); 1 }",
+        '        other => { eprintln!("npm: unknown command {}", quoteaf_os(&other)); 1 }',
+    )
+    # The brace and the text after the terminator are copied through, never
+    # parsed, so the rewrite is exactly as safe when they do not pair up.
+    expect_fix(
+        "trailing-brace-without-a-leading-one",
+        "            eprintln!(\"npm: bad '{}'\", other); }",
+        '            eprintln!("npm: bad {}", quoteaf_os(&other)); }',
     )
     # Declines. Each is a real shape in the tree, and each would be corrupted
     # by a rewrite that went ahead anyway.

@@ -1405,6 +1405,18 @@ impl Vfs {
         if !mount_path.is_absolute() {
             return Err(KernelError::InvalidArgument);
         }
+        // `.` and `..` are rejected rather than resolved.  Resolving them
+        // here would need the VFS lock we have not taken yet, and a mount
+        // recorded with them is unreachable anyway: `mount_matches` compares
+        // components literally, so no resolved lookup path could ever match
+        // `/mnt/../mnt`.  That is the same registered-but-unreachable class
+        // the parent-exists check below exists to prevent.
+        if !mount_path.has_no_dot_components() {
+            return Err(KernelError::InvalidArgument);
+        }
+        // Canonicalise the separators before anything records or compares
+        // these bytes — see `normalize_mount_path` for what depends on it.
+        let mount_path = &normalize_mount_path(mount_path);
 
         // Refuse a mount that path lookup could never reach.
         //
@@ -1444,9 +1456,10 @@ impl Vfs {
 
         let mut vfs = VFS.lock();
 
-        // Check for duplicate mount point.
+        // Check for duplicate mount point.  Both sides are normalised, so
+        // `/mnt` and `/mnt/` now collide as they should.
         for mp in &vfs.mounts {
-            if mp.path.as_path() == mount_path {
+            if mp.path.as_path() == mount_path.as_path() {
                 return Err(KernelError::AlreadyExists);
             }
         }
@@ -1518,11 +1531,14 @@ impl Vfs {
     }
 
     pub fn unmount(mount_path: impl AsRef<Path>) -> KernelResult<()> {
-        let mount_path = mount_path.as_ref();
+        // Normalise to the spelling registration stored, so an unmount is not
+        // refused merely because the caller wrote the trailing slash that
+        // `mount` accepted.  This also makes the root check below catch `//`.
+        let mount_path = &normalize_mount_path(mount_path.as_ref());
 
         // Refuse to unmount root.  Checked before the table lookup so the answer
         // does not depend on whether `/` happens to be present.
-        if mount_path == Path::new("/") {
+        if mount_path.as_path() == Path::new("/") {
             return Err(KernelError::PermissionDenied);
         }
 
@@ -2899,10 +2915,12 @@ impl Vfs {
 
     /// Re-mount a filesystem with new options (e.g., `remount,ro`).
     pub fn remount(mount_path: impl AsRef<Path>, options: MountOptions) -> KernelResult<()> {
-        let mount_path = mount_path.as_ref();
+        // Same normalisation as `mount`/`unmount`: identify the mount by its
+        // canonical spelling, not by the caller's.
+        let mount_path = &normalize_mount_path(mount_path.as_ref());
         let mut vfs = VFS.lock();
         for mp in &mut vfs.mounts {
-            if mp.path.as_path() == mount_path {
+            if mp.path.as_path() == mount_path.as_path() {
                 crate::serial_println!(
                     "[vfs] Remounted '{}' with options: {}",
                     mount_path.display(),
@@ -3412,10 +3430,22 @@ impl Vfs {
         // lock-free (debug_stats may itself touch the VFS on stacked mounts).
         let fs = {
             let vfs = VFS.lock();
-            vfs.mounts
-                .iter()
-                .find(|mp| path.starts_with(&mp.path))
-                .map(|mp| Arc::clone(&mp.fs))
+            // Longest-prefix, not first-match.  `find` returned whichever
+            // covering mount sat earliest in the table, and the root mount is
+            // registered first and covers everything — so `debug_stats` for a
+            // path under any submount reported the *root* filesystem's stats.
+            // Every other mount lookup here scores by prefix length; this one
+            // did not.
+            let mut best: Option<&MountPoint> = None;
+            for mp in &vfs.mounts {
+                if !mount_matches(&mp.path, path) {
+                    continue;
+                }
+                if best.is_none_or(|b| mp.path.len() > b.path.len()) {
+                    best = Some(mp);
+                }
+            }
+            best.map(|mp| Arc::clone(&mp.fs))
         };
         match fs {
             Some(fs) => Ok(fs.lock().debug_stats()),
@@ -4347,6 +4377,41 @@ fn mount_matches(mount_path: &Path, path: &Path) -> bool {
     // Component-aligned by construction: a mount at `/tmp` must capture
     // `/tmp/foo` but not `/tmpfile`.  See [`Path::starts_with`].
     path.starts_with(mount_path)
+}
+
+/// A mount path in its canonical spelling: absolute, with no trailing
+/// separator and no repeated ones — except the root mount, which *is* a
+/// single separator.
+///
+/// Mount paths are stored verbatim and then used in two ways that both
+/// assume this spelling, so normalising once at the boundary is what makes
+/// their precondition true by construction:
+///
+/// - [`find_mount`] strips the mount prefix by **byte offset**
+///   (`path.as_bytes().get(best_len..)`) rather than by component, because
+///   it is on the VFS lookup hot path and a component-wise strip would
+///   allocate a `PathBuf` on every single path resolution.  A mount
+///   registered as `/mnt/` makes that strip start one byte late, so
+///   `/mnt/foo` resolves to the *relative* `foo` instead of `/foo` and the
+///   mounted filesystem is handed a path it cannot find; `/mnt//sub` makes
+///   it land mid-name and produce outright garbage.
+/// - Registration, [`Vfs::unmount`] and [`Vfs::remount`] identify a mount by
+///   **byte equality**.  Without normalisation `/mnt` and `/mnt/` are two
+///   different table entries: a second mount at the other spelling is
+///   accepted rather than refused as a duplicate, and an unmount or remount
+///   spelled either way cannot find one registered under the other.
+///
+/// Note this normalises *separators only*.  `.` and `..` are rejected
+/// outright at registration instead — see [`Vfs::mount_with_options`].
+fn normalize_mount_path(p: &Path) -> PathBuf {
+    // Starting from `/` rather than the empty path is what gives the
+    // zero-component case (`/`, `//`, `///`) the root mount's spelling;
+    // `PathBuf::push` supplies the separators between the rest.
+    let mut out = PathBuf::from("/");
+    for c in p.components() {
+        out.push(c);
+    }
+    out
 }
 
 /// Find the mount point that best matches `path`.
@@ -5713,6 +5778,81 @@ pub fn self_test() -> KernelResult<()> {
         let _ = Vfs::remove(test_path);
         let _ = Vfs::remove(new_path);
         serial_println!("[vfs]     atomic write test PASSED");
+    }
+
+    // --- Mount path normalisation ---
+    //
+    // A mount registered with a trailing slash used to be stored verbatim,
+    // and `find_mount` strips the mount prefix by byte offset -- so
+    // `/tmp/vfsnorm/x` was handed to the mounted filesystem as the relative
+    // `x` instead of `/x`, and every operation under the mount failed. The
+    // matching byte-equality failures let the same directory be mounted
+    // twice under two spellings and made unmount/remount spelling-sensitive.
+    if has_tmp {
+        serial_println!("[vfs]   Testing mount path normalisation...");
+
+        // Trailing slash, and a doubled separator for good measure.
+        crate::fs::memfs::mount("/tmp//vfsnorm/")?;
+
+        // Stored under the canonical spelling.
+        let stored = Vfs::mounts();
+        if !stored
+            .iter()
+            .any(|(p, _)| p.as_path() == Path::new("/tmp/vfsnorm"))
+        {
+            serial_println!("[vfs]   FAIL: mount not stored as '/tmp/vfsnorm'");
+            let _ = Vfs::unmount("/tmp/vfsnorm");
+            return Err(KernelError::InternalError);
+        }
+
+        // The mount is usable: this is the byte-offset strip that broke.
+        if let Err(e) = Vfs::write_file("/tmp/vfsnorm/probe", b"normalised") {
+            serial_println!("[vfs]   FAIL: write under normalised mount: {:?}", e);
+            let _ = Vfs::unmount("/tmp/vfsnorm");
+            return Err(e);
+        }
+        match Vfs::read_file("/tmp/vfsnorm/probe") {
+            Ok(data) if data.as_slice() == b"normalised" => {}
+            other => {
+                serial_println!("[vfs]   FAIL: read under normalised mount: {:?}", other);
+                let _ = Vfs::unmount("/tmp/vfsnorm");
+                return Err(KernelError::InternalError);
+            }
+        }
+
+        // The other spelling is now recognised as a duplicate.
+        match crate::fs::memfs::mount("/tmp/vfsnorm") {
+            Err(KernelError::AlreadyExists) => {}
+            other => {
+                serial_println!(
+                    "[vfs]   FAIL: duplicate mount under other spelling: {:?}",
+                    other
+                );
+                let _ = Vfs::unmount("/tmp/vfsnorm");
+                return Err(KernelError::InternalError);
+            }
+        }
+
+        // `..` in a mount path is refused rather than silently unreachable.
+        match crate::fs::memfs::mount("/tmp/../tmp/vfsdots") {
+            Err(KernelError::InvalidArgument) => {}
+            other => {
+                serial_println!("[vfs]   FAIL: dot-component mount accepted: {:?}", other);
+                let _ = Vfs::unmount("/tmp/vfsdots");
+                let _ = Vfs::unmount("/tmp/vfsnorm");
+                return Err(KernelError::InternalError);
+            }
+        }
+
+        let _ = Vfs::remove("/tmp/vfsnorm/probe");
+        // Unmount by the *un*-normalised spelling: it must find the mount
+        // registered under the canonical one.
+        if let Err(e) = Vfs::unmount("/tmp/vfsnorm/") {
+            serial_println!("[vfs]   FAIL: unmount by trailing-slash spelling: {:?}", e);
+            let _ = Vfs::unmount("/tmp/vfsnorm");
+            return Err(e);
+        }
+        serial_println!("[vfs]   mount path normalisation: OK");
     }
 
     serial_println!("[vfs] Self-test PASSED");

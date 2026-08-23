@@ -5242,6 +5242,16 @@ extern "C" fn kernel_main() -> ! {
             if let Err(e) = fs::dragdrop::self_test() {
                 serial_println!("WARNING: drag-and-drop self-test failed: {:?}", e);
             }
+            // fcomment and immutable were reachable only from a `kshell`
+            // subcommand, so neither `self_test()` had ever run in the boot
+            // test -- including `immutable`'s, which covers the table that
+            // decides whether a write, truncate, delete or link is refused.
+            // Same "a test that never runs is not a test" trap as the batch
+            // above. See known-issues TD-A-FS-SELFTESTS-NEVER-RUN for the
+            // ~220 further `fs` modules still in that state.
+            if let Err(e) = fs::fcomment::self_test() {
+                serial_println!("WARNING: file comments self-test failed: {:?}", e);
+            }
             if let Err(e) = fs::fileinfo::self_test() {
                 serial_println!("WARNING: fileinfo self-test failed: {:?}", e);
             }
@@ -5256,6 +5266,9 @@ extern "C" fn kernel_main() -> ! {
             }
             if let Err(e) = fs::fstrim::self_test() {
                 serial_println!("WARNING: fstrim self-test failed: {:?}", e);
+            }
+            if let Err(e) = fs::immutable::self_test() {
+                serial_println!("WARNING: immutable flags self-test failed: {:?}", e);
             }
             if let Err(e) = fs::pathbar::self_test() {
                 serial_println!("WARNING: pathbar self-test failed: {:?}", e);

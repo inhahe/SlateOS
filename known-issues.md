@@ -63596,3 +63596,55 @@ is the same shape but two orders of magnitude smaller -- bounded by the field
 width, survivable, and the same order as the reserve cap now applied at frame
 level. Noted rather than changed, so a future reader who spots it knows it was
 seen and judged, not missed.
+
+---
+
+## TD-A-FS-SELFTESTS-NEVER-RUN — ~220 `kernel/src/fs` self-tests are dead code
+
+**Lane A. Found 2026-08-23, during the §261 byte-clean conversion.**
+
+`kernel/src/fs/` has 424 `pub fn self_test()` entry points. Only about 200
+of them are invoked from `main.rs`. The rest are called from nowhere at
+all — a few are reachable from a `kshell` subcommand a human would have to
+type, and the remainder are reachable from nothing whatsoever. They
+compile, so nothing warns; they simply never run, in the boot test or
+anywhere else.
+
+This was found the direct way: the §261 conversion added new non-UTF-8
+regression tests to six modules, and after a green boot test only four of
+the six markers appeared on the serial log. `fcomment` and `immutable`
+were missing because their `self_test()`s had never run — `immutable`'s
+covers the table that decides whether a write, truncate, delete or link is
+refused, so the flag-enforcement path had no boot coverage at all. Both
+are now wired into `main.rs`.
+
+**Reproduce / enumerate:**
+
+```bash
+for f in kernel/src/fs/*.rs; do m=$(basename "$f" .rs)
+  grep -q "pub fn self_test" "$f" &&
+  ! grep -q "fs::$m::self_test" kernel/src/main.rs && echo "$m"
+done
+```
+
+**The proper fix** is to call every one of them from the boot self-test
+block in `main.rs`, in the same `if let Err(e) = … { serial_println!(…) }`
+shape as the existing entries. Two things make it more than a mechanical
+edit, which is why it is filed rather than done inline:
+
+- These tests have *never executed*. Expect a substantial number to fail
+  or panic on first run, and a panic in the boot self-test block halts the
+  boot test rather than reporting. They should be enabled in batches, each
+  batch boot-tested, with the failures fixed as they surface — that is the
+  point of enabling them, but it is its own task and cannot ride along
+  inside an unrelated commit.
+- Boot time. These are in-memory table tests and individually fast, but
+  220 of them is a real addition to a boot test that already runs ~9
+  minutes.
+
+**Why it matters beyond the missing coverage:** every one of these modules
+reads as tested. A future reader — or a future session doing exactly what
+this one did — sees a `self_test()` with real assertions and reasonably
+concludes the module is covered. It is the same "a test that never runs is
+not a test" trap the earlier locale/timezone sweep hit, at about ten times
+the scale.

@@ -43,15 +43,18 @@ fn run_kexec(args: &[String]) -> i32 {
     let unload = args.iter().any(|a| a == "-u" || a == "--unload");
     let load_panic = args.iter().any(|a| a == "-p" || a == "--load-panic");
 
-    let kernel = args.iter()
+    let kernel = args
+        .iter()
         .find(|a| !a.starts_with('-'))
         .map(|s| s.as_str());
 
-    let initrd = args.iter()
+    let initrd = args
+        .iter()
         .find(|a| a.starts_with("--initrd="))
         .and_then(|a| a.strip_prefix("--initrd="));
 
-    let cmdline = args.iter()
+    let cmdline = args
+        .iter()
         .find(|a| a.starts_with("--append="))
         .and_then(|a| a.strip_prefix("--append="));
 
@@ -136,7 +139,8 @@ fn run_kdump_config(args: &[String]) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first()
+    let prog = args
+        .first()
         .map(|s| strip_ext(basename(s)).to_string())
         .unwrap_or_else(|| "kexec".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
@@ -150,7 +154,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_kexec};
+    use super::{basename, run_kexec, strip_ext};
 
     #[test]
     fn basename_strips_path() {

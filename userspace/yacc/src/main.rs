@@ -282,9 +282,10 @@ impl<'a> GrammarLexer<'a> {
                     if let Some(c) = self.advance() {
                         buf.push(c as char);
                         if c == b'\\'
-                            && let Some(c2) = self.advance() {
-                                buf.push(c2 as char);
-                            }
+                            && let Some(c2) = self.advance()
+                        {
+                            buf.push(c2 as char);
+                        }
                     }
                     // closing quote
                     if let Some(b'\'') = self.peek() {
@@ -381,8 +382,7 @@ impl<'a> GrammarLexer<'a> {
             while self.pos < self.src.len() && self.src[self.pos].is_ascii_alphanumeric() {
                 self.pos += 1;
             }
-            let kw =
-                std::str::from_utf8(&self.src[start..self.pos]).unwrap_or("");
+            let kw = std::str::from_utf8(&self.src[start..self.pos]).unwrap_or("");
             match kw {
                 "token" => Ok(GrammarToken::DeclToken),
                 "left" => Ok(GrammarToken::DeclLeft),
@@ -426,7 +426,7 @@ impl<'a> GrammarLexer<'a> {
             self.pos += 1;
             let ch = if self.pos < self.src.len() && self.src[self.pos] == b'\\' {
                 self.pos += 1;
-                
+
                 if self.pos < self.src.len() {
                     let e = self.src[self.pos];
                     self.pos += 1;
@@ -588,8 +588,7 @@ fn parse_grammar(src: &[u8]) -> Result<Grammar, String> {
                                     if let Some(ref tag_val) = tag {
                                         let syms = names.clone();
                                         if !syms.is_empty() {
-                                            type_decls
-                                                .push((tag_val.clone(), syms));
+                                            type_decls.push((tag_val.clone(), syms));
                                         }
                                     }
                                     // Now handle the token `t` as if it were
@@ -615,13 +614,12 @@ fn parse_grammar(src: &[u8]) -> Result<Grammar, String> {
                     }
                 }
                 if let Some(ref tag_val) = tag
-                    && !names.is_empty() {
-                        type_decls.push((tag_val.clone(), names));
-                    }
+                    && !names.is_empty()
+                {
+                    type_decls.push((tag_val.clone(), names));
+                }
             }
-            GrammarToken::DeclLeft
-            | GrammarToken::DeclRight
-            | GrammarToken::DeclNonassoc => {
+            GrammarToken::DeclLeft | GrammarToken::DeclRight | GrammarToken::DeclNonassoc => {
                 prec_level += 1;
                 let assoc = match tok {
                     GrammarToken::DeclLeft => Assoc::Left,
@@ -674,12 +672,7 @@ fn parse_grammar(src: &[u8]) -> Result<Grammar, String> {
                 let tag_tok = lex.next_token()?;
                 let tag = match tag_tok {
                     GrammarToken::TypeTag(t) => t,
-                    _ => {
-                        return Err(format!(
-                            "line {}: expected <type> after %type",
-                            lex.line
-                        ))
-                    }
+                    _ => return Err(format!("line {}: expected <type> after %type", lex.line)),
                 };
                 let mut names = Vec::new();
                 loop {
@@ -700,12 +693,7 @@ fn parse_grammar(src: &[u8]) -> Result<Grammar, String> {
                     GrammarToken::Ident(name) => {
                         start_symbol = Some(name);
                     }
-                    _ => {
-                        return Err(format!(
-                            "line {}: expected symbol after %start",
-                            lex.line
-                        ))
-                    }
+                    _ => return Err(format!("line {}: expected symbol after %start", lex.line)),
                 }
             }
             GrammarToken::DeclUnion => {
@@ -715,12 +703,7 @@ fn parse_grammar(src: &[u8]) -> Result<Grammar, String> {
                     GrammarToken::Action(body) => {
                         union_body = Some(body);
                     }
-                    _ => {
-                        return Err(format!(
-                            "line {}: expected {{ after %union",
-                            lex.line
-                        ))
-                    }
+                    _ => return Err(format!("line {}: expected {{ after %union", lex.line)),
                 }
             }
             _ => {
@@ -730,12 +713,7 @@ fn parse_grammar(src: &[u8]) -> Result<Grammar, String> {
     }
 
     // Phase 2: grammar rules (between %% and %%)
-    parse_rules(
-        &mut lex,
-        &mut productions,
-        &terminals,
-        &mut nonterminals,
-    )?;
+    parse_rules(&mut lex, &mut productions, &terminals, &mut nonterminals)?;
 
     // Phase 3: epilogue (after second %%)
     let epilogue = if lex.pos < lex.src.len() {
@@ -756,7 +734,10 @@ fn parse_grammar(src: &[u8]) -> Result<Grammar, String> {
     // Build augmented grammar: insert $accept -> start $end at index 0
     let augmented = Production {
         lhs: "$accept".to_string(),
-        rhs: vec![Symbol::NonTerminal(start.clone()), Symbol::Terminal("$end".to_string())],
+        rhs: vec![
+            Symbol::NonTerminal(start.clone()),
+            Symbol::Terminal("$end".to_string()),
+        ],
         action: String::new(),
         prec_tag: None,
         number: 0,
@@ -773,10 +754,7 @@ fn parse_grammar(src: &[u8]) -> Result<Grammar, String> {
     // Build nonterminal -> production indices map
     let mut nt_prods: HashMap<String, Vec<usize>> = HashMap::new();
     for (i, p) in all_prods.iter().enumerate() {
-        nt_prods
-            .entry(p.lhs.clone())
-            .or_default()
-            .push(i);
+        nt_prods.entry(p.lhs.clone()).or_default().push(i);
     }
 
     Ok(Grammar {
@@ -850,9 +828,7 @@ fn parse_grammar_with_pushback(
                     }
                 }
             }
-            GrammarToken::DeclLeft
-            | GrammarToken::DeclRight
-            | GrammarToken::DeclNonassoc => {
+            GrammarToken::DeclLeft | GrammarToken::DeclRight | GrammarToken::DeclNonassoc => {
                 prec_level += 1;
                 let assoc = match tok {
                     GrammarToken::DeclLeft => Assoc::Left,
@@ -927,12 +903,7 @@ fn parse_grammar_with_pushback(
     }
 
     // Phase 2: grammar rules
-    parse_rules(
-        &mut lex,
-        &mut productions,
-        &terminals,
-        &mut nonterminals,
-    )?;
+    parse_rules(&mut lex, &mut productions, &terminals, &mut nonterminals)?;
 
     // Phase 3: epilogue
     let epilogue = if lex.pos < lex.src.len() {
@@ -951,7 +922,10 @@ fn parse_grammar_with_pushback(
 
     let augmented = Production {
         lhs: "$accept".to_string(),
-        rhs: vec![Symbol::NonTerminal(start.clone()), Symbol::Terminal("$end".to_string())],
+        rhs: vec![
+            Symbol::NonTerminal(start.clone()),
+            Symbol::Terminal("$end".to_string()),
+        ],
         action: String::new(),
         prec_tag: None,
         number: 0,
@@ -1006,8 +980,7 @@ fn parse_rules(
                     nonterminals.insert(name.clone());
                     current_lhs = Some(name);
                     // Now read the first RHS
-                    let (rhs, action, prec_tag) =
-                        read_rhs(lex, terminals, nonterminals)?;
+                    let (rhs, action, prec_tag) = read_rhs(lex, terminals, nonterminals)?;
                     if let Some(ref lhs) = current_lhs {
                         productions.push(Production {
                             lhs: lhs.clone(),
@@ -1028,8 +1001,7 @@ fn parse_rules(
             }
             GrammarToken::Pipe => {
                 // Alternative RHS for current LHS
-                let (rhs, action, prec_tag) =
-                    read_rhs(lex, terminals, nonterminals)?;
+                let (rhs, action, prec_tag) = read_rhs(lex, terminals, nonterminals)?;
                 if let Some(ref lhs) = current_lhs {
                     productions.push(Production {
                         lhs: lhs.clone(),
@@ -1064,7 +1036,10 @@ fn read_rhs(
     loop {
         let tok = lex.next_token()?;
         match tok {
-            GrammarToken::Pipe | GrammarToken::Semicolon | GrammarToken::DoublePct | GrammarToken::Eof => {
+            GrammarToken::Pipe
+            | GrammarToken::Semicolon
+            | GrammarToken::DoublePct
+            | GrammarToken::Eof => {
                 // End of this alternative.  The lexer already consumed the
                 // delimiter; for Pipe we need to "push back" conceptually
                 // but our caller handles Pipe by reading another RHS, and
@@ -1356,24 +1331,21 @@ fn closure(items: &BTreeSet<Item>, grammar: &Grammar) -> BTreeSet<Item> {
         let prod = &grammar.productions[item.prod];
         if item.dot < prod.rhs.len()
             && let Symbol::NonTerminal(ref nt) = prod.rhs[item.dot]
-                && let Some(prods) = grammar.nonterminal_prods.get(nt) {
-                    for &pi in prods {
-                        let new_item = Item { prod: pi, dot: 0 };
-                        if result.insert(new_item) {
-                            worklist.push_back(new_item);
-                        }
-                    }
+            && let Some(prods) = grammar.nonterminal_prods.get(nt)
+        {
+            for &pi in prods {
+                let new_item = Item { prod: pi, dot: 0 };
+                if result.insert(new_item) {
+                    worklist.push_back(new_item);
                 }
+            }
+        }
     }
     result
 }
 
 /// Compute the GOTO set: advance dot past `symbol` in `items`.
-fn goto_set(
-    items: &BTreeSet<Item>,
-    symbol: &Symbol,
-    grammar: &Grammar,
-) -> BTreeSet<Item> {
+fn goto_set(items: &BTreeSet<Item>, symbol: &Symbol, grammar: &Grammar) -> BTreeSet<Item> {
     let mut kernel = BTreeSet::new();
     for &item in items {
         let prod = &grammar.productions[item.prod];
@@ -1500,10 +1472,12 @@ fn build_parse_table(
                 // Shift
                 let sym = &prod.rhs[item.dot];
                 match sym {
-                    Symbol::Terminal(_) | Symbol::Error if {
-                        let key = sym.name();
-                        transitions[si].contains_key(key)
-                    } => {
+                    Symbol::Terminal(_) | Symbol::Error
+                        if {
+                            let key = sym.name();
+                            transitions[si].contains_key(key)
+                        } =>
+                    {
                         let key = sym.name().to_string();
                         let target = transitions[si][&key];
                         let shift_action = Action::Shift(target);
@@ -1513,12 +1487,7 @@ fn build_parse_table(
                                 // Shift-reduce or shift-shift conflict
                                 if let Action::Reduce(rp) = existing {
                                     // Try to resolve with precedence
-                                    let resolved = try_resolve_sr(
-                                        grammar,
-                                        &key,
-                                        *rp,
-                                        target,
-                                    );
+                                    let resolved = try_resolve_sr(grammar, &key, *rp, target);
                                     match resolved {
                                         Some((act, reason)) => {
                                             conflicts.push(Conflict {
@@ -1540,9 +1509,7 @@ fn build_parse_table(
                                                 kind: ConflictKind::ShiftReduce {
                                                     shift_state: target,
                                                     reduce_prod: *rp,
-                                                    resolved: Some(
-                                                        "default shift".into(),
-                                                    ),
+                                                    resolved: Some("default shift".into()),
                                                 },
                                             });
                                             action[si].insert(key, shift_action);
@@ -1573,12 +1540,8 @@ fn build_parse_table(
                                 if *existing != reduce_action {
                                     match existing {
                                         Action::Shift(target) => {
-                                            let resolved = try_resolve_sr(
-                                                grammar,
-                                                la,
-                                                item.prod,
-                                                *target,
-                                            );
+                                            let resolved =
+                                                try_resolve_sr(grammar, la, item.prod, *target);
                                             match resolved {
                                                 Some((act, reason)) => {
                                                     conflicts.push(Conflict {
@@ -1599,9 +1562,7 @@ fn build_parse_table(
                                                         kind: ConflictKind::ShiftReduce {
                                                             shift_state: *target,
                                                             reduce_prod: item.prod,
-                                                            resolved: Some(
-                                                                "default shift".into(),
-                                                            ),
+                                                            resolved: Some("default shift".into()),
                                                         },
                                                     });
                                                     // default: keep shift
@@ -1619,8 +1580,7 @@ fn build_parse_table(
                                             });
                                             // Keep the lower-numbered production
                                             if item.prod < *other_prod {
-                                                action[si]
-                                                    .insert(la.clone(), reduce_action);
+                                                action[si].insert(la.clone(), reduce_action);
                                             }
                                         }
                                         _ => {}
@@ -1677,14 +1637,8 @@ fn try_resolve_sr(
     } else {
         // Same precedence: use associativity
         match tok_prec.assoc {
-            Assoc::Left => Some((
-                Action::Reduce(reduce_prod),
-                "reduce (left assoc)".into(),
-            )),
-            Assoc::Right => Some((
-                Action::Shift(shift_state),
-                "shift (right assoc)".into(),
-            )),
+            Assoc::Left => Some((Action::Reduce(reduce_prod), "reduce (left assoc)".into())),
+            Assoc::Right => Some((Action::Shift(shift_state), "shift (right assoc)".into())),
             Assoc::NonAssoc => Some((Action::Error, "error (nonassoc)".into())),
         }
     }
@@ -1884,8 +1838,8 @@ fn generate_c_output(
             if let Some(act) = table.action[si].get(tname) {
                 let code = match act {
                     Action::Shift(s) => (*s as i32) + 1, // positive = shift
-                    Action::Reduce(r) => -(*r as i32),     // negative = reduce
-                    Action::Accept => 0,                    // zero = accept
+                    Action::Reduce(r) => -(*r as i32),   // negative = reduce
+                    Action::Accept => 0,                 // zero = accept
                     Action::Error => -32768,
                 };
                 action_entries.push(tid as i32);
@@ -2001,7 +1955,10 @@ fn generate_c_output(
     let _ = writeln!(out);
     let _ = writeln!(out, "  for (;;) {{");
     let _ = writeln!(out, "    yy_state = yy_state_stack[yy_top];");
-    let _ = writeln!(out, "    const int *p = &yy_actions[yy_action_idx[yy_state]];");
+    let _ = writeln!(
+        out,
+        "    const int *p = &yy_actions[yy_action_idx[yy_state]];"
+    );
     let _ = writeln!(out, "    int yy_act = YY_ERROR;");
     let _ = writeln!(out, "    while (*p != -1) {{");
     let _ = writeln!(out, "      if (*p == yy_token) {{");
@@ -2022,10 +1979,7 @@ fn generate_c_output(
     let _ = writeln!(out, "      /* Shift */");
     let _ = writeln!(out, "      yy_top++;");
     let _ = writeln!(out, "      if (yy_top >= YYMAXDEPTH) {{");
-    let _ = writeln!(
-        out,
-        "        yyerror(\"parse stack overflow\");"
-    );
+    let _ = writeln!(out, "        yyerror(\"parse stack overflow\");");
     let _ = writeln!(out, "        return 2;");
     let _ = writeln!(out, "      }}");
     let _ = writeln!(out, "      yy_state_stack[yy_top] = yy_act - 1;");
@@ -2056,7 +2010,10 @@ fn generate_c_output(
     let _ = writeln!(out, "      yy_state = yy_state_stack[yy_top];");
     let _ = writeln!(out, "      /* GOTO */");
     let _ = writeln!(out, "      int yy_lhs = yyr1[yy_rule];");
-    let _ = writeln!(out, "      const int *g = &yy_gotos[yy_goto_idx[yy_state]];");
+    let _ = writeln!(
+        out,
+        "      const int *g = &yy_gotos[yy_goto_idx[yy_state]];"
+    );
     let _ = writeln!(out, "      int yy_nstate = -1;");
     let _ = writeln!(out, "      while (*g != -1) {{");
     let _ = writeln!(out, "        if (*g == yy_lhs) {{");
@@ -2082,7 +2039,10 @@ fn generate_c_output(
     let _ = writeln!(out, "      }}");
     let _ = writeln!(out, "      if (yy_errflag < 3) {{");
     let _ = writeln!(out, "        yy_errflag = 3;");
-    let _ = writeln!(out, "        /* Error recovery: pop until error shift is possible */");
+    let _ = writeln!(
+        out,
+        "        /* Error recovery: pop until error shift is possible */"
+    );
     let _ = writeln!(out, "        while (yy_top >= 0) {{");
     let _ = writeln!(out, "          yy_state = yy_state_stack[yy_top];");
     let _ = writeln!(out, "          p = &yy_actions[yy_action_idx[yy_state]];");
@@ -2282,10 +2242,7 @@ fn generate_verbose_output(
 // -------------------------------------------------------------------------
 
 /// Generate a C header with token definitions.
-fn generate_header(
-    grammar: &Grammar,
-    token_ids: &BTreeMap<String, usize>,
-) -> String {
+fn generate_header(grammar: &Grammar, token_ids: &BTreeMap<String, usize>) -> String {
     let mut out = String::new();
     let _ = writeln!(out, "/* Generated by Slate OS yacc */");
     let _ = writeln!(out, "#ifndef YYTOKENTYPE");
@@ -2465,13 +2422,20 @@ fn run_main() -> i32 {
         Ok(o) => o,
         Err(e) => {
             if !e.is_empty() {
-                eprintln!("{}: {e}", if args.is_empty() { YACC_NAME } else { &args[0] });
+                eprintln!(
+                    "{}: {e}",
+                    if args.is_empty() { YACC_NAME } else { &args[0] }
+                );
             }
             return if e.is_empty() { 0 } else { 1 };
         }
     };
 
-    let prog_name = if opts.bison_mode { BISON_NAME } else { YACC_NAME };
+    let prog_name = if opts.bison_mode {
+        BISON_NAME
+    } else {
+        YACC_NAME
+    };
 
     let input_file = match opts.input_file {
         Some(ref f) => f.clone(),
@@ -2560,13 +2524,7 @@ fn run_main() -> i32 {
     // Generate verbose output if requested
     if opts.verbose {
         let verbose_name = derive_verbose_name(&input_file);
-        let verbose = generate_verbose_output(
-            &grammar,
-            &states,
-            &transitions,
-            &table,
-            &conflicts,
-        );
+        let verbose = generate_verbose_output(&grammar, &states, &transitions, &table, &conflicts);
         if let Err(e) = fs::write(&verbose_name, verbose.as_bytes()) {
             eprintln!("{prog_name}: cannot write '{verbose_name}': {e}");
             return 1;
@@ -2698,19 +2656,13 @@ mod tests {
     #[test]
     fn lex_c_comment_skipped() {
         let mut lex = GrammarLexer::new(b"/* comment */ FOO");
-        assert_eq!(
-            lex.next_token().unwrap(),
-            GrammarToken::Ident("FOO".into())
-        );
+        assert_eq!(lex.next_token().unwrap(), GrammarToken::Ident("FOO".into()));
     }
 
     #[test]
     fn lex_cpp_comment_skipped() {
         let mut lex = GrammarLexer::new(b"// comment\nFOO");
-        assert_eq!(
-            lex.next_token().unwrap(),
-            GrammarToken::Ident("FOO".into())
-        );
+        assert_eq!(lex.next_token().unwrap(), GrammarToken::Ident("FOO".into()));
     }
 
     #[test]
@@ -2719,9 +2671,15 @@ mod tests {
         let mut lex = GrammarLexer::new(src);
         assert_eq!(lex.next_token().unwrap(), GrammarToken::DeclToken);
         assert_eq!(lex.next_token().unwrap(), GrammarToken::Ident("NUM".into()));
-        assert_eq!(lex.next_token().unwrap(), GrammarToken::Ident("PLUS".into()));
+        assert_eq!(
+            lex.next_token().unwrap(),
+            GrammarToken::Ident("PLUS".into())
+        );
         assert_eq!(lex.next_token().unwrap(), GrammarToken::DoublePct);
-        assert_eq!(lex.next_token().unwrap(), GrammarToken::Ident("expr".into()));
+        assert_eq!(
+            lex.next_token().unwrap(),
+            GrammarToken::Ident("expr".into())
+        );
         assert_eq!(lex.next_token().unwrap(), GrammarToken::Colon);
         assert_eq!(lex.next_token().unwrap(), GrammarToken::Ident("NUM".into()));
         assert_eq!(lex.next_token().unwrap(), GrammarToken::Semicolon);
@@ -2791,7 +2749,8 @@ mod tests {
 
     #[test]
     fn parse_type_decl() {
-        let src = b"%union { int ival; }\n%token <ival> NUM\n%type <ival> expr\n%%\nexpr : NUM ;\n%%\n";
+        let src =
+            b"%union { int ival; }\n%token <ival> NUM\n%type <ival> expr\n%%\nexpr : NUM ;\n%%\n";
         let g = parse_grammar(src).unwrap();
         assert!(!g.type_decls.is_empty());
     }
@@ -2833,7 +2792,10 @@ mod tests {
         let src = b"%token NUM UMINUS\n%left '+'\n%left '*'\n%right UMINUS\n%%\nexpr : '-' expr %prec UMINUS | expr '+' expr | expr '*' expr | NUM ;\n%%\n";
         let g = parse_grammar(src).unwrap();
         // Find the production with %prec UMINUS
-        let has_prec = g.productions.iter().any(|p| p.prec_tag.as_deref() == Some("UMINUS"));
+        let has_prec = g
+            .productions
+            .iter()
+            .any(|p| p.prec_tag.as_deref() == Some("UMINUS"));
         assert!(has_prec);
     }
 
@@ -2841,9 +2803,10 @@ mod tests {
     fn parse_error_token_in_rule() {
         let src = b"%token NUM\n%%\nexpr : NUM | error ;\n%%\n";
         let g = parse_grammar(src).unwrap();
-        let error_prod = g.productions.iter().find(|p| {
-            p.rhs.iter().any(|s| matches!(s, Symbol::Error))
-        });
+        let error_prod = g
+            .productions
+            .iter()
+            .find(|p| p.rhs.iter().any(|s| matches!(s, Symbol::Error)));
         assert!(error_prod.is_some());
     }
 
@@ -2852,7 +2815,10 @@ mod tests {
         let src = b"%token A\n%%\nopt : A | ;\n%%\n";
         let g = parse_grammar(src).unwrap();
         // Should have an empty alternative
-        let empty_prod = g.productions.iter().any(|p| p.rhs.is_empty() && p.lhs == "opt");
+        let empty_prod = g
+            .productions
+            .iter()
+            .any(|p| p.rhs.is_empty() && p.lhs == "opt");
         assert!(empty_prod);
     }
 
@@ -3019,9 +2985,10 @@ factor : LPAREN expr RPAREN | NUM ;\n\
         let (table, _) = build_parse_table(&g, &states, &transitions, &follow);
         assert!(table.num_states > 0);
         // There should be an accept action somewhere
-        let has_accept = table.action.iter().any(|row| {
-            row.values().any(|a| matches!(a, Action::Accept))
-        });
+        let has_accept = table
+            .action
+            .iter()
+            .any(|row| row.values().any(|a| matches!(a, Action::Accept)));
         assert!(has_accept);
     }
 
@@ -3032,9 +2999,10 @@ factor : LPAREN expr RPAREN | NUM ;\n\
         let follow = compute_follow_sets(&g, &first);
         let (states, transitions) = build_item_sets(&g);
         let (table, _) = build_parse_table(&g, &states, &transitions, &follow);
-        let has_shift = table.action.iter().any(|row| {
-            row.values().any(|a| matches!(a, Action::Shift(_)))
-        });
+        let has_shift = table
+            .action
+            .iter()
+            .any(|row| row.values().any(|a| matches!(a, Action::Shift(_))));
         assert!(has_shift);
     }
 
@@ -3045,9 +3013,10 @@ factor : LPAREN expr RPAREN | NUM ;\n\
         let follow = compute_follow_sets(&g, &first);
         let (states, transitions) = build_item_sets(&g);
         let (table, _) = build_parse_table(&g, &states, &transitions, &follow);
-        let has_reduce = table.action.iter().any(|row| {
-            row.values().any(|a| matches!(a, Action::Reduce(_)))
-        });
+        let has_reduce = table
+            .action
+            .iter()
+            .any(|row| row.values().any(|a| matches!(a, Action::Reduce(_))));
         assert!(has_reduce);
     }
 
@@ -3144,12 +3113,21 @@ factor : LPAREN expr RPAREN | NUM ;\n\
     fn production_prec_from_prec_tag() {
         let prec_table: HashMap<String, PrecEntry> = {
             let mut m = HashMap::new();
-            m.insert("UMINUS".into(), PrecEntry { level: 3, assoc: Assoc::Right });
+            m.insert(
+                "UMINUS".into(),
+                PrecEntry {
+                    level: 3,
+                    assoc: Assoc::Right,
+                },
+            );
             m
         };
         let prod = Production {
             lhs: "expr".into(),
-            rhs: vec![Symbol::Terminal("'-'".into()), Symbol::NonTerminal("expr".into())],
+            rhs: vec![
+                Symbol::Terminal("'-'".into()),
+                Symbol::NonTerminal("expr".into()),
+            ],
             action: String::new(),
             prec_tag: Some("UMINUS".into()),
             number: 1,
@@ -3163,7 +3141,13 @@ factor : LPAREN expr RPAREN | NUM ;\n\
     fn production_prec_from_rightmost_terminal() {
         let prec_table: HashMap<String, PrecEntry> = {
             let mut m = HashMap::new();
-            m.insert("PLUS".into(), PrecEntry { level: 1, assoc: Assoc::Left });
+            m.insert(
+                "PLUS".into(),
+                PrecEntry {
+                    level: 1,
+                    assoc: Assoc::Left,
+                },
+            );
             m
         };
         let prod = Production {
@@ -3453,7 +3437,12 @@ factor : LPAREN expr RPAREN | NUM ;\n\
 
     #[test]
     fn options_output_file() {
-        let args = vec!["yacc".into(), "-o".into(), "out.c".into(), "grammar.y".into()];
+        let args = vec![
+            "yacc".into(),
+            "-o".into(),
+            "out.c".into(),
+            "grammar.y".into(),
+        ];
         let opts = parse_options(&args).unwrap();
         assert_eq!(opts.output_file, Some("out.c".into()));
     }

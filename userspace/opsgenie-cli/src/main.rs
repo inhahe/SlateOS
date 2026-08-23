@@ -35,25 +35,41 @@ fn run_opsgenie(args: Vec<String>) -> i32 {
                 "list" => {
                     println!("  ID                  Status   Priority  Message");
                     println!("  alert-abc123-def4   open     P1        CPU usage exceeded 95%");
-                    println!("  alert-ghi567-jkl8   acked    P2        Disk space low on prod-db-01");
-                    println!("  alert-mno901-pqr2   closed   P3        SSL cert expiring in 7 days");
+                    println!(
+                        "  alert-ghi567-jkl8   acked    P2        Disk space low on prod-db-01"
+                    );
+                    println!(
+                        "  alert-mno901-pqr2   closed   P3        SSL cert expiring in 7 days"
+                    );
                 }
                 "create" => {
                     let msg = args.get(2).map(|s| s.as_str()).unwrap_or("New alert");
-                    let priority = args.windows(2).find(|w| w[0] == "--priority").map(|w| w[1].as_str()).unwrap_or("P3");
+                    let priority = args
+                        .windows(2)
+                        .find(|w| w[0] == "--priority")
+                        .map(|w| w[1].as_str())
+                        .unwrap_or("P3");
                     println!("Created alert: {}", msg);
                     println!("  ID: alert-stu345-vwx6");
                     println!("  Priority: {}", priority);
                 }
                 "ack" => {
-                    let id = args.get(2).map(|s| s.as_str()).unwrap_or("alert-abc123-def4");
+                    let id = args
+                        .get(2)
+                        .map(|s| s.as_str())
+                        .unwrap_or("alert-abc123-def4");
                     println!("Acknowledged alert {}", id);
                 }
                 "close" => {
-                    let id = args.get(2).map(|s| s.as_str()).unwrap_or("alert-abc123-def4");
+                    let id = args
+                        .get(2)
+                        .map(|s| s.as_str())
+                        .unwrap_or("alert-abc123-def4");
                     println!("Closed alert {}", id);
                 }
-                _ => { println!("Alert operation: {}", sub); }
+                _ => {
+                    println!("Alert operation: {}", sub);
+                }
             }
             0
         }
@@ -71,7 +87,9 @@ fn run_opsgenie(args: Vec<String>) -> i32 {
                     println!("  Current: alice@example.com");
                     println!("  Next:    bob@example.com (starts 2024-01-16 09:00 UTC)");
                 }
-                _ => { println!("Schedule operation: {}", sub); }
+                _ => {
+                    println!("Schedule operation: {}", sub);
+                }
             }
             0
         }
@@ -84,7 +102,9 @@ fn run_opsgenie(args: Vec<String>) -> i32 {
                     println!("  Backend             8         Backend services team");
                     println!("  SRE                 4         Site reliability engineering");
                 }
-                _ => { println!("Team operation: {}", sub); }
+                _ => {
+                    println!("Team operation: {}", sub);
+                }
             }
             0
         }
@@ -101,7 +121,9 @@ fn run_opsgenie(args: Vec<String>) -> i32 {
                     let name = args.get(2).map(|s| s.as_str()).unwrap_or("backup-job");
                     println!("Heartbeat '{}' pinged successfully", name);
                 }
-                _ => { println!("Heartbeat operation: {}", sub); }
+                _ => {
+                    println!("Heartbeat operation: {}", sub);
+                }
             }
             0
         }
@@ -140,7 +162,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_opsgenie};
+    use super::run_opsgenie;
 
     #[test]
     fn help_exits_zero() {

@@ -37,11 +37,16 @@ fn run_meson(args: Vec<String>) -> i32 {
             println!("  --version   Show version");
             0
         }
-        "--version" => { println!("0.1.0 (Slate OS)"); 0 }
+        "--version" => {
+            println!("0.1.0 (Slate OS)");
+            0
+        }
         "setup" => {
             let source = cmd_args.first().map(|s| s.as_str()).unwrap_or(".");
             let build = cmd_args.get(1).map(|s| s.as_str()).unwrap_or("builddir");
-            let buildtype = cmd_args.iter().position(|a| a.starts_with("--buildtype="))
+            let buildtype = cmd_args
+                .iter()
+                .position(|a| a.starts_with("--buildtype="))
                 .map(|i| cmd_args[i].split('=').nth(1).unwrap_or("debugoptimized"))
                 .unwrap_or("debugoptimized");
 
@@ -61,7 +66,10 @@ fn run_meson(args: Vec<String>) -> i32 {
             println!("Found run-time dependency threads: YES");
             println!("Found run-time dependency math: YES");
             println!();
-            println!("Build directory configured. Run 'ninja -C {}' to build.", build);
+            println!(
+                "Build directory configured. Run 'ninja -C {}' to build.",
+                build
+            );
             0
         }
         "configure" => {
@@ -73,7 +81,9 @@ fn run_meson(args: Vec<String>) -> i32 {
             println!("  Option             Current Value  Possible Values");
             println!("  ------             -------------  ---------------");
             println!("  auto_features      auto           [enabled, disabled, auto]");
-            println!("  buildtype          debugoptimized [plain, debug, debugoptimized, release, minsize, custom]");
+            println!(
+                "  buildtype          debugoptimized [plain, debug, debugoptimized, release, minsize, custom]"
+            );
             println!("  default_library    shared         [shared, static, both]");
             println!("  optimization       2              [plain, 0, g, 1, 2, 3, s]");
             println!("  prefix             /usr/local     []");
@@ -81,7 +91,9 @@ fn run_meson(args: Vec<String>) -> i32 {
             0
         }
         "compile" | "build" => {
-            let jobs = cmd_args.iter().position(|a| a == "-j")
+            let jobs = cmd_args
+                .iter()
+                .position(|a| a == "-j")
                 .and_then(|i| cmd_args.get(i + 1))
                 .and_then(|s| s.parse::<u32>().ok())
                 .unwrap_or(4);
@@ -113,7 +125,9 @@ fn run_meson(args: Vec<String>) -> i32 {
             0
         }
         "install" => {
-            let destdir = cmd_args.iter().position(|a| a == "--destdir")
+            let destdir = cmd_args
+                .iter()
+                .position(|a| a == "--destdir")
                 .and_then(|i| cmd_args.get(i + 1))
                 .map(|s| s.as_str());
             println!("Installing myapp to /usr/local/bin/myapp");
@@ -133,7 +147,9 @@ fn run_meson(args: Vec<String>) -> i32 {
         }
         "init" => {
             let name = cmd_args.first().map(|s| s.as_str()).unwrap_or("myproject");
-            let lang = cmd_args.iter().position(|a| a == "-l" || a == "--language")
+            let lang = cmd_args
+                .iter()
+                .position(|a| a == "-l" || a == "--language")
                 .and_then(|i| cmd_args.get(i + 1))
                 .map(|s| s.as_str())
                 .unwrap_or("c");
@@ -149,8 +165,12 @@ fn run_meson(args: Vec<String>) -> i32 {
             match what {
                 "--targets" => {
                     println!("[");
-                    println!("  {{\"name\": \"myapp\", \"type\": \"executable\", \"sources\": [\"src/main.c\"]}},");
-                    println!("  {{\"name\": \"libutil\", \"type\": \"static_library\", \"sources\": [\"src/util.c\"]}}");
+                    println!(
+                        "  {{\"name\": \"myapp\", \"type\": \"executable\", \"sources\": [\"src/main.c\"]}},"
+                    );
+                    println!(
+                        "  {{\"name\": \"libutil\", \"type\": \"static_library\", \"sources\": [\"src/util.c\"]}}"
+                    );
                     println!("]");
                 }
                 "--buildoptions" => {
@@ -160,7 +180,9 @@ fn run_meson(args: Vec<String>) -> i32 {
                     println!("]");
                 }
                 "--projectinfo" => {
-                    println!("{{\"descriptive_name\": \"myproject\", \"version\": \"0.1.0\", \"subprojects\": []}}");
+                    println!(
+                        "{{\"descriptive_name\": \"myproject\", \"version\": \"0.1.0\", \"subprojects\": []}}"
+                    );
                 }
                 _ => {
                     println!("introspect: {} (simulated)", what);
@@ -204,9 +226,18 @@ fn run_meson(args: Vec<String>) -> i32 {
             }
             0
         }
-        "env2mfile" => { println!("Generated cross file from environment (simulated)"); 0 }
-        "rewrite" => { println!("Rewrote meson.build (simulated)"); 0 }
-        other => { eprintln!("meson: unknown command '{}'", other); 1 }
+        "env2mfile" => {
+            println!("Generated cross file from environment (simulated)");
+            0
+        }
+        "rewrite" => {
+            println!("Rewrote meson.build (simulated)");
+            0
+        }
+        other => {
+            eprintln!("meson: unknown command '{}'", other);
+            1
+        }
     }
 }
 
@@ -217,7 +248,12 @@ fn run_mesonconf(args: Vec<String>) -> i32 {
         return 0;
     }
     // Delegate to configure subcommand
-    run_meson(vec!["configure".to_string()].into_iter().chain(args).collect())
+    run_meson(
+        vec!["configure".to_string()]
+            .into_iter()
+            .chain(args)
+            .collect(),
+    )
 }
 
 fn run_mesonintrospect(args: Vec<String>) -> i32 {
@@ -225,7 +261,12 @@ fn run_mesonintrospect(args: Vec<String>) -> i32 {
         println!("Usage: mesonintrospect [builddir] [--targets|--buildoptions|--projectinfo]");
         return 0;
     }
-    run_meson(vec!["introspect".to_string()].into_iter().chain(args).collect())
+    run_meson(
+        vec!["introspect".to_string()]
+            .into_iter()
+            .chain(args)
+            .collect(),
+    )
 }
 
 // ── Entry point ───────────────────────────────────────────────────────
@@ -238,7 +279,9 @@ fn main() {
         let bytes = s.as_bytes();
         let mut last_sep = 0;
         for (i, &b) in bytes.iter().enumerate() {
-            if b == b'/' || b == b'\\' { last_sep = i + 1; }
+            if b == b'/' || b == b'\\' {
+                last_sep = i + 1;
+            }
         }
         let base = &s[last_sep..];
         let base = base.strip_suffix(".exe").unwrap_or(base);

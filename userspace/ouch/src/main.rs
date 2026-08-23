@@ -42,7 +42,8 @@ fn run_ouch(args: Vec<String>) -> i32 {
             0
         }
         "compress" | "c" => {
-            let rest: Vec<&str> = args[1..].iter()
+            let rest: Vec<&str> = args[1..]
+                .iter()
                 .filter(|a| !a.starts_with('-'))
                 .map(|s| s.as_str())
                 .collect();
@@ -76,7 +77,12 @@ fn run_ouch(args: Vec<String>) -> i32 {
                 "tar"
             };
 
-            println!("Compressing {} file(s) into '{}' [{}]...", inputs.len(), output, format);
+            println!(
+                "Compressing {} file(s) into '{}' [{}]...",
+                inputs.len(),
+                output,
+                format
+            );
             for input in &inputs {
                 println!("  + {}", input);
             }
@@ -84,7 +90,8 @@ fn run_ouch(args: Vec<String>) -> i32 {
             0
         }
         "decompress" | "d" => {
-            let rest: Vec<&str> = args[1..].iter()
+            let rest: Vec<&str> = args[1..]
+                .iter()
                 .filter(|a| !a.starts_with('-'))
                 .map(|s| s.as_str())
                 .collect();
@@ -108,7 +115,8 @@ fn run_ouch(args: Vec<String>) -> i32 {
             0
         }
         "list" | "l" | "ls" => {
-            let archive = args.get(1)
+            let archive = args
+                .get(1)
                 .filter(|a| !a.starts_with('-'))
                 .map(|s| s.as_str())
                 .unwrap_or("archive.tar.gz");
@@ -141,7 +149,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_ouch};
+    use super::run_ouch;
 
     #[test]
     fn help_exits_zero() {

@@ -28,7 +28,8 @@ fn run_chroot(args: &[String]) -> i32 {
         return 0;
     }
 
-    let positional: Vec<&str> = args.iter()
+    let positional: Vec<&str> = args
+        .iter()
         .filter(|a| !a.starts_with('-'))
         .map(|s| s.as_str())
         .collect();
@@ -61,18 +62,22 @@ fn run_unshare(args: &[String]) -> i32 {
         return 0;
     }
 
-    let namespaces: Vec<&str> = args.iter().filter_map(|a| match a.as_str() {
-        "-m" | "--mount" => Some("mount"),
-        "-u" | "--uts" => Some("uts"),
-        "-i" | "--ipc" => Some("ipc"),
-        "-n" | "--net" => Some("net"),
-        "-p" | "--pid" => Some("pid"),
-        "-U" | "--user" => Some("user"),
-        "-C" | "--cgroup" => Some("cgroup"),
-        _ => None,
-    }).collect();
+    let namespaces: Vec<&str> = args
+        .iter()
+        .filter_map(|a| match a.as_str() {
+            "-m" | "--mount" => Some("mount"),
+            "-u" | "--uts" => Some("uts"),
+            "-i" | "--ipc" => Some("ipc"),
+            "-n" | "--net" => Some("net"),
+            "-p" | "--pid" => Some("pid"),
+            "-U" | "--user" => Some("user"),
+            "-C" | "--cgroup" => Some("cgroup"),
+            _ => None,
+        })
+        .collect();
 
-    let cmd = args.iter()
+    let cmd = args
+        .iter()
         .find(|a| !a.starts_with('-'))
         .map(|s| s.as_str())
         .unwrap_or("/bin/sh");
@@ -94,7 +99,8 @@ fn run_pivot_root(args: &[String]) -> i32 {
         return 0;
     }
 
-    let positional: Vec<&str> = args.iter()
+    let positional: Vec<&str> = args
+        .iter()
         .filter(|a| !a.starts_with('-'))
         .map(|s| s.as_str())
         .collect();
@@ -108,7 +114,8 @@ fn run_pivot_root(args: &[String]) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first()
+    let prog = args
+        .first()
         .map(|s| strip_ext(basename(s)).to_string())
         .unwrap_or_else(|| "chroot".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
@@ -123,7 +130,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_chroot};
+    use super::{basename, run_chroot, strip_ext};
 
     #[test]
     fn basename_strips_path() {

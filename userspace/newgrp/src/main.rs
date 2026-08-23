@@ -196,10 +196,7 @@ fn exec_with_group(gid: u32, command: Option<&[String]>) -> i32 {
             eprintln!(
                 "newgrp: would setgid({}) and exec: {}",
                 gid,
-                cmd.iter()
-                    .map(|s| s.as_str())
-                    .collect::<Vec<_>>()
-                    .join(" ")
+                cmd.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(" ")
             );
         }
         _ => {
@@ -284,7 +281,10 @@ fn newgrp_main(args: &[String]) -> i32 {
 
     if login_shell {
         // Would set up a clean environment for login shell.
-        eprintln!("newgrp: starting login shell with group '{}'", target_group.name);
+        eprintln!(
+            "newgrp: starting login shell with group '{}'",
+            target_group.name
+        );
     }
 
     exec_with_group(target_group.gid, None)

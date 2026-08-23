@@ -293,7 +293,8 @@ fn read_until_byte<R: BufRead>(reader: &mut R, delim: u8, buf: &mut String) -> i
     // Convert to UTF-8, replacing invalid sequences (paths/data could contain
     // arbitrary bytes when NUL-terminated mode is used, but String requires
     // UTF-8). In practice, paste operates on text, so this is fine.
-    let text = String::from_utf8(raw).unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned());
+    let text = String::from_utf8(raw)
+        .unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned());
     buf.push_str(&text);
     Ok(n)
 }

@@ -66,7 +66,7 @@ struct NvmeNamespace {
 #[derive(Clone, Debug)]
 struct SmartLog {
     critical_warning: u8,
-    temperature: u16,  // Kelvin
+    temperature: u16, // Kelvin
     avail_spare: u8,
     avail_spare_threshold: u8,
     percent_used: u8,
@@ -121,19 +121,17 @@ fn read_controllers() -> Vec<NvmeController> {
             firmware: "5B2QGXA7".to_string(),
             _transport: NvmeTransport::_PCIe,
             _pci_addr: "0000:01:00.0".to_string(),
-            namespaces: vec![
-                NvmeNamespace {
-                    nsid: 1,
-                    _dev_path: "/dev/nvme0n1".to_string(),
-                    size_bytes: 1_000_204_886_016,
-                    capacity_bytes: 1_000_204_886_016,
-                    _sector_size: 512,
-                    _format_lba: 0,
-                    _metadata_size: 0,
-                    _eui64: "0025385b21406e53".to_string(),
-                    _nguid: "0025385b21406e530001000100000001".to_string(),
-                },
-            ],
+            namespaces: vec![NvmeNamespace {
+                nsid: 1,
+                _dev_path: "/dev/nvme0n1".to_string(),
+                size_bytes: 1_000_204_886_016,
+                capacity_bytes: 1_000_204_886_016,
+                _sector_size: 512,
+                _format_lba: 0,
+                _metadata_size: 0,
+                _eui64: "0025385b21406e53".to_string(),
+                _nguid: "0025385b21406e530001000100000001".to_string(),
+            }],
         },
         NvmeController {
             name: "nvme1".to_string(),
@@ -142,19 +140,17 @@ fn read_controllers() -> Vec<NvmeController> {
             firmware: "613200WD".to_string(),
             _transport: NvmeTransport::_PCIe,
             _pci_addr: "0000:02:00.0".to_string(),
-            namespaces: vec![
-                NvmeNamespace {
-                    nsid: 1,
-                    _dev_path: "/dev/nvme1n1".to_string(),
-                    size_bytes: 2_000_398_934_016,
-                    capacity_bytes: 2_000_398_934_016,
-                    _sector_size: 512,
-                    _format_lba: 0,
-                    _metadata_size: 0,
-                    _eui64: "e8238fa6bf530001".to_string(),
-                    _nguid: "e8238fa6bf5300010001000100000001".to_string(),
-                },
-            ],
+            namespaces: vec![NvmeNamespace {
+                nsid: 1,
+                _dev_path: "/dev/nvme1n1".to_string(),
+                size_bytes: 2_000_398_934_016,
+                capacity_bytes: 2_000_398_934_016,
+                _sector_size: 512,
+                _format_lba: 0,
+                _metadata_size: 0,
+                _eui64: "e8238fa6bf530001".to_string(),
+                _nguid: "e8238fa6bf5300010001000100000001".to_string(),
+            }],
         },
     ]
 }
@@ -162,7 +158,7 @@ fn read_controllers() -> Vec<NvmeController> {
 fn read_smart_log(_ctrl: &str) -> SmartLog {
     SmartLog {
         critical_warning: 0,
-        temperature: 312,  // 39°C
+        temperature: 312, // 39°C
         avail_spare: 100,
         avail_spare_threshold: 10,
         percent_used: 2,
@@ -293,18 +289,28 @@ fn run_nvme(args: Vec<String>) -> i32 {
 
 fn cmd_list() -> i32 {
     let controllers = read_controllers();
-    println!("Node             SN                   Model                                    Namespace Usage                      Format           FW Rev");
-    println!("---------------- -------------------- ---------------------------------------- --------- -------------------------- ---------------- --------");
+    println!(
+        "Node             SN                   Model                                    Namespace Usage                      Format           FW Rev"
+    );
+    println!(
+        "---------------- -------------------- ---------------------------------------- --------- -------------------------- ---------------- --------"
+    );
 
     for ctrl in &controllers {
         for ns in &ctrl.namespaces {
-            println!("/dev/{}n{:<4} {:<20} {:<40} {:<9} {:>12} / {:<12} {:>3}B + {:>3} B    {}",
-                ctrl.name, ns.nsid, ctrl.serial, ctrl.model,
+            println!(
+                "/dev/{}n{:<4} {:<20} {:<40} {:<9} {:>12} / {:<12} {:>3}B + {:>3} B    {}",
+                ctrl.name,
+                ns.nsid,
+                ctrl.serial,
+                ctrl.model,
                 ns.nsid,
                 format_size(ns.capacity_bytes),
                 format_size(ns.size_bytes),
-                ns._sector_size, ns._metadata_size,
-                ctrl.firmware);
+                ns._sector_size,
+                ns._metadata_size,
+                ctrl.firmware
+            );
         }
     }
     0
@@ -317,12 +323,17 @@ fn get_ctrl_name(args: &[String]) -> &str {
 fn cmd_list_ns(args: &[String]) -> i32 {
     let ctrl_name = get_ctrl_name(args);
     let controllers = read_controllers();
-    let ctrl = controllers.iter().find(|c| c.name == ctrl_name || format!("/dev/{}", c.name) == ctrl_name);
+    let ctrl = controllers
+        .iter()
+        .find(|c| c.name == ctrl_name || format!("/dev/{}", c.name) == ctrl_name);
 
     match ctrl {
         Some(c) => {
             println!("Namespace List for {} ({}):", c.name, c.model);
-            println!("[  0]: {:#010x}", c.namespaces.first().map_or(0, |n| n.nsid));
+            println!(
+                "[  0]: {:#010x}",
+                c.namespaces.first().map_or(0, |n| n.nsid)
+            );
             for ns in c.namespaces.iter().skip(1) {
                 println!("[  {}]: {:#010x}", ns.nsid - 1, ns.nsid);
             }
@@ -338,7 +349,9 @@ fn cmd_list_ns(args: &[String]) -> i32 {
 fn cmd_id_ctrl(args: &[String]) -> i32 {
     let ctrl_name = get_ctrl_name(args);
     let controllers = read_controllers();
-    let ctrl = controllers.iter().find(|c| c.name == ctrl_name || format!("/dev/{}", c.name) == ctrl_name);
+    let ctrl = controllers
+        .iter()
+        .find(|c| c.name == ctrl_name || format!("/dev/{}", c.name) == ctrl_name);
 
     match ctrl {
         Some(c) => {
@@ -394,7 +407,9 @@ fn cmd_id_ctrl(args: &[String]) -> i32 {
 fn cmd_id_ns(args: &[String]) -> i32 {
     let ctrl_name = get_ctrl_name(args);
     let controllers = read_controllers();
-    let ctrl = controllers.iter().find(|c| c.name == ctrl_name || format!("/dev/{}", c.name) == ctrl_name);
+    let ctrl = controllers
+        .iter()
+        .find(|c| c.name == ctrl_name || format!("/dev/{}", c.name) == ctrl_name);
 
     match ctrl {
         Some(c) => {
@@ -412,8 +427,12 @@ fn cmd_id_ns(args: &[String]) -> i32 {
                 println!("nmic      : 0");
                 println!("nguid     : {}", ns._nguid);
                 println!("eui64     : {}", ns._eui64);
-                println!("lbaf  0   : ms:{:<4} lbads:{:<2} rp:0x{:x} (in use)",
-                    ns._metadata_size, (ns._sector_size as f64).log2() as u32, 0);
+                println!(
+                    "lbaf  0   : ms:{:<4} lbads:{:<2} rp:0x{:x} (in use)",
+                    ns._metadata_size,
+                    (ns._sector_size as f64).log2() as u32,
+                    0
+                );
             }
             0
         }
@@ -428,25 +447,73 @@ fn cmd_smart_log(args: &[String]) -> i32 {
     let ctrl_name = get_ctrl_name(args);
     let smart = read_smart_log(ctrl_name);
 
-    println!("Smart Log for NVME device:{} namespace-id:ffffffff", ctrl_name);
-    println!("critical_warning                        : {}", smart.critical_warning);
-    println!("temperature                             : {} K ({} °C)",
-        smart.temperature, smart.temperature.saturating_sub(273));
-    println!("available_spare                         : {}%", smart.avail_spare);
-    println!("available_spare_threshold               : {}%", smart.avail_spare_threshold);
-    println!("percentage_used                         : {}%", smart.percent_used);
-    println!("data_units_read                         : {} ({})",
-        smart.data_units_read, format_data_units(smart.data_units_read));
-    println!("data_units_written                      : {} ({})",
-        smart.data_units_written, format_data_units(smart.data_units_written));
-    println!("host_read_commands                      : {}", smart.host_read_commands);
-    println!("host_write_commands                     : {}", smart.host_write_commands);
-    println!("controller_busy_time                    : {} minutes", smart.controller_busy_time);
-    println!("power_cycles                            : {}", smart.power_cycles);
-    println!("power_on_hours                          : {}", smart.power_on_hours);
-    println!("unsafe_shutdowns                        : {}", smart.unsafe_shutdowns);
-    println!("media_errors                            : {}", smart.media_errors);
-    println!("num_err_log_entries                     : {}", smart.num_err_log_entries);
+    println!(
+        "Smart Log for NVME device:{} namespace-id:ffffffff",
+        ctrl_name
+    );
+    println!(
+        "critical_warning                        : {}",
+        smart.critical_warning
+    );
+    println!(
+        "temperature                             : {} K ({} °C)",
+        smart.temperature,
+        smart.temperature.saturating_sub(273)
+    );
+    println!(
+        "available_spare                         : {}%",
+        smart.avail_spare
+    );
+    println!(
+        "available_spare_threshold               : {}%",
+        smart.avail_spare_threshold
+    );
+    println!(
+        "percentage_used                         : {}%",
+        smart.percent_used
+    );
+    println!(
+        "data_units_read                         : {} ({})",
+        smart.data_units_read,
+        format_data_units(smart.data_units_read)
+    );
+    println!(
+        "data_units_written                      : {} ({})",
+        smart.data_units_written,
+        format_data_units(smart.data_units_written)
+    );
+    println!(
+        "host_read_commands                      : {}",
+        smart.host_read_commands
+    );
+    println!(
+        "host_write_commands                     : {}",
+        smart.host_write_commands
+    );
+    println!(
+        "controller_busy_time                    : {} minutes",
+        smart.controller_busy_time
+    );
+    println!(
+        "power_cycles                            : {}",
+        smart.power_cycles
+    );
+    println!(
+        "power_on_hours                          : {}",
+        smart.power_on_hours
+    );
+    println!(
+        "unsafe_shutdowns                        : {}",
+        smart.unsafe_shutdowns
+    );
+    println!(
+        "media_errors                            : {}",
+        smart.media_errors
+    );
+    println!(
+        "num_err_log_entries                     : {}",
+        smart.num_err_log_entries
+    );
     0
 }
 
@@ -482,11 +549,15 @@ fn cmd_fw_log(args: &[String]) -> i32 {
 
 fn cmd_get_feature(args: &[String]) -> i32 {
     let ctrl_name = get_ctrl_name(args);
-    let feature_id = args.get(1)
+    let feature_id = args
+        .get(1)
         .and_then(|s| s.strip_prefix("--feature-id=").or(Some(s.as_str())))
         .unwrap_or("0x06");
 
-    println!("get-feature:{} feature:{} value:0x00010001", ctrl_name, feature_id);
+    println!(
+        "get-feature:{} feature:{} value:0x00010001",
+        ctrl_name, feature_id
+    );
     0
 }
 
@@ -499,7 +570,10 @@ fn cmd_set_feature(args: &[String]) -> i32 {
 
 fn cmd_format(args: &[String]) -> i32 {
     let ctrl_name = get_ctrl_name(args);
-    println!("WARNING: NVMe format will destroy all data on {}!", ctrl_name);
+    println!(
+        "WARNING: NVMe format will destroy all data on {}!",
+        ctrl_name
+    );
     println!("nvme format: formatting namespace (simulated)");
     println!("Format completed successfully");
     0
@@ -507,7 +581,10 @@ fn cmd_format(args: &[String]) -> i32 {
 
 fn cmd_sanitize(args: &[String]) -> i32 {
     let ctrl_name = get_ctrl_name(args);
-    println!("WARNING: NVMe sanitize will securely erase all data on {}!", ctrl_name);
+    println!(
+        "WARNING: NVMe sanitize will securely erase all data on {}!",
+        ctrl_name
+    );
     println!("nvme sanitize: block erase (simulated)");
     println!("Sanitize initiated successfully");
     0
@@ -522,7 +599,10 @@ fn cmd_reset(args: &[String]) -> i32 {
 
 fn cmd_subsystem_reset(args: &[String]) -> i32 {
     let ctrl_name = get_ctrl_name(args);
-    println!("nvme subsystem-reset: resetting NVM subsystem {} (simulated)", ctrl_name);
+    println!(
+        "nvme subsystem-reset: resetting NVM subsystem {} (simulated)",
+        ctrl_name
+    );
     println!("NVM subsystem reset successfully");
     0
 }
@@ -530,24 +610,32 @@ fn cmd_subsystem_reset(args: &[String]) -> i32 {
 fn cmd_fw_download(args: &[String]) -> i32 {
     let ctrl_name = get_ctrl_name(args);
     let fw_file = args.get(1).map(|s| s.as_str()).unwrap_or("firmware.bin");
-    println!("nvme fw-download: downloading {} to {} (simulated)", fw_file, ctrl_name);
+    println!(
+        "nvme fw-download: downloading {} to {} (simulated)",
+        fw_file, ctrl_name
+    );
     println!("Firmware download complete");
     0
 }
 
 fn cmd_fw_commit(args: &[String]) -> i32 {
     let ctrl_name = get_ctrl_name(args);
-    println!("nvme fw-commit: committing firmware on {} to slot 1 (simulated)", ctrl_name);
+    println!(
+        "nvme fw-commit: committing firmware on {} to slot 1 (simulated)",
+        ctrl_name
+    );
     println!("Firmware commit successful. Reboot required to activate.");
     0
 }
 
 fn cmd_connect(args: &[String]) -> i32 {
-    let transport = args.iter()
+    let transport = args
+        .iter()
         .find(|a| a.starts_with("--transport=") || a.starts_with("-t="))
         .map(|a| a.split('=').nth(1).unwrap_or("tcp"))
         .unwrap_or("tcp");
-    let traddr = args.iter()
+    let traddr = args
+        .iter()
         .find(|a| a.starts_with("--traddr=") || a.starts_with("-a="))
         .map(|a| a.split('=').nth(1).unwrap_or("192.168.1.100"))
         .unwrap_or("192.168.1.100");
@@ -560,7 +648,8 @@ fn cmd_connect(args: &[String]) -> i32 {
 }
 
 fn cmd_discover(args: &[String]) -> i32 {
-    let traddr = args.iter()
+    let traddr = args
+        .iter()
         .find(|a| a.starts_with("--traddr=") || a.starts_with("-a="))
         .map(|a| a.split('=').nth(1).unwrap_or("192.168.1.100"))
         .unwrap_or("192.168.1.100");
@@ -598,7 +687,10 @@ fn cmd_disconnect(args: &[String]) -> i32 {
 // ── nvme-connect personality ──────────────────────────────────────────
 
 fn run_connect(args: Vec<String>) -> i32 {
-    let cmd = args.first().cloned().unwrap_or_else(|| "--help".to_string());
+    let cmd = args
+        .first()
+        .cloned()
+        .unwrap_or_else(|| "--help".to_string());
 
     match cmd.as_str() {
         "--help" | "help" | "-h" => {
@@ -621,7 +713,10 @@ fn run_connect(args: Vec<String>) -> i32 {
 // ── nvme-discover personality ─────────────────────────────────────────
 
 fn run_discover(args: Vec<String>) -> i32 {
-    let cmd = args.first().cloned().unwrap_or_else(|| "--help".to_string());
+    let cmd = args
+        .first()
+        .cloned()
+        .unwrap_or_else(|| "--help".to_string());
 
     match cmd.as_str() {
         "--help" | "help" | "-h" => {

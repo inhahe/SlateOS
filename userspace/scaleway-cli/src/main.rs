@@ -7,8 +7,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_scw(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
@@ -43,12 +47,22 @@ fn run_scw(args: &[String]) -> i32 {
             let sub = args.get(1).map(|s| s.as_str()).unwrap_or("list");
             match sub {
                 "list" | "ls" => {
-                    println!("ID                                    Name       Type       State    Zone");
-                    println!("abc12345-1234-1234-1234-abc123456789  web-1      DEV1-S     running  fr-par-1");
-                    println!("def12345-1234-1234-1234-def123456789  db-1       GP1-XS     running  fr-par-1");
+                    println!(
+                        "ID                                    Name       Type       State    Zone"
+                    );
+                    println!(
+                        "abc12345-1234-1234-1234-abc123456789  web-1      DEV1-S     running  fr-par-1"
+                    );
+                    println!(
+                        "def12345-1234-1234-1234-def123456789  db-1       GP1-XS     running  fr-par-1"
+                    );
                 }
                 "create" => {
-                    let itype = args.windows(2).find(|w| w[0] == "--type").map(|w| w[1].as_str()).unwrap_or("DEV1-S");
+                    let itype = args
+                        .windows(2)
+                        .find(|w| w[0] == "--type")
+                        .map(|w| w[1].as_str())
+                        .unwrap_or("DEV1-S");
                     println!("Instance created: type={}", itype);
                 }
                 "start" | "stop" | "delete" => {
@@ -62,7 +76,9 @@ fn run_scw(args: &[String]) -> i32 {
             let sub = args.get(1).map(|s| s.as_str()).unwrap_or("list");
             match sub {
                 "list" | "ls" => {
-                    println!("ID                                    Name    Version  Status  Nodes");
+                    println!(
+                        "ID                                    Name    Version  Status  Nodes"
+                    );
                     println!("abc12345-xxxx-xxxx-xxxx-abc123456789  myclus  1.29.3   ready   3");
                 }
                 "create" => println!("Kubernetes cluster created."),
@@ -80,7 +96,10 @@ fn run_scw(args: &[String]) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "scw".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "scw".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_scw(&rest);
     process::exit(code);
@@ -88,7 +107,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_scw};
+    use super::{basename, run_scw, strip_ext};
 
     #[test]
     fn basename_strips_path() {

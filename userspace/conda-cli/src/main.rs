@@ -7,8 +7,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_conda(args: &[String], prog_name: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
@@ -37,19 +41,28 @@ fn run_conda(args: &[String], prog_name: &str) -> i32 {
     match subcmd {
         "--version" | "-V" => println!("{} 24.5.0", prog_name),
         "create" => {
-            let env_name = args.windows(2).find(|w| w[0] == "-n" || w[0] == "--name")
-                .map(|w| w[1].as_str()).unwrap_or("myenv");
-            let pkgs: Vec<&str> = args.iter()
+            let env_name = args
+                .windows(2)
+                .find(|w| w[0] == "-n" || w[0] == "--name")
+                .map(|w| w[1].as_str())
+                .unwrap_or("myenv");
+            let pkgs: Vec<&str> = args
+                .iter()
                 .filter(|a| !a.starts_with('-') && a.as_str() != "create")
                 .filter(|a| {
                     let pos = args.iter().position(|x| x == *a).unwrap_or(0);
-                    pos == 0 || (args.get(pos - 1).map(|s| s.as_str()) != Some("-n")
-                        && args.get(pos - 1).map(|s| s.as_str()) != Some("--name"))
+                    pos == 0
+                        || (args.get(pos - 1).map(|s| s.as_str()) != Some("-n")
+                            && args.get(pos - 1).map(|s| s.as_str()) != Some("--name"))
                 })
-                .map(|s| s.as_str()).collect();
+                .map(|s| s.as_str())
+                .collect();
             println!("Collecting package metadata: done");
             println!("Solving environment: done");
-            println!("Creating environment at /home/user/.conda/envs/{}", env_name);
+            println!(
+                "Creating environment at /home/user/.conda/envs/{}",
+                env_name
+            );
             if !pkgs.is_empty() {
                 for p in &pkgs {
                     println!("  Installing {}...", p);
@@ -58,9 +71,11 @@ fn run_conda(args: &[String], prog_name: &str) -> i32 {
             println!("Environment '{}' created successfully.", env_name);
         }
         "install" => {
-            let pkgs: Vec<&str> = args.iter()
+            let pkgs: Vec<&str> = args
+                .iter()
                 .filter(|a| !a.starts_with('-') && a.as_str() != "install")
-                .map(|s| s.as_str()).collect();
+                .map(|s| s.as_str())
+                .collect();
             println!("Collecting package metadata: done");
             println!("Solving environment: done");
             for p in &pkgs {
@@ -107,14 +122,20 @@ fn run_conda(args: &[String], prog_name: &str) -> i32 {
             }
         }
         "remove" => {
-            let env_name = args.windows(2).find(|w| w[0] == "-n" || w[0] == "--name")
-                .map(|w| w[1].as_str()).unwrap_or("myenv");
+            let env_name = args
+                .windows(2)
+                .find(|w| w[0] == "-n" || w[0] == "--name")
+                .map(|w| w[1].as_str())
+                .unwrap_or("myenv");
             if args.iter().any(|a| a == "--all") {
                 println!("Remove all packages in environment '{}'...", env_name);
                 println!("Environment '{}' removed.", env_name);
             } else {
-                let pkg = args.iter().find(|a| !a.starts_with('-') && a.as_str() != "remove")
-                    .map(|s| s.as_str()).unwrap_or("package");
+                let pkg = args
+                    .iter()
+                    .find(|a| !a.starts_with('-') && a.as_str() != "remove")
+                    .map(|s| s.as_str())
+                    .unwrap_or("package");
                 println!("Removing {} from {}...", pkg, env_name);
                 println!("Done.");
             }
@@ -149,7 +170,10 @@ fn run_conda(args: &[String], prog_name: &str) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "conda".to_string());
+    let prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "conda".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_conda(&rest, &prog);
     process::exit(code);
@@ -157,7 +181,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_conda};
+    use super::{basename, run_conda, strip_ext};
 
     #[test]
     fn basename_strips_path() {

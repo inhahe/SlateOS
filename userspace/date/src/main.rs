@@ -1052,7 +1052,9 @@ fn parse_args(args: &[String]) -> Options {
 /// Tries the kernel syscall first, falls back to std::time::SystemTime.
 fn get_current_time() -> Result<(i64, i64), String> {
     // Try the direct syscall for SlateOS.
-    if let Ok(time) = clock_gettime(CLOCK_REALTIME) { return Ok(time) }
+    if let Ok(time) = clock_gettime(CLOCK_REALTIME) {
+        return Ok(time);
+    }
 
     // Fallback: std::time::SystemTime (may work if the runtime is functional).
     match std::time::SystemTime::now().duration_since(std::time::SystemTime::UNIX_EPOCH) {

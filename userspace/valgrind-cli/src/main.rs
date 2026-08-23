@@ -49,12 +49,14 @@ fn run_valgrind(args: &[String]) -> i32 {
         return 0;
     }
 
-    let tool = args.iter()
+    let tool = args
+        .iter()
         .find(|a| a.starts_with("--tool="))
         .and_then(|a| a.strip_prefix("--tool="))
         .unwrap_or("memcheck");
 
-    let program = args.iter()
+    let program = args
+        .iter()
         .find(|a| !a.starts_with('-'))
         .map(|s| s.as_str())
         .unwrap_or("");
@@ -141,7 +143,11 @@ fn run_callgrind_annotate(args: &[String]) -> i32 {
         return 0;
     }
 
-    let file = args.iter().find(|a| !a.starts_with('-')).map(|s| s.as_str()).unwrap_or("callgrind.out.12345");
+    let file = args
+        .iter()
+        .find(|a| !a.starts_with('-'))
+        .map(|s| s.as_str())
+        .unwrap_or("callgrind.out.12345");
     println!("Reading data from '{}'...", file);
     println!("Events recorded: Ir");
     println!();
@@ -160,7 +166,11 @@ fn run_cg_annotate(args: &[String]) -> i32 {
         return 0;
     }
 
-    let file = args.iter().find(|a| !a.starts_with('-')).map(|s| s.as_str()).unwrap_or("cachegrind.out.12345");
+    let file = args
+        .iter()
+        .find(|a| !a.starts_with('-'))
+        .map(|s| s.as_str())
+        .unwrap_or("cachegrind.out.12345");
     println!("Reading data from '{}'...", file);
     println!();
     println!("         Ir    I1mr   ILmr       Dr    D1mr   DLmr");
@@ -176,7 +186,11 @@ fn run_ms_print(args: &[String]) -> i32 {
         return 0;
     }
 
-    let file = args.iter().find(|a| !a.starts_with('-')).map(|s| s.as_str()).unwrap_or("massif.out.12345");
+    let file = args
+        .iter()
+        .find(|a| !a.starts_with('-'))
+        .map(|s| s.as_str())
+        .unwrap_or("massif.out.12345");
     println!("Reading data from '{}'...", file);
     println!();
     println!("    KB");
@@ -197,7 +211,8 @@ fn run_ms_print(args: &[String]) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first()
+    let prog = args
+        .first()
         .map(|s| strip_ext(basename(s)).to_string())
         .unwrap_or_else(|| "valgrind".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
@@ -213,7 +228,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_valgrind};
+    use super::{basename, run_valgrind, strip_ext};
 
     #[test]
     fn basename_strips_path() {

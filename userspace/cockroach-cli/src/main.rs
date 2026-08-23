@@ -7,8 +7,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_cockroach(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
@@ -40,8 +44,11 @@ fn run_cockroach(args: &[String]) -> i32 {
             println!("Go Version:   go1.22.4");
         }
         "sql" => {
-            let url = args.windows(2).find(|w| w[0] == "--url")
-                .map(|w| w[1].as_str()).unwrap_or("postgresql://root@localhost:26257/defaultdb");
+            let url = args
+                .windows(2)
+                .find(|w| w[0] == "--url")
+                .map(|w| w[1].as_str())
+                .unwrap_or("postgresql://root@localhost:26257/defaultdb");
             println!("# Welcome to the CockroachDB SQL shell.");
             println!("# All statements must be terminated by a semicolon.");
             println!("# To exit, type: \\q.");
@@ -53,8 +60,11 @@ fn run_cockroach(args: &[String]) -> i32 {
         }
         "start" => {
             let insecure = args.iter().any(|a| a == "--insecure");
-            let store = args.windows(2).find(|w| w[0] == "--store")
-                .map(|w| w[1].as_str()).unwrap_or("cockroach-data");
+            let store = args
+                .windows(2)
+                .find(|w| w[0] == "--store")
+                .map(|w| w[1].as_str())
+                .unwrap_or("cockroach-data");
             println!("CockroachDB node starting at 2024-06-15 12:00:00");
             println!("  build:      v24.1.0");
             println!("  sql:        postgresql://root@localhost:26257");
@@ -72,8 +82,12 @@ fn run_cockroach(args: &[String]) -> i32 {
             let sub = args.get(1).map(|s| s.as_str()).unwrap_or("status");
             match sub {
                 "status" => {
-                    println!("  id |     address     |  build  |         started_at         | is_live");
-                    println!("-----+-----------------+---------+----------------------------+---------");
+                    println!(
+                        "  id |     address     |  build  |         started_at         | is_live"
+                    );
+                    println!(
+                        "-----+-----------------+---------+----------------------------+---------"
+                    );
                     println!("   1 | localhost:26257 | v24.1.0 | 2024-06-15 12:00:00+00:00 | true");
                     println!("   2 | localhost:26258 | v24.1.0 | 2024-06-15 12:00:01+00:00 | true");
                     println!("   3 | localhost:26259 | v24.1.0 | 2024-06-15 12:00:02+00:00 | true");
@@ -95,7 +109,9 @@ fn run_cockroach(args: &[String]) -> i32 {
         "dump" => {
             let db = args.get(1).map(|s| s.as_str()).unwrap_or("defaultdb");
             println!("-- CockroachDB dump of database '{}'", db);
-            println!("CREATE TABLE users (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), name STRING);");
+            println!(
+                "CREATE TABLE users (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), name STRING);"
+            );
             println!("-- Dump completed.");
         }
         "cert" => {
@@ -120,7 +136,10 @@ fn run_cockroach(args: &[String]) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "cockroach".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "cockroach".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_cockroach(&rest);
     process::exit(code);
@@ -128,7 +147,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_cockroach};
+    use super::{basename, run_cockroach, strip_ext};
 
     #[test]
     fn basename_strips_path() {

@@ -93,10 +93,15 @@ fn run_etcdctl(args: Vec<String>) -> i32 {
                     println!("  694d81a0c6b8f734 (TTL: 300s, remaining: 280s)");
                 }
                 "revoke" => {
-                    let id = args.get(2).map(|s| s.as_str()).unwrap_or("694d81a0c6b8f733");
+                    let id = args
+                        .get(2)
+                        .map(|s| s.as_str())
+                        .unwrap_or("694d81a0c6b8f733");
                     println!("lease {} revoked", id);
                 }
-                _ => { println!("Lease operation: {}", sub); }
+                _ => {
+                    println!("Lease operation: {}", sub);
+                }
             }
             0
         }
@@ -104,12 +109,22 @@ fn run_etcdctl(args: Vec<String>) -> i32 {
             let sub = args.get(1).map(|s| s.as_str()).unwrap_or("list");
             match sub {
                 "list" => {
-                    println!("  ID                  Status   Name      Peer URLs                 Client URLs");
-                    println!("  8e9e05c52164694d    started  etcd-0    http://etcd-0:2380        http://etcd-0:2379");
-                    println!("  91bc3c398fb3c146    started  etcd-1    http://etcd-1:2380        http://etcd-1:2379");
-                    println!("  fd422379fda50e48    started  etcd-2    http://etcd-2:2380        http://etcd-2:2379");
+                    println!(
+                        "  ID                  Status   Name      Peer URLs                 Client URLs"
+                    );
+                    println!(
+                        "  8e9e05c52164694d    started  etcd-0    http://etcd-0:2380        http://etcd-0:2379"
+                    );
+                    println!(
+                        "  91bc3c398fb3c146    started  etcd-1    http://etcd-1:2380        http://etcd-1:2379"
+                    );
+                    println!(
+                        "  fd422379fda50e48    started  etcd-2    http://etcd-2:2380        http://etcd-2:2379"
+                    );
                 }
-                _ => { println!("Member operation: {}", sub); }
+                _ => {
+                    println!("Member operation: {}", sub);
+                }
             }
             0
         }
@@ -135,7 +150,9 @@ fn run_etcdctl(args: Vec<String>) -> i32 {
                     println!("  Data dir: /var/lib/etcd-restore");
                     println!("  Restored successfully");
                 }
-                _ => { println!("Snapshot operation: {}", sub); }
+                _ => {
+                    println!("Snapshot operation: {}", sub);
+                }
             }
             0
         }
@@ -148,11 +165,19 @@ fn run_etcdctl(args: Vec<String>) -> i32 {
                     println!("  http://etcd-2:2379 is healthy: committed proposal took 2ms");
                 }
                 "status" => {
-                    println!("  Endpoint             ID                  Version  DB Size  Leader             Raft Term  Raft Index  Errors");
-                    println!("  http://etcd-0:2379   8e9e05c52164694d    3.5.12   12 MB    8e9e05c52164694d   5          45          ");
-                    println!("  http://etcd-1:2379   91bc3c398fb3c146    3.5.12   12 MB    8e9e05c52164694d   5          45          ");
+                    println!(
+                        "  Endpoint             ID                  Version  DB Size  Leader             Raft Term  Raft Index  Errors"
+                    );
+                    println!(
+                        "  http://etcd-0:2379   8e9e05c52164694d    3.5.12   12 MB    8e9e05c52164694d   5          45          "
+                    );
+                    println!(
+                        "  http://etcd-1:2379   91bc3c398fb3c146    3.5.12   12 MB    8e9e05c52164694d   5          45          "
+                    );
                 }
-                _ => { println!("Endpoint operation: {}", sub); }
+                _ => {
+                    println!("Endpoint operation: {}", sub);
+                }
             }
             0
         }
@@ -176,7 +201,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_etcdctl};
+    use super::run_etcdctl;
 
     #[test]
     fn help_exits_zero() {

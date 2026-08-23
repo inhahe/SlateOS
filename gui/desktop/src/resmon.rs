@@ -1783,11 +1783,41 @@ mod tests {
     fn a_metric_is_one_colour_wherever_it_appears() {
         for light in [false, true] {
             let p = accented(light);
-            let cmds = monitor(DisplayMode::Expanded).render(&p);
+            // Both display modes, because the compact strip plots the same
+            // four metrics from a *different* call site with its own copy of
+            // the hue lookup — and the strip carries no labels at all, so
+            // there is nothing else in the module that could notice its lines
+            // being drawn in the wrong metric's colour.
+            for mode in [DisplayMode::Compact, DisplayMode::Expanded] {
+                let cmds = monitor(mode).render(&p);
 
-            // The sparklines are the module's only 1.5-point lines.
+                // The sparklines are the module's only 1.5-point lines.
+                let plotted = line_colors(&cmds, 1.5);
+                assert!(!plotted.is_empty(), "{mode:?} drew no sparkline to check");
+                for (resource, _) in GRAPHED {
+                    let hue = resource.color(&p);
+                    assert!(
+                        plotted.contains(&hue),
+                        "{:?} plots nothing in the {} hue, so one metric is \
+                         drawn in another's colour",
+                        mode,
+                        resource.label()
+                    );
+                }
+                // And nothing is plotted in a colour that is not a metric's.
+                for c in &plotted {
+                    assert!(
+                        ResourceType::ALL.iter().any(|r| r.color(&p) == *c),
+                        "{mode:?} draws a line in {c:?}, which is not any \
+                         metric's hue"
+                    );
+                }
+            }
+
+            // Expanded alone carries the labels, and each names the graph
+            // beneath it: same hue, two commands, one claim.
+            let cmds = monitor(DisplayMode::Expanded).render(&p);
             let plotted = line_colors(&cmds, 1.5);
-            assert!(!plotted.is_empty(), "no sparkline was drawn to check");
             for (resource, label) in GRAPHED {
                 let hue = resource.color(&p);
                 assert_eq!(text_color(&cmds, label), hue, "the {label} label");
@@ -1795,13 +1825,6 @@ mod tests {
                     plotted.contains(&hue),
                     "the {label} label is drawn in a hue no line on the screen \
                      uses, so the label names a graph that is not there"
-                );
-            }
-            // And nothing is plotted in a colour that is not a metric's.
-            for c in &plotted {
-                assert!(
-                    ResourceType::ALL.iter().any(|r| r.color(&p) == *c),
-                    "a line is drawn in {c:?}, which is not any metric's hue"
                 );
             }
 

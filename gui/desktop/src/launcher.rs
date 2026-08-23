@@ -1793,6 +1793,27 @@ mod tests {
                 );
             }
 
+            // The five categories, each pinned to the role it names. A table,
+            // not a set: a permutation of five distinct hues is still five
+            // distinct hues, so `the_five_category_hues_stay_five_distinct_colours`
+            // cannot see one, and neither can a test that compares the drawn
+            // colour to `Category::color` — that asks the code under test what
+            // it meant. Only naming the pairs here can fail.
+            for (category, expected, label) in [
+                (Category::Application, p.blue, "App"),
+                (Category::System, p.red, "Sys"),
+                (Category::Setting, p.peach, "Set"),
+                (Category::File, p.green, "File"),
+                (Category::Command, p.mauve, "Cmd"),
+            ] {
+                assert_eq!(category.color(&p), expected, "{label} names the wrong role");
+                assert_eq!(
+                    text_color(&cmds, label),
+                    expected,
+                    "the {label} badge is not drawn in the role its category names"
+                );
+            }
+
             // The placeholder and the no-results line, each in its own state.
             let mut typed = five_categories();
             "alpha".clone_into(&mut typed.query);
@@ -1986,6 +2007,15 @@ mod tests {
             assert!(
                 dialog.a < 255,
                 "an opaque dialog is a panel, not a floating one"
+            );
+            // Bounded on both sides, because the line above compares the drawn
+            // alpha to the constant that produced it and so cannot notice that
+            // constant moving. Translucent enough to float, solid enough that
+            // the desktop does not read through the result list.
+            assert!(
+                dialog.a >= 224,
+                "at alpha {} the wallpaper shows through the results",
+                dialog.a
             );
 
             let shadows: Vec<Color> = cmds

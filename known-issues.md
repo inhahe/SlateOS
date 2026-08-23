@@ -65049,6 +65049,73 @@ fix. Worth stating as a rule: when a never-run suite finally runs and fails,
 the assertion is a report, not a diagnosis — read the API it is asserting
 against before changing either.
 
+### 2026-08-23 — the 16 the first sweep could not see
+
+**Immediately after the 37 landed, a second-opinion pass found 16 more
+destructive suites of the same class.** Eleven of them are the interesting
+ones: they would have read as *safe to wire* under the survey that gated the
+first batch, and wiring them would have shipped eleven data-destroying
+suites into boot.
+
+`build/survey_destructive.py` classified each manual-only suite by grepping
+its body for a whole-table clear. That grep knew six spellings —
+`clear_all`, `reset_all`, `remove_all`, `delete_all`, `clear_history`,
+`wipe_all` — and anything it did not match fell into a bucket named
+`quiet`, described as "probably safe, still worth a glance." **A vocabulary
+list is the wrong shape of test for "does this destroy data", because the
+vocabulary is open.** Eleven suites emptied their tables under names not on
+it:
+
+| module | how it empties the table |
+|---|---|
+| `autofix` | `clear_resolved()` |
+| `cliphistory` | `clear()` |
+| `crashreport` | `clear_reports()` |
+| `datausage` | `reset_usage()` |
+| `dmevent` | `clear_events()` |
+| `dnssettings` | `flush_cache()` |
+| `hwmonitor` | `clear_alerts()` |
+| `nameservice` | `flush_cache()` |
+| `printmgr` | `clear_completed()` |
+| `startuprepair` | `reset_failed_boots()` |
+| `tracemon` | `clear_buffer()` |
+
+The remaining five (`dumpanalyzer`, `location`, `multiclip`,
+`recentsearch`, `sysresource`) *were* in the `wipes` bucket all along. They
+were missed for an unrelated reason: they are lazy-init
+(`static STATE: Mutex<Option<T>>`), and the converter written for the first
+53 only understood the eager shape. `build/sweep_lazy.py` handles them —
+their pristine value is literally `None`, which is what a fresh boot holds,
+so there is no constructor to extract.
+
+**What found the eleven was a structural property, not a longer word list.**
+`build/widen_check.py` flags any call that (a) has a destructive-sounding
+name and (b) **takes no arguments**. Taking no arguments is the tell: a
+function that destroys *one row* needs to be told which row, so a
+zero-argument destructive call acts on the whole table almost by definition.
+That test does not care what the author called it. It produced exactly one
+false positive across 161 modules — `colorblind::list_presets`, because
+"presets" contains "reset" — which is the right error to make.
+
+The rule, then, is not "add these eleven names to the regex." It is: **when
+a check enumerates the ways something can go wrong, assume the enumeration
+is short, and find a second check that keys on structure instead.** The
+first survey's `quiet: 155` was a number I nearly trusted.
+
+**A subtlety worth recording: `OPS` is a mirror, not a counter.** These
+modules do `state.ops += 1; OPS.store(state.ops, Ordering::Relaxed);` —
+`state.ops` lives *inside* the table, and `OPS` is a lock-free cached copy
+outside it for cheap reads. `with_pristine` restores the table, and so
+restores `state.ops`, but it cannot know about the mirror. Left alone, the
+two disagree permanently and `<module> stats` reports the suite's activity
+as the user's. Each wrapper therefore saves and restores `OPS` around the
+call. The first comment written for this said "`OPS` lives outside the
+table, so `with_pristine` cannot see it", which is true of the variable and
+false of the value — the correction is in `1c29294f3`.
+
+Converted in `1c29294f3`, wired in the commit that follows it.
+**Counts after this batch:** boot-reachable 933, manual-only 181, dead 0.
+
 ---
 
 ## TD-A-SPARSE-FSTRIM-WRONG-DEVICE — hole punching queued discards for a nonexistent device at a file offset

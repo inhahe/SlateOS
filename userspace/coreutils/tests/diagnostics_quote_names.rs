@@ -321,7 +321,10 @@ fn a_doubled_brace_is_a_literal_brace_not_a_name() {
         r#"    println!("  aws scheduler create-schedule --target '{{\"Arn\":\"<a>\"}}'");"#,
         r#"    println!("usage: prog '{{...}}'");"#,
     ] {
-        assert!(!quotes_around_placeholder(line), "detector fired on {line:?}");
+        assert!(
+            !quotes_around_placeholder(line),
+            "detector fired on {line:?}"
+        );
     }
 }
 

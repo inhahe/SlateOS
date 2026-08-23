@@ -30,6 +30,7 @@
 //!       --version                Output version information and exit
 //! ```
 
+use quoting::{quoteaf, quoteaf_os, quotef_os};
 use std::cmp::Ordering;
 use std::env;
 use std::fs::File;
@@ -335,7 +336,7 @@ fn parse_args(args: &[String]) -> ParseResult {
                 match parse_keydef(&spec, &global_mods) {
                     Ok(kd) => keys.push(kd),
                     Err(e) => {
-                        eprintln!("sort: invalid key definition '{spec}': {e}");
+                        eprintln!("sort: invalid key definition {}: {e}", quoteaf_os(&spec));
                         process::exit(2);
                     }
                 }
@@ -371,7 +372,7 @@ fn parse_args(args: &[String]) -> ParseResult {
                 };
                 output_file = Some(val);
             } else {
-                eprintln!("sort: unrecognized option '{arg}'");
+                eprintln!("sort: unrecognized option {}", quoteaf_os(arg));
                 eprintln!("Try 'sort --help' for more information.");
                 process::exit(2);
             }
@@ -412,7 +413,7 @@ fn parse_args(args: &[String]) -> ParseResult {
                     match parse_keydef(&spec, &global_mods) {
                         Ok(kd) => keys.push(kd),
                         Err(e) => {
-                            eprintln!("sort: invalid key definition '{spec}': {e}");
+                            eprintln!("sort: invalid key definition {}: {e}", quoteaf_os(&spec));
                             process::exit(2);
                         }
                     }
@@ -460,8 +461,11 @@ fn parse_args(args: &[String]) -> ParseResult {
                     continue;
                 }
                 _ => {
-                    let ch = arg_bytes[j] as char;
-                    eprintln!("sort: invalid option -- '{ch}'");
+                    // The byte, not `as char`: `u8 as char` is a Latin-1
+                    // widening, so an option byte of 0xE9 would be reported as
+                    // 'é' -- a character the user never typed. `quoteaf` of the
+                    // single byte shows what actually arrived.
+                    eprintln!("sort: invalid option -- {}", quoteaf(&[arg_bytes[j]]));
                     eprintln!("Try 'sort --help' for more information.");
                     process::exit(2);
                 }
@@ -504,7 +508,7 @@ fn read_all_lines(paths: &[String]) -> Vec<String> {
             match File::open(path) {
                 Ok(f) => Box::new(f),
                 Err(e) => {
-                    eprintln!("sort: {path}: {e}");
+                    eprintln!("sort: {}: {e}", quotef_os(path));
                     continue;
                 }
             }
@@ -515,7 +519,7 @@ fn read_all_lines(paths: &[String]) -> Vec<String> {
             match line_result {
                 Ok(l) => lines.push(l),
                 Err(e) => {
-                    eprintln!("sort: {path}: read error: {e}");
+                    eprintln!("sort: {}: read error: {e}", quotef_os(path));
                     break;
                 }
             }
@@ -958,7 +962,7 @@ fn merge_files(
             match File::open(path) {
                 Ok(f) => Box::new(f),
                 Err(e) => {
-                    eprintln!("sort: {path}: {e}");
+                    eprintln!("sort: {}: {e}", quotef_os(path));
                     continue;
                 }
             }
@@ -1138,7 +1142,7 @@ fn run(config: &Config) -> i32 {
         Some(path) => match File::create(path) {
             Ok(f) => Box::new(io::BufWriter::new(f)),
             Err(e) => {
-                eprintln!("sort: {path}: {e}");
+                eprintln!("sort: {}: {e}", quotef_os(path));
                 return 2;
             }
         },

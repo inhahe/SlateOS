@@ -4,6 +4,7 @@
 //!
 //! Single personality: `duply`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -52,7 +53,7 @@ fn run_duply(args: Vec<String>) -> i32 {
 
     match cmd {
         "create" => {
-            println!("Creating profile '{}' ...", profile);
+            println!("Creating profile {} ...", quoteaf_os(profile));
             println!("  /home/user/.duply/{}/conf  — configuration", profile);
             println!("  /home/user/.duply/{}/exclude — exclude patterns", profile);
             println!("  /home/user/.duply/{}/pre    — pre-backup script", profile);
@@ -60,13 +61,16 @@ fn run_duply(args: Vec<String>) -> i32 {
                 "  /home/user/.duply/{}/post   — post-backup script",
                 profile
             );
-            println!("Profile '{}' created. Edit 'conf' to configure.", profile);
+            println!(
+                "Profile {} created. Edit 'conf' to configure.",
+                quoteaf_os(profile)
+            );
         }
         "backup" | "bkp" => {
             println!("--- Start duply (Version 2.5.2) ---");
             println!("Profile: {}", profile);
             println!();
-            println!("Start running backup for profile '{}'", profile);
+            println!("Start running backup for profile {}", quoteaf_os(profile));
             println!("  Reading config...");
             println!("  Running pre-backup script...");
             println!("  Starting incremental backup...");
@@ -95,34 +99,34 @@ fn run_duply(args: Vec<String>) -> i32 {
             println!("Total size: 258.0 MB");
         }
         "list" => {
-            println!("Files in backup '{}' (latest):", profile);
+            println!("Files in backup {} (latest):", quoteaf_os(profile));
             println!("  Mon Jan 15 10:30 home/user/.bashrc");
             println!("  Mon Jan 15 10:30 home/user/.profile");
             println!("  Mon Jan 15 10:28 home/user/docs/report.txt");
             println!("  Sun Jan 14 09:15 home/user/photos/image.jpg");
         }
         "verify" => {
-            println!("Verifying backup '{}' ...", profile);
+            println!("Verifying backup {} ...", quoteaf_os(profile));
             println!("  Verified 1523 files");
             println!("  0 differences found");
             println!("  Verify complete: OK");
         }
         "restore" => {
             let dest = args.get(2).map(|s| s.as_str()).unwrap_or("/restore");
-            println!("Restoring '{}' → '{}'", profile, dest);
+            println!("Restoring {} → {}", quoteaf_os(profile), quoteaf_os(dest));
             println!("  Restored 1523 files (245.6 MB)");
         }
         "purge" => {
-            println!("Purging old backups for '{}' ...", profile);
+            println!("Purging old backups for {} ...", quoteaf_os(profile));
             println!("  Removed 3 old backup sets");
             println!("  Freed 89.2 MB");
         }
         "cleanup" => {
-            println!("Cleaning up '{}' ...", profile);
+            println!("Cleaning up {} ...", quoteaf_os(profile));
             println!("  No partial backup sets found.");
         }
         _ => {
-            eprintln!("duply: unknown command '{}'. See --help.", cmd);
+            eprintln!("duply: unknown command {}. See --help.", quoteaf_os(cmd));
             return 1;
         }
     }

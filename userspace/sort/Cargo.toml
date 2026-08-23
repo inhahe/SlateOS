@@ -4,3 +4,7 @@ version = "0.1.0"
 edition = "2024"
 description = "SlateOS line sorter utility"
 [dependencies]
+# sort names its input and output files and the temporary files it spills
+# to, all taken from the command line or built from a user-supplied
+# directory.
+quoting = { path = "../quoting" }

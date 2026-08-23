@@ -4,6 +4,7 @@
 //!
 //! Multi-personality: `influx`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -55,7 +56,7 @@ fn run_influx(args: &[String]) -> i32 {
                 .find(|w| w[0] == "-b" || w[0] == "--bucket")
                 .map(|w| w[1].as_str())
                 .unwrap_or("mybucket");
-            println!("Writing to bucket '{}'...", bucket);
+            println!("Writing to bucket {}...", quoteaf_os(bucket));
             println!("Success. 1 point(s) written.");
         }
         "query" => {
@@ -82,13 +83,13 @@ fn run_influx(args: &[String]) -> i32 {
                 }
                 "create" => {
                     let name = args.get(2).map(|s| s.as_str()).unwrap_or("newbucket");
-                    println!("Bucket '{}' created.", name);
+                    println!("Bucket {} created.", quoteaf_os(name));
                 }
                 "delete" => {
                     let name = args.get(2).map(|s| s.as_str()).unwrap_or("oldbucket");
-                    println!("Bucket '{}' deleted.", name);
+                    println!("Bucket {} deleted.", quoteaf_os(name));
                 }
-                _ => println!("influx bucket: '{}' completed", sub),
+                _ => println!("influx bucket: {} completed", quoteaf_os(sub)),
             }
         }
         "org" => {
@@ -100,9 +101,9 @@ fn run_influx(args: &[String]) -> i32 {
                 }
                 "create" => {
                     let name = args.get(2).map(|s| s.as_str()).unwrap_or("neworg");
-                    println!("Organization '{}' created.", name);
+                    println!("Organization {} created.", quoteaf_os(name));
                 }
-                _ => println!("influx org: '{}' completed", sub),
+                _ => println!("influx org: {} completed", quoteaf_os(sub)),
             }
         }
         "auth" => {
@@ -117,7 +118,7 @@ fn run_influx(args: &[String]) -> i32 {
                     );
                 }
                 "create" => println!("Token created: xxxxxxxxxxxxxxxxxxxx"),
-                _ => println!("influx auth: '{}' completed", sub),
+                _ => println!("influx auth: {} completed", quoteaf_os(sub)),
             }
         }
         "config" => {
@@ -127,13 +128,13 @@ fn run_influx(args: &[String]) -> i32 {
                     println!("Active  Name     URL                    Org     Token");
                     println!("*       default  http://localhost:8086  myorg   xxx...xxx");
                 }
-                _ => println!("influx config: '{}' completed", sub),
+                _ => println!("influx config: {} completed", quoteaf_os(sub)),
             }
         }
         "delete" => {
             println!("Data deleted successfully.");
         }
-        _ => println!("influx: '{}' completed", subcmd),
+        _ => println!("influx: {} completed", quoteaf_os(subcmd)),
     }
     0
 }

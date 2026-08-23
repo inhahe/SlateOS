@@ -35,6 +35,7 @@
 //! Use '-' as FILE1 or FILE2 to read from standard input.
 //! ```
 
+use quoting::quoteaf_os;
 use std::cmp::Ordering;
 use std::env;
 use std::fs::File;
@@ -104,7 +105,7 @@ enum ParseResult {
 fn next_arg<'a>(args: &'a [String], i: &mut usize, opt_name: &str) -> &'a str {
     *i += 1;
     if *i >= args.len() {
-        eprintln!("join: option '{opt_name}' requires an argument");
+        eprintln!("join: option {} requires an argument", quoteaf_os(opt_name));
         process::exit(1);
     }
     &args[*i]
@@ -115,7 +116,10 @@ fn parse_field(s: &str, opt_name: &str) -> usize {
     match s.parse::<usize>() {
         Ok(n) if n >= 1 => n,
         _ => {
-            eprintln!("join: invalid field number '{s}' for {opt_name}");
+            eprintln!(
+                "join: invalid field number {} for {opt_name}",
+                quoteaf_os(s)
+            );
             process::exit(1);
         }
     }
@@ -127,7 +131,10 @@ fn parse_filenum(s: &str, opt_name: &str) -> u8 {
         "1" => 1,
         "2" => 2,
         _ => {
-            eprintln!("join: invalid file number '{s}' for {opt_name} (must be 1 or 2)");
+            eprintln!(
+                "join: invalid file number {} for {opt_name} (must be 1 or 2)",
+                quoteaf_os(s)
+            );
             process::exit(1);
         }
     }
@@ -151,7 +158,10 @@ fn parse_output_format(s: &str) -> Option<Vec<OutputSpec>> {
         }
         let parts: Vec<&str> = token.splitn(2, '.').collect();
         if parts.len() != 2 {
-            eprintln!("join: invalid field spec '{token}' in -o format");
+            eprintln!(
+                "join: invalid field spec {} in -o format",
+                quoteaf_os(token)
+            );
             process::exit(1);
         }
         let file = match parts[0] {
@@ -159,8 +169,9 @@ fn parse_output_format(s: &str) -> Option<Vec<OutputSpec>> {
             "2" => 2_u8,
             _ => {
                 eprintln!(
-                    "join: invalid file number '{}' in -o spec '{token}'",
-                    parts[0]
+                    "join: invalid file number {} in -o spec {}",
+                    quoteaf_os(parts[0]),
+                    quoteaf_os(token)
                 );
                 process::exit(1);
             }
@@ -169,8 +180,9 @@ fn parse_output_format(s: &str) -> Option<Vec<OutputSpec>> {
             Ok(n) if n >= 1 => n,
             _ => {
                 eprintln!(
-                    "join: invalid field number '{}' in -o spec '{token}'",
-                    parts[1]
+                    "join: invalid field number {} in -o spec {}",
+                    quoteaf_os(parts[1]),
+                    quoteaf_os(token)
                 );
                 process::exit(1);
             }
@@ -227,7 +239,7 @@ fn parse_args(args: &[String]) -> ParseResult {
                 "--header" => header = true,
                 "--json" => json = true,
                 _ => {
-                    eprintln!("join: unrecognized option '{arg}'");
+                    eprintln!("join: unrecognized option {}", quoteaf_os(&arg));
                     eprintln!("Try 'join --help' for more information.");
                     process::exit(1);
                 }
@@ -306,7 +318,7 @@ fn parse_args(args: &[String]) -> ParseResult {
                         field2 = parse_field(rest, "-j2");
                     }
                 } else {
-                    eprintln!("join: unrecognized option '{arg}'");
+                    eprintln!("join: unrecognized option {}", quoteaf_os(&arg));
                     eprintln!("Try 'join --help' for more information.");
                     process::exit(1);
                 }

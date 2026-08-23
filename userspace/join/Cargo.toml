@@ -4,3 +4,6 @@ version = "0.1.0"
 edition = "2024"
 description = "SlateOS join utility -- join lines of two sorted files on a common field"
 [dependencies]
+# join names the input files it was given and the field values it read out
+# of them, so both the paths and the data are the user's words.
+quoting = { path = "../quoting" }

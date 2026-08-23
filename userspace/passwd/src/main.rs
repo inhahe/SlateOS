@@ -27,6 +27,7 @@
 //! `/etc/shadow` — colon-separated:
 //! `username:hash:lastchanged:min:max:warn:inactive:expire:`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::fs;
 use std::io::{self, BufRead, Write};
@@ -828,7 +829,7 @@ fn cmd_lock(target: &str) -> i32 {
         return 1;
     }
 
-    eprintln!("passwd: account '{}' locked", target);
+    eprintln!("passwd: account {} locked", quoteaf_os(target));
     0
 }
 
@@ -856,7 +857,7 @@ fn cmd_unlock(target: &str) -> i32 {
         return 1;
     }
 
-    eprintln!("passwd: account '{}' unlocked", target);
+    eprintln!("passwd: account {} unlocked", quoteaf_os(target));
     0
 }
 
@@ -873,7 +874,7 @@ fn cmd_delete_password(target: &str) -> i32 {
         return 1;
     }
 
-    eprintln!("passwd: password deleted for '{}'", target);
+    eprintln!("passwd: password deleted for {}", quoteaf_os(target));
     0
 }
 
@@ -924,7 +925,7 @@ fn cmd_expire(target: &str) -> i32 {
         return 1;
     }
 
-    eprintln!("passwd: password for '{}' expired", target);
+    eprintln!("passwd: password for {} expired", quoteaf_os(target));
     0
 }
 
@@ -941,8 +942,9 @@ fn cmd_set_min_days(target: &str, days: i64) -> i32 {
     }
 
     eprintln!(
-        "passwd: minimum password age for '{}' set to {} day(s)",
-        target, days
+        "passwd: minimum password age for {} set to {} day(s)",
+        quoteaf_os(target),
+        days
     );
     0
 }
@@ -960,8 +962,9 @@ fn cmd_set_max_days(target: &str, days: i64) -> i32 {
     }
 
     eprintln!(
-        "passwd: maximum password age for '{}' set to {} day(s)",
-        target, days
+        "passwd: maximum password age for {} set to {} day(s)",
+        quoteaf_os(target),
+        days
     );
     0
 }
@@ -978,7 +981,11 @@ fn cmd_set_warn_days(target: &str, days: i64) -> i32 {
         return 1;
     }
 
-    eprintln!("passwd: warning days for '{}' set to {}", target, days);
+    eprintln!(
+        "passwd: warning days for {} set to {}",
+        quoteaf_os(target),
+        days
+    );
     0
 }
 
@@ -994,7 +1001,11 @@ fn cmd_set_inactive_days(target: &str, days: i64) -> i32 {
         return 1;
     }
 
-    eprintln!("passwd: inactive days for '{}' set to {}", target, days);
+    eprintln!(
+        "passwd: inactive days for {} set to {}",
+        quoteaf_os(target),
+        days
+    );
     0
 }
 
@@ -1077,7 +1088,7 @@ fn main() {
 
     // Validate the target user exists in /etc/passwd.
     if find_user(&target).is_none() {
-        eprintln!("passwd: user '{}' does not exist", target);
+        eprintln!("passwd: user {} does not exist", quoteaf_os(&target));
         process::exit(1);
     }
 

@@ -19,9 +19,8 @@
 # 71 real sites. If a number rises in a commit that also edits code, the
 # code is what raised it.
 #
-# 1465 sites across 762 files.
+# 1373 sites across 751 files.
 
-init/servicebus/src/main.rs:8
 userspace/abduco-cli/src/main.rs:5
 userspace/acpid/src/main.rs:3
 userspace/ada-cli/src/main.rs:1
@@ -203,10 +202,8 @@ userspace/doxygen-cli/src/main.rs:1
 userspace/doxygen/src/main.rs:2
 userspace/dracut-cli/src/main.rs:1
 userspace/drone-cli/src/main.rs:3
-userspace/du/src/main.rs:9
 userspace/dunst-cli/src/main.rs:1
 userspace/duplicity-cli/src/main.rs:1
-userspace/duply-cli/src/main.rs:9
 userspace/dvc-cli/src/main.rs:2
 userspace/dynadot-cli/src/main.rs:1
 userspace/e2fsprogs/src/main.rs:4
@@ -272,7 +269,6 @@ userspace/ghostscript/src/main.rs:1
 userspace/ghostty-cli/src/main.rs:1
 userspace/gimp-cli/src/main.rs:1
 userspace/git-branchless/src/main.rs:1
-userspace/git/src/main.rs:8
 userspace/gitbook-cli/src/main.rs:3
 userspace/gitea/src/main.rs:1
 userspace/gitlab-cli/src/main.rs:1
@@ -313,7 +309,6 @@ userspace/hyprpaper-cli/src/main.rs:1
 userspace/ibus-cli/src/main.rs:2
 userspace/ifconfig/src/main.rs:1
 userspace/imply-cli/src/main.rs:1
-userspace/influx-cli/src/main.rs:9
 userspace/influxdb/src/main.rs:1
 userspace/inkscape-cli/src/main.rs:4
 userspace/insomnia-cli/src/main.rs:3
@@ -329,7 +324,6 @@ userspace/jekyll-cli/src/main.rs:1
 userspace/jenkins-cli/src/main.rs:2
 userspace/jira-cli/src/main.rs:2
 userspace/jless/src/main.rs:2
-userspace/join/src/main.rs:8
 userspace/joplin-cli/src/main.rs:1
 userspace/jsdelivr-cli/src/main.rs:1
 userspace/julia-cli/src/main.rs:1
@@ -443,7 +437,6 @@ userspace/nextjs-cli/src/main.rs:1
 userspace/nim-cli/src/main.rs:2
 userspace/ninja/src/main.rs:2
 userspace/nix-cli/src/main.rs:5
-userspace/nl/src/main.rs:8
 userspace/nnn-cli/src/main.rs:1
 userspace/node/src/main.rs:2
 userspace/nomad-cli/src/main.rs:1
@@ -482,7 +475,6 @@ userspace/pandas-cli/src/main.rs:1
 userspace/pants-cli/src/main.rs:1
 userspace/paraview-cli/src/main.rs:2
 userspace/pass-cli/src/main.rs:5
-userspace/passwd/src/main.rs:9
 userspace/paste/src/main.rs:4
 userspace/pastel/src/main.rs:1
 userspace/payload-cli/src/main.rs:1
@@ -497,7 +489,6 @@ userspace/phpstan-cli/src/main.rs:1
 userspace/picard-cli/src/main.rs:1
 userspace/pidgin-cli/src/main.rs:1
 userspace/pinecone-cli/src/main.rs:1
-userspace/pipewire/src/main.rs:8
 userspace/pipx-cli/src/main.rs:1
 userspace/pkg-cli/src/main.rs:1
 userspace/pkgconf/src/main.rs:1
@@ -623,7 +614,6 @@ userspace/sns-cli/src/main.rs:2
 userspace/snyk-cli/src/main.rs:4
 userspace/solana-cli/src/main.rs:1
 userspace/sops-cli/src/main.rs:1
-userspace/sort/src/main.rs:8
 userspace/sox/src/main.rs:3
 userspace/spacelift-cli/src/main.rs:4
 userspace/sparkpost-cli/src/main.rs:1
@@ -706,7 +696,6 @@ userspace/tuned/src/main.rs:5
 userspace/twilio-cli/src/main.rs:1
 userspace/typst-cli/src/main.rs:1
 userspace/udevadm-cli/src/main.rs:1
-userspace/udevd/src/main.rs:8
 userspace/udisks/src/main.rs:3
 userspace/uname/src/main.rs:3
 userspace/unbound/src/main.rs:1

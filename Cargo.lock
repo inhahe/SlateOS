@@ -2667,6 +2667,7 @@ version = "0.1.0"
 name = "du"
 version = "0.1.0"
 dependencies = [
+ "quoting",
  "scratchdir",
 ]
 
@@ -2709,6 +2710,9 @@ version = "0.1.0"
 [[package]]
 name = "duply-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "dust"
@@ -3824,6 +3828,9 @@ version = "0.1.0"
 [[package]]
 name = "git"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "git-absorb"
@@ -4660,6 +4667,9 @@ version = "0.1.0"
 [[package]]
 name = "influx-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "influxdb"
@@ -4940,6 +4950,9 @@ version = "0.1.0"
 [[package]]
 name = "join"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "joplin-cli"
@@ -7106,6 +7119,9 @@ version = "0.1.0"
 [[package]]
 name = "nl"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "nm-cli"
@@ -7811,6 +7827,7 @@ version = "0.1.0"
 dependencies = [
  "authlib",
  "posix",
+ "quoting",
 ]
 
 [[package]]
@@ -8112,6 +8129,9 @@ dependencies = [
 [[package]]
 name = "pipewire"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "pipx-cli"
@@ -9548,6 +9568,9 @@ version = "0.1.0"
 [[package]]
 name = "servicebus"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "servicebus-cli"
@@ -9995,6 +10018,9 @@ version = "0.1.0"
 [[package]]
 name = "sort"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "soundrecorder"
@@ -11241,6 +11267,9 @@ version = "0.1.0"
 [[package]]
 name = "udevd"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "udisks"

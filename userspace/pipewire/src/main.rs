@@ -16,6 +16,7 @@
 //! - `wpctl` — WirePlumber control (status, inspect, set-volume, set-mute, set-default)
 //! - `pipewire` — PipeWire daemon
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -2742,8 +2743,11 @@ fn run_pw_metadata_list(state: &PwState) -> i32 {
     }
     for entry in &state.metadata {
         println!(
-            "update: id:{} key:'{}' value:'{}' type:'{}'",
-            entry.subject, entry.key, entry.value, entry._key_type
+            "update: id:{} key:{} value:{} type:{}",
+            entry.subject,
+            quoteaf_os(&entry.key),
+            quoteaf_os(&entry.value),
+            quoteaf_os(&entry._key_type)
         );
     }
     0
@@ -2763,8 +2767,9 @@ fn run_pw_metadata_delete(args: &[String]) -> i32 {
     };
     if args.len() > 1 {
         println!(
-            "pw-metadata: deleted key '{}' for subject {} (simulated)",
-            args[1], subject
+            "pw-metadata: deleted key {} for subject {} (simulated)",
+            quoteaf_os(&args[1]),
+            subject
         );
     } else {
         println!(
@@ -2779,8 +2784,11 @@ fn run_pw_metadata_monitor(state: &PwState) -> i32 {
     println!("Monitoring metadata changes...");
     for entry in &state.metadata {
         println!(
-            "  update: id:{} key:'{}' value:'{}' type:'{}'",
-            entry.subject, entry.key, entry.value, entry._key_type
+            "  update: id:{} key:{} value:{} type:{}",
+            entry.subject,
+            quoteaf_os(&entry.key),
+            quoteaf_os(&entry.value),
+            quoteaf_os(&entry._key_type)
         );
     }
     println!("(end of simulated events)");
@@ -2808,8 +2816,10 @@ fn run_pw_metadata_set_or_get(args: &[String], state: &PwState) -> i32 {
         } else {
             for entry in entries {
                 println!(
-                    "  key:'{}' value:'{}' type:'{}'",
-                    entry.key, entry.value, entry._key_type
+                    "  key:{} value:{} type:{}",
+                    quoteaf_os(&entry.key),
+                    quoteaf_os(&entry.value),
+                    quoteaf_os(&entry._key_type)
                 );
             }
         }
@@ -2825,11 +2835,17 @@ fn run_pw_metadata_set_or_get(args: &[String], state: &PwState) -> i32 {
             .find(|m| m.subject == subject && m.key == *key)
         {
             println!(
-                "  key:'{}' value:'{}' type:'{}'",
-                entry.key, entry.value, entry._key_type
+                "  key:{} value:{} type:{}",
+                quoteaf_os(&entry.key),
+                quoteaf_os(&entry.value),
+                quoteaf_os(&entry._key_type)
             );
         } else {
-            println!("(no metadata for subject {} key '{}')", subject, key);
+            println!(
+                "(no metadata for subject {} key {})",
+                subject,
+                quoteaf_os(key)
+            );
         }
         return 0;
     }
@@ -2843,8 +2859,11 @@ fn run_pw_metadata_set_or_get(args: &[String], state: &PwState) -> i32 {
         "Spa:String:JSON"
     };
     println!(
-        "pw-metadata: set subject:{} key:'{}' value:'{}' type:'{}' (simulated)",
-        subject, key, value, key_type
+        "pw-metadata: set subject:{} key:{} value:{} type:{} (simulated)",
+        subject,
+        quoteaf_os(key),
+        quoteaf_os(value),
+        quoteaf_os(key_type)
     );
     0
 }
@@ -3004,8 +3023,10 @@ fn print_wpctl_help() {
 
 fn run_wpctl_status(state: &PwState) -> i32 {
     println!(
-        "PipeWire '{}' [{}] {}",
-        state.core_info._name, state.core_info._cookie, state.core_info._version
+        "PipeWire {} [{}] {}",
+        quoteaf_os(&state.core_info._name),
+        state.core_info._cookie,
+        state.core_info._version
     );
     println!();
 

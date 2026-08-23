@@ -2,3 +2,9 @@
 name = "influx-cli"
 version = "0.1.0"
 edition = "2024"
+
+[dependencies]
+# influx-cli names databases, measurements and subcommands that came from
+# the command line or from the server's own reply, so the words it echoes
+# are the user's and the network's, not its own.
+quoting = { path = "../quoting" }

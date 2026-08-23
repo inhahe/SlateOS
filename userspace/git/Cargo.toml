@@ -3,3 +3,7 @@ name = "git"
 version = "0.1.0"
 edition = "2024"
 [dependencies]
+# git names branches, remotes, refs and paths, every one of which is chosen
+# by whoever made the repository -- including a repository that was just
+# cloned from a stranger.
+quoting = { path = "../quoting" }

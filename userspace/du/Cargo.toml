@@ -4,6 +4,11 @@ version = "0.1.0"
 edition = "2024"
 description = "SlateOS disk usage utility"
 [dependencies]
+# du names the directories it walks, and it walks whatever it is pointed at
+# -- an extracted archive, a downloads folder, someone else's home. A name
+# holding a newline could otherwise forge an extra size line in the report,
+# which is exactly the output people pipe into sort and act on.
+quoting = { path = "../quoting" }
 
 [dev-dependencies]
 scratchdir = { path = "../scratchdir" }

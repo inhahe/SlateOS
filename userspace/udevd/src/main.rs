@@ -32,6 +32,7 @@
 #![cfg_attr(test, allow(dead_code))]
 #![allow(clippy::needless_range_loop)]
 
+use quoting::quoteaf_os;
 use std::collections::HashMap;
 use std::env;
 use std::fs;
@@ -1572,7 +1573,10 @@ fn cmd_info(args: &[String]) -> i32 {
             }
         }
         _ => {
-            eprintln!("udevadm info: unknown query type '{query_type}'");
+            eprintln!(
+                "udevadm info: unknown query type {}",
+                quoteaf_os(query_type)
+            );
             return 1;
         }
     }
@@ -1592,7 +1596,7 @@ fn show_attr_walk(devpath: &str) -> i32 {
     println!("chain of parent devices.\n");
 
     loop {
-        println!("  looking at device '{}':", current.display());
+        println!("  looking at device {}:", quoteaf_os(&current));
 
         // Read uevent.
         let uevent = current.join("uevent");
@@ -1669,13 +1673,13 @@ fn print_info_all(devpath: &str, props: &HashMap<String, String>, query: &str) {
 /// Print device info in export (env-var) format.
 fn print_info_export(devpath: &str, props: &HashMap<String, String>) {
     let kernel_name = devpath.rsplit('/').next().unwrap_or("");
-    println!("DEVPATH='{devpath}'");
-    println!("DEVNAME='{kernel_name}'");
+    println!("DEVPATH={}", quoteaf_os(devpath));
+    println!("DEVNAME={}", quoteaf_os(kernel_name));
     let mut sorted_keys: Vec<&String> = props.keys().collect();
     sorted_keys.sort();
     for k in sorted_keys {
         if let Some(v) = props.get(k) {
-            println!("{k}='{v}'");
+            println!("{k}={}", quoteaf_os(v));
         }
     }
 }
@@ -2006,7 +2010,7 @@ fn cmd_control(args: &[String]) -> i32 {
 
 fn set_log_level(level: &str) -> i32 {
     if LogLevel::from_str(level).is_none() {
-        eprintln!("udevadm control: invalid log level '{level}'");
+        eprintln!("udevadm control: invalid log level {}", quoteaf_os(level));
         return 1;
     }
     let _ = fs::create_dir_all("/run/udev");
@@ -2184,7 +2188,7 @@ fn run() -> i32 {
                 0
             }
             _ => {
-                eprintln!("udevadm: unknown command '{subcmd}'");
+                eprintln!("udevadm: unknown command {}", quoteaf_os(subcmd));
                 print_udevadm_help();
                 1
             }
@@ -2211,7 +2215,7 @@ fn run() -> i32 {
                     if arg.starts_with("--resolve-names=") {
                         // Accept but ignore unknown values.
                     } else {
-                        eprintln!("udevd: unknown option '{arg}'");
+                        eprintln!("udevd: unknown option {}", quoteaf_os(arg));
                         return 1;
                     }
                 }

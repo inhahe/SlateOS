@@ -4,3 +4,6 @@ version = "0.1.0"
 edition = "2024"
 description = "SlateOS nl - number lines of files"
 [dependencies]
+# nl names the files it numbers, which are whatever the caller listed on the
+# command line -- commonly a shell glob over a directory nobody audited.
+quoting = { path = "../quoting" }

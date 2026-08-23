@@ -30,6 +30,7 @@
 //!       --version                   Output version information and exit
 //! ```
 
+use quoting::quoteaf_os;
 use std::env;
 use std::fs::File;
 use std::io::{self, BufRead, BufReader, Write};
@@ -76,7 +77,10 @@ fn parse_style(s: &str, flag_name: &str) -> NumberingStyle {
         "n" => NumberingStyle::None,
         _ if s.starts_with('p') => NumberingStyle::Regex(s[1..].to_string()),
         _ => {
-            eprintln!("nl: invalid numbering style '{s}' for {flag_name}");
+            eprintln!(
+                "nl: invalid numbering style {} for {flag_name}",
+                quoteaf_os(s)
+            );
             process::exit(1);
         }
     }
@@ -107,7 +111,7 @@ fn parse_number_format(s: &str) -> NumberFormat {
         "rn" => NumberFormat::RightNoZero,
         "rz" => NumberFormat::RightZero,
         _ => {
-            eprintln!("nl: invalid line numbering format '{s}'");
+            eprintln!("nl: invalid line numbering format {}", quoteaf_os(s));
             eprintln!("Valid formats are: ln, rn, rz");
             process::exit(1);
         }
@@ -236,7 +240,7 @@ fn parse_args(args: &[String]) -> ParseResult {
                     process::exit(1);
                 }
             } else {
-                eprintln!("nl: unrecognized option '{arg}'");
+                eprintln!("nl: unrecognized option {}", quoteaf_os(arg));
                 eprintln!("Try 'nl --help' for more information.");
                 process::exit(1);
             }
@@ -313,7 +317,7 @@ fn parse_args(args: &[String]) -> ParseResult {
                     continue;
                 }
                 _ => {
-                    eprintln!("nl: invalid option -- '{ch}'");
+                    eprintln!("nl: invalid option -- {}", quoteaf_os(ch.to_string()));
                     eprintln!("Try 'nl --help' for more information.");
                     process::exit(1);
                 }
@@ -349,7 +353,7 @@ fn long_opt_value(arg: &str, prefix: &str, args: &[String], i: &mut usize) -> St
     } else {
         *i += 1;
         if *i >= args.len() {
-            eprintln!("nl: option '{prefix}' requires an argument");
+            eprintln!("nl: option {} requires an argument", quoteaf_os(prefix));
             process::exit(1);
         }
         args[*i].clone()
@@ -371,7 +375,10 @@ fn short_opt_value(
     } else {
         *arg_idx += 1;
         if *arg_idx >= args.len() {
-            eprintln!("nl: option requires an argument -- '{opt_char}'");
+            eprintln!(
+                "nl: option requires an argument -- {}",
+                quoteaf_os(opt_char.to_string())
+            );
             process::exit(1);
         }
         args[*arg_idx].clone()
@@ -382,7 +389,7 @@ fn parse_i64_arg(flag: &str, val: &str) -> i64 {
     match val.parse::<i64>() {
         Ok(n) => n,
         Err(_) => {
-            eprintln!("nl: invalid number for {flag}: '{val}'");
+            eprintln!("nl: invalid number for {flag}: {}", quoteaf_os(val));
             process::exit(1);
         }
     }
@@ -392,7 +399,7 @@ fn parse_usize_arg(flag: &str, val: &str) -> usize {
     match val.parse::<usize>() {
         Ok(n) => n,
         Err(_) => {
-            eprintln!("nl: invalid number for {flag}: '{val}'");
+            eprintln!("nl: invalid number for {flag}: {}", quoteaf_os(val));
             process::exit(1);
         }
     }

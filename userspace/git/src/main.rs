@@ -4,6 +4,7 @@
 //!
 //! Single personality: `git`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -122,13 +123,12 @@ fn run_git(args: Vec<String>) -> i32 {
                 .first()
                 .map(|s| s.as_str())
                 .unwrap_or("https://example.com/repo.git");
-            println!(
-                "Cloning into '{}'...",
-                url.rsplit('/')
-                    .next()
-                    .unwrap_or("repo")
-                    .trim_end_matches(".git")
-            );
+            let into = url
+                .rsplit('/')
+                .next()
+                .unwrap_or("repo")
+                .trim_end_matches(".git");
+            println!("Cloning into {}...", quoteaf_os(into));
             println!("remote: Enumerating objects: 150, done.");
             println!("remote: Counting objects: 100%");
             println!("remote: Compressing objects: 100%");
@@ -197,7 +197,7 @@ fn run_git(args: Vec<String>) -> i32 {
                 println!("usage: git add <pathspec>...");
             } else {
                 for f in &files {
-                    println!("add '{}'", f);
+                    println!("add {}", quoteaf_os(f));
                 }
             }
             0
@@ -226,7 +226,7 @@ fn run_git(args: Vec<String>) -> i32 {
                 if cmd_args.iter().any(|a| a == "-d" || a == "-D") {
                     println!("Deleted branch {} (was abc1234).", name);
                 } else {
-                    println!("Created branch '{}'", name);
+                    println!("Created branch {}", quoteaf_os(name));
                 }
             }
             0
@@ -234,9 +234,9 @@ fn run_git(args: Vec<String>) -> i32 {
         "checkout" | "switch" => {
             let target = cmd_args.first().map(|s| s.as_str()).unwrap_or("main");
             if cmd_args.iter().any(|a| a == "-b") {
-                println!("Switched to a new branch '{}'", target);
+                println!("Switched to a new branch {}", quoteaf_os(target));
             } else {
-                println!("Switched to branch '{}'", target);
+                println!("Switched to branch {}", quoteaf_os(target));
             }
             0
         }
@@ -261,7 +261,7 @@ fn run_git(args: Vec<String>) -> i32 {
                         .get(2)
                         .map(|s| s.as_str())
                         .unwrap_or("https://example.com/repo.git");
-                    println!("Added remote '{}' → {}", name, url);
+                    println!("Added remote {} → {}", quoteaf_os(name), quoteaf_os(url));
                 }
                 _ => println!("origin"),
             }
@@ -281,7 +281,7 @@ fn run_git(args: Vec<String>) -> i32 {
                 println!("v0.1.0");
                 println!("v0.2.0");
             } else {
-                println!("Created tag '{}'", cmd_args[0]);
+                println!("Created tag {}", quoteaf_os(&cmd_args[0]));
             }
             0
         }
@@ -309,7 +309,7 @@ fn run_git(args: Vec<String>) -> i32 {
             0
         }
         other => {
-            eprintln!("git: '{}' is not a git command.", other);
+            eprintln!("git: {} is not a git command.", quoteaf_os(other));
             1
         }
     }

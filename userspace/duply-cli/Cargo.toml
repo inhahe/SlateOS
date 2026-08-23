@@ -2,3 +2,9 @@
 name = "duply-cli"
 version = "0.1.0"
 edition = "2024"
+
+[dependencies]
+# duply-cli echoes back profile names and backup target paths that come from
+# the user's command line and from the profile files on disk, neither of
+# which this tool created.
+quoting = { path = "../quoting" }

@@ -32,6 +32,7 @@
 #![allow(clippy::needless_pass_by_value)]
 #![allow(clippy::unnecessary_wraps)]
 
+use quoting::quoteaf_os;
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::fmt;
 use std::time::{Duration, Instant};
@@ -1303,7 +1304,8 @@ impl ServiceBus {
 
             if self.debug_mode {
                 eprintln!(
-                    "[servicebus] {owner_unique_name} queued for name '{name}' (pos={})",
+                    "[servicebus] {owner_unique_name} queued for name {} (pos={})",
+                    quoteaf_os(name),
                     ownership.queue.len()
                 );
             }
@@ -1343,7 +1345,10 @@ impl ServiceBus {
         self.complete_activation(name);
 
         if self.debug_mode {
-            eprintln!("[servicebus] registered: '{name}' owned by {owner_unique_name} (pid={pid})");
+            eprintln!(
+                "[servicebus] registered: {} owned by {owner_unique_name} (pid={pid})",
+                quoteaf_os(name)
+            );
         }
 
         Ok(())
@@ -1370,7 +1375,10 @@ impl ServiceBus {
         self.release_name_internal(name, owner_unique_name);
 
         if self.debug_mode {
-            eprintln!("[servicebus] unregistered: '{name}' by {owner_unique_name}");
+            eprintln!(
+                "[servicebus] unregistered: {} by {owner_unique_name}",
+                quoteaf_os(name)
+            );
         }
 
         Ok(())
@@ -1405,7 +1413,8 @@ impl ServiceBus {
 
                     if self.debug_mode {
                         eprintln!(
-                            "[servicebus] name '{name}' transferred to {conn_name} (pid={next_pid})"
+                            "[servicebus] name {} transferred to {conn_name} (pid={next_pid})",
+                            quoteaf_os(name)
                         );
                     }
                 }
@@ -1415,7 +1424,10 @@ impl ServiceBus {
                 self.services.remove(name);
 
                 if self.debug_mode {
-                    eprintln!("[servicebus] name '{name}' released (no waiters)");
+                    eprintln!(
+                        "[servicebus] name {} released (no waiters)",
+                        quoteaf_os(name)
+                    );
                 }
             }
         }
@@ -1811,7 +1823,11 @@ impl ServiceBus {
         let timeout = Duration::from_secs(entry.timeout_secs);
 
         if self.debug_mode {
-            eprintln!("[servicebus] activating '{name}' via '{}'", entry.exec_path);
+            eprintln!(
+                "[servicebus] activating {} via {}",
+                quoteaf_os(name),
+                quoteaf_os(&entry.exec_path)
+            );
         }
 
         self.pending_activations.push(PendingActivation {
@@ -1837,8 +1853,8 @@ impl ServiceBus {
 
             if self.debug_mode {
                 eprintln!(
-                    "[servicebus] activation complete for '{}', delivering {} queued messages",
-                    name,
+                    "[servicebus] activation complete for {}, delivering {} queued messages",
+                    quoteaf_os(name),
                     pending.queued_messages.len()
                 );
             }
@@ -1871,7 +1887,7 @@ impl ServiceBus {
         for name in &timed_out {
             self.stats.activations_timed_out = self.stats.activations_timed_out.saturating_add(1);
             if self.debug_mode {
-                eprintln!("[servicebus] activation timed out for '{name}'");
+                eprintln!("[servicebus] activation timed out for {}", quoteaf_os(name));
             }
         }
 

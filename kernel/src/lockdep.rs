@@ -151,24 +151,46 @@ static CLASS_READY: [AtomicBool; MAX_CLASSES] = [const { AtomicBool::new(false) 
 /// point, and no other state is published through it.
 static CLASS_SITE: [AtomicUsize; MAX_CLASSES] = [const { AtomicUsize::new(0) }; MAX_CLASSES];
 
-/// The return address of the caller of [`lock_acquire`].
+/// The caller's caller — one frame beyond [`CLASS_SITE`].
 ///
-/// Walks exactly two frames of the RBP chain: this helper's own frame, then
-/// `lock_acquire`'s. Both are guaranteed to exist — we are executing inside
-/// them — and the kernel is built with `-C force-frame-pointers=yes`
-/// (`.cargo/config.toml`), so neither can have been omitted. That is why this
-/// does no range validation the way [`crate::backtrace::walk_from`] must: that
-/// walker follows a chain of *arbitrary* length into frames that may be
-/// corrupt, whereas these two are ours.
+/// Needed because the immediate caller of `lock_acquire` is almost always
+/// `Mutex::<T>::lock`, which names the *guard type* but not the lock. Boot
+/// batch 31 showed exactly that: a real AB/BA inversion reported both sides as
+/// `kernel::sync::Mutex<T>::lock+0x6f`, differing only in the monomorphisation
+/// hash. That is one frame short of the answer — it says two different types
+/// were locked, and refuses to say by whom.
+///
+/// Stored separately rather than replacing [`CLASS_SITE`]: when `Mutex::lock`
+/// *is* inlined the immediate frame is already the interesting one, and which
+/// case applies is not knowable without symbolising, which this path may not
+/// do. Printing both costs a line and is never wrong.
+static CLASS_SITE_UP: [AtomicUsize; MAX_CLASSES] = [const { AtomicUsize::new(0) }; MAX_CLASSES];
+
+/// The return addresses of [`lock_acquire`]'s caller and its caller in turn.
+///
+/// Walks the RBP chain from this helper's own frame: frame 0 is ours, frame 1
+/// is `lock_acquire`'s, frame 2 belongs to whoever called it. The first two are
+/// guaranteed to exist — we are executing inside them — and the kernel is built
+/// with `-C force-frame-pointers=yes` (`.cargo/config.toml`), so neither can
+/// have been omitted. That is why this does no range validation the way
+/// [`crate::backtrace::walk_from`] must: that walker follows a chain of
+/// *arbitrary* length into frames that may be corrupt, whereas these are ours.
+///
+/// The third frame is **not** ours, so it gets the one check that costs
+/// nothing and needs no other subsystem: the stack grows downward, so an outer
+/// frame must sit at a strictly higher address than an inner one. A chain that
+/// fails that is not a stack, and the second address is dropped. Deliberately
+/// no `hhdm()`/`is_kstack_region()` validation — this runs inside
+/// `lock_acquire`, and a reporter that takes a lock to describe a locking bug
+/// is a deadlock in a diagnostic.
 ///
 /// `#[inline(never)]` is load-bearing: an inlined body would have no frame of
 /// its own and the walk would start one level too high.
 ///
-/// The address returned is inside `Mutex::<T>::lock` when that call was not
-/// inlined — which still identifies the guarded type through the monomorphised
-/// symbol name — and inside the true calling function when it was.
+/// Returns `(0, 0)` when the chain cannot be trusted, which degrades the
+/// report to what it printed before these arrays existed — the right failure.
 #[inline(never)]
-fn caller_ip() -> usize {
+fn caller_ips() -> (usize, usize) {
     let rbp: u64;
     // SAFETY: Reading RBP is always safe in ring 0.
     unsafe {
@@ -176,32 +198,56 @@ fn caller_ip() -> usize {
     }
     // Defensive despite the argument above: a zero or misaligned RBP would mean
     // the frame-pointer guarantee has been broken, and reading through it would
-    // fault inside a diagnostic path. Returning 0 degrades the report to what
-    // it printed before this array existed, which is the right failure.
+    // fault inside a diagnostic path.
     if rbp == 0 || !rbp.is_multiple_of(8) {
-        return 0;
+        return (0, 0);
     }
     // SAFETY: `rbp` is this function's own frame pointer, established by its
     // prologue, so `[rbp]` — the saved caller RBP — is in-bounds and
     // initialised.
     let parent_rbp: u64 = unsafe { core::ptr::read_volatile(rbp as *const u64) };
     if parent_rbp == 0 || !parent_rbp.is_multiple_of(8) {
-        return 0;
+        return (0, 0);
     }
     // SAFETY: `parent_rbp` is `lock_acquire`'s frame pointer, likewise
     // established by its prologue, so `[parent_rbp + 8]` is its return-address
     // slot — in-bounds and initialised by the `call` that reached it.
     #[allow(clippy::arithmetic_side_effects)]
     let ret: u64 = unsafe { core::ptr::read_volatile((parent_rbp + 8) as *const u64) };
+
+    // SAFETY: `[parent_rbp]` is the RBP `lock_acquire`'s prologue saved, i.e.
+    // its caller's frame pointer. In-bounds and initialised for the same reason
+    // as the read above.
+    let grand_rbp: u64 = unsafe { core::ptr::read_volatile(parent_rbp as *const u64) };
+    // Outer frames live at higher addresses; anything else is not a frame
+    // chain. This is the only guard the third frame gets, and the only one it
+    // can afford.
+    if grand_rbp == 0 || !grand_rbp.is_multiple_of(8) || grand_rbp <= parent_rbp {
+        #[allow(clippy::cast_possible_truncation)]
+        return (ret as usize, 0);
+    }
+    // SAFETY: `grand_rbp` passed the ordering and alignment checks above and is
+    // the frame pointer of `lock_acquire`'s caller, so `[grand_rbp + 8]` is
+    // that frame's return-address slot.
+    #[allow(clippy::arithmetic_side_effects)]
+    let up: u64 = unsafe { core::ptr::read_volatile((grand_rbp + 8) as *const u64) };
     #[allow(clippy::cast_possible_truncation)]
     {
-        ret as usize
+        (ret as usize, up as usize)
     }
 }
 
 /// The recorded acquisition site for class `idx`, if one has been captured.
 fn class_site(idx: u16) -> Option<usize> {
     match CLASS_SITE.get(idx as usize)?.load(Ordering::Relaxed) {
+        0 => None,
+        ip => Some(ip),
+    }
+}
+
+/// The recorded caller-of-the-caller for class `idx`, if one was captured.
+fn class_site_up(idx: u16) -> Option<usize> {
+    match CLASS_SITE_UP.get(idx as usize)?.load(Ordering::Relaxed) {
         0 => None,
         ip => Some(ip),
     }
@@ -542,8 +588,12 @@ pub fn lock_acquire(lock_addr: usize, name: &[u8]) {
     // Record where this acquisition came from, before any report can be
     // emitted below — a violation involving this class should describe the
     // acquisition that provoked it, not the one before.
+    let (site, site_up) = caller_ips();
     if let Some(slot) = CLASS_SITE.get(class_idx as usize) {
-        slot.store(caller_ip(), Ordering::Relaxed);
+        slot.store(site, Ordering::Relaxed);
+    }
+    if let Some(slot) = CLASS_SITE_UP.get(class_idx as usize) {
+        slot.store(site_up, Ordering::Relaxed);
     }
 
     // SAFETY: Only this CPU accesses its held stack (called with lock
@@ -1117,14 +1167,20 @@ fn report_violation(held_class: u16, acquired_class: u16, cpu: usize) {
     // identifying information there is — its address resolves to no symbol —
     // and it is what a reader needs even when the address does resolve, since
     // the fix is always a change to one of these two call paths.
-    match (class_site(held_class), class_site(acquired_class)) {
-        (Some(h), Some(a)) => {
-            serial_println!("[lockdep]     held taken at:  {}", AddrDesc(h));
-            serial_println!("[lockdep]     acquiring at:   {}", AddrDesc(a));
+    // The `via` line is the one that usually answers the question: the direct
+    // caller is nearly always `Mutex::<T>::lock`, which names the guarded type
+    // and nothing else, so the frame above it is where the fix goes.
+    if let Some(h) = class_site(held_class) {
+        serial_println!("[lockdep]     held taken at:  {}", AddrDesc(h));
+        if let Some(hu) = class_site_up(held_class) {
+            serial_println!("[lockdep]                via: {}", AddrDesc(hu));
         }
-        (Some(h), None) => serial_println!("[lockdep]     held taken at:  {}", AddrDesc(h)),
-        (None, Some(a)) => serial_println!("[lockdep]     acquiring at:   {}", AddrDesc(a)),
-        (None, None) => {}
+    }
+    if let Some(a) = class_site(acquired_class) {
+        serial_println!("[lockdep]     acquiring at:   {}", AddrDesc(a));
+        if let Some(au) = class_site_up(acquired_class) {
+            serial_println!("[lockdep]                via: {}", AddrDesc(au));
+        }
     }
     serial_println!("[lockdep]   But the reverse order was observed previously.");
     serial_println!("[lockdep]   This means a deadlock is possible under different scheduling.");
@@ -1433,9 +1489,9 @@ pub fn self_test() {
         assert!(
             site >= 0xFFFF_FFFF_8000_0000,
             "recorded site {site:#x} is not a kernel text address — the frame walk in \
-             caller_ip() is off by a frame, or a frame pointer was omitted"
+             caller_ips() is off by a frame, or a frame pointer was omitted"
         );
-        // The site must resolve to *this* function: `caller_ip` walks to
+        // The site must resolve to *this* function: `caller_ips` walks to
         // `lock_acquire`'s caller, and that caller is the self-test. A name
         // from anywhere else means the walk depth is wrong. `resolve_static`
         // yields nothing before ksyms has loaded, which is not a failure —
@@ -1446,11 +1502,34 @@ pub fn self_test() {
                 "recorded site resolved to {name}, which is not the calling self-test"
             );
         }
+        // The second frame is what makes a real report readable: the immediate
+        // caller of `lock_acquire` is nearly always `Mutex::<T>::lock`, which
+        // names the guard *type* and not the lock. Here the probe calls
+        // `lock_acquire` directly, so frame 1 is this self-test and frame 2 is
+        // whoever called it — still kernel text either way. A zero is tolerated
+        // (the walk bails out rather than guess when the chain looks wrong), but
+        // a non-zero value that is not kernel text means the extra hop read
+        // something that was never a frame pointer.
+        let site_up = class_site_up(idx);
+        if let Some(up) = site_up {
+            assert!(
+                up >= 0xFFFF_FFFF_8000_0000,
+                "recorded via-site {up:#x} is not a kernel text address — the second \
+                 frame of caller_ips() walked off the frame chain"
+            );
+        }
         lock_release(SITE_PROBE);
-        serial_println!(
-            "[lockdep]   Acquisition-site capture: OK ({})",
-            AddrDesc(site)
-        );
+        match site_up {
+            Some(up) => serial_println!(
+                "[lockdep]   Acquisition-site capture: OK ({}, via {})",
+                AddrDesc(site),
+                AddrDesc(up)
+            ),
+            None => serial_println!(
+                "[lockdep]   Acquisition-site capture: OK ({}, no second frame)",
+                AddrDesc(site)
+            ),
+        }
     }
 
     // Test 10: the edge bitmap. `record_edge` answers "is this edge new?" on

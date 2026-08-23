@@ -33656,14 +33656,14 @@ fn cmd_loginscreen(args: &str) {
         "show" => {
             let cfg = loginscreen::config();
             shell_println!("Background:    {:?}", cfg.background_mode);
-            shell_println!(
-                "Image:         {}",
-                if cfg.background_path.is_empty() {
-                    "-"
-                } else {
-                    &cfg.background_path
-                }
-            );
+            // An unset background is the empty path, so the two arms cannot
+            // share a type -- print the placeholder separately rather than
+            // force the path through a lossy `to_str`.
+            if cfg.background_path.is_empty() {
+                shell_println!("Image:         -");
+            } else {
+                shell_println!("Image:         {}", cfg.background_path.display());
+            }
             shell_println!("Color:         #{}", cfg.background_color);
             shell_println!("Synced:        {}", cfg.synced_with_desktop);
             shell_println!("Fit:           {:?}", cfg.fit_mode);
@@ -33685,14 +33685,11 @@ fn cmd_loginscreen(args: &str) {
                     &cfg.message
                 }
             );
-            shell_println!(
-                "Logo:          {}",
-                if cfg.logo_path.is_empty() {
-                    "-"
-                } else {
-                    &cfg.logo_path
-                }
-            );
+            if cfg.logo_path.is_empty() {
+                shell_println!("Logo:          -");
+            } else {
+                shell_println!("Logo:          {}", cfg.logo_path.display());
+            }
         }
         "bg" => {
             let mode = match parts.get(1).copied() {

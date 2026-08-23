@@ -5502,6 +5502,13 @@ extern "C" fn kernel_main() -> ! {
             if let Err(e) = fs::wallpaper::self_test() {
                 serial_println!("WARNING: wallpaper self-test failed: {:?}", e);
             }
+            // loginscreen was reachable only from a `kshell` subcommand, so its
+            // suite had never run in the boot test (TD-A-FS-SELFTESTS-NEVER-RUN).
+            // Safe here: `clear_all()` at both ends, and the greeter is not
+            // running yet -- this only edits the config it will later read.
+            if let Err(e) = fs::loginscreen::self_test() {
+                serial_println!("WARNING: loginscreen self-test failed: {:?}", e);
+            }
             // screenshot was reachable only from a `kshell` subcommand, so its
             // suite had never run in the boot test (TD-A-FS-SELFTESTS-NEVER-RUN).
             // Safe here: `clear_all()` and `reset_stats()` at both ends, and it

@@ -325,57 +325,58 @@ pub fn get_dialog(id: u64) -> Option<DialogState> {
 pub fn navigate<P: AsRef<Path> + ?Sized>(id: u64, path: &P) -> KernelResult<()> {
     let path = path.as_ref();
     NAV_OPS.fetch_add(1, Ordering::Relaxed);
-    let mut picker = PICKER.lock();
-    let dialog = picker
-        .dialogs
-        .iter_mut()
-        .find(|d| d.id == id)
-        .ok_or(KernelError::NotFound)?;
+    let (show_hidden, filter_idx) = {
+        let mut picker = PICKER.lock();
+        let dialog = picker
+            .dialogs
+            .iter_mut()
+            .find(|d| d.id == id)
+            .ok_or(KernelError::NotFound)?;
 
-    if !dialog.open {
-        return Err(KernelError::InvalidArgument);
-    }
+        if !dialog.open {
+            return Err(KernelError::InvalidArgument);
+        }
 
-    // Push current to history.
-    dialog.history.push(dialog.current_dir.clone());
-    dialog.current_dir = path.to_path_buf();
-    dialog.selection.clear();
+        // Push current to history.
+        dialog.history.push(dialog.current_dir.clone());
+        dialog.current_dir = path.to_path_buf();
+        dialog.selection.clear();
+        // The old directory's entries do not describe the new one. Emptying
+        // the listing means a reader that looks between the move and the
+        // refresh sees nothing rather than the wrong directory's contents.
+        dialog.listing.clear();
 
-    // Refresh listing from VFS.
-    dialog.listing = build_listing(
-        path,
-        dialog.show_hidden,
-        dialog.filters.get(dialog.active_filter),
-    );
+        (dialog.show_hidden, dialog.active_filter)
+    };
 
-    // Sort listing.
-    sort_listing(&mut dialog.listing, dialog.sort_column, dialog.sort_dir);
-
+    // Refresh listing from VFS -- outside the lock; see `refresh_listing`.
+    refresh_listing(id, path, show_hidden, filter_idx);
     Ok(())
 }
 
 /// Go back in navigation history.
 pub fn go_back(id: u64) -> KernelResult<()> {
-    let mut picker = PICKER.lock();
-    let dialog = picker
-        .dialogs
-        .iter_mut()
-        .find(|d| d.id == id)
-        .ok_or(KernelError::NotFound)?;
+    let (prev, show_hidden, filter_idx) = {
+        let mut picker = PICKER.lock();
+        let dialog = picker
+            .dialogs
+            .iter_mut()
+            .find(|d| d.id == id)
+            .ok_or(KernelError::NotFound)?;
 
-    if let Some(prev) = dialog.history.pop() {
+        // Nothing to go back to: the dialog is untouched.
+        let Some(prev) = dialog.history.pop() else {
+            return Err(KernelError::NotFound);
+        };
         dialog.current_dir = prev.clone();
         dialog.selection.clear();
-        dialog.listing = build_listing(
-            &prev,
-            dialog.show_hidden,
-            dialog.filters.get(dialog.active_filter),
-        );
-        sort_listing(&mut dialog.listing, dialog.sort_column, dialog.sort_dir);
-        Ok(())
-    } else {
-        Err(KernelError::NotFound)
-    }
+        dialog.listing.clear();
+
+        (prev, dialog.show_hidden, dialog.active_filter)
+    };
+
+    refresh_listing(id, &prev, show_hidden, filter_idx);
+    Ok(())
 }
 
 /// Navigate up one directory.
@@ -452,24 +453,26 @@ pub fn set_filename<P: AsRef<Path> + ?Sized>(id: u64, name: &P) -> KernelResult<
 
 /// Change the active filter.
 pub fn set_filter(id: u64, filter_idx: usize) -> KernelResult<()> {
-    let mut picker = PICKER.lock();
-    let dialog = picker
-        .dialogs
-        .iter_mut()
-        .find(|d| d.id == id)
-        .ok_or(KernelError::NotFound)?;
+    let (dir, show_hidden) = {
+        let mut picker = PICKER.lock();
+        let dialog = picker
+            .dialogs
+            .iter_mut()
+            .find(|d| d.id == id)
+            .ok_or(KernelError::NotFound)?;
 
-    if filter_idx >= dialog.filters.len() {
-        return Err(KernelError::InvalidArgument);
-    }
-    dialog.active_filter = filter_idx;
+        if filter_idx >= dialog.filters.len() {
+            return Err(KernelError::InvalidArgument);
+        }
+        dialog.active_filter = filter_idx;
+        // The listing still shows the previous filter's entries.
+        dialog.listing.clear();
 
-    // Refresh listing with new filter.
-    let dir = dialog.current_dir.clone();
-    let show_hidden = dialog.show_hidden;
-    let filter = dialog.filters.get(dialog.active_filter).cloned();
-    dialog.listing = build_listing(&dir, show_hidden, filter.as_ref());
-    sort_listing(&mut dialog.listing, dialog.sort_column, dialog.sort_dir);
+        (dialog.current_dir.clone(), dialog.show_hidden)
+    };
+
+    // Refresh listing with new filter -- outside the lock.
+    refresh_listing(id, &dir, show_hidden, filter_idx);
     Ok(())
 }
 
@@ -501,20 +504,25 @@ pub fn set_view_mode(id: u64, mode: ViewMode) -> KernelResult<()> {
 
 /// Toggle hidden files.
 pub fn toggle_hidden(id: u64) -> KernelResult<bool> {
-    let mut picker = PICKER.lock();
-    let dialog = picker
-        .dialogs
-        .iter_mut()
-        .find(|d| d.id == id)
-        .ok_or(KernelError::NotFound)?;
-    dialog.show_hidden = !dialog.show_hidden;
-    let show = dialog.show_hidden;
+    let (dir, show, filter_idx) = {
+        let mut picker = PICKER.lock();
+        let dialog = picker
+            .dialogs
+            .iter_mut()
+            .find(|d| d.id == id)
+            .ok_or(KernelError::NotFound)?;
+        dialog.show_hidden = !dialog.show_hidden;
+        dialog.listing.clear();
 
-    // Refresh listing.
-    let dir = dialog.current_dir.clone();
-    let filter = dialog.filters.get(dialog.active_filter).cloned();
-    dialog.listing = build_listing(&dir, show, filter.as_ref());
-    sort_listing(&mut dialog.listing, dialog.sort_column, dialog.sort_dir);
+        (
+            dialog.current_dir.clone(),
+            dialog.show_hidden,
+            dialog.active_filter,
+        )
+    };
+
+    // Refresh listing -- outside the lock.
+    refresh_listing(id, &dir, show, filter_idx);
     Ok(show)
 }
 
@@ -597,6 +605,58 @@ pub fn close(id: u64) -> KernelResult<()> {
 // ---------------------------------------------------------------------------
 // Listing helpers
 // ---------------------------------------------------------------------------
+
+/// Rebuild a dialog's listing without holding `PICKER` across the VFS.
+///
+/// Every caller that changes what a dialog is looking at -- `navigate`,
+/// `go_back`, `set_filter`, `toggle_hidden` -- has to re-read the directory
+/// afterwards, and doing that under `PICKER` is a deadlock, not a style
+/// problem. `build_listing` calls `Vfs::readdir`, which takes the
+/// *filesystem's* lock and holds it across the filesystem's own readdir; for
+/// procfs that call generates content and reaches into arbitrary kernel
+/// subsystems, each taking its own module-global lock. The live order is
+/// `filesystem lock -> module state`, so holding `PICKER` across the readdir
+/// runs it backwards and two CPUs, one in each path, wedge.
+/// `scripts/check-vfs-under-lock.py` enforces the rule.
+///
+/// So the work is split into three: the caller mutates dialog state under the
+/// lock and releases it, this reads the directory with no lock held, then
+/// retakes the lock and installs.
+///
+/// The install is conditional. Between the two critical sections another
+/// thread may have navigated the same dialog elsewhere, changed its filter, or
+/// closed it outright. Installing then would paint the previous directory's
+/// contents over a dialog that has already moved on -- a stale listing looks
+/// exactly like a correct one to the user, which makes it worse than none. So
+/// the listing is installed only if the dialog still exists and still
+/// describes the view it was built for; otherwise it is dropped and the newer
+/// navigation's own refresh supplies the entries.
+fn refresh_listing(id: u64, dir: &Path, show_hidden: bool, filter_idx: usize) {
+    // The filter set belongs to the dialog, so reading it needs the lock --
+    // but only briefly, and well before the VFS call.
+    let filter = {
+        let picker = PICKER.lock();
+        let Some(dialog) = picker.dialogs.iter().find(|d| d.id == id) else {
+            return;
+        };
+        dialog.filters.get(filter_idx).cloned()
+    };
+
+    let mut items = build_listing(dir, show_hidden, filter.as_ref());
+
+    let mut picker = PICKER.lock();
+    let Some(dialog) = picker.dialogs.iter_mut().find(|d| d.id == id) else {
+        return;
+    };
+    if dialog.current_dir.as_path() != dir
+        || dialog.show_hidden != show_hidden
+        || dialog.active_filter != filter_idx
+    {
+        return;
+    }
+    sort_listing(&mut items, dialog.sort_column, dialog.sort_dir);
+    dialog.listing = items;
+}
 
 /// Build a directory listing from VFS.
 fn build_listing(dir: &Path, show_hidden: bool, filter: Option<&FileFilter>) -> Vec<ListingItem> {

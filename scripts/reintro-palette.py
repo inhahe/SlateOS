@@ -7468,6 +7468,7 @@ DEFECTS = [
         ["desktop"],
         [
             'every_text_this_dialog_draws_is_in_the_role_it_claims',
+            'nothing_but_the_selection_and_the_default_action_moves_with_the_accent',
         ],
     ),
     (
@@ -7628,6 +7629,8 @@ DEFECTS = [
         ],
         ["desktop"],
         [
+            'nothing_but_the_selection_and_the_default_action_moves_with_the_accent',
+            'test_dialog_render_hidden',
             'the_fixtures_take_every_branch_this_dialog_has',
         ],
     ),
@@ -7664,6 +7667,7 @@ DEFECTS = [
         ],
         ["desktop"],
         [
+            'every_text_this_dialog_draws_is_in_the_role_it_claims',
             'the_fixtures_take_every_branch_this_dialog_has',
         ],
     ),
@@ -7676,6 +7680,7 @@ DEFECTS = [
         ],
         ["desktop"],
         [
+            'every_text_this_dialog_draws_is_in_the_role_it_claims',
             'the_fixtures_take_every_branch_this_dialog_has',
         ],
     ),

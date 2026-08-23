@@ -4,6 +4,7 @@
 //!
 //! Multi-personality: `nix`, `nix-build`, `nix-shell`, `nix-env`, `nix-store`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -92,7 +93,7 @@ fn run_nix(args: &[String]) -> i32 {
                     println!("    └───x86_64-linux");
                     println!("        └───default");
                 }
-                _ => println!("nix flake: '{}' completed", action),
+                _ => println!("nix flake: {} completed", quoteaf_os(action)),
             }
         }
         "store" => {
@@ -107,7 +108,7 @@ fn run_nix(args: &[String]) -> i32 {
                     println!("Store URL: /nix/store");
                     println!("Trusted: yes");
                 }
-                _ => println!("nix store: '{}' completed", action),
+                _ => println!("nix store: {} completed", quoteaf_os(action)),
             }
         }
         "repl" => {
@@ -132,10 +133,10 @@ fn run_nix(args: &[String]) -> i32 {
                     println!("Installing {}...", pkg);
                     println!("  installed to profile");
                 }
-                _ => println!("nix profile: '{}' completed", action),
+                _ => println!("nix profile: {} completed", quoteaf_os(action)),
             }
         }
-        _ => println!("nix: '{}' completed", subcmd),
+        _ => println!("nix: {} completed", quoteaf_os(subcmd)),
     }
     0
 }
@@ -192,7 +193,7 @@ fn run_nix_env(args: &[String]) -> i32 {
             .find(|w| w[0] == "-i" || w[0] == "--install")
             .map(|w| w[1].as_str())
             .unwrap_or("hello");
-        println!("installing '{}'...", pkg);
+        println!("installing {}...", quoteaf_os(pkg));
         println!("  created 1 symlink in user environment");
     }
     0

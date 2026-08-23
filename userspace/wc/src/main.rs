@@ -23,6 +23,7 @@
 //!       --version           Output version information and exit
 //! ```
 
+use quoting::{quoteaf_os, quotef_os};
 use std::env;
 use std::fs::File;
 use std::io::{self, BufReader, Read, Write};
@@ -170,7 +171,7 @@ fn parse_args(args: &[String]) -> ParseResult {
                 };
                 files0_from = Some(val);
             } else {
-                eprintln!("wc: unrecognized option '{arg}'");
+                eprintln!("wc: unrecognized option {}", quoteaf_os(arg));
                 eprintln!("Try 'wc --help' for more information.");
                 process::exit(1);
             }
@@ -188,7 +189,7 @@ fn parse_args(args: &[String]) -> ParseResult {
                 'm' => display.chars = true,
                 'L' => display.max_line_len = true,
                 _ => {
-                    eprintln!("wc: invalid option -- '{ch}'");
+                    eprintln!("wc: invalid option -- {}", quoteaf_os(ch.to_string()));
                     eprintln!("Try 'wc --help' for more information.");
                     process::exit(1);
                 }
@@ -209,7 +210,7 @@ fn parse_args(args: &[String]) -> ParseResult {
                 }
             }
             Err(e) => {
-                eprintln!("wc: cannot open '{f0}' for reading: {e}");
+                eprintln!("wc: cannot open {} for reading: {e}", quoteaf_os(&f0));
                 process::exit(1);
             }
         }
@@ -524,7 +525,7 @@ fn run(config: &Config) -> i32 {
                     count_reader(&mut reader, &config.display)
                 }
                 Err(e) => {
-                    eprintln!("wc: {path}: {e}");
+                    eprintln!("wc: {}: {e}", quotef_os(path));
                     had_error = true;
                     continue;
                 }
@@ -547,7 +548,7 @@ fn run(config: &Config) -> i32 {
                 } else {
                     path.as_str()
                 };
-                eprintln!("wc: {display_name}: {e}");
+                eprintln!("wc: {}: {e}", quotef_os(display_name));
                 had_error = true;
             }
         }

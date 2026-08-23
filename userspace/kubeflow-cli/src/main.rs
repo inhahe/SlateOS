@@ -4,6 +4,7 @@
 //!
 //! Multi-personality: `kfp`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -43,7 +44,7 @@ fn run_kfp(args: &[String]) -> i32 {
                     println!("Creating pipeline from {}...", file);
                     println!("Pipeline created: pl-ghi789");
                 }
-                _ => println!("kfp pipeline: '{}' completed", sub),
+                _ => println!("kfp pipeline: {} completed", quoteaf_os(sub)),
             }
         }
         "run" => {
@@ -60,10 +61,10 @@ fn run_kfp(args: &[String]) -> i32 {
                         .find(|w| w[0] == "--pipeline-name")
                         .map(|w| w[1].as_str())
                         .unwrap_or("training-pipeline");
-                    println!("Creating run for pipeline '{}'...", pipeline);
+                    println!("Creating run for pipeline {}...", quoteaf_os(pipeline));
                     println!("Run created: run-ghi");
                 }
-                _ => println!("kfp run: '{}' completed", sub),
+                _ => println!("kfp run: {} completed", quoteaf_os(sub)),
             }
         }
         "experiment" => {
@@ -73,10 +74,10 @@ fn run_kfp(args: &[String]) -> i32 {
                 println!("exp-abc      Default           15");
                 println!("exp-def      Hyperparameter    8");
             } else {
-                println!("kfp experiment: '{}' completed", sub);
+                println!("kfp experiment: {} completed", quoteaf_os(sub));
             }
         }
-        _ => println!("kfp: '{}' completed", subcmd),
+        _ => println!("kfp: {} completed", quoteaf_os(subcmd)),
     }
     0
 }

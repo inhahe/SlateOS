@@ -21,6 +21,9 @@ version = "0.1.0"
 [[package]]
 name = "abduco-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "abiword-cli"
@@ -806,6 +809,9 @@ version = "0.1.0"
 [[package]]
 name = "bentoml-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "berglas-cli"
@@ -1566,6 +1572,7 @@ version = "0.1.0"
 name = "chroot"
 version = "0.1.0"
 dependencies = [
+ "quoting",
  "userdb",
 ]
 
@@ -1758,6 +1765,9 @@ version = "0.1.0"
 [[package]]
 name = "column"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "comm"
@@ -2127,6 +2137,9 @@ version = "0.1.0"
 [[package]]
 name = "cut"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "cutadapt-cli"
@@ -2947,6 +2960,9 @@ version = "0.1.0"
 [[package]]
 name = "env"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "env0-cli"
@@ -3423,6 +3439,9 @@ version = "0.1.0"
 [[package]]
 name = "fold"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "foliate-cli"
@@ -4293,6 +4312,9 @@ version = "0.1.0"
 [[package]]
 name = "harness-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "hashcat"
@@ -4305,6 +4327,9 @@ version = "0.1.0"
 [[package]]
 name = "hatch-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "havoc-cli"
@@ -4586,6 +4611,9 @@ version = "0.1.0"
 [[package]]
 name = "hyprland-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "hyprpaper-cli"
@@ -5358,6 +5386,9 @@ version = "0.1.0"
 [[package]]
 name = "kubeflow-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "kubescape-cli"
@@ -6625,6 +6656,7 @@ name = "mkinitramfs"
 version = "0.1.0"
 dependencies = [
  "modechange",
+ "quoting",
 ]
 
 [[package]]
@@ -6642,6 +6674,9 @@ version = "0.1.0"
 [[package]]
 name = "mlrun-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "moc-cli"
@@ -6662,6 +6697,9 @@ version = "0.1.0"
 [[package]]
 name = "modem-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "modo-cli"
@@ -7149,6 +7187,9 @@ version = "0.1.0"
 [[package]]
 name = "nix-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "nixops-cli"
@@ -7858,6 +7899,9 @@ version = "0.1.0"
 [[package]]
 name = "pass-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "passwd"
@@ -8025,6 +8069,9 @@ version = "0.1.0"
 [[package]]
 name = "perf-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "perl"
@@ -8231,6 +8278,9 @@ version = "0.1.0"
 [[package]]
 name = "plymouth"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "pmtiles-cli"
@@ -9360,6 +9410,9 @@ version = "0.1.0"
 [[package]]
 name = "sbctl"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "scaleway-cli"
@@ -9515,6 +9568,9 @@ version = "0.1.0"
 [[package]]
 name = "seldon-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "selenium-cli"
@@ -10815,6 +10871,9 @@ dependencies = [
 [[package]]
 name = "tekton-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "telegraf-cli"
@@ -11086,6 +11145,9 @@ dependencies = [
 [[package]]
 name = "tmux-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "toad-cli"
@@ -11256,6 +11318,9 @@ version = "0.1.0"
 [[package]]
 name = "tuned"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "tuned-cli"
@@ -11463,6 +11528,9 @@ version = "0.1.0"
 [[package]]
 name = "useradd-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "useradm"
@@ -11772,6 +11840,9 @@ version = "0.1.0"
 [[package]]
 name = "wandb-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "wasabi-cli"
@@ -11852,6 +11923,9 @@ version = "0.1.0"
 [[package]]
 name = "wc"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "wdisplays-cli"

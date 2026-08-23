@@ -4,6 +4,7 @@
 //!
 //! Single personality: `abduco`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -44,11 +45,17 @@ fn run_abduco(args: &[String], _prog: &str) -> i32 {
     let name = args.get(1).map(|s| s.as_str()).unwrap_or("default");
 
     match mode {
-        "-a" => println!("abduco: Attaching to session '{}'...", name),
-        "-A" => println!("abduco: Attaching or creating session '{}'...", name),
-        "-c" => println!("abduco: Creating detached session '{}'...", name),
-        "-n" => println!("abduco: Creating non-interactive session '{}'...", name),
-        _ => println!("abduco: Session '{}'", mode),
+        "-a" => println!("abduco: Attaching to session {}...", quoteaf_os(name)),
+        "-A" => println!(
+            "abduco: Attaching or creating session {}...",
+            quoteaf_os(name)
+        ),
+        "-c" => println!("abduco: Creating detached session {}...", quoteaf_os(name)),
+        "-n" => println!(
+            "abduco: Creating non-interactive session {}...",
+            quoteaf_os(name)
+        ),
+        _ => println!("abduco: Session {}", quoteaf_os(mode)),
     }
     0
 }

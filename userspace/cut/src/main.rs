@@ -29,6 +29,7 @@
 //!   -M     From first to M'th (inclusive) byte, character, or field
 //! ```
 
+use quoting::{quoteaf_os, quotef_os};
 use std::env;
 use std::fs::File;
 use std::io::{self, BufRead, BufReader, Write};
@@ -293,7 +294,7 @@ fn parse_args(args: &[String]) -> ParseResult {
                 let val = long_opt_value(arg, "--output-delimiter", args, &mut i);
                 output_delimiter = Some(val);
             } else {
-                eprintln!("cut: unrecognized option '{arg}'");
+                eprintln!("cut: unrecognized option {}", quoteaf_os(arg));
                 eprintln!("Try 'cut --help' for more information.");
                 process::exit(1);
             }
@@ -337,7 +338,10 @@ fn parse_args(args: &[String]) -> ParseResult {
                     only_delimited = true;
                 }
                 _ => {
-                    eprintln!("cut: invalid option -- '{}'", chars[j]);
+                    eprintln!(
+                        "cut: invalid option -- {}",
+                        quoteaf_os(chars[j].to_string())
+                    );
                     eprintln!("Try 'cut --help' for more information.");
                     process::exit(1);
                 }
@@ -409,7 +413,7 @@ fn long_opt_value(arg: &str, name: &str, args: &[String], i: &mut usize) -> Stri
     // Value is the next argument.
     *i += 1;
     if *i >= args.len() {
-        eprintln!("cut: option '{name}' requires an argument");
+        eprintln!("cut: option {} requires an argument", quoteaf_os(name));
         process::exit(1);
     }
     args[*i].clone()
@@ -776,7 +780,7 @@ fn run(config: &Config) -> i32 {
         let mut input = match open_input(path) {
             Ok(inp) => inp,
             Err(e) => {
-                eprintln!("cut: {path}: {e}");
+                eprintln!("cut: {}: {e}", quotef_os(path));
                 exit_code = 1;
                 continue;
             }
@@ -793,7 +797,7 @@ fn run(config: &Config) -> i32 {
             if e.kind() == io::ErrorKind::BrokenPipe {
                 process::exit(0);
             }
-            eprintln!("cut: {path}: {e}");
+            eprintln!("cut: {}: {e}", quotef_os(path));
             exit_code = 1;
         }
     }

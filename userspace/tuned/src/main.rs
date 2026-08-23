@@ -9,6 +9,7 @@
 //! - `tuned-adm` — tuning profile administration CLI
 //! - `tuned-gui` — placeholder for GUI configuration
 
+use quoting::quoteaf_os;
 use std::collections::BTreeMap;
 use std::env;
 use std::process;
@@ -383,7 +384,7 @@ fn cmd_profile(args: &[String]) {
     let name = &args[0];
     let profiles = load_profiles();
     if !profiles.iter().any(|p| p.name == *name) {
-        eprintln!("Error: profile '{}' not found.", name);
+        eprintln!("Error: profile {} not found.", quoteaf_os(name));
         eprintln!("Use 'tuned-adm list' to see available profiles.");
         process::exit(1);
     }
@@ -414,7 +415,7 @@ fn cmd_profile_info(args: &[String]) {
     let profile = match profiles.iter().find(|p| p.name == target) {
         Some(p) => p,
         None => {
-            eprintln!("Profile '{}' not found.", target);
+            eprintln!("Profile {} not found.", quoteaf_os(&target));
             process::exit(1);
         }
     };
@@ -507,12 +508,12 @@ fn cmd_verify() {
     let profile = match profiles.iter().find(|p| p.name == active) {
         Some(p) => p,
         None => {
-            println!("FAIL: Active profile '{}' not found.", active);
+            println!("FAIL: Active profile {} not found.", quoteaf_os(&active));
             process::exit(1);
         }
     };
 
-    println!("Verification for profile '{}':", profile.name);
+    println!("Verification for profile {}:", quoteaf_os(&profile.name));
     let all_ok = true;
 
     for (section, params) in &profile.sections {
@@ -543,7 +544,7 @@ fn run_daemon(args: &[String]) {
     if active.is_empty() {
         println!("tuned: no active profile, using 'balanced'");
     } else {
-        println!("tuned: applying profile '{}'", active);
+        println!("tuned: applying profile {}", quoteaf_os(&active));
     }
 
     if foreground {

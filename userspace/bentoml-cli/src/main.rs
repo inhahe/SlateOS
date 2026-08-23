@@ -4,6 +4,7 @@
 //!
 //! Multi-personality: `bentoml`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -35,7 +36,7 @@ fn run_bentoml(args: &[String]) -> i32 {
         "--version" => println!("bentoml 1.2.0"),
         "serve" => {
             let service = args.get(1).map(|s| s.as_str()).unwrap_or("service:svc");
-            println!("Starting BentoML server for '{}'...", service);
+            println!("Starting BentoML server for {}...", quoteaf_os(service));
             println!("  API server running on http://0.0.0.0:3000");
             println!("  Swagger UI: http://0.0.0.0:3000/docs");
         }
@@ -57,7 +58,7 @@ fn run_bentoml(args: &[String]) -> i32 {
                 println!("my-model:latest           sklearn          12.3 MB    2024-01-15");
                 println!("text-classifier:v2        transformers     450 MB     2024-01-14");
             } else {
-                println!("bentoml models: '{}' completed", sub);
+                println!("bentoml models: {} completed", quoteaf_os(sub));
             }
         }
         "containerize" => {
@@ -65,7 +66,7 @@ fn run_bentoml(args: &[String]) -> i32 {
                 .get(1)
                 .map(|s| s.as_str())
                 .unwrap_or("my-service:latest");
-            println!("Containerizing '{}'...", bento);
+            println!("Containerizing {}...", quoteaf_os(bento));
             println!("  Building Docker image...");
             println!("  Image built: my-service:abc123");
         }
@@ -74,10 +75,10 @@ fn run_bentoml(args: &[String]) -> i32 {
                 .get(1)
                 .map(|s| s.as_str())
                 .unwrap_or("my-service:latest");
-            println!("Pushing '{}' to BentoCloud...", bento);
+            println!("Pushing {} to BentoCloud...", quoteaf_os(bento));
             println!("Done.");
         }
-        _ => println!("bentoml: '{}' completed", subcmd),
+        _ => println!("bentoml: {} completed", quoteaf_os(subcmd)),
     }
     0
 }

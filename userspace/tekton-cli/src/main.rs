@@ -4,6 +4,7 @@
 //!
 //! Multi-personality: `tkn`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -59,7 +60,7 @@ fn run_tkn(args: &[String]) -> i32 {
                     println!("[{} : deploy] Deploying...", name);
                     println!("[{} : deploy] Deployed successfully", name);
                 }
-                _ => println!("tkn pipeline: '{}' completed", sub),
+                _ => println!("tkn pipeline: {} completed", quoteaf_os(sub)),
             }
         }
         "task" => {
@@ -70,7 +71,7 @@ fn run_tkn(args: &[String]) -> i32 {
                 println!("build        10 days ago");
                 println!("deploy       10 days ago");
             } else {
-                println!("tkn task: '{}' completed", sub);
+                println!("tkn task: {} completed", quoteaf_os(sub));
             }
         }
         "hub" => {
@@ -81,16 +82,16 @@ fn run_tkn(args: &[String]) -> i32 {
                     println!("NAME              DESCRIPTION                    RATING");
                     println!("git-clone         Clone a git repo               ★★★★★");
                     println!("git-batch-merge   Merge multiple PRs             ★★★★☆");
-                    println!("Query: '{}'", query);
+                    println!("Query: {}", quoteaf_os(query));
                 }
                 "install" => {
                     let task = args.get(2).map(|s| s.as_str()).unwrap_or("git-clone");
                     println!("Task {} installed in default namespace", task);
                 }
-                _ => println!("tkn hub: '{}' completed", sub),
+                _ => println!("tkn hub: {} completed", quoteaf_os(sub)),
             }
         }
-        _ => println!("tkn: '{}' completed", subcmd),
+        _ => println!("tkn: {} completed", quoteaf_os(subcmd)),
     }
     0
 }

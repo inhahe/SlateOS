@@ -4,6 +4,7 @@
 //!
 //! Multi-personality: `hatch`, `hatchling`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -108,18 +109,18 @@ fn run_hatch(args: &[String]) -> i32 {
                     let env = args.get(2).map(|s| s.as_str()).unwrap_or("default");
                     println!("Creating environment: {}", env);
                     println!("Installing dependencies...");
-                    println!("Environment '{}' created.", env);
+                    println!("Environment {} created.", quoteaf_os(env));
                 }
                 "remove" => {
                     let env = args.get(2).map(|s| s.as_str()).unwrap_or("default");
                     println!("Removing environment: {}", env);
                 }
-                _ => println!("hatch env: '{}' completed", sub),
+                _ => println!("hatch env: {} completed", quoteaf_os(sub)),
             }
         }
         "run" => {
             let cmd = args.get(1).map(|s| s.as_str()).unwrap_or("python");
-            println!("hatch: running '{}' in default environment", cmd);
+            println!("hatch: running {} in default environment", quoteaf_os(cmd));
         }
         "test" => {
             println!("Running tests in default environment...");
@@ -146,7 +147,7 @@ fn run_hatch(args: &[String]) -> i32 {
             println!("Python: 3.12.4");
             println!("Build backend: hatchling");
         }
-        _ => println!("hatch: '{}' completed", subcmd),
+        _ => println!("hatch: {} completed", quoteaf_os(subcmd)),
     }
     0
 }
@@ -175,7 +176,7 @@ fn run_hatchling(args: &[String]) -> i32 {
             println!("Requires-Python: >=3.8");
         }
         "version" => println!("0.1.0"),
-        _ => println!("hatchling: '{}' completed", subcmd),
+        _ => println!("hatchling: {} completed", quoteaf_os(subcmd)),
     }
     0
 }

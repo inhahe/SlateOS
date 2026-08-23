@@ -2,3 +2,8 @@
 name = "hatch-cli"
 version = "0.1.0"
 edition = "2024"
+
+[dependencies]
+# hatch-cli names environments, scripts and project directories that come
+# from the command line and from the project's own config file.
+quoting = { path = "../quoting" }

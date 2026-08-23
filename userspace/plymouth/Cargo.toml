@@ -4,3 +4,6 @@ version = "0.1.0"
 edition = "2024"
 description = "SlateOS plymouth utility"
 [dependencies]
+# plymouth names the boot theme it loaded, a string read out of a config
+# file on disk rather than one it chose.
+quoting = { path = "../quoting" }

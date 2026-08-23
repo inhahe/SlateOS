@@ -2,3 +2,8 @@
 name = "kubeflow-cli"
 version = "0.1.0"
 edition = "2024"
+
+[dependencies]
+# kubeflow-cli names pipelines, runs and experiments, identifiers created by
+# whoever uploaded them to the cluster.
+quoting = { path = "../quoting" }

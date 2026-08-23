@@ -2,3 +2,9 @@
 name = "hyprland-cli"
 version = "0.1.0"
 edition = "2024"
+
+[dependencies]
+# hyprland-cli names workspaces, windows and monitors; a window title is
+# chosen by the application that owns the window, so it is another process's
+# word.
+quoting = { path = "../quoting" }

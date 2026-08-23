@@ -20,6 +20,7 @@
 //! printenv NAME [NAME...]         Display specific variables (exit 1 if missing)
 //! ```
 
+use quoting::quoteaf_os;
 use std::collections::BTreeMap;
 use std::env;
 use std::path::Path;
@@ -162,7 +163,7 @@ fn parse_env_args(args: &[String]) -> Action {
                     config.chdir = Some(dir);
                 }
                 _ => {
-                    eprintln!("env: unrecognized option '{arg}'");
+                    eprintln!("env: unrecognized option {}", quoteaf_os(arg));
                     eprintln!("Try 'env --help' for more information.");
                     process::exit(125);
                 }
@@ -230,7 +231,10 @@ fn parse_env_args(args: &[String]) -> Action {
                         continue;
                     }
                     _ => {
-                        eprintln!("env: invalid option -- '{}'", chars[j]);
+                        eprintln!(
+                            "env: invalid option -- {}",
+                            quoteaf_os(chars[j].to_string())
+                        );
                         eprintln!("Try 'env --help' for more information.");
                         process::exit(125);
                     }
@@ -300,7 +304,7 @@ fn parse_printenv_args(args: &[String]) -> Action {
                     }
                 }
                 if !valid {
-                    eprintln!("printenv: unrecognized option '{arg}'");
+                    eprintln!("printenv: unrecognized option {}", quoteaf_os(arg));
                     eprintln!("Try 'printenv --help' for more information.");
                     process::exit(2);
                 }
@@ -427,7 +431,7 @@ fn exec_command(
     if let Some(dir) = chdir
         && let Err(e) = env::set_current_dir(dir)
     {
-        eprintln!("env: cannot change directory to '{dir}': {e}");
+        eprintln!("env: cannot change directory to {}: {e}", quoteaf_os(dir));
         return 125;
     }
 
@@ -448,7 +452,7 @@ fn exec_command(
         Ok(status) => status.code().unwrap_or(128),
         Err(e) => {
             let kind = e.kind();
-            eprintln!("env: '{program}': {e}");
+            eprintln!("env: {}: {e}", quoteaf_os(program));
             match kind {
                 std::io::ErrorKind::NotFound => 127,
                 std::io::ErrorKind::PermissionDenied => 126,

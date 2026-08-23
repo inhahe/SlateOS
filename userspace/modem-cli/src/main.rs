@@ -4,6 +4,7 @@
 //!
 //! Multi-personality: `mmcli`, `nmcli` (ModemManager / NetworkManager)
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -131,7 +132,7 @@ fn run_nmcli(args: &[String]) -> i32 {
                     println!("connected  full          enabled  enabled  enabled  enabled");
                 }
                 "hostname" => println!("slateos-desktop"),
-                _ => println!("nmcli: general command '{}' completed", cmd),
+                _ => println!("nmcli: general command {} completed", quoteaf_os(cmd)),
             }
         }
         "connection" | "con" => {
@@ -158,7 +159,7 @@ fn run_nmcli(args: &[String]) -> i32 {
                         name.len()
                     );
                 }
-                _ => println!("nmcli: connection command '{}' completed", cmd),
+                _ => println!("nmcli: connection command {} completed", quoteaf_os(cmd)),
             }
         }
         "device" | "dev" => {
@@ -190,7 +191,7 @@ fn run_nmcli(args: &[String]) -> i32 {
                         println!("nmcli: wifi {} completed", subcmd);
                     }
                 }
-                _ => println!("nmcli: device command '{}' completed", cmd),
+                _ => println!("nmcli: device command {} completed", quoteaf_os(cmd)),
             }
         }
         "radio" => {
@@ -207,10 +208,10 @@ fn run_nmcli(args: &[String]) -> i32 {
             match cmd {
                 "on" | "off" => println!("Networking {}.", cmd),
                 "connectivity" => println!("full"),
-                _ => println!("nmcli: networking command '{}' completed", cmd),
+                _ => println!("nmcli: networking command {} completed", quoteaf_os(cmd)),
             }
         }
-        _ => println!("nmcli: unknown object '{}'", obj),
+        _ => println!("nmcli: unknown object {}", quoteaf_os(obj)),
     }
     0
 }

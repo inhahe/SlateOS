@@ -2,3 +2,8 @@
 name = "tmux-cli"
 version = "0.1.0"
 edition = "2024"
+
+[dependencies]
+# tmux-cli names sessions, windows and panes; a session name is whatever the
+# user typed and a window name is set by the program running in it.
+quoting = { path = "../quoting" }

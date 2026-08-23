@@ -10,6 +10,7 @@
 
 #![deny(clippy::all)]
 
+use quoting::quoteaf_os;
 use std::env;
 use std::fs;
 use std::io::{self, Write};
@@ -334,7 +335,7 @@ fn plymouth_main(args: &[String]) -> i32 {
                 return 0;
             }
             other => {
-                eprintln!("plymouth: unknown command '{other}'");
+                eprintln!("plymouth: unknown command {}", quoteaf_os(other));
                 return 1;
             }
         }
@@ -406,7 +407,7 @@ fn plymouthd_main(args: &[String]) -> i32 {
                 };
             }
             other => {
-                eprintln!("plymouthd: unknown option '{other}'");
+                eprintln!("plymouthd: unknown option {}", quoteaf_os(other));
                 return 1;
             }
         }
@@ -416,8 +417,8 @@ fn plymouthd_main(args: &[String]) -> i32 {
     let config = load_config();
 
     eprintln!(
-        "plymouthd: starting with theme '{}', mode {:?}",
-        config.theme, mode
+        "plymouthd: starting with theme {}, mode {mode:?}",
+        quoteaf_os(&config.theme)
     );
     eprintln!("plymouthd: no_daemon={no_daemon}, attach={attach_to_session}");
 
@@ -473,7 +474,10 @@ fn set_theme_main(args: &[String]) -> i32 {
                 theme_name = Some(s.to_string());
             }
             other => {
-                eprintln!("plymouth-set-default-theme: unknown option '{other}'");
+                eprintln!(
+                    "plymouth-set-default-theme: unknown option {}",
+                    quoteaf_os(other)
+                );
                 return 1;
             }
         }
@@ -494,7 +498,10 @@ fn set_theme_main(args: &[String]) -> i32 {
     match theme_name {
         Some(name) => match set_default_theme(&name) {
             Ok(()) => {
-                println!("plymouth-set-default-theme: theme set to '{name}'");
+                println!(
+                    "plymouth-set-default-theme: theme set to {}",
+                    quoteaf_os(&name)
+                );
                 if rebuild {
                     eprintln!("plymouth-set-default-theme: would rebuild initramfs");
                 }

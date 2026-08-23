@@ -18,6 +18,7 @@
 //!       --version   Output version information and exit
 //! ```
 
+use quoting::{quoteaf_os, quotef_os};
 use std::env;
 use std::fs::File;
 use std::io::{self, BufRead, BufReader, Write};
@@ -105,12 +106,12 @@ fn parse_args(args: &[String]) -> ParseResult {
                 match val_str.parse::<usize>() {
                     Ok(n) => width = Some(n),
                     Err(_) => {
-                        eprintln!("fold: invalid width: '{val_str}'");
+                        eprintln!("fold: invalid width: {}", quoteaf_os(&val_str));
                         process::exit(1);
                     }
                 }
             } else {
-                eprintln!("fold: unrecognized option '{arg}'");
+                eprintln!("fold: unrecognized option {}", quoteaf_os(arg));
                 eprintln!("Try 'fold --help' for more information.");
                 process::exit(1);
             }
@@ -142,14 +143,14 @@ fn parse_args(args: &[String]) -> ParseResult {
                     match val_str.parse::<usize>() {
                         Ok(n) => width = Some(n),
                         Err(_) => {
-                            eprintln!("fold: invalid width: '{val_str}'");
+                            eprintln!("fold: invalid width: {}", quoteaf_os(&val_str));
                             process::exit(1);
                         }
                     }
                     break;
                 }
                 _ => {
-                    eprintln!("fold: invalid option -- '{ch}'");
+                    eprintln!("fold: invalid option -- {}", quoteaf_os(ch.to_string()));
                     eprintln!("Try 'fold --help' for more information.");
                     process::exit(1);
                 }
@@ -414,7 +415,7 @@ fn run(config: &Config) -> io::Result<i32> {
                     fold_input(&mut reader, &mut out, config)?;
                 }
                 Err(e) => {
-                    eprintln!("fold: {path}: {e}");
+                    eprintln!("fold: {}: {e}", quotef_os(path));
                     exit_code = 1;
                 }
             }

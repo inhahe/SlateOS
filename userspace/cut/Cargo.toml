@@ -4,3 +4,6 @@ version = "0.1.0"
 edition = "2024"
 description = "SlateOS field/character cut utility"
 [dependencies]
+# cut names each input file, and it is routinely handed a whole directory
+# via a shell glob.
+quoting = { path = "../quoting" }

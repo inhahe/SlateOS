@@ -4,6 +4,7 @@
 //!
 //! Single personality: `wandb`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -48,12 +49,13 @@ fn run_wandb(args: Vec<String>) -> i32 {
         }
         "init" => {
             let project = args.get(1).map(|s| s.as_str()).unwrap_or("my-project");
-            println!("wandb: Initializing project '{}'", project);
+            println!("wandb: Initializing project {}", quoteaf_os(project));
             println!("wandb: Created wandb directory");
             println!("wandb: Updated .gitignore");
             println!(
-                "wandb: Project '{}' ready at https://wandb.ai/user/{}",
-                project, project
+                "wandb: Project {} ready at https://wandb.ai/user/{}",
+                quoteaf_os(project),
+                quoteaf_os(project)
             );
             0
         }
@@ -115,7 +117,7 @@ fn run_wandb(args: Vec<String>) -> i32 {
                         .get(2)
                         .map(|s| s.as_str())
                         .unwrap_or("best-model:latest");
-                    println!("wandb: Downloading artifact '{}'...", name);
+                    println!("wandb: Downloading artifact {}...", quoteaf_os(name));
                     println!(
                         "wandb: Downloaded 456 MB to ./artifacts/{}",
                         name.split(':').next().unwrap_or(name)
@@ -123,7 +125,7 @@ fn run_wandb(args: Vec<String>) -> i32 {
                 }
                 "put" => {
                     let path = args.get(2).map(|s| s.as_str()).unwrap_or("./model");
-                    println!("wandb: Uploading artifact from '{}'...", path);
+                    println!("wandb: Uploading artifact from {}...", quoteaf_os(path));
                     println!("wandb: Artifact uploaded as 'model:v8' (456 MB)");
                 }
                 _ => {
@@ -156,7 +158,7 @@ fn run_wandb(args: Vec<String>) -> i32 {
             if cmd.is_empty() {
                 eprintln!("Usage: wandb <command>. See --help.");
             } else {
-                eprintln!("Error: unknown command '{}'. See --help.", cmd);
+                eprintln!("Error: unknown command {}. See --help.", quoteaf_os(cmd));
             }
             1
         }

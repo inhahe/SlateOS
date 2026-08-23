@@ -4,6 +4,7 @@
 //!
 //! Multi-personality: `harness`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -46,11 +47,11 @@ fn run_harness(args: &[String]) -> i32 {
                 }
                 "run" => {
                     let name = args.get(2).map(|s| s.as_str()).unwrap_or("build-deploy");
-                    println!("Triggering pipeline '{}'...", name);
+                    println!("Triggering pipeline {}...", quoteaf_os(name));
                     println!("Execution ID: exec-abc123");
                     println!("Status: RUNNING");
                 }
-                _ => println!("harness pipeline: '{}' completed", sub),
+                _ => println!("harness pipeline: {} completed", quoteaf_os(sub)),
             }
         }
         "service" => {
@@ -60,7 +61,7 @@ fn run_harness(args: &[String]) -> i32 {
                 println!("my-app         Kubernetes  docker:my-app:latest");
                 println!("backend-api    Kubernetes  docker:backend:v1.2.3");
             } else {
-                println!("harness service: '{}' completed", sub);
+                println!("harness service: {} completed", quoteaf_os(sub));
             }
         }
         "environment" => {
@@ -71,10 +72,10 @@ fn run_harness(args: &[String]) -> i32 {
                 println!("staging       PreProduction");
                 println!("production    Production");
             } else {
-                println!("harness environment: '{}' completed", sub);
+                println!("harness environment: {} completed", quoteaf_os(sub));
             }
         }
-        _ => println!("harness: '{}' completed", subcmd),
+        _ => println!("harness: {} completed", quoteaf_os(subcmd)),
     }
     0
 }

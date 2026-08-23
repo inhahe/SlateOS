@@ -4,6 +4,7 @@
 //!
 //! Multi-personality: `seldon`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -40,15 +41,15 @@ fn run_seldon(args: &[String]) -> i32 {
                 }
                 "load" => {
                     let name = args.get(2).map(|s| s.as_str()).unwrap_or("iris-model");
-                    println!("Loading model '{}'...", name);
+                    println!("Loading model {}...", quoteaf_os(name));
                     println!("Model loaded successfully.");
                 }
                 "infer" => {
                     let name = args.get(2).map(|s| s.as_str()).unwrap_or("iris-model");
-                    println!("Inferring with '{}'...", name);
+                    println!("Inferring with {}...", quoteaf_os(name));
                     println!("{{\"predictions\": [0, 1, 2]}}");
                 }
-                _ => println!("seldon model: '{}' completed", sub),
+                _ => println!("seldon model: {} completed", quoteaf_os(sub)),
             }
         }
         "pipeline" => {
@@ -58,7 +59,7 @@ fn run_seldon(args: &[String]) -> i32 {
                 println!("nlp-pipeline      3         Ready");
                 println!("cv-pipeline       2         Ready");
             } else {
-                println!("seldon pipeline: '{}' completed", sub);
+                println!("seldon pipeline: {} completed", quoteaf_os(sub));
             }
         }
         "status" => {
@@ -68,7 +69,7 @@ fn run_seldon(args: &[String]) -> i32 {
             println!("  Experiments: 1 running");
             println!("  Requests:    12,345 (last 24h)");
         }
-        _ => println!("seldon: '{}' completed", subcmd),
+        _ => println!("seldon: {} completed", quoteaf_os(subcmd)),
     }
     0
 }

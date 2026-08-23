@@ -4,6 +4,7 @@
 //!
 //! Single personality: `pass`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -109,19 +110,19 @@ fn run_pass(args: Vec<String>) -> i32 {
         "rm" | "remove" | "delete" => {
             let name = args.get(1).map(|s| s.as_str()).unwrap_or("old/entry");
             println!("Are you sure you would like to delete {}? [y/N] y", name);
-            println!("removed '{}'", name);
+            println!("removed {}", quoteaf_os(name));
             0
         }
         "mv" => {
             let src = args.get(1).map(|s| s.as_str()).unwrap_or("old/path");
             let dst = args.get(2).map(|s| s.as_str()).unwrap_or("new/path");
-            println!("'{}' => '{}'", src, dst);
+            println!("{} => {}", quoteaf_os(src), quoteaf_os(dst));
             0
         }
         "cp" => {
             let src = args.get(1).map(|s| s.as_str()).unwrap_or("original");
             let dst = args.get(2).map(|s| s.as_str()).unwrap_or("copy");
-            println!("'{}' => '{}'", src, dst);
+            println!("{} => {}", quoteaf_os(src), quoteaf_os(dst));
             0
         }
         "find" | "search" => {
@@ -133,7 +134,7 @@ fn run_pass(args: Vec<String>) -> i32 {
         }
         "grep" => {
             let pattern = args.get(1).map(|s| s.as_str()).unwrap_or("user");
-            println!("Searching for '{}' in passwords...", pattern);
+            println!("Searching for {} in passwords...", quoteaf_os(pattern));
             println!("email/work:");
             println!("  user: user@work.com");
             println!("social/github:");
@@ -167,7 +168,7 @@ fn run_pass(args: Vec<String>) -> i32 {
         }
         _ => {
             // Bare argument is treated as "show"
-            println!("(showing password for '{}')", cmd);
+            println!("(showing password for {})", quoteaf_os(cmd));
             println!("p4ssw0rd-placeholder");
             0
         }

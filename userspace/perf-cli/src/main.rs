@@ -4,6 +4,7 @@
 //!
 //! Multi-personality: `perf`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -54,7 +55,7 @@ fn run_perf(args: &[String]) -> i32 {
                 .map(|s| s.as_str())
                 .unwrap_or("program");
             println!();
-            println!(" Performance counter stats for '{}':", command);
+            println!(" Performance counter stats for {}:", quoteaf_os(command));
             println!();
             println!(
                 "          1,234.56 msec task-clock                       #    0.998 CPUs utilized"
@@ -81,7 +82,7 @@ fn run_perf(args: &[String]) -> i32 {
                 .find(|a| !a.starts_with('-'))
                 .map(|s| s.as_str())
                 .unwrap_or("program");
-            println!("Recording events for '{}'...", command);
+            println!("Recording events for {}...", quoteaf_os(command));
             println!("[ perf record: Woken up 1 times to write data ]");
             println!("[ perf record: Captured and wrote 0.234 MB perf.data (5678 samples) ]");
         }
@@ -125,7 +126,7 @@ fn run_perf(args: &[String]) -> i32 {
         }
         "bench" => {
             let suite = rest.first().map(|s| s.as_str()).unwrap_or("all");
-            println!("# Running '{}' benchmarks...", suite);
+            println!("# Running {} benchmarks...", quoteaf_os(suite));
             println!("# Benchmark: sched/messaging");
             println!("  20 groups, 40 threads: 0.123 seconds");
             println!("# Benchmark: mem/memcpy");
@@ -138,7 +139,7 @@ fn run_perf(args: &[String]) -> i32 {
                 .find(|a| !a.starts_with('-'))
                 .map(|s| s.as_str())
                 .unwrap_or("program");
-            println!("tracing '{}'...", command);
+            println!("tracing {}...", quoteaf_os(command));
             println!(
                 "  0.000 ( 0.012 ms): execve(filename: /usr/bin/{}) = 0",
                 command
@@ -161,8 +162,8 @@ fn run_perf(args: &[String]) -> i32 {
         }
         _ => {
             eprintln!(
-                "perf: '{}' is not a perf command. See 'perf --help'.",
-                subcmd
+                "perf: {} is not a perf command. See 'perf --help'.",
+                quoteaf_os(subcmd)
             );
             return 1;
         }

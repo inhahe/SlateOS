@@ -4,6 +4,7 @@
 //!
 //! Multi-personality: `useradd`, `userdel`, `usermod`, `groupadd`, `groupdel`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -36,7 +37,7 @@ fn run_useradd(args: &[String]) -> i32 {
         .rfind(|a| !a.starts_with('-'))
         .map(|s| s.as_str())
         .unwrap_or("newuser");
-    println!("useradd: user '{}' created", user);
+    println!("useradd: user {} created", quoteaf_os(user));
     if args.iter().any(|a| a == "-m" || a == "--create-home") {
         println!("useradd: home directory /home/{} created", user);
     }
@@ -55,7 +56,7 @@ fn run_userdel(args: &[String]) -> i32 {
         .rfind(|a| !a.starts_with('-'))
         .map(|s| s.as_str())
         .unwrap_or("olduser");
-    println!("userdel: user '{}' deleted", user);
+    println!("userdel: user {} deleted", quoteaf_os(user));
     if args.iter().any(|a| a == "-r" || a == "--remove") {
         println!("userdel: /home/{} removed", user);
     }
@@ -78,7 +79,7 @@ fn run_usermod(args: &[String]) -> i32 {
         .rfind(|a| !a.starts_with('-'))
         .map(|s| s.as_str())
         .unwrap_or("user");
-    println!("usermod: user '{}' modified", user);
+    println!("usermod: user {} modified", quoteaf_os(user));
     0
 }
 
@@ -94,7 +95,7 @@ fn run_groupadd(args: &[String]) -> i32 {
         .rfind(|a| !a.starts_with('-'))
         .map(|s| s.as_str())
         .unwrap_or("newgroup");
-    println!("groupadd: group '{}' created", group);
+    println!("groupadd: group {} created", quoteaf_os(group));
     0
 }
 
@@ -108,7 +109,7 @@ fn run_groupdel(args: &[String]) -> i32 {
         .rfind(|a| !a.starts_with('-'))
         .map(|s| s.as_str())
         .unwrap_or("oldgroup");
-    println!("groupdel: group '{}' deleted", group);
+    println!("groupdel: group {} deleted", quoteaf_os(group));
     0
 }
 

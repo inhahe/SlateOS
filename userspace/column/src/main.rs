@@ -30,6 +30,7 @@
 //!       --version               Output version information and exit
 //! ```
 
+use quoting::{quoteaf_os, quotef_os};
 use std::env;
 use std::fs::File;
 use std::io::{self, BufRead, BufReader, Write};
@@ -280,7 +281,7 @@ fn parse_args(args: &[String]) -> ParseResult {
                     Ok(val) => match val.parse::<usize>() {
                         Ok(n) if n > 0 => term_width = n,
                         _ => {
-                            eprintln!("column: invalid column count: '{val}'");
+                            eprintln!("column: invalid column count: {}", quoteaf_os(val));
                             process::exit(1);
                         }
                     },
@@ -332,7 +333,7 @@ fn parse_args(args: &[String]) -> ParseResult {
                     }
                 }
                 _ => {
-                    eprintln!("column: unrecognized option '{arg}'");
+                    eprintln!("column: unrecognized option {}", quoteaf_os(arg));
                     eprintln!("Try 'column --help' for more information.");
                     process::exit(1);
                 }
@@ -398,7 +399,7 @@ fn parse_args(args: &[String]) -> ParseResult {
                     match val_str.parse::<usize>() {
                         Ok(n) if n > 0 => term_width = n,
                         _ => {
-                            eprintln!("column: invalid column count: '{val_str}'");
+                            eprintln!("column: invalid column count: {}", quoteaf_os(&val_str));
                             process::exit(1);
                         }
                     }
@@ -462,7 +463,7 @@ fn parse_args(args: &[String]) -> ParseResult {
                     break;
                 }
                 _ => {
-                    eprintln!("column: invalid option -- '{ch}'");
+                    eprintln!("column: invalid option -- {}", quoteaf_os(ch.to_string()));
                     eprintln!("Try 'column --help' for more information.");
                     process::exit(1);
                 }
@@ -508,7 +509,7 @@ fn read_all_lines(file_paths: &[String], keep_empty: bool) -> io::Result<Vec<Str
             match File::open(path) {
                 Ok(f) => Box::new(BufReader::new(f)),
                 Err(e) => {
-                    eprintln!("column: {path}: {e}");
+                    eprintln!("column: {}: {e}", quotef_os(path));
                     continue;
                 }
             }

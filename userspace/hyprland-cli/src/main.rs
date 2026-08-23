@@ -4,6 +4,7 @@
 //!
 //! Multi-personality: `hyprctl`, `hyprpm`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -40,22 +41,22 @@ fn run_hyprland(args: &[String], prog: &str) -> i32 {
             "reload" => println!("hyprpm: Plugins reloaded."),
             "add" => {
                 let url = args.get(1).map(|s| s.as_str()).unwrap_or("<url>");
-                println!("hyprpm: Adding repository '{}'...", url);
+                println!("hyprpm: Adding repository {}...", quoteaf_os(url));
                 println!("hyprpm: Done.");
             }
             "remove" => {
                 let name = args.get(1).map(|s| s.as_str()).unwrap_or("<plugin>");
-                println!("hyprpm: Removing '{}'...", name);
+                println!("hyprpm: Removing {}...", quoteaf_os(name));
             }
             "enable" => {
                 let name = args.get(1).map(|s| s.as_str()).unwrap_or("<plugin>");
-                println!("hyprpm: Enabled '{}'.", name);
+                println!("hyprpm: Enabled {}.", quoteaf_os(name));
             }
             "disable" => {
                 let name = args.get(1).map(|s| s.as_str()).unwrap_or("<plugin>");
-                println!("hyprpm: Disabled '{}'.", name);
+                println!("hyprpm: Disabled {}.", quoteaf_os(name));
             }
-            _ => println!("hyprpm: unknown command '{}'", cmd),
+            _ => println!("hyprpm: unknown command {}", quoteaf_os(cmd)),
         }
         return 0;
     }

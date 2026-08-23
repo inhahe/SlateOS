@@ -4,6 +4,7 @@
 //!
 //! Single personality: `tmux`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -41,9 +42,9 @@ fn run_tmux(args: Vec<String>) -> i32 {
                 .unwrap_or("0");
             let detach = args.iter().any(|a| a == "-d");
             if detach {
-                println!("Session '{}' created (detached)", name);
+                println!("Session {} created (detached)", quoteaf_os(name));
             } else {
-                println!("[Session '{}' attached]", name);
+                println!("[Session {} attached]", quoteaf_os(name));
                 println!("  Window 0: bash");
             }
             0
@@ -54,7 +55,7 @@ fn run_tmux(args: Vec<String>) -> i32 {
                 .find(|w| w[0] == "-t")
                 .map(|w| w[1].as_str())
                 .unwrap_or("0");
-            println!("[Attached to session '{}']", target);
+            println!("[Attached to session {}]", quoteaf_os(target));
             0
         }
         "detach" | "detach-client" | "d" => {
@@ -73,7 +74,7 @@ fn run_tmux(args: Vec<String>) -> i32 {
                 .find(|w| w[0] == "-t")
                 .map(|w| w[1].as_str())
                 .unwrap_or("0");
-            println!("Session '{}' killed", target);
+            println!("Session {} killed", quoteaf_os(target));
             0
         }
         "split-window" => {
@@ -127,7 +128,7 @@ fn run_tmux(args: Vec<String>) -> i32 {
                 println!("[new session started]");
                 0
             } else {
-                eprintln!("Error: unknown command '{}'. See --help.", cmd);
+                eprintln!("Error: unknown command {}. See --help.", quoteaf_os(cmd));
                 1
             }
         }

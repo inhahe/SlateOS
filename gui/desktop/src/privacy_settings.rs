@@ -4,25 +4,48 @@
 //! location, contacts, calendar, notifications), activity history,
 //! telemetry opt-out, and app background access controls.
 
+use appearance::Palette;
 use guitk::color::Color;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 
 // ============================================================================
-// Catppuccin Mocha palette
+// Colour
 // ============================================================================
-
-const BASE: Color = Color::from_hex(0x1E1E2E);
-const MANTLE: Color = Color::from_hex(0x181825);
-const SURFACE0: Color = Color::from_hex(0x313244);
-const SURFACE1: Color = Color::from_hex(0x45475A);
-const TEXT: Color = Color::from_hex(0xCDD6F4);
-const SUBTEXT0: Color = Color::from_hex(0xA6ADC8);
-const BLUE: Color = Color::from_hex(0x89B4FA);
-const GREEN: Color = Color::from_hex(0xA6E3A1);
-const RED: Color = Color::from_hex(0xF38BA8);
-const LAVENDER: Color = Color::from_hex(0xB4BEFE);
-const OVERLAY0: Color = Color::from_hex(0x6C7086);
+//
+// This panel had its own copy of Catppuccin Mocha; it now draws from the
+// resolved `Palette` its caller passes in, so it follows the user's mode and
+// accent. Four judgements decide which sites move with the accent and which
+// are pinned to a fixed role.
+//
+// 1. **Two sites follow the accent, and both mean "you are here".** The
+//    active tab's label and the selected telemetry level's label were both
+//    Mocha `blue`. Selection is position, and marking position is the
+//    accent's job, so both became `p.accent`. Nothing else in the panel is
+//    allowed to.
+//
+// 2. **Allowed/Denied is a category, so green and red are frozen.** Three
+//    separate sites report permission state in green-versus-red: the
+//    `PermissionState::color` match, the overview's per-resource status, and
+//    each row of the activity log. A user on a green desktop must still be
+//    able to see that a resource is *denied*, and on a red desktop that one
+//    is *allowed* — so these keep `p.green`/`p.red` regardless of accent.
+//    This is a privacy panel; a status a user cannot trust at a glance is
+//    worse than no status.
+//
+// 3. **The section headings stay `lavender`.** "Telemetry" and "Other" label
+//    a category, and the accent never marks category (module 23's rule).
+//
+// 4. **The tab strip's own fill is position, but not accent.** Active tabs
+//    take `p.surface0` against `p.mantle` — the shape says which tab is
+//    selected, and the label already carries the accent; tinting the fill too
+//    would leave the strip reading as one solid accent block.
+//
+// The switch knob stays `p.text` on the pill rather than becoming derived
+// ink. That contrast problem is real and is tracked as
+// `TD-C-SWITCH-KNOBS-ARE-LOW-CONTRAST-ON-THE-ON-PILL`, which is scheduled to
+// fix every switch in the shell at once; fixing this one here would leave the
+// desktop half-converted and make that sweep harder to verify.
 
 // ============================================================================
 // Permission type
@@ -127,11 +150,16 @@ impl PermissionState {
         }
     }
 
-    pub fn color(self) -> Color {
+    /// The colour this state reports itself in.
+    ///
+    /// Categorical, not decorative: green *means* allowed and red *means*
+    /// denied, so neither follows the accent. See judgement 2 in the module's
+    /// colour notes.
+    pub fn color(self, p: &Palette) -> Color {
         match self {
-            Self::Allowed => GREEN,
-            Self::Denied => RED,
-            Self::NotDecided => OVERLAY0,
+            Self::Allowed => p.green,
+            Self::Denied => p.red,
+            Self::NotDecided => p.overlay0,
         }
     }
 }
@@ -446,7 +474,7 @@ impl PrivacySettingsUI {
 
     const TAB_LABELS: [&'static str; 3] = ["Permissions", "Activity", "General"];
 
-    pub fn render(&self, x: f32, y: f32, width: f32) -> Vec<RenderCommand> {
+    pub fn render(&self, p: &Palette, x: f32, y: f32, width: f32) -> Vec<RenderCommand> {
         let mut cmds = Vec::new();
         let pad = 16.0_f32;
         let inner = width - 2.0 * pad;
@@ -458,7 +486,7 @@ impl PrivacySettingsUI {
             y,
             width,
             height: 900.0,
-            color: BASE,
+            color: p.base,
             corner_radii: CornerRadii::all(8.0),
         });
 
@@ -469,7 +497,7 @@ impl PrivacySettingsUI {
             y: cy,
             text: "Privacy & Permissions".into(),
             font_size: 20.0,
-            color: TEXT,
+            color: p.text,
             font_weight: FontWeightHint::Bold,
             max_width: Some(inner),
             overflow: TextOverflow::Ellipsis,
@@ -486,7 +514,7 @@ impl PrivacySettingsUI {
                 y: cy,
                 width: tab_w - 2.0,
                 height: 30.0,
-                color: if active { SURFACE0 } else { MANTLE },
+                color: if active { p.surface0 } else { p.mantle },
                 corner_radii: CornerRadii::all(6.0),
             });
             cmds.push(RenderCommand::Text {
@@ -494,7 +522,7 @@ impl PrivacySettingsUI {
                 y: cy + 8.0,
                 text: (*label).into(),
                 font_size: 12.0,
-                color: if active { BLUE } else { SUBTEXT0 },
+                color: if active { p.accent } else { p.subtext0 },
                 font_weight: if active {
                     FontWeightHint::Bold
                 } else {
@@ -507,9 +535,9 @@ impl PrivacySettingsUI {
         cy += 38.0;
 
         match self.active_tab {
-            0 => self.render_permissions_tab(&mut cmds, x + pad, cy, inner),
-            1 => self.render_activity_tab(&mut cmds, x + pad, cy, inner),
-            2 => self.render_general_tab(&mut cmds, x + pad, cy, inner),
+            0 => self.render_permissions_tab(p, &mut cmds, x + pad, cy, inner),
+            1 => self.render_activity_tab(p, &mut cmds, x + pad, cy, inner),
+            2 => self.render_general_tab(p, &mut cmds, x + pad, cy, inner),
             _ => {}
         }
 
@@ -518,6 +546,7 @@ impl PrivacySettingsUI {
 
     fn render_permissions_tab(
         &self,
+        p: &Palette,
         cmds: &mut Vec<RenderCommand>,
         x: f32,
         mut y: f32,
@@ -537,7 +566,7 @@ impl PrivacySettingsUI {
                 y,
                 text: format!("{} {}", kind.icon(), kind.label()),
                 font_size: 16.0,
-                color: LAVENDER,
+                color: p.lavender,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(width),
                 overflow: TextOverflow::Ellipsis,
@@ -548,7 +577,7 @@ impl PrivacySettingsUI {
                 y,
                 text: kind.description().into(),
                 font_size: 12.0,
-                color: SUBTEXT0,
+                color: p.subtext0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width - 8.0),
                 overflow: TextOverflow::Ellipsis,
@@ -557,7 +586,15 @@ impl PrivacySettingsUI {
 
             // Global toggle
             let enabled = self.settings.is_globally_enabled(kind);
-            Self::render_toggle(cmds, x, y, width, "Allow access to this resource", enabled);
+            Self::render_toggle(
+                p,
+                cmds,
+                x,
+                y,
+                width,
+                "Allow access to this resource",
+                enabled,
+            );
             y += 32.0;
 
             // App list
@@ -568,7 +605,7 @@ impl PrivacySettingsUI {
                     y,
                     text: "No apps have requested this permission.".into(),
                     font_size: 12.0,
-                    color: OVERLAY0,
+                    color: p.overlay0,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(width),
                     overflow: TextOverflow::Ellipsis,
@@ -580,7 +617,7 @@ impl PrivacySettingsUI {
                         y,
                         width,
                         height: 32.0,
-                        color: MANTLE,
+                        color: p.mantle,
                         corner_radii: CornerRadii::all(4.0),
                     });
                     cmds.push(RenderCommand::Text {
@@ -588,7 +625,7 @@ impl PrivacySettingsUI {
                         y: y + 8.0,
                         text: app.app_name.clone(),
                         font_size: 13.0,
-                        color: TEXT,
+                        color: p.text,
                         font_weight: FontWeightHint::Regular,
                         max_width: Some(width * 0.5),
                         overflow: TextOverflow::Ellipsis,
@@ -598,7 +635,7 @@ impl PrivacySettingsUI {
                         y: y + 8.0,
                         text: app.state.label().into(),
                         font_size: 13.0,
-                        color: app.state.color(),
+                        color: app.state.color(p),
                         font_weight: FontWeightHint::Regular,
                         max_width: Some(width * 0.2),
                         overflow: TextOverflow::Ellipsis,
@@ -608,7 +645,7 @@ impl PrivacySettingsUI {
                         y: y + 8.0,
                         text: format!("{}×", app.access_count),
                         font_size: 11.0,
-                        color: OVERLAY0,
+                        color: p.overlay0,
                         font_weight: FontWeightHint::Regular,
                         max_width: Some(width * 0.2),
                         overflow: TextOverflow::Ellipsis,
@@ -626,7 +663,7 @@ impl PrivacySettingsUI {
                     y,
                     width,
                     height: 40.0,
-                    color: MANTLE,
+                    color: p.mantle,
                     corner_radii: CornerRadii::all(6.0),
                 });
                 cmds.push(RenderCommand::Text {
@@ -634,7 +671,7 @@ impl PrivacySettingsUI {
                     y: y + 4.0,
                     text: format!("{} {}", kind.icon(), kind.label()),
                     font_size: 14.0,
-                    color: TEXT,
+                    color: p.text,
                     font_weight: FontWeightHint::Bold,
                     max_width: Some(width * 0.5),
                     overflow: TextOverflow::Ellipsis,
@@ -652,7 +689,7 @@ impl PrivacySettingsUI {
                     y: y + 4.0,
                     text: status,
                     font_size: 12.0,
-                    color: if enabled { GREEN } else { RED },
+                    color: if enabled { p.green } else { p.red },
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(width * 0.4),
                     overflow: TextOverflow::Ellipsis,
@@ -662,7 +699,7 @@ impl PrivacySettingsUI {
                     y: y + 22.0,
                     text: kind.description().into(),
                     font_size: 10.0,
-                    color: OVERLAY0,
+                    color: p.overlay0,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(width - 16.0),
                     overflow: TextOverflow::Ellipsis,
@@ -674,7 +711,14 @@ impl PrivacySettingsUI {
         }
     }
 
-    fn render_activity_tab(&self, cmds: &mut Vec<RenderCommand>, x: f32, mut y: f32, width: f32) {
+    fn render_activity_tab(
+        &self,
+        p: &Palette,
+        cmds: &mut Vec<RenderCommand>,
+        x: f32,
+        mut y: f32,
+        width: f32,
+    ) {
         let log = self.settings.activity_log();
         if log.is_empty() {
             cmds.push(RenderCommand::Text {
@@ -682,7 +726,7 @@ impl PrivacySettingsUI {
                 y,
                 text: "No activity recorded yet.".into(),
                 font_size: 13.0,
-                color: OVERLAY0,
+                color: p.overlay0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width),
                 overflow: TextOverflow::Ellipsis,
@@ -695,7 +739,7 @@ impl PrivacySettingsUI {
             y,
             text: format!("{} recent access events", log.len()),
             font_size: 13.0,
-            color: TEXT,
+            color: p.text,
             font_weight: FontWeightHint::Bold,
             max_width: Some(width),
             overflow: TextOverflow::Ellipsis,
@@ -710,12 +754,12 @@ impl PrivacySettingsUI {
                 y,
                 width,
                 height: 28.0,
-                color: MANTLE,
+                color: p.mantle,
                 corner_radii: CornerRadii::all(4.0),
             });
             let icon = entry.permission.icon();
             let status = if entry.allowed { "✓" } else { "✕" };
-            let color = if entry.allowed { GREEN } else { RED };
+            let color = if entry.allowed { p.green } else { p.red };
             cmds.push(RenderCommand::Text {
                 x: x + 8.0,
                 y: y + 6.0,
@@ -736,13 +780,20 @@ impl PrivacySettingsUI {
         }
     }
 
-    fn render_general_tab(&self, cmds: &mut Vec<RenderCommand>, x: f32, mut y: f32, width: f32) {
+    fn render_general_tab(
+        &self,
+        p: &Palette,
+        cmds: &mut Vec<RenderCommand>,
+        x: f32,
+        mut y: f32,
+        width: f32,
+    ) {
         cmds.push(RenderCommand::Text {
             x,
             y,
             text: "Telemetry".into(),
             font_size: 14.0,
-            color: LAVENDER,
+            color: p.lavender,
             font_weight: FontWeightHint::Bold,
             max_width: Some(width),
             overflow: TextOverflow::Ellipsis,
@@ -756,7 +807,7 @@ impl PrivacySettingsUI {
                 y,
                 width,
                 height: 28.0,
-                color: if active { SURFACE0 } else { MANTLE },
+                color: if active { p.surface0 } else { p.mantle },
                 corner_radii: CornerRadii::all(4.0),
             });
             let indicator = if active { "● " } else { "○ " };
@@ -765,7 +816,7 @@ impl PrivacySettingsUI {
                 y: y + 6.0,
                 text: format!("{}{}", indicator, level.label()),
                 font_size: 13.0,
-                color: if active { BLUE } else { TEXT },
+                color: if active { p.accent } else { p.text },
                 font_weight: if active {
                     FontWeightHint::Bold
                 } else {
@@ -783,7 +834,7 @@ impl PrivacySettingsUI {
             y,
             text: "Other".into(),
             font_size: 14.0,
-            color: LAVENDER,
+            color: p.lavender,
             font_weight: FontWeightHint::Bold,
             max_width: Some(width),
             overflow: TextOverflow::Ellipsis,
@@ -791,6 +842,7 @@ impl PrivacySettingsUI {
         y += 24.0;
 
         Self::render_toggle(
+            p,
             cmds,
             x,
             y,
@@ -800,6 +852,7 @@ impl PrivacySettingsUI {
         );
         y += 28.0;
         Self::render_toggle(
+            p,
             cmds,
             x,
             y,
@@ -809,6 +862,7 @@ impl PrivacySettingsUI {
         );
         y += 28.0;
         Self::render_toggle(
+            p,
             cmds,
             x,
             y,
@@ -819,6 +873,7 @@ impl PrivacySettingsUI {
     }
 
     fn render_toggle(
+        p: &Palette,
         cmds: &mut Vec<RenderCommand>,
         x: f32,
         y: f32,
@@ -831,13 +886,13 @@ impl PrivacySettingsUI {
             y,
             text: label.into(),
             font_size: 13.0,
-            color: SUBTEXT0,
+            color: p.subtext0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(width * 0.65),
             overflow: TextOverflow::Ellipsis,
         });
         let tx = x + width - 48.0;
-        let bg = if on { GREEN } else { SURFACE1 };
+        let bg = if on { p.green } else { p.surface1 };
         cmds.push(RenderCommand::FillRect {
             x: tx,
             y,
@@ -852,7 +907,7 @@ impl PrivacySettingsUI {
             y: y + 2.0,
             width: 16.0,
             height: 16.0,
-            color: TEXT,
+            color: p.text,
             corner_radii: CornerRadii::all(8.0),
         });
     }
@@ -882,6 +937,15 @@ mod tests {
     )]
 
     use super::*;
+    use crate::palette_check::assert_drawn_from;
+
+    fn mocha() -> Palette {
+        Palette::for_mode(false)
+    }
+
+    fn rgb(c: Color) -> (u8, u8, u8) {
+        (c.r, c.g, c.b)
+    }
 
     #[test]
     fn permission_kind_labels() {
@@ -900,7 +964,7 @@ mod tests {
             PermissionState::NotDecided,
         ] {
             assert!(!s.label().is_empty());
-            let _ = s.color();
+            let _ = s.color(&mocha());
         }
     }
 
@@ -1153,7 +1217,7 @@ mod tests {
     #[test]
     fn ui_render_produces_commands() {
         let ui = PrivacySettingsUI::new();
-        let cmds = ui.render(0.0, 0.0, 500.0);
+        let cmds = ui.render(&mocha(), 0.0, 0.0, 500.0);
         assert!(!cmds.is_empty());
     }
 
@@ -1162,7 +1226,7 @@ mod tests {
         let mut ui = PrivacySettingsUI::new();
         for i in 0..3 {
             ui.set_active_tab(i);
-            let cmds = ui.render(0.0, 0.0, 500.0);
+            let cmds = ui.render(&mocha(), 0.0, 0.0, 500.0);
             assert!(!cmds.is_empty());
         }
     }
@@ -1177,7 +1241,7 @@ mod tests {
             PermissionState::Allowed,
         );
         ui.select_permission(Some(0)); // Camera
-        let cmds = ui.render(0.0, 0.0, 500.0);
+        let cmds = ui.render(&mocha(), 0.0, 0.0, 500.0);
         let has_cam = cmds
             .iter()
             .any(|c| matches!(c, RenderCommand::Text { text, .. } if text.contains("Camera")));
@@ -1196,7 +1260,7 @@ mod tests {
         ui.settings_mut()
             .record_access("app", PermissionKind::Camera, true);
         ui.set_active_tab(1);
-        let cmds = ui.render(0.0, 0.0, 500.0);
+        let cmds = ui.render(&mocha(), 0.0, 0.0, 500.0);
         assert!(!cmds.is_empty());
     }
 
@@ -1227,5 +1291,529 @@ mod tests {
         s.record_access("app", PermissionKind::Camera, true);
         let perms = s.apps_for_permission(PermissionKind::Camera);
         assert_eq!(perms[0].access_count, 2);
+    }
+
+    // ========================================================================
+    // Palette conversion
+    // ========================================================================
+
+    const SAFE_ACCENTS: [Color; 4] = [
+        appearance::MAUVE,
+        appearance::TEAL,
+        appearance::SAPPHIRE,
+        appearance::PINK,
+    ];
+
+    /// Every state this panel can be rendered in, named.
+    ///
+    /// Built by enumerating the renderer's `if`s and `match`es rather than its
+    /// colours: a leftover Mocha constant is only caught if the sweep renders
+    /// the state that draws it, and two thirds of this module's colour sites
+    /// sit behind the `match self.active_tab` in `render`.
+    fn every_state() -> Vec<(String, PrivacySettingsUI)> {
+        let mut out: Vec<(String, PrivacySettingsUI)> = Vec::new();
+
+        // Tab 0, overview. The status line is three-way, so the fixture needs
+        // a disabled resource, an enabled one with allowed apps, and an
+        // enabled one with none.
+        let mut st = PrivacySettings::new();
+        st.set_globally_enabled(PermissionKind::Camera, false);
+        st.set_app_permission(
+            "a",
+            "App A",
+            PermissionKind::Microphone,
+            PermissionState::Allowed,
+        );
+        let mut ui = PrivacySettingsUI::with_settings(st);
+        ui.set_active_tab(0);
+        ui.select_permission(None);
+        out.push(("overview: disabled, allowed, empty".into(), ui));
+
+        // Tab 0, detail, no app has asked yet.
+        let mut ui = PrivacySettingsUI::new();
+        ui.set_active_tab(0);
+        ui.select_permission(Some(0));
+        out.push(("detail: no apps".into(), ui));
+
+        // Tab 0, detail, one app in each of the three states.
+        let mut st = PrivacySettings::new();
+        for (i, state) in [
+            PermissionState::Allowed,
+            PermissionState::Denied,
+            PermissionState::NotDecided,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            st.set_app_permission(
+                &format!("app{i}"),
+                &format!("App {i}"),
+                PermissionKind::ALL[0],
+                state,
+            );
+        }
+        let mut ui = PrivacySettingsUI::with_settings(st);
+        ui.set_active_tab(0);
+        ui.select_permission(Some(0));
+        out.push(("detail: one app per state, enabled".into(), ui));
+
+        // Tab 0, detail, resource globally disabled -- flips the toggle.
+        let mut st = PrivacySettings::new();
+        st.set_globally_enabled(PermissionKind::ALL[0], false);
+        st.set_app_permission(
+            "app",
+            "App",
+            PermissionKind::ALL[0],
+            PermissionState::Denied,
+        );
+        let mut ui = PrivacySettingsUI::with_settings(st);
+        ui.set_active_tab(0);
+        ui.select_permission(Some(0));
+        out.push(("detail: resource disabled".into(), ui));
+
+        // Tab 1, empty log.
+        let mut ui = PrivacySettingsUI::new();
+        ui.set_active_tab(1);
+        out.push(("activity: empty".into(), ui));
+
+        // Tab 1, log carrying both an allowed and a denied event.
+        let mut st = PrivacySettings::new();
+        st.set_app_permission(
+            "ok",
+            "Ok App",
+            PermissionKind::Camera,
+            PermissionState::Allowed,
+        );
+        st.record_access("ok", PermissionKind::Camera, true);
+        st.record_access("no", PermissionKind::Microphone, false);
+        let mut ui = PrivacySettingsUI::with_settings(st);
+        ui.set_active_tab(1);
+        out.push(("activity: allowed and denied".into(), ui));
+
+        // Tab 2, one fixture per telemetry level so every radio row is
+        // rendered both selected and unselected, crossed with the three
+        // toggles set both ways.
+        for (i, level) in TelemetryLevel::ALL.into_iter().enumerate() {
+            for on in [false, true] {
+                let mut st = PrivacySettings::new();
+                st.telemetry = level;
+                st.prompt_on_first_access = on;
+                st.clear_history_on_logout = on;
+                st.location_while_in_use_only = on;
+                let mut ui = PrivacySettingsUI::with_settings(st);
+                ui.set_active_tab(2);
+                out.push((format!("general: level {i}, toggles {on}"), ui));
+            }
+        }
+
+        out
+    }
+
+    fn texts_of(cmds: &[RenderCommand]) -> Vec<(String, f32, Color)> {
+        cmds.iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text {
+                    text,
+                    font_size,
+                    color,
+                    ..
+                } => Some((text.clone(), *font_size, *color)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn fills(cmds: &[RenderCommand], w: f32, h: f32) -> Vec<Color> {
+        cmds.iter()
+            .filter_map(|c| match c {
+                RenderCommand::FillRect {
+                    width,
+                    height,
+                    color,
+                    ..
+                } if (*width - w).abs() < 0.01 && (*height - h).abs() < 0.01 => Some(*color),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn every_color(cmds: &[RenderCommand]) -> Vec<Color> {
+        cmds.iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { color, .. } | RenderCommand::FillRect { color, .. } => {
+                    Some(*color)
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn every_colour_this_panel_draws_comes_from_its_palette() {
+        for dark in [false, true] {
+            for accent in SAFE_ACCENTS {
+                let mut pal = Palette::for_mode(dark);
+                pal.accent = accent;
+                for (what, ui) in every_state() {
+                    let cmds = ui.render(&pal, 0.0, 0.0, 500.0);
+                    assert_drawn_from(&pal, &cmds, &[], &format!("{what} (dark={dark})"));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_fixtures_take_every_branch_this_panel_has() {
+        let p = mocha();
+        let all: Vec<Vec<RenderCommand>> = every_state()
+            .into_iter()
+            .map(|(_, ui)| ui.render(&p, 0.0, 0.0, 500.0))
+            .collect();
+        let says = |needle: &str| {
+            all.iter()
+                .any(|c| texts_of(c).iter().any(|(t, _, _)| t.contains(needle)))
+        };
+
+        // Permissions tab: both arms, and both sub-arms of the detail view.
+        assert!(
+            says("No apps have requested"),
+            "detail-with-no-apps is never rendered"
+        );
+        assert!(says("Allowed"), "an allowed app row is never rendered");
+        assert!(says("Denied"), "a denied app row is never rendered");
+        assert!(
+            says("Not decided"),
+            "an undecided app row is never rendered"
+        );
+        // The overview status line is three-way.
+        assert!(says("Disabled"), "the disabled status is never rendered");
+        assert!(
+            says("apps allowed"),
+            "the allowed-count status is never rendered"
+        );
+        assert!(says("No apps"), "the no-apps status is never rendered");
+        // Activity tab: both arms, and both event outcomes.
+        assert!(
+            says("No activity recorded"),
+            "the empty log is never rendered"
+        );
+        assert!(
+            says("recent access events"),
+            "a populated log is never rendered"
+        );
+        assert!(
+            says("\u{2713}"),
+            "an allowed activity row is never rendered"
+        );
+        assert!(says("\u{2715}"), "a denied activity row is never rendered");
+        // General tab: both radio arms.
+        assert!(says("\u{25CF} "), "no telemetry level is ever selected");
+        assert!(says("\u{25CB} "), "no telemetry level is ever unselected");
+        assert!(says("Telemetry"), "the general tab is never rendered");
+    }
+
+    /// The fixture named `name`, or a panic naming what was asked for.
+    fn state(name: &str) -> PrivacySettingsUI {
+        every_state()
+            .into_iter()
+            .find(|(n, _)| n == name)
+            .map(|(_, ui)| ui)
+            .unwrap_or_else(|| panic!("no fixture named {name:?}"))
+    }
+
+    /// Render the fixture named `name` at a fixed 500px width, so the sizes
+    /// the role tables match on are stable: inner width is 468 and a tab is
+    /// 154 wide.
+    fn draw(name: &str, p: &Palette) -> Vec<RenderCommand> {
+        state(name).render(p, 0.0, 0.0, 500.0)
+    }
+
+    /// The colour of every text whose content contains `want`. Same
+    /// one-site-many-rows contract as `text_starting`.
+    fn text_containing(cmds: &[RenderCommand], want: &str) -> Color {
+        let hits: Vec<Color> = texts_of(cmds)
+            .into_iter()
+            .filter(|(t, _, _)| t.contains(want))
+            .map(|(_, _, c)| c)
+            .collect();
+        assert!(!hits.is_empty(), "no text containing {want:?} is drawn");
+        assert!(
+            hits.iter().all(|c| rgb(*c) == rgb(hits[0])),
+            "the {} texts containing {want:?} are not all one colour",
+            hits.len()
+        );
+        hits[0]
+    }
+
+    /// The colour of every text whose content is exactly `want`.
+    ///
+    /// The tab labels need this rather than `text_containing`: "Permissions"
+    /// is also a substring of the panel title, and a substring match would
+    /// silently compare the wrong site.
+    fn text_exact(cmds: &[RenderCommand], want: &str) -> Color {
+        let hits: Vec<Color> = texts_of(cmds)
+            .into_iter()
+            .filter(|(t, _, _)| t == want)
+            .map(|(_, _, c)| c)
+            .collect();
+        assert!(!hits.is_empty(), "no text exactly {want:?} is drawn");
+        assert!(
+            hits.iter().all(|c| rgb(*c) == rgb(hits[0])),
+            "the {} texts exactly {want:?} are not all one colour",
+            hits.len()
+        );
+        hits[0]
+    }
+
+    #[test]
+    fn every_text_this_panel_draws_is_in_the_role_it_claims() {
+        // ONE ENTRY PER SOURCE SITE. Not one per kind of site, and not one per
+        // rendered row -- a loop that draws ten app rows from a single
+        // `color:` expression is ONE site, but two expressions that happen to
+        // name the same role are TWO. Shortening this table by grouping is how
+        // modules 21 and 22 lost five defects between them; do not do it.
+        let p = mocha();
+        let over = draw("overview: disabled, allowed, empty", &p);
+        let bare = draw("detail: no apps", &p);
+        let full = draw("detail: one app per state, enabled", &p);
+        let none = draw("activity: empty", &p);
+        let act = draw("activity: allowed and denied", &p);
+        let tab2 = draw("general: level 0, toggles true", &p);
+
+        let kind0 = PermissionKind::ALL[0];
+
+        // render
+        assert_eq!(
+            rgb(text_containing(&over, "Privacy & Permissions")),
+            rgb(p.text)
+        );
+        // render_permissions_tab, detail arm
+        assert_eq!(rgb(text_containing(&bare, kind0.label())), rgb(p.lavender));
+        assert_eq!(
+            rgb(text_containing(&bare, kind0.description())),
+            rgb(p.subtext0)
+        );
+        assert_eq!(
+            rgb(text_containing(&bare, "No apps have requested")),
+            rgb(p.overlay0)
+        );
+        assert_eq!(rgb(text_containing(&full, "App 0")), rgb(p.text));
+        assert_eq!(rgb(text_containing(&full, "0\u{d7}")), rgb(p.overlay0));
+        // render_permissions_tab, overview arm
+        assert_eq!(
+            rgb(text_containing(&over, PermissionKind::Camera.label())),
+            rgb(p.text)
+        );
+        assert_eq!(
+            rgb(text_containing(&over, PermissionKind::Camera.description())),
+            rgb(p.overlay0)
+        );
+        // render_activity_tab
+        assert_eq!(
+            rgb(text_containing(&none, "No activity recorded")),
+            rgb(p.overlay0)
+        );
+        assert_eq!(
+            rgb(text_containing(&act, "recent access events")),
+            rgb(p.text)
+        );
+        // render_general_tab
+        assert_eq!(rgb(text_containing(&tab2, "Telemetry")), rgb(p.lavender));
+        assert_eq!(rgb(text_containing(&tab2, "Other")), rgb(p.lavender));
+        // render_toggle
+        assert_eq!(
+            rgb(text_containing(&tab2, "Prompt on first access")),
+            rgb(p.subtext0)
+        );
+    }
+
+    #[test]
+    fn every_rectangle_this_panel_draws_is_in_the_role_it_claims() {
+        // ONE ENTRY PER SOURCE SITE -- see the note on the text table above.
+        //
+        // Note that the activity row and the telemetry row are both 468x28.
+        // They are told apart by fixture, not by size: they live on different
+        // tabs and are never in one render.
+        let p = mocha();
+        let over = draw("overview: disabled, allowed, empty", &p);
+        let full = draw("detail: one app per state, enabled", &p);
+        let act = draw("activity: allowed and denied", &p);
+        let tab2 = draw("general: level 0, toggles true", &p);
+
+        // render: the panel background.
+        assert_eq!(rgb(fills(&over, 500.0, 900.0)[0]), rgb(p.base));
+        // render_permissions_tab: an app row.
+        assert!(
+            fills(&full, 468.0, 32.0)
+                .iter()
+                .all(|c| rgb(*c) == rgb(p.mantle))
+        );
+        // render_permissions_tab: an overview row.
+        assert!(
+            fills(&over, 468.0, 40.0)
+                .iter()
+                .all(|c| rgb(*c) == rgb(p.mantle))
+        );
+        // render_activity_tab: a log row.
+        assert!(
+            fills(&act, 468.0, 28.0)
+                .iter()
+                .all(|c| rgb(*c) == rgb(p.mantle))
+        );
+        // render_toggle: the knob.
+        assert!(
+            fills(&tab2, 16.0, 16.0)
+                .iter()
+                .all(|c| rgb(*c) == rgb(p.text))
+        );
+    }
+
+    #[test]
+    fn every_choice_this_panel_makes_hands_over_the_role_it_claims() {
+        // The sweep cannot see any of these and neither role table can reach
+        // them: every arm names a role, and a role is a member of BOTH
+        // palettes, so swapping one arm for another is invisible to a
+        // membership check. A per-source-site table does not help either --
+        // these sites choose a colour rather than drawing one, and the table
+        // only ever sees whichever arm its fixture happened to take.
+        //
+        // So: one assertion per ARM, both sides of every choice.
+        let p = mocha();
+
+        // PermissionState::color -- three arms.
+        assert_eq!(rgb(PermissionState::Allowed.color(&p)), rgb(p.green));
+        assert_eq!(rgb(PermissionState::Denied.color(&p)), rgb(p.red));
+        assert_eq!(rgb(PermissionState::NotDecided.color(&p)), rgb(p.overlay0));
+
+        // render: the tab strip, fill and label, selected and not.
+        let over = draw("overview: disabled, allowed, empty", &p);
+        let tabs = fills(&over, 154.0, 30.0);
+        assert_eq!(rgb(tabs[0]), rgb(p.surface0), "the selected tab's fill");
+        assert_eq!(rgb(tabs[1]), rgb(p.mantle), "an unselected tab's fill");
+        assert_eq!(rgb(text_exact(&over, "Permissions")), rgb(p.accent));
+        assert_eq!(rgb(text_exact(&over, "Activity")), rgb(p.subtext0));
+
+        // render_permissions_tab: the overview status line, all three ways.
+        assert_eq!(rgb(text_containing(&over, "Disabled")), rgb(p.red));
+        assert_eq!(rgb(text_containing(&over, "apps allowed")), rgb(p.green));
+        assert_eq!(rgb(text_containing(&over, "No apps")), rgb(p.green));
+
+        // render_activity_tab: an allowed event and a denied one.
+        let act = draw("activity: allowed and denied", &p);
+        assert_eq!(rgb(text_containing(&act, "\u{2713}")), rgb(p.green));
+        assert_eq!(rgb(text_containing(&act, "\u{2715}")), rgb(p.red));
+
+        // render_general_tab: the radio row, fill and label, both ways.
+        let tab2 = draw("general: level 0, toggles true", &p);
+        let rows = fills(&tab2, 468.0, 28.0);
+        assert_eq!(rgb(rows[0]), rgb(p.surface0), "the selected level's row");
+        assert_eq!(rgb(rows[1]), rgb(p.mantle), "an unselected level's row");
+        assert_eq!(rgb(text_containing(&tab2, "\u{25CF} ")), rgb(p.accent));
+        assert_eq!(rgb(text_containing(&tab2, "\u{25CB} ")), rgb(p.text));
+
+        // render_toggle: the pill, both ways.
+        let off = draw("general: level 0, toggles false", &p);
+        assert!(
+            fills(&tab2, 40.0, 20.0)
+                .iter()
+                .all(|c| rgb(*c) == rgb(p.green))
+        );
+        assert!(
+            fills(&off, 40.0, 20.0)
+                .iter()
+                .all(|c| rgb(*c) == rgb(p.surface1))
+        );
+    }
+
+    #[test]
+    fn only_the_two_selection_labels_follow_the_accent() {
+        // A COUNT, not a list. If a fourth site starts taking the accent this
+        // fails rather than passing unnoticed, which is the whole point --
+        // "the accent marks position and invitation" is a claim about the
+        // sites that DON'T take it as much as the ones that do.
+        //
+        // Tab 2 is chosen because it draws both accent sites at once: its own
+        // tab label, and the selected telemetry level.
+        for accent in SAFE_ACCENTS {
+            let mut p = mocha();
+            p.accent = accent;
+            let cmds = draw("general: level 0, toggles true", &p);
+            let n = every_color(&cmds)
+                .into_iter()
+                .filter(|c| rgb(*c) == rgb(accent))
+                .count();
+            assert_eq!(
+                n, 2,
+                "the general tab should take the accent exactly twice \
+                 (its tab label and the selected telemetry level), not {n} times"
+            );
+        }
+    }
+
+    #[test]
+    fn nothing_that_reports_a_permission_state_follows_the_accent() {
+        // This is a privacy panel: green means allowed and red means denied,
+        // and a user on a green desktop must still be able to read "denied".
+        // So every state read-out is pinned, and the way to prove a colour is
+        // pinned is to move the accent underneath it and watch it not budge.
+        let names = [
+            "overview: disabled, allowed, empty",
+            "detail: one app per state, enabled",
+            "activity: allowed and denied",
+            "general: level 0, toggles true",
+        ];
+        for name in names {
+            let mut first: Option<Vec<Color>> = None;
+            for accent in SAFE_ACCENTS {
+                let mut p = mocha();
+                p.accent = accent;
+                let cmds = draw(name, &p);
+                let states: Vec<Color> = every_color(&cmds)
+                    .into_iter()
+                    .filter(|c| {
+                        rgb(*c) == rgb(p.green)
+                            || rgb(*c) == rgb(p.red)
+                            || rgb(*c) == rgb(p.overlay0)
+                    })
+                    .collect();
+                match &first {
+                    None => first = Some(states),
+                    Some(want) => assert_eq!(
+                        states.iter().map(|c| rgb(*c)).collect::<Vec<_>>(),
+                        want.iter().map(|c| rgb(*c)).collect::<Vec<_>>(),
+                        "{name}: a state read-out moved when the accent did"
+                    ),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn allowed_and_denied_stay_apart_under_every_accent_and_mode() {
+        // The pair is what carries the meaning, so neither half may collide
+        // with the other or with the accent that happens to be set. A green
+        // desktop must not make "denied" look allowed.
+        for dark in [false, true] {
+            for accent in SAFE_ACCENTS {
+                let mut p = Palette::for_mode(dark);
+                p.accent = accent;
+                let allow = PermissionState::Allowed.color(&p);
+                let deny = PermissionState::Denied.color(&p);
+                let undecided = PermissionState::NotDecided.color(&p);
+                assert_ne!(
+                    rgb(allow),
+                    rgb(deny),
+                    "allowed and denied collide (dark={dark})"
+                );
+                assert_ne!(rgb(allow), rgb(undecided), "allowed and undecided collide");
+                assert_ne!(rgb(deny), rgb(undecided), "denied and undecided collide");
+                assert_ne!(
+                    rgb(allow),
+                    rgb(accent),
+                    "allowed collides with the accent (dark={dark})"
+                );
+                assert_ne!(rgb(deny), rgb(accent), "denied collides with the accent");
+            }
+        }
     }
 }

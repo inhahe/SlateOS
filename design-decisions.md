@@ -37656,6 +37656,187 @@ same mistake, and because the INTx writes would otherwise have inherited it.
 
 ---
 
+## §363 — The capability-subset spawn gets its own entry point, `slateos_spawn_caps`, rather than an attribute on `posix_spawnattr_t`
+
+**Date:** 2026-08-22
+**Decided by:** Claude (autonomous)
+**Where it bites:** `posix/src/spawn.rs` — `slateos_spawn_caps`, `spawn_impl`,
+`spawn_ex2_args`, the `SpawnEx2Args` mirror; `posix/src/syscall.rs`
+`SYS_PROCESS_SPAWN_EX2`.
+
+**In short:** The kernel gained a way to start a program holding only *some* of
+the permissions the parent holds, instead of all of them (lane A's syscall 559
+— see §279 for why it is a new number). Userspace needed a way to ask for that.
+The question was where to put the new argument: hidden inside the existing
+`posix_spawn` attributes object, or in a new function beside `posix_spawn`. We
+added a new function. `posix_spawn` itself is untouched and still hands the
+child everything, which is what the POSIX standard requires it to do.
+
+### The options
+
+| | *What changes* |
+|---|---|
+| **A. New entry point** (chosen) | A caller that wants to narrow permissions calls `slateos_spawn_caps(...)` instead of `posix_spawn(...)`; the extra list is a visible argument. |
+| **B. Attribute on `posix_spawnattr_t`** | A caller sets a field on the attributes object it already passes, and keeps calling `posix_spawn`. |
+
+### Why A
+
+**`posix_spawnattr_t` is a value, and a pointer stored in it outlives nothing.**
+The object is 336 bytes of plain data with a C ABI (`test_spawnattr_matches_musl_layout`
+pins the layout); callers copy it, keep it in a struct, reuse it across several
+spawns, and memcpy it. A capability array is variable-length, so the attribute
+could only ever be a *pointer plus a count* stored in the padding — and every
+one of those ordinary uses would then carry a pointer to a list that may have
+been dropped. A dangling pointer smuggled through a struct nobody thinks of as
+holding references is the kind of bug that shows up as a spawn with the wrong
+authority, which is the exact failure this feature exists to prevent.
+
+**A sandbox request should not be invisible at the call site.** With B, the
+difference between "this child gets everything I have" and "this child gets
+three capabilities" is a line somewhere earlier that set a field. With A it is
+the name of the function being called. Reviewing an attribute-carried policy
+means finding every mutation of the attr object; reviewing A means reading the
+call.
+
+**POSIX pins the default anyway.** `posix_spawn` is specified as
+fork+exec-equivalent, and `fork` gives the child the parent's whole authority,
+so `posix_spawn`'s default must stay inherit-everything under either option.
+Given that, B's only advantage — reusing a familiar signature — buys nothing a
+portable program can use: any code setting the attribute is already SlateOS-only.
+
+**Cost of A, stated honestly.** Two exported symbols where C libraries
+conventionally have one, and a second signature to keep in step with
+`posix_spawn` if it ever grows a parameter. Mitigated by both being thin
+wrappers over one `spawn_impl`, so ELF loading, fd-map construction, argv
+packing and the `munmap`/`close_all` cleanup exist once.
+
+### Two smaller calls made inside this one
+
+**`None` goes to syscall 517, not to 559 with `cap_mode == 0`.** Both mean
+"inherit everything" and the kernel treats them identically. Routing the
+untouched case down the untouched syscall means adding this feature cannot
+regress `posix_spawn`, which every existing caller uses; the alternative would
+have put every spawn in the system through new code to gain nothing.
+
+**A delegation refusal is reported as `EPERM`, not the table's `EACCES`.** The
+shared kernel-error mapping sends `PermissionDenied` to `EACCES`, and
+`load_elf` earlier in the same function can also return `EACCES` for a binary
+it could not read. On the subset path those two would be indistinguishable, so
+a caller whose capability list was rejected would go and look at the file —
+a smaller copy of the bug lane A's request describes, where a quietly
+under-privileged child surfaced as `libc.so.6: cannot open shared object file`
+and was read as a userspace bug for a day. So from `slateos_spawn_caps`,
+`EPERM` means "the kernel refused on capability grounds" and `EACCES` means
+"the binary was unreadable". The divergence is confined to this entry point;
+the shared table and `posix_spawn` are unchanged. The cost is that one kernel
+error now has two POSIX spellings depending on which function you called, which
+is a real inconsistency — accepted because the alternative is an ambiguity in
+precisely the answer this feature exists to make legible.
+
+### What is *not* in the mirror, on purpose
+
+No retry-with-fewer-capabilities loop. The kernel fails the whole spawn if the
+parent names authority it does not hold, rather than trimming to the
+intersection, and libc does not soften that: the list is caller-written, so an
+unsatisfiable entry is a caller bug and belongs at the call site.
+
+## §364 — Mode-string parsing is a crate of its own, not a `coreutils` module, because the shell and `install` need it and neither may depend on `coreutils`
+
+**Date:** 2026-08-22
+**Decided by:** Claude (autonomous)
+**Where it bites:** `userspace/modechange/` (new); `userspace/coreutils/src/bin/chmod.rs`,
+`.../mkdir.rs`, `.../mkfifo.rs`, `.../stat.rs`; `userspace/install`,
+`userspace/chown`; `userspace/oils`'s `umask` builtin.
+
+**In short:** A "mode string" is the thing you type after `chmod` — `755`, or
+`u+w`, or `a+rX,go-w`. Four separate places in the tree each had their own
+hand-written parser for it, and they disagreed with each other on thirteen
+points, so a script that set a permission with one utility and checked it with
+another could get two different answers about the same file. The fix is one
+parser everyone shares. The only question was *where to put it*: inside the
+`coreutils` crate, where `chmod` already lives, or in a small crate of its own.
+It went in its own crate.
+
+### The options
+
+| | *What changes* |
+|---|---|
+| **A. Its own crate, `modechange`** (chosen) | `install`, `chown` and the shell can call the shared parser; the workspace gains one more small crate. |
+| **B. A module inside `coreutils`** | Only the utilities inside `coreutils` can call it; `install`, `chown` and the shell keep their own copies, and the disagreement survives in three places. |
+
+### Why A
+
+The deciding fact is that the callers are not all in `coreutils`, and cannot
+be. `userspace/install` and `userspace/chown` are separate binaries with their
+own crates; `oils` is the shell, whose `umask` builtin parses the same grammar.
+Making any of them depend on `coreutils` to reach one parser would pull in
+eighty-odd binaries' worth of code and a dependency edge from the shell to the
+utilities — exactly backwards, since the utilities are the things the shell
+runs. That is the same shape as §322, which put the regular-expression engine
+in `userspace/ere` for the same reason: `grep`, `sed`, `awk`, `expr` and `osh`
+all match the same patterns, and the shell may not depend on the utilities.
+
+The cost of B is not that the parser is inconvenient to reach — it is that the
+bug this work exists to fix would only be half fixed. The thirteen
+disagreements were between `chmod`, `mkdir -m`, `install -m` and the shell's
+`umask`; two of those four are outside `coreutils`. A shared module inside
+`coreutils` would reconcile `chmod` with `mkdir` and leave `install` and the
+shell still holding their own answers, which is a worse outcome than it looks:
+the remaining disagreement would be *harder* to find, because three of the four
+parsers now agree and the fourth looks like a local bug rather than a missing
+abstraction.
+
+The cost of A is one more workspace member — a real cost, since the workspace
+already has hundreds and each one is a manifest to keep current. It is paid
+once, and the crate is small and finished: it implements a grammar POSIX froze,
+and the fixture that pins it is 24,480 rows measured from GNU chmod 9.4.
+
+### What went in it, and what did not
+
+`permission_string` (gnulib's `strmode` — the `rwxr-xr-x` rendering) is in the
+crate even though it is a *printing* function rather than a parsing one,
+because it is the same twelve bits with the same overload to get right: setuid,
+setgid and sticky have no column of their own and are shown in the execute
+slot, lowercase when the execute bit is set and uppercase when it is not. Three
+callers need it — `chmod -v` to say what it did, and `ls -l` and `stat` to
+report a mode — and `stat.rs` still carries a private copy, logged in
+`known-issues.md` as the remaining one to converge.
+
+The umask is *not* read inside the crate. `adjust` takes it as an argument, so
+the crate performs no I/O and no syscalls, which is what lets the 24,480-row
+fixture be a pure table-driven test rather than something that has to create
+files. Reading the umask is the caller's job, and `chmod` only does it when the
+mode was spelt symbolically — an octal mode ignores it entirely.
+
+### Correction, same day: the shell's `umask` is *not* one of the callers
+
+The reasoning above names three non-`coreutils` callers — `install`, `chown`
+and the shell's `umask` builtin. Converting them turned up that the third is
+wrong on the facts, and the conclusion is unchanged only by luck: `install` and
+`chown` alone are enough to force the separate crate, so A is still right.
+
+`umask` does not parse the coreutils grammar. It parses **bash's**, which looks
+identical and is a strict subset with different semantics. Measured against
+bash 5.2.21: it rejects `X`, `s` and `t` as permission characters, rejects the
+copy-source triads (`u=g`), and rejects more than one operator in a clause
+(`u+r-w`) — `modechange` accepts all of these. It works on the *complement* of
+the mask rather than on a file's mode bits, so a `who`-less clause is not
+umask-filtered (the value in hand *is* the umask). Its octal form has a
+`07777` ceiling and then keeps only the low nine bits. And it reports errors by
+quoting the single offending character, distinguishing an invalid operator from
+an invalid permission letter, where coreutils quotes the whole spec.
+
+So the shell keeps `parse_symbolic_umask`, and this is not a leftover to be
+tidied later: converting it would *widen* the language `osh` accepts —
+`umask u+X`, `umask u=g` and `umask 10000` would begin succeeding — and would
+discard diagnostics that name the exact offending character. The general
+principle worth carrying forward is that **two grammars that share a notation
+are not thereby the same grammar**; the way to tell is to measure the reference
+implementation of each, which is what turned this up. The comparison table is
+in `known-issues.md` under
+`TD-B-THREE-UTILITIES-STILL-CARRY-THEIR-OWN-MODE-PARSER`, and
+`parse_symbolic_umask`'s own doc comment now carries the short form so nobody
+re-opens the question from the code alone.
 ## §282 — The last 71 kernel panics reachable from ordinary inputs were removed by making the panic *impossible*, not by catching it
 
 **Date:** 2026-08-22

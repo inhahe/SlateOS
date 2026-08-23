@@ -1,12 +1,22 @@
 #!/bin/sh
-# Two gates at the push boundary. Either one aborts the push.
+# Seven gates at the push boundary. Any one of them aborts the push.
 #
 #   1. Refuse to publish the operator's private files (`todo2.txt`).
 #   2. Refuse to publish a command name that nothing can produce an executable
-#      for -- see the comment above that gate, near the bottom.
+#      for.
+#   3. Refuse to publish a mutable process-global that its own tests race.
+#   4. Refuse to publish a utility that panics on a legal (non-UTF-8) filename.
+#   5. Refuse to publish a long-option table that disagrees with GNU's.
+#   6. Refuse to publish a utility that prints the host's error text, not POSIX's.
+#   7. Refuse to publish a source file that `rustfmt` would reformat.
 #
-# They are unrelated, and each has its own bypass variable so silencing one
-# never silences the other.
+# Each has a full comment above it, further down; each has its own bypass
+# variable, so silencing one never silences another; and each is scoped to the
+# tree that can introduce it, so a lane that cannot cause a given defect never
+# pays for the check or is blocked by it.
+#
+# They are unrelated to each other on purpose. A single `ALLOW_EVERYTHING`
+# would be one variable away from turning the push boundary off entirely.
 #
 # Gate 1 — why this exists
 # ------------------------
@@ -281,6 +291,450 @@ reason, which is auditable, rather than to the baseline, which is not.
 
 To push anyway:
     ALLOW_RACED_GLOBAL=1 git push $remote_name ...
+
+EOF
+    exit 1
+fi
+
+# ---------------------------------------------------------------------------
+# Gate 4: refuse to publish a utility that dies on a legal filename.
+#
+# A path on this OS may hold every byte but `/` and NUL -- design.txt says so.
+# A utility that reads argv as `String` therefore does not merely mishandle
+# such a name, it *panics before its own first statement*: `std::env::args()`'s
+# iterator is a literal `unwrap` and is documented to panic. So `rm` on a file
+# holding byte 0x80 does not remove it, does not report an error, and runs no
+# code we wrote. 49 of 84 shipped utilities were like this when this gate
+# landed. See known-issues.md -> B-COREUTILS-PANIC-ON-A-NON-UTF-8-ARGUMENT.
+#
+# This is gated rather than merely fixed because the defect is invisible on the
+# development host -- Windows delivers argv as UTF-16, so a test cannot easily
+# produce a triggering argument, and `cargo test` never runs the binaries at
+# all, only their internal functions. `main` is the least-tested line in every
+# one of these files, so a convention would not hold and a ratchet will.
+#
+# Same shape as gates 2 and 3: the backlog lives in
+# scripts/argv-utf8-baseline.txt, this fails only on a finding that is *not* in
+# it, and it runs only when the push touches `userspace/`.
+#
+# Bypass: ALLOW_ARGV_UTF8=1 git push origin <branch>
+# ---------------------------------------------------------------------------
+
+if [ "${ALLOW_ARGV_UTF8:-0}" = "1" ]; then
+    echo "pre-push: ALLOW_ARGV_UTF8=1 set — argv-encoding check skipped." >&2
+    skip_argv=1
+else
+    skip_argv=$skip
+fi
+
+argv="${repo_root:-.}/scripts/argv-utf8.py"
+[ -f "$argv" ] || skip_argv=1
+touches userspace/ || skip_argv=1
+
+argv_failed=0
+if [ "$skip_argv" != "1" ]; then
+    # Check the checker before believing it, for the same reason as gate 3 --
+    # and more sharply here, because this defect cannot be reproduced on the
+    # development host at all. Nothing but --selftest stands between a broken
+    # regex and a permanently green gate.
+    if ! "$py" "$argv" --selftest; then
+        echo "pre-push: argv-utf8.py FAILED ITS OWN SELF-TEST — its --check result is not trustworthy." >&2
+        argv_failed=1
+    elif ! "$py" "$argv" --check; then
+        argv_failed=1
+    fi
+fi
+
+if [ "$argv_failed" = "1" ]; then
+    cat >&2 <<EOF
+
+pre-push: REFUSING to push — a utility above dies on a legal filename.
+
+It reads its command line (or the environment) as \`String\`. Rust's \`String\`
+cannot hold a byte sequence that is not UTF-8, and a path on this OS can, so
+the program panics before reaching its own first statement. A user sees a Rust
+backtrace instead of the tool, and an \`rm -r\` or a backup script stops
+half-done.
+
+Do NOT add a line to scripts/argv-utf8-baseline.txt to turn this green -- the
+baseline records the existing backlog and is only ever meant to shrink.
+
+The fix:
+
+  * \`std::env::args_os()\` instead of \`args()\`, and carry the \`OsString\`
+    through to where the argument is used. For a filename that means all the
+    way to the syscall -- \`Path::new(&os)\` takes an \`OsStr\` directly, so
+    usually nothing in between needs to change shape.
+  * Parse options with \`coreutils::getopt\`, which is byte-based. This is the
+    structural half: of the 35 bins that were already clean, 24 go through it;
+    of the 49 that were not, none did.
+  * For diagnostics use \`coreutils::quote::{quotef_os, quoteaf_os, quote_os}\`,
+    which take \`AsRef<OsStr>\` and escape what does not decode.
+
+If this is genuinely a false positive, add it to the IGNORE table in
+scripts/argv-utf8.py with the reason, which is auditable, rather than to the
+baseline, which is not.
+
+To push anyway:
+    ALLOW_ARGV_UTF8=1 git push $remote_name ...
+
+EOF
+    exit 1
+fi
+
+# ---------------------------------------------------------------------------
+# Gate 5: refuse to publish a long-option table that disagrees with GNU's.
+#
+# Every converted coreutils bin carries a LONG_OPTIONS table copied from GNU,
+# and it must list options the utility does not implement, because the table --
+# not the set of options we handle -- is what decides whether an abbreviation
+# like `--v` is ambiguous. Drop `--verbose` from `rm`'s table and `rm --v file`
+# prints a version banner and deletes nothing.
+#
+# Copying it from memory does not work, and we have the scars: `mv` carried
+# `--exchange` (a newer upstream's option) and lacked `--no-copy` (the
+# reference's), `cp` carried `--keep-directory-symlink` (which is a *tar*
+# option), `rm` and `split` were each missing an entry whose name begins with a
+# hyphen, and `csplit` held exactly the right names in an order no getopt
+# produces. Five bins, five different ways to be wrong, none of them visible by
+# reading the file.
+#
+# scripts/getopt-ambiguity-check.py measures instead. It reads GNU's own table
+# out of `<util> --=x` and compares ours to it as a sequence, then compares our
+# verdict against GNU's for every abbreviation of every name.
+#
+# Unlike gates 2-4 this has no baseline, because it starts at zero: all 24
+# tables agreed when it landed. A ratchet exists to let an inherited backlog be
+# worked down; there is no backlog here, so the gate is simply strict.
+#
+# Scoping matters more here than for the others, because each probe is a WSL
+# round trip: a full sweep is ~35s, one bin is ~2s. So it checks only the bins
+# whose files this push actually rewrites -- unless the push touches getopt.rs
+# itself, whose resolution rules every table depends on, in which case it sweeps
+# all of them.
+#
+# A machine with no GNU userland (no WSL, not Linux) is a skip, not a failure:
+# the script exits 0 saying so. A check that cannot run has nothing to say, and
+# a hook that blocks pushing on such a machine is a hook that gets uninstalled.
+#
+# Bypass: ALLOW_GETOPT_DRIFT=1 git push origin <branch>
+# ---------------------------------------------------------------------------
+
+if [ "${ALLOW_GETOPT_DRIFT:-0}" = "1" ]; then
+    echo "pre-push: ALLOW_GETOPT_DRIFT=1 set — option-table check skipped." >&2
+    skip_getopt=1
+else
+    skip_getopt=$skip
+fi
+
+gopt="${repo_root:-.}/scripts/getopt-ambiguity-check.py"
+[ -f "$gopt" ] || skip_getopt=1
+
+# The bin files this push would newly publish.
+#
+# This is a *diff* across the whole range rather than `git log --name-only`,
+# because `--name-only` prints nothing for a merge commit: a bin change arriving
+# in this branch through a merge would be invisible to it, and merging is how
+# lanes integrate here. Take the oldest commit the remote does not have, and
+# diff its parent against HEAD.
+oldest_new=$(git rev-list HEAD --not --remotes="$remote_name" 2>/dev/null | tail -n 1)
+changed=""
+if [ -n "$oldest_new" ]; then
+    scope="userspace/coreutils/src/bin/ userspace/coreutils/src/getopt.rs"
+    if base=$(git rev-parse --verify -q "$oldest_new^" 2>/dev/null); then
+        # shellcheck disable=SC2086
+        changed=$(git diff --name-only "$base" HEAD -- $scope 2>/dev/null | sort -u)
+    else
+        # Pushing a root commit: everything in it is new.
+        # shellcheck disable=SC2086
+        changed=$(git ls-tree -r --name-only HEAD -- $scope 2>/dev/null | sort -u)
+    fi
+fi
+
+run_all=0
+bins=""
+case "$changed" in
+    # Shared resolution logic: every table's verdicts depend on it, so a change
+    # here is not scoped to any one bin.
+    *userspace/coreutils/src/getopt.rs*) run_all=1 ;;
+    *)
+        # `bin/foo.rs` -> `foo`, `bin/foo/main.rs` -> `foo`, matching how the
+        # checker names a utility.
+        bins=$(printf '%s\n' "$changed" \
+               | sed -n 's|^userspace/coreutils/src/bin/||p' \
+               | sed 's|/main\.rs$||; s|\.rs$||' \
+               | sort -u | tr '\n' ' ')
+        ;;
+esac
+
+getopt_failed=0
+if [ "$skip_getopt" != "1" ]; then
+    if [ "$run_all" = "1" ]; then
+        "$py" "$gopt" || getopt_failed=1
+    elif [ -n "$bins" ]; then
+        # Deliberately unquoted: `$bins` is a list of utility names to pass as
+        # separate arguments, and they are shell-safe by construction (they are
+        # Rust source file stems).
+        # shellcheck disable=SC2086
+        "$py" "$gopt" $bins || getopt_failed=1
+    fi
+fi
+
+if [ "$getopt_failed" = "1" ]; then
+    cat >&2 <<EOF
+
+pre-push: REFUSING to push — a long-option table disagrees with GNU's.
+
+The table above does not match the one the real utility carries. That is not a
+cosmetic difference: the table is what decides whether an abbreviation is
+ambiguous, and which option an ambiguous one names first.
+
+  * "GNU has --x, LONG_OPTIONS does not" is the dangerous direction. Every
+    abbreviation of the missing name is one we resolve to some *other* option
+    and act on, where GNU would have refused it.
+  * "LONG_OPTIONS has --x, GNU does not" usually means the entry was written
+    from memory of a newer release than the one we measure against.
+  * "same names, different order" changes which candidate a diagnostic names
+    first, because glibc reports the first table entry that matched.
+
+Fix the table, not the check. Read GNU's own copy with:
+
+    <util> --=x
+
+The empty prefix matches every entry, so the ambiguity message lists the whole
+table in declaration order -- names, and order, in one measurement.
+
+If a difference is genuine (\`--context\` is compiled out of a build without
+SELinux, say), exempt that one name explicitly in
+scripts/getopt-ambiguity-check.py with the reason. Do not loosen the
+comparison: it starts at zero disagreements and is meant to stay there.
+
+To push anyway:
+    ALLOW_GETOPT_DRIFT=1 git push $remote_name ...
+
+EOF
+    exit 1
+fi
+
+# ---------------------------------------------------------------------------
+# Gate 6: refuse to publish a utility that prints the host's error text.
+#
+# `std::io::Error`'s Display is whatever the platform said. On SlateOS and on
+# Linux that is strerror(3) -- "No such file or directory". On the Windows
+# development host the same error prints "The system cannot find the file
+# specified. (os error 2)". So
+#
+#     eprintln!("cp: cannot stat {}: {e}", quoteaf_os(src));
+#
+# says one thing in production and a different thing in every test run on the
+# machine we develop on. userspace/coreutils/src/errmsg.rs exists for this and
+# states the principle: the message is an interface. A script doing
+# `2>&1 | grep 'No such file'`, a test asserting a diagnostic, and a person
+# reading a log all read it, and none of them are reading Windows' wording.
+#
+# Same shape as gates 2-4: the backlog lives in
+# scripts/host-errmsg-baseline.txt (29 bins, 93 sites when this landed), this
+# fails only on a file that is *not* in it, and it runs only when the push
+# touches `userspace/`. Unlike those, a finding is keyed on the file rather than
+# the site, because the unit of repair is a whole bin -- a half-converted one
+# prints two wordings for the same failure, which is worse than one wrong one.
+#
+# See known-issues.md -> TD-B-COREUTILS-PRINT-THE-HOSTS-ERROR-TEXT.
+#
+# Bypass: ALLOW_HOST_ERRMSG=1 git push origin <branch>
+# ---------------------------------------------------------------------------
+
+if [ "${ALLOW_HOST_ERRMSG:-0}" = "1" ]; then
+    echo "pre-push: ALLOW_HOST_ERRMSG=1 set — error-text check skipped." >&2
+    skip_errmsg=1
+else
+    skip_errmsg=$skip
+fi
+
+errmsg="${repo_root:-.}/scripts/host-errmsg.py"
+[ -f "$errmsg" ] || skip_errmsg=1
+touches userspace/ || skip_errmsg=1
+
+errmsg_failed=0
+if [ "$skip_errmsg" != "1" ]; then
+    # Check the checker first, as gates 3 and 4 do. This one is the most exposed
+    # of the three to failing silently: its signal lives *inside* a string
+    # literal, so the obvious Rust lexer to reach for -- the one the other gates
+    # share, which blanks literals -- would make every file look clean.
+    if ! "$py" "$errmsg" --selftest; then
+        echo "pre-push: host-errmsg.py FAILED ITS OWN SELF-TEST — its --check result is not trustworthy." >&2
+        errmsg_failed=1
+    elif ! "$py" "$errmsg" --check; then
+        errmsg_failed=1
+    fi
+fi
+
+if [ "$errmsg_failed" = "1" ]; then
+    cat >&2 <<EOF
+
+pre-push: REFUSING to push — a utility above prints the host's error text.
+
+An \`io::Error\` is being formatted with \`{e}\`, which prints whatever the
+platform's C library said. That is strerror(3) on SlateOS and on Linux, and
+something else entirely on the Windows development host:
+
+    want:  cp: cannot stat 'x': No such file or directory
+    got:   cp: cannot stat 'x': The system cannot find the file specified. (os error 2)
+
+The message is an interface. Anything that greps a diagnostic, asserts on one,
+or is read by a person expects POSIX's wording.
+
+The fix, one line per site:
+
+    let why = strerror(&e);
+    let _ = writeln!(err, "cp: cannot stat {}: {why}", quoteaf_os(src));
+
+\`strerror\` is \`coreutils::errmsg::strerror\`. Bind it rather than inlining
+it: most of these are multi-line \`writeln!\`s whose arguments would otherwise
+have to be reordered.
+
+Do NOT add a line to scripts/host-errmsg-baseline.txt to turn this green -- the
+baseline records the existing backlog and is only ever meant to shrink. If this
+is genuinely a false positive (a variable named \`e\` that is not an error, a
+\`Display\` impl forwarding its source), add it to the IGNORE table in
+scripts/host-errmsg.py with the reason, which is auditable.
+
+To push anyway:
+    ALLOW_HOST_ERRMSG=1 git push $remote_name ...
+
+EOF
+    exit 1
+fi
+
+# ---------------------------------------------------------------------------
+# Gate 7 — a source file rustfmt would reformat
+#
+# CLAUDE.md: "Formatting: rustfmt defaults. No manual formatting overrides."
+# There is no rustfmt.toml anywhere in the tree, so "formatted" has exactly one
+# meaning here and no file gets to negotiate its own.
+#
+# Nothing enforced it until now, and the drift is not hypothetical: seven files
+# in userspace/coreutils were committed unformatted (bc, cp, mkdir, mv, rm,
+# rmdir, getopt), six of them bins converted over the preceding few days by the
+# agent that wrote this gate. Nobody noticed, because nobody runs `cargo fmt`
+# unprompted and a formatting difference never fails a build or a test.
+#
+# Why it matters more here than on a human team: three agents edit this tree in
+# parallel and merge across each other constantly. Unformatted code makes every
+# later diff noisier than the change it carries -- a one-line edit inside a
+# badly-wrapped function reformats its neighbourhood the next time anyone *does*
+# run rustfmt, and that shows up in `git blame` and in a merge conflict as if it
+# were real work. Formatting drift is not a style complaint; it is future merge
+# conflicts, and merge conflicts between lanes are this project's most expensive
+# failure mode.
+#
+# Scope: exactly the .rs files the commits being pushed add or modify. That
+# needs no `touches` guard and no lane list -- a lane only ever pushes its own
+# commits, so it can only ever be blocked by its own files. Pre-existing drift
+# elsewhere in the tree is invisible to this gate, deliberately: a gate that
+# fails on files the pusher did not touch is a gate that gets bypassed by habit.
+# It is a ratchet like gates 2-6, but it needs no baseline file to be one,
+# because "the files in this push" *is* the ratchet.
+#
+# rustfmt is invoked directly rather than through `cargo fmt` on purpose: cargo
+# would need to resolve workspace metadata and would format whole crates, which
+# reintroduces exactly the unrelated-file failure this is avoiding. Every crate
+# in the tree is edition 2024 (checked: 2933 Cargo.toml files, one value), so
+# the edition can be a constant.
+#
+# Bypass: ALLOW_FMT_DRIFT=1 git push origin <branch>
+# ---------------------------------------------------------------------------
+
+if [ "${ALLOW_FMT_DRIFT:-0}" = "1" ]; then
+    echo "pre-push: ALLOW_FMT_DRIFT=1 set — formatting check skipped." >&2
+    skip_fmt=1
+else
+    # Not `$skip`: that one also demands a python interpreter, and this gate
+    # does not use one. A missing repo root is still a skip, since the paths
+    # git reports are relative to it.
+    skip_fmt=0
+    [ -n "${repo_root:-}" ] || skip_fmt=1
+fi
+
+# A machine without rustfmt is a skip, not a failure — same reasoning as the
+# missing-python skip above: a hook that breaks pushing gets uninstalled.
+command -v rustfmt >/dev/null 2>&1 || skip_fmt=1
+
+# One batch of paths. A function is how a POSIX shell passes a built-up
+# argument list without re-splitting it on spaces.
+fmt_check() {
+    [ "$#" -gt 0 ] || return 0
+    rustfmt --edition 2024 --check "$@"
+}
+
+fmt_failed=0
+if [ "$skip_fmt" != "1" ]; then
+    # `set --` builds the argument list one path at a time so a filename
+    # containing a space survives; plain word-splitting on `$(...)` would tear
+    # it in half. Safe here because the positional parameters are no longer
+    # needed: `$1` was captured into `$remote_name` at the top of the file.
+    #
+    # `core.quotePath=false` stops git octal-escaping a non-ASCII path into
+    # something that does not name a file — this repository has utilities whose
+    # whole purpose is handling those names, so its own hook had better not
+    # choke on one.
+    #
+    # `--diff-filter=ACMR` excludes deletions, but a file added by one commit in
+    # this push and deleted by a later one still appears; the `[ -f ]` test is
+    # what drops it.
+    fmt_old_ifs=$IFS
+    IFS='
+'
+    set --
+    for fmt_file in $(git -c core.quotePath=false log --name-only --pretty=format: \
+                          --diff-filter=ACMR HEAD --not --remotes="$remote_name" \
+                          -- '*.rs' 2>/dev/null | sort -u); do
+        [ -f "$repo_root/$fmt_file" ] || continue
+        set -- "$@" "$repo_root/$fmt_file"
+        # Drain in batches: the command line is finite, and a push that lands a
+        # whole subsystem can carry hundreds of files. (Measured: handing
+        # rustfmt all 5214 of lane B's .rs paths at once fails outright with
+        # exit 126 — which, note, is a *failure*, so an unbatched version of
+        # this gate would have blocked exactly the large pushes it should be
+        # scrutinising most.) Every batch is checked even after one fails, so
+        # the diff printed is complete rather than truncated at the first file.
+        if [ "$#" -ge 64 ]; then
+            fmt_check "$@" || fmt_failed=1
+            set --
+        fi
+    done
+    IFS=$fmt_old_ifs
+
+    fmt_check "$@" || fmt_failed=1
+fi
+
+if [ "$fmt_failed" = "1" ]; then
+    cat >&2 <<EOF
+
+pre-push: REFUSING to push — a file above is not formatted the way rustfmt
+formats it. The diff printed above is what rustfmt would change.
+
+CLAUDE.md requires rustfmt defaults with no overrides, and there is no
+rustfmt.toml in this tree, so there is nothing to argue with: the file is
+simply out of date with the formatter.
+
+The fix, for the crate that owns the file:
+
+    cargo fmt -p <crate>
+
+or, for exactly the files listed above and nothing else:
+
+    rustfmt --edition 2024 <file>...
+
+then \`git add\` them and amend or add a commit. Formatting-only changes are
+worth their own commit — mixed into a real change they hide it.
+
+Only the files this push adds or modifies are checked, so this is never
+complaining about someone else's code. If rustfmt failed to *parse* a file
+rather than reporting a diff, the file does not compile either; fix that first.
+
+To push anyway:
+    ALLOW_FMT_DRIFT=1 git push $remote_name ...
 
 EOF
     exit 1

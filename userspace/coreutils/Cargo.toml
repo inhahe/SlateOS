@@ -21,6 +21,12 @@ bignum = { path = "../bignum" }
 # on the same terminal as osh's `select` menu, so a disagreement about how wide
 # a character is shows up as a misaligned screen. See `userspace/charwidth`.
 charwidth = { path = "../charwidth" }
+# One chmod-style mode string, shared with `install -m`, `mkdir -m` and the
+# shell's `umask`. Four hand-written parsers of `u+X` had disagreed on thirteen
+# separate rules — including whether the umask applies at all, and whether `X`
+# exists — so a script that set a mode with one and checked it with another got
+# two answers. See `userspace/modechange`.
+modechange = { path = "../modechange" }
 # One SHA-256, shared with `pkg`, `backup`, `rsync`, `ssh` and the rest. The
 # `sha256sum` binary carried its own, which is the least defensible place for a
 # private copy: the whole output of that utility is a digest another machine

@@ -130,15 +130,34 @@ use std::process::ExitCode;
 /// Measured: `csplit --zzz-bogus; echo $?` is 1.
 const CSPLIT: Program = Program::new("csplit", 1);
 
+/// GNU's option table **in GNU's declaration order**, which is observable:
+/// glibc lists an ambiguous prefix's candidates in table order.
+///
+/// Measured with `csplit --=x`, which an empty prefix makes print the whole
+/// table:
+///
+/// ```text
+/// csplit: option '--=x' is ambiguous; possibilities: '--digits' '--quiet'
+/// '--silent' '--keep-files' '--elide-empty-files' '--prefix' '--suffix-format'
+/// '--suppress-matched' '--help' '--version'
+/// ```
+///
+/// This list once held exactly these names in a different (roughly
+/// alphabetical-by-short-flag) order, which no getopt anywhere produces. Nothing
+/// resolved differently — the *set* decides what is ambiguous — but the message
+/// listed the candidates in the wrong order, so `csplit --s` named
+/// `'--suffix-format'` first where GNU names `'--silent'`. Found by
+/// `scripts/getopt-ambiguity-check.py`, which compares this list against the
+/// readout above as a sequence for that reason.
 const LONG_OPTIONS: &[(&str, Takes)] = &[
-    ("suffix-format", Takes::Required),
-    ("prefix", Takes::Required),
-    ("keep-files", Takes::Nothing),
-    ("suppress-matched", Takes::Nothing),
     ("digits", Takes::Required),
     ("quiet", Takes::Nothing),
     ("silent", Takes::Nothing),
+    ("keep-files", Takes::Nothing),
     ("elide-empty-files", Takes::Nothing),
+    ("prefix", Takes::Required),
+    ("suffix-format", Takes::Required),
+    ("suppress-matched", Takes::Nothing),
     ("help", Takes::Nothing),
     ("version", Takes::Nothing),
 ];
@@ -1595,5 +1614,34 @@ mod tests {
             parse_args(&os(&["-z", "--version"])),
             Ok(Request::Version)
         ));
+    }
+
+    // ---------------- the option table ----------------
+
+    /// The empty prefix matches every entry, so the ambiguity message is a
+    /// readout of [`LONG_OPTIONS`] in declaration order. Asserting the whole
+    /// string pins the order, which is the part a set-comparison would miss.
+    /// Compare `csplit --=x` under GNU.
+    #[test]
+    fn the_empty_prefix_lists_the_table_in_order() {
+        let e = parse_args(&os(&["--=x", "f", "1"])).err().unwrap();
+        assert_eq!(
+            e.sentence,
+            "option '--=x' is ambiguous; possibilities: '--digits' '--quiet' \
+             '--silent' '--keep-files' '--elide-empty-files' '--prefix' \
+             '--suffix-format' '--suppress-matched' '--help' '--version'"
+        );
+    }
+
+    /// The prefix that made the ordering visible: three options begin with `s`,
+    /// and GNU names `--silent` first because it comes first in the table.
+    #[test]
+    fn ambiguous_s_prefix_lists_silent_first() {
+        let e = parse_args(&os(&["--s", "f", "1"])).err().unwrap();
+        assert_eq!(
+            e.sentence,
+            "option '--s' is ambiguous; possibilities: '--silent' \
+             '--suffix-format' '--suppress-matched'"
+        );
     }
 }

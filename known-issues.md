@@ -57893,7 +57893,7 @@ to call, and it would get `localhost` with no indication anything was amiss.
 ## B-COREUTILS-PANIC-ON-A-NON-UTF-8-ARGUMENT (lane B, 2026-08-22) — OPEN
 
 **In short:** On this OS a filename may contain any byte except `/` and NUL —
-that is a deliberate design decision, written down in `design.txt`. But 50 of
+that is a deliberate design decision, written down in `design.txt`. But 49 of
 our 84 core utilities read their command line with a Rust function that
 *crashes* when an argument is not valid text. So `rm` on a file whose name
 contains such a byte does not delete it, does not report an error, and does
@@ -57916,23 +57916,48 @@ tree already has the pieces: `coreutils::quote::os_bytes`, `quotef_os`,
 **How to reproduce (needs QEMU — see below):** create a file whose name
 contains byte `0x80`, then `rm` it.
 
-**Scale, measured 2026-08-22 (`grep -l '^[^/]*env::args()' src/bin/*.rs`):**
-50 of 84 bins.
+**Scale, measured 2026-08-22 by `scripts/argv-utf8.py` (see the gate section
+below):** 49 of 84 bins, plus `examples/extfloat-probe.rs` — 51 findings across
+50 files, since `sh` carries two of them.
 
 ```
-basename bc cal chmod chown cmp cp dd df diff dirname du echo ed fetch
+basename cal chmod chown cmp cp dd df diff dirname du echo ed fetch
 find free grep id ln logger ls md5sum mkdir mkfifo more mv
 nice nohup patch ps readlink realpath renice rm rmdir sed sh sha256sum sleep
 stat strings tar tee time_cmd touch tty which xargs yes
 ```
+
+**Burn-down progress.** Converted so far: `rm`, `mv`, `cp`, `ln`, `mkdir` (all
+2026-08-22, see the sections at the end of this entry). The live count is
+whatever `python scripts/argv-utf8.py --check` prints; the baseline shrinks by
+one line per conversion and never grows, so this paragraph cannot silently go
+stale in the dangerous direction — if it disagrees with the tool, the tool is
+right.
+
+**Every conversion so far has uncovered unrelated bugs in the `main` it
+replaced** — three in `rm`, four in `mv`, six in `cp`, four in `ln`, four in
+`mkdir`, none of
+them about UTF-8 and all of them in code that no test touched. That is the argument for converting these
+files properly rather than mechanically swapping `env::args()` for
+`env::args_os()`: the defect is a marker for *untested `main`*, and the panic
+is only the part of that a checker can see.
 
 `env`, `kill`, `hostname` and `uname` were on this list and were fixed the same
 day, which is why they are absent above. `stat`, `chmod`, `chown` and `tar`
 were rewritten this week for other reasons and use `os_bytes` internally but
 still *read* argv as `String`, so they remain on it.
 
-**The correlation is the whole argument for how to fix this.** Of the 34 bins
-that are already clean, **23 use `coreutils::getopt`**; of the 50 dirty ones,
+`bc` was on this list too, and is the reason the count moved from 50 to 49.
+The original figure came from `grep -l '^[^/]*env::args()' src/bin/*.rs`, which
+counts a *comment* as a hit whenever it is not the first thing on the line —
+and `bc` had already been converted, so its only surviving `env::args()` are
+the two comments explaining what `env::args_os()` replaced. The tool disagreed
+with the grep, and the tool was right, for exactly the reason its self-test
+rule 3 exists: a file being *fixed* is the likeliest place in the tree for the
+broken call to appear in prose.
+
+**The correlation is the whole argument for how to fix this.** Of the 35 bins
+that are already clean, **24 use `coreutils::getopt`**; of the 49 dirty ones,
 **none do** — not one. `getopt` is byte-based, so a bin that goes through it
 never had a reason to reach for `String` in the first place. That is a
 structural cause, not a coincidence, and it means finishing the `getopt`
@@ -57958,6 +57983,573 @@ those the panic happens on data the *user does not control and cannot see*: a
 single oddly-named file in a directory is enough to make `rm -r` abort
 part-way, and a backup or a cleanup script that dies half-done is worse than
 one that refuses to start.
+
+### A gate now exists, before any of the 50 are fixed (2026-08-22)
+
+`scripts/argv-utf8.py` is pre-push gate 4, with a 51-entry baseline recording
+exactly the backlog above. It is deliberately built *first*, because fixing 49
+`main`s fixes 49 instances and does nothing about the fiftieth — and the
+"why it survived" paragraph above is precisely an argument that a convention
+will not hold here. Nothing on the development host can produce a triggering
+argument, so the only thing standing between a reintroduction and silence is a
+machine that looks.
+
+Building it first also paid for itself immediately, before fixing anything: it
+is what caught `bc` being counted as broken when it had already been fixed —
+the grep behind the original figure could not tell a call from a comment about
+that call. A burn-down driven by that list would have spent a pass "fixing" a
+file that was already correct.
+
+It reports four spellings of the one defect — `env::args()`, `env::vars()`,
+`.into_string().unwrap()`, `.to_str().unwrap()` — keyed per file *and per
+rule*, so a file carrying two of them does not go green when the first is
+fixed. That is not hypothetical: `sh` is the 51st finding against the 50th
+file, because it reads both argv and the environment as `String`, and a
+baseline keyed on the path alone would have stopped watching it the moment
+argv was fixed. `env::var()` is deliberately absent: it returns `Err(NotUnicode)`
+rather than panicking, so it is a behaviour bug at worst and lumping it in
+would bury the one that crashes. Comments and string literals are excluded by
+importing `raced-globals.py`'s Rust lexer rather than copying it — a file being
+*fixed* is the single likeliest place for `env::args()` to appear in a comment
+about what it replaced, and that same tool once spent a whole pass reporting a
+global whose name occurred only in prose about it.
+
+**Scope is stated as a number, not left as a silence.** The gate covers
+`userspace/coreutils/` — 51 findings. The ~2750 single-file stub crates under
+`userspace/*/` are *not* gated (a 2750-line baseline is a baseline nobody
+reads) but they are counted and printed: **2746 findings in 2736 files**. The
+reasoning is the one this whole class of tooling rests on — a checker that
+quietly narrows its own scope reports a clean tree, and a clean report is the
+one outcome that must never be produced by accident. That survey prints on a
+bare run and under `--write-baseline`, and *not* under `--check`: it costs 30
+seconds against the gated tree's 2, and in a push hook it buys four lines
+nobody acts on. A gate slow enough to be resented is a gate that gets
+uninstalled, which is the same silence by a longer route.
+
+Two things were tried and removed, both worth recording because both looked
+right:
+
+- **A substring prefilter to skip lexing.** The natural literal for the first
+  rule is `env::args` — which is a substring of `env::args_os`, the fix. It
+  therefore admits every *converted* file too, and measured, it let 2857 of
+  2902 files through. A prefilter that cannot distinguish the defect from its
+  own remedy buys nothing, and its only possible error is the silent one.
+- **A raw-source (unlexed) prefilter**, which would have been tighter but is
+  not sound: blanking a comment can *create* a match — `env::args/*x*/()`
+  becomes `env::args      ()` — so it could invent findings as well as miss
+  them.
+
+`--selftest` pins seven rules, run before `--check` in the hook and on every
+invocation here. Six classify synthetic files; the seventh asserts the gated
+tree is really there and non-empty, because none of the other six would notice
+if `GATED` pointed at a renamed directory — the walk would return nothing,
+`--check` would find nothing new, and the gate would pass forever while looking
+at an empty set. Each rule was verified capable of failing by breaking what it
+guards and confirming that rule and no other went red. The gate itself was
+verified end to end by appending a `to_str().unwrap()` to a clean bin: `1 not
+in the baseline`, exit 1, with the fix hint printed; green again on removal.
+
+One design note that cost a debugging pass: findings are keyed
+`<path>:<rule>` and split on the last colon, so the first draft's rule names —
+`env::args` and `env::vars` — silently took a piece of the path with them and
+produced entries like `…/rm.rs:env::21 [args]`. Not a crash: a plausible-looking
+report plus a baseline that could never match. The names are now hyphenated and
+a module-level `assert` forbids a colon in a rule name, so the mistake cannot
+recur.
+
+**The backlog stood at 51 findings across 50 files when the gate landed** —
+that commit added no fix, only the guarantee that the number cannot grow. The
+burn-down starts with the file-touching bins listed above.
+
+### `rm` converted, and the three further bugs the rewrite uncovered (2026-08-22)
+
+`rm` is the first of the 49 and sets the pattern for the rest: `env::args_os()`
+into a `Vec<OsString>`, a hand-written byte-wise option loop over
+`coreutils::getopt` (which supplies the diagnostics and the long-name
+abbreviation resolution, not the iteration), and `OsString` operands carried
+untouched all the way to `fs::remove_file`. Gate count 51 → 50; the baseline
+was shrunk in the same commit so the file cannot regress.
+
+**Converting it also turned up three real bugs in the lines being replaced.**
+None of them are about UTF-8; all three were invisible because the old file's
+tests covered `parse_args` only and there were *zero* tests of the removal
+path. This is the second time in this audit that rewriting a `main` for the
+argv defect has surfaced unrelated defects underneath it, which is an argument
+for doing the conversions properly rather than mechanically swapping the one
+function call.
+
+1. **`--` was not an end-of-options marker.** `rm -- -foo` answered `unknown
+   option: --` instead of deleting the file named `-foo`. `--` is the only way
+   to name a file whose name begins with `-`, so the utility had no way at all
+   to delete one.
+2. **`-f` suppressed *every* error, not just absence.** POSIX says `-f`
+   ignores a *nonexistent* operand; ours ignored a permission denial, a
+   non-empty directory, a read-only filesystem — anything. `rm -f important`
+   on an undeletable file printed nothing and exited 0, i.e. reported success
+   for work it had not done. That is the worst shape a bug can have in a
+   delete utility: silence that reads as completion.
+3. **Symlinks were followed.** The old code used `Path::exists` and
+   `Path::is_dir`, which both *resolve* the link. So `rm dangling-link` said
+   "No such file or directory" about a link that was plainly there and could
+   have been unlinked, and `rm -r link-to-dir` chose its recursive branch by
+   looking at the *target's* type. Now `fs::symlink_metadata`, which stats the
+   link itself.
+
+**What `rm` still does not do**, deliberately kept out of the conversion
+commit so that one commit is one logical change:
+
+- **No root failsafe.** GNU `rm` refuses `rm -rf /` unless
+  `--no-preserve-root` is given. Ours has nothing: `--preserve-root` and
+  `--no-preserve-root` are accepted by the option parser (so that abbreviation
+  resolution stays correct) and then rejected as `not implemented`. Until this
+  lands, the single most destructive typo in Unix has no guard on this OS.
+  Fixing it needs a canonicalised-path comparison against `/`, which needs
+  `realpath` semantics that are themselves on the burn-down list — so it is
+  sequenced after them rather than forgotten.
+- **Seven GNU options unimplemented:** `-d`, `-i`, `-I`, `-v`,
+  `--interactive[=WHEN]`, `--one-file-system`, `--preserve-root[=all]`. They
+  are *rejected by name* rather than ignored. That choice matters for `-i`
+  specifically: silently ignoring a request to be asked before each deletion
+  would convert it into deleting without asking, which is the one direction a
+  user of this utility cannot afford to be surprised in. An error costs a
+  retype; a wrong default costs the files.
+
+**On testing the fix from Windows.** The obvious regression test — an operand
+containing byte `0x80` — is `#[cfg(unix)]` and therefore does not run on the
+development host, which is precisely the blind spot that let the bug live. So
+`rm` also carries `#[cfg(windows)]` twins keyed on an **unpaired surrogate**
+(a UTF-16 code unit in `0xD800..=0xDFFF` with no partner, which Windows will
+hand you in `argv` and which no `String` can represent). `OsString` stores it
+as WTF-8, `to_str()` returns `None`, and `env::args()` panics on it — the same
+`unwrap`, in the same std function, reached by a different route. Both twins
+pass here, so the fix is genuinely covered on the machine the work is done on.
+**Every remaining conversion should carry the same pair**; a `#[cfg(unix)]`-only
+regression test for this defect is a test that never runs.
+
+### `mv` converted, and the four further bugs the rewrite uncovered (2026-08-22)
+
+Same shape as `rm`: `env::args_os()`, a byte-wise option loop over
+`coreutils::getopt`, `OsString` operands carried to `fs::rename`. Gate count
+50 → 49; baseline shrunk in the same commit. 38 tests, up from 12, and the
+move path — which had **no tests at all** — now has fourteen.
+
+Also `cfg(unix)`+`cfg(windows)` twins of the non-UTF-8 regression test, per the
+rule established for `rm` above, and the binary was compiled for the *real*
+target (`cd userspace && cargo +nightly build -p coreutils --bin mv`) because
+the target is `unix` and the development host is not — so the `#[cfg(unix)]`
+half of the source is never compiled by `cargo test` here. That step belongs to
+every remaining conversion; without it a typo in a `#[cfg(unix)]` arm is
+invisible until it breaks the boot test for all three lanes. (The `+nightly` is
+load-bearing and undocumented outside lane C's
+`TD-C-A-ZONE-BUILD-FAILS-UNLESS-YOU-KNOW-TO-SAY-NIGHTLY` below; a plain `cargo
+build` in a zone fails with a message naming a flag `CLAUDE.md` tells you not
+to pass.)
+
+**The four bugs**, in the lines the rewrite replaced:
+
+1. **`--` was not an end-of-options marker.** `mv -- -foo bar` answered
+   `unknown option: --`, so a file whose name begins with a dash could not be
+   moved at all.
+2. **`-f` suppressed the diagnostic but not the failure.** The `-f` branch
+   skipped the `eprintln!` and *still* set the exit status to 1, so `mv -f a b`
+   on a failure printed nothing and exited non-zero: the caller was told
+   something went wrong and given no way to find out what. `-f` has never meant
+   that anywhere. In GNU `mv` it suppresses the *prompt* that `-i` would raise
+   before overwriting; this `mv` never prompts, so `-f` is now accepted and
+   inert — which is exactly GNU's behaviour in the absence of `-i`, and is why
+   it now records no flag at all.
+3. **A source ending in `..` moved something the user never named.** The target
+   was `dest.join(src.file_name().unwrap_or_default())`, and `Path::file_name`
+   is `None` when the last component is `..` — so `unwrap_or_default()` gave an
+   *empty* name, `dest.join("")` collapsed back to `dest` itself, and
+   `mv a/.. dst` asked the kernel to rename `a`'s **parent directory** onto
+   `dst`. If `dst` was an empty directory that succeeds: the user asks to move
+   something *into* `dst` and instead the directory they were standing in is
+   moved *onto* it. Reachable from an ordinary glob (`mv */.. dst`). Now
+   refused with a diagnostic, with a test asserting the parent is still there.
+4. **The cross-filesystem fallback silently turned a symlink into a copy of its
+   target.** When `rename` fails with `EXDEV` (the kernel refusing to rename
+   across a filesystem boundary), `mv` must copy and then unlink. The fallback
+   used `fs::copy`, which *follows* symlinks — so moving a symlink across a
+   boundary read the file it pointed at, wrote those bytes at the destination
+   as an ordinary file, and deleted the link. A symlink went in and a full copy
+   came out, with no message. It now recreates the link with `symlink(2)` and
+   only then unlinks. A *dangling* symlink hit the same path and failed with
+   `No such file or directory` naming the link — which reads as "the link is
+   missing" when the link was right there.
+
+   The fallback is also no longer entered for *every* rename failure, only for
+   a genuine cross-device one (`EXDEV` / `ERROR_NOT_SAME_DEVICE`, checked by
+   errno first and `ErrorKind::CrossesDevices` second — errno first because our
+   own target's libstd may not map the variant yet, and a rename that *is*
+   cross-device must not become a hard failure because a classification is
+   missing). Previously `mv nonexistent dst` failed `rename`, fell through to
+   `fs::copy`, and reported the *copy's* error, which happened to read the same
+   but need not have.
+
+**What `mv` still does not do:**
+
+- **Moving a directory across a filesystem boundary.** It reports that this is
+  not implemented rather than attempting a partial job. Doing it properly needs
+  a recursive copy preserving modes, symlinks and hard links; doing it badly
+  loses data quietly, which is why the honest error is the interim answer. This
+  was already the old behaviour and is unchanged.
+- **Twelve GNU options**, all rejected by name rather than ignored: `-b` /
+  `--backup`, `-i` / `--interactive`, `-n` / `--no-clobber`, `-t` /
+  `--target-directory`, `-T` / `--no-target-directory`, `-u` / `--update`,
+  `-v` / `--verbose`, `-S` / `--suffix`, `-Z` / `--context`, `--debug`,
+  `--exchange`, `--strip-trailing-slashes`. Silently ignoring `-n` would
+  overwrite a file the user asked to be left alone, and ignoring `-i` would
+  skip a confirmation they asked for; for this utility both mistakes are
+  unrecoverable, and an error costs only a retype. All twelve stay in the
+  long-option table so abbreviation resolution keeps working — there are tests
+  that `--v` is ambiguous between `--verbose` and `--version`, and `--n`
+  between `--no-clobber` and `--no-target-directory`, and those are the tests
+  that fail if someone prunes the table to what is actually handled.
+
+### `cp` converted, and the six further bugs the rewrite uncovered (2026-08-22)
+
+Same shape again: `env::args_os()`, a byte-wise option loop over
+`coreutils::getopt`, `OsString` operands, `cfg(unix)`+`cfg(windows)` twins of
+the non-UTF-8 regression test, and a build for the real target
+(`cd userspace && cargo +nightly build -p coreutils --bin cp`). Gate count
+49 → 48. 36 tests, and — as with `mv` — the copy path had **no tests at all**
+before, so all of its coverage is new.
+
+Two of the six are severe enough to state first: **`cp -r` could not terminate**
+on a directory containing a symlink to an ancestor, and **`cp -r a a` copied a
+directory into itself without limit.** Both fill the disk.
+
+**The six bugs**, in the lines the rewrite replaced:
+
+1. **The recursive walk followed symlinks, so `cp -r` did not terminate.**
+   `copy_dir_recursive` asked `src_path.is_dir()` — which follows a symlink —
+   and then handed non-directories to `fs::copy`, which also follows. So
+   `ln -s .. loop` inside a copied tree made the walk descend into the parent,
+   find `loop` again, and descend again, for ever, writing a copy of the whole
+   tree at each level until the disk filled. Without a loop it was still wrong
+   in a quieter way: every symlink came out as a full copy of the file it
+   pointed at, and a *dangling* one aborted the copy with an error naming the
+   link rather than what it pointed at. The walk now uses
+   `DirEntry::file_type`, which is the call that does **not** follow, and
+   recreates links with `symlink(2)`.
+
+   The behaviour now matches GNU: with `-r`/`-R` and none of `-H`/`-L`/`-P`,
+   symlinks are not dereferenced anywhere, *including* the operands named on
+   the command line — but plain `cp link dst` with no `-r` still dereferences,
+   because that is the one case where GNU does. There is a test for each half,
+   since "matches GNU" is otherwise indistinguishable from "we happened to pick
+   the same answer".
+2. **`cp -r` would copy a directory into itself, without limit.** `cp -r a a`
+   and `cp -r a .` both resolve to a destination *inside* the source, so the
+   walk kept finding the copies it had just written. GNU refuses this by name
+   (`cannot copy a directory into itself`) and now so does this one. The check
+   resolves both paths first, so it also catches the spellings that are not
+   textually equal — `cp -r a ./a/../a` is the same directory and is refused,
+   which is what `is_inside_sees_through_a_different_spelling` pins.
+3. **A copied directory came out world-readable.** `create_dir_all` applies the
+   process umask, so a source directory mode 0700 — the mode that means "only I
+   can look in here" — produced a copy at 0755. Copying a private tree into a
+   shared location therefore published it, with no message. The mode is now
+   carried over, and applied **after** the directory has been filled rather
+   than before: a source mode of 0500 applied first would lock the copying
+   process out of the directory it is still writing into.
+4. **`--` was not an end-of-options marker** — same as `rm` and `mv`, same
+   consequence: a file whose name begins with a dash could not be copied.
+5. **A source ending in `..` or `/` copied into the wrong place.** The same
+   `file_name().unwrap_or_default()` shape as `mv` bug 3, with a different
+   outcome: `dest.join("")` collapsed to `dest`, so `cp -r a/.. dst` merged the
+   *contents* of `a`'s parent into `dst` instead of creating anything under it.
+   **The old test suite asserted this**, in a case named
+   `target_source_with_no_filename_into_dir`, which is why it survived: the
+   behaviour was pinned, so it read as intentional. A test can preserve a bug
+   as effectively as it can prevent one; the fix included deleting that
+   assertion and writing `a_source_with_no_file_name_is_refused_not_collapsed`
+   in its place.
+6. **One unreadable file abandoned the rest of the copy.** The walk propagated
+   the first error with `?`, so a single permission-denied file part-way
+   through a large tree stopped everything after it — and the files already
+   written stayed, so the result was a silent partial copy with a non-zero
+   status and one message. It now continues past each failure, reports every
+   one, and returns non-zero if any failed. (Same anti-silence direction as the
+   batch-error rule in `CLAUDE.md`: report the worst error, do not stop at the
+   first.)
+
+**What `cp` still does not do:**
+
+- **Every option but `-r`/`-R`**, all rejected by name rather than ignored:
+  `-a`, `-b`, `-d`, `-f`, `-H`, `-i`, `-l`, `-L`, `-n`, `-p`, `-P`, `-s`, `-S`,
+  `-t`, `-T`, `-u`, `-v`, `-x`, `-Z` and their long spellings. Ignoring `-p`
+  would silently drop the permissions the user asked to preserve; ignoring `-n`
+  would overwrite a file they asked to leave alone; ignoring `-i` would skip a
+  confirmation. All of GNU's 31 long options stay in the table so abbreviation
+  resolution stays correct — including the **deprecated `--path` alias**, whose
+  only remaining job is to keep `--pa` ambiguous with `--parents`. Tests pin
+  that, and that `--r` is ambiguous between `--recursive` and `--reflink`; they
+  are what fails if someone prunes the table to what is implemented.
+- **Hard links are not preserved.** A tree containing two names for one inode
+  copies as two independent files, silently doubling its size. GNU needs `-a`
+  or `-d` for link preservation, neither of which exists here, so this is a
+  missing feature rather than a deviation — but it is the kind that is only
+  noticed by whoever runs out of disk.
+- **No `-p`**, so ownership, timestamps and the setuid/setgid bits are not
+  carried over on *files*. Directory modes are (bug 3), because leaving those
+  wrong is a confidentiality bug rather than a fidelity one.
+
+### `ln` converted, and the four further defects the rewrite uncovered (2026-08-22)
+
+Gate count 49 → 47 (`cp` took it to 48). 32 tests, up from 10, and — as with
+`mv` and `cp` — the *action* path had none at all before, so all of its coverage
+is new.
+
+**Unlike `rm`, `mv` and `cp`, none of `ln`'s defects produced a silently wrong
+result.** Every one was a refusal of a valid command or a mangled message, not a
+link pointing somewhere the user did not ask for. That is worth recording rather
+than dressing up: it is the first of the four conversions where the argv defect
+was not also a marker for something that loses data, and it is evidence about
+what the remaining 47 are likely to hold — not every one of them is `cp`.
+
+**The four defects**, in the lines the rewrite replaced:
+
+1. **No long option worked at all, including `--help`.** The parser treated any
+   argument beginning with `-` as a bundle of short options and iterated its
+   characters, so `--help` tripped on its own second `-` and answered
+   `unknown option: --` — an option nobody typed, and no hint that `--help`,
+   `--version` and `--symbolic` were simply unreachable. The same line is why
+   `--` was not an end-of-options marker, so a file whose name begins with a
+   dash could not be linked either.
+2. **Filenames went into diagnostics unquoted**, between two literal `'` marks,
+   so a file called `a⏎ln: /etc/shadow: Permission denied` made `ln` appear to
+   print a second line it never wrote. Same fix, same reason, as the tree-wide
+   sweep that put file names through `quote`.
+3. **Three of GNU's four operand forms were refused.** Only
+   `ln TARGET LINK_NAME` worked; `ln TARGET` and `ln TARGET... DIRECTORY` both
+   answered `expected exactly two arguments`. The third form is not exotic —
+   `ln -s ../lib/libfoo.so .` is it — and a user who typed it was told they had
+   made a mistake. Forms 1–3 work now; the fourth (`-t DIRECTORY`) needs `-t`,
+   which is rejected by name.
+4. **A relative symlink target was misjudged on Windows.** The `#[cfg(windows)]`
+   arm has to decide at creation time between a file link and a directory link,
+   and asked `Path::new(target).is_dir()` — resolving `target` against the
+   *current* directory. A symlink's text is resolved against the *link's own*
+   directory, so `ln -s ../thing sub/link` asked the wrong question. Host-only
+   (the shipping target takes the `#[cfg(unix)]` branch), but a bug in code that
+   exists, and the fix was one `join`.
+
+**What `ln` still does not do:**
+
+- **Every option but `-s`/`--symbolic`**, all rejected by name: `-b`, `-d`/`-F`,
+  `-f`, `-i`, `-n`, `-r`, `-t`, `-v`, `-L`, `-P`, `-S`, `-T` and their long
+  spellings. `-n` is the one that would be dangerous ignored: it asks for a
+  `LINK_NAME` that is *itself* a symlink to a directory to be treated as a plain
+  file, so ignoring it puts the new link inside the pointed-at directory instead
+  of replacing the link — a link somewhere the user never named, with no message.
+- **The `-t DIRECTORY` operand form**, which depends on `-t`.
+
+**Two things this conversion did better than the three before it, and which the
+remaining 47 should copy:**
+
+- **The GNU behaviour was measured, not recalled.** Every diagnostic and every
+  operand form above was read off GNU coreutils 9.4 through WSL before being
+  implemented, including the long-option table's *declaration order* — obtained
+  with the instrument documented in `getopt::Program::resolve_long`, namely that
+  an empty prefix matches every option, so `ln --=x` prints the whole table in
+  order. Three ambiguities are pinned by tests against the measured strings:
+  `--s` between `--suffix` and `--symbolic`, `--n` between `--no-dereference`
+  and `--no-target-directory`, `--v` between `--verbose` and `--version`. The
+  first is the one that matters — a table pruned to the single implemented
+  option would turn `ln --s` from an error into a symbolic link.
+- **The target-side check is `cargo +nightly clippy --all-targets`, not
+  `cargo +nightly build`.** `build` does not compile `#[cfg(test)]` code, so the
+  `#[cfg(unix)]` *tests* — which are the regression tests for the whole
+  burn-down, and which never run on this Windows host — were still never
+  type-checked by the step introduced for `mv`. `clippy --all-targets` compiles
+  the test harness for `x86_64-slateos` and so covers them. Use it in place of
+  the plain build from here on.
+
+### `mkdir` converted, and the four further defects the rewrite uncovered (2026-08-22)
+
+Gate count 47 → 46. 27 tests, up from 7, and — as with `mv`, `cp` and `ln` — the
+*action* path had none at all before, so all of its coverage is new.
+
+Like `ln`, and unlike `rm`, `mv` and `cp`, **none of these defects made `mkdir`
+create a directory in a place the user did not ask for**. All four were refusals
+of valid command lines, or messages in the wrong shape. That is now two
+conversions in a row where the argv defect was not a marker for something that
+loses data.
+
+**The four defects**, in the lines the rewrite replaced:
+
+1. **No long option worked, including `--help` and `--parents`, and `--` was not
+   an end-of-options marker.** `parse_args` compared each whole argument against
+   the literal string `"-p"` and treated everything else beginning with `-` as
+   unknown. So the long spelling of the one option the program *has* was refused;
+   `--help` was refused; a directory whose name begins with a dash could not be
+   created at all, there being no way to stop option parsing; and short options
+   could not be bundled, so `mkdir -pv` failed as one unknown option.
+2. **The failure message used the wrong quoting style** — `quoteaf_os`, straight
+   `'a'`, where GNU `mkdir` uses locale quoting, curly `‘a’`. See the section
+   below; this is the finding worth carrying forward, not the bug.
+3. **`missing operand` carried no `Try 'mkdir --help' for more information.`**,
+   which was the only pointer a user had to a `--help` that — see defect 1 — did
+   not work anyway.
+4. **Unknown options were reported in a shape no other utility uses**:
+   `mkdir: unknown option: -q`, against GNU's `mkdir: invalid option -- 'q'`
+   plus the referral. Going through `getopt` fixes this for the same reason it
+   fixes ambiguity handling — the wording is the library's, measured once,
+   rather than each bin's own guess.
+
+**The quoting style is a property of the individual message, not of the utility,
+and `mkdir` is the odd one out.** This is the reusable finding. Measured under
+`LANG=C.UTF-8`, GNU coreutils 9.4:
+
+| Message | Marks | Our function |
+|---|---|---|
+| ``mkdir: cannot create directory ‘a’: File exists`` | curly | `quote` / `quote_os` |
+| ``mkdir: created directory 'v1'`` (`-v`) | straight | `quoteaf` / `quoteaf_os` |
+| ``rmdir: failed to remove 'nosuch'`` | straight | `quoteaf_os` |
+| ``cp: cannot stat 'nosuch'`` | straight | `quoteaf_os` |
+| ``rm: cannot remove 'nosuch'`` | straight | `quoteaf_os` |
+| ``touch: cannot touch '/nope/x'`` | straight | `quoteaf_os` |
+| ``ln: failed to create hard link 'g'`` | straight | `quoteaf_os` |
+
+The two `mkdir` rows are the point: one program, two styles, in the same run.
+`quoteaf_os` was not a careless choice in the old file — it is what all five of
+`mkdir`'s nearest neighbours use, which is exactly why it is easy to get wrong
+in both directions. **The rule for the remaining 46 is to measure the specific
+message, not to copy the utility next door**, and `mkdir.rs` now carries a test
+(`the_failure_message_uses_curly_marks`) that fails if someone harmonises it.
+
+**What `mkdir` still does not do:**
+
+- **Every option but `-p`/`--parents`**, all rejected by name: `-m`/`--mode`,
+  `-v`/`--verbose`, `-Z`/`--context`. `-m` is the one that would be harmful
+  ignored — `mkdir -m 700 ~/.ssh` would silently produce a 0755 directory, i.e.
+  a directory the user asked to be private, made world-readable with no message.
+  Implementing it properly needs a symbolic-mode parser (`u=rwx,go=`); the only
+  one in the tree is private to `chmod.rs`. **Lifting that into a shared
+  `coreutils::mode` module is the prerequisite**, and it unblocks `-m` in
+  `mkdir`, `mkfifo` and `install` at once, so it is worth doing once rather than
+  copying the parser a third time.
+- `--verbose` is unimplemented only for scope discipline; it is safe to ignore
+  and trivial to add, and it is refused rather than ignored purely so that no
+  option in this program is silently dropped.
+
+**Measured, not recalled**, per the rule the `ln` section sets out. The whole
+long-option table came from `mkdir --=x` and is pinned by a test asserting the
+exact string, so the *order* — which is observable, and which the ambiguity
+messages depend on — cannot drift:
+
+```text
+mkdir: option '--=x' is ambiguous; possibilities: '--context' '--mode'
+'--parents' '--verbose' '--help' '--version'
+```
+
+The ambiguity that matters is `--v` between `--verbose` and `--version`: a table
+pruned to the single implemented option would turn `mkdir --v` from an error
+into a version banner. `--p` is measured as *unambiguous* (`mkdir --p q` works),
+and there is a test for that too, since it is the abbreviation a user is most
+likely to type.
+
+### The option tables were wrong in five bins, and now there is a gate (2026-08-22)
+
+**In short:** Each converted utility carries a copy of the real GNU program's
+list of long options (`--verbose`, `--parents`, …). The copy has to be exact,
+including options we deliberately do not implement, because that list — not the
+set of options we handle — is what decides whether a shortened option like
+`--v` is an error or a command. We had been writing those lists from memory.
+Five of them were wrong, in five different ways, and none of the mistakes was
+visible by reading the file. There is now a script that asks the real utility
+for its list and compares, and a push gate that runs it.
+
+**Why the list must include options we do not implement.** `getopt_long` lets a
+user shorten a long option to any prefix that names exactly one entry. Whether
+`--v` names exactly one entry depends on *every* entry, so an option missing
+from the list does not merely go unrecognised — it stops making its neighbours
+ambiguous. Drop `--verbose` from `rm`'s list and `rm --v file` no longer fails;
+it matches `--version`, prints a banner, and deletes nothing.
+
+**How they were wrong.** All five were found by measurement, none by review:
+
+| Bin | The mistake | What a user would have seen |
+|---|---|---|
+| `mv` | had `--exchange`, which is a *newer* upstream's option; lacked `--no-copy`, which the reference has | `mv --no-c` acted on `--no-clobber` where GNU calls it ambiguous |
+| `cp` | had `--keep-directory-symlink`, which is a **`tar`** option and has never been a `cp` one | an accepted abbreviation of an option `cp` does not have |
+| `rm` | lacked `-presume-input-tty` | `rm ---p` unrecognised where GNU resolves it |
+| `split` | lacked `-io-blksize` | `split ---i` unrecognised where GNU resolves it |
+| `csplit` | exactly the right names, in an order no getopt produces | `csplit --s` listed `'--suffix-format'` first where GNU lists `'--silent'` |
+
+Two of those deserve enlarging on.
+
+**Option names may begin with a hyphen.** GNU's `rm` table literally holds the
+name `-presume-input-tty`, so it is typed `---presume-input-tty`, with three
+dashes. `split` has `-io-blksize` the same way. These are internal knobs
+deliberately made awkward to spell, and the leading hyphen is not a typo in
+this file — it is the name. They cannot collide with any ordinary `--name`
+(nothing else starts with `-`), so listing them changes nothing except that a
+`---` prefix now resolves as GNU resolves it. `rm.rs` carries a test in each
+direction: `---p` reaches the hyphen-named option, and `--p` still means
+`--preserve-root` alone.
+
+**Order is observable, not cosmetic.** glibc reports `pfound` — the *first*
+table entry that matched — so two tables holding the same names in different
+orders name different options in their diagnostics. `csplit`'s list had been
+sorted into a plausible-looking order rather than GNU's, which changed nothing
+about *what* resolved and everything about what the error message said.
+
+**The gate.** `scripts/getopt-ambiguity-check.py` runs two comparisons per bin:
+
+1. **The table.** `<util> --=x` prints GNU's whole table — the empty prefix
+   matches every entry, so the ambiguity message lists all of them in
+   declaration order. Ours is compared to that as a *sequence*.
+2. **Every abbreviation.** For each distinct proper prefix of each name, our
+   verdict (resolves / ambiguous / unrecognised) is compared with GNU's.
+
+The second cannot find everything on its own, which is why the first exists:
+the prefixes it probes are generated from *our* names, so an option GNU has and
+we lack is never typed and never measured. That blind spot is exactly what hid
+`rm`'s and `split`'s missing entries through an earlier, prefix-only version of
+the script — it reported zero disagreements on all 24 tables.
+
+Run it with `python scripts/getopt-ambiguity-check.py [util…]`. It needs a GNU
+userland, finds WSL itself on this host, and exits 0 with a note where there is
+none. **Unlike the other pre-push gates it has no baseline**: all 24 tables
+agreed once these five were fixed, so it starts at zero and is simply strict.
+It is pre-push gate 5, scoped to the bins a push actually rewrites (~2s each)
+unless `getopt.rs` itself changed, in which case it sweeps all of them (~35s).
+
+### `getopt` called an alias ambiguous against itself (2026-08-22)
+
+**In short:** Some utilities have two spellings of one option — `rmdir --path`
+and `rmdir --parents` are the same thing. Our option matcher treated them as two
+different options, so it refused `rmdir --p` as "ambiguous" when the real
+`rmdir` accepts it. Fixed, with the fix driven by measurement rather than by
+guessing what "ambiguous" ought to mean.
+
+**What glibc actually does.** It judges ambiguity by `struct option`'s `val`
+field, not by name: two spellings sharing a `val` are one option, and a prefix
+matching only those resolves. Three measurements pinned the behaviour, and each
+one contradicted a plausible guess:
+
+| Measured | Result | The guess it kills |
+|---|---|---|
+| `rmdir --p` | resolves | "two matching names is ambiguous" |
+| `cp --p` | `ambiguous; possibilities: '--parents' '--preserve'` | "aliases are hidden" — `--path` matched, and is simply not a second *candidate* |
+| `rmdir --pa=1` → `'--path'`, `cp --pa=1` → `'--parents'` | disagree | "the alias resolves to its target" |
+
+That last row is the subtle one. The two utilities name *different* spellings
+for the same abbreviation, purely because their tables are in different orders:
+glibc returns the first entry that matched and never the alias's target. So the
+fix must **not** canonicalise — reporting the target would be one line shorter
+and would silently name an option the user did not type.
+
+`Program::resolve_long_aliased` takes an extra `&[(&str, &str)]` mapping a
+spelling to the option it *is*, compares each later match against the first
+one's identity (which is what glibc does, and is what decides the shape of the
+list), and returns the entry it matched. `resolve_long` delegates to it with an
+empty map, so the 23 call sites with no aliases needed no change and there is
+still only one implementation. `cp` was the one live bin affected; `rmdir` would
+have been wrong the same way the moment it was converted.
 
 ---
 
@@ -59428,6 +60020,22 @@ flag. `gui/`'s header also said *"Zone config for apps/"*, copied verbatim from
 - `userspace/.cargo/config.toml`, `net/.cargo/config.toml` and
   `init/.cargo/config.toml` carry the identical incomplete header. Those are
   lanes A and B's trees.
+
+  **Lane B, 2026-08-22: `userspace/` and `init/` are done** — both now carry
+  the `+nightly` paragraph, and both had *also* inherited lane C's original
+  first line verbatim ("Zone config for apps/ — userspace GUI/CLI
+  applications"), which now names the right zone. `net/` is untouched; per the
+  lane table in `CLAUDE.md` it is lane C's, not lane A's.
+
+  Lane B lost exactly the ten minutes this entry predicts, converting `mv`.
+  The cost is worse in `userspace/` than elsewhere and the fixed header now
+  says so: the target's family is `unix` and the development host is Windows,
+  so `cargo test` on the host never compiles the `#[cfg(unix)]` arm of
+  anything in that tree. A zone build is not a convenience there — it is the
+  only thing that type-checks half the source, and it is the half that runs in
+  production. An agent who does not know the `+nightly` word therefore does not
+  merely lose ten minutes; it concludes the target build is unavailable and
+  commits code whose `#[cfg(unix)]` branches have never been compiled.
 - `CLAUDE.md` line 41 should gain "and only on a nightly toolchain", and the
   `build-slateos` alias comment at `.cargo/config.toml:62` already shows
   `cargo +nightly build-slateos` in its example but does not say why the
@@ -60661,6 +61269,84 @@ It now falls back to the bare path.
 
 **Backlog: 22.**
 
+### Fourth pass: 22 → 20, by learning that a crate can have no test target at all
+
+**In short:** the checker reported two racing tests in the kernel's network
+code. Lane A checked before fixing them and found the tests do not run — the
+kernel crate is built in a way that makes `cargo test` produce nothing to run,
+so its 54 `#[test]` functions are dead code that is never even compiled. The
+checker was right about the code and wrong about the consequence. It now knows
+about that shape, and says so loudly rather than quietly dropping the crate.
+
+Lane A's reply is `requests/a-b-raced-globals-flags-tests-that-cannot-run.md`.
+`kernel/Cargo.toml` sets `test = false` on its `[[bin]]` and the crate has no
+`src/lib.rs`, so `cargo test -p kernel` compiles and runs **no target**. My
+`raw.rs` finding described a real interleaving between two `#[test]`s that can
+never execute.
+
+**The rule, and why it is skip-*and-report* rather than skip.** Lane A suggested
+the tool skip crates whose test target is disabled, and the reason they gave is
+the right one: "a checker that reports a race in code that never runs is right
+about the code and wrong about the consequence, and the second is what people
+act on." But a silent skip is the failure direction this whole tool is built
+around — **a broken detector does not report a broken tree, it reports a clean
+one**. If `test = false` ever appeared in `posix/Cargo.toml`, a silent skip
+would delete my entire crate from the report and the `--check` gate would go
+green on the way out. So the dead `#[test]`s are counted and printed in their
+own section above the findings:
+
+```
+--- 54 `#[test]` fn(s) in 1 crate(s) with no test target: kernel ---
+    They look like tests and are not: `cargo test` builds no target for them,
+    so they never run and are never even type-checked. Not counted as raced
+    below -- tests that cannot execute cannot interleave.
+```
+
+That turns a false positive into a true positive about a larger problem, and it
+makes a crate falling out of scope an event rather than an absence.
+
+**Every uncertainty in `crate_has_test_target` resolves to "keep the crate".**
+The only path to `False` is a manifest that positively demonstrates no target is
+left: a `[lib]` with `test = false` (or no `src/lib.rs`), no `tests/*.rs`, an
+explicit `[[bin]]` list with `test = false` on every entry, and no autodiscovered
+binary — `src/main.rs` unclaimed by an explicit `path`, or any `src/bin/*.rs` —
+unaccounted for. A malformed manifest, an unreadable file, a Python without
+`tomllib`: all return `True`. Getting this backwards costs silence, and silence
+is the one outcome the tool exists to prevent.
+
+**Cross-validated against a number derived independently.** Lane A counted 54
+dead tests across 8 files by reading the crate; the new detector reports the same
+total *and* the same per-file counts (balloc 3, driver 6, vfs_impl 13, pathutil
+10, frag 7, httpd 7, raw 2, tty 6). Two methods that never saw each other
+agreeing is stronger evidence than either alone — a regex that merely produced
+"some number" would have looked just as plausible.
+
+Self-test **rule 9** covers it, with six expectations built as synthetic crates
+in a temp directory: the kernel shape → no test target; `src/lib.rs` present →
+has one; an unclaimed `src/main.rs` → has one; a `tests/*.rs` → has one; an
+ordinary crate → has one; an unparseable manifest → has one. `--selftest` now
+reports 9/9.
+
+The predicate was also run over **every tracked `Cargo.toml` in the repository**
+— 2934 manifests, vendored crates included, not just the ones the walker reaches
+— and exactly one comes back with no test target: `kernel`. That is the number
+that makes the new section meaningful. Had it come back with forty, it would
+have been describing a normal shape rather than a defect, and the right response
+would have been a quiet skip after all.
+
+**I removed the two `raw.rs` lines from the baseline, against lane A's
+suggestion.** They suggested leaving them, on the grounds that "they are
+currently the only honest pointer to a real problem, even if the reason they
+fire is wrong." That was true when they wrote it and stopped being true with
+this change: the new section points at the real problem directly, by name and
+with a count. What a stale baseline line would buy now is the ability to excuse
+a *genuine* reappearance — if the kernel ever gains a test target and those two
+tests start running and racing, a pre-existing baseline entry means `--check`
+stays green through it. That is the silence direction again, so the lines came
+out. The baseline shrank by exactly two and gained nothing.
+
+**Backlog: 20.**
+
 ---
 
 ## B-AT-RANDOM-WAS-RE-ROLLED-UNDER-A-RACE — two threads could both fill the stack-canary buffer
@@ -61726,6 +62412,490 @@ fixes — the question to ask is not "how do I ignore other writers" but "what i
 this assertion actually claiming, and is that claim still true when the system
 is busy".
 
+## TD-B-COREUTILS-PRINT-THE-HOSTS-ERROR-TEXT (lane B, 2026-08-22) — OPEN
+
+**In short:** When a tool like `cp` or `tar` fails to open a file, it prints a
+sentence explaining why — "No such file or directory". That sentence does not
+come from us; it comes from whatever operating system the program was *compiled
+on*. Compiled for SlateOS it reads the way every Unix reads. Compiled on the
+Windows machine we develop on, the very same failure prints "The system cannot
+find the file specified. (os error 2)" instead. So 29 of our 85 tools say one
+thing in production and a different thing in every test we run, and a test that
+checks the wording is either wrong on the real OS or wrong on the dev machine —
+it cannot be right on both. We already have the one-line fix; it has been
+applied to 5 tools and not to the other 29.
+
+### Why the wording is not cosmetic
+
+`userspace/coreutils/src/errmsg.rs` states the principle in its own module doc,
+and it is the reason that file exists at all:
+
+> the message is an interface. A shell script that does
+> `2>&1 | grep 'No such file'`, a test that asserts a diagnostic, and a person
+> reading a log all read it.
+
+POSIX names these strings (`strerror(3)` — the C function that turns an error
+number into a sentence), every Unix uses the same ones, and scripts written
+against any Unix expect them. A tool that substitutes Windows' phrasing is not
+merely differently worded; it is unmatchable by anything written for a Unix.
+
+### Where
+
+The defect is a *format string*: an `io::Error` interpolated directly, so Rust
+calls the platform's own `Display` for it.
+
+```rust
+// wrong -- prints whatever the host said
+eprintln!("cp: cannot stat {}: {e}", quoteaf_os(src));
+```
+
+Measured 2026-08-22 by `scripts/host-errmsg.py`: **92 sites across 29 bins**
+under `userspace/coreutils/src/bin/`. The head of the distribution:
+
+```
+   17  tar.rs        4  patch.rs      2  nohup.rs
+   11  fetch.rs      4  cmp.rs        2  diff.rs
+    8  dd.rs         3  xargs.rs
+    7  chmod.rs      3  stat.rs      1 each:  bc chown df ed find ls md5sum
+    6  tee.rs        2  renice.rs            more nice realpath sh sha256sum
+    6  du.rs         2  readlink.rs          strings time_cmd touch
+```
+
+Five bins — `rm`, `mv`, `cp`, `ln`, `mkdir` — were converted in commit
+`f516898f7` (18 sites) and are clean. They are the worked example.
+
+### What the correct fix looks like
+
+`coreutils::errmsg::strerror` already exists and already does the whole job: it
+maps `std::io::ErrorKind` to the POSIX sentence, falling back to the host's text
+only for the kinds Rust does not name. Per site:
+
+```rust
+let why = strerror(&e);
+let _ = writeln!(err, "cp: cannot stat {}: {why}", quoteaf_os(src));
+```
+
+Bind it to a `let` rather than inlining `strerror(&e)` into the format string.
+Most of these are multi-line `writeln!` calls, and inlining forces the argument
+list to be reordered — a much larger diff for no gain.
+
+Convert a **whole bin at a time**. A half-converted one prints two different
+wordings for the same failure depending on which line reported it, which is
+worse than one wrong wording consistently.
+
+Watch for one thing while converting: `rm.rs` had a hand-written `NotFound`
+arm that existed to make `-f` quiet. That is matched on `ErrorKind`, not on the
+message, so it survives the change untouched — the branch decides whether to
+speak, `strerror` decides the words. Don't fold the two together.
+
+### Why a gate as well as a burn-down
+
+The defect is invisible where we work. The dev host prints the *wrong* text, so
+a test asserting the *right* text fails on the machine that runs it, and the
+natural response is to assert nothing — which is why none of the 29 bins has a
+test that would have caught this. Fixing 29 bins does not stop the thirtieth.
+
+`scripts/host-errmsg.py` is gate 6 in `scripts/hooks/pre-push`
+(`ALLOW_HOST_ERRMSG=1` to bypass). It records the 29 in
+`scripts/host-errmsg-baseline.txt` and fails only on a bin that is *not* there,
+so the backlog is frozen and can only shrink. A finding is keyed on the file
+rather than the site, matching the unit of repair above; `--list` prints the
+individual sites for whoever is doing the work.
+
+Three shapes are deliberately not reported, and each is pinned by
+`--selftest` so the exclusion cannot silently widen:
+
+| Not reported | Why |
+|---|---|
+| `assert!(ok, "{err}")` and friends | Test scaffolding, read by a developer looking at a failure. There is no POSIX wording to get wrong. Seven bins' *only* hit was one of these — three of them bins that had just been converted, and a gate that reports its own fixes is a gate nobody believes. |
+| `write!(f, "{e}")` in a `Display` impl | A wrapper error forwarding its source. Nothing there for `strerror` to translate. Recognised by the sink being named `f`, the formatter's conventional name. |
+| `eprintln!("tar: {e}")` — the *whole* message | The top-level print in `main`, where the error already is the entire message. In every bin here it carries a `getopt::Error` or a `String`, never an `io::Error`. This exemption is what lets the target be zero rather than "one per bin". |
+
+One genuine false positive is in the script's `IGNORE` table with its reason:
+`awk/fmt.rs` formats `%e` output as `format!("{s}{e}{sign}{:02}", ..)`, where
+`e` is the exponent character. A name collision, and the only one in 85 bins.
+
+### Interaction with the argv conversion
+
+This travels with `B-COREUTILS-PANIC-ON-A-NON-UTF-8-ARGUMENT`. Both are
+per-bin rewrites of the same 30-odd files, both touch the diagnostics, and doing
+them separately means reading and re-reading each bin twice. The five converted
+so far had both done in one pass (argv first, error text immediately after), and
+that is the order to keep: the argv conversion is what introduces the
+`writeln!(err, ..)` sink in the first place.
+
+## TD-B-TOUCH-CANNOT-STAMP-A-PATH-IT-CANNOT-OPEN (lane B, 2026-08-22) — OPEN, host-only
+
+**In short:** `touch` sets a file's "last changed" date. On SlateOS it does that
+by naming the file — which works even for things you are not allowed to *open*,
+like a directory, a file whose permissions are set to deny everyone, or a
+socket. On the Windows machine we develop on there is no way to set a date by
+name; you must open the file first. So on that machine, and only on that
+machine, `touch` fails on those few kinds of file. Nothing shipped is affected —
+the real OS takes the good path — but it means a test for those cases cannot be
+written on the dev machine, so none exists.
+
+### Where
+
+`userspace/coreutils/src/bin/touch.rs` → `stamp_path`. Two arms:
+
+| Arm | How it stamps | Reaches |
+|---|---|---|
+| `#[cfg(unix)]` — **what ships** | `utimensat(AT_FDCWD, path, times, 0)` | everything a path can name |
+| `#[cfg(not(unix))]` — the dev host | open a handle, `SetFileTime` | everything a handle can name |
+
+### What the gap actually is
+
+Measured on Linux 6.6 (glibc), running the create-open and the stamp in the
+order `touch_one` does:
+
+| Path | create-open | `utimensat` |
+|---|---|---|
+| ordinary file | ok | ok |
+| a directory | `Is a directory` | ok |
+| a file of mode 000 you own | `Permission denied` | ok |
+| a FIFO with no reader | `No such device or address` | ok |
+| a unix-domain socket | `No such device or address` | ok |
+
+Four of those five cannot be opened in *any* mode — a mode-000 file refuses
+`O_RDONLY` exactly as it refuses `O_WRONLY`, and `open` on a socket fails
+outright. The unix arm handles all five. The Windows arm handles the first two
+(a directory works there because the handle asks for `FILE_WRITE_ATTRIBUTES`
+with `FILE_FLAG_BACKUP_SEMANTICS`); the other three have no Windows analogue
+worth chasing, since Windows has neither a mode-000 file nor a unix socket.
+
+### Why this is filed as debt rather than fixed
+
+There is nothing to fix in the shipping code — it already does the right thing.
+What is missing is **coverage**: the four interesting rows above are exactly the
+rows the host cannot execute, so the host suite proves the *logic* around the
+stamp (order of operations, which error is reported, `-c`/`-a`/`-m`/`-r`) and
+not the stamp itself on those file types.
+
+The C probe that produced the table above is the evidence that exists today. It
+was run once, by hand, under WSL. That is better than reasoning and worse than
+a test.
+
+### What the correct fix looks like
+
+A ring-3 self-test on the target, next to the existing `fastpy-settimes` one in
+`kernel/src/proc/spawn.rs` (which already exercises `SYS_FS_SET_TIMES` end to
+end). It should create the five paths above in a scratch directory, run the
+shipped `touch` on each, and assert exit 0 and a moved timestamp for all five.
+That is the only place all five can exist at once.
+
+Trigger: whenever the next ring-3 coreutils self-test is written — do not build
+a boot-test harness solely for this.
+
+### What must NOT be done about it
+
+Do not "fix" the divergence by making the unix arm open a handle too, so that
+both hosts behave alike. That trades a correct program for a testable one: it
+would break `touch` on four real file types on the only OS this is for, to make
+the dev host's limitation universal. The asymmetry is the right outcome.
+
+## TD-B-GETOPT-HAS-NO-DRIVER-FOR-OPTIONS-THAT-TAKE-VALUES (lane B, 2026-08-22) — RESOLVED 2026-08-22
+
+**Resolved.** The trigger fired: `realpath` is the second bin needing a
+value-taking option (`--relative-to=DIR`, `--relative-base=DIR`), so the walk was
+lifted rather than copied. `coreutils::getopt` now has `Program::parse` /
+`parse_aliased`, the `Opt` enum and the `Parser` iterator; `touch` was converted
+onto it and its private `Cursor`, `parse_long`, `parse_cluster`,
+`short_takes_argument` and `apply_short*` are gone. All 45 of `touch`'s tests
+passed **unchanged** across the swap, which is the evidence that the lift is
+behaviour-preserving.
+
+Two deliberate deviations from the plan below, both of which the plan got wrong:
+
+- **The signature is lazy, not eager.** `-> Result<Vec<Opt>, Error>` would have
+  broken `--help`: measured, `readlink --help --bogus` prints the help and exits
+  0, while `readlink --bogus --help` is an error. A parser that validated all of
+  argv before returning cannot produce the first. `parse` returns an
+  `Iterator<Item = Result<Opt, Error>>` instead, so a caller acts on each item
+  before asking for the next — which is what `getopt_long` itself does.
+- **`Takes::Optional` now has a design and a test**, though still no bin using
+  it: an optional value is *never* the next word, only the glued one. That was
+  the case the entry said would shape the design, and it did — it is the whole
+  difference between `--check x` (operand) and `--key x` (value).
+
+The tests named below as the specification moved into `getopt.rs` alongside the
+code, keeping `touch`'s table as their subject. `touch`'s own copies stayed, now
+testing one layer up: that each `Opt` is wired to the right field.
+
+The original entry follows.
+
+---
+
+## TD-B-GETOPT-HAS-NO-DRIVER-FOR-OPTIONS-THAT-TAKE-VALUES (original entry, lane B, 2026-08-22)
+
+**In short:** Our command-line tools share a helper that produces the *error
+messages* for bad options ("invalid option -- 'q'"). It does not do the actual
+*reading* of the command line. That was fine while every converted tool had only
+on/off switches like `-r`, but `touch` is the first with an option that takes a
+value (`-r FILE`, `--reference=FILE`), and those can be written four different
+ways. `touch` therefore carries about forty lines of its own command-line reader.
+The moment a second tool needs one, that code will be copied — and two copies
+will drift apart on the fiddly cases.
+
+### Where
+
+- The shared helper: `userspace/coreutils/src/getopt.rs`. It has
+  `Program::invalid_option`, `unrecognized_option`, `short_missing_argument`,
+  `long_missing_argument`, `argmatch`, `resolve_long`, and the `Takes` enum
+  (`Nothing` / `Required` / `Optional`) — everything needed to *describe* an
+  option table and to *complain* about it. There is no loop that walks argv.
+- The private copy: `userspace/coreutils/src/bin/touch.rs` → `Cursor`,
+  `parse_args`, `parse_long`, `parse_cluster`, `short_takes_argument`.
+
+### The four spellings that have to be got right
+
+For an option taking a value, all of these are the same thing, and GNU accepts
+all four:
+
+```
+-r FILE        --reference FILE
+-rFILE         --reference=FILE
+```
+
+Plus the cases that are easy to get subtly wrong, each of which `touch` has a
+test for:
+
+| Input | Correct behaviour |
+|---|---|
+| `-cr ref f` | bundling continues up to the value-taking option, which then eats the *next* argv word |
+| `-r` at the end | `option requires an argument -- 'r'` |
+| `--reference` at the end | `option '--reference' requires an argument` |
+| `--no-create=x` | refused: the option takes no value |
+| `--time=` | an *empty* value, which then fails `argmatch` and lists the valid words |
+| `-d 2001-01-01` | the option is refused, but its value must still be *consumed*, or `2001-01-01` becomes a file name |
+
+That last row is the one worth calling out: an option this crate does not
+implement still has to be parsed exactly like one it does, or the refusal turns
+into a silent file operation on the argument.
+
+### Why it was not lifted into `getopt` immediately
+
+Deliberate, not an oversight. An API designed from a single caller is one the
+second caller has to fight, and the case that will actually shape the design —
+`Takes::Optional`, where `--color` and `--color=never` differ but `--color never`
+is *not* the option's value — has no caller at all yet. `touch` needs only
+`Nothing` and `Required`, so a `getopt` driver written now would be guessing at
+the third.
+
+### What the correct fix looks like
+
+When a **second** bin needs an option argument, lift it then, with two callers
+in hand to check the shape against. The natural signature, given what is already
+in `getopt.rs`:
+
+```rust
+impl Program {
+    pub fn parse<'a>(
+        &self,
+        argv: &'a [OsString],
+        shorts: &str,              // GNU's getopt string, e.g. "acd:fhmr:t:"
+        longs: &[(&str, Takes)],
+    ) -> Result<Vec<Opt<'a>>, Error>;
+}
+```
+
+...yielding a flat sequence of `Opt::Short(u8, Option<OsString>)`,
+`Opt::Long(&str, Option<OsString>)` and `Opt::Operand(&OsString)`, so each bin
+keeps its own `match` over that sequence and only the walking is shared. Move
+`touch`'s tests for the table above with it — they are the specification.
+
+Trigger: **the second bin that needs an option taking a value.** The remaining
+argv-conversion backlog makes that near-certain (`ls`, `find`, `du`, `dd`,
+`sed`, `tar` all have them), so this should not sit long.
+
+---
+
+## TD-B-CANON-DETECTS-CYCLES-BY-PATH-NOT-BY-INODE (lane B, 2026-08-22) — OPEN, cannot bite on SlateOS today
+
+**In short:** A *symlink* is a file whose contents are the name of another file,
+so following one can go in circles — `a` points at `b`, `b` points back at `a`.
+`readlink -f` and `realpath` have to notice that and stop, rather than following
+the circle forever. Ours notices by remembering the **names** it has already
+walked through; the program we copied the algorithm from remembers the
+**identity numbers** the filesystem gives each directory instead. Those two are
+the same answer everywhere except on a filesystem where one directory has been
+made to appear at two different names at once — a "bind mount", which SlateOS
+does not have and has no plans to add. If that ever changes, a circle built out
+of the two names would be followed 100,000 times before a safety counter cut it
+off, instead of being spotted immediately. Nothing is broken now; this is a note
+about what would have to change first.
+
+### Where
+
+`userspace/coreutils/src/canon.rs` — `canonicalize()`, the `seen` set:
+
+```rust
+let mut seen: HashSet<(Vec<u8>, Vec<u8>)> = HashSet::new();
+...
+} else if !seen.insert((parent, comp)) || expansions > MAX_EXPANSIONS {
+```
+
+`parent` is the canonical path accumulated so far; gnulib's
+`canonicalize_filename_mode` (`lib/canonicalize.c`) instead stores
+`(st_dev, st_ino, component)` obtained from a `stat` of the parent.
+
+### Why ours is different
+
+Two reasons, both about what the code is allowed to assume.
+
+1. **[`Fs`] has three methods on purpose.** `cwd`, `read_link` and `dir_check`
+   are the whole filesystem interface the algorithm needs, which is what lets
+   the entire component walk be tested against a `BTreeMap` fake with no
+   temporary directories and no host-specific behaviour. Adding a fourth method
+   that returns a `(device, inode)` pair would drag a concept into the trait
+   that the SlateOS VFS does not yet expose to userspace at all — there is no
+   `stat` field carrying a device number today — so the trait would have to
+   describe something that cannot be implemented.
+
+2. **Inode identity is not available on the host either.** The host build (the
+   one all these tests run under) is Windows, where `std::fs::Metadata` exposes
+   no `st_ino`. So the inode-keyed version would be dead code on the host and
+   untestable on the target, which is the worst of both.
+
+### What breaks, precisely
+
+Only a directory reachable under two distinct canonical paths. Concretely, with
+`/x` and `/y` naming the same directory, and `/x/l -> /y/l`:
+
+- gnulib: the second visit to the directory has the same `(dev, ino)` and the
+  same component `l`, so the loop is detected on the second hop and `ELOOP` is
+  reported.
+- ours: `/x` and `/y` are different byte strings, so the pair never repeats.
+  The walk alternates forever until `expansions > MAX_EXPANSIONS` (100,000)
+  trips, and *then* reports `ELOOP` — the same answer, after a bounded amount
+  of pointless work.
+
+Note the failure mode is a slow correct answer, not a hang and not a wrong
+answer. That is what makes this tech debt rather than a bug.
+
+### What the correct fix looks like
+
+When the SlateOS VFS exposes a stable per-file identity to userspace — it will
+need one for `ls -i`, for `du`'s hard-link deduplication, and for `cp -a`'s
+"same file" refusal, so this is coming regardless — add a fourth method:
+
+```rust
+fn identity(&self, path: &[u8]) -> io::Result<(u64, u64)>;
+```
+
+with a default implementation returning `Err(Unsupported)`, key `seen` on
+`(identity_or_path, comp)`, and keep `MAX_EXPANSIONS` as the backstop for
+implementations that decline. The fake `Fs` in `canon.rs`'s tests can then
+hand out synthetic identities, and the bind-mount case above becomes a unit
+test rather than a paragraph.
+
+**Trigger:** the first of (a) a `dev`/`ino` pair reaching userspace through the
+SlateOS `stat` ABI, or (b) bind mounts appearing in the VFS. Neither exists as
+of 2026-08-22.
+
+## TD-B-THREE-UTILITIES-STILL-CARRY-THEIR-OWN-MODE-PARSER (lane B, 2026-08-22) — RESOLVED 2026-08-22
+
+**In short:** "Mode" here means the thing you type after `chmod` — `755`, or
+`u+w`, or `a+rX,go-w`. Several places in the tree each wrote their own parser
+for it and disagreed, so a script that set a permission with one tool and read
+it back with another could get two answers. There is now one parser,
+`userspace/modechange`, and every utility that speaks the coreutils mode
+grammar uses it. The one parser that remains separate — the shell's `umask`
+builtin — is deliberate, and is explained at the bottom of this entry: it is
+not the same grammar.
+
+**Where it lives:**
+
+| Site | State |
+|---|---|
+| `userspace/coreutils/src/bin/chmod.rs` | **Done** — rewritten on `modechange`, 24,480 GNU rows agree. |
+| `userspace/coreutils/src/bin/stat.rs` | **Done** — `format_mode` now calls `modechange::permission_string`. |
+| `userspace/coreutils/src/bin/mkdir.rs` | **Done** — `-m` implemented on `modechange` (base `0777`, real umask, `dir=true`). |
+| `userspace/coreutils/src/bin/mkfifo.rs` | **Done** — same, base `0666`, `dir=false`. |
+| `userspace/install/src/main.rs` | **Done** — base `0`, umask `0`; see below. |
+| `userspace/chown/src/main.rs` | **Done** — this crate's `chmod` persona now resolves even an octal mode against the current mode, so `-R 755` no longer strips setgid off a directory. |
+| `userspace/oils/src/interp.rs` | **Stays separate, on purpose** — a different grammar, see below. |
+
+**The five callers disagree on all three arguments to `adjust`, so there is no
+shared "apply the mode" helper above the parser** — only a shared parser. This
+was the surprise of the conversion and is worth keeping written down:
+
+| | `mkdir -m` | `mkfifo -m` | `install -m` | `chmod` | `chmod --reference` |
+|---|---|---|---|---|---|
+| Base mode | `0777` | `0666` | **`0`** | the file's current mode | the file's current mode |
+| `dir` | `true` | `false` | `true` for `-d`, else `false` | per-file `is_dir()` | per-file `is_dir()` |
+| Umask | the real umask | the real umask | **`0`** | the real umask | **`0`** |
+
+`install` is the odd one twice over, and both were measured against GNU 9.4
+across umasks `000 022 077 002 027`: every `install -m` answer is identical
+under all five, and the base of `0` means a `-m` spec *describes the finished
+mode* rather than editing a default — `install -m u+w` is `0200`, not `0755`
+with a write bit added, which is what the old hand-written parser produced.
+
+**Why the shell's `umask` builtin is not converted, and must not be.** It is
+bash's grammar, not GNU coreutils'. Measured against bash 5.2.21:
+
+| | coreutils / `modechange` | bash `umask` |
+|---|---|---|
+| `X`, `s`, `t` | accepted | rejected — `` `X': invalid symbolic mode character `` |
+| copy-source triads (`u=g`) | accepted | rejected — `` `g': invalid symbolic mode character `` |
+| several operators per clause (`u+r-w`) | accepted | rejected — `` `-': invalid symbolic mode character `` |
+| octal ceiling | `07777` kept whole | parsed to `07777`, then masked to `0777`; `10000` is "octal number out of range" |
+| a clause with no `who` | filtered by the umask | no umask is involved — the value *is* the umask |
+| operates on | the file's mode bits | the **complement**, i.e. the permission set, re-complemented at the end |
+| diagnostic | `chmod: invalid mode: ‘zzz’` | `` umask: `z': invalid symbolic mode operator `` |
+
+Putting `umask` on `modechange` would *widen* the language the shell accepts —
+`umask u+X`, `umask u=g` and `umask 10000` would all start succeeding — and
+would lose the per-character diagnostics, which name the exact offending
+character and distinguish a bad operator from a bad permission letter. That is
+a regression wearing the clothes of a cleanup. The shell keeps
+`parse_symbolic_umask`, and its module doc now says why.
+
+**What the previous entry got wrong, and it matters for whoever picks this up:**
+that entry called the prerequisite "lifting `chmod`'s parser into a shared
+`coreutils::mode` module". It became a **separate crate**, `userspace/modechange`,
+not a `coreutils` module, because three of the six remaining callers —
+`install`, `chown` and the shell — are their own crates and must not depend on
+`coreutils`; the shell especially, since `coreutils` is the set of programs the
+shell *runs*. See design-decisions §364. A `coreutils::mode` module would have
+reconciled `chmod` with `mkdir` and left the other four disagreeing, which is
+worse than it sounds: three of four agreeing makes the fourth look like a local
+bug rather than a missing abstraction.
+
+**Measured GNU behaviour for the two that are unimplemented**, so nobody has to
+re-measure (GNU coreutils 9.4, under WSL):
+
+- Both `mkdir -m` and `mkfifo -m` compile the mode against a **starting mode of
+  `0777`** — not `0755`, and not `0666` for the FIFO — then set the umask to
+  zero for the actual creation. So `mkdir -m 700 d` is `0700` under **every**
+  umask, which is the whole point of the option.
+- The umask still reaches clauses with no `who`, because that is `modechange`'s
+  rule rather than the caller's: `mkdir -m 'a=,+w'` is `0222` under umask 000,
+  `0200` under 022 **and** under 077, `0220` under 002.
+- `dir` differs, and `X` is what shows it: `mkdir -m 'a=,+X'` is `0111`,
+  `mkfifo -m 'a=,+X'` is `0000`. Note this also pins that `X` consults the mode
+  *as accumulated so far* — after `a=` there is no execute bit left, so on the
+  FIFO it does not fire.
+- With `-p`, only the **last** component gets the requested mode; the
+  intermediates get the ordinary `0777 & ~umask`. Measured: `umask 022; mkdir -p
+  -m 700 a/b/c` gives `a` 755, `a/b` 755, `a/b/c` 700.
+- `-m` on a directory that already exists does nothing, even with `-p`:
+  `mkdir a; chmod 700 a; mkdir -p -m 755 a` leaves it `0700`.
+
+**The three invalid-mode wordings are all different**, which is exactly the kind
+of thing the "measure the specific message, not the utility next door" rule
+above exists for:
+
+```text
+chmod:  chmod: invalid mode: ‘zzz’      (colon, curly)
+mkdir:  mkdir: invalid mode ‘zzz’       (no colon, curly)
+install: install: invalid mode ‘zzz’    (no colon, curly)
+mkfifo: mkfifo: invalid mode            (no colon, and the string is not quoted at all)
+```
+
+`mkfifo`'s is not a typo in this entry — GNU really does drop the operand from
+that one message.
 ---
 
 ## CLOSED 2026-08-22 — the kernel has no `.unwrap()`/`.expect()` left in production paths, and a script to keep it that way

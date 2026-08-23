@@ -280,6 +280,11 @@ enum Request {
 
 /// GNU's option table, in GNU's declaration order, which is the order an
 /// ambiguous abbreviation lists its candidates in.
+///
+/// Measured with `split --=x`, which an empty prefix makes print the whole
+/// table. `scripts/getopt-ambiguity-check.py` compares this list against that
+/// readout on every run; it is how the `-io-blksize` entry below was found
+/// missing.
 const LONG_OPTIONS: &[(&str, Takes)] = &[
     ("bytes", Takes::Required),
     ("lines", Takes::Required),
@@ -294,6 +299,16 @@ const LONG_OPTIONS: &[(&str, Takes)] = &[
     ("filter", Takes::Required),
     ("verbose", Takes::Nothing),
     ("separator", Takes::Required),
+    // The leading hyphen is part of the *name*: GNU's table holds
+    // `-io-blksize`, so it is typed with three dashes. It is an internal tuning
+    // knob deliberately made awkward to type, not a user-facing option, and it
+    // takes an argument (`split ---io-blksize` answers `requires an argument`).
+    //
+    // Because the name starts with `-` it is reachable only from a `---`
+    // prefix, so listing it cannot change what any ordinary `--name` resolves
+    // to; it is here so that `---i` resolves rather than being called
+    // unrecognised.
+    ("-io-blksize", Takes::Required),
     ("help", Takes::Nothing),
     ("version", Takes::Nothing),
 ];
@@ -553,6 +568,13 @@ fn long_option(
         "filter" => state.options.filter = value,
         "verbose" => state.options.verbose = true,
         "separator" => set_separator(state, &text)?,
+        // Same reasoning as `unbuffered` above, and the same conclusion: it
+        // names the size of the read buffer, which this implementation does not
+        // have, because it reads the input whole. There is no observable
+        // difference for it to make, so accepting it is honest rather than
+        // permissive. It is spelled with a leading hyphen in GNU's table, hence
+        // three dashes on the command line.
+        "-io-blksize" => {}
         "help" => return Ok(Some(Request::Help)),
         "version" => return Ok(Some(Request::Version)),
         // `resolve_long` returns only names from the table, all of which are

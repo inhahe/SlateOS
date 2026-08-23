@@ -5986,6 +5986,162 @@ extern "C" fn kernel_main() -> ! {
     }
 
     {
+        // De-fanged eager self-tests, batch 1 of 4.
+        //
+        // The six batches above are the *lazily*-initialised modules, whose
+        // state lives behind an `Option` or a `Vec` that starts empty.  These
+        // 35 hold theirs in a table that is fully formed the moment the
+        // `static` is const-initialised -- fixed-size arrays of interfaces,
+        // rings and rule tables, mostly under `net/` -- so the sweep that
+        // converted them had to lift each `static`'s own initialiser verbatim
+        // rather than reach for a `None`.  `crate::fs::selftest` records why
+        // the initialiser is the only spelling of "pristine" that cannot drift.
+        //
+        // Two hazards showed up here that the lazy ones never posed, and both
+        // are worth knowing before adding to these lists:
+        //
+        // * **Size.**  `with_pristine` moves the pristine value in and the
+        //   saved one out, so two whole tables sit in this frame at once.
+        //   `net::bridge`'s is 105 216 bytes against a 64 KiB task stack;
+        //   it uses `with_pristine_swapped` and builds its substitute on the
+        //   heap.  Clippy only sees array *expressions*, so measure.
+        //
+        // * **Reach.**  `with_pristine` restores the module's *own* state and
+        //   nothing else, so a suite that calls into a neighbour is still
+        //   destructive while wearing a wrapper that suggests otherwise.
+        //   Three did (`svcstart`, `logpersist`, `eventlog`) and were fixed in
+        //   `d29938b53`; `build/survey_reach.py` is the check.
+        //
+        // These return `()`, hence the bare calls.
+        #[inline(never)]
+        fn case() {
+            devhotplug::self_test();
+            devpower::self_test();
+            udriver::self_test();
+            vmguest::self_test();
+            net::upnp::self_test();
+        }
+        case();
+    }
+
+    {
+        // De-fanged eager self-tests, batch 2 of 4. See batch 1 above.
+        //
+        // These report failure as `false` rather than an `Err`, and each has
+        // already printed which assertion failed by the time it returns.
+        #[inline(never)]
+        fn case() {
+            if !initproc::self_test() {
+                serial_println!("WARNING: initproc self-test failed");
+            }
+            if !reslimit::self_test() {
+                serial_println!("WARNING: reslimit self-test failed");
+            }
+            if !syshealth::self_test() {
+                serial_println!("WARNING: syshealth self-test failed");
+            }
+        }
+        case();
+    }
+
+    {
+        // De-fanged eager self-tests, batch 3 of 4. See batch 1 above.
+        #[inline(never)]
+        fn case() {
+            if let Err(e) = drvmon::self_test() {
+                serial_println!("WARNING: drvmon self-test failed: {:?}", e);
+            }
+            if let Err(e) = logpersist::self_test() {
+                serial_println!("WARNING: logpersist self-test failed: {:?}", e);
+            }
+            if let Err(e) = svcstart::self_test() {
+                serial_println!("WARNING: svcstart self-test failed: {:?}", e);
+            }
+            if let Err(e) = fs::toolbar::self_test() {
+                serial_println!("WARNING: toolbar self-test failed: {:?}", e);
+            }
+            if let Err(e) = net::bridge::self_test() {
+                serial_println!("WARNING: net::bridge self-test failed: {:?}", e);
+            }
+            if let Err(e) = net::dhcpv6::self_test() {
+                serial_println!("WARNING: net::dhcpv6 self-test failed: {:?}", e);
+            }
+            if let Err(e) = net::ftp::self_test() {
+                serial_println!("WARNING: net::ftp self-test failed: {:?}", e);
+            }
+            if let Err(e) = net::http::self_test() {
+                serial_println!("WARNING: net::http self-test failed: {:?}", e);
+            }
+            if let Err(e) = net::igmp::self_test() {
+                serial_println!("WARNING: net::igmp self-test failed: {:?}", e);
+            }
+            if let Err(e) = net::iperf::self_test() {
+                serial_println!("WARNING: net::iperf self-test failed: {:?}", e);
+            }
+            if let Err(e) = net::lldp::self_test() {
+                serial_println!("WARNING: net::lldp self-test failed: {:?}", e);
+            }
+            if let Err(e) = net::mdns::self_test() {
+                serial_println!("WARNING: net::mdns self-test failed: {:?}", e);
+            }
+            if let Err(e) = net::mld::self_test() {
+                serial_println!("WARNING: net::mld self-test failed: {:?}", e);
+            }
+            if let Err(e) = net::ndisc::self_test() {
+                serial_println!("WARNING: net::ndisc self-test failed: {:?}", e);
+            }
+        }
+        case();
+    }
+
+    {
+        // De-fanged eager self-tests, batch 4 of 4. See batch 1 above.
+        #[inline(never)]
+        fn case() {
+            if let Err(e) = net::netcat::self_test() {
+                serial_println!("WARNING: net::netcat self-test failed: {:?}", e);
+            }
+            if let Err(e) = net::netstat::self_test() {
+                serial_println!("WARNING: net::netstat self-test failed: {:?}", e);
+            }
+            if let Err(e) = net::ntp::self_test() {
+                serial_println!("WARNING: net::ntp self-test failed: {:?}", e);
+            }
+            if let Err(e) = net::pcap::self_test() {
+                serial_println!("WARNING: net::pcap self-test failed: {:?}", e);
+            }
+            if let Err(e) = net::qos::self_test() {
+                serial_println!("WARNING: net::qos self-test failed: {:?}", e);
+            }
+            if let Err(e) = net::smtp::self_test() {
+                serial_println!("WARNING: net::smtp self-test failed: {:?}", e);
+            }
+            if let Err(e) = net::snmp::self_test() {
+                serial_println!("WARNING: net::snmp self-test failed: {:?}", e);
+            }
+            if let Err(e) = net::socks::self_test() {
+                serial_println!("WARNING: net::socks self-test failed: {:?}", e);
+            }
+            if let Err(e) = net::telnet::self_test() {
+                serial_println!("WARNING: net::telnet self-test failed: {:?}", e);
+            }
+            if let Err(e) = net::tftp::self_test() {
+                serial_println!("WARNING: net::tftp self-test failed: {:?}", e);
+            }
+            if let Err(e) = net::traceroute::self_test() {
+                serial_println!("WARNING: net::traceroute self-test failed: {:?}", e);
+            }
+            if let Err(e) = net::vlan::self_test() {
+                serial_println!("WARNING: net::vlan self-test failed: {:?}", e);
+            }
+            if let Err(e) = net::wol::self_test() {
+                serial_println!("WARNING: net::wol self-test failed: {:?}", e);
+            }
+        }
+        case();
+    }
+
+    {
         #[inline(never)]
         fn case() {
             // Run cryptographic self-tests.

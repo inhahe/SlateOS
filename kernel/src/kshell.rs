@@ -45862,6 +45862,35 @@ fn cmd_svcstart(args: &str) {
                 }
             }
         }
+        "blame" | "timings" => {
+            let timings = svcstart::startup_timings();
+            if timings.is_empty() {
+                shell_println!("No startup timings. Run 'svcstart resolve' first.");
+            } else {
+                shell_println!(
+                    "{:16} {:>6} {:>12} {:>13}",
+                    "Service",
+                    "Level",
+                    "Started",
+                    "Ready after"
+                );
+                for t in &timings {
+                    // "not started" and "at 0 ms" are different answers, and the
+                    // graph could not tell them apart until these fields became
+                    // Option — the earliest service in the boot is exactly the
+                    // one that used to report itself as never having started.
+                    let started = match t.started_at_ns {
+                        Some(ns) => alloc::format!("{} ms", ns / 1_000_000),
+                        None => alloc::string::String::from("not started"),
+                    };
+                    let ready = match t.ready_after_ns {
+                        Some(ns) => alloc::format!("{} ms", ns / 1_000_000),
+                        None => alloc::string::String::from("never ready"),
+                    };
+                    shell_println!("{:16} {:>6} {:>12} {:>13}", t.name, t.level, started, ready);
+                }
+            }
+        }
         "resolve" => match svcstart::resolve_dependencies() {
             Ok(()) => {
                 let levels = svcstart::start_levels();
@@ -46109,6 +46138,7 @@ fn cmd_svcstart(args: &str) {
             shell_println!("svcstart — service startup orchestration");
             shell_println!("  show               Status and statistics");
             shell_println!("  levels             Show resolved start levels");
+            shell_println!("  blame              Per-service boot timings, slowest first");
             shell_println!("  resolve            Resolve dependency graph");
             shell_println!("  boot               Run full boot sequence");
             shell_println!("  crash <id>         Report a service crash");

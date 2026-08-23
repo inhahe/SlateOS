@@ -63700,3 +63700,65 @@ returns nothing). Two steps:
 **Trigger to promote this to active work:** anyone implementing real block
 device discard behind `fstrim::issue_trim`. Do not implement that stub
 without doing step 1 and 2 first.
+
+## TD-A-ACL-NEVER-ENFORCED — POSIX ACLs are stored, listed and formatted, but no VFS operation ever consults them (lane A, 2026-08-23)
+
+**Status:** open. Discovered while converting `kernel/src/fs/acl.rs` to
+byte-clean paths (design-decisions.md §261).
+
+`fs::acl::check_access` — the function that implements the whole POSIX
+1003.1e evaluation algorithm, all five steps of it — **has no production
+callers.** The evidence is a one-liner:
+
+```bash
+grep -rn "check_access" kernel/src --include=*.rs | grep -v "fs/acl.rs"
+```
+
+Every hit is a different, unrelated `check_access`: `cap/file_tags.rs`,
+`cap/groups.rs`, `fs/appsandbox.rs`. Nothing in `fs/vfs.rs` — or anywhere
+else — calls `fs::acl::check_access`. The only callers of the *rest* of
+the module are `kshell`'s `getfacl`/`setfacl` commands and `procfs`'s
+statistics line.
+
+**What this means in practice.** `setfacl` appears to work: it validates
+the ACL, stores it, and `getfacl` reads it back verbatim. The statistics in
+procfs will report `files_with_acls: N`. But the ACL governs nothing — an
+open/read/write/unlink goes through the VFS's traditional owner/group/other
+check and never learns the ACL exists. A user who denies a colleague access
+to a file with `setfacl -m u:1001:--- /path` is told the operation
+succeeded and is given no indication that user 1001 can still read the
+file. **This is a security feature that reports success while doing
+nothing**, which is worse than not having the feature: the absence of a
+feature is visible, a silently-inert one is not.
+
+Note also that `check_access` **fails open** by design — `None => return
+Ok(())`, deferring to traditional permissions — which is the right
+behavior for a hook that runs on every path, but it means that wiring it in
+incorrectly (e.g. passing an unnormalized or relative path, so the lookup
+misses) degrades silently to "no ACLs at all" rather than to a visible
+failure. Whoever does the wiring must test the *deny* direction, not just
+that nothing broke.
+
+**The proper fix** is to call `fs::acl::check_access` from the VFS
+permission check, on the same resolved absolute path the rest of the
+operation uses:
+
+1. Find the single point in `fs/vfs.rs` where traditional
+   owner/group/other permission is evaluated for a path operation. If there
+   is no single point, make one first — the ACL hook must not be sprinkled
+   across every entry point, or the next entry point added will forget it.
+2. Call `acl::check_access(path, uid, gid, file_uid, file_gid, request)`
+   *after* the traditional check grants access, never instead of it: POSIX
+   ACLs can only be evaluated once the owner/group of the file is known,
+   and an ACL that grants must not override a mount flag (`ro`, `noexec`)
+   or an immutable/append-only bit that already refused.
+3. The path passed must be the normalized absolute path, since that is what
+   `set_acl` keys on. `fs/vfs.rs`'s `normalize_mount_path` is the model.
+4. Test the deny direction end-to-end from `kshell`: `setfacl` a deny for a
+   non-owner uid, then confirm the read actually fails. `acl.rs`'s own
+   self-test (11 tests) covers the algorithm but cannot cover the wiring.
+
+**Trigger to promote this to active work:** any task that touches VFS
+permission checking, or any task that claims POSIX ACL support is done.
+Until then, `getfacl`/`setfacl` should be understood as a database editor
+for a database nothing reads.

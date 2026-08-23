@@ -50388,7 +50388,7 @@ commands that carry the colour in question, and assert the two renders agree.
 Candidates: anything drawn on the wallpaper, on a video surface, on a
 thumbnail, or on any other content the palette does not own.
 
-**Part 2 progress. 28 of 49 modules converted.**
+**Part 2 progress. 29 of 49 modules converted.**
 
 - [x] `security_dialog.rs` — 29 constants, done 2026-08-22. The method above
   survived contact: the sweep lives in `gui/desktop/src/palette_check.rs` as
@@ -51890,6 +51890,99 @@ thumbnail, or on any other content the palette does not own.
     equal endpoints"). Worth recording as evidence for the method: a membership
     sweep written to catch a missed *constant* caught an arithmetic error in
     code that had nothing to do with the conversion.
+- [x] `taskbar.rs` — 10 constants plus four inline `Color::rgba(…)` triples,
+  done 2026-08-23. Nineteen tests in the module (ten new, six reworked),
+  harness defects Ax36–Ix38 (sixty-one), all sixty-one caught, none escaped.
+  - **Ninth lesson for the width rule: a set-membership table cannot see a
+    *permutation* of the set.** The button-background ladder has four rungs —
+    `with_alpha(surface0, 128)` running, `surface1` focused, `surface2`
+    hovered, `with_alpha(surface1, 180)` for the dragged ghost — and the first
+    version of `each_button_state_draws_the_background_its_role_names` asked
+    `bgs.contains(&p.surface1)` and `bgs.contains(&p.surface2)` for each. That
+    is a test of the *set* of colours drawn, and a render that swapped the
+    hovered and focused rungs draws exactly the same set. The whole defect
+    class this module is most likely to have — a ladder re-seated one rung
+    off — was invisible. The fix is that `fills()` now carries each rect's `x`
+    and a `button_x(i)` helper reproduces the layout arithmetic, so every
+    assertion names a *site* (`at(button_x(1)) == p.surface1`) rather than
+    asking whether a colour is present anywhere. Generally: **whenever the
+    per-site table's sites are interchangeable in shape, index it by position,
+    or it degrades from a table into a checklist.** `bgs.len() == 4` plus an
+    explicit "no background at `button_x(2)`" close the two remaining holes
+    (an extra rung, and an idle button that drew one).
+  - **Corollary found in the same pass: an assertion made at a stock default
+    value cannot fail.** `every_colour_in_the_context_menu_is_in_the_role_it_claims`
+    asserts the menu is filled with `p.panel_bg()` rather than `p.base` — a
+    real distinction, because a floating menu is a panel and a panel is
+    translucent. Except that `Palette::for_mode` sets `panel_alpha: 255` in
+    *both* branches, at which `panel_bg() == base` exactly, so the assertion
+    was true of a menu filled with either and proved nothing. The probe
+    palette now sets `panel_alpha = 200`, and `accented()` carries
+    `assert_ne!(p.panel_bg(), p.base, …)` so the day someone changes the
+    default back the fixture fails instead of quietly going vacuous. This is
+    the same shape as the module-26 accent trap: **a test fixture must move
+    every value the assertions discriminate on, and the stock palette is not a
+    fixture — it is the one input guaranteed to make defaults indistinguishable.**
+  - **The one principled exception to "the accent marks position, never
+    category".** Modules 19–28 established that the accent marks position and
+    invitation. A taskbar draws two position-ish marks *simultaneously and a
+    few pixels apart* during a drag: the focus underline ("you are here", 16×3)
+    and the drag insertion caret ("release here", 2×36). Both are small bars;
+    if both take the accent they are told apart only by aspect ratio. So the
+    caret takes `p.green` — `drop_target()`'s hue, matching the precedent in
+    `appearance` that a drop target differs from a selection *by hue and not
+    merely by alpha* — but at full opacity, because a 2px bar has no area in
+    which to be translucent.
+    `the_drop_caret_is_never_the_same_hue_as_the_focus_underline` pins it in
+    both modes and under an off-palette accent, so the rule cannot be undone
+    by someone "unifying" the two marks.
+  - **The window-count badge is a *measurement*, so it keeps its named hue.**
+    It reports how many windows an app has; that is a quantity, not a position
+    or an invitation, so it stays `p.red` under every accent
+    (`the_count_badge_does_not_follow_the_accent`). Its digit is the reverse
+    case — ink on a coloured fill, so `readable_on(p.red)`, and *proved*
+    derived rather than frozen by the two modes disagreeing about it: Mocha
+    `red` `#F38BA8` is light enough to want `#11111B`, Latte `red` `#D20F39`
+    is dark enough to want `#EFF1F5`. A single-mode test could not tell that
+    from a leftover `MOCHA_MANTLE`.
+  - **The ladder was re-seated, not merely renamed.** The old constants had
+    hovered = `SURFACE1` and focused = `SURFACE0`, which puts the *transient*
+    state a rung above the *persistent* one on a bar where both are visible at
+    once. The roles now name the ordering they mean —
+    `with_alpha(surface0, 128)` < `surface1` < `surface2` for running <
+    focused < hovered — and idle draws no rect at all rather than a
+    transparent one. Similarly the section divider moved from `surface2` to
+    `overlay0`, the role that actually means "separator"; `surface2` remains
+    only where it is an outline (the context menu's stroke). A pure
+    find-and-replace conversion would have preserved both mistakes, which is
+    the argument for reading every site rather than mapping constant names to
+    role names.
+  - **The lesson generalises past colour, and the harness proved it.** Defect
+    Hx38 clears the fixture's `hover_index` and was caught by *one* test — the
+    positional ladder table. `the_fixture_takes_every_branch_this_module_has`,
+    whose entire job is to notice a fixture that stopped covering something,
+    missed it: it asserted `bgs.len() == 4`, and the hovered app is *also*
+    running, so it kept drawing a background — just a different one. A count
+    of four cannot tell "hovered, focused, running" from "running, running,
+    running". The branch test now checks each of the three rungs is present by
+    colour. Worth stating as a rule, because it is the same failure at one
+    remove: **a coverage test that counts is as blind to a permutation as a
+    membership table is, and a fixture-coverage test is exactly where that
+    blindness is most expensive** — everything downstream of it is then
+    vacuous rather than merely wrong.
+  - **Four of the five under-caught verdicts were mis-declarations worth
+    recording, because each names a limit of a *kind* of test.** (1) A
+    pre-conversion test named for a site often asserts that site's *geometry*
+    and never its colour (`test_render_empty_taskbar` against a frozen bar
+    background). (2) **A consistency check cannot see a change that moves both
+    sides:** the digit test compares ink against `readable_on(badge as
+    actually drawn)`, so re-rolling the badge to another role keeps the pair
+    consistent — and Mocha yellow and Mocha red happen to want the same
+    near-black ink, so it does not even shift the value. (3) A fixture
+    weakened by removing one item is caught only by whichever test reads the
+    value that actually changed: dropping the third window still leaves a
+    badge (any count above one draws one) and still leaves it `p.red`, so only
+    the digit test — which selects the text by its content, `"3"` — notices.
 
 **Trigger:** this is not blocked on anything. It is sequenced after the shell
 event loop (`TD-C-THE-SHELL-CAN-DRAW-ITSELF-AND-NOBODY-CAN-ASK-IT-TO`) only

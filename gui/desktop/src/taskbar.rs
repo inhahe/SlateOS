@@ -1985,6 +1985,25 @@ mod tests {
             .map(|(_, _, _, c)| c)
             .collect();
         assert_eq!(bgs.len(), 4, "ghost + three drawn button backgrounds");
+        // …and each rung is actually *taken*. Counting four backgrounds does
+        // not distinguish "hovered, focused, running" from "running, running,
+        // running" — which is exactly what this fixture degrades into if it
+        // stops hovering anything, since the hovered app is also running and
+        // so keeps drawing a background, just a different one. Found by
+        // harness defect Hx38, which cleared `hover_index` and left the count
+        // at four; only the positional table noticed.
+        for (rung, what) in [
+            (p.surface2, "hovered"),
+            (p.surface1, "focused"),
+            (with_alpha(p.surface0, 128), "running-but-unfocused"),
+        ] {
+            assert!(
+                bgs.contains(&rung),
+                "the fixture no longer reaches the {what} rung of the button \
+                 background ladder, so nothing renders it and every test that \
+                 checks it passes vacuously"
+            );
+        }
         // Both underlines.
         assert!(
             fills(&cmds)

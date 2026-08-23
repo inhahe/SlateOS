@@ -129,6 +129,19 @@ const MAX_PLAINTEXT_SIZE: usize = 16384;
 /// Maximum TLS record ciphertext size (plaintext + 1 content type + 16 tag).
 const MAX_CIPHERTEXT_SIZE: usize = MAX_PLAINTEXT_SIZE + 256;
 
+/// Maximum size of a single reassembled handshake message.
+///
+/// A handshake message may span records, so the record ceiling above does not
+/// bound it: the length is a 24-bit wire field, so without this the peer may
+/// declare 16 MiB and we would buffer toward it, one record at a time, in
+/// kernel memory — and it need never finish. Server authentication does not
+/// complete until CertificateVerify, so "the peer" here includes an active
+/// man-in-the-middle, not just a server we chose to trust.
+///
+/// 64 KiB is far above anything TLS 1.3 sends. The largest real message is
+/// the certificate chain, which runs to a few tens of KiB at worst.
+const MAX_HANDSHAKE_MSG_SIZE: usize = 65_536;
+
 /// AEAD tag length for ChaCha20-Poly1305.
 const TAG_LEN: usize = 16;
 
@@ -782,8 +795,7 @@ pub fn tls_connect(tcp_handle: usize, server_name: &str) -> KernelResult<TlsSess
 
         // Process all complete handshake messages in the buffer.
         while hs_buf.len() >= 4 {
-            let hs_msg_len = read_u24_slice(&hs_buf, 1);
-            let total_len = 4 + hs_msg_len;
+            let total_len = handshake_total_len(&hs_buf)?;
             if hs_buf.len() < total_len {
                 break; // Need more data.
             }
@@ -798,7 +810,10 @@ pub fn tls_connect(tcp_handle: usize, server_name: &str) -> KernelResult<TlsSess
                     got_encrypted_extensions = true;
                 }
                 handshake_type::CERTIFICATE => {
-                    crate::serial_println!("[tls] Certificate received ({} bytes)", hs_msg_len);
+                    crate::serial_println!(
+                        "[tls] Certificate received ({} bytes)",
+                        total_len.saturating_sub(4)
+                    );
                     transcript.update(&msg_data);
                     got_certificate = true;
                     // NOTE: We don't validate the certificate chain.
@@ -2184,6 +2199,28 @@ fn read_u24(data: &[u8], offset: usize) -> KernelResult<usize> {
     Ok((b0 << 16) | (b1 << 8) | b2)
 }
 
+/// Total wire length of the handshake message `hs_buf` starts with.
+///
+/// `Err` means the declared length is one we will never satisfy, and the
+/// caller must abandon the connection rather than wait. That distinction is
+/// the entire reason this is a `Result` and not a `usize`: the reassembly
+/// loop's other exit is `break`, meaning "short read, fetch another record
+/// and append" — so returning a too-large length and letting the caller
+/// `break` would turn a hostile length field into an instruction to keep
+/// allocating kernel memory. Same failure shape as the SSH framing bug; see
+/// `known-issues.md`.
+///
+/// Callers guarantee `hs_buf.len() >= 4`, which is what makes the u24 read
+/// meaningful; a shorter slice reads zeros and is merely useless, not unsafe.
+fn handshake_total_len(hs_buf: &[u8]) -> KernelResult<usize> {
+    let hs_msg_len = read_u24_slice(hs_buf, 1);
+    if hs_msg_len > MAX_HANDSHAKE_MSG_SIZE {
+        crate::serial_println!("[tls] Handshake message too large: {hs_msg_len} bytes");
+        return Err(KernelError::InvalidArgument);
+    }
+    Ok(hs_msg_len.saturating_add(4))
+}
+
 /// Read u24 from a slice (infallible — caller guarantees bounds).
 fn read_u24_slice(data: &[u8], offset: usize) -> usize {
     let b0 = data.get(offset).copied().unwrap_or(0) as usize;
@@ -2486,6 +2523,51 @@ pub fn self_test() -> KernelResult<()> {
         assert!(sig_len == 64, "CertVerify Ed25519 signature length");
         passed = passed.saturating_add(1);
         crate::serial_println!("[tls]   CertificateVerify construction: PASSED");
+    }
+
+    // Handshake reassembly must reject a length it can never satisfy, rather
+    // than report a short read. The reassembly loop appends another record on
+    // a short read, so the two answers are not interchangeable: the wrong one
+    // buffers toward a 16 MiB u24 that the peer need never complete.
+    {
+        // A legitimate length passes and includes the 4-byte header.
+        let hdr = [0x0bu8, 0x00, 0x01, 0x00];
+        assert!(
+            matches!(handshake_total_len(&hdr), Ok(260)),
+            "a normal handshake length must be accepted"
+        );
+
+        // The largest accepted message, and the first rejected one.
+        let at_cap = MAX_HANDSHAKE_MSG_SIZE;
+        let hdr = [
+            0x0bu8,
+            ((at_cap >> 16) & 0xff) as u8,
+            ((at_cap >> 8) & 0xff) as u8,
+            (at_cap & 0xff) as u8,
+        ];
+        assert!(
+            handshake_total_len(&hdr).is_ok(),
+            "the cap itself must be accepted"
+        );
+        let over = at_cap.saturating_add(1);
+        let hdr = [
+            0x0bu8,
+            ((over >> 16) & 0xff) as u8,
+            ((over >> 8) & 0xff) as u8,
+            (over & 0xff) as u8,
+        ];
+        assert!(
+            handshake_total_len(&hdr).is_err(),
+            "one byte over the cap must be rejected"
+        );
+
+        // The u24 ceiling — what an attacker actually sends.
+        assert!(
+            handshake_total_len(&[0x0b, 0xff, 0xff, 0xff]).is_err(),
+            "a 16 MiB handshake message must be rejected"
+        );
+        passed = passed.saturating_add(1);
+        crate::serial_println!("[tls]   Handshake length bound: PASSED");
     }
 
     crate::serial_println!("[tls] All {} TLS self-tests PASSED", passed);

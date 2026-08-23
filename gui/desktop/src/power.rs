@@ -15,6 +15,7 @@
 //! and the settings app's power management page.
 
 use crate::Rect;
+use appearance::Palette;
 use guitk::color::Color;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::rng::{RandomSource, SeededRng};
@@ -22,18 +23,48 @@ use guitk::style::{Border, CornerRadii};
 use guitk::text;
 
 // ============================================================================
-// Catppuccin Mocha theme constants
+// Colour
 // ============================================================================
+//
+// This module used to keep nine `const COL_*: Color` of its own, hard-coded to
+// Catppuccin Mocha, which is why the battery icon stayed dark when the user
+// picked the light theme. Every colour now comes from the `Palette` the caller
+// resolved. Four judgements are worth stating, because a reader will otherwise
+// assume the module simply forgot to follow the theme:
+//
+// 1. *The screen saver follows neither the mode nor the accent.* It paints the
+//    whole display black in both modes — that is the point of a screen saver,
+//    and a light one would be a lamp pointed at a sleeping user. Latte's roles
+//    are picked to sit on white: its `text` is nearly black and would vanish on
+//    that surface. And nothing the saver draws is a position or an invitation —
+//    a clock, a star field, rain, a logo — so nothing in it takes the accent
+//    either. It therefore takes no palette argument at all, which makes its
+//    independence structural rather than something a test has to keep asserting.
+//    See [`screen_palette`].
+//
+// 2. *The battery gauge's colour is a measurement, not a decoration.* Red at
+//    critical, yellow at low, green when nearly full, blue otherwise — a scale
+//    the user reads a number off. A scale that moved with the accent would say
+//    something different on every machine, so it is frozen to named hues. Note
+//    the "otherwise" branch is `p.blue` and *not* `p.accent`, even though the
+//    stock accent happens to be blue.
+//
+// 3. *The power-profile badge is a category, for the same reason.* Four
+//    profiles, four fixed hues, none of them the accent.
+//
+// 4. *The star field and the matrix rain compute their colours.* A star's grey
+//    is its depth and a glyph's green is its age in the column; both are ramps,
+//    not roles, and neither is a palette lookup that was missed.
 
-const COL_BASE: Color = Color::from_hex(0x1E1E2E);
-const COL_TEXT: Color = Color::from_hex(0xCDD6F4);
-const COL_SUBTEXT0: Color = Color::from_hex(0xA6ADC8);
-const COL_BLUE: Color = Color::from_hex(0x89B4FA);
-const COL_GREEN: Color = Color::from_hex(0xA6E3A1);
-const COL_YELLOW: Color = Color::from_hex(0xF9E2AF);
-const COL_RED: Color = Color::from_hex(0xF38BA8);
-const COL_PEACH: Color = Color::from_hex(0xFAB387);
-const COL_LAVENDER: Color = Color::from_hex(0xB4BEFE);
+/// The palette the screen saver draws with.
+///
+/// The saver's background is black whatever the user's mode is, so the light
+/// palette is the wrong palette for that surface — see judgement 1 above. These
+/// are still the project's roles rather than nine numbers copied into this file;
+/// what is pinned is *which* palette, not the values in it.
+fn screen_palette() -> Palette {
+    Palette::for_mode(false)
+}
 
 // ============================================================================
 // Power states and actions
@@ -1043,7 +1074,7 @@ impl ScreenSaver {
             x,
             y,
             text: "12:00".to_string(),
-            color: COL_LAVENDER,
+            color: screen_palette().lavender,
             font_size: 72.0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
@@ -1200,21 +1231,24 @@ impl ScreenSaver {
 
         // Logo background.
         let radii = CornerRadii::all(8.0);
+        let sp = screen_palette();
         cmds.push(RenderCommand::FillRect {
             x,
             y,
             width: logo_w,
             height: logo_h,
-            color: COL_BLUE,
+            color: sp.blue,
             corner_radii: radii,
         });
 
-        // Logo text.
+        // Logo text. Derived from the fill rather than named, because it is ink
+        // *on* the logo: name it and the day the logo's hue changes the label
+        // stops being readable, silently and only on that one screen.
         cmds.push(RenderCommand::Text {
             x: x + 15.0,
             y: y + 15.0,
             text: "Slate OS".to_string(),
-            color: COL_BASE,
+            color: appearance::readable_on(sp.blue),
             font_size: 28.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(logo_w - 30.0),
@@ -1233,6 +1267,7 @@ impl ScreenSaver {
 pub fn render_battery_icon(
     battery: &BatteryInfo,
     config: &PowerConfig,
+    p: &Palette,
     x: f32,
     y: f32,
 ) -> Vec<RenderCommand> {
@@ -1244,7 +1279,7 @@ pub fn render_battery_icon(
             x,
             y: y + 2.0,
             text: "AC".to_string(),
-            color: COL_SUBTEXT0,
+            color: p.subtext0,
             font_size: 11.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(24.0),
@@ -1264,7 +1299,7 @@ pub fn render_battery_icon(
         y: y + 2.0,
         width: batt_w,
         height: batt_h,
-        color: COL_TEXT,
+        color: p.text,
         line_width: 1.0,
         corner_radii: CornerRadii::all(2.0),
     });
@@ -1275,7 +1310,7 @@ pub fn render_battery_icon(
         y: y + 2.0 + (batt_h - tip_h) / 2.0,
         width: tip_w,
         height: tip_h,
-        color: COL_TEXT,
+        color: p.text,
         corner_radii: CornerRadii {
             top_left: 0.0,
             top_right: 2.0,
@@ -1287,14 +1322,18 @@ pub fn render_battery_icon(
     // Fill level.
     let fill_pct = battery.charge_pct as f32;
     let fill_w = ((batt_w - 4.0) * fill_pct) / 100.0;
+    // A measurement, not a decoration: see judgement 2 at the top of the file.
+    // The last arm is `p.blue` and must stay `p.blue` — an accent here would
+    // make "enough charge" mean a different colour on every machine, and would
+    // collide with whatever accent a user picked for red or green.
     let fill_color = if battery.is_critical(config) {
-        COL_RED
+        p.red
     } else if battery.is_warning(config) {
-        COL_YELLOW
+        p.yellow
     } else if battery.charge_pct > 80 {
-        COL_GREEN
+        p.green
     } else {
-        COL_BLUE
+        p.blue
     };
 
     if fill_w > 0.0 {
@@ -1314,7 +1353,7 @@ pub fn render_battery_icon(
             x: x + 5.0,
             y: y + 2.0,
             text: "\u{26A1}".to_string(), // ⚡
-            color: COL_YELLOW,
+            color: p.yellow,
             font_size: 10.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(batt_w),
@@ -1328,7 +1367,7 @@ pub fn render_battery_icon(
             x: x + batt_w + tip_w + 4.0,
             y: y + 2.0,
             text: format!("{}%", battery.charge_pct),
-            color: COL_SUBTEXT0,
+            color: p.subtext0,
             font_size: 11.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(36.0),
@@ -1340,12 +1379,20 @@ pub fn render_battery_icon(
 }
 
 /// Render a power profile indicator (for settings or quick settings).
-pub fn render_power_profile_badge(profile: PowerProfile, x: f32, y: f32) -> Vec<RenderCommand> {
+pub fn render_power_profile_badge(
+    profile: PowerProfile,
+    p: &Palette,
+    x: f32,
+    y: f32,
+) -> Vec<RenderCommand> {
+    // A category, not a ranking: see judgement 3 at the top of the file. None of
+    // these is the accent, including Balanced — the accent means "this is where
+    // you are", and every machine is in one of these four states at all times.
     let (label, color) = match profile {
-        PowerProfile::Balanced => ("Balanced", COL_BLUE),
-        PowerProfile::Performance => ("Performance", COL_PEACH),
-        PowerProfile::PowerSaver => ("Power Saver", COL_GREEN),
-        PowerProfile::Custom => ("Custom", COL_LAVENDER),
+        PowerProfile::Balanced => ("Balanced", p.blue),
+        PowerProfile::Performance => ("Performance", p.peach),
+        PowerProfile::PowerSaver => ("Power Saver", p.green),
+        PowerProfile::Custom => ("Custom", p.lavender),
     };
 
     let badge_w = text::padded_width(label, 8.0, 12.0, FontWeightHint::Regular);
@@ -2139,7 +2186,7 @@ mod tests {
     fn test_battery_icon_no_battery() {
         let b = BatteryInfo::no_battery();
         let cfg = PowerConfig::default();
-        let cmds = render_battery_icon(&b, &cfg, 10.0, 10.0);
+        let cmds = render_battery_icon(&b, &cfg, &Palette::for_mode(false), 10.0, 10.0);
         assert!(!cmds.is_empty()); // Shows "AC" text.
     }
 
@@ -2147,7 +2194,7 @@ mod tests {
     fn test_battery_icon_with_battery() {
         let b = BatteryInfo::with_battery(75, BatteryState::Discharging);
         let cfg = PowerConfig::default();
-        let cmds = render_battery_icon(&b, &cfg, 10.0, 10.0);
+        let cmds = render_battery_icon(&b, &cfg, &Palette::for_mode(false), 10.0, 10.0);
         assert!(cmds.len() >= 3); // outline + tip + fill
     }
 
@@ -2155,13 +2202,18 @@ mod tests {
     fn test_battery_icon_charging() {
         let b = BatteryInfo::with_battery(50, BatteryState::Charging);
         let cfg = PowerConfig::default();
-        let cmds = render_battery_icon(&b, &cfg, 10.0, 10.0);
+        let cmds = render_battery_icon(&b, &cfg, &Palette::for_mode(false), 10.0, 10.0);
         assert!(cmds.len() >= 4); // outline + tip + fill + charging symbol
     }
 
     #[test]
     fn test_power_profile_badge() {
-        let cmds = render_power_profile_badge(PowerProfile::Performance, 0.0, 0.0);
+        let cmds = render_power_profile_badge(
+            PowerProfile::Performance,
+            &Palette::for_mode(false),
+            0.0,
+            0.0,
+        );
         assert_eq!(cmds.len(), 2); // bg + text
     }
 
@@ -2173,7 +2225,7 @@ mod tests {
             PowerProfile::PowerSaver,
             PowerProfile::Custom,
         ] {
-            let cmds = render_power_profile_badge(*profile, 0.0, 0.0);
+            let cmds = render_power_profile_badge(*profile, &Palette::for_mode(false), 0.0, 0.0);
             assert_eq!(cmds.len(), 2);
         }
     }
@@ -2220,5 +2272,588 @@ mod tests {
         assert_eq!(cfg.low_battery_pct, 100);
         assert_eq!(cfg.critical_battery_pct, 100);
         assert_eq!(cfg.dim_brightness_pct, 100);
+    }
+
+    // ========================================================================
+    // Colour — the palette conversion (module 27 of 49)
+    // ========================================================================
+    //
+    // This file used to hold nine Mocha constants of its own. What follows
+    // proves they are gone and that what replaced them is in the role it
+    // claims. Six lessons from earlier modules are applied here up front, and
+    // this module adds a seventh:
+    //
+    // 1. The sweep is only as wide as the render it is given: enumerate the
+    //    renderer's `if`s, not its colours.
+    // 2. A representative sample is not a per-site check: n *source* sites give
+    //    n assertions, not n rendered instances and not n kinds.
+    // 3. A site that only *selects* a colour is a source site too, even though
+    //    it draws nothing itself.
+    // 4. Render under an accent that is in neither palette. Testing a
+    //    conversion in the palette it was converted *from* hides exactly the
+    //    failures that conversion causes.
+    // 5. An expectation written in terms of the code under test cannot fail.
+    //    State the role literal, never `X.color(p)`.
+    // 6. You cannot recognise the legitimate instances of a property by testing
+    //    for that property — the bug has it too. Count them instead.
+    //
+    // 7. NEW HERE: *pinning a surface to one mode disarms the membership sweep
+    //    for that surface.* The screen saver draws with the dark palette in both
+    //    modes (judgement 1 at the top of the file), so every value it draws is
+    //    a member of its palette in both modes — and a `COL_LAVENDER` left
+    //    behind would be bit-for-bit identical to `screen_palette().lavender`.
+    //    The sweep below is still worth running, because it catches an inline
+    //    literal that is not a role at all, but it can no longer catch the
+    //    defect it was written for. For a surface that does not follow the mode
+    //    the per-site tables are not a supplement to the sweep: they are the
+    //    only thing left. Anyone who trims them is removing the whole proof.
+
+    use crate::palette_check::assert_drawn_from;
+    use appearance::readable_on;
+
+    /// An accent that is in neither palette, so a site reaching for the accent
+    /// where it must not is visible rather than merely plausible. The stock
+    /// accent *is* `blue`, and three sites in this file legitimately draw
+    /// `p.blue`; under the stock accent those cases are indistinguishable.
+    const OFF_PALETTE: Color = Color::from_hex(0x00FF_8C1A);
+
+    fn rgb(c: Color) -> (u8, u8, u8) {
+        (c.r, c.g, c.b)
+    }
+
+    /// Both modes, each with an accent no palette contains.
+    fn table_palettes() -> Vec<(String, Palette)> {
+        [false, true]
+            .into_iter()
+            .map(|light| {
+                let mut p = Palette::for_mode(light);
+                p.accent = OFF_PALETTE;
+                (format!("light={light}"), p)
+            })
+            .collect()
+    }
+
+    /// Every state the battery icon can be drawn in, one per branch.
+    fn battery_states() -> Vec<(String, BatteryInfo, PowerConfig)> {
+        let cfg = PowerConfig::default();
+        let mut hidden_pct = PowerConfig::default();
+        hidden_pct.show_battery_pct = false;
+        vec![
+            (
+                "no battery".to_string(),
+                BatteryInfo::no_battery(),
+                cfg.clone(),
+            ),
+            (
+                "critical".to_string(),
+                BatteryInfo::with_battery(3, BatteryState::Discharging),
+                cfg.clone(),
+            ),
+            (
+                "low".to_string(),
+                BatteryInfo::with_battery(15, BatteryState::Discharging),
+                cfg.clone(),
+            ),
+            (
+                "nearly full".to_string(),
+                BatteryInfo::with_battery(90, BatteryState::Discharging),
+                cfg.clone(),
+            ),
+            (
+                "normal".to_string(),
+                BatteryInfo::with_battery(50, BatteryState::Discharging),
+                cfg.clone(),
+            ),
+            (
+                "charging".to_string(),
+                BatteryInfo::with_battery(50, BatteryState::Charging),
+                cfg.clone(),
+            ),
+            (
+                "flat".to_string(),
+                BatteryInfo::with_battery(0, BatteryState::Discharging),
+                cfg,
+            ),
+            (
+                "percentage hidden".to_string(),
+                BatteryInfo::with_battery(50, BatteryState::Discharging),
+                hidden_pct,
+            ),
+        ]
+    }
+
+    fn every_profile() -> [PowerProfile; 4] {
+        [
+            PowerProfile::Balanced,
+            PowerProfile::Performance,
+            PowerProfile::PowerSaver,
+            PowerProfile::Custom,
+        ]
+    }
+
+    fn every_style() -> [ScreenSaverStyle; 6] {
+        [
+            ScreenSaverStyle::Blank,
+            ScreenSaverStyle::Clock,
+            ScreenSaverStyle::MatrixRain,
+            ScreenSaverStyle::Starfield,
+            ScreenSaverStyle::BouncingLogo,
+            ScreenSaverStyle::Disabled,
+        ]
+    }
+
+    fn every_color(cmds: &[RenderCommand]) -> Vec<Color> {
+        cmds.iter()
+            .filter_map(|c| match c {
+                RenderCommand::FillRect { color, .. }
+                | RenderCommand::StrokeRect { color, .. }
+                | RenderCommand::Text { color, .. } => Some(*color),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The colour of the one text with this exact string *and* size.
+    ///
+    /// Both discriminators are needed: this module draws "AC" once but a module
+    /// that drew one word in two roles would need the size to tell them apart,
+    /// and a lookup that silently took the first match would test whichever site
+    /// happened to be drawn first.
+    fn text_exact(cmds: &[RenderCommand], want: &str, size: f32) -> Color {
+        let hits: Vec<Color> = cmds
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text {
+                    text,
+                    color,
+                    font_size,
+                    ..
+                } if text == want && *font_size == size => Some(*color),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            hits.len(),
+            1,
+            "{want:?} at {size}pt: {} matches",
+            hits.len()
+        );
+        hits[0]
+    }
+
+    /// The colour of the one filled rectangle of this height.
+    fn fill_of_height(cmds: &[RenderCommand], h: f32) -> Color {
+        let hits: Vec<Color> = cmds
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::FillRect { height, color, .. } if *height == h => Some(*color),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(hits.len(), 1, "fill {h} high: {} matches", hits.len());
+        hits[0]
+    }
+
+    /// The colour of the one stroked rectangle of this size.
+    fn stroke_of_size(cmds: &[RenderCommand], w: f32, h: f32) -> Color {
+        let hits: Vec<Color> = cmds
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::StrokeRect {
+                    width,
+                    height,
+                    color,
+                    ..
+                } if *width == w && *height == h => Some(*color),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(hits.len(), 1, "stroke {w}x{h}: {} matches", hits.len());
+        hits[0]
+    }
+
+    /// Lesson 1: the sweep must see every branch, so it walks every fixture of
+    /// both renderers that take a palette, in both modes.
+    #[test]
+    fn every_colour_the_taskbar_and_settings_draw_comes_from_their_palette() {
+        for (mode, p) in table_palettes() {
+            for (what, battery, cfg) in battery_states() {
+                let cmds = render_battery_icon(&battery, &cfg, &p, 10.0, 10.0);
+                assert_drawn_from(&p, &cmds, &[], &format!("power battery {what} ({mode})"));
+            }
+            for profile in every_profile() {
+                let cmds = render_power_profile_badge(profile, &p, 0.0, 0.0);
+                assert_drawn_from(&p, &cmds, &[], &format!("power badge {profile:?} ({mode})"));
+            }
+        }
+    }
+
+    /// The saver's sweep, and lesson 7 in practice.
+    ///
+    /// It runs against the pinned dark palette because that is the palette the
+    /// saver draws with. It cannot catch a leftover Mocha constant — see lesson
+    /// 7 above — but it does catch an inline literal that is no role at all, and
+    /// it pins the two computed ramps to the two shapes they are allowed to
+    /// have: a grey (a star's depth) and a green (a glyph's age).
+    #[test]
+    fn every_colour_the_screen_saver_draws_is_a_dark_role_or_one_of_its_two_ramps() {
+        let mut derived: Vec<Color> = (0..=u8::MAX).map(|v| Color::rgba(v, v, v, 255)).collect();
+        derived.extend((0..=u8::MAX).map(|v| Color::rgba(0, v, 0, 255)));
+        let sp = screen_palette();
+        assert!(!sp.light, "the saver must draw with the dark palette");
+        for style in every_style() {
+            let mut ss = ScreenSaver::new(style, 800, 600);
+            // Several frames: the matrix rain only recycles a column after it
+            // has fallen off the bottom, and the recycled glyphs are the ones
+            // drawn from the generator rather than the constructor.
+            for frame in 0..40 {
+                let cmds = ss.render_frame();
+                assert_drawn_from(
+                    &sp,
+                    &cmds,
+                    &derived,
+                    &format!("saver {style:?} frame {frame}"),
+                );
+            }
+        }
+    }
+
+    /// Lesson 1 again, from the other end: prove the fixtures reach the
+    /// branches, so a sweep that passes cannot be passing vacuously.
+    #[test]
+    fn the_fixtures_take_every_branch_this_module_has() {
+        let p = Palette::for_mode(false);
+
+        // The gauge's four steps, the branch that draws no gauge at all, the
+        // charging bolt, and the percentage the user can switch off.
+        let mut gauges = Vec::new();
+        let (mut with_bolt, mut without_bolt) = (0, 0);
+        let (mut with_pct, mut without_pct) = (0, 0);
+        let mut no_gauge = 0;
+        let mut ac_only = 0;
+        for (what, battery, cfg) in battery_states() {
+            let cmds = render_battery_icon(&battery, &cfg, &p, 10.0, 10.0);
+            let texts: Vec<String> = cmds
+                .iter()
+                .filter_map(|c| match c {
+                    RenderCommand::Text { text, .. } => Some(text.clone()),
+                    _ => None,
+                })
+                .collect();
+            if texts.iter().any(|t| t == "AC") {
+                ac_only += 1;
+                assert_eq!(cmds.len(), 1, "{what}: an absent battery drew a gauge");
+                continue;
+            }
+            if cmds
+                .iter()
+                .any(|c| matches!(c, RenderCommand::FillRect { height, .. } if *height == 8.0))
+            {
+                gauges.push(rgb(fill_of_height(&cmds, 8.0)));
+            } else {
+                no_gauge += 1;
+            }
+            if texts.iter().any(|t| t == "\u{26A1}") {
+                with_bolt += 1;
+            } else {
+                without_bolt += 1;
+            }
+            if texts.iter().any(|t| t.ends_with('%')) {
+                with_pct += 1;
+            } else {
+                without_pct += 1;
+            }
+        }
+        gauges.sort_unstable();
+        gauges.dedup();
+        assert_eq!(
+            gauges.len(),
+            4,
+            "the fixtures reach {} of the gauge's four steps",
+            gauges.len()
+        );
+        assert_eq!(ac_only, 1, "no fixture has the battery missing");
+        assert_eq!(no_gauge, 1, "no fixture has a battery too flat to draw");
+        assert!(with_bolt >= 1 && without_bolt >= 1, "charging is untested");
+        assert!(
+            with_pct >= 1 && without_pct >= 1,
+            "the percentage is untested"
+        );
+
+        // Every profile, and every saver style.
+        assert_eq!(every_profile().len(), 4);
+        for style in every_style() {
+            let mut ss = ScreenSaver::new(style, 800, 600);
+            let cmds = ss.render_frame();
+            assert_eq!(
+                cmds.is_empty(),
+                style == ScreenSaverStyle::Disabled,
+                "{style:?} drew the wrong amount of nothing"
+            );
+        }
+    }
+
+    /// Lesson 2: one assertion per *source* site, not per rendered instance.
+    #[test]
+    fn every_text_this_module_draws_is_in_the_role_it_claims() {
+        for (mode, p) in table_palettes() {
+            let cfg = PowerConfig::default();
+
+            // The AC hint, when there is no battery to draw.
+            let ac = render_battery_icon(&BatteryInfo::no_battery(), &cfg, &p, 10.0, 10.0);
+            assert_eq!(rgb(text_exact(&ac, "AC", 11.0)), rgb(p.subtext0), "{mode}");
+
+            // The charging bolt is a state marker, so it is a named hue and not
+            // the accent — the bolt means "charging" on every machine.
+            let charging = render_battery_icon(
+                &BatteryInfo::with_battery(50, BatteryState::Charging),
+                &cfg,
+                &p,
+                10.0,
+                10.0,
+            );
+            assert_eq!(
+                rgb(text_exact(&charging, "\u{26A1}", 10.0)),
+                rgb(p.yellow),
+                "{mode}"
+            );
+
+            // The percentage readout is secondary text beside the gauge.
+            assert_eq!(
+                rgb(text_exact(&charging, "50%", 11.0)),
+                rgb(p.subtext0),
+                "{mode}"
+            );
+
+            // The badge's label takes the badge's own hue, so it is asserted
+            // against the role literal for each profile below, not here.
+            let badge = render_power_profile_badge(PowerProfile::Balanced, &p, 0.0, 0.0);
+            assert_eq!(
+                rgb(text_exact(&badge, "Balanced", 12.0)),
+                rgb(p.blue),
+                "{mode}"
+            );
+        }
+
+        // The saver's two labels. The expected values name `Palette::for_mode`
+        // directly rather than `screen_palette()` — lesson 5: an expectation
+        // computed by the code under test moves when that code does, so a
+        // `screen_palette` that started returning the light palette would take
+        // both sides of the comparison with it and this test would not notice.
+        let sp = Palette::for_mode(false);
+        let mut clock = ScreenSaver::new(ScreenSaverStyle::Clock, 800, 600);
+        let cmds = clock.render_frame();
+        assert_eq!(rgb(text_exact(&cmds, "12:00", 72.0)), rgb(sp.lavender));
+        let mut logo = ScreenSaver::new(ScreenSaverStyle::BouncingLogo, 800, 600);
+        let cmds = logo.render_frame();
+        assert_eq!(
+            rgb(text_exact(&cmds, "Slate OS", 28.0)),
+            rgb(readable_on(sp.blue)),
+        );
+    }
+
+    /// Lesson 2 for the rectangles.
+    #[test]
+    fn every_rectangle_this_module_draws_is_in_the_role_it_claims() {
+        for (mode, p) in table_palettes() {
+            let cfg = PowerConfig::default();
+            let cmds = render_battery_icon(
+                &BatteryInfo::with_battery(50, BatteryState::Discharging),
+                &cfg,
+                &p,
+                10.0,
+                10.0,
+            );
+            // Outline and tip are the icon's structure: foreground ink.
+            assert_eq!(
+                rgb(stroke_of_size(&cmds, 22.0, 12.0)),
+                rgb(p.text),
+                "{mode}"
+            );
+            assert_eq!(rgb(fill_of_height(&cmds, 6.0)), rgb(p.text), "{mode}");
+
+            // The badge's wash is the badge's own hue at low alpha — derived
+            // from the choice, so it must track it rather than name a role.
+            for profile in every_profile() {
+                let badge = render_power_profile_badge(profile, &p, 0.0, 0.0);
+                let colors = every_color(&badge);
+                assert_eq!(colors.len(), 2, "{profile:?} ({mode})");
+                assert_eq!(rgb(colors[0]), rgb(colors[1]), "{profile:?} ({mode})");
+                assert_eq!(colors[0].a, 40, "{profile:?} ({mode}): the wash is opaque");
+                assert_eq!(
+                    colors[1].a, 255,
+                    "{profile:?} ({mode}): the label is washed"
+                );
+            }
+        }
+
+        // The saver's logo plate, against the dark palette by name — see the
+        // note on lesson 5 in the text table.
+        let sp = Palette::for_mode(false);
+        let mut logo = ScreenSaver::new(ScreenSaverStyle::BouncingLogo, 800, 600);
+        let cmds = logo.render_frame();
+        assert_eq!(rgb(fill_of_height(&cmds, 60.0)), rgb(sp.blue));
+    }
+
+    /// Lesson 3: the two `match`/`if` chains that pick a colour and hand it to
+    /// a shared draw call. Neither draws anything itself, so neither shows up
+    /// in the tables above — the gauge is one rectangle and the badge is one
+    /// label, whatever they are coloured.
+    #[test]
+    fn every_choice_this_module_makes_hands_over_the_role_it_claims() {
+        for (mode, p) in table_palettes() {
+            let cfg = PowerConfig::default();
+            // Lesson 5: the expected values are role literals. Written as
+            // "whatever `is_critical` picks" the arms could be swapped and both
+            // sides of the comparison would move together.
+            let gauge = |pct: u8, state: BatteryState| {
+                let cmds = render_battery_icon(
+                    &BatteryInfo::with_battery(pct, state),
+                    &cfg,
+                    &p,
+                    10.0,
+                    10.0,
+                );
+                rgb(fill_of_height(&cmds, 8.0))
+            };
+            assert_eq!(gauge(3, BatteryState::Discharging), rgb(p.red), "{mode}");
+            assert_eq!(
+                gauge(15, BatteryState::Discharging),
+                rgb(p.yellow),
+                "{mode}"
+            );
+            assert_eq!(gauge(90, BatteryState::Discharging), rgb(p.green), "{mode}");
+            assert_eq!(gauge(50, BatteryState::Discharging), rgb(p.blue), "{mode}");
+
+            let badge = |profile: PowerProfile| {
+                let cmds = render_power_profile_badge(profile, &p, 0.0, 0.0);
+                rgb(every_color(&cmds)[1])
+            };
+            assert_eq!(badge(PowerProfile::Balanced), rgb(p.blue), "{mode}");
+            assert_eq!(badge(PowerProfile::Performance), rgb(p.peach), "{mode}");
+            assert_eq!(badge(PowerProfile::PowerSaver), rgb(p.green), "{mode}");
+            assert_eq!(badge(PowerProfile::Custom), rgb(p.lavender), "{mode}");
+        }
+    }
+
+    /// Lesson 6, in its simplest form: nothing here is a position or an
+    /// invitation, so the allowed count is zero and "count them" collapses to
+    /// "none of them". A gauge or a badge that followed the accent would mean
+    /// something different on every machine.
+    #[test]
+    fn nothing_this_module_draws_moves_when_the_accent_does() {
+        const A: Color = Color::from_hex(0x00FF_8C1A);
+        const B: Color = Color::from_hex(0x0012_9E7D);
+
+        for light in [false, true] {
+            let (mut pa, mut pb) = (Palette::for_mode(light), Palette::for_mode(light));
+            pa.accent = A;
+            pb.accent = B;
+            for (what, battery, cfg) in battery_states() {
+                let ca = render_battery_icon(&battery, &cfg, &pa, 10.0, 10.0);
+                let cb = render_battery_icon(&battery, &cfg, &pb, 10.0, 10.0);
+                assert_eq!(
+                    ca.len(),
+                    cb.len(),
+                    "{what}: the accent changed how much is drawn"
+                );
+                for (i, (x, y)) in every_color(&ca).iter().zip(every_color(&cb)).enumerate() {
+                    assert_eq!(
+                        rgb(*x),
+                        rgb(y),
+                        "battery {what} (light={light}): command {i} follows the accent, \
+                         but a charge gauge is a measurement and must read the same \
+                         on every machine"
+                    );
+                }
+            }
+            for profile in every_profile() {
+                let ca = render_power_profile_badge(profile, &pa, 0.0, 0.0);
+                let cb = render_power_profile_badge(profile, &pb, 0.0, 0.0);
+                for (i, (x, y)) in every_color(&ca).iter().zip(every_color(&cb)).enumerate() {
+                    assert_eq!(
+                        rgb(*x),
+                        rgb(y),
+                        "badge {profile:?} (light={light}): command {i} follows the \
+                         accent, but the four profiles are a category, not a position"
+                    );
+                }
+            }
+        }
+    }
+
+    /// A scale whose steps are not told apart is not a scale. Two gauge steps
+    /// that collided would leave the user unable to see the difference between
+    /// "nearly flat" and "fine", in a palette where both happen to be legal.
+    #[test]
+    fn every_step_of_the_gauge_and_every_profile_stays_apart_from_the_others() {
+        for (mode, p) in table_palettes() {
+            let steps = [p.red, p.yellow, p.green, p.blue];
+            for (i, a) in steps.iter().enumerate() {
+                for b in steps.iter().skip(i + 1) {
+                    assert_ne!(rgb(*a), rgb(*b), "two gauge steps collide in {mode}");
+                }
+            }
+            let hues = [p.blue, p.peach, p.green, p.lavender];
+            for (i, a) in hues.iter().enumerate() {
+                for b in hues.iter().skip(i + 1) {
+                    assert_ne!(rgb(*a), rgb(*b), "two profile badges collide in {mode}");
+                }
+            }
+        }
+    }
+
+    /// Judgement 1: the saver blacks out the display, whatever the user's mode.
+    ///
+    /// This is the property that lets the saver pin its palette to dark, so if
+    /// it ever stops holding the pinning becomes wrong too.
+    #[test]
+    fn the_screen_saver_blacks_out_the_display_in_every_style_it_draws() {
+        for style in every_style() {
+            let mut ss = ScreenSaver::new(style, 800, 600);
+            let cmds = ss.render_frame();
+            if style == ScreenSaverStyle::Disabled {
+                assert!(cmds.is_empty(), "{style:?} drew over the desktop");
+                continue;
+            }
+            match cmds[0] {
+                RenderCommand::FillRect {
+                    x,
+                    y,
+                    width,
+                    height,
+                    color,
+                    ..
+                } => {
+                    assert_eq!((x, y, width, height), (0.0, 0.0, 800.0, 600.0), "{style:?}");
+                    assert_eq!(
+                        (color.r, color.g, color.b),
+                        (0, 0, 0),
+                        "{style:?} lit the display instead of blacking it out"
+                    );
+                }
+                _ => panic!("{style:?} does not start with a background"),
+            }
+        }
+    }
+
+    /// The logo's label is ink *on* the logo, so it is derived from the plate.
+    ///
+    /// The plate never varies here, so — unlike the accent cases — this cannot
+    /// prove derivation the way varying the fill would. What it does catch is
+    /// the failure that matters: a named role in place of the derivation, which
+    /// is how the label used to be written (`COL_BASE`, a dark role on a light
+    /// plate that a change of plate would have made unreadable).
+    #[test]
+    fn the_logo_label_is_readable_on_the_logo_plate() {
+        let mut logo = ScreenSaver::new(ScreenSaverStyle::BouncingLogo, 800, 600);
+        let cmds = logo.render_frame();
+        let plate = fill_of_height(&cmds, 60.0);
+        let label = text_exact(&cmds, "Slate OS", 28.0);
+        assert_eq!(
+            rgb(label),
+            rgb(readable_on(plate)),
+            "the logo's label is not derived from its plate"
+        );
     }
 }

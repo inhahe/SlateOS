@@ -50388,7 +50388,7 @@ commands that carry the colour in question, and assert the two renders agree.
 Candidates: anything drawn on the wallpaper, on a video surface, on a
 thumbnail, or on any other content the palette does not own.
 
-**Part 2 progress. 23 of 49 modules converted.**
+**Part 2 progress. 28 of 49 modules converted.**
 
 - [x] `security_dialog.rs` — 29 constants, done 2026-08-22. The method above
   survived contact: the sweep lives in `gui/desktop/src/palette_check.rs` as
@@ -51552,6 +51552,344 @@ thumbnail, or on any other content the palette does not own.
     restore, leaving the in-flight defect patched on disk; `run_dialog.rs` was
     left modified by that kill. **After any stop of a harness run, `git status`
     must be checked and the damaged file restored with `git checkout --`.**
+- [x] `osd.rs` — 11 constants, done 2026-08-23. Eleven tests, harness defects
+  Ax22–Ax25 (ninety-eight). **98/98 caught, zero escapes.**
+  - **The width rule has a third gap, and this module is where it showed.**
+    Modules 21 and 22 taught that the sweep is only as wide as the render it is
+    given, and that a per-*kind* assertion table is not a per-*site* one. Both
+    were applied here up front — and both still missed a whole class. A
+    per-source-site *text* table and a per-source-site *rectangle* table check
+    the colours that reach the renderer; neither can see the **choice** sites,
+    the `match`/`if` expressions that decide *which* role gets handed to a
+    shared renderer. `render_content` makes 15 such decisions and `icon_info`
+    another 10, and not one was reachable: the sweep waves them through
+    (every arm names a role, and a role is a member of both palettes) and the
+    two role tables render only two fixtures. That is 25 sites checked by
+    nothing, which is worse than modules 21 and 22 lost combined. The fix is an
+    eleventh test, `every_kind_draws_its_icon_in_the_colour_that_kind_claims`,
+    which spells out all 25 mappings. **Generalised: n source sites means n
+    assertions — and a site that only *selects* a colour is a source site too,
+    even though it draws nothing itself.**
+  - **An OSD overlay takes no accent at all — the deliberate mirror of module
+    23.** Module 23's rule was "the accent marks what you can move, not what
+    you are being told"; a volume *bar* is draggable so it takes the accent.
+    The volume *overlay* is the same subject and the opposite answer: it is
+    pure feedback that appears, reports and fades, and nothing in it is
+    touchable. So zero of the overlay's sites follow the accent, held by
+    `no_colour_the_overlay_draws_ever_follows_the_accent`. The settings panel
+    below it *is* interactive and has exactly three accent sites, held by a
+    test that counts them — a count, not a list, so a fourth site added later
+    fails rather than passing unnoticed.
+  - **Volume-blue and brightness-yellow are a category pair, so both freeze.**
+    Tempting to give volume the accent since it is the most-shown overlay; that
+    would make the two indistinguishable on a blue desktop and identical on a
+    yellow one. The pair is what carries the meaning, so neither half may move
+    independently, and `volume_and_brightness_stay_a_pair_you_can_tell_apart`
+    says exactly that.
+  - **Proving ink is *derived* needs the accent to vary, and the stock accents
+    are all too similar to do it.** `ink_drawn_on_a_coloured_fill_is_readable_
+    in_both_modes` originally used the four `SAFE_ACCENTS`, which are all
+    pastel — `readable_on` answers the same dark endpoint for every one of
+    them, so a hard-coded constant passed. The test only bites once it renders
+    a deliberately dark accent (`0x0020_3050`) *and* a deliberately pale one
+    (`0x00F5_D0E0`) and demands the ink flip between them. Any future
+    `on_accent`/`readable_on` test needs the same treatment; four similar
+    fixtures prove nothing about a derivation.
+  - **`text_saying` — one source site, many rendered instances.** The helper
+    first asserted exactly one match and failed, because the settings panel
+    draws four ticks from one `"✓"` expression. The correct question is not
+    "which one" but "do they all agree": at least one match, and all matches
+    the same colour. If they ever disagree the site has grown a branch that
+    needs naming, so the assertion catches that too rather than silently
+    reporting whichever came first.
+  - **The under-declaration audit found four, and over-declaration one.** Four
+    defects were caught by tests their declaration did not name (an album
+    branch-killer also trips the text-bounding test; two battery defects also
+    trip the text-role table; the Success-icon defect also trips the
+    pair-distinctness test). One declared a test that did *not* fire — recolouring
+    the selected position dot changes no branch, so
+    `the_fixtures_take_every_branch_the_osd_has` was wrong to list. The harness
+    reports only that second direction, which is the rarer one; the audit
+    script is what catches the first.
+  - **clippy trap: `unusual_byte_groupings`.** `Color::from_hex(0x2030_50)` is
+    rejected — hex digits must group in equal-size runs. Write the full eight
+    (`0x0020_3050`), which is what the rest of the file does anyway.
+- [x] `privacy_settings.rs` — 11 constants, done 2026-08-23. Eight tests,
+  harness defects Ax26–Zx27 (fifty-two).
+  - **The width rule has a fourth gap: an assertion is only as
+    discriminating as the palette it renders under.** Modules 21/22/24 taught
+    that the sweep is only as wide as its render, that a per-kind table is not
+    a per-site one, and that a site which only *selects* a colour is a source
+    site too. All three were applied here up front, and the first proof run
+    still left 19 defects declared-but-uncaught — because the three role
+    tables rendered **Mocha only, with the stock accent**. That is structurally
+    blind to exactly the two mistakes this conversion makes: a constant frozen
+    back to its Mocha value is *identical* to the role that replaced it when
+    viewed in Mocha, and a site naming `p.blue` instead of following the accent
+    is identical to the stock accent, which *is* blue. **Testing a conversion
+    in the palette it was converted from hides precisely the failures that
+    conversion causes.** The fix is `table_palettes()` — both modes, and in
+    each an accent (`0x00FF_8C1A`) deliberately outside either palette — which
+    every role table now loops over, with `"{mode}"` in all 38 failure
+    messages. 15 of the 19 resolved on that change alone.
+  - **An expectation written in terms of the code under test cannot fail.**
+    The text table asserted the app-state label against
+    `PermissionState::Allowed.color(&p)`. Swap the `Allowed => p.green` arm and
+    *both sides of the comparison move together*: the row a user reads as
+    "allowed" can turn any colour at all and the table stays green. Two arm-swap
+    defects walked through it. Assert the **role literal** instead, and list all
+    three states — that pins the value, and the three-way spread still proves
+    the call site asks the method, because a flat literal there would give all
+    three rows one colour. Generalised: **if the expected value is computed by
+    the thing being tested, the assertion is checking that a function equals
+    itself.**
+  - **An exemption defined by the property under test exempts the bug too —
+    the accent test had to be written three times.** *Attempt 1* collected
+    every colour equal to green, red or overlay0 and compared *that list*
+    across accents. The filter runs before the comparison, so a site that stops
+    drawing green and starts drawing the accent drops out of the list — for
+    every accent equally. The lists still matched; it was checking that the
+    sites which stayed put stayed put. *Attempt 2* fixed that by comparing every
+    command under two out-of-palette accents A and B, and skipping any site that
+    drew A in the first render and B in the second, "because that is a site
+    meant to follow the accent". Three defects walked through it — an enabled
+    resource, an allowed log entry and a switched-on toggle, all reporting state
+    in the accent — because **a site that wrongly follows the accent satisfies
+    the exemption exactly.** *Attempt 3* is the one that works: every command
+    must match under both accents, any command that moves must move exactly
+    A→B, and the number that move must equal a **declared per-state count**
+    (one for the tab strip's active label; two on the general tab, which adds
+    the selected telemetry level). Generalised: **you cannot recognise the
+    legitimate instances of a property by testing for that property — the bug
+    has it too. Count them instead**, so a new one fails rather than joining
+    the exemption. This is the same shape as module 24's "count, not list" rule
+    for accent sites, arrived at from the opposite direction, and it is now the
+    third time a *whitelist by description* has silently absorbed a defect.
+  - **Four judgements, all recorded in the module's prose header.** (1) Two
+    sites follow the accent, both meaning "you are here" — the active tab's
+    label and the selected telemetry level's label; held by a test that
+    **counts** them, so a third added later fails. (2) Allowed/Denied is a
+    *category*, not a decoration, so green and red freeze across every accent —
+    a privacy panel whose status a user cannot trust at a glance is worse than
+    no status at all. (3) Section headings stay `lavender`; the accent never
+    marks category. (4) The tab strip's own fill is position but not accent
+    (`p.surface0`/`p.mantle`) — only the label moves.
+  - **Traps.** `gen` is a reserved keyword in Rust 2024 and cannot name a
+    fixture variable. Harness patterns must contain literal `✓`/`✕`; the Rust
+    source stores the characters, not `\u{}` escapes. And `text_containing`
+    fired its ambiguity guard on `"Permissions"`, which is a substring of the
+    title `"Privacy & Permissions"` — the guard converted a silent
+    wrong-site comparison into a loud failure, which is what it is for; tab
+    labels now use a `text_exact` helper.
+  - **The harness now reports both directions of declaration error.** It only
+    ever printed `[MISSING:]` — a test a defect *declared* but that did not
+    fire. The reverse, a test that fired but was not declared, was found by an
+    audit script run by hand, which meant it was found when someone remembered
+    to run it. This module had **sixteen** of them, all created the moment one
+    test became far more discriminating than its declarations claimed. That
+    direction matters because the declarations are the only record of what the
+    suite is known to prove: left stale, the next person to prune a
+    "redundant" test cannot see what they would be giving up. Both directions
+    are now inline as `[MISSING:]` / `[UNDECLARED:]`, with a closing tally.
+- [x] `print_manager.rs` — 11 constants, done 2026-08-23. Eight tests, harness
+  defects Ax28–Nx29 (forty).
+  - **The first module where the previous module's lesson was applied before
+    the proof run rather than after it.** Module 25 lost 19 defects to role
+    tables that rendered Mocha with the stock accent; every table here renders
+    both modes with an accent outside either palette from the first line of
+    the first test. This module needed it more than any so far, because
+    `JobState::Queued` is `p.blue` — and the stock accent *is* blue, so under
+    it "correctly frozen to blue" and "wrongly following the accent" are the
+    same pixels. Two of the forty defects exist purely to hold that line.
+  - **Both colour-choice methods are unreachable from `render`.**
+    `Printer::status_color` and `JobState::color` are called by nothing else in
+    the file — they are pure *selection* sites in module 24's sense. Without an
+    explicit table naming all nine arms, every one of them is checked by
+    nothing at all: the membership sweep waves them through, because each arm
+    names a role and a role belongs to both palettes. A colour method with no
+    call site is the easiest kind of site to forget, because grepping the
+    render function for colours will never show it.
+  - **Four judgements.** (1) `status_color`'s offline/busy/ready red/yellow/
+    green is a category — red *means* "this printer will not print" — so it
+    freezes. (2) `JobState::color` is the same, six ways, with all fifteen
+    pairs asserted distinct under five accents and both modes. (3) The Print
+    button is the dialog's default action, which *is* the accent's job, so
+    `p.accent` fill with `p.on_accent()` ink; Cancel is not the default action
+    and keeps `p.surface1`/`p.text`. (4) The selected printer's name marks the
+    choice you have made and takes the accent, while the field it sits in stays
+    `p.surface0` — position is marked by the label, not by repainting the
+    furniture, the same split as module 25's tab strip.
+  - **The accent count has to allow for derived ink.** The counting rule from
+    module 25 says every command must match across two accents except a
+    declared number. Here three commands move, not two: the printer name and
+    the button fill take the accent, and the button's *ink* moves as well
+    because `on_accent` is derived from it. The test classifies each moving
+    command as accent-valued or derived-ink and fails on anything that is
+    neither, so the derived site is accounted for rather than exempted.
+  - **Two sites drew the identical string in different roles.** The dialog
+    title and the Print button both draw exactly `"Print"`, and the caption
+    `"Printer:"` contains it — three sites, two roles, one substring. A
+    `text_containing` lookup would have compared the wrong one silently. Added
+    `text_exact(cmds, want, size)`, matching text *and* font size. Whenever a
+    module draws one word in two roles, the lookup helper needs a second
+    discriminator; the ambiguity guard only tells you that you have the
+    problem, not which site you meant.
+- [x] `power.rs` — 9 constants, done 2026-08-23. Ten tests, harness defects
+  Ax30–Bx32 (fifty-four).
+  - **The first module whose surface deliberately does not follow the user's
+    mode**, and that turns out to matter for the proof, not just the pixels. A
+    screen saver blacks out the display in both modes — a light one is a lamp
+    pointed at a sleeping user — so Latte's roles, which are picked to sit on
+    white, are the wrong palette for that surface: Latte `text` is nearly black
+    and would vanish on it. The saver pins itself to the dark palette and, since
+    nothing it draws is a position or an invitation, takes no palette argument
+    at all. Making the independence *structural* rather than asserted is the
+    better half of the fix: a later edit cannot accidentally make the saver
+    follow the theme, because there is no theme in scope to follow.
+  - **Seventh lesson for the width rule: pinning a surface to one mode disarms
+    the membership sweep for that surface.** The sweep works by rendering in
+    Latte and finding a value Latte does not contain. A surface pinned to Mocha
+    contains every Mocha value *by construction*, in both modes — so a leftover
+    `COL_LAVENDER` is bit-for-bit `screen_palette().lavender` and there is no
+    observable difference for any test to see. The sweep is still worth running
+    (it catches an inline literal that is no role at all, and it pins the star
+    field's greys and the rain's greens to the two ramp shapes they are allowed
+    to have), but for such a surface the per-site role tables are not a
+    supplement to it: they are the entire proof, and anyone who trims them as
+    redundant is deleting the only check there is. The harness block says the
+    same thing from the other side — the saver's sites carry no freeze-to-Mocha
+    defect, because such a defect would be undetectable and declaring it would
+    be declaring a test that cannot exist. They reach for the *light* palette
+    instead, which is the failure pinning can genuinely suffer.
+  - **Lesson 5 applies to which palette, not just which role.** The saver's role
+    tables first wrote their expectations as `screen_palette().lavender`. That
+    is the module-25 tautology one level up: a `screen_palette` that started
+    returning the light palette takes both sides of the comparison with it. The
+    expectations now name `Palette::for_mode(false)` directly, and the defect
+    that flips the pinning is caught by three tests instead of none.
+  - **Four judgements.** (1) The saver follows neither mode nor accent. (2) The
+    battery gauge is a *measurement* — red at critical, yellow at low, green
+    when nearly full, blue otherwise — so it freezes; note its "otherwise" arm
+    is `p.blue` and must stay `p.blue`, which is the module-26 trap again and is
+    why every table renders under an off-palette accent. (3) The four power
+    profiles are a category, so none of them is the accent, not even Balanced.
+    (4) A star's grey is its depth and a glyph's green is its age in the column:
+    both are computed ramps, not roles that were missed, and the sweep declares
+    them as the two shapes `rgba(v, v, v, 255)` and `rgba(0, v, 0, 255)` rather
+    than waving arbitrary colour through.
+  - **The logo's ink is derived but cannot be proved so.** `readable_on(sp.blue)`
+    sits on a plate that never varies, so — unlike the accent cases, where the
+    fill moves and the ink must move with it — a frozen endpoint and a
+    derivation are indistinguishable here. The test asserts ink ==
+    `readable_on(plate as actually drawn)`, which is a consistency check rather
+    than a derivation proof; what it does catch is the failure that matters and
+    the one the code actually had, a *named* role (`COL_BASE`, dark) on a plate
+    whose lightness a later change could flip.
+  - **The membership sweep can never catch a site that reaches for the accent,
+    in any module.** `accent` is one of the palette's twenty-one roles, so a
+    command drawing it is accounted for by construction — in either mode, under
+    any accent value. Thirteen of this module's defects were declared against
+    the sweep on the assumption that an off-palette accent would make them
+    visible to it; it caught none of the thirteen, and the accent count and the
+    role tables caught all thirteen. This is not a gap to fix — the sweep asks
+    "is this a colour the palette can account for?", and the accent is one. It
+    is a fact about what the sweep is *for*: it finds a **leftover constant**,
+    and nothing else. For every site that must not follow the accent, the accent
+    count is not a supplement to the sweep; together with the per-site table it
+    is the whole check. Read with lesson 7 above, the sweep's reach is now
+    precise: it cannot see a wrong role, it cannot see the accent, and on a
+    mode-pinned surface it cannot see a leftover constant either.
+  - **`Palette::for_mode(true).base` is exactly the `readable_on` light
+    endpoint,** which the sweep allows everywhere on purpose, so "the screen
+    saver lights the display with Latte's background" is invisible to it. The
+    black-out test catches it, which is the test that owns that property.
+    Generally: the two endpoint values are sweep-transparent, so a defect that
+    happens to land on one is only ever caught by a property test.
+- [x] `login_screen.rs` — 11 constants, done 2026-08-23. Sixteen new tests (50
+  in the module), harness defects Ax33–Lx35 (sixty-four), all sixty-four
+  caught, none escaped.
+  - **Eighth lesson for the width rule: the sweep is blind to the two
+    `readable_on` endpoints, and this module draws one of them nearly
+    everywhere.** Most of what a greeter draws sits on a background the shell
+    did not choose — a photograph, a gradient, a colour a user picked — so no
+    palette role is legible on all of them. The answer (the `icons.rs`
+    precedent) is `on_wallpaper()` plus a hard `text_shadow()` at +1/+1. But
+    `on_wallpaper()` is the constant `LIGHT_EXTREME` = `#EFF1F5`, which is
+    *also* the light `readable_on` endpoint, which the sweep allows
+    unconditionally in **both** modes. So a site that took `on_wallpaper()`
+    where it owed `p.text`, or the reverse, is invisible to the sweep — and it
+    is a legibility bug that looks perfect in every screenshot taken against
+    the default background. Five defects reproduce exactly that confusion
+    (Kx33, Ox33, Dx34, Vx34, Xx34) and the sweep caught none of them.
+  - **The fix was to make the boundary a shape, not a colour.** Text on the
+    background goes through one helper, `push_on_background`, which emits *two*
+    commands; text on a panel this module filled is pushed directly and emits
+    *one*. The test helpers mirror that exactly — `panel_text` asserts one
+    command, `floating_text` asserts two with the shadow one pixel down-right —
+    so a site that changes sides fails whichever helper names it, without any
+    colour comparison being involved. `exactly_seven_things_in_the_full_render_sit_on_the_background`
+    then counts the shadows, so a *new* floating site nobody named is caught
+    too. That is lesson 6 (count them, don't recognise them) applied to a
+    property the sweep structurally cannot see.
+  - **Sharpest measurement of the session: the wallpaper-ink tests cannot
+    detect a module that ignores its palette entirely.** Defect Ix35 makes
+    `render` shadow its parameter with `Palette::for_mode(false)` — the exact
+    failure this whole conversion exists to prevent. Nine tests caught it. The
+    two wallpaper-ink tests did not, and could not: `on_wallpaper()` is a
+    constant, `on_wallpaper_dim()` is that constant at alpha 200, and
+    `text_shadow()` is black, so all three are mode-independent *by
+    construction* and a frozen render still draws them correctly. The corollary
+    is a rule for every later module: **a site whose colour does not vary with
+    the mode contributes nothing to the "did this module read its palette at
+    all" question, and needs a separate site that does.** Here that is the role
+    tables on the panels.
+  - **A near-miss with the same root cause, found by the harness rather than
+    reasoned out.** Defect Cx33 resolves the theme background to `p.base`
+    instead of `p.crust`, and unexpectedly tripped the floating-text count —
+    because Latte `base` *is* `LIGHT_EXTREME`, so the background fill was
+    counted as a seventh piece of wallpaper ink. Harmless here, but it means
+    the counting test is coupled to which role the background takes; if a later
+    edit makes the login background `base`, that test needs re-reading rather
+    than re-baselining.
+  - **`Default` could not name a colour, so it stopped trying.** The default
+    background was `SolidColor(CRUST)` with `CRUST` a Mocha literal in this
+    file — a default that had already made the choice the palette exists to
+    make, and the direct cause of the greeter staying black for a user who had
+    asked for the light theme. `Default::default` takes no arguments and so can
+    never be handed a `Palette`; the fix is a payload-free `Theme` variant
+    resolved at render time. `the_default_background_defers_its_colour_to_the_palette`
+    pins that the default carries *no* payload, which is not a restatement of
+    the code: it is what stops a future edit reintroducing a literal by
+    changing an argument. The `match` in `render_background` names the three
+    colourless variants explicitly rather than using `_`, so adding a variant
+    is a compile error instead of a silent dark rectangle.
+  - **Three judgements about the accent, consistent with modules 19–27.** A
+    *default action* is an invitation, so Sign In takes the accent and its label
+    is `on_accent()` — derived, and proved derived by sweeping the accent from
+    `0x00` to `0xF0` and requiring both `readable_on` endpoints to be observed.
+    A *selection marker* is position, so the chosen avatar carries the accent in
+    the row list and keeps it in the password panel. A *refusal* is neither, so
+    the error border and message stay `p.red` and the lockout notice stays
+    `p.yellow` under every accent. Note that defect Ox34 — freezing the Sign In
+    label to `#11111B` — is caught by **one** test only: the sweep allows it (it
+    is an endpoint), the deleted-constants test exempts it (it is `CRUST`), and
+    the role table passes it (under the off-palette accent, `readable_on`
+    genuinely answers `#11111B`). Only the accent-sweep test sees it. A module
+    that draws a coloured button and has no such test has no check on that
+    label at all.
+  - **The sweep found a real rendering bug that nobody put there.** It rejected
+    `#CBA5F7` — one step off Mocha `mauve` — in a gradient whose two endpoints
+    were *both* `mauve`. The band arithmetic truncated rather than rounded, and
+    `a*(1-t) + a*t` lands a hair below `a` in `f32` for most `t`, so a flat
+    "gradient" came out as twenty stripes alternating between the colour the
+    user chose and one darker, and every real gradient was biased a step dark
+    along its whole length — invisible there, because a gradient is expected to
+    change. Extracted as `lerp_channel` with `.round().clamp(0.0, 255.0)` and
+    pinned by two tests, one for the flat case and one for the midpoint (127.5
+    rounds to 128 and truncates to 127, so the fix cannot be "special-case
+    equal endpoints"). Worth recording as evidence for the method: a membership
+    sweep written to catch a missed *constant* caught an arithmetic error in
+    code that had nothing to do with the conversion.
 
 **Trigger:** this is not blocked on anything. It is sequenced after the shell
 event loop (`TD-C-THE-SHELL-CAN-DRAW-ITSELF-AND-NOBODY-CAN-ASK-IT-TO`) only
@@ -63805,3 +64143,362 @@ latch fires, which is exactly where GNU calls `signal_init`.
 a second program in the image starts leaving the terminal in a modified state.
 
 Recorded in `design-decisions.md` §368.
+
+---
+
+## A malformed Data Offset injected the TCP header into the receive stream (lane A)
+
+**Status:** FIXED 2026-08-22 — `d5ca795fc`, boot-tested on `lane-a`.
+
+Found by reading, during the `net/tcp.rs` lint sweep, not by a lint: clippy
+flagged `data[12]` as `indexing_slicing` and the *value* it read turned out to
+be the actual bug. Worth recording because the sweep's stated purpose is
+removing panics, and the most serious thing it surfaced was not a panic.
+
+**What was wrong.** `process_tcp_common` took the segment's Data Offset field
+and used it as the payload's start offset without checking it:
+
+```rust
+let data_offset = ((data[12] >> 4) as usize) * 4;
+let payload = if data_offset < data.len() { &data[data_offset..] } else { &[] };
+```
+
+Data Offset is four bits. A peer may send 0. When it did, `payload` was
+`&data[0..]` — the whole segment, starting with its own 20-byte TCP header —
+and that was appended to `rx_buffer` and returned to the application as
+ordinary stream data. Twenty bytes of attacker-chosen content (ports,
+sequence numbers, flags, window) injected into a stream, from one segment,
+requiring only an established connection. Values 1..4 inject proportionally
+less. RFC 793 §3.1 sets the minimum at 5 words; nothing enforced it.
+
+The mirror case was also wrong but harmless: Data Offset past the end of the
+segment claims options that were never transmitted, and was silently treated
+as "no options", so a 20-byte segment could pose as an option-bearing one.
+Linux drops both in `tcp_v4_rcv`
+(`th->doff < sizeof(struct tcphdr) / 4 || skb->len < th->doff * 4`).
+
+**Why it lasted.** The check had nowhere to live. The header parse was
+sixteen index expressions at the top of an 800-line function, so the only way
+to exercise the kernel's first contact with peer-chosen bytes was to stand up
+a connection and inject a frame — which no test did. The fix is therefore a
+split as much as a check: `parse_tcp_header` returns a `TcpHeaderView` or
+`None`, holds options and payload as *slices* rather than the offsets used to
+cut them, and destructures the fixed header in a single refutable slice
+pattern so the length check and the field reads are one operation. It has a
+direct self-test pinning doff 0–4, doff past the end, short segments, the
+bare 20-byte header, and the doff 5 vs 6 split of one 24-byte segment.
+
+**Generalisation worth acting on.** Every other wire parser in the tree reads
+a length or offset field out of the header and slices with it. The three on
+the remaining sweep list — `net/ssh.rs`, `net/tls.rs`, `net/firewall.rs` —
+should be read for this specific shape (a header field used as an offset
+without a lower bound), not merely swept for `indexing_slicing`. A `.get()`
+conversion silences the lint on such a site while leaving the injection
+intact, which is the failure mode to avoid: the panic is the loud symptom,
+the unchecked offset is the bug.
+
+**Sweep status for `net/tcp.rs`:** 182 → 110 → 56 distinct sites, all now
+`indexing_slicing`; all 22 blanket `arithmetic_side_effects` allows removed
+(`953f828c0`), of which only seven functions had any arithmetic at all.
+
+---
+
+## Unauthenticated peers could grow the in-kernel SSH receive buffer without bound (lane A)
+
+**Status:** FIXED 2026-08-23 — boot-tested on `lane-a`.
+
+**In short:** the SSH server runs inside the kernel. Its packet reader could
+not tell "I have not received the whole packet yet" from "these bytes can
+never *be* a packet", and reported both as "wait for more". So a peer that
+sent four bytes of garbage length and then streamed filler was never
+disconnected, and its data piled up in kernel memory forever. Enough of it
+exhausts the kernel heap and takes the whole machine down — not just that
+connection, and without ever logging in.
+
+### What was wrong
+
+`try_read_packet_plain` returned `Option<Vec<u8>>`:
+
+```rust
+if packet_length > MAX_PACKET_SIZE || packet_length < 2 {
+    return None; // Invalid.
+}
+let total = 4 + packet_length;
+if recv_buf.len() < total {
+    return None; // Incomplete.
+}
+```
+
+Two different situations, one return value. The caller is a loop:
+
+```rust
+while let Some(payload) = try_read_packet_plain(&mut session.recv_buf) {
+```
+
+`None` ends the loop, and the buffer is only ever drained by a *successful*
+parse (`*recv_buf = recv_buf.split_off(total)`). So an unframeable length
+field parks the bytes permanently: every poll re-reads the same four bytes,
+re-rejects them, and returns to a caller that appends still more.
+
+Nothing capped the accumulation either — `session.recv_buf.extend_from_slice(&data)`
+ran unconditionally on every poll.
+
+### Why it survived review
+
+Three things hid it:
+
+- **It produces no lint.** It is not an index, not an unwrap, not an
+  arithmetic op. A clippy sweep of this file walks straight past it. This is
+  the concrete vindication of the note above: the file was on the sweep list
+  with 104 sites, and *none of them was this bug*.
+- **The correct shape was already in the file, twelve lines below.**
+  `try_read_packet_encrypted` returns `KernelResult<Option<Vec<u8>>>` and does
+  return `Err` for a bad length. The two functions are read as a pair and
+  look alike; only the return types differ, which is exactly the sort of
+  difference the eye completes rather than notices.
+- **The comments were correct and still misleading.** `return None; // Invalid.`
+  and `return None; // Incomplete.` each accurately describe their own line.
+  Nothing in the function says those two must be *distinguishable*, because
+  the type had already decided they were not.
+
+### The fix
+
+`try_read_packet_plain` now returns `KernelResult<Option<Vec<u8>>>`, matching
+its encrypted twin: `Ok(Some)` consumed a packet, `Ok(None)` is a legal
+prefix, `Err` is unframeable and closes the session. The caller became a
+three-arm `loop`/`match`. Also tightened while there: `packet_length` must be
+at least `MIN_PADDING + 1`, and `padding_length` must meet the RFC 4253
+minimum of four — neither was checked, though our own builder emits both.
+
+Separately, a backstop at the append site drops any session whose buffer
+passes `MAX_RECV_BUF` (`4 + MAX_PACKET_SIZE + POLY1305_TAG_LEN`, the largest
+thing that can legitimately be in flight). A `const _: () = assert!(...)`
+pins that it stays above `MAX_PACKET_SIZE`, so a later edit to either
+constant fails the build rather than silently truncating legal traffic.
+`Session::reset` does `*self = Self::new()`, so the buffer is genuinely
+freed on close — checked, because a cap that only defers the exhaustion
+would be worse than none.
+
+Self-test `1b` covers what was broken rather than what was written: legal
+prefixes of 0/1/4/5/8 bytes must be *held* and not consumed, oversize and
+undersize lengths and out-of-range padding must all be `Err`.
+
+### What this says about the remaining sweep
+
+The generalisation in the entry above was right about *where* to look and
+understated *what* to look for. "A header field used as an offset without a
+lower bound" was the TCP shape. The SSH shape is a level up: **a parser whose
+return type cannot express the difference between a recoverable and an
+unrecoverable failure.** Both are invisible to lints, and both are found by
+reading the framing layer and asking what a peer gains by lying.
+
+For `net/tls.rs` and `net/firewall.rs`, the questions to carry over:
+
+1. Can a length or offset field be rejected in a way that leaves the bytes
+   buffered and the connection open?
+2. Is there any accumulating buffer fed from the wire with no absolute cap?
+3. Where two sibling parsers exist (plain/encrypted, v4/v6), do their return
+   types agree? A divergence is where the weaker one is wrong.
+
+---
+
+## Wire-fed buffer audit of `kernel/src/net` — complete (lane A, 2026-08-23)
+
+**In short:** after finding two places where a remote machine could make the
+kernel allocate memory forever, I checked every other place in the networking
+code that stores incoming data, to see whether the same mistake was hiding
+anywhere else. It was not. Ten such buffers exist; two were broken and are now
+fixed, and the other eight were already correct. This entry records the list so
+nobody has to repeat the search.
+
+**Status:** DONE. No action outstanding.
+
+### Method
+
+The failure being hunted is not a lint and not a crash. It is: *a buffer fed
+from the network that has no ceiling, or that has one but cannot say so.* The
+three questions from the SSH entry above, applied to every file in
+`kernel/src/net`:
+
+1. Can a length or offset field be rejected in a way that leaves the bytes
+   buffered and the connection open?
+2. Is there an accumulating buffer fed from the wire with no absolute cap?
+3. Where two sibling parsers exist (plain/encrypted, v4/v6, client/server), do
+   their return types and their bounds agree? A divergence is where the weaker
+   one is wrong.
+
+Question 3 is the cheap one and it earns its place: both bugs found were a
+sibling pair where one half was right and the other was not.
+
+### Every wire-fed buffer, and its bound
+
+| Buffer | Bound | Verdict |
+|---|---|---|
+| `ssh.rs` `Session::recv_buf` | *none* | **was broken** — fixed, `MAX_RECV_BUF` |
+| `tls.rs` `hs_buf` (handshake reassembly) | u24, i.e. 16 MiB | **was broken** — fixed, `MAX_HANDSHAKE_MSG_SIZE` |
+| `tcp.rs` `TcpConnection::rx_buffer` | `MAX_RX_BUFFER`, clamped at every append, and it drives the advertised window | correct |
+| `tcp.rs` `TcpConnection::tx_buffer` | fed by the local application, not the wire | n/a |
+| `udp.rs` `rx_queue` / `rx_queue_v6` | `MAX_QUEUED` (64), silent drop — right for UDP | correct, and the two agree |
+| `veth.rs` `rx_queue` | `VETH_QUEUE_DEPTH`, returns `ChannelFull` and counts the drop | correct |
+| `frag.rs` v4 and v6 reassembly `buffer` | `MAX_PAYLOAD_V4`/`_V6` checked *before* `resize`, 8 slots, 30 s/60 s timeouts | correct, and the two agree |
+| `telnet.rs` `line_buf` | `MAX_LINE_LEN` | correct |
+| `ssh.rs` `Channel::line_buf` | 1024 | correct, though see below |
+| `tls.rs` `recv_buf` (client and server) | holds one record's unread remainder; the reader drains before it refills, so ≤ `MAX_PLAINTEXT_SIZE` | correct, and the two agree |
+
+`firewall.rs` has no accumulating buffer at all — its conntrack tables are
+fixed-size arrays, and its v4 and v6 paths call the *same* `extract_ports`
+helper, so they cannot drift apart. That is the structure the rest of this
+table is trying to achieve by inspection.
+
+### The one nit left
+
+`ssh.rs`'s `Channel::line_buf` caps at a bare `1024` rather than a named
+constant. It is a correct bound, so this is not a bug and is deliberately not
+being "fixed" into a churn commit — but if that file is touched again, the
+literal should become a `const` next to `MAX_RECV_BUF`. A magic number is a
+bound nobody can find when they go looking for bounds, which is exactly the
+search this entry documents.
+
+### What did not work
+
+Grepping for the *symptom* found nothing, twice. Both bugs are invisible to
+`cargo clippy`: no index, no unwrap, no arithmetic. `net/ssh.rs` was sitting on
+the sweep list with 104 clippy sites and the denial of service was not one of
+them. The audit that worked was reading each framing layer and asking what a
+peer gains by lying about a length — which is a different activity from
+lowering a warning count, and the warning count is not a proxy for it.
+
+
+## A count field could allocate memory the archive never contained (lane A, 2026-08-23)
+
+**Status: FIXED** -- `kernel/src/fs/sevenz.rs`, `kernel/src/fs/zstd.rs`.
+
+### In short
+
+Two archive parsers took a number out of a file and used it to reserve memory
+before checking whether the file was big enough to contain that much. A 9-byte
+7z header could claim four billion files; a 14-byte zstd header could claim it
+decompressed to 256 MiB. In a normal program the allocation just fails and you
+get an error. In a kernel it does not fail -- it halts the machine. Both
+parsers are reachable from a shell command on a file the user supplies, so
+"the user opened a bad archive" and "the machine stopped" were the same event.
+
+### Why an unchecked count is worse than an unchecked loop
+
+The usual unbounded-growth bug is a loop that appends without a ceiling; it
+takes an attacker some traffic to exploit and it degrades before it dies. A
+count field is worse in every dimension, because of *where the number lands*:
+
+    Vec::with_capacity(n)      // n from the file
+    vec![x; n]
+    resize_with(n, ..)
+
+None of these can report failure. There is no `Result` to propagate -- on
+failure the allocator calls `handle_alloc_error`, and in a kernel that is a
+halt. So the check cannot be "handle the allocation error"; it has to happen
+*before* the allocation, or it does not happen at all. One malformed header,
+one halt, no traffic required.
+
+### The two instances
+
+| Parser | The claim | What it cost |
+|---|---|---|
+| `sevenz.rs` | every count was a raw `read_vli()` -- up to `u64::MAX` -- with **no guard of any kind**; `MAX_OUTPUT` was the module's only constant | `num_files` fed `resize_with` directly, so a 9-byte header sized a `Vec<FileInfo>` at four billion |
+| `zstd.rs` | `content_size` is an 8-byte frame-header field, clamped **only** to `MAX_OUTPUT_SIZE` | a 14-byte frame reserved 256 MiB before one byte of compressed data was read |
+
+Reachability was checked, not assumed. `un7z`: `archive.rs:391`,
+`archive.rs:478`, `kshell.rs:104454`. `unzstd`: `fcompress.rs:529`,
+`kshell.rs:102859`, `kshell.rs:104108`, `kshell.rs:105962`. Several of those
+are shell commands taking a path from the user.
+
+An earlier pass had wrongly cleared zstd as unreachable, on a grep for
+`zstd::decompress`. The public entry point is `unzstd`, and it has four
+callers. A reachability check that greps for a guessed name and concludes
+"no callers" is not a check; the export list is the thing to read.
+
+### The fixes, and why they use different bounds
+
+They look like the same bug and they are, but the right bound differs because
+the two numbers mean different things.
+
+**7z counts bound themselves against the input.** Every counted item costs at
+least one byte somewhere in the archive, so a count larger than the bytes
+remaining is a lie *whatever it is counting* -- no invented constant needed.
+That is generous (real entries cost far more than a byte each) and it is exact
+in the direction that matters: it can never reject an archive that could
+actually have been parsed. `read_count()` applies it at the four count sites.
+Two further places needed separate reasoning: the per-folder substream **sum**
+(each part was bounded, but `sum()` on `usize` panics on overflow under the
+kernel's overflow checks, and a non-overflowing total still sizes a
+`vec![_; n]`), and `read_bool_vector` itself, whose all-defined branch
+allocates while consuming no input at all -- the one place a count becomes
+memory with nothing to check it against.
+
+**A zstd content size cannot be bounded that way**, because decompression is
+supposed to produce more output than input; bytes-remaining is not a valid
+ceiling. But the reservation is only a *performance hint*, which is what makes
+it cheap to cap: `MAX_INITIAL_RESERVE` (1 MiB) bounds what is reserved up
+front, while `MAX_OUTPUT_SIZE` stays the real ceiling, enforced incrementally
+as blocks actually append bytes. A frame that genuinely decodes to 256 MiB now
+costs eight geometric regrowths -- negligible against the decode -- and memory
+is committed in proportion to bytes *produced* rather than bytes *claimed*.
+
+### Two things the fixes deliberately also test
+
+- **That the bound does not reject valid input.** Rejecting the malformed case
+  is only half the property; a bound that also refused parseable archives
+  would be a worse bug than the one it fixed. Both self-tests pin both sides.
+- **That the clamp did not replace the validation.** zstd still verifies the
+  declared content size against the real output at the end of the frame. The
+  test asserts an inflated claim is still `CorruptedData` and not merely
+  survived -- otherwise a future reader could conclude the clamp made the
+  check redundant and delete it.
+
+`initial_output_capacity` was split out of `decompress_frame` purely so the
+bound is reachable from a test. A clamp inside a function that also does the
+decoding can only be exercised by allocating whatever it failed to clamp,
+which is precisely the thing being prevented.
+
+Both constants carry `const _: () = assert!(..)` invariants, so an edit that
+reintroduces the hazard fails the build rather than the boot.
+
+### Where this leaves the audit
+
+`kernel/src/net` is closed (see the entry above), and with this pass
+`kernel/src/fs` is closed for **this class** too. Every allocation in the
+archive and decompression parsers whose size could come from the file was
+traced to its source. Two were broken; the rest were already right:
+
+| File | Verdict |
+|---|---|
+| `sevenz.rs` | **was broken** -- no count guard of any kind. Fixed. |
+| `zstd.rs` | **was broken** -- `content_size` clamped only to `MAX_OUTPUT_SIZE`. Fixed. |
+| `compress.rs` | correct -- `with_capacity(len.saturating_mul(2).min(MAX_OUTPUT))` |
+| `bzip2.rs` | correct -- `n_selectors` <= 18002, `max_block` <= `MAX_BLOCK_SIZE`, `alpha_size` <= 258; `with_capacity(max_block.min(65536))` at line 715 is the pattern zstd should have had. The `block_len` at lines 313/326 is `mtf_decoded.len()` -- an already-materialised length, not a claim. |
+| `xz.rs` | correct -- and the strongest case: it makes *no* speculative reservation, growing `output` only as bytes are produced. `lc`/`lp`/`pb` are validated (`lc<=8, lp<=4, pb<=4`) before `1usize << (lc+lp)`, which matters more than it looks: an unvalidated shift there is not a big allocation but a shift-overflow panic, i.e. a halt. |
+| `zip.rs` | correct -- `with_capacity(total_entries.min(4096))` |
+| `tar.rs` | correct -- capacities derive from slice lengths already in memory |
+| `cpio.rs`, `ar.rs` | correct -- writer-side padding and fixed field widths only |
+| `rar.rs` | no allocation of this shape at all |
+
+The distinction the table keeps drawing is the one that matters: a size taken
+from a buffer that **already exists** is a fact, and a size taken from a header
+that **describes** a buffer is a claim. Both look like `usize` at the
+allocation site.
+
+The question that finds this class quickly is: **does a number read from the
+file reach an allocation before anything has confirmed the file is big enough
+to contain what it describes?** Grep is a poor tool for it -- none of these
+produce a clippy warning, and there is no index, unwrap or arithmetic to match
+on. Reading each `with_capacity` / `vec![_; n]` / `resize*` call and asking
+where its argument came from is what worked, and there are few enough of them
+per file to do exhaustively.
+
+### A smaller finding, left alone deliberately
+
+zstd's literals decoder allocates `regen_size` bytes from a 20-bit wire field
+(`zstd.rs:1293`, `:1404`, `:1462`), so ~1 MiB from three bytes of input. That
+is the same shape but two orders of magnitude smaller -- bounded by the field
+width, survivable, and the same order as the reserve cap now applied at frame
+level. Noted rather than changed, so a future reader who spots it knows it was
+seen and judged, not missed.

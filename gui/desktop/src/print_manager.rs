@@ -10,6 +10,7 @@
 //! - Print spooler status
 //! - Print history / job log
 
+use appearance::Palette;
 use guitk::color::Color;
 use guitk::ratio;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
@@ -19,17 +20,26 @@ use guitk::style::CornerRadii;
 // Catppuccin Mocha palette
 // ============================================================================
 
-const MOCHA_BASE: Color = Color::from_hex(0x1E1E2E);
-const MOCHA_SURFACE0: Color = Color::from_hex(0x313244);
-const MOCHA_SURFACE1: Color = Color::from_hex(0x45475A);
-const MOCHA_TEXT: Color = Color::from_hex(0xCDD6F4);
-const MOCHA_SUBTEXT0: Color = Color::from_hex(0xA6ADC8);
-const MOCHA_BLUE: Color = Color::from_hex(0x89B4FA);
-const MOCHA_GREEN: Color = Color::from_hex(0xA6E3A1);
-const MOCHA_RED: Color = Color::from_hex(0xF38BA8);
-const MOCHA_YELLOW: Color = Color::from_hex(0xF9E2AF);
-const MOCHA_PEACH: Color = Color::from_hex(0xFAB387);
-const MOCHA_OVERLAY0: Color = Color::from_hex(0x6C7086);
+// Colour
+//
+// Every colour this module draws is resolved from the live `Palette`. Four
+// judgements decide which role each site asks for:
+//
+//  1. `Printer::status_color` (offline/busy/ready) is a CATEGORY, not a
+//     decoration -- red *means* "this printer will not print". Frozen; never
+//     follows the accent.
+//  2. `JobState::color` is the same, six ways. Note `Queued => p.blue`: blue
+//     and the stock accent are the same colour, so only an out-of-palette
+//     accent can tell a correct freeze from a wrong accent-follow. The tests
+//     use one.
+//  3. The "Print" button is the default action -- what Enter does -- which is
+//     the accent's job. Its fill is `p.accent` and its label is
+//     `p.on_accent()`, derived rather than named, because a pale accent needs
+//     dark ink and a deep one needs light. "Cancel" is not the default action
+//     and stays `p.surface1` / `p.text`.
+//  4. The selected printer's name marks the choice you have made, so it takes
+//     the accent; the field it sits in stays `p.surface0`. Position is marked
+//     by the label, not by repainting the furniture.
 
 // ============================================================================
 // Printer types
@@ -214,13 +224,17 @@ impl Printer {
         }
     }
 
-    pub fn status_color(&self) -> Color {
+    /// The colour this printer reports its readiness in.
+    ///
+    /// Categorical: red *means* offline. See judgement 1 in the module's
+    /// colour notes -- this never follows the accent.
+    pub fn status_color(&self, p: &Palette) -> Color {
         if !self.online {
-            MOCHA_RED
+            p.red
         } else if self.queue_count > 0 {
-            MOCHA_YELLOW
+            p.yellow
         } else {
-            MOCHA_GREEN
+            p.green
         }
     }
 }
@@ -252,14 +266,19 @@ impl JobState {
         }
     }
 
-    pub fn color(&self) -> Color {
+    /// The colour this job state reports itself in.
+    ///
+    /// A six-way category scale, so every arm is frozen. `Queued` is
+    /// `p.blue` and NOT `p.accent`, which is a distinction the stock accent
+    /// cannot show: see judgement 2 in the module's colour notes.
+    pub fn color(&self, p: &Palette) -> Color {
         match self {
-            Self::Queued => MOCHA_BLUE,
-            Self::Printing => MOCHA_PEACH,
-            Self::Paused => MOCHA_YELLOW,
-            Self::Completed => MOCHA_GREEN,
-            Self::Failed => MOCHA_RED,
-            Self::Cancelled => MOCHA_OVERLAY0,
+            Self::Queued => p.blue,
+            Self::Printing => p.peach,
+            Self::Paused => p.yellow,
+            Self::Completed => p.green,
+            Self::Failed => p.red,
+            Self::Cancelled => p.overlay0,
         }
     }
 
@@ -679,6 +698,7 @@ impl PrintDialog {
     /// Render the print dialog.
     pub fn render(
         &self,
+        p: &Palette,
         printers: &[Printer],
         x: f32,
         y: f32,
@@ -711,7 +731,7 @@ impl PrintDialog {
             y: dy,
             width: dw,
             height: dh,
-            color: MOCHA_BASE,
+            color: p.base,
             corner_radii: CornerRadii::all(12.0),
         });
 
@@ -721,7 +741,7 @@ impl PrintDialog {
             y: dy + 16.0,
             text: "Print".to_string(),
             font_size: 16.0,
-            color: MOCHA_TEXT,
+            color: p.text,
             font_weight: FontWeightHint::Bold,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -733,7 +753,7 @@ impl PrintDialog {
             y: dy + 40.0,
             text: format!("Document: {}", self.document_name),
             font_size: 12.0,
-            color: MOCHA_SUBTEXT0,
+            color: p.subtext0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -745,7 +765,7 @@ impl PrintDialog {
             y: dy + 68.0,
             text: "Printer:".to_string(),
             font_size: 12.0,
-            color: MOCHA_TEXT,
+            color: p.text,
             font_weight: FontWeightHint::Regular,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -759,7 +779,7 @@ impl PrintDialog {
             y: dy + 62.0,
             width: 280.0,
             height: 24.0,
-            color: MOCHA_SURFACE0,
+            color: p.surface0,
             corner_radii: CornerRadii::all(4.0),
         });
         cmds.push(RenderCommand::Text {
@@ -767,7 +787,7 @@ impl PrintDialog {
             y: dy + 66.0,
             text: printer_name.to_string(),
             font_size: 12.0,
-            color: MOCHA_BLUE,
+            color: p.accent,
             font_weight: FontWeightHint::Regular,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -815,7 +835,7 @@ impl PrintDialog {
                 y: cy,
                 text: label.to_string(),
                 font_size: 12.0,
-                color: MOCHA_TEXT,
+                color: p.text,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
                 overflow: TextOverflow::Clip,
@@ -825,7 +845,7 @@ impl PrintDialog {
                 y: cy,
                 text: value.clone(),
                 font_size: 12.0,
-                color: MOCHA_SUBTEXT0,
+                color: p.subtext0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
                 overflow: TextOverflow::Clip,
@@ -840,7 +860,7 @@ impl PrintDialog {
                 y: cy,
                 text: err.clone(),
                 font_size: 11.0,
-                color: MOCHA_RED,
+                color: p.red,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
                 overflow: TextOverflow::Clip,
@@ -855,7 +875,7 @@ impl PrintDialog {
             y: btn_y,
             width: 70.0,
             height: 28.0,
-            color: MOCHA_BLUE,
+            color: p.accent,
             corner_radii: CornerRadii::all(6.0),
         });
         cmds.push(RenderCommand::Text {
@@ -863,7 +883,7 @@ impl PrintDialog {
             y: btn_y + 7.0,
             text: "Print".to_string(),
             font_size: 12.0,
-            color: MOCHA_BASE,
+            color: p.on_accent(),
             font_weight: FontWeightHint::Bold,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -873,7 +893,7 @@ impl PrintDialog {
             y: btn_y,
             width: 80.0,
             height: 28.0,
-            color: MOCHA_SURFACE1,
+            color: p.surface1,
             corner_radii: CornerRadii::all(6.0),
         });
         cmds.push(RenderCommand::Text {
@@ -881,7 +901,7 @@ impl PrintDialog {
             y: btn_y + 7.0,
             text: "Cancel".to_string(),
             font_size: 12.0,
-            color: MOCHA_TEXT,
+            color: p.text,
             font_weight: FontWeightHint::Regular,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -919,6 +939,507 @@ mod tests {
     #![allow(clippy::float_cmp)]
 
     use super::*;
+
+    // ================================================================
+    // Colour: every site resolves from the live palette
+    // ================================================================
+
+    use crate::palette_check::assert_drawn_from;
+
+    fn rgb(c: Color) -> (u8, u8, u8) {
+        (c.r, c.g, c.b)
+    }
+
+    /// An accent that is a member of neither palette.
+    ///
+    /// The stock accent is blue, and this module has a `Queued => p.blue`
+    /// arm, so under the stock accent "correctly frozen to blue" and
+    /// "wrongly following the accent" are the same colour. Every table below
+    /// renders this instead.
+    const OFF_PALETTE: Color = Color::from_hex(0x00FF_8C1A);
+
+    /// The palettes the role tables assert against: both modes, neither
+    /// using an accent that any role could be confused with.
+    fn table_palettes() -> Vec<(String, Palette)> {
+        [false, true]
+            .into_iter()
+            .map(|light| {
+                let mut p = Palette::for_mode(light);
+                p.accent = OFF_PALETTE;
+                (format!("light={light}"), p)
+            })
+            .collect()
+    }
+
+    fn printers() -> Vec<Printer> {
+        vec![Printer {
+            id: 1,
+            name: "Office Laser".to_string(),
+            model: "L100".to_string(),
+            connection: PrinterConnection::Network,
+            capabilities: PrinterCapabilities::full_color(),
+            online: true,
+            is_default: true,
+            queue_count: 0,
+            ink_level: Some(80),
+        }]
+    }
+
+    /// One fixture per branch of `render` that selects or suppresses a
+    /// colour. Geometry-only branches are deliberately absent; branches that
+    /// change *what is drawn* are all here.
+    fn every_state() -> Vec<(String, PrintDialog)> {
+        let mut out = Vec::new();
+
+        // Hidden: draws nothing at all.
+        out.push(("hidden".to_string(), PrintDialog::new()));
+
+        // Visible, a printer selected, portrait, no duplex, no errors.
+        let mut d = PrintDialog::new();
+        d.open("report.pdf", 12);
+        out.push(("open: portrait, simplex".to_string(), d));
+
+        // Landscape and duplex flip two settings-row *values*.
+        let mut d = PrintDialog::new();
+        d.open("report.pdf", 12);
+        d.settings.orientation = Orientation::Landscape;
+        d.settings.duplex = true;
+        out.push(("open: landscape, duplex".to_string(), d));
+
+        // No printer selected -- the field falls back to "None".
+        let mut d = PrintDialog::new();
+        d.open("report.pdf", 12);
+        d.selected_printer_idx = 99;
+        out.push(("open: no printer".to_string(), d));
+
+        // Validation errors -- the only site that draws `p.red`.
+        let mut d = PrintDialog::new();
+        d.open("report.pdf", 12);
+        d.validation_errors = vec!["Duplex not supported".to_string()];
+        out.push(("open: one error".to_string(), d));
+
+        out
+    }
+
+    fn draw(name: &str, p: &Palette) -> Vec<RenderCommand> {
+        let (_, d) = every_state()
+            .into_iter()
+            .find(|(n, _)| n == name)
+            .unwrap_or_else(|| panic!("no fixture named {name}"));
+        d.render(p, &printers(), 0.0, 0.0, 800.0, 600.0)
+    }
+
+    fn every_color(cmds: &[RenderCommand]) -> Vec<Color> {
+        cmds.iter()
+            .filter_map(|c| match c {
+                RenderCommand::FillRect { color, .. } | RenderCommand::Text { color, .. } => {
+                    Some(*color)
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The colour of the one text whose content contains `want`.
+    ///
+    /// Many rendered instances may share a single source site (the settings
+    /// rows draw four labels from one expression), so the question is not
+    /// "which one" but "do they all agree". If they ever disagree the site
+    /// has grown a branch that needs naming, and this fails rather than
+    /// silently reporting whichever came first.
+    fn text_containing(cmds: &[RenderCommand], want: &str) -> Color {
+        let hits: Vec<Color> = cmds
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, color, .. } if text.contains(want) => Some(*color),
+                _ => None,
+            })
+            .collect();
+        assert!(!hits.is_empty(), "no text containing {want:?}");
+        assert!(
+            hits.iter().all(|c| rgb(*c) == rgb(hits[0])),
+            "the {} texts containing {want:?} are not all one colour",
+            hits.len()
+        );
+        hits[0]
+    }
+
+    /// The colour of the one text that is exactly `want` at exactly `size`.
+    ///
+    /// Needed because this dialog draws the string "Print" three ways: as the
+    /// title, inside the caption "Printer:", and as the default button's
+    /// label -- in `p.text`, `p.text` and `p.on_accent()` respectively. A
+    /// substring match would silently compare the wrong site, which is how
+    /// module 25 nearly asserted a tab label against a window title.
+    fn text_exact(cmds: &[RenderCommand], want: &str, size: f32) -> Color {
+        let hits: Vec<Color> = cmds
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text {
+                    text,
+                    color,
+                    font_size,
+                    ..
+                } if text == want && *font_size == size => Some(*color),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(hits.len(), 1, "expected exactly one {want:?} at {size}pt");
+        hits[0]
+    }
+
+    fn fill_of_size(cmds: &[RenderCommand], w: f32, h: f32) -> Color {
+        let hits: Vec<Color> = cmds
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::FillRect {
+                    width,
+                    height,
+                    color,
+                    ..
+                } if *width == w && *height == h => Some(*color),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(hits.len(), 1, "expected exactly one {w}x{h} fill");
+        hits[0]
+    }
+
+    #[test]
+    fn every_colour_this_dialog_draws_comes_from_its_palette() {
+        // The membership half: after the conversion no drawn colour may be a
+        // value the palette does not contain. A leftover Mocha constant is
+        // invisible in Mocha and shows up the moment Latte is rendered.
+        for light in [false, true] {
+            for accent in [
+                appearance::MAUVE,
+                appearance::TEAL,
+                appearance::SAPPHIRE,
+                appearance::PINK,
+            ] {
+                let mut p = Palette::for_mode(light);
+                p.accent = accent;
+                for (what, d) in every_state() {
+                    let cmds = d.render(&p, &printers(), 0.0, 0.0, 800.0, 600.0);
+                    // `on_accent` is derived from the accent rather than named,
+                    // so it is not a palette member and must be declared.
+                    assert_drawn_from(
+                        &p,
+                        &cmds,
+                        &[p.on_accent()],
+                        &format!("{what} light={light}"),
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_fixtures_take_every_branch_this_dialog_has() {
+        // The sweep above is worth exactly as much as the states it renders.
+        // This pins the fixtures to the branches, so deleting a fixture fails
+        // here rather than quietly narrowing every other test in the module.
+        let p = Palette::for_mode(false);
+        let says = |name: &str, want: &str| {
+            let cmds = draw(name, &p);
+            assert!(
+                cmds.iter().any(|c| matches!(
+                    c,
+                    RenderCommand::Text { text, .. } if text.contains(want)
+                )),
+                "{name} never drew {want:?}"
+            );
+        };
+
+        assert!(
+            draw("hidden", &p).is_empty(),
+            "the hidden dialog drew something"
+        );
+        says("open: portrait, simplex", "Portrait");
+        says("open: portrait, simplex", "Off");
+        says("open: landscape, duplex", "Landscape");
+        says("open: landscape, duplex", "On");
+        says("open: portrait, simplex", "Office Laser");
+        says("open: no printer", "None");
+        says("open: one error", "Duplex not supported");
+        assert!(
+            !draw("open: portrait, simplex", &p).iter().any(
+                |c| matches!(c, RenderCommand::Text { text, .. } if text.contains("supported"))
+            ),
+            "the no-error fixture drew an error"
+        );
+    }
+
+    #[test]
+    fn every_text_this_dialog_draws_is_in_the_role_it_claims() {
+        // ONE ENTRY PER SOURCE SITE. The four settings rows are one site, not
+        // four; the printer name and the title are two sites even though both
+        // could be called "a label".
+        for (mode, p) in table_palettes() {
+            let open = draw("open: portrait, simplex", &p);
+            let err = draw("open: one error", &p);
+
+            // Title.
+            assert_eq!(rgb(text_exact(&open, "Print", 16.0)), rgb(p.text), "{mode}");
+            // Document name.
+            assert_eq!(
+                rgb(text_containing(&open, "Document:")),
+                rgb(p.subtext0),
+                "{mode}"
+            );
+            // "Printer:" caption.
+            assert_eq!(
+                rgb(text_containing(&open, "Printer:")),
+                rgb(p.text),
+                "{mode}"
+            );
+            // The selected printer's name -- judgement 4, follows the accent.
+            assert_eq!(
+                rgb(text_containing(&open, "Office Laser")),
+                rgb(p.accent),
+                "{mode}"
+            );
+            // Settings-row label (one site, four instances).
+            assert_eq!(
+                rgb(text_containing(&open, "Copies:")),
+                rgb(p.text),
+                "{mode}"
+            );
+            // Settings-row value (one site, four instances).
+            assert_eq!(
+                rgb(text_containing(&open, "Portrait")),
+                rgb(p.subtext0),
+                "{mode}"
+            );
+            // Validation error -- a reading of what went wrong, so frozen red.
+            assert_eq!(
+                rgb(text_containing(&err, "Duplex not supported")),
+                rgb(p.red),
+                "{mode}"
+            );
+            // The Print button's label -- judgement 3, ink DERIVED from the
+            // fill it sits on rather than named, so a pale accent gets dark
+            // ink and a deep one gets light.
+            assert_eq!(
+                rgb(text_exact(&open, "Print", 12.0)),
+                rgb(p.on_accent()),
+                "{mode}"
+            );
+            // Cancel's label. Stated as the role, never as `p.on_accent()`:
+            // Cancel is not the default action and must not track the accent.
+            assert_eq!(
+                rgb(text_exact(&open, "Cancel", 12.0)),
+                rgb(p.text),
+                "{mode}"
+            );
+        }
+    }
+
+    #[test]
+    fn every_rectangle_this_dialog_draws_is_in_the_role_it_claims() {
+        for (mode, p) in table_palettes() {
+            let open = draw("open: portrait, simplex", &p);
+
+            // The scrim is black at an alpha, not a role.
+            assert_eq!(rgb(fill_of_size(&open, 800.0, 600.0)), (0, 0, 0), "{mode}");
+            // Dialog box.
+            assert_eq!(
+                rgb(fill_of_size(&open, 500.0, 400.0)),
+                rgb(p.base),
+                "{mode}"
+            );
+            // Printer field -- judgement 4: the furniture stays put, only the
+            // label inside it marks the choice.
+            assert_eq!(
+                rgb(fill_of_size(&open, 280.0, 24.0)),
+                rgb(p.surface0),
+                "{mode}"
+            );
+            // Print button: the default action.
+            assert_eq!(
+                rgb(fill_of_size(&open, 70.0, 28.0)),
+                rgb(p.accent),
+                "{mode}"
+            );
+            // Cancel button: not the default action.
+            assert_eq!(
+                rgb(fill_of_size(&open, 80.0, 28.0)),
+                rgb(p.surface1),
+                "{mode}"
+            );
+        }
+    }
+
+    #[test]
+    fn every_choice_this_module_makes_hands_over_the_role_it_claims() {
+        // `status_color` and `JobState::color` are pure CHOICE sites: neither
+        // is called by `render`, so nothing else in this file can reach them.
+        // Without this table all nine arms are checked by nothing at all --
+        // the sweep waves them through, because every arm names a role and a
+        // role is a member of both palettes.
+        for (mode, p) in table_palettes() {
+            let printer = |online: bool, queued: u32| Printer {
+                id: 1,
+                name: "P".to_string(),
+                model: "M".to_string(),
+                connection: PrinterConnection::Usb,
+                capabilities: PrinterCapabilities::basic(),
+                online,
+                is_default: false,
+                queue_count: queued,
+                ink_level: None,
+            };
+            assert_eq!(
+                rgb(printer(false, 0).status_color(&p)),
+                rgb(p.red),
+                "offline is not red ({mode})"
+            );
+            assert_eq!(
+                rgb(printer(true, 3).status_color(&p)),
+                rgb(p.yellow),
+                "busy is not yellow ({mode})"
+            );
+            assert_eq!(
+                rgb(printer(true, 0).status_color(&p)),
+                rgb(p.green),
+                "ready is not green ({mode})"
+            );
+
+            // The six job states. `Queued` is the reason this table renders an
+            // off-palette accent: under the stock accent `p.blue` and
+            // `p.accent` are the same colour, so a queued job that wrongly
+            // followed the accent would read as correct.
+            assert_eq!(rgb(JobState::Queued.color(&p)), rgb(p.blue), "{mode}");
+            assert_eq!(rgb(JobState::Printing.color(&p)), rgb(p.peach), "{mode}");
+            assert_eq!(rgb(JobState::Paused.color(&p)), rgb(p.yellow), "{mode}");
+            assert_eq!(rgb(JobState::Completed.color(&p)), rgb(p.green), "{mode}");
+            assert_eq!(rgb(JobState::Failed.color(&p)), rgb(p.red), "{mode}");
+            assert_eq!(
+                rgb(JobState::Cancelled.color(&p)),
+                rgb(p.overlay0),
+                "{mode}"
+            );
+        }
+    }
+
+    #[test]
+    fn nothing_but_the_selection_and_the_default_action_moves_with_the_accent() {
+        // Render each fixture under two accents and count what moves.
+        //
+        // Counting is the load-bearing part. Exempting sites "that are meant
+        // to follow the accent" by testing whether they follow the accent
+        // exempts the bug too -- a job state or a printer status that wrongly
+        // took the accent satisfies that description exactly. The NUMBER of
+        // followers is what a new one changes.
+        //
+        // This dialog is allowed three moving commands: the selected
+        // printer's name and the Print button's fill both take the accent,
+        // and the Print button's label is derived from it via `on_accent`.
+        const A: Color = Color::from_hex(0x00FF_8C1A);
+        const B: Color = Color::from_hex(0x0012_9E7D);
+
+        for light in [false, true] {
+            let (mut pa, mut pb) = (Palette::for_mode(light), Palette::for_mode(light));
+            pa.accent = A;
+            pb.accent = B;
+            for (what, d) in every_state() {
+                let ca = d.render(&pa, &printers(), 0.0, 0.0, 800.0, 600.0);
+                let cb = d.render(&pb, &printers(), 0.0, 0.0, 800.0, 600.0);
+                assert_eq!(
+                    ca.len(),
+                    cb.len(),
+                    "{what}: the accent changed how much is drawn"
+                );
+                let want = if what == "hidden" { 0 } else { 3 };
+                let (mut on_accent_moves, mut accent_moves) = (0, 0);
+                let (xa, xb) = (every_color(&ca), every_color(&cb));
+                for (i, (a, b)) in xa.iter().zip(xb.iter()).enumerate() {
+                    if rgb(*a) == rgb(*b) {
+                        continue;
+                    }
+                    if (rgb(*a), rgb(*b)) == (rgb(A), rgb(B)) {
+                        accent_moves += 1;
+                    } else if (rgb(*a), rgb(*b)) == (rgb(pa.on_accent()), rgb(pb.on_accent())) {
+                        on_accent_moves += 1;
+                    } else {
+                        panic!(
+                            "{what} (light={light}): command {i} changed with the accent without being the accent or ink derived from it"
+                        );
+                    }
+                }
+                assert_eq!(
+                    accent_moves + on_accent_moves,
+                    want,
+                    "{what} (light={light}): {accent_moves} accent sites and \
+                     {on_accent_moves} derived-ink sites move, but this state \
+                     is allowed exactly {want} in total"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn every_state_a_job_can_be_in_stays_apart_from_every_other() {
+        // The six colours are what carry the meaning, so no two may collide,
+        // and none may collide with the accent that happens to be set -- a
+        // user on an orange desktop must still be able to see that a job
+        // failed rather than merely printing.
+        for light in [false, true] {
+            for accent in [
+                appearance::MAUVE,
+                appearance::TEAL,
+                appearance::SAPPHIRE,
+                appearance::PINK,
+                OFF_PALETTE,
+            ] {
+                let mut p = Palette::for_mode(light);
+                p.accent = accent;
+                let all = [
+                    ("queued", JobState::Queued),
+                    ("printing", JobState::Printing),
+                    ("paused", JobState::Paused),
+                    ("completed", JobState::Completed),
+                    ("failed", JobState::Failed),
+                    ("cancelled", JobState::Cancelled),
+                ];
+                for (i, (na, a)) in all.iter().enumerate() {
+                    for (nb, b) in all.iter().skip(i + 1) {
+                        assert_ne!(
+                            rgb(a.color(&p)),
+                            rgb(b.color(&p)),
+                            "{na} and {nb} collide (light={light})"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_default_action_ink_stays_readable_in_both_modes() {
+        // `on_accent` is DERIVED, and proving that needs the accent to vary
+        // far enough to change the answer. The stock accents are all pastel
+        // and every one of them yields the same dark ink, so a hard-coded
+        // constant would pass against them. A deliberately dark accent and a
+        // deliberately pale one must produce different ink.
+        let dark = Color::from_hex(0x0020_3050);
+        let pale = Color::from_hex(0x00F5_D0E0);
+        for light in [false, true] {
+            let ink = |accent: Color| {
+                let mut p = Palette::for_mode(light);
+                p.accent = accent;
+                let cmds = draw("open: portrait, simplex", &p);
+                // The Print button's label is the only text drawn on a filled
+                // accent rectangle.
+                rgb(text_exact(&cmds, "Print", 12.0))
+            };
+            assert_ne!(
+                ink(dark),
+                ink(pale),
+                "the Print button's ink does not follow its fill (light={light})"
+            );
+        }
+    }
 
     // --- PaperSize ---
     #[test]
@@ -1382,7 +1903,7 @@ mod tests {
     #[test]
     fn test_dialog_render_hidden() {
         let dlg = PrintDialog::new();
-        let cmds = dlg.render(&[], 0.0, 0.0, 800.0, 600.0);
+        let cmds = dlg.render(&Palette::for_mode(false), &[], 0.0, 0.0, 800.0, 600.0);
         assert!(cmds.is_empty());
     }
 
@@ -1390,7 +1911,7 @@ mod tests {
     fn test_dialog_render_visible() {
         let mut dlg = PrintDialog::new();
         dlg.open("doc.pdf", 5);
-        let cmds = dlg.render(&[], 0.0, 0.0, 800.0, 600.0);
+        let cmds = dlg.render(&Palette::for_mode(false), &[], 0.0, 0.0, 800.0, 600.0);
         assert!(!cmds.is_empty());
     }
 

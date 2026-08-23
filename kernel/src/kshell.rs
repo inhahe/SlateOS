@@ -42510,7 +42510,7 @@ fn cmd_diskencrypt(args: &str) {
                         "{:<4} {:<12} {:<14} {:<16} {:<10} {}",
                         v.id,
                         v.label,
-                        v.device,
+                        v.device.display(),
                         v.algorithm.label(),
                         v.status.label(),
                         v.key_slots.len()
@@ -42533,18 +42533,18 @@ fn cmd_diskencrypt(args: &str) {
             match diskencrypt::get_volume(id) {
                 Ok(v) => {
                     shell_println!("Volume {}: {}", v.id, v.label);
-                    shell_println!("  Device:    {}", v.device);
+                    shell_println!("  Device:    {}", v.device.display());
                     shell_println!("  Algorithm: {}", v.algorithm.label());
                     shell_println!("  Status:    {}", v.status.label());
                     shell_println!("  Size:      {} bytes", v.size_bytes);
-                    shell_println!(
-                        "  Mount:     {}",
-                        if v.mount_point.is_empty() {
-                            "-"
-                        } else {
-                            &v.mount_point
-                        }
-                    );
+                    // An unset mount point is the empty path, so the two arms
+                    // cannot share a type -- print the placeholder separately
+                    // rather than force one branch through a lossy `to_str`.
+                    if v.mount_point.as_path().as_bytes().is_empty() {
+                        shell_println!("  Mount:     -");
+                    } else {
+                        shell_println!("  Mount:     {}", v.mount_point.display());
+                    }
                     shell_println!("  Recovery:  {}", v.has_recovery_key);
                     shell_println!("  TPM:       {}", v.tpm_sealed);
                     if !v.key_slots.is_empty() {

@@ -5348,6 +5348,12 @@ extern "C" fn kernel_main() -> ! {
             if let Err(e) = fs::dirsync::self_test() {
                 serial_println!("WARNING: dirsync self-test failed: {:?}", e);
             }
+            // diskencrypt was reachable only from a `kshell` subcommand, so
+            // its suite had never run in the boot test
+            // (TD-A-FS-SELFTESTS-NEVER-RUN).  It is in-memory volume
+            // bookkeeping -- the unlock/encrypt paths are simulated, it
+            // touches no disk -- and clears the state on the way out.
+            fs::diskencrypt::self_test();
             fs::diskio::self_test();
             if let Err(e) = fs::encrypt::self_test() {
                 serial_println!("WARNING: file-encryption self-test failed: {:?}", e);

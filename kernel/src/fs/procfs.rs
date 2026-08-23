@@ -8435,7 +8435,7 @@ fn gen_diskencrypt() -> Vec<u8> {
             "{}: {} ({}) {} [{}]\n",
             v.id,
             v.label,
-            v.device,
+            v.device.display(),
             v.algorithm.label(),
             v.status.label()
         ));

@@ -289,11 +289,13 @@ pub fn destroy(set_id: u64) -> KernelResult<()> {
 /// Replaces the current selection with just this item.
 pub fn select_single(set_id: u64, path: impl AsRef<Path>, index: usize) -> KernelResult<()> {
     let path = path.as_ref();
+    // The stat happens before `SETS` is taken, never under it -- see
+    // `make_items` for the lock order this preserves.
+    let item = make_item(path)?;
+
     let mut sets = SETS.lock();
     let set = find_set_mut(&mut sets, set_id)?;
     set.clear();
-
-    let item = make_item(path)?;
     set.add(item);
     set.anchor = Some(index);
     set.cursor = Some(index);
@@ -305,14 +307,19 @@ pub fn select_single(set_id: u64, path: impl AsRef<Path>, index: usize) -> Kerne
 /// If selected, deselects it. If not selected, adds it to selection.
 pub fn select_toggle(set_id: u64, path: impl AsRef<Path>, index: usize) -> KernelResult<()> {
     let path = path.as_ref();
+    // Whether this call adds or removes is only knowable under the lock, but
+    // the stat may not run under it (see `make_items`), so the remove case
+    // pays for one stat it then discards. The `?` stays on the add path so the
+    // error a caller would have seen is unchanged.
+    let item = make_item(path);
+
     let mut sets = SETS.lock();
     let set = find_set_mut(&mut sets, set_id)?;
 
     if set.contains(path) {
         set.remove(path);
     } else {
-        let item = make_item(path)?;
-        set.add(item);
+        set.add(item?);
     }
     set.cursor = Some(index);
     // Anchor stays for potential future range select.
@@ -327,28 +334,37 @@ pub fn select_toggle(set_id: u64, path: impl AsRef<Path>, index: usize) -> Kerne
 /// Selects all items from the anchor to the given index.
 /// `listing` provides the full ordered listing of the directory.
 pub fn select_range(set_id: u64, listing: &[&Path], target_index: usize) -> KernelResult<()> {
-    let mut sets = SETS.lock();
-    let set = find_set_mut(&mut sets, set_id)?;
-
-    let anchor = set.anchor.unwrap_or(0);
+    // The anchor lives in the set, but the items must be stat'ed outside the
+    // lock (see `make_items`). So: read the anchor under a short lock, release
+    // it for the stats, then retake and install. The anchor is written back
+    // explicitly below, so a concurrent change to it between the two critical
+    // sections cannot leave the set describing a different range than the one
+    // whose items were just built.
+    let anchor = {
+        let sets = SETS.lock();
+        find_set(&sets, set_id)?.anchor.unwrap_or(0)
+    };
     let (start, end) = if anchor <= target_index {
         (anchor, target_index)
     } else {
         (target_index, anchor)
     };
+    // A range that runs past the end of the listing selects the part that
+    // exists, as the per-index `listing.get` this replaced did.
+    let last = end.min(listing.len().saturating_sub(1));
+    let items = make_items(listing.get(start..=last).unwrap_or(&[]));
+
+    let mut sets = SETS.lock();
+    let set = find_set_mut(&mut sets, set_id)?;
 
     // Clear previous selection then select range.
     set.clear();
     set.anchor = Some(anchor);
     set.cursor = Some(target_index);
 
-    for idx in start..=end {
-        if let Some(path) = listing.get(idx) {
-            if !set.contains(path) {
-                if let Ok(item) = make_item(path) {
-                    set.add(item);
-                }
-            }
+    for item in items {
+        if !set.contains(&item.path) {
+            set.add(item);
         }
     }
     Ok(())
@@ -356,14 +372,14 @@ pub fn select_range(set_id: u64, listing: &[&Path], target_index: usize) -> Kern
 
 /// Select all items in the listing.
 pub fn select_all(set_id: u64, listing: &[&Path]) -> KernelResult<()> {
+    let items = make_items(listing);
+
     let mut sets = SETS.lock();
     let set = find_set_mut(&mut sets, set_id)?;
 
     set.clear();
-    for path in listing {
-        if let Ok(item) = make_item(path) {
-            set.add(item);
-        }
+    for item in items {
+        set.add(item);
     }
     if !listing.is_empty() {
         set.anchor = Some(0);
@@ -374,6 +390,13 @@ pub fn select_all(set_id: u64, listing: &[&Path]) -> KernelResult<()> {
 
 /// Invert selection — toggle every item in the listing.
 pub fn select_invert(set_id: u64, listing: &[&Path]) -> KernelResult<()> {
+    // Which entries survive depends on the current selection and so is only
+    // knowable under the lock, while the stats may only happen outside it (see
+    // `make_items`). Every entry is therefore stat'ed and the already-selected
+    // ones dropped afterwards: N stats rather than N-K. The bounded extra work
+    // is the price of not holding `SETS` across the VFS.
+    let items = make_items(listing);
+
     let mut sets = SETS.lock();
     let set = find_set_mut(&mut sets, set_id)?;
 
@@ -382,11 +405,9 @@ pub fn select_invert(set_id: u64, listing: &[&Path]) -> KernelResult<()> {
     set.clear();
 
     // Add items that were NOT selected before.
-    for path in listing {
-        if !was_selected.iter().any(|s| s.as_path() == *path) {
-            if let Ok(item) = make_item(path) {
-                set.add(item);
-            }
+    for item in items {
+        if !was_selected.iter().any(|s| *s == item.path) {
+            set.add(item);
         }
     }
     Ok(())
@@ -397,19 +418,27 @@ pub fn select_pattern(set_id: u64, listing: &[&Path], pattern: &str) -> KernelRe
     if pattern.len() > MAX_PATTERN_LEN {
         return Err(KernelError::InvalidArgument);
     }
+    // The glob test is pure, so it can run before the lock and spare the stat
+    // for every non-matching entry. Only the "is it already selected?" test
+    // needs the lock, and that one is cheap.
+    let matching: Vec<&Path> = listing
+        .iter()
+        .filter(|path| {
+            // A path with no final component (the root, or all separators) has
+            // no name to match, so no pattern can select it.
+            path.file_name()
+                .is_some_and(|name| simple_glob(pattern, name))
+        })
+        .copied()
+        .collect();
+    let items = make_items(&matching);
+
     let mut sets = SETS.lock();
     let set = find_set_mut(&mut sets, set_id)?;
 
-    for path in listing {
-        // A path with no final component (the root, or all separators) has no
-        // name to match, so no pattern can select it.
-        let Some(name) = path.file_name() else {
-            continue;
-        };
-        if simple_glob(pattern, name) && !set.contains(path) {
-            if let Ok(item) = make_item(path) {
-                set.add(item);
-            }
+    for item in items {
+        if !set.contains(&item.path) {
+            set.add(item);
         }
     }
     Ok(())
@@ -599,6 +628,26 @@ fn make_item(path: &Path) -> KernelResult<SelectedItem> {
         is_dir: meta.entry_type == crate::fs::EntryType::Directory,
         size: meta.size,
     })
+}
+
+/// Stat a batch of paths through the VFS, dropping the ones that fail.
+///
+/// This exists so that callers can do their VFS work *before* taking `SETS`,
+/// which is not a stylistic preference but the kernel's actual lock order.
+/// `Vfs::metadata` resolves through the filesystem's own lock, and the VFS
+/// holds that lock across content generation; for procfs, generating content
+/// reaches back into arbitrary module-global state. The live order is
+/// therefore `filesystem lock -> module state`, and holding `SETS` across a
+/// `Vfs::` call would run `SETS -> filesystem lock` -- an AB/BA inversion that
+/// wedges two CPUs. `scripts/check-vfs-under-lock.py` enforces this.
+///
+/// A failed stat is dropped rather than propagated because every batching
+/// caller already ignored one: an entry that vanished between the directory
+/// listing and the click is not an error for the selection as a whole. The
+/// single-path callers (`select_single`, `select_toggle`) call `make_item`
+/// directly and keep propagating.
+fn make_items(paths: &[&Path]) -> Vec<SelectedItem> {
+    paths.iter().filter_map(|p| make_item(p).ok()).collect()
 }
 
 /// Set check state recursively on a node and all children.

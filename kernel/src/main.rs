@@ -5778,6 +5778,214 @@ extern "C" fn kernel_main() -> ! {
     }
 
     {
+        // De-fanged fs self-tests, batch 1 of 6.
+        //
+        // See the first such block above for why the order matters: these are
+        // kernel-shell subcommands too, so until `58117e72c` running one
+        // modified the user's own state -- `brightness test` set their screen
+        // brightness and left it there.  At boot the tables are empty, so that
+        // damage is invisible here and the boot test would have gone green
+        // either way.  De-fang first, wire second.
+        //
+        // These were converted without first classifying which were
+        // destructive, because that classification was the mistake: a suite
+        // that calls `set_brightness(50)` and asserts it took deletes nothing
+        // and is exactly as damaging, and no name or signature separates it
+        // from a legitimate call.  `with_pristine` restores either.
+        //
+        // These return `()` rather than `KernelResult<()>`, hence the bare
+        // calls.
+        #[inline(never)]
+        fn case() {
+            fs::appcompat::self_test();
+            fs::appdefaults::self_test();
+            fs::applaunch::self_test();
+            fs::apppermissions::self_test();
+            fs::appsandbox::self_test();
+            fs::appstore::self_test();
+            fs::audiodevice::self_test();
+            fs::audioeq::self_test();
+            fs::audiomux::self_test();
+            fs::backupsched::self_test();
+            fs::battery::self_test();
+            fs::blktrace::self_test();
+            fs::bluetooth::self_test();
+            fs::brightness::self_test();
+            fs::cgroupfs::self_test();
+            fs::clipaction::self_test();
+            fs::clipsync::self_test();
+            fs::colorblind::self_test();
+            fs::colorscheme::self_test();
+            fs::colortemp::self_test();
+            fs::coredump::self_test();
+            fs::cpuset::self_test();
+            fs::cputhr::self_test();
+            fs::defaultapps::self_test();
+        }
+        case();
+    }
+
+    {
+        // De-fanged fs self-tests, batch 2 of 6. See batch 1 above.
+        #[inline(never)]
+        fn case() {
+            fs::devicemgr::self_test();
+            fs::devpair::self_test();
+            fs::dictation::self_test();
+            fs::diskquota::self_test();
+            fs::disksmart::self_test();
+            fs::displayarrange::self_test();
+            fs::displaycal::self_test();
+            fs::displaycolor::self_test();
+            fs::dpiscaling::self_test();
+            fs::driverupdate::self_test();
+            fs::dynlock::self_test();
+            fs::energysaver::self_test();
+            fs::entropy::self_test();
+            fs::envvars::self_test();
+            fs::faceunlock::self_test();
+            fs::filelock::self_test();
+            fs::filerules::self_test();
+            fs::filetransfer::self_test();
+            fs::focusassist::self_test();
+            fs::focussession::self_test();
+            fs::fontpreview::self_test();
+            fs::fontsettings::self_test();
+            fs::fscache::self_test();
+            fs::fwsettings::self_test();
+        }
+        case();
+    }
+
+    {
+        // De-fanged fs self-tests, batch 3 of 6. See batch 1 above.
+        #[inline(never)]
+        fn case() {
+            fs::fwupdate::self_test();
+            fs::gamepadinput::self_test();
+            fs::gestures::self_test();
+            fs::groupmgr::self_test();
+            fs::haptfeedback::self_test();
+            fs::hdrdisplay::self_test();
+            fs::hotcorners::self_test();
+            fs::inputa11y::self_test();
+            fs::inputmethod::self_test();
+            fs::iosched::self_test();
+            fs::iotdevice::self_test();
+            fs::kbmacro::self_test();
+            fs::kbshortcuts::self_test();
+            fs::kconsole::self_test();
+            fs::kernlog::self_test();
+            fs::kernparam::self_test();
+            fs::kmod::self_test();
+            fs::langpack::self_test();
+            fs::loadavg::self_test();
+            fs::lockwallpaper::self_test();
+            fs::magnifier::self_test();
+            fs::mediakeys::self_test();
+            fs::mobilelink::self_test();
+            fs::monitors::self_test();
+        }
+        case();
+    }
+
+    {
+        // De-fanged fs self-tests, batch 4 of 6. See batch 1 above.
+        #[inline(never)]
+        fn case() {
+            fs::mousegestures::self_test();
+            fs::mousesettings::self_test();
+            fs::netdiag::self_test();
+            fs::netprofile::self_test();
+            fs::netproxy::self_test();
+            fs::netthrottle::self_test();
+            fs::networkbridge::self_test();
+            fs::nightlight::self_test();
+            fs::notifbadge::self_test();
+            fs::notiffilter::self_test();
+            fs::notifgroup::self_test();
+            fs::notifprefs::self_test();
+            fs::oobe::self_test();
+            fs::oomkiller::self_test();
+            fs::parental::self_test();
+            fs::parentaltime::self_test();
+            fs::peninput::self_test();
+            fs::pidfd::self_test();
+            fs::pkgmgr::self_test();
+            fs::playmedia::self_test();
+            fs::policyengine::self_test();
+            fs::powerprofile::self_test();
+            fs::printqueue::self_test();
+            fs::prochistory::self_test();
+        }
+        case();
+    }
+
+    {
+        // De-fanged fs self-tests, batch 5 of 6. See batch 1 above.
+        #[inline(never)]
+        fn case() {
+            fs::prociso::self_test();
+            fs::quicknote::self_test();
+            fs::quicksettings::self_test();
+            fs::raidmgr::self_test();
+            fs::remoteassist::self_test();
+            fs::remotedesktop::self_test();
+            fs::restorepoint::self_test();
+            fs::screenlock::self_test();
+            fs::screenreader::self_test();
+            fs::screensaver::self_test();
+            fs::secpolicy::self_test();
+            fs::secureboot::self_test();
+            fs::secureerase::self_test();
+            fs::sessionmgr::self_test();
+            fs::sharesheet::self_test();
+            fs::shmem::self_test();
+            fs::signalq::self_test();
+            fs::snaplayout::self_test();
+            fs::soundevents::self_test();
+            fs::spatialaudio::self_test();
+            fs::speechio::self_test();
+            fs::spellcheck::self_test();
+            fs::splitview::self_test();
+            fs::storageclean::self_test();
+        }
+        case();
+    }
+
+    {
+        // De-fanged fs self-tests, batch 6 of 6. See batch 1 above.
+        #[inline(never)]
+        fn case() {
+            fs::storagesense::self_test();
+            fs::surroundsound::self_test();
+            fs::sysanimations::self_test();
+            fs::sysdiag::self_test();
+            fs::syslog::self_test();
+            fs::sysmaint::self_test();
+            fs::sysrestore::self_test();
+            fs::sysrq::self_test();
+            fs::systemimage::self_test();
+            fs::systemsounds::self_test();
+            fs::tasksched::self_test();
+            fs::timesync::self_test();
+            fs::touchpad::self_test();
+            fs::touchscreen::self_test();
+            fs::updatemgr::self_test();
+            fs::usbmgr::self_test();
+            fs::usbpolicy::self_test();
+            fs::voicecontrol::self_test();
+            fs::volumeosd::self_test();
+            fs::vpnprofile::self_test();
+            fs::webcam::self_test();
+            fs::wifiscan::self_test();
+            fs::windowrules::self_test();
+            fs::wintiling::self_test();
+        }
+        case();
+    }
+
+    {
         #[inline(never)]
         fn case() {
             // Run cryptographic self-tests.

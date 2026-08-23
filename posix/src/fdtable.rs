@@ -156,6 +156,35 @@ pub enum HandleKind {
     /// inherited across `posix_spawn`/`exec` (the kernel bumps the
     /// endpoint refcount when it dups the handle into the child).
     UnixStream,
+
+    /// The **master** end of a pseudo-terminal (uses `SYS_PTY_*`).
+    ///
+    /// This is the end a terminal emulator, `script(1)`, `expect` or `sshd`
+    /// holds: `read` returns what the program on the other end printed (already
+    /// through `OPOST`/`ONLCR`), and `write` delivers keystrokes into the
+    /// slave's line discipline.
+    ///
+    /// Master and slave are separate kinds rather than one `Pty` kind plus an
+    /// end bit because the two ends use *different syscalls in both
+    /// directions*.  With one kind, every dispatch site would have to re-derive
+    /// the end from the handle's low bit, and the compiler could not check that
+    /// it had; with two, a missed site is a non-exhaustive `match`.
+    ///
+    /// `handle` is the raw kernel handle, `(tty_id << 1) | end`.  A read at
+    /// hangup yields `EIO` rather than 0, and libc passes that through
+    /// deliberately — see [`crate::syscall::SYS_PTY_MASTER_READ`].
+    PtyMaster,
+
+    /// The **slave** end of a pseudo-terminal — the fd a program's stdin,
+    /// stdout and stderr are `dup2`'d onto when it runs "in" a terminal.
+    ///
+    /// `read` goes through the line discipline (`SYS_TTY_READ`, honouring
+    /// `ICANON`/`VMIN`/`ISIG`) and `write` through `SYS_PTY_SLAVE_WRITE`.  A
+    /// process that has made this its controlling terminal can also reach the
+    /// same terminal with a plain `write(1, …)` and no handle at all, because
+    /// the kernel resolves that through `current_tty()`; the handle form is for
+    /// naming a pty you are *not* running on.
+    PtySlave,
 }
 
 /// An entry in the file descriptor table.

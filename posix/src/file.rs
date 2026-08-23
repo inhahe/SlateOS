@@ -115,6 +115,16 @@ pub extern "C" fn open(path: *const u8, flags: i32, mode: ModeT) -> Fd {
         return -1;
     };
 
+    // `/dev/ptmx` and `/dev/pts/<n>` are handled entirely in libc.  Lane A
+    // considered a VFS device-node concept for them and declined it on the
+    // grounds that "a mechanism whose only user is two hardcoded names will
+    // be wrong for the third", which is right: nothing about these two
+    // paths needs to reach the filesystem, and putting them here keeps the
+    // kernel's namespace free of nodes that are really syscalls.
+    if let Some(fd) = open_pty_device(resolved.get(..resolved_len).unwrap_or(&[]), flags) {
+        return fd;
+    }
+
     let native_flags = translate_open_flags(flags);
 
     // Compute the umask-masked create mode only when O_CREAT is present;
@@ -269,6 +279,7 @@ pub extern "C" fn close(fd: Fd) -> i32 {
             crate::epoll::inotify_instance_close(entry.handle);
             0
         }
+        HandleKind::PtyMaster | HandleKind::PtySlave => close_pty_handle(entry.handle),
     };
 
     errno::translate(ret) as i32
@@ -485,6 +496,49 @@ pub extern "C" fn read(fd: Fd, buf: *mut u8, count: SizeT) -> SsizeT {
                 }
             }
         }
+        HandleKind::PtyMaster => {
+            // What the program on the slave end printed, already through
+            // `OPOST`/`ONLCR` — this is the byte stream a terminal emulator
+            // draws.
+            let is_nb = fdtable::get_status_flags(fd).unwrap_or(0) & crate::fcntl::O_NONBLOCK != 0;
+            // `SYS_PTY_MASTER_READ` reports the last slave closing as
+            // `IoError` → `EIO`, *not* as a zero-length read, and we pass
+            // that through unchanged.  Converting it to 0 for friendliness
+            // is the one thing lane A asked us not to do (design-decisions
+            // §259): a program that only understands `EIO` reads a 0 as
+            // "nothing right now, retry" and spins at 100% CPU forever on a
+            // window whose child is already dead.  The reverse mistake —
+            // `EIO` to a program expecting 0 — is a spurious diagnostic and
+            // an exit.  Buffered output is delivered before the `EIO`, so
+            // nothing the child printed is lost by honouring it.
+            if is_nb {
+                syscall3(
+                    SYS_PTY_MASTER_TRY_READ,
+                    entry.handle,
+                    buf as u64,
+                    count as u64,
+                )
+            } else {
+                syscall3(SYS_PTY_MASTER_READ, entry.handle, buf as u64, count as u64)
+            }
+        }
+        HandleKind::PtySlave => {
+            // The slave end reads through the line discipline, which is the
+            // same code path the console uses — `SYS_TTY_READ` honours
+            // `ICANON`, `VMIN`/`VTIME` and `ISIG` for whichever terminal the
+            // caller is on.
+            //
+            // It resolves the terminal as `current_tty()` and takes no
+            // handle, so it can only serve a slave that is *this* process's
+            // controlling terminal.  That is the case the fd exists for: a
+            // slave fd is what `login_tty` makes stdin, and `login_tty`
+            // acquires the terminal first.  A process holding a slave fd for
+            // a terminal it is not on has no way to read it; that needs a
+            // handle-taking `SYS_TTY_READ`, which does not exist yet and is
+            // logged as `TD-B-PTY-SLAVE-READ-IS-CTTY-ONLY` in
+            // `known-issues.md`.
+            syscall2(SYS_TTY_READ, buf as u64, count as u64)
+        }
     };
 
     errno::translate(ret) as SsizeT
@@ -661,6 +715,32 @@ pub extern "C" fn write(fd: Fd, buf: *const u8, count: SizeT) -> SsizeT {
             }
             return 8;
         }
+        HandleKind::PtyMaster => {
+            // Writing to the master delivers keystrokes into the slave's
+            // line discipline — this is the emulator typing at the shell.
+            let ret = syscall3(SYS_PTY_MASTER_WRITE, entry.handle, buf as u64, count as u64);
+            if ret == errno::native::CHANNEL_CLOSED {
+                // Every slave is gone: nothing can ever read these bytes.
+                // POSIX spells that EPIPE, the same as a pipe whose reader
+                // has closed, and lane A's table names EPIPE for this case
+                // explicitly.
+                errno::set_errno(errno::EPIPE);
+                return -1;
+            }
+            ret
+        }
+        HandleKind::PtySlave => {
+            // Output from the program's side, through `OPOST`/`ONLCR` and
+            // the `TOSTOP` job-control gate.  The return is counted in the
+            // bytes we handed over, not in the CRLF-expanded ones, so a
+            // caller looping on a short write makes progress.
+            let ret = syscall3(SYS_PTY_SLAVE_WRITE, entry.handle, buf as u64, count as u64);
+            if ret == errno::native::CHANNEL_CLOSED {
+                errno::set_errno(errno::EPIPE);
+                return -1;
+            }
+            ret
+        }
     };
 
     errno::translate(ret) as SsizeT
@@ -726,7 +806,9 @@ pub extern "C" fn lseek(fd: Fd, offset: OffT, whence: i32) -> OffT {
         | HandleKind::Epoll
         | HandleKind::Timerfd
         | HandleKind::Inotify
-        | HandleKind::UnixStream => {
+        | HandleKind::UnixStream
+        | HandleKind::PtyMaster
+        | HandleKind::PtySlave => {
             errno::set_errno(errno::ESPIPE);
             -1
         }
@@ -1426,6 +1508,28 @@ pub extern "C" fn dup(oldfd: Fd) -> Fd {
                 -1
             }
         }
+        HandleKind::PtyMaster | HandleKind::PtySlave => {
+            // Share the handle, exactly as for pipes — *not* `SYS_PTY_DUP`.
+            //
+            // `SYS_PTY_DUP` returns the same value with the kernel refcount
+            // bumped, so calling it here would need a matching extra
+            // `SYS_PTY_CLOSE`.  But `close` short-circuits on
+            // `is_handle_referenced` and issues exactly one kernel close for
+            // however many fds name a handle, so a bumped refcount would
+            // never be dropped and the device would outlive its last fd.
+            // Sharing at the fd-table level is what the rest of this table
+            // already does and is what the existing refcount-by-fd-scan is
+            // built for.  `SYS_PTY_DUP` is for a *second* holder that the fd
+            // scan cannot see — a handle handed to another process — which
+            // is the spawn path, not this one.
+            if let Some(fd) = fdtable::alloc_fd_with_flags(entry.kind, entry.handle, src_status) {
+                fdtable::copy_fd_path(oldfd, fd);
+                fd
+            } else {
+                errno::set_errno(errno::EMFILE);
+                -1
+            }
+        }
     }
 }
 
@@ -1466,7 +1570,9 @@ pub extern "C" fn dup2(oldfd: Fd, newfd: Fd) -> Fd {
         | HandleKind::TcpListener
         | HandleKind::UdpSocket
         | HandleKind::Eventfd
-        | HandleKind::UnixStream => entry.handle,
+        | HandleKind::UnixStream
+        | HandleKind::PtyMaster
+        | HandleKind::PtySlave => entry.handle,
         HandleKind::Epoll | HandleKind::Timerfd | HandleKind::Inotify => {
             // Share the epoll/timerfd/inotify instance.  No addref
             // needed: dup2 calls is_handle_referenced() before tearing
@@ -1761,8 +1867,12 @@ pub extern "C" fn fstat(fd: Fd, buf: *mut Stat) -> i32 {
             }
             0
         }
-        HandleKind::Console => {
-            // Return minimal stat for a character device.
+        HandleKind::Console | HandleKind::PtyMaster | HandleKind::PtySlave => {
+            // Return minimal stat for a character device.  Both pty ends are
+            // character devices on Linux too (`/dev/ptmx` and `/dev/pts/N`),
+            // and `S_ISCHR` on `fstat` is how several programs — `script(1)`
+            // among them — decide an fd is terminal-shaped before they even
+            // reach `isatty`.
             unsafe {
                 core::ptr::write_bytes(buf, 0, 1);
                 (*buf).st_mode = crate::fcntl::S_IFCHR;
@@ -2076,7 +2186,9 @@ pub extern "C" fn ftruncate(fd: Fd, length: OffT) -> i32 {
         | HandleKind::Epoll
         | HandleKind::Timerfd
         | HandleKind::Inotify
-        | HandleKind::UnixStream => {
+        | HandleKind::UnixStream
+        | HandleKind::PtyMaster
+        | HandleKind::PtySlave => {
             errno::set_errno(errno::EINVAL);
             -1
         }
@@ -2111,7 +2223,9 @@ pub extern "C" fn fsync(fd: Fd) -> i32 {
         | HandleKind::Epoll
         | HandleKind::Timerfd
         | HandleKind::Inotify
-        | HandleKind::UnixStream => 0,
+        | HandleKind::UnixStream
+        | HandleKind::PtyMaster
+        | HandleKind::PtySlave => 0,
     }
 }
 
@@ -2198,7 +2312,107 @@ fn close_kernel_handle(kind: HandleKind, handle: u64) -> i64 {
             crate::epoll::inotify_instance_close(handle);
             0
         }
+        HandleKind::PtyMaster | HandleKind::PtySlave => close_pty_handle(handle),
     }
+}
+
+/// Open `/dev/ptmx` or `/dev/pts/<n>`, if that is what `resolved` names.
+///
+/// `None` means the path is an ordinary one and [`open`] should carry on to
+/// the filesystem; `Some` carries the descriptor, or `-1` with `errno` set.
+///
+/// Reached after path resolution, so `../dev/pts/3` and `/dev//pts/3` land
+/// here too -- a special case keyed on the *unresolved* argument would be a
+/// special case a caller could step around by accident.
+fn open_pty_device(resolved: &[u8], flags: i32) -> Option<Fd> {
+    if resolved == b"/dev/ptmx" {
+        let fd = crate::ioctl::posix_openpt(flags);
+        if fd >= 0 && flags & fcntl::O_CLOEXEC != 0 {
+            let _ = fdtable::set_fd_flags(fd, fdtable::FD_CLOEXEC);
+        }
+        return Some(fd);
+    }
+
+    let digits = resolved.strip_prefix(b"/dev/pts/".as_slice())?;
+    // A non-numeric or empty tail is not a slave name at all.  Falling
+    // through to the filesystem would be wrong in a subtler way than it
+    // looks: `/dev/pts` is not a real directory here, so the caller would
+    // get whatever the VFS says about a path that does not exist, which is
+    // the same ENOENT by a longer route -- but it would also let
+    // `/dev/pts/../../etc/passwd` reach the filesystem if resolution ever
+    // stopped normalising, so the parse is strict and terminal.
+    let mut id: u32 = 0;
+    if digits.is_empty() {
+        errno::set_errno(errno::ENOENT);
+        return Some(-1);
+    }
+    for &b in digits {
+        let Some(d) = (b as char).to_digit(10) else {
+            errno::set_errno(errno::ENOENT);
+            return Some(-1);
+        };
+        let Some(next) = id.checked_mul(10).and_then(|v| v.checked_add(d)) else {
+            // A number too large to be a terminal id names no terminal.
+            errno::set_errno(errno::ENOENT);
+            return Some(-1);
+        };
+        id = next;
+    }
+
+    // The slave was created alongside its master and has been held by
+    // `ptytab` ever since; claiming it is what transfers it to an fd.  A
+    // name we have no record of is ENOENT, which is also what Linux
+    // reports for a `/dev/pts/N` that no master has allocated.
+    let Some(handle) = crate::ptytab::claim_slave(id) else {
+        errno::set_errno(errno::ENOENT);
+        return Some(-1);
+    };
+
+    let status = flags & (fcntl::O_ACCMODE | fcntl::O_APPEND | fcntl::O_NONBLOCK | fcntl::O_SYNC);
+    let Some(fd) = fdtable::alloc_fd_with_flags(HandleKind::PtySlave, handle, status) else {
+        // The claim is not rolled back.  A claimed-but-unopened slave is
+        // still closed by the master's `close_pty_handle`, whereas an
+        // un-claim would put it back in the state where a *second* claim
+        // could hand the same handle to a second fd -- trading a leak this
+        // process can still close for one it cannot.
+        errno::set_errno(errno::EMFILE);
+        return Some(-1);
+    };
+    if flags & fcntl::O_CLOEXEC != 0 {
+        let _ = fdtable::set_fd_flags(fd, fdtable::FD_CLOEXEC);
+    }
+    // `O_NOCTTY` needs no handling: opening a terminal here never makes it
+    // the controlling one.  Linux's implicit acquisition on open is a
+    // documented misfeature that `O_NOCTTY` exists to switch *off*; our
+    // kernel only ever grants a controlling terminal through an explicit
+    // `SYS_TTY_ACQUIRE_CTTY`, which is what `login_tty` issues.
+    Some(fd)
+}
+
+/// Release one end of a pseudo-terminal, and the pair record with it.
+///
+/// One syscall serves both ends -- the kernel reads the end out of the
+/// handle's low bit -- so this is shared by `close` and by the dup2
+/// eviction path rather than duplicated into each.
+///
+/// The second half is the part that is easy to miss.  `SYS_PTY_CREATE`
+/// hands back *both* ends already open, and [`crate::ptytab`] holds the
+/// slave until an `open("/dev/pts/<n>")` claims it.  If the caller closes
+/// the master without ever having claimed the slave -- which is exactly
+/// what a `posix_openpt` followed by a failed `openpty` does -- that slave
+/// handle has no fd, and nothing would ever close it: the device would stay
+/// alive with no way left to reach it.  [`crate::ptytab::retire_master`]
+/// reports such an orphan, and we close it here.
+fn close_pty_handle(handle: u64) -> i64 {
+    let ret = syscall1(SYS_PTY_CLOSE, handle);
+    if let Some(orphan) = crate::ptytab::retire_master(handle) {
+        // Deliberately unchecked: the close the caller asked about is the
+        // one above, and a failure to reap a slave they never named is not
+        // something they can act on.
+        let _ = syscall1(SYS_PTY_CLOSE, orphan);
+    }
+    crate::ptytab::retire_slave(handle);
+    ret
 }
 
 /// Compute length of a C string (excluding null terminator).

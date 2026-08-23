@@ -365,11 +365,34 @@ pub fn procfs_content() -> String {
 // Self-tests
 // ---------------------------------------------------------------------------
 
-/// Run netcat self-tests.
-// Self-tests deliberately runtime-assert protocol constants as
-// living documentation.
-#[allow(clippy::assertions_on_constants)]
+/// Run the module's self-test suite against state of its own.
+///
+/// The suite mutates module state and asserts exact contents, and it used to
+/// do that to the *live* state -- which, since it is also a kernel-shell
+/// subcommand, changed or destroyed whatever the user had here and then
+/// reported success.  It is moved aside for the duration and put back
+/// afterwards; `crate::fs::selftest` records why this shape rather than the
+/// alternatives.
+///
+/// Each pristine value is the `static`'s own initialiser, which is the one
+/// spelling of "what a fresh boot holds" that cannot drift away from it.
 pub fn self_test() -> KernelResult<()> {
+    let _pristine_tcp_connects = crate::fs::selftest::pristine_atomic(&TCP_CONNECTS, 0);
+    let _pristine_tcp_listens = crate::fs::selftest::pristine_atomic(&TCP_LISTENS, 0);
+    let _pristine_udp_sends = crate::fs::selftest::pristine_atomic(&UDP_SENDS, 0);
+    let _pristine_port_scans = crate::fs::selftest::pristine_atomic(&PORT_SCANS, 0);
+    let _pristine_bytes_sent = crate::fs::selftest::pristine_atomic(&BYTES_SENT, 0);
+    let _pristine_bytes_received = crate::fs::selftest::pristine_atomic(&BYTES_RECEIVED, 0);
+    self_test_inner()
+}
+
+#[allow(clippy::assertions_on_constants)]
+// `KernelResult` is `self_test`'s signature, which the shell's dispatch table
+// fixes; this body has no failing path of its own and never had one. The lint
+// fires only because the split moved that body into a *private* function, and
+// private is the visibility it inspects -- the code itself is unchanged.
+#[allow(clippy::unnecessary_wraps)]
+fn self_test_inner() -> KernelResult<()> {
     crate::serial_println!("[nc] Running netcat self-tests...");
     let mut passed = 0u32;
 

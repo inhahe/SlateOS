@@ -939,8 +939,22 @@ pub fn procfs_content() -> String {
 // Self-test
 // ---------------------------------------------------------------------------
 
-/// Run log rotation self-tests.
+/// Run the module's self-test suite against state of its own.
+///
+/// The suite mutates module state and asserts exact contents, and it used to
+/// do that to the *live* state -- which, since it is also a kernel-shell
+/// subcommand, changed or destroyed whatever the user had here and then
+/// reported success.  It is moved aside for the duration and put back
+/// afterwards; `crate::fs::selftest` records why this shape rather than the
+/// alternatives.
+///
+/// Each pristine value is the `static`'s own initialiser, which is the one
+/// spelling of "what a fresh boot holds" that cannot drift away from it.
 pub fn self_test() -> KernelResult<()> {
+    crate::fs::selftest::with_pristine(&STATE, State::new(), self_test_inner)
+}
+
+fn self_test_inner() -> KernelResult<()> {
     use crate::eventlog::EventBuilder;
 
     crate::serial_println!("[logpersist] Running log rotation self-tests...");

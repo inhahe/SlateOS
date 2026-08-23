@@ -4937,7 +4937,7 @@ fn gen_sparse() -> Vec<u8> {
     } else {
         out.push_str(&format!("{:40} {:>6}\n", "PATH", "HOLES"));
         for (path, holes) in &files {
-            out.push_str(&format!("{:40} {:>6}\n", path, holes));
+            out.push_str(&format!("{:40} {:>6}\n", path.display(), holes));
         }
     }
 

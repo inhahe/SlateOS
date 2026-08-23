@@ -18098,7 +18098,7 @@ fn cmd_sparse(args: &str) {
                 shell_println!("{:40} {:>6}", "PATH", "HOLES");
                 shell_println!("{}", "-".repeat(48));
                 for (path, holes) in &files {
-                    shell_println!("{:40} {:>6}", path, holes);
+                    shell_println!("{:40} {:>6}", path.display(), holes);
                 }
             }
         }

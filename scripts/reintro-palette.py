@@ -25,6 +25,27 @@ search-and-replace is not good enough — if a patch half-applied, or a formatte
 ran, or the process died between the write and the undo, a reverse replace
 silently leaves the tree modified while claiming success.
 
+Three modes, cheapest first.
+
+- `--check` matches every defect's pattern against the snapshot and builds
+  nothing. Seconds, no toolchain, and it answers the only question that rots
+  on its own: has a rename or a rustfmt pass stopped this defect applying?
+- `--compile [names…]` applies each defect and runs `cargo check --all-targets`
+  on its packages. This is the question `--check` *cannot* answer, and the
+  distinction is not academic: a pattern can be findable, unambiguous and
+  non-no-op and still leave source that is not Rust. Module 36 wrote four
+  defects that replaced the wrong line of a two-line anchor, emitted two
+  `color:` fields apiece, and were discovered an hour into the run they had
+  already invalidated — see known-issues.md lesson 19. `--check` had passed
+  all four.
+- No flag: the real sweep. Apply, run the tests, restore, report.
+
+`--compile` is a preflight, not a correctness gate. The full run detects a
+broken defect too (`DID NOT COMPILE`); what the preflight buys is learning it
+in minutes rather than at the end of an hour, before the run whose result it
+spoils has been started. Filter it with the same names the real run takes, so a
+new module's defects can be vetted without rebuilding against the older ones.
+
 One finding is recorded here rather than as a defect, because it cannot be one.
 Defect Q — a window's close button following the accent — went *uncaught* on
 the first run, and the reason was not the test: `DecorationColors::from_settings`
@@ -85,6 +106,7 @@ RESMON = "gui/desktop/src/resmon.rs"
 MOUSESET = "gui/desktop/src/mouse_settings.rs"
 HOTKEYS = "gui/desktop/src/hotkeys.rs"
 SCRCAP = "gui/desktop/src/screen_capture.rs"
+SNAP = "gui/desktop/src/snap.rs"
 
 # (name, file, [(old, new), ...], [packages], [tests expected to fail])
 DEFECTS = [
@@ -14804,6 +14826,693 @@ DEFECTS = [
             'the_indicator_is_silent_unless_something_is_happening',
         ],
     ),
+    (
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA: MOCHA_SURFACE0 survives at the picker's border",
+        SNAP,
+        [
+            ('            height: picker_h,\n            color: p.surface0,',
+             '            height: picker_h,\n            color: guitk::color::Color::from_hex(0x313244),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_all_three_renderers_draw_comes_from_their_palette',
+            'none_of_the_ten_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB: MOCHA_SURFACE0 survives at a thumbnail's background",
+        SNAP,
+        [
+            ('                height: THUMB_SIZE,\n                color: p.surface0,',
+             '                height: THUMB_SIZE,\n                color: guitk::color::Color::from_hex(0x313244),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_all_three_renderers_draw_comes_from_their_palette',
+            'none_of_the_ten_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC: ZONE_FILL survives at the resting zone's fill",
+        SNAP,
+        [
+            ('                // Judgement 1: a zone at rest is a selection at rest.\n                color: p.selection_fill(),',
+             '                // Judgement 1: a zone at rest is a selection at rest.\n                color: guitk::color::Color::rgba(137, 180, 250, 50),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_all_three_renderers_draw_comes_from_their_palette',
+            'none_of_the_ten_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD: ZONE_BORDER survives at the resting zone's border",
+        SNAP,
+        [
+            ('                // drift closing, not a change of intent.\n                color: p.selection_border(),',
+             '                // drift closing, not a change of intent.\n                color: guitk::color::Color::rgba(137, 180, 250, 160),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_all_three_renderers_draw_comes_from_their_palette',
+            'none_of_the_ten_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE: ZONE_HIGHLIGHT survives at the hovered zone's fill",
+        SNAP,
+        [
+            ('            // Judgement 1, one rung louder than the zones at rest.\n            color: p.highlight_fill(),',
+             '            // Judgement 1, one rung louder than the zones at rest.\n            color: guitk::color::Color::rgba(137, 180, 250, 90),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_all_three_renderers_draw_comes_from_their_palette',
+            'none_of_the_ten_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+            'the_zone_under_the_cursor_out_reads_the_zones_at_rest',
+        ],
+    ),
+    (
+        "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF: MOCHA_BLUE survives at the hovered zone's border",
+        SNAP,
+        [
+            ('            // out-read the eight at rest that are already wearing that wash.\n            color: p.accent,',
+             '            // out-read the eight at rest that are already wearing that wash.\n            color: guitk::color::Color::from_hex(0x89B4FA),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_all_three_renderers_draw_comes_from_their_palette',
+            'none_of_the_ten_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+            'the_zone_under_the_cursor_out_reads_the_zones_at_rest',
+        ],
+    ),
+    (
+        "GGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGG: MOCHA_LAVENDER survives at the picker's title",
+        SNAP,
+        [
+            ('            // the accented thumbnail below it that actually means something.\n            color: p.lavender,',
+             '            // the accented thumbnail below it that actually means something.\n            color: guitk::color::Color::from_hex(0xB4BEFE),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_all_three_renderers_draw_comes_from_their_palette',
+            'none_of_the_ten_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH: MOCHA_LAVENDER survives at an inactive thumbnail",
+        SNAP,
+        [
+            ('                    } else {\n                        p.overlay0',
+             '                    } else {\n                        guitk::color::Color::from_hex(0xB4BEFE)'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_all_three_renderers_draw_comes_from_their_palette',
+            'none_of_the_ten_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+            'an_inactive_preset_is_never_the_accent_the_user_chose',
+        ],
+    ),
+    (
+        "IIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIII: MOCHA_TEXT survives at a resting zone's label",
+        SNAP,
+        [
+            ('                // be dark-on-dark under the light theme.\n                color: readable_on(p.scrim()),',
+             '                // be dark-on-dark under the light theme.\n                color: guitk::color::Color::from_hex(0xCDD6F4),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_all_three_renderers_draw_comes_from_their_palette',
+            'none_of_the_ten_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+            'a_zone_label_is_lettered_for_the_scrim_and_not_for_the_mode',
+        ],
+    ),
+    (
+        "JJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJ: Color::WHITE survives at the hovered zone's label",
+        SNAP,
+        [
+            ('            // because both are read off the same scrim, not by coincidence.\n            color: readable_on(p.scrim()),',
+             '            // because both are read off the same scrim, not by coincidence.\n            color: Color::WHITE,'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_all_three_renderers_draw_comes_from_their_palette',
+            'every_site_draws_the_role_it_claims',
+            'a_zone_label_is_lettered_for_the_scrim_and_not_for_the_mode',
+        ],
+    ),
+    (
+        "KKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKK: OVERLAY_SCRIM survives, tint and all",
+        SNAP,
+        [
+            ('            // the desktop in light mode instead of pushing it back.\n            color: p.scrim(),',
+             '            // the desktop in light mode instead of pushing it back.\n            color: guitk::color::Color::rgba(30, 30, 46, 140),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_all_three_renderers_draw_comes_from_their_palette',
+            'none_of_the_ten_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+            'the_scrim_is_black_in_both_modes',
+            'the_picker_is_as_transparent_as_the_user_asked',
+        ],
+    ),
+    (
+        "LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLL: PICKER_BG survives, frozen alpha and all",
+        SNAP,
+        [
+            ('            // Judgement 3: the transparency setting, not a frozen 230.\n            color: p.panel_bg(),',
+             '            // Judgement 3: the transparency setting, not a frozen 230.\n            color: guitk::color::Color::rgba(30, 30, 46, 230),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_all_three_renderers_draw_comes_from_their_palette',
+            'none_of_the_ten_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+            'the_picker_is_as_transparent_as_the_user_asked',
+        ],
+    ),
+    (
+        "MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM: PICKER_HOVER survives, frozen alpha and all",
+        SNAP,
+        [
+            ('                    // at a frozen 200.\n                    color: p.panel_hover(),',
+             '                    // at a frozen 200.\n                    color: guitk::color::Color::rgba(69, 71, 90, 200),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_all_three_renderers_draw_comes_from_their_palette',
+            'none_of_the_ten_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+            'the_picker_is_as_transparent_as_the_user_asked',
+        ],
+    ),
+    (
+        "NNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNN: the resting zone's fill and the hovered zone's fill trade places",
+        SNAP,
+        [
+            ('                // Judgement 1: a zone at rest is a selection at rest.\n                color: p.selection_fill(),',
+             '                // Judgement 1: a zone at rest is a selection at rest.\n                color: p.highlight_fill(),'),
+            ('            // Judgement 1, one rung louder than the zones at rest.\n            color: p.highlight_fill(),',
+             '            // Judgement 1, one rung louder than the zones at rest.\n            color: p.selection_fill(),'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'the_zone_under_the_cursor_out_reads_the_zones_at_rest',
+        ],
+    ),
+    (
+        "OOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOO: the resting zone's border and the hovered zone's border trade places",
+        SNAP,
+        [
+            ('                // drift closing, not a change of intent.\n                color: p.selection_border(),',
+             '                // drift closing, not a change of intent.\n                color: p.accent,'),
+            ('            // out-read the eight at rest that are already wearing that wash.\n            color: p.accent,',
+             '            // out-read the eight at rest that are already wearing that wash.\n            color: p.selection_border(),'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'the_zone_under_the_cursor_out_reads_the_zones_at_rest',
+        ],
+    ),
+    (
+        "PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPP: the picker's background and its hover rung trade places",
+        SNAP,
+        [
+            ('            // Judgement 3: the transparency setting, not a frozen 230.\n            color: p.panel_bg(),',
+             '            // Judgement 3: the transparency setting, not a frozen 230.\n            color: p.panel_hover(),'),
+            ('                    // at a frozen 200.\n                    color: p.panel_hover(),',
+             '                    // at a frozen 200.\n                    color: p.panel_bg(),'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "QQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQ: the picker's title and a zone's label trade inks",
+        SNAP,
+        [
+            ('            // the accented thumbnail below it that actually means something.\n            color: p.lavender,',
+             '            // the accented thumbnail below it that actually means something.\n            color: readable_on(p.scrim()),'),
+            ('                // be dark-on-dark under the light theme.\n                color: readable_on(p.scrim()),',
+             '                // be dark-on-dark under the light theme.\n                color: p.lavender,'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_all_three_renderers_draw_comes_from_their_palette',
+            'every_site_draws_the_role_it_claims',
+            'a_zone_label_is_lettered_for_the_scrim_and_not_for_the_mode',
+        ],
+    ),
+    (
+        "RRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRR: the scrim and the picker's shadow trade alphas",
+        SNAP,
+        [
+            ('            // the desktop in light mode instead of pushing it back.\n            color: p.scrim(),',
+             '            // the desktop in light mode instead of pushing it back.\n            color: Color::rgba(0, 0, 0, 100),'),
+            ('            // picker is a small popup rather than a window.\n            color: Color::rgba(0, 0, 0, 100),',
+             '            // picker is a small popup rather than a window.\n            color: p.scrim(),'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'the_scrim_is_black_in_both_modes',
+            'the_picker_is_as_transparent_as_the_user_asked',
+        ],
+    ),
+    (
+        "SSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSS: the active thumbnail and the inactive ones trade colours",
+        SNAP,
+        [
+            ('                    color: if self.active_preset == preset {\n                        p.accent',
+             '                    color: if self.active_preset == preset {\n                        p.overlay0'),
+            ('                    } else {\n                        p.overlay0',
+             '                    } else {\n                        p.accent'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT: the thumbnail background and the picker's title trade colours",
+        SNAP,
+        [
+            ('                height: THUMB_SIZE,\n                color: p.surface0,',
+             '                height: THUMB_SIZE,\n                color: p.lavender,'),
+            ('            // the accented thumbnail below it that actually means something.\n            color: p.lavender,',
+             '            // the accented thumbnail below it that actually means something.\n            color: p.surface0,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "UUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUU: the picker's border and its title trade colours",
+        SNAP,
+        [
+            ('            height: picker_h,\n            color: p.surface0,',
+             '            height: picker_h,\n            color: p.lavender,'),
+            ('            // the accented thumbnail below it that actually means something.\n            color: p.lavender,',
+             '            // the accented thumbnail below it that actually means something.\n            color: p.surface0,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "VVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVV: a resting zone is washed in a fixed blue rather than the accent",
+        SNAP,
+        [
+            ('                // Judgement 1: a zone at rest is a selection at rest.\n                color: p.selection_fill(),',
+             '                // Judgement 1: a zone at rest is a selection at rest.\n                color: guitk::color::Color::rgba(p.blue.r, p.blue.g, p.blue.b, 50),'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "WWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWW: a resting zone's border is a fixed blue rather than the accent",
+        SNAP,
+        [
+            ('                // drift closing, not a change of intent.\n                color: p.selection_border(),',
+             '                // drift closing, not a change of intent.\n                color: guitk::color::Color::rgba(p.blue.r, p.blue.g, p.blue.b, 150),'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX: the hovered zone's border is a fixed blue rather than the accent",
+        SNAP,
+        [
+            ('            // out-read the eight at rest that are already wearing that wash.\n            color: p.accent,',
+             '            // out-read the eight at rest that are already wearing that wash.\n            color: p.blue,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "YYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYY: the active thumbnail's mini-zones are a fixed blue",
+        SNAP,
+        [
+            ('                    color: if self.active_preset == preset {\n                        p.accent',
+             '                    color: if self.active_preset == preset {\n                        p.blue'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ: the active preset's marker is a fixed blue",
+        SNAP,
+        [
+            ('                    height: THUMB_SIZE,\n                    color: p.accent,',
+             '                    height: THUMB_SIZE,\n                    color: p.blue,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA: the inactive thumbnails go back to lavender, the collision judgement 5 names",
+        SNAP,
+        [
+            ('                    } else {\n                        p.overlay0',
+             '                    } else {\n                        p.lavender'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'an_inactive_preset_is_never_the_accent_the_user_chose',
+        ],
+    ),
+    (
+        "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB: the inactive thumbnails are accented too, so nothing says which is active",
+        SNAP,
+        [
+            ('                    } else {\n                        p.overlay0',
+             '                    } else {\n                        p.accent'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'an_inactive_preset_is_never_the_accent_the_user_chose',
+        ],
+    ),
+    (
+        "CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC: the picker's title is accented and competes with the thumbnail that matters",
+        SNAP,
+        [
+            ('            // the accented thumbnail below it that actually means something.\n            color: p.lavender,',
+             '            // the accented thumbnail below it that actually means something.\n            color: p.accent,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD: the picker's border is accented",
+        SNAP,
+        [
+            ('            height: picker_h,\n            color: p.surface0,',
+             '            height: picker_h,\n            color: p.accent,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE: a resting zone's label follows the mode instead of the scrim",
+        SNAP,
+        [
+            ('                // be dark-on-dark under the light theme.\n                color: readable_on(p.scrim()),',
+             '                // be dark-on-dark under the light theme.\n                color: p.text,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'a_zone_label_is_lettered_for_the_scrim_and_not_for_the_mode',
+        ],
+    ),
+    (
+        "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF: the hovered zone's label follows the mode instead of the scrim",
+        SNAP,
+        [
+            ('            // because both are read off the same scrim, not by coincidence.\n            color: readable_on(p.scrim()),',
+             '            // because both are read off the same scrim, not by coincidence.\n            color: p.text,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'a_zone_label_is_lettered_for_the_scrim_and_not_for_the_mode',
+        ],
+    ),
+    (
+        "GGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGG: a resting zone's label is read off the panel base rather than the scrim",
+        SNAP,
+        [
+            ('                // be dark-on-dark under the light theme.\n                color: readable_on(p.scrim()),',
+             '                // be dark-on-dark under the light theme.\n                color: readable_on(p.base),'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'a_zone_label_is_lettered_for_the_scrim_and_not_for_the_mode',
+        ],
+    ),
+    (
+        "HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH: the hovered zone's label is read off the accent under it",
+        SNAP,
+        [
+            ('            // because both are read off the same scrim, not by coincidence.\n            color: readable_on(p.scrim()),',
+             '            // because both are read off the same scrim, not by coincidence.\n            color: readable_on(p.accent),'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'a_zone_label_is_lettered_for_the_scrim_and_not_for_the_mode',
+        ],
+    ),
+    (
+        "IIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIII: the scrim is tinted with the mode's base again",
+        SNAP,
+        [
+            ('            // the desktop in light mode instead of pushing it back.\n            color: p.scrim(),',
+             '            // the desktop in light mode instead of pushing it back.\n            color: guitk::color::Color::rgba(p.base.r, p.base.g, p.base.b, 140),'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'the_scrim_is_black_in_both_modes',
+            'the_picker_is_as_transparent_as_the_user_asked',
+        ],
+    ),
+    (
+        "JJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJ: the scrim is the panel background rather than an absence of light",
+        SNAP,
+        [
+            ('            // the desktop in light mode instead of pushing it back.\n            color: p.scrim(),',
+             '            // the desktop in light mode instead of pushing it back.\n            color: p.panel_bg(),'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'the_scrim_is_black_in_both_modes',
+            'the_picker_is_as_transparent_as_the_user_asked',
+        ],
+    ),
+    (
+        "KKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKK: the picker's shadow is tinted with the mode's crust",
+        SNAP,
+        [
+            ('            // picker is a small popup rather than a window.\n            color: Color::rgba(0, 0, 0, 100),',
+             '            // picker is a small popup rather than a window.\n            color: guitk::color::Color::rgba(p.crust.r, p.crust.g, p.crust.b, 100),'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'the_picker_is_as_transparent_as_the_user_asked',
+        ],
+    ),
+    (
+        "LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLL: the picker's background drops the transparency setting",
+        SNAP,
+        [
+            ('            // Judgement 3: the transparency setting, not a frozen 230.\n            color: p.panel_bg(),',
+             '            // Judgement 3: the transparency setting, not a frozen 230.\n            color: p.base,'),
+        ],
+        ["desktop"],
+        [
+            'the_picker_is_as_transparent_as_the_user_asked',
+        ],
+    ),
+    (
+        "MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM: the picker's hover rung drops the transparency setting",
+        SNAP,
+        [
+            ('                    // at a frozen 200.\n                    color: p.panel_hover(),',
+             '                    // at a frozen 200.\n                    color: p.surface1,'),
+        ],
+        ["desktop"],
+        [
+            'the_picker_is_as_transparent_as_the_user_asked',
+        ],
+    ),
+    (
+        "NNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNN: the picker's background freezes an alpha onto the right role",
+        SNAP,
+        [
+            ('            // Judgement 3: the transparency setting, not a frozen 230.\n            color: p.panel_bg(),',
+             '            // Judgement 3: the transparency setting, not a frozen 230.\n            color: guitk::color::Color::rgba(p.base.r, p.base.g, p.base.b, 230),'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'the_picker_is_as_transparent_as_the_user_asked',
+        ],
+    ),
+    (
+        "OOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOO: the picker's hover rung freezes an alpha onto the right role",
+        SNAP,
+        [
+            ('                    // at a frozen 200.\n                    color: p.panel_hover(),',
+             '                    // at a frozen 200.\n                    color: guitk::color::Color::rgba(p.surface1.r, p.surface1.g, p.surface1.b, 200),'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'the_picker_is_as_transparent_as_the_user_asked',
+        ],
+    ),
+    (
+        "PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPP: the picker's shadow thins out with the panel behind it",
+        SNAP,
+        [
+            ('            // picker is a small popup rather than a window.\n            color: Color::rgba(0, 0, 0, 100),',
+             '            // picker is a small popup rather than a window.\n            color: guitk::color::Color::rgba(0, 0, 0, p.panel_alpha),'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'the_picker_is_as_transparent_as_the_user_asked',
+        ],
+    ),
+    (
+        "QQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQ: the scrim thins out with the panel setting",
+        SNAP,
+        [
+            ('            // the desktop in light mode instead of pushing it back.\n            color: p.scrim(),',
+             '            // the desktop in light mode instead of pushing it back.\n            color: guitk::color::Color::rgba(0, 0, 0, p.panel_alpha),'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'the_picker_is_as_transparent_as_the_user_asked',
+        ],
+    ),
+    (
+        "RRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRR: the picker's shadow is the window shadow, one rung too heavy",
+        SNAP,
+        [
+            ('            // picker is a small popup rather than a window.\n            color: Color::rgba(0, 0, 0, 100),',
+             '            // picker is a small popup rather than a window.\n            color: p.shadow(),'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'the_picker_is_as_transparent_as_the_user_asked',
+        ],
+    ),
+    (
+        "SSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSS: the hovered zone is washed no louder than the eight at rest",
+        SNAP,
+        [
+            ('            // Judgement 1, one rung louder than the zones at rest.\n            color: p.highlight_fill(),',
+             '            // Judgement 1, one rung louder than the zones at rest.\n            color: p.selection_fill(),'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'the_zone_under_the_cursor_out_reads_the_zones_at_rest',
+        ],
+    ),
+    (
+        "TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT: the hovered zone's border is washed rather than solid",
+        SNAP,
+        [
+            ('            // out-read the eight at rest that are already wearing that wash.\n            color: p.accent,',
+             '            // out-read the eight at rest that are already wearing that wash.\n            color: p.selection_border(),'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'the_zone_under_the_cursor_out_reads_the_zones_at_rest',
+        ],
+    ),
+    (
+        "UUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUU: the resting zones are washed as loudly as the hovered one",
+        SNAP,
+        [
+            ('                // Judgement 1: a zone at rest is a selection at rest.\n                color: p.selection_fill(),',
+             '                // Judgement 1: a zone at rest is a selection at rest.\n                color: p.highlight_fill(),'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'the_zone_under_the_cursor_out_reads_the_zones_at_rest',
+        ],
+    ),
+    (
+        "VVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVV: the picker's border drops to the lowest rung there is",
+        SNAP,
+        [
+            ('            height: picker_h,\n            color: p.surface0,',
+             '            height: picker_h,\n            color: p.crust,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "WWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWW: a thumbnail's background drops a rung",
+        SNAP,
+        [
+            ('                height: THUMB_SIZE,\n                color: p.surface0,',
+             '                height: THUMB_SIZE,\n                color: p.mantle,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX: the inactive thumbnails climb a rung and lose the thumbnail behind them",
+        SNAP,
+        [
+            ('                    } else {\n                        p.overlay0',
+             '                    } else {\n                        p.surface2'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "YYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYY: the picker's title is as quiet as body text",
+        SNAP,
+        [
+            ('            // the accented thumbnail below it that actually means something.\n            color: p.lavender,',
+             '            // the accented thumbnail below it that actually means something.\n            color: p.subtext0,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
 ]
 
 
@@ -14893,6 +15602,117 @@ def check(snap):
     return 1 if bad or amb or noop else 0
 
 
+def apply_to(snap, path, edits):
+    """`(patched_text, None)`, or `(None, why)` if the defect cannot be put in.
+
+    One implementation of "apply this defect", shared by the preflights and
+    the real run, so that what a preflight vets is what the run runs. The two
+    refusals are the ones `check()` names — a pattern that is gone, and a set
+    of edits that cancels out — and both must be refusals rather than silent
+    successes: writing unmodified source and then asking the suite about it
+    produces `NO TEST FAILED`, which reads as a hole in the tests for a
+    question they were never asked.
+
+    They are reported apart rather than together because they mean different
+    things to whoever fixes them: a missing pattern is source that moved under
+    the defect, while a no-op is the defect arguing with itself (lesson 18).
+    """
+    original = snap[path].decode("utf-8")
+    text = original
+    for old, new in edits:
+        if old not in text:
+            return None, "PATTERN NOT FOUND"
+        text = text.replace(old, new, 1)
+    if text == original:
+        return None, "*** PATCH IS A NO-OP ***"
+    return text, None
+
+
+def cargo_check(pkg):
+    """`None` if `pkg` builds, else the compiler's first error lines.
+
+    `--all-targets` rather than a bare check: a defect reinstates a constant
+    that the *tests* are the only remaining reader of in several modules, so
+    checking only the lib would miss exactly the errors these defects cause.
+    """
+    r = subprocess.run(
+        ["cargo", "check", "-p", pkg, "--target", TARGET, "--all-targets"],
+        cwd=ROOT, capture_output=True, text=True, errors="replace",
+    )
+    if r.returncode == 0:
+        return None
+    out = r.stdout + r.stderr
+    why = [
+        ln.rstrip()
+        for ln in out.splitlines()
+        if ln.startswith("error[") or ln.startswith("error:")
+    ]
+    return "; ".join(why[:3]) if why else "no error line found"
+
+
+def compile_check(snap, only):
+    """Apply each selected defect, `cargo check` it, restore, report.
+
+    See the module docstring for why this exists: `--check` proves an anchor
+    is *findable*, not that the file it produces is Rust. An anchor's last
+    line must be the line being replaced — anything else invites a
+    replacement that rewrites the wrong line — and this is the pass that
+    notices when it was not.
+
+    Restores after every defect rather than at the end, so that an interrupted
+    preflight leaves at most one file patched and the caller's `finally` puts
+    even that back.
+    """
+    broken, skipped, ok = [], [], 0
+    for name, path, edits, pkgs, _expect in DEFECTS:
+        if only and name.split(":", 1)[0] not in only:
+            continue
+        text, why = apply_to(snap, path, edits)
+        if text is None:
+            # Not this pass's finding, but report it rather than skipping
+            # silently: a defect that never went in was not vetted, and a
+            # preflight that says nothing about it would be read as clearance.
+            skipped.append(name)
+            print(f"NOT APPLIED  {name}\n    {why}", flush=True)
+            continue
+        (ROOT / path).write_text(text, encoding="utf-8", newline="")
+        try:
+            why = None
+            for pkg in pkgs:
+                why = cargo_check(pkg)
+                if why:
+                    why = f"{pkg}: {why}"
+                    break
+        finally:
+            (ROOT / path).write_bytes(snap[path])
+        if why:
+            broken.append(name)
+            print(f"DOES NOT COMPILE  {name}\n    {why}", flush=True)
+        else:
+            ok += 1
+            print(f"builds  {name}", flush=True)
+    print(
+        f"\n{ok + len(broken) + len(skipped)} defects: {ok} build, "
+        f"{len(broken)} do not, {len(skipped)} not applied"
+    )
+    if broken:
+        print(f"\nfix before running the sweep: {broken}")
+    return 1 if broken or skipped else 0
+
+
+def restore(files, snap, digest):
+    """Write every snapshotted file back and prove it is byte-identical."""
+    bad = []
+    for f in files:
+        (ROOT / f).write_bytes(snap[f])
+        if hashlib.sha256((ROOT / f).read_bytes()).hexdigest() != digest[f]:
+            bad.append(f)
+    if bad:
+        print(f"!!! NOT RESTORED: {bad}")
+        sys.exit(2)
+    print("restored: all files match their recorded SHA-256")
+
+
 def main():
     files = sorted({d[1] for d in DEFECTS})
     snap = {f: (ROOT / f).read_bytes() for f in files}
@@ -14905,6 +15725,16 @@ def main():
     if sys.argv[1:2] == ["--check"]:
         sys.exit(check(snap))
 
+    if sys.argv[1:2] == ["--compile"]:
+        # Its own `finally`: `compile_check` writes to the tree, so a Ctrl-C
+        # between the patch and the per-defect restore must still be caught by
+        # the same SHA-256-verified rewrite the real run gets.
+        try:
+            rc = compile_check(snap, sys.argv[2:])
+        finally:
+            restore(files, snap, digest)
+        sys.exit(rc)
+
     only = sys.argv[1:]
     verdicts = []
     try:
@@ -14913,24 +15743,17 @@ def main():
             # past Z, so `"AA"[0]` would select defect A as well.
             if only and name.split(":", 1)[0] not in only:
                 continue
-            text = snap[path].decode("utf-8")
-            ok = True
-            for old, new in edits:
-                if old not in text:
-                    ok = False
-                    break
-                text = text.replace(old, new, 1)
-            if not ok:
-                verdicts.append((name, "PATTERN NOT FOUND"))
-                print(f"{name}\n    PATTERN NOT FOUND\n", flush=True)
-                continue
-            # See `check()`: a multi-edit defect can cancel itself out. Running
-            # the suite against unmodified source would report `NO TEST FAILED`
-            # — an accusation against the tests for a question they were never
-            # asked. Refuse to run instead, and give the failure its own name.
-            if text == snap[path].decode("utf-8"):
-                verdicts.append((name, "*** PATCH IS A NO-OP ***"))
-                print(f"{name}\n    *** PATCH IS A NO-OP ***\n", flush=True)
+            # `apply_to` folds together the two refusals: a pattern that no
+            # longer matches, and (see `check()`) a multi-edit defect that
+            # cancels itself out. Running the suite against unmodified source
+            # would report `NO TEST FAILED` — an accusation against the tests
+            # for a question they were never asked. Which of the two it was is
+            # `--check`'s to report, in seconds and without a toolchain; here
+            # the only thing that matters is that the suite is not consulted.
+            text, why = apply_to(snap, path, edits)
+            if text is None:
+                verdicts.append((name, why))
+                print(f"{name}\n    {why}\n", flush=True)
                 continue
             (ROOT / path).write_text(text, encoding="utf-8", newline="")
 
@@ -14979,15 +15802,7 @@ def main():
             verdicts.append((name, verdict))
             print(f"{name}\n    {verdict}\n", flush=True)
     finally:
-        bad = []
-        for f in files:
-            (ROOT / f).write_bytes(snap[f])
-            if hashlib.sha256((ROOT / f).read_bytes()).hexdigest() != digest[f]:
-                bad.append(f)
-        if bad:
-            print(f"!!! NOT RESTORED: {bad}")
-            sys.exit(2)
-        print("restored: all files match their recorded SHA-256")
+        restore(files, snap, digest)
 
     print("\n=== summary ===")
     for name, verdict in verdicts:

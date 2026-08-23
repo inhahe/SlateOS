@@ -50401,7 +50401,7 @@ guarantee, and on Windows the failure mode would be a sharing violation in
 whichever of the two processes lost the race. Wait for `[run-timeout] child
 exited` before running any cargo command against the same target directory.
 
-**Part 2 progress. 36 of 49 modules converted.**
+**Part 2 progress. 37 of 49 modules converted.**
 
 - [x] `security_dialog.rs` — 29 constants, done 2026-08-22. The method above
   survived contact: the sweep lives in `gui/desktop/src/palette_check.rs` as
@@ -52564,6 +52564,92 @@ exited` before running any cargo command against the same target directory.
       catcher census above is unchanged by it: the four add three more to the
       pin table, one each to the two-mode sweep, the deleted-constant list, the
       accent count and the transparency test.
+- [x] `snap.rs` — 10 constants over 16 colour sites in three public renderers,
+  done 2026-08-23. Thirty-six tests in the module (eight new), harness defects
+  Ax56–Yx57 (fifty-one).
+  - **This module is where the palette's own numbers came from, which makes it
+    the one module that could be converted by accident.** `mod theme` here held
+    `ZONE_FILL` at alpha 50, `ZONE_HIGHLIGHT` at 90 and `ZONE_BORDER` at 160,
+    and `appearance::wash` ships `FILL = 50`, `HIGHLIGHT = 90`, `EDGE = 150` —
+    `Palette::selection_border`'s doc comment names snap zones as its caller.
+    So three of the ten constants were *already* the palette rung, written out
+    by hand, and one (160 against 150) was the copy having drifted ten units
+    from the original. The conversion closes that drift rather than preserving
+    it: a copy that agrees is still a copy, and this one had already begun to
+    disagree.
+  - **Five judgements, recorded in the module's own `# Colour` doc section**,
+    because each is a place where "read it from the palette" does not by itself
+    say *which* role:
+    1. **A snap zone follows the accent.** It is a selection — the thing the
+       drop will land in — so it moves with the user's accent, and the three
+       rungs become `selection_fill`, `selection_border` and `highlight_fill`.
+       This is the **opposite** answer from `screen_capture`'s transport
+       buttons one module earlier, and deliberately so: red-records is a code a
+       user decodes, a highlighted drop target is a selection a user points at.
+       The distinction is "does the colour *mean* something specific" versus
+       "does this colour mean *this one is chosen*".
+    2. **The zone labels are lettered for the scrim, not for the mode.** They
+       sit on `p.scrim()`, which is black in both modes on purpose (§525
+       decision 3), so `readable_on(p.scrim())` is the correct ink and `p.text`
+       is the plausible wrong one — it would put dark grey on near-black under
+       the light theme. The test pins the near-white endpoint by hand and
+       asserts `ink != p.text`, which is module 32's tautology lesson and
+       module 36's endpoint-pinning practice applied together.
+    3. **The picker is a panel and obeys the transparency setting.** Its
+       background was frozen at `rgba(30, 30, 46, 230)` and its hover at
+       `rgba(69, 71, 90, 200)` — the frozen-transparency finding for the
+       **third** consecutive module, after `hotkeys.rs` and `screen_capture.rs`.
+       Both become `panel_bg()` / `panel_hover()`.
+    4. **The scrim was tinted and should not have been.** `OVERLAY_SCRIM` was
+       `rgba(30, 30, 46, 140)` — Mocha `base` at the scrim alpha — so in light
+       mode the backdrop behind the zone grid would have *lightened* the
+       desktop instead of pushing it back. `p.scrim()` is `rgba(0, 0, 0, 140)`
+       and does the job in both modes. This is the same class of bug as module
+       36's near-black lettering: a value that is right in the palette it was
+       written in and wrong in the other one, invisible until the other one
+       exists.
+    5. **A hue against a rung, never a hue against a hue.** The picker's active
+       preset is `p.accent` and its inactive presets are `p.overlay0` — a grey
+       rung, not `p.lavender`. `AccentColor` offers Lavender, so an inactive
+       marker in lavender would be *identical* to an active one for any user
+       who picked that accent. The test iterates all fourteen named accents in
+       both modes and asserts the two are present and distinct; a fixture with
+       a single off-palette accent would pass while the shipped Lavender broke.
+  - The picker's drop shadow stays `rgba(0, 0, 0, 100)` rather than
+    `p.shadow()`'s 120, and that is a deliberate keep: the picker is a small
+    popup, not a window, and the lighter shadow is a size judgement rather than
+    a copy of the palette. It is declared in the module docs so the next reader
+    does not "fix" it.
+  - **The transparency test pins what must *not* follow the setting**, not only
+    what must. Sweeping `panel_alpha` across 255 / 200 / 160 and asserting the
+    background and hover track it is half the claim; the other half is that the
+    shadow (`rgba(0,0,0,100)`) and the scrim (`rgba(0,0,0,140)`) do **not**.
+    Module 36's dot clause is the same shape — a fix that made everything
+    follow the setting would satisfy the first half and be wrong.
+  - **Lesson 19 is now closed in the harness rather than in a habit.**
+    `scripts/reintro-palette.py` grew a third mode, `--compile [names…]`, which
+    applies each selected defect, runs `cargo check -p <pkg> --all-targets`,
+    restores, and reports `builds` / `DOES NOT COMPILE` / `NOT APPLIED`. That
+    is precisely the question `--check` cannot answer — module 36's four broken
+    defects passed `--check` and were found an hour into the run they had
+    already invalidated. Minutes instead of an hour, and it is a preflight for
+    every future module rather than a rule someone has to remember.
+    - `--all-targets` and not a bare `cargo check`: several defects reinstate a
+      constant whose only remaining reader is the test module, so checking the
+      lib alone would miss exactly the errors these defects cause.
+    - Applying a defect is now one function, `apply_to`, shared by all three
+      modes — so what a preflight vets is literally what the run runs, rather
+      than a second implementation that can drift from it. It returns the
+      *reason* a defect could not be introduced, which keeps `PATTERN NOT
+      FOUND` and `PATCH IS A NO-OP` reported apart: a missing pattern is source
+      that moved under the defect, a no-op is the defect arguing with itself.
+    - `--compile` restores after **each** defect rather than at the end, and
+      still runs under the same SHA-256-verified whole-snapshot rewrite in a
+      `finally`. An interrupted preflight therefore leaves at most one file
+      patched, and that one gets put back too.
+    - It is a preflight, not a gate. The real run still detects a broken defect
+      (`DID NOT COMPILE`); what this buys is learning it before the run whose
+      result it would spoil has been started.
 
 **Trigger:** this is not blocked on anything. It is sequenced after the shell
 event loop (`TD-C-THE-SHELL-CAN-DRAW-ITSELF-AND-NOBODY-CAN-ASK-IT-TO`) only

@@ -53,7 +53,9 @@ use std::path::Path;
 use std::process;
 
 use coreutils::errmsg::strerror;
-use ere::{MatchLimit, Regex, bre};
+// Aliased: this file already has a `Syntax` — the `-G`/`-E`/`-F` selector —
+// and `ere::Syntax` is the dialect that selector maps *onto*.
+use ere::{MatchLimit, Regex, Syntax as EreSyntax, bre};
 
 /// Which language the patterns are written in.
 #[derive(Clone, Copy, Default)]
@@ -320,7 +322,17 @@ fn compile_patterns(patterns: &[Vec<u8>], opts: &Options) -> Result<Vec<Pat>, St
         }
         let compiled = match opts.syntax {
             Syntax::Basic => bre::compile(p, opts.ignore_case),
-            Syntax::Extended => Regex::new_flags(p, opts.ignore_case),
+            // `-E` is *egrep* syntax, which is not the POSIX-extended syntax
+            // the same engine gives `osh`, `find -regextype posix-extended`
+            // and `awk`. The two differ on what happens to nonsense: GNU
+            // `grep -E '*a'` warns and matches "a", and `grep -E 'a{b}'`
+            // matches the text `a{b}`, where POSIX-extended refuses both.
+            // Compiling grep's patterns in the stricter dialect would refuse
+            // patterns GNU grep runs. See `ere::Syntax` for the measured table.
+            Syntax::Extended => Regex::new_syntax(p, opts.ignore_case, EreSyntax::EGREP),
+            // `-F` escapes every metacharacter before it gets here, so no
+            // pattern reaching this arm can contain the constructs the two
+            // dialects disagree about.
             Syntax::Fixed => Regex::new_flags(&quote_ere(p), opts.ignore_case),
         };
         match compiled {

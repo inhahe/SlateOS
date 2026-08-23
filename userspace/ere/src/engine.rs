@@ -378,6 +378,66 @@ impl PosixClass {
 
 // ---- Parser -----------------------------------------------------------------
 
+/// Which ERE dialect a pattern is written in.
+///
+/// The grammar is the same in both; what differs is what happens to two kinds
+/// of nonsense. That is not a distinction this crate invented — it is glibc's
+/// `reg_syntax_t` bits, and our callers genuinely want different ones:
+/// `osh`'s `[[ =~ ]]`, `find -regextype posix-extended`, `sed -E` and `awk`
+/// want [`Syntax::POSIX_EXTENDED`], while `grep -E` wants [`Syntax::EGREP`].
+///
+/// The two-caller problem is real and was measured, not assumed. Against
+/// glibc 2.39 / findutils 4.9.0 / grep 3.11, in `C.UTF-8`:
+///
+/// | pattern | `find -regextype posix-extended` | `grep -E` |
+/// |---|---|---|
+/// | `*a` `+a` `?a` `{2}a` `{b}a` `{}a` `{1,2,3}a` `{a` | `REG_BADRPT` | accepted, warned about, matches `a` |
+/// | `a{b}` `a{` `a{2` `a{1,` `a{1,b}` `a{,b}` | `REG_EBRACE`/`REG_BADBR` | accepted, the `{` is a literal |
+/// | `a{}` `a{1,2,3}` `a{1,0}` | `REG_BADBR` | `REG_BADBR` — same |
+/// | `a{99999999}` | `REG_ESIZE` | `REG_ESIZE` — same |
+/// | `(` `((a)` | `REG_EPAREN` | `REG_EPAREN` — same |
+/// | `)` `a)` `a**` `a{,3}` `a|` `|a` `(|a)` | accepted | accepted — same |
+///
+/// A `grep` built on the POSIX-extended reading refuses patterns GNU `grep`
+/// runs, which is the failure the difference exists to prevent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Syntax {
+    /// A quantifier with nothing to quantify repeats the empty expression
+    /// instead of being an error, so `*a` is `a` and `{2}a` is `a`.
+    ///
+    /// glibc's `RE_CONTEXT_INDEP_OPS` without `RE_CONTEXT_INVALID_OPS`.
+    pub context_indep_ops: bool,
+    /// A `{` that does not open a well-formed interval is a literal brace
+    /// instead of an error, so `a{b}` matches the four characters `a{b}`.
+    ///
+    /// glibc's `RE_INVALID_INTERVAL_ORD`. Note that it does *not* excuse every
+    /// malformed interval: a `{…}` whose content is present but wrong — `a{}`,
+    /// `a{1,2,3}`, `a{1,0}` — is still `REG_BADBR` under both dialects, and
+    /// `a{99999999}` is still `REG_ESIZE`. Only the forms glibc *rolls back*
+    /// become literals; see [`EParser::parse_brace`].
+    pub invalid_interval_ord: bool,
+}
+
+impl Syntax {
+    /// `RE_SYNTAX_POSIX_EXTENDED`: what `osh`, `find`, `sed -E` and `awk` use.
+    pub const POSIX_EXTENDED: Syntax = Syntax {
+        context_indep_ops: false,
+        invalid_interval_ord: false,
+    };
+
+    /// `RE_SYNTAX_EGREP` as GNU `grep -E` applies it.
+    pub const EGREP: Syntax = Syntax {
+        context_indep_ops: true,
+        invalid_interval_ord: true,
+    };
+}
+
+impl Default for Syntax {
+    fn default() -> Self {
+        Self::POSIX_EXTENDED
+    }
+}
+
 /// One bound of a `{m,n}` interval as [`EParser::fetch_number`] read it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum BraceNum {
@@ -406,6 +466,9 @@ struct EParser {
     /// It exists only to answer whether a `)` closes a group or is an ordinary
     /// character — see [`EParser::parse_concat`].
     depth: usize,
+    /// Which dialect's answer to give for the two kinds of nonsense that
+    /// distinguish them — see [`Syntax`].
+    syntax: Syntax,
 }
 
 impl EParser {
@@ -504,15 +567,46 @@ impl EParser {
 
     /// Parse one atom and every quantifier stacked on it.
     fn parse_repeat(&mut self) -> Result<Node, EreError> {
-        // A quantifier has to have something to quantify. `RE_CONTEXT_INVALID_OPS`
-        // is set in `RE_SYNTAX_POSIX_EXTENDED`, so glibc rejects `*a`, `?a`,
-        // `{2}a` and — because an alternation branch and a group each start a
-        // fresh expression — `a|*b` and `(*a)` too. (`grep -E` accepts all of
-        // those with a warning, because egrep syntax sets `RE_CONTEXT_INDEP_OPS`
-        // instead. This crate implements the POSIX-extended answer, which is
-        // also bash's and findutils'.)
         if is_quantifier_start(self.peek_ascii()) {
-            return Err(nothing_to_repeat());
+            // A quantifier has to have something to quantify — under
+            // `RE_SYNTAX_POSIX_EXTENDED`, where `RE_CONTEXT_INVALID_OPS` makes
+            // it `REG_BADRPT`. glibc rejects `*a`, `?a`, `{2}a` and — because
+            // an alternation branch and a group each start a fresh expression
+            // — `a|*b` and `(*a)` too. Every *malformed* interval in this
+            // position gets the same `REG_BADRPT` rather than its own brace
+            // error, `{b}a` and `{}a` and `{a` included: measured against
+            // findutils 4.9.0, which reports "Invalid preceding regular
+            // expression" for all of them.
+            if !self.syntax.context_indep_ops {
+                return Err(nothing_to_repeat());
+            }
+            // Under egrep syntax the quantifier repeats the *empty*
+            // expression, which is grep's dfa.c reading (its `atom()` emits
+            // `EMPTY` when the token is already a repetition operator) and is
+            // what grep actually prints: `grep -E '{2}a'` warns and then
+            // matches every line containing `a`, exactly as `grep -E 'a'`
+            // does.
+            //
+            // A brace that will not parse is a literal `{` here, never an
+            // error, even for the `a{}` and `a{1,2,3}` shapes that *are*
+            // errors after a real atom. That asymmetry is GNU's, not ours:
+            // grep decides accept/reject with glibc's `regcomp`, which at the
+            // start of an expression skips the offending token instead of
+            // judging it, and decides what *matches* with dfa.c, which makes
+            // it a literal. `grep -E '{}a'` and `grep -E '{1,2,3}a'` therefore
+            // exit 1 with no diagnostic, while `grep -E 'a{}'` exits 2 —
+            // measured, all three.
+            let mark = self.pos;
+            match self.parse_quantifier() {
+                Ok(Some((min, max))) => {
+                    let node = repeat(Node::Empty, min, max);
+                    return self.stack_quantifiers(node);
+                }
+                // A `{` that rolled back to a literal; fall through to
+                // `parse_atom`, which will take it as one.
+                Ok(None) => {}
+                Err(_) => self.pos = mark,
+            }
         }
         let atom = self.parse_atom()?;
         self.stack_quantifiers(atom)
@@ -531,24 +625,14 @@ impl EParser {
         while let Some((min, max)) = self.parse_quantifier()? {
             // `^` is an assertion, not an atom, so glibc reports `^*` and
             // `a^*b` the way it reports a leading `*`. `$` it does accept.
-            if matches!(node, Node::Start) {
+            // Under egrep syntax nothing here is an error at all, and `^*`
+            // becomes the anchor repeated zero-or-more times — which is why
+            // `grep -E 'a^*b'` matches "ab": zero repetitions of an assertion
+            // that can never hold is the empty string.
+            if matches!(node, Node::Start) && !self.syntax.context_indep_ops {
                 return Err(nothing_to_repeat());
             }
-            node = if max == Some(0) {
-                // `a{0}` is not an error and does not delete anything: it is an
-                // expression matching the empty string, which is why
-                // `[[ b =~ a{0} ]]` succeeds and `a{0}b` matches "b". The old
-                // reading — that the atom was deleted and an emptied run was
-                // then an error — made `a{0}` and `(a{0})` fail to compile,
-                // which neither bash nor findutils does.
-                Node::Empty
-            } else {
-                Node::Repeat {
-                    node: Box::new(node),
-                    min,
-                    max,
-                }
-            };
+            node = repeat(node, min, max);
         }
         Ok(node)
     }
@@ -568,7 +652,12 @@ impl EParser {
                 self.bump(1);
                 Ok(Some((0, Some(1))))
             }
-            Some('{') => self.parse_brace().map(Some),
+            // `parse_brace` answers `None` when the `{` is not an interval at
+            // all, which under egrep syntax means it is an ordinary character.
+            // That is the same `None` this function uses for "no quantifier
+            // here", and deliberately so: to the caller the two are the same
+            // fact — the cursor has not moved and the next thing is an atom.
+            Some('{') => self.parse_brace(),
             _ => Ok(None),
         }
     }
@@ -591,7 +680,19 @@ impl EParser {
     /// sane" — which is why the scan below runs to the `}` before judging
     /// anything. An absent lower bound is zero (`{,3}` is `{0,3}` and `{,}` is
     /// `{0,}`), which POSIX does not require and glibc nonetheless does.
-    fn parse_brace(&mut self) -> Result<(usize, Option<usize>), EreError> {
+    ///
+    /// Under [`Syntax::EGREP`] the first two rows are not errors: glibc's
+    /// `RE_INVALID_INTERVAL_ORD` makes it *roll back* to where the `{` was and
+    /// hand the brace on as an ordinary character, which is reported here as
+    /// `Ok(None)`. Only the `-2` ("this is not a count") cases roll back;
+    /// `a{}`, `a{1,2,3}`, `a{1,0}` and `a{99999999}` stay errors in both
+    /// dialects, because glibc has already committed to reading an interval by
+    /// the time it checks them. That is exactly why the rollback is expressed
+    /// as a return value from the middle of this function rather than as "try
+    /// it and reset the cursor if anything at all goes wrong" — the two halves
+    /// of glibc's error set behave differently and the difference is the whole
+    /// point.
+    fn parse_brace(&mut self) -> Result<Option<(usize, Option<usize>)>, EreError> {
         let unmatched = || {
             EreError::new(
                 RegCode::UnmatchedBrace,
@@ -604,6 +705,14 @@ impl EParser {
                 b"invalid interval in regex".to_vec(),
             )
         };
+        let open = self.pos;
+        // Rewind to the `{` and report it as no interval at all.
+        macro_rules! rollback {
+            () => {{
+                self.pos = open;
+                return Ok(None);
+            }};
+        }
         self.bump(1); // consume '{'
 
         let (first, stop) = self.fetch_number();
@@ -614,6 +723,9 @@ impl EParser {
             BraceNum::Absent if stop == BraceStop::Comma => 0,
             BraceNum::Absent => return Err(bad()),
             BraceNum::Invalid => {
+                if self.syntax.invalid_interval_ord {
+                    rollback!();
+                }
                 return Err(if stop == BraceStop::End {
                     unmatched()
                 } else {
@@ -631,6 +743,9 @@ impl EParser {
                     // `{m,}` — an absent upper bound is no bound.
                     BraceNum::Absent => (None, stop),
                     BraceNum::Invalid => {
+                        if self.syntax.invalid_interval_ord {
+                            rollback!();
+                        }
                         return Err(if stop == BraceStop::End {
                             unmatched()
                         } else {
@@ -659,7 +774,7 @@ impl EParser {
                 b"repetition count too large".to_vec(),
             ));
         }
-        Ok((min, max))
+        Ok(Some((min, max)))
     }
 
     /// glibc's `fetch_number`: read one bound of an interval, consuming the
@@ -768,12 +883,19 @@ impl EParser {
                 }
                 Ok(Node::Lit(unescape(e)))
             }
-            // Only `parse_quantifier` may consume a `{`, and `parse_repeat`
-            // rejects one that reaches an atom slot, so this is unreachable —
-            // but a literal brace here would silently resurrect the lenient
-            // reading glibc does not have. `UnmatchedBrace` is the right code
-            // for it anyway: a `{` in this position had no `}` to reach.
-            Some('{') => Err(EreError::new(
+            // Under POSIX-extended syntax only `parse_quantifier` may consume
+            // a `{`, and `parse_repeat` rejects one that reaches an atom slot,
+            // so this is unreachable — but a literal brace here would silently
+            // resurrect the lenient reading glibc does not have.
+            // `UnmatchedBrace` is the right code for it anyway: a `{` in this
+            // position had no `}` to reach.
+            //
+            // Under egrep syntax it is reachable and it *is* a literal: the
+            // brace got here because `parse_brace` rolled back, which is
+            // `RE_INVALID_INTERVAL_ORD` saying the character was never an
+            // interval. Falling through to the literal arm below is the whole
+            // of the difference for `grep -E 'a{b}'`.
+            Some('{') if !self.syntax.invalid_interval_ord => Err(EreError::new(
                 RegCode::UnmatchedBrace,
                 b"invalid interval in regex".to_vec(),
             )),
@@ -916,6 +1038,25 @@ impl EParser {
 /// turn out to be malformed — that is an error either way, never a literal.
 fn is_quantifier_start(c: Option<char>) -> bool {
     matches!(c, Some('*' | '+' | '?' | '{'))
+}
+
+/// Wrap `node` in a `{min,max}` repetition.
+///
+/// `a{0}` is not an error and does not delete anything: it is an expression
+/// matching the empty string, which is why `[[ b =~ a{0} ]]` succeeds and
+/// `a{0}b` matches "b". An earlier reading — that the atom was deleted and an
+/// emptied run was then an error — made `a{0}` and `(a{0})` fail to compile,
+/// which neither bash nor findutils does.
+fn repeat(node: Node, min: usize, max: Option<usize>) -> Node {
+    if max == Some(0) {
+        Node::Empty
+    } else {
+        Node::Repeat {
+            node: Box::new(node),
+            min,
+            max,
+        }
+    }
 }
 
 /// The error for a quantifier with nothing to quantify.
@@ -1235,11 +1376,25 @@ impl Regex {
     /// # Errors
     /// Returns [`EreError`] on a syntax error, as [`Regex::new`].
     pub fn new_flags(pattern: BStr<'_>, ci: bool) -> Result<Regex, EreError> {
+        Self::new_syntax(pattern, ci, Syntax::POSIX_EXTENDED)
+    }
+
+    /// Compile an ERE pattern in a chosen dialect.
+    ///
+    /// Only `grep -E` wants anything but [`Syntax::POSIX_EXTENDED`]; see
+    /// [`Syntax`] for the measured table of what differs and why one engine
+    /// cannot serve both callers with one answer.
+    ///
+    /// # Errors
+    /// Returns [`EreError`] on a syntax error, as [`Regex::new`] — though
+    /// which patterns are syntax errors is part of what `syntax` selects.
+    pub fn new_syntax(pattern: BStr<'_>, ci: bool, syntax: Syntax) -> Result<Regex, EreError> {
         let mut parser = EParser {
             chars: bytes::chars(pattern).collect(),
             pos: 0,
             ngroups: 0,
             depth: 0,
+            syntax,
         };
         let ast = parser.parse()?;
         let ngroups = parser.ngroups;
@@ -2410,6 +2565,116 @@ mod tests {
         bad("(");
         bad("((a)");
         bad("(a");
+    }
+
+    /// Compile in egrep syntax.
+    fn ge(pat: &str) -> Result<Regex, EreError> {
+        Regex::new_syntax(pat.as_bytes(), false, Syntax::EGREP)
+    }
+
+    /// Match in egrep syntax — see [`m`] for why the `unwrap`s are the point.
+    fn me(pat: &str, s: &str) -> bool {
+        ge(pat).unwrap().is_match(s.as_bytes()).unwrap()
+    }
+
+    /// Under egrep syntax a quantifier with nothing to quantify repeats the
+    /// empty expression instead of being an error.
+    ///
+    /// Measured against GNU grep 3.11 in `C.UTF-8`: each pattern below exits 0
+    /// (after a `warning: … at start of expression` on stderr) and prints every
+    /// line the same pattern *without* the leading operator would print. The
+    /// same patterns are `REG_BADRPT` under `RE_SYNTAX_POSIX_EXTENDED`, which
+    /// [`rejects_what_glibc_rejects`] pins — the two tests are the same survey
+    /// run in the two dialects and are meant to be read together.
+    #[test]
+    fn egrep_lets_a_quantifier_repeat_nothing() {
+        for pat in ["*a", "+a", "?a", "{2}a", "{,}a"] {
+            assert!(ge(pat).is_ok(), "{pat:?} should compile under egrep");
+            assert!(me(pat, "xa"), "{pat:?} should match \"xa\"");
+            assert!(!me(pat, "b"), "{pat:?} should not match \"b\"");
+            assert!(
+                Regex::new(pat.as_bytes()).is_err(),
+                "{pat:?} must stay an error under posix-extended"
+            );
+        }
+        // A group and an alternation branch each begin a fresh expression, so
+        // the operator has nothing before it there either.
+        assert!(me("(*a)", "xa"));
+        assert!(me("a|*b", "b"));
+        // `^*` is the anchor repeated, and zero repetitions of an assertion is
+        // the empty string — which is why `grep -E 'a^*b'` matches "ab" even
+        // though a `^` in the middle of a pattern can never hold.
+        assert!(me("^*", "b"));
+        assert!(me("a^*b", "ab"));
+    }
+
+    /// Under egrep syntax a `{` that opens no interval is an ordinary
+    /// character.
+    ///
+    /// glibc's `RE_INVALID_INTERVAL_ORD`. The dividing line is not "is this
+    /// interval sensible" but "did glibc get far enough to commit to reading
+    /// one": `a{b}` rolls back to a literal, `a{}` does not. Measured — every
+    /// row below is a `grep -E` run whose output was the literal line and
+    /// nothing else, or an exit-2 diagnostic.
+    #[test]
+    fn egrep_reads_a_malformed_interval_as_a_literal_brace() {
+        for pat in [
+            "a{b}", "a{", "a{2", "a{1,b}", "a{1,", "a{,b}", "a{1,2b}", "{b}a",
+        ] {
+            assert!(ge(pat).is_ok(), "{pat:?} should compile under egrep");
+            assert!(me(pat, pat), "{pat:?} should match itself literally");
+            assert!(
+                Regex::new(pat.as_bytes()).is_err(),
+                "{pat:?} must stay an error under posix-extended"
+            );
+        }
+        // `{}a` and `{1,2,3}a` are the two shapes that are an error *after* an
+        // atom and a literal *before* one. GNU is two engines — glibc decides
+        // whether to reject, dfa.c decides what matches — and at the start of
+        // an expression glibc skips the token instead of judging it, so no
+        // rejection ever happens and dfa's literal reading is what runs.
+        for pat in ["{}a", "{1,2,3}a"] {
+            assert!(me(pat, pat), "{pat:?} should match itself literally");
+        }
+        // Committed-to intervals stay errors in both dialects.
+        for pat in ["a{}", "a{1,2,3}", "a{1,0}", "a{99999999}"] {
+            assert!(ge(pat).is_err(), "{pat:?} must stay an error under egrep");
+            assert!(Regex::new(pat.as_bytes()).is_err());
+        }
+        // And a well-formed interval still means what it means.
+        assert!(me("^a{2,}$", "aa"));
+        assert!(!me("^a{2,}$", "a"));
+        assert!(me("^a{1}{2}$", "aa"));
+        assert!(me("^a{,3}$", ""));
+    }
+
+    /// Everything the two dialects agree about, checked in both.
+    ///
+    /// Worth its own test because the temptation when adding a dialect is to
+    /// fork more than actually differs. Only two things do; these are the
+    /// neighbours of those two, and they must not move.
+    #[test]
+    fn the_dialects_differ_in_exactly_two_places() {
+        for pat in [")", "a)", "a**", "a{,3}", "a{2,}", "a|", "|a", "(|a)", ""] {
+            assert!(ge(pat).is_ok(), "{pat:?} should compile under egrep");
+            assert!(
+                Regex::new(pat.as_bytes()).is_ok(),
+                "{pat:?} should compile under posix-extended"
+            );
+        }
+        for pat in ["(", "((a)", "(a", "a[", "a\\"] {
+            assert!(ge(pat).is_err(), "{pat:?} should fail under egrep");
+            assert!(
+                Regex::new(pat.as_bytes()).is_err(),
+                "{pat:?} should fail under posix-extended"
+            );
+        }
+        // An unopened `)` is the literal character in both.
+        assert!(me("^a)$", "a)"));
+        assert!(m("^a)$", "a)"));
+        // The default is the strict dialect, so nothing that does not ask for
+        // egrep can drift into it.
+        assert_eq!(Syntax::default(), Syntax::POSIX_EXTENDED);
     }
 
     #[test]

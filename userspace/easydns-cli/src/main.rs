@@ -1,6 +1,7 @@
 #![deny(clippy::all)]
 //! easydns-cli — Slate OS personality CLI for easyDNS, the Canadian civil-liberties registrar.
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -110,8 +111,7 @@ fn cmd_domains() {
     println!("  by default redact registrant information per CIRA policy");
     println!("  unless you're a business owner who chooses to publish.");
     println!();
-    println!("LIFETIME PRICING TIER")
-    ;
+    println!("LIFETIME PRICING TIER");
     println!("  easyDNS offers (in selected promo periods) extended-pricing");
     println!("  options where renewals are locked at registration price for");
     println!("  the life of a corporate plan — a hedge against future");
@@ -238,17 +238,47 @@ fn run_easydns(args: &[String], prog: &str) -> i32 {
         return 0;
     };
     match sub.as_str() {
-        "help" | "-h" | "--help" => { print_help(prog); 0 }
-        "version" | "-V" | "--version" => { print_version(); 0 }
-        "about" => { cmd_about(); 0 }
-        "dns" => { cmd_dns(); 0 }
-        "domains" => { cmd_domains(); 0 }
-        "civil" => { cmd_civil(); 0 }
-        "api" => { cmd_api(); 0 }
-        "backupmx" => { cmd_backupmx(); 0 }
-        "plans" => { cmd_plans(); 0 }
+        "help" | "-h" | "--help" => {
+            print_help(prog);
+            0
+        }
+        "version" | "-V" | "--version" => {
+            print_version();
+            0
+        }
+        "about" => {
+            cmd_about();
+            0
+        }
+        "dns" => {
+            cmd_dns();
+            0
+        }
+        "domains" => {
+            cmd_domains();
+            0
+        }
+        "civil" => {
+            cmd_civil();
+            0
+        }
+        "api" => {
+            cmd_api();
+            0
+        }
+        "backupmx" => {
+            cmd_backupmx();
+            0
+        }
+        "plans" => {
+            cmd_plans();
+            0
+        }
         other => {
-            eprintln!("{prog}: unknown subcommand '{other}'. Try '{prog} help'.");
+            eprintln!(
+                "{prog}: unknown subcommand {}. Try '{prog} help'.",
+                quoteaf_os(other)
+            );
             2
         }
     }

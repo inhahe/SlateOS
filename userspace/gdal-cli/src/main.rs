@@ -4,11 +4,16 @@
 //!
 //! Multi-personality: `gdalinfo`, `gdal_translate`, `gdalwarp`, `ogr2ogr`, `ogrinfo`, `gdalsrsinfo`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_gdalinfo(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
@@ -23,7 +28,11 @@ fn run_gdalinfo(args: &[String]) -> i32 {
         println!("GDAL 3.8.3, released 2024/01/04");
         return 0;
     }
-    let file = args.iter().find(|a| !a.starts_with('-')).map(|s| s.as_str()).unwrap_or("raster.tif");
+    let file = args
+        .iter()
+        .find(|a| !a.starts_with('-'))
+        .map(|s| s.as_str())
+        .unwrap_or("raster.tif");
     println!("Driver: GTiff/GeoTIFF");
     println!("Files: {}", file);
     println!("Size is 4096, 4096");
@@ -48,7 +57,11 @@ fn run_gdal_translate(args: &[String]) -> i32 {
         println!("  -projwin ULX ULY LRX LRY  Spatial subset");
         return 0;
     }
-    let src = args.iter().find(|a| !a.starts_with('-')).map(|s| s.as_str()).unwrap_or("input.tif");
+    let src = args
+        .iter()
+        .find(|a| !a.starts_with('-'))
+        .map(|s| s.as_str())
+        .unwrap_or("input.tif");
     println!("Input file size is 4096x4096");
     println!("Translating {} ...", src);
     println!("0...10...20...30...40...50...60...70...80...90...100 - done.");
@@ -64,7 +77,11 @@ fn run_gdalwarp(args: &[String]) -> i32 {
         println!("  -tr XRES YRES  Target resolution");
         return 0;
     }
-    let src = args.iter().find(|a| !a.starts_with('-')).map(|s| s.as_str()).unwrap_or("input.tif");
+    let src = args
+        .iter()
+        .find(|a| !a.starts_with('-'))
+        .map(|s| s.as_str())
+        .unwrap_or("input.tif");
     println!("Processing {} ...", src);
     println!("Creating output file...");
     println!("0...10...20...30...40...50...60...70...80...90...100 - done.");
@@ -98,8 +115,15 @@ fn run_ogrinfo(args: &[String]) -> i32 {
         println!("GDAL 3.8.3, released 2024/01/04");
         return 0;
     }
-    let file = args.iter().find(|a| !a.starts_with('-')).map(|s| s.as_str()).unwrap_or("data.gpkg");
-    println!("INFO: Open of '{}' using driver 'GPKG' successful.", file);
+    let file = args
+        .iter()
+        .find(|a| !a.starts_with('-'))
+        .map(|s| s.as_str())
+        .unwrap_or("data.gpkg");
+    println!(
+        "INFO: Open of {} using driver 'GPKG' successful.",
+        quoteaf_os(file)
+    );
     println!("1: buildings (Polygon)");
     println!("2: roads (Line String)");
     println!("3: points_of_interest (Point)");
@@ -111,7 +135,11 @@ fn run_gdalsrsinfo(args: &[String]) -> i32 {
         println!("Usage: gdalsrsinfo [OPTIONS] SRS_DEF");
         return 0;
     }
-    let srs = args.iter().find(|a| !a.starts_with('-')).map(|s| s.as_str()).unwrap_or("EPSG:4326");
+    let srs = args
+        .iter()
+        .find(|a| !a.starts_with('-'))
+        .map(|s| s.as_str())
+        .unwrap_or("EPSG:4326");
     println!("PROJ.4 : +proj=longlat +datum=WGS84 +no_defs");
     println!("OGC WKT2:");
     println!("GEOGCRS[\"WGS 84\",");
@@ -124,7 +152,10 @@ fn run_gdalsrsinfo(args: &[String]) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "gdalinfo".to_string());
+    let prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "gdalinfo".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = match prog.as_str() {
         "gdal_translate" => run_gdal_translate(&rest),
@@ -139,7 +170,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_gdalinfo};
+    use super::{basename, run_gdalinfo, strip_ext};
 
     #[test]
     fn basename_strips_path() {

@@ -4,6 +4,7 @@
 //!
 //! Multi-personality: `espeak`, `espeak-ng`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -68,16 +69,30 @@ fn run_espeak(args: &[String], ng: bool) -> i32 {
     }
 
     if args.iter().any(|a| a == "--languages") {
-        println!("Available languages: af an bg bs ca cs cy da de el en en-gb en-us es et fa fi fr ga gd grc hi hr hu hy id is it ja ka kn ko ku la lv mk ml mr ms ne nl no pa pl pt pt-br ro ru sk sl sq sr sv sw ta te tr vi zh zh-yue");
+        println!(
+            "Available languages: af an bg bs ca cs cy da de el en en-gb en-us es et fa fi fr ga gd grc hi hr hu hy id is it ja ka kn ko ku la lv mk ml mr ms ne nl no pa pl pt pt-br ro ru sk sl sq sr sv sw ta te tr vi zh zh-yue"
+        );
         return 0;
     }
 
-    let voice = args.windows(2).find(|w| w[0] == "-v").map(|w| w[1].as_str()).unwrap_or("en");
-    let speed = args.windows(2).find(|w| w[0] == "-s").map(|w| w[1].as_str()).unwrap_or("175");
+    let voice = args
+        .windows(2)
+        .find(|w| w[0] == "-v")
+        .map(|w| w[1].as_str())
+        .unwrap_or("en");
+    let speed = args
+        .windows(2)
+        .find(|w| w[0] == "-s")
+        .map(|w| w[1].as_str())
+        .unwrap_or("175");
     let show_phonemes = args.iter().any(|a| a == "-x" || a == "-X");
-    let wav_output = args.windows(2).find(|w| w[0] == "-w").map(|w| w[1].as_str());
+    let wav_output = args
+        .windows(2)
+        .find(|w| w[0] == "-w")
+        .map(|w| w[1].as_str());
 
-    let text: Vec<&str> = args.iter()
+    let text: Vec<&str> = args
+        .iter()
         .filter(|a| !a.starts_with('-'))
         .map(|s| s.as_str())
         .collect();
@@ -86,21 +101,46 @@ fn run_espeak(args: &[String], ng: bool) -> i32 {
         println!("  h@l'oU w'3:ld");
     }
 
+    // Every interpolated value below is a raw argv string -- `-w`, `-v`, `-s`
+    // and the positional text -- and none is ever parsed, so `speed` is as
+    // forgeable as the path is. The hand-written quotes wrapped the path
+    // alone, which quoted nothing and left three unquoted names on the same
+    // line.
     if let Some(wav) = wav_output {
-        let input = if text.is_empty() { "(stdin)" } else { &text.join(" ") };
-        println!("Writing to '{}': voice={}, speed={} wpm", wav, voice, speed);
-        println!("  Text: {}", input);
+        let input = if text.is_empty() {
+            "(stdin)"
+        } else {
+            &text.join(" ")
+        };
+        println!(
+            "Writing to {}: voice={}, speed={} wpm",
+            quoteaf_os(wav),
+            quoteaf_os(voice),
+            quoteaf_os(speed)
+        );
+        println!("  Text: {}", quoteaf_os(input));
     } else if text.is_empty() {
-        println!("{}: reading from stdin (voice={}, speed={} wpm)...", name, voice, speed);
+        println!(
+            "{}: reading from stdin (voice={}, speed={} wpm)...",
+            name,
+            quoteaf_os(voice),
+            quoteaf_os(speed)
+        );
     } else {
-        println!("Speaking: \"{}\" (voice={}, speed={} wpm)", text.join(" "), voice, speed);
+        println!(
+            "Speaking: {} (voice={}, speed={} wpm)",
+            quoteaf_os(text.join(" ")),
+            quoteaf_os(voice),
+            quoteaf_os(speed)
+        );
     }
     0
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first()
+    let prog = args
+        .first()
         .map(|s| strip_ext(basename(s)).to_string())
         .unwrap_or_else(|| "espeak".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
@@ -114,7 +154,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_espeak};
+    use super::{basename, run_espeak, strip_ext};
 
     #[test]
     fn basename_strips_path() {

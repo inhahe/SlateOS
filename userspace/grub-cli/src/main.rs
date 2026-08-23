@@ -5,6 +5,7 @@
 //! Multi-personality: `grub-install`, `grub-mkconfig`, `update-grub`,
 //! `grub-set-default`, `grub-editenv`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -32,8 +33,15 @@ fn run_grub_install(args: &[String]) -> i32 {
         return 0;
     }
 
-    let device = args.iter().find(|a| !a.starts_with('-')).map(|s| s.as_str()).unwrap_or("/dev/sda");
-    let efi = args.iter().find(|a| a.starts_with("--efi-directory=")).is_some();
+    let device = args
+        .iter()
+        .find(|a| !a.starts_with('-'))
+        .map(|s| s.as_str())
+        .unwrap_or("/dev/sda");
+    let efi = args
+        .iter()
+        .find(|a| a.starts_with("--efi-directory="))
+        .is_some();
 
     println!("Installing for x86_64-efi platform.");
     if efi {
@@ -80,21 +88,26 @@ fn run_grub_editenv(args: &[String]) -> i32 {
         println!("Commands: create, list, set NAME=VALUE, unset NAME");
         return 0;
     }
-    let subcmd = args.iter().find(|a| !a.starts_with('-') && !a.contains('/')).map(|s| s.as_str()).unwrap_or("list");
+    let subcmd = args
+        .iter()
+        .find(|a| !a.starts_with('-') && !a.contains('/'))
+        .map(|s| s.as_str())
+        .unwrap_or("list");
     match subcmd {
         "list" => {
             println!("saved_entry=0");
             println!("next_entry=");
         }
         "create" => println!("Environment block created."),
-        _ => println!("grub-editenv: operation '{}' complete", subcmd),
+        _ => println!("grub-editenv: operation {} complete", quoteaf_os(subcmd)),
     }
     0
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first()
+    let prog = args
+        .first()
         .map(|s| strip_ext(basename(s)).to_string())
         .unwrap_or_else(|| "grub-install".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
@@ -111,7 +124,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_grub_install};
+    use super::{basename, run_grub_install, strip_ext};
 
     #[test]
     fn basename_strips_path() {

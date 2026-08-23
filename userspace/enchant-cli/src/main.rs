@@ -4,6 +4,7 @@
 //!
 //! Multi-personality: `enchant-2`, `enchant-lsmod-2`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -34,7 +35,11 @@ fn run_enchant(args: &[String]) -> i32 {
         return 0;
     }
 
-    let dict = args.windows(2).find(|w| w[0] == "-d").map(|w| w[1].as_str()).unwrap_or("en_US");
+    let dict = args
+        .windows(2)
+        .find(|w| w[0] == "-d")
+        .map(|w| w[1].as_str())
+        .unwrap_or("en_US");
     let list_mode = args.iter().any(|a| a == "-l");
     let pipe_mode = args.iter().any(|a| a == "-a");
 
@@ -64,7 +69,7 @@ fn run_enchant_lsmod(args: &[String]) -> i32 {
 
     if let Some(pos) = args.iter().position(|a| a == "-lang") {
         let lang = args.get(pos + 1).map(|s| s.as_str()).unwrap_or("en_US");
-        println!("Providers for '{}':", lang);
+        println!("Providers for {}:", quoteaf_os(lang));
         println!("  hunspell  Hunspell Provider (en_US)");
         println!("  aspell    Aspell Provider (en)");
     } else {
@@ -79,7 +84,8 @@ fn run_enchant_lsmod(args: &[String]) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first()
+    let prog = args
+        .first()
         .map(|s| strip_ext(basename(s)).to_string())
         .unwrap_or_else(|| "enchant-2".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
@@ -93,7 +99,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_enchant};
+    use super::{basename, run_enchant, strip_ext};
 
     #[test]
     fn basename_strips_path() {

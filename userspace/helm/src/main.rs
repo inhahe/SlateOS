@@ -4,6 +4,7 @@
 //!
 //! Single personality: `helm`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -35,10 +36,16 @@ fn run_helm(args: Vec<String>) -> i32 {
             println!("  --version   Show version");
             0
         }
-        "version" | "--version" => { println!("v3.14.0+g (Slate OS)"); 0 }
+        "version" | "--version" => {
+            println!("v3.14.0+g (Slate OS)");
+            0
+        }
         "install" => {
             let name = cmd_args.first().map(|s| s.as_str()).unwrap_or("myrelease");
-            let chart = cmd_args.get(1).map(|s| s.as_str()).unwrap_or("stable/nginx");
+            let chart = cmd_args
+                .get(1)
+                .map(|s| s.as_str())
+                .unwrap_or("stable/nginx");
             println!("NAME: {}", name);
             println!("LAST DEPLOYED: Thu May 22 10:00:00 2025");
             println!("NAMESPACE: default");
@@ -91,7 +98,9 @@ fn run_helm(args: Vec<String>) -> i32 {
                     println!("stable    https://charts.helm.sh/stable");
                     println!("bitnami   https://charts.bitnami.com/bitnami");
                 }
-                "update" => println!("...Successfully got an update from the \"stable\" chart repository"),
+                "update" => {
+                    println!("...Successfully got an update from the \"stable\" chart repository")
+                }
                 "remove" => println!("\"repo\" has been removed from your repositories"),
                 _ => println!("repo {}: (simulated)", sub),
             }
@@ -102,8 +111,12 @@ fn run_helm(args: Vec<String>) -> i32 {
             let query = cmd_args.get(1).map(|s| s.as_str()).unwrap_or("nginx");
             println!("NAME                  CHART VERSION   APP VERSION   DESCRIPTION");
             println!("bitnami/nginx         15.0.0          1.25.0        NGINX web server");
-            println!("bitnami/nginx-ingress 10.0.0          1.10.0        NGINX Ingress Controller");
-            println!("({} search for '{}')", sub, query);
+            println!(
+                "bitnami/nginx-ingress 10.0.0          1.10.0        NGINX Ingress Controller"
+            );
+            // Both are argv words -- the search kind and the search term --
+            // and the hand-written quotes wrapped only the second.
+            println!("({} search for {})", quoteaf_os(sub), quoteaf_os(query));
             0
         }
         "create" => {
@@ -111,16 +124,35 @@ fn run_helm(args: Vec<String>) -> i32 {
             println!("Creating {}", name);
             0
         }
-        "template" => { println!("---\n# Source: mychart/templates/deployment.yaml\napiVersion: apps/v1\nkind: Deployment\n(simulated)"); 0 }
-        "lint" => { println!("==> Linting mychart\n[INFO] Chart.yaml: icon is recommended\n\n1 chart(s) linted, 0 chart(s) failed"); 0 }
-        "package" => { println!("Successfully packaged chart and saved it to: mychart-0.1.0.tgz"); 0 }
+        "template" => {
+            println!(
+                "---\n# Source: mychart/templates/deployment.yaml\napiVersion: apps/v1\nkind: Deployment\n(simulated)"
+            );
+            0
+        }
+        "lint" => {
+            println!(
+                "==> Linting mychart\n[INFO] Chart.yaml: icon is recommended\n\n1 chart(s) linted, 0 chart(s) failed"
+            );
+            0
+        }
+        "package" => {
+            println!("Successfully packaged chart and saved it to: mychart-0.1.0.tgz");
+            0
+        }
         "show" => {
             let sub = cmd_args.first().map(|s| s.as_str()).unwrap_or("chart");
             println!("({} info — simulated)", sub);
             0
         }
-        "rollback" => { println!("Rollback was a success! (simulated)"); 0 }
-        other => { eprintln!("Error: unknown command \"{}\"", other); 1 }
+        "rollback" => {
+            println!("Rollback was a success! (simulated)");
+            0
+        }
+        other => {
+            eprintln!("Error: unknown command \"{}\"", other);
+            1
+        }
     }
 }
 
@@ -133,7 +165,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_helm};
+    use super::run_helm;
 
     #[test]
     fn help_exits_zero() {

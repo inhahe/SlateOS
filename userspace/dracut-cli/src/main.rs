@@ -4,6 +4,7 @@
 //!
 //! Multi-personality: `dracut`, `lsinitrd`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -59,17 +60,31 @@ fn run_dracut(args: &[String]) -> i32 {
         return 0;
     }
 
-    let version = args.iter().find(|a| a.starts_with("--kver="))
+    let version = args
+        .iter()
+        .find(|a| a.starts_with("--kver="))
         .and_then(|a| a.strip_prefix("--kver="))
         .unwrap_or("1.0.0");
-    let image = args.iter().find(|a| !a.starts_with('-')).map(|s| s.as_str())
+    let image = args
+        .iter()
+        .find(|a| !a.starts_with('-'))
+        .map(|s| s.as_str())
         .unwrap_or("/boot/initramfs-1.0.0.img");
 
-    println!("dracut: generating '{}' for kernel {}", image, version);
+    // The image is a path taken positionally from argv and the kernel version
+    // comes from `--kver=`; the hand-written quotes wrapped the first and left
+    // the second bare, which quotes neither.
+    println!(
+        "dracut: generating {} for kernel {}",
+        quoteaf_os(image),
+        quoteaf_os(version)
+    );
     println!("dracut: including modules: base bash kernel-modules rootfs-block udev-rules");
     println!("dracut: including drivers: ext4 nvme ahci sd_mod");
     println!("dracut: compressing with xz");
-    println!("dracut: created {} (24.5 MB)", image);
+    // The same path again: leaving one of the two mentions bare would let the
+    // name forge a line here instead of six lines up.
+    println!("dracut: created {} (24.5 MB)", quoteaf_os(image));
     0
 }
 
@@ -81,7 +96,10 @@ fn run_lsinitrd(args: &[String]) -> i32 {
     }
 
     let modules = args.iter().any(|a| a == "-m");
-    let image = args.iter().find(|a| !a.starts_with('-')).map(|s| s.as_str())
+    let image = args
+        .iter()
+        .find(|a| !a.starts_with('-'))
+        .map(|s| s.as_str())
         .unwrap_or("/boot/initramfs-1.0.0.img");
 
     if modules {
@@ -114,7 +132,8 @@ fn run_lsinitrd(args: &[String]) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first()
+    let prog = args
+        .first()
         .map(|s| strip_ext(basename(s)).to_string())
         .unwrap_or_else(|| "dracut".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
@@ -128,7 +147,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_dracut};
+    use super::{basename, run_dracut, strip_ext};
 
     #[test]
     fn basename_strips_path() {

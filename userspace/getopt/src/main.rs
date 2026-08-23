@@ -8,6 +8,7 @@
 
 #![allow(unexpected_cfgs)]
 
+use quoting::quoteaf_os;
 use std::env;
 use std::fs;
 use std::io::{self, Read};
@@ -24,10 +25,7 @@ enum Mode {
 }
 
 fn detect_mode(argv0: &str) -> Mode {
-    let name = argv0
-        .rsplit(['/', '\\'])
-        .next()
-        .unwrap_or(argv0);
+    let name = argv0.rsplit(['/', '\\']).next().unwrap_or(argv0);
     let name = name.strip_suffix(".exe").unwrap_or(name);
     let lower = name.to_ascii_lowercase();
     match lower.as_str() {
@@ -186,11 +184,20 @@ fn parse_longopts(spec: &str) -> Vec<LongOpt> {
             continue;
         }
         if let Some(name) = part.strip_suffix("::") {
-            opts.push(LongOpt { name: name.to_string(), has_arg: ArgReq::Optional });
+            opts.push(LongOpt {
+                name: name.to_string(),
+                has_arg: ArgReq::Optional,
+            });
         } else if let Some(name) = part.strip_suffix(':') {
-            opts.push(LongOpt { name: name.to_string(), has_arg: ArgReq::Required });
+            opts.push(LongOpt {
+                name: name.to_string(),
+                has_arg: ArgReq::Required,
+            });
         } else {
-            opts.push(LongOpt { name: part.to_string(), has_arg: ArgReq::None });
+            opts.push(LongOpt {
+                name: part.to_string(),
+                has_arg: ArgReq::None,
+            });
         }
     }
     opts
@@ -268,7 +275,8 @@ fn parse_options(
                     result.push(format!("-{c}"));
                     // Check if it takes an argument
                     let next_is_colon = pos + 1 < opt_chars.len() && opt_chars[pos + 1] == ':';
-                    let next_is_double = next_is_colon && pos + 2 < opt_chars.len() && opt_chars[pos + 2] == ':';
+                    let next_is_double =
+                        next_is_colon && pos + 2 < opt_chars.len() && opt_chars[pos + 2] == ':';
 
                     if next_is_double {
                         // Optional argument (must be attached)
@@ -291,7 +299,11 @@ fn parse_options(
                         }
                     }
                 } else {
-                    eprintln!("getopt: invalid option -- '{c}'");
+                    // A genuine `char` off `.chars()`: one whole scalar value,
+                    // so `to_string` is lossless. Not the `byte as char` this
+                    // sweep keeps finding elsewhere, which is a Latin-1
+                    // widening that reports 0xE9 as an 'é' nobody typed.
+                    eprintln!("getopt: invalid option -- {}", quoteaf_os(c.to_string()));
                 }
                 j += 1;
             }
@@ -428,8 +440,7 @@ fn run_cksum() -> Result<(), String> {
                 .map_err(|e| format!("stdin: {e}"))?;
             (buf, None)
         } else {
-            let data = fs::read(file)
-                .map_err(|e| format!("{file}: {e}"))?;
+            let data = fs::read(file).map_err(|e| format!("{file}: {e}"))?;
             (data, Some(file.as_str()))
         };
 
@@ -495,8 +506,7 @@ fn run_sync() -> Result<(), String> {
     } else {
         // Sync specific files
         for file in &files {
-            let f = fs::File::open(file)
-                .map_err(|e| format!("{file}: {e}"))?;
+            let f = fs::File::open(file).map_err(|e| format!("{file}: {e}"))?;
             if data_only {
                 f.sync_data().map_err(|e| format!("{file}: {e}"))?;
             } else {
@@ -571,10 +581,7 @@ fn run() -> Result<(), String> {
 fn main() {
     if let Err(e) = run() {
         let prog = env::args().next().unwrap_or_else(|| "getopt".to_string());
-        let name = prog
-            .rsplit(['/', '\\'])
-            .next()
-            .unwrap_or(&prog);
+        let name = prog.rsplit(['/', '\\']).next().unwrap_or(&prog);
         eprintln!("{name}: {e}");
         process::exit(1);
     }
@@ -647,9 +654,18 @@ mod tests {
 
     #[test]
     fn test_parse_short_options() {
-        let result = parse_options("abc:", &[], &[
-            "-a".to_string(), "-b".to_string(), "-c".to_string(), "value".to_string()
-        ], "test", false);
+        let result = parse_options(
+            "abc:",
+            &[],
+            &[
+                "-a".to_string(),
+                "-b".to_string(),
+                "-c".to_string(),
+                "value".to_string(),
+            ],
+            "test",
+            false,
+        );
         assert!(result.contains(&"-a".to_string()));
         assert!(result.contains(&"-b".to_string()));
         assert!(result.contains(&"-c".to_string()));
@@ -666,9 +682,17 @@ mod tests {
     #[test]
     fn test_parse_long_options() {
         let longopts = parse_longopts("verbose,output:");
-        let result = parse_options("", &longopts, &[
-            "--verbose".to_string(), "--output".to_string(), "file.txt".to_string()
-        ], "test", false);
+        let result = parse_options(
+            "",
+            &longopts,
+            &[
+                "--verbose".to_string(),
+                "--output".to_string(),
+                "file.txt".to_string(),
+            ],
+            "test",
+            false,
+        );
         assert!(result.contains(&"--verbose".to_string()));
         assert!(result.contains(&"--output".to_string()));
         assert!(result.contains(&"file.txt".to_string()));
@@ -677,16 +701,26 @@ mod tests {
     #[test]
     fn test_parse_long_option_with_equals() {
         let longopts = parse_longopts("output:");
-        let result = parse_options("", &longopts, &["--output=file.txt".to_string()], "test", false);
+        let result = parse_options(
+            "",
+            &longopts,
+            &["--output=file.txt".to_string()],
+            "test",
+            false,
+        );
         assert!(result.contains(&"--output".to_string()));
         assert!(result.contains(&"file.txt".to_string()));
     }
 
     #[test]
     fn test_parse_separator() {
-        let result = parse_options("a", &[], &[
-            "-a".to_string(), "--".to_string(), "non-opt".to_string()
-        ], "test", false);
+        let result = parse_options(
+            "a",
+            &[],
+            &["-a".to_string(), "--".to_string(), "non-opt".to_string()],
+            "test",
+            false,
+        );
         let sep_pos = result.iter().position(|s| s == "--").unwrap_or(0);
         assert!(sep_pos > 0);
         assert!(result[sep_pos + 1..].contains(&"non-opt".to_string()));
@@ -694,9 +728,13 @@ mod tests {
 
     #[test]
     fn test_parse_non_option_args() {
-        let result = parse_options("a", &[], &[
-            "-a".to_string(), "file1".to_string(), "file2".to_string()
-        ], "test", false);
+        let result = parse_options(
+            "a",
+            &[],
+            &["-a".to_string(), "file1".to_string(), "file2".to_string()],
+            "test",
+            false,
+        );
         let sep_pos = result.iter().position(|s| s == "--").unwrap_or(0);
         let non_opts = &result[sep_pos + 1..];
         assert!(non_opts.contains(&"file1".to_string()));

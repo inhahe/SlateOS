@@ -4,11 +4,16 @@
 //!
 //! Multi-personality: `gitleaks`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_gitleaks(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
@@ -36,11 +41,17 @@ fn run_gitleaks(args: &[String]) -> i32 {
             println!("gitleaks 8.18.0");
         }
         "detect" => {
-            let source = args.windows(2).find(|w| w[0] == "--source")
-                .map(|w| w[1].as_str()).unwrap_or(".");
+            let source = args
+                .windows(2)
+                .find(|w| w[0] == "--source")
+                .map(|w| w[1].as_str())
+                .unwrap_or(".");
             let redact = args.iter().any(|a| a == "--redact");
-            let report_fmt = args.windows(2).find(|w| w[0] == "--report-format")
-                .map(|w| w[1].as_str()).unwrap_or("json");
+            let report_fmt = args
+                .windows(2)
+                .find(|w| w[0] == "--report-format")
+                .map(|w| w[1].as_str())
+                .unwrap_or("json");
 
             println!("    ○");
             println!("    │╲");
@@ -51,7 +62,11 @@ fn run_gitleaks(args: &[String]) -> i32 {
             println!("Scanning {} for secrets...", source);
             println!();
 
-            let secret_display = if redact { "REDACTED" } else { "AKIAIOSFODNN7EXAMPLE" };
+            let secret_display = if redact {
+                "REDACTED"
+            } else {
+                "AKIAIOSFODNN7EXAMPLE"
+            };
 
             println!("Finding:     {}", secret_display);
             println!("RuleID:      aws-access-key");
@@ -63,7 +78,11 @@ fn run_gitleaks(args: &[String]) -> i32 {
             println!("Date:        2024-01-15");
             println!();
 
-            let secret2 = if redact { "REDACTED" } else { "ghp_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" };
+            let secret2 = if redact {
+                "REDACTED"
+            } else {
+                "ghp_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+            };
             println!("Finding:     {}", secret2);
             println!("RuleID:      github-pat");
             println!("Entropy:     4.12");
@@ -82,14 +101,17 @@ fn run_gitleaks(args: &[String]) -> i32 {
             println!();
             println!("No leaks found in staged changes.");
         }
-        _ => println!("gitleaks: unknown command '{}'", subcmd),
+        _ => println!("gitleaks: unknown command {}", quoteaf_os(subcmd)),
     }
     0
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "gitleaks".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "gitleaks".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_gitleaks(&rest);
     process::exit(code);
@@ -97,7 +119,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_gitleaks};
+    use super::{basename, run_gitleaks, strip_ext};
 
     #[test]
     fn basename_strips_path() {

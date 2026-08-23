@@ -4,11 +4,16 @@
 //!
 //! Multi-personality: `dunst`, `dunstify`, `dunstctl`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_dunst(args: &[String], prog: &str) -> i32 {
     match prog {
@@ -23,7 +28,11 @@ fn run_dunst(args: &[String], prog: &str) -> i32 {
                 println!("  -C           Close notification");
                 return 0;
             }
-            let summary = args.iter().find(|a| !a.starts_with('-')).map(|s| s.as_str()).unwrap_or("Notification");
+            let summary = args
+                .iter()
+                .find(|a| !a.starts_with('-'))
+                .map(|s| s.as_str())
+                .unwrap_or("Notification");
             println!("Notification sent: {}", summary);
             return 0;
         }
@@ -54,7 +63,7 @@ fn run_dunst(args: &[String], prog: &str) -> i32 {
                 }
                 "close" => println!("Closed top notification."),
                 "close-all" => println!("Closed all notifications."),
-                _ => println!("dunstctl: '{}' completed", cmd),
+                _ => println!("dunstctl: {} completed", quoteaf_os(cmd)),
             }
             return 0;
         }
@@ -81,7 +90,10 @@ fn run_dunst(args: &[String], prog: &str) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "dunst".to_string());
+    let prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "dunst".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_dunst(&rest, &prog);
     process::exit(code);
@@ -89,7 +101,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_dunst};
+    use super::{basename, run_dunst, strip_ext};
 
     #[test]
     fn basename_strips_path() {

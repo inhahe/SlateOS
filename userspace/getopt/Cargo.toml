@@ -4,3 +4,7 @@ version = "0.1.0"
 edition = "2024"
 description = "SlateOS getopt/tsort/cksum - shell scripting helpers"
 [dependencies]
+# It interpolates `c` into "getopt: invalid option -- {}". That value is an
+# argv word, so it is whatever the user typed and not text this program
+# chose.
+quoting = { path = "../quoting" }

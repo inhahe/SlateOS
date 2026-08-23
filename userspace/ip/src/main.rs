@@ -22,6 +22,7 @@
 //! ip stats <iface>               Show interface statistics
 //! ```
 
+use quoting::quoteaf_os;
 use std::env;
 use std::fs;
 use std::process;
@@ -350,7 +351,11 @@ fn interface_from_net_if_info(info: &NetIfInfo) -> InterfaceInfo {
         state: if info.up { "up" } else { "down" }.to_string(),
         mac: fmt_mac(info.mac),
         mtu: 1500,
-        ip_addr: if has_ip { fmt_ipv4(info.ip) } else { String::new() },
+        ip_addr: if has_ip {
+            fmt_ipv4(info.ip)
+        } else {
+            String::new()
+        },
         netmask: if has_ip {
             fmt_ipv4(info.mask)
         } else {
@@ -557,40 +562,42 @@ fn read_interfaces() -> Vec<InterfaceInfo> {
 
     // Fallback: parse /proc/net/dev.
     if interfaces.is_empty()
-        && let Some(content) = read_file("/proc/net/dev") {
-            let mut skip_header = 2;
-            for line in content.lines() {
-                if skip_header > 0 {
-                    skip_header -= 1;
-                    continue;
-                }
-                let line = line.trim();
-                if let Some((name, stats)) = line.split_once(':') {
-                    let name = name.trim();
-                    let parts: Vec<u64> = stats.split_whitespace()
-                        .filter_map(|s| s.parse().ok())
-                        .collect();
+        && let Some(content) = read_file("/proc/net/dev")
+    {
+        let mut skip_header = 2;
+        for line in content.lines() {
+            if skip_header > 0 {
+                skip_header -= 1;
+                continue;
+            }
+            let line = line.trim();
+            if let Some((name, stats)) = line.split_once(':') {
+                let name = name.trim();
+                let parts: Vec<u64> = stats
+                    .split_whitespace()
+                    .filter_map(|s| s.parse().ok())
+                    .collect();
 
-                    let (ip_addr, netmask, broadcast) = get_iface_ip(name);
+                let (ip_addr, netmask, broadcast) = get_iface_ip(name);
 
-                    interfaces.push(InterfaceInfo {
-                        name: name.to_string(),
-                        state: "unknown".to_string(),
-                        mac: String::new(),
-                        mtu: 1500,
-                        ip_addr,
-                        netmask,
-                        broadcast,
-                        rx_bytes: parts.first().copied().unwrap_or(0),
-                        rx_packets: parts.get(1).copied().unwrap_or(0),
-                        rx_errors: parts.get(2).copied().unwrap_or(0),
-                        tx_bytes: parts.get(8).copied().unwrap_or(0),
-                        tx_packets: parts.get(9).copied().unwrap_or(0),
-                        tx_errors: parts.get(10).copied().unwrap_or(0),
-                    });
-                }
+                interfaces.push(InterfaceInfo {
+                    name: name.to_string(),
+                    state: "unknown".to_string(),
+                    mac: String::new(),
+                    mtu: 1500,
+                    ip_addr,
+                    netmask,
+                    broadcast,
+                    rx_bytes: parts.first().copied().unwrap_or(0),
+                    rx_packets: parts.get(1).copied().unwrap_or(0),
+                    rx_errors: parts.get(2).copied().unwrap_or(0),
+                    tx_bytes: parts.get(8).copied().unwrap_or(0),
+                    tx_packets: parts.get(9).copied().unwrap_or(0),
+                    tx_errors: parts.get(10).copied().unwrap_or(0),
+                });
             }
         }
+    }
 
     // Last resort: query the kernel directly. The kernel does not yet populate
     // /sys/class/net/ or /proc/net/dev, so without this the show paths would
@@ -640,7 +647,10 @@ fn read_routes() -> Vec<RouteEntry> {
     if let Some(content) = read_file("/proc/net/route") {
         let mut first = true;
         for line in content.lines() {
-            if first { first = false; continue; }
+            if first {
+                first = false;
+                continue;
+            }
             let parts: Vec<&str> = line.split_whitespace().collect();
             if parts.len() >= 8 {
                 let dest_hex = u32::from_str_radix(parts[1], 16).unwrap_or(0);
@@ -661,47 +671,50 @@ fn read_routes() -> Vec<RouteEntry> {
 
     // Also try our kernel's route format: /proc/net/routes.
     if routes.is_empty()
-        && let Some(content) = read_file("/proc/net/routes") {
-            for line in content.lines() {
-                let line = line.trim();
-                if line.is_empty() || line.starts_with('#') {
-                    continue;
-                }
-                // Format: dest/mask via gateway dev iface metric N
-                let parts: Vec<&str> = line.split_whitespace().collect();
-                if parts.len() >= 5 {
-                    let (dest, mask) = if let Some((d, m)) = parts[0].split_once('/') {
-                        (d.to_string(), cidr_to_mask(m))
-                    } else {
-                        (parts[0].to_string(), "255.255.255.255".to_string())
-                    };
-                    let gateway = if parts.len() > 2 && parts[1] == "via" {
-                        parts[2].to_string()
-                    } else {
-                        "0.0.0.0".to_string()
-                    };
-                    let iface = parts.iter()
-                        .position(|&s| s == "dev")
-                        .and_then(|i| parts.get(i + 1))
-                        .unwrap_or(&"?")
-                        .to_string();
-                    let metric = parts.iter()
-                        .position(|&s| s == "metric")
-                        .and_then(|i| parts.get(i + 1))
-                        .and_then(|s| s.parse().ok())
-                        .unwrap_or(0);
+        && let Some(content) = read_file("/proc/net/routes")
+    {
+        for line in content.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            // Format: dest/mask via gateway dev iface metric N
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            if parts.len() >= 5 {
+                let (dest, mask) = if let Some((d, m)) = parts[0].split_once('/') {
+                    (d.to_string(), cidr_to_mask(m))
+                } else {
+                    (parts[0].to_string(), "255.255.255.255".to_string())
+                };
+                let gateway = if parts.len() > 2 && parts[1] == "via" {
+                    parts[2].to_string()
+                } else {
+                    "0.0.0.0".to_string()
+                };
+                let iface = parts
+                    .iter()
+                    .position(|&s| s == "dev")
+                    .and_then(|i| parts.get(i + 1))
+                    .unwrap_or(&"?")
+                    .to_string();
+                let metric = parts
+                    .iter()
+                    .position(|&s| s == "metric")
+                    .and_then(|i| parts.get(i + 1))
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(0);
 
-                    routes.push(RouteEntry {
-                        destination: dest,
-                        gateway,
-                        mask,
-                        iface,
-                        metric,
-                        flags: String::new(),
-                    });
-                }
+                routes.push(RouteEntry {
+                    destination: dest,
+                    gateway,
+                    mask,
+                    iface,
+                    metric,
+                    flags: String::new(),
+                });
             }
         }
+    }
 
     // /proc/net/route(s) are not populated on Slate OS, so the live sources are
     // the kernel route table (SYS_NET_ROUTE_LIST, non-default routes) and the
@@ -788,7 +801,10 @@ fn read_arp() -> Vec<NeighEntry> {
     if let Some(content) = read_file("/proc/net/arp") {
         let mut first = true;
         for line in content.lines() {
-            if first { first = false; continue; }
+            if first {
+                first = false;
+                continue;
+            }
             let parts: Vec<&str> = line.split_whitespace().collect();
             if parts.len() >= 6 {
                 entries.push(NeighEntry {
@@ -852,9 +868,9 @@ fn cmd_link_show() {
 
     for (idx, iface) in interfaces.iter().enumerate() {
         let state_color = match iface.state.as_str() {
-            "up" => "\x1b[32m",    // green
-            "down" => "\x1b[31m",  // red
-            _ => "\x1b[33m",       // yellow
+            "up" => "\x1b[32m",   // green
+            "down" => "\x1b[31m", // red
+            _ => "\x1b[33m",      // yellow
         };
 
         println!(
@@ -879,9 +895,10 @@ fn cmd_addr_show(filter: Option<&str>) {
 
     for (idx, iface) in interfaces.iter().enumerate() {
         if let Some(f) = filter
-            && iface.name != f {
-                continue;
-            }
+            && iface.name != f
+        {
+            continue;
+        }
 
         println!(
             "{}: {}: <{}> mtu {}",
@@ -919,16 +936,30 @@ fn cmd_route_show() {
         return;
     }
 
-    println!("{:<18} {:<18} {:<18} {:<8} {:<8}",
-        "Destination", "Gateway", "Netmask", "Iface", "Metric");
-    println!("{:<18} {:<18} {:<18} {:<8} {:<8}",
-        "-----------", "-------", "-------", "-----", "------");
+    println!(
+        "{:<18} {:<18} {:<18} {:<8} {:<8}",
+        "Destination", "Gateway", "Netmask", "Iface", "Metric"
+    );
+    println!(
+        "{:<18} {:<18} {:<18} {:<8} {:<8}",
+        "-----------", "-------", "-------", "-----", "------"
+    );
 
     for r in &routes {
-        let dest = if r.destination == "0.0.0.0" { "default" } else { &r.destination };
-        let gw = if r.gateway == "0.0.0.0" { "*" } else { &r.gateway };
-        println!("{:<18} {:<18} {:<18} {:<8} {:<8}",
-            dest, gw, r.mask, r.iface, r.metric);
+        let dest = if r.destination == "0.0.0.0" {
+            "default"
+        } else {
+            &r.destination
+        };
+        let gw = if r.gateway == "0.0.0.0" {
+            "*"
+        } else {
+            &r.gateway
+        };
+        println!(
+            "{:<18} {:<18} {:<18} {:<8} {:<8}",
+            dest, gw, r.mask, r.iface, r.metric
+        );
     }
 }
 
@@ -940,8 +971,14 @@ fn cmd_neigh_show() {
         return;
     }
 
-    println!("{:<18} {:<20} {:<10} State", "Address", "HW Address", "Iface");
-    println!("{:<18} {:<20} {:<10} -----", "-------", "----------", "-----");
+    println!(
+        "{:<18} {:<20} {:<10} State",
+        "Address", "HW Address", "Iface"
+    );
+    println!(
+        "{:<18} {:<20} {:<10} -----",
+        "-------", "----------", "-----"
+    );
 
     for e in &entries {
         println!("{:<18} {:<20} {:<10} {}", e.ip, e.mac, e.iface, e.state);
@@ -965,7 +1002,7 @@ fn cmd_stats(iface_name: &str) {
     let iface = match interfaces.iter().find(|i| i.name == iface_name) {
         Some(i) => i,
         None => {
-            eprintln!("Interface '{}' not found", iface_name);
+            eprintln!("Interface {} not found", quoteaf_os(iface_name));
             process::exit(1);
         }
     };
@@ -979,11 +1016,19 @@ fn cmd_stats(iface_name: &str) {
     }
     println!();
     println!("  RX:");
-    println!("    Bytes:   {} ({})", iface.rx_bytes, format_bytes(iface.rx_bytes));
+    println!(
+        "    Bytes:   {} ({})",
+        iface.rx_bytes,
+        format_bytes(iface.rx_bytes)
+    );
     println!("    Packets: {}", iface.rx_packets);
     println!("    Errors:  {}", iface.rx_errors);
     println!("  TX:");
-    println!("    Bytes:   {} ({})", iface.tx_bytes, format_bytes(iface.tx_bytes));
+    println!(
+        "    Bytes:   {} ({})",
+        iface.tx_bytes,
+        format_bytes(iface.tx_bytes)
+    );
     println!("    Packets: {}", iface.tx_packets);
     println!("    Errors:  {}", iface.tx_errors);
 }
@@ -1427,13 +1472,7 @@ mod tests {
     #[test]
     fn test_build_config_record_addr_add() {
         // `ip addr add 10.0.2.42/24` -> IP + MASK fields set.
-        let rec = build_config_record(
-            Some([10, 0, 2, 42]),
-            prefix_to_mask(24),
-            None,
-            None,
-            None,
-        );
+        let rec = build_config_record(Some([10, 0, 2, 42]), prefix_to_mask(24), None, None, None);
         assert_eq!(&rec[0..4], &[10, 0, 2, 42]);
         assert_eq!(&rec[4..8], &[255, 255, 255, 0]);
         assert_eq!(rec[17], cfg_mask::IP | cfg_mask::MASK);

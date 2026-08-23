@@ -4,6 +4,7 @@
 //!
 //! Single personality: `deno`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -59,7 +60,10 @@ fn run_deno(args: Vec<String>) -> i32 {
             println!("> (REPL — simulated)");
         }
         "eval" => {
-            let code = args.get(1).map(|s| s.as_str()).unwrap_or("console.log('hello')");
+            let code = args
+                .get(1)
+                .map(|s| s.as_str())
+                .unwrap_or("console.log('hello')");
             println!("(eval: {})", code);
         }
         "info" => {
@@ -71,7 +75,7 @@ fn run_deno(args: Vec<String>) -> i32 {
             println!("({} — simulated)", cmd);
         }
         _ => {
-            eprintln!("Unknown subcommand '{}'. Use --help.", cmd);
+            eprintln!("Unknown subcommand {}. Use --help.", quoteaf_os(cmd));
             return 1;
         }
     }
@@ -87,7 +91,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_deno};
+    use super::run_deno;
 
     #[test]
     fn help_exits_zero() {

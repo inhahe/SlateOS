@@ -4,6 +4,7 @@
 //!
 //! Single personality: `jaeger-cli`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -52,7 +53,8 @@ fn run_jaeger(args: Vec<String>) -> i32 {
             0
         }
         "operations" => {
-            let svc = args.windows(2)
+            let svc = args
+                .windows(2)
                 .find(|w| w[0] == "--service")
                 .map(|w| w[1].as_str())
                 .unwrap_or("api-gateway");
@@ -65,16 +67,31 @@ fn run_jaeger(args: Vec<String>) -> i32 {
             0
         }
         "traces" => {
-            println!("Trace ID                         Service         Operation          Duration  Spans  Errors");
-            println!("──────────────────────────────── ────────────── ──────────────── ─────── ───── ──────");
-            println!("abc123def456789012345678901234    api-gateway    GET /api/users     45ms     8      0");
-            println!("def456abc789012345678901234567    api-gateway    POST /api/orders  123ms    12      0");
-            println!("789abc123def456012345678901234    api-gateway    GET /api/products  15ms     5      0");
-            println!("012def456abc789345678901234567    api-gateway    POST /api/orders  890ms    14      1");
+            println!(
+                "Trace ID                         Service         Operation          Duration  Spans  Errors"
+            );
+            println!(
+                "──────────────────────────────── ────────────── ──────────────── ─────── ───── ──────"
+            );
+            println!(
+                "abc123def456789012345678901234    api-gateway    GET /api/users     45ms     8      0"
+            );
+            println!(
+                "def456abc789012345678901234567    api-gateway    POST /api/orders  123ms    12      0"
+            );
+            println!(
+                "789abc123def456012345678901234    api-gateway    GET /api/products  15ms     5      0"
+            );
+            println!(
+                "012def456abc789345678901234567    api-gateway    POST /api/orders  890ms    14      1"
+            );
             0
         }
         "trace" => {
-            let id = args.get(1).map(|s| s.as_str()).unwrap_or("abc123def456789012345678901234");
+            let id = args
+                .get(1)
+                .map(|s| s.as_str())
+                .unwrap_or("abc123def456789012345678901234");
             println!("Trace: {}", id);
             println!("  Duration: 45ms");
             println!("  Services: 4");
@@ -88,7 +105,8 @@ fn run_jaeger(args: Vec<String>) -> i32 {
             0
         }
         "stats" => {
-            let svc = args.windows(2)
+            let svc = args
+                .windows(2)
                 .find(|w| w[0] == "--service")
                 .map(|w| w[1].as_str())
                 .unwrap_or("api-gateway");
@@ -106,7 +124,7 @@ fn run_jaeger(args: Vec<String>) -> i32 {
             if cmd.is_empty() {
                 eprintln!("Usage: jaeger-cli <command>. See --help.");
             } else {
-                eprintln!("Error: unknown command '{}'. See --help.", cmd);
+                eprintln!("Error: unknown command {}. See --help.", quoteaf_os(cmd));
             }
             1
         }
@@ -122,7 +140,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_jaeger};
+    use super::run_jaeger;
 
     #[test]
     fn help_exits_zero() {

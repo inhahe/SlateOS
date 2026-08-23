@@ -4,6 +4,7 @@
 //!
 //! Single personality: `flyway`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -57,17 +58,39 @@ fn run_flyway(args: Vec<String>) -> i32 {
             println!("Database: jdbc:postgresql://localhost:5432/mydb");
             println!("Schema version: 6");
             println!();
-            println!("+-----------+---------+------------------------+--------+---------------------+---------+");
-            println!("| Version   | State   | Description            | Type   | Installed On        | Time    |");
-            println!("+-----------+---------+------------------------+--------+---------------------+---------+");
-            println!("| 1         | Success | Create users table     | SQL    | 2024-01-10 10:00:00 | 0.045s  |");
-            println!("| 2         | Success | Create orders table    | SQL    | 2024-01-10 10:00:01 | 0.032s  |");
-            println!("| 3         | Success | Add email index        | SQL    | 2024-01-12 14:00:00 | 0.018s  |");
-            println!("| 4         | Success | Add products table     | SQL    | 2024-01-15 14:00:00 | 0.041s  |");
-            println!("| 5         | Success | Add product categories | SQL    | 2024-01-15 14:00:00 | 0.028s  |");
-            println!("| 6         | Success | Add user preferences   | SQL    | 2024-01-15 14:00:00 | 0.035s  |");
-            println!("| 7         | Pending | Add payment methods    | SQL    |                     |         |");
-            println!("+-----------+---------+------------------------+--------+---------------------+---------+");
+            println!(
+                "+-----------+---------+------------------------+--------+---------------------+---------+"
+            );
+            println!(
+                "| Version   | State   | Description            | Type   | Installed On        | Time    |"
+            );
+            println!(
+                "+-----------+---------+------------------------+--------+---------------------+---------+"
+            );
+            println!(
+                "| 1         | Success | Create users table     | SQL    | 2024-01-10 10:00:00 | 0.045s  |"
+            );
+            println!(
+                "| 2         | Success | Create orders table    | SQL    | 2024-01-10 10:00:01 | 0.032s  |"
+            );
+            println!(
+                "| 3         | Success | Add email index        | SQL    | 2024-01-12 14:00:00 | 0.018s  |"
+            );
+            println!(
+                "| 4         | Success | Add products table     | SQL    | 2024-01-15 14:00:00 | 0.041s  |"
+            );
+            println!(
+                "| 5         | Success | Add product categories | SQL    | 2024-01-15 14:00:00 | 0.028s  |"
+            );
+            println!(
+                "| 6         | Success | Add user preferences   | SQL    | 2024-01-15 14:00:00 | 0.035s  |"
+            );
+            println!(
+                "| 7         | Pending | Add payment methods    | SQL    |                     |         |"
+            );
+            println!(
+                "+-----------+---------+------------------------+--------+---------------------+---------+"
+            );
             0
         }
         "validate" => {
@@ -89,8 +112,11 @@ fn run_flyway(args: Vec<String>) -> i32 {
             0
         }
         "baseline" => {
-            let version = args.windows(2).find(|w| w[0] == "-baselineVersion")
-                .map(|w| w[1].as_str()).unwrap_or("1");
+            let version = args
+                .windows(2)
+                .find(|w| w[0] == "-baselineVersion")
+                .map(|w| w[1].as_str())
+                .unwrap_or("1");
             println!("Flyway Community Edition 10.6.0");
             println!("Database: jdbc:postgresql://localhost:5432/mydb");
             println!();
@@ -110,7 +136,7 @@ fn run_flyway(args: Vec<String>) -> i32 {
             if cmd.is_empty() {
                 eprintln!("Usage: flyway <command>. See --help.");
             } else {
-                eprintln!("Error: unknown command '{}'. See --help.", cmd);
+                eprintln!("Error: unknown command {}. See --help.", quoteaf_os(cmd));
             }
             1
         }
@@ -126,7 +152,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_flyway};
+    use super::run_flyway;
 
     #[test]
     fn help_exits_zero() {

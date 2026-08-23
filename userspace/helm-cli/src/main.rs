@@ -4,6 +4,7 @@
 //!
 //! Single personality: `helm`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -43,7 +44,9 @@ fn run_helm(args: Vec<String>) -> i32 {
     let cmd = args.first().map(|s| s.as_str()).unwrap_or("");
     match cmd {
         "version" => {
-            println!("version.BuildInfo{{Version:\"v3.14.0\", GitCommit:\"abc123\", GoVersion:\"go1.21.6\"}}");
+            println!(
+                "version.BuildInfo{{Version:\"v3.14.0\", GitCommit:\"abc123\", GoVersion:\"go1.21.6\"}}"
+            );
             0
         }
         "install" => {
@@ -118,8 +121,14 @@ fn run_helm(args: Vec<String>) -> i32 {
             let sub = args.get(1).map(|s| s.as_str()).unwrap_or("repo");
             let query = args.get(2).map(|s| s.as_str()).unwrap_or("nginx");
             println!("NAME                  CHART VERSION  APP VERSION  DESCRIPTION");
-            println!("bitnami/{}       15.4.0         1.25.3       Open source web server", query);
-            println!("stable/{}-ingress 4.9.0          1.9.5        Ingress controller", query);
+            println!(
+                "bitnami/{}       15.4.0         1.25.3       Open source web server",
+                query
+            );
+            println!(
+                "stable/{}-ingress 4.9.0          1.9.5        Ingress controller",
+                query
+            );
             let _ = sub;
             0
         }
@@ -140,7 +149,7 @@ fn run_helm(args: Vec<String>) -> i32 {
             if cmd.is_empty() {
                 eprintln!("Usage: helm <command>. See --help.");
             } else {
-                eprintln!("Error: unknown command '{}'. See --help.", cmd);
+                eprintln!("Error: unknown command {}. See --help.", quoteaf_os(cmd));
             }
             1
         }
@@ -156,7 +165,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_helm};
+    use super::run_helm;
 
     #[test]
     fn help_exits_zero() {

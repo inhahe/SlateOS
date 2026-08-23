@@ -4,6 +4,7 @@
 //!
 //! Multi-personality: `grpcurl`, `grpc_health_probe`, `grpc_cli`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -34,7 +35,8 @@ fn run_grpcurl(args: Vec<String>) -> i32 {
         return 0;
     }
 
-    let positional: Vec<&str> = args.iter()
+    let positional: Vec<&str> = args
+        .iter()
         .filter(|a| !a.starts_with('-'))
         .map(|s| s.as_str())
         .collect();
@@ -93,11 +95,15 @@ fn run_grpc_health_probe(args: Vec<String>) -> i32 {
         return 0;
     }
 
-    let addr = args.iter().position(|a| a == "-addr")
+    let addr = args
+        .iter()
+        .position(|a| a == "-addr")
         .and_then(|i| args.get(i + 1))
         .map(|s| s.as_str())
         .unwrap_or("localhost:443");
-    let service = args.iter().position(|a| a == "-service")
+    let service = args
+        .iter()
+        .position(|a| a == "-service")
         .and_then(|i| args.get(i + 1))
         .map(|s| s.as_str())
         .unwrap_or("");
@@ -139,7 +145,7 @@ fn run_grpc_cli(args: Vec<String>) -> i32 {
             println!("}}");
         }
         _ => {
-            eprintln!("Unknown command '{}'. Use --help.", cmd);
+            eprintln!("Unknown command {}. Use --help.", quoteaf_os(cmd));
             return 1;
         }
     }
@@ -153,7 +159,9 @@ fn main() {
         let bytes = s.as_bytes();
         let mut last_sep = 0;
         for (i, &b) in bytes.iter().enumerate() {
-            if b == b'/' || b == b'\\' { last_sep = i + 1; }
+            if b == b'/' || b == b'\\' {
+                last_sep = i + 1;
+            }
         }
         let base = &s[last_sep..];
         base.strip_suffix(".exe").unwrap_or(base).to_string()
@@ -169,7 +177,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_grpcurl};
+    use super::run_grpcurl;
 
     #[test]
     fn help_exits_zero() {

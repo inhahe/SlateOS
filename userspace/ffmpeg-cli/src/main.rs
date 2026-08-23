@@ -4,6 +4,7 @@
 //!
 //! Multi-personality: `ffmpeg`, `ffprobe`, `ffplay`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -64,22 +65,26 @@ fn run_ffmpeg(args: &[String]) -> i32 {
         return 0;
     }
 
-    let input = args.windows(2)
+    let input = args
+        .windows(2)
         .find(|w| w[0] == "-i")
         .map(|w| w[1].as_str())
         .unwrap_or("input.mp4");
 
-    let output = args.iter()
+    let output = args
+        .iter()
         .rfind(|a| !a.starts_with('-'))
         .map(|s| s.as_str())
         .unwrap_or("output.mp4");
 
-    let video_codec = args.windows(2)
+    let video_codec = args
+        .windows(2)
         .find(|w| w[0] == "-c:v")
         .map(|w| w[1].as_str())
         .unwrap_or("libx264");
 
-    let audio_codec = args.windows(2)
+    let audio_codec = args
+        .windows(2)
         .find(|w| w[0] == "-c:a")
         .map(|w| w[1].as_str())
         .unwrap_or("aac");
@@ -90,7 +95,10 @@ fn run_ffmpeg(args: &[String]) -> i32 {
     println!("    Stream #0:0: Video: h264, yuv420p, 1920x1080, 30 fps");
     println!("    Stream #0:1: Audio: aac, 48000 Hz, stereo, 192 kb/s");
     println!("  Output #0: {}", output);
-    println!("    Stream #0:0: Video: {}, yuv420p, 1920x1080", video_codec);
+    println!(
+        "    Stream #0:0: Video: {}, yuv420p, 1920x1080",
+        video_codec
+    );
     println!("    Stream #0:1: Audio: {}, 48000 Hz, stereo", audio_codec);
     println!();
     println!("frame= 9703 fps=120 q=28.0 size=  45056kB time=00:05:23.43 bitrate=1142.3kbits/s");
@@ -114,9 +122,12 @@ fn run_ffprobe(args: &[String]) -> i32 {
         return 0;
     }
 
-    let json = args.windows(2).any(|w| w[0] == "-print_format" && w[1] == "json");
+    let json = args
+        .windows(2)
+        .any(|w| w[0] == "-print_format" && w[1] == "json");
 
-    let file = args.iter()
+    let file = args
+        .iter()
         .rfind(|a| !a.starts_with('-'))
         .map(|s| s.as_str())
         .unwrap_or("input.mp4");
@@ -131,14 +142,20 @@ fn run_ffprobe(args: &[String]) -> i32 {
         println!("    \"bit_rate\": \"8543210\"");
         println!("  }},");
         println!("  \"streams\": [");
-        println!("    {{\"index\":0, \"codec_type\":\"video\", \"codec_name\":\"h264\", \"width\":1920, \"height\":1080, \"r_frame_rate\":\"30/1\"}},");
-        println!("    {{\"index\":1, \"codec_type\":\"audio\", \"codec_name\":\"aac\", \"sample_rate\":\"48000\", \"channels\":2}}");
+        println!(
+            "    {{\"index\":0, \"codec_type\":\"video\", \"codec_name\":\"h264\", \"width\":1920, \"height\":1080, \"r_frame_rate\":\"30/1\"}},"
+        );
+        println!(
+            "    {{\"index\":1, \"codec_type\":\"audio\", \"codec_name\":\"aac\", \"sample_rate\":\"48000\", \"channels\":2}}"
+        );
         println!("  ]");
         println!("}}");
     } else {
-        println!("Input #0, mov,mp4,m4a,3gp, from '{}':", file);
+        println!("Input #0, mov,mp4,m4a,3gp, from {}:", quoteaf_os(file));
         println!("  Duration: 00:05:23.45, start: 0.000000, bitrate: 8543 kb/s");
-        println!("  Stream #0:0(und): Video: h264 (High), yuv420p(tv, bt709), 1920x1080, 8000 kb/s, 30 fps");
+        println!(
+            "  Stream #0:0(und): Video: h264 (High), yuv420p(tv, bt709), 1920x1080, 8000 kb/s, 30 fps"
+        );
         println!("  Stream #0:1(und): Audio: aac (LC), 48000 Hz, stereo, fltp, 192 kb/s");
     }
     0
@@ -164,7 +181,8 @@ fn run_ffplay(args: &[String]) -> i32 {
         return 0;
     }
 
-    let file = args.iter()
+    let file = args
+        .iter()
         .rfind(|a| !a.starts_with('-'))
         .map(|s| s.as_str())
         .unwrap_or("input.mp4");
@@ -179,7 +197,10 @@ fn run_ffplay(args: &[String]) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let argv0 = args.first().cloned().unwrap_or_else(|| String::from("ffmpeg"));
+    let argv0 = args
+        .first()
+        .cloned()
+        .unwrap_or_else(|| String::from("ffmpeg"));
     let p = personality(&argv0);
     let rest: Vec<String> = args.into_iter().skip(1).collect();
 
@@ -203,7 +224,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_ffmpeg};
+    use super::run_ffmpeg;
 
     #[test]
     fn help_exits_zero() {

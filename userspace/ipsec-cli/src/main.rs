@@ -4,11 +4,16 @@
 //!
 //! Multi-personality: `ipsec`, `swanctl`, `strongswan`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_ipsec(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
@@ -38,8 +43,12 @@ fn run_ipsec(args: &[String]) -> i32 {
     match subcmd {
         "status" => {
             println!("Security Associations (1 up, 0 connecting):");
-            println!("    office-vpn[1]: ESTABLISHED 2 hours ago, 192.168.1.100[me]...10.0.0.1[office-gw]");
-            println!("    office-vpn{{1}}: INSTALLED, TUNNEL, reqid 1, ESP SPIs: c1a2b3d4_i e5f60718_o");
+            println!(
+                "    office-vpn[1]: ESTABLISHED 2 hours ago, 192.168.1.100[me]...10.0.0.1[office-gw]"
+            );
+            println!(
+                "    office-vpn{{1}}: INSTALLED, TUNNEL, reqid 1, ESP SPIs: c1a2b3d4_i e5f60718_o"
+            );
             println!("    office-vpn{{1}}:   10.0.0.0/8 === 192.168.1.0/24");
         }
         "statusall" => {
@@ -55,9 +64,13 @@ fn run_ipsec(args: &[String]) -> i32 {
             println!("  office-vpn:   child:  10.0.0.0/8 === 192.168.1.0/24 TUNNEL");
             println!();
             println!("Security Associations (1 up, 0 connecting):");
-            println!("  office-vpn[1]: ESTABLISHED 2 hours ago, 192.168.1.100[me]...10.0.0.1[office-gw]");
+            println!(
+                "  office-vpn[1]: ESTABLISHED 2 hours ago, 192.168.1.100[me]...10.0.0.1[office-gw]"
+            );
             println!("  office-vpn[1]: IKEv2 SPIs: aabbccdd11223344_i 55667788aabbccdd_o");
-            println!("  office-vpn{{1}}: INSTALLED, TUNNEL, reqid 1, ESP in UDP SPIs: c1a2b3d4_i e5f60718_o");
+            println!(
+                "  office-vpn{{1}}: INSTALLED, TUNNEL, reqid 1, ESP in UDP SPIs: c1a2b3d4_i e5f60718_o"
+            );
         }
         "start" => println!("Starting strongSwan 5.9.11 IPsec [starter]..."),
         "stop" => println!("Stopping strongSwan IPsec..."),
@@ -69,8 +82,14 @@ fn run_ipsec(args: &[String]) -> i32 {
         "up" => {
             let name = args.get(1).map(|s| s.as_str()).unwrap_or("office-vpn");
             println!("initiating IKE_SA {}[1] to 10.0.0.1", name);
-            println!("IKE_SA {}[1] established between 192.168.1.100[me]...10.0.0.1[office-gw]", name);
-            println!("CHILD_SA {}{{1}} established with SPIs c1a2b3d4_i e5f60718_o", name);
+            println!(
+                "IKE_SA {}[1] established between 192.168.1.100[me]...10.0.0.1[office-gw]",
+                name
+            );
+            println!(
+                "CHILD_SA {}{{1}} established with SPIs c1a2b3d4_i e5f60718_o",
+                name
+            );
         }
         "down" => {
             let name = args.get(1).map(|s| s.as_str()).unwrap_or("office-vpn");
@@ -79,7 +98,9 @@ fn run_ipsec(args: &[String]) -> i32 {
         }
         "listalgs" => {
             println!("List of registered IKE algorithms:");
-            println!("  encryption: AES_CBC-128 AES_CBC-256 AES_GCM_16-128 AES_GCM_16-256 CHACHA20_POLY1305");
+            println!(
+                "  encryption: AES_CBC-128 AES_CBC-256 AES_GCM_16-128 AES_GCM_16-256 CHACHA20_POLY1305"
+            );
             println!("  integrity:  HMAC_SHA2_256_128 HMAC_SHA2_384_192 HMAC_SHA2_512_256");
             println!("  prf:        PRF_HMAC_SHA2_256 PRF_HMAC_SHA2_384 PRF_HMAC_SHA2_512");
             println!("  dh-group:   CURVE_25519 ECP_256 ECP_384 MODP_2048 MODP_3072");
@@ -92,7 +113,7 @@ fn run_ipsec(args: &[String]) -> i32 {
             println!("  validity: not before May 01 00:00:00 2024, ok");
             println!("            not after  May 01 00:00:00 2025, ok");
         }
-        _ => println!("ipsec: command '{}' completed", subcmd),
+        _ => println!("ipsec: command {} completed", quoteaf_os(subcmd)),
     }
     0
 }
@@ -101,7 +122,9 @@ fn run_swanctl(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: swanctl [OPTIONS] COMMAND");
         println!();
-        println!("Commands: --list-sas, --list-conns, --list-certs, --initiate, --terminate, --load-all");
+        println!(
+            "Commands: --list-sas, --list-conns, --list-certs, --initiate, --terminate, --load-all"
+        );
         return 0;
     }
 
@@ -134,7 +157,10 @@ fn run_swanctl(args: &[String]) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "ipsec".to_string());
+    let prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "ipsec".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = match prog.as_str() {
         "swanctl" | "strongswan" => run_swanctl(&rest),
@@ -145,7 +171,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_ipsec};
+    use super::{basename, run_ipsec, strip_ext};
 
     #[test]
     fn basename_strips_path() {

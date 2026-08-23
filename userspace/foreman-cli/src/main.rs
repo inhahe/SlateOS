@@ -4,11 +4,16 @@
 //!
 //! Multi-personality: `foreman`, `hammer`, `foreman-rake`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_foreman(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -22,7 +27,10 @@ fn run_foreman(args: &[String], _prog: &str) -> i32 {
         println!("  --version       Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("foreman v3.9 (Slate OS)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("foreman v3.9 (Slate OS)");
+        return 0;
+    }
     println!("foreman: lifecycle management server");
     println!("  Hosts managed: 24");
     println!("  Host groups: 4");
@@ -44,7 +52,10 @@ fn run_hammer(args: &[String], _prog: &str) -> i32 {
         println!("  --version     Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("hammer v3.9 (Slate OS, Foreman CLI)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("hammer v3.9 (Slate OS, Foreman CLI)");
+        return 0;
+    }
     if args.len() >= 2 {
         println!("hammer: {} {} completed", args[0], args[1]);
     } else if args.len() == 1 && args[0] == "host" {
@@ -69,7 +80,7 @@ fn run_foreman_rake(args: &[String], _prog: &str) -> i32 {
         return 0;
     }
     if let Some(task) = args.first() {
-        println!("foreman-rake: running task '{}'", task);
+        println!("foreman-rake: running task {}", quoteaf_os(task));
         println!("  Status: completed");
     } else {
         println!("foreman-rake: no task specified");
@@ -79,7 +90,10 @@ fn run_foreman_rake(args: &[String], _prog: &str) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "foreman".to_string());
+    let prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "foreman".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = match prog.as_str() {
         "hammer" => run_hammer(&rest, &prog),
@@ -91,7 +105,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_foreman};
+    use super::{basename, run_foreman, strip_ext};
 
     #[test]
     fn basename_strips_path() {

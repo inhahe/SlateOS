@@ -7,6 +7,7 @@
 //!
 //! Single personality: `earlyoom`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -213,7 +214,7 @@ fn run_earlyoom(args: Vec<String>) -> i32 {
                 }
             }
             other => {
-                eprintln!("earlyoom: unknown option '{}'", other);
+                eprintln!("earlyoom: unknown option {}", quoteaf_os(other));
                 return 1;
             }
         }

@@ -4,11 +4,16 @@
 //!
 //! Multi-personality: `graphql`, `gql`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_graphql(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
@@ -43,21 +48,33 @@ fn run_graphql(args: &[String]) -> i32 {
             println!("Schema is valid. 15 types, 28 fields.");
         }
         "get-schema" => {
-            let endpoint = args.get(1).map(|s| s.as_str()).unwrap_or("http://localhost:4000/graphql");
+            let endpoint = args
+                .get(1)
+                .map(|s| s.as_str())
+                .unwrap_or("http://localhost:4000/graphql");
             println!("Downloading schema from {}...", endpoint);
             println!("Schema saved to schema.graphql");
         }
         "diff" => {
-            let old = args.get(1).map(|s| s.as_str()).unwrap_or("schema-v1.graphql");
-            let new = args.get(2).map(|s| s.as_str()).unwrap_or("schema-v2.graphql");
+            let old = args
+                .get(1)
+                .map(|s| s.as_str())
+                .unwrap_or("schema-v1.graphql");
+            let new = args
+                .get(2)
+                .map(|s| s.as_str())
+                .unwrap_or("schema-v2.graphql");
             println!("Comparing {} vs {}:", old, new);
             println!("  + Added: User.avatarUrl (String)");
             println!("  ~ Changed: User.name (String -> String!)");
             println!("  - Removed: User.legacy_id");
         }
         "query" => {
-            let endpoint = args.windows(2).find(|w| w[0] == "--endpoint")
-                .map(|w| w[1].as_str()).unwrap_or("http://localhost:4000/graphql");
+            let endpoint = args
+                .windows(2)
+                .find(|w| w[0] == "--endpoint")
+                .map(|w| w[1].as_str())
+                .unwrap_or("http://localhost:4000/graphql");
             println!("Querying {}...", endpoint);
             println!("{{");
             println!("  \"data\": {{");
@@ -68,14 +85,17 @@ fn run_graphql(args: &[String]) -> i32 {
             println!("  }}");
             println!("}}");
         }
-        _ => println!("graphql: '{}' completed", subcmd),
+        _ => println!("graphql: {} completed", quoteaf_os(subcmd)),
     }
     0
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "graphql".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "graphql".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_graphql(&rest);
     process::exit(code);
@@ -83,7 +103,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_graphql};
+    use super::{basename, run_graphql, strip_ext};
 
     #[test]
     fn basename_strips_path() {

@@ -4,6 +4,7 @@
 //!
 //! Single personality: `gcloud`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -81,7 +82,9 @@ fn run_gcloud(args: Vec<String>) -> i32 {
                     println!("ya29.A0ARrdaM...(truncated)");
                 }
                 _ => {
-                    eprintln!("Usage: gcloud auth <list|login|print-access-token|revoke>. See --help.");
+                    eprintln!(
+                        "Usage: gcloud auth <list|login|print-access-token|revoke>. See --help."
+                    );
                     return 1;
                 }
             }
@@ -103,7 +106,9 @@ fn run_gcloud(args: Vec<String>) -> i32 {
                     println!("Updated property [{}] to [{}].", key, val);
                 }
                 _ => {
-                    eprintln!("Usage: gcloud config <list|set|get-value|configurations>. See --help.");
+                    eprintln!(
+                        "Usage: gcloud config <list|set|get-value|configurations>. See --help."
+                    );
                     return 1;
                 }
             }
@@ -122,11 +127,16 @@ fn run_gcloud(args: Vec<String>) -> i32 {
                         }
                         "create" => {
                             let name = args.get(3).map(|s| s.as_str()).unwrap_or("new-instance");
-                            println!("Created [https://compute.googleapis.com/.../instances/{}].", name);
+                            println!(
+                                "Created [https://compute.googleapis.com/.../instances/{}].",
+                                name
+                            );
                             println!("NAME          ZONE           MACHINE_TYPE  STATUS");
                             println!("{}  us-central1-a  e2-medium     RUNNING", name);
                         }
-                        _ => { println!("Instance operation: {}", sub); }
+                        _ => {
+                            println!("Instance operation: {}", sub);
+                        }
                     }
                 }
                 "ssh" => {
@@ -136,7 +146,9 @@ fn run_gcloud(args: Vec<String>) -> i32 {
                     println!("Connected to {}.", name);
                 }
                 _ => {
-                    eprintln!("Usage: gcloud compute <instances|ssh|disks|images|...>. See --help.");
+                    eprintln!(
+                        "Usage: gcloud compute <instances|ssh|disks|images|...>. See --help."
+                    );
                     return 1;
                 }
             }
@@ -148,16 +160,24 @@ fn run_gcloud(args: Vec<String>) -> i32 {
                     let sub = args.get(2).map(|s| s.as_str()).unwrap_or("list");
                     match sub {
                         "list" => {
-                            println!("NAME          LOCATION       MASTER_VERSION  NUM_NODES  STATUS");
-                            println!("prod-cluster  us-central1    1.28.3-gke.100  6          RUNNING");
-                            println!("dev-cluster   us-east1       1.28.3-gke.100  3          RUNNING");
+                            println!(
+                                "NAME          LOCATION       MASTER_VERSION  NUM_NODES  STATUS"
+                            );
+                            println!(
+                                "prod-cluster  us-central1    1.28.3-gke.100  6          RUNNING"
+                            );
+                            println!(
+                                "dev-cluster   us-east1       1.28.3-gke.100  3          RUNNING"
+                            );
                         }
                         "get-credentials" => {
                             let name = args.get(3).map(|s| s.as_str()).unwrap_or("prod-cluster");
                             println!("Fetching cluster endpoint and auth data.");
                             println!("kubeconfig entry generated for {}.", name);
                         }
-                        _ => { println!("Cluster operation: {}", sub); }
+                        _ => {
+                            println!("Cluster operation: {}", sub);
+                        }
                     }
                 }
                 _ => {
@@ -195,11 +215,19 @@ fn run_gcloud(args: Vec<String>) -> i32 {
                     let sub = args.get(2).map(|s| s.as_str()).unwrap_or("list");
                     match sub {
                         "list" => {
-                            println!("SERVICE       REGION         URL                                    LAST DEPLOYED");
-                            println!("my-api        us-central1    https://my-api-abc123-uc.a.run.app     2024-01-15");
-                            println!("web-frontend  us-east1       https://web-frontend-def456-ue.a.run.app 2024-01-14");
+                            println!(
+                                "SERVICE       REGION         URL                                    LAST DEPLOYED"
+                            );
+                            println!(
+                                "my-api        us-central1    https://my-api-abc123-uc.a.run.app     2024-01-15"
+                            );
+                            println!(
+                                "web-frontend  us-east1       https://web-frontend-def456-ue.a.run.app 2024-01-14"
+                            );
                         }
-                        _ => { println!("Cloud Run services: {}", sub); }
+                        _ => {
+                            println!("Cloud Run services: {}", sub);
+                        }
                     }
                 }
                 "deploy" => {
@@ -208,7 +236,10 @@ fn run_gcloud(args: Vec<String>) -> i32 {
                     println!("  Building...");
                     println!("  Deploying...");
                     println!("  Setting IAM policy...");
-                    println!("Service [{}] revision [{}--00001-abc] has been deployed.", svc, svc);
+                    println!(
+                        "Service [{}] revision [{}--00001-abc] has been deployed.",
+                        svc, svc
+                    );
                     println!("Service URL: https://{}-abc123-uc.a.run.app", svc);
                 }
                 _ => {
@@ -222,7 +253,7 @@ fn run_gcloud(args: Vec<String>) -> i32 {
             if group.is_empty() {
                 eprintln!("Usage: gcloud <group> <command>. See --help.");
             } else {
-                eprintln!("Error: unknown group '{}'. See --help.", group);
+                eprintln!("Error: unknown group {}. See --help.", quoteaf_os(group));
             }
             1
         }
@@ -238,7 +269,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_gcloud};
+    use super::run_gcloud;
 
     #[test]
     fn help_exits_zero() {

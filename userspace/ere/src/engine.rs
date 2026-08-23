@@ -56,16 +56,107 @@ fn cat(parts: &[BStr<'_>]) -> Str {
     out
 }
 
+/// POSIX's classification of a pattern that would not compile — the `REG_*`
+/// codes, with glibc's own English for each.
+///
+/// This exists because "what is wrong with the pattern" and "what does a GNU
+/// utility print about it" are two different questions, and this crate had only
+/// been answering the first. Every consumer here is a work-alike of a GNU tool
+/// whose diagnostics are compared against the original, and all of them report a
+/// bad pattern by printing back whatever glibc's `re_compile_pattern` returned
+/// — one of the fourteen fixed sentences below and nothing else. Carrying the
+/// code rather than the sentence keeps [`EreError::detail`]'s more specific
+/// wording available for tests and for any caller that would rather be helpful
+/// than compatible.
+///
+/// The strings are transcribed from glibc's `re_error_msgid`, and the mapping
+/// from pattern to code is *measured* against findutils 4.9.0 on glibc 2.39 —
+/// see the `-regex` block in `scripts/find-diff.sh`, which pins every one of
+/// them. It is measured rather than reasoned because it is not reasonable: a
+/// pattern of just `[` is `REG_BADPAT`, while `[a` is `REG_EBRACK`, since glibc
+/// reaches its "premature end of pattern" path before it decides the bracket
+/// was the problem.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RegCode {
+    /// `REG_BADPAT`, which glibc also uses for a pattern that simply ran out.
+    BadPattern,
+    /// `REG_ECTYPE`: `[[:nosuch:]]`.
+    BadCharClass,
+    /// `REG_EESCAPE`: the pattern ends in a backslash.
+    TrailingBackslash,
+    /// `REG_ESUBREG`: `\9` with no ninth group.
+    BadBackReference,
+    /// `REG_EBRACK`: a `[` that is never closed.
+    UnmatchedBracket,
+    /// `REG_EPAREN`: a `(` or `\(` that is never closed.
+    UnmatchedParen,
+    /// `REG_ERPAREN`: a `\)` with nothing open. (Plain `)` is an *ordinary
+    /// character* in a POSIX ERE, not an error.)
+    UnmatchedRightParen,
+    /// `REG_EBRACE`: a `{` or `\{` that is never closed.
+    UnmatchedBrace,
+    /// `REG_BADBR`: closed, but the counts inside are not usable — `a{1,0}`.
+    BadBraceContent,
+    /// `REG_ERANGE`: `[z-a]`.
+    BadRangeEnd,
+    /// `REG_BADRPT`: a quantifier with nothing in front of it.
+    BadRepeat,
+    /// `REG_ESIZE`: the compiled program would be too large.
+    TooBig,
+}
+
+impl RegCode {
+    /// glibc's sentence for this code, byte for byte.
+    #[must_use]
+    pub fn message(self) -> &'static str {
+        match self {
+            Self::BadPattern => "Invalid regular expression",
+            Self::BadCharClass => "Invalid character class name",
+            Self::TrailingBackslash => "Trailing backslash",
+            Self::BadBackReference => "Invalid back reference",
+            Self::UnmatchedBracket => "Unmatched [, [^, [:, [., or [=",
+            Self::UnmatchedParen => "Unmatched ( or \\(",
+            Self::UnmatchedRightParen => "Unmatched ) or \\)",
+            Self::UnmatchedBrace => "Unmatched \\{",
+            Self::BadBraceContent => "Invalid content of \\{\\}",
+            Self::BadRangeEnd => "Invalid range end",
+            Self::BadRepeat => "Invalid preceding regular expression",
+            Self::TooBig => "Regular expression too big",
+        }
+    }
+}
+
 /// A compile-time error in an ERE pattern.
 ///
-/// The message is bytes because two of them quote a slice of the pattern back —
-/// the offending character of a stray-`)` error and the endpoints of an invalid
-/// range — and a pattern character need not be text. There is deliberately no
-/// `Display`: bash prints *nothing* for an uncompilable `=~` right-hand side (it
-/// just makes `[[` exit 2), so the shell discards this, and the only other
-/// reader is a test asserting that a pattern was rejected at all.
+/// [`Self::detail`] is bytes because two of them quote a slice of the pattern
+/// back — the offending character of a stray-`)` error and the endpoints of an
+/// invalid range — and a pattern character need not be text. There is
+/// deliberately no `Display`: a caller has to choose between the two wordings,
+/// and which one is right depends on whether it is imitating a GNU tool
+/// ([`Self::message`]) or explaining itself to a human ([`Self::detail`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct EreError(pub Str);
+pub struct EreError {
+    /// This crate's own wording: more specific than POSIX's, and not stable.
+    pub detail: Str,
+    /// What glibc would have called this failure.
+    pub code: RegCode,
+}
+
+impl EreError {
+    /// Build one from a code and this crate's own wording.
+    pub(crate) fn new(code: RegCode, detail: impl Into<Str>) -> Self {
+        Self {
+            detail: detail.into(),
+            code,
+        }
+    }
+
+    /// glibc's sentence for this failure — what a GNU work-alike should print.
+    #[must_use]
+    pub fn message(&self) -> &'static str {
+        self.code.message()
+    }
+}
 
 /// A search that was abandoned because it exceeded its backtracking budget.
 ///
@@ -323,7 +414,7 @@ impl EParser {
         // is status 2, not a match on the empty string. An empty *sub*expression
         // is still fine: `[[ x =~ () ]]` matches.
         if self.chars.is_empty() {
-            return Err(EreError(b"empty regex".to_vec()));
+            return Err(EreError::new(RegCode::BadPattern, b"empty regex".to_vec()));
         }
         let node = self.parse_alt()?;
         if self.pos != self.chars.len() {
@@ -331,7 +422,10 @@ impl EParser {
             // character is quoted back as its own bytes — it is a slice of the
             // pattern, which need not be text.
             let at = self.peek().map(Ch::to_str).unwrap_or_default();
-            return Err(EreError(cat(&[b"unexpected '", &at, b"' in regex"])));
+            return Err(EreError::new(
+                RegCode::UnmatchedRightParen,
+                cat(&[b"unexpected '", &at, b"' in regex"]),
+            ));
         }
         Ok(node)
     }
@@ -349,7 +443,10 @@ impl EParser {
             // alternation to be a real expression, even though a wholly empty
             // pattern between parens (`()`) is fine.
             if branches.iter().any(|b| matches!(b, Node::Empty)) {
-                return Err(EreError(b"empty alternation branch in regex".to_vec()));
+                return Err(EreError::new(
+                    RegCode::BadPattern,
+                    b"empty alternation branch in regex".to_vec(),
+                ));
             }
             Ok(Node::Alt(branches))
         }
@@ -377,7 +474,10 @@ impl EParser {
             }
         }
         match parts.len() {
-            0 if deleted => Err(EreError(b"nothing to repeat in regex".to_vec())),
+            0 if deleted => Err(EreError::new(
+                RegCode::BadRepeat,
+                b"nothing to repeat in regex".to_vec(),
+            )),
             0 => Ok(Node::Empty),
             1 => Ok(parts.pop().unwrap_or(Node::Empty)),
             _ => Ok(Node::Concat(parts)),
@@ -391,7 +491,10 @@ impl EParser {
         // `?a`, `{2}a` and — because an alternation branch or a group starts a
         // fresh expression — `a|*b` and `(*a)` too.
         if is_quantifier_start(self.peek_ascii()) {
-            return Err(EreError(b"nothing to repeat in regex".to_vec()));
+            return Err(EreError::new(
+                RegCode::BadRepeat,
+                b"nothing to repeat in regex".to_vec(),
+            ));
         }
         let atom = self.parse_atom()?;
         let Some((min, max)) = self.parse_quantifier()? else {
@@ -400,12 +503,18 @@ impl EParser {
         // `^` is an assertion, not an atom, so glibc reports `^*` and `a^*b`
         // the same way it reports a leading `*`. `$` it does accept.
         if matches!(atom, Node::Start) {
-            return Err(EreError(b"nothing to repeat in regex".to_vec()));
+            return Err(EreError::new(
+                RegCode::BadRepeat,
+                b"nothing to repeat in regex".to_vec(),
+            ));
         }
         // One quantifier per atom: `a**`, `a*?`, `a{1}*` and `a*{1}` are all
         // errors, not a repeat of a repeat.
         if is_quantifier_start(self.peek_ascii()) {
-            return Err(EreError(b"repeated quantifier in regex".to_vec()));
+            return Err(EreError::new(
+                RegCode::BadRepeat,
+                b"repeated quantifier in regex".to_vec(),
+            ));
         }
         if max == Some(0) {
             return Ok(None);
@@ -443,7 +552,12 @@ impl EParser {
     /// not a literal brace: glibc rejects `a{b`, `a{1`, `a{}`, `a{,3}` and
     /// `a{1,2,3}` outright, and only `\{` or `[{]` gets you a literal one.
     fn parse_brace(&mut self) -> Result<(usize, Option<usize>), EreError> {
-        let bad = || EreError(b"invalid interval in regex".to_vec());
+        let bad = || {
+            EreError::new(
+                RegCode::UnmatchedBrace,
+                b"invalid interval in regex".to_vec(),
+            )
+        };
         self.bump(1); // consume '{'
         let Some(min) = self.parse_int() else {
             return Err(bad());
@@ -463,14 +577,18 @@ impl EParser {
         }
         self.bump(1); // consume '}'
         if min > MAX_REPEAT || max.is_some_and(|n| n > MAX_REPEAT) {
-            return Err(EreError(b"repetition count too large".to_vec()));
+            return Err(EreError::new(
+                RegCode::BadBraceContent,
+                b"repetition count too large".to_vec(),
+            ));
         }
         if let Some(n) = max
             && min > n
         {
             // Both bounds are decimal digits the scan just accepted, so this
             // one message really is text.
-            return Err(EreError(
+            return Err(EreError::new(
+                RegCode::BadBraceContent,
                 format!("invalid interval {{{min},{n}}}").into_bytes(),
             ));
         }
@@ -503,7 +621,10 @@ impl EParser {
                 let idx = self.ngroups;
                 let inner = self.parse_alt()?;
                 if self.peek_ascii() != Some(')') {
-                    return Err(EreError(b"expected ')' in regex".to_vec()));
+                    return Err(EreError::new(
+                        RegCode::UnmatchedParen,
+                        b"expected ')' in regex".to_vec(),
+                    ));
                 }
                 self.bump(1);
                 Ok(Node::Group(idx, Box::new(inner)))
@@ -523,9 +644,12 @@ impl EParser {
             }
             Some('\\') => {
                 self.bump(1);
-                let e = self
-                    .peek()
-                    .ok_or_else(|| EreError(b"trailing backslash in regex".to_vec()))?;
+                let e = self.peek().ok_or_else(|| {
+                    EreError::new(
+                        RegCode::TrailingBackslash,
+                        b"trailing backslash in regex".to_vec(),
+                    )
+                })?;
                 self.bump(1);
                 // `\1`–`\9` is a backreference, not the digit. POSIX puts them
                 // in BRE only, but glibc honours them in ERE too and every
@@ -541,11 +665,10 @@ impl EParser {
                 if let Some(d @ '1'..='9') = e.as_ascii() {
                     let n = (d as usize).saturating_sub('0' as usize);
                     if n > self.ngroups {
-                        return Err(EreError(cat(&[
-                            b"invalid backreference \\",
-                            &[d as u8],
-                            b" in regex",
-                        ])));
+                        return Err(EreError::new(
+                            RegCode::BadBackReference,
+                            cat(&[b"invalid backreference \\", &[d as u8], b" in regex"]),
+                        ));
                     }
                     return Ok(Node::Backref(n));
                 }
@@ -555,7 +678,10 @@ impl EParser {
             // rejects one that reaches an atom slot, so this is unreachable —
             // but a literal brace here would silently resurrect the lenient
             // reading glibc does not have.
-            Some('{') => Err(EreError(b"invalid interval in regex".to_vec())),
+            Some('{') => Err(EreError::new(
+                RegCode::UnmatchedBrace,
+                b"invalid interval in regex".to_vec(),
+            )),
             // Anything that is not one of the ASCII metacharacters above is a
             // literal — including a character that is not ASCII and a byte that
             // decodes to no character at all.
@@ -581,7 +707,14 @@ impl EParser {
         let mut first = true;
         loop {
             let Some(c) = self.peek() else {
-                return Err(EreError(b"unterminated '[' in regex".to_vec()));
+                return Err(EreError::new(
+                    if first {
+                        RegCode::BadPattern
+                    } else {
+                        RegCode::UnmatchedBracket
+                    },
+                    b"unterminated '[' in regex".to_vec(),
+                ));
             };
             // A `]` closes the class, except as the very first member where it
             // is a literal (POSIX rule).
@@ -615,7 +748,8 @@ impl EParser {
                             continue;
                         }
                         None => {
-                            return Err(EreError(
+                            return Err(EreError::new(
+                                RegCode::BadCharClass,
                                 format!("unknown character class [:{name}:]").into_bytes(),
                             ));
                         }
@@ -636,13 +770,16 @@ impl EParser {
                 if lo > hi {
                     // Both endpoints are slices of the pattern, so the message
                     // is bytes.
-                    return Err(EreError(cat(&[
-                        b"invalid range ",
-                        &lo.to_str(),
-                        b"-",
-                        &hi.to_str(),
-                        b" in class",
-                    ])));
+                    return Err(EreError::new(
+                        RegCode::BadRangeEnd,
+                        cat(&[
+                            b"invalid range ",
+                            &lo.to_str(),
+                            b"-",
+                            &hi.to_str(),
+                            b" in class",
+                        ]),
+                    ));
                 }
                 ranges.push((lo, hi));
             } else {
@@ -659,13 +796,19 @@ impl EParser {
     /// Read one character inside a bracket expression, honoring `\`-escapes.
     fn class_char(&mut self) -> Result<Ch, EreError> {
         let Some(c) = self.peek() else {
-            return Err(EreError(b"unterminated '[' in regex".to_vec()));
+            return Err(EreError::new(
+                RegCode::UnmatchedBracket,
+                b"unterminated '[' in regex".to_vec(),
+            ));
         };
         if c == '\\' {
             self.bump(1);
-            let e = self
-                .peek()
-                .ok_or_else(|| EreError(b"trailing backslash in class".to_vec()))?;
+            let e = self.peek().ok_or_else(|| {
+                EreError::new(
+                    RegCode::TrailingBackslash,
+                    b"trailing backslash in class".to_vec(),
+                )
+            })?;
             self.bump(1);
             return Ok(unescape(e));
         }
@@ -1024,7 +1167,7 @@ impl Regex {
             // Reported as a compile error rather than a truncated program: a
             // program that stopped part-way would match the wrong language, and
             // silently answering a different question is worse than refusing.
-            return Err(EreError(b"regex too large".to_vec()));
+            return Err(EreError::new(RegCode::TooBig, b"regex too large".to_vec()));
         }
 
         Ok(Regex {
@@ -1195,10 +1338,7 @@ impl Regex {
     ///
     /// # Errors
     /// [`MatchLimit`] if a backreference search exceeded its budget.
-    pub fn capture_spans(
-        &self,
-        text: BStr<'_>,
-    ) -> Result<Option<GroupSpans>, MatchLimit> {
+    pub fn capture_spans(&self, text: BStr<'_>) -> Result<Option<GroupSpans>, MatchLimit> {
         self.capture_spans_at(text, 0)
     }
 
@@ -1220,11 +1360,7 @@ impl Regex {
     }
 
     /// Turn a winning thread's character slots into byte spans, one per group.
-    fn spans_from_slots(
-        &self,
-        scan: &Scan,
-        slots: &[Option<usize>],
-    ) -> GroupSpans {
+    fn spans_from_slots(&self, scan: &Scan, slots: &[Option<usize>]) -> GroupSpans {
         let mut out = Vec::with_capacity(self.ngroups.saturating_add(1));
         for g in 0..=self.ngroups {
             let (open, close) = (g.saturating_mul(2), g.saturating_mul(2).saturating_add(1));
@@ -1420,7 +1556,9 @@ impl Regex {
                         f.pc = next_pc;
                         f.sp = f.sp.saturating_add(1);
                     }
-                    Inst::Class(d) if input.get(f.sp).is_some_and(|c| d.matches_ci(*c, self.ci)) => {
+                    Inst::Class(d)
+                        if input.get(f.sp).is_some_and(|c| d.matches_ci(*c, self.ci)) =>
+                    {
                         f.pc = next_pc;
                         f.sp = f.sp.saturating_add(1);
                     }
@@ -1523,10 +1661,8 @@ impl Regex {
             Some(left) => left,
             None => return Err(MatchLimit),
         };
-        let (Some(want), Some(have)) = (
-            input.get(s..e),
-            input.get(f.sp..f.sp.saturating_add(len)),
-        ) else {
+        let (Some(want), Some(have)) = (input.get(s..e), input.get(f.sp..f.sp.saturating_add(len)))
+        else {
             return Ok(None);
         };
         if want
@@ -1888,6 +2024,83 @@ impl Iterator for CaptureMatches<'_> {
 mod tests {
     use super::*;
 
+    /// Every malformed pattern is classified the way glibc classifies it.
+    ///
+    /// The expected codes are *measured*, not derived: each row was run through
+    /// findutils 4.9.0 on glibc 2.39 (`find t -regextype posix-extended -regex
+    /// PAT`) and the code is the one whose [`RegCode::message`] matches what
+    /// GNU printed. `scripts/find-diff.sh` re-checks the same rows end to end
+    /// against the real binary; this test is the fast copy that runs on a
+    /// machine with no GNU find on it.
+    ///
+    /// The `[` / `[a` pair is the reason this is a table and not a rule: they
+    /// differ only in a trailing character and glibc gives them different
+    /// codes, because a pattern that ends immediately after `[` trips its
+    /// "premature end" path before it ever decides the bracket was at fault.
+    #[test]
+    fn a_bad_pattern_is_classified_the_way_glibc_classifies_it() {
+        let cases: &[(&str, RegCode)] = &[
+            ("[", RegCode::BadPattern),
+            ("[^", RegCode::BadPattern),
+            ("[a", RegCode::UnmatchedBracket),
+            ("[[:alpha:]", RegCode::UnmatchedBracket),
+            ("[.", RegCode::UnmatchedBracket),
+            ("[=", RegCode::UnmatchedBracket),
+            ("[[:foo:]]", RegCode::BadCharClass),
+            ("[z-a]", RegCode::BadRangeEnd),
+            ("*", RegCode::BadRepeat),
+            ("{1}", RegCode::BadRepeat),
+            ("(", RegCode::UnmatchedParen),
+            ("a(", RegCode::UnmatchedParen),
+            ("a{1", RegCode::UnmatchedBrace),
+            ("a{2", RegCode::UnmatchedBrace),
+            ("a{1,0}", RegCode::BadBraceContent),
+            ("a\\", RegCode::TrailingBackslash),
+        ];
+        for &(pat, want) in cases {
+            let got = Regex::new(pat.as_bytes())
+                .expect_err("pattern should not compile")
+                .code;
+            assert_eq!(got, want, "{pat:?}");
+        }
+    }
+
+    /// The sentences are glibc's, byte for byte.
+    ///
+    /// Pinned as literals because they are an *interface*: they are what our
+    /// `find` prints, so a script that greps for `Unmatched \{` keeps working
+    /// only as long as nobody tidies the wording.
+    #[test]
+    fn the_messages_are_glibcs_own_words() {
+        assert_eq!(RegCode::BadPattern.message(), "Invalid regular expression");
+        assert_eq!(
+            RegCode::BadCharClass.message(),
+            "Invalid character class name"
+        );
+        assert_eq!(RegCode::TrailingBackslash.message(), "Trailing backslash");
+        assert_eq!(
+            RegCode::BadBackReference.message(),
+            "Invalid back reference"
+        );
+        assert_eq!(
+            RegCode::UnmatchedBracket.message(),
+            "Unmatched [, [^, [:, [., or [="
+        );
+        assert_eq!(RegCode::UnmatchedParen.message(), r"Unmatched ( or \(");
+        assert_eq!(RegCode::UnmatchedRightParen.message(), r"Unmatched ) or \)");
+        assert_eq!(RegCode::UnmatchedBrace.message(), r"Unmatched \{");
+        assert_eq!(
+            RegCode::BadBraceContent.message(),
+            r"Invalid content of \{\}"
+        );
+        assert_eq!(RegCode::BadRangeEnd.message(), "Invalid range end");
+        assert_eq!(
+            RegCode::BadRepeat.message(),
+            "Invalid preceding regular expression"
+        );
+        assert_eq!(RegCode::TooBig.message(), "Regular expression too big");
+    }
+
     /// The cases below spell patterns and subjects as Rust string literals,
     /// which are UTF-8 by construction, while the engine is byte-typed. These
     /// two adapters keep them readable; the cases that are *about* bytes which
@@ -2098,8 +2311,18 @@ mod tests {
         // `.` matches one *character*, and an undecodable byte is one — not a
         // third of an `é`, and not nothing.
         assert!(Regex::new(b"^a.b$").unwrap().is_match(b"a\xffb").unwrap());
-        assert!(Regex::new(b"^a.b$").unwrap().is_match("aéb".as_bytes()).unwrap());
-        assert!(!Regex::new(b"^a..b$").unwrap().is_match("aéb".as_bytes()).unwrap());
+        assert!(
+            Regex::new(b"^a.b$")
+                .unwrap()
+                .is_match("aéb".as_bytes())
+                .unwrap()
+        );
+        assert!(
+            !Regex::new(b"^a..b$")
+                .unwrap()
+                .is_match("aéb".as_bytes())
+                .unwrap()
+        );
         // The case from the tracked issue: an anchored match on such a subject.
         assert!(Regex::new(b"^a").unwrap().is_match(b"a\xffb").unwrap());
         assert!(!Regex::new(b"^b").unwrap().is_match(b"a\xffb").unwrap());
@@ -2108,33 +2331,79 @@ mod tests {
         assert!(Regex::new(b"\xff").unwrap().is_match(b"a\xffb").unwrap());
         assert!(!Regex::new(b"\xff").unwrap().is_match(b"a\xfeb").unwrap());
         // …after a backslash, which denotes it rather than escaping anything…
-        assert!(Regex::new(b"^a\\\xffb$").unwrap().is_match(b"a\xffb").unwrap());
+        assert!(
+            Regex::new(b"^a\\\xffb$")
+                .unwrap()
+                .is_match(b"a\xffb")
+                .unwrap()
+        );
         // …and inside a bracket expression.
-        assert!(Regex::new(b"^a[\xff\xfe]b$").unwrap().is_match(b"a\xffb").unwrap());
-        assert!(!Regex::new(b"^a[\xfe]b$").unwrap().is_match(b"a\xffb").unwrap());
+        assert!(
+            Regex::new(b"^a[\xff\xfe]b$")
+                .unwrap()
+                .is_match(b"a\xffb")
+                .unwrap()
+        );
+        assert!(
+            !Regex::new(b"^a[\xfe]b$")
+                .unwrap()
+                .is_match(b"a\xffb")
+                .unwrap()
+        );
 
         // It falls in no written range and in no POSIX class: it is not a
         // letter, and no collation would place it among them…
         assert!(!Regex::new(b"[a-z]").unwrap().is_match(b"\xff").unwrap());
-        assert!(!Regex::new(b"[[:alpha:]]").unwrap().is_match(b"\xff").unwrap());
-        assert!(!Regex::new(b"[[:print:]]").unwrap().is_match(b"\xff").unwrap());
+        assert!(
+            !Regex::new(b"[[:alpha:]]")
+                .unwrap()
+                .is_match(b"\xff")
+                .unwrap()
+        );
+        assert!(
+            !Regex::new(b"[[:print:]]")
+                .unwrap()
+                .is_match(b"\xff")
+                .unwrap()
+        );
         // …so a negated class does match it, as bash in the C locale does.
         assert!(Regex::new(b"^[^a-z]$").unwrap().is_match(b"\xff").unwrap());
 
         // A quantifier counts it as one character.
-        assert!(Regex::new(b"^\xff{3}$").unwrap().is_match(b"\xff\xff\xff").unwrap());
-        assert!(!Regex::new(b"^\xff{3}$").unwrap().is_match(b"\xff\xff").unwrap());
+        assert!(
+            Regex::new(b"^\xff{3}$")
+                .unwrap()
+                .is_match(b"\xff\xff\xff")
+                .unwrap()
+        );
+        assert!(
+            !Regex::new(b"^\xff{3}$")
+                .unwrap()
+                .is_match(b"\xff\xff")
+                .unwrap()
+        );
 
         // It has no case, so under `nocasematch` it folds only to itself — it
         // can become neither a letter nor a different byte.
-        assert!(Regex::new_flags(b"^\xff$", true).unwrap().is_match(b"\xff").unwrap());
-        assert!(!Regex::new_flags(b"^\xff$", true).unwrap().is_match(b"\xfe").unwrap());
+        assert!(
+            Regex::new_flags(b"^\xff$", true)
+                .unwrap()
+                .is_match(b"\xff")
+                .unwrap()
+        );
+        assert!(
+            !Regex::new_flags(b"^\xff$", true)
+                .unwrap()
+                .is_match(b"\xfe")
+                .unwrap()
+        );
 
         // A capture hands back the bytes, not an approximation of them — this
         // is what reaches `BASH_REMATCH`.
         let caps = Regex::new(b"^a(.+)b$")
             .unwrap()
-            .captures(b"a\xff\xfeb").unwrap()
+            .captures(b"a\xff\xfeb")
+            .unwrap()
             .unwrap();
         assert_eq!(caps[1].as_deref(), Some(&b"\xff\xfe"[..]));
     }
@@ -2188,7 +2457,11 @@ mod tests {
         // leftmost-first. Priority ordering alone answers these with the short
         // arm, which is what `grep -o` and `sed` would then have printed.
         let cap = |pat: &str, s: &str| {
-            compile(pat).unwrap().captures(s.as_bytes()).unwrap().unwrap()[0]
+            compile(pat)
+                .unwrap()
+                .captures(s.as_bytes())
+                .unwrap()
+                .unwrap()[0]
                 .clone()
                 .unwrap()
         };
@@ -2356,7 +2629,10 @@ mod tests {
         // empty one, which does.
         let spans = re("(a)|(b)").capture_spans(b"b").unwrap().unwrap();
         assert_eq!(spans, vec![Some((0, 1)), None, Some((0, 1))]);
-        assert_eq!(re("(x*)y").capture_spans(b"y").unwrap().unwrap()[1], Some((0, 0)));
+        assert_eq!(
+            re("(x*)y").capture_spans(b"y").unwrap().unwrap()[1],
+            Some((0, 0))
+        );
     }
 
     #[test]
@@ -2438,9 +2714,9 @@ mod tests {
         // diagnostic — `(a)\2` would quietly match `a2`.
         let e = compile("(a)\\2").unwrap_err();
         assert!(
-            String::from_utf8_lossy(&e.0).contains("invalid backreference"),
+            String::from_utf8_lossy(&e.detail).contains("invalid backreference"),
             "{}",
-            String::from_utf8_lossy(&e.0)
+            String::from_utf8_lossy(&e.detail)
         );
         assert!(compile("\\1").is_err());
         // Forward references are refused for the same reason: the group is not

@@ -496,7 +496,7 @@ fn colon(subject: &[u8], pattern: &[u8]) -> Result<Str, Fail> {
         return Ok(b"0".to_vec());
     }
     let re = ere::bre::compile(pattern, false)
-        .map_err(|e| Fail(String::from_utf8_lossy(&e.0).into_owned()))?;
+        .map_err(|e| Fail(String::from_utf8_lossy(&e.detail).into_owned()))?;
     // A search that gave up is neither a match nor a non-match. `expr` is used
     // for control flow — `expr "$f" : 'lib' >/dev/null || exit` — so reporting
     // it as "no match" would take the failure branch on a question we never

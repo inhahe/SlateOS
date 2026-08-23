@@ -329,7 +329,7 @@ fn compile_patterns(patterns: &[Vec<u8>], opts: &Options) -> Result<Vec<Pat>, St
                 return Err(format!(
                     "{}: {}",
                     String::from_utf8_lossy(p),
-                    String::from_utf8_lossy(&e.0)
+                    String::from_utf8_lossy(&e.detail)
                 ));
             }
         }

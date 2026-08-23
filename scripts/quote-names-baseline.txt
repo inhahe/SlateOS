@@ -19,7 +19,7 @@
 # 71 real sites. If a number rises in a commit that also edits code, the
 # code is what raised it.
 #
-# 1691 sites across 779 files.
+# 1673 sites across 778 files.
 
 init/servicebus/src/main.rs:8
 userspace/abduco-cli/src/main.rs:5
@@ -630,7 +630,6 @@ userspace/skopeo-cli/src/main.rs:1
 userspace/skopeo/src/main.rs:1
 userspace/slack-cli/src/main.rs:2
 userspace/snap-cli/src/main.rs:1
-userspace/snapper/src/main.rs:18
 userspace/snapper2/src/main.rs:1
 userspace/sns-cli/src/main.rs:2
 userspace/snyk-cli/src/main.rs:4

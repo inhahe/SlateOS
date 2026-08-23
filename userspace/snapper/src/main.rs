@@ -48,6 +48,7 @@
 
 #![deny(clippy::all)]
 
+use quoting::quoteaf_os;
 use std::collections::HashMap;
 use std::env;
 use std::io::{self, Write};
@@ -1146,7 +1147,7 @@ fn run_snapper(args: &[String]) -> i32 {
         "rollback" => cmd_rollback(config_name, subcmd_args),
         "cleanup" => cmd_cleanup(config_name, subcmd_args),
         _ => {
-            eprintln!("snapper: unknown subcommand '{}'", subcmd);
+            eprintln!("snapper: unknown subcommand {}", quoteaf_os(subcmd));
             eprintln!("Try 'snapper --help' for more information.");
             1
         }
@@ -1302,7 +1303,7 @@ fn cmd_create_config(args: &[String]) -> i32 {
     let cfg = SnapperConfig::new(name, subvolume);
     match save_config(&cfg) {
         Ok(()) => {
-            println!("Config '{}' created.", name);
+            println!("Config {} created.", quoteaf_os(name));
             0
         }
         Err(e) => {
@@ -1322,7 +1323,7 @@ fn cmd_delete_config(args: &[String]) -> i32 {
     };
     match delete_config_file(name) {
         Ok(()) => {
-            println!("Config '{}' deleted.", name);
+            println!("Config {} deleted.", quoteaf_os(name));
             0
         }
         Err(e) => {
@@ -1346,7 +1347,7 @@ fn cmd_get_config(args: &[String]) -> i32 {
             0
         }
         None => {
-            eprintln!("Error: config '{}' not found", name);
+            eprintln!("Error: config {} not found", quoteaf_os(name));
             1
         }
     }
@@ -1363,7 +1364,7 @@ fn cmd_set_config(args: &[String]) -> i32 {
     let mut cfg = match load_config(name) {
         Some(c) => c,
         None => {
-            eprintln!("Error: config '{}' not found", name);
+            eprintln!("Error: config {} not found", quoteaf_os(name));
             return 1;
         }
     };
@@ -1374,7 +1375,7 @@ fn cmd_set_config(args: &[String]) -> i32 {
             if cfg.set_value(&k, &v) {
                 found_kv = true;
             } else {
-                eprintln!("Warning: unknown key '{}'", k);
+                eprintln!("Warning: unknown key {}", quoteaf_os(&k));
             }
         }
     }
@@ -1386,7 +1387,7 @@ fn cmd_set_config(args: &[String]) -> i32 {
 
     match save_config(&cfg) {
         Ok(()) => {
-            println!("Config '{}' updated.", name);
+            println!("Config {} updated.", quoteaf_os(name));
             0
         }
         Err(e) => {
@@ -1424,7 +1425,7 @@ fn cmd_create(config_name: &str, args: &[String]) -> i32 {
     let snap_type = match SnapType::from_str(snap_type_str) {
         Some(t) => t,
         None => {
-            eprintln!("Error: unknown snapshot type '{}'", snap_type_str);
+            eprintln!("Error: unknown snapshot type {}", quoteaf_os(snap_type_str));
             return 1;
         }
     };
@@ -1465,7 +1466,7 @@ fn cmd_modify(config_name: &str, args: &[String]) -> i32 {
     let num: u64 = match args[0].parse() {
         Ok(n) => n,
         Err(_) => {
-            eprintln!("Error: invalid snapshot number '{}'", args[0]);
+            eprintln!("Error: invalid snapshot number {}", quoteaf_os(&args[0]));
             return 1;
         }
     };
@@ -1525,7 +1526,7 @@ fn cmd_delete(config_name: &str, args: &[String]) -> i32 {
                 }
             }
             Err(_) => {
-                eprintln!("Error: invalid snapshot number '{}'", arg);
+                eprintln!("Error: invalid snapshot number {}", quoteaf_os(arg));
                 errors += 1;
             }
         }
@@ -1543,7 +1544,10 @@ fn cmd_status(config_name: &str, args: &[String], csvout: bool) -> i32 {
     let (from, to) = match parse_range(&args[0]) {
         Some(r) => r,
         None => {
-            eprintln!("Error: invalid range '{}', expected format: N..M", args[0]);
+            eprintln!(
+                "Error: invalid range {}, expected format: N..M",
+                quoteaf_os(&args[0])
+            );
             return 1;
         }
     };
@@ -1593,7 +1597,10 @@ fn cmd_undochange(config_name: &str, args: &[String]) -> i32 {
     let (from, to) = match parse_range(&args[0]) {
         Some(r) => r,
         None => {
-            eprintln!("Error: invalid range '{}', expected format: N..M", args[0]);
+            eprintln!(
+                "Error: invalid range {}, expected format: N..M",
+                quoteaf_os(&args[0])
+            );
             return 1;
         }
     };
@@ -1638,7 +1645,7 @@ fn cmd_rollback(config_name: &str, args: &[String]) -> i32 {
         match args[0].parse::<u64>() {
             Ok(n) => n,
             Err(_) => {
-                eprintln!("Error: invalid snapshot number '{}'", args[0]);
+                eprintln!("Error: invalid snapshot number {}", quoteaf_os(&args[0]));
                 return 1;
             }
         }
@@ -1679,7 +1686,7 @@ fn cmd_cleanup(config_name: &str, args: &[String]) -> i32 {
             )
         }),
         _ => {
-            eprintln!("Error: unknown cleanup algorithm '{}'", algo);
+            eprintln!("Error: unknown cleanup algorithm {}", quoteaf_os(algo));
             return 1;
         }
     };
@@ -1712,7 +1719,10 @@ fn run_timeline(args: &[String]) -> i32 {
 
     let once = has_flag(args, "--once");
 
-    println!("snapper-timeline: starting for config '{}'", config_name);
+    println!(
+        "snapper-timeline: starting for config {}",
+        quoteaf_os(config_name)
+    );
 
     let cfg = match load_config(config_name) {
         Some(c) => c,
@@ -1721,8 +1731,8 @@ fn run_timeline(args: &[String]) -> i32 {
 
     if !cfg.timeline_create {
         println!(
-            "Timeline creation is disabled for config '{}'.",
-            config_name
+            "Timeline creation is disabled for config {}.",
+            quoteaf_os(config_name)
         );
         return 0;
     }
@@ -1800,7 +1810,10 @@ fn run_cleanup(args: &[String]) -> i32 {
 
     let algo = extract_flag(args, "--algorithm").or_else(|| extract_flag(args, "-a"));
 
-    println!("snapper-cleanup: running for config '{}'", config_name);
+    println!(
+        "snapper-cleanup: running for config {}",
+        quoteaf_os(config_name)
+    );
 
     let cfg = match load_config(config_name) {
         Some(c) => c,
@@ -1830,7 +1843,7 @@ fn run_cleanup(args: &[String]) -> i32 {
             total_deleted += deleted.len();
         }
         Some(a) => {
-            eprintln!("Error: unknown algorithm '{}'", a);
+            eprintln!("Error: unknown algorithm {}", quoteaf_os(a));
             return 1;
         }
         None => {

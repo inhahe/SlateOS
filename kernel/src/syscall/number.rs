@@ -2761,6 +2761,31 @@ pub const SYS_RLIMIT_SET: u64 = 558;
 /// Rights may be *narrowed* (hold `READ | WRITE`, delegate `READ`) but never
 /// widened, which is what makes this delegation rather than a grant.
 ///
+/// # Two verdicts that are easy to guess wrong
+///
+/// Both were found by lane B reading [`crate::proc::pcb::inherit_caps_subset`]
+/// rather than this doc
+/// (`requests/b-a-spawn-ex2-mirror-landed-and-three-notes-back.md`), which is
+/// the situation this section exists to prevent.
+///
+/// * **An entry whose `rights` are empty is `InvalidArgument`**, not
+///   `PermissionDenied`.  A rights-less capability is not a narrowing that went
+///   too far; it is a table entry that would grant nothing and pass no gate.
+///   `rights` is the field a hand-built entry is most likely to leave at its
+///   default, and the wrong verdict would send that caller hunting for a grant
+///   it already holds.
+/// * **`cap_mode = 1` with a non-empty list from a process whose parent is the
+///   kernel (`parent == 0`) is `PermissionDenied`.**  The kernel has no
+///   capability table to delegate from, so there is nothing for an entry to be
+///   checked against.  `cap_count = 0` from the kernel still *succeeds*: the
+///   empty request returns before the parent is consulted, because "give this
+///   child nothing" is satisfiable by a parent that holds nothing.
+///
+/// Both are pinned by `spawn::self_test` → `test_spawn_capability_subset`,
+/// not by the ring-3 ABI probe: they live in the delegation check, which runs
+/// after the ELF image is read, and that probe's `elf_ptr` is deliberately
+/// unmapped so it can never get that far.
+///
 /// Returns: process ID on success, negative error on failure.  Chosen number
 /// 559.  See design-decisions.md §279.
 pub const SYS_PROCESS_SPAWN_EX2: u64 = 559;

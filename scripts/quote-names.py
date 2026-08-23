@@ -292,8 +292,16 @@ def violations(text: str) -> list[tuple[int, str, str]]:
 # `join_wrapped_calls` reassembled from several physical lines; the rewrite
 # emits one line and leaves rustfmt to re-wrap it, which is the only way to
 # reformat a wrapped call without reimplementing rustfmt's decisions.
+# The whole call on one (logical) line. `lead` may carry a match-arm pattern:
+# `_ => println!("influx: '{}' completed", sub),` is a real and common shape in
+# the CLI wrappers, and without this it was reported as "not a single-line
+# call" -- five of `influx-cli`'s nine sites, all of them ordinary. The prefix
+# may not contain a quote or a brace, so it cannot span a block boundary or
+# swallow a string that happens to hold `println!(`. `end` is `;` or the `,`
+# that terminates a match arm.
 _CALL = re.compile(
-    r'^(?P<lead>\s*)(?P<mac>e?println!)\(\s*"(?P<fmt>(?:[^"\\]|\\.)*)"(?P<args>.*?)\s*\);$'
+    r'^(?P<lead>\s*(?:[^"\'{};]*=>\s*)?)(?P<mac>e?println!)'
+    r'\(\s*"(?P<fmt>(?:[^"\\]|\\.)*)"(?P<args>.*?)\s*\)(?P<end>[;,])$'
 )
 
 # `'{ident}'` -- the hand-written-quote shape, with a plain identifier inside.
@@ -372,7 +380,10 @@ def fix_line(line: str) -> tuple[str | None, str]:
 
     def rebuilt(new_fmt: str, new_args: list[str]) -> str:
         tail = "".join(f", {a}" for a in new_args)
-        return f'{m.group("lead")}{m.group("mac")}("{new_fmt}"{tail});'
+        return (
+            f'{m.group("lead")}{m.group("mac")}("{new_fmt}"{tail})'
+            f'{m.group("end")}'
+        )
 
     ident = bare_interpolated_name(line)
     if ident is not None:
@@ -682,6 +693,19 @@ def selftest() -> int:
         '    eprintln!("cut: {path}: {e}");',
         '    eprintln!("cut: {}: {e}", quotef_os(&path));',
     )
+    # A match arm is a call too, and it ends in `,` rather than `;`. Five of
+    # `influx-cli`'s nine sites are this shape and were reported as "not a
+    # single-line call" -- a decline that looks like a hard case and is not.
+    expect_fix(
+        "match-arm-keeps-its-comma",
+        "        _ => println!(\"influx: '{}' completed\", sub),",
+        '        _ => println!("influx: {} completed", quoteaf_os(&sub)),',
+    )
+    expect_fix(
+        "match-arm-with-a-pattern",
+        "    Cmd::Get(k) => eprintln!(\"db: key '{k}' missing\"),",
+        '    Cmd::Get(k) => eprintln!("db: key {} missing", quoteaf_os(&k)),',
+    )
     # Declines. Each is a real shape in the tree, and each would be corrupted
     # by a rewrite that went ahead anyway.
     expect_fix("declines-multiline", "eprintln!(\"lp: printer '{p}' not\"", None)
@@ -853,6 +877,19 @@ def fix(targets: list[str]) -> int:
 
 
 def main() -> int:
+    # The thing being reported is a *diagnostic*, and diagnostics in this tree
+    # are full of the characters a Windows console's cp1252 cannot encode --
+    # an em dash, an arrow, a non-ASCII file name. Printing one raised
+    # UnicodeEncodeError from inside `--fix`'s report loop, *after* the files
+    # had been written: the edits landed and the list of what was skipped did
+    # not. A tool that reports less than it did is much worse than a tool with
+    # a mangled character in its output.
+    for s in (sys.stdout, sys.stderr):
+        try:
+            s.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError):
+            pass
+
     args = sys.argv[1:]
     if "--selftest" in args:
         return selftest()

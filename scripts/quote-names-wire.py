@@ -29,6 +29,7 @@ so a batch can be re-run after fixing one member of it.
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import sys
 import textwrap
@@ -55,6 +56,18 @@ def entry_points(crate: Path) -> list[Path]:
     return out
 
 
+def quoting_path(crate: Path) -> str:
+    """The `path = ` value that reaches the `quoting` crate from `crate`.
+
+    Not a constant: `userspace/du` wants `../quoting` but `init/servicebus`
+    wants `../../userspace/quoting`, and a hardcoded `../quoting` in the
+    second is a manifest that does not resolve -- a loud failure, but only
+    after the rest of the wiring has already been written."""
+    target = (ROOT / "userspace" / "quoting").resolve()
+    rel = os.path.relpath(target, crate.resolve())
+    return Path(rel).as_posix()
+
+
 def wire_cargo(crate: Path, why: str) -> str:
     toml = crate / "Cargo.toml"
     src = toml.read_text(encoding="utf-8")
@@ -78,7 +91,7 @@ def wire_cargo(crate: Path, why: str) -> str:
     )
     src = src.replace(
         "[dependencies]\n",
-        f'[dependencies]\n{body}\nquoting = {{ path = "../quoting" }}\n',
+        f'[dependencies]\n{body}\nquoting = {{ path = "{quoting_path(crate)}" }}\n',
         1,
     )
     if not src.endswith("\n"):

@@ -12194,7 +12194,7 @@ fn cmd_assoc(args: &str) {
                     shell_println!(
                         "  {:>3}  {} — {}{}{}",
                         app.priority,
-                        app.app_path,
+                        app.app_path.display(),
                         app.app_name,
                         default_marker,
                         user_marker
@@ -12252,7 +12252,11 @@ fn cmd_assoc(args: &str) {
 
             match associations::default_app_for_file(&path) {
                 Some(app) => {
-                    shell_println!("Open with: {} ({})", app.app_name, app.app_path);
+                    shell_println!(
+                        "Open with: {} ({})",
+                        app.app_name,
+                        app.app_path.display()
+                    );
                 }
                 None => {
                     shell_println!("Open with: (no application registered)");
@@ -20420,7 +20424,11 @@ fn cmd_openwith(args: &str) {
             let app_name = app_path.rsplit('/').next().unwrap_or(app_path);
             match crate::fs::openwith::open_with(&file, app_path, app_name, set_default) {
                 Ok(result) => {
-                    shell_println!("Opened {} with {}", result.file_path, result.app_path);
+                    shell_println!(
+                        "Opened {} with {}",
+                        result.file_path.display(),
+                        result.app_path.display()
+                    );
                     if result.default_changed {
                         shell_println!("  (set as default for this type)");
                     }
@@ -20449,7 +20457,7 @@ fn cmd_openwith(args: &str) {
                 } else {
                     shell_println!("Recent apps for {}:", mime);
                     for (path, name, count) in &entries {
-                        shell_println!("  {} ({}) — {} uses", name, path, count);
+                        shell_println!("  {} ({}) — {} uses", name, path.display(), count);
                     }
                 }
             } else {
@@ -20464,7 +20472,7 @@ fn cmd_openwith(args: &str) {
                 shell_println!("{:<30} {}", "Path", "Name");
                 shell_println!("{}", "-".repeat(50));
                 for (path, name) in &apps {
-                    shell_println!("{:<30} {}", path, name);
+                    shell_println!("{:<30} {}", path.display(), name);
                 }
             }
         }

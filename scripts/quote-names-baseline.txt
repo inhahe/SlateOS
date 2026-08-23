@@ -19,7 +19,7 @@
 # 71 real sites. If a number rises in a commit that also edits code, the
 # code is what raised it.
 #
-# 1712 sites across 781 files.
+# 1711 sites across 780 files.
 
 init/servicebus/src/main.rs:8
 userspace/abduco-cli/src/main.rs:5
@@ -153,7 +153,6 @@ userspace/consul/src/main.rs:1
 userspace/containerd-cli/src/main.rs:1
 userspace/contentful-cli/src/main.rs:1
 userspace/coredumpctl/src/main.rs:1
-userspace/coreutils/src/bin/tar.rs:1
 userspace/cortex-cli/src/main.rs:2
 userspace/cosign-cli/src/main.rs:1
 userspace/cosign/src/main.rs:1

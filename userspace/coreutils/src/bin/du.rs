@@ -584,6 +584,15 @@ struct Walk<'a> {
     seen: HashSet<(u64, u64)>,
     grand: u64,
     failed: bool,
+    /// How `--files0-from`'s file was spelled, when the roots came from one.
+    ///
+    /// It is here rather than consumed while the list was read because the
+    /// empty names in that list are reported *in position* — GNU walks the
+    /// token list one entry at a time and diagnoses an empty entry when it
+    /// reaches it, so `printf 'f\0\0sub\0'` prints `f`'s row, then the
+    /// complaint, then `sub`'s. Pre-scanning for empties puts every complaint
+    /// before every row, which is a visibly different transcript.
+    list: Option<Vec<u8>>,
 }
 
 impl Walk<'_> {
@@ -734,7 +743,27 @@ impl Walk<'_> {
     /// The total is exempt from `-t`: measured, `du -t 1000000 -c` prints a
     /// total line even when the threshold suppressed every row that made it up.
     fn run(&mut self, roots: &[Vec<u8>]) {
-        for root in roots {
+        for (index, root) in roots.iter().enumerate() {
+            // An empty name is never looked up — it is refused, and the
+            // sentence says where it came from. Measured on 9.4:
+            //
+            //     $ du ''                       du: invalid zero-length file name
+            //     $ du --files0-from=z0         du: z0:2: invalid zero-length file name
+            //
+            // The bare form carries neither a label nor a position because
+            // there is no list to point into.
+            if root.is_empty() {
+                let line = match self.list.clone() {
+                    Some(label) => format!(
+                        "du: {}:{}: invalid zero-length file name",
+                        quotef(&label),
+                        index.saturating_add(1)
+                    ),
+                    None => "du: invalid zero-length file name".to_string(),
+                };
+                self.diagnose(&line);
+                continue;
+            }
             let name = normalise_root(root);
             if let Some((size, _)) = self.entry(&name, 0, None) {
                 self.grand = self.grand.saturating_add(size);
@@ -1166,11 +1195,16 @@ fn meta_of(meta: &std::fs::Metadata) -> io::Result<Meta> {
     })
 }
 
-/// Read a whole file, or standard input when the name is `-` or empty.
+/// Read a whole file, or standard input when the name is exactly `-`.
+///
+/// An *empty* name is a file name, not a second spelling of standard input —
+/// measured, `du -X '' t` is `du: '': No such file or directory` and
+/// `du --files0-from=` is `du: cannot open '' for reading: No such file or
+/// directory`, while both accept `-` and read stdin.
 #[cfg(unix)]
 fn slurp(name: &[u8]) -> io::Result<Vec<u8>> {
     use std::io::Read;
-    if name == b"-" || name.is_empty() {
+    if name == b"-" {
         let mut text = Vec::new();
         io::stdin().read_to_end(&mut text)?;
         return Ok(text);
@@ -1211,15 +1245,13 @@ fn main() -> ExitCode {
     let stdout = io::stdout();
     let mut out = stdout.lock();
     let mut err = io::stderr();
-    let mut failed = false;
 
-    let roots = match source {
-        Source::Operands(names) => names,
+    let (roots, list) = match source {
+        Source::Operands(names) => (names, None),
         Source::Files0From(from) => match read_operand_list(&from, &mut err) {
-            Ok((names, bad)) => {
-                failed |= bad;
-                names
-            }
+            // The label the diagnostics carry is the spelling as given, `-`
+            // included: `du --files0-from=-` reports `du: -:2: …`.
+            Ok(names) => (names, Some(from)),
             Err(status) => return ExitCode::from(status),
         },
     };
@@ -1232,7 +1264,8 @@ fn main() -> ExitCode {
         err: &mut err,
         seen: HashSet::new(),
         grand: 0,
-        failed,
+        failed: false,
+        list,
     };
     walk.run(&roots);
     let failed = walk.failed;
@@ -1246,53 +1279,70 @@ fn main() -> ExitCode {
     }
 }
 
-/// Read `--files0-from`'s list, reporting the empty names it contains.
+/// Read `--files0-from`'s list into the operand vector, empty names included.
 ///
-/// An empty name is not fatal: it is reported with its 1-based position and the
-/// rest of the list is still walked. Measured:
+/// The empty names stay in the list on purpose: [`Walk::run`] reports each one
+/// where it stands, because that is where GNU reports it. See the `list` field
+/// of [`Walk`].
+///
+/// Failing to *read* the list is fatal and is worded differently from failing
+/// to *open* it, which is not a distinction one would invent — it exists
+/// because the two are separate calls in gnulib and a directory passes the
+/// first and fails the second. Measured, on 9.4:
 ///
 /// ```text
-/// $ printf 'a\0\0b\0' > z0 && du --files0-from=z0
-/// du: z0:2: invalid zero-length file name
+/// $ du --files0-from='no such'      du: cannot open 'no such' for reading: …
+/// $ du --files0-from=secret         du: cannot open 'secret' for reading: …
+/// $ du --files0-from=plain          du: plain: read error: Is a directory
+/// $ du --files0-from='a b'          du: 'a b': read error: Is a directory
 /// ```
+///
+/// The last pair is why the two sentences also quote differently: the open
+/// failure is `quoteaf` (always quoted), the read failure `quotef` (quoted
+/// only where the name needs it). An empty spelling is a file named `""` and
+/// not a second way to write `-`; see [`slurp`].
 #[cfg(unix)]
-fn read_operand_list(from: &[u8], err: &mut dyn Write) -> Result<(Vec<Vec<u8>>, bool), u8> {
-    let text = match slurp(from) {
-        Ok(text) => text,
-        Err(error) => {
-            let name: &[u8] = if from.is_empty() { b"-" } else { from };
-            // `error (EXIT_FAILURE, …)`, so no referral follows.
-            let _ = writeln!(
-                err,
-                "du: cannot open {} for reading: {}",
-                quoteaf(name),
-                strerror(&error)
-            );
-            return Err(1);
+fn read_operand_list(name: &[u8], err: &mut dyn Write) -> Result<Vec<Vec<u8>>, u8> {
+    use std::io::Read;
+
+    let text = if name == b"-" {
+        let mut text = Vec::new();
+        match io::stdin().read_to_end(&mut text) {
+            Ok(_) => text,
+            Err(error) => {
+                let line = format!("du: {}: read error: {}", quotef(name), strerror(&error));
+                let _ = writeln!(err, "{line}");
+                return Err(1);
+            }
+        }
+    } else {
+        match std::fs::File::open(os_from_bytes(name)) {
+            Ok(mut file) => {
+                let mut text = Vec::new();
+                match file.read_to_end(&mut text) {
+                    Ok(_) => text,
+                    Err(error) => {
+                        let line =
+                            format!("du: {}: read error: {}", quotef(name), strerror(&error));
+                        let _ = writeln!(err, "{line}");
+                        return Err(1);
+                    }
+                }
+            }
+            Err(error) => {
+                // `error (EXIT_FAILURE, …)`, so no referral follows.
+                let _ = writeln!(
+                    err,
+                    "du: cannot open {} for reading: {}",
+                    quoteaf(name),
+                    strerror(&error)
+                );
+                return Err(1);
+            }
         }
     };
 
-    let label: &[u8] = if from == b"-" || from.is_empty() {
-        b"-"
-    } else {
-        from
-    };
-    let mut names = Vec::new();
-    let mut bad = false;
-    for (index, name) in split_nul(&text).into_iter().enumerate() {
-        if name.is_empty() {
-            let _ = writeln!(
-                err,
-                "du: {}:{}: invalid zero-length file name",
-                quotef(label),
-                index.saturating_add(1)
-            );
-            bad = true;
-            continue;
-        }
-        names.push(name);
-    }
-    Ok((names, bad))
+    Ok(split_nul(&text))
 }
 
 // ------------------------------------------------------------------ tests ---
@@ -1665,6 +1715,18 @@ mod tests {
 
     /// Run a walk and return `(stdout, stderr, failed)`.
     fn walk(cfg: &Config, tree: &dyn Tree, roots: &[&[u8]]) -> (String, String, bool) {
+        walk_list(cfg, tree, roots, None)
+    }
+
+    /// [`walk`], with the roots declared to have come from a `--files0-from`
+    /// file of the given name — which is the only thing that makes an empty
+    /// root a diagnostic rather than a lookup of `""`.
+    fn walk_list(
+        cfg: &Config,
+        tree: &dyn Tree,
+        roots: &[&[u8]],
+        list: Option<&[u8]>,
+    ) -> (String, String, bool) {
         let mut out: Vec<u8> = Vec::new();
         let mut err: Vec<u8> = Vec::new();
         let names: Vec<Vec<u8>> = roots.iter().map(|r| r.to_vec()).collect();
@@ -1677,6 +1739,7 @@ mod tests {
                 seen: HashSet::new(),
                 grand: 0,
                 failed: false,
+                list: list.map(<[u8]>::to_vec),
             };
             walk.run(&names);
             walk.failed
@@ -2003,6 +2066,56 @@ mod tests {
             split_nul(b"t\0\0hl\0"),
             vec![b"t".to_vec(), Vec::new(), b"hl".to_vec()]
         );
+    }
+
+    /// The complaint about an empty name lands *between* the rows either side
+    /// of it, not before all of them. Measured on 9.4:
+    ///
+    /// ```text
+    /// $ printf 't/f\0\0t/sub\0' > z0 && du --files0-from=z0
+    /// 0	t/f
+    /// du: z0:2: invalid zero-length file name
+    /// 4	t/sub
+    /// ```
+    ///
+    /// Only the ordering distinguishes this from a pre-scan, which is why the
+    /// test interleaves rather than merely counting the diagnostics: it is the
+    /// difference the harness caught.
+    #[test]
+    fn an_empty_name_is_reported_where_it_stands_in_the_list() {
+        let cfg = bytes();
+        let (out, err, failed) = walk_list(
+            &cfg,
+            &two_levels(),
+            &[b"t/f", b"", b"t/sub"],
+            Some(b"list0"),
+        );
+        assert_eq!(out, "4096\tt/f\n8192\tt/sub\n");
+        assert_eq!(err, "du: list0:2: invalid zero-length file name\n");
+        assert!(failed);
+    }
+
+    /// The same list without a `--files0-from` behind it: still refused, but
+    /// the sentence loses the label and the position, because there is no
+    /// list to point into. `du ''` is `du: invalid zero-length file name`.
+    #[test]
+    fn an_empty_operand_is_refused_without_a_position() {
+        let cfg = bytes();
+        let (out, err, failed) = walk(&cfg, &two_levels(), &[b"t/f", b""]);
+        assert_eq!(out, "4096\tt/f\n");
+        assert_eq!(err, "du: invalid zero-length file name\n");
+        assert!(failed);
+    }
+
+    /// A name the caller spelled with a space is quoted; one that needs no
+    /// quoting is left bare. `quotef`, not `quoteaf` — measured above.
+    #[test]
+    fn the_list_label_is_quoted_only_when_it_needs_to_be() {
+        let cfg = bytes();
+        let (_, plain, _) = walk_list(&cfg, &two_levels(), &[b""], Some(b"list0"));
+        assert_eq!(plain, "du: list0:1: invalid zero-length file name\n");
+        let (_, spaced, _) = walk_list(&cfg, &two_levels(), &[b""], Some(b"a b"));
+        assert_eq!(spaced, "du: 'a b':1: invalid zero-length file name\n");
     }
 
     // --------------------------------------------------------- parsing ---

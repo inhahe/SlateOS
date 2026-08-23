@@ -76,6 +76,7 @@
 //!   -m MODE, --mode=MODE  Set permission mode (default 0666)
 //! ```
 
+use quoting::{quoteaf_os, quotef_os};
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -799,7 +800,7 @@ fn run_stat(opts: &StatOpts) -> bool {
                     }
                 }
                 Err(e) => {
-                    eprintln!("stat: cannot statfs '{file}': {e}");
+                    eprintln!("stat: cannot statfs {}: {e}", quoteaf_os(file));
                     any_error = true;
                 }
             }
@@ -840,7 +841,7 @@ fn run_stat(opts: &StatOpts) -> bool {
                     }
                 }
                 Err(e) => {
-                    eprintln!("stat: cannot stat '{file}': {e}");
+                    eprintln!("stat: cannot stat {}: {e}", quoteaf_os(file));
                     any_error = true;
                 }
             }
@@ -853,9 +854,13 @@ fn run_stat(opts: &StatOpts) -> bool {
 fn print_default_stat(st: &KernelStat, file: &str, link_target: &str) {
     // File line
     if !link_target.is_empty() {
-        println!("  File: '{file}' -> '{link_target}'");
+        println!(
+            "  File: {} -> {}",
+            quoteaf_os(file),
+            quoteaf_os(link_target)
+        );
     } else {
-        println!("  File: '{file}'");
+        println!("  File: {}", quoteaf_os(file));
     }
 
     println!(
@@ -1199,7 +1204,7 @@ fn run_touch(opts: &TouchOpts) -> bool {
                 tv_nsec: st.st_mtime_nsec as i64,
             }),
             Err(e) => {
-                eprintln!("touch: cannot stat reference '{refpath}': {e}");
+                eprintln!("touch: cannot stat reference {}: {e}", quoteaf_os(refpath));
                 return false;
             }
         }
@@ -1218,7 +1223,7 @@ fn run_touch(opts: &TouchOpts) -> bool {
             }
             // Create the file (empty).
             if let Err(e) = fs::write(file, b"") {
-                eprintln!("touch: cannot create '{file}': {e}");
+                eprintln!("touch: cannot create {}: {e}", quoteaf_os(file));
                 any_error = true;
                 continue;
             }
@@ -1252,7 +1257,7 @@ fn run_touch(opts: &TouchOpts) -> bool {
 
         let times = [atime, mtime];
         if let Err(e) = do_utimensat(file, &times) {
-            eprintln!("touch: cannot update times for '{file}': {e}");
+            eprintln!("touch: cannot update times for {}: {e}", quoteaf_os(file));
             any_error = true;
         }
     }
@@ -1416,18 +1421,21 @@ fn run_ln(opts: &LnOpts) -> bool {
             if opts.backup {
                 let backup_path = format!("{link_path}~");
                 if let Err(e) = do_rename(&link_path, &backup_path) {
-                    eprintln!("ln: cannot create backup of '{link_path}': {e}");
+                    eprintln!(
+                        "ln: cannot create backup of {}: {e}",
+                        quoteaf_os(&link_path)
+                    );
                     any_error = true;
                     continue;
                 }
             } else if opts.force {
                 if let Err(e) = do_unlink(&link_path) {
-                    eprintln!("ln: cannot remove '{link_path}': {e}");
+                    eprintln!("ln: cannot remove {}: {e}", quoteaf_os(&link_path));
                     any_error = true;
                     continue;
                 }
             } else {
-                eprintln!("ln: '{link_path}': file exists");
+                eprintln!("ln: {}: file exists", quoteaf_os(&link_path));
                 any_error = true;
                 continue;
             }
@@ -1443,12 +1451,20 @@ fn run_ln(opts: &LnOpts) -> bool {
             Ok(()) => {
                 if opts.verbose {
                     let kind = if opts.symbolic { "symbolic" } else { "hard" };
-                    eprintln!("'{link_path}' -> '{target}' ({kind} link)");
+                    eprintln!(
+                        "{} -> {} ({kind} link)",
+                        quoteaf_os(&link_path),
+                        quoteaf_os(target)
+                    );
                 }
             }
             Err(e) => {
                 let kind = if opts.symbolic { "symbolic" } else { "hard" };
-                eprintln!("ln: failed to create {kind} link '{link_path}' -> '{target}': {e}");
+                eprintln!(
+                    "ln: failed to create {kind} link {} -> {}: {e}",
+                    quoteaf_os(&link_path),
+                    quoteaf_os(target)
+                );
                 any_error = true;
             }
         }
@@ -1668,7 +1684,7 @@ fn run_readlink(opts: &ReadlinkOpts) -> bool {
                 }
             }
             Err(e) => {
-                eprintln!("readlink: {file}: {e}");
+                eprintln!("readlink: {}: {e}", quotef_os(file));
                 any_error = true;
             }
         }
@@ -1830,7 +1846,7 @@ fn run_realpath(opts: &RealpathOpts) -> bool {
                             // If not below base, print absolute (per GNU coreutils behavior).
                         }
                         Err(e) => {
-                            eprintln!("realpath: {base}: {e}");
+                            eprintln!("realpath: {}: {e}", quotef_os(base));
                             any_error = true;
                             continue;
                         }
@@ -1846,7 +1862,7 @@ fn run_realpath(opts: &RealpathOpts) -> bool {
                             resolved = make_relative(&resolved, &ar);
                         }
                         Err(e) => {
-                            eprintln!("realpath: {rel_to}: {e}");
+                            eprintln!("realpath: {}: {e}", quotef_os(rel_to));
                             any_error = true;
                             continue;
                         }
@@ -1856,7 +1872,7 @@ fn run_realpath(opts: &RealpathOpts) -> bool {
                 println!("{resolved}");
             }
             Err(e) => {
-                eprintln!("realpath: {file}: {e}");
+                eprintln!("realpath: {}: {e}", quotef_os(file));
                 any_error = true;
             }
         }
@@ -1934,7 +1950,7 @@ fn run_mkfifo(opts: &MkfifoOpts) -> bool {
 
     for file in &opts.files {
         if let Err(e) = do_mkfifo(file, opts.mode) {
-            eprintln!("mkfifo: cannot create fifo '{file}': {e}");
+            eprintln!("mkfifo: cannot create fifo {}: {e}", quoteaf_os(file));
             any_error = true;
         }
     }

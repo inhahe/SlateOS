@@ -19,7 +19,7 @@
 # 71 real sites. If a number rises in a commit that also edits code, the
 # code is what raised it.
 #
-# 1673 sites across 778 files.
+# 1639 sites across 776 files.
 
 init/servicebus/src/main.rs:8
 userspace/abduco-cli/src/main.rs:5
@@ -373,7 +373,6 @@ userspace/lite-xl-cli/src/main.rs:1
 userspace/locale-cli/src/main.rs:1
 userspace/locale/src/main.rs:1
 userspace/localectl/src/main.rs:3
-userspace/loginctl/src/main.rs:17
 userspace/loki-cli/src/main.rs:1
 userspace/loki/src/main.rs:1
 userspace/look/src/main.rs:1
@@ -653,7 +652,6 @@ userspace/ssh/src/main.rs:2
 userspace/stackpath-cli/src/main.rs:1
 userspace/starship-cli/src/main.rs:1
 userspace/starship/src/main.rs:2
-userspace/stat/src/main.rs:17
 userspace/statsd-cli/src/main.rs:1
 userspace/step-cli/src/main.rs:1
 userspace/step3d-cli/src/main.rs:1

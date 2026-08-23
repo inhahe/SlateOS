@@ -7,3 +7,9 @@ description = "SlateOS file status and manipulation tools"
 # One definition of a mode word's file-type field, and one `rwxrwxrwx`
 # rendering, shared with `chmod`, `ls -l` and coreutils' own `stat`.
 modechange = { path = "../modechange" }
+
+# One rendering of untrusted text inside a diagnostic. Every name this crate
+# reports on is a path, and a path may hold any byte but `/` and NUL --
+# including a newline. `stat: {path}: {e}` therefore lets whoever *named* the
+# file write extra lines of this program's stderr. See `userspace/quoting`.
+quoting = { path = "../quoting" }

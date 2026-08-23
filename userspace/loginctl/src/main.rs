@@ -8,6 +8,7 @@
 //! - `loginctl` (default) — session/user/seat management
 //! - `userdbctl` — user/group database query tool
 
+use quoting::quoteaf_os;
 use std::collections::BTreeMap;
 use std::env;
 use std::process;
@@ -270,7 +271,7 @@ fn show_session(args: &[String]) {
             if session_id.is_empty() {
                 eprintln!("No active session found.");
             } else {
-                eprintln!("Session '{}' not found.", session_id);
+                eprintln!("Session {} not found.", quoteaf_os(session_id));
             }
             process::exit(1);
         }
@@ -306,7 +307,7 @@ fn lock_session(args: &[String]) {
             process::exit(1);
         }
     };
-    println!("Session '{}' locked.", session_id);
+    println!("Session {} locked.", quoteaf_os(session_id));
 }
 
 fn unlock_session(args: &[String]) {
@@ -317,7 +318,7 @@ fn unlock_session(args: &[String]) {
             process::exit(1);
         }
     };
-    println!("Session '{}' unlocked.", session_id);
+    println!("Session {} unlocked.", quoteaf_os(session_id));
 }
 
 fn activate_session(args: &[String]) {
@@ -328,7 +329,7 @@ fn activate_session(args: &[String]) {
             process::exit(1);
         }
     };
-    println!("Session '{}' activated.", session_id);
+    println!("Session {} activated.", quoteaf_os(session_id));
 }
 
 fn terminate_session(args: &[String]) {
@@ -339,7 +340,7 @@ fn terminate_session(args: &[String]) {
             process::exit(1);
         }
     };
-    println!("Session '{}' terminated.", session_id);
+    println!("Session {} terminated.", quoteaf_os(session_id));
 }
 
 fn kill_session(args: &[String]) {
@@ -374,8 +375,10 @@ fn kill_session(args: &[String]) {
         process::exit(1);
     }
     println!(
-        "Sending {} to {} processes in session '{}'.",
-        signal, who, session_id
+        "Sending {} to {} processes in session {}.",
+        signal,
+        who,
+        quoteaf_os(session_id)
     );
 }
 
@@ -454,7 +457,7 @@ fn show_user(args: &[String]) {
     let user = match user {
         Some(u) => u,
         None => {
-            eprintln!("User '{}' not found or not logged in.", target);
+            eprintln!("User {} not found or not logged in.", quoteaf_os(target));
             process::exit(1);
         }
     };
@@ -477,14 +480,14 @@ fn enable_linger(args: &[String]) {
     let _ = std::fs::create_dir_all(&linger_dir);
     let linger_file = format!("{}/{}", linger_dir, user);
     let _ = std::fs::write(&linger_file, "");
-    println!("Linger enabled for user '{}'.", user);
+    println!("Linger enabled for user {}.", quoteaf_os(user));
 }
 
 fn disable_linger(args: &[String]) {
     let user = args.first().map(|s| s.as_str()).unwrap_or("current user");
     let linger_file = format!("{}/linger/{}", USER_RUNTIME_DIR, user);
     let _ = std::fs::remove_file(&linger_file);
-    println!("Linger disabled for user '{}'.", user);
+    println!("Linger disabled for user {}.", quoteaf_os(user));
 }
 
 fn terminate_user(args: &[String]) {
@@ -495,7 +498,7 @@ fn terminate_user(args: &[String]) {
             process::exit(1);
         }
     };
-    println!("User '{}' sessions terminated.", user);
+    println!("User {} sessions terminated.", quoteaf_os(user));
 }
 
 fn kill_user(args: &[String]) {
@@ -522,7 +525,11 @@ fn kill_user(args: &[String]) {
         eprintln!("Error: user name or UID required");
         process::exit(1);
     }
-    println!("Sending {} to all sessions of user '{}'.", signal, user);
+    println!(
+        "Sending {} to all sessions of user {}.",
+        signal,
+        quoteaf_os(user)
+    );
 }
 
 // ── Seat management ────────────────────────────────────────────────────
@@ -605,7 +612,7 @@ fn show_seat(args: &[String]) {
     let seat = match seats.iter().find(|s| s.id == seat_id) {
         Some(s) => s,
         None => {
-            eprintln!("Seat '{}' not found.", seat_id);
+            eprintln!("Seat {} not found.", quoteaf_os(seat_id));
             process::exit(1);
         }
     };
@@ -624,7 +631,11 @@ fn attach_device(args: &[String]) {
     }
     let seat = &args[0];
     for dev in &args[1..] {
-        println!("Device '{}' attached to seat '{}'.", dev, seat);
+        println!(
+            "Device {} attached to seat {}.",
+            quoteaf_os(dev),
+            quoteaf_os(seat)
+        );
     }
 }
 
@@ -640,7 +651,7 @@ fn terminate_seat(args: &[String]) {
             process::exit(1);
         }
     };
-    println!("All sessions on seat '{}' terminated.", seat_id);
+    println!("All sessions on seat {} terminated.", quoteaf_os(seat_id));
 }
 
 // ── System control ─────────────────────────────────────────────────────
@@ -757,7 +768,7 @@ fn userdbctl_user(args: &[String]) {
                 }
             }
             None => {
-                eprintln!("User '{}' not found.", name);
+                eprintln!("User {} not found.", quoteaf_os(name));
                 process::exit(1);
             }
         }
@@ -803,7 +814,7 @@ fn userdbctl_group(args: &[String]) {
                 }
             }
             None => {
-                eprintln!("Group '{}' not found.", name);
+                eprintln!("Group {} not found.", quoteaf_os(name));
                 process::exit(1);
             }
         }
@@ -826,7 +837,7 @@ fn userdbctl_members(args: &[String]) {
                 }
             }
             None => {
-                eprintln!("Group '{}' not found.", name);
+                eprintln!("Group {} not found.", quoteaf_os(name));
                 process::exit(1);
             }
         }

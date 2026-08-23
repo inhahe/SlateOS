@@ -5717,6 +5717,9 @@ dependencies = [
 [[package]]
 name = "loginctl"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "logind"
@@ -10231,6 +10234,7 @@ name = "stat"
 version = "0.1.0"
 dependencies = [
  "modechange",
+ "quoting",
 ]
 
 [[package]]

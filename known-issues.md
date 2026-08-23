@@ -61772,3 +61772,75 @@ Two smaller notes for whoever picks that up:
   possibility" shape and leaves less behind.
 - Do not bulk-`allow` the lints in kernel modules to clear the count. The
   userspace crates that did this are recorded above as a warning, not a model.
+
+### 2026-08-22 — that 18 000 triaged, and two of the claims above corrected
+
+The paragraph above is right that 18 000 warnings exist and wrong about what
+they mean. `scripts/clippy-sites.py --by-context` now splits them by enclosing
+scope (see §286), giving **9 751 production / 8 386 self-test / 24 test**.
+Within production:
+
+| lint | production | self-test |
+|---|---:|---:|
+| `arithmetic_side_effects` | 4 893 | 2 545 |
+| `indexing_slicing` | 4 455 | 1 428 |
+| `expect_used` | **0** | 3 509 |
+| `unwrap_used` | **0** | 877 |
+| `panic` | **3** | 21 |
+
+So the second bullet of "what this does NOT cover" — direct `panic!` — was
+never a large backlog. It is three sites, and all three were adjudicated:
+
+- `main.rs:5882` — aborts the boot when syscall dispatch is broken under live
+  filtering. Correct: a kernel that cannot dispatch syscalls should stop
+  loudly, and this one shipped broken once already (stale `MAX_SYSCALL_NR`).
+- `sync.rs:962` — a proven self-deadlock. Correct, and already carries a
+  "## Why it panics" section arguing it: the alternative is spinning to the
+  boot test's timeout with no indication of which lock was involved.
+- `mm/kvspace.rs:238` — **fixed**, see below.
+
+The remaining ~9 300 production sites are all `arithmetic_side_effects` and
+`indexing_slicing`. That is still a real backlog and still unworked, but it is
+one kind of work, not five.
+
+**Do not prioritise it by count.** The per-file ranking puts
+`kernel/src/proc/elf.rs` first by a wide margin, which reads as "the ELF parser
+handles attacker-supplied executables and is the worst file in the tree". It is
+not: every one of those sites is in a `build_*_elf` function that *constructs*
+a synthetic ELF for a self-test, writing constants into a `Vec` of known size.
+They are test fixtures that happen to live in a production module, and they are
+now classified as such. Ranking by count points at the safest code in the file.
+
+The criterion that matters is the one CLAUDE.md states — "a potential DoS if an
+attacker can shape the input" — which picks out a different list: the
+decompressors (`fs/zstd.rs`, `fs/xz.rs`, `fs/bzip2.rs`, `fs/sevenz.rs`,
+`fs/compress.rs`), the wire parsers (`net/tcp.rs`, `net/tls.rs`, `net/ssh.rs`,
+`net/firewall.rs`), `drm/edid.rs` (bytes supplied by whatever monitor is
+plugged in), and the untrusted-image filesystems (`fs/fat.rs`,
+`fs/ext4/driver.rs`). Start there.
+
+**Correction 1: `kvspace::validate` was not the boot check it said it was.**
+Its doc read "Call once at boot to catch configuration errors", and no boot
+path called it — its only caller was this module's own `self_test`, so the
+check ran when the self-test ran and never otherwise. The module's blanket
+`#![allow(dead_code)]` meant nothing pointed out the gap. Every region it
+compares is a compile-time constant, so the question was always a compile-time
+one: it is now `const _: () = assert!(first_overlap().is_none(), …)`, which
+fails the **build**. Verified by moving `FAULT_TEST` onto `PT_SELFTEST` and
+confirming `error[E0080]: evaluation panicked`.
+
+**Correction 2: "the exit status is 1 when it finds something" was false.**
+`scan-unwrap.py`'s `main()` returned 0 unconditionally, so any caller written
+as `if scan-unwrap.py; then` would have succeeded on a tree full of findings.
+Nothing called it, so nothing noticed. Now it returns 1 on findings *and* is
+wired into `scripts/boot-test.sh` as `check_production_unwrap`, next to the
+user-access gate. Verified by injecting `Some(1u64).unwrap()` into
+`kvspace::identify` and confirming exit 1, then removing it and confirming 0.
+
+Those two are the same defect wearing different clothes: **a guard whose
+documentation asserts an enforcement that nothing performs.** It is the third
+instance in this file — `write_user_image`'s safety contract asserted what its
+caller happened to arrange (§285) — and it is worth checking for directly,
+because in all three cases the code read correctly and only the *wiring* was
+missing. Two questions catch it: does anything call this, and does anyone
+check what it returns?

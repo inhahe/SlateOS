@@ -5637,6 +5637,7 @@ pub fn self_test() -> KernelResult<()> {
     test_bind_duplicate_rejected()?;
     test_try_accept_empty()?;
     test_parse_tcp_options()?;
+    test_build_options_roundtrip()?;
     test_sack_blocks()?;
     test_seq_lt()?;
     test_ipv6_checksum()?;
@@ -5644,7 +5645,7 @@ pub fn self_test() -> KernelResult<()> {
     test_dual_stack_ip_addr()?;
     test_namespace_isolation()?;
 
-    crate::serial_println!("[tcp] TCP self-test PASSED (10 tests)");
+    crate::serial_println!("[tcp] TCP self-test PASSED (11 tests)");
     Ok(())
 }
 
@@ -5991,6 +5992,116 @@ fn test_parse_tcp_options() -> KernelResult<()> {
     }
 
     crate::serial_println!("[tcp]   TCP option parsing: OK");
+    Ok(())
+}
+
+/// Test: the option builders agree with the option parser.
+///
+/// The builders are the parser's inverse, and until now only the parser
+/// was tested. The specific thing worth asserting is that an option's
+/// declared length byte equals the number of bytes actually written after
+/// it: a builder that gets that wrong emits a segment every peer on the
+/// network parses differently from us, and it is silent locally because
+/// we never read back what we sent. Sharing one cursor between the length
+/// and the writes is what makes it true; this is the test that says so.
+fn test_build_options_roundtrip() -> KernelResult<()> {
+    let mut conn = TcpConnection::empty();
+    conn.ts_ok = true;
+    conn.ts_recent = 0xDEAD_BEEF;
+    conn.sack_ok = true;
+    conn.sack_blocks = [(100, 200), (300, 400), (500, 600), (0, 0)];
+    conn.sack_block_count = 3;
+
+    let (buf, len) = build_ts_and_sack_options(&conn);
+
+    // Three blocks alongside a timestamp exactly fill the 40 bytes a
+    // segment can carry — the case with no slack left at all.
+    let expect = TS_OPT_LEN.saturating_add(sack_opt_len(3));
+    if len != expect || len > MAX_TCP_OPT_SPACE {
+        crate::serial_println!(
+            "[tcp]   FAIL: ts+sack length {} (expected {}, cap {})",
+            len,
+            expect,
+            MAX_TCP_OPT_SPACE
+        );
+        return Err(KernelError::InternalError);
+    }
+    let Some(written) = buf.get(..len) else {
+        return Err(KernelError::InternalError);
+    };
+
+    // The parser finding the timestamp also proves it walked the whole
+    // block: the SACK option sits behind it, so a wrong length byte on
+    // either one desynchronises the walk and loses the other.
+    match parse_tcp_options(written).timestamp {
+        Some((_, 0xDEAD_BEEF)) => {}
+        other => {
+            crate::serial_println!("[tcp]   FAIL: TSecr round-trip got {:?}", other);
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // The SACK option's declared length must equal what follows it.
+    let sack = written.get(TS_OPT_LEN..).unwrap_or(&[]);
+    let edges = match sack {
+        [TCP_OPT_NOP, TCP_OPT_NOP, TCP_OPT_SACK, declared, rest @ ..] => {
+            if (*declared as usize) != rest.len().saturating_add(2) {
+                crate::serial_println!(
+                    "[tcp]   FAIL: SACK declares {} but carries {}",
+                    declared,
+                    rest.len().saturating_add(2)
+                );
+                return Err(KernelError::InternalError);
+            }
+            rest
+        }
+        _ => {
+            crate::serial_println!("[tcp]   FAIL: SACK option malformed: {:?}", sack);
+            return Err(KernelError::InternalError);
+        }
+    };
+
+    // ...and the edges must survive the trip byte-for-byte.
+    for (chunk, want) in edges.chunks_exact(4).zip([100u32, 200, 300, 400, 500, 600]) {
+        let bytes: [u8; 4] = chunk
+            .try_into()
+            .map_err(|_| KernelError::InternalError)?;
+        if u32::from_be_bytes(bytes) != want {
+            crate::serial_println!(
+                "[tcp]   FAIL: SACK edge expected {}, got {}",
+                want,
+                u32::from_be_bytes(bytes)
+            );
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // Without timestamps the SACK-only builder takes over, and a full
+    // four blocks must exactly fill its buffer. This is the case that
+    // would have written past the end had `MAX_SACK_BLOCKS` been raised
+    // while the hard-coded `[u8; 36]` stayed behind.
+    conn.ts_ok = false;
+    conn.sack_blocks = [(1, 2), (3, 4), (5, 6), (7, 8)];
+    conn.sack_block_count = 4;
+    let (_, slen) = build_sack_option(&conn);
+    if slen != SACK_OPT_BUF || slen != sack_opt_len(MAX_SACK_BLOCKS) {
+        crate::serial_println!(
+            "[tcp]   FAIL: sack-only length {} (buffer is {})",
+            slen,
+            SACK_OPT_BUF
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // Nothing to say means an empty option block, not a header with no body.
+    conn.sack_ok = false;
+    let (_, none_len) = build_sack_option(&conn);
+    if none_len != 0 {
+        crate::serial_println!("[tcp]   FAIL: sack disabled produced {} bytes", none_len);
+        return Err(KernelError::InternalError);
+    }
+
+    crate::serial_println!("[tcp]   TCP option building: OK");
     Ok(())
 }
 

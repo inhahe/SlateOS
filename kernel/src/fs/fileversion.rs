@@ -434,25 +434,70 @@ pub fn self_test() {
 
     init_defaults();
 
+    // Fixtures live in a directory no user would have, so nothing this suite
+    // captures, purges or watches can collide with the user's own versioning.
+    // `/home/user/test.txt` -- the old fixture -- is exactly the kind of path
+    // someone really has, and `purge_file_versions` on it would have thrown
+    // away their history.
+    const FIXTURE: &str = "/tmp/.fileversion-selftest/a.txt";
+    const WATCH_DIR: &str = "/tmp/.fileversion-selftest/docs";
+
+    // A pre-existing watch covering the fixture would impose its own retention
+    // policy on the captures below, so the exact version counts in tests 4, 9
+    // and 10 would be the user's policy's counts rather than the default's.
+    // That is a configuration the suite cannot test under, not a failure.
+    if list_watches()
+        .iter()
+        .any(|w| crate::fs::pathutil::path_in_subtree(FIXTURE, w.path.as_str()))
+    {
+        crate::serial_println!(
+            "fileversion::self_test() — skipped: an existing watch covers {FIXTURE}"
+        );
+        return;
+    }
+
+    // Baseline.
+    //
+    // Deliberately *not* asserted as absolute counts.  This suite is reachable
+    // from the `fversion test` shell command, so a user can run it twice -- and
+    // the previous version left the watch `/home/user/documents` behind, so the
+    // second run's `add_watch(...).expect("add watch")` hit `AlreadyExists` and
+    // panicked the kernel.  Everything below is relative to what the module
+    // already held, and the tail restores it exactly.
+    let (base_versions, _, base_captured, base_restored, base_watches, _) = stats();
+
     // Test 1: Capture a version.
+    //
+    // A user can turn versioning off globally, or put a `Disabled` policy on a
+    // subtree covering the fixture, and either makes every capture below fail.
+    // Neither is a defect for the suite to report, so detect it and skip.
     let data = b"Hello, world!";
-    let id1 = capture_version("/home/user/test.txt", data, 1000).expect("capture v1");
+    let id1 = match capture_version(FIXTURE, data, 1000) {
+        Ok(id) => id,
+        Err(KernelError::NotSupported) => {
+            crate::serial_println!(
+                "fileversion::self_test() — skipped: versioning is disabled for {FIXTURE}"
+            );
+            return;
+        }
+        Err(e) => panic!("capture v1: {e:?}"),
+    };
     assert!(id1 > 0);
     crate::serial_println!("  [1/11] capture version: OK");
 
     // Test 2: Capture a different version.
     let data2 = b"Hello, world! Updated.";
-    let id2 = capture_version("/home/user/test.txt", data2, 1000).expect("capture v2");
+    let id2 = capture_version(FIXTURE, data2, 1000).expect("capture v2");
     assert_ne!(id1, id2);
     crate::serial_println!("  [2/11] capture second version: OK");
 
     // Test 3: Dedup — same content should return existing ID.
-    let id_dup = capture_version("/home/user/test.txt", data2, 1000).expect("capture dup");
+    let id_dup = capture_version(FIXTURE, data2, 1000).expect("capture dup");
     assert_eq!(id_dup, id2); // Same content, returns previous ID.
     crate::serial_println!("  [3/11] dedup detection: OK");
 
     // Test 4: List versions (newest first).
-    let versions = list_versions("/home/user/test.txt");
+    let versions = list_versions(FIXTURE);
     assert_eq!(versions.len(), 2);
     assert_eq!(versions[0].id, id2); // newest
     crate::serial_println!("  [4/11] list versions: OK");
@@ -470,36 +515,55 @@ pub fn self_test() {
 
     // Test 7: Restore version (just increments counter, returns info).
     let restored = restore_version(id1).expect("restore");
-    assert_eq!(restored.path, "/home/user/test.txt");
+    assert_eq!(restored.path, FIXTURE);
     crate::serial_println!("  [7/11] restore version: OK");
 
     // Test 8: Add watch with policy.
-    add_watch("/home/user/documents", VersionPolicy::KeepLast(5)).expect("add watch");
+    add_watch(WATCH_DIR, VersionPolicy::KeepLast(5)).expect("add watch");
     let watches = list_watches();
-    assert_eq!(watches.len(), 1);
+    assert_eq!(watches.len(), base_watches + 1);
+    assert!(watches.iter().any(|w| w.path == WATCH_DIR));
     crate::serial_println!("  [8/11] add watch: OK");
 
     // Test 9: Delete a version.
     delete_version(id1).expect("delete version");
-    let versions = list_versions("/home/user/test.txt");
+    let versions = list_versions(FIXTURE);
     assert_eq!(versions.len(), 1);
     crate::serial_println!("  [9/11] delete version: OK");
 
     // Test 10: Purge all versions of a file.
-    let purged = purge_file_versions("/home/user/test.txt").expect("purge");
+    let purged = purge_file_versions(FIXTURE).expect("purge");
     assert_eq!(purged, 1);
-    let versions = list_versions("/home/user/test.txt");
+    let versions = list_versions(FIXTURE);
     assert!(versions.is_empty());
     crate::serial_println!("  [10/11] purge file versions: OK");
 
     // Test 11: Stats.
+    // `total_captured`/`total_restored` are lifetime counters with no reset, so
+    // they can only be asserted as having advanced by at least what this suite
+    // contributed.  The version count is exact: everything the suite captured
+    // has been deleted or purged by now.
     let (ver_count, _file_count, captured, restored, watch_count, ops) = stats();
-    assert_eq!(ver_count, 0);
-    assert!(captured >= 2);
-    assert!(restored >= 1);
-    assert_eq!(watch_count, 1);
+    assert_eq!(ver_count, base_versions);
+    assert!(captured >= base_captured + 2);
+    assert!(restored >= base_restored + 1);
+    assert_eq!(watch_count, base_watches + 1);
     assert!(ops > 0);
     crate::serial_println!("  [11/11] stats: OK");
+
+    // Cleanup: put the store back exactly as it was found, so a second
+    // `fversion test` sees the same baseline this one did.
+    remove_watch(WATCH_DIR).expect("cleanup: remove watch");
+    assert_eq!(
+        list_watches().len(),
+        base_watches,
+        "self_test must leave the watch list as it found it"
+    );
+    assert_eq!(
+        stats().0,
+        base_versions,
+        "self_test must leave the version store as it found it"
+    );
 
     crate::serial_println!("fileversion::self_test() — all 11 tests passed");
 }

@@ -17,6 +17,7 @@
 //! network I/O is performed; the daemon maintains in-memory service
 //! registries and responds with synthetic data.
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -2655,7 +2656,10 @@ fn resolve_with_flags(args: &[String], protocol: i32) -> i32 {
 fn resolve_name_cmd(hostname: &str, protocol: i32, _verbose: bool) -> i32 {
     let results = resolve_hostname(hostname);
     if results.is_empty() {
-        eprintln!("avahi-resolve: Failed to resolve hostname '{hostname}': Timeout reached");
+        eprintln!(
+            "avahi-resolve: Failed to resolve hostname {}: Timeout reached",
+            quoteaf_os(hostname)
+        );
         return 1;
     }
 
@@ -2680,7 +2684,10 @@ fn resolve_address_cmd(address: &str, _verbose: bool) -> i32 {
             0
         }
         None => {
-            eprintln!("avahi-resolve: Failed to resolve address '{address}': Timeout reached");
+            eprintln!(
+                "avahi-resolve: Failed to resolve address {}: Timeout reached",
+                quoteaf_os(address)
+            );
             1
         }
     }
@@ -2858,7 +2865,7 @@ fn publish_service_cmd(args: &[String]) -> i32 {
         .with_domain(&domain)
         .with_txt(txt_records);
 
-    println!("Established under name '{}'", entry._name);
+    println!("Established under name {}", quoteaf_os(&entry._name));
     println!("Service: {} ({})", entry.instance_name(), entry._port);
     println!("Domain: {domain}");
     if !entry._txt.is_empty() {
@@ -2922,7 +2929,7 @@ fn publish_address_cmd(args: &[String]) -> i32 {
     };
 
     let fqdn = hostname_fqdn(&hostname, MDNS_DOMAIN);
-    println!("Established under name '{fqdn}'");
+    println!("Established under name {}", quoteaf_os(&fqdn));
     println!("Address: {addr}");
     if !no_reverse {
         let reverse = match addr {

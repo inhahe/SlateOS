@@ -4,6 +4,7 @@
 //!
 //! Multi-personality: `syncthing`, `stcli`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -74,11 +75,14 @@ fn run_syncthing(args: &[String]) -> i32 {
                     println!("  This Device");
                 }
                 "errors" => println!("No errors"),
-                _ => println!("syncthing cli: unknown subcommand '{}'", subcmd),
+                _ => println!("syncthing cli: unknown subcommand {}", quoteaf_os(subcmd)),
             }
         }
         _ => {
-            eprintln!("syncthing: unknown command '{}'. See --help.", cmd);
+            eprintln!(
+                "syncthing: unknown command {}. See --help.",
+                quoteaf_os(cmd)
+            );
             return 1;
         }
     }
@@ -109,10 +113,10 @@ fn run_stcli(args: &[String]) -> i32 {
             }
             "config" => println!("(configuration output)"),
             "errors" => println!("No errors"),
-            _ => println!("stcli: unknown show target '{}'", what),
+            _ => println!("stcli: unknown show target {}", quoteaf_os(what)),
         }
     } else {
-        println!("stcli: unknown command '{}'", cmd);
+        println!("stcli: unknown command {}", quoteaf_os(cmd));
     }
     0
 }

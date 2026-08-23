@@ -2,3 +2,8 @@
 name = "ollama-cli"
 version = "0.1.0"
 edition = "2024"
+
+[dependencies]
+# ollama-cli names models and tags, identifiers that come from the command
+# line and from a manifest pulled off the network.
+quoting = { path = "../quoting" }

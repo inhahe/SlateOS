@@ -4,6 +4,7 @@
 //!
 //! Multi-personality: `chroot`, `unshare`, `pivot_root`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -37,8 +38,8 @@ fn run_chroot(args: &[String]) -> i32 {
     let root = positional.first().copied().unwrap_or("/mnt/newroot");
     let cmd = positional.get(1).copied().unwrap_or("/bin/sh");
 
-    println!("chroot: changing root to '{}'", root);
-    println!("chroot: running '{}'", cmd);
+    println!("chroot: changing root to {}", quoteaf_os(root));
+    println!("chroot: running {}", quoteaf_os(cmd));
     0
 }
 
@@ -83,10 +84,13 @@ fn run_unshare(args: &[String]) -> i32 {
         .unwrap_or("/bin/sh");
 
     if namespaces.is_empty() {
-        println!("unshare: running '{}' (no namespaces specified)", cmd);
+        println!(
+            "unshare: running {} (no namespaces specified)",
+            quoteaf_os(cmd)
+        );
     } else {
         println!("unshare: new namespaces: {}", namespaces.join(", "));
-        println!("unshare: running '{}'", cmd);
+        println!("unshare: running {}", quoteaf_os(cmd));
     }
     0
 }

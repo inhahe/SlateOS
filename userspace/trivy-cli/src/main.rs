@@ -4,6 +4,7 @@
 //!
 //! Single personality: `trivy`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -285,15 +286,18 @@ fn run_trivy(args: Vec<String>) -> i32 {
                 }
                 "install" => {
                     let name = args.get(2).map(|s| s.as_str()).unwrap_or("example");
-                    println!("Installing plugin '{}'...", name);
-                    println!("Plugin '{}' installed successfully.", name);
+                    println!("Installing plugin {}...", quoteaf_os(name));
+                    println!("Plugin {} installed successfully.", quoteaf_os(name));
                     0
                 }
                 _ => {
                     if sub.is_empty() {
                         eprintln!("Usage: trivy plugin <list|install|uninstall|run>");
                     } else {
-                        eprintln!("Error: unknown plugin subcommand '{}'. See --help.", sub);
+                        eprintln!(
+                            "Error: unknown plugin subcommand {}. See --help.",
+                            quoteaf_os(sub)
+                        );
                     }
                     1
                 }
@@ -303,7 +307,7 @@ fn run_trivy(args: Vec<String>) -> i32 {
             if cmd.is_empty() {
                 eprintln!("Usage: trivy <command>. See --help.");
             } else {
-                eprintln!("Error: unknown command '{}'. See --help.", cmd);
+                eprintln!("Error: unknown command {}. See --help.", quoteaf_os(cmd));
             }
             1
         }

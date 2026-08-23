@@ -2,3 +2,8 @@
 name = "etcd-cli"
 version = "0.1.0"
 edition = "2024"
+
+[dependencies]
+# etcd-cli names keys and values, and a key in etcd is arbitrary bytes
+# written by any client with access.
+quoting = { path = "../quoting" }

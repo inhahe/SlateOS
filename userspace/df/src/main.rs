@@ -23,6 +23,7 @@
 //! df --help                 Show help
 //! ```
 
+use quoting::{quoteaf_os, quotef_os};
 use std::env;
 use std::fs;
 use std::process;
@@ -520,7 +521,7 @@ fn parse_args() -> Config {
                 if i < args.len() {
                     cfg.include_types.push(args[i].clone());
                 } else {
-                    eprintln!("df: option '{arg}' requires an argument");
+                    eprintln!("df: option {} requires an argument", quoteaf_os(arg));
                     process::exit(1);
                 }
             }
@@ -529,7 +530,7 @@ fn parse_args() -> Config {
                 if i < args.len() {
                     cfg.exclude_types.push(args[i].clone());
                 } else {
-                    eprintln!("df: option '{arg}' requires an argument");
+                    eprintln!("df: option {} requires an argument", quoteaf_os(arg));
                     process::exit(1);
                 }
             }
@@ -545,7 +546,7 @@ fn parse_args() -> Config {
                 process::exit(0);
             }
             other if other.starts_with('-') => {
-                eprintln!("df: unknown option '{other}'");
+                eprintln!("df: unknown option {}", quoteaf_os(other));
                 eprintln!("Try 'df --help' for more information.");
                 process::exit(1);
             }
@@ -1003,7 +1004,7 @@ fn run() -> i32 {
             eprintln!("df: no matching filesystems");
         } else {
             for p in &cfg.filter_paths {
-                eprintln!("df: {p}: no file system information available");
+                eprintln!("df: {}: no file system information available", quotef_os(p));
             }
         }
         return 1;

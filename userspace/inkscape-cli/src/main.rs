@@ -4,6 +4,7 @@
 //!
 //! Single personality: `inkscape`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -79,7 +80,7 @@ fn run_inkscape(args: Vec<String>) -> i32 {
 
     if args.iter().any(|a| a == "--vacuum-defs") {
         for f in &files {
-            println!("Vacuuming defs in '{}'...", f);
+            println!("Vacuuming defs in {}...", quoteaf_os(f));
         }
         println!("Done.");
         return 0;
@@ -89,23 +90,26 @@ fn run_inkscape(args: Vec<String>) -> i32 {
         for f in &files {
             let out = output.unwrap_or("output");
             println!(
-                "Exporting '{}' → '{}' as {} at {} DPI",
-                f,
-                out,
-                etype.to_uppercase(),
-                dpi
+                "Exporting {} → {} as {} at {dpi} DPI",
+                quoteaf_os(f),
+                quoteaf_os(out),
+                etype.to_uppercase()
             );
         }
     } else if output.is_some() {
         for f in &files {
-            println!("Exporting '{}' → '{}'", f, output.unwrap_or("output"));
+            println!(
+                "Exporting {} → {}",
+                quoteaf_os(f),
+                quoteaf_os(output.unwrap_or("output"))
+            );
         }
     } else if files.is_empty() {
         println!("Inkscape 1.3.2 (Slate OS)");
         println!("Starting Inkscape GUI...");
     } else {
         for f in &files {
-            println!("Opening '{}' in Inkscape...", f);
+            println!("Opening {} in Inkscape...", quoteaf_os(f));
         }
     }
     0

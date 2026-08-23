@@ -19,7 +19,7 @@
 # 71 real sites. If a number rises in a commit that also edits code, the
 # code is what raised it.
 #
-# 1107 sites across 704 files.
+# 927 sites across 659 files.
 
 userspace/acpid/src/main.rs:3
 userspace/ada-cli/src/main.rs:1
@@ -52,7 +52,6 @@ userspace/audacity-cli/src/main.rs:1
 userspace/audit/src/main.rs:2
 userspace/augeas-cli/src/main.rs:1
 userspace/avahi-cli/src/main.rs:1
-userspace/avahi/src/main.rs:4
 userspace/avrdude-cli/src/main.rs:1
 userspace/avro-cli/src/main.rs:1
 userspace/aws-cli/src/main.rs:1
@@ -74,7 +73,6 @@ userspace/bind-cli/src/main.rs:1
 userspace/blender-cli/src/main.rs:1
 userspace/bluez-cli/src/main.rs:1
 userspace/bluez/src/main.rs:3
-userspace/bootctl/src/main.rs:4
 userspace/bore/src/main.rs:1
 userspace/borg-cli/src/main.rs:2
 userspace/borg/src/main.rs:1
@@ -89,7 +87,6 @@ userspace/btrfs-cli/src/main.rs:3
 userspace/buck-cli/src/main.rs:1
 userspace/buildah-cli/src/main.rs:1
 userspace/buildah/src/main.rs:1
-userspace/buildkite-cli/src/main.rs:4
 userspace/bun-cli/src/main.rs:3
 userspace/bundler-cli/src/main.rs:2
 userspace/bunny-cli/src/main.rs:1
@@ -119,10 +116,7 @@ userspace/chargebee-cli/src/main.rs:1
 userspace/cheat-sh/src/main.rs:1
 userspace/checkout-cli/src/main.rs:1
 userspace/chrony/src/main.rs:1
-userspace/chroot-cli/src/main.rs:4
 userspace/circleci-cli/src/main.rs:3
-userspace/civo-cli/src/main.rs:4
-userspace/clearml-cli/src/main.rs:4
 userspace/clickup-cli/src/main.rs:1
 userspace/cloud-init-cli/src/main.rs:1
 userspace/cmake-cli/src/main.rs:1
@@ -130,14 +124,12 @@ userspace/cml-cli/src/main.rs:3
 userspace/cmp/src/main.rs:3
 userspace/cmus/src/main.rs:1
 userspace/cni-cli/src/main.rs:2
-userspace/cockroach-cli/src/main.rs:4
 userspace/cockroachdb/src/main.rs:1
 userspace/coinbase-cli/src/main.rs:1
 userspace/comm/src/main.rs:2
 userspace/composer-cli/src/main.rs:2
 userspace/conan-cli/src/main.rs:2
 userspace/concourse-cli/src/main.rs:3
-userspace/conda-cli/src/main.rs:4
 userspace/consul-cli/src/main.rs:1
 userspace/consul/src/main.rs:1
 userspace/containerd-cli/src/main.rs:1
@@ -156,7 +148,6 @@ userspace/crio-cli/src/main.rs:1
 userspace/cron-cli/src/main.rs:1
 userspace/crossplane-cli/src/main.rs:3
 userspace/crystal-cli/src/main.rs:2
-userspace/cups-cli/src/main.rs:4
 userspace/cups/src/main.rs:2
 userspace/curl/src/main.rs:2
 userspace/cyberark-cli/src/main.rs:1
@@ -165,21 +156,18 @@ userspace/d-cli/src/main.rs:2
 userspace/dagger-cli/src/main.rs:3
 userspace/dapr-cli/src/main.rs:3
 userspace/datadog-cli/src/main.rs:1
-userspace/date/src/main.rs:4
 userspace/dbmate/src/main.rs:1
 userspace/dbt-cli/src/main.rs:2
 userspace/dconf-cli/src/main.rs:2
 userspace/deno-cli/src/main.rs:1
 userspace/deno/src/main.rs:1
 userspace/deta-cli/src/main.rs:3
-userspace/df/src/main.rs:4
 userspace/diesel-cli/src/main.rs:1
 userspace/directus-cli/src/main.rs:1
 userspace/direnv-cli/src/main.rs:1
 userspace/dirvish-cli/src/main.rs:1
 userspace/discord-cli/src/main.rs:1
 userspace/diskonaut-cli/src/main.rs:1
-userspace/django-cli/src/main.rs:4
 userspace/dnsimple-cli/src/main.rs:1
 userspace/dnsmadeeasy-cli/src/main.rs:1
 userspace/doas/src/main.rs:1
@@ -197,7 +185,6 @@ userspace/dunst-cli/src/main.rs:1
 userspace/duplicity-cli/src/main.rs:1
 userspace/dvc-cli/src/main.rs:2
 userspace/dynadot-cli/src/main.rs:1
-userspace/e2fsprogs/src/main.rs:4
 userspace/earlyoom/src/main.rs:1
 userspace/earthly-cli/src/main.rs:1
 userspace/easydns-cli/src/main.rs:1
@@ -210,12 +197,10 @@ userspace/envoy-cli/src/main.rs:1
 userspace/envoy/src/main.rs:1
 userspace/espeak-cli/src/main.rs:1
 userspace/esphome-cli/src/main.rs:1
-userspace/etcd-cli/src/main.rs:4
 userspace/etcd/src/main.rs:2
 userspace/ethers-cli/src/main.rs:2
 userspace/eventbridge-cli/src/main.rs:2
 userspace/evolution-cli/src/main.rs:1
-userspace/exoscale-cli/src/main.rs:4
 userspace/fabric-cli/src/main.rs:1
 userspace/fastapi-cli/src/main.rs:1
 userspace/festival-cli/src/main.rs:2
@@ -224,7 +209,6 @@ userspace/ffmpeg/src/main.rs:3
 userspace/ffplay-cli/src/main.rs:1
 userspace/firebase-cli/src/main.rs:2
 userspace/firecracker-cli/src/main.rs:3
-userspace/fivetran-cli/src/main.rs:4
 userspace/flask-cli/src/main.rs:2
 userspace/flatpak/src/main.rs:2
 userspace/flavours-cli/src/main.rs:1
@@ -290,7 +274,6 @@ userspace/ibus-cli/src/main.rs:2
 userspace/ifconfig/src/main.rs:1
 userspace/imply-cli/src/main.rs:1
 userspace/influxdb/src/main.rs:1
-userspace/inkscape-cli/src/main.rs:4
 userspace/insomnia-cli/src/main.rs:3
 userspace/ip/src/main.rs:1
 userspace/ipsec-cli/src/main.rs:1
@@ -315,7 +298,6 @@ userspace/kafkacat-cli/src/main.rs:2
 userspace/kakoune-cli/src/main.rs:1
 userspace/kcat-cli/src/main.rs:1
 userspace/keras-cli/src/main.rs:1
-userspace/kexec-cli/src/main.rs:4
 userspace/kexec/src/main.rs:2
 userspace/keycdn-cli/src/main.rs:1
 userspace/keycloak/src/main.rs:1
@@ -325,7 +307,6 @@ userspace/kitty-cli/src/main.rs:1
 userspace/kopia-cli/src/main.rs:1
 userspace/krakend-cli/src/main.rs:1
 userspace/kubectl-cli/src/main.rs:1
-userspace/kustomize-cli/src/main.rs:4
 userspace/kvantum-cli/src/main.rs:1
 userspace/lapce-cli/src/main.rs:1
 userspace/ldd/src/main.rs:1
@@ -344,7 +325,6 @@ userspace/loki/src/main.rs:1
 userspace/look/src/main.rs:1
 userspace/loops-cli/src/main.rs:1
 userspace/lottie-player/src/main.rs:1
-userspace/lsmod/src/main.rs:4
 userspace/lsusb/src/main.rs:1
 userspace/lua/src/main.rs:2
 userspace/luarocks-cli/src/main.rs:2
@@ -364,26 +344,21 @@ userspace/mangohud-cli/src/main.rs:1
 userspace/matplotlib-cli/src/main.rs:1
 userspace/matrix-cli/src/main.rs:2
 userspace/mattermost/src/main.rs:2
-userspace/mc-cli/src/main.rs:4
 userspace/mcelog/src/main.rs:2
 userspace/mcfly-cli/src/main.rs:3
 userspace/mcfly/src/main.rs:2
 userspace/mdbook-cli/src/main.rs:3
 userspace/mdbook/src/main.rs:1
 userspace/mednafen-cli/src/main.rs:1
-userspace/meltano-cli/src/main.rs:4
 userspace/memphis-cli/src/main.rs:1
 userspace/meshio-cli/src/main.rs:1
 userspace/meson-cli/src/main.rs:1
-userspace/meson/src/main.rs:4
 userspace/micro-cli/src/main.rs:2
 userspace/mimir-cli/src/main.rs:3
 userspace/minio-cli/src/main.rs:1
 userspace/minio/src/main.rs:1
 userspace/mkdocs-cli/src/main.rs:1
-userspace/mktemp/src/main.rs:4
 userspace/mlflow-cli/src/main.rs:3
-userspace/modprobe-cli/src/main.rs:4
 userspace/mollie-cli/src/main.rs:1
 userspace/monday-cli/src/main.rs:1
 userspace/mqtt-cli/src/main.rs:1
@@ -397,11 +372,9 @@ userspace/nats-cli/src/main.rs:1
 userspace/nats/src/main.rs:1
 userspace/navi-cli/src/main.rs:3
 userspace/navi/src/main.rs:1
-userspace/nebula-cli/src/main.rs:4
 userspace/neo4j/src/main.rs:1
 userspace/netlify-cli/src/main.rs:1
 userspace/networkd-cli/src/main.rs:2
-userspace/newgrp/src/main.rs:4
 userspace/newman-cli/src/main.rs:1
 userspace/newrelic-cli/src/main.rs:3
 userspace/nextcloud/src/main.rs:1
@@ -421,21 +394,17 @@ userspace/ntp-cli/src/main.rs:1
 userspace/numpy-cli/src/main.rs:2
 userspace/nushell/src/main.rs:2
 userspace/nuxt-cli/src/main.rs:2
-userspace/nvme/src/main.rs:4
 userspace/obs-cli/src/main.rs:1
 userspace/ocaml-cli/src/main.rs:3
 userspace/ocrmypdf-cli/src/main.rs:2
 userspace/octoprint-cli/src/main.rs:3
 userspace/oh-my-posh-cli/src/main.rs:2
-userspace/ollama-cli/src/main.rs:4
 userspace/openapi-cli/src/main.rs:2
 userspace/openocd-cli/src/main.rs:1
 userspace/openssl-cli/src/main.rs:1
 userspace/openssl/src/main.rs:2
-userspace/opsgenie-cli/src/main.rs:4
 userspace/osmium-cli/src/main.rs:1
 userspace/otel-cli/src/main.rs:2
-userspace/ouch/src/main.rs:4
 userspace/ox-cli/src/main.rs:1
 userspace/oxipng-cli/src/main.rs:1
 userspace/packer-cli/src/main.rs:1
@@ -445,7 +414,6 @@ userspace/pagerduty-cli/src/main.rs:1
 userspace/pandas-cli/src/main.rs:1
 userspace/pants-cli/src/main.rs:1
 userspace/paraview-cli/src/main.rs:2
-userspace/paste/src/main.rs:4
 userspace/pastel/src/main.rs:1
 userspace/payload-cli/src/main.rs:1
 userspace/paypal-cli/src/main.rs:1
@@ -511,7 +479,6 @@ userspace/rabbitmq/src/main.rs:3
 userspace/racket-cli/src/main.rs:2
 userspace/rails-cli/src/main.rs:1
 userspace/rake-cli/src/main.rs:1
-userspace/ranger-cli/src/main.rs:4
 userspace/rasdaemon/src/main.rs:2
 userspace/ray-cli/src/main.rs:3
 userspace/razorpay-cli/src/main.rs:1
@@ -525,7 +492,6 @@ userspace/recurly-cli/src/main.rs:1
 userspace/redis-cli-tool/src/main.rs:1
 userspace/redis-cli/src/main.rs:1
 userspace/redoc-cli/src/main.rs:1
-userspace/redpanda-cli/src/main.rs:4
 userspace/remix-cli/src/main.rs:2
 userspace/resend-cli/src/main.rs:1
 userspace/restic-cli/src/main.rs:1
@@ -548,7 +514,6 @@ userspace/rustdoc-cli/src/main.rs:1
 userspace/sage-cli/src/main.rs:1
 userspace/samtools-cli/src/main.rs:1
 userspace/sanity-cli/src/main.rs:1
-userspace/scaleway-cli/src/main.rs:4
 userspace/sccache/src/main.rs:1
 userspace/scipy-cli/src/main.rs:1
 userspace/scons-cli/src/main.rs:1
@@ -574,11 +539,9 @@ userspace/slack-cli/src/main.rs:2
 userspace/snap-cli/src/main.rs:1
 userspace/snapper2/src/main.rs:1
 userspace/sns-cli/src/main.rs:2
-userspace/snyk-cli/src/main.rs:4
 userspace/solana-cli/src/main.rs:1
 userspace/sops-cli/src/main.rs:1
 userspace/sox/src/main.rs:3
-userspace/spacelift-cli/src/main.rs:4
 userspace/sparkpost-cli/src/main.rs:1
 userspace/spectral-cli/src/main.rs:1
 userspace/speechd-cli/src/main.rs:1
@@ -604,16 +567,13 @@ userspace/stunnel-cli/src/main.rs:1
 userspace/stylix-cli/src/main.rs:1
 userspace/stytch-cli/src/main.rs:1
 userspace/sudo/src/main.rs:3
-userspace/supabase-cli/src/main.rs:4
 userspace/surrealdb-cli/src/main.rs:1
 userspace/svelte-cli/src/main.rs:2
 userspace/svgo-cli/src/main.rs:1
 userspace/swagger-cli/src/main.rs:1
-userspace/swapon/src/main.rs:4
 userspace/swupd-cli/src/main.rs:2
 userspace/swww-cli/src/main.rs:1
 userspace/sympy-cli/src/main.rs:1
-userspace/syncthing-cli/src/main.rs:4
 userspace/sysctl/src/main.rs:1
 userspace/syslogd/src/main.rs:1
 userspace/systemctl-cli/src/main.rs:1
@@ -645,7 +605,6 @@ userspace/torch-cli/src/main.rs:1
 userspace/tpm-cli/src/main.rs:1
 userspace/tput/src/main.rs:1
 userspace/trello-cli/src/main.rs:3
-userspace/trivy-cli/src/main.rs:4
 userspace/trivy/src/main.rs:1
 userspace/tsort/src/main.rs:2
 userspace/ttfautohint-cli/src/main.rs:1
@@ -664,7 +623,6 @@ userspace/update-alternatives/src/main.rs:1
 userspace/uvtool-cli/src/main.rs:1
 userspace/v-cli/src/main.rs:2
 userspace/vagrant-cli/src/main.rs:3
-userspace/valgrind-cli/src/main.rs:4
 userspace/vault-cli/src/main.rs:1
 userspace/vault/src/main.rs:1
 userspace/vcpkg-cli/src/main.rs:1
@@ -674,7 +632,6 @@ userspace/vercel-cli/src/main.rs:1
 userspace/victoria-cli/src/main.rs:1
 userspace/vifm-cli/src/main.rs:2
 userspace/virt-cli/src/main.rs:3
-userspace/vllm-cli/src/main.rs:4
 userspace/vmstat/src/main.rs:1
 userspace/vonage-cli/src/main.rs:1
 userspace/vuepress-cli/src/main.rs:1
@@ -706,10 +663,8 @@ userspace/xkbcomp-cli/src/main.rs:1
 userspace/xplr-cli/src/main.rs:1
 userspace/xsv/src/main.rs:2
 userspace/xz/src/main.rs:2
-userspace/yacc/src/main.rs:4
 userspace/yard-cli/src/main.rs:1
 userspace/yarn-cli/src/main.rs:2
-userspace/yazi-cli/src/main.rs:4
 userspace/zathura-cli/src/main.rs:1
 userspace/zed-cli/src/main.rs:1
 userspace/zellij-cli/src/main.rs:3

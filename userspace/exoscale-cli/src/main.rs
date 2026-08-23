@@ -4,6 +4,7 @@
 //!
 //! Multi-personality: `exo`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -46,10 +47,10 @@ fn run_exo(args: &[String]) -> i32 {
                             );
                         }
                         "create" => println!("Compute instance created."),
-                        _ => println!("exo compute instance: '{}' completed", action),
+                        _ => println!("exo compute instance: {} completed", quoteaf_os(action)),
                     }
                 }
-                _ => println!("exo compute: '{}' completed", sub),
+                _ => println!("exo compute: {} completed", quoteaf_os(sub)),
             }
         }
         "sks" => {
@@ -61,7 +62,7 @@ fn run_exo(args: &[String]) -> i32 {
                 }
                 "create" => println!("SKS cluster created."),
                 "kubeconfig" => println!("Kubeconfig saved."),
-                _ => println!("exo sks: '{}' completed", sub),
+                _ => println!("exo sks: {} completed", quoteaf_os(sub)),
             }
         }
         "status" => {
@@ -71,7 +72,7 @@ fn run_exo(args: &[String]) -> i32 {
             println!("  Network:  ✓ Operational");
             println!("  DNS:      ✓ Operational");
         }
-        _ => println!("exo: '{}' completed", subcmd),
+        _ => println!("exo: {} completed", quoteaf_os(subcmd)),
     }
     0
 }

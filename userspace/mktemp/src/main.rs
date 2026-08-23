@@ -45,6 +45,7 @@
 //! whoami
 //! ```
 
+use quoting::quoteaf_os;
 use std::env;
 use std::fs;
 use std::process;
@@ -513,7 +514,10 @@ fn run_mktemp(args: &[String]) -> i32 {
         .count();
     if trailing_x < 3 {
         if !opts.quiet {
-            eprintln!("mktemp: too few X's in template '{}'", opts.template);
+            eprintln!(
+                "mktemp: too few X's in template {}",
+                quoteaf_os(&opts.template)
+            );
         }
         return 1;
     }
@@ -662,7 +666,7 @@ fn run_id(args: &[String]) -> i32 {
                     let target_gid = target_uid; // fallback
                     (target_uid, target_uid, target_gid, target_gid)
                 } else {
-                    eprintln!("id: '{username}': no such user");
+                    eprintln!("id: {}: no such user", quoteaf_os(username));
                     return 1;
                 }
             }
@@ -863,7 +867,7 @@ fn run_groups(args: &[String]) -> i32 {
             }
             // Verify user exists.
             if name_to_uid(user).is_none() {
-                eprintln!("groups: '{user}': no such user");
+                eprintln!("groups: {}: no such user", quoteaf_os(user));
                 if idx + 1 < users.len() {
                     continue;
                 }
@@ -930,7 +934,7 @@ fn run_whoami(args: &[String]) -> i32 {
                 return 0;
             }
             other => {
-                eprintln!("whoami: extra operand '{other}'");
+                eprintln!("whoami: extra operand {}", quoteaf_os(other));
                 return 1;
             }
         }

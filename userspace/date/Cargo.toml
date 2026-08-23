@@ -4,3 +4,6 @@ version = "0.1.0"
 edition = "2024"
 description = "SlateOS date and time utility"
 [dependencies]
+# date names the format string and the input date it failed to parse, both
+# from the command line.
+quoting = { path = "../quoting" }

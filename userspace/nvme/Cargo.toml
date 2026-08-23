@@ -3,3 +3,6 @@ name = "nvme"
 version = "0.1.0"
 edition = "2024"
 [dependencies]
+# nvme names NVMe devices and the controller and namespace identifiers read
+# out of them, so the strings come from the drive's own firmware.
+quoting = { path = "../quoting" }

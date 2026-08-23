@@ -5,6 +5,7 @@
 //! Multi-personality: `valgrind`, `callgrind_annotate`, `cachegrind_annotate`,
 //! `cg_annotate`, `ms_print`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -129,7 +130,7 @@ fn run_valgrind(args: &[String]) -> i32 {
             println!("==12345== ERROR SUMMARY: 1 errors from 1 contexts");
         }
         _ => {
-            println!("==12345== Unknown tool '{}'", tool);
+            println!("==12345== Unknown tool {}", quoteaf_os(tool));
         }
     }
     0
@@ -148,7 +149,7 @@ fn run_callgrind_annotate(args: &[String]) -> i32 {
         .find(|a| !a.starts_with('-'))
         .map(|s| s.as_str())
         .unwrap_or("callgrind.out.12345");
-    println!("Reading data from '{}'...", file);
+    println!("Reading data from {}...", quoteaf_os(file));
     println!("Events recorded: Ir");
     println!();
     println!("         Ir  file:function");
@@ -171,7 +172,7 @@ fn run_cg_annotate(args: &[String]) -> i32 {
         .find(|a| !a.starts_with('-'))
         .map(|s| s.as_str())
         .unwrap_or("cachegrind.out.12345");
-    println!("Reading data from '{}'...", file);
+    println!("Reading data from {}...", quoteaf_os(file));
     println!();
     println!("         Ir    I1mr   ILmr       Dr    D1mr   DLmr");
     println!("  1,234,567   2,345    234  456,789   8,901  1,234  PROGRAM TOTALS");
@@ -191,7 +192,7 @@ fn run_ms_print(args: &[String]) -> i32 {
         .find(|a| !a.starts_with('-'))
         .map(|s| s.as_str())
         .unwrap_or("massif.out.12345");
-    println!("Reading data from '{}'...", file);
+    println!("Reading data from {}...", quoteaf_os(file));
     println!();
     println!("    KB");
     println!("128.0^                                               #");

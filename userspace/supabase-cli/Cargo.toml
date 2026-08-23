@@ -2,3 +2,8 @@
 name = "supabase-cli"
 version = "0.1.0"
 edition = "2024"
+
+[dependencies]
+# supabase-cli names projects, migrations and functions, taken from the
+# command line and from the project directory on disk.
+quoting = { path = "../quoting" }

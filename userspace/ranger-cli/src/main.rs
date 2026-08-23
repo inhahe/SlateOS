@@ -4,6 +4,7 @@
 //!
 //! Multi-personality: `ranger`, `rifle`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -33,8 +34,8 @@ fn run_ranger(args: &[String], prog: &str) -> i32 {
                 .rfind(|a| !a.starts_with('-'))
                 .map(|s| s.as_str())
                 .unwrap_or("file.txt");
-            println!("  0: editor -- '{}'", file);
-            println!("  1: pager -- '{}'", file);
+            println!("  0: editor -- {}", quoteaf_os(file));
+            println!("  1: pager -- {}", quoteaf_os(file));
             return 0;
         }
         let file = args
@@ -42,7 +43,7 @@ fn run_ranger(args: &[String], prog: &str) -> i32 {
             .rfind(|a| !a.starts_with('-'))
             .map(|s| s.as_str())
             .unwrap_or("file.txt");
-        println!("rifle: Opening '{}'", file);
+        println!("rifle: Opening {}", quoteaf_os(file));
         return 0;
     }
     // ranger
@@ -79,7 +80,7 @@ fn run_ranger(args: &[String], prog: &str) -> i32 {
         .rfind(|a| !a.starts_with('-'))
         .map(|s| s.as_str())
         .unwrap_or(".");
-    println!("ranger: Opening '{}'", path);
+    println!("ranger: Opening {}", quoteaf_os(path));
     0
 }
 

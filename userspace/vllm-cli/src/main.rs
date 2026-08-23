@@ -4,6 +4,7 @@
 //!
 //! Multi-personality: `vllm`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -49,7 +50,7 @@ fn run_vllm(args: &[String]) -> i32 {
                 .find(|w| w[0] == "--port")
                 .map(|w| w[1].as_str())
                 .unwrap_or("8000");
-            println!("INFO:     Loading model '{}'...", model);
+            println!("INFO:     Loading model {}...", quoteaf_os(model));
             println!("INFO:     Model loaded in 12.3s");
             println!("INFO:     GPU memory usage: 14.2 GB / 24.0 GB");
             println!("INFO:     Starting OpenAI-compatible API server");
@@ -61,7 +62,7 @@ fn run_vllm(args: &[String]) -> i32 {
                 .get(1)
                 .map(|s| s.as_str())
                 .unwrap_or("meta-llama/Llama-3-8B");
-            println!("Loading model '{}'...", model);
+            println!("Loading model {}...", quoteaf_os(model));
             println!("Model loaded. Type 'quit' to exit.");
             println!();
             println!("> Hello!");
@@ -78,7 +79,7 @@ fn run_vllm(args: &[String]) -> i32 {
                 .get(1)
                 .map(|s| s.as_str())
                 .unwrap_or("meta-llama/Llama-3-8B");
-            println!("Benchmarking '{}'...", model);
+            println!("Benchmarking {}...", quoteaf_os(model));
             println!();
             println!("  Throughput: 1234.5 tokens/s");
             println!("  Latency (median): 23.4ms");
@@ -86,7 +87,7 @@ fn run_vllm(args: &[String]) -> i32 {
             println!("  Time to first token: 12.3ms");
             println!("  Batch size: 32");
         }
-        _ => println!("vllm: '{}' completed", subcmd),
+        _ => println!("vllm: {} completed", quoteaf_os(subcmd)),
     }
     0
 }

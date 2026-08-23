@@ -4,6 +4,7 @@
 //!
 //! Multi-personality: `nebula`, `nebula-cert`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -78,7 +79,7 @@ fn run_nebula(args: &[String]) -> i32 {
         .find(|w| w[0] == "-config")
         .map(|w| w[1].as_str())
         .unwrap_or("/etc/nebula/config.yml");
-    println!("nebula: loading config from '{}'", config);
+    println!("nebula: loading config from {}", quoteaf_os(config));
     println!("nebula: Firewall has been enabled");
     println!("nebula: Handshake manager ready");
     println!("nebula: Main HostMap created (capacity: 1024)");
@@ -112,7 +113,7 @@ fn run_nebula_cert(args: &[String]) -> i32 {
                 .find(|w| w[0] == "-name")
                 .map(|w| w[1].as_str())
                 .unwrap_or("Slate OS Nebula CA");
-            println!("Generated CA certificate for '{}':", name);
+            println!("Generated CA certificate for {}:", quoteaf_os(name));
             println!("  ca.crt (certificate)");
             println!("  ca.key (private key)");
         }
@@ -127,7 +128,7 @@ fn run_nebula_cert(args: &[String]) -> i32 {
                 .find(|w| w[0] == "-ip")
                 .map(|w| w[1].as_str())
                 .unwrap_or("10.42.0.5/24");
-            println!("Signed certificate for '{}' with IP {}", name, ip);
+            println!("Signed certificate for {} with IP {ip}", quoteaf_os(name));
             println!("  {}.crt (certificate)", name);
             println!("  {}.key (private key)", name);
         }
@@ -157,7 +158,7 @@ fn run_nebula_cert(args: &[String]) -> i32 {
             println!("  host.pub (public key)");
         }
         _ => {
-            eprintln!("nebula-cert: unknown command '{}'", subcmd);
+            eprintln!("nebula-cert: unknown command {}", quoteaf_os(subcmd));
             return 1;
         }
     }

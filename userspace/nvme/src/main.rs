@@ -9,6 +9,7 @@
 //! - `nvme-connect` — connect to NVMe-oF (NVMe over Fabrics) targets
 //! - `nvme-discover` — discover NVMe-oF subsystems
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -280,7 +281,7 @@ fn run_nvme(args: Vec<String>) -> i32 {
         "discover" => cmd_discover(&cmd_args),
         "disconnect" => cmd_disconnect(&cmd_args),
         other => {
-            eprintln!("nvme: unknown command '{}'", other);
+            eprintln!("nvme: unknown command {}", quoteaf_os(other));
             eprintln!("Try 'nvme --help' for more information.");
             1
         }
@@ -340,7 +341,7 @@ fn cmd_list_ns(args: &[String]) -> i32 {
             0
         }
         None => {
-            eprintln!("nvme: controller '{}' not found", ctrl_name);
+            eprintln!("nvme: controller {} not found", quoteaf_os(ctrl_name));
             1
         }
     }
@@ -398,7 +399,7 @@ fn cmd_id_ctrl(args: &[String]) -> i32 {
             0
         }
         None => {
-            eprintln!("nvme: controller '{}' not found", ctrl_name);
+            eprintln!("nvme: controller {} not found", quoteaf_os(ctrl_name));
             1
         }
     }
@@ -437,7 +438,7 @@ fn cmd_id_ns(args: &[String]) -> i32 {
             0
         }
         None => {
-            eprintln!("nvme: controller '{}' not found", ctrl_name);
+            eprintln!("nvme: controller {} not found", quoteaf_os(ctrl_name));
             1
         }
     }

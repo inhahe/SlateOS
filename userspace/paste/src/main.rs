@@ -20,6 +20,7 @@
 //!       --version           Output version information and exit
 //! ```
 
+use quoting::{quoteaf_os, quotef_os};
 use std::env;
 use std::fs::File;
 use std::io::{self, BufRead, BufReader, Write};
@@ -156,7 +157,7 @@ fn parse_args(args: &[String]) -> ParseResult {
                 };
                 delimiters_str = Some(val);
             } else {
-                eprintln!("paste: unrecognized option '{arg}'");
+                eprintln!("paste: unrecognized option {}", quoteaf_os(arg));
                 eprintln!("Try 'paste --help' for more information.");
                 process::exit(1);
             }
@@ -195,7 +196,7 @@ fn parse_args(args: &[String]) -> ParseResult {
                     break;
                 }
                 _ => {
-                    eprintln!("paste: invalid option -- '{ch}'");
+                    eprintln!("paste: invalid option -- {}", quoteaf_os(ch.to_string()));
                     eprintln!("Try 'paste --help' for more information.");
                     process::exit(1);
                 }
@@ -365,7 +366,7 @@ fn paste_parallel(config: &Config) -> io::Result<i32> {
         match open_input(path) {
             Ok(src) => sources.push(src),
             Err(e) => {
-                eprintln!("paste: {path}: {e}");
+                eprintln!("paste: {}: {e}", quotef_os(path));
                 all_ok = false;
             }
         }
@@ -490,7 +491,7 @@ fn paste_serial(config: &Config) -> io::Result<i32> {
         let mut source = match open_input(path) {
             Ok(s) => s,
             Err(e) => {
-                eprintln!("paste: {path}: {e}");
+                eprintln!("paste: {}: {e}", quotef_os(path));
                 all_ok = false;
                 continue;
             }

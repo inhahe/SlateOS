@@ -4,6 +4,7 @@
 //!
 //! Multi-personality: `cupsctl`, `cupsenable`, `cupsdisable`, `cupsaccept`, `cupsreject`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -64,7 +65,7 @@ fn run_cupsenable(args: &[String]) -> i32 {
         return 0;
     }
     for printer in args.iter().filter(|a| !a.starts_with('-')) {
-        println!("Printer '{}' enabled.", printer);
+        println!("Printer {} enabled.", quoteaf_os(printer));
     }
     0
 }
@@ -80,7 +81,7 @@ fn run_cupsdisable(args: &[String]) -> i32 {
         return 0;
     }
     for printer in args.iter().filter(|a| !a.starts_with('-')) {
-        println!("Printer '{}' disabled.", printer);
+        println!("Printer {} disabled.", quoteaf_os(printer));
     }
     0
 }
@@ -93,7 +94,7 @@ fn run_cupsaccept(args: &[String]) -> i32 {
         return 0;
     }
     for printer in args.iter().filter(|a| !a.starts_with('-')) {
-        println!("Printer '{}' now accepting jobs.", printer);
+        println!("Printer {} now accepting jobs.", quoteaf_os(printer));
     }
     0
 }
@@ -106,7 +107,7 @@ fn run_cupsreject(args: &[String]) -> i32 {
         return 0;
     }
     for printer in args.iter().filter(|a| !a.starts_with('-')) {
-        println!("Printer '{}' now rejecting jobs.", printer);
+        println!("Printer {} now rejecting jobs.", quoteaf_os(printer));
     }
     0
 }

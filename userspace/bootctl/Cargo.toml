@@ -4,3 +4,6 @@ version = "0.1.0"
 edition = "2024"
 description = "SlateOS bootctl utility"
 [dependencies]
+# bootctl names boot entries and the EFI loader paths read out of the ESP,
+# files this tool did not write.
+quoting = { path = "../quoting" }

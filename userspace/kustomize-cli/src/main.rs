@@ -4,6 +4,7 @@
 //!
 //! Multi-personality: `kustomize`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -79,7 +80,7 @@ fn run_kustomize(args: &[String]) -> i32 {
                 "add" => {
                     let what = args.get(2).map(|s| s.as_str()).unwrap_or("resource");
                     let target = args.get(3).map(|s| s.as_str()).unwrap_or("deployment.yaml");
-                    println!("Added {} '{}'", what, target);
+                    println!("Added {what} {}", quoteaf_os(target));
                 }
                 "set" => {
                     let what = args.get(2).map(|s| s.as_str()).unwrap_or("image");
@@ -87,12 +88,12 @@ fn run_kustomize(args: &[String]) -> i32 {
                         .get(3)
                         .map(|s| s.as_str())
                         .unwrap_or("my-app=my-app:v2.0.0");
-                    println!("Set {} to '{}'", what, val);
+                    println!("Set {what} to {}", quoteaf_os(val));
                 }
-                _ => println!("kustomize edit: '{}' completed", sub),
+                _ => println!("kustomize edit: {} completed", quoteaf_os(sub)),
             }
         }
-        _ => println!("kustomize: '{}' completed", subcmd),
+        _ => println!("kustomize: {} completed", quoteaf_os(subcmd)),
     }
     0
 }

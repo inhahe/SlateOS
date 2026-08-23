@@ -4,6 +4,7 @@
 //!
 //! Multi-personality: `meltano`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -36,7 +37,7 @@ fn run_meltano(args: &[String]) -> i32 {
         "--version" => println!("meltano 3.4.0"),
         "init" => {
             let name = args.get(1).map(|s| s.as_str()).unwrap_or("my-project");
-            println!("Creating Meltano project '{}'...", name);
+            println!("Creating Meltano project {}...", quoteaf_os(name));
             println!("  Created: meltano.yml");
             println!("  Created: .meltano/");
             println!("  Created: output/");
@@ -45,7 +46,7 @@ fn run_meltano(args: &[String]) -> i32 {
         "add" => {
             let plugin_type = args.get(1).map(|s| s.as_str()).unwrap_or("extractor");
             let plugin = args.get(2).map(|s| s.as_str()).unwrap_or("tap-csv");
-            println!("Adding {} '{}'...", plugin_type, plugin);
+            println!("Adding {plugin_type} {}...", quoteaf_os(plugin));
             println!("  Installed: {}", plugin);
             println!("  Added to meltano.yml");
         }
@@ -82,10 +83,10 @@ fn run_meltano(args: &[String]) -> i32 {
                 println!("daily-sync      @daily      tap-csv target-jsonl");
                 println!("hourly-api      @hourly     tap-rest-api target-postgres");
             } else {
-                println!("meltano schedule: '{}' completed", sub);
+                println!("meltano schedule: {} completed", quoteaf_os(sub));
             }
         }
-        _ => println!("meltano: '{}' completed", subcmd),
+        _ => println!("meltano: {} completed", quoteaf_os(subcmd)),
     }
     0
 }

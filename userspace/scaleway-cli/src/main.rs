@@ -4,6 +4,7 @@
 //!
 //! Multi-personality: `scw`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -69,7 +70,7 @@ fn run_scw(args: &[String]) -> i32 {
                     let id = args.get(2).map(|s| s.as_str()).unwrap_or("abc12345");
                     println!("Instance {}: {} done.", id, sub);
                 }
-                _ => println!("scw instance: '{}' completed", sub),
+                _ => println!("scw instance: {} completed", quoteaf_os(sub)),
             }
         }
         "k8s" => {
@@ -82,14 +83,14 @@ fn run_scw(args: &[String]) -> i32 {
                     println!("abc12345-xxxx-xxxx-xxxx-abc123456789  myclus  1.29.3   ready   3");
                 }
                 "create" => println!("Kubernetes cluster created."),
-                _ => println!("scw k8s: '{}' completed", sub),
+                _ => println!("scw k8s: {} completed", quoteaf_os(sub)),
             }
         }
         "object" => {
             let sub = args.get(1).map(|s| s.as_str()).unwrap_or("list");
-            println!("scw object: '{}' completed", sub);
+            println!("scw object: {} completed", quoteaf_os(sub));
         }
-        _ => println!("scw: '{}' completed", subcmd),
+        _ => println!("scw: {} completed", quoteaf_os(subcmd)),
     }
     0
 }

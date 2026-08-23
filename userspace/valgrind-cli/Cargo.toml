@@ -2,3 +2,8 @@
 name = "valgrind-cli"
 version = "0.1.0"
 edition = "2024"
+
+[dependencies]
+# valgrind-cli names the program it runs and the symbols and source files in
+# its output, all read out of a binary this tool did not build.
+quoting = { path = "../quoting" }

@@ -8,6 +8,7 @@
 //! - `mesonconf` — configure project options
 //! - `mesonintrospect` — introspect project
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -154,10 +155,10 @@ fn run_meson(args: Vec<String>) -> i32 {
                 .map(|s| s.as_str())
                 .unwrap_or("c");
             println!("Using {} language", lang);
-            println!("Creating files for project '{}':", name);
+            println!("Creating files for project {}:", quoteaf_os(name));
             println!("  meson.build");
             println!("  src/main.{}", if lang == "cpp" { "cpp" } else { lang });
-            println!("Project '{}' initialized.", name);
+            println!("Project {} initialized.", quoteaf_os(name));
             0
         }
         "introspect" => {
@@ -220,7 +221,7 @@ fn run_meson(args: Vec<String>) -> i32 {
                 }
                 "search" => {
                     let q = cmd_args.get(1).map(|s| s.as_str()).unwrap_or("");
-                    println!("Search results for '{}': (simulated)", q);
+                    println!("Search results for {}: (simulated)", quoteaf_os(q));
                 }
                 _ => println!("wrap: {} (simulated)", sub),
             }
@@ -235,7 +236,7 @@ fn run_meson(args: Vec<String>) -> i32 {
             0
         }
         other => {
-            eprintln!("meson: unknown command '{}'", other);
+            eprintln!("meson: unknown command {}", quoteaf_os(other));
             1
         }
     }

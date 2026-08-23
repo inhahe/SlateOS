@@ -4,6 +4,7 @@
 //!
 //! Multi-personality: `yazi`, `ya`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -35,7 +36,7 @@ fn run_yazi(args: &[String], prog: &str) -> i32 {
                     "-l" | "--list" => println!("Installed plugins: (none)"),
                     "-a" | "--add" => {
                         let pkg = args.get(2).map(|s| s.as_str()).unwrap_or("<plugin>");
-                        println!("ya pack: Installing '{}'...", pkg);
+                        println!("ya pack: Installing {}...", quoteaf_os(pkg));
                     }
                     "-u" | "--upgrade" => println!("ya pack: All plugins up to date."),
                     _ => println!("ya pack: {}", subcmd),
@@ -43,9 +44,9 @@ fn run_yazi(args: &[String], prog: &str) -> i32 {
             }
             "pub" => {
                 let msg = args.get(1).map(|s| s.as_str()).unwrap_or("ping");
-                println!("ya pub: Sending '{}'", msg);
+                println!("ya pub: Sending {}", quoteaf_os(msg));
             }
-            _ => println!("ya: unknown command '{}'", cmd),
+            _ => println!("ya: unknown command {}", quoteaf_os(cmd)),
         }
         return 0;
     }
@@ -82,7 +83,7 @@ fn run_yazi(args: &[String], prog: &str) -> i32 {
         .rfind(|a| !a.starts_with('-'))
         .map(|s| s.as_str())
         .unwrap_or(".");
-    println!("yazi: Opening '{}'", entry);
+    println!("yazi: Opening {}", quoteaf_os(entry));
     0
 }
 

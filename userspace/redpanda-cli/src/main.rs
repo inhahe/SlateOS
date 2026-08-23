@@ -4,6 +4,7 @@
 //!
 //! Multi-personality: `rpk`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -54,15 +55,15 @@ fn run_rpk(args: &[String]) -> i32 {
                 }
                 "produce" => {
                     let topic = args.get(2).map(|s| s.as_str()).unwrap_or("events");
-                    println!("Producing to topic '{}'...", topic);
+                    println!("Producing to topic {}...", quoteaf_os(topic));
                     println!("Produced offset 42 to partition 0");
                 }
                 "consume" => {
                     let topic = args.get(2).map(|s| s.as_str()).unwrap_or("events");
-                    println!("Consuming from '{}':", topic);
+                    println!("Consuming from {}:", quoteaf_os(topic));
                     println!("  partition: 0, offset: 42, value: hello");
                 }
-                _ => println!("rpk topic: '{}' completed", sub),
+                _ => println!("rpk topic: {} completed", quoteaf_os(sub)),
             }
         }
         "group" => {
@@ -87,7 +88,7 @@ fn run_rpk(args: &[String]) -> i32 {
                 println!("  2     192.168.1.3   9092   rack2");
             }
         }
-        _ => println!("rpk: '{}' completed", subcmd),
+        _ => println!("rpk: {} completed", quoteaf_os(subcmd)),
     }
     0
 }

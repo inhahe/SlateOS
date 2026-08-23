@@ -4,6 +4,7 @@
 //!
 //! Multi-personality: `kexec`, `kdump-config`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -71,11 +72,11 @@ fn run_kexec(args: &[String]) -> i32 {
 
     if let Some(kern) = kernel {
         if load_panic {
-            println!("kexec: loading panic kernel '{}'", kern);
+            println!("kexec: loading panic kernel {}", quoteaf_os(kern));
         } else if load {
-            println!("kexec: loading kernel '{}'", kern);
+            println!("kexec: loading kernel {}", quoteaf_os(kern));
         } else {
-            println!("kexec: loading and executing kernel '{}'", kern);
+            println!("kexec: loading and executing kernel {}", quoteaf_os(kern));
         }
         if let Some(rd) = initrd {
             println!("kexec: initrd: {}", rd);
@@ -130,7 +131,7 @@ fn run_kdump_config(args: &[String]) -> i32 {
             println!("kdump-config: use 'echo c > /proc/sysrq-trigger' to trigger");
         }
         _ => {
-            eprintln!("kdump-config: unknown command '{}'", subcmd);
+            eprintln!("kdump-config: unknown command {}", quoteaf_os(subcmd));
             return 1;
         }
     }

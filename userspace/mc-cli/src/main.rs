@@ -4,6 +4,7 @@
 //!
 //! Multi-personality: `mc`, `mcedit`, `mcview`, `mcdiff`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -35,7 +36,7 @@ fn run_mc(args: &[String], prog: &str) -> i32 {
                 .rfind(|a| !a.starts_with('-'))
                 .map(|s| s.as_str())
                 .unwrap_or("untitled");
-            println!("mcedit: Editing '{}'", file);
+            println!("mcedit: Editing {}", quoteaf_os(file));
             return 0;
         }
         "mcview" => {
@@ -49,7 +50,7 @@ fn run_mc(args: &[String], prog: &str) -> i32 {
                 .rfind(|a| !a.starts_with('-'))
                 .map(|s| s.as_str())
                 .unwrap_or("file");
-            println!("mcview: Viewing '{}'", file);
+            println!("mcview: Viewing {}", quoteaf_os(file));
             return 0;
         }
         "mcdiff" => {
@@ -60,7 +61,11 @@ fn run_mc(args: &[String], prog: &str) -> i32 {
             }
             let f1 = args.first().map(|s| s.as_str()).unwrap_or("file1");
             let f2 = args.get(1).map(|s| s.as_str()).unwrap_or("file2");
-            println!("mcdiff: Comparing '{}' and '{}'", f1, f2);
+            println!(
+                "mcdiff: Comparing {} and {}",
+                quoteaf_os(f1),
+                quoteaf_os(f2)
+            );
             return 0;
         }
         _ => {}
@@ -103,7 +108,7 @@ fn run_mc(args: &[String], prog: &str) -> i32 {
         .find(|a| !a.starts_with('-'))
         .map(|s| s.as_str())
         .unwrap_or(".");
-    println!("mc: Opening panels at '{}'", dir);
+    println!("mc: Opening panels at {}", quoteaf_os(dir));
     0
 }
 

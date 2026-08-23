@@ -30,6 +30,7 @@
 //! each clock is its own no-argument syscall that returns a single
 //! nanoseconds value in `rax` (see kernel `syscall/number.rs`).
 
+use quoting::quoteaf_os;
 use std::env;
 use std::fs;
 use std::process;
@@ -963,7 +964,7 @@ fn parse_args(args: &[String]) -> Options {
             "-d" | "--date" => {
                 i += 1;
                 if i >= args.len() {
-                    eprintln!("date: option '{arg}' requires an argument");
+                    eprintln!("date: option {} requires an argument", quoteaf_os(arg));
                     process::exit(1);
                 }
                 action = Some(Action::DisplayDate {
@@ -974,7 +975,7 @@ fn parse_args(args: &[String]) -> Options {
             "-s" | "--set" => {
                 i += 1;
                 if i >= args.len() {
-                    eprintln!("date: option '{arg}' requires an argument");
+                    eprintln!("date: option {} requires an argument", quoteaf_os(arg));
                     process::exit(1);
                 }
                 action = Some(Action::SetTime {
@@ -984,7 +985,7 @@ fn parse_args(args: &[String]) -> Options {
             "-r" | "--reference" => {
                 i += 1;
                 if i >= args.len() {
-                    eprintln!("date: option '{arg}' requires an argument");
+                    eprintln!("date: option {} requires an argument", quoteaf_os(arg));
                     process::exit(1);
                 }
                 action = Some(Action::Reference {
@@ -1017,7 +1018,7 @@ fn parse_args(args: &[String]) -> Options {
                 });
             }
             _ => {
-                eprintln!("date: unrecognized option: '{arg}'");
+                eprintln!("date: unrecognized option: {}", quoteaf_os(arg));
                 eprintln!("Try 'date --help' for more information.");
                 process::exit(1);
             }

@@ -2,3 +2,8 @@
 name = "vllm-cli"
 version = "0.1.0"
 edition = "2024"
+
+[dependencies]
+# vllm-cli names models and served model identifiers, taken from the command
+# line and from a downloaded model config.
+quoting = { path = "../quoting" }

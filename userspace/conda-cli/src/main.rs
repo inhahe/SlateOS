@@ -4,6 +4,7 @@
 //!
 //! Multi-personality: `conda`, `mamba`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -68,7 +69,7 @@ fn run_conda(args: &[String], prog_name: &str) -> i32 {
                     println!("  Installing {}...", p);
                 }
             }
-            println!("Environment '{}' created successfully.", env_name);
+            println!("Environment {} created successfully.", quoteaf_os(env_name));
         }
         "install" => {
             let pkgs: Vec<&str> = args
@@ -128,8 +129,11 @@ fn run_conda(args: &[String], prog_name: &str) -> i32 {
                 .map(|w| w[1].as_str())
                 .unwrap_or("myenv");
             if args.iter().any(|a| a == "--all") {
-                println!("Remove all packages in environment '{}'...", env_name);
-                println!("Environment '{}' removed.", env_name);
+                println!(
+                    "Remove all packages in environment {}...",
+                    quoteaf_os(env_name)
+                );
+                println!("Environment {} removed.", quoteaf_os(env_name));
             } else {
                 let pkg = args
                     .iter()
@@ -163,7 +167,7 @@ fn run_conda(args: &[String], prog_name: &str) -> i32 {
             println!("  - numpy=1.26.4");
             println!("  - pandas=2.2.2");
         }
-        _ => println!("{}: '{}' completed", prog_name, subcmd),
+        _ => println!("{prog_name}: {} completed", quoteaf_os(subcmd)),
     }
     0
 }

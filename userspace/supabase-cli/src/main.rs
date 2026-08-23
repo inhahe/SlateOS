@@ -4,6 +4,7 @@
 //!
 //! Multi-personality: `supabase`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -77,7 +78,7 @@ fn run_supabase(args: &[String]) -> i32 {
                     println!("-- diff output");
                     println!("ALTER TABLE users ADD COLUMN avatar_url TEXT;");
                 }
-                _ => println!("supabase db: '{}' completed", sub),
+                _ => println!("supabase db: {} completed", quoteaf_os(sub)),
             }
         }
         "functions" => {
@@ -100,7 +101,7 @@ fn run_supabase(args: &[String]) -> i32 {
                         name, name
                     );
                 }
-                _ => println!("supabase functions: '{}' completed", sub),
+                _ => println!("supabase functions: {} completed", quoteaf_os(sub)),
             }
         }
         "migration" => {
@@ -115,7 +116,7 @@ fn run_supabase(args: &[String]) -> i32 {
                     let name = args.get(2).map(|s| s.as_str()).unwrap_or("add_column");
                     println!("Created migration: supabase/migrations/20240615120000_{name}.sql");
                 }
-                _ => println!("supabase migration: '{}' completed", sub),
+                _ => println!("supabase migration: {} completed", quoteaf_os(sub)),
             }
         }
         "projects" => {
@@ -129,7 +130,7 @@ fn run_supabase(args: &[String]) -> i32 {
             let id = args.get(1).map(|s| s.as_str()).unwrap_or("abc12345");
             println!("Linked to project: {}", id);
         }
-        _ => println!("supabase: '{}' completed", subcmd),
+        _ => println!("supabase: {} completed", quoteaf_os(subcmd)),
     }
     0
 }

@@ -4,6 +4,7 @@
 //!
 //! Single personality: `ollama`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -130,7 +131,7 @@ fn run_ollama(args: Vec<String>) -> i32 {
                 .map(|w| w[1].as_str())
                 .unwrap_or("Modelfile");
             println!("reading {} ...", modelfile);
-            println!("creating model '{}'", name);
+            println!("creating model {}", quoteaf_os(name));
             println!("  using base model llama3");
             println!("  applying parameters");
             println!("  applying system prompt");
@@ -140,12 +141,12 @@ fn run_ollama(args: Vec<String>) -> i32 {
         "cp" => {
             let src = args.get(1).map(|s| s.as_str()).unwrap_or("llama3");
             let dst = args.get(2).map(|s| s.as_str()).unwrap_or("my-llama3");
-            println!("copied '{}' to '{}'", src, dst);
+            println!("copied {} to {}", quoteaf_os(src), quoteaf_os(dst));
             0
         }
         "rm" => {
             let model = args.get(1).map(|s| s.as_str()).unwrap_or("llama3");
-            println!("deleted '{}'", model);
+            println!("deleted {}", quoteaf_os(model));
             0
         }
         "ps" => {
@@ -159,7 +160,7 @@ fn run_ollama(args: Vec<String>) -> i32 {
             if cmd.is_empty() {
                 eprintln!("Usage: ollama <command>. See --help.");
             } else {
-                eprintln!("Error: unknown command '{}'. See --help.", cmd);
+                eprintln!("Error: unknown command {}. See --help.", quoteaf_os(cmd));
             }
             1
         }

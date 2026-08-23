@@ -9,6 +9,7 @@
 
 #![deny(clippy::all)]
 
+use quoting::quoteaf_os;
 use std::env;
 use std::io::{self, Write};
 use std::process;
@@ -239,7 +240,7 @@ fn newgrp_main(args: &[String]) -> i32 {
                 group_name = Some(s.to_string());
             }
             other => {
-                eprintln!("newgrp: invalid option '{other}'");
+                eprintln!("newgrp: invalid option {}", quoteaf_os(other));
                 return 1;
             }
         }
@@ -253,7 +254,7 @@ fn newgrp_main(args: &[String]) -> i32 {
         Some(name) => match find_group_by_name(&group_db, name) {
             Some(g) => g,
             None => {
-                eprintln!("newgrp: group '{name}' does not exist");
+                eprintln!("newgrp: group {} does not exist", quoteaf_os(name));
                 return 1;
             }
         },
@@ -282,8 +283,8 @@ fn newgrp_main(args: &[String]) -> i32 {
     if login_shell {
         // Would set up a clean environment for login shell.
         eprintln!(
-            "newgrp: starting login shell with group '{}'",
-            target_group.name
+            "newgrp: starting login shell with group {}",
+            quoteaf_os(&target_group.name)
         );
     }
 
@@ -353,7 +354,7 @@ fn sg_main(args: &[String]) -> i32 {
     let target_group = match find_group_by_name(&group_db, &group_name) {
         Some(g) => g,
         None => {
-            eprintln!("sg: group '{group_name}' does not exist");
+            eprintln!("sg: group {} does not exist", quoteaf_os(&group_name));
             return 1;
         }
     };

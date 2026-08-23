@@ -4,6 +4,7 @@
 //!
 //! Multi-personality: `cockroach`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -97,7 +98,7 @@ fn run_cockroach(args: &[String]) -> i32 {
                     println!("Node {} decommissioning...", id);
                     println!("Node {} decommissioned.", id);
                 }
-                _ => println!("cockroach node: '{}' completed", sub),
+                _ => println!("cockroach node: {} completed", quoteaf_os(sub)),
             }
         }
         "demo" => {
@@ -108,7 +109,7 @@ fn run_cockroach(args: &[String]) -> i32 {
         }
         "dump" => {
             let db = args.get(1).map(|s| s.as_str()).unwrap_or("defaultdb");
-            println!("-- CockroachDB dump of database '{}'", db);
+            println!("-- CockroachDB dump of database {}", quoteaf_os(db));
             println!(
                 "CREATE TABLE users (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), name STRING);"
             );
@@ -126,10 +127,10 @@ fn run_cockroach(args: &[String]) -> i32 {
                 "create-ca" => println!("CA certificate created: certs/ca.crt"),
                 "create-node" => println!("Node certificate created: certs/node.crt"),
                 "create-client" => println!("Client certificate created."),
-                _ => println!("cockroach cert: '{}' completed", sub),
+                _ => println!("cockroach cert: {} completed", quoteaf_os(sub)),
             }
         }
-        _ => println!("cockroach: '{}' completed", subcmd),
+        _ => println!("cockroach: {} completed", quoteaf_os(subcmd)),
     }
     0
 }

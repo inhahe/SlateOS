@@ -15,6 +15,7 @@
 //! rmmod -f <module>               Force removal
 //! ```
 
+use quoting::quoteaf_os;
 use std::env;
 use std::fs;
 use std::process;
@@ -352,7 +353,7 @@ fn run_lsmod(args: &[String]) -> i32 {
                 return 0;
             }
             other => {
-                eprintln!("lsmod: unexpected argument '{other}'");
+                eprintln!("lsmod: unexpected argument {}", quoteaf_os(other));
                 return 1;
             }
         }
@@ -719,13 +720,13 @@ fn run_insmod(args: &[String]) -> i32 {
     let image = match fs::read(module_path) {
         Ok(data) => data,
         Err(e) => {
-            eprintln!("insmod: cannot read '{module_path}': {e}");
+            eprintln!("insmod: cannot read {}: {e}", quoteaf_os(module_path));
             return 1;
         }
     };
 
     if image.is_empty() {
-        eprintln!("insmod: '{module_path}' is empty");
+        eprintln!("insmod: {} is empty", quoteaf_os(module_path));
         return 1;
     }
 
@@ -770,7 +771,7 @@ fn run_rmmod(args: &[String]) -> i32 {
                 return 0;
             }
             s if s.starts_with('-') => {
-                eprintln!("rmmod: unknown option '{s}'");
+                eprintln!("rmmod: unknown option {}", quoteaf_os(s));
                 return 1;
             }
             _ => module_name = Some(arg.clone()),

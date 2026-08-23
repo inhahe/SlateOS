@@ -4,6 +4,7 @@
 //!
 //! Multi-personality: `spacectl`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -42,7 +43,7 @@ fn run_spacectl(args: &[String]) -> i32 {
                     println!("default    https://myorg.app.spacelift.io  *");
                     println!("staging    https://staging.app.spacelift.io");
                 }
-                _ => println!("spacectl profile: '{}' completed", sub),
+                _ => println!("spacectl profile: {} completed", quoteaf_os(sub)),
             }
         }
         "stack" => {
@@ -62,7 +63,7 @@ fn run_spacectl(args: &[String]) -> i32 {
                     println!("  Provider:  terraform");
                     println!("  Workers:   public");
                 }
-                _ => println!("spacectl stack: '{}' completed", sub),
+                _ => println!("spacectl stack: {} completed", quoteaf_os(sub)),
             }
         }
         "run" => {
@@ -78,10 +79,10 @@ fn run_spacectl(args: &[String]) -> i32 {
                     println!("Triggered run for stack: {}", stack);
                     println!("Run ID: xyz789");
                 }
-                _ => println!("spacectl run: '{}' completed", sub),
+                _ => println!("spacectl run: {} completed", quoteaf_os(sub)),
             }
         }
-        _ => println!("spacectl: '{}' completed", subcmd),
+        _ => println!("spacectl: {} completed", quoteaf_os(subcmd)),
     }
     0
 }

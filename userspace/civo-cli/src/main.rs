@@ -4,6 +4,7 @@
 //!
 //! Multi-personality: `civo`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -45,9 +46,9 @@ fn run_civo(args: &[String]) -> i32 {
                 }
                 "create" => {
                     let name = args.get(2).map(|s| s.as_str()).unwrap_or("new-instance");
-                    println!("Instance '{}' created.", name);
+                    println!("Instance {} created.", quoteaf_os(name));
                 }
-                _ => println!("civo instance: '{}' completed", sub),
+                _ => println!("civo instance: {} completed", quoteaf_os(sub)),
             }
         }
         "kubernetes" | "k8s" => {
@@ -59,7 +60,7 @@ fn run_civo(args: &[String]) -> i32 {
                 }
                 "create" => println!("Kubernetes cluster created."),
                 "config" => println!("Kubeconfig saved to ~/.kube/config"),
-                _ => println!("civo kubernetes: '{}' completed", sub),
+                _ => println!("civo kubernetes: {} completed", quoteaf_os(sub)),
             }
         }
         "region" => {
@@ -79,7 +80,7 @@ fn run_civo(args: &[String]) -> i32 {
                 println!("default    xxxxxxxxxxxxxxxxxxxxxxxx");
             }
         }
-        _ => println!("civo: '{}' completed", subcmd),
+        _ => println!("civo: {} completed", quoteaf_os(subcmd)),
     }
     0
 }

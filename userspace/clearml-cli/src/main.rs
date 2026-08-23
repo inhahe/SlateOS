@@ -4,6 +4,7 @@
 //!
 //! Multi-personality: `clearml-init`, `clearml-task`, `clearml-data`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -49,9 +50,9 @@ fn run_clearml(args: &[String], prog: &str) -> i32 {
                         .find(|w| w[0] == "--name")
                         .map(|w| w[1].as_str())
                         .unwrap_or("my-dataset");
-                    println!("Created dataset '{}': ds-ghi789", name);
+                    println!("Created dataset {}: ds-ghi789", quoteaf_os(name));
                 }
-                _ => println!("clearml-data: '{}' completed", subcmd),
+                _ => println!("clearml-data: {} completed", quoteaf_os(subcmd)),
             }
             return 0;
         }
@@ -83,10 +84,10 @@ fn run_clearml(args: &[String], prog: &str) -> i32 {
         .map(|w| w[1].as_str())
         .unwrap_or("default");
 
-    println!("Creating task '{}'...", name);
+    println!("Creating task {}...", quoteaf_os(name));
     println!("  Task ID: task-abc123");
     println!("  Project: my-project");
-    println!("  Enqueuing on queue '{}'...", queue);
+    println!("  Enqueuing on queue {}...", quoteaf_os(queue));
     println!("Task enqueued successfully.");
     0
 }

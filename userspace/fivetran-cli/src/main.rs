@@ -4,6 +4,7 @@
 //!
 //! Multi-personality: `fivetran`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -49,7 +50,7 @@ fn run_fivetran(args: &[String]) -> i32 {
                     println!("  Last sync: 2024-01-15 10:00:00 UTC");
                     println!("  Rows synced: 1,234,567");
                 }
-                _ => println!("fivetran connector: '{}' completed", sub),
+                _ => println!("fivetran connector: {} completed", quoteaf_os(sub)),
             }
         }
         "destination" => {
@@ -59,18 +60,18 @@ fn run_fivetran(args: &[String]) -> i32 {
                 println!("dest_abc     snowflake-wh      snowflake   us-east-1");
                 println!("dest_def     bigquery-prod     bigquery    us-central1");
             } else {
-                println!("fivetran destination: '{}' completed", sub);
+                println!("fivetran destination: {} completed", quoteaf_os(sub));
             }
         }
         "sync" => {
             let connector = args.get(1).map(|s| s.as_str()).unwrap_or("conn_abc");
-            println!("Triggering sync for connector '{}'...", connector);
+            println!("Triggering sync for connector {}...", quoteaf_os(connector));
             println!(
                 "Sync started. Check status with: fivetran connector status {}",
                 connector
             );
         }
-        _ => println!("fivetran: '{}' completed", subcmd),
+        _ => println!("fivetran: {} completed", quoteaf_os(subcmd)),
     }
     0
 }

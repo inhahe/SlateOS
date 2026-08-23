@@ -8,6 +8,7 @@
 
 #![deny(clippy::all)]
 
+use quoting::quoteaf_os;
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -315,7 +316,7 @@ fn cmd_set_default(esp: &Path, entry_id: &str) -> i32 {
 
     match save_loader_config(esp, &config) {
         Ok(()) => {
-            println!("bootctl: default set to '{entry_id}'");
+            println!("bootctl: default set to {}", quoteaf_os(entry_id));
             0
         }
         Err(e) => {
@@ -331,7 +332,7 @@ fn cmd_set_oneshot(esp: &Path, entry_id: &str) -> i32 {
     let _ = fs::create_dir_all(&loader_dir);
     match fs::write(loader_dir.join("oneshot"), entry_id) {
         Ok(()) => {
-            println!("bootctl: oneshot set to '{entry_id}'");
+            println!("bootctl: oneshot set to {}", quoteaf_os(entry_id));
             0
         }
         Err(e) => {
@@ -348,7 +349,7 @@ fn cmd_set_timeout(esp: &Path, timeout: &str) -> i32 {
     } else if let Ok(t) = timeout.parse::<u32>() {
         config.timeout = Some(t);
     } else {
-        eprintln!("bootctl: invalid timeout '{timeout}'");
+        eprintln!("bootctl: invalid timeout {}", quoteaf_os(timeout));
         return 1;
     }
 
@@ -524,7 +525,7 @@ fn main() {
         Some("is-installed") => cmd_is_installed(&esp),
         Some("reboot-to-firmware") => cmd_reboot_to_firmware(),
         Some(other) => {
-            eprintln!("bootctl: unknown command '{other}'");
+            eprintln!("bootctl: unknown command {}", quoteaf_os(other));
             1
         }
     };

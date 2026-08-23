@@ -16,6 +16,7 @@
 // classic algorithm. Allow too_many_arguments at file scope.
 #![allow(clippy::too_many_arguments)]
 
+use quoting::quoteaf_os;
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 #[cfg(not(test))]
 use std::env;
@@ -2448,7 +2449,7 @@ fn run_main() -> i32 {
     let src = match fs::read(&input_file) {
         Ok(data) => data,
         Err(e) => {
-            eprintln!("{prog_name}: cannot read '{input_file}': {e}");
+            eprintln!("{prog_name}: cannot read {}: {e}", quoteaf_os(&input_file));
             return 1;
         }
     };
@@ -2503,7 +2504,10 @@ fn run_main() -> i32 {
         .unwrap_or_else(|| derive_output_name(&input_file));
 
     if let Err(e) = fs::write(&output_file, c_output.as_bytes()) {
-        eprintln!("{prog_name}: cannot write '{output_file}': {e}");
+        eprintln!(
+            "{prog_name}: cannot write {}: {e}",
+            quoteaf_os(&output_file)
+        );
         return 1;
     }
 
@@ -2516,7 +2520,10 @@ fn run_main() -> i32 {
         };
         let header = generate_header(&grammar, &token_ids);
         if let Err(e) = fs::write(&header_name, header.as_bytes()) {
-            eprintln!("{prog_name}: cannot write '{header_name}': {e}");
+            eprintln!(
+                "{prog_name}: cannot write {}: {e}",
+                quoteaf_os(&header_name)
+            );
             return 1;
         }
     }
@@ -2526,7 +2533,10 @@ fn run_main() -> i32 {
         let verbose_name = derive_verbose_name(&input_file);
         let verbose = generate_verbose_output(&grammar, &states, &transitions, &table, &conflicts);
         if let Err(e) = fs::write(&verbose_name, verbose.as_bytes()) {
-            eprintln!("{prog_name}: cannot write '{verbose_name}': {e}");
+            eprintln!(
+                "{prog_name}: cannot write {}: {e}",
+                quoteaf_os(&verbose_name)
+            );
             return 1;
         }
     }

@@ -4,6 +4,7 @@
 //!
 //! Multi-personality: `modprobe`, `insmod`, `rmmod`, `lsmod`, `modinfo`, `depmod`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -64,12 +65,12 @@ fn run_modprobe(args: &[String]) -> i32 {
         if verbose {
             println!("rmmod {}", module);
         }
-        println!("modprobe: removed '{}'", module);
+        println!("modprobe: removed {}", quoteaf_os(module));
     } else {
         if verbose {
             println!("insmod /lib/modules/1.0.0/kernel/drivers/{}.ko", module);
         }
-        println!("modprobe: inserted '{}'", module);
+        println!("modprobe: inserted {}", quoteaf_os(module));
     }
     0
 }
@@ -80,7 +81,7 @@ fn run_insmod(args: &[String]) -> i32 {
         println!("Usage: insmod MODULE [PARAMS]");
         return if module == "--help" { 0 } else { 1 };
     }
-    println!("insmod: loading module '{}'", module);
+    println!("insmod: loading module {}", quoteaf_os(module));
     0
 }
 
@@ -90,7 +91,7 @@ fn run_rmmod(args: &[String]) -> i32 {
         println!("Usage: rmmod MODULE");
         return if module == "--help" { 0 } else { 1 };
     }
-    println!("rmmod: unloading module '{}'", module);
+    println!("rmmod: unloading module {}", quoteaf_os(module));
     0
 }
 

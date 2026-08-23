@@ -4,6 +4,7 @@
 //!
 //! Multi-personality: `snyk`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -89,7 +90,7 @@ fn run_snyk(args: &[String]) -> i32 {
                     println!("Monitoring {}...", image);
                     println!("Snapshot created for container image.");
                 }
-                _ => println!("snyk container: '{}' completed", sub),
+                _ => println!("snyk container: {} completed", quoteaf_os(sub)),
             }
         }
         "iac" => {
@@ -110,7 +111,7 @@ fn run_snyk(args: &[String]) -> i32 {
                 println!();
                 println!("Tested 3 files, found 2 issues.");
             } else {
-                println!("snyk iac: '{}' completed", sub);
+                println!("snyk iac: {} completed", quoteaf_os(sub));
             }
         }
         "code" => {
@@ -128,10 +129,10 @@ fn run_snyk(args: &[String]) -> i32 {
                 println!();
                 println!("Tested 45 files, found 2 issues.");
             } else {
-                println!("snyk code: '{}' completed", sub);
+                println!("snyk code: {} completed", quoteaf_os(sub));
             }
         }
-        _ => println!("snyk: '{}' completed", subcmd),
+        _ => println!("snyk: {} completed", quoteaf_os(subcmd)),
     }
     0
 }

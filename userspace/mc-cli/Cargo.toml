@@ -2,3 +2,8 @@
 name = "mc-cli"
 version = "0.1.0"
 edition = "2024"
+
+[dependencies]
+# mc-cli names the files and directories it copies, compares and moves,
+# every one of them from the command line.
+quoting = { path = "../quoting" }

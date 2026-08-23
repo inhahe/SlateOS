@@ -4,6 +4,7 @@
 //!
 //! Single personality: `opsgenie`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -83,7 +84,7 @@ fn run_opsgenie(args: Vec<String>) -> i32 {
                 }
                 "oncall" => {
                     let name = args.get(2).map(|s| s.as_str()).unwrap_or("Primary On-Call");
-                    println!("On-call for '{}':", name);
+                    println!("On-call for {}:", quoteaf_os(name));
                     println!("  Current: alice@example.com");
                     println!("  Next:    bob@example.com (starts 2024-01-16 09:00 UTC)");
                 }
@@ -119,7 +120,7 @@ fn run_opsgenie(args: Vec<String>) -> i32 {
                 }
                 "ping" => {
                     let name = args.get(2).map(|s| s.as_str()).unwrap_or("backup-job");
-                    println!("Heartbeat '{}' pinged successfully", name);
+                    println!("Heartbeat {} pinged successfully", quoteaf_os(name));
                 }
                 _ => {
                     println!("Heartbeat operation: {}", sub);
@@ -132,7 +133,7 @@ fn run_opsgenie(args: Vec<String>) -> i32 {
             match sub {
                 "set" => {
                     let key = args.get(2).map(|s| s.as_str()).unwrap_or("apiKey");
-                    println!("Configuration '{}' updated", key);
+                    println!("Configuration {} updated", quoteaf_os(key));
                 }
                 _ => {
                     println!("  apiKey:     ****...****abcd");
@@ -146,7 +147,7 @@ fn run_opsgenie(args: Vec<String>) -> i32 {
             if cmd.is_empty() {
                 eprintln!("Usage: opsgenie <command>. See --help.");
             } else {
-                eprintln!("Error: unknown command '{}'. See --help.", cmd);
+                eprintln!("Error: unknown command {}. See --help.", quoteaf_os(cmd));
             }
             1
         }

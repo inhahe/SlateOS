@@ -4,6 +4,7 @@
 //!
 //! Single personality: `etcdctl`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -65,16 +66,16 @@ fn run_etcdctl(args: Vec<String>) -> i32 {
             let prefix = args.iter().any(|a| a == "--prefix");
             if prefix {
                 println!("3");
-                println!("  Deleted 3 keys with prefix '{}'", key);
+                println!("  Deleted 3 keys with prefix {}", quoteaf_os(key));
             } else {
                 println!("1");
-                println!("  Deleted key '{}'", key);
+                println!("  Deleted key {}", quoteaf_os(key));
             }
             0
         }
         "watch" => {
             let key = args.get(1).map(|s| s.as_str()).unwrap_or("/config");
-            println!("Watching key '{}' ...", key);
+            println!("Watching key {} ...", quoteaf_os(key));
             println!("  PUT {}/db_host = \"postgres-new.local\" (rev: 43)", key);
             println!("  PUT {}/cache_ttl = \"7200\" (rev: 44)", key);
             println!("  DELETE {}/old_key (rev: 45)", key);
@@ -185,7 +186,7 @@ fn run_etcdctl(args: Vec<String>) -> i32 {
             if cmd.is_empty() {
                 eprintln!("Usage: etcdctl <command>. See --help.");
             } else {
-                eprintln!("Error: unknown command '{}'. See --help.", cmd);
+                eprintln!("Error: unknown command {}. See --help.", quoteaf_os(cmd));
             }
             1
         }

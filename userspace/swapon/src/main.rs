@@ -14,6 +14,7 @@
 // consume. Dead-code lint cannot see across that future boundary.
 #![allow(dead_code)]
 
+use quoting::quotef_os;
 use std::collections::HashMap;
 use std::env;
 use std::fs;
@@ -306,7 +307,7 @@ fn cmd_swapon(args: &[String]) {
     } else {
         for device in &devices {
             if is_swap_active(device) {
-                eprintln!("swapon: {device}: already active");
+                eprintln!("swapon: {}: already active", quotef_os(device));
                 continue;
             }
             activate_swap(device, priority, discard, verbose);
@@ -357,7 +358,7 @@ fn activate_swap(device: &str, priority: Option<i32>, discard: bool, verbose: bo
             }
         }
         Err(e) => {
-            eprintln!("swapon: {device}: failed to activate: {e}");
+            eprintln!("swapon: {}: failed to activate: {e}", quotef_os(device));
         }
     }
 }
@@ -421,7 +422,7 @@ fn cmd_swapoff(args: &[String]) {
     } else {
         for device in &devices {
             if !is_swap_active(device) {
-                eprintln!("swapoff: {device}: not currently active");
+                eprintln!("swapoff: {}: not currently active", quotef_os(device));
                 continue;
             }
             deactivate_swap(device, verbose);
@@ -438,7 +439,7 @@ fn deactivate_swap(device: &str, verbose: bool) {
             }
         }
         Err(e) => {
-            eprintln!("swapoff: {device}: failed to deactivate: {e}");
+            eprintln!("swapoff: {}: failed to deactivate: {e}", quotef_os(device));
         }
     }
 }

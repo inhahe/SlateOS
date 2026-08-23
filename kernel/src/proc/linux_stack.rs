@@ -47,8 +47,6 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use crate::error::{KernelError, KernelResult};
-use crate::mm::frame::FRAME_SIZE;
-use crate::mm::page_table::{self, VirtAddr};
 use crate::proc::elf::ElfFile;
 
 // ---------------------------------------------------------------------------
@@ -94,7 +92,8 @@ pub const AT_EXECFN: u64 = 31;
 
 /// Page size reported to Linux binaries through `AT_PAGESZ`.
 ///
-/// This is **4096**, not the native 16 KiB [`FRAME_SIZE`]: the Linux ABI
+/// This is **4096**, not the native 16 KiB [`crate::mm::frame::FRAME_SIZE`]:
+/// the Linux ABI
 /// boundary uniformly reports a 4 KiB page (see design-decision #1).  A
 /// Linux binary that computes page-aligned addresses from `AT_PAGESZ`
 /// must see the same value `sysconf(_SC_PAGESIZE)` reports.
@@ -404,53 +403,46 @@ fn base_auxv(elf: &ElfFile<'_>, interp_base: Option<u64>, exec_load_bias: u64) -
     aux
 }
 
-/// Copy `bytes` into the user address space at `vaddr`, page by page.
-///
-/// Walks the target page table to resolve each page's physical frame and
-/// writes through the HHDM mapping.  The destination pages must already
-/// be mapped present + writable (the stack frames mapped by
-/// `setup_user_stack`).
-///
-/// # Safety
-///
-/// `pml4_phys` must be a valid PML4 for the target process, and
-/// `[vaddr, vaddr + bytes.len())` must lie within present, writable,
-/// user pages that no other CPU is concurrently mutating.
-unsafe fn write_user_image(pml4_phys: u64, vaddr: u64, bytes: &[u8]) -> KernelResult<()> {
-    let hhdm = page_table::hhdm().ok_or(KernelError::InternalError)?;
-    let frame_size = FRAME_SIZE as u64;
-    let mut written: u64 = 0;
-    let total = bytes.len() as u64;
-    while written < total {
-        let cur = vaddr.checked_add(written).ok_or(KernelError::Overflow)?;
-        let phys = page_table::translate(pml4_phys, VirtAddr::new(cur))
-            .ok_or(KernelError::InvalidAddress)?;
-        let page_off = cur % frame_size;
-        let in_page = frame_size
-            .checked_sub(page_off)
-            .ok_or(KernelError::Overflow)?;
-        let remaining = total.checked_sub(written).ok_or(KernelError::Overflow)?;
-        let n = in_page.min(remaining);
-        let src_off = written as usize;
-        let src_end = src_off
-            .checked_add(n as usize)
-            .ok_or(KernelError::Overflow)?;
-        let src = bytes
-            .get(src_off..src_end)
-            .ok_or(KernelError::InvalidAddress)?;
-        let dst = phys.checked_add(hhdm).ok_or(KernelError::Overflow)? as *mut u8;
-        // SAFETY: `phys` is the physical address backing the mapped,
-        // writable user page `cur`; `dst` is its HHDM alias.  `n` bytes
-        // fit within this page (bounded by `in_page`).  `src` is a valid
-        // slice of `bytes`.  Source and destination cannot overlap (one
-        // is a kernel-built buffer, the other a user stack frame).
-        unsafe {
-            core::ptr::copy_nonoverlapping(src.as_ptr(), dst, n as usize);
-        }
-        written = written.checked_add(n).ok_or(KernelError::Overflow)?;
-    }
-    Ok(())
-}
+// The initial stack image is written with `crate::mm::user::copy_to_user_as`.
+//
+// This file used to carry its own page-walking copy loop, `write_user_image`,
+// which resolved each destination page with `page_table::translate` and wrote
+// through the HHDM alias.  It was a second implementation of exactly what
+// `copy_to_user_as` does, and it had silently lost three of that function's
+// checks:
+//
+//   1. **No `WRITABLE` check.**  `translate` reports the physical frame behind
+//      a mapping without regard to its flags, so a present-but-read-only page
+//      resolved fine and was then written anyway.  Because the write went
+//      through the HHDM — a *kernel* address — neither SMAP nor the page-level
+//      write-protect bit could stop it: the fault that ought to have been
+//      raised was raised against an alias that is legitimately writable.  A
+//      copy-on-write page would therefore have been modified *in place*,
+//      corrupting every other process sharing it, with no fault and no
+//      diagnostic anywhere.  That is strictly worse than the loud ring-0 #PF
+//      tracked as `W-KERNEL-COW-WRITE`, because nothing reports it at all.
+//   2. **No CoW break and no demand-population.**  `copy_to_user_as` resolves
+//      through `user_page_phys`, which asks the owning process's fault
+//      resolver to do what the hardware fault would have done — populate a
+//      committed-but-absent page, or break a CoW — and only then walks again.
+//      The loop here treated both states as `InvalidAddress`.
+//   3. **No null / wrap / `USER_SPACE_END` bound.**  The destination was
+//      trusted to be a user address rather than checked to be one.
+//
+// None of that was reachable today: `setup_user_stack` maps all
+// `USER_STACK_FRAMES` frames eagerly, present + writable, from freshly
+// allocated memory, into an address space this thread is the sole owner of, so
+// every precondition held by construction.  The defect was that it held by
+// construction *elsewhere* — the safety contract asserted what the caller
+// happened to arrange, and nothing checked it.  Making the stack demand-paged,
+// or reaching this path with an address space that has been forked, would have
+// turned a caller-side change into silent cross-process corruption here.
+//
+// The general form of that is worth stating, because it is the same lesson the
+// duplicated `uname` literals taught (§284): a hand-copied second
+// implementation does not stay equivalent to the first.  `copy_to_user_as`
+// gained the CoW break in §249; this copy did not, because nothing connected
+// them.
 
 /// Outcome of installing a Linux SysV initial stack: the entry `%rsp`
 /// and a standalone copy of the auxv to persist in the process's
@@ -500,13 +492,12 @@ pub fn install_linux_stack(
 ) -> KernelResult<InstalledLinuxStack> {
     let aux = base_auxv(elf, interp_base, exec_load_bias);
     let built = build_sysv_stack(stack_top, stack_limit, argv, envp, &aux, random16)?;
-    // SAFETY: the stack frames [stack_limit, stack_top) were just mapped
-    // present + writable by `setup_user_stack`, and `built.image` spans
-    // exactly [built.rsp, stack_top) with built.rsp >= stack_limit.  This
-    // thread is the sole accessor of the freshly-created address space.
-    unsafe {
-        write_user_image(pml4_phys, built.rsp, &built.image)?;
-    }
+    // `built.image` spans exactly [built.rsp, stack_top), with
+    // built.rsp >= stack_limit, so every byte lands in the stack region
+    // `setup_user_stack` mapped.  `copy_to_user_as` re-establishes that for
+    // itself rather than trusting it — see the note above it for why this is
+    // no longer a hand-rolled loop.
+    crate::mm::user::copy_to_user_as(pml4_phys, built.rsp, &built.image)?;
     Ok(InstalledLinuxStack {
         rsp: built.rsp,
         auxv_bytes: built.auxv_bytes,

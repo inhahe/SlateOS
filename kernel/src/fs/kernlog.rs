@@ -279,8 +279,14 @@ fn self_test_inner() {
     crate::serial_println!("  [3/8] levels: OK");
 
     // 4: Read from seq.
+    //
+    // `seq` is 1 — the first sequence `log` hands out, since `next_seq` starts
+    // at 1 while the boot message is seq 0 — so this is every entry bar the
+    // boot message: exactly the four the suite logged. Stated exactly rather
+    // than as `>= 4`, which is true of any ring that has ever been written to
+    // and so says nothing about `read_from`'s filtering.
     let recent = read_from(seq);
-    assert!(recent.len() >= 4);
+    assert_eq!(recent.len(), 4, "everything after the boot message");
     crate::serial_println!("  [4/8] read from: OK");
 
     // 5: Tail.
@@ -301,10 +307,21 @@ fn self_test_inner() {
     crate::serial_println!("  [7/8] filter source: OK");
 
     // 8: Stats.
+    //
+    // `total_logged` is 5, not 6: `init_defaults` pushes the boot message and
+    // sets the counter to 1, and the suite logs four more. This asserted
+    // `>= 6` and failed the first time it was ever run — the boot message got
+    // counted twice, which nothing caught because on the live table the suite
+    // ran against before `58117e72c` the counter was already far past 6.
+    //
+    // `total_dropped` is 0 and is worth saying so rather than discarding:
+    // `log` only drops once the ring reaches RING_SIZE (4096), so a non-zero
+    // count here would mean the ring is not the size it claims. That is the
+    // one thing this test can tell us that `count()` cannot.
     let (msg_count, total, dropped, ops) = stats();
     assert_eq!(msg_count, 5);
-    assert!(total >= 6);
-    let _ = dropped;
+    assert_eq!(total, 5, "the boot message plus the four the suite logged");
+    assert_eq!(dropped, 0, "five entries cannot overflow a 4096-slot ring");
     assert!(ops > 0);
     crate::serial_println!("  [8/8] stats: OK");
 

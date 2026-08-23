@@ -1360,6 +1360,53 @@ fn send_ack_with_sack(conn: &TcpConnection) -> KernelResult<()> {
 // Public API
 // ---------------------------------------------------------------------------
 
+/// Take a connection slot, recycling the oldest TIME_WAIT one if none is free.
+///
+/// Returns `OutOfMemory` when every slot is active and none is in TIME_WAIT.
+///
+/// `why` names the caller in the recycling log line.
+///
+/// Extracted because `connect`, `connect_start` and `handle_incoming_syn`
+/// carried this logic verbatim: a slot-allocation rule that exists in
+/// three copies is one that will eventually exist in three *versions* —
+/// and it had already started, since only two of the three logged the
+/// recycle at all.  It also replaces a hand-rolled minimum search whose
+/// result was then used as an index six times over: `get_mut` once, into
+/// a binding, is both one bounds check instead of six and the reason none
+/// of them can be out of range.
+fn take_conn_slot(conns: &mut [TcpConnection], why: &str) -> KernelResult<usize> {
+    if let Some(idx) = conns.iter().position(|c| !c.active) {
+        return Ok(idx);
+    }
+
+    // No free slot.  Reclaim the least recently active TIME_WAIT one;
+    // `min_by_key` keeps the first minimum, which is what the open-coded
+    // strict-`<` loop did.
+    let idx = conns
+        .iter()
+        .enumerate()
+        .filter(|(_, c)| c.active && c.state == TcpState::TimeWait)
+        .min_by_key(|(_, c)| c.last_activity_ns)
+        .map(|(i, _)| i)
+        .ok_or(KernelError::OutOfMemory)?;
+    let conn = conns.get_mut(idx).ok_or(KernelError::InternalError)?;
+
+    crate::serial_println!(
+        "[tcp] Recycling TIME_WAIT slot {} (port {}) for {}",
+        idx,
+        conn.local_port,
+        why
+    );
+
+    conn.active = false;
+    conn.state = TcpState::Closed;
+    conn.rx_buffer.clear();
+    conn.tx_buffer.clear();
+    conn.nagle_buf.clear();
+    conn.ooo_buf.clear();
+    Ok(idx)
+}
+
 /// Open a TCP connection to the given address and port.
 ///
 /// `ns_id` identifies the network namespace; connections in different
@@ -1382,38 +1429,9 @@ pub fn connect(ns_id: NetNsId, remote_ip: IpAddr, remote_port: u16) -> KernelRes
         // to the same remote endpoint within the same namespace.
         let local_port = alloc_port_for(&conns, ns_id, remote_ip, remote_port)?;
 
-        let slot = match conns.iter().position(|c| !c.active) {
-            Some(idx) => idx,
-            None => {
-                // No free slots — try to reclaim a TIME_WAIT connection.
-                let mut best: Option<usize> = None;
-                let mut oldest_activity: u64 = u64::MAX;
-                for (i, c) in conns.iter().enumerate() {
-                    if c.active && c.state == TcpState::TimeWait {
-                        if c.last_activity_ns < oldest_activity {
-                            oldest_activity = c.last_activity_ns;
-                            best = Some(i);
-                        }
-                    }
-                }
-                let idx = best.ok_or(KernelError::OutOfMemory)?;
-                // Reclaim the TIME_WAIT slot.
-                crate::serial_println!(
-                    "[tcp] Recycling TIME_WAIT slot {} (port {}) for new connection",
-                    idx,
-                    conns[idx].local_port
-                );
-                conns[idx].active = false;
-                conns[idx].state = TcpState::Closed;
-                conns[idx].rx_buffer.clear();
-                conns[idx].tx_buffer.clear();
-                conns[idx].nagle_buf.clear();
-                conns[idx].ooo_buf.clear();
-                idx
-            }
-        };
+        let slot = take_conn_slot(&mut conns[..], "new connection")?;
 
-        let conn = &mut conns[slot];
+        let conn = conns.get_mut(slot).ok_or(KernelError::InternalError)?;
         conn.active = true;
         conn.ns_id = ns_id;
         conn.state = TcpState::SynSent;
@@ -1590,31 +1608,9 @@ pub fn connect_start(ns_id: NetNsId, remote_ip: IpAddr, remote_port: u16) -> Ker
         // to the same remote endpoint within the same namespace.
         let local_port = alloc_port_for(&conns, ns_id, remote_ip, remote_port)?;
 
-        let slot = match conns.iter().position(|c| !c.active) {
-            Some(idx) => idx,
-            None => {
-                let mut best: Option<usize> = None;
-                let mut oldest_activity: u64 = u64::MAX;
-                for (i, c) in conns.iter().enumerate() {
-                    if c.active && c.state == TcpState::TimeWait {
-                        if c.last_activity_ns < oldest_activity {
-                            oldest_activity = c.last_activity_ns;
-                            best = Some(i);
-                        }
-                    }
-                }
-                let idx = best.ok_or(KernelError::OutOfMemory)?;
-                conns[idx].active = false;
-                conns[idx].state = TcpState::Closed;
-                conns[idx].rx_buffer.clear();
-                conns[idx].tx_buffer.clear();
-                conns[idx].nagle_buf.clear();
-                conns[idx].ooo_buf.clear();
-                idx
-            }
-        };
+        let slot = take_conn_slot(&mut conns[..], "new connection")?;
 
-        let conn = &mut conns[slot];
+        let conn = conns.get_mut(slot).ok_or(KernelError::InternalError)?;
         conn.active = true;
         conn.ns_id = ns_id;
         conn.state = TcpState::SynSent;
@@ -3673,37 +3669,9 @@ fn handle_incoming_syn(
     let isn = generate_isn();
     let handle = {
         let mut conns = CONNECTIONS.lock();
-        let slot = match conns.iter().position(|c| !c.active) {
-            Some(idx) => idx,
-            None => {
-                // No free slots — try to reclaim a TIME_WAIT connection.
-                let mut best: Option<usize> = None;
-                let mut oldest_activity: u64 = u64::MAX;
-                for (i, c) in conns.iter().enumerate() {
-                    if c.active && c.state == TcpState::TimeWait {
-                        if c.last_activity_ns < oldest_activity {
-                            oldest_activity = c.last_activity_ns;
-                            best = Some(i);
-                        }
-                    }
-                }
-                let idx = best.ok_or(KernelError::OutOfMemory)?;
-                crate::serial_println!(
-                    "[tcp] Recycling TIME_WAIT slot {} (port {}) for incoming SYN",
-                    idx,
-                    conns[idx].local_port
-                );
-                conns[idx].active = false;
-                conns[idx].state = TcpState::Closed;
-                conns[idx].rx_buffer.clear();
-                conns[idx].tx_buffer.clear();
-                conns[idx].nagle_buf.clear();
-                conns[idx].ooo_buf.clear();
-                idx
-            }
-        };
+        let slot = take_conn_slot(&mut conns[..], "incoming SYN")?;
 
-        let conn = &mut conns[slot];
+        let conn = conns.get_mut(slot).ok_or(KernelError::InternalError)?;
         conn.active = true;
         conn.ns_id = effective_ns;
         conn.state = TcpState::SynReceived;

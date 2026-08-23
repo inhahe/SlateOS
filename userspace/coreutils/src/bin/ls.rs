@@ -50,8 +50,10 @@
 #![cfg_attr(not(unix), allow(dead_code))]
 
 use charwidth::char_width;
+use coreutils::fnmatch::{Flags, fnmatch};
 use coreutils::getopt::{self, Opt, Program, Takes};
 use coreutils::human::{Opts, default_block_size};
+use coreutils::pathname::{base_len, last_component, last_component_offset};
 use coreutils::quote::{Mb, Style, next_mb, os_bytes, quote};
 use coreutils::vercmp::version;
 use coreutils::xnum::{self, Status, strtol_fatal};
@@ -732,7 +734,11 @@ struct Settings {
     clippy::too_many_lines,
     reason = "one arm per option, in upstream's order; splitting it would hide that order"
 )]
-fn parse_args(argv: &[OsString], env: &Environment, err: &mut dyn Write) -> Result<Request, Refusal> {
+fn parse_args(
+    argv: &[OsString],
+    env: &Environment,
+    err: &mut dyn Write,
+) -> Result<Request, Refusal> {
     let mut cfg = Config::default();
     let mut operands: Vec<Vec<u8>> = Vec::new();
 
@@ -874,14 +880,24 @@ fn parse_args(argv: &[OsString], env: &Environment, err: &mut dyn Write) -> Resu
             }
             Flag::Width => {
                 let Some(width) = decode_line_length(arg) else {
-                    return Err(Refusal::fatal(format!("invalid line width: {}", quote(arg))));
+                    return Err(Refusal::fatal(format!(
+                        "invalid line width: {}",
+                        quote(arg)
+                    )));
                 };
                 set.width_opt = Some(width);
             }
             Flag::Tabsize => {
                 set.tabsize_opt = Some(
-                    xnum::xnumtoumax(arg, 0, 0, i64::MAX.unsigned_abs(), Some(b""), "invalid tab size")
-                        .map_err(Refusal::fatal)?,
+                    xnum::xnumtoumax(
+                        arg,
+                        0,
+                        0,
+                        i64::MAX.unsigned_abs(),
+                        Some(b""),
+                        "invalid tab size",
+                    )
+                    .map_err(Refusal::fatal)?,
                 );
             }
             Flag::IgnoreBackups => {
@@ -950,7 +966,8 @@ fn parse_args(argv: &[OsString], env: &Environment, err: &mut dyn Write) -> Resu
             }
             Flag::TimeStyle => set.time_style_option = Some(arg.to_vec()),
             Flag::BlockSize => {
-                let (size, opts, status) = coreutils::human::human_options(arg, env.posixly_correct);
+                let (size, opts, status) =
+                    coreutils::human::human_options(arg, env.posixly_correct);
                 if let Some(sentence) = strtol_fatal(status, &spelling, arg) {
                     return Err(Refusal::fatal(sentence));
                 }
@@ -1043,8 +1060,9 @@ fn finish(
 
     // The most columns the page could hold: every column is at least three
     // cells wide, and the first one carries no separator.
-    cfg.max_idx = (cfg.line_length / MIN_COLUMN_WIDTH)
-        .saturating_add(usize::from(!cfg.line_length.is_multiple_of(MIN_COLUMN_WIDTH)));
+    cfg.max_idx = (cfg.line_length / MIN_COLUMN_WIDTH).saturating_add(usize::from(
+        !cfg.line_length.is_multiple_of(MIN_COLUMN_WIDTH),
+    ));
 
     if matches!(
         cfg.format,
@@ -1103,7 +1121,8 @@ fn finish(
     // Only the three styles whose quotes are *conditional* need the padding
     // column, and only in a format that aligns anything.
     cfg.align_variable_outer_quotes = (cfg.format == Format::Long
-        || (matches!(cfg.format, Format::ManyPerLine | Format::Horizontal) && cfg.line_length != 0))
+        || (matches!(cfg.format, Format::ManyPerLine | Format::Horizontal)
+            && cfg.line_length != 0))
         && matches!(
             cfg.quoting_style,
             Style::Shell | Style::ShellEscape | Style::CMaybe
@@ -1127,7 +1146,8 @@ fn finish(
             && matches!(
                 cfg.time_type,
                 TimeType::Ctime | TimeType::Atime | TimeType::Btime
-            ) {
+            )
+        {
             Sort::Time
         } else {
             Sort::Name
@@ -1673,8 +1693,7 @@ fn file_cmp(cfg: &Config, cwd_some_quoted: bool, a: &FileInfo, b: &FileInfo) -> 
 /// GNU caches it under exactly the conditions that ask for it twice.
 fn sort_files(cfg: &Config, cwd_some_quoted: bool, files: &mut [FileInfo]) {
     if cfg.sort == Sort::Width
-        || (cfg.line_length > 0
-            && matches!(cfg.format, Format::ManyPerLine | Format::Horizontal))
+        || (cfg.line_length > 0 && matches!(cfg.format, Format::ManyPerLine | Format::Horizontal))
     {
         for f in files.iter_mut() {
             let out = quote_name(cfg, &cfg.filename_extra, cwd_some_quoted, &f.name, f.quoted);
@@ -1688,6 +1707,208 @@ fn sort_files(cfg: &Config, cwd_some_quoted: bool, files: &mut [FileInfo]) {
     // comparator is a total order only because every key falls back to the
     // name, and an unstable sort would still be free to reorder genuine ties.
     files.sort_by(|a, b| file_cmp(cfg, cwd_some_quoted, a, b));
+}
+
+// ------------------------------------------------- selecting and naming ---
+
+/// GNU's `patterns_match`: does any `--hide`/`--ignore` pattern cover `name`?
+///
+/// `FNM_PERIOD` is the flag that makes `-I '*'` leave the dot files alone,
+/// which is what lets `ls -a -I '*'` print `.`, `..` and `.hidden` and nothing
+/// else. Measured, GNU ls 9.4.
+fn patterns_match(patterns: &[Vec<u8>], name: &[u8]) -> bool {
+    patterns.iter().any(|p| fnmatch(p, name, Flags::PERIOD))
+}
+
+/// GNU's `file_ignored`: is this directory entry hidden before it is ever
+/// stat'd?
+///
+/// The three clauses answer to `-a`/`-A`, `--hide` and `--ignore` in that
+/// order. Upstream writes the middle test as `! name[1 + (name[1] == '.')]`,
+/// which reads as "the name is exactly `.` or exactly `..`" — under `-A` those
+/// two are the only entries hidden.
+///
+/// `--hide` is consulted only in the default mode, so `-a` and `-A` both
+/// cancel it while neither cancels `--ignore`. Measured: `ls -a --hide='*'`
+/// prints everything, `ls --hide='d*'` drops `dirA` and `dirZ`.
+fn file_ignored(cfg: &Config, name: &[u8]) -> bool {
+    let dot_special = cfg.ignore_mode != IgnoreMode::Minimal
+        && name.first() == Some(&b'.')
+        && (cfg.ignore_mode == IgnoreMode::Default || name == b"." || name == b"..");
+    dot_special
+        || (cfg.ignore_mode == IgnoreMode::Default && patterns_match(&cfg.hide_patterns, name))
+        || patterns_match(&cfg.ignore_patterns, name)
+}
+
+/// GNU's `attach`: the path `stat` is given for an entry of `dirname`.
+///
+/// Two special cases, both upstream's and both visible in the error messages a
+/// failed listing prints. A `dirname` of exactly `.` contributes nothing, so
+/// `ls .` reports `cannot access 'x'` and not `cannot access './x'`; and a
+/// `dirname` that already ends in `/` does not get a second one, so `ls /`
+/// reports `/x` rather than `//x`.
+fn attach(dirname: &[u8], name: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(dirname.len().saturating_add(name.len()).saturating_add(1));
+    if dirname != b"." {
+        out.extend_from_slice(dirname);
+        if !dirname.is_empty() && dirname.last() != Some(&b'/') {
+            out.push(b'/');
+        }
+    }
+    out.extend_from_slice(name);
+    out
+}
+
+/// The full name `gobble_file` stats: `name` itself when there is nothing to
+/// prepend, [`attach`]'s join otherwise.
+///
+/// An absolute `name` is used as-is even inside a directory listing, which is
+/// how `ls -R /` reaches `/etc` without building `///etc`.
+fn full_name_for(dirname: &[u8], name: &[u8]) -> Vec<u8> {
+    if name.first() == Some(&b'/') || dirname.is_empty() {
+        name.to_vec()
+    } else {
+        attach(dirname, name)
+    }
+}
+
+/// gnulib's `file_name_concat`, which is *not* [`attach`].
+///
+/// `ls` joins a directory to an entry two different ways on purpose, and the
+/// difference is visible: `attach` builds the path handed to `stat`, and drops
+/// a `dirname` of `.` so an error reads `cannot access 'x'`; this one builds
+/// the name a recursive listing will *print*, and keeps it, so `ls -R .`
+/// heads the subdirectory `./dirA`. Measured, GNU ls 9.4.
+///
+/// The dir is truncated to the end of its last component, so a trailing run of
+/// slashes collapses: `ls -R 'dirA//'` heads `dirA//` — the operand, printed
+/// verbatim — but its children `dirA/sub1`. The `.` separator is gnulib's
+/// answer to joining the root to an absolute base: `/` + `/foo` is `/./foo`,
+/// because `//foo` names a different file on some POSIX systems.
+fn file_name_concat(dir: &[u8], base: &[u8]) -> Vec<u8> {
+    let dirbase_at = last_component_offset(dir);
+    let dirbaselen = base_len(dir.get(dirbase_at..).unwrap_or_default());
+    let dirlen = dirbase_at.saturating_add(dirbaselen);
+    let sep = if dirbaselen == 0 {
+        // The dir is a filesystem root.
+        (base.first() == Some(&b'/')).then_some(b'.')
+    } else {
+        let ends_in_slash = dirlen
+            .checked_sub(1)
+            .and_then(|last| dir.get(last))
+            .is_some_and(|&c| c == b'/');
+        (!ends_in_slash && base.first() != Some(&b'/')).then_some(b'/')
+    };
+    let mut out = dir.get(..dirlen).unwrap_or_default().to_vec();
+    out.extend(sep);
+    out.extend_from_slice(base);
+    out
+}
+
+/// GNU's `basename_is_dot_or_dotdot`, the guard that stops `-R` recursing
+/// through `./././.` forever.
+fn basename_is_dot_or_dotdot(name: &[u8]) -> bool {
+    let base = last_component(name);
+    base == b"." || base == b".."
+}
+
+/// Whether an entry has to be `stat`ed, GNU's condition at `ls.c:3400`.
+///
+/// The point of the condition is that a plain `ls` of a large directory makes
+/// *no* `stat` calls at all: `readdir` on Linux supplies the inode and the
+/// type, and nothing in the default output needs more than the name. Every
+/// clause below names an option that does need more.
+///
+/// Three of upstream's clauses are absent, all of them `--color`'s: colouring
+/// a directory needs its mode for the sticky and other-writable cases, and
+/// colouring a regular file needs it for the executable and set-id cases.
+/// `ls` here accepts `--color` and emits nothing for it (see
+/// `known-issues.md`), so a `stat` driven by it could only change which errors
+/// are printed, never the listing. `--hyperlink` is absent for the same
+/// reason.
+fn needs_stat(cfg: &Config, kind: FileType, inode_known: bool, command_line_arg: bool) -> bool {
+    command_line_arg
+        || cfg.format_needs_stat
+        // Dereferencing changes both the inode and the type, and `readdir`
+        // reports the link's, not the target's.
+        || ((cfg.print_inode || cfg.format_needs_type)
+            && matches!(kind, FileType::SymbolicLink | FileType::Unknown)
+            && (cfg.dereference == Deref::Always || cfg.check_symlink_mode))
+        || (cfg.print_inode && !inode_known)
+        || (cfg.format_needs_type
+            && (kind == FileType::Unknown
+                || command_line_arg
+                // `-F` marks an executable with `*`, and only the mode says
+                // whether a regular file is one.
+                || (kind == FileType::Normal && cfg.indicator_style == Indicator::Classify)))
+}
+
+/// A directory waiting to be listed. GNU's `struct pending`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Pending {
+    /// The path to open, or [`None`] for the marker that says a recursive
+    /// listing has finished with `realname` and may stop guarding against
+    /// loops through it.
+    name: Option<Vec<u8>>,
+    /// The name to print in the `dir:` header when it differs from `name` —
+    /// a symlink named on the command line is opened through its target but
+    /// announced under the name the user typed.
+    realname: Option<Vec<u8>>,
+    command_line_arg: bool,
+}
+
+/// GNU's `extract_dirs_from_files`: move the directories out of the listing
+/// and into the queue.
+///
+/// `dirname` is [`None`] for the command-line pass, where `.` and `..` are
+/// real operands to be listed, and `Some` inside a recursive one, where they
+/// are the entries that would make the walk cycle.
+///
+/// Only `arg_directory` entries are *removed*; a plain `directory` found by
+/// `-R` is both queued and left in the parent's listing, which is why a
+/// recursive listing shows a subdirectory as a row under its parent and again
+/// as a heading of its own.
+///
+/// Upstream walks the files backwards and prepends to the queue, so the two
+/// reversals cancel and the queue ends up in listing order. Pushing forwards
+/// onto a `Vec` we then drain from the front is the same order, so the
+/// backwards walk is not reproduced.
+fn extract_dirs_from_files(
+    dirname: Option<&[u8]>,
+    command_line_arg: bool,
+    loop_detect: bool,
+    files: &mut Vec<FileInfo>,
+    pending: &mut Vec<Pending>,
+) {
+    if let Some(dir) = dirname
+        && loop_detect
+    {
+        // The marker that says `dir` is done. It carries no name, so the
+        // listing loop knows to pop it rather than open it.
+        pending.push(Pending {
+            name: None,
+            realname: Some(dir.to_vec()),
+            command_line_arg: false,
+        });
+    }
+
+    for f in files.iter() {
+        let is_dir = matches!(f.filetype, FileType::Directory | FileType::ArgDirectory);
+        if !is_dir || (dirname.is_some() && basename_is_dot_or_dotdot(&f.name)) {
+            continue;
+        }
+        let name = match dirname {
+            Some(dir) if f.name.first() != Some(&b'/') => file_name_concat(dir, &f.name),
+            _ => f.name.clone(),
+        };
+        pending.push(Pending {
+            name: Some(name),
+            realname: f.linkname.clone(),
+            command_line_arg,
+        });
+    }
+
+    files.retain(|f| f.filetype != FileType::ArgDirectory);
 }
 
 fn main() -> ExitCode {
@@ -1723,14 +1944,8 @@ mod tests {
             filename_extra(Style::Literal, Indicator::FileType),
             b"*=>@|"
         );
-        assert_eq!(
-            filename_extra(Style::Literal, Indicator::Classify),
-            b"=>@|"
-        );
-        assert_eq!(
-            filename_extra(Style::Escape, Indicator::Classify),
-            b" =>@|"
-        );
+        assert_eq!(filename_extra(Style::Literal, Indicator::Classify), b"=>@|");
+        assert_eq!(filename_extra(Style::Escape, Indicator::Classify), b" =>@|");
         // The header set never grows: a header has nothing appended to it.
         assert_eq!(DIRNAME_EXTRA, b":");
     }
@@ -1842,7 +2057,10 @@ mod tests {
             ..Config::default()
         };
         assert_eq!(rendered(&cfg, true, b"a b"), ("'a b'".to_owned(), 5, false));
-        assert_eq!(rendered(&cfg, true, b"plain"), ("plain".to_owned(), 5, true));
+        assert_eq!(
+            rendered(&cfg, true, b"plain"),
+            ("plain".to_owned(), 5, true)
+        );
         // Nothing in this directory was quoted, so nothing is padded.
         assert_eq!(
             rendered(&cfg, false, b"plain"),
@@ -2079,7 +2297,14 @@ mod tests {
             },
             ..file(name)
         };
-        let files = || vec![sized("a", 10), sized("b", 30), sized("c", 30), sized("d", 20)];
+        let files = || {
+            vec![
+                sized("a", 10),
+                sized("b", 30),
+                sized("c", 30),
+                sized("d", 20),
+            ]
+        };
         let cfg = Config {
             sort: Sort::Size,
             ..Config::default()
@@ -2148,5 +2373,280 @@ mod tests {
             order(&cfg, files),
             ["a\u{7f}bcd", "ab", "abc", "\u{4e00}\u{4e00}"]
         );
+    }
+
+    // --------------------------------------- selecting and naming entries ---
+
+    /// The `--ignore` patterns are matched with `FNM_PERIOD`, so a `*` does not
+    /// reach a dot file — which makes `-a -I '*'` print the three dot entries
+    /// and nothing else. `--hide` is cancelled by `-a` and `-A`; `--ignore` is
+    /// cancelled by neither. Measured, GNU ls 9.4:
+    ///
+    /// ```text
+    /// $ ls -1 -a -I '*'        ->  .  ..  .hidden
+    /// $ ls -1 -a --hide='*'    ->  (everything)
+    /// $ ls -1 --hide='d*'      ->  everything but dirA and dirZ
+    /// $ ls -1 -a -I '?'        ->  everything but c
+    /// ```
+    #[test]
+    fn ignore_reaches_the_dot_files_only_by_naming_the_dot() {
+        let survivors = |cfg: &Config| -> Vec<String> {
+            fixture()
+                .into_iter()
+                .filter(|f| !file_ignored(cfg, &f.name))
+                .map(|f| String::from_utf8(f.name).unwrap())
+                .collect()
+        };
+
+        let all_ignore_star = Config {
+            ignore_mode: IgnoreMode::Minimal,
+            ignore_patterns: vec![b"*".to_vec()],
+            ..Config::default()
+        };
+        assert_eq!(survivors(&all_ignore_star), [".", "..", ".hidden"]);
+
+        let all_hide_star = Config {
+            ignore_mode: IgnoreMode::Minimal,
+            hide_patterns: vec![b"*".to_vec()],
+            ..Config::default()
+        };
+        assert_eq!(survivors(&all_hide_star).len(), fixture().len());
+
+        let hide_d = Config {
+            hide_patterns: vec![b"d*".to_vec()],
+            ..Config::default()
+        };
+        assert!(!survivors(&hide_d).iter().any(|n| n.starts_with('d')));
+        // The default mode was already hiding these, so `--hide` is not what
+        // removed them and the test above would pass without it.
+        assert!(!survivors(&hide_d).contains(&".hidden".to_owned()));
+
+        let all_ignore_one = Config {
+            ignore_mode: IgnoreMode::Minimal,
+            ignore_patterns: vec![b"?".to_vec()],
+            ..Config::default()
+        };
+        assert!(!survivors(&all_ignore_one).contains(&"c".to_owned()));
+        assert!(survivors(&all_ignore_one).contains(&".".to_owned()));
+    }
+
+    /// `-A` hides exactly two names, and upstream's
+    /// `! name[1 + (name[1] == '.')]` is how it says so. A name that merely
+    /// *starts* `..` — `...` or `..a` — is not one of them.
+    #[test]
+    fn almost_all_hides_the_two_directory_entries_and_no_other_dot_name() {
+        let cfg = Config {
+            ignore_mode: IgnoreMode::DotAndDotDot,
+            ..Config::default()
+        };
+        assert!(file_ignored(&cfg, b"."));
+        assert!(file_ignored(&cfg, b".."));
+        assert!(!file_ignored(&cfg, b"..."));
+        assert!(!file_ignored(&cfg, b"..a"));
+        assert!(!file_ignored(&cfg, b".hidden"));
+
+        let default = Config::default();
+        assert!(file_ignored(&default, b"..."));
+        assert!(file_ignored(&default, b".hidden"));
+        assert!(!file_ignored(&default, b"a.hidden"));
+
+        let all = Config {
+            ignore_mode: IgnoreMode::Minimal,
+            ..Config::default()
+        };
+        assert!(!all.hide_patterns.is_empty() || !file_ignored(&all, b"."));
+    }
+
+    /// The two joins are different functions and the difference shows.
+    /// `attach` builds what `stat` is given and drops a `.`; `file_name_concat`
+    /// builds what a recursive listing prints and keeps it. Measured:
+    ///
+    /// ```text
+    /// $ ls -R .        ->  headings  .:  then  ./dirA
+    /// $ ls -R 'dirA//' ->  headings  dirA//:  then  dirA/sub1
+    /// ```
+    #[test]
+    fn the_path_that_is_stated_and_the_path_that_is_printed_are_joined_differently() {
+        assert_eq!(attach(b".", b"x"), b"x");
+        assert_eq!(file_name_concat(b".", b"x"), b"./x");
+
+        assert_eq!(attach(b"dir", b"x"), b"dir/x");
+        assert_eq!(attach(b"dir/", b"x"), b"dir/x");
+        assert_eq!(attach(b"/", b"x"), b"/x");
+
+        // The trailing run collapses because the dir is truncated to the end
+        // of its last component.
+        assert_eq!(file_name_concat(b"dirA//", b"sub1"), b"dirA/sub1");
+        assert_eq!(file_name_concat(b"./dirA/", b"sub1"), b"./dirA/sub1");
+        assert_eq!(file_name_concat(b"/", b"bin"), b"/bin");
+        // gnulib joins a root to an absolute base with `.`, because `//foo`
+        // is a different file from `/foo` on some POSIX systems.
+        assert_eq!(file_name_concat(b"/", b"/foo"), b"/./foo");
+
+        // An absolute entry name is used as it stands, whatever it is under.
+        assert_eq!(full_name_for(b"dir", b"/abs"), b"/abs");
+        assert_eq!(full_name_for(b"", b"rel"), b"rel");
+        assert_eq!(full_name_for(b"dir", b"rel"), b"dir/rel");
+    }
+
+    /// A plain `ls` makes no `stat` calls at all, and the options that force
+    /// one are exactly the ones that need more than `readdir` supplies. The
+    /// clean way to see it is a *dangling* symlink, which only a stat can fail
+    /// on. Measured, GNU ls 9.4, on a directory holding one:
+    ///
+    /// ```text
+    /// ls -L   rc=0  (no error)          -- nothing wants the target
+    /// ls -LF  rc=1  cannot access ...   -- -F needs the target's type
+    /// ls -Li  rc=1  cannot access ...   -- -L moves the inode to the target
+    /// ls -F   rc=0  (no error)          -- readdir already said "symlink"
+    /// ls -i   rc=0  (no error)          -- readdir already gave the inode
+    /// ls -l   rc=0  (no error)          -- lstat, and lstat succeeds
+    /// ```
+    #[test]
+    fn nothing_is_stated_that_readdir_already_answered() {
+        let link = FileType::SymbolicLink;
+        let plain = Config::default();
+        assert!(!needs_stat(&plain, link, true, false));
+
+        // -L on its own: the dereference is real, but no output field asks
+        // for anything the link itself cannot answer.
+        let deref = Config {
+            dereference: Deref::Always,
+            ..Config::default()
+        };
+        assert!(!needs_stat(&deref, link, true, false));
+
+        // -LF: `format_needs_type` plus the dereference.
+        let deref_classify = Config {
+            format_needs_type: true,
+            indicator_style: Indicator::Classify,
+            ..deref.clone()
+        };
+        assert!(needs_stat(&deref_classify, link, true, false));
+
+        // -Li: the same clause, reached through the inode instead.
+        let deref_inode = Config {
+            print_inode: true,
+            ..deref
+        };
+        assert!(needs_stat(&deref_inode, link, true, false));
+
+        // -F without -L: readdir already said "symlink", and that is the
+        // whole answer `@` needs.
+        let classify = Config {
+            format_needs_type: true,
+            indicator_style: Indicator::Classify,
+            ..Config::default()
+        };
+        assert!(!needs_stat(&classify, link, true, false));
+        // But a *regular* file under -F needs its mode, to know whether to
+        // mark it `*`.
+        assert!(needs_stat(&classify, FileType::Normal, true, false));
+        // And a filesystem whose readdir gives no type forces one regardless.
+        assert!(needs_stat(&classify, FileType::Unknown, true, false));
+
+        // -i without -L: the inode readdir gave is the one to print.
+        let inode = Config {
+            print_inode: true,
+            ..Config::default()
+        };
+        assert!(!needs_stat(&inode, link, true, false));
+        assert!(needs_stat(&inode, link, false, false));
+
+        // -l stats, and the stat is an lstat, which is why it succeeds on a
+        // dangling link.
+        let long = Config {
+            format: Format::Long,
+            format_needs_stat: true,
+            ..Config::default()
+        };
+        assert!(needs_stat(&long, link, true, false));
+
+        // A command-line operand is always stated: it is how `ls nope` learns
+        // there is nothing there to list.
+        assert!(needs_stat(&plain, link, true, true));
+    }
+
+    /// `extract_dirs_from_files` queues the directories in listing order and
+    /// removes only the ones that were named on the command line. Measured:
+    ///
+    /// ```text
+    /// $ ls a.txt dirA   ->  a.txt  (blank)  dirA:  sub1 sub2 x
+    /// $ ls -R .         ->  .:  ... dirA ...  (blank)  ./dirA:  ...
+    /// ```
+    ///
+    /// The first shows the removal — `dirA` is not listed beside `a.txt`. The
+    /// second shows that a directory found by `-R` is *not* removed: `dirA` is
+    /// both a row under `.` and a heading of its own.
+    #[test]
+    fn only_a_directory_named_on_the_command_line_leaves_the_listing() {
+        let mut files = vec![
+            file("a.txt"),
+            FileInfo {
+                filetype: FileType::ArgDirectory,
+                ..file("dirA")
+            },
+        ];
+        let mut pending = Vec::new();
+        extract_dirs_from_files(None, true, false, &mut files, &mut pending);
+        assert_eq!(files.len(), 1);
+        assert_eq!(files.first().unwrap().name, b"a.txt");
+        assert_eq!(pending.first().unwrap().name.as_deref(), Some(&b"dirA"[..]));
+
+        let mut files = vec![file("x"), dir("dirA"), dir("dirZ")];
+        let mut pending = Vec::new();
+        extract_dirs_from_files(Some(b"."), false, false, &mut files, &mut pending);
+        assert_eq!(files.len(), 3, "-R leaves the subdirectory in the listing");
+        let queued: Vec<&[u8]> = pending.iter().filter_map(|p| p.name.as_deref()).collect();
+        assert_eq!(queued, [&b"./dirA"[..], &b"./dirZ"[..]]);
+    }
+
+    /// Inside a recursive listing `.` and `..` are the entries that would make
+    /// the walk cycle, and they are dropped; on the command line they are
+    /// operands the user asked for, and they are not.
+    #[test]
+    fn dot_and_dotdot_are_operands_at_the_top_and_cycles_below_it() {
+        let subdirs = || vec![dir("."), dir(".."), dir("sub"), dir("a/..")];
+
+        let mut files = subdirs();
+        let mut pending = Vec::new();
+        extract_dirs_from_files(Some(b"top"), false, false, &mut files, &mut pending);
+        let queued: Vec<&[u8]> = pending.iter().filter_map(|p| p.name.as_deref()).collect();
+        assert_eq!(
+            queued,
+            [&b"top/sub"[..]],
+            "a/.. ends in .. and is a cycle too"
+        );
+
+        let mut files = subdirs();
+        let mut pending = Vec::new();
+        extract_dirs_from_files(None, true, false, &mut files, &mut pending);
+        assert_eq!(pending.len(), 4);
+    }
+
+    /// `-R` puts a marker in the queue ahead of a directory's children, so the
+    /// loop that reads the queue knows when the directory is finished and can
+    /// stop guarding against a cycle through it. It carries no name, which is
+    /// how it is told apart from a directory to open.
+    #[test]
+    fn recursion_marks_the_end_of_a_directory_in_the_queue_itself() {
+        let mut files = vec![dir("sub")];
+        let mut pending = Vec::new();
+        extract_dirs_from_files(Some(b"top"), false, true, &mut files, &mut pending);
+        assert_eq!(pending.first().unwrap().name, None);
+        assert_eq!(
+            pending.first().unwrap().realname.as_deref(),
+            Some(&b"top"[..])
+        );
+        assert_eq!(
+            pending.get(1).unwrap().name.as_deref(),
+            Some(&b"top/sub"[..])
+        );
+
+        // Without `-R` there is no cycle to detect and no marker.
+        let mut files = vec![dir("sub")];
+        let mut pending = Vec::new();
+        extract_dirs_from_files(Some(b"top"), false, false, &mut files, &mut pending);
+        assert_eq!(pending.len(), 1);
     }
 }

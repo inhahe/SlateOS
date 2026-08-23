@@ -321,25 +321,26 @@ struct GuestInfoData {
     cpu_count: u32,
     /// Total memory in bytes.
     total_memory: u64,
-    /// Hostname.
-    hostname: String,
     /// Number of times info has been reported.
     report_count: u64,
 }
 
-impl GuestInfoData {
-    fn new() -> Self {
-        Self {
-            os_name: String::from("MintOS"),
-            os_version: String::from("0.1.0"),
-            kernel_version: String::from("0.1.0-dev"),
-            cpu_count: 0,
-            total_memory: 0,
-            hostname: String::from("mintos"),
-            report_count: 0,
-        }
-    }
-}
+// There is deliberately no `hostname` field, and no `GuestInfoData::new`.
+//
+// The hostname lives once, in `fs::sysfs` behind `/sys/kernel/hostname`, and
+// is read through `fs::sysfs::get_hostname()` at the moment it is reported.
+// The field this replaces was a second copy that `init` never populated, so
+// the hostname we told the hypervisor was the empty string on every real
+// boot; the only thing that ever wrote it was this module's own self-test,
+// whose "// Restore." line set it for the first time rather than restoring
+// anything.  A duplicate that only the test maintains is worse than no
+// duplicate: it makes the test pass and the product wrong.
+//
+// `GuestInfoData::new` went with it. Nothing called it, and it had drifted
+// from `State::new` — the real initialiser — in three of its six fields.
+// That is the same dead-constructor drift already described on `State::new`,
+// which is why the remedy is the same one: delete it rather than fix it, so
+// there is nothing left to drift.
 
 // ---------------------------------------------------------------------------
 // Global state
@@ -463,7 +464,6 @@ impl State {
                 kernel_version: String::new(),
                 cpu_count: 0,
                 total_memory: 0,
-                hostname: String::new(),
                 report_count: 0,
             },
             tick_count: 0,
@@ -1177,7 +1177,14 @@ pub fn notify_host_shutdown() {
 }
 
 /// Get guest info summary.
+///
+/// The hostname comes from `fs::sysfs` (`/sys/kernel/hostname`) rather than
+/// from this module, because there is one system hostname and reporting a
+/// private second one to the hypervisor would be reporting a fiction.  It is
+/// read *before* `STATE` is locked so that this function establishes no lock
+/// ordering between the two.
 pub fn guest_info() -> (String, String, String, u32, u64, String, u64) {
+    let hostname = crate::fs::sysfs::get_hostname();
     let state = STATE.lock();
     (
         state.guest_info.os_name.clone(),
@@ -1185,15 +1192,9 @@ pub fn guest_info() -> (String, String, String, u32, u64, String, u64) {
         state.guest_info.kernel_version.clone(),
         state.guest_info.cpu_count,
         state.guest_info.total_memory,
-        state.guest_info.hostname.clone(),
+        hostname,
         state.guest_info.report_count,
     )
-}
-
-/// Set the hostname reported to the host.
-pub fn set_hostname(name: &str) {
-    let mut state = STATE.lock();
-    state.guest_info.hostname = String::from(name);
 }
 
 // ---------------------------------------------------------------------------
@@ -1217,6 +1218,8 @@ pub fn stats() -> (bool, &'static str, u32, u32, u64) {
 
 /// Generate content for `/proc/vmguest`.
 pub fn procfs_content() -> String {
+    // Read before locking STATE, for the reason given on `guest_info`.
+    let hostname = crate::fs::sysfs::get_hostname();
     let state = STATE.lock();
     let mut out = String::with_capacity(1024);
 
@@ -1291,7 +1294,7 @@ pub fn procfs_content() -> String {
         "memory: {} bytes\n",
         state.guest_info.total_memory
     ));
-    out.push_str(&format!("hostname: {}\n", state.guest_info.hostname));
+    out.push_str(&format!("hostname: {hostname}\n"));
     out.push_str(&format!("reports: {}\n", state.guest_info.report_count));
 
     // Display.
@@ -1340,13 +1343,36 @@ fn self_test_inner() {
     assert_eq!(GuestFeature::ALL.len(), 8, "Should have 8 features");
     crate::serial_println!("[vmguest]   Feature count: OK");
 
-    // Test 3: Init should have been called (if in VM).
+    // Test 3: init() brings guest integration up under a hypervisor.
+    //
+    // This used to read `stats()` and assert that the module was already
+    // initialised, which was true only by accident: the suite ran against
+    // live state, so it was observing the `init()` the boot sequence had
+    // called minutes earlier.  De-fanging installs a pristine `State` and
+    // pins `INITIALIZED` to false, so the assertion started failing — and
+    // rightly, because it was never a test of this module.  It was a test
+    // that *something else* had run.
+    //
+    // Calling `init()` here is both the fix and a strictly better test: it
+    // exercises the function instead of watching for its residue.  It is
+    // safe inside the pristine window because `init` writes only STATE,
+    // INITIALIZED and ACTIVE_FEATURES, all three of which `self_test` has
+    // saved; its inputs (hypervisor detection, CPU count, frame stats) are
+    // read-only.
+    //
+    // It also un-skips the rest of the suite.  Tests 7-9 are gated on
+    // `initialized` and on feature support, so against an uninitialised
+    // module they silently degraded to nothing at all.
+    init();
     let (initialized, hv_name, supported, active, _ticks) = stats();
     if hypervisor::is_virtual() {
-        assert!(initialized, "Should be initialized when in VM");
+        assert!(initialized, "init() must initialize us when in a VM");
         assert!(!hv_name.is_empty(), "Hypervisor name should not be empty");
+        assert!(supported > 0, "a known hypervisor supports some feature");
         crate::serial_println!("[vmguest]   Init state: OK ({})", hv_name);
     } else {
+        assert!(!initialized, "init() is a no-op on bare metal");
+        assert_eq!(active, 0, "and activates nothing");
         crate::serial_println!("[vmguest]   Init state: OK (bare metal — skipped)");
     }
     crate::serial_println!("[vmguest]   Supported: {}, Active: {}", supported, active);
@@ -1416,14 +1442,32 @@ fn self_test_inner() {
         crate::serial_println!("[vmguest]   Display resize clamping: OK");
     }
 
-    // Test 10: set_hostname works.
-    set_hostname("test-host");
-    {
-        let state = STATE.lock();
-        assert_eq!(state.guest_info.hostname.as_str(), "test-host");
-    }
-    set_hostname("mintos"); // Restore.
-    crate::serial_println!("[vmguest]   set_hostname: OK");
+    // Test 10: the hostname we report is the system's, not a copy of it.
+    //
+    // This replaces a test of a `set_hostname` that existed only to be
+    // tested: it wrote a private duplicate field that `init` never filled,
+    // so what we actually reported to every hypervisor was "".  The test
+    // passed because it wrote the field itself, then "restored" it to
+    // "mintos" — a value no boot had ever put there.
+    //
+    // What is worth asserting is the invariant that replaced it: whatever
+    // `/sys/kernel/hostname` holds is what leaves this module.  Reading it
+    // is also non-destructive, which the old test was not.
+    let system_hostname = crate::fs::sysfs::get_hostname();
+    assert!(
+        !system_hostname.is_empty(),
+        "sysfs falls back to a default, so this is never empty"
+    );
+    let (.., reported, _) = guest_info();
+    assert_eq!(
+        reported, system_hostname,
+        "the host is told the system hostname"
+    );
+    assert!(
+        procfs_content().contains(&format!("hostname: {system_hostname}\n")),
+        "and so is /proc"
+    );
+    crate::serial_println!("[vmguest]   Hostname: OK ({})", system_hostname);
 
     // Test 11: Balloon target setting.
     let original_target = {

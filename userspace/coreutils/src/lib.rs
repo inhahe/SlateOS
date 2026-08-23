@@ -206,7 +206,13 @@ pub mod fnmatch;
 pub mod getopt;
 pub mod human;
 pub mod pathname;
-pub mod quote;
+/// How a name is rendered inside a diagnostic — now `userspace/quoting`.
+///
+/// Re-exported under its old path so that `use coreutils::quote::quotef_os`
+/// keeps working across all 86 bins. It left this crate because the 777 other
+/// utility crates in the tree need it too and cannot depend on the bundle; see
+/// that crate's docs and `design-decisions.md` §370.
+pub use quoting as quote;
 pub mod shell;
 pub mod tabstops;
 pub mod vercmp;

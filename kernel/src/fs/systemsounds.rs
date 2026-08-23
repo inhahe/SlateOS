@@ -418,10 +418,30 @@ fn self_test_inner() {
     crate::serial_println!("  [7/8] assignments: OK");
 
     // 8: Stats.
+    //
+    // `total_plays` counts *audible* plays, not attempts: it is incremented
+    // beside the per-assignment `play_count`, inside the `assignment.enabled`
+    // branch and downstream of the `global_enabled` gate. A muted event is not
+    // a play, and a stats line that said otherwise would be reporting sounds
+    // the user never heard.
+    //
+    // So the exact count is 2, and this asserted `>= 3`. The suite calls
+    // `play()` six times, but four of those exist precisely to check that
+    // nothing is emitted:
+    //
+    //   [2] Notification, enabled       -> audible   (+1)
+    //   [3] Notification, event disabled -> silent
+    //   [4] Error, custom sound          -> audible   (+1)
+    //   [5] Startup, "Silent" scheme     -> silent
+    //   [6] Startup, global sound off    -> silent
+    //
+    // Assert the exact value rather than a bound: it is deterministic, and an
+    // equality also catches the counter *over*-counting -- a suppressed play
+    // that started incrementing would still satisfy any `>=`.
     let (schemes, events, plays, ops) = stats();
     assert_eq!(schemes, 2);
     assert!(events >= 10);
-    assert!(plays >= 3);
+    assert_eq!(plays, 2, "two of the six play() calls are audible");
     assert!(ops > 0);
     crate::serial_println!("  [8/8] stats: OK");
 

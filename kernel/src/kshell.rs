@@ -44717,7 +44717,7 @@ fn cmd_soundevents(args: &str) {
                         } else {
                             String::from("off")
                         },
-                        m.sound_path
+                        m.sound_path.display()
                     );
                 }
             }

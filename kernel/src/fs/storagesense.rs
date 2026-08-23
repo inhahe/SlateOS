@@ -24,7 +24,6 @@
 #![allow(dead_code)]
 
 use crate::sync::PreemptSpinMutex as Mutex;
-use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
@@ -332,20 +331,12 @@ pub fn get_schedule() -> Schedule {
 }
 
 /// Format bytes to human-readable string.
+///
+/// See [`crate::bytesize`]. Storage Sense and the disk-cleanup tool report on
+/// the same directories, and before this they disagreed both on the digits and
+/// on the unit names.
 pub fn format_bytes(bytes: u64) -> String {
-    if bytes >= 1_073_741_824 {
-        format!(
-            "{}.{} GB",
-            bytes / 1_073_741_824,
-            (bytes % 1_073_741_824) / 107_374_183
-        )
-    } else if bytes >= 1_048_576 {
-        format!("{}.{} MB", bytes / 1_048_576, (bytes % 1_048_576) / 104_858)
-    } else if bytes >= 1_024 {
-        format!("{} KB", bytes / 1_024)
-    } else {
-        format!("{} B", bytes)
-    }
+    crate::bytesize::iec(bytes)
 }
 
 /// Statistics: (policy_count, total_runs, total_bytes_freed, ops).
@@ -420,9 +411,11 @@ fn self_test_inner() {
     assert!(policies[2].enabled);
     crate::serial_println!("  [6/8] category toggle: OK");
 
-    // 7: Format bytes.
-    assert_eq!(format_bytes(1_073_741_824), "1.0 GB");
-    assert_eq!(format_bytes(5_242_880), "5.0 MB");
+    // 7: Format bytes.  `GiB`/`MiB` since the move onto `bytesize`: these are
+    // 1024-based quantities and calling them GB/MB overstated the prefix by
+    // ~7% per unit, which is the precise confusion the IEC names exist to end.
+    assert_eq!(format_bytes(1_073_741_824), "1.0 GiB");
+    assert_eq!(format_bytes(5_242_880), "5.0 MiB");
     crate::serial_println!("  [7/8] format bytes: OK");
 
     // 8: Stats.

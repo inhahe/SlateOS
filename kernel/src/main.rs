@@ -77,6 +77,7 @@ mod bench;
 mod blkdev;
 mod boot;
 mod boot_timing;
+mod bytesize;
 mod bytestr;
 mod cap;
 mod cet;
@@ -5190,6 +5191,16 @@ extern "C" fn kernel_main() -> ! {
             if let Err(e) = bytestr::self_test() {
                 serial_println!("WARNING: bytestr self-test failed: {:?}", e);
             }
+            // The one byte-size formatter, replacing twenty-one private copies.
+            // Two of those copies printed a two-digit tenths ("1.10 KiB", which
+            // reads as larger than the "1.9 KiB" below it) because they divided
+            // by `unit / 10`; six more labelled 1024-based units `GB`/`MB`/`KB`.
+            // Checked on every boot because it is pure arithmetic over literals —
+            // the whole suite is a handful of microseconds — and because the
+            // digit it gets wrong is the one that only appears at the top of a
+            // unit, which is exactly where a hand-written spot check does not
+            // look. See `bytesize`'s module docs.
+            bytesize::self_test();
             // The octal escaper that lets those byte paths be written into the
             // line-oriented text formats (/proc/mounts, the trash index). A bug here
             // corrupts a file rather than failing loudly, so it is checked on boot.

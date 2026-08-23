@@ -22,7 +22,6 @@
 #![allow(dead_code)]
 
 use crate::sync::PreemptSpinMutex as Mutex;
-use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
@@ -294,24 +293,12 @@ pub fn total_kernel() -> u64 {
 }
 
 /// Format bytes as human-readable.
+///
+/// See [`crate::bytesize`]. The copy that used to be here printed a two-digit
+/// tenths at the top of a unit, and dropped the tenths entirely for KiB — so
+/// `format_size` was not even self-consistent across its own three branches.
 pub fn format_size(bytes: u64) -> String {
-    if bytes >= 1_073_741_824 {
-        format!(
-            "{}.{} GiB",
-            bytes / 1_073_741_824,
-            (bytes % 1_073_741_824) / 107_374_182
-        )
-    } else if bytes >= 1_048_576 {
-        format!(
-            "{}.{} MiB",
-            bytes / 1_048_576,
-            (bytes % 1_048_576) / 104_857
-        )
-    } else if bytes >= 1024 {
-        format!("{} KiB", bytes / 1024)
-    } else {
-        format!("{} B", bytes)
-    }
+    crate::bytesize::iec(bytes)
 }
 
 /// Statistics: (region_count, total_ram, total_reserved, total_kernel, total_queries, ops).
@@ -409,10 +396,12 @@ pub fn self_test() {
     assert_eq!(total_ram(), ram + 0x4000_0000);
     crate::serial_println!("  [6/8] add region: OK");
 
-    // 7: Human-readable size formatting.
+    // 7: Human-readable size formatting.  `4096` gained its tenths digit when
+    // this moved onto `bytesize`: the old local copy printed KiB with no
+    // decimal point at all while printing MiB and GiB with one.
     assert_eq!(format_size(1_073_741_824), "1.0 GiB");
     assert_eq!(format_size(1_048_576), "1.0 MiB");
-    assert_eq!(format_size(4096), "4 KiB");
+    assert_eq!(format_size(4096), "4.0 KiB");
     crate::serial_println!("  [7/8] format: OK");
 
     // 8: Stats — 5 regions now (4 installed + 1 added), exact totals.

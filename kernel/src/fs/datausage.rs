@@ -22,7 +22,6 @@
 #![allow(dead_code)]
 
 use crate::sync::PreemptSpinMutex as Mutex;
-use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
@@ -503,20 +502,15 @@ pub fn reset_usage() -> KernelResult<()> {
 // ---------------------------------------------------------------------------
 
 /// Format byte count as human-readable string.
+///
+/// Kept as a named function because it is part of this module's public surface;
+/// the arithmetic lives in [`crate::bytesize`]. The copy that used to be here
+/// divided the remainder by `unit / 10` and so printed a two-digit tenths at
+/// the top of every unit, and labelled 1024-based units `GB`/`MB`/`KB` — which
+/// meant the data-usage report and the disk-usage report could describe the
+/// same number differently.
 pub fn format_bytes(bytes: u64) -> String {
-    if bytes >= 1_073_741_824 {
-        format!(
-            "{}.{} GB",
-            bytes / 1_073_741_824,
-            (bytes % 1_073_741_824) / 107_374_182
-        )
-    } else if bytes >= 1_048_576 {
-        format!("{}.{} MB", bytes / 1_048_576, (bytes % 1_048_576) / 104_857)
-    } else if bytes >= 1024 {
-        format!("{}.{} KB", bytes / 1024, (bytes % 1024) / 102)
-    } else {
-        format!("{} B", bytes)
-    }
+    crate::bytesize::iec(bytes)
 }
 
 // ---------------------------------------------------------------------------

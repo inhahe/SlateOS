@@ -581,20 +581,9 @@ pub fn os_version() -> String {
 // Format helpers
 // ---------------------------------------------------------------------------
 
+/// See [`crate::bytesize`] for why this is no longer written out here.
 fn format_size(bytes: u64) -> String {
-    if bytes >= 1_073_741_824 {
-        format!(
-            "{}.{} GB",
-            bytes / 1_073_741_824,
-            (bytes % 1_073_741_824) / 107_374_182
-        )
-    } else if bytes >= 1_048_576 {
-        format!("{}.{} MB", bytes / 1_048_576, (bytes % 1_048_576) / 104_857)
-    } else if bytes >= 1024 {
-        format!("{}.{} KB", bytes / 1024, (bytes % 1024) / 102)
-    } else {
-        format!("{} B", bytes)
-    }
+    crate::bytesize::iec(bytes)
 }
 
 /// Format size for external use.

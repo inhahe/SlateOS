@@ -5997,14 +5997,14 @@ fn gen_wallpaper() -> Vec<u8> {
     out.push_str("Desktop Wallpaper\n");
     out.push_str("=================\n\n");
     out.push_str(&format!("Kind:       {}\n", cfg.kind.label()));
-    out.push_str(&format!(
-        "Image:      {}\n",
-        if cfg.image_path.is_empty() {
-            "(none)"
-        } else {
-            &cfg.image_path
-        }
-    ));
+    // An unset image is the empty path, so the two arms cannot share a type
+    // -- print the placeholder separately rather than force the path through
+    // a lossy `to_str`.
+    if cfg.image_path.is_empty() {
+        out.push_str("Image:      (none)\n");
+    } else {
+        out.push_str(&format!("Image:      {}\n", cfg.image_path.display()));
+    }
     out.push_str(&format!("Fit:        {}\n", cfg.fit_mode.label()));
     out.push_str(&format!("BG Color:   {}\n", cfg.background_color));
     out.push_str(&format!(

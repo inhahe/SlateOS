@@ -45,6 +45,26 @@ use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::error::{KernelError, KernelResult};
+use crate::fs::path::{Path, PathBuf};
+
+/// Case-insensitive byte-substring search.
+///
+/// The exclusion list (see `is_excluded`) matches a *fragment* of a path
+/// against a whole path, and both sides are raw bytes under §261 — so this
+/// cannot go through `str::contains`.  Kept private and deliberately naive:
+/// the lists it searches are capped at `MAX_EXCLUSIONS` short patterns, so
+/// the O(n*m) window scan is never on a hot path.
+fn contains_ascii_lowercase(haystack: &[u8], needle: &[u8]) -> bool {
+    if needle.is_empty() {
+        return true;
+    }
+    if needle.len() > haystack.len() {
+        return false;
+    }
+    haystack
+        .windows(needle.len())
+        .any(|w| w.eq_ignore_ascii_case(needle))
+}
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -161,7 +181,12 @@ pub struct WallpaperConfig {
     /// Kind of wallpaper.
     pub kind: WallpaperKind,
     /// Path to current image file (empty for SolidColor).
-    pub image_path: String,
+    ///
+    /// §261: a wallpaper lives in the user's picture directory, so its name
+    /// may contain any byte except `/` and NUL — including bytes with no
+    /// UTF-8 spelling.  Typing this `String` would fold two distinct files
+    /// onto one U+FFFD-bearing name and silently display the wrong image.
+    pub image_path: PathBuf,
     /// Fit mode.
     pub fit_mode: FitMode,
     /// Background/letterbox color (hex, e.g., "#000000").
@@ -170,7 +195,7 @@ pub struct WallpaperConfig {
     pub offset_x: f32,
     pub offset_y: f32,
     /// Slideshow images.
-    pub slideshow_paths: Vec<String>,
+    pub slideshow_paths: Vec<PathBuf>,
     /// Slideshow interval in seconds.
     pub slideshow_interval_secs: u64,
     /// Current slideshow index.
@@ -180,24 +205,35 @@ pub struct WallpaperConfig {
     /// Whether slideshow auto-advances.
     pub slideshow_running: bool,
     /// Path to animated wallpaper program/video.
-    pub animated_source: String,
+    pub animated_source: PathBuf,
     /// Whether to use same wallpaper for login screen.
     pub use_for_login: bool,
     /// Per-monitor wallpaper override (monitor_id → path).
-    pub per_monitor: Vec<(String, String)>,
+    ///
+    /// The monitor id stays a `String`: it is a display-connector name the
+    /// kernel itself mints (`DP-1`, `HDMI-A-2`), not a name read off a
+    /// filesystem, so it is ASCII by construction.  Only the second half of
+    /// the pair names a file and therefore has to be byte-clean.
+    pub per_monitor: Vec<(String, PathBuf)>,
     /// Change wallpaper randomly on boot.
     pub random_on_boot: bool,
     /// Change wallpaper daily.
     pub change_daily: bool,
     /// Excluded patterns (file paths that won't be picked randomly).
-    pub exclusions: Vec<String>,
+    ///
+    /// A `Vec<u8>` rather than a `PathBuf` because an exclusion is a
+    /// *fragment* matched against a path, not a path itself — but it is
+    /// matched against path bytes, so it has to be able to hold any byte a
+    /// path can.  A `String` here would make a directory whose name carries
+    /// a non-UTF-8 byte impossible to exclude.
+    pub exclusions: Vec<Vec<u8>>,
 }
 
 impl WallpaperConfig {
     fn new() -> Self {
         Self {
             kind: WallpaperKind::SolidColor,
-            image_path: String::new(),
+            image_path: PathBuf::new(),
             fit_mode: FitMode::Fill,
             background_color: String::from("#1a1a2e"),
             offset_x: 0.5,
@@ -207,7 +243,7 @@ impl WallpaperConfig {
             slideshow_index: 0,
             shuffle: ShuffleMode::Sequential,
             slideshow_running: false,
-            animated_source: String::new(),
+            animated_source: PathBuf::new(),
             use_for_login: true,
             per_monitor: Vec::new(),
             random_on_boot: false,
@@ -221,10 +257,13 @@ impl WallpaperConfig {
 #[derive(Debug, Clone)]
 pub struct HistoryEntry {
     /// Image path.
-    pub path: String,
+    pub path: PathBuf,
     /// When it was set (nanoseconds).
     pub set_at_ns: u64,
     /// How it was set (manual/slideshow/random/boot).
+    ///
+    /// Stays a `String`: this is one of a closed set of kernel-minted labels
+    /// (`manual`, `slideshow`, `animated`, `dynamic`), not a filesystem name.
     pub source: String,
 }
 
@@ -242,7 +281,7 @@ impl WallpaperState {
         Self {
             config: WallpaperConfig {
                 kind: WallpaperKind::SolidColor,
-                image_path: String::new(),
+                image_path: PathBuf::new(),
                 fit_mode: FitMode::Fill,
                 background_color: String::new(),
                 offset_x: 0.5,
@@ -252,7 +291,7 @@ impl WallpaperState {
                 slideshow_index: 0,
                 shuffle: ShuffleMode::Sequential,
                 slideshow_running: false,
-                animated_source: String::new(),
+                animated_source: PathBuf::new(),
                 use_for_login: true,
                 per_monitor: Vec::new(),
                 random_on_boot: false,
@@ -263,13 +302,13 @@ impl WallpaperState {
         }
     }
 
-    fn add_history(&mut self, path: &str, source: &str) {
+    fn add_history(&mut self, path: &Path, source: &str) {
         let now = crate::timekeeping::clock_monotonic();
         if self.history.len() >= MAX_HISTORY {
             self.history.remove(0);
         }
         self.history.push(HistoryEntry {
-            path: String::from(path),
+            path: path.to_path_buf(),
             set_at_ns: now,
             source: String::from(source),
         });
@@ -290,14 +329,15 @@ pub fn current() -> WallpaperConfig {
 }
 
 /// Set a static image as the wallpaper.
-pub fn set_image(path: &str) -> KernelResult<()> {
+pub fn set_image(path: impl AsRef<Path>) -> KernelResult<()> {
+    let path = path.as_ref();
     if path.is_empty() {
         return Err(KernelError::InvalidArgument);
     }
     SET_COUNT.fetch_add(1, Ordering::Relaxed);
     let mut state = WALLPAPER.lock();
     state.config.kind = WallpaperKind::Static;
-    state.config.image_path = String::from(path);
+    state.config.image_path = path.to_path_buf();
     state.config.slideshow_running = false;
     state.add_history(path, "manual");
     Ok(())
@@ -311,7 +351,7 @@ pub fn set_solid_color(color: &str) -> KernelResult<()> {
     SET_COUNT.fetch_add(1, Ordering::Relaxed);
     let mut state = WALLPAPER.lock();
     state.config.kind = WallpaperKind::SolidColor;
-    state.config.image_path = String::new();
+    state.config.image_path = PathBuf::new();
     state.config.background_color = String::from(color);
     state.config.slideshow_running = false;
     Ok(())
@@ -339,7 +379,11 @@ pub fn set_offset(x: f32, y: f32) {
 // ---------------------------------------------------------------------------
 
 /// Set up a slideshow.
-pub fn set_slideshow(paths: &[&str], interval_secs: u64) -> KernelResult<()> {
+///
+/// Generic over the element type rather than taking `&[&Path]` so that the
+/// existing `&["/a.jpg", "/b.jpg"]` call sites still compile: `&str`,
+/// `String`, `&Path` and `PathBuf` all satisfy `AsRef<Path>`.
+pub fn set_slideshow<P: AsRef<Path>>(paths: &[P], interval_secs: u64) -> KernelResult<()> {
     if paths.is_empty() {
         return Err(KernelError::InvalidArgument);
     }
@@ -349,7 +393,7 @@ pub fn set_slideshow(paths: &[&str], interval_secs: u64) -> KernelResult<()> {
     SET_COUNT.fetch_add(1, Ordering::Relaxed);
     let mut state = WALLPAPER.lock();
     state.config.kind = WallpaperKind::Slideshow;
-    state.config.slideshow_paths = paths.iter().map(|p| String::from(*p)).collect();
+    state.config.slideshow_paths = paths.iter().map(|p| p.as_ref().to_path_buf()).collect();
     state.config.slideshow_interval_secs = if interval_secs == 0 {
         300
     } else {
@@ -358,14 +402,16 @@ pub fn set_slideshow(paths: &[&str], interval_secs: u64) -> KernelResult<()> {
     state.config.slideshow_index = 0;
     state.config.slideshow_running = true;
     if let Some(first) = paths.first() {
-        state.config.image_path = String::from(*first);
+        let first = first.as_ref();
+        state.config.image_path = first.to_path_buf();
         state.add_history(first, "slideshow");
     }
     Ok(())
 }
 
 /// Add an image to the slideshow.
-pub fn slideshow_add(path: &str) -> KernelResult<()> {
+pub fn slideshow_add(path: impl AsRef<Path>) -> KernelResult<()> {
+    let path = path.as_ref();
     if path.is_empty() {
         return Err(KernelError::InvalidArgument);
     }
@@ -373,7 +419,7 @@ pub fn slideshow_add(path: &str) -> KernelResult<()> {
     if state.config.slideshow_paths.len() >= MAX_SLIDESHOW {
         return Err(KernelError::ResourceExhausted);
     }
-    state.config.slideshow_paths.push(String::from(path));
+    state.config.slideshow_paths.push(path.to_path_buf());
     Ok(())
 }
 
@@ -394,7 +440,7 @@ pub fn slideshow_remove(index: usize) -> KernelResult<()> {
 }
 
 /// Advance to next slideshow image.
-pub fn slideshow_next() -> KernelResult<String> {
+pub fn slideshow_next() -> KernelResult<PathBuf> {
     ADVANCE_COUNT.fetch_add(1, Ordering::Relaxed);
     let mut state = WALLPAPER.lock();
     if state.config.slideshow_paths.is_empty() {
@@ -403,19 +449,22 @@ pub fn slideshow_next() -> KernelResult<String> {
     let next_idx =
         (state.config.slideshow_index.wrapping_add(1)) % state.config.slideshow_paths.len();
     state.config.slideshow_index = next_idx;
+    // `next_idx` is a modulus of a checked-non-empty length, so the entry is
+    // always there; propagate rather than defaulting so a future refactor
+    // that breaks that invariant surfaces as an error, not as an empty path.
     let path = state
         .config
         .slideshow_paths
         .get(next_idx)
         .cloned()
-        .unwrap_or_default();
+        .ok_or(KernelError::NotFound)?;
     state.config.image_path = path.clone();
-    state.add_history(&path, "slideshow");
+    state.add_history(path.as_path(), "slideshow");
     Ok(path)
 }
 
 /// Go to previous slideshow image.
-pub fn slideshow_prev() -> KernelResult<String> {
+pub fn slideshow_prev() -> KernelResult<PathBuf> {
     let mut state = WALLPAPER.lock();
     if state.config.slideshow_paths.is_empty() {
         return Err(KernelError::NotFound);
@@ -427,14 +476,15 @@ pub fn slideshow_prev() -> KernelResult<String> {
         state.config.slideshow_index.saturating_sub(1)
     };
     state.config.slideshow_index = prev_idx;
+    // See `slideshow_next`: `prev_idx` is in range by construction.
     let path = state
         .config
         .slideshow_paths
         .get(prev_idx)
         .cloned()
-        .unwrap_or_default();
+        .ok_or(KernelError::NotFound)?;
     state.config.image_path = path.clone();
-    state.add_history(&path, "slideshow");
+    state.add_history(path.as_path(), "slideshow");
     Ok(path)
 }
 
@@ -459,30 +509,32 @@ pub fn set_shuffle(mode: ShuffleMode) {
 // ---------------------------------------------------------------------------
 
 /// Set an animated wallpaper source (video path or program path).
-pub fn set_animated(source: &str) -> KernelResult<()> {
+pub fn set_animated(source: impl AsRef<Path>) -> KernelResult<()> {
+    let source = source.as_ref();
     if source.is_empty() {
         return Err(KernelError::InvalidArgument);
     }
     SET_COUNT.fetch_add(1, Ordering::Relaxed);
     let mut state = WALLPAPER.lock();
     state.config.kind = WallpaperKind::Animated;
-    state.config.animated_source = String::from(source);
-    state.config.image_path = String::from(source);
+    state.config.animated_source = source.to_path_buf();
+    state.config.image_path = source.to_path_buf();
     state.config.slideshow_running = false;
     state.add_history(source, "animated");
     Ok(())
 }
 
 /// Set a dynamic wallpaper (changes with time of day).
-pub fn set_dynamic(source: &str) -> KernelResult<()> {
+pub fn set_dynamic(source: impl AsRef<Path>) -> KernelResult<()> {
+    let source = source.as_ref();
     if source.is_empty() {
         return Err(KernelError::InvalidArgument);
     }
     SET_COUNT.fetch_add(1, Ordering::Relaxed);
     let mut state = WALLPAPER.lock();
     state.config.kind = WallpaperKind::Dynamic;
-    state.config.animated_source = String::from(source);
-    state.config.image_path = String::from(source);
+    state.config.animated_source = source.to_path_buf();
+    state.config.image_path = source.to_path_buf();
     state.config.slideshow_running = false;
     state.add_history(source, "dynamic");
     Ok(())
@@ -507,7 +559,8 @@ pub fn use_for_login() -> bool {
 // ---------------------------------------------------------------------------
 
 /// Set a wallpaper for a specific monitor.
-pub fn set_per_monitor(monitor_id: &str, path: &str) -> KernelResult<()> {
+pub fn set_per_monitor(monitor_id: &str, path: impl AsRef<Path>) -> KernelResult<()> {
+    let path = path.as_ref();
     if monitor_id.is_empty() || path.is_empty() {
         return Err(KernelError::InvalidArgument);
     }
@@ -515,14 +568,14 @@ pub fn set_per_monitor(monitor_id: &str, path: &str) -> KernelResult<()> {
     // Update existing or add new.
     for entry in &mut state.config.per_monitor {
         if entry.0 == monitor_id {
-            entry.1 = String::from(path);
+            entry.1 = path.to_path_buf();
             return Ok(());
         }
     }
     state
         .config
         .per_monitor
-        .push((String::from(monitor_id), String::from(path)));
+        .push((String::from(monitor_id), path.to_path_buf()));
     Ok(())
 }
 
@@ -538,7 +591,7 @@ pub fn clear_per_monitor(monitor_id: &str) -> KernelResult<()> {
 }
 
 /// Get wallpaper path for a specific monitor (falls back to global).
-pub fn wallpaper_for_monitor(monitor_id: &str) -> String {
+pub fn wallpaper_for_monitor(monitor_id: &str) -> PathBuf {
     let state = WALLPAPER.lock();
     for entry in &state.config.per_monitor {
         if entry.0 == monitor_id {
@@ -563,7 +616,8 @@ pub fn set_change_daily(enabled: bool) {
 }
 
 /// Add a path pattern to the exclusion list for random selection.
-pub fn add_exclusion(pattern: &str) -> KernelResult<()> {
+pub fn add_exclusion(pattern: impl AsRef<[u8]>) -> KernelResult<()> {
+    let pattern = pattern.as_ref();
     if pattern.is_empty() {
         return Err(KernelError::InvalidArgument);
     }
@@ -571,7 +625,7 @@ pub fn add_exclusion(pattern: &str) -> KernelResult<()> {
     if state.config.exclusions.len() >= MAX_EXCLUSIONS {
         return Err(KernelError::ResourceExhausted);
     }
-    state.config.exclusions.push(String::from(pattern));
+    state.config.exclusions.push(pattern.to_vec());
     Ok(())
 }
 
@@ -586,13 +640,14 @@ pub fn remove_exclusion(index: usize) -> KernelResult<()> {
 }
 
 /// Check if a path matches any exclusion pattern (simple substring match).
-pub fn is_excluded(path: &str) -> bool {
+pub fn is_excluded(path: impl AsRef<Path>) -> bool {
+    let path = path.as_ref();
     let state = WALLPAPER.lock();
-    let path_lower = path.to_ascii_lowercase();
-    state.config.exclusions.iter().any(|exc| {
-        let exc_lower = exc.to_ascii_lowercase();
-        path_lower.contains(&exc_lower)
-    })
+    state
+        .config
+        .exclusions
+        .iter()
+        .any(|exc| contains_ascii_lowercase(path.as_bytes(), exc))
 }
 
 // ---------------------------------------------------------------------------
@@ -651,7 +706,10 @@ pub fn self_test() -> KernelResult<()> {
     set_image("/usr/share/wallpapers/mountain.jpg")?;
     let cfg = current();
     assert_eq!(cfg.kind, WallpaperKind::Static);
-    assert_eq!(cfg.image_path, "/usr/share/wallpapers/mountain.jpg");
+    assert_eq!(
+        cfg.image_path.as_path(),
+        Path::new("/usr/share/wallpapers/mountain.jpg")
+    );
     assert!(!cfg.image_path.is_empty());
 
     // Test 2: Fit mode and color.
@@ -675,9 +733,9 @@ pub fn self_test() -> KernelResult<()> {
     assert_eq!(cfg4.slideshow_paths.len(), 3);
     assert!(cfg4.slideshow_running);
     let next = slideshow_next()?;
-    assert_eq!(next, "/wp/b.jpg");
+    assert_eq!(next.as_path(), Path::new("/wp/b.jpg"));
     let prev = slideshow_prev()?;
-    assert_eq!(prev, "/wp/a.jpg");
+    assert_eq!(prev.as_path(), Path::new("/wp/a.jpg"));
     slideshow_add("/wp/d.jpg")?;
     assert_eq!(current().slideshow_paths.len(), 4);
     slideshow_remove(3)?;
@@ -694,10 +752,19 @@ pub fn self_test() -> KernelResult<()> {
     serial_println!("  wallpaper::test 5: per-monitor");
     set_image("/wp/main.jpg")?;
     set_per_monitor("HDMI-1", "/wp/second.jpg")?;
-    assert_eq!(wallpaper_for_monitor("HDMI-1"), "/wp/second.jpg");
-    assert_eq!(wallpaper_for_monitor("DP-1"), "/wp/main.jpg");
+    assert_eq!(
+        wallpaper_for_monitor("HDMI-1").as_path(),
+        Path::new("/wp/second.jpg")
+    );
+    assert_eq!(
+        wallpaper_for_monitor("DP-1").as_path(),
+        Path::new("/wp/main.jpg")
+    );
     clear_per_monitor("HDMI-1")?;
-    assert_eq!(wallpaper_for_monitor("HDMI-1"), "/wp/main.jpg");
+    assert_eq!(
+        wallpaper_for_monitor("HDMI-1").as_path(),
+        Path::new("/wp/main.jpg")
+    );
 
     // Test 6: Login screen and random options.
     serial_println!("  wallpaper::test 6: login and random options");
@@ -720,6 +787,60 @@ pub fn self_test() -> KernelResult<()> {
     assert!(!is_excluded("/wp/animated_sunset.mp4"));
     let hist = history();
     assert!(hist.len() >= 2); // We set several images above.
+
+    // Test 8: non-UTF-8 image paths survive intact (§261).
+    //
+    // A picture directory is an ordinary directory: a file in it may be named
+    // with any byte except `/` and NUL.  Two names that differ only in a byte
+    // with no UTF-8 spelling used to collapse onto a single U+FFFD-bearing
+    // key, so the compositor would cheerfully display the wrong image and
+    // report success.  Every field this module stores a path in is exercised
+    // here, including the exclusion matcher, which compares raw bytes.
+    serial_println!("  wallpaper::test 8: non-UTF-8 image paths");
+    let img_a = Path::new(&b"/wp/wp_\xFFa.jpg"[..]);
+    let img_b = Path::new(&b"/wp/wp_\xFEa.jpg"[..]);
+    set_image(img_a)?;
+    let cfg8 = current();
+    assert_eq!(cfg8.image_path.as_path(), img_a);
+    assert_eq!(cfg8.image_path.as_path().as_bytes(), b"/wp/wp_\xFFa.jpg");
+    // The two names differ in exactly one byte, neither of which is
+    // representable in UTF-8 -- the case a `String` field silently folded.
+    set_image(img_b)?;
+    assert_ne!(current().image_path, cfg8.image_path);
+
+    let anim = Path::new(&b"/wp/wp_\xFFv.mp4"[..]);
+    set_animated(anim)?;
+    let cfg8b = current();
+    assert_eq!(cfg8b.animated_source.as_path(), anim);
+    assert_eq!(cfg8b.image_path.as_path(), anim);
+
+    set_slideshow(&[img_a, img_b], 30)?;
+    let cfg8c = current();
+    assert_eq!(cfg8c.slideshow_paths.len(), 2);
+    assert_eq!(
+        cfg8c.slideshow_paths.first().map(PathBuf::as_path),
+        Some(img_a)
+    );
+    assert_eq!(slideshow_next()?.as_path(), img_b);
+
+    set_per_monitor("DP-2", img_b)?;
+    assert_eq!(wallpaper_for_monitor("DP-2").as_path(), img_b);
+
+    // The exclusion pattern itself carries the un-spellable byte, so a
+    // `String`-typed exclusion list could not express this filter at all.
+    add_exclusion(&b"wp_\xFF"[..])?;
+    assert!(is_excluded(img_a));
+    assert!(!is_excluded(img_b));
+    remove_exclusion(0)?;
+
+    // History records the byte-exact path it was given.
+    let hist8 = history();
+    assert!(
+        hist8
+            .iter()
+            .any(|h| h.path.as_path().as_bytes() == b"/wp/wp_\xFFa.jpg"),
+        "history must record the non-UTF-8 path byte-for-byte"
+    );
 
     // Cleanup.
     clear_all();

@@ -23127,11 +23127,11 @@ fn cmd_wallpaper(args: &str) {
             }
         }
         "next" => match wallpaper::slideshow_next() {
-            Ok(path) => shell_println!("Next: {}", path),
+            Ok(path) => shell_println!("Next: {}", path.display()),
             Err(e) => shell_println!("Error: {:?}", e),
         },
         "prev" => match wallpaper::slideshow_prev() {
-            Ok(path) => shell_println!("Previous: {}", path),
+            Ok(path) => shell_println!("Previous: {}", path.display()),
             Err(e) => shell_println!("Error: {:?}", e),
         },
         "pause" => {
@@ -23212,11 +23212,14 @@ fn cmd_wallpaper(args: &str) {
                 shell_println!("Usage: wallpaper monitor <id> <path>");
             } else if path.is_empty() {
                 let wp = wallpaper::wallpaper_for_monitor(mon);
-                shell_println!(
-                    "Monitor '{}': {}",
-                    mon,
-                    if wp.is_empty() { "(none)" } else { &wp }
-                );
+                // An unset override is the empty path, so the two arms cannot
+                // share a type -- print the placeholder separately rather
+                // than force the path through a lossy `to_str`.
+                if wp.is_empty() {
+                    shell_println!("Monitor '{}': (none)", mon);
+                } else {
+                    shell_println!("Monitor '{}': {}", mon, wp.display());
+                }
             } else {
                 match wallpaper::set_per_monitor(mon, &path) {
                     Ok(()) => shell_println!("Monitor '{}' wallpaper: {}", mon, path),
@@ -23255,7 +23258,13 @@ fn cmd_wallpaper(args: &str) {
                     shell_println!("No exclusions");
                 } else {
                     for (i, e) in cfg.exclusions.iter().enumerate() {
-                        shell_println!("  [{}] {}", i, e);
+                        // An exclusion is a raw path fragment; borrow `Path`'s
+                        // byte-preserving formatter rather than assume UTF-8.
+                        shell_println!(
+                            "  [{}] {}",
+                            i,
+                            crate::fs::path::Path::new(&e[..]).display()
+                        );
                     }
                 }
             } else {
@@ -23282,21 +23291,21 @@ fn cmd_wallpaper(args: &str) {
             } else {
                 shell_println!("{:40} {:12} {}", "PATH", "SOURCE", "TIME_NS");
                 for h in hist.iter().take(20) {
-                    shell_println!("{:40} {:12} {}", h.path, h.source, h.set_at_ns);
+                    shell_println!("{:40} {:12} {}", h.path.display(), h.source, h.set_at_ns);
                 }
             }
         }
         "show" | "info" => {
             let cfg = wallpaper::current();
             shell_println!("Kind:       {}", cfg.kind.label());
-            shell_println!(
-                "Image:      {}",
-                if cfg.image_path.is_empty() {
-                    "(none)"
-                } else {
-                    &cfg.image_path
-                }
-            );
+            // An unset image is the empty path, so the two arms cannot share
+            // a type -- print the placeholder separately rather than force
+            // the path through a lossy `to_str`.
+            if cfg.image_path.is_empty() {
+                shell_println!("Image:      (none)");
+            } else {
+                shell_println!("Image:      {}", cfg.image_path.display());
+            }
             shell_println!("Fit:        {}", cfg.fit_mode.label());
             shell_println!("BG Color:   {}", cfg.background_color);
             shell_println!("Offset:     ({:.2}, {:.2})", cfg.offset_x, cfg.offset_y);
@@ -23326,7 +23335,7 @@ fn cmd_wallpaper(args: &str) {
             if !cfg.per_monitor.is_empty() {
                 shell_println!("Per-monitor:");
                 for (mon, path) in &cfg.per_monitor {
-                    shell_println!("  {} → {}", mon, path);
+                    shell_println!("  {} → {}", mon, path.display());
                 }
             }
         }

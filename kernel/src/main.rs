@@ -5470,6 +5470,14 @@ extern "C" fn kernel_main() -> ! {
             if let Err(e) = fs::usage::self_test() {
                 serial_println!("WARNING: disk-usage self-test failed: {:?}", e);
             }
+            // wallpaper was reachable only from a `kshell` subcommand, so its
+            // suite had never run in the boot test (TD-A-FS-SELFTESTS-NEVER-RUN).
+            // It is safe to run here: it calls `clear_all()` and `reset_stats()`
+            // at both ends, so it neither depends on nor leaves behind state,
+            // and a boot has no wallpaper configured for it to destroy.
+            if let Err(e) = fs::wallpaper::self_test() {
+                serial_println!("WARNING: wallpaper self-test failed: {:?}", e);
+            }
             if let Err(e) = crate::sockact::self_test() {
                 serial_println!("WARNING: socket-activation self-test failed: {:?}", e);
             }

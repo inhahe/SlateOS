@@ -65534,3 +65534,118 @@ table `with_pristine` swaps.
 That is on purpose — a kernel that has just proved one of its own invariants
 wrong has no business carrying the user's data forward into whatever runs
 next. Every non-panicking exit, including an early `?`, does restore.
+
+## TD-A-SELFTESTS-REACH-OUTSIDE-THEIR-OWN-MODULE — `with_pristine` restores one module, and a suite is not confined to one module
+
+**In short:** the fix for the destructive self-tests swaps a module's state
+for an empty one, runs the suite, and puts the real state back. That covers
+the module the wrapper is applied to and nothing else. A suite that calls
+into a *neighbour* — clearing the service registry, clearing the event log,
+writing files — still destroys what it touches, and now does so while
+wearing a wrapper that reads as if it is safe. Three of the 35 eager modules
+did exactly that. All three are fixed; the point of this entry is the class,
+and the check.
+
+**Lane A. Found 2026-08-23, before wiring the eager suites into the boot
+test.** Found by static survey, not by a boot panic — which matters, because
+at boot these tables are empty and every one of them would have gone green.
+
+**What was found:**
+
+| Suite | Reached into | Effect on a live machine |
+|---|---|---|
+| `svcstart` | `fs::servicemgr::clear_all()`, twice | deregisters every service on the machine |
+| `logpersist` | `eventlog::clear()` twice, and `flush()` | appends fabricated events to `/var/log/events/combined.jsonl` and can rotate genuine history off the end of it |
+| `eventlog` itself | its own ring, via `clear()` at the start of test 1 and again as "clean up" | discards the operator's whole event history |
+
+`eventlog` also carried a dead `let _saved_total = total_events();` — a
+save with no matching restore, i.e. someone had noticed this exact problem
+and left a stub of the fix.
+
+**Fixed in `d29938b53`** by giving `eventlog` and `fs::servicemgr` a
+`pub(crate) fn with_pristine_state<R>(body: impl FnOnce() -> R) -> R` and
+composing the wrappers. Exposing a *function* rather than the `static` is
+deliberate: both modules keep state outside the table (`GLOBAL_SEQ`, `OPS`)
+that has to be made pristine alongside it, and a caller holding the `Mutex`
+would have to know that. `logpersist` additionally redirects its log
+directory to `/tmp/logpersist-selftest` and removes it afterwards — the
+directory is chosen by whoever calls `init`, not by the state the `static`
+holds, so `with_pristine` could not have redirected it.
+
+**The check is `build/survey_reach.py`.** For each `self_test_inner` it
+reports every `crate::`/`super::` path in the body, plus every `use crate::…`
+imported name used bare there (which is not a refinement — `net::bridge`
+imports `MacAddress` and then writes `MacAddress::new(..)` with no `crate::`
+anywhere). It is a filter, not a verdict: a call that leaves the module
+through a helper *in* the module is invisible to it, so a clean report means
+"nothing obvious".
+
+**Deliberately not fixed: `net::traceroute`** advances
+`icmp::next_trace_seq` and `icmpv6::next_trace6_seq` by two and does not put
+them back. The counter is a correlation nonce, it is `wrapping_add`, the
+suite registers no probe under the numbers it burns, and the assertions are
+relative to what it read. Recorded in the wrapper so the next reader of
+`survey_reach.py`'s output does not re-investigate it.
+
+## TD-A-PRISTINE-STATE-CAN-BE-TOO-BIG-FOR-THE-STACK — `with_pristine` puts two whole tables in the caller's frame
+
+**In short:** the same fix moves a fresh copy of a module's state *in* and
+the saved copy *out*, both by value, so two of them sit in the calling
+function's stack frame at once. For the `Vec`-backed tables this is nothing.
+For one module it was 105 216 bytes each against a 64 KiB kernel stack —
+the swap would have overrun the stack three times over before the suite
+reached its first assertion, i.e. an instant triple fault at boot.
+
+**Lane A. Found 2026-08-23, by clippy, before the suite was wired.**
+
+`net::bridge`'s `[Bridge; MAX_BRIDGES]` is 105 216 bytes — 16 bridges each
+carrying a 256-entry forwarding database — against
+`sched::task::TASK_STACK_SIZE` of 64 KiB.
+
+**Two things about this generalise, and are why it has an entry:**
+
+- **Clippy under-reports it.** `large_stack_arrays` sees array
+  *expressions*. A `Mutex<State>` whose `State` merely *contains* a big
+  fixed-size table is invisible to it, and that is the more common shape.
+- **`Box::new([const { X }; N])` does not avoid it.** The array is built in
+  the caller's frame and only then copied into the box. Filling the
+  allocation slot by slot does avoid it, because a large return value is
+  written straight through the destination pointer.
+
+**Fixed in `71d7148ad`:** `fs::selftest::with_pristine_swapped` takes the
+pristine value by `&mut` and `core::mem::swap`s it into place, so no whole
+`T` is ever materialised in a frame; `net::bridge::pristine_bridges` builds
+the substitute on the heap one `Bridge` at a time.
+
+**Measure rather than guess: `build/size_probe.py`.** There is no `size_of`
+at the shell and no way to run code in a `no_std` kernel, so it appends
+`const _P: [u8; 0] = [0u8; core::mem::size_of::<T>()];` to each file and
+reads the size back out of rustc's E0308 ("expected an array with a size of
+0, found one with a size of N"). One `cargo check` yields every table's size
+at once. Across the 25 converted at the time, `net::bridge` was the only one
+over 16 KiB and the next largest was 1280 bytes.
+
+## TD-A-FORMAT-SIZE-PRINTED-A-TWO-DIGIT-TENTHS — `format_size(2047)` read "1.10 KiB"
+
+**In short:** the human-readable byte formatter used by the disk cleanup
+tool computed the digit after the decimal point by dividing, which gives
+**10** near the top of every unit. So sizes just under a boundary printed
+with two digits after the point — `1.10 KiB` — which also reads as *larger*
+than the `1.9 KiB` just below it.
+
+**Lane A. Found and fixed 2026-08-23 (`11825e56d`), while diagnosing the
+first boot panic from the newly-wired suites.**
+
+`kernel/src/fs/storageclean.rs::format_size` used
+`remainder / (unit / 10)`; `1023 / 100` is `10`. All three unit arms had
+it. Now `remainder * 10 / unit`, which is in `0..=9` by construction, in one
+shared helper.
+
+**How it surfaced is the interesting part.** The boot panicked on the
+suite's own `assert_eq!(format_size(512), "0.5 KiB")` — and that assertion
+was simply wrong, since under a KiB the count is exact and belongs in bytes.
+Reading the helper to decide which side to believe is what turned up the
+real defect behind it. The assertion had never been executed in its life;
+this is precisely the payoff argued for in TD-A-FS-SELFTESTS-NEVER-RUN. The
+suite now carries the boundary cases (1023, 2047, one below a MiB) that
+would have caught it.

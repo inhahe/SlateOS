@@ -6276,14 +6276,14 @@ fn gen_screenshot() -> Vec<u8> {
     out.push_str("==========\n\n");
     out.push_str(&format!("History:    {}\n", hc));
     out.push_str(&format!("Captures:   {}\n", cc));
-    out.push_str(&format!(
-        "Save dir:   {}\n",
-        if cfg.save_dir.is_empty() {
-            "(default)"
-        } else {
-            &cfg.save_dir
-        }
-    ));
+    // An unset save directory is the empty path, so the two arms cannot share a
+    // type -- print the placeholder separately rather than force the path
+    // through a lossy `to_str`.
+    if cfg.save_dir.is_empty() {
+        out.push_str("Save dir:   (default)\n");
+    } else {
+        out.push_str(&format!("Save dir:   {}\n", cfg.save_dir.display()));
+    }
     out.push_str(&format!("Format:     {}\n", cfg.format.label()));
     out.push_str(&format!("Cursor:     {}\n", cfg.include_cursor));
     out.push_str(&format!("Clipboard:  {}\n", cfg.copy_to_clipboard));
@@ -6297,7 +6297,7 @@ fn gen_screenshot() -> Vec<u8> {
             s.kind.label(),
             s.width,
             s.height,
-            s.path
+            s.path.display()
         ));
     }
 

@@ -5502,6 +5502,13 @@ extern "C" fn kernel_main() -> ! {
             if let Err(e) = fs::wallpaper::self_test() {
                 serial_println!("WARNING: wallpaper self-test failed: {:?}", e);
             }
+            // screenshot was reachable only from a `kshell` subcommand, so its
+            // suite had never run in the boot test (TD-A-FS-SELFTESTS-NEVER-RUN).
+            // Safe here: `clear_all()` and `reset_stats()` at both ends, and it
+            // only records capture *metadata* -- nothing touches the framebuffer.
+            if let Err(e) = fs::screenshot::self_test() {
+                serial_println!("WARNING: screenshot self-test failed: {:?}", e);
+            }
             // cloudsync was reachable only from a `kshell` subcommand, so its
             // suite had never run in the boot test (TD-A-FS-SELFTESTS-NEVER-RUN).
             // Safe here: it is baseline-relative and restores the account,

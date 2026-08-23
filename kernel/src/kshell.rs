@@ -24753,7 +24753,7 @@ fn cmd_screenshot(args: &str) {
                     s.width,
                     s.height,
                     s.format.label(),
-                    s.path
+                    s.path.display()
                 );
             } else {
                 shell_println!("Screenshot #{} not found", id);
@@ -24771,7 +24771,7 @@ fn cmd_screenshot(args: &str) {
                         s.kind.label(),
                         s.width,
                         s.height,
-                        s.path
+                        s.path.display()
                     );
                 }
             }
@@ -24789,7 +24789,7 @@ fn cmd_screenshot(args: &str) {
                     s.kind.label(),
                     s.width,
                     s.height,
-                    s.path
+                    s.path.display()
                 );
             }
         }
@@ -24810,7 +24810,7 @@ fn cmd_screenshot(args: &str) {
         "dir" | "savedir" => {
             let dir = parts.get(1).copied().unwrap_or("");
             if dir.is_empty() {
-                shell_println!("Save dir: {}", screenshot::config().save_dir);
+                shell_println!("Save dir: {}", screenshot::config().save_dir.display());
             } else {
                 match screenshot::set_save_dir(dir) {
                     Ok(()) => shell_println!("Save dir: {}", dir),

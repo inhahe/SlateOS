@@ -5386,6 +5386,15 @@ extern "C" fn kernel_main() -> ! {
             if let Err(e) = fs::properties::self_test() {
                 serial_println!("WARNING: file-properties self-test failed: {:?}", e);
             }
+            // queryable was reachable only from a `kshell` subcommand, so
+            // its suite had never run in the boot test -- including the
+            // coverage of the attribute index, which is the structure that
+            // decides which files a query returns. Promoted here as one of
+            // the batches described in known-issues
+            // TD-A-FS-SELFTESTS-NEVER-RUN; ~255 fs suites remain manual-only.
+            if let Err(e) = fs::queryable::self_test() {
+                serial_println!("WARNING: queryable-attrs self-test failed: {:?}", e);
+            }
             if let Err(e) = fs::readdir_plus::self_test() {
                 serial_println!("WARNING: readdir-plus self-test failed: {:?}", e);
             }

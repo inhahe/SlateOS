@@ -21035,7 +21035,14 @@ fn cmd_queryable(args: &str) {
                 op,
                 value,
             };
-            let results = queryable::query(&[pred], queryable::QueryMode::All, root.as_deref());
+            // Transitional: `resolve_path` still yields a `String`. The
+            // `Path::new` wrapper collapses to `root.as_deref()` once §261
+            // reaches it.
+            let results = queryable::query(
+                &[pred],
+                queryable::QueryMode::All,
+                root.as_deref().map(Path::new),
+            );
             if results.is_empty() {
                 shell_println!("No matches");
             } else {
@@ -21056,7 +21063,7 @@ fn cmd_queryable(args: &str) {
                             alloc::format!("{}={}", k, d)
                         })
                         .collect();
-                    shell_println!("  {} ({})", r.path, vals.join(", "));
+                    shell_println!("  {} ({})", r.path.display(), vals.join(", "));
                 }
             }
         }

@@ -1109,6 +1109,43 @@ mod tests {
             .len()
     }
 
+    /// The fourteen named accents the appearance page offers.
+    ///
+    /// Shared by the two tests that must not be satisfied by a single sample.
+    /// `accented()`'s magenta is the right fixture for asking "did this site
+    /// follow the accent at all", because it is in no palette and so cannot be
+    /// matched by accident. It is the wrong fixture for asking anything about
+    /// a *function of* the accent: `readable_on` is a threshold, one accent
+    /// samples one side of it, and the pair of hues in judgement 5 collides
+    /// for exactly one of the fourteen. Walk the list for those.
+    const OFFERED: [AccentColor; 14] = [
+        AccentColor::Blue,
+        AccentColor::Lavender,
+        AccentColor::Teal,
+        AccentColor::Green,
+        AccentColor::Yellow,
+        AccentColor::Peach,
+        AccentColor::Pink,
+        AccentColor::Mauve,
+        AccentColor::Red,
+        AccentColor::Rosewater,
+        AccentColor::Flamingo,
+        AccentColor::Maroon,
+        AccentColor::Sky,
+        AccentColor::Sapphire,
+    ];
+
+    /// `p` for `light` mode wearing `accent`, as the settings page would build.
+    fn wearing(light: bool, accent: AccentColor) -> Palette {
+        let mut p = Palette::for_mode(light);
+        p.accent = if light {
+            accent.color_light()
+        } else {
+            accent.color()
+        };
+        p
+    }
+
     /// A manager with the overlay up, the picker up and a zone hovered.
     fn everything_showing() -> SnapManager {
         let mut mgr = SnapManager::new(DESK);
@@ -1262,38 +1299,56 @@ mod tests {
         // Pinned by hand rather than by calling `readable_on`: a test that
         // called the function the renderer calls would agree with it however
         // wrong both were (module 32's tautology lesson).
+        //
+        // Walked over all fourteen accents, not over the magenta fixture, and
+        // that is what makes this a test rather than a coincidence. The wrong
+        // implementation here is `readable_on(p.accent)` -- lettering the
+        // label for the wash *over* the scrim instead of the scrim itself --
+        // and `readable_on` is a threshold at luma 140. The fixture accent
+        // `#FF00FF` has luma 105, so it lands on the same side as black and
+        // the wrong implementation returns the right answer. Yellow, Peach,
+        // Rosewater and Flamingo land on the other side; under those the
+        // labels would go near-*black* on a black scrim. One accent is one
+        // sample of a step function, which is no sample at all.
         const NEAR_WHITE: u32 = 0x00EF_F1F5;
         let mut seen = Vec::new();
         for light in [false, true] {
-            let p = accented(light);
-            let mut mgr = everything_showing();
-            mgr.set_layout(SnapLayoutPreset::TwoEqualHalves);
+            for accent in OFFERED {
+                let p = wearing(light, accent);
+                let mut mgr = everything_showing();
+                mgr.set_layout(SnapLayoutPreset::TwoEqualHalves);
 
-            let overlay = colors(&mgr.render_overlay(&p));
-            let highlight = colors(&mgr.render_zone_highlight(&p, 0));
-            // The zone label is the third of each zone's three commands; the
-            // highlight's is its third and last.
-            for (what, ink) in [
-                ("a resting zone", overlay[3]),
-                ("the hovered zone", highlight[2]),
-            ] {
-                let rgb = (u32::from(ink.r) << 16) | (u32::from(ink.g) << 8) | u32::from(ink.b);
-                assert_eq!(
-                    rgb,
-                    NEAR_WHITE,
-                    "{what}'s label is #{rgb:06X} in {} mode, but it sits on a \
-                     black scrim in both",
-                    if light { "light" } else { "dark" }
-                );
-                assert_ne!(
-                    ink, p.text,
-                    "{what}'s label took the mode's body ink, which is what \
-                     loses it on the scrim under the light theme"
-                );
-                seen.push(rgb);
+                let overlay = colors(&mgr.render_overlay(&p));
+                let highlight = colors(&mgr.render_zone_highlight(&p, 0));
+                // The zone label is the third of each zone's three commands;
+                // the highlight's is its third and last.
+                for (what, ink) in [
+                    ("a resting zone", overlay[3]),
+                    ("the hovered zone", highlight[2]),
+                ] {
+                    let rgb = (u32::from(ink.r) << 16) | (u32::from(ink.g) << 8) | u32::from(ink.b);
+                    assert_eq!(
+                        rgb,
+                        NEAR_WHITE,
+                        "{what}'s label is #{rgb:06X} in {} mode under {accent:?}, \
+                         but it sits on a black scrim in every mode and under \
+                         every accent",
+                        if light { "light" } else { "dark" }
+                    );
+                    assert_ne!(
+                        ink, p.text,
+                        "{what}'s label took the mode's body ink, which is what \
+                         loses it on the scrim under the light theme"
+                    );
+                    seen.push(rgb);
+                }
             }
         }
-        assert_eq!(seen, vec![NEAR_WHITE; 4], "a label changed with the mode");
+        assert_eq!(
+            seen,
+            vec![NEAR_WHITE; 2 * OFFERED.len() * 2],
+            "a label changed with the mode or with the accent"
+        );
     }
 
     #[test]
@@ -1326,30 +1381,9 @@ mod tests {
         // This walks all fourteen rather than one, because a pair of hues
         // collides for exactly one of them and a spot check picks the other
         // thirteen with probability 13/14.
-        const OFFERED: [AccentColor; 14] = [
-            AccentColor::Blue,
-            AccentColor::Lavender,
-            AccentColor::Teal,
-            AccentColor::Green,
-            AccentColor::Yellow,
-            AccentColor::Peach,
-            AccentColor::Pink,
-            AccentColor::Mauve,
-            AccentColor::Red,
-            AccentColor::Rosewater,
-            AccentColor::Flamingo,
-            AccentColor::Maroon,
-            AccentColor::Sky,
-            AccentColor::Sapphire,
-        ];
         for light in [false, true] {
             for accent in OFFERED {
-                let mut p = Palette::for_mode(light);
-                p.accent = if light {
-                    accent.color_light()
-                } else {
-                    accent.color()
-                };
+                let p = wearing(light, accent);
                 let mut mgr = SnapManager::new(DESK);
                 mgr.show_picker();
                 mgr.set_layout(SnapLayoutPreset::TwoEqualHalves);

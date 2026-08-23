@@ -52650,6 +52650,75 @@ exited` before running any cargo command against the same target directory.
     - It is a preflight, not a gate. The real run still detects a broken defect
       (`DID NOT COMPILE`); what this buys is learning it before the run whose
       result it would spoil has been started.
+    - First use, on this module's fifty-one: **51 build, 0 do not, 0 not
+      applied**, tree restored byte-clean, in a fraction of the sweep's time.
+  - **The catcher census.** The ordered pin table
+    `every_site_draws_the_role_it_claims` caught 48 of 51 and was sole catcher
+    of 13; `the_picker_is_as_transparent_as_the_user_asked` 15 and sole on 2;
+    the two-mode sweep
+    `every_colour_all_three_renderers_draw_comes_from_their_palette` 13;
+    `none_of_the_ten_deleted_constants_is_still_drawn` 12;
+    `the_zone_under_the_cursor_out_reads_the_zones_at_rest` and
+    `a_zone_label_is_lettered_for_the_scrim_and_not_for_the_mode` 6 each;
+    `the_scrim_is_black_in_both_modes` 5;
+    `an_inactive_preset_is_never_the_accent_the_user_chose` 4 — the last five
+    sole catcher of nothing. **No pre-existing test in the module caught a
+    single defect**, which is the plainest statement available that a module
+    with thirty-six tests can have no colour coverage whatever.
+  - **Lesson 20: an off-palette accent is the right fixture for "did this
+    follow the accent" and the wrong one for anything that is a *function of*
+    the accent.** One defect escaped all fifty-one — the hovered zone's label
+    lettered `readable_on(p.accent)` instead of `readable_on(p.scrim())` — and
+    the reason is arithmetic, not oversight. `readable_on` is a step function
+    with its threshold at luma 140; the fixture accent `#FF00FF` has luma 105,
+    so it falls on the *same* side as the black scrim and the wrong expression
+    returns the right answer. Every colour test in the module used that one
+    accent, so all of them agreed with the bug.
+    - It is a real bug and not a hypothetical: Yellow, Peach, Rosewater and
+      Flamingo are all above the threshold, so a user on any of those four
+      would get near-black labels on a black scrim — invisible.
+    - The rule that follows is sharper than "vary the fixture". A fixture
+      value is a *sample*, and one sample characterises a function only if the
+      function is constant. `readable_on` is a step, judgement 5's hue-vs-hue
+      collision is an equality — both have exactly one interesting input among
+      the fourteen, and a spot check finds it with probability 1/14 and 4/14
+      respectively. Where the property under test is a function of the accent,
+      **walk the fourteen**; where it is "is this site accented at all", the
+      single off-palette magenta remains correct and cheaper.
+    - Fixed by walking `OFFERED` in the label test as
+      `an_inactive_preset_is_never_the_accent_the_user_chose` already did, and
+      by lifting the fourteen-accent table and a `wearing(light, accent)`
+      helper to the top of the test module so the next test that needs a
+      sweep does not re-derive one.
+    - Note which test the fix belongs in. The pin table cannot be made to
+      catch this: it compares a vector of colours against expectations built
+      from the same palette, so it would have to walk the fourteen accents
+      *and* recompute the expected ink per accent — which is the tautology of
+      module 32. The claim "the ink is the scrim's, whatever the accent" is a
+      different claim from "each site draws the role it claims", and it needs
+      its own test.
+  - **Five declarations were wrong in two directions**, after two consecutive
+    modules of predicting every catcher exactly. Two were under-caught: a
+    fully-opaque `MOCHA_BLUE` at a *border* slot does not trip the
+    hovered-out-reads-resting test, because that test compares alphas and 255
+    beats 150; and two inks trading places is invisible to the membership
+    sweep, because both inks are members. Three were under-declared: the
+    transparency test pins both rungs the picker's background and hover traded,
+    the scrim test pins the scrim's alpha so a setting-driven one trips it, and
+    climbing to the active marker's rung is precisely what the inactive-preset
+    test forbids. All five are now reconciled in the harness — the declarations
+    are the only record of what each test proves, and a wrong one is a
+    misleading record rather than a harmless one.
+    - Two modules of perfect prediction did not mean the method had stopped
+      needing the run. What it meant is that modules 35 and 36 were shaped like
+      the ones before them; this one has three renderers, a threshold function
+      and a scrim, and the predictions went wrong in both directions the first
+      time the shape changed.
+  - **Re-run of the six after the fix and the reconciliation: 6 caught, 0
+    escaped, 0 under-caught, 0 under-declared**, and the escaped defect is now
+    caught by exactly one test — the accent-walking label test, which is the
+    only test that can see it. Module 37 closes at **51/51**. The census above
+    gains one to that test, taking it to 7 catches and its first sole catch.
 
 **Trigger:** this is not blocked on anything. It is sequenced after the shell
 event loop (`TD-C-THE-SHELL-CAN-DRAW-ITSELF-AND-NOBODY-CAN-ASK-IT-TO`) only

@@ -14909,7 +14909,6 @@ DEFECTS = [
             'every_colour_all_three_renderers_draw_comes_from_their_palette',
             'none_of_the_ten_deleted_constants_is_still_drawn',
             'every_site_draws_the_role_it_claims',
-            'the_zone_under_the_cursor_out_reads_the_zones_at_rest',
         ],
     ),
     (
@@ -15058,6 +15057,7 @@ DEFECTS = [
         ["desktop"],
         [
             'every_site_draws_the_role_it_claims',
+            'the_picker_is_as_transparent_as_the_user_asked',
         ],
     ),
     (
@@ -15071,7 +15071,6 @@ DEFECTS = [
         ],
         ["desktop"],
         [
-            'every_colour_all_three_renderers_draw_comes_from_their_palette',
             'every_site_draws_the_role_it_claims',
             'a_zone_label_is_lettered_for_the_scrim_and_not_for_the_mode',
         ],
@@ -15292,7 +15291,6 @@ DEFECTS = [
         ],
         ["desktop"],
         [
-            'every_site_draws_the_role_it_claims',
             'a_zone_label_is_lettered_for_the_scrim_and_not_for_the_mode',
         ],
     ),
@@ -15411,6 +15409,7 @@ DEFECTS = [
         [
             'every_site_draws_the_role_it_claims',
             'the_picker_is_as_transparent_as_the_user_asked',
+            'the_scrim_is_black_in_both_modes',
         ],
     ),
     (
@@ -15498,6 +15497,7 @@ DEFECTS = [
         ],
         ["desktop"],
         [
+            'an_inactive_preset_is_never_the_accent_the_user_chose',
             'every_site_draws_the_role_it_claims',
         ],
     ),

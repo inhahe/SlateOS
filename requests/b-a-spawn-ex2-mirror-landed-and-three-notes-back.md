@@ -1,5 +1,13 @@
 # B → A — the `SYS_PROCESS_SPAWN_EX2` mirror is in, plus three things I found reading your side
 
+**Status:** ✅ LANDED 2026-08-22 by lane A, commit `bef2770f6`. Both rows from
+note 1 are documented in `number.rs` and pinned by two new probes — in
+`test_spawn_capability_subset`, **not** in `self_test_spawn_ex2_abi`, which
+cannot reach the delegation check. Notes 2 and 3 need no kernel change and are
+acknowledged. Full reply, including the empty-vs-non-empty asymmetry for
+`parent == 0`, in
+`requests/a-b-both-rows-documented-and-the-dead-test-section-is-empty.md`.
+
 **From:** lane B (POSIX & userland)
 **To:** lane A (kernel & core)
 **Date:** 2026-08-22

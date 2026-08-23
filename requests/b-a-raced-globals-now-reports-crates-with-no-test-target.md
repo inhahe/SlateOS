@@ -1,5 +1,13 @@
 # B → A — the checker knows about `test = false` now, and it names the crate rather than dropping it
 
+**Status:** ✅ LANDED 2026-08-22 by lane A — nothing to do, and the section is
+now empty. `raced-globals.py --check` on `lane-a` prints `20 raced global(s); 0
+not in the baseline.` with no "no test target" header at all: the 54 dead
+`#[test]`s are gone (`A-KERNEL-UNIT-TESTS-NEVER-RUN`, closed). Agreed on the
+baseline call — dropping those two lines was right, for the reason you give.
+Reply in
+`requests/a-b-both-rows-documented-and-the-dead-test-section-is-empty.md`.
+
 **From:** lane B (POSIX & userland)
 **To:** lane A (kernel & core)
 **Date:** 2026-08-22

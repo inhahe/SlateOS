@@ -753,9 +753,10 @@ fn walk(
     // Check one-file-system: skip if device differs from root.
     if cfg.one_file_system
         && let Some(rd) = root_device
-            && dev != rd {
-                return (0, 0);
-            }
+        && dev != rd
+    {
+        return (0, 0);
+    }
 
     // Determine the effective root device (set on first call).
     let effective_root_device = root_device.or(Some(dev));
@@ -1241,10 +1242,56 @@ mod tests {
 
     // -- Integration-style test using a temp directory --
 
+    /// A directory of this test run's own, removed however the test ends.
+    ///
+    /// These tests used a fixed name each — `du_test_walk` and friends — and
+    /// began each run by deleting it. That is a race, not a cleanup: two test
+    /// binaries alive at once (two `cargo test --workspace` runs, or a
+    /// workspace run overlapping a single-crate one) share `%TEMP%`, so one
+    /// would delete the tree the other was midway through walking. It showed up
+    /// as `du: cannot access …: The system cannot find the file specified` and
+    /// a `write skip: NotFound` — failures that reproduce only under
+    /// concurrency and look like `walk` bugs.
+    ///
+    /// The process id makes the name unique between binaries and the counter
+    /// between tests within one, so no two live directories can collide. `Drop`
+    /// does the removal, which a panicking assertion cannot skip the way a
+    /// trailing `remove_dir_all` could — a failed test used to leave its tree
+    /// behind for the next run to trip over.
+    struct Scratch(std::path::PathBuf);
+
+    impl Scratch {
+        fn new(tag: &str) -> Self {
+            use std::sync::atomic::{AtomicU32, Ordering};
+            static NEXT: AtomicU32 = AtomicU32::new(0);
+            let serial = NEXT.fetch_add(1, Ordering::Relaxed);
+            let dir =
+                std::env::temp_dir().join(format!("du-test-{}-{serial}-{tag}", std::process::id()));
+            // Not `remove_dir_all` first: the name is ours alone, so an
+            // existing one would be a bug we want to hear about, not tidy away.
+            stdfs::create_dir_all(&dir).expect("create scratch dir");
+            Self(dir)
+        }
+
+        fn path(&self) -> &std::path::Path {
+            &self.0
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            // Ignored: the test's verdict is already decided, and on Windows a
+            // removal can lose to a virus scanner still holding a handle.
+            // Leaking one directory under `%TEMP%` is not worth masking that
+            // verdict with a second panic.
+            let _ = stdfs::remove_dir_all(&self.0);
+        }
+    }
+
     #[test]
     fn walk_temp_dir() {
-        let dir = std::env::temp_dir().join("du_test_walk");
-        let _ = stdfs::remove_dir_all(&dir);
+        let scratch = Scratch::new("walk");
+        let dir = scratch.path();
         stdfs::create_dir_all(dir.join("sub")).expect("create dirs");
 
         // Write some data.
@@ -1257,7 +1304,7 @@ mod tests {
         let mut exit_code = 0;
 
         let (total, _inodes) = walk(
-            &dir,
+            dir,
             0,
             &cfg,
             &mut visited,
@@ -1270,16 +1317,12 @@ mod tests {
         // Both files are small, so each takes one block = 16384.
         // Total should be 2 * 16384 = 32768.
         assert_eq!(total, 2 * BLOCK_SIZE);
-
-        // Clean up.
-        let _ = stdfs::remove_dir_all(&dir);
     }
 
     #[test]
     fn walk_temp_dir_apparent_size() {
-        let dir = std::env::temp_dir().join("du_test_apparent");
-        let _ = stdfs::remove_dir_all(&dir);
-        stdfs::create_dir_all(&dir).expect("create dir");
+        let scratch = Scratch::new("apparent");
+        let dir = scratch.path();
 
         stdfs::write(dir.join("a.txt"), "12345").expect("write");
 
@@ -1291,7 +1334,7 @@ mod tests {
         let mut exit_code = 0;
 
         let (total, _) = walk(
-            &dir,
+            dir,
             0,
             &cfg,
             &mut visited,
@@ -1302,15 +1345,12 @@ mod tests {
 
         assert_eq!(exit_code, 0);
         assert_eq!(total, 5); // "12345" is 5 bytes.
-
-        let _ = stdfs::remove_dir_all(&dir);
     }
 
     #[test]
     fn walk_with_exclude() {
-        let dir = std::env::temp_dir().join("du_test_exclude");
-        let _ = stdfs::remove_dir_all(&dir);
-        stdfs::create_dir_all(&dir).expect("create dir");
+        let scratch = Scratch::new("exclude");
+        let dir = scratch.path();
 
         stdfs::write(dir.join("keep.txt"), "data").expect("write keep");
         stdfs::write(dir.join("skip.tmp"), "data").expect("write skip");
@@ -1323,7 +1363,7 @@ mod tests {
         let mut exit_code = 0;
 
         let (total, _) = walk(
-            &dir,
+            dir,
             0,
             &cfg,
             &mut visited,
@@ -1335,7 +1375,5 @@ mod tests {
         assert_eq!(exit_code, 0);
         // Only keep.txt should be counted: one block.
         assert_eq!(total, BLOCK_SIZE);
-
-        let _ = stdfs::remove_dir_all(&dir);
     }
 }

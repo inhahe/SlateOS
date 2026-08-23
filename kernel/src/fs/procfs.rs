@@ -5503,7 +5503,12 @@ fn gen_fcomment() -> Vec<u8> {
         for (path, comment) in &all {
             let preview: String = comment.chars().take(40).collect();
             let preview = preview.replace('\n', " ");
-            out.push_str(&format!("{:40} {:8} {}\n", path, comment.len(), preview));
+            out.push_str(&format!(
+                "{:40} {:8} {}\n",
+                path.display(),
+                comment.len(),
+                preview
+            ));
         }
     }
 

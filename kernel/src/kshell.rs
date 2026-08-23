@@ -21247,7 +21247,7 @@ fn cmd_fcomment(args: &str) {
                 shell_println!("Usage: fcomment search <text> [root]");
                 return;
             }
-            let results = fcomment::search(needle, root.as_deref());
+            let results = fcomment::search(needle, root.as_ref().map(|r| Path::new(r)));
             if results.is_empty() {
                 shell_println!("No matches");
             } else {
@@ -21255,13 +21255,13 @@ fn cmd_fcomment(args: &str) {
                 for (path, comment) in &results {
                     let preview: String = comment.chars().take(60).collect();
                     let preview = preview.replace('\n', " ");
-                    shell_println!("  {} — {}", path, preview);
+                    shell_println!("  {} — {}", path.display(), preview);
                 }
             }
         }
         "list" | "" => {
             let root = parts.get(1).map(|p| resolve_path(p));
-            let all = fcomment::list(root.as_deref());
+            let all = fcomment::list(root.as_ref().map(|r| Path::new(r)));
             if all.is_empty() {
                 shell_println!("No commented files");
             } else {
@@ -21269,7 +21269,7 @@ fn cmd_fcomment(args: &str) {
                 for (path, comment) in &all {
                     let preview: String = comment.chars().take(50).collect();
                     let preview = preview.replace('\n', " ");
-                    shell_println!("  {:40} {}", path, preview);
+                    shell_println!("  {:40} {}", path.display(), preview);
                 }
             }
         }

@@ -813,10 +813,7 @@ mod tests {
         assert_eq!(xstrtoimax_base(b"-0x10", 0, SIZES), (-16, Status::Ok));
         // Base ten is the other reading of the same three arguments, and it
         // refuses rather than answering sixteen.
-        assert_eq!(
-            xstrtoimax_base(b"0x10", 10, SIZES).1,
-            Status::InvalidSuffix
-        );
+        assert_eq!(xstrtoimax_base(b"0x10", 10, SIZES).1, Status::InvalidSuffix);
         // The suffix still applies on top of the prefix.
         assert_eq!(xstrtoimax_base(b"0x10K", 0, SIZES), (16384, Status::Ok));
     }

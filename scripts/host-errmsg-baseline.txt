@@ -20,7 +20,6 @@ userspace/coreutils/src/bin/cmp.rs:host-error-text
 userspace/coreutils/src/bin/dd.rs:host-error-text
 userspace/coreutils/src/bin/df.rs:host-error-text
 userspace/coreutils/src/bin/diff.rs:host-error-text
-userspace/coreutils/src/bin/du.rs:host-error-text
 userspace/coreutils/src/bin/ed.rs:host-error-text
 userspace/coreutils/src/bin/fetch.rs:host-error-text
 userspace/coreutils/src/bin/find.rs:host-error-text

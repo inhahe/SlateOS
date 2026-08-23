@@ -327,9 +327,16 @@ pub fn self_test() {
     crate::serial_println!("netshare::self_test() — running tests...");
     init_defaults();
 
-    // 1: Empty initial.
-    assert!(list_shares().is_empty());
-    crate::serial_println!("  [1/12] empty initial: OK");
+    // 1: Baseline.
+    //
+    // Deliberately *not* `assert!(list_shares().is_empty())`.  This suite is
+    // reachable from the `netshare selftest` shell command, so a user can run
+    // it twice -- and the previous version left share `id1` mounted, so the
+    // second run panicked the kernel on this very line.  Every count below is
+    // relative to this baseline, and the cleanup at the end restores it
+    // exactly, which makes the suite re-runnable and safe to wire into boot.
+    let baseline = list_shares().len();
+    crate::serial_println!("  [1/12] baseline ({} shares): OK", baseline);
 
     // 2: Mount SMB share.
     let id1 = mount(
@@ -356,7 +363,7 @@ pub fn self_test() {
         true,
     )
     .expect("mount nfs");
-    assert_eq!(list_shares().len(), 2);
+    assert_eq!(list_shares().len(), baseline + 2);
     crate::serial_println!("  [3/12] mount NFS: OK");
 
     // 4: Duplicate mount point rejected.
@@ -391,14 +398,18 @@ pub fn self_test() {
     crate::serial_println!("  [7/12] connection state: OK");
 
     // 8: Auto-mount list.
+    //
+    // Stated as membership rather than `len() == 1` so a pre-existing
+    // auto-mount share in the baseline does not fail the suite: what is
+    // being tested is that the flag selects, not how many shares exist.
     let auto = auto_mount_shares();
-    assert_eq!(auto.len(), 1);
-    assert_eq!(auto[0].id, id1);
+    assert!(auto.iter().any(|s| s.id == id1));
+    assert!(!auto.iter().any(|s| s.id == id2));
     crate::serial_println!("  [8/12] auto-mount: OK");
 
     // 9: Unmount.
     unmount(id2).expect("unmount");
-    assert_eq!(list_shares().len(), 1);
+    assert_eq!(list_shares().len(), baseline + 1);
     crate::serial_println!("  [9/12] unmount: OK");
 
     // 10: Error tracking.
@@ -409,7 +420,7 @@ pub fn self_test() {
 
     // 11: Stats.
     let (count, connected, mounts, errors, ops) = stats();
-    assert_eq!(count, 1);
+    assert_eq!(count, baseline + 1);
     assert!(mounts >= 2);
     assert!(ops > 0);
     let _ = (connected, errors);
@@ -476,6 +487,19 @@ pub fn self_test() {
         unmount(idb).expect("unmount non-utf8 b");
         crate::serial_println!("  [12/12] non-UTF-8 paths: OK");
     }
+
+    // Cleanup: restore the baseline exactly.
+    //
+    // `id1` is the only share the suite still holds -- it is deliberately
+    // left mounted through tests 7-11 because they inspect its state.  It
+    // must go now: leaving it behind is what made the previous version of
+    // this suite panic on its second run.
+    unmount(id1).expect("cleanup: unmount id1");
+    assert_eq!(
+        list_shares().len(),
+        baseline,
+        "self_test must leave the share registry as it found it"
+    );
 
     crate::serial_println!("netshare::self_test() — all 12 tests passed");
 }

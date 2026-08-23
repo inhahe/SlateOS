@@ -5376,6 +5376,11 @@ extern "C" fn kernel_main() -> ! {
             if let Err(e) = fs::linkcheck::self_test() {
                 serial_println!("WARNING: linkcheck self-test failed: {:?}", e);
             }
+            // netshare was reachable only from a `kshell` subcommand, so its
+            // suite had never run in the boot test (TD-A-FS-SELFTESTS-NEVER-RUN).
+            // It is pure in-memory registry bookkeeping -- it contacts no
+            // server -- so it is safe to run unconditionally at boot.
+            fs::netshare::self_test();
             if let Err(e) = fs::openwith::self_test() {
                 serial_println!("WARNING: open-with self-test failed: {:?}", e);
             }

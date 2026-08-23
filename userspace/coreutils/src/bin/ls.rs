@@ -2748,6 +2748,440 @@ fn pad_left_zero_sep(out: &mut Vec<u8>, width: usize, text: &[u8]) {
     out.extend_from_slice(b", ");
 }
 
+// ------------------------------------------------------- the column layouts ---
+
+/// GNU's `print_file_name_and_frills`: one name, with whatever `-i`, `-s` and
+/// `-Z` put in front of it and whatever `-F` puts behind it.
+///
+/// This is the short-format counterpart of [`print_long_format`], and its three
+/// prefix columns are the same three, laid out the same way — except under
+/// `-m`, where every one of them collapses to its own natural width. That is
+/// upstream's `format == with_commas ? 0 : <width>`, and it is what makes `-m`
+/// a *flowing* list rather than a table: there are no columns to align to.
+///
+/// Upstream's `start_col` parameter and return value both exist only for
+/// colour — the first tells the escape code whether the name straddles a line
+/// boundary, the second is that name's byte length so the caller can work the
+/// first out. Neither is reproduced, because neither has a consumer here: the
+/// callers below all track position from
+/// [`length_of_file_name_and_frills`] instead.
+fn print_file_name_and_frills(
+    out: &mut Out,
+    cfg: &Config,
+    w: &Widths,
+    cwd_some_quoted: bool,
+    f: &FileInfo,
+) {
+    let flowing = cfg.format == Format::WithCommas;
+
+    if cfg.print_inode {
+        let width = if flowing { 0 } else { w.inode };
+        pad_left(&mut out.buf, width, &format_inode(f));
+    }
+    if cfg.print_block_size {
+        let blocks = if f.stat_ok {
+            human_readable(
+                f.stat.blocks,
+                cfg.human_output_opts,
+                ST_NBLOCKSIZE,
+                cfg.output_block_size,
+            )
+        } else {
+            "?".to_owned()
+        };
+        let width = if flowing { 0 } else { w.block_size };
+        // `printf("%*s ", …)`, which counts *bytes* — unlike the long
+        // format's block column, which is measured. The two disagree only for
+        // a block size whose unit letter is not ASCII, which no `--block-size`
+        // can produce.
+        pad_left(&mut out.buf, width, blocks.as_bytes());
+    }
+    if cfg.print_scontext {
+        let width = if flowing { 0 } else { w.scontext };
+        pad_left(&mut out.buf, width, SCONTEXT_UNKNOWN);
+    }
+
+    print_name_with_quoting(out, cfg, cwd_some_quoted, f, false, Dired::Names);
+
+    if cfg.indicator_style != Indicator::None {
+        print_type_indicator(out, cfg, f.stat_ok, f.stat.mode, f.filetype);
+    }
+}
+
+/// GNU's `length_of_file_name_and_frills`: what
+/// [`print_file_name_and_frills`] will occupy, computed before it is called.
+///
+/// The column allocator needs this for every file *before* it can decide how
+/// many columns there are, which is why the layout formats cannot start
+/// printing until the whole directory has been read.
+///
+/// The inode's contribution under `-m` is the width of the raw `st_ino` and
+/// not of what [`format_inode`] would print — so a file with no inode is
+/// measured as `0` and printed as `?`. Both are one column, so the discrepancy
+/// is invisible; it is reproduced rather than tidied because it is upstream's
+/// `strlen (umaxtostr (f->stat.st_ino, buf))`.
+fn length_of_file_name_and_frills(
+    cfg: &Config,
+    w: &Widths,
+    cwd_some_quoted: bool,
+    f: &FileInfo,
+) -> usize {
+    let flowing = cfg.format == Format::WithCommas;
+    let mut len = 0usize;
+
+    if cfg.print_inode {
+        let own = if flowing {
+            f.stat.ino.to_string().len()
+        } else {
+            w.inode
+        };
+        len = len.saturating_add(1).saturating_add(own);
+    }
+    if cfg.print_block_size {
+        let own = if flowing {
+            if f.stat_ok {
+                human_readable(
+                    f.stat.blocks,
+                    cfg.human_output_opts,
+                    ST_NBLOCKSIZE,
+                    cfg.output_block_size,
+                )
+                .len()
+            } else {
+                1
+            }
+        } else {
+            w.block_size
+        };
+        len = len.saturating_add(1).saturating_add(own);
+    }
+    if cfg.print_scontext {
+        let own = if flowing {
+            SCONTEXT_UNKNOWN.len()
+        } else {
+            w.scontext
+        };
+        len = len.saturating_add(1).saturating_add(own);
+    }
+
+    len = len.saturating_add(name_width(cfg, cwd_some_quoted, f));
+
+    if cfg.indicator_style != Indicator::None
+        && get_type_indicator(cfg, f.stat_ok, f.stat.mode, f.filetype).is_some()
+    {
+        len = len.saturating_add(1);
+    }
+    len
+}
+
+/// One candidate layout: `i + 1` columns wide, in GNU's `column_info`.
+#[derive(Clone, Debug)]
+struct ColumnInfo {
+    /// Whether this many columns still fits. Once it stops fitting it is never
+    /// reconsidered — a column can only ever grow — so this doubles as a
+    /// short-circuit for the rest of the scan.
+    valid_len: bool,
+    /// The width of the whole line under this layout, separators included.
+    line_len: usize,
+    /// The width of each column, which is why the search is quadratic: a
+    /// layout is not `n` equal columns but `n` independently-sized ones.
+    col_arr: Vec<usize>,
+}
+
+/// GNU's `calculate_columns`: the column count, found by trying every one of
+/// them at once.
+///
+/// There is no formula. The number of columns that fits depends on *which*
+/// names land in which column, which depends on the number of columns — so
+/// upstream evaluates all `max_cols` candidate layouts in a single pass over
+/// the files, growing each layout's per-column maxima as it goes, and then
+/// takes the widest layout that never overflowed. It is `O(files × columns)`,
+/// which is the reason for the `max_idx` cap on `max_cols`.
+///
+/// `by_columns` is the difference between `-C` and `-x`, and it is only this
+/// line: which column a file lands in. Down the page,
+/// `filesno / ceil(n / cols)`; across it, `filesno % cols`.
+///
+/// The `+ 2` is [`MIN_COLUMN_WIDTH`]'s two separating spaces, charged to every
+/// column but the last — which is why a listing can be exactly `line_length`
+/// wide without wrapping.
+///
+/// Returns the count and that layout's column widths.
+fn calculate_columns(cfg: &Config, lengths: &[usize], by_columns: bool) -> (usize, Vec<usize>) {
+    let n = lengths.len();
+    // Upstream's "normally the screen decides, but few files can decide too".
+    let max_cols = if cfg.max_idx > 0 && cfg.max_idx < n {
+        cfg.max_idx
+    } else {
+        n
+    };
+    if max_cols == 0 {
+        return (1, vec![MIN_COLUMN_WIDTH]);
+    }
+
+    let mut info: Vec<ColumnInfo> = (0..max_cols)
+        .map(|i| ColumnInfo {
+            valid_len: true,
+            line_len: i.saturating_add(1).saturating_mul(MIN_COLUMN_WIDTH),
+            col_arr: vec![MIN_COLUMN_WIDTH; i.saturating_add(1)],
+        })
+        .collect();
+
+    for (filesno, &name_length) in lengths.iter().enumerate() {
+        for (i, candidate) in info.iter_mut().enumerate() {
+            if !candidate.valid_len {
+                continue;
+            }
+            let cols = i.saturating_add(1);
+            let idx = if by_columns {
+                // `(n + i) / (i + 1)` is `ceil(n / cols)`: the rows this
+                // layout needs. It cannot be zero, because `max_cols <= n`.
+                let rows = n.saturating_add(i) / cols;
+                filesno / rows.max(1)
+            } else {
+                filesno % cols
+            };
+            let real_length = name_length.saturating_add(if idx == i { 0 } else { 2 });
+            let Some(slot) = candidate.col_arr.get_mut(idx) else {
+                continue;
+            };
+            if *slot < real_length {
+                candidate.line_len = candidate
+                    .line_len
+                    .saturating_add(real_length.saturating_sub(*slot));
+                *slot = real_length;
+                candidate.valid_len = candidate.line_len < cfg.line_length;
+            }
+        }
+    }
+
+    let mut cols = max_cols;
+    while cols > 1 {
+        if info
+            .get(cols.saturating_sub(1))
+            .is_some_and(|c| c.valid_len)
+        {
+            break;
+        }
+        cols = cols.saturating_sub(1);
+    }
+    let widths = info
+        .get(cols.saturating_sub(1))
+        .map(|c| c.col_arr.clone())
+        .unwrap_or_else(|| vec![MIN_COLUMN_WIDTH]);
+    (cols, widths)
+}
+
+/// GNU's `indent`: move the cursor from column `from` to column `to`, using a
+/// tab wherever one lands exactly where a run of spaces would.
+///
+/// The test is `to / tabsize > (from + 1) / tabsize`, which is not the obvious
+/// "is there a tab stop between here and there". The `+ 1` makes it refuse to
+/// emit a tab that would save only a single space, so `ls` never turns one
+/// space into a tab — a tab that renders as one column on the terminal it was
+/// measured for renders as eight somewhere else, and a listing that is only
+/// correct at one tab width is worse than one that is a byte longer.
+///
+/// `tabsize` of zero is `-T0`, which asks for spaces only.
+fn indent(out: &mut Vec<u8>, tabsize: usize, mut from: usize, to: usize) {
+    while from < to {
+        if tabsize != 0 && to / tabsize > from.saturating_add(1) / tabsize {
+            out.push(b'\t');
+            // Advance to the next tab stop, not by a whole `tabsize`.
+            from = from.saturating_add(tabsize.saturating_sub(from % tabsize));
+        } else {
+            out.push(b' ');
+            from = from.saturating_add(1);
+        }
+    }
+}
+
+/// GNU's `print_many_per_line` (`-C`): names down the page, then across.
+///
+/// The row loop stops at the *file* count and not at the column count, so the
+/// last column is short rather than the last row — which is the whole visible
+/// difference from `-x`.
+fn print_many_per_line(
+    out: &mut Out,
+    cfg: &Config,
+    w: &Widths,
+    cwd_some_quoted: bool,
+    files: &[&FileInfo],
+    lengths: &[usize],
+) {
+    let n = files.len();
+    let (cols, col_arr) = calculate_columns(cfg, lengths, true);
+    let rows = n / cols + usize::from(!n.is_multiple_of(cols));
+
+    for row in 0..rows {
+        let mut col = 0usize;
+        let mut filesno = row;
+        let mut pos = 0usize;
+        while let (Some(f), Some(&name_length)) = (files.get(filesno), lengths.get(filesno)) {
+            let max_name_length = col_arr.get(col).copied().unwrap_or(MIN_COLUMN_WIDTH);
+            col = col.saturating_add(1);
+            print_file_name_and_frills(out, cfg, w, cwd_some_quoted, f);
+
+            filesno = filesno.saturating_add(rows);
+            if filesno >= n {
+                break;
+            }
+            indent(
+                &mut out.buf,
+                cfg.tabsize,
+                pos.saturating_add(name_length),
+                pos.saturating_add(max_name_length),
+            );
+            pos = pos.saturating_add(max_name_length);
+        }
+        out.buf.push(cfg.eolbyte);
+    }
+}
+
+/// GNU's `print_horizontal` (`-x`): names across the page, then down.
+fn print_horizontal(
+    out: &mut Out,
+    cfg: &Config,
+    w: &Widths,
+    cwd_some_quoted: bool,
+    files: &[&FileInfo],
+    lengths: &[usize],
+) {
+    let (cols, col_arr) = calculate_columns(cfg, lengths, false);
+    let mut pos = 0usize;
+    let mut name_length = lengths.first().copied().unwrap_or(0);
+    let mut max_name_length = col_arr.first().copied().unwrap_or(MIN_COLUMN_WIDTH);
+
+    let Some(first) = files.first() else { return };
+    print_file_name_and_frills(out, cfg, w, cwd_some_quoted, first);
+
+    for (filesno, f) in files.iter().enumerate().skip(1) {
+        let col = filesno % cols;
+        if col == 0 {
+            out.buf.push(cfg.eolbyte);
+            pos = 0;
+        } else {
+            indent(
+                &mut out.buf,
+                cfg.tabsize,
+                pos.saturating_add(name_length),
+                pos.saturating_add(max_name_length),
+            );
+            pos = pos.saturating_add(max_name_length);
+        }
+        print_file_name_and_frills(out, cfg, w, cwd_some_quoted, f);
+        name_length = lengths.get(filesno).copied().unwrap_or(0);
+        max_name_length = col_arr.get(col).copied().unwrap_or(MIN_COLUMN_WIDTH);
+    }
+    out.buf.push(cfg.eolbyte);
+}
+
+/// GNU's `print_with_separator`: names separated by `sep` and a space, wrapped
+/// at the line width.
+///
+/// It serves two formats. `-m` passes a comma; `-C` and `-x` pass a *space*
+/// when there is no line width to wrap at (`-w0`), because with no width there
+/// are no columns to compute and a single flowing line is all that is left.
+///
+/// The wrap test is `pos + len + 2 < line_length`, strictly — so a name that
+/// would end exactly at the last column still wraps. The separator that starts
+/// the next line is the `sep` *and* the newline, in that order: `-m` output
+/// ends its lines with a comma.
+fn print_with_separator(
+    out: &mut Out,
+    cfg: &Config,
+    w: &Widths,
+    cwd_some_quoted: bool,
+    files: &[&FileInfo],
+    lengths: &[usize],
+    sep: u8,
+) {
+    let mut pos = 0usize;
+    for (filesno, f) in files.iter().enumerate() {
+        let len = if cfg.line_length == 0 {
+            0
+        } else {
+            lengths.get(filesno).copied().unwrap_or(0)
+        };
+
+        if filesno != 0 {
+            let fits = cfg.line_length == 0
+                || pos
+                    .checked_add(len)
+                    .and_then(|s| s.checked_add(2))
+                    .is_some_and(|s| s < cfg.line_length);
+            let separator = if fits {
+                pos = pos.saturating_add(2);
+                b' '
+            } else {
+                pos = 0;
+                cfg.eolbyte
+            };
+            out.buf.push(sep);
+            out.buf.push(separator);
+        }
+
+        print_file_name_and_frills(out, cfg, w, cwd_some_quoted, f);
+        pos = pos.saturating_add(len);
+    }
+    out.buf.push(cfg.eolbyte);
+}
+
+/// GNU's `print_current_files`: the whole of one directory's listing, in
+/// whichever of the five arrangements was asked for.
+///
+/// `-C` and `-x` fall back to [`print_with_separator`] with a space when
+/// `-w0` removed the width they lay out against. `-m` uses it always.
+fn print_current_files(
+    out: &mut Out,
+    cfg: &Config,
+    names: &Names,
+    times: &mut Times,
+    w: &Widths,
+    cwd_some_quoted: bool,
+    files: &[&FileInfo],
+) {
+    if files.is_empty() {
+        return;
+    }
+    let lengths: Vec<usize> = files
+        .iter()
+        .map(|f| length_of_file_name_and_frills(cfg, w, cwd_some_quoted, f))
+        .collect();
+
+    match cfg.format {
+        Format::OnePerLine => {
+            for f in files {
+                print_file_name_and_frills(out, cfg, w, cwd_some_quoted, f);
+                out.buf.push(cfg.eolbyte);
+            }
+        }
+        Format::ManyPerLine => {
+            if cfg.line_length == 0 {
+                print_with_separator(out, cfg, w, cwd_some_quoted, files, &lengths, b' ');
+            } else {
+                print_many_per_line(out, cfg, w, cwd_some_quoted, files, &lengths);
+            }
+        }
+        Format::Horizontal => {
+            if cfg.line_length == 0 {
+                print_with_separator(out, cfg, w, cwd_some_quoted, files, &lengths, b' ');
+            } else {
+                print_horizontal(out, cfg, w, cwd_some_quoted, files, &lengths);
+            }
+        }
+        Format::WithCommas => {
+            print_with_separator(out, cfg, w, cwd_some_quoted, files, &lengths, b',');
+        }
+        Format::Long => {
+            for f in files {
+                print_long_format(out, cfg, names, times, w, cwd_some_quoted, f);
+                out.buf.push(cfg.eolbyte);
+            }
+        }
+    }
+}
+
 fn main() -> ExitCode {
     ExitCode::SUCCESS
 }
@@ -4413,5 +4847,230 @@ mod tests {
         });
         assert_eq!(String::from_utf8_lossy(&stated_mode), "-rwsr-xr-x");
         assert_eq!(stated_mode.len(), 10);
+    }
+
+    // ----------------------------------------------------- the column layouts ---
+
+    /// A `Config` for one of the four non-long formats, with `max_idx`
+    /// derived the way `main` derives it — `ceil(line_length / 3)`, the most
+    /// columns a screen that wide could conceivably hold.
+    fn layout_cfg(format: Format, line_length: usize) -> Config {
+        Config {
+            format,
+            line_length,
+            max_idx: (line_length / MIN_COLUMN_WIDTH)
+                .saturating_add(usize::from(!line_length.is_multiple_of(MIN_COLUMN_WIDTH))),
+            ..Config::default()
+        }
+    }
+
+    /// The ten fixture names, laid out. They are the ones in `/tmp/lay` that
+    /// every measurement in this section was taken from, and they are already
+    /// in `ls`'s order.
+    fn laid_out(cfg: &Config, w: &Widths, files: &[FileInfo]) -> String {
+        let refs: Vec<&FileInfo> = files.iter().collect();
+        let mut out = Out::default();
+        let mut times = Times::new(cfg, localtime::Zone::utc(), frozen_clock);
+        print_current_files(&mut out, cfg, &inhahe(), &mut times, w, false, &refs);
+        String::from_utf8_lossy(&out.buf).into_owned()
+    }
+
+    /// `aaa bb c dddddddd ee fffff g hh iii jjjj` — widths 3 2 1 8 2 5 1 2 3 4,
+    /// which is enough spread that the per-column maxima differ from each other
+    /// and from the widest name.
+    fn ten_names() -> Vec<FileInfo> {
+        [
+            "aaa", "bb", "c", "dddddddd", "ee", "fffff", "g", "hh", "iii", "jjjj",
+        ]
+        .into_iter()
+        .map(|n| stated(n, S_IFREG | 0o644, FileType::Normal))
+        .collect()
+    }
+
+    /// `-C` fills columns before rows and `-x` fills rows before columns, and
+    /// that one difference re-sizes every column: the same ten names give
+    /// different column widths under each. Measured, GNU ls 9.5, `-w40`
+    /// (`.` for a space, `>` for a tab):
+    ///
+    /// ```text
+    /// $ ls -C -w40      $ ls -x -w40
+    /// aaa..c>.......ee.....g...iii    aaa..bb..c....dddddddd>ee..fffff
+    /// bb...dddddddd..fffff..hh..jjjj  g....hh..iii..jjjj
+    /// ```
+    ///
+    /// Note that `-C`'s first row is *not* the first three names: down-the-page
+    /// order puts `aaa bb`, `c dddddddd`, … in the columns, so row one is the
+    /// first name of each pair.
+    #[test]
+    fn down_the_page_and_across_it_size_their_columns_differently() {
+        let w = Widths::default();
+        let files = ten_names();
+
+        assert_eq!(
+            laid_out(&layout_cfg(Format::ManyPerLine, 40), &w, &files),
+            "aaa  c\t       ee     g   iii\n\
+             bb   dddddddd  fffff  hh  jjjj\n"
+        );
+        assert_eq!(
+            laid_out(&layout_cfg(Format::Horizontal, 40), &w, &files),
+            "aaa  bb  c    dddddddd\tee  fffff\n\
+             g    hh  iii  jjjj\n"
+        );
+    }
+
+    /// The gap between two columns is padded with tabs wherever a tab lands
+    /// exactly, which makes the byte count depend on `-T` even though the
+    /// rendered layout does not. `-T0` asks for spaces only; `-T4` moves every
+    /// tab stop and so produces a third, different byte sequence for the same
+    /// picture. Measured, GNU ls 9.5, `-C -w40`:
+    ///
+    /// ```text
+    /// -T0   aaa..c.........ee.....g...iii
+    /// -T4   aaa..c>>...ee>..g...iii
+    /// ```
+    ///
+    /// The `(from + 1)` in the test is why `-T4` still spends two spaces after
+    /// `bb`'s tab rather than a second tab: a tab that saves only one column is
+    /// not worth the ambiguity of a tab.
+    #[test]
+    fn a_gap_is_paid_in_tabs_only_where_a_tab_stop_falls_inside_it() {
+        let w = Widths::default();
+        let files = ten_names();
+
+        let spaces_only = Config {
+            tabsize: 0,
+            ..layout_cfg(Format::ManyPerLine, 40)
+        };
+        assert_eq!(
+            laid_out(&spaces_only, &w, &files),
+            "aaa  c         ee     g   iii\n\
+             bb   dddddddd  fffff  hh  jjjj\n"
+        );
+
+        let four = Config {
+            tabsize: 4,
+            ..layout_cfg(Format::ManyPerLine, 40)
+        };
+        assert_eq!(
+            laid_out(&four, &w, &files),
+            "aaa  c\t\t   ee\t  g   iii\n\
+             bb\t dddddddd  fffff  hh  jjjj\n"
+        );
+    }
+
+    /// `-m` ends its lines with the separator, not before it: the comma belongs
+    /// to the name it follows, and the newline is what replaces the space that
+    /// would otherwise follow the comma. Measured, GNU ls 9.5, `-m -w40`:
+    ///
+    /// ```text
+    /// aaa, bb, c, dddddddd, ee, fffff, g, hh,
+    /// iii, jjjj
+    /// ```
+    ///
+    /// The wrap test is `pos + len + 2 < line_length` — strict, and counting
+    /// the separator that has not been emitted yet — so `hh,` sits at column 39
+    /// of a 40-column screen and `iii` does not follow it.
+    #[test]
+    fn commas_end_the_line_they_wrap() {
+        let w = Widths::default();
+        let files = ten_names();
+        assert_eq!(
+            laid_out(&layout_cfg(Format::WithCommas, 40), &w, &files),
+            "aaa, bb, c, dddddddd, ee, fffff, g, hh,\niii, jjjj\n"
+        );
+    }
+
+    /// `-w0` says there is no screen to lay out against, which leaves `-C` and
+    /// `-x` with nothing to compute: both fall through to the same flowing line
+    /// the comma format uses, with a *space* in the comma's place.
+    ///
+    /// That gives **two** spaces between names, not one. The separator upstream
+    /// prints is always two bytes — the `sep` it was passed and then either a
+    /// space or a newline — so passing a space as the `sep` makes both of them
+    /// spaces. Measured, GNU ls 9.5 (`.` for a space):
+    ///
+    /// ```text
+    /// $ ls -C -w0
+    /// aaa..bb..c..dddddddd..ee..fffff..g..hh..iii..jjjj
+    /// ```
+    #[test]
+    fn no_width_at_all_leaves_one_flowing_line() {
+        let w = Widths::default();
+        let files = ten_names();
+        let flat = "aaa  bb  c  dddddddd  ee  fffff  g  hh  iii  jjjj\n";
+        assert_eq!(
+            laid_out(&layout_cfg(Format::ManyPerLine, 0), &w, &files),
+            flat
+        );
+        assert_eq!(
+            laid_out(&layout_cfg(Format::Horizontal, 0), &w, &files),
+            flat
+        );
+
+        // `-1` is not the same thing: it has a width, it just never uses it.
+        assert_eq!(
+            laid_out(&layout_cfg(Format::OnePerLine, 40), &w, &files),
+            "aaa\nbb\nc\ndddddddd\nee\nfffff\ng\nhh\niii\njjjj\n"
+        );
+    }
+
+    /// Every format but `-m` pads the inode and block-size prefixes to the
+    /// widest in the listing; `-m` pads them to nothing, because a flowing list
+    /// has no column for them to line up in. Measured, GNU ls 9.5, on a 200 KiB
+    /// file beside an empty one:
+    ///
+    /// ```text
+    /// $ ls -s -C          $ ls -s -m
+    /// 200 big    0 small  200 big, 0 small
+    /// ```
+    #[test]
+    fn a_flowing_list_pads_its_prefixes_to_nothing() {
+        let w = Widths {
+            block_size: 3,
+            ..Widths::default()
+        };
+        let mut big = stated("big", S_IFREG | 0o644, FileType::Normal);
+        big.stat.blocks = 400; // 400 × 512 B = 200 KiB, printed in KiB units.
+        let mut small = stated("small", S_IFREG | 0o644, FileType::Normal);
+        small.stat.blocks = 0;
+        let files = vec![big, small];
+
+        let columns = Config {
+            print_block_size: true,
+            ..layout_cfg(Format::ManyPerLine, 40)
+        };
+        assert_eq!(laid_out(&columns, &w, &files), "200 big    0 small\n");
+
+        let commas = Config {
+            print_block_size: true,
+            ..layout_cfg(Format::WithCommas, 40)
+        };
+        assert_eq!(laid_out(&commas, &w, &files), "200 big, 0 small\n");
+    }
+
+    /// A layout is not `n` equal columns: each is sized independently, and a
+    /// layout is rejected only when the *sum* overflows. The `+ 2` is charged
+    /// to every column but the last, so a listing may be exactly `line_length`
+    /// wide — `line_len < line_length` is tested against a total that does not
+    /// include the trailing separator the last column never gets.
+    #[test]
+    fn a_layout_is_rejected_on_its_total_and_never_on_its_widest_column() {
+        // Four names of four bytes: 4 + 2 per column, but only 4 for the last.
+        let lengths = [4usize, 4, 4, 4];
+        let cfg = |line_length: usize| layout_cfg(Format::ManyPerLine, line_length);
+
+        // 6 + 6 + 6 + 4 = 22, which fits a 23-column screen and not a 22.
+        assert_eq!(calculate_columns(&cfg(23), &lengths, true).0, 4);
+        assert_eq!(calculate_columns(&cfg(22), &lengths, true).0, 3);
+
+        // The widths come back per column, and the last one is short by the
+        // two spaces it does not have to pay for.
+        let (cols, widths) = calculate_columns(&cfg(23), &lengths, true);
+        assert_eq!(cols, 4);
+        assert_eq!(widths, vec![6, 6, 6, 4]);
+
+        // `max_idx` caps the search, not the answer: with one name there is one
+        // column however wide the screen is.
+        assert_eq!(calculate_columns(&cfg(200), &[3], true).0, 1);
     }
 }

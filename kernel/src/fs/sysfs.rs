@@ -1152,7 +1152,11 @@ impl FileSystem for SysFs {
 // ---------------------------------------------------------------------------
 
 /// Mount sysfs at the given path (typically `/sys`).
-pub fn mount(mount_path: &str) -> KernelResult<()> {
+///
+/// Takes a path rather than a `&str` (design-decisions.md 261): a mount
+/// point is an ordinary directory, whose name may contain any byte but `/`
+/// and NUL.
+pub fn mount(mount_path: impl AsRef<Path>) -> KernelResult<()> {
     let fs = SysFs::new();
     crate::fs::Vfs::mount(mount_path, alloc::boxed::Box::new(fs))?;
     Ok(())

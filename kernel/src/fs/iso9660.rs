@@ -1312,10 +1312,16 @@ fn read_u32_le(data: &[u8], offset: usize) -> u32 {
 // ---------------------------------------------------------------------------
 
 /// Try to mount an ISO 9660 filesystem from the given device.
-pub fn mount(device: &str, mount_path: &str) -> KernelResult<()> {
+///
+/// `mount_path` is a path rather than a `&str` (design-decisions.md 261): a
+/// mount point is an ordinary directory, whose name may contain any byte but
+/// `/` and NUL.  `device` stays a `&str` because it is a block-device
+/// registry key chosen by the driver, not a name read off a filesystem.
+pub fn mount(device: &str, mount_path: impl AsRef<Path>) -> KernelResult<()> {
+    let mount_path = mount_path.as_ref();
     let fs = Iso9660Fs::open(device)?;
     crate::fs::Vfs::mount(mount_path, Box::new(fs))?;
-    serial_println!("[iso9660] Mounted {} at {}", device, mount_path);
+    serial_println!("[iso9660] Mounted {} at {}", device, mount_path.display());
     Ok(())
 }
 

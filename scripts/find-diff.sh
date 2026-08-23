@@ -747,6 +747,32 @@ find t -Ox
 find --nosuchoption t
 find -name f -type
 
+# --- diagnostics that name an argument which is not text ---
+#
+# Every one of these makes find quote an argv token back at the user, and every
+# token here contains a byte that decodes to no character in a UTF-8 locale.
+# They exist to pin the *lossless* half of that rendering: whatever the two
+# sides print, ours must let the reader work out which byte was passed, which a
+# U+FFFD does not. See design-decisions.md §369 for why we escape where upstream
+# writes the byte raw, and why that is not the same question as the deliberate
+# differences at the foot of this file.
+#
+# The five marked cases are the complete set of find diagnostics that quote a
+# single undecodable byte: GNU writes the raw byte (`M-^?` through od -c), we
+# write `\377`. Both name the same byte and both are recoverable; the marking
+# records that the difference is the escape and nothing else. If find's
+# String-typed Fatal/errmsg plumbing is ever converted to bytes, these five
+# should flip back to plain cases and be expected to pass. `-perm` is *not*
+# marked, and must keep passing: its diagnostic does not echo the argument, so
+# it is the control that shows the marking above is about rendering and not
+# about the parse.
+!we escape an undecodable argument byte as \377, GNU writes it raw (design-decisions.md §369)|find t -type $'\377'
+find t -perm $'\377'
+!we escape an undecodable argument byte as \377, GNU writes it raw (design-decisions.md §369)|find t -used $'\377'
+!we escape an undecodable argument byte as \377, GNU writes it raw (design-decisions.md §369)|find t -size $'\377'
+!we escape an undecodable format byte as \377, GNU writes it raw (design-decisions.md §369)|find t -printf $'%\377\n'
+!we escape an undecodable predicate byte as \377, GNU writes it raw (design-decisions.md §369)|find t $'-\377'
+
 # --- deliberate differences ---
 # The only two messages in the whole interface that are *about the program
 # rather than about the files*, and so the only two that must not imitate

@@ -45,7 +45,7 @@
 //! system may hold any byte but `/` and NUL, so a grep that insisted on UTF-8
 //! could not search a file listing.
 
-use coreutils::quote::quotef_os;
+use coreutils::quote::{self, quotef_os};
 use std::env;
 use std::fs::{self, File};
 use std::io::{self, BufRead, BufReader, Read, Write};
@@ -326,10 +326,16 @@ fn compile_patterns(patterns: &[Vec<u8>], opts: &Options) -> Result<Vec<Pat>, St
         match compiled {
             Ok(re) => out.push(Pat::Re(re)),
             Err(e) => {
+                // Escaped, not lossy: a pattern is an argv token, so it is a
+                // byte string and need not decode. `from_utf8_lossy` would
+                // substitute U+FFFD and hand the user a message naming a
+                // *different* pattern from the one they typed, which is the one
+                // thing this diagnostic exists to get right. See
+                // design-decisions.md §369.
                 return Err(format!(
                     "{}: {}",
-                    String::from_utf8_lossy(p),
-                    String::from_utf8_lossy(&e.detail)
+                    quote::escape_unprintable(p),
+                    quote::escape_unprintable(&e.detail)
                 ));
             }
         }

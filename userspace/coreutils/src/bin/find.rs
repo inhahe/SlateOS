@@ -865,7 +865,7 @@ fn process_optimisation_option(arg: &[u8]) -> Result<(), Leading> {
     if run != arg.len() {
         return Err(Leading::Die(format!(
             "Invalid optimisation level {}",
-            String::from_utf8_lossy(arg)
+            quote::escape_unprintable(arg)
         )));
     }
     // `strtoul` overflow, then the `USHRT_MAX` ceiling. Both refuse; only the
@@ -878,7 +878,7 @@ fn process_optimisation_option(arg: &[u8]) -> Result<(), Leading> {
             ),
             None => format!(
                 "Invalid optimisation level {}: Numerical result out of range",
-                String::from_utf8_lossy(arg)
+                quote::escape_unprintable(arg)
             ),
         }));
     };
@@ -1138,9 +1138,9 @@ impl<'a> Parser<'a> {
                          but global options are not positional, i.e., {} affects tests specified \
                          before it as well as those specified after it.  Please specify global \
                          options before other arguments.",
-                        String::from_utf8_lossy(tok),
-                        String::from_utf8_lossy(&first),
-                        String::from_utf8_lossy(tok)
+                        quote::escape_unprintable(tok),
+                        quote::escape_unprintable(&first),
+                        quote::escape_unprintable(tok)
                     ));
                 }
             }
@@ -1162,7 +1162,7 @@ impl<'a> Parser<'a> {
             }
             None => Err(Fatal::new(format!(
                 "missing argument to `{}'",
-                String::from_utf8_lossy(name)
+                quote::escape_unprintable(name)
             ))),
         }
     }
@@ -1190,8 +1190,8 @@ impl<'a> Parser<'a> {
     fn bad_arg(name: &[u8], arg: &[u8]) -> Fatal {
         Fatal::new(format!(
             "invalid argument `{}' to `{}'",
-            String::from_utf8_lossy(arg),
-            String::from_utf8_lossy(name)
+            quote::escape_unprintable(arg),
+            quote::escape_unprintable(name)
         ))
     }
 
@@ -1310,11 +1310,11 @@ fn safe_atoi(s: &[u8]) -> Parsed<i32> {
     let erange = || {
         Fatal::new(format!(
             "{}: {}",
-            String::from_utf8_lossy(s),
+            quote::escape_unprintable(s),
             errmsg::strerror(&std::io::Error::from_raw_os_error(34))
         ))
     };
-    let text = String::from_utf8_lossy(s).into_owned();
+    let text = quote::escape_unprintable(s);
     let body = text.trim_start_matches(|c: char| c.is_ascii_whitespace());
     let digits_at = body.strip_prefix(['+', '-']).map_or(0, |_| 1);
     let end = body
@@ -1419,7 +1419,7 @@ fn get_relative_timestamp(s: &[u8], origin: Ts, sec_per_unit: f64) -> Option<(Co
 /// Upstream `insert_type`: the comma-separated letter list `-type`/`-xtype`
 /// take, with its four distinct refusals.
 fn parse_type_letters(name: &[u8], arg: &[u8]) -> Parsed<Vec<u8>> {
-    let pname = String::from_utf8_lossy(name).into_owned();
+    let pname = quote::escape_unprintable(name);
     if arg.is_empty() {
         return Err(Fatal::new(format!(
             "Arguments to {pname} should contain at least one letter"
@@ -1436,13 +1436,13 @@ fn parse_type_letters(name: &[u8], arg: &[u8]) -> Parsed<Vec<u8>> {
         if !matches!(c, b'b' | b'c' | b'd' | b'f' | b'l' | b'p' | b's' | b'D') {
             return Err(Fatal::new(format!(
                 "Unknown argument to {pname}: {}",
-                c as char
+                chr(c)
             )));
         }
         if letters.contains(&c) {
             return Err(Fatal::new(format!(
                 "Duplicate file type '{}' in the argument list to {pname}.",
-                c as char
+                chr(c)
             )));
         }
         letters.push(c);
@@ -1862,7 +1862,7 @@ impl Parser<'_> {
                 let depth = depth.ok_or_else(|| {
                     Fatal::new(format!(
                         "Expected a positive decimal integer argument to {}, but got {}",
-                        String::from_utf8_lossy(tok),
+                        quote::escape_unprintable(tok),
                         quote(&arg)
                     ))
                 })?;
@@ -1990,7 +1990,7 @@ impl Parser<'_> {
             _ => {
                 return Err(Fatal::new(format!(
                     "unknown predicate `{}'",
-                    String::from_utf8_lossy(tok)
+                    quote::escape_unprintable(tok)
                 )));
             }
         }
@@ -2081,10 +2081,7 @@ fn parse_size(arg: &[u8]) -> Parsed<Prim> {
         b'w' => (head, 2, b"w"),
         d if d.is_ascii_digit() => (arg, 512, b""),
         other => {
-            return Err(Fatal::new(format!(
-                "invalid -size type `{}'",
-                other as char
-            )));
+            return Err(Fatal::new(format!("invalid -size type `{}'", chr(other))));
         }
     };
     let (cmp, digits) = get_comp_type(body);
@@ -2130,7 +2127,7 @@ impl Parser<'_> {
                 "warning: you have specified a mode pattern {} (which is equivalent to /000). \
                  The meaning of -perm /000 has now been changed to be consistent with -perm -000; \
                  that is, while it used to match no files, it now matches all files.",
-                String::from_utf8_lossy(arg)
+                quote::escape_unprintable(arg)
             ));
             kind = PermKind::AtLeast;
         }
@@ -2197,7 +2194,7 @@ impl Parser<'_> {
     fn invalid_predicate(tok: &[u8]) -> Fatal {
         Fatal::new(format!(
             "invalid predicate `{}'",
-            String::from_utf8_lossy(tok)
+            quote::escape_unprintable(tok)
         ))
     }
 
@@ -2210,7 +2207,7 @@ impl Parser<'_> {
         if self.argv.get(self.i).is_none() {
             return Err(Fatal::new(format!(
                 "missing argument to `{}'",
-                String::from_utf8_lossy(tok)
+                quote::escape_unprintable(tok)
             )));
         }
         if dir_relative {
@@ -2245,7 +2242,7 @@ impl Parser<'_> {
             self.i = end;
             return Err(Fatal::new(format!(
                 "missing argument to `{}'",
-                String::from_utf8_lossy(tok)
+                quote::escape_unprintable(tok)
             )));
         }
 
@@ -2308,7 +2305,7 @@ fn check_path_safety(action: &[u8], path: Option<&[u8]>) -> Parsed<()> {
                  insecure in combination with the {} action of find.  Please remove the current \
                  directory from your $PATH (that is, remove \".\", doubled colons, or leading or \
                  trailing colons)",
-                String::from_utf8_lossy(action)
+                quote::escape_unprintable(action)
             )));
         }
         if entry.first() != Some(&b'/') {
@@ -2317,7 +2314,7 @@ fn check_path_safety(action: &[u8], path: Option<&[u8]>) -> Parsed<()> {
                  insecure in combination with the {} action of find.  Please remove that entry \
                  from $PATH",
                 quote(entry),
-                String::from_utf8_lossy(action)
+                quote::escape_unprintable(action)
             )));
         }
     }
@@ -2477,11 +2474,19 @@ fn format_specifier_length(ch: u8) -> usize {
 
 /// One byte as it appears inside a diagnostic. A NUL renders as nothing, which
 /// is what C's `%c` does with it once the message reaches a terminal.
+///
+/// Every other byte goes through [`quote::escape_unprintable`], so a byte above
+/// 0x7F comes back as `\ooo`. That is one byte of a character rather than a
+/// character — upstream's `%c` writes it raw and the terminal reassembles it
+/// with its neighbours — but this function is handed *one* byte with no
+/// neighbours to reassemble, so the only two available answers are an octal
+/// escape and U+FFFD. The escape says what the byte was; U+FFFD says only that
+/// there was one.
 fn chr(b: u8) -> String {
     if b == 0 {
         String::new()
     } else {
-        String::from_utf8_lossy(&[b]).into_owned()
+        quote::escape_unprintable(&[b])
     }
 }
 
@@ -2649,7 +2654,7 @@ impl Parser<'_> {
             if !looks_like_expression(&tok, false) {
                 let mut fatal = Fatal::new(format!(
                     "paths must precede expression: `{}'",
-                    String::from_utf8_lossy(&tok)
+                    quote::escape_unprintable(&tok)
                 ));
                 // The second line is a guess, and upstream only offers it when
                 // the token names something that exists — which is the shape a
@@ -2662,7 +2667,7 @@ impl Parser<'_> {
                         .unwrap_or_default();
                     fatal.0.push(format!(
                         "possible unquoted pattern after predicate `{}'?",
-                        String::from_utf8_lossy(&last)
+                        quote::escape_unprintable(&last)
                     ));
                 }
                 return Err(fatal);
@@ -2671,7 +2676,7 @@ impl Parser<'_> {
             let Some(canon) = find_parser(&tok) else {
                 return Err(Fatal::new(format!(
                     "unknown predicate `{}'",
-                    String::from_utf8_lossy(&tok)
+                    quote::escape_unprintable(&tok)
                 )));
             };
 
@@ -2746,7 +2751,7 @@ impl Builder<'_> {
     fn name(&self, idx: usize) -> String {
         self.nodes
             .get(idx)
-            .map(|n| String::from_utf8_lossy(&n.name).into_owned())
+            .map(|n| quote::escape_unprintable(&n.name))
             .unwrap_or_default()
     }
 
@@ -3125,8 +3130,11 @@ fn parse_spec(spec: &[u8], conv: u8) -> extfloat::Spec {
 /// upstream's rule and the reason a script sees raw bytes.
 fn qmark(bytes: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(bytes.len());
-    let text = String::from_utf8_lossy(bytes);
-    if matches!(text, std::borrow::Cow::Borrowed(_)) {
+    // `from_utf8`, not `from_utf8_lossy`: the question here is only whether the
+    // name decodes, and the lossy form answers it by *building the corrupted
+    // string first* and then asking whether it had to. Same answer, and it
+    // cannot leak the U+FFFD version into the branch below by accident.
+    if let Ok(text) = std::str::from_utf8(bytes) {
         for ch in text.chars() {
             if ch.is_control() || (!ch.is_ascii() && ch.is_whitespace()) {
                 out.push(b'?');
@@ -3771,10 +3779,12 @@ fn render_ls(
             }
             Err(e) => {
                 // Not quoted: upstream's `error (0, errno, "%s", name)` puts
-                // the name through a plain `%s`.
+                // the name through a plain `%s`. Escaped rather than written
+                // raw, because this string is a `String` and the path need not
+                // be text — see the `escape_unprintable` note on `bad_arg`.
                 err = Some(format!(
                     "{}: {}",
-                    String::from_utf8_lossy(&it.path),
+                    quote::escape_unprintable(&it.path),
                     errmsg::strerror(&e)
                 ));
             }
@@ -4081,12 +4091,27 @@ impl Ctx<'_> {
 
         if confirm {
             self.flush();
-            eprint!(
-                "< {} ... {} > ? ",
-                String::from_utf8_lossy(&prog),
-                String::from_utf8_lossy(&it.path)
-            );
-            let _ = io::stderr().flush();
+            // Written as bytes, not through `format!`. This is the one
+            // diagnostic in the file whose sink is a byte stream with no
+            // `String` in the way, so it can do what upstream's
+            // `fprintf (stderr, "< %s ... %s > ?", …)` does — put the program
+            // name and the path out exactly as they came in. Everywhere else
+            // the message is a `String` and an undecodable byte has to be
+            // escaped; here it does not, and a prompt that showed the user a
+            // *different* path from the one about to be handed to the command
+            // would be asking them to confirm the wrong thing.
+            //
+            // `write_all` errors are dropped deliberately: the answer to a
+            // failed write on stderr is not a second write to stderr, and the
+            // read that follows is what actually decides whether to run.
+            let mut e = io::stderr().lock();
+            let _ = e.write_all(b"< ");
+            let _ = e.write_all(&prog);
+            let _ = e.write_all(b" ... ");
+            let _ = e.write_all(&it.path);
+            let _ = e.write_all(b" > ? ");
+            let _ = e.flush();
+            drop(e);
             if !self.tree.confirm() {
                 return false;
             }

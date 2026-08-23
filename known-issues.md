@@ -63791,8 +63791,8 @@ the assertion panics — which in the kernel is not a red test, it is a dead
 machine. Each of these is reachable from a `kshell` subcommand, so this is
 a user-typeable kernel panic, not merely a testing inconvenience.
 
-**Found in five modules while converting them for §261** — it was not a
-coincidence in any of them, and all five are now fixed:
+**Found in six modules while converting them for §261** — it was not a
+coincidence in any of them, and all six are now fixed:
 
 | Module | Second-run failure | Fixed in |
 |---|---|---|
@@ -63801,6 +63801,7 @@ coincidence in any of them, and all five are now fixed:
 | `fs::diskencrypt` | test 9 `start_encryption(1, …)` — run 1 leaves volume 1 `Unlocked`, and it only accepts `Unencrypted` | `59bd8befc` |
 | `fs::cloudsync` | test 3 `assert_eq!(list_accounts().len(), 2)` — run 1 leaves account `id1`, its conflict row and an extra `*.bak` exclude behind, so tests 3, 6, 8, 10 and 11 all fail on the second run | `2ebe9f40c` |
 | `fs::fileversion` | test 8 `assert_eq!(list_watches().len(), 1)` — run 1 leaves the watch behind. Worse, run 2's watch then *covers* the fixture, so its `KeepLast(5)` policy silently replaces the default `KeepLast(10)` the capture tests assume | `aae93b532` |
+| `fs::pinnedapps` | test 7 `assert_eq!(count, 1)` — `record_launch` is cumulative, so run 1 leaves `files` at 1 and run 2 reads 2. Test 6's reorder is likewise still in place, having moved `terminal` to position 0 | `d2876326f` |
 
 `fs::cloudsync` also showed a fixture hazard worth naming separately,
 because it is not about leftovers at all and so survives any amount of
@@ -63842,25 +63843,50 @@ and the hostname set to `"fileserver"` in the live table. Wiring it into
 boot as it stood would have made `fileshare show` report sharing switched
 on and the machine renamed, without the user having asked for either.
 
-**The two fixes, and when to use which:**
+**A worse variant: the suite that "fixes" non-idempotency by wiping the
+user's data.** Three of the §261 modules — `fs::certmgr`, `fs::appregistry`
+and `fs::startmenu` — *were* idempotent, and were idempotent for the wrong
+reason: each opened with `clear_all()`. That does make a second run pass,
+and it makes the opening emptiness assertion true by construction. It also
+means `certmgr test` deleted every certificate in the trust store,
+`appreg test` deleted every registered application, and `startmenu test`
+deleted the user's favourites and quick links. These are shell commands. A
+user typing `test` on a subsystem reasonably expects to be told whether it
+works, not to have its contents destroyed. Treat a `clear_all()` at the top
+of a suite as a bug on sight, not as cleanup.
+
+**The three fixes, and when to use which:**
 
 - *Reset at both ends* — `*STATE.lock() = None; init_defaults();` on entry
   and `*STATE.lock() = None;` on exit. Correct when the module has no lazy
   init, so `None` is exactly the state a fresh boot has. This is what
   `fs::inodestat` already did and documented, and what `filevault`,
-  `diskencrypt` and `fileshare` now do.
+  `diskencrypt`, `fileshare`, `screenrec` and `pinnedapps` now do.
 - *Baseline-relative + full cleanup* — capture the row count on entry,
   state every count relative to it, and assert on exit that the table was
   restored. Correct when the module may legitimately hold live rows the
-  suite must not destroy. This is what `netshare` now does.
+  suite must not destroy. This is what `netshare`, `fileversion` and
+  `certmgr` now do.
+- *Decline to run* — check on entry whether the store is populated and, if
+  it is, print a `self-test skipped: …` line and return `Ok(())`. Correct
+  when the module holds user data **and** the suite's assertions are exact
+  counts that cannot be restated relative to a baseline ("exactly one app
+  in Accessories" is not a statement you can make baseline-relative). This
+  is what `appregistry` and `startmenu` now do, and what `fileversion`'s
+  watch guard does. It costs coverage on a machine in use and gains full
+  coverage at boot, where the store is genuinely empty — the right trade,
+  because the alternative on offer is not "more coverage" but "coverage
+  purchased with the user's data".
 
-Prefer the second where the module could plausibly be in use, because the
-first is a data-destroying operation dressed up as a test.
+Prefer the second where the module could plausibly be in use; fall back to
+the third only when the assertions cannot be made relative. Never reach for
+`clear_all()`: the first shape is safe only because `None` is what a fresh
+boot has, which is a fact about the module, not a licence to empty a table.
 
 **Reproduce:** run any such suite's shell subcommand twice, e.g.
 `dencrypt test` then `dencrypt test`.
 
-**The proper fix** is to apply one of the two shapes above to every
+**The proper fix** is to apply one of the three shapes above to every
 state-holding suite in the ~250 still-manual-only set, as each is wired up
 under TD-A-FS-SELFTESTS-NEVER-RUN — checking specifically for (a) an
 opening emptiness/shape assertion, (b) fixtures that are never removed, and

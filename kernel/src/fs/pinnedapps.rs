@@ -20,6 +20,7 @@
 
 #![allow(dead_code)]
 
+use crate::fs::path::{Path, PathBuf};
 use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -54,8 +55,17 @@ impl PinLocation {
 pub struct PinnedApp {
     pub app_name: String,
     pub display_name: String,
-    pub icon_path: String,
-    pub exec_path: String,
+    /// Path to the pin's icon file, or the empty path if it has none.
+    ///
+    /// A `PathBuf`, not a `String`: a path may contain any byte except `/`
+    /// and NUL. See design-decisions.md §261.
+    pub icon_path: PathBuf,
+    /// Path to the executable this pin launches.
+    ///
+    /// A `PathBuf` for the same reason, and here it matters most: a lossily
+    /// decoded path does not merely display wrong, it launches a different
+    /// binary or nothing at all.
+    pub exec_path: PathBuf,
     pub location: PinLocation,
     pub position: u32,
     pub group: String,
@@ -104,8 +114,8 @@ pub fn init_defaults() {
             PinnedApp {
                 app_name: String::from("files"),
                 display_name: String::from("Files"),
-                icon_path: String::from("/sys/icons/files.png"),
-                exec_path: String::from("/usr/bin/files"),
+                icon_path: PathBuf::from("/sys/icons/files.png"),
+                exec_path: PathBuf::from("/usr/bin/files"),
                 location: PinLocation::Taskbar,
                 position: 0,
                 group: String::new(),
@@ -114,8 +124,8 @@ pub fn init_defaults() {
             PinnedApp {
                 app_name: String::from("browser"),
                 display_name: String::from("Web Browser"),
-                icon_path: String::from("/sys/icons/browser.png"),
-                exec_path: String::from("/usr/bin/browser"),
+                icon_path: PathBuf::from("/sys/icons/browser.png"),
+                exec_path: PathBuf::from("/usr/bin/browser"),
                 location: PinLocation::Taskbar,
                 position: 1,
                 group: String::new(),
@@ -124,8 +134,8 @@ pub fn init_defaults() {
             PinnedApp {
                 app_name: String::from("terminal"),
                 display_name: String::from("Terminal"),
-                icon_path: String::from("/sys/icons/terminal.png"),
-                exec_path: String::from("/usr/bin/terminal"),
+                icon_path: PathBuf::from("/sys/icons/terminal.png"),
+                exec_path: PathBuf::from("/usr/bin/terminal"),
                 location: PinLocation::Taskbar,
                 position: 2,
                 group: String::new(),
@@ -134,8 +144,8 @@ pub fn init_defaults() {
             PinnedApp {
                 app_name: String::from("settings"),
                 display_name: String::from("Settings"),
-                icon_path: String::from("/sys/icons/settings.png"),
-                exec_path: String::from("/usr/bin/settings"),
+                icon_path: PathBuf::from("/sys/icons/settings.png"),
+                exec_path: PathBuf::from("/usr/bin/settings"),
                 location: PinLocation::StartMenu,
                 position: 0,
                 group: String::from("System"),
@@ -154,8 +164,9 @@ pub fn pin(
     location: PinLocation,
     app_name: &str,
     display_name: &str,
-    exec_path: &str,
+    exec_path: impl AsRef<Path>,
 ) -> KernelResult<()> {
+    let exec_path = exec_path.as_ref();
     with_state(|state| {
         if state.pins.len() >= MAX_PINS {
             return Err(KernelError::ResourceExhausted);
@@ -179,8 +190,8 @@ pub fn pin(
         state.pins.push(PinnedApp {
             app_name: String::from(app_name),
             display_name: String::from(display_name),
-            icon_path: String::new(),
-            exec_path: String::from(exec_path),
+            icon_path: PathBuf::new(),
+            exec_path: exec_path.to_path_buf(),
             location,
             position: max_pos + 1,
             group: String::new(),
@@ -228,6 +239,60 @@ pub fn set_group(location: PinLocation, app_name: &str, group: &str) -> KernelRe
             .find(|p| p.app_name == app_name && p.location == location)
             .ok_or(KernelError::NotFound)?;
         pin.group = String::from(group);
+        Ok(())
+    })
+}
+
+/// Set the icon file for a pinned app.
+///
+/// Only `init_defaults` used to fill `icon_path` in, so an app the user
+/// pinned themselves was stuck with no icon and no way to give it one. Pass
+/// the empty path to clear it.
+///
+/// # Errors
+///
+/// Returns [`KernelError::NotFound`] if no app of that name is pinned at
+/// `location`.
+pub fn set_icon(
+    location: PinLocation,
+    app_name: &str,
+    icon_path: impl AsRef<Path>,
+) -> KernelResult<()> {
+    let icon_path = icon_path.as_ref();
+    with_state(|state| {
+        let pin = state
+            .pins
+            .iter_mut()
+            .find(|p| p.app_name == app_name && p.location == location)
+            .ok_or(KernelError::NotFound)?;
+        pin.icon_path = icon_path.to_path_buf();
+        Ok(())
+    })
+}
+
+/// Set the executable a pinned app launches.
+///
+/// # Errors
+///
+/// Returns [`KernelError::NotFound`] if no app of that name is pinned at
+/// `location`, and [`KernelError::InvalidArgument`] for the empty path, which
+/// names no executable and would leave the pin unlaunchable.
+pub fn set_exec(
+    location: PinLocation,
+    app_name: &str,
+    exec_path: impl AsRef<Path>,
+) -> KernelResult<()> {
+    let exec_path = exec_path.as_ref();
+    if exec_path.is_empty() {
+        return Err(KernelError::InvalidArgument);
+    }
+    with_state(|state| {
+        let pin = state
+            .pins
+            .iter_mut()
+            .find(|p| p.app_name == app_name && p.location == location)
+            .ok_or(KernelError::NotFound)?;
+        pin.exec_path = exec_path.to_path_buf();
         Ok(())
     })
 }
@@ -302,18 +367,27 @@ pub fn stats() -> (usize, usize, usize, u64, u64) {
 
 pub fn self_test() {
     crate::serial_println!("pinnedapps::self_test() — running tests...");
+
+    // Reset at both ends. `init_defaults()` early-returns once the state
+    // exists and `with_state` does not lazily initialise, so without this the
+    // suite ran exactly once: on a second `pinnedapps test` the reorder in
+    // test 6 and the launch count in test 7 are already in place, and test 7's
+    // `assert_eq!(count, 1)` panics -- which in the kernel is a dead machine,
+    // reachable by typing a shell command. `None` is what a fresh boot has:
+    // nothing calls `init_defaults()` outside the `pinnedapps` commands.
+    *STATE.lock() = None;
     init_defaults();
 
     // 1: Default pins.
     let all = list_all();
     assert_eq!(all.len(), 4);
-    crate::serial_println!("  [1/8] default pins: OK");
+    crate::serial_println!("  [1/9] default pins: OK");
 
     // 2: Taskbar pins.
     let taskbar = list_pins(PinLocation::Taskbar);
     assert_eq!(taskbar.len(), 3);
     assert_eq!(taskbar[0].app_name, "files");
-    crate::serial_println!("  [2/8] taskbar pins: OK");
+    crate::serial_println!("  [2/9] taskbar pins: OK");
 
     // 3: Pin new app.
     pin(
@@ -325,27 +399,27 @@ pub fn self_test() {
     .expect("pin");
     assert!(is_pinned(PinLocation::Taskbar, "editor"));
     assert_eq!(list_pins(PinLocation::Taskbar).len(), 4);
-    crate::serial_println!("  [3/8] pin: OK");
+    crate::serial_println!("  [3/9] pin: OK");
 
     // 4: Duplicate rejection.
     assert!(pin(PinLocation::Taskbar, "editor", "Editor", "/usr/bin/editor").is_err());
-    crate::serial_println!("  [4/8] duplicate rejection: OK");
+    crate::serial_println!("  [4/9] duplicate rejection: OK");
 
     // 5: Unpin.
     unpin(PinLocation::Taskbar, "editor").expect("unpin");
     assert!(!is_pinned(PinLocation::Taskbar, "editor"));
-    crate::serial_println!("  [5/8] unpin: OK");
+    crate::serial_println!("  [5/9] unpin: OK");
 
     // 6: Reorder.
     reorder(PinLocation::Taskbar, "terminal", 0).expect("reorder");
     let taskbar = list_pins(PinLocation::Taskbar);
     assert_eq!(taskbar[0].app_name, "terminal");
-    crate::serial_println!("  [6/8] reorder: OK");
+    crate::serial_println!("  [6/9] reorder: OK");
 
     // 7: Launch tracking.
     let count = record_launch("files").expect("launch");
     assert_eq!(count, 1);
-    crate::serial_println!("  [7/8] launch: OK");
+    crate::serial_println!("  [7/9] launch: OK");
 
     // 8: Stats.
     let (total, tb, sm, launches, ops) = stats();
@@ -354,7 +428,59 @@ pub fn self_test() {
     assert_eq!(sm, 1);
     assert_eq!(launches, 1);
     assert!(ops > 0);
-    crate::serial_println!("  [8/8] stats: OK");
+    crate::serial_println!("  [8/9] stats: OK");
 
-    crate::serial_println!("pinnedapps::self_test() — all 8 tests passed");
+    // 9: Non-UTF-8 executable and icon paths survive byte-exact (§261).
+    //
+    // A pin is a launcher: its `exec_path` is what gets run. Under the old
+    // `String` typing an app installed at a path holding a byte with no UTF-8
+    // spelling was pinned as a U+FFFD-bearing name, so clicking the pin ran a
+    // different binary or nothing, and two such apps became indistinguishable.
+    let raw_exec = Path::new(b"/opt/pl\xFFyer/bin/play");
+    let raw_icon = Path::new(b"/sys/icons/pl\xFEyer.png");
+    pin(PinLocation::Desktop, "rawapp", "Raw Path App", raw_exec).expect("pin raw");
+    set_icon(PinLocation::Desktop, "rawapp", raw_icon).expect("set raw icon");
+    let p = list_pins(PinLocation::Desktop)
+        .into_iter()
+        .find(|p| p.app_name == "rawapp")
+        .expect("rawapp pinned");
+    assert_eq!(
+        p.exec_path.as_path().as_bytes(),
+        &b"/opt/pl\xFFyer/bin/play"[..],
+        "the executable path must round-trip byte-for-byte"
+    );
+    assert_eq!(
+        p.icon_path.as_path().as_bytes(),
+        &b"/sys/icons/pl\xFEyer.png"[..],
+        "the icon path must round-trip byte-for-byte"
+    );
+
+    // `set_exec` must replace the path, and must refuse the empty one: a pin
+    // with no executable is a button that does nothing.
+    set_exec(
+        PinLocation::Desktop,
+        "rawapp",
+        Path::new(b"/opt/pl\xFEyer/bin/play"),
+    )
+    .expect("set raw exec");
+    let p = list_pins(PinLocation::Desktop)
+        .into_iter()
+        .find(|p| p.app_name == "rawapp")
+        .expect("rawapp still pinned");
+    assert_eq!(
+        p.exec_path.as_path().as_bytes(),
+        &b"/opt/pl\xFEyer/bin/play"[..],
+        "paths differing only in a byte with no UTF-8 spelling must stay distinct"
+    );
+    assert!(set_exec(PinLocation::Desktop, "rawapp", "").is_err());
+    assert!(set_icon(PinLocation::Desktop, "nosuchapp", raw_icon).is_err());
+
+    unpin(PinLocation::Desktop, "rawapp").expect("unpin raw");
+    crate::serial_println!("  [9/9] non-UTF-8 exec and icon paths: OK");
+
+    // Back to the uninitialised state a fresh boot has, so the suite does not
+    // leave its reorder and launch counts in a table the user then reads.
+    *STATE.lock() = None;
+
+    crate::serial_println!("pinnedapps::self_test() — all 9 tests passed");
 }

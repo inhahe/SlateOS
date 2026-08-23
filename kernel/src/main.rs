@@ -5546,6 +5546,11 @@ extern "C" fn kernel_main() -> ! {
             if let Err(e) = fs::startmenu::self_test() {
                 serial_println!("WARNING: startmenu self-test failed: {:?}", e);
             }
+            // pinnedapps was reachable only from a `kshell` subcommand
+            // (TD-A-FS-SELFTESTS-NEVER-RUN). Safe here: it resets `STATE` to
+            // `None` at both ends, which is what a fresh boot has -- nothing
+            // calls `init_defaults()` outside the `pinnedapps` commands.
+            fs::pinnedapps::self_test();
             if let Err(e) = crate::sockact::self_test() {
                 serial_println!("WARNING: socket-activation self-test failed: {:?}", e);
             }

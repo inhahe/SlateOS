@@ -60615,6 +60615,10 @@ fn cmd_pinnedapps(args: &str) {
                             group,
                             p.launch_count
                         );
+                        shell_println!("      exec: {}", p.exec_path.display());
+                        if !p.icon_path.is_empty() {
+                            shell_println!("      icon: {}", p.icon_path.display());
+                        }
                     }
                 }
             }
@@ -60686,6 +60690,38 @@ fn cmd_pinnedapps(args: &str) {
                 None => shell_println!("Usage: pinnedapps move <location> <app> <position>"),
             }
         }
+        "icon" | "exec" => {
+            let loc_str = parts.get(1).copied().unwrap_or("");
+            let app = parts.get(2).copied().unwrap_or("");
+            // The rest of the line, not just one token: a path may legally
+            // contain spaces (our only forbidden bytes are `/` and NUL).
+            let path = parts.get(3..).map(|s| s.join(" ")).unwrap_or_default();
+            let loc = match loc_str {
+                "taskbar" | "tb" => pinnedapps::PinLocation::Taskbar,
+                "start" | "sm" => pinnedapps::PinLocation::StartMenu,
+                "desktop" | "dt" => pinnedapps::PinLocation::Desktop,
+                _ => {
+                    shell_println!(
+                        "Usage: pinnedapps {} <taskbar|start|desktop> <app> <path>",
+                        sub
+                    );
+                    return;
+                }
+            };
+            if app.is_empty() {
+                shell_println!("Usage: pinnedapps {} <location> <app> <path>", sub);
+                return;
+            }
+            let res = if sub == "icon" {
+                pinnedapps::set_icon(loc, app, &path)
+            } else {
+                pinnedapps::set_exec(loc, app, &path)
+            };
+            match res {
+                Ok(()) => shell_println!("'{}' {} set to '{}'.", app, sub, path),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
         "launch" => {
             let app = parts.get(1).copied().unwrap_or("");
             if app.is_empty() {
@@ -60713,6 +60749,8 @@ fn cmd_pinnedapps(args: &str) {
             shell_println!("  pin <loc> <app> [name] Pin app");
             shell_println!("  unpin <loc> <app>      Unpin app");
             shell_println!("  move <loc> <app> <pos>  Reorder");
+            shell_println!("  exec <loc> <app> <path> Set executable");
+            shell_println!("  icon <loc> <app> <path> Set icon (empty clears)");
             shell_println!("  launch <app>           Record launch");
             shell_println!("  Locations: taskbar(tb), start(sm), desktop(dt)");
             shell_println!("  stats / test / init");

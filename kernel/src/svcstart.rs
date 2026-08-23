@@ -960,8 +960,18 @@ pub fn procfs_content() -> String {
 ///
 /// Each pristine value is the `static`'s own initialiser, which is the one
 /// spelling of "what a fresh boot holds" that cannot drift away from it.
+///
+/// The suite needs an empty *service manager* too — it calls `init_defaults`
+/// and then asserts the exact set of services that produces — and it used to
+/// get one by calling `servicemgr::clear_all()`, which deregisters every
+/// service on the machine.  `with_pristine` would not have caught that: its
+/// guarantee is that *this* module's state comes back, and it says nothing
+/// about anything the suite reaches into.  So the service table is moved aside
+/// as well, by [`servicemgr::with_pristine_state`].
 pub fn self_test() -> KernelResult<()> {
-    crate::fs::selftest::with_pristine(&STATE, State::new(), self_test_inner)
+    servicemgr::with_pristine_state(|| {
+        crate::fs::selftest::with_pristine(&STATE, State::new(), self_test_inner)
+    })
 }
 
 fn self_test_inner() -> KernelResult<()> {
@@ -1167,12 +1177,9 @@ fn self_test_inner() -> KernelResult<()> {
     }
     crate::serial_println!("[svcstart]   10. Stats and procfs: OK");
 
-    // Clean up.
-    servicemgr::clear_all();
-    {
-        let mut state = STATE.lock();
-        *state = State::new();
-    }
+    // No clean-up: `self_test` runs this against substitutes for both this
+    // module's state and the service manager's, and both are dropped on the way
+    // out along with everything registered above.
 
     crate::serial_println!("[svcstart] All 10 self-tests passed.");
     Ok(())

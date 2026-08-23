@@ -655,6 +655,17 @@ pub fn procfs_content() -> String {
 ///
 /// Each pristine value is the `static`'s own initialiser, which is the one
 /// spelling of "what a fresh boot holds" that cannot drift away from it.
+///
+/// One thing outside this module is left alone deliberately: the suite calls
+/// `icmp::next_trace_seq` and `icmpv6::next_trace6_seq` twice each, so it
+/// advances both counters by two and does not put them back.  That is harmless
+/// rather than merely tolerated.  The counter is a correlation nonce — it goes
+/// in a probe's identifier so a reply can be matched to the probe that caused
+/// it — so any value is as good as any other, it is `wrapping_add` and cannot
+/// overflow, and the suite never calls `record_trace_probe`, so no in-flight
+/// probe is registered under the numbers it burns.  The assertions are stated
+/// relative to what it read (`s2 == s1.wrapping_add(1)`) rather than against a
+/// literal, so they hold whatever the counter started at.
 pub fn self_test() -> KernelResult<()> {
     let _pristine_active = crate::fs::selftest::pristine_atomic(&ACTIVE, false);
     let _pristine_total_traces = crate::fs::selftest::pristine_atomic(&TOTAL_TRACES, 0);

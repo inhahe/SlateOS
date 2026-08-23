@@ -950,8 +950,48 @@ pub fn procfs_content() -> String {
 ///
 /// Each pristine value is the `static`'s own initialiser, which is the one
 /// spelling of "what a fresh boot holds" that cannot drift away from it.
+///
+/// This module's state is not all in the table, and the rest of it is not even
+/// in this module: the suite makes up events, and everything downstream of that
+/// is real.  Two further things are therefore moved aside.
+///
+/// * The **event ring**, via [`eventlog::with_pristine_state`].  The suite's
+///   invented events are indistinguishable from real ones once they are in the
+///   ring, and on a machine that has been up a while they push real history out
+///   of it.  The body also called `eventlog::clear()` outright, twice.
+/// * The **log directory**.  A flush writes JSON lines to
+///   `<log_dir>/combined.jsonl` and rotates it when it grows, so against the
+///   default `/var/log/events` the suite appended fabricated entries to the
+///   operator's persisted system log and could rotate genuine history off the
+///   end of it.  [`self_test_config`] points the suite at a scratch directory,
+///   which this wrapper then removes — the directory is real, so nothing else
+///   will.
 pub fn self_test() -> KernelResult<()> {
-    crate::fs::selftest::with_pristine(&STATE, State::new(), self_test_inner)
+    let result = eventlog::with_pristine_state(|| {
+        crate::fs::selftest::with_pristine(&STATE, State::new(), self_test_inner)
+    });
+    // Deliberately after the restore and unconditional: the files exist on disk
+    // whether or not the suite reached its last assertion. The error is dropped
+    // because there is nothing useful to do about a scratch directory that will
+    // not go away, and because on the first run it does not exist at all.
+    let _ = crate::fs::Vfs::remove_recursive(SELF_TEST_LOG_DIR);
+    result
+}
+
+/// Where the suite's log files go instead of `/var/log/events`.
+const SELF_TEST_LOG_DIR: &str = "/tmp/logpersist-selftest";
+
+/// The default configuration, redirected to [`SELF_TEST_LOG_DIR`].
+///
+/// The directory is chosen by whoever calls `init`, not by the state the
+/// `static` holds, so `with_pristine` cannot redirect it: `init()` overwrites
+/// the pristine `log_dir` with `RotationConfig::default()`'s.  Everything else
+/// is left at its default so the suite exercises the real rotation thresholds.
+fn self_test_config() -> RotationConfig {
+    RotationConfig {
+        log_dir: String::from(SELF_TEST_LOG_DIR),
+        ..RotationConfig::default()
+    }
 }
 
 fn self_test_inner() -> KernelResult<()> {
@@ -969,7 +1009,7 @@ fn self_test_inner() -> KernelResult<()> {
         state.total_pruned = 0;
         state.global_last_flushed = 0;
     }
-    init();
+    init_with_config(self_test_config());
     {
         let state = STATE.lock();
         if !state.initialized {
@@ -1056,7 +1096,7 @@ fn self_test_inner() -> KernelResult<()> {
     }
     init_with_config(RotationConfig {
         mode: RotationMode::PerNamespace,
-        ..RotationConfig::default()
+        ..self_test_config()
     });
     {
         let state = STATE.lock();
@@ -1079,8 +1119,8 @@ fn self_test_inner() -> KernelResult<()> {
     }
     crate::serial_println!("[logpersist]   6. Prune (empty): OK");
 
-    // Clean up.
-    eventlog::clear();
+    // No clean-up of the ring here: `self_test` runs this against a substitute
+    // one, which is dropped on the way out along with every event emitted above.
     crate::serial_println!("[logpersist] All 6 self-tests passed.");
     Ok(())
 }

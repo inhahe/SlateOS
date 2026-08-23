@@ -1116,6 +1116,28 @@ pub fn clear() {
     GLOBAL_SEQ.store(0, Ordering::Relaxed);
 }
 
+/// Run `body` against an empty event log, then put the real one back.
+///
+/// Offered as a function rather than by making [`EVENT_RING`] visible because
+/// what a caller needs is the guarantee, not the static: `GLOBAL_SEQ` lives
+/// outside the ring and has to be made pristine alongside it, and a caller
+/// holding the `Mutex` would have to remember that.
+///
+/// Every module whose self-test emits events wants this — the events a suite
+/// makes up are indistinguishable from real ones once they are in the ring, and
+/// on a machine that has been up for a while they push real history out of it.
+/// `crate::logpersist` is the caller that forced it; see
+/// `crate::fs::selftest` for the wider problem this is one instance of.
+///
+/// A pristine `EventRing` has `initialized: false` and an empty `entries`, and
+/// that is correct rather than merely tolerable: [`EventRing::write`] opens with
+/// `ensure_init`, so the first emission allocates the buffer exactly as it does
+/// on a fresh boot. There is no separate `init()` to remember to call.
+pub(crate) fn with_pristine_state<R>(body: impl FnOnce() -> R) -> R {
+    let _pristine_seq = crate::fs::selftest::pristine_atomic(&GLOBAL_SEQ, 0);
+    crate::fs::selftest::with_pristine(&EVENT_RING, EventRing::new(), body)
+}
+
 // ---------------------------------------------------------------------------
 // Procfs content generation
 // ---------------------------------------------------------------------------
@@ -1156,12 +1178,18 @@ pub fn procfs_content() -> String {
 // Self-test
 // ---------------------------------------------------------------------------
 
-/// Run event logging self-tests.
+/// Run the module's self-test suite against state of its own.
+///
+/// The suite emits events and clears the ring, so on a live machine it used to
+/// destroy the operator's event history — and, because the ring is empty at
+/// boot, the boot test was green either way. It now runs against a substitute
+/// ring; see [`with_pristine_state`] and `crate::fs::selftest`.
 pub fn self_test() -> KernelResult<()> {
-    crate::serial_println!("[eventlog] Running event logging self-tests...");
+    with_pristine_state(self_test_inner)
+}
 
-    // Save state and clear for testing.
-    let _saved_total = total_events();
+fn self_test_inner() -> KernelResult<()> {
+    crate::serial_println!("[eventlog] Running event logging self-tests...");
 
     {
         #[inline(never)]
@@ -1424,8 +1452,8 @@ pub fn self_test() -> KernelResult<()> {
         case()?;
     }
 
-    // Clean up.
-    clear();
+    // No clean-up: the substitute ring is dropped on the way out, taking every
+    // event this suite emitted with it.
     crate::serial_println!("[eventlog] All 10 self-tests passed.");
     Ok(())
 }

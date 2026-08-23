@@ -1,6 +1,7 @@
 #![deny(clippy::all)]
 //! namecheap-cli — Slate OS personality CLI for Namecheap, the long-standing affordable registrar.
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -221,17 +222,47 @@ fn run_namecheap(args: &[String], prog: &str) -> i32 {
         return 0;
     };
     match sub.as_str() {
-        "help" | "-h" | "--help" => { print_help(prog); 0 }
-        "version" | "-V" | "--version" => { print_version(); 0 }
-        "about" => { cmd_about(); 0 }
-        "domains" => { cmd_domains(); 0 }
-        "privacy" => { cmd_privacy(); 0 }
-        "privateemail" => { cmd_privateemail(); 0 }
-        "sslcerts" => { cmd_sslcerts(); 0 }
-        "hosting" => { cmd_hosting(); 0 }
-        "activism" => { cmd_activism(); 0 }
+        "help" | "-h" | "--help" => {
+            print_help(prog);
+            0
+        }
+        "version" | "-V" | "--version" => {
+            print_version();
+            0
+        }
+        "about" => {
+            cmd_about();
+            0
+        }
+        "domains" => {
+            cmd_domains();
+            0
+        }
+        "privacy" => {
+            cmd_privacy();
+            0
+        }
+        "privateemail" => {
+            cmd_privateemail();
+            0
+        }
+        "sslcerts" => {
+            cmd_sslcerts();
+            0
+        }
+        "hosting" => {
+            cmd_hosting();
+            0
+        }
+        "activism" => {
+            cmd_activism();
+            0
+        }
         other => {
-            eprintln!("{prog}: unknown subcommand '{other}'. Try '{prog} help'.");
+            eprintln!(
+                "{prog}: unknown subcommand {}. Try '{prog} help'.",
+                quoteaf_os(other)
+            );
             2
         }
     }

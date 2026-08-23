@@ -4,6 +4,7 @@
 //!
 //! Single personality: `nomad`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -78,8 +79,12 @@ fn run_nomad(args: Vec<String>) -> i32 {
             let file = args.get(1).map(|s| s.as_str()).unwrap_or("job.nomad");
             println!("==> 2024-01-15T14:30:00Z: Monitoring evaluation \"abc123\"");
             println!("    2024-01-15T14:30:00Z: Evaluation triggered by job \"web-app\"");
-            println!("    2024-01-15T14:30:01Z: Evaluation status changed: \"pending\" -> \"complete\"");
-            println!("==> 2024-01-15T14:30:01Z: Evaluation \"abc123\" finished with status \"complete\"");
+            println!(
+                "    2024-01-15T14:30:01Z: Evaluation status changed: \"pending\" -> \"complete\""
+            );
+            println!(
+                "==> 2024-01-15T14:30:01Z: Evaluation \"abc123\" finished with status \"complete\""
+            );
             println!("==> 2024-01-15T14:30:01Z: Monitoring deployment \"def456\"");
             println!("    2024-01-15T14:30:10Z: Deployment \"def456\" successful");
             println!("  (from {})", file);
@@ -123,7 +128,7 @@ fn run_nomad(args: Vec<String>) -> i32 {
             if cmd.is_empty() {
                 eprintln!("Usage: nomad <command>. See --help.");
             } else {
-                eprintln!("Error: unknown command '{}'. See --help.", cmd);
+                eprintln!("Error: unknown command {}. See --help.", quoteaf_os(cmd));
             }
             1
         }
@@ -139,7 +144,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_nomad};
+    use super::run_nomad;
 
     #[test]
     fn help_exits_zero() {

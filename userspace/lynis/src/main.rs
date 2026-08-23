@@ -4,6 +4,7 @@
 //!
 //! Single personality: `lynis`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -39,10 +40,18 @@ fn run_lynis(args: Vec<String>) -> i32 {
             if sub == "system" {
                 println!("[ Lynis 3.1.1 (Slate OS) ]");
                 println!();
-                println!("################################################################################");
-                println!("  Lynis comes with ABSOLUTELY NO WARRANTY. This is free software, and you are");
-                println!("  welcome to redistribute it under the terms of the GNU General Public License.");
-                println!("################################################################################");
+                println!(
+                    "################################################################################"
+                );
+                println!(
+                    "  Lynis comes with ABSOLUTELY NO WARRANTY. This is free software, and you are"
+                );
+                println!(
+                    "  welcome to redistribute it under the terms of the GNU General Public License."
+                );
+                println!(
+                    "################################################################################"
+                );
                 println!();
                 println!("[+] Initializing program");
                 println!("------------------------------------");
@@ -97,7 +106,7 @@ fn run_lynis(args: Vec<String>) -> i32 {
         }
         "update" => println!("No updates available. Version 3.1.1 is current."),
         _ => {
-            eprintln!("Unknown command '{}'. Use --help.", cmd);
+            eprintln!("Unknown command {}. Use --help.", quoteaf_os(cmd));
             return 1;
         }
     }
@@ -113,7 +122,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_lynis};
+    use super::run_lynis;
 
     #[test]
     fn help_exits_zero() {

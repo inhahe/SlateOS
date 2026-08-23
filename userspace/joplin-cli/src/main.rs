@@ -4,11 +4,16 @@
 //!
 //! Multi-personality: `joplin-desktop`, `joplin`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_desktop(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -19,7 +24,10 @@ fn run_desktop(args: &[String], _prog: &str) -> i32 {
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("joplin-desktop v2.14 (Slate OS)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("joplin-desktop v2.14 (Slate OS)");
+        return 0;
+    }
     println!("joplin-desktop: note-taking application started");
     println!("  Notebooks: 8");
     println!("  Notes: 256");
@@ -43,7 +51,10 @@ fn run_terminal(args: &[String], _prog: &str) -> i32 {
         println!("  search QUERY      Search notes");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("joplin v2.14 (Slate OS)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("joplin v2.14 (Slate OS)");
+        return 0;
+    }
     let cmd = args.first().map(|s| s.as_str()).unwrap_or("ls");
     match cmd {
         "ls" => {
@@ -56,7 +67,7 @@ fn run_terminal(args: &[String], _prog: &str) -> i32 {
         "sync" => println!("Synchronizing... done (0 conflicts)"),
         "search" => {
             let query = args.get(1).map(|s| s.as_str()).unwrap_or("");
-            println!("Search results for '{}': 5 notes found", query);
+            println!("Search results for {}: 5 notes found", quoteaf_os(query));
         }
         _ => println!("joplin: {}", cmd),
     }
@@ -65,7 +76,10 @@ fn run_terminal(args: &[String], _prog: &str) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "joplin-desktop".to_string());
+    let prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "joplin-desktop".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = match prog.as_str() {
         "joplin" => run_terminal(&rest, &prog),
@@ -76,7 +90,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_desktop};
+    use super::{basename, run_desktop, strip_ext};
 
     #[test]
     fn basename_strips_path() {

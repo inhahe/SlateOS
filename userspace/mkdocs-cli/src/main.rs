@@ -4,6 +4,7 @@
 //!
 //! Multi-personality: `mkdocs`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -36,7 +37,11 @@ fn run_mkdocs(args: &[String]) -> i32 {
             println!("INFO    -  Documentation built in 0.45 seconds");
         }
         "serve" => {
-            let port = args.windows(2).find(|w| w[0] == "-a").map(|w| w[1].as_str()).unwrap_or("127.0.0.1:8000");
+            let port = args
+                .windows(2)
+                .find(|w| w[0] == "-a")
+                .map(|w| w[1].as_str())
+                .unwrap_or("127.0.0.1:8000");
             println!("INFO    -  Building documentation...");
             println!("INFO    -  Serving on http://{}/", port);
             println!("INFO    -  Start watching for changes...");
@@ -47,7 +52,7 @@ fn run_mkdocs(args: &[String]) -> i32 {
             println!("INFO    -  Deploying to GitHub Pages");
             println!("INFO    -  Deployed successfully.");
         }
-        _ => println!("mkdocs: '{}' completed", subcmd),
+        _ => println!("mkdocs: {} completed", quoteaf_os(subcmd)),
     }
     0
 }
@@ -61,7 +66,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_mkdocs};
+    use super::run_mkdocs;
 
     #[test]
     fn help_exits_zero() {

@@ -1,6 +1,7 @@
 #![deny(clippy::all)]
 //! payload-cli — Slate OS personality CLI for Payload, the Next.js-native headless CMS.
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -221,17 +222,47 @@ fn run_payload(args: &[String], prog: &str) -> i32 {
         return 0;
     };
     match sub.as_str() {
-        "help" | "-h" | "--help" => { print_help(prog); 0 }
-        "version" | "-V" | "--version" => { print_version(); 0 }
-        "about" => { cmd_about(); 0 }
-        "config" => { cmd_config(); 0 }
-        "v3" => { cmd_v3(); 0 }
-        "api" => { cmd_api(); 0 }
-        "cloud" => { cmd_cloud(); 0 }
-        "vercel" => { cmd_vercel(); 0 }
-        "customers" => { cmd_customers(); 0 }
+        "help" | "-h" | "--help" => {
+            print_help(prog);
+            0
+        }
+        "version" | "-V" | "--version" => {
+            print_version();
+            0
+        }
+        "about" => {
+            cmd_about();
+            0
+        }
+        "config" => {
+            cmd_config();
+            0
+        }
+        "v3" => {
+            cmd_v3();
+            0
+        }
+        "api" => {
+            cmd_api();
+            0
+        }
+        "cloud" => {
+            cmd_cloud();
+            0
+        }
+        "vercel" => {
+            cmd_vercel();
+            0
+        }
+        "customers" => {
+            cmd_customers();
+            0
+        }
         other => {
-            eprintln!("{prog}: unknown subcommand '{other}'. Try '{prog} help'.");
+            eprintln!(
+                "{prog}: unknown subcommand {}. Try '{prog} help'.",
+                quoteaf_os(other)
+            );
             2
         }
     }

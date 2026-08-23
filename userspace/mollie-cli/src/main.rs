@@ -1,6 +1,7 @@
 #![deny(clippy::all)]
 //! mollie-cli — Slate OS Mollie European payments personality CLI.
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -140,7 +141,7 @@ fn cmd_onboarding() {
     println!("  3. Identity verification:");
     println!("     • Bank verification — small refundable payment from your IBAN");
     println!("     • For NL: iDIN (digital ID) for instant verification");
-    println!     ("     • Document upload as fallback");
+    println!("     • Document upload as fallback");
     println!();
     println!("  4. Activation review:");
     println!("     • Typically same-day for NL/BE businesses with clean KvK records");
@@ -257,7 +258,7 @@ fn run_mollie(args: &[String], prog: &str) -> i32 {
         "help" | "--help" | "-h" => print_help(prog),
         "version" | "--version" | "-V" => print_version(),
         other => {
-            eprintln!("{prog}: unknown subcommand '{other}'");
+            eprintln!("{prog}: unknown subcommand {}", quoteaf_os(other));
             eprintln!("Try '{prog} help' for the list of subcommands.");
             return 2;
         }

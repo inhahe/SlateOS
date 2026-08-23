@@ -4,6 +4,7 @@
 //!
 //! Multi-personality: `osmium`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -72,7 +73,7 @@ fn run_osmium(args: &[String]) -> i32 {
             println!("osmium export: exporting to GeoJSON...");
             println!("  23,456 features exported.");
         }
-        _ => println!("osmium: '{}' completed", subcmd),
+        _ => println!("osmium: {} completed", quoteaf_os(subcmd)),
     }
     0
 }
@@ -86,7 +87,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_osmium};
+    use super::run_osmium;
 
     #[test]
     fn help_exits_zero() {

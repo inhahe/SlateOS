@@ -4,6 +4,7 @@
 //!
 //! Single personality: `mdbook`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -55,7 +56,8 @@ fn run_mdbook(args: Vec<String>) -> i32 {
             0
         }
         "serve" => {
-            let port = args.windows(2)
+            let port = args
+                .windows(2)
                 .find(|w| w[0] == "-p" || w[0] == "--port")
                 .and_then(|w| w[1].parse::<u16>().ok())
                 .unwrap_or(3000);
@@ -93,7 +95,7 @@ fn run_mdbook(args: Vec<String>) -> i32 {
             0
         }
         _ => {
-            eprintln!("Error: unknown command '{}'. See --help.", cmd);
+            eprintln!("Error: unknown command {}. See --help.", quoteaf_os(cmd));
             1
         }
     }
@@ -108,7 +110,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_mdbook};
+    use super::run_mdbook;
 
     #[test]
     fn help_exits_zero() {

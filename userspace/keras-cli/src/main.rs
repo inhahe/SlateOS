@@ -4,6 +4,7 @@
 //!
 //! Multi-personality: `keras`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -55,7 +56,7 @@ fn run_keras(args: &[String]) -> i32 {
             println!("  Model.fit 1 epoch (MNIST, batch=128): 3.2 s");
             println!("  Model.predict (ResNet50, batch=32): 4.1 ms");
         }
-        _ => println!("keras: command '{}' completed", subcmd),
+        _ => println!("keras: command {} completed", quoteaf_os(subcmd)),
     }
     0
 }
@@ -69,7 +70,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_keras};
+    use super::run_keras;
 
     #[test]
     fn help_exits_zero() {

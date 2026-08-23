@@ -1,6 +1,7 @@
 #![deny(clippy::all)]
 //! ns1-cli — Slate OS personality CLI for NS1, the intelligent DNS + traffic steering platform.
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -225,17 +226,47 @@ fn run_ns1(args: &[String], prog: &str) -> i32 {
         return 0;
     };
     match sub.as_str() {
-        "help" | "-h" | "--help" => { print_help(prog); 0 }
-        "version" | "-V" | "--version" => { print_version(); 0 }
-        "about" => { cmd_about(); 0 }
-        "pulsar" => { cmd_pulsar(); 0 }
-        "filters" => { cmd_filters(); 0 }
-        "api" => { cmd_api(); 0 }
-        "private" => { cmd_private(); 0 }
-        "ibm" => { cmd_ibm(); 0 }
-        "customers" => { cmd_customers(); 0 }
+        "help" | "-h" | "--help" => {
+            print_help(prog);
+            0
+        }
+        "version" | "-V" | "--version" => {
+            print_version();
+            0
+        }
+        "about" => {
+            cmd_about();
+            0
+        }
+        "pulsar" => {
+            cmd_pulsar();
+            0
+        }
+        "filters" => {
+            cmd_filters();
+            0
+        }
+        "api" => {
+            cmd_api();
+            0
+        }
+        "private" => {
+            cmd_private();
+            0
+        }
+        "ibm" => {
+            cmd_ibm();
+            0
+        }
+        "customers" => {
+            cmd_customers();
+            0
+        }
         other => {
-            eprintln!("{prog}: unknown subcommand '{other}'. Try '{prog} help'.");
+            eprintln!(
+                "{prog}: unknown subcommand {}. Try '{prog} help'.",
+                quoteaf_os(other)
+            );
             2
         }
     }

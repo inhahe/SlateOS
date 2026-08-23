@@ -4,6 +4,7 @@
 //!
 //! Single personality: `occ` (Nextcloud command-line interface)
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -144,7 +145,10 @@ fn run_occ(args: Vec<String>) -> i32 {
             0
         }
         "files:scan" => {
-            let user = cmd_args.iter().find(|a| !a.starts_with('-')).map(|s| s.as_str());
+            let user = cmd_args
+                .iter()
+                .find(|a| !a.starts_with('-'))
+                .map(|s| s.as_str());
             if let Some(u) = user {
                 println!("Starting scan for user {} ...", u);
             } else {
@@ -178,7 +182,13 @@ fn run_occ(args: Vec<String>) -> i32 {
             println!("  - enabled: false");
             0
         }
-        other => { eprintln!("occ: unknown command '{}'. Run 'occ list' for help.", other); 1 }
+        other => {
+            eprintln!(
+                "occ: unknown command {}. Run 'occ list' for help.",
+                quoteaf_os(other)
+            );
+            1
+        }
     }
 }
 
@@ -191,7 +201,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_occ};
+    use super::run_occ;
 
     #[test]
     fn help_exits_zero() {

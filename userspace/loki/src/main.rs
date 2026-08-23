@@ -4,6 +4,7 @@
 //!
 //! Multi-personality: `loki`, `logcli`, `promtail`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -28,17 +29,35 @@ fn run_loki(args: Vec<String>) -> i32 {
         return 0;
     }
 
-    let config = args.iter().find_map(|a| a.strip_prefix("--config.file=")
-        .or_else(|| a.strip_prefix("-config.file=")))
+    let config = args
+        .iter()
+        .find_map(|a| {
+            a.strip_prefix("--config.file=")
+                .or_else(|| a.strip_prefix("-config.file="))
+        })
         .unwrap_or("loki.yaml");
-    let target = args.iter().find_map(|a| a.strip_prefix("--target="))
+    let target = args
+        .iter()
+        .find_map(|a| a.strip_prefix("--target="))
         .unwrap_or("all");
 
-    println!("level=info ts=2025-05-22T10:00:00.000Z caller=main.go msg=\"Starting Loki\" version=\"3.0.0 (Slate OS)\"");
-    println!("level=info ts=2025-05-22T10:00:00.001Z caller=main.go msg=\"Loading configuration\" file=\"{}\"", config);
-    println!("level=info ts=2025-05-22T10:00:00.010Z caller=modules.go msg=\"Running target\" target=\"{}\"", target);
-    println!("level=info ts=2025-05-22T10:00:00.050Z caller=server.go msg=\"HTTP server listening\" address=:3100");
-    println!("level=info ts=2025-05-22T10:00:00.051Z caller=server.go msg=\"gRPC server listening\" address=:9095");
+    println!(
+        "level=info ts=2025-05-22T10:00:00.000Z caller=main.go msg=\"Starting Loki\" version=\"3.0.0 (Slate OS)\""
+    );
+    println!(
+        "level=info ts=2025-05-22T10:00:00.001Z caller=main.go msg=\"Loading configuration\" file=\"{}\"",
+        config
+    );
+    println!(
+        "level=info ts=2025-05-22T10:00:00.010Z caller=modules.go msg=\"Running target\" target=\"{}\"",
+        target
+    );
+    println!(
+        "level=info ts=2025-05-22T10:00:00.050Z caller=server.go msg=\"HTTP server listening\" address=:3100"
+    );
+    println!(
+        "level=info ts=2025-05-22T10:00:00.051Z caller=server.go msg=\"gRPC server listening\" address=:9095"
+    );
     0
 }
 
@@ -65,9 +84,15 @@ fn run_logcli(args: Vec<String>) -> i32 {
     let cmd = args.first().map(|s| s.as_str()).unwrap_or("query");
     match cmd {
         "query" => {
-            println!("2025-05-22T10:00:00Z {{app=\"myapp\"}} level=info msg=\"Request processed\" duration=1.23ms");
-            println!("2025-05-22T09:59:58Z {{app=\"myapp\"}} level=info msg=\"Request received\" method=GET path=/api/v1/items");
-            println!("2025-05-22T09:59:55Z {{app=\"myapp\"}} level=warn msg=\"Slow query\" duration=523ms");
+            println!(
+                "2025-05-22T10:00:00Z {{app=\"myapp\"}} level=info msg=\"Request processed\" duration=1.23ms"
+            );
+            println!(
+                "2025-05-22T09:59:58Z {{app=\"myapp\"}} level=info msg=\"Request received\" method=GET path=/api/v1/items"
+            );
+            println!(
+                "2025-05-22T09:59:55Z {{app=\"myapp\"}} level=warn msg=\"Slow query\" duration=523ms"
+            );
         }
         "labels" => {
             println!("app");
@@ -93,7 +118,7 @@ fn run_logcli(args: Vec<String>) -> i32 {
             println!("  Total duplicates: 3");
         }
         _ => {
-            eprintln!("Unknown command '{}'. Use --help.", cmd);
+            eprintln!("Unknown command {}. Use --help.", quoteaf_os(cmd));
             return 1;
         }
     }
@@ -117,10 +142,15 @@ fn run_promtail(args: Vec<String>) -> i32 {
         return 0;
     }
 
-    let config = args.iter().find_map(|a| a.strip_prefix("--config.file="))
+    let config = args
+        .iter()
+        .find_map(|a| a.strip_prefix("--config.file="))
         .unwrap_or("promtail.yaml");
     println!("level=info msg=\"Starting Promtail\" version=\"3.0.0\"");
-    println!("level=info msg=\"Loading configuration\" file=\"{}\"", config);
+    println!(
+        "level=info msg=\"Loading configuration\" file=\"{}\"",
+        config
+    );
     println!("level=info msg=\"Tailing file\" path=/var/log/syslog");
     println!("level=info msg=\"Tailing file\" path=/var/log/auth.log");
     0
@@ -133,7 +163,9 @@ fn main() {
         let bytes = s.as_bytes();
         let mut last_sep = 0;
         for (i, &b) in bytes.iter().enumerate() {
-            if b == b'/' || b == b'\\' { last_sep = i + 1; }
+            if b == b'/' || b == b'\\' {
+                last_sep = i + 1;
+            }
         }
         let base = &s[last_sep..];
         base.strip_suffix(".exe").unwrap_or(base).to_string()
@@ -149,7 +181,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_loki};
+    use super::run_loki;
 
     #[test]
     fn help_exits_zero() {

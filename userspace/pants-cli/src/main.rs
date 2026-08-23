@@ -4,6 +4,7 @@
 //!
 //! Multi-personality: `pants`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -36,11 +37,17 @@ fn run_pants(args: &[String]) -> i32 {
         return 0;
     }
     let goal = args.first().map(|s| s.as_str()).unwrap_or("help");
-    let targets: Vec<&str> = args.iter().skip(1)
+    let targets: Vec<&str> = args
+        .iter()
+        .skip(1)
         .filter(|a| !a.starts_with('-'))
         .map(|s| s.as_str())
         .collect();
-    let target_str = if targets.is_empty() { "::" } else { targets.first().copied().unwrap_or("::") };
+    let target_str = if targets.is_empty() {
+        "::"
+    } else {
+        targets.first().copied().unwrap_or("::")
+    };
     match goal {
         "check" => {
             println!("Pants 2.20.0");
@@ -97,7 +104,7 @@ fn run_pants(args: &[String]) -> i32 {
             println!("src/python/lib:utils");
             println!("3rdparty/python:requests");
         }
-        _ => println!("pants: '{}' completed", goal),
+        _ => println!("pants: {} completed", quoteaf_os(goal)),
     }
     0
 }
@@ -111,7 +118,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_pants};
+    use super::run_pants;
 
     #[test]
     fn help_exits_zero() {

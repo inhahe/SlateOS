@@ -4,6 +4,7 @@
 //!
 //! Multi-personality: `mysqld` (server), `mysql` (client), `mysqladmin`, `mysqldump`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -27,14 +28,29 @@ fn run_mysqld(args: Vec<String>) -> i32 {
         println!("mysqld  Ver 8.4.0 for Slate OS on x86_64 (Slate OS Community Server - GPL)");
         return 0;
     }
-    let port = args.iter().find_map(|a| {
-        a.strip_prefix("--port=").and_then(|v| v.parse::<u16>().ok())
-    }).unwrap_or(3306);
-    println!("2025-05-22T10:00:00.000000Z 0 [System] [MY-010116] [Server] mysqld (mysqld 8.4.0) starting as process 12345");
-    println!("2025-05-22T10:00:00.100000Z 0 [System] [MY-013576] [InnoDB] InnoDB initialization has started.");
-    println!("2025-05-22T10:00:01.000000Z 0 [System] [MY-013577] [InnoDB] InnoDB initialization has ended.");
-    println!("2025-05-22T10:00:01.500000Z 0 [System] [MY-011323] [Server] X Plugin ready for connections. Bind-address: '::' port: 33060");
-    println!("2025-05-22T10:00:02.000000Z 0 [System] [MY-010931] [Server] mysqld: ready for connections. Version: '8.4.0'  socket: '/tmp/mysql.sock'  port: {}  Slate OS Community Server - GPL.", port);
+    let port = args
+        .iter()
+        .find_map(|a| {
+            a.strip_prefix("--port=")
+                .and_then(|v| v.parse::<u16>().ok())
+        })
+        .unwrap_or(3306);
+    println!(
+        "2025-05-22T10:00:00.000000Z 0 [System] [MY-010116] [Server] mysqld (mysqld 8.4.0) starting as process 12345"
+    );
+    println!(
+        "2025-05-22T10:00:00.100000Z 0 [System] [MY-013576] [InnoDB] InnoDB initialization has started."
+    );
+    println!(
+        "2025-05-22T10:00:01.000000Z 0 [System] [MY-013577] [InnoDB] InnoDB initialization has ended."
+    );
+    println!(
+        "2025-05-22T10:00:01.500000Z 0 [System] [MY-011323] [Server] X Plugin ready for connections. Bind-address: '::' port: 33060"
+    );
+    println!(
+        "2025-05-22T10:00:02.000000Z 0 [System] [MY-010931] [Server] mysqld: ready for connections. Version: '8.4.0'  socket: '/tmp/mysql.sock'  port: {}  Slate OS Community Server - GPL.",
+        port
+    );
     0
 }
 
@@ -57,7 +73,9 @@ fn run_mysql_client(args: Vec<String>) -> i32 {
         return 0;
     }
 
-    let exec_stmt = args.iter().position(|a| a == "-e" || a.starts_with("--execute"))
+    let exec_stmt = args
+        .iter()
+        .position(|a| a == "-e" || a.starts_with("--execute"))
         .and_then(|i| {
             let a = &args[i];
             if let Some(val) = a.strip_prefix("--execute=") {
@@ -107,7 +125,9 @@ fn run_mysql_client(args: Vec<String>) -> i32 {
             println!("Server version:         8.4.0 Slate OS Community Server - GPL");
             println!("Protocol version:       10");
             println!("Uptime:                 1 day 0 hours 0 min 0 sec");
-            println!("Threads: 2  Questions: 42  Slow queries: 0  Opens: 150  Open tables: 120  Queries per second avg: 0.048");
+            println!(
+                "Threads: 2  Questions: 42  Slow queries: 0  Opens: 150  Open tables: 120  Queries per second avg: 0.048"
+            );
             println!("--------------");
         } else {
             println!("Query OK, 0 rows affected (0.00 sec)");
@@ -116,7 +136,10 @@ fn run_mysql_client(args: Vec<String>) -> i32 {
     }
 
     // Interactive mode
-    let host = args.iter().find_map(|a| a.strip_prefix("-h")).unwrap_or("localhost");
+    let host = args
+        .iter()
+        .find_map(|a| a.strip_prefix("-h"))
+        .unwrap_or("localhost");
     println!("Welcome to the MySQL monitor.  Commands end with ; or \\g.");
     println!("Your MySQL connection id is 8");
     println!("Server version: 8.4.0 Slate OS Community Server - GPL");
@@ -158,21 +181,35 @@ fn run_mysqladmin(args: Vec<String>) -> i32 {
     let cmd = args.first().map(|s| s.as_str()).unwrap_or("status");
     match cmd {
         "version" | "--version" => {
-            println!("mysqladmin  Ver 8.4.0 for Slate OS on x86_64 (Slate OS Community Server - GPL)");
+            println!(
+                "mysqladmin  Ver 8.4.0 for Slate OS on x86_64 (Slate OS Community Server - GPL)"
+            );
             println!("Server version          8.4.0");
             println!("Protocol version        10");
             println!("Connection              Localhost via UNIX socket");
         }
         "ping" => println!("mysqld is alive"),
         "status" => {
-            println!("Uptime: 86400  Threads: 2  Questions: 42  Slow queries: 0  Opens: 150  Flush tables: 3  Open tables: 120  Queries per second avg: 0.048");
+            println!(
+                "Uptime: 86400  Threads: 2  Questions: 42  Slow queries: 0  Opens: 150  Flush tables: 3  Open tables: 120  Queries per second avg: 0.048"
+            );
         }
         "processlist" => {
-            println!("+----+------+-----------+-------+---------+------+----------+------------------+");
-            println!("| Id | User | Host      | db    | Command | Time | State    | Info             |");
-            println!("+----+------+-----------+-------+---------+------+----------+------------------+");
-            println!("|  8 | root | localhost | myapp | Query   |    0 | starting | SHOW PROCESSLIST |");
-            println!("+----+------+-----------+-------+---------+------+----------+------------------+");
+            println!(
+                "+----+------+-----------+-------+---------+------+----------+------------------+"
+            );
+            println!(
+                "| Id | User | Host      | db    | Command | Time | State    | Info             |"
+            );
+            println!(
+                "+----+------+-----------+-------+---------+------+----------+------------------+"
+            );
+            println!(
+                "|  8 | root | localhost | myapp | Query   |    0 | starting | SHOW PROCESSLIST |"
+            );
+            println!(
+                "+----+------+-----------+-------+---------+------+----------+------------------+"
+            );
         }
         "shutdown" => println!("mysqld will shut down"),
         "create" => {
@@ -185,7 +222,10 @@ fn run_mysqladmin(args: Vec<String>) -> i32 {
         }
         "flush-logs" => println!("Logs flushed."),
         "reload" => println!("Grant tables reloaded."),
-        _ => { eprintln!("mysqladmin: unknown command '{}'", cmd); return 1; }
+        _ => {
+            eprintln!("mysqladmin: unknown command {}", quoteaf_os(cmd));
+            return 1;
+        }
     }
     0
 }
@@ -210,7 +250,11 @@ fn run_mysqldump(args: Vec<String>) -> i32 {
         println!("mysqldump  Ver 8.4.0 for Slate OS on x86_64 (Slate OS Community Server - GPL)");
         return 0;
     }
-    let db = args.iter().find(|a| !a.starts_with('-')).map(|s| s.as_str()).unwrap_or("myapp");
+    let db = args
+        .iter()
+        .find(|a| !a.starts_with('-'))
+        .map(|s| s.as_str())
+        .unwrap_or("myapp");
     println!("-- MySQL dump 10.13  Distrib 8.4.0, for Slate OS (x86_64)");
     println!("--");
     println!("-- Host: localhost    Database: {}", db);
@@ -244,7 +288,9 @@ fn main() {
         let bytes = s.as_bytes();
         let mut last_sep = 0;
         for (i, &b) in bytes.iter().enumerate() {
-            if b == b'/' || b == b'\\' { last_sep = i + 1; }
+            if b == b'/' || b == b'\\' {
+                last_sep = i + 1;
+            }
         }
         let base = &s[last_sep..];
         base.strip_suffix(".exe").unwrap_or(base).to_string()
@@ -261,7 +307,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_mysqld};
+    use super::run_mysqld;
 
     #[test]
     fn help_exits_zero() {

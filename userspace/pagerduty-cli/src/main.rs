@@ -4,6 +4,7 @@
 //!
 //! Single personality: `pd`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -35,9 +36,15 @@ fn run_pd(args: Vec<String>) -> i32 {
             match sub {
                 "list" => {
                     println!("  ID           Status       Urgency   Service           Title");
-                    println!("  P1ABC123     triggered    high      Production API    Database connection timeout");
-                    println!("  P2DEF456     acknowledged high      Payment Service   Payment processing failure");
-                    println!("  P3GHI789     resolved     low       Staging           Disk space warning");
+                    println!(
+                        "  P1ABC123     triggered    high      Production API    Database connection timeout"
+                    );
+                    println!(
+                        "  P2DEF456     acknowledged high      Payment Service   Payment processing failure"
+                    );
+                    println!(
+                        "  P3GHI789     resolved     low       Staging           Disk space warning"
+                    );
                 }
                 "create" => {
                     let title = args.get(2).map(|s| s.as_str()).unwrap_or("New incident");
@@ -54,7 +61,9 @@ fn run_pd(args: Vec<String>) -> i32 {
                     let id = args.get(2).map(|s| s.as_str()).unwrap_or("P1ABC123");
                     println!("Resolved incident {}", id);
                 }
-                _ => { println!("Incident operation: {}", sub); }
+                _ => {
+                    println!("Incident operation: {}", sub);
+                }
             }
             0
         }
@@ -68,7 +77,9 @@ fn run_pd(args: Vec<String>) -> i32 {
                     println!("  PSVC003      active    Auth Service        Default");
                     println!("  PSVC004      disabled  Staging             Low Priority");
                 }
-                _ => { println!("Service operation: {}", sub); }
+                _ => {
+                    println!("Service operation: {}", sub);
+                }
             }
             0
         }
@@ -81,7 +92,9 @@ fn run_pd(args: Vec<String>) -> i32 {
                     println!("  PSCHED02     Secondary          US/Eastern    2");
                     println!("  PSCHED03     Weekend            US/Pacific    4");
                 }
-                _ => { println!("Schedule operation: {}", sub); }
+                _ => {
+                    println!("Schedule operation: {}", sub);
+                }
             }
             0
         }
@@ -95,10 +108,15 @@ fn run_pd(args: Vec<String>) -> i32 {
                     println!("  Severity: critical");
                 }
                 "resolve" => {
-                    let key = args.get(2).map(|s| s.as_str()).unwrap_or("evt-abc123def456");
+                    let key = args
+                        .get(2)
+                        .map(|s| s.as_str())
+                        .unwrap_or("evt-abc123def456");
                     println!("Event resolved for dedup key: {}", key);
                 }
-                _ => { println!("Event operation: {}", sub); }
+                _ => {
+                    println!("Event operation: {}", sub);
+                }
             }
             0
         }
@@ -124,7 +142,9 @@ fn run_pd(args: Vec<String>) -> i32 {
                     println!("  Role: admin");
                     println!("  Time Zone: US/Pacific");
                 }
-                _ => { println!("Auth operation: {}", sub); }
+                _ => {
+                    println!("Auth operation: {}", sub);
+                }
             }
             0
         }
@@ -132,7 +152,7 @@ fn run_pd(args: Vec<String>) -> i32 {
             if cmd.is_empty() {
                 eprintln!("Usage: pd <command>. See --help.");
             } else {
-                eprintln!("Error: unknown command '{}'. See --help.", cmd);
+                eprintln!("Error: unknown command {}. See --help.", quoteaf_os(cmd));
             }
             1
         }
@@ -148,7 +168,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_pd};
+    use super::run_pd;
 
     #[test]
     fn help_exits_zero() {

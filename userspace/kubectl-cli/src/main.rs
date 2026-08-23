@@ -4,6 +4,7 @@
 //!
 //! Single personality: `kubectl`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -74,11 +75,21 @@ fn run_kubectl(args: Vec<String>) -> i32 {
                     println!("postgres-0                1/1    Running   0          7d");
                 }
                 "svc" | "services" | "service" => {
-                    println!("NAME         TYPE           CLUSTER-IP      EXTERNAL-IP    PORT(S)        AGE");
-                    println!("kubernetes   ClusterIP      10.96.0.1       <none>         443/TCP        30d");
-                    println!("web-app      LoadBalancer   10.96.45.123    54.123.45.67   80:31234/TCP   3d");
-                    println!("api-srv      ClusterIP      10.96.78.234    <none>         8080/TCP       5d");
-                    println!("redis        ClusterIP      10.96.12.345    <none>         6379/TCP       7d");
+                    println!(
+                        "NAME         TYPE           CLUSTER-IP      EXTERNAL-IP    PORT(S)        AGE"
+                    );
+                    println!(
+                        "kubernetes   ClusterIP      10.96.0.1       <none>         443/TCP        30d"
+                    );
+                    println!(
+                        "web-app      LoadBalancer   10.96.45.123    54.123.45.67   80:31234/TCP   3d"
+                    );
+                    println!(
+                        "api-srv      ClusterIP      10.96.78.234    <none>         8080/TCP       5d"
+                    );
+                    println!(
+                        "redis        ClusterIP      10.96.12.345    <none>         6379/TCP       7d"
+                    );
                 }
                 "nodes" | "node" | "no" => {
                     println!("NAME           STATUS   ROLES           AGE   VERSION");
@@ -106,7 +117,10 @@ fn run_kubectl(args: Vec<String>) -> i32 {
         }
         "describe" => {
             let resource = args.get(1).map(|s| s.as_str()).unwrap_or("pod");
-            let name = args.get(2).map(|s| s.as_str()).unwrap_or("web-app-7d4f9b8c6-x2k4j");
+            let name = args
+                .get(2)
+                .map(|s| s.as_str())
+                .unwrap_or("web-app-7d4f9b8c6-x2k4j");
             println!("Name:         {}", name);
             println!("Namespace:    default");
             println!("Node:         node-2/10.0.1.2");
@@ -122,7 +136,10 @@ fn run_kubectl(args: Vec<String>) -> i32 {
             0
         }
         "logs" => {
-            let name = args.get(1).map(|s| s.as_str()).unwrap_or("web-app-7d4f9b8c6-x2k4j");
+            let name = args
+                .get(1)
+                .map(|s| s.as_str())
+                .unwrap_or("web-app-7d4f9b8c6-x2k4j");
             println!("[{}] 2024/01/15 14:30:00 Starting server on :80", name);
             println!("[{}] 2024/01/15 14:30:01 Server ready", name);
             println!("[{}] 2024/01/15 14:31:23 GET / 200 3ms", name);
@@ -130,7 +147,8 @@ fn run_kubectl(args: Vec<String>) -> i32 {
             0
         }
         "apply" => {
-            let file = args.windows(2)
+            let file = args
+                .windows(2)
                 .find(|w| w[0] == "-f")
                 .map(|w| w[1].as_str())
                 .unwrap_or("manifest.yaml");
@@ -141,7 +159,9 @@ fn run_kubectl(args: Vec<String>) -> i32 {
         }
         "cluster-info" => {
             println!("Kubernetes control plane is running at https://10.0.0.1:6443");
-            println!("CoreDNS is running at https://10.0.0.1:6443/api/v1/namespaces/kube-system/services/kube-dns:dns/proxy");
+            println!(
+                "CoreDNS is running at https://10.0.0.1:6443/api/v1/namespaces/kube-system/services/kube-dns:dns/proxy"
+            );
             0
         }
         "top" => {
@@ -185,7 +205,7 @@ fn run_kubectl(args: Vec<String>) -> i32 {
             if cmd.is_empty() {
                 eprintln!("Usage: kubectl <command>. See --help.");
             } else {
-                eprintln!("Error: unknown command '{}'. See --help.", cmd);
+                eprintln!("Error: unknown command {}. See --help.", quoteaf_os(cmd));
             }
             1
         }
@@ -201,7 +221,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_kubectl};
+    use super::run_kubectl;
 
     #[test]
     fn help_exits_zero() {

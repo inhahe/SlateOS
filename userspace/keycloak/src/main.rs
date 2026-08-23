@@ -4,6 +4,7 @@
 //!
 //! Single personality: `kc` (Keycloak admin CLI)
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -33,23 +34,40 @@ fn run_keycloak(args: Vec<String>) -> i32 {
         }
         "start" | "start-dev" => {
             let is_dev = cmd.as_str() == "start-dev";
-            let port = cmd_args.iter().position(|a| a == "--http-port")
+            let port = cmd_args
+                .iter()
+                .position(|a| a == "--http-port")
                 .and_then(|i| cmd_args.get(i + 1))
                 .map(|s| s.as_str())
                 .unwrap_or("8080");
-            println!("2025-05-22 10:00:00,000 INFO  [io.keycloak.quarkus.runtime.hostname] Hostname settings: FrontEnd: <request>, Strict HTTPS: false");
+            println!(
+                "2025-05-22 10:00:00,000 INFO  [io.keycloak.quarkus.runtime.hostname] Hostname settings: FrontEnd: <request>, Strict HTTPS: false"
+            );
             if is_dev {
-                println!("2025-05-22 10:00:00,100 WARN  [org.keycloak.quarkus.runtime.KeycloakMain] Running the server in development mode. DO NOT use this configuration in production.");
+                println!(
+                    "2025-05-22 10:00:00,100 WARN  [org.keycloak.quarkus.runtime.KeycloakMain] Running the server in development mode. DO NOT use this configuration in production."
+                );
             }
-            println!("2025-05-22 10:00:01,000 INFO  [org.keycloak.services] (main) Keycloak 24.0.4 (Slate OS) on JVM (build 21.0.2)");
-            println!("2025-05-22 10:00:01,500 INFO  [io.quarkus] (main) Installed features: [cdi, hibernate-orm, jdbc-h2, keycloak, narayana-jta, resteasy-reactive, smallrye-context-propagation, vertx]");
-            println!("2025-05-22 10:00:02,000 INFO  [io.quarkus] (main) Keycloak started in 2.0s. Listening on: http://0.0.0.0:{}", port);
+            println!(
+                "2025-05-22 10:00:01,000 INFO  [org.keycloak.services] (main) Keycloak 24.0.4 (Slate OS) on JVM (build 21.0.2)"
+            );
+            println!(
+                "2025-05-22 10:00:01,500 INFO  [io.quarkus] (main) Installed features: [cdi, hibernate-orm, jdbc-h2, keycloak, narayana-jta, resteasy-reactive, smallrye-context-propagation, vertx]"
+            );
+            println!(
+                "2025-05-22 10:00:02,000 INFO  [io.quarkus] (main) Keycloak started in 2.0s. Listening on: http://0.0.0.0:{}",
+                port
+            );
             println!("2025-05-22 10:00:02,001 INFO  [io.quarkus] (main) Installed features: 8");
             0
         }
         "build" => {
-            println!("2025-05-22 10:00:00,000 INFO  Updating the configuration and installing your custom providers, if any.");
-            println!("2025-05-22 10:00:01,000 INFO  Server configuration updated and target persisted.");
+            println!(
+                "2025-05-22 10:00:00,000 INFO  Updating the configuration and installing your custom providers, if any."
+            );
+            println!(
+                "2025-05-22 10:00:01,000 INFO  Server configuration updated and target persisted."
+            );
             0
         }
         "show-config" => {
@@ -64,7 +82,9 @@ fn run_keycloak(args: Vec<String>) -> i32 {
             0
         }
         "export" => {
-            let path = cmd_args.iter().position(|a| a == "--dir")
+            let path = cmd_args
+                .iter()
+                .position(|a| a == "--dir")
                 .and_then(|i| cmd_args.get(i + 1))
                 .map(|s| s.as_str())
                 .unwrap_or("/tmp/keycloak-export");
@@ -73,7 +93,9 @@ fn run_keycloak(args: Vec<String>) -> i32 {
             0
         }
         "import" => {
-            let path = cmd_args.iter().position(|a| a == "--dir")
+            let path = cmd_args
+                .iter()
+                .position(|a| a == "--dir")
                 .and_then(|i| cmd_args.get(i + 1))
                 .map(|s| s.as_str())
                 .unwrap_or("/tmp/keycloak-import");
@@ -81,7 +103,10 @@ fn run_keycloak(args: Vec<String>) -> i32 {
             println!("Imported successfully.");
             0
         }
-        other => { eprintln!("kc: unknown command '{}'", other); 1 }
+        other => {
+            eprintln!("kc: unknown command {}", quoteaf_os(other));
+            1
+        }
     }
 }
 
@@ -94,7 +119,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_keycloak};
+    use super::run_keycloak;
 
     #[test]
     fn help_exits_zero() {

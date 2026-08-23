@@ -4,6 +4,7 @@
 //!
 //! Multi-personality: `neo4j` (server manager), `cypher-shell` (CLI)
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -43,11 +44,15 @@ fn run_neo4j(args: Vec<String>) -> i32 {
             println!("2025-05-22 10:00:02.000+0000 INFO  Bolt enabled on 0.0.0.0:7687.");
             println!("2025-05-22 10:00:02.500+0000 INFO  HTTP enabled on 0.0.0.0:7474.");
             println!("2025-05-22 10:00:03.000+0000 INFO  HTTPS enabled on 0.0.0.0:7473.");
-            println!("2025-05-22 10:00:03.500+0000 INFO  Remote interface available at http://localhost:7474/");
+            println!(
+                "2025-05-22 10:00:03.500+0000 INFO  Remote interface available at http://localhost:7474/"
+            );
             if is_bg {
                 println!("2025-05-22 10:00:03.501+0000 INFO  Started.");
             } else {
-                println!("2025-05-22 10:00:03.501+0000 INFO  Started in console mode. Press Ctrl-C to exit.");
+                println!(
+                    "2025-05-22 10:00:03.501+0000 INFO  Started in console mode. Press Ctrl-C to exit."
+                );
             }
             0
         }
@@ -64,7 +69,10 @@ fn run_neo4j(args: Vec<String>) -> i32 {
             println!("Neo4j is running at pid 12345");
             0
         }
-        other => { eprintln!("neo4j: unknown command '{}'", other); 1 }
+        other => {
+            eprintln!("neo4j: unknown command {}", quoteaf_os(other));
+            1
+        }
     }
 }
 
@@ -87,7 +95,8 @@ fn run_cypher_shell(args: Vec<String>) -> i32 {
     }
 
     // Check for inline Cypher command via positional args
-    let cypher_cmd: Vec<&str> = args.iter()
+    let cypher_cmd: Vec<&str> = args
+        .iter()
         .filter(|a| !a.starts_with('-'))
         .map(|s| s.as_str())
         .collect();
@@ -118,11 +127,16 @@ fn run_cypher_shell(args: Vec<String>) -> i32 {
     }
 
     // Interactive mode
-    let addr = args.iter().position(|a| a == "-a" || a == "--address")
+    let addr = args
+        .iter()
+        .position(|a| a == "-a" || a == "--address")
         .and_then(|i| args.get(i + 1))
         .map(|s| s.as_str())
         .unwrap_or("bolt://localhost:7687");
-    println!("Connected to Neo4j using Bolt protocol version 5.4 at {}.", addr);
+    println!(
+        "Connected to Neo4j using Bolt protocol version 5.4 at {}.",
+        addr
+    );
     println!("Type :help for a list of available commands or :exit to exit the shell.");
     println!();
     println!("neo4j@neo4j> MATCH (n) RETURN count(n);");
@@ -146,7 +160,9 @@ fn main() {
         let bytes = s.as_bytes();
         let mut last_sep = 0;
         for (i, &b) in bytes.iter().enumerate() {
-            if b == b'/' || b == b'\\' { last_sep = i + 1; }
+            if b == b'/' || b == b'\\' {
+                last_sep = i + 1;
+            }
         }
         let base = &s[last_sep..];
         base.strip_suffix(".exe").unwrap_or(base).to_string()
@@ -161,7 +177,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_neo4j};
+    use super::run_neo4j;
 
     #[test]
     fn help_exits_zero() {

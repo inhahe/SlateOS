@@ -35,11 +35,9 @@
 // safety here — they only obscure the parsing logic — so we allow them at
 // the file level. (Length-check failures fall through to `break` or
 // `Err(...)`, never panic.)
-#![allow(
-    clippy::arithmetic_side_effects,
-    clippy::indexing_slicing,
-)]
+#![allow(clippy::arithmetic_side_effects, clippy::indexing_slicing)]
 
+use quoting::quoteaf_os;
 use std::collections::HashSet;
 use std::env;
 use std::fmt;
@@ -111,10 +109,18 @@ enum Error {
     Io(io::Error),
     NotElf,
     TruncatedHeader,
-    TruncatedData { what: &'static str, offset: usize, needed: usize, available: usize },
+    TruncatedData {
+        what: &'static str,
+        offset: usize,
+        needed: usize,
+        available: usize,
+    },
     InvalidClass(u8),
     InvalidEncoding(u8),
-    StringOutOfBounds { offset: usize, table_size: usize },
+    StringOutOfBounds {
+        offset: usize,
+        table_size: usize,
+    },
 }
 
 impl fmt::Display for Error {
@@ -123,7 +129,12 @@ impl fmt::Display for Error {
             Self::Io(e) => write!(f, "I/O error: {e}"),
             Self::NotElf => write!(f, "not an ELF file (bad magic)"),
             Self::TruncatedHeader => write!(f, "file too small to contain ELF header"),
-            Self::TruncatedData { what, offset, needed, available } => write!(
+            Self::TruncatedData {
+                what,
+                offset,
+                needed,
+                available,
+            } => write!(
                 f,
                 "{what}: truncated data at offset {offset:#x}: need {needed}, have {available}"
             ),
@@ -228,7 +239,15 @@ fn parse_args() -> Options {
                 'u' => opts.unused = true,
                 'r' => opts.function_relocs = true,
                 _ => {
-                    eprintln!("{PROGRAM_NAME}: invalid option -- '{ch}'");
+                    // A genuine `char` off `.chars()` -- one whole scalar
+                    // value, so `to_string` is lossless. Not the `byte as
+                    // char` this sweep keeps finding elsewhere, which is a
+                    // Latin-1 widening that reports 0xE9 as an 'é' nobody
+                    // typed.
+                    eprintln!(
+                        "{PROGRAM_NAME}: invalid option -- {}",
+                        quoteaf_os(ch.to_string())
+                    );
                     eprintln!("Try '{PROGRAM_NAME} --help' for more information.");
                     process::exit(1);
                 }
@@ -326,18 +345,26 @@ fn read_u16(data: &[u8], off: usize, le: bool) -> Result<u16> {
         needed: 2,
         available: data.len().saturating_sub(off),
     })?;
-    let arr: [u8; 2] = data.get(off..end).ok_or(Error::TruncatedData {
-        what: "u16",
-        offset: off,
-        needed: 2,
-        available: data.len().saturating_sub(off),
-    })?.try_into().map_err(|_| Error::TruncatedData {
-        what: "u16",
-        offset: off,
-        needed: 2,
-        available: data.len().saturating_sub(off),
-    })?;
-    Ok(if le { u16::from_le_bytes(arr) } else { u16::from_be_bytes(arr) })
+    let arr: [u8; 2] = data
+        .get(off..end)
+        .ok_or(Error::TruncatedData {
+            what: "u16",
+            offset: off,
+            needed: 2,
+            available: data.len().saturating_sub(off),
+        })?
+        .try_into()
+        .map_err(|_| Error::TruncatedData {
+            what: "u16",
+            offset: off,
+            needed: 2,
+            available: data.len().saturating_sub(off),
+        })?;
+    Ok(if le {
+        u16::from_le_bytes(arr)
+    } else {
+        u16::from_be_bytes(arr)
+    })
 }
 
 fn read_u32(data: &[u8], off: usize, le: bool) -> Result<u32> {
@@ -347,18 +374,26 @@ fn read_u32(data: &[u8], off: usize, le: bool) -> Result<u32> {
         needed: 4,
         available: data.len().saturating_sub(off),
     })?;
-    let arr: [u8; 4] = data.get(off..end).ok_or(Error::TruncatedData {
-        what: "u32",
-        offset: off,
-        needed: 4,
-        available: data.len().saturating_sub(off),
-    })?.try_into().map_err(|_| Error::TruncatedData {
-        what: "u32",
-        offset: off,
-        needed: 4,
-        available: data.len().saturating_sub(off),
-    })?;
-    Ok(if le { u32::from_le_bytes(arr) } else { u32::from_be_bytes(arr) })
+    let arr: [u8; 4] = data
+        .get(off..end)
+        .ok_or(Error::TruncatedData {
+            what: "u32",
+            offset: off,
+            needed: 4,
+            available: data.len().saturating_sub(off),
+        })?
+        .try_into()
+        .map_err(|_| Error::TruncatedData {
+            what: "u32",
+            offset: off,
+            needed: 4,
+            available: data.len().saturating_sub(off),
+        })?;
+    Ok(if le {
+        u32::from_le_bytes(arr)
+    } else {
+        u32::from_be_bytes(arr)
+    })
 }
 
 fn read_u64(data: &[u8], off: usize, le: bool) -> Result<u64> {
@@ -368,27 +403,41 @@ fn read_u64(data: &[u8], off: usize, le: bool) -> Result<u64> {
         needed: 8,
         available: data.len().saturating_sub(off),
     })?;
-    let arr: [u8; 8] = data.get(off..end).ok_or(Error::TruncatedData {
-        what: "u64",
-        offset: off,
-        needed: 8,
-        available: data.len().saturating_sub(off),
-    })?.try_into().map_err(|_| Error::TruncatedData {
-        what: "u64",
-        offset: off,
-        needed: 8,
-        available: data.len().saturating_sub(off),
-    })?;
-    Ok(if le { u64::from_le_bytes(arr) } else { u64::from_be_bytes(arr) })
+    let arr: [u8; 8] = data
+        .get(off..end)
+        .ok_or(Error::TruncatedData {
+            what: "u64",
+            offset: off,
+            needed: 8,
+            available: data.len().saturating_sub(off),
+        })?
+        .try_into()
+        .map_err(|_| Error::TruncatedData {
+            what: "u64",
+            offset: off,
+            needed: 8,
+            available: data.len().saturating_sub(off),
+        })?;
+    Ok(if le {
+        u64::from_le_bytes(arr)
+    } else {
+        u64::from_be_bytes(arr)
+    })
 }
 
 /// Extract a NUL-terminated byte string from `table` starting at `offset`,
 /// returning it as a Rust `String`. Returns an error if out-of-bounds.
 fn strtab_get(table: &[u8], offset: usize) -> Result<String> {
     if offset >= table.len() {
-        return Err(Error::StringOutOfBounds { offset, table_size: table.len() });
+        return Err(Error::StringOutOfBounds {
+            offset,
+            table_size: table.len(),
+        });
     }
-    let end = table[offset..].iter().position(|&b| b == 0).unwrap_or(table.len() - offset);
+    let end = table[offset..]
+        .iter()
+        .position(|&b| b == 0)
+        .unwrap_or(table.len() - offset);
     // Path bytes are never forced through UTF-8; non-UTF-8 names are
     // replaced with '?' so they can still be displayed.
     let s = String::from_utf8_lossy(&table[offset..offset + end]).into_owned();
@@ -444,7 +493,12 @@ impl Elf {
         let phdrs = parse_program_headers(&data, &hdr)?;
         let shdrs = parse_section_headers(&data, &hdr)?;
 
-        Ok(Self { data, hdr, phdrs, shdrs })
+        Ok(Self {
+            data,
+            hdr,
+            phdrs,
+            shdrs,
+        })
     }
 
     fn class(&self) -> u8 {
@@ -457,12 +511,14 @@ impl Elf {
 
     /// Return a slice of the file data at [offset, offset+size).
     fn slice(&self, offset: usize, size: usize, what: &'static str) -> Result<&[u8]> {
-        self.data.get(offset..offset.saturating_add(size)).ok_or(Error::TruncatedData {
-            what,
-            offset,
-            needed: size,
-            available: self.data.len().saturating_sub(offset),
-        })
+        self.data
+            .get(offset..offset.saturating_add(size))
+            .ok_or(Error::TruncatedData {
+                what,
+                offset,
+                needed: size,
+                available: self.data.len().saturating_sub(offset),
+            })
     }
 
     /// Return the raw bytes of section `idx`.
@@ -488,8 +544,7 @@ impl Elf {
         // since that is authoritative at runtime.
         for ph in &self.phdrs {
             if ph.p_type == PT_DYNAMIC {
-                let data =
-                    self.slice(ph.p_offset as usize, ph.p_filesz as usize, "PT_DYNAMIC")?;
+                let data = self.slice(ph.p_offset as usize, ph.p_filesz as usize, "PT_DYNAMIC")?;
                 return Ok(Some(parse_dynamic_entries(data, self.class(), self.le())?));
             }
         }
@@ -510,8 +565,10 @@ impl Elf {
         // Prefer the address from the dynamic section (DT_STRTAB + DT_STRSZ),
         // resolved via the first LOAD segment's vaddr→offset mapping.
         if let Some(entries) = dyn_entries {
-            let strtab_vaddr =
-                entries.iter().find(|e| e.d_tag == DT_STRTAB).map(|e| e.d_val);
+            let strtab_vaddr = entries
+                .iter()
+                .find(|e| e.d_tag == DT_STRTAB)
+                .map(|e| e.d_val);
             let strsz = entries
                 .iter()
                 .find(|e| e.d_tag == DT_STRSZ)
@@ -780,7 +837,10 @@ fn parse_dynamic_entries(sec_data: &[u8], class: u8, le: bool) -> Result<Vec<Dyn
                 read_u32(sec_data, base + 4, le)? as u64,
             )
         };
-        entries.push(DynEntry { d_tag: tag, d_val: val });
+        entries.push(DynEntry {
+            d_tag: tag,
+            d_val: val,
+        });
         if tag == DT_NULL {
             break;
         }
@@ -788,12 +848,7 @@ fn parse_dynamic_entries(sec_data: &[u8], class: u8, le: bool) -> Result<Vec<Dyn
     Ok(entries)
 }
 
-fn parse_dynsym_entries(
-    data: &[u8],
-    strtab: &[u8],
-    class: u8,
-    le: bool,
-) -> Result<Vec<DynSym>> {
+fn parse_dynsym_entries(data: &[u8], strtab: &[u8], class: u8, le: bool) -> Result<Vec<DynSym>> {
     let entsz: usize = if class == ELFCLASS64 { 24 } else { 16 };
     if entsz == 0 || data.is_empty() {
         return Ok(Vec::new());
@@ -812,7 +867,11 @@ fn parse_dynsym_entries(
             let st_info = data[base + 4];
             let st_shndx = read_u16(data, base + 6, le)?;
             let name = strtab_get(strtab, name_off).unwrap_or_default();
-            DynSym { name, st_info, st_shndx }
+            DynSym {
+                name,
+                st_info,
+                st_shndx,
+            }
         } else {
             // Elf32_Sym layout: st_name(4), st_value(4), st_size(4), st_info(1),
             //                   st_other(1), st_shndx(2).
@@ -820,7 +879,11 @@ fn parse_dynsym_entries(
             let st_info = data[base + 12];
             let st_shndx = read_u16(data, base + 14, le)?;
             let name = strtab_get(strtab, name_off).unwrap_or_default();
-            DynSym { name, st_info, st_shndx }
+            DynSym {
+                name,
+                st_info,
+                st_shndx,
+            }
         };
         syms.push(sym);
     }
@@ -880,11 +943,19 @@ fn parse_rel_entries(data: &[u8], class: u8, le: bool) -> Result<Vec<Rel>> {
         let entry = if class == ELFCLASS64 {
             let r_offset = read_u64(data, base, le)?;
             let r_info = read_u64(data, base + 8, le)?;
-            Rel { r_offset, r_sym: (r_info >> 32) as u32, r_type: r_info as u32 }
+            Rel {
+                r_offset,
+                r_sym: (r_info >> 32) as u32,
+                r_type: r_info as u32,
+            }
         } else {
             let r_offset = read_u32(data, base, le)? as u64;
             let r_info = read_u32(data, base + 4, le)?;
-            Rel { r_offset, r_sym: r_info >> 8, r_type: r_info & 0xff }
+            Rel {
+                r_offset,
+                r_sym: r_info >> 8,
+                r_type: r_info & 0xff,
+            }
         };
         out.push(entry);
     }
@@ -927,7 +998,11 @@ struct SearchPaths {
 
 impl SearchPaths {
     fn new(rpath: Vec<PathBuf>, runpath: Vec<PathBuf>, ld_library_path: Vec<PathBuf>) -> Self {
-        Self { rpath, ld_library_path, runpath }
+        Self {
+            rpath,
+            ld_library_path,
+            runpath,
+        }
     }
 
     /// Resolve a library name to a filesystem path.
@@ -971,21 +1046,25 @@ impl SearchPaths {
 
 /// Parse a colon-separated path list (as used in RPATH, RUNPATH, LD_LIBRARY_PATH).
 fn parse_colon_paths(s: &str) -> Vec<PathBuf> {
-    s.split(':').filter(|p| !p.is_empty()).map(PathBuf::from).collect()
+    s.split(':')
+        .filter(|p| !p.is_empty())
+        .map(PathBuf::from)
+        .collect()
 }
 
 /// Extract RPATH and RUNPATH strings from the dynamic section.
-fn extract_rpaths(
-    entries: &[DynEntry],
-    dynstr: &[u8],
-) -> (Vec<PathBuf>, Vec<PathBuf>) {
+fn extract_rpaths(entries: &[DynEntry], dynstr: &[u8]) -> (Vec<PathBuf>, Vec<PathBuf>) {
     let mut rpath = Vec::new();
     let mut runpath = Vec::new();
 
     for e in entries {
-        if e.d_tag == DT_RPATH && let Ok(s) = strtab_get(dynstr, e.d_val as usize) {
+        if e.d_tag == DT_RPATH
+            && let Ok(s) = strtab_get(dynstr, e.d_val as usize)
+        {
             rpath = parse_colon_paths(&s);
-        } else if e.d_tag == DT_RUNPATH && let Ok(s) = strtab_get(dynstr, e.d_val as usize) {
+        } else if e.d_tag == DT_RUNPATH
+            && let Ok(s) = strtab_get(dynstr, e.d_val as usize)
+        {
             runpath = parse_colon_paths(&s);
         }
     }
@@ -1073,7 +1152,9 @@ fn fake_load_addr(seed: u64) -> u64 {
     let base: u64 = 0x0000_7f00_0000_0000;
     let range: u64 = 0x0000_00ff_ffff_f000;
     // Simple LCG: multiply by a prime, mask to range.
-    let v = seed.wrapping_mul(0x9e37_79b9_7f4a_7c15).wrapping_add(0x6c62_272e_07bb_0142);
+    let v = seed
+        .wrapping_mul(0x9e37_79b9_7f4a_7c15)
+        .wrapping_add(0x6c62_272e_07bb_0142);
     base + (v & range)
 }
 
@@ -1115,13 +1196,18 @@ fn resolve_deps(
         if seen.contains(libname) {
             // Already resolved — do not re-process (handles circular deps).
             if verbose {
-                writeln!(out, "  ldd: note: circular/duplicate dependency skipped: {libname}")?;
+                writeln!(
+                    out,
+                    "  ldd: note: circular/duplicate dependency skipped: {libname}"
+                )?;
             }
             continue;
         }
         seen.insert(libname.clone());
 
-        addr_seed = addr_seed.wrapping_mul(0x5851_f42d_4c95_7f2d).wrapping_add(0x1405_7b7e_f767_814f);
+        addr_seed = addr_seed
+            .wrapping_mul(0x5851_f42d_4c95_7f2d)
+            .wrapping_add(0x1405_7b7e_f767_814f);
         let load_addr = fake_load_addr(addr_seed);
 
         let resolution = match effective_search.resolve(libname) {
@@ -1242,13 +1328,21 @@ fn print_version_info(out: &mut impl Write, elf: &Elf) -> io::Result<()> {
 
     // Each Verneed record: vn_version(2), vn_cnt(2), vn_file(4), vn_aux(4), vn_next(4)
     while pos + 16 <= data.len() && verneed_count < 256 {
-        let Ok(vn_cnt_u16) = read_u16(data, pos + 2, le) else { break };
+        let Ok(vn_cnt_u16) = read_u16(data, pos + 2, le) else {
+            break;
+        };
         let vn_cnt = vn_cnt_u16 as usize;
-        let Ok(vn_file_u32) = read_u32(data, pos + 4, le) else { break };
+        let Ok(vn_file_u32) = read_u32(data, pos + 4, le) else {
+            break;
+        };
         let vn_file = vn_file_u32 as usize;
-        let Ok(vn_aux_u32) = read_u32(data, pos + 8, le) else { break };
+        let Ok(vn_aux_u32) = read_u32(data, pos + 8, le) else {
+            break;
+        };
         let vn_aux = vn_aux_u32 as usize;
-        let Ok(vn_next) = read_u32(data, pos + 12, le) else { break };
+        let Ok(vn_next) = read_u32(data, pos + 12, le) else {
+            break;
+        };
 
         let file_name = strtab_get(dynstr, vn_file).unwrap_or_default();
         writeln!(out, "\t{file_name}:")?;
@@ -1260,9 +1354,13 @@ fn print_version_info(out: &mut impl Write, elf: &Elf) -> io::Result<()> {
             if aux_pos + 16 > data.len() {
                 break;
             }
-            let Ok(vna_name_u32) = read_u32(data, aux_pos + 8, le) else { break };
+            let Ok(vna_name_u32) = read_u32(data, aux_pos + 8, le) else {
+                break;
+            };
             let vna_name = vna_name_u32 as usize;
-            let Ok(vna_next) = read_u32(data, aux_pos + 12, le) else { break };
+            let Ok(vna_next) = read_u32(data, aux_pos + 12, le) else {
+                break;
+            };
             let ver_name = strtab_get(dynstr, vna_name).unwrap_or_default();
             writeln!(out, "\t\t{ver_name} ({file_name}) => found")?;
             if vna_next == 0 {
@@ -1297,8 +1395,11 @@ fn find_unused_deps(
 ) -> Vec<String> {
     // Collect undefined symbols from .dynsym.
     let dynsyms = elf.parse_dynsym().unwrap_or_default();
-    let undefined_syms: HashSet<&str> =
-        dynsyms.iter().filter(|s| s.is_undefined() && !s.name.is_empty()).map(|s| s.name.as_str()).collect();
+    let undefined_syms: HashSet<&str> = dynsyms
+        .iter()
+        .filter(|s| s.is_undefined() && !s.name.is_empty())
+        .map(|s| s.name.as_str())
+        .collect();
 
     if undefined_syms.is_empty() {
         // If there are no undefined symbols, all direct deps are candidates.
@@ -1329,8 +1430,7 @@ fn find_unused_deps(
                     .unwrap_or_default()
                     .into_iter()
                     .filter(|s| {
-                        !s.is_undefined()
-                            && (s.binding() == STB_GLOBAL || s.binding() == STB_WEAK)
+                        !s.is_undefined() && (s.binding() == STB_GLOBAL || s.binding() == STB_WEAK)
                     })
                     .map(|s| s.name)
                     .collect()
@@ -1338,7 +1438,9 @@ fn find_unused_deps(
             .unwrap_or_default();
 
         // If the lib provides none of our undefined symbols, it is unused.
-        let used = provides.iter().any(|sym| undefined_syms.contains(sym.as_str()));
+        let used = provides
+            .iter()
+            .any(|sym| undefined_syms.contains(sym.as_str()));
         if !used {
             unused.push(dep_name.clone());
         }
@@ -1356,9 +1458,7 @@ fn print_relocs(out: &mut impl Write, elf: &Elf) -> io::Result<()> {
     let dynstr = elf.dynstr_section();
 
     // Helper: look up a symbol name by index.
-    let sym_name = |idx: usize| -> &str {
-        dynsyms.get(idx).map_or("", |s| s.name.as_str())
-    };
+    let sym_name = |idx: usize| -> &str { dynsyms.get(idx).map_or("", |s| s.name.as_str()) };
 
     writeln!(out, "\nRelocations:")?;
 
@@ -1500,8 +1600,9 @@ fn process_file(
     let mut addr_seed: u64 = 0x1234_5678_9abc_def0;
 
     for libname in &direct_needed {
-        addr_seed =
-            addr_seed.wrapping_mul(0x5851_f42d_4c95_7f2d).wrapping_add(0x1405_7b7e_f767_814f);
+        addr_seed = addr_seed
+            .wrapping_mul(0x5851_f42d_4c95_7f2d)
+            .wrapping_add(0x1405_7b7e_f767_814f);
         let load_addr = fake_load_addr(addr_seed);
         let resolution = match search.resolve(libname) {
             Some(p) => LibResolution::Found(p.clone()),
@@ -1549,7 +1650,9 @@ fn process_file(
     print_deps(out, &all_entries, interp.as_deref(), interp_addr)?;
 
     // Verbose: version information.
-    if opts.verbose && let Err(e) = print_version_info(out, &elf) {
+    if opts.verbose
+        && let Err(e) = print_version_info(out, &elf)
+    {
         writeln!(out, "  ldd: warning: version info error: {e}")?;
     }
 
@@ -1567,7 +1670,9 @@ fn process_file(
     }
 
     // Function/data relocations (-r).
-    if opts.function_relocs && let Err(e) = print_relocs(out, &elf) {
+    if opts.function_relocs
+        && let Err(e) = print_relocs(out, &elf)
+    {
         writeln!(out, "  ldd: warning: relocation error: {e}")?;
     }
 
@@ -1733,9 +1838,25 @@ mod tests {
         // Null section
         write_shdr(&mut file, 0, 0, 0, 0, 0, 0);
         // .dynamic
-        write_shdr(&mut file, sh_name_dynamic, SHT_DYNAMIC_VAL, dynamic_off, dynamic.len(), 0, 16);
+        write_shdr(
+            &mut file,
+            sh_name_dynamic,
+            SHT_DYNAMIC_VAL,
+            dynamic_off,
+            dynamic.len(),
+            0,
+            16,
+        );
         // .dynstr
-        write_shdr(&mut file, sh_name_dynstr, SHT_STRTAB_VAL, dynstr_off, dynstr.len(), 0, 0);
+        write_shdr(
+            &mut file,
+            sh_name_dynstr,
+            SHT_STRTAB_VAL,
+            dynstr_off,
+            dynstr.len(),
+            0,
+            0,
+        );
         // .shstrtab
         write_shdr(
             &mut file,
@@ -1972,7 +2093,10 @@ mod tests {
 
     #[test]
     fn test_extract_rpaths_empty() {
-        let entries = vec![DynEntry { d_tag: DT_NULL, d_val: 0 }];
+        let entries = vec![DynEntry {
+            d_tag: DT_NULL,
+            d_val: 0,
+        }];
         let dynstr = b"\0";
         let (rpath, runpath) = extract_rpaths(&entries, dynstr);
         assert!(rpath.is_empty());
@@ -2029,7 +2153,12 @@ mod tests {
     fn test_error_display_truncated_data() {
         let msg = format!(
             "{}",
-            Error::TruncatedData { what: "test", offset: 0x10, needed: 8, available: 2 }
+            Error::TruncatedData {
+                what: "test",
+                offset: 0x10,
+                needed: 8,
+                available: 2
+            }
         );
         assert!(msg.contains("test"));
         assert!(msg.contains("0x10"));

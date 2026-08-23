@@ -4,6 +4,7 @@
 //!
 //! Single personality: `netlify`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -58,9 +59,16 @@ fn run_netlify(args: Vec<String>) -> i32 {
         }
         "deploy" => {
             let prod = args.iter().any(|a| a == "--prod" || a == "-p");
-            let dir = args.windows(2).find(|w| w[0] == "--dir" || w[0] == "-d").map(|w| w[1].as_str()).unwrap_or("./dist");
+            let dir = args
+                .windows(2)
+                .find(|w| w[0] == "--dir" || w[0] == "-d")
+                .map(|w| w[1].as_str())
+                .unwrap_or("./dist");
             println!("Deploy path: {}", dir);
-            println!("Deploying to {}...", if prod { "production" } else { "draft" });
+            println!(
+                "Deploying to {}...",
+                if prod { "production" } else { "draft" }
+            );
             println!("  Uploading 42 files...");
             println!("  ✔ Deploy complete!");
             println!();
@@ -84,11 +92,18 @@ fn run_netlify(args: Vec<String>) -> i32 {
             0
         }
         "dev" => {
-            let port = args.windows(2).find(|w| w[0] == "--port" || w[0] == "-p").map(|w| w[1].as_str()).unwrap_or("8888");
+            let port = args
+                .windows(2)
+                .find(|w| w[0] == "--port" || w[0] == "-p")
+                .map(|w| w[1].as_str())
+                .unwrap_or("8888");
             println!("◈ Netlify Dev ◈");
             println!("Starting local dev server...");
             println!("◈ Injecting environment variables...");
-            println!("◈ Functions server: http://localhost:{}/.netlify/functions/", port);
+            println!(
+                "◈ Functions server: http://localhost:{}/.netlify/functions/",
+                port
+            );
             println!("◈ Server now ready on http://localhost:{}", port);
             0
         }
@@ -109,7 +124,9 @@ fn run_netlify(args: Vec<String>) -> i32 {
                     let name = args.get(2).map(|s| s.as_str()).unwrap_or("my-site");
                     println!("Site {} deleted.", name);
                 }
-                _ => { println!("Sites operation: {}", sub); }
+                _ => {
+                    println!("Sites operation: {}", sub);
+                }
             }
             0
         }
@@ -126,7 +143,9 @@ fn run_netlify(args: Vec<String>) -> i32 {
                     let key = args.get(2).map(|s| s.as_str()).unwrap_or("KEY");
                     println!("Set environment variable {} for site my-site.", key);
                 }
-                _ => { println!("Env operation: {}", sub); }
+                _ => {
+                    println!("Env operation: {}", sub);
+                }
             }
             0
         }
@@ -142,7 +161,9 @@ fn run_netlify(args: Vec<String>) -> i32 {
                     let name = args.get(2).map(|s| s.as_str()).unwrap_or("new-function");
                     println!("Function {} created in netlify/functions/", name);
                 }
-                _ => { println!("Functions operation: {}", sub); }
+                _ => {
+                    println!("Functions operation: {}", sub);
+                }
             }
             0
         }
@@ -160,7 +181,7 @@ fn run_netlify(args: Vec<String>) -> i32 {
             if cmd.is_empty() {
                 eprintln!("Usage: netlify <command>. See --help.");
             } else {
-                eprintln!("Error: unknown command '{}'. See --help.", cmd);
+                eprintln!("Error: unknown command {}. See --help.", quoteaf_os(cmd));
             }
             1
         }
@@ -176,7 +197,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_netlify};
+    use super::run_netlify;
 
     #[test]
     fn help_exits_zero() {

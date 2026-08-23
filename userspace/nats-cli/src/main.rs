@@ -4,6 +4,7 @@
 //!
 //! Single personality: `nats`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -83,7 +84,9 @@ fn run_nats(args: Vec<String>) -> i32 {
                     let name = args.get(2).map(|s| s.as_str()).unwrap_or("NEW-STREAM");
                     println!("Stream {} created", name);
                 }
-                _ => { println!("Stream operation: {}", sub); }
+                _ => {
+                    println!("Stream operation: {}", sub);
+                }
             }
             0
         }
@@ -98,7 +101,9 @@ fn run_nats(args: Vec<String>) -> i32 {
                     println!("  analytics       Pull      12           45");
                     println!("  audit-log       Push      0            0");
                 }
-                _ => { println!("Consumer operation: {}", sub); }
+                _ => {
+                    println!("Consumer operation: {}", sub);
+                }
             }
             0
         }
@@ -113,7 +118,10 @@ fn run_nats(args: Vec<String>) -> i32 {
                 "get" => {
                     let bucket = args.get(2).map(|s| s.as_str()).unwrap_or("config");
                     let key = args.get(3).map(|s| s.as_str()).unwrap_or("app.setting");
-                    println!("{} > {} created @ 2024-01-15T14:00:00Z revision: 42", bucket, key);
+                    println!(
+                        "{} > {} created @ 2024-01-15T14:00:00Z revision: 42",
+                        bucket, key
+                    );
                     println!("value-for-setting");
                 }
                 "list" | "ls" => {
@@ -122,7 +130,9 @@ fn run_nats(args: Vec<String>) -> i32 {
                     println!("  sessions  456 keys  45.6 KB");
                     println!("  cache     89 keys   8.9 KB");
                 }
-                _ => { println!("KV operation: {}", sub); }
+                _ => {
+                    println!("KV operation: {}", sub);
+                }
             }
             0
         }
@@ -146,7 +156,9 @@ fn run_nats(args: Vec<String>) -> i32 {
                     println!("  nats-2   nats://node2:4222   NDEF456   v2.10.9  38 conns");
                     println!("  nats-3   nats://node3:4222   NGHI789   v2.10.9  41 conns");
                 }
-                _ => { println!("Server operation: {}", sub); }
+                _ => {
+                    println!("Server operation: {}", sub);
+                }
             }
             0
         }
@@ -154,7 +166,7 @@ fn run_nats(args: Vec<String>) -> i32 {
             if cmd.is_empty() {
                 eprintln!("Usage: nats <command>. See --help.");
             } else {
-                eprintln!("Error: unknown command '{}'. See --help.", cmd);
+                eprintln!("Error: unknown command {}. See --help.", quoteaf_os(cmd));
             }
             1
         }
@@ -170,7 +182,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_nats};
+    use super::run_nats;
 
     #[test]
     fn help_exits_zero() {

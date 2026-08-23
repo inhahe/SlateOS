@@ -1,0 +1,22 @@
+# A shell script must arrive in the working tree with LF endings, on every
+# platform and in every worktree.
+#
+# This is not a style preference. `bash` treats a CR as part of the token it
+# ends, so a CRLF script fails in ways that look like the script being wrong:
+# `set -u` becomes `set -u$'\r'` ("invalid option"), and `. "$(dirname
+# "$0")/diff-subject.sh"` looks for a file whose name ends in a carriage
+# return. Twenty-three of this tree's differential harnesses were unrunnable
+# from a Windows worktree for exactly that reason, and silently so — with
+# `core.autocrlf=input` the CRLF is normalised away on commit, so `git status`
+# stays clean and nothing ever points at the cause.
+#
+# `text eol=lf` says: normalise to LF in the repository (as `autocrlf=input`
+# already did) *and* check out LF regardless of the platform or of any local
+# `core.autocrlf`. The second half is the one that was missing.
+*.sh text eol=lf
+
+# The same reasoning for the other files that are read by a POSIX tool rather
+# than by an editor: a CR inside them is data, not formatting.
+*.py text eol=lf
+*.yaml text eol=lf
+*.yml text eol=lf

@@ -614,7 +614,7 @@ fn set_style(
                 // the wording of a compile error, which `scripts/nl-diff.sh`
                 // marks xfail rather than pretending the two agree.
                 let compiled = bre::compile(pattern, false)
-                    .map_err(|e| deferred.fatal(String::from_utf8_lossy(&e.0).into_owned()))?;
+                    .map_err(|e| deferred.fatal(String::from_utf8_lossy(&e.detail).into_owned()))?;
                 Some(Box::new(compiled))
             });
         }

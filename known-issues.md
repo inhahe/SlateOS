@@ -66094,3 +66094,265 @@ table `with_pristine` swaps.
 That is on purpose — a kernel that has just proved one of its own invariants
 wrong has no business carrying the user's data forward into whatever runs
 next. Every non-panicking exit, including an early `?`, does restore.
+
+## `find` is a complete port of findutils 4.9.0, verified against the real binary — and five things it deliberately does differently (lane B, 2026-08-23)
+
+### In short
+
+`find` used to be a small stub. It is now a 6200-line reimplementation of
+the whole findutils 4.9.0 interface — every primary, every action, every
+operator, the expression tree and the walk — and there is a harness,
+`scripts/find-diff.sh`, that runs 448 command lines through *our* `find` and
+through *GNU's* `find` inside WSL and compares stdout, stderr and the exit
+status byte for byte. It currently reports **443 passed, 0 differed, 5
+differ on purpose**. This entry records what those five are, why each is
+deliberate rather than unfinished, and what debt is left behind.
+
+### The harness, and why the control run matters
+
+    MSYS2_ARG_CONV_EXCL='*' wsl -e env FIND_DIFF_INNER=1 LC_ALL=C.UTF-8 TZ=UTC \
+        bash ./scripts/find-diff.sh
+
+It runs inside WSL because half of `find`'s vocabulary asks questions only a
+real inode can answer — `-inum`, `-links`, `-samefile`, `-perm`, `-user`,
+`-type l`, `-xtype`, `-fstype`, `%i`, `%n`, `%b` — and the fixture tree is
+built in WSL's own `/tmp` rather than under `/mnt/d`, because on 9p a
+directory's link count is synthesised, hard links do not share an inode, and
+`st_blocks` is invented. A harness on 9p would be comparing two
+implementations against fiction.
+
+`OURS=/usr/bin/find sh scripts/find-diff.sh` is the control: GNU against
+itself. It reports 443 passed, 0 differed, 4 unexpectedly agreed — the four
+being exactly the cases we mark deliberate, which of course agree when both
+sides are GNU. That run is what makes the 443 passes mean something: without
+it, a case that agrees because it exercises nothing would look identical to
+one that agrees because both implementations got it right.
+
+### The five deliberate differences
+
+| Case | Why |
+|---|---|
+| `find --version` | Answers "which program is this". Copying GNU's banner is a false attribution. |
+| `find --help` | Its bug-report block sends reports to us, not to `bug-findutils@gnu.org`. |
+| `find t -name f -printf '%Z\n'` | SELinux context. We render it empty; GNU asks a kernel that has no policy loaded. |
+| `find t -mtime nan` | GNU reaches `assert (! isnan (...))` in `get_comp_type` and dumps core; we diagnose the argument. Unusable as a straight comparison anyway — the shell prints the crashed child's *pid*, so the two sides could not agree even against themselves. |
+| `find t -regex '.*'` | Byte-based regex versus glibc's multibyte matcher; see below. |
+
+The first two are the interesting ones, because the harness surfaced them
+only *incidentally*: they showed up as cases that **agreed**, which is to
+say our binary was claiming to be GNU findutils by GNU's authors and
+directing its bug reports at GNU's tracker. A differential harness normally
+finds bugs by disagreement; these two were bugs *of* agreement, and they are
+the reason the harness counts "unexpectedly agreed" as a distinct outcome
+rather than folding it into "passed".
+
+### The regex difference is a consequence of a decision already taken
+
+The fixture tree contains a file called `t/n\377ame`, whose name is not
+valid UTF-8. GNU compiles `.*` with glibc's multibyte matcher, which cannot
+decode `\377` in a UTF-8 locale and therefore declines to match the name at
+all — `find -regex '.*'` silently skips the file. Ours is byte-based and
+matches it.
+
+Ours is the deliberate answer, per `design-decisions.md` §322: a path on
+this system is a byte string with no encoding attached, so a pattern meaning
+"any sequence of characters" has to mean "any sequence of bytes" or it stops
+being able to name some of the files that exist. Every *other* `-regex` case
+in the harness agrees exactly, because every other one is over a name that
+decodes — the difference is confined to the one input where the two models
+of "character" cannot both be right.
+
+### What the harness found in the shared `ere` crate, not in `find`
+
+Driving the last few cases to zero turned up a defect that was never
+`find`'s: the ERE parser had been written from the grammar rather than from
+a measurement, and rejected a dozen patterns glibc accepts — an empty
+pattern, a stacked quantifier (`a**`, `a{1}{2}`), an unopened `)`, `{,3}`,
+an empty alternation branch, `a{0}`. Eight binaries share that crate, so
+every one of them refused patterns GNU runs. Fixed in `8aca183de`, with
+`parse_brace` rewritten as a transcription of glibc's `parse_dup_op` rather
+than its own reading, because the interval errors divide on a line no
+grammar suggests — whether a `}` ever turned up, not whether the content was
+sane.
+
+That is the argument for pointing a differential harness at a *port* even
+when the port looks finished: the bug was two layers below the thing under
+test, and no amount of reading `find.rs` would have found it.
+
+### TD-B-FIND-DIAGNOSTICS-STILL-GO-THROUGH-FROM-UTF8-LOSSY -- FIXED (2026-08-23)
+
+**Where:** `userspace/coreutils/src/bin/find.rs`, `userspace/coreutils/src/bin/grep.rs`.
+
+Fixed as described below, and pinned by six new harness cases. `grep -n
+'from_utf8_lossy\| as char'` over both files now returns exactly one hit, in
+`#[cfg(test)]` code, where the input is a literal the test wrote itself.
+
+**What the sweep actually changed.** Twenty-six sites in `find.rs` moved from
+`String::from_utf8_lossy` to `quote::escape_unprintable`, and both sites in
+`grep.rs`'s `compile_patterns` did the same. Three sites did something other
+than a substitution, because a substitution would have been wrong:
+
+- `qmark` now uses `std::str::from_utf8`, not the lossy form. The question it
+  asks is only *whether* the bytes decode; the lossy form answers that by
+  building the corrupted string first and then reporting that it had to.
+- The `-ok`/`-okdir` confirmation prompt writes bytes directly to a locked
+  `io::Stderr` with `write_all`, exactly as upstream's `fprintf (stderr, "< %s
+  ... %s > ?", ...)` does. This is the one diagnostic in the file whose sink is
+  a byte stream with no `String` in the way, and it is also the one where being
+  wrong is worst: a prompt showing a *different* path from the one about to be
+  handed to the command asks the user to confirm the wrong thing.
+- `chr` renders a NUL as nothing (which is what C's `%c` does once the message
+  reaches a terminal) and every other byte through `escape_unprintable`.
+
+**A second corruption class the sweep uncovered, which this entry did not
+originally know about.** Three sites did not use `from_utf8_lossy` at all —
+they wrote `c as char`. That is not a decode; Rust's `u8 as char` reinterprets
+the byte as the Unicode scalar with the same number, i.e. as Latin-1, so byte
+`0xFF` becomes U+00FF and is then *encoded back out* as the two bytes `0xC3
+0xBF`. The differential harness caught it the moment a non-UTF-8 argument was
+passed: GNU printed `M-^?` (one byte), we printed `M-CM-?` (two). The sites
+were `parse_type_letters`' "Unknown argument to -type" and "Duplicate file
+type", and `parse_size`' "invalid -size type"; all three now call `chr`.
+`grep -rn ' as char'` over `find.rs` returns nothing.
+
+**How it is pinned.** `scripts/find-diff.sh` gained six cases that pass a
+`\377` byte as an option argument, a format directive and a predicate name:
+`-type`, `-perm`, `-used`, `-size`, `-printf %\377` and `-\377`. Five of them
+are marked as deliberate differences — we escape, GNU writes the byte raw —
+and the sixth, `-perm`, is deliberately *not* marked and must keep passing: its
+diagnostic does not echo the argument, so it is the control showing the marking
+is about rendering and not about the parse. The harness now reports
+
+    454 case(s): 444 passed, 0 differed, 10 differ on purpose, 0 unexpectedly agreed
+
+and the GNU-against-itself control run (`OURS=/usr/bin/find`) reports nine of
+the ten deliberate cases as `XPASS`, which is the shape that makes the marking
+meaningful.
+
+**What remains, and it is a real refactor rather than a leftover.** We escape
+where GNU writes the byte raw. Being byte-identical means making `find`'s
+`Fatal`/`errmsg` plumbing byte-typed, which means diagnostics can no longer be
+built with `format!` and the change reaches the forty-odd other binaries that
+share `errmsg`. That tradeoff — raw versus escaped, and why lossy is never
+acceptable either way — is written up in `design-decisions.md` §369, and the
+five marked harness cases are the exact list that should flip back to plain
+passes if the plumbing is ever converted.
+
+### TD-B-GREP-PRINTS-POSIX-EXTENDED-DIAGNOSTICS-FOR-EGREP-SYNTAX -- FIXED (2026-08-23)
+
+**Where:** `userspace/ere/src/engine.rs` (`Syntax`, `Regex::new_syntax`),
+`userspace/coreutils/src/bin/grep.rs`.
+
+**The original report was right about the problem and half right about the
+cause.** `grep -E` is indeed not the syntax `find -regextype posix-extended`
+gets; it is glibc's `RE_SYNTAX_EGREP`. But the entry guessed at which flags
+differ from the header rather than measuring, and the guess was off — so the
+fix started by running both real binaries over the same patterns:
+
+| pattern | `find -regextype posix-extended` | `grep -E` |
+|---|---|---|
+| `*a` | `REG_BADRPT` | matches `a` |
+| `{b}a` | `REG_BADRPT` | matches `a` |
+| `{}a` / `{1,2,3}a` | `REG_BADRPT` | exit 1, **no diagnostic** |
+| `a{b}` | invalid interval | matches `a{b}` |
+| `a{}` / `a{1,2,3}` / `a{1,0}` / `a{99999999}` | error | **error** |
+| `a^*b` | `REG_BADRPT` | matches `ab` |
+
+Two consequences the header alone would not have told you. First, the
+difference reduces to exactly **two** bits — `RE_CONTEXT_INDEP_OPS` without
+`RE_CONTEXT_INVALID_OPS` (a quantifier with nothing to quantify repeats the
+*empty* expression instead of erroring) and `RE_INVALID_INTERVAL_ORD` (a `{`
+that does not open a well-formed interval is a literal brace) — so `Syntax`
+is a two-field struct with two constants, and the parser is parameterised
+rather than forked. Second, only the "this is not a count" forms roll back;
+a *well-formed-looking but wrong* interval stays an error in both dialects,
+which is why `repeat()` folds `{0,0}` to `Node::Empty` but `parse_brace`
+rolls back only on `BraceNum::Invalid`.
+
+**The posix-extended side needed no change at all.** The original entry
+implied our `find` answer might also be wrong for malformed braces; measured,
+every *leading* quantifier form — `{b}a`, `{}a`, `{a`, `{1,2,3}a` included —
+is `REG_BADRPT` "Invalid preceding regular expression", never a brace error,
+and that is already what this parser did. (A first measurement said otherwise
+because the pattern was passed as `"\./$p"`, which put a `/` in front of the
+"leading" quantifier. Worth remembering: `find`'s regex is whole-path
+anchored, so a probe pattern must be used verbatim.)
+
+**The two `grep -E` cases that exit 1 with no diagnostic are GNU being two
+engines**, not a syntax bit: glibc `regcomp` decides accept/reject and
+`dfa.c` decides what matches, and at the start of an expression glibc skips
+the offending token while dfa.c makes it a literal. We do not reproduce the
+silent-nonmatch behaviour — we accept those patterns and match the empty
+expression, which is what `dfa.c` alone would do. Nothing in the tree depends
+on the difference and reproducing it would mean shipping two disagreeing
+parsers, which is the thing this crate exists to stop.
+
+**`-G` was the follow-up question, and it is now measured too.** `bre::compile`
+translates to extended and hands it to the same engine, so it inherits
+`POSIX_EXTENDED`; GNU asks for `RE_SYNTAX_GREP`, which has its own bits. Rather
+than read that header — the mistake this entry started with — `scripts/grep-diff.sh`
+now runs 40 BRE patterns through both binaries, including every form the two
+`-E` bits are about (`*a`, `a{b}`, `a{`, `{b}`, `a\{2,1\}`, `\(a`, `a\)`,
+`a[`). All agree. So BRE needs no dialect parameter: in BRE a bare `{` is
+already a literal and a leading `*` is already an ordinary character, which is
+what makes both bits moot there.
+
+Covered by 59 `ere` tests including `the_dialects_differ_in_exactly_two_places`,
+and by `scripts/grep-diff.sh` — 155 passed, 0 differed, 11 deliberate, with the
+`OURS=/usr/bin/grep` control turning all 11 into XPASS, which is the shape that
+makes the markings mean something.
+
+### B-GREP-DIFF-FOUND-THREE-BUGS-AND-A-MISSING-PAIR-OF-FLAGS -- FIXED (2026-08-23)
+
+**Where:** `userspace/coreutils/src/bin/grep.rs`, `scripts/grep-diff.sh`.
+
+**In short:** a differential harness was added for `grep` to settle one
+question about `-E` syntax. It settled that question in three lines of output
+and then found four *other* things wrong, none of which any unit test had
+noticed, because every unit test asserted the behaviour the program had.
+
+| what | GNU | us, before | why nobody noticed |
+|---|---|---|---|
+| `grep -o 'o*'` on `foo bar` | one line, `oo` | `oo` surrounded by six blank lines | the `-o` tests all used patterns that cannot match empty |
+| `grep -m 0 foo f` | nothing, exit 1 — and *no* `-c` count line | every match, exit 0 | `-m` was tested at 1, 2 and 5 |
+| `grep -Z`, `grep -z` | NUL-delimited names and records | `unknown option` | a whole feature cannot be missed by a test of the features present |
+| a fixture named `nul` | an ordinary file | the Windows null device | the harness's own bug — see below |
+
+**`-m 0` is the interesting one.** It is not "no limit" and it is not "stop
+after the first": GNU prints nothing, reports the file as not matching, *and
+suppresses the `-c` count line entirely* rather than printing `0`. The only way
+to get that is to answer before reading a line, since the count line is
+otherwise printed unconditionally.
+
+**`-Z`/`-z` are not decoration on this system.** A path here may hold any byte
+but `/` and NUL — newline included — so `grep -rl … | xargs` is ambiguous *by
+construction*, and `grep -rlZ … | xargs -0` is the only spelling that is not.
+`-z` is the other half: `find -print0 | xargs -0 grep -z` only works if grep
+agrees about what a record is. Measured details that are easy to get wrong and
+are now asserted: `-Z` changes the byte after a *file name* only — the one after
+a line number stays `:`, or `-nZ` would be unparseable — and `-z` does not reach
+the `-c` count line, which ends with a newline even under `-z` because a count
+is not a record.
+
+**Two things the harness had to learn about itself**, both worth remembering
+for the next `*-diff.sh`:
+
+* **A case that names no file reads stdin, and stdin was the case list.** The
+  first such case (`grep a`) swallowed every remaining line; the harness
+  reported "12 passed" for a file with 180 cases in it and looked entirely
+  healthy doing so. Fixed by feeding the list on fd 3 and giving every case
+  `</dev/null` unless it says otherwise.
+* **A command substitution discards NUL bytes.** Without the `tr` that
+  `find-diff.sh` already had, every `-Z`/`-z` case would have captured
+  identically to the same case without the flag — the flags would have "passed"
+  by being invisible.
+
+**The eleven deliberate differences**, all XPASS under the
+`OURS=/usr/bin/grep` control: three `\<`/`\>`/`\b` refusals (`bre.rs` explains
+why — the engine has no word-boundary matcher and there is no spelling that
+would quietly do the wrong thing), two binary-file cases (we never replace a
+line with `Binary file X matches`), and six recursion cases where the *Windows*
+build joins child paths with `\`. That last group is a harness artefact, not a
+grep bug: `Path::join` uses the host separator and the target's is `/`. `grep
+foo sub` — recursion's sibling that names no child path — is left unmarked as
+the control that proves the difference is the separator and nothing else.

@@ -5364,6 +5364,12 @@ extern "C" fn kernel_main() -> ! {
             if let Err(e) = fs::fileselect::self_test() {
                 serial_println!("WARNING: file-select self-test failed: {:?}", e);
             }
+            // filevault was reachable only from a `kshell` subcommand, so its
+            // suite had never run in the boot test (TD-A-FS-SELFTESTS-NEVER-RUN).
+            // It is in-memory vault bookkeeping with a simulated password
+            // hash -- no real crypto, no disk -- and clears the state on the
+            // way out, so it leaves no vault behind for a boot run.
+            fs::filevault::self_test();
             if let Err(e) = fs::filetype::self_test() {
                 serial_println!("WARNING: filetype self-test failed: {:?}", e);
             }

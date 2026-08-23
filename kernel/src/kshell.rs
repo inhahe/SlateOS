@@ -58952,8 +58952,8 @@ fn cmd_filevault(args: &str) {
                         v.name,
                         v.state.label(),
                         v.cipher.label(),
-                        v.path,
-                        v.mount_point
+                        v.path.display(),
+                        v.mount_point.display()
                     );
                     shell_println!("    Auto-lock: {}s", v.auto_lock_secs);
                 }

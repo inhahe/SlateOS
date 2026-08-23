@@ -20,8 +20,8 @@
 
 #![allow(dead_code)]
 
+use crate::fs::path::{Path, PathBuf};
 use crate::sync::Mutex;
-use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
@@ -61,9 +61,24 @@ pub struct UserProfile {
     pub username: String,
     pub display_name: String,
     pub account_type: AccountType,
-    pub avatar_path: Option<String>,
-    pub home_dir: String,
-    pub shell: String,
+    /// Avatar image, if one has been set.
+    ///
+    /// `PathBuf`, not `String`: our filesystem forbids only `/` and NUL in a
+    /// name, so a `String` cannot hold every legal path. See
+    /// design-decisions.md §261.
+    pub avatar_path: Option<PathBuf>,
+    /// Home directory.
+    ///
+    /// The most consequential of the three: this is the root of everything the
+    /// user owns. A lossily decoded spelling does not point at an empty home,
+    /// it points at *a different directory* -- one that may well exist and
+    /// belong to someone else.
+    pub home_dir: PathBuf,
+    /// Login shell.
+    ///
+    /// A path to an executable, so the same argument as `home_dir`: the wrong
+    /// spelling runs the wrong program, or fails to log the user in at all.
+    pub shell: PathBuf,
     pub login_count: u64,
     pub last_login_ns: u64,
     pub created_ns: u64,
@@ -118,8 +133,8 @@ pub fn init_defaults() {
                 display_name: String::from("System Administrator"),
                 account_type: AccountType::Admin,
                 avatar_path: None,
-                home_dir: String::from("/root"),
-                shell: String::from("/bin/kshell"),
+                home_dir: PathBuf::from("/root"),
+                shell: PathBuf::from("/bin/kshell"),
                 login_count: 1,
                 last_login_ns: now,
                 created_ns: now,
@@ -132,8 +147,8 @@ pub fn init_defaults() {
                 display_name: String::from("Default User"),
                 account_type: AccountType::Standard,
                 avatar_path: None,
-                home_dir: String::from("/home/user"),
-                shell: String::from("/bin/kshell"),
+                home_dir: PathBuf::from("/home/user"),
+                shell: PathBuf::from("/bin/kshell"),
                 login_count: 0,
                 last_login_ns: 0,
                 created_ns: now,
@@ -165,7 +180,9 @@ pub fn create_profile(
         let now = crate::hpet::elapsed_ns();
         let id = state.next_id;
         state.next_id += 1;
-        let home = format!("/home/{}", username);
+        // `join`, not `format!("/home/{}")`: it carries the username's bytes
+        // through unchanged and cannot produce a doubled separator.
+        let home = Path::new("/home").join(username);
         state.profiles.push(UserProfile {
             id,
             username: String::from(username),
@@ -173,7 +190,7 @@ pub fn create_profile(
             account_type,
             avatar_path: None,
             home_dir: home,
-            shell: String::from("/bin/kshell"),
+            shell: PathBuf::from("/bin/kshell"),
             login_count: 0,
             last_login_ns: 0,
             created_ns: now,
@@ -260,15 +277,81 @@ pub fn set_display_name(id: u32, name: &str) -> KernelResult<()> {
     })
 }
 
-/// Set avatar path.
-pub fn set_avatar(id: u32, path: &str) -> KernelResult<()> {
+/// Set the avatar image path. The empty path clears it.
+///
+/// # Errors
+///
+/// Returns [`KernelError::NotFound`] if no profile has that id.
+pub fn set_avatar(id: u32, path: impl AsRef<Path>) -> KernelResult<()> {
+    let path = path.as_ref();
     with_state(|state| {
         let profile = state
             .profiles
             .iter_mut()
             .find(|p| p.id == id)
             .ok_or(KernelError::NotFound)?;
-        profile.avatar_path = Some(String::from(path));
+        profile.avatar_path = if path.is_empty() {
+            None
+        } else {
+            Some(path.to_path_buf())
+        };
+        Ok(())
+    })
+}
+
+/// Set the home directory.
+///
+/// `create_profile` derives `/home/<username>`, which was previously the only
+/// home a profile could ever have: nothing could move a user onto another
+/// volume, and the root account's `/root` was unreachable through the API
+/// entirely. Dead configuration -- a field the module displays but no caller
+/// can write.
+///
+/// # Errors
+///
+/// Returns [`KernelError::NotFound`] if no profile has that id, and
+/// [`KernelError::InvalidArgument`] for a path that is empty or relative: a
+/// home directory is resolved from no particular working directory, so a
+/// relative one names nothing in particular.
+pub fn set_home_dir(id: u32, dir: impl AsRef<Path>) -> KernelResult<()> {
+    let dir = dir.as_ref();
+    if !dir.is_absolute() {
+        return Err(KernelError::InvalidArgument);
+    }
+    with_state(|state| {
+        let profile = state
+            .profiles
+            .iter_mut()
+            .find(|p| p.id == id)
+            .ok_or(KernelError::NotFound)?;
+        profile.home_dir = dir.to_path_buf();
+        Ok(())
+    })
+}
+
+/// Set the login shell.
+///
+/// Every profile was hard-wired to `/bin/kshell` with no way to change it,
+/// for the same reason `home_dir` was: the field existed and was displayed,
+/// but had no setter.
+///
+/// # Errors
+///
+/// Returns [`KernelError::NotFound`] if no profile has that id, and
+/// [`KernelError::InvalidArgument`] for a path that is empty or relative --
+/// a login shell is executed with no established working directory.
+pub fn set_shell(id: u32, shell: impl AsRef<Path>) -> KernelResult<()> {
+    let shell = shell.as_ref();
+    if !shell.is_absolute() {
+        return Err(KernelError::InvalidArgument);
+    }
+    with_state(|state| {
+        let profile = state
+            .profiles
+            .iter_mut()
+            .find(|p| p.id == id)
+            .ok_or(KernelError::NotFound)?;
+        profile.shell = shell.to_path_buf();
         Ok(())
     })
 }
@@ -318,52 +401,105 @@ pub fn self_test() {
     assert_eq!(list_profiles().len(), 2);
     let active = active_user().expect("active");
     assert_eq!(active.username, "root");
-    crate::serial_println!("  [1/8] defaults: OK");
+    crate::serial_println!("  [1/9] defaults: OK");
 
     // 2: Create profile.
     let id = create_profile("alice", "Alice Smith", AccountType::Standard).expect("create");
     assert_eq!(list_profiles().len(), 3);
-    crate::serial_println!("  [2/8] create: OK");
+    crate::serial_println!("  [2/9] create: OK");
 
     // 3: Switch user.
     switch_user(id).expect("switch");
     let active = active_user().expect("active2");
     assert_eq!(active.username, "alice");
     assert_eq!(active.login_count, 1);
-    crate::serial_println!("  [3/8] switch: OK");
+    crate::serial_println!("  [3/9] switch: OK");
 
     // 4: Update name.
     set_display_name(id, "Alice Wonderland").expect("rename");
     let p = get_profile(id).expect("get");
     assert_eq!(p.display_name, "Alice Wonderland");
-    crate::serial_println!("  [4/8] update name: OK");
+    crate::serial_println!("  [4/9] update name: OK");
 
     // 5: Set avatar.
     set_avatar(id, "/avatars/alice.png").expect("avatar");
     let p = get_profile(id).expect("get2");
-    assert_eq!(p.avatar_path.as_deref(), Some("/avatars/alice.png"));
-    crate::serial_println!("  [5/8] avatar: OK");
+    assert_eq!(
+        p.avatar_path.as_deref(),
+        Some(Path::new("/avatars/alice.png"))
+    );
+    // The empty path clears it rather than storing a path that names nothing.
+    set_avatar(id, "").expect("clear avatar");
+    assert!(get_profile(id).expect("get2b").avatar_path.is_none());
+    set_avatar(id, "/avatars/alice.png").expect("avatar again");
+    crate::serial_println!("  [5/9] avatar: OK");
 
     // 6: Lock/unlock.
     set_locked(2, true).expect("lock");
     assert!(switch_user(2).is_err()); // Locked.
     set_locked(2, false).expect("unlock");
-    crate::serial_println!("  [6/8] lock/unlock: OK");
+    crate::serial_println!("  [6/9] lock/unlock: OK");
 
-    // 7: Delete (can't delete active).
+    // 7: Non-UTF-8 home directory, shell and avatar survive byte-exact (§261).
+    //
+    // `\xFF` and `\xFE` have no UTF-8 spelling in any position, so under the
+    // old `String` typing both folded to the same U+FFFD-bearing name. For a
+    // home directory that is not a display glitch: it is the root of
+    // everything the user owns, and the folded spelling names a *different*
+    // directory that may well exist and belong to someone else. The shell is
+    // an executable path, so the same spelling error runs the wrong program.
+    // See design-decisions.md §261.
+    let raw_home = Path::new(b"/home/al\xFFce");
+    let raw_home_sibling = Path::new(b"/home/al\xFEce");
+    let raw_shell = Path::new(b"/bin/sh\xFFll");
+    let raw_avatar = Path::new(b"/avatars/al\xFFce.png");
+    set_home_dir(id, raw_home).expect("set raw home");
+    set_shell(id, raw_shell).expect("set raw shell");
+    set_avatar(id, raw_avatar).expect("set raw avatar");
+    let p = get_profile(id).expect("get raw");
+    assert_eq!(
+        p.home_dir.as_path().as_bytes(),
+        &b"/home/al\xFFce"[..],
+        "the home directory must be stored byte-for-byte"
+    );
+    assert_eq!(
+        p.shell.as_path().as_bytes(),
+        &b"/bin/sh\xFFll"[..],
+        "the login shell must be stored byte-for-byte"
+    );
+    assert_eq!(
+        p.avatar_path.as_deref().map(Path::as_bytes),
+        Some(&b"/avatars/al\xFFce.png"[..]),
+        "the avatar path must be stored byte-for-byte"
+    );
+    assert_ne!(
+        p.home_dir.as_path(),
+        raw_home_sibling,
+        "two homes differing only in an unencodable byte must stay distinct"
+    );
+    // Relative and empty paths are refused: neither names a home or a shell
+    // without a working directory, and there is none at login time.
+    assert!(set_home_dir(id, "home/alice").is_err());
+    assert!(set_home_dir(id, "").is_err());
+    assert!(set_shell(id, "bin/sh").is_err());
+    assert!(set_shell(id, "").is_err());
+    assert!(set_home_dir(9999, "/home/nobody").is_err());
+    crate::serial_println!("  [7/9] non-UTF-8 home, shell and avatar: OK");
+
+    // 8: Delete (can't delete active).
     assert!(delete_profile(id).is_err());
     switch_user(1).expect("switch_back");
     delete_profile(id).expect("delete");
     assert_eq!(list_profiles().len(), 2);
-    crate::serial_println!("  [7/8] delete: OK");
+    crate::serial_println!("  [8/9] delete: OK");
 
-    // 8: Stats.
+    // 9: Stats.
     let (count, logins, switches, ops) = stats();
     assert_eq!(count, 2);
     assert!(logins >= 3);
     assert!(switches >= 2);
     assert!(ops > 0);
-    crate::serial_println!("  [8/8] stats: OK");
+    crate::serial_println!("  [9/9] stats: OK");
 
-    crate::serial_println!("userprofile::self_test() — all 8 tests passed");
+    crate::serial_println!("userprofile::self_test() — all 9 tests passed");
 }

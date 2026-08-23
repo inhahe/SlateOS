@@ -43,6 +43,7 @@ use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::error::{KernelError, KernelResult};
+use crate::fs::path::{Path, PathBuf};
 
 // ---------------------------------------------------------------------------
 // Types
@@ -147,7 +148,10 @@ pub struct ProgramSnapshot {
 #[derive(Debug, Clone)]
 pub struct BuildRecord {
     /// Source directory path.
-    pub source_dir: String,
+    ///
+    /// §261: a source tree is an ordinary directory, so its name may contain
+    /// any byte except `/` and NUL.
+    pub source_dir: PathBuf,
     /// Hash of source tree at last compile.
     pub source_hash: u64,
     /// Compile parameters (flags, options).
@@ -181,11 +185,17 @@ pub struct ProgramEntry {
     /// Version string.
     pub version: String,
     /// Install directory.
-    pub install_dir: String,
+    ///
+    /// §261: a program is installed wherever its packager put it, under a
+    /// name this kernel does not choose, so it may contain any byte except
+    /// `/` and NUL.  These three are the directories `uninstall` deletes --
+    /// folding two of them onto one U+FFFD-bearing name would mean deleting
+    /// the wrong program's data.
+    pub install_dir: PathBuf,
     /// Settings directory (standard subdirectory).
-    pub settings_dir: String,
+    pub settings_dir: PathBuf,
     /// Data directory (standard subdirectory).
-    pub data_dir: String,
+    pub data_dir: PathBuf,
     /// Scheduling priority.
     pub priority: PriorityLevel,
     /// Granted capabilities.
@@ -232,9 +242,10 @@ pub fn register(
     app_id: &str,
     name: &str,
     version: &str,
-    install_dir: &str,
+    install_dir: impl AsRef<Path>,
     size_bytes: u64,
 ) -> KernelResult<()> {
+    let install_dir = install_dir.as_ref();
     let mut state = STATE.lock();
     if state.programs.len() >= 4096 {
         return Err(KernelError::ResourceExhausted);
@@ -242,20 +253,17 @@ pub fn register(
     if state.programs.iter().any(|p| p.app_id == app_id) {
         return Err(KernelError::AlreadyExists);
     }
-    let settings_dir = {
-        use alloc::format;
-        format!("{}/settings", install_dir)
-    };
-    let data_dir = {
-        use alloc::format;
-        format!("{}/data", install_dir)
-    };
+    // `join` rather than `format!`: the parent may hold bytes with no UTF-8
+    // spelling, and it also collapses a trailing `/` that a formatted
+    // concatenation would double.
+    let settings_dir = install_dir.join("settings");
+    let data_dir = install_dir.join("data");
     let now = crate::hpet::elapsed_ns();
     state.programs.push(ProgramEntry {
         app_id: String::from(app_id),
         name: String::from(name),
         version: String::from(version),
-        install_dir: String::from(install_dir),
+        install_dir: install_dir.to_path_buf(),
         settings_dir,
         data_dir,
         priority: PriorityLevel::Normal,
@@ -476,34 +484,36 @@ pub fn set_notification_config(
 // ---------------------------------------------------------------------------
 
 /// Set custom settings directory for a program.
-pub fn set_settings_dir(app_id: &str, dir: &str) -> KernelResult<()> {
+pub fn set_settings_dir(app_id: &str, dir: impl AsRef<Path>) -> KernelResult<()> {
+    let dir = dir.as_ref();
     let mut state = STATE.lock();
     let prog = state
         .programs
         .iter_mut()
         .find(|p| p.app_id == app_id)
         .ok_or(KernelError::NotFound)?;
-    prog.settings_dir = String::from(dir);
+    prog.settings_dir = dir.to_path_buf();
     state.changes += 1;
     Ok(())
 }
 
 /// Set custom data directory for a program.
-pub fn set_data_dir(app_id: &str, dir: &str) -> KernelResult<()> {
+pub fn set_data_dir(app_id: &str, dir: impl AsRef<Path>) -> KernelResult<()> {
+    let dir = dir.as_ref();
     let mut state = STATE.lock();
     let prog = state
         .programs
         .iter_mut()
         .find(|p| p.app_id == app_id)
         .ok_or(KernelError::NotFound)?;
-    prog.data_dir = String::from(dir);
+    prog.data_dir = dir.to_path_buf();
     state.changes += 1;
     Ok(())
 }
 
 /// Mark program data for wipe (caller handles actual deletion).
 /// Returns the data directory that should be cleared.
-pub fn wipe_data(app_id: &str) -> KernelResult<String> {
+pub fn wipe_data(app_id: &str) -> KernelResult<PathBuf> {
     let mut state = STATE.lock();
     let prog = state
         .programs
@@ -518,7 +528,7 @@ pub fn wipe_data(app_id: &str) -> KernelResult<String> {
 
 /// Mark program settings for wipe (caller handles actual deletion).
 /// Returns the settings directory that should be cleared.
-pub fn wipe_settings(app_id: &str) -> KernelResult<String> {
+pub fn wipe_settings(app_id: &str) -> KernelResult<PathBuf> {
     let mut state = STATE.lock();
     let prog = state
         .programs
@@ -536,7 +546,12 @@ pub fn wipe_settings(app_id: &str) -> KernelResult<String> {
 // ---------------------------------------------------------------------------
 
 /// Set a program as compilable with a source directory.
-pub fn set_compilable(app_id: &str, source_dir: &str, parameters: &str) -> KernelResult<()> {
+pub fn set_compilable(
+    app_id: &str,
+    source_dir: impl AsRef<Path>,
+    parameters: &str,
+) -> KernelResult<()> {
+    let source_dir = source_dir.as_ref();
     let mut state = STATE.lock();
     let prog = state
         .programs
@@ -545,7 +560,7 @@ pub fn set_compilable(app_id: &str, source_dir: &str, parameters: &str) -> Kerne
         .ok_or(KernelError::NotFound)?;
     prog.compilable = true;
     prog.build = Some(BuildRecord {
-        source_dir: String::from(source_dir),
+        source_dir: source_dir.to_path_buf(),
         source_hash: 0,
         parameters: String::from(parameters),
         last_compile_ns: 0,
@@ -749,9 +764,9 @@ pub fn init_defaults() {
         app_id: String::from("system.fileexplorer"),
         name: String::from("File Explorer"),
         version: String::from("1.0.0"),
-        install_dir: String::from("/usr/lib/fileexplorer"),
-        settings_dir: String::from("/usr/lib/fileexplorer/settings"),
-        data_dir: String::from("/usr/lib/fileexplorer/data"),
+        install_dir: PathBuf::from("/usr/lib/fileexplorer"),
+        settings_dir: PathBuf::from("/usr/lib/fileexplorer/settings"),
+        data_dir: PathBuf::from("/usr/lib/fileexplorer/data"),
         priority: PriorityLevel::Normal,
         capabilities: alloc::vec![
             ProgCapability::FilesystemFull,
@@ -788,9 +803,9 @@ pub fn init_defaults() {
         app_id: String::from("system.terminal"),
         name: String::from("Terminal"),
         version: String::from("1.0.0"),
-        install_dir: String::from("/usr/lib/terminal"),
-        settings_dir: String::from("/usr/lib/terminal/settings"),
-        data_dir: String::from("/usr/lib/terminal/data"),
+        install_dir: PathBuf::from("/usr/lib/terminal"),
+        settings_dir: PathBuf::from("/usr/lib/terminal/settings"),
+        data_dir: PathBuf::from("/usr/lib/terminal/data"),
         priority: PriorityLevel::Normal,
         capabilities: alloc::vec![
             ProgCapability::FilesystemFull,
@@ -812,9 +827,9 @@ pub fn init_defaults() {
         app_id: String::from("system.texteditor"),
         name: String::from("Text Editor"),
         version: String::from("1.0.0"),
-        install_dir: String::from("/usr/lib/texteditor"),
-        settings_dir: String::from("/usr/lib/texteditor/settings"),
-        data_dir: String::from("/usr/lib/texteditor/data"),
+        install_dir: PathBuf::from("/usr/lib/texteditor"),
+        settings_dir: PathBuf::from("/usr/lib/texteditor/settings"),
+        data_dir: PathBuf::from("/usr/lib/texteditor/data"),
         priority: PriorityLevel::Normal,
         capabilities: alloc::vec![
             ProgCapability::FilesystemFull,
@@ -841,9 +856,9 @@ pub fn init_defaults() {
         app_id: String::from("system.settings"),
         name: String::from("Settings"),
         version: String::from("1.0.0"),
-        install_dir: String::from("/usr/lib/settings"),
-        settings_dir: String::from("/usr/lib/settings/settings"),
-        data_dir: String::from("/usr/lib/settings/data"),
+        install_dir: PathBuf::from("/usr/lib/settings"),
+        settings_dir: PathBuf::from("/usr/lib/settings/settings"),
+        data_dir: PathBuf::from("/usr/lib/settings/data"),
         priority: PriorityLevel::Normal,
         capabilities: alloc::vec![
             ProgCapability::SystemSettings,
@@ -1016,7 +1031,68 @@ pub fn self_test() -> KernelResult<()> {
         case()?;
     }
 
+    {
+        #[inline(never)]
+        fn case() -> crate::error::KernelResult<()> {
+            // Test 8: non-UTF-8 install, data and source directories (§261).
+            //
+            // A program is installed wherever its packager put it, under a
+            // name this kernel does not choose -- any byte but `/` and NUL is
+            // legal.  As `String`s, two install trees differing only in a byte
+            // with no UTF-8 spelling folded onto one U+FFFD-bearing name, and
+            // since these are the directories `wipe_data` hands back for
+            // deletion, that fold meant wiping the wrong program's data.
+            serial_println!("progmgr::self_test 8: non-UTF-8 directories");
+            let inst_a = Path::new(&b"/opt/pm_\xFFapp"[..]);
+            let inst_b = Path::new(&b"/opt/pm_\xFEapp"[..]);
+            register("test.bytes.a", "BytesA", "1.0", inst_a, 2048)?;
+            register("test.bytes.b", "BytesB", "1.0", inst_b, 2048)?;
+            // Two apps whose install trees differ in exactly one byte, neither
+            // representable in UTF-8 -- the case a `String` field folded.
+            let a = get_program("test.bytes.a")?;
+            let b = get_program("test.bytes.b")?;
+            assert_eq!(a.install_dir.as_path(), inst_a);
+            assert_eq!(a.install_dir.as_path().as_bytes(), b"/opt/pm_\xFFapp");
+            assert_ne!(a.install_dir, b.install_dir);
+
+            // The derived subdirectories are built with `join`, so they carry
+            // the parent's bytes through unchanged.
+            assert_eq!(
+                a.settings_dir.as_path().as_bytes(),
+                b"/opt/pm_\xFFapp/settings"
+            );
+            assert_eq!(a.data_dir.as_path().as_bytes(), b"/opt/pm_\xFFapp/data");
+
+            // wipe_data hands back the byte-exact directory to delete.
+            assert_eq!(
+                wipe_data("test.bytes.a")?.as_path().as_bytes(),
+                b"/opt/pm_\xFFapp/data"
+            );
+
+            let custom = Path::new(&b"/var/pm_\xFFdata"[..]);
+            set_data_dir("test.bytes.a", custom)?;
+            assert_eq!(get_program("test.bytes.a")?.data_dir.as_path(), custom);
+            let settings = Path::new(&b"/var/pm_\xFFcfg"[..]);
+            set_settings_dir("test.bytes.a", settings)?;
+            assert_eq!(
+                wipe_settings("test.bytes.a")?.as_path(),
+                settings,
+                "wipe_settings must return the byte-exact custom directory"
+            );
+
+            let src = Path::new(&b"/src/pm_\xFFsrc"[..]);
+            set_compilable("test.bytes.a", src, "--release")?;
+            let a = get_program("test.bytes.a")?;
+            assert_eq!(
+                a.build.as_ref().expect("build record").source_dir.as_path(),
+                src
+            );
+            Ok(())
+        }
+        case()?;
+    }
+
     clear_all();
-    serial_println!("progmgr::self_test: all 7 tests passed");
+    serial_println!("progmgr::self_test: all 8 tests passed");
     Ok(())
 }

@@ -1260,11 +1260,35 @@ fn kind_to_handle_type(kind: crate::fdtable::HandleKind) -> u8 {
         HandleKind::UdpSocket => fd_handle_type::UDP_SOCKET,
         HandleKind::Eventfd => fd_handle_type::EVENTFD,
         HandleKind::UnixStream => fd_handle_type::STREAM_SOCKET,
+        // A pty *slave* crosses as a console handle, and that is exact
+        // rather than approximate.  `CONSOLE` does not name a specific
+        // device: the kernel resolves every console read and write
+        // through `current_tty()`, so a console fd means "my controlling
+        // terminal".  A child reached through `login_tty` has *made* the
+        // slave its controlling terminal (`setsid` + `TIOCSCTTY`) before
+        // it execs, so console-kind stdio in the child lands in the pty,
+        // with `OPOST`/`ONLCR` and the `TOSTOP` gate applied -- which is
+        // the whole of what a shell running under a terminal emulator
+        // needs.  See lane A's "Linux `write(1, ...)` is already
+        // pty-aware" note in
+        // `requests/a-b-pty-the-tty-layer-is-now-n-devices-and-a-pty-object-exists.md`.
+        HandleKind::PtySlave => fd_handle_type::CONSOLE,
         // Epoll, Timerfd, and Inotify fds are per-process userspace
         // state and cannot be meaningfully transferred to a child.  Map
         // to FILE so the function is total; build_fd_map filters these
         // entries out before they reach this conversion.
-        HandleKind::Epoll | HandleKind::Timerfd | HandleKind::Inotify => fd_handle_type::FILE,
+        //
+        // A pty *master* is filtered for a different reason: it is a real
+        // kernel handle that could be inherited, but there is no
+        // `fd_handle_type` for it, so the kernel has no way to dup it into
+        // the child's PCB.  Passing it as `FILE` would hand the child a
+        // handle number the file layer would misread.  Filed with lane A
+        // as `requests/b-a-spawn-cannot-inherit-a-pty-master.md`; until
+        // that lands, a child that needs a master must be given one over
+        // a channel rather than at spawn.
+        HandleKind::Epoll | HandleKind::Timerfd | HandleKind::Inotify | HandleKind::PtyMaster => {
+            fd_handle_type::FILE
+        }
     }
 }
 
@@ -1382,13 +1406,34 @@ fn build_fd_map(
         let fd = idx as i32;
         if let Some(entry) = fdtable::get_fd(fd) {
             // Skip close-on-exec fds — they shouldn't be inherited.
+            //
             // Skip epoll/timerfd/inotify fds — the instance state lives
             // in the parent's userspace memory and cannot be transferred
-            // to the child.
+            // to the child.  For those three the filter is honest: there
+            // is no kernel object to hand over.
+            //
+            // `PtyMaster` is in the same list for a different and worse
+            // reason: it *does* have a kernel identity, but
+            // `SYS_PROCESS_SPAWN`'s `fd_handle_type` has no value that
+            // names a pty end, so there is no way to pass it.  Dropping
+            // it is a lie of convenience — the child silently loses the
+            // master rather than being told it cannot have it — and it
+            // is what stops `script -f`-shaped programs (where the
+            // *child* is the master holder) from working at all.  Tracked
+            // as `TD-B-PTY-MASTER-CANNOT-BE-INHERITED-ACROSS-SPAWN` and
+            // filed to lane A as
+            // `requests/b-a-pty-gaps-master-inheritance-and-readable-bytes.md`.
+            //
+            // `PtySlave` deliberately is *not* skipped: `kind_to_handle_type`
+            // maps it to `CONSOLE`, which the kernel resolves through
+            // `current_tty()`, and `login_tty` has already made the pty the
+            // child's controlling terminal — so that mapping is exact
+            // rather than approximate.
             if entry.flags & fdtable::FD_CLOEXEC == 0
                 && entry.kind != fdtable::HandleKind::Epoll
                 && entry.kind != fdtable::HandleKind::Timerfd
                 && entry.kind != fdtable::HandleKind::Inotify
+                && entry.kind != fdtable::HandleKind::PtyMaster
             {
                 virt[idx] = Some((kind_to_handle_type(entry.kind), entry.handle));
             }
@@ -4203,7 +4248,9 @@ mod tests {
             (0, 0, 0, 0, 0, 0)
         );
         assert_eq!(
-            (a.argv_ptr, a.argv_len, a.argc, a.envp_ptr, a.envp_len, a.envc),
+            (
+                a.argv_ptr, a.argv_len, a.argc, a.envp_ptr, a.envp_len, a.envc
+            ),
             (0, 0, 0, 0, 0, 0)
         );
     }

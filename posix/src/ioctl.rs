@@ -230,6 +230,11 @@ pub struct Termios {
 // ---------------------------------------------------------------------------
 
 /// Default terminal dimensions (80x25 text mode).
+///
+/// **Host-only**, for the same reason as [`default_termios`]: on the real
+/// target the size belongs to the kernel and must be asked for
+/// (`SYS_PTY_GET_WINSIZE`).  What survives here is the host double's seed.
+#[cfg(not(target_os = "none"))]
 const DEFAULT_WINSIZE: Winsize = Winsize {
     ws_row: 25,
     ws_col: 80,
@@ -406,18 +411,84 @@ fn termios_from_wire(buf: &[u8; KERNEL_TERMIOS_BYTES]) -> Termios {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Kernel winsize marshalling
+// ---------------------------------------------------------------------------
+
+/// Serialised size of the kernel `struct winsize`: four little-endian `u16`s
+/// (`ws_row`, `ws_col`, `ws_xpixel`, `ws_ypixel`).  Must equal
+/// `kernel/src/tty/mod.rs`'s `WINSIZE_BYTES`.
+const WINSIZE_BYTES: usize = 2 * 4;
+
+/// Marshal a [`Winsize`] into the 8-byte kernel wire format.
+///
+/// On x86-64 this happens to be byte-for-byte the `#[repr(C)]` layout of
+/// `Winsize` itself, so passing the struct's address straight to the kernel
+/// would work today.  It is marshalled anyway for the same reason the termios
+/// pair is: the wire format is a *contract with the kernel*, and a contract
+/// that is only satisfied by accident of the host's endianness and padding
+/// rules is one that breaks silently the first time either side changes.  The
+/// cost is eight bytes of copying on an operation a terminal emulator
+/// performs when its window is dragged.
+fn winsize_to_wire(ws: &Winsize) -> [u8; WINSIZE_BYTES] {
+    let mut buf = [0u8; WINSIZE_BYTES];
+    let fields = [ws.ws_row, ws.ws_col, ws.ws_xpixel, ws.ws_ypixel];
+    // `chunks_exact_mut(2).zip(fields)` makes every write in-bounds by
+    // construction -- no offset arithmetic to get wrong, and nothing for
+    // `clippy::indexing_slicing` or `arithmetic_side_effects` to flag.
+    for (slot, field) in buf.chunks_exact_mut(2).zip(fields) {
+        slot.copy_from_slice(&field.to_le_bytes());
+    }
+    buf
+}
+
+/// Unmarshal the 8-byte kernel wire format into a [`Winsize`].
+///
+/// The exact inverse of [`winsize_to_wire`], so a `TIOCGWINSZ` after a
+/// `TIOCSWINSZ` reports what was set.
+fn winsize_from_wire(buf: &[u8; WINSIZE_BYTES]) -> Winsize {
+    let mut fields = [0u16; 4];
+    for (field, src) in fields.iter_mut().zip(buf.chunks_exact(2)) {
+        let mut b = [0u8; 2];
+        b.copy_from_slice(src);
+        *field = u16::from_le_bytes(b);
+    }
+    // Destructuring rather than indexing keeps the field order stated once,
+    // in the same order as `winsize_to_wire` writes it.
+    let [ws_row, ws_col, ws_xpixel, ws_ypixel] = fields;
+    Winsize {
+        ws_row,
+        ws_col,
+        ws_xpixel,
+        ws_ypixel,
+    }
+}
+
 /// Read the console's termios from the kernel (`SYS_TTY_GET_TERMIOS`).
 ///
 /// Returns `None` with `errno` already set (by `errno::translate`) on
 /// failure.  On host builds there is no kernel, so this answers from the
 /// per-thread [`host_termios`] double — which is what makes the marshalling
 /// above testable under `cargo test`.
-fn get_kernel_termios() -> Option<Termios> {
+fn get_kernel_termios(term: u64) -> Option<Termios> {
     #[cfg(target_os = "none")]
     {
         let mut buf = [0u8; KERNEL_TERMIOS_BYTES];
-        let ret =
-            crate::syscall::syscall1(crate::syscall::SYS_TTY_GET_TERMIOS, buf.as_mut_ptr() as u64);
+        let ret = if term == CTTY {
+            // 541 keeps its exact original shape -- `(buffer)`, my-terminal
+            // only.  Lane A deliberately did *not* widen it, so that
+            // everything already compiled against it keeps working; the
+            // handle-taking form is a new number.  Using 541 for the
+            // controlling terminal rather than 555-with-zero keeps this
+            // libc honest about which contract it is exercising.
+            crate::syscall::syscall1(crate::syscall::SYS_TTY_GET_TERMIOS, buf.as_mut_ptr() as u64)
+        } else {
+            crate::syscall::syscall2(
+                crate::syscall::SYS_PTY_GET_TERMIOS,
+                term,
+                buf.as_mut_ptr() as u64,
+            )
+        };
         if errno::translate(ret) < 0 {
             return None;
         }
@@ -425,6 +496,12 @@ fn get_kernel_termios() -> Option<Termios> {
     }
     #[cfg(not(target_os = "none"))]
     {
+        // One double for every terminal.  A host build can never own a real
+        // pty -- `posix_openpt` needs `SYS_PTY_CREATE`, which is `ENOSYS`
+        // here -- so the only way to reach this with `term != CTTY` is a
+        // test that installed a pty fd by hand, and such a test is
+        // exercising the marshalling, not the per-terminal separation.
+        let _ = term;
         Some(termios_from_wire(&host_termios::get()))
     }
 }
@@ -432,16 +509,24 @@ fn get_kernel_termios() -> Option<Termios> {
 /// Install a console termios in the kernel (`SYS_TTY_SET_TERMIOS`).
 ///
 /// Returns `false` with `errno` already set on failure.
-fn set_kernel_termios(t: &Termios) -> bool {
+fn set_kernel_termios(term: u64, t: &Termios) -> bool {
     let buf = termios_to_wire(t);
     #[cfg(target_os = "none")]
     {
-        let ret =
-            crate::syscall::syscall1(crate::syscall::SYS_TTY_SET_TERMIOS, buf.as_ptr() as u64);
+        let ret = if term == CTTY {
+            crate::syscall::syscall1(crate::syscall::SYS_TTY_SET_TERMIOS, buf.as_ptr() as u64)
+        } else {
+            crate::syscall::syscall2(
+                crate::syscall::SYS_PTY_SET_TERMIOS,
+                term,
+                buf.as_ptr() as u64,
+            )
+        };
         errno::translate(ret) >= 0
     }
     #[cfg(not(target_os = "none"))]
     {
+        let _ = term;
         host_termios::set(buf);
         true
     }
@@ -484,6 +569,72 @@ mod host_termios {
     }
 }
 
+// Host-build test double for the terminal window size.
+//
+// The mirror image of [`host_termios`], and it exists for the same two
+// reasons: `cargo test` has no kernel to hold the size, and storing the
+// *wire* form means a host `TIOCSWINSZ`/`TIOCGWINSZ` round trip exercises
+// both marshalling directions rather than skipping them.  Without it the
+// host build would never call `winsize_to_wire`/`winsize_from_wire` at all,
+// so the only coverage they could have is a test that calls them directly
+// -- which proves they are each other's inverse but not that anything uses
+// them that way.
+#[cfg(not(target_os = "none"))]
+mod host_winsize {
+    use super::{DEFAULT_WINSIZE, WINSIZE_BYTES, winsize_to_wire};
+    use core::cell::Cell;
+
+    std::thread_local! {
+        /// `None` until first use, then the last wire-format winsize set.
+        static WINSIZE: Cell<Option<[u8; WINSIZE_BYTES]>> = const { Cell::new(None) };
+    }
+
+    pub(super) fn get() -> [u8; WINSIZE_BYTES] {
+        WINSIZE
+            .try_with(Cell::get)
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| winsize_to_wire(&DEFAULT_WINSIZE))
+    }
+
+    pub(super) fn set(v: [u8; WINSIZE_BYTES]) {
+        let _ = WINSIZE.try_with(|c| c.set(Some(v)));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Naming a terminal to the kernel
+// ---------------------------------------------------------------------------
+
+/// The `arg0` that means "the caller's controlling terminal".
+///
+/// The pty family's terminal-taking syscalls (539, 553-556) share one
+/// convention for `arg0`: `0` is my terminal, `1` is reserved and always
+/// rejected, and `>= 2` is a pty handle the caller must actually own.  See
+/// the header comment on [`crate::syscall::SYS_PTY_CREATE`].
+const CTTY: u64 = 0;
+
+/// Name the terminal an fd refers to, in the kernel's convention.
+///
+/// `None` means "this descriptor is not a terminal", which every caller
+/// turns into `ENOTTY`.
+///
+/// A `Console` fd becomes [`CTTY`] rather than a handle, and that is not a
+/// shortcut: console fds carry no pty handle, and the kernel resolves
+/// every console operation through `current_tty()` anyway -- so `0` is a
+/// more accurate description of a console fd than any number would be.
+/// The practical consequence is the good one: after `login_tty`, a child's
+/// console-kind stdio and the pty it is running on are the same terminal,
+/// so `tcgetattr(0)` in the child reads the pty's discipline without the
+/// child having to know it is on a pty.
+fn terminal_arg(kind: HandleKind, handle: u64) -> Option<u64> {
+    match kind {
+        HandleKind::Console => Some(CTTY),
+        HandleKind::PtyMaster | HandleKind::PtySlave => Some(handle),
+        _ => None,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // ioctl()
 // ---------------------------------------------------------------------------
@@ -505,16 +656,16 @@ pub extern "C" fn ioctl(fd: i32, request: u64, arg: *mut u8) -> i32 {
     };
 
     match request {
-        TIOCGWINSZ => handle_tiocgwinsz(entry.kind, arg),
-        TIOCSWINSZ => handle_tiocswinsz(entry.kind),
+        TIOCGWINSZ => handle_tiocgwinsz(entry.kind, entry.handle, arg),
+        TIOCSWINSZ => handle_tiocswinsz(entry.kind, entry.handle, arg),
         FIONBIO => handle_fionbio(fd, arg),
         FIONREAD => handle_fionread(entry.kind, entry.handle, arg),
-        TCGETS => handle_tcgets(entry.kind, arg),
-        TCSETS | TCSETSW | TCSETSF => handle_tcsets(entry.kind, arg),
+        TCGETS => handle_tcgets(entry.kind, entry.handle, arg),
+        TCSETS | TCSETSW | TCSETSF => handle_tcsets(entry.kind, entry.handle, arg),
         TIOCGPGRP => handle_tiocgpgrp(fd, entry.kind, arg),
         TIOCSPGRP => handle_tiocspgrp(fd, entry.kind, arg),
-        TIOCSCTTY => handle_tiocsctty(entry.kind),
-        TIOCNOTTY => handle_tiocnotty(entry.kind),
+        TIOCSCTTY => handle_tiocsctty(entry.kind, entry.handle),
+        TIOCNOTTY => handle_tiocnotty(entry.kind, entry.handle),
         _ => {
             errno::set_errno(errno::ENOTTY);
             -1
@@ -523,34 +674,100 @@ pub extern "C" fn ioctl(fd: i32, request: u64, arg: *mut u8) -> i32 {
 }
 
 /// TIOCGWINSZ — get terminal window size.
-fn handle_tiocgwinsz(kind: HandleKind, arg: *mut u8) -> i32 {
-    if kind != HandleKind::Console {
+///
+/// Reads the kernel's real size via `SYS_PTY_GET_WINSIZE`, which takes a
+/// terminal under the convention [`terminal_arg`] encodes and therefore
+/// answers for the console (`0`) and for a named pty alike.
+///
+/// This used to answer [`DEFAULT_WINSIZE`] unconditionally, which was
+/// merely stale for the console but would have been actively wrong for a
+/// pty: a terminal emulator's whole point is that its size is not 80x25,
+/// and a shell that believes otherwise wraps every line in the wrong
+/// place.  The default survives only as the *host* answer, where there is
+/// no kernel to ask.
+fn handle_tiocgwinsz(kind: HandleKind, handle: u64, arg: *mut u8) -> i32 {
+    let Some(term) = terminal_arg(kind, handle) else {
         errno::set_errno(errno::ENOTTY);
         return -1;
+    };
+    if arg.is_null() {
+        errno::set_errno(errno::EFAULT);
+        return -1;
     }
+    #[cfg(target_os = "none")]
+    {
+        let mut buf = [0u8; WINSIZE_BYTES];
+        let ret = crate::syscall::syscall2(
+            crate::syscall::SYS_PTY_GET_WINSIZE,
+            term,
+            buf.as_mut_ptr() as u64,
+        );
+        if errno::translate(ret) < 0 {
+            return -1;
+        }
+        // SAFETY: Caller must provide a buffer large enough for Winsize.
+        // Use write_unaligned since we don't know the alignment of arg.
+        unsafe {
+            core::ptr::write_unaligned(arg.cast::<Winsize>(), winsize_from_wire(&buf));
+        }
+        0
+    }
+    #[cfg(not(target_os = "none"))]
+    {
+        let _ = term;
+        // SAFETY: Caller must provide a buffer large enough for Winsize.
+        unsafe {
+            core::ptr::write_unaligned(
+                arg.cast::<Winsize>(),
+                winsize_from_wire(&host_winsize::get()),
+            );
+        }
+        0
+    }
+}
+
+/// TIOCSWINSZ — set terminal window size.
+///
+/// On a pty this is the operation that makes a resized emulator window
+/// visible to the program inside it: the kernel raises `SIGWINCH` on the
+/// slave's foreground process group, but **only when the size actually
+/// changed**, because shells re-set the same size at every prompt and a
+/// redraw storm per prompt is worse than no signal at all.
+///
+/// On the console it is still accepted and still cannot resize anything —
+/// the framebuffer's geometry comes from the display mode — but it now
+/// goes to the kernel rather than being swallowed here, so the size the
+/// console *reports* and the size it was *told* cannot drift apart.
+fn handle_tiocswinsz(kind: HandleKind, handle: u64, arg: *mut u8) -> i32 {
+    let Some(term) = terminal_arg(kind, handle) else {
+        errno::set_errno(errno::ENOTTY);
+        return -1;
+    };
     if arg.is_null() {
         errno::set_errno(errno::EFAULT);
         return -1;
     }
     // SAFETY: Caller must provide a buffer large enough for Winsize.
-    // Use write_unaligned since we don't know the alignment of arg.
-    unsafe {
-        core::ptr::write_unaligned(arg.cast::<Winsize>(), DEFAULT_WINSIZE);
+    let ws = unsafe { core::ptr::read_unaligned(arg.cast::<Winsize>()) };
+    #[cfg(target_os = "none")]
+    {
+        let buf = winsize_to_wire(&ws);
+        let ret = crate::syscall::syscall2(
+            crate::syscall::SYS_PTY_SET_WINSIZE,
+            term,
+            buf.as_ptr() as u64,
+        );
+        if errno::translate(ret) < 0 {
+            return -1;
+        }
+        0
     }
-    0
-}
-
-/// TIOCSWINSZ — set terminal window size.
-///
-/// Accepted as a no-op for Console fds.  Our framebuffer console has a
-/// fixed size determined by the display resolution.
-fn handle_tiocswinsz(kind: HandleKind) -> i32 {
-    if kind != HandleKind::Console {
-        errno::set_errno(errno::ENOTTY);
-        return -1;
+    #[cfg(not(target_os = "none"))]
+    {
+        let _ = term;
+        host_winsize::set(winsize_to_wire(&ws));
+        0
     }
-    // Accept silently — we can't resize the framebuffer console.
-    0
 }
 
 /// FIONBIO — set/clear non-blocking I/O.
@@ -584,6 +801,13 @@ fn handle_fionbio(fd: i32, arg: *mut u8) -> i32 {
 /// Returns 0 for Console fds (we don't buffer input), ENOTTY for
 /// non-terminal fds (files don't support FIONREAD via ioctl; use
 /// stat + seek instead).
+///
+/// The pty arms answer `0` or `1` rather than a true count, because the
+/// kernel exposes no readable-byte count for a pty — only the readable bit
+/// of `SYS_PTY_POLL`.  See the arm's own comment for why that is a
+/// deliberate approximation and not a silent one; it is tracked as
+/// `TD-B-PTY-FIONREAD-IS-A-BOOLEAN` and requested of lane A in
+/// `requests/b-a-pty-gaps-master-inheritance-and-readable-bytes.md`.
 fn handle_fionread(kind: HandleKind, handle: u64, arg: *mut u8) -> i32 {
     use crate::syscall::{SYS_TCP_INFO, syscall3};
 
@@ -675,6 +899,33 @@ fn handle_fionread(kind: HandleKind, handle: u64, arg: *mut u8) -> i32 {
             }
             0
         }
+        HandleKind::PtyMaster | HandleKind::PtySlave => {
+            // The kernel has no `SYS_PTY_READABLE_BYTES` counterpart to
+            // `SYS_PIPE_READABLE_BYTES`, so the honest answer available here
+            // is the readable *bit* from `SYS_PTY_POLL`, widened to 0 or 1.
+            //
+            // Answering `ENOTTY` instead was considered and rejected: a pty
+            // does support FIONREAD on Linux, and the programs that ask are
+            // terminal emulators, whose fallback for "this is not a
+            // terminal" is far more wrong than a low count.  A low count
+            // degrades a caller that sizes a read by it into reading a byte
+            // at a time — slow, but every byte still arrives, because
+            // `read()` returns what is actually there regardless of what
+            // this said.  Critically, the 0 case is *exact*: a caller that
+            // uses FIONREAD only to test emptiness (the common case, and
+            // what `select`-less polling loops do) gets the right answer.
+            //
+            // The real fix is a kernel counter; until it exists this must
+            // never silently grow a plausible-looking estimate, since a
+            // wrong non-zero count is worse than an admittedly coarse one.
+            let status = crate::syscall::syscall1(crate::syscall::SYS_PTY_POLL, handle);
+            let available = i32::from(status >= 0 && (status as u64) & 0x1 != 0);
+            // SAFETY: arg must be at least sizeof(i32).
+            unsafe {
+                core::ptr::write_unaligned(arg.cast::<i32>(), available);
+            }
+            0
+        }
         HandleKind::Eventfd | HandleKind::Epoll | HandleKind::Timerfd | HandleKind::Inotify => {
             // Linux's eventfd / epoll / timerfd / inotify have no .ioctl
             // handler, so ioctl() returns ENOTTY on them.  Match that
@@ -692,16 +943,16 @@ fn handle_fionread(kind: HandleKind, handle: u64, arg: *mut u8) -> i32 {
 /// `Termios`.  This used to return `default_termios()` unconditionally, so
 /// it reported cooked-mode-with-echo even after a `tcsetattr` to raw mode,
 /// and disagreed with what a Linux-ABI program on the same console saw.
-fn handle_tcgets(kind: HandleKind, arg: *mut u8) -> i32 {
-    if kind != HandleKind::Console {
+fn handle_tcgets(kind: HandleKind, handle: u64, arg: *mut u8) -> i32 {
+    let Some(term) = terminal_arg(kind, handle) else {
         errno::set_errno(errno::ENOTTY);
         return -1;
-    }
+    };
     if arg.is_null() {
         errno::set_errno(errno::EFAULT);
         return -1;
     }
-    let Some(t) = get_kernel_termios() else {
+    let Some(t) = get_kernel_termios(term) else {
         // errno already set by the translation of the kernel's error.
         return -1;
     };
@@ -728,23 +979,44 @@ fn handle_tcgets(kind: HandleKind, arg: *mut u8) -> i32 {
 /// when `kernel/src/tty.rs` gained one; the comment outlived the fact, and
 /// every native-ABI program that asked for raw mode silently got cooked
 /// mode instead.
-fn handle_tcsets(kind: HandleKind, arg: *mut u8) -> i32 {
-    if kind != HandleKind::Console {
+fn handle_tcsets(kind: HandleKind, handle: u64, arg: *mut u8) -> i32 {
+    let Some(term) = terminal_arg(kind, handle) else {
         errno::set_errno(errno::ENOTTY);
         return -1;
-    }
+    };
     if arg.is_null() {
         errno::set_errno(errno::EFAULT);
         return -1;
     }
     // SAFETY: Caller must provide a buffer large enough for Termios.
     let t = unsafe { core::ptr::read_unaligned(arg.cast::<Termios>()) };
-    if set_kernel_termios(&t) {
+    if set_kernel_termios(term, &t) {
         0
     } else {
         // errno already set by the translation of the kernel's error.
         -1
     }
+}
+
+/// Whether the *process-group* ioctls may act on this kind of descriptor.
+///
+/// Narrower than [`terminal_arg`] on purpose, and the exclusion is
+/// `PtyMaster`.  Syscalls 537/538 (`SYS_TTY_GET_PGRP`/`SYS_TTY_SET_PGRP`)
+/// were deliberately *not* widened to the terminal-naming convention, so
+/// they answer only for the caller's own controlling terminal.  A pty slave
+/// usually *is* that -- after `login_tty` it is exactly that -- so
+/// delegating works and, when it does not, the kernel's `ENOTTY` is the
+/// truthful answer.  A master never is: it belongs to the emulator, whose
+/// controlling terminal is something else entirely, so delegating on a
+/// master would report the *emulator's* foreground group as if it were the
+/// pty's -- a wrong number, which is worse than a refusal.
+///
+/// Linux can answer for a master because master and slave share one `struct
+/// tty`.  We cannot until 537/538 take a terminal; requested of lane A in
+/// `requests/b-a-pty-gaps-master-inheritance-and-readable-bytes.md` and
+/// tracked as `TD-B-PTY-MASTER-HAS-NO-FOREGROUND-GROUP`.
+fn is_pgrp_terminal(kind: HandleKind) -> bool {
+    matches!(kind, HandleKind::Console | HandleKind::PtySlave)
 }
 
 /// TIOCGPGRP — get the foreground process group of a terminal.
@@ -758,7 +1030,7 @@ fn handle_tcsets(kind: HandleKind, arg: *mut u8) -> i32 {
 /// controlling terminal), so its -1 is propagated rather than written into
 /// the caller's buffer as if it were a process group.
 fn handle_tiocgpgrp(fd: i32, kind: HandleKind, arg: *mut u8) -> i32 {
-    if kind != HandleKind::Console {
+    if !is_pgrp_terminal(kind) {
         errno::set_errno(errno::ENOTTY);
         return -1;
     }
@@ -783,7 +1055,7 @@ fn handle_tiocgpgrp(fd: i32, kind: HandleKind, arg: *mut u8) -> i32 {
 /// Reads the PGID from the integer pointer `arg` and delegates to
 /// `tcsetpgrp()`.
 fn handle_tiocspgrp(fd: i32, kind: HandleKind, arg: *mut u8) -> i32 {
-    if kind != HandleKind::Console {
+    if !is_pgrp_terminal(kind) {
         errno::set_errno(errno::ENOTTY);
         return -1;
     }
@@ -805,23 +1077,30 @@ fn handle_tiocspgrp(fd: i32, kind: HandleKind, arg: *mut u8) -> i32 {
 /// `tcgetpgrp`/`tcsetpgrp` forever.  Accepting silently therefore stopped
 /// being harmless and started being a lie.
 ///
-/// The kernel enforces POSIX's two rules (session leader only; the console
+/// The kernel enforces POSIX's two rules (session leader only; the terminal
 /// must not already belong to another session) and reports `EPERM` for
 /// either.  Linux's `arg != 0` "steal the terminal from another session"
 /// force flag is deliberately not implemented — it is a root-only override
 /// and we have no credential model for it yet; see `todo.txt`.
 ///
+/// Syscall 539 is the one member of the tty family whose signature changed
+/// when ptys landed: it takes a *terminal* now, under the convention
+/// [`terminal_arg`] encodes.  That is what makes `login_tty` work — the
+/// whole point of the call there is to claim a terminal that is emphatically
+/// *not* the one we already have, and a no-argument "acquire" could only
+/// ever mean the console.
+///
 /// Errors:
 ///   * `ENOTTY` — `fd` is not a terminal.
-///   * `EPERM` — not a session leader, or the console is taken.
-fn handle_tiocsctty(kind: HandleKind) -> i32 {
-    if kind != HandleKind::Console {
+///   * `EPERM` — not a session leader, or the terminal is taken.
+fn handle_tiocsctty(kind: HandleKind, handle: u64) -> i32 {
+    let Some(term) = terminal_arg(kind, handle) else {
         errno::set_errno(errno::ENOTTY);
         return -1;
-    }
+    };
     #[cfg(target_os = "none")]
     {
-        let ret = crate::syscall::syscall0(crate::syscall::SYS_TTY_ACQUIRE_CTTY);
+        let ret = crate::syscall::syscall1(crate::syscall::SYS_TTY_ACQUIRE_CTTY, term);
         if ret < 0 {
             errno::set_errno(crate::process::ctty_errno(ret));
             return -1;
@@ -830,6 +1109,7 @@ fn handle_tiocsctty(kind: HandleKind) -> i32 {
     }
     #[cfg(not(target_os = "none"))]
     {
+        let _ = term;
         crate::process::host_ctty_acquire()
     }
 }
@@ -846,8 +1126,13 @@ fn handle_tiocsctty(kind: HandleKind) -> i32 {
 /// Errors:
 ///   * `ENOTTY` — `fd` is not a terminal, or we have no controlling one.
 ///   * `EPERM` — the caller is not the session leader.
-fn handle_tiocnotty(kind: HandleKind) -> i32 {
-    if kind != HandleKind::Console {
+fn handle_tiocnotty(kind: HandleKind, handle: u64) -> i32 {
+    // Syscall 540 did not change: it releases *our* controlling terminal
+    // and takes no argument, so the fd only has to be a terminal at all.
+    // Which terminal it names is not consulted -- and need not be, because
+    // the kernel's own check is "do I have one, and am I the session
+    // leader", which no argument here could make more or less true.
+    if terminal_arg(kind, handle).is_none() {
         errno::set_errno(errno::ENOTTY);
         return -1;
     }
@@ -872,8 +1157,14 @@ fn handle_tiocnotty(kind: HandleKind) -> i32 {
 
 /// Test whether a file descriptor refers to a terminal.
 ///
-/// Returns 1 if `fd` is a Console fd, 0 otherwise (with errno set
-/// to `ENOTTY`).
+/// Returns 1 for a console fd or for **either end of a pty**, 0 otherwise
+/// (with errno set to `ENOTTY`).
+///
+/// Both pty ends count, as on Linux: a master is a character device with a
+/// line discipline behind it, and programs rely on that.  `script(1)` runs
+/// `isatty` on the master to decide whether to propagate the window size,
+/// and a terminal emulator that got 0 here would conclude it had been
+/// handed a pipe.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn isatty(fd: i32) -> i32 {
     let Some(entry) = fdtable::get_fd(fd) else {
@@ -881,7 +1172,7 @@ pub extern "C" fn isatty(fd: i32) -> i32 {
         return 0;
     };
 
-    if entry.kind == HandleKind::Console {
+    if terminal_arg(entry.kind, entry.handle).is_some() {
         1
     } else {
         errno::set_errno(errno::ENOTTY);
@@ -895,7 +1186,21 @@ pub extern "C" fn isatty(fd: i32) -> i32 {
 
 /// Return the name of the terminal device.
 ///
-/// Returns "/dev/console\0" for Console fds, NULL otherwise.
+/// * a console fd -> `"/dev/console"`
+/// * a pty **master** -> `"/dev/ptmx"`, which is the name it was opened by
+///   and the answer glibc arrives at too (it stats the fd and searches
+///   `/dev`, and `/dev/ptmx` is the node with that device number)
+/// * a pty **slave** -> `"/dev/pts/<id>"`, asked of the kernel rather than
+///   derived from the handle, so libc never has to know how a handle
+///   encodes its terminal id
+/// * anything else -> NULL with `ENOTTY`
+///
+/// **Not reentrant for a slave**, exactly as POSIX permits and glibc
+/// implements: the name is formatted into a process-wide buffer that the
+/// next slave-side call overwrites.  [`ttyname_r`] is the reentrant form
+/// and is what everything in this tree should call; this one exists for
+/// programs we did not write.  The two constant answers are static and do
+/// not touch the buffer at all.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn ttyname(fd: i32) -> *const u8 {
     let Some(entry) = fdtable::get_fd(fd) else {
@@ -903,12 +1208,155 @@ pub extern "C" fn ttyname(fd: i32) -> *const u8 {
         return core::ptr::null();
     };
 
-    if entry.kind == HandleKind::Console {
-        // SAFETY: This is a static byte string with a null terminator.
-        c"/dev/console".as_ptr().cast::<u8>()
-    } else {
+    match entry.kind {
+        // SAFETY: These are static byte strings with a null terminator.
+        HandleKind::Console => c"/dev/console".as_ptr().cast::<u8>(),
+        HandleKind::PtyMaster => c"/dev/ptmx".as_ptr().cast::<u8>(),
+        HandleKind::PtySlave => match slave_id_of(entry.handle) {
+            Some(id) => ttyname_buf::store(id),
+            // `slave_id_of` has already set errno from the kernel's reply.
+            // Not overwriting it matters: a slave whose pair has gone
+            // reports the kernel's verdict rather than a generic ENOTTY.
+            None => core::ptr::null(),
+        },
+        _ => {
+            errno::set_errno(errno::ENOTTY);
+            core::ptr::null()
+        }
+    }
+}
+
+/// Longest `/dev/pts/<id>` this system can produce, plus its NUL.
+///
+/// `u32::MAX` is ten digits, so the widest name is `/dev/pts/4294967295`.
+/// Sized from the type rather than from "ids are small in practice",
+/// because a buffer bound that depends on a *habit* is the kind that stops
+/// holding quietly.
+const PTS_NAME_MAX: usize = "/dev/pts/".len() + 10 + 1;
+
+/// Format `/dev/pts/<id>` into `out`, returning the length written,
+/// excluding the NUL.
+///
+/// Split out from its two callers ([`ttyname`] and [`ptsname_r`]) so that
+/// there is exactly one place this system's slave names are spelled, and so
+/// that the formatting is unit-testable on the host, where no pty can exist
+/// and every pty syscall answers `ENOSYS`.
+fn format_pts_name(id: u32, out: &mut [u8; PTS_NAME_MAX]) -> usize {
+    const PREFIX: &[u8] = b"/dev/pts/";
+    let mut len = 0usize;
+    for (dst, src) in out.iter_mut().zip(PREFIX.iter()) {
+        *dst = *src;
+        len = len.wrapping_add(1);
+    }
+
+    // Digits are generated least-significant first into a scratch array and
+    // then copied back in reverse.  Ten is `u32::MAX`'s digit count, so the
+    // scratch cannot overflow whatever `id` is.
+    let mut digits = [0u8; 10];
+    let mut ndigits = 0usize;
+    let mut v = id;
+    loop {
+        #[allow(clippy::cast_possible_truncation)]
+        let d = b'0'.wrapping_add((v % 10) as u8);
+        if let Some(slot) = digits.get_mut(ndigits) {
+            *slot = d;
+        }
+        ndigits = ndigits.wrapping_add(1);
+        v /= 10;
+        if v == 0 {
+            break;
+        }
+    }
+    let mut i = ndigits;
+    while i > 0 {
+        i = i.wrapping_sub(1);
+        if let (Some(dst), Some(src)) = (out.get_mut(len), digits.get(i)) {
+            *dst = *src;
+        }
+        len = len.wrapping_add(1);
+    }
+    if let Some(slot) = out.get_mut(len) {
+        *slot = 0;
+    }
+    len
+}
+
+/// Ask the kernel which terminal a pty handle belongs to
+/// (`SYS_PTY_SLAVE_ID`).
+///
+/// `None` leaves `errno` set by `errno::translate`.  Deliberately asks
+/// rather than computing `handle >> 1`: the handle encoding is the kernel's
+/// business, and syscall 551 exists precisely so that libc need not depend
+/// on it.
+fn slave_id_of(handle: u64) -> Option<u32> {
+    let ret = crate::syscall::syscall1(crate::syscall::SYS_PTY_SLAVE_ID, handle);
+    if errno::translate(ret) < 0 {
+        return None;
+    }
+    u32::try_from(ret).ok().or_else(|| {
+        // A terminal id that does not fit in 32 bits would mean the kernel
+        // and this libc disagree about the type, which is a bug rather than
+        // a runtime condition -- but it must not become a silent truncation
+        // that names the wrong terminal.
         errno::set_errno(errno::ENOTTY);
-        core::ptr::null()
+        None
+    })
+}
+
+// Process-wide buffer behind the non-reentrant `ttyname`.
+//
+// Follows the crate's global-state pattern (design-decisions section 110): a
+// `static mut` on the bare-metal target, and per-thread storage on the host
+// so that `cargo test` -- which runs each test on its own thread -- cannot
+// have one test observe another test's name.
+mod ttyname_buf {
+    use super::PTS_NAME_MAX;
+
+    #[cfg(target_os = "none")]
+    mod imp {
+        use super::PTS_NAME_MAX;
+        static mut BUF: [u8; PTS_NAME_MAX] = [0; PTS_NAME_MAX];
+
+        pub(super) fn buf() -> *mut [u8; PTS_NAME_MAX] {
+            &raw mut BUF
+        }
+    }
+
+    #[cfg(not(target_os = "none"))]
+    mod imp {
+        use super::PTS_NAME_MAX;
+        use core::cell::UnsafeCell;
+
+        std::thread_local! {
+            static BUF: UnsafeCell<[u8; PTS_NAME_MAX]> =
+                const { UnsafeCell::new([0; PTS_NAME_MAX]) };
+        }
+
+        /// Reached only if a `ttyname` runs during thread-local teardown,
+        /// when `try_with` can no longer hand out the per-thread copy.
+        static mut FALLBACK: [u8; PTS_NAME_MAX] = [0; PTS_NAME_MAX];
+
+        pub(super) fn buf() -> *mut [u8; PTS_NAME_MAX] {
+            BUF.try_with(UnsafeCell::get).unwrap_or(&raw mut FALLBACK)
+        }
+    }
+
+    /// Format `/dev/pts/<id>` into the buffer and return a pointer to it.
+    ///
+    /// The pointer is resolved before the buffer is written, and the write
+    /// happens outside any thread-local accessor, so the returned pointer
+    /// is the same storage the name was formatted into on both builds.
+    pub(super) fn store(id: u32) -> *const u8 {
+        let p = imp::buf();
+        // SAFETY: `p` names either this thread's own cell, the teardown
+        // fallback, or -- on the bare-metal target, which is
+        // single-threaded per the crate's global-state convention -- the
+        // one process-wide buffer.  No other reference to it is live for
+        // the duration of the call.  `ttyname`/`ptsname` are documented
+        // non-reentrant, so a caller needing thread safety must use the
+        // `_r` forms, which never touch this.
+        super::format_pts_name(id, unsafe { &mut *p });
+        p.cast::<u8>().cast_const()
     }
 }
 
@@ -1436,13 +1884,13 @@ mod tests {
         // used to answer from a constant, so this pair could never fail.
         let mut raw = default_termios();
         raw.c_lflag &= !(ICANON | ECHO);
-        assert!(set_kernel_termios(&raw), "set_kernel_termios failed");
-        let got = get_kernel_termios().expect("get_kernel_termios failed");
+        assert!(set_kernel_termios(CTTY, &raw), "set_kernel_termios failed");
+        let got = get_kernel_termios(CTTY).expect("get_kernel_termios failed");
         assert_eq!(got.c_lflag & ICANON, 0, "ICANON survived a raw-mode set");
         assert_eq!(got.c_lflag & ECHO, 0, "ECHO survived a raw-mode set");
         // And going back to cooked mode is equally visible.
-        assert!(set_kernel_termios(&default_termios()));
-        let cooked = get_kernel_termios().expect("get_kernel_termios failed");
+        assert!(set_kernel_termios(CTTY, &default_termios()));
+        let cooked = get_kernel_termios(CTTY).expect("get_kernel_termios failed");
         assert_ne!(cooked.c_lflag & ICANON, 0);
         assert_ne!(cooked.c_lflag & ECHO, 0);
     }
@@ -2754,21 +3202,162 @@ mod tests {
 
     #[test]
     fn test_posix_openpt_rdwr() {
+        // Host build: `SYS_PTY_CREATE` is not there, so this fails.  See
+        // `test_posix_openpt_fails_on_host` for why the errno is EIO and
+        // not ENOSYS.
         assert_eq!(posix_openpt(0x02), -1); // O_RDWR
-        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EIO);
     }
 
     #[test]
     fn test_ptsname_r_small_buffer() {
-        // Phase 68: the small-buffer (ERANGE) path is currently
-        // unreachable because fd=0 is open but is not a PTY master,
-        // so ENOTTY fires before any path-length check.  When PTY
-        // support lands, the buflen check should happen after the
-        // fd validates as a real PTY master.
+        // fd 0 is open but is not a pty master, so ENOTTY fires before
+        // any path-length check -- which is the ordering Linux has and
+        // the one `ptsname_r` now implements explicitly (`require_master`
+        // first, then `slave_id_of`, then the buflen check).
+        //
+        // The ERANGE arm itself cannot be reached through this entry
+        // point on a host build: it sits *after* `slave_id_of`, and
+        // `SYS_PTY_SLAVE_ID` does not exist here, so the call fails one
+        // step earlier.  `test_format_pts_name_*` covers the name whose
+        // length that arm compares against, which is the part that could
+        // actually be wrong; the comparison itself is one line and is
+        // exercised on the target.
         let mut buf = [0u8; 1];
         crate::errno::set_errno(0);
         assert_eq!(ptsname_r(0, buf.as_mut_ptr(), buf.len()), -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::ENOTTY);
+    }
+
+    // --- format_pts_name ---
+    //
+    // The one piece of the pty naming path that is pure computation, so
+    // the one piece a host build can check properly.  It is also the piece
+    // where a mistake would be quiet: a wrong name is still a plausible
+    // name, and the caller that uses it -- `open("/dev/pts/<n>")` -- would
+    // fail with ENOENT far away from the digit loop that caused it.
+
+    fn pts_name_of(id: u32) -> std::string::String {
+        let mut buf = [0u8; PTS_NAME_MAX];
+        let len = format_pts_name(id, &mut buf);
+        assert_eq!(buf.get(len), Some(&0), "must be NUL-terminated at `len`");
+        std::string::String::from_utf8(buf.get(..len).unwrap_or(&[]).to_vec()).expect("ASCII only")
+    }
+
+    #[test]
+    fn test_format_pts_name_zero() {
+        // The digit loop is do-while precisely so that 0 emits "0" rather
+        // than the empty string a `while v != 0` would leave.
+        assert_eq!(pts_name_of(0), "/dev/pts/0");
+    }
+
+    #[test]
+    fn test_format_pts_name_single_and_multi_digit() {
+        assert_eq!(pts_name_of(7), "/dev/pts/7");
+        assert_eq!(pts_name_of(10), "/dev/pts/10");
+        assert_eq!(pts_name_of(1234), "/dev/pts/1234");
+    }
+
+    #[test]
+    fn test_format_pts_name_u32_max_fits_exactly() {
+        // `PTS_NAME_MAX` is sized for ten digits plus a NUL, so the widest
+        // possible id must fit with the terminator and no truncation.
+        // If this ever fails, `format_pts_name`'s bounds-checked writes
+        // would silently drop the tail rather than overflow -- which is
+        // safe but would name the wrong terminal.
+        let name = pts_name_of(u32::MAX);
+        assert_eq!(name, "/dev/pts/4294967295");
+        assert_eq!(name.len() + 1, PTS_NAME_MAX);
+    }
+
+    #[test]
+    fn test_format_pts_name_returns_written_length() {
+        let mut buf = [0u8; PTS_NAME_MAX];
+        assert_eq!(format_pts_name(0, &mut buf), "/dev/pts/0".len());
+        assert_eq!(
+            format_pts_name(u32::MAX, &mut buf),
+            "/dev/pts/4294967295".len()
+        );
+    }
+
+    #[test]
+    fn test_format_pts_name_does_not_keep_previous_digits() {
+        // The buffer is reused by `ttyname_buf`, so a shorter name written
+        // over a longer one must not leave the old tail visible past the
+        // NUL a caller stops at -- and, more importantly, `len` must
+        // shrink with it.
+        let mut buf = [0u8; PTS_NAME_MAX];
+        let long = format_pts_name(u32::MAX, &mut buf);
+        let short = format_pts_name(3, &mut buf);
+        assert!(short < long);
+        assert_eq!(buf.get(..short), Some(b"/dev/pts/3".as_slice()));
+        assert_eq!(buf.get(short), Some(&0));
+    }
+
+    // --- winsize wire format ---
+
+    #[test]
+    fn test_winsize_wire_round_trip() {
+        let ws = Winsize {
+            ws_row: 0x0102,
+            ws_col: 0x0304,
+            ws_xpixel: 0x0506,
+            ws_ypixel: 0x0708,
+        };
+        let wire = winsize_to_wire(&ws);
+        // Little-endian, in the kernel's declared field order.  Pinned as
+        // bytes rather than by round trip alone, because a round trip is
+        // equally happy with a self-consistent *wrong* order.
+        assert_eq!(wire, [0x02, 0x01, 0x04, 0x03, 0x06, 0x05, 0x08, 0x07]);
+        let back = winsize_from_wire(&wire);
+        assert_eq!(back.ws_row, ws.ws_row);
+        assert_eq!(back.ws_col, ws.ws_col);
+        assert_eq!(back.ws_xpixel, ws.ws_xpixel);
+        assert_eq!(back.ws_ypixel, ws.ws_ypixel);
+    }
+
+    #[test]
+    fn test_winsize_wire_extremes() {
+        let ws = Winsize {
+            ws_row: 0,
+            ws_col: u16::MAX,
+            ws_xpixel: u16::MAX,
+            ws_ypixel: 0,
+        };
+        let back = winsize_from_wire(&winsize_to_wire(&ws));
+        assert_eq!(
+            (back.ws_row, back.ws_col, back.ws_xpixel, back.ws_ypixel),
+            (0, u16::MAX, u16::MAX, 0)
+        );
+    }
+
+    #[test]
+    fn test_tiocswinsz_then_tiocgwinsz_round_trips_through_the_wire() {
+        // Goes through the ioctl entry points rather than the marshalling
+        // functions directly, so the host double stores exactly what the
+        // kernel would be handed and hands back exactly what it would
+        // return.  fd 0 is the console, which `terminal_arg` maps to CTTY.
+        let set = Winsize {
+            ws_row: 51,
+            ws_col: 132,
+            ws_xpixel: 1056,
+            ws_ypixel: 816,
+        };
+        let ret = ioctl(0, TIOCSWINSZ, (&raw const set).cast::<u8>().cast_mut());
+        assert_eq!(ret, 0);
+
+        let mut got = Winsize {
+            ws_row: 0,
+            ws_col: 0,
+            ws_xpixel: 0,
+            ws_ypixel: 0,
+        };
+        let ret = ioctl(0, TIOCGWINSZ, (&raw mut got).cast::<u8>());
+        assert_eq!(ret, 0);
+        assert_eq!(got.ws_row, 51);
+        assert_eq!(got.ws_col, 132);
+        assert_eq!(got.ws_xpixel, 1056);
+        assert_eq!(got.ws_ypixel, 816);
     }
 
     // -- ctermid with buffer verifies null terminator --
@@ -2857,38 +3446,54 @@ mod tests {
     }
 
     // --- posix_openpt ---
+    //
+    // These four used to pin ENOSYS, because `posix_openpt` was a stub that
+    // set it by hand.  It is now the real `SYS_PTY_CREATE` call, so on a
+    // host build it fails the way every other syscall in this crate fails:
+    // the host `syscallN` shims answer -38, which is not one of the
+    // kernel's native error codes, so `errno::translate` maps it through
+    // its catch-all to EIO.
+    //
+    // Pinning EIO rather than deleting the tests is deliberate.  They no
+    // longer say anything about ENOSYS, but they still say the thing that
+    // matters: `posix_openpt` reports a failure and sets *an* errno on
+    // every flag word, including the garbage ones, and a caller that
+    // checks the return value stops there.  Deleting them would have
+    // removed the only host-side coverage of the early-return path in a
+    // function whose later paths cannot run here at all.
 
     #[test]
-    fn test_posix_openpt_enosys_for_zero() {
+    fn test_posix_openpt_fails_on_host() {
         crate::errno::set_errno(0);
         assert_eq!(posix_openpt(0), -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EIO);
     }
 
     #[test]
-    fn test_posix_openpt_enosys_for_o_rdwr() {
+    fn test_posix_openpt_fails_for_o_rdwr() {
         // O_RDWR is what POSIX requires callers to pass.
         crate::errno::set_errno(0);
         assert_eq!(posix_openpt(0x02), -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EIO);
     }
 
     #[test]
-    fn test_posix_openpt_enosys_for_o_rdwr_noctty() {
+    fn test_posix_openpt_fails_for_o_rdwr_noctty() {
         // The canonical posix_openpt(O_RDWR | O_NOCTTY) form.
         crate::errno::set_errno(0);
         assert_eq!(posix_openpt(0x02 | 0x100), -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EIO);
     }
 
     #[test]
     fn test_posix_openpt_does_not_validate_flags() {
-        // Garbage flags are accepted (and would be by Linux too,
-        // since posix_openpt is open("/dev/ptmx", flags) — we don't
-        // invent EINVAL paths Linux doesn't have).
+        // Garbage flags are accepted (and would be by Linux too, since
+        // posix_openpt is open("/dev/ptmx", flags) — we don't invent
+        // EINVAL paths Linux doesn't have).  The failure that comes back
+        // is the kernel's, not an argument complaint.
         crate::errno::set_errno(0);
         assert_eq!(posix_openpt(-1), -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EIO);
     }
 
     // --- grantpt ---
@@ -3034,15 +3639,17 @@ mod tests {
 
     #[test]
     fn test_workflow_openpty_emulation_fails_at_openpt() {
-        // libc's openpty() typically does:
+        // libc's openpty() does:
         //   m = posix_openpt(O_RDWR | O_NOCTTY)
         //   grantpt(m); unlockpt(m); name = ptsname(m); ...
-        // The first step fails with ENOSYS on our system, so the
-        // caller should never reach grantpt/unlockpt/ptsname.
+        // On a host build the first step fails, so the caller should never
+        // reach grantpt/unlockpt/ptsname.  On the real target it succeeds
+        // and the whole chain runs; that is the ring-3 fixture's job, not
+        // this one's, because none of these syscalls exist here.
         crate::errno::set_errno(0);
         let m = posix_openpt(0x02 | 0x100);
         assert_eq!(m, -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EIO);
     }
 
     #[test]
@@ -3095,156 +3702,211 @@ mod tests {
 }
 
 // ---------------------------------------------------------------------------
-// Pseudo-terminal stubs
+// Pseudo-terminals
 // ---------------------------------------------------------------------------
 
 /// Open a pseudo-terminal master device.
 ///
-/// Returns -1 with ENOSYS — PTY support requires kernel `/dev/ptmx`,
-/// which we have not implemented.  Since no fd can ever come back
-/// from `posix_openpt`, every subsequent `grantpt`/`unlockpt`/
-/// `ptsname`/`ptsname_r` call necessarily operates on a non-PTY fd,
-/// which the validators below report with ENOTTY (or EBADF if the
-/// fd was never opened in the first place).
+/// Wraps `SYS_PTY_CREATE`, which returns **both** ends at once -- the master
+/// in `rax` and the slave in `rdx`.  That is the whole reason this family
+/// looks simpler here than on Linux: there is no `grantpt` chmod dance and
+/// no `unlockpt` unlock bit, because the kernel never publishes a slave for
+/// a third party to race for in the first place.  See the header comment on
+/// [`crate::syscall::SYS_PTY_CREATE`].
 ///
-/// `oflag` is not validated — Linux's posix_openpt is implemented as
-/// `open("/dev/ptmx", oflag)` and forwards whatever the open path
-/// would accept.  Since we never reach the open path, flag validation
-/// here would only invent failures Linux doesn't have.
+/// The slave handle the kernel hands back is parked in [`crate::ptytab`]
+/// until someone opens it by name (`open("/dev/pts/<id>")`).  It has to be
+/// held rather than closed, because `openpty(3)`'s published order is
+/// open-master, *then* ask its name, *then* open the slave -- so between
+/// those two steps the slave exists with no file descriptor naming it, and
+/// dropping it there would make the pair unusable exactly one call before it
+/// became usable.
+///
+/// `oflag` is not validated -- Linux's `posix_openpt` is
+/// `open("/dev/ptmx", oflag)` and forwards whatever the open path accepts --
+/// but `O_NONBLOCK` *is* honoured, because a terminal emulator's read loop
+/// depends on it and the alternative is a caller that silently blocks.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn posix_openpt(_oflag: i32) -> i32 {
-    crate::errno::set_errno(crate::errno::ENOSYS);
-    -1
+pub extern "C" fn posix_openpt(oflag: i32) -> i32 {
+    let (master, slave) = crate::syscall::syscall3_2ret(crate::syscall::SYS_PTY_CREATE, 0, 0, 0);
+    if crate::errno::translate(master) < 0 {
+        return -1;
+    }
+    #[allow(clippy::cast_sign_loss)]
+    let (master, slave) = (master as u64, slave as u64);
+
+    let Some(id) = slave_id_of(master) else {
+        // The pair exists but we cannot name it, so it can never be
+        // completed; close both ends rather than leak a terminal that
+        // nothing will ever open.  `slave_id_of` set errno.
+        let _ = crate::syscall::syscall1(crate::syscall::SYS_PTY_CLOSE, master);
+        let _ = crate::syscall::syscall1(crate::syscall::SYS_PTY_CLOSE, slave);
+        return -1;
+    };
+
+    // Record the pair *before* installing the fd.  The reverse order has a
+    // window in which a master fd exists whose slave nothing is tracking,
+    // and a close in that window would leak the slave permanently.
+    if !crate::ptytab::note_pair(id, master, slave) {
+        let _ = crate::syscall::syscall1(crate::syscall::SYS_PTY_CLOSE, master);
+        let _ = crate::syscall::syscall1(crate::syscall::SYS_PTY_CLOSE, slave);
+        // EMFILE, not ENOMEM: the limit that was hit is a per-process table
+        // of open terminals, which is what EMFILE describes, and it is the
+        // errno `openpty` callers already handle.
+        crate::errno::set_errno(crate::errno::EMFILE);
+        return -1;
+    }
+
+    let status = oflag & crate::fcntl::O_NONBLOCK;
+    let fd =
+        crate::fdtable::alloc_fd_with_flags(crate::fdtable::HandleKind::PtyMaster, master, status);
+    let Some(fd) = fd else {
+        // Unwind in the reverse order of construction.  The record is
+        // retired directly rather than through `close_pty_handle`, because
+        // that helper drives the same retirement and would then close a
+        // slave this arm has already closed.
+        crate::ptytab::retire_master(master);
+        let _ = crate::syscall::syscall1(crate::syscall::SYS_PTY_CLOSE, master);
+        let _ = crate::syscall::syscall1(crate::syscall::SYS_PTY_CLOSE, slave);
+        crate::errno::set_errno(crate::errno::EMFILE);
+        return -1;
+    };
+    fd
 }
 
 /// Grant access to the slave pseudo-terminal device.
 ///
-/// Phase 68: previously returned 0 unconditionally, which lied to
-/// buggy callers (passing -1 or a closed fd looked like success).
-/// Now validates `fd` and reports the same errno Linux would:
+/// A no-op that succeeds for a master fd, and that is the design rather
+/// than a shortcut.  On Linux `grantpt` exists to `chown`/`chmod` the slave
+/// node into the caller's ownership, because the node is a globally visible
+/// file that anybody could otherwise open.  Our slave is a capability the
+/// kernel handed to this process; there is no node and no third party to
+/// exclude, so there is nothing for `grantpt` to grant.
 ///
-/// 1. `fd < 0`              -> `EBADF`
-/// 2. `fd` not in fdtable   -> `EBADF`
-/// 3. otherwise             -> `EINVAL` (fd is not a PTY master —
-///    none exist on this system because `posix_openpt` always
-///    returns ENOSYS).
+/// It is still validated rather than blindly returning 0, because a caller
+/// that passes the *slave* fd, or a pipe, has a bug this is the natural
+/// place to report:
 ///
-/// Linux's `grantpt(3)` returns EINVAL when the fd is not associated
-/// with a master pseudo-terminal device, which is always our case.
+/// 1. `fd < 0` or not open -> `EBADF`
+/// 2. `fd` is not a pty master -> `EINVAL`, as Linux's `grantpt(3)` returns
+///    for an fd not associated with a master.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn grantpt(fd: i32) -> i32 {
-    if fd < 0 {
-        crate::errno::set_errno(crate::errno::EBADF);
-        return -1;
-    }
-    if crate::fdtable::get_fd(fd).is_none() {
-        crate::errno::set_errno(crate::errno::EBADF);
-        return -1;
-    }
-    crate::errno::set_errno(crate::errno::EINVAL);
-    -1
+    require_master(fd, crate::errno::EINVAL).map_or(-1, |_| 0)
 }
 
 /// Unlock a pseudo-terminal master/slave pair.
 ///
-/// Phase 68: previously returned 0 unconditionally.  Now validates
-/// `fd` and reports Linux-matching errnos, identical to `grantpt`.
+/// Also a validated no-op, for the same reason as [`grantpt`]: Linux's
+/// `unlockpt` clears a lock bit (`TIOCSPTLCK`) that exists to stop a slave
+/// being opened before `grantpt` has fixed its permissions.  With no node
+/// and no permissions to fix, there is no window to lock, so the lock bit
+/// was never introduced -- rather than introduced and then always cleared.
 ///
-/// 1. `fd < 0`              -> `EBADF`
-/// 2. `fd` not in fdtable   -> `EBADF`
-/// 3. otherwise             -> `EINVAL` (not a PTY master).
+/// Errors are identical to `grantpt`'s.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn unlockpt(fd: i32) -> i32 {
+    require_master(fd, crate::errno::EINVAL).map_or(-1, |_| 0)
+}
+
+/// Resolve `fd` to the handle of a pty master, or set `errno` and fail.
+///
+/// `not_master` is the errno to report when the descriptor is open but is
+/// not a master, which differs across this family: `grantpt`/`unlockpt` use
+/// `EINVAL` and `ptsname`/`ptsname_r` use `ENOTTY`, each matching what the
+/// corresponding glibc entry point produces.
+fn require_master(fd: i32, not_master: i32) -> Option<u64> {
     if fd < 0 {
         crate::errno::set_errno(crate::errno::EBADF);
-        return -1;
+        return None;
     }
-    if crate::fdtable::get_fd(fd).is_none() {
+    let Some(entry) = crate::fdtable::get_fd(fd) else {
         crate::errno::set_errno(crate::errno::EBADF);
-        return -1;
+        return None;
+    };
+    if entry.kind != crate::fdtable::HandleKind::PtyMaster {
+        crate::errno::set_errno(not_master);
+        return None;
     }
-    crate::errno::set_errno(crate::errno::EINVAL);
-    -1
+    Some(entry.handle)
 }
 
 /// Get the name of the slave pseudo-terminal device.
 ///
-/// Phase 68: still returns NULL (no PTYs exist), but now sets errno
-/// on every failure path so the caller can distinguish "bad fd" from
-/// "fd is not a PTY".  Validation order:
+/// Returns a pointer to a process-wide buffer holding `/dev/pts/<id>`,
+/// or NULL with `errno` set.  Shares [`ttyname`]'s buffer, which is
+/// deliberate: both are the non-reentrant spelling of "name this
+/// terminal", and one buffer means a program cannot hold a `ptsname`
+/// result across a `ttyname` call and believe it survived.
 ///
-/// 1. `fd < 0`              -> set `EBADF`, return NULL.
-/// 2. `fd` not in fdtable   -> set `EBADF`, return NULL.
-/// 3. otherwise             -> set `ENOTTY`, return NULL
-///    (matching Linux's behaviour for non-PTY-master fds).
+/// Validation order:
+///
+/// 1. `fd < 0` or not open -> `EBADF`
+/// 2. `fd` is not a pty master -> `ENOTTY`, matching Linux.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn ptsname(fd: i32) -> *mut u8 {
-    if fd < 0 {
-        crate::errno::set_errno(crate::errno::EBADF);
+    let Some(handle) = require_master(fd, crate::errno::ENOTTY) else {
         return core::ptr::null_mut();
-    }
-    if crate::fdtable::get_fd(fd).is_none() {
-        crate::errno::set_errno(crate::errno::EBADF);
+    };
+    let Some(id) = slave_id_of(handle) else {
         return core::ptr::null_mut();
-    }
-    crate::errno::set_errno(crate::errno::ENOTTY);
-    core::ptr::null_mut()
+    };
+    ttyname_buf::store(id).cast_mut()
 }
 
-/// Thread-safe version of `ptsname`.
+/// Thread-safe version of [`ptsname`].
 ///
-/// Phase 68: returns -1 with errno set (consistent with the local
-/// project convention; note that strict POSIX `ptsname_r` returns
-/// the errno value directly rather than -1, but every other stub in
-/// this file uses the -1+errno convention).  TODO(ptsname_r): if we
-/// ever ship PTY support, decide whether to switch to the strict
-/// return-the-errno convention — see todo.txt.
+/// Returns -1 with `errno` set, **not** a positive errno.  That is the
+/// local convention every other function in this file follows, and it is
+/// also what musl does; glibc returns the errno directly.  The divergence
+/// is deliberate and is why `ttyname_r` -- whose callers propagate the
+/// return value straight into an errno slot -- does *not* follow suit.
 ///
-/// Validation order matches glibc's `__ptsname_r`
-/// (`sysdeps/unix/sysv/linux/ptsname.c`, checked against glibc 2.39),
-/// which issues `ioctl(fd, TIOCGPTN)` *first* and only formats a path
-/// into `buf` if that succeeds:
+/// Validation order follows glibc's `__ptsname_r`
+/// (`sysdeps/unix/sysv/linux/ptsname.c`, checked against 2.39), which
+/// issues its `ioctl` **first** and only then looks at the buffer, so a bad
+/// descriptor outranks a bad buffer:
 ///
-/// 1. `fd < 0`              -> `EBADF`
-/// 2. `fd` not in fdtable   -> `EBADF`
-/// 3. otherwise             -> `ENOTTY` (not a PTY master).
+/// 1. `fd < 0` or not open -> `EBADF`
+/// 2. `fd` is not a pty master -> `ENOTTY`
+/// 3. `buf` is NULL -> `EINVAL`
+/// 4. the name does not fit in `buflen` -> `ERANGE`
 ///
-/// The fd verdict therefore outranks the state of `buf` — see the
-/// note in the body about why `buf == NULL` is not checked up front.
-///
-/// `buflen` is not separately validated: a non-PTY fd produces
-/// ENOTTY before we'd reach a buffer-size check, and we never have
-/// a real PTY path to compare against, so `ERANGE` (buflen too
-/// small) is currently unreachable.  If PTY support lands, the
-/// path-length check should happen after the fd validation and
-/// before writing the path.
+/// `EINVAL` for a NULL `buf` is a deliberate improvement on both libcs we
+/// compare against: glibc has no check and segfaults in
+/// `__stpcpy (buf, devpts)`, musl clamps the length to 0 and yields
+/// `ERANGE`.  Neither is acceptable to copy, and both POSIX.1-2024 and
+/// `ptsname_r(3)` document `EINVAL`.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn ptsname_r(fd: i32, buf: *mut u8, _buflen: usize) -> i32 {
-    if fd < 0 {
-        crate::errno::set_errno(crate::errno::EBADF);
+pub extern "C" fn ptsname_r(fd: i32, buf: *mut u8, buflen: usize) -> i32 {
+    let Some(handle) = require_master(fd, crate::errno::ENOTTY) else {
+        return -1;
+    };
+    let Some(id) = slave_id_of(handle) else {
+        return -1;
+    };
+    if buf.is_null() {
+        crate::errno::set_errno(crate::errno::EINVAL);
         return -1;
     }
-    if crate::fdtable::get_fd(fd).is_none() {
-        crate::errno::set_errno(crate::errno::EBADF);
+    let mut name = [0u8; PTS_NAME_MAX];
+    let len = format_pts_name(id, &mut name);
+    // Room for the name *and* its terminator, as POSIX requires of `buflen`.
+    if len.wrapping_add(1) > buflen {
+        crate::errno::set_errno(crate::errno::ERANGE);
         return -1;
     }
-    // The fd exists but is not a PTY master — nothing on this system is,
-    // because `posix_openpt` returns ENOSYS.  glibc learns the same thing
-    // from TIOCGPTN failing and returns that errno *without ever examining
-    // `buf`*, so reporting the fd verdict here (rather than an argument
-    // complaint about `buf`) is what a Linux caller actually sees.
-    //
-    // When PTY support lands, the NULL-`buf` check belongs immediately
-    // below this line, between identifying the master and writing the
-    // path.  The errno to use there is EINVAL: glibc 2.39 has no NULL
-    // check at all and simply segfaults in `__stpcpy (buf, devpts)`, and
-    // musl clamps the length to 0 and yields ERANGE — neither is
-    // acceptable behaviour to copy, while both POSIX.1-2024 and
-    // `ptsname_r(3)` document EINVAL for a NULL `buf`.
-    //
-    // `buf` is deliberately unexamined until then; there is no path here
-    // that could dereference it.
-    let _ = buf;
-    crate::errno::set_errno(crate::errno::ENOTTY);
-    -1
+    let mut i = 0usize;
+    while i <= len {
+        if let Some(&b) = name.get(i) {
+            // SAFETY: `i <= len` and `buf` was just confirmed to hold at
+            // least `len + 1` bytes; the final iteration copies the NUL
+            // that `format_pts_name` wrote at `len`.
+            unsafe {
+                *buf.add(i) = b;
+            }
+        }
+        i = i.wrapping_add(1);
+    }
+    0
 }

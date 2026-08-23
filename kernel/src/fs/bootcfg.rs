@@ -34,6 +34,7 @@ use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::error::{KernelError, KernelResult};
+use crate::fs::path::{Path, PathBuf};
 
 // ---------------------------------------------------------------------------
 // Types
@@ -96,9 +97,15 @@ pub struct BootEntry {
     /// Entry type.
     pub kind: EntryKind,
     /// Path to kernel/loader.
-    pub kernel_path: String,
+    ///
+    /// §261: `/boot` is an ordinary directory, and a dual-boot entry points
+    /// at *another* operating system's loader -- a name chosen by that
+    /// installer, not by us, which may hold any byte except `/` and NUL.
+    /// A `String` here would fold two such entries onto one U+FFFD-bearing
+    /// name and boot the wrong one.
+    pub kernel_path: PathBuf,
     /// Path to initramfs/initrd (if applicable).
-    pub initrd_path: String,
+    pub initrd_path: PathBuf,
     /// Kernel command-line parameters.
     pub parameters: String,
     /// Whether this entry is the default boot target.
@@ -144,9 +151,13 @@ pub struct BootConfig {
     /// Whether Secure Boot is enabled.
     pub secure_boot: bool,
     /// Path to GRUB config (if applicable).
-    pub grub_config_path: String,
+    ///
+    /// §261: both name locations on a filesystem this kernel did not lay
+    /// out -- the ESP in particular is written by whichever installer got
+    /// there first.
+    pub grub_config_path: PathBuf,
     /// Path to EFI System Partition.
-    pub esp_path: String,
+    pub esp_path: PathBuf,
     /// Whether dual-boot is detected.
     pub dual_boot: bool,
     /// Resolution for graphical boot (e.g., "1920x1080").
@@ -171,8 +182,8 @@ static STATE: Mutex<State> = Mutex::new(State {
         console_mode: ConsoleMode::Graphical,
         show_boot_activity: false,
         secure_boot: false,
-        grub_config_path: String::new(),
-        esp_path: String::new(),
+        grub_config_path: PathBuf::new(),
+        esp_path: PathBuf::new(),
         dual_boot: false,
         gfx_mode: String::new(),
     },
@@ -238,17 +249,19 @@ pub fn set_secure_boot(enabled: bool) -> KernelResult<()> {
 }
 
 /// Set GRUB config path.
-pub fn set_grub_path(path: &str) -> KernelResult<()> {
+pub fn set_grub_path(path: impl AsRef<Path>) -> KernelResult<()> {
+    let path = path.as_ref();
     let mut state = STATE.lock();
-    state.config.grub_config_path = String::from(path);
+    state.config.grub_config_path = path.to_path_buf();
     state.changes += 1;
     Ok(())
 }
 
 /// Set ESP (EFI System Partition) path.
-pub fn set_esp_path(path: &str) -> KernelResult<()> {
+pub fn set_esp_path(path: impl AsRef<Path>) -> KernelResult<()> {
+    let path = path.as_ref();
     let mut state = STATE.lock();
-    state.config.esp_path = String::from(path);
+    state.config.esp_path = path.to_path_buf();
     state.changes += 1;
     Ok(())
 }
@@ -269,11 +282,12 @@ pub fn set_gfx_mode(mode: &str) -> KernelResult<()> {
 pub fn add_entry(
     name: &str,
     kind: EntryKind,
-    kernel_path: &str,
-    initrd_path: &str,
+    kernel_path: impl AsRef<Path>,
+    initrd_path: impl AsRef<Path>,
     parameters: &str,
     auto_detected: bool,
 ) -> KernelResult<u64> {
+    let (kernel_path, initrd_path) = (kernel_path.as_ref(), initrd_path.as_ref());
     let mut state = STATE.lock();
     if state.entries.len() >= 64 {
         return Err(KernelError::ResourceExhausted);
@@ -285,8 +299,8 @@ pub fn add_entry(
         id,
         name: String::from(name),
         kind,
-        kernel_path: String::from(kernel_path),
-        initrd_path: String::from(initrd_path),
+        kernel_path: kernel_path.to_path_buf(),
+        initrd_path: initrd_path.to_path_buf(),
         parameters: String::from(parameters),
         is_default,
         hidden: false,
@@ -462,8 +476,8 @@ pub fn init_defaults() {
         console_mode: ConsoleMode::Graphical,
         show_boot_activity: false,
         secure_boot: false,
-        grub_config_path: String::from("/boot/grub/grub.cfg"),
-        esp_path: String::from("/boot/efi"),
+        grub_config_path: PathBuf::from("/boot/grub/grub.cfg"),
+        esp_path: PathBuf::from("/boot/efi"),
         dual_boot: false,
         gfx_mode: String::from("1920x1080"),
     };
@@ -473,8 +487,8 @@ pub fn init_defaults() {
         id: id1,
         name: String::from("Mint Cinnamon OS"),
         kind: EntryKind::SlateOs,
-        kernel_path: String::from("/boot/kernel"),
-        initrd_path: String::from("/boot/initrd"),
+        kernel_path: PathBuf::from("/boot/kernel"),
+        initrd_path: PathBuf::from("/boot/initrd"),
         parameters: String::from("root=/dev/sda2 quiet splash"),
         is_default: true,
         hidden: false,
@@ -487,8 +501,8 @@ pub fn init_defaults() {
         id: id2,
         name: String::from("Mint Cinnamon OS (Recovery)"),
         kind: EntryKind::Recovery,
-        kernel_path: String::from("/boot/kernel"),
-        initrd_path: String::from("/boot/initrd"),
+        kernel_path: PathBuf::from("/boot/kernel"),
+        initrd_path: PathBuf::from("/boot/initrd"),
         parameters: String::from("root=/dev/sda2 single recovery"),
         is_default: false,
         hidden: false,
@@ -501,8 +515,8 @@ pub fn init_defaults() {
         id: id3,
         name: String::from("UEFI Firmware Settings"),
         kind: EntryKind::FirmwareSettings,
-        kernel_path: String::new(),
-        initrd_path: String::new(),
+        kernel_path: PathBuf::new(),
+        initrd_path: PathBuf::new(),
         parameters: String::new(),
         is_default: false,
         hidden: false,
@@ -536,8 +550,8 @@ pub fn clear_all() {
         console_mode: ConsoleMode::Graphical,
         show_boot_activity: false,
         secure_boot: false,
-        grub_config_path: String::new(),
-        esp_path: String::new(),
+        grub_config_path: PathBuf::new(),
+        esp_path: PathBuf::new(),
         dual_boot: false,
         gfx_mode: String::new(),
     };
@@ -634,7 +648,40 @@ pub fn self_test() -> KernelResult<()> {
     assert_eq!(active.id, e1);
     assert_eq!(active.name, "TestOS");
 
+    // Test 8: non-UTF-8 loader, initrd and ESP paths (§261).
+    //
+    // A dual-boot entry points at *another* operating system's loader, under
+    // a name that installer chose -- any byte but `/` and NUL is legal.  As
+    // `String`s, two such entries differing only in a byte with no UTF-8
+    // spelling folded onto one U+FFFD-bearing name, which here means booting
+    // the wrong OS while reporting success.
+    serial_println!("bootcfg::self_test 8: non-UTF-8 loader paths");
+    let ker_a = Path::new(&b"/boot/bc_\xFFk"[..]);
+    let ker_b = Path::new(&b"/boot/bc_\xFEk"[..]);
+    let ird_a = Path::new(&b"/boot/bc_\xFFi"[..]);
+    let e8a = add_entry("ByteOS A", EntryKind::Linux, ker_a, ird_a, "ro", true)?;
+    let e8b = add_entry("ByteOS B", EntryKind::Linux, ker_b, ird_a, "ro", true)?;
+    let entry8a = get_entry(e8a)?;
+    assert_eq!(entry8a.kernel_path.as_path(), ker_a);
+    assert_eq!(entry8a.kernel_path.as_path().as_bytes(), b"/boot/bc_\xFFk");
+    assert_eq!(entry8a.initrd_path.as_path(), ird_a);
+    // The two loaders differ in exactly one byte, neither of which is
+    // representable in UTF-8 -- the case a `String` field silently folded.
+    assert_ne!(get_entry(e8b)?.kernel_path, entry8a.kernel_path);
+
+    let esp = Path::new(&b"/boot/bc_\xFFefi"[..]);
+    let grub = Path::new(&b"/boot/bc_\xFFgrub/grub.cfg"[..]);
+    set_esp_path(esp)?;
+    set_grub_path(grub)?;
+    let cfg8 = get_config();
+    assert_eq!(cfg8.esp_path.as_path(), esp);
+    assert_eq!(cfg8.grub_config_path.as_path(), grub);
+    assert_eq!(
+        cfg8.grub_config_path.as_path().as_bytes(),
+        b"/boot/bc_\xFFgrub/grub.cfg"
+    );
+
     clear_all();
-    serial_println!("bootcfg::self_test: all 7 tests passed");
+    serial_println!("bootcfg::self_test: all 8 tests passed");
     Ok(())
 }

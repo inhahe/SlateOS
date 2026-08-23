@@ -44,6 +44,7 @@ use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::error::{KernelError, KernelResult};
+use crate::fs::path::Path;
 use crate::serial_println;
 
 // ---------------------------------------------------------------------------
@@ -110,15 +111,16 @@ pub struct SpliceStats {
 /// Returns the number of bytes actually transferred (may be less than
 /// `len` if src is shorter than expected).
 pub fn copy_file_range(
-    src_path: &str,
+    src_path: impl AsRef<Path>,
     src_offset: u64,
-    dst_path: &str,
+    dst_path: impl AsRef<Path>,
     dst_offset: u64,
     len: usize,
 ) -> KernelResult<TransferResult> {
     use crate::fs::Vfs;
 
-    if src_path.is_empty() || dst_path.is_empty() {
+    let (src_path, dst_path) = (src_path.as_ref(), dst_path.as_ref());
+    if src_path.as_bytes().is_empty() || dst_path.as_bytes().is_empty() {
         ERROR_COUNT.fetch_add(1, Ordering::Relaxed);
         return Err(KernelError::InvalidArgument);
     }
@@ -173,14 +175,15 @@ pub fn copy_file_range(
 /// (appending). Useful for serving file content to pipes or network
 /// destinations without user-space buffering.
 pub fn sendfile(
-    src_path: &str,
-    dst_path: &str,
+    src_path: impl AsRef<Path>,
+    dst_path: impl AsRef<Path>,
     offset: u64,
     len: usize,
 ) -> KernelResult<TransferResult> {
     use crate::fs::Vfs;
 
-    if src_path.is_empty() || dst_path.is_empty() {
+    let (src_path, dst_path) = (src_path.as_ref(), dst_path.as_ref());
+    if src_path.as_bytes().is_empty() || dst_path.as_bytes().is_empty() {
         ERROR_COUNT.fetch_add(1, Ordering::Relaxed);
         return Err(KernelError::InvalidArgument);
     }
@@ -246,14 +249,15 @@ pub fn sendfile(
 /// would move page references; here we transfer through an internal
 /// kernel buffer.
 pub fn splice(
-    src_path: &str,
+    src_path: impl AsRef<Path>,
     src_offset: u64,
-    dst_path: &str,
+    dst_path: impl AsRef<Path>,
     len: usize,
 ) -> KernelResult<TransferResult> {
     use crate::fs::Vfs;
 
-    if src_path.is_empty() || dst_path.is_empty() {
+    let (src_path, dst_path) = (src_path.as_ref(), dst_path.as_ref());
+    if src_path.as_bytes().is_empty() || dst_path.as_bytes().is_empty() {
         ERROR_COUNT.fetch_add(1, Ordering::Relaxed);
         return Err(KernelError::InvalidArgument);
     }
@@ -317,14 +321,15 @@ pub fn splice(
 /// the data remains readable at the same position. Useful for tee-style
 /// logging where data flows to both a pipe consumer and a log file.
 pub fn tee(
-    src_path: &str,
+    src_path: impl AsRef<Path>,
     src_offset: u64,
-    dst_path: &str,
+    dst_path: impl AsRef<Path>,
     len: usize,
 ) -> KernelResult<TransferResult> {
     use crate::fs::Vfs;
 
-    if src_path.is_empty() || dst_path.is_empty() {
+    let (src_path, dst_path) = (src_path.as_ref(), dst_path.as_ref());
+    if src_path.as_bytes().is_empty() || dst_path.as_bytes().is_empty() {
         ERROR_COUNT.fetch_add(1, Ordering::Relaxed);
         return Err(KernelError::InvalidArgument);
     }
@@ -445,9 +450,54 @@ pub fn self_test() -> KernelResult<()> {
     test_tee();
     test_empty_transfer();
     test_invalid_args();
+    test_non_utf8_paths();
 
-    serial_println!("[splice] Self-test passed (6 tests).");
+    serial_println!("[splice] Self-test passed (7 tests).");
     Ok(())
+}
+
+/// Non-UTF-8 paths (design-decisions.md 261).
+///
+/// Every path in this module names a file, and our filesystems permit any
+/// byte but `/` and NUL in a name.  While these took `&str`, no caller could
+/// splice, copy, send or tee such a file at all — and any layer that reached
+/// them by lossily converting a real path would have transferred data
+/// between the wrong two files while reporting success.
+fn test_non_utf8_paths() {
+    use crate::fs::Vfs;
+
+    let src = Path::new(&b"/tmp/_spl_\xFFs"[..]);
+    let dst = Path::new(&b"/tmp/_spl_\xFEd"[..]);
+    let data = alloc::vec![0xA7u8; 2048];
+
+    Vfs::write_file(src, &data).unwrap();
+    Vfs::write_file(dst, &[]).unwrap();
+
+    let result = copy_file_range(src, 0, dst, 0, 2048).unwrap();
+    assert_eq!(result.bytes_transferred, 2048);
+    assert_eq!(Vfs::read_file(dst).unwrap(), data);
+
+    // The two names differ only in one byte with no UTF-8 spelling.  If the
+    // paths folded, this sendfile would append the source to itself.
+    let dst2 = Path::new(&b"/tmp/_spl_\xFEd2"[..]);
+    let sent = sendfile(src, dst2, 0, 2048).unwrap();
+    assert_eq!(sent.bytes_transferred, 2048);
+    assert_eq!(Vfs::read_file(dst2).unwrap(), data);
+    assert_eq!(Vfs::read_file(src).unwrap().len(), 2048);
+
+    // splice and tee likewise.
+    let dst3 = Path::new(&b"/tmp/_spl_\xFEd3"[..]);
+    assert_eq!(splice(src, 0, dst3, 1024).unwrap().bytes_transferred, 1024);
+    let dst4 = Path::new(&b"/tmp/_spl_\xFEd4"[..]);
+    assert_eq!(tee(src, 0, dst4, 1024).unwrap().bytes_transferred, 1024);
+    assert_eq!(Vfs::read_file(src).unwrap().len(), 2048);
+
+    let _ = Vfs::remove(src);
+    let _ = Vfs::remove(dst);
+    let _ = Vfs::remove(dst2);
+    let _ = Vfs::remove(dst3);
+    let _ = Vfs::remove(dst4);
+    serial_println!("[splice]   non_utf8_paths: ok");
 }
 
 fn test_copy_file_range() {

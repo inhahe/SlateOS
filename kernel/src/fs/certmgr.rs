@@ -22,6 +22,7 @@
 
 #![allow(dead_code)]
 
+use crate::fs::path::{Path, PathBuf};
 use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -136,9 +137,13 @@ pub struct CertInfo {
     /// Challenge type for ACME.
     pub challenge_type: ChallengeType,
     /// Path to PEM file on disk.
-    pub cert_path: String,
+    ///
+    /// A `PathBuf`, not a `String`: a path may contain any byte except `/`
+    /// and NUL, and `String` cannot hold the ones with no UTF-8 spelling.
+    /// See design-decisions.md §261.
+    pub cert_path: PathBuf,
     /// Path to private key file.
-    pub key_path: String,
+    pub key_path: PathBuf,
     /// Timestamp of last renewal attempt (ns).
     pub last_renewal_ns: u64,
     /// Number of successful renewals.
@@ -204,9 +209,10 @@ pub fn import_cert(
     source: CertSource,
     key_type: KeyType,
     issuer: &str,
-    cert_path: &str,
-    key_path: &str,
+    cert_path: impl AsRef<Path>,
+    key_path: impl AsRef<Path>,
 ) -> KernelResult<u64> {
+    let (cert_path, key_path) = (cert_path.as_ref(), key_path.as_ref());
     let mut state = STATE.lock();
     if state.certs.len() >= 1024 {
         return Err(KernelError::ResourceExhausted);
@@ -243,8 +249,8 @@ pub fn import_cert(
         auto_renew: source == CertSource::LetsEncrypt || source == CertSource::Acme,
         acme_email: String::new(),
         challenge_type: ChallengeType::Http01,
-        cert_path: String::from(cert_path),
-        key_path: String::from(key_path),
+        cert_path: cert_path.to_path_buf(),
+        key_path: key_path.to_path_buf(),
         last_renewal_ns: 0,
         renewal_count: 0,
         pinned: cert_type == CertType::Root,
@@ -490,11 +496,11 @@ pub fn complete_request(request_id: u64) -> KernelResult<u64> {
 
     let cert_path = {
         use alloc::format;
-        format!("/etc/ssl/certs/{}.pem", domain)
+        PathBuf::from(format!("/etc/ssl/certs/{}.pem", domain))
     };
     let key_path = {
         use alloc::format;
-        format!("/etc/ssl/private/{}.key", domain)
+        PathBuf::from(format!("/etc/ssl/private/{}.key", domain))
     };
 
     state.certs.push(CertInfo {
@@ -668,36 +674,47 @@ pub fn clear_all() {
 pub fn self_test() -> KernelResult<()> {
     use crate::serial_println;
 
-    clear_all();
+    // Baseline-relative, *not* `clear_all()` at entry. The trust store is
+    // something a user genuinely populates and `certmgr test` is a shell
+    // command, so clearing it to make room for fixtures would be a
+    // data-destroying operation dressed up as a test.
+    let (base_total, _, _, base_reqs, _) = stats();
+
+    // Fixture names live in the reserved `.invalid` TLD and carry a `selftest`
+    // label, so they cannot collide with a certificate the user really holds
+    // -- `certs_for_domain` below asserts an exact match count.
+    const CN: &str = "certmgr-selftest.invalid";
+    const CN_WWW: &str = "www.certmgr-selftest.invalid";
+    const CN_API: &str = "api.certmgr-selftest.invalid";
 
     // Test 1: import certificates.
     serial_println!("certmgr::self_test 1: import certs");
     let c1 = import_cert(
-        "example.com",
+        CN,
         CertType::Server,
         CertSource::UserImported,
         KeyType::EcdsaP256,
-        "DigiCert",
-        "/etc/ssl/certs/example.pem",
-        "/etc/ssl/private/example.key",
+        "certmgr-selftest CA",
+        "/etc/ssl/certs/certmgr-selftest.pem",
+        "/etc/ssl/private/certmgr-selftest.key",
     )?;
     let c2 = import_cert(
-        "ISRG Root X1",
+        "certmgr-selftest Root CA",
         CertType::Root,
         CertSource::System,
         KeyType::Rsa4096,
-        "ISRG",
-        "/etc/ssl/certs/isrg.pem",
+        "certmgr-selftest",
+        "/etc/ssl/certs/certmgr-selftest-root.pem",
         "",
     )?;
-    assert_eq!(list_certs().len(), 2);
+    assert_eq!(list_certs().len(), base_total + 2);
 
     // Test 2: domain lookup and SAN.
     serial_println!("certmgr::self_test 2: domain lookup");
-    add_san(c1, "www.example.com")?;
-    add_san(c1, "api.example.com")?;
-    assert!(add_san(c1, "www.example.com").is_err()); // duplicate
-    let matches = certs_for_domain("www.example.com");
+    add_san(c1, CN_WWW)?;
+    add_san(c1, CN_API)?;
+    assert!(add_san(c1, CN_WWW).is_err()); // duplicate
+    let matches = certs_for_domain(CN_WWW);
     assert_eq!(matches.len(), 1);
     assert_eq!(matches[0].id, c1);
 
@@ -714,7 +731,7 @@ pub fn self_test() -> KernelResult<()> {
     assert!(remove_cert(c2).is_err()); // pinned root
     set_pinned(c2, false)?;
     remove_cert(c2)?;
-    assert_eq!(list_certs().len(), 1);
+    assert_eq!(list_certs().len(), base_total + 1);
 
     // Test 5: renewal.
     serial_println!("certmgr::self_test 5: renewal");
@@ -728,28 +745,96 @@ pub fn self_test() -> KernelResult<()> {
     // Test 6: ACME request.
     serial_println!("certmgr::self_test 6: ACME request");
     let req = request_cert(
-        "test.example.com",
-        "admin@example.com",
+        "acme.certmgr-selftest.invalid",
+        "selftest@certmgr-selftest.invalid",
         KeyType::EcdsaP256,
         ChallengeType::Http01,
     )?;
-    assert_eq!(list_requests().len(), 1);
+    assert_eq!(list_requests().len(), base_reqs + 1);
     let cert_id = complete_request(req)?;
     let le_cert = get_cert(cert_id)?;
     assert_eq!(le_cert.source, CertSource::LetsEncrypt);
     assert!(le_cert.auto_renew);
 
-    // Test 7: init_defaults — the trust store starts EMPTY (no phantom roots);
-    // certificates appear only through a real import. After init the store has
-    // zero certs and zero roots.
-    serial_println!("certmgr::self_test 7: init defaults");
-    clear_all();
-    init_defaults();
-    let (total, roots, _, _, _) = stats();
-    assert_eq!(total, 0); // empty trust store — no fabricated roots
-    assert_eq!(roots, 0);
+    // Test 7: non-UTF-8 certificate and key paths survive byte-exact (§261).
+    //
+    // A PEM and its key live at paths, and a path may hold any byte except `/`
+    // and NUL. Under the old `String` typing a key under such a path could not
+    // be recorded at all: it decoded to a U+FFFD-bearing name, so whatever
+    // later went to load the key would have opened a different file, or none —
+    // and two keys differing only in such a byte became indistinguishable.
+    serial_println!("certmgr::self_test 7: non-UTF-8 cert paths");
+    let c3 = import_cert(
+        "raw1.certmgr-selftest.invalid",
+        CertType::Server,
+        CertSource::UserImported,
+        KeyType::EcdsaP256,
+        "certmgr-selftest CA",
+        Path::new(b"/etc/ssl/certs/ce\xFFrt.pem"),
+        Path::new(b"/etc/ssl/private/ke\xFEy.key"),
+    )?;
+    let raw = get_cert(c3)?;
+    assert_eq!(
+        raw.cert_path.as_path().as_bytes(),
+        &b"/etc/ssl/certs/ce\xFFrt.pem"[..],
+        "the certificate path must round-trip byte-for-byte"
+    );
+    assert_eq!(
+        raw.key_path.as_path().as_bytes(),
+        &b"/etc/ssl/private/ke\xFEy.key"[..],
+        "the key path must round-trip byte-for-byte"
+    );
 
-    clear_all();
-    serial_println!("certmgr::self_test: all 7 tests passed");
+    let c4 = import_cert(
+        "raw2.certmgr-selftest.invalid",
+        CertType::Server,
+        CertSource::UserImported,
+        KeyType::EcdsaP256,
+        "certmgr-selftest CA",
+        Path::new(b"/etc/ssl/certs/ce\xFErt.pem"),
+        Path::new(b"/etc/ssl/private/ke\xFFy.key"),
+    )?;
+    assert_ne!(
+        get_cert(c3)?.cert_path,
+        get_cert(c4)?.cert_path,
+        "paths differing only in a byte with no UTF-8 spelling must stay distinct"
+    );
+
+    // Cleanup: put the store back exactly as it was found, so a second
+    // `certmgr test` sees the same baseline this one did — and so the suite
+    // never leaves fabricated certificates in a real trust store.
+    remove_cert(c1)?;
+    remove_cert(cert_id)?;
+    remove_cert(c3)?;
+    remove_cert(c4)?;
+    cancel_request(req)?;
+    assert_eq!(
+        list_certs().len(),
+        base_total,
+        "self_test must leave the trust store as it found it"
+    );
+    assert_eq!(
+        list_requests().len(),
+        base_reqs,
+        "self_test must leave the ACME request list as it found it"
+    );
+
+    // Test 8: init_defaults must not fabricate a trust store — certificates
+    // appear only through a real import. It early-returns once any certificate
+    // exists, so the property is observable only on an empty store; where the
+    // machine already has certificates, checking it would mean deleting them.
+    serial_println!("certmgr::self_test 8: init defaults");
+    if base_total == 0 {
+        init_defaults();
+        let (total, roots, _, _, _) = stats();
+        assert_eq!(total, 0, "init_defaults must not fabricate certificates");
+        assert_eq!(roots, 0, "init_defaults must not fabricate root CAs");
+    } else {
+        serial_println!(
+            "certmgr::self_test 8: skipped — {base_total} certificate(s) already in the store"
+        );
+    }
+
+    serial_println!("certmgr::self_test: all 8 tests passed");
     Ok(())
 }

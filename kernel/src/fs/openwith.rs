@@ -29,6 +29,7 @@ use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::error::{KernelError, KernelResult};
+use crate::fs::path::{Path, PathBuf};
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -51,7 +52,11 @@ const MAX_ALL_APPS: usize = 256;
 #[derive(Debug, Clone)]
 pub struct AppChoice {
     /// Application path.
-    pub app_path: String,
+    ///
+    /// A `PathBuf`, not a `String` (design-decisions.md 261): an installed
+    /// executable is an ordinary file, and our filesystems permit any byte
+    /// but `/` and NUL in a name.
+    pub app_path: PathBuf,
     /// Application display name.
     pub app_name: String,
     /// Why this app appears in the list.
@@ -81,7 +86,7 @@ struct RecentChoice {
     /// MIME type.
     mime: String,
     /// App path.
-    app_path: String,
+    app_path: PathBuf,
     /// App name.
     app_name: String,
     /// Use count.
@@ -94,9 +99,9 @@ struct RecentChoice {
 #[derive(Debug, Clone)]
 pub struct OpenWithResult {
     /// The file that was opened.
-    pub file_path: String,
+    pub file_path: PathBuf,
     /// The app used to open it.
-    pub app_path: String,
+    pub app_path: PathBuf,
     /// Whether the default was changed.
     pub default_changed: bool,
 }
@@ -114,30 +119,35 @@ use crate::sync::PreemptSpinMutex as Mutex;
 static RECENT: Mutex<Vec<RecentChoice>> = Mutex::new(Vec::new());
 
 /// All known apps (simplified app registry).
-static KNOWN_APPS: Mutex<Vec<(String, String)>> = Mutex::new(Vec::new()); // (path, name)
+/// (path, display name).  The path is a `PathBuf` for the reason given on
+/// [`AppChoice::app_path`]; the display name is text chosen by whoever
+/// registered the app, so it stays a `String`.
+static KNOWN_APPS: Mutex<Vec<(PathBuf, String)>> = Mutex::new(Vec::new());
 
 // ---------------------------------------------------------------------------
 // App Registry
 // ---------------------------------------------------------------------------
 
 /// Register a known application (for "browse" in Open With).
-pub fn register_app(app_path: &str, app_name: &str) -> KernelResult<()> {
+pub fn register_app(app_path: impl AsRef<Path>, app_name: &str) -> KernelResult<()> {
+    let app_path = app_path.as_ref();
     let mut apps = KNOWN_APPS.lock();
     if apps.len() >= MAX_ALL_APPS {
         return Err(KernelError::ResourceExhausted);
     }
     // No duplicates.
-    if apps.iter().any(|(p, _)| p == app_path) {
+    if apps.iter().any(|(p, _)| p.as_path() == app_path) {
         return Ok(());
     }
-    apps.push((String::from(app_path), String::from(app_name)));
+    apps.push((app_path.to_path_buf(), String::from(app_name)));
     Ok(())
 }
 
 /// Unregister a known application.
-pub fn unregister_app(app_path: &str) -> KernelResult<()> {
+pub fn unregister_app(app_path: impl AsRef<Path>) -> KernelResult<()> {
+    let app_path = app_path.as_ref();
     let mut apps = KNOWN_APPS.lock();
-    if let Some(pos) = apps.iter().position(|(p, _)| p == app_path) {
+    if let Some(pos) = apps.iter().position(|(p, _)| p.as_path() == app_path) {
         apps.remove(pos);
         Ok(())
     } else {
@@ -146,7 +156,7 @@ pub fn unregister_app(app_path: &str) -> KernelResult<()> {
 }
 
 /// List all registered applications.
-pub fn list_apps() -> Vec<(String, String)> {
+pub fn list_apps() -> Vec<(PathBuf, String)> {
     KNOWN_APPS.lock().clone()
 }
 
@@ -161,10 +171,11 @@ pub fn list_apps() -> Vec<(String, String)> {
 /// 2. Other registered handlers
 /// 3. Recently used apps for this type
 /// 4. All installed apps (in browse section)
-pub fn build_choices(path: &str) -> KernelResult<Vec<AppChoice>> {
+pub fn build_choices(path: impl AsRef<Path>) -> KernelResult<Vec<AppChoice>> {
+    let path = path.as_ref();
     let mime = crate::fs::mime::detect(path).unwrap_or("application/octet-stream");
     let mut choices = Vec::new();
-    let mut seen_paths: Vec<String> = Vec::new();
+    let mut seen_paths: Vec<PathBuf> = Vec::new();
 
     // 1. Registered handlers from associations.
     let registered = crate::fs::associations::apps_for(mime);
@@ -243,11 +254,12 @@ pub fn build_choices(path: &str) -> KernelResult<Vec<AppChoice>> {
 ///
 /// Records the choice and optionally sets as default.
 pub fn open_with(
-    path: &str,
-    app_path: &str,
+    path: impl AsRef<Path>,
+    app_path: impl AsRef<Path>,
     app_name: &str,
     set_as_default: bool,
 ) -> KernelResult<OpenWithResult> {
+    let (path, app_path) = (path.as_ref(), app_path.as_ref());
     OPEN_COUNT.fetch_add(1, Ordering::Relaxed);
 
     let mime = crate::fs::mime::detect(path).unwrap_or("application/octet-stream");
@@ -258,7 +270,7 @@ pub fn open_with(
         let mut recent = RECENT.lock();
         if let Some(entry) = recent
             .iter_mut()
-            .find(|r| r.mime == mime && r.app_path == app_path)
+            .find(|r| r.mime == mime && r.app_path.as_path() == app_path)
         {
             entry.use_count = entry.use_count.saturating_add(1);
             entry.last_used_ns = now;
@@ -276,7 +288,7 @@ pub fn open_with(
             }
             recent.push(RecentChoice {
                 mime: String::from(mime),
-                app_path: String::from(app_path),
+                app_path: app_path.to_path_buf(),
                 app_name: String::from(app_name),
                 use_count: 1,
                 last_used_ns: now,
@@ -293,21 +305,21 @@ pub fn open_with(
     }
 
     Ok(OpenWithResult {
-        file_path: String::from(path),
-        app_path: String::from(app_path),
+        file_path: path.to_path_buf(),
+        app_path: app_path.to_path_buf(),
         default_changed,
     })
 }
 
 /// Get the current default app for a file.
-pub fn current_default(path: &str) -> Option<String> {
+pub fn current_default(path: impl AsRef<Path>) -> Option<String> {
     crate::fs::associations::default_app_for_file(path).map(|a| a.app_name)
 }
 
 /// Get recent choices for a MIME type.
-pub fn recent_for_type(mime: &str) -> Vec<(String, String, u64)> {
+pub fn recent_for_type(mime: &str) -> Vec<(PathBuf, String, u64)> {
     let recent = RECENT.lock();
-    let mut entries: Vec<(String, String, u64)> = recent
+    let mut entries: Vec<(PathBuf, String, u64)> = recent
         .iter()
         .filter(|r| r.mime == mime)
         .map(|r| (r.app_path.clone(), r.app_name.clone(), r.use_count))
@@ -360,8 +372,8 @@ pub fn self_test() -> KernelResult<()> {
         register_app("/usr/bin/editor", "Text Editor")?;
         register_app("/usr/bin/viewer", "Image Viewer")?;
         let apps = list_apps();
-        assert!(apps.iter().any(|(p, _)| p == "/usr/bin/editor"));
-        assert!(apps.iter().any(|(p, _)| p == "/usr/bin/viewer"));
+        assert!(apps.iter().any(|(p, _)| p.as_path() == Path::new("/usr/bin/editor")));
+        assert!(apps.iter().any(|(p, _)| p.as_path() == Path::new("/usr/bin/viewer")));
         serial_println!("[openwith] test 1 passed: register apps");
     }
 
@@ -379,12 +391,14 @@ pub fn self_test() -> KernelResult<()> {
     // Test 3: open with and record recent.
     {
         let result = open_with("/test.txt", "/usr/bin/editor", "Text Editor", false)?;
-        assert_eq!(result.file_path, "/test.txt");
+        assert_eq!(result.file_path.as_path(), Path::new("/test.txt"));
         assert!(!result.default_changed);
 
         // Check recent was recorded.
         let recent = recent_for_type("text/plain");
-        assert!(recent.iter().any(|(p, _, _)| p == "/usr/bin/editor"));
+        assert!(recent
+            .iter()
+            .any(|(p, _, _)| p.as_path() == Path::new("/usr/bin/editor")));
         serial_println!("[openwith] test 3 passed: open with + recent");
     }
 
@@ -419,7 +433,7 @@ pub fn self_test() -> KernelResult<()> {
         unregister_app("/usr/bin/editor")?;
         unregister_app("/usr/bin/viewer")?;
         let apps = list_apps();
-        assert!(!apps.iter().any(|(p, _)| p == "/usr/bin/editor"));
+        assert!(!apps.iter().any(|(p, _)| p.as_path() == Path::new("/usr/bin/editor")));
         serial_println!("[openwith] test 6 passed: unregister apps");
     }
 
@@ -431,6 +445,45 @@ pub fn self_test() -> KernelResult<()> {
         serial_println!("[openwith] test 7 passed: stats");
     }
 
-    serial_println!("[openwith] all 7 self-tests passed");
+    // Test 8: non-UTF-8 paths (design-decisions.md 261).
+    //
+    // Every path here is a filesystem path: the file being opened, and the
+    // executable opening it.  While these were `String`, two applications
+    // whose paths differed only in a byte with no UTF-8 spelling were
+    // indistinguishable — registering one suppressed the other as a
+    // "duplicate", and unregistering either removed both.
+    {
+        let app_a = Path::new(&b"/usr/bin/ed_\xFFr"[..]);
+        let app_b = Path::new(&b"/usr/bin/ed_\xFEr"[..]);
+        let file = Path::new(&b"/ow_\xFF.txt"[..]);
+
+        register_app(app_a, "Editor A")?;
+        register_app(app_b, "Editor B")?;
+        let apps = list_apps();
+        // Two distinct entries, not one deduplicated one.
+        assert!(apps.iter().any(|(p, n)| p.as_path() == app_a && n == "Editor A"));
+        assert!(apps.iter().any(|(p, n)| p.as_path() == app_b && n == "Editor B"));
+
+        // The opened file's path round-trips byte-exactly.
+        let result = open_with(file, app_a, "Editor A", false)?;
+        assert_eq!(result.file_path.as_path(), file);
+        assert_eq!(result.app_path.as_path(), app_a);
+
+        // The recent entry belongs to A alone.
+        let recent = recent_for_type("text/plain");
+        assert!(recent.iter().any(|(p, _, _)| p.as_path() == app_a));
+        assert!(!recent.iter().any(|(p, _, _)| p.as_path() == app_b));
+        clear_recent_for_type("text/plain");
+
+        // Unregistering one leaves the other in place.
+        unregister_app(app_a)?;
+        let apps = list_apps();
+        assert!(!apps.iter().any(|(p, _)| p.as_path() == app_a));
+        assert!(apps.iter().any(|(p, _)| p.as_path() == app_b));
+        unregister_app(app_b)?;
+        serial_println!("[openwith] test 8 passed: non-UTF-8 paths");
+    }
+
+    serial_println!("[openwith] all 8 self-tests passed");
     Ok(())
 }

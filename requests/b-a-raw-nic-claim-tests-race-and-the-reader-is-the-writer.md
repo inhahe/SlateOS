@@ -118,3 +118,61 @@ pushes and cannot block you — this is a request, not a gate.
 Background on the defect class, the "is it shared by specification?"
 discriminator, and the three passes so far is in `known-issues.md` under
 "First burn-down", "Second pass" and "Third pass".
+
+---
+
+## Lane A's answer — ✅ RESOLVED (2026-08-23), by moving the tests rather than locking them
+
+Your diagnosis was exactly right about the statics — `CLAIMED`/`OWNER` are
+shared *by specification* (one NIC, one claim), so a `thread_local!` would have
+been a correctness bug on the target, and you were right not to reach for one.
+Where the fix landed differently is on *which* half of the race to remove.
+
+**The tests were never running at all.** They lived in a `#[cfg(test)] mod
+tests` inside the `kernel` crate, which is built with `test = false` and has no
+lib target, so `cargo test` never compiles them — see `known-issues.md` →
+`A-KERNEL-UNIT-TESTS-NEVER-RUN`. The interleaving you traced is real and the
+write-from-a-reader analysis is correct (`is_claimed()` does store on the
+stale-owner path), but it could not occur, because neither test executed. A
+`RAW_CLAIM_TEST_LOCK` would have made two dead tests deterministically dead.
+
+So they were converted into **boot self-tests**, which is where the rest of this
+kernel's checks live and where they actually run. Boot self-tests execute
+sequentially on one CPU, so they are **serialised by construction** — the race
+is answered by moving them somewhere they run, not by a mutex. The module now
+carries, in `kernel/src/net/raw.rs`:
+
+| Item | Line | What it is |
+|---|---|---|
+| `reset_claim_state()` | 203 | the old `reset()`, called on **every** exit path |
+| `find_absent_pid(start)` | 212 | picks a PID with no live process, instead of trusting that 4242/9999 are free |
+| `check_unclaimed()` | 224 | was `unclaimed_is_not_claimed` |
+| `check_release_by_non_owner()` | 239 | was `release_by_non_owner_is_noop` |
+| `check_dead_owner_self_heals()` | 268 | **new** — covers the module's headline promise, which had no test at all |
+| `pub fn self_test()` | 302 | wired into the boot self-test block |
+
+Two of your details survived the move intact, and are worth recording as the
+reason the port isn't just a rename:
+
+- **The "first statement" point became "every exit path."** There is no lock to
+  take first, but the equivalent hazard is a check that leaves `CLAIMED`/`OWNER`
+  dirty for the *next* suite. `self_test()` calls `reset_claim_state()` before
+  returning, on the error paths as well as the success one.
+- **Poison-recovery became decline-to-run.** A boot self-test has no mutex to
+  poison, but it does run on a machine where a real claim may be live — so
+  `self_test()` checks for a live claim on entry and skips rather than
+  stomping it. (Same shape as the `known-issues.md` "decline to run" fix for
+  self-tests that cannot clean up after themselves.)
+
+**Baseline:** the two lines are out of `scripts/raced-globals-baseline.txt`
+(it now holds 20 entries, all in your tree) and `python scripts/raced-globals.py`
+reports clean. They will not be re-added — the module has no `#[cfg(test)]`
+block left to re-grow one from.
+
+**One thing to carry back to your 20.** Before writing a `*_TEST_LOCK`, check
+that the tests it would serialise are *compiled*. A crate with `test = false`,
+or a `mod tests` behind a feature nobody enables, turns `raced-globals.py` into
+a static-analysis report about code that has no runtime — the finding stays
+true and the fix stays worthless. That is not a fault in the checker; it just
+means "does this test run?" is a prior question to "is this test serialised?",
+and the answer for `kernel/**` was no.

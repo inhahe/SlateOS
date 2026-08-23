@@ -45,6 +45,7 @@ use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec::Vec;
 
+use super::path::{Path, PathBuf};
 use crate::error::{KernelError, KernelResult};
 use crate::fs::vfs::Vfs;
 use crate::serial_println;
@@ -75,32 +76,32 @@ pub enum TxState {
 #[derive(Debug, Clone)]
 enum TxOp {
     /// Write file content.
-    WriteFile { path: String, data: Vec<u8> },
+    WriteFile { path: PathBuf, data: Vec<u8> },
     /// Remove a file.
-    Remove { path: String },
+    Remove { path: PathBuf },
     /// Create a directory.
-    Mkdir { path: String },
+    Mkdir { path: PathBuf },
     /// Rename/move a file or directory.
-    Rename { from: String, to: String },
+    Rename { from: PathBuf, to: PathBuf },
     /// Create a symlink.
-    Symlink { path: String, target: String },
+    Symlink { path: PathBuf, target: PathBuf },
 }
 
 /// Undo information for rolling back a single operation.
 #[derive(Debug, Clone)]
 enum UndoOp {
     /// File was created — remove it.
-    RemoveFile { path: String },
+    RemoveFile { path: PathBuf },
     /// File was overwritten — restore original content.
-    RestoreFile { path: String, data: Vec<u8> },
+    RestoreFile { path: PathBuf, data: Vec<u8> },
     /// File was removed — restore it.
-    WriteFile { path: String, data: Vec<u8> },
+    WriteFile { path: PathBuf, data: Vec<u8> },
     /// Directory was created — remove it.
-    Rmdir { path: String },
+    Rmdir { path: PathBuf },
     /// Rename was done — reverse it.
-    Rename { from: String, to: String },
+    Rename { from: PathBuf, to: PathBuf },
     /// Symlink was created — remove it.
-    RemoveSymlink { path: String },
+    RemoveSymlink { path: PathBuf },
 }
 
 /// A filesystem transaction.
@@ -174,7 +175,8 @@ pub fn begin_with_label(label: &str) -> KernelResult<TxId> {
 }
 
 /// Add a write operation to the transaction.
-pub fn tx_write(tx_id: TxId, path: &str, data: &[u8]) -> KernelResult<()> {
+pub fn tx_write(tx_id: TxId, path: impl AsRef<Path>, data: &[u8]) -> KernelResult<()> {
+    let path = path.as_ref();
     let mut inner = TRANSACTIONS.lock();
     let tx = inner
         .transactions
@@ -184,7 +186,7 @@ pub fn tx_write(tx_id: TxId, path: &str, data: &[u8]) -> KernelResult<()> {
     check_capacity(tx)?;
 
     tx.ops.push(TxOp::WriteFile {
-        path: String::from(path),
+        path: path.to_path_buf(),
         data: data.to_vec(),
     });
 
@@ -192,7 +194,8 @@ pub fn tx_write(tx_id: TxId, path: &str, data: &[u8]) -> KernelResult<()> {
 }
 
 /// Add a remove operation to the transaction.
-pub fn tx_remove(tx_id: TxId, path: &str) -> KernelResult<()> {
+pub fn tx_remove(tx_id: TxId, path: impl AsRef<Path>) -> KernelResult<()> {
+    let path = path.as_ref();
     let mut inner = TRANSACTIONS.lock();
     let tx = inner
         .transactions
@@ -202,14 +205,15 @@ pub fn tx_remove(tx_id: TxId, path: &str) -> KernelResult<()> {
     check_capacity(tx)?;
 
     tx.ops.push(TxOp::Remove {
-        path: String::from(path),
+        path: path.to_path_buf(),
     });
 
     Ok(())
 }
 
 /// Add a mkdir operation to the transaction.
-pub fn tx_mkdir(tx_id: TxId, path: &str) -> KernelResult<()> {
+pub fn tx_mkdir(tx_id: TxId, path: impl AsRef<Path>) -> KernelResult<()> {
+    let path = path.as_ref();
     let mut inner = TRANSACTIONS.lock();
     let tx = inner
         .transactions
@@ -219,14 +223,15 @@ pub fn tx_mkdir(tx_id: TxId, path: &str) -> KernelResult<()> {
     check_capacity(tx)?;
 
     tx.ops.push(TxOp::Mkdir {
-        path: String::from(path),
+        path: path.to_path_buf(),
     });
 
     Ok(())
 }
 
 /// Add a rename operation to the transaction.
-pub fn tx_rename(tx_id: TxId, from: &str, to: &str) -> KernelResult<()> {
+pub fn tx_rename(tx_id: TxId, from: impl AsRef<Path>, to: impl AsRef<Path>) -> KernelResult<()> {
+    let (from, to) = (from.as_ref(), to.as_ref());
     let mut inner = TRANSACTIONS.lock();
     let tx = inner
         .transactions
@@ -236,15 +241,16 @@ pub fn tx_rename(tx_id: TxId, from: &str, to: &str) -> KernelResult<()> {
     check_capacity(tx)?;
 
     tx.ops.push(TxOp::Rename {
-        from: String::from(from),
-        to: String::from(to),
+        from: from.to_path_buf(),
+        to: to.to_path_buf(),
     });
 
     Ok(())
 }
 
 /// Add a symlink creation to the transaction.
-pub fn tx_symlink(tx_id: TxId, path: &str, target: &str) -> KernelResult<()> {
+pub fn tx_symlink(tx_id: TxId, path: impl AsRef<Path>, target: impl AsRef<Path>) -> KernelResult<()> {
+    let (path, target) = (path.as_ref(), target.as_ref());
     let mut inner = TRANSACTIONS.lock();
     let tx = inner
         .transactions
@@ -254,8 +260,8 @@ pub fn tx_symlink(tx_id: TxId, path: &str, target: &str) -> KernelResult<()> {
     check_capacity(tx)?;
 
     tx.ops.push(TxOp::Symlink {
-        path: String::from(path),
-        target: String::from(target),
+        path: path.to_path_buf(),
+        target: target.to_path_buf(),
     });
 
     Ok(())
@@ -495,8 +501,9 @@ pub fn self_test() -> KernelResult<()> {
     test_multi_op();
     test_info_list();
     test_remove();
+    test_non_utf8_paths();
 
-    serial_println!("[transaction] Self-test passed (6 tests).");
+    serial_println!("[transaction] Self-test passed (7 tests).");
     Ok(())
 }
 
@@ -610,4 +617,48 @@ fn test_remove() {
     let _ = remove(tx2);
 
     serial_println!("[transaction]   remove: ok");
+}
+
+/// A transaction must be able to name any file the filesystem can, and its
+/// rollback must undo exactly the file it created -- not a different one
+/// whose name happened to fold onto the same lossy key.
+fn test_non_utf8_paths() {
+    let a = Path::new(&b"/tmp/tx_\xFFa.txt"[..]);
+    let b = Path::new(&b"/tmp/tx_\xFEa.txt"[..]);
+
+    // Commit: both names round-trip through the op log to the VFS.
+    let tx = begin_with_label("test-non-utf8").expect("begin failed");
+    tx_write(tx, a, b"alpha").expect("tx_write a");
+    tx_write(tx, b, b"beta").expect("tx_write b");
+    commit(tx).expect("commit failed");
+
+    // Distinct keys: a lossy op log would have written "beta" to both.
+    assert_eq!(Vfs::read_file(a).expect("a exists").as_slice(), b"alpha");
+    assert_eq!(Vfs::read_file(b).expect("b exists").as_slice(), b"beta");
+    let _ = remove(tx);
+
+    // Rollback of an overwrite must restore the *original* content of the
+    // file it overwrote, which is where a folded key does real damage: it
+    // would restore `a`'s saved content over `b`.
+    let tx2 = begin().expect("begin failed");
+    tx_write(tx2, a, b"overwritten").expect("tx_write a2");
+    // A remove of a nonexistent file fails at apply time and forces the
+    // whole transaction to roll back.
+    tx_remove(tx2, "/tmp/tx_nonexistent_nonutf8.txt").expect("queue ok");
+    assert!(commit(tx2).is_err(), "commit should fail and roll back");
+    assert_eq!(
+        Vfs::read_file(a).expect("a still exists").as_slice(),
+        b"alpha",
+        "rollback must restore a's original content"
+    );
+    assert_eq!(
+        Vfs::read_file(b).expect("b still exists").as_slice(),
+        b"beta",
+        "rollback must not touch b"
+    );
+    let _ = remove(tx2);
+
+    let _ = Vfs::remove(a);
+    let _ = Vfs::remove(b);
+    serial_println!("[transaction]   non_utf8_paths: ok");
 }

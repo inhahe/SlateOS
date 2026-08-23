@@ -28,6 +28,7 @@ use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::error::{KernelError, KernelResult};
+use crate::fs::path::{Path, PathBuf};
 
 // ---------------------------------------------------------------------------
 // Types
@@ -119,7 +120,13 @@ pub struct EncryptedVolume {
     /// Volume ID.
     pub id: u32,
     /// Device path (e.g., "/dev/sda2").
-    pub device: String,
+    ///
+    /// A `PathBuf`, not a `String` (design-decisions.md 261): this names a
+    /// device node, which is an ordinary filesystem entry and so may contain
+    /// any byte but `/` and NUL.  (Contrast `iso9660::mount`'s `device`,
+    /// which stays a `&str` because it indexes the block-device registry
+    /// rather than naming something in a filesystem.)
+    pub device: PathBuf,
     /// Volume label.
     pub label: String,
     /// Encryption algorithm.
@@ -135,7 +142,10 @@ pub struct EncryptedVolume {
     /// Whether TPM is used to seal the key.
     pub tpm_sealed: bool,
     /// Mount point when unlocked.
-    pub mount_point: String,
+    ///
+    /// A `PathBuf`, not a `String` (design-decisions.md 261): a mount point
+    /// is an ordinary directory.
+    pub mount_point: PathBuf,
     /// Encryption progress percentage (0-100, for Encrypting/Decrypting).
     pub progress_pct: u8,
 }
@@ -180,7 +190,7 @@ pub fn init_defaults() {
     // Default: one system volume, unencrypted.
     let volumes = alloc::vec![EncryptedVolume {
         id: 1,
-        device: String::from("/dev/sda1"),
+        device: PathBuf::from("/dev/sda1"),
         label: String::from("System"),
         algorithm: EncryptAlgorithm::Aes256Xts,
         status: VolumeStatus::Unencrypted,
@@ -188,7 +198,7 @@ pub fn init_defaults() {
         key_slots: Vec::new(),
         has_recovery_key: false,
         tpm_sealed: false,
-        mount_point: String::from("/"),
+        mount_point: PathBuf::from("/"),
         progress_pct: 0,
     },];
 
@@ -203,18 +213,19 @@ pub fn init_defaults() {
 
 /// Register an encrypted volume.
 pub fn register_volume(
-    device: &str,
+    device: impl AsRef<Path>,
     label: &str,
     algorithm: EncryptAlgorithm,
     size_bytes: u64,
 ) -> KernelResult<u32> {
+    let device = device.as_ref();
     with_state(|state| {
         let id = state.next_id;
         state.next_id += 1;
 
         state.volumes.push(EncryptedVolume {
             id,
-            device: String::from(device),
+            device: device.to_path_buf(),
             label: String::from(label),
             algorithm,
             status: VolumeStatus::Locked,
@@ -227,7 +238,7 @@ pub fn register_volume(
             },],
             has_recovery_key: false,
             tpm_sealed: false,
-            mount_point: String::new(),
+            mount_point: PathBuf::new(),
             progress_pct: 0,
         });
 
@@ -477,13 +488,18 @@ pub fn stats() -> (usize, usize, usize, u64, u64) {
 pub fn self_test() {
     crate::serial_println!("diskencrypt::self_test() — running tests...");
 
+    // Start from the seeded defaults, not from whatever a previous run left.
+    // `init_defaults()` returns early when the state exists, so without this
+    // reset a second `dencrypt test` panicked at test 9: the first run leaves
+    // volume 1 `Unlocked`, and `start_encryption` only accepts `Unencrypted`.
+    *STATE.lock() = None;
     init_defaults();
 
     // Test 1: Default volume present.
     let vols = list_volumes();
     assert!(!vols.is_empty());
     assert_eq!(vols[0].status, VolumeStatus::Unencrypted);
-    crate::serial_println!("  [1/11] default volume: OK");
+    crate::serial_println!("  [1/12] default volume: OK");
 
     // Test 2: Register encrypted volume.
     let id = register_volume(
@@ -494,53 +510,53 @@ pub fn self_test() {
     )
     .expect("register");
     assert!(id > 0);
-    crate::serial_println!("  [2/11] register volume: OK");
+    crate::serial_println!("  [2/12] register volume: OK");
 
     // Test 3: Volume starts locked.
     let vol = get_volume(id).expect("get");
     assert_eq!(vol.status, VolumeStatus::Locked);
-    crate::serial_println!("  [3/11] starts locked: OK");
+    crate::serial_println!("  [3/12] starts locked: OK");
 
     // Test 4: Unlock with empty passphrase fails.
     let result = unlock_volume(id, "");
     assert!(result.is_err());
-    crate::serial_println!("  [4/11] empty passphrase rejected: OK");
+    crate::serial_println!("  [4/12] empty passphrase rejected: OK");
 
     // Test 5: Unlock with passphrase.
     unlock_volume(id, "correct-horse-battery-staple").expect("unlock");
     let vol = get_volume(id).expect("get unlocked");
     assert_eq!(vol.status, VolumeStatus::Unlocked);
-    crate::serial_println!("  [5/11] unlock volume: OK");
+    crate::serial_println!("  [5/12] unlock volume: OK");
 
     // Test 6: Lock volume.
     lock_volume(id).expect("lock");
     let vol = get_volume(id).expect("get locked");
     assert_eq!(vol.status, VolumeStatus::Locked);
-    crate::serial_println!("  [6/11] lock volume: OK");
+    crate::serial_println!("  [6/12] lock volume: OK");
 
     // Test 7: Add key slot.
     let slot = add_key_slot(id, Kdf::Argon2id, "Backup passphrase").expect("add slot");
     assert_eq!(slot, 1);
-    crate::serial_println!("  [7/11] add key slot: OK");
+    crate::serial_println!("  [7/12] add key slot: OK");
 
     // Test 8: Generate recovery key.
     let key = generate_recovery_key(id).expect("gen recovery");
     assert!(key.contains('-'));
     let vol = get_volume(id).expect("get with recovery");
     assert!(vol.has_recovery_key);
-    crate::serial_println!("  [8/11] recovery key: OK");
+    crate::serial_println!("  [8/12] recovery key: OK");
 
     // Test 9: Start encryption on unencrypted volume.
     start_encryption(1, EncryptAlgorithm::Aes256Xts).expect("start encrypt");
     let vol = get_volume(1).expect("get encrypting");
     assert_eq!(vol.status, VolumeStatus::Encrypting);
-    crate::serial_println!("  [9/11] start encryption: OK");
+    crate::serial_println!("  [9/12] start encryption: OK");
 
     // Test 10: Update progress to completion.
     update_progress(1, 100).expect("complete");
     let vol = get_volume(1).expect("get after encrypt");
     assert_eq!(vol.status, VolumeStatus::Unlocked);
-    crate::serial_println!("  [10/11] encryption complete: OK");
+    crate::serial_println!("  [10/12] encryption complete: OK");
 
     // Test 11: Stats.
     let (total, encrypted, unlocked, failed, ops) = stats();
@@ -549,7 +565,37 @@ pub fn self_test() {
     assert!(unlocked >= 1);
     assert!(failed >= 1);
     assert!(ops > 0);
-    crate::serial_println!("  [11/11] stats: OK");
+    crate::serial_println!("  [11/12] stats: OK");
 
-    crate::serial_println!("diskencrypt::self_test() — all 11 tests passed");
+    // Test 12: non-UTF-8 device nodes (design-decisions.md 261).
+    //
+    // A device node is an ordinary filesystem entry, so it may be named with
+    // bytes that have no UTF-8 spelling.  While `device` was a `String` such
+    // a node could not be registered at all, and two volumes on device nodes
+    // differing only in such a byte would have been listed identically --
+    // which for "which disk am I about to encrypt?" is the worst possible
+    // ambiguity.
+    {
+        let da = Path::new(&b"/dev/de_\xFFd"[..]);
+        let db = Path::new(&b"/dev/de_\xFEd"[..]);
+        let ia = register_volume(da, "nu-a", EncryptAlgorithm::Aes256Xts, 1024)
+            .expect("register non-utf8 a");
+        let ib = register_volume(db, "nu-b", EncryptAlgorithm::Aes256Xts, 1024)
+            .expect("register non-utf8 b");
+        let va = get_volume(ia).expect("get non-utf8 a");
+        let vb = get_volume(ib).expect("get non-utf8 b");
+        assert_eq!(va.device.as_path(), da);
+        assert_eq!(va.device.as_path().as_bytes(), b"/dev/de_\xFFd");
+        assert_eq!(vb.device.as_path(), db);
+        assert_ne!(va.device, vb.device);
+    }
+    crate::serial_println!("  [12/12] non-UTF-8 device nodes: OK");
+
+    // Leave NO residue: the tests above encrypt the seeded system volume and
+    // register several more.  Clearing the state restores exactly what a
+    // fresh boot has -- there is no lazy init, so nothing re-populates it
+    // until a caller asks for `init_defaults()`.
+    *STATE.lock() = None;
+
+    crate::serial_println!("diskencrypt::self_test() — all 12 tests passed");
 }

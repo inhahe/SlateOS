@@ -227,26 +227,54 @@ pub fn detect(data: &[u8]) -> Option<ArchiveFormat> {
 }
 
 /// Detect format from a file extension.
-pub fn detect_from_extension(name: &str) -> Option<ArchiveFormat> {
-    let lower = name.to_ascii_lowercase();
-    if lower.ends_with(".zip") {
+///
+/// Takes a path rather than a `&str` (design-decisions.md 261): the name
+/// being classified comes off the filesystem, where any byte but `/` and NUL
+/// is legal, so it cannot be required to be UTF-8.  Only the *suffix* has to
+/// be ASCII, which every one of these extensions is.
+///
+/// Matching is on the whole path, not just the final component: a suffix can
+/// only land mid-path if the caller passed a trailing `/`, and a path with a
+/// trailing `/` names a directory, which is not an archive.
+///
+/// This deliberately does not go through [`Path::extension`], because several
+/// of these are compound suffixes (`.tar.gz`, `.tar.zst`) that a single
+/// extension cannot express.
+pub fn detect_from_extension(name: impl AsRef<Path>) -> Option<ArchiveFormat> {
+    let name = name.as_ref().as_bytes();
+
+    /// Case-insensitive (ASCII) byte suffix test.
+    ///
+    /// Lower-casing the whole name into a fresh allocation just to test a
+    /// handful of suffixes would be wasteful, and on a path is meaningless
+    /// besides — bytes outside ASCII have no case.
+    fn ends_with_ci(name: &[u8], suffix: &[u8]) -> bool {
+        let Some(start) = name.len().checked_sub(suffix.len()) else {
+            return false;
+        };
+        name.get(start..)
+            .is_some_and(|tail| tail.eq_ignore_ascii_case(suffix))
+    }
+
+    if ends_with_ci(name, b".zip") {
         Some(ArchiveFormat::Zip)
-    } else if lower.ends_with(".tar")
-        || lower.ends_with(".tgz")
-        || lower.ends_with(".tar.gz")
-        || lower.ends_with(".tar.bz2")
-        || lower.ends_with(".tar.xz")
-        || lower.ends_with(".tar.lz4")
-        || lower.ends_with(".tar.zst")
+    } else if ends_with_ci(name, b".tar")
+        || ends_with_ci(name, b".tgz")
+        || ends_with_ci(name, b".tar.gz")
+        || ends_with_ci(name, b".tar.bz2")
+        || ends_with_ci(name, b".tar.xz")
+        || ends_with_ci(name, b".tar.lz4")
+        || ends_with_ci(name, b".tar.zst")
     {
         Some(ArchiveFormat::Tar)
-    } else if lower.ends_with(".cpio") {
+    } else if ends_with_ci(name, b".cpio") {
         Some(ArchiveFormat::Cpio)
-    } else if lower.ends_with(".a") || lower.ends_with(".ar") || lower.ends_with(".deb") {
+    } else if ends_with_ci(name, b".a") || ends_with_ci(name, b".ar") || ends_with_ci(name, b".deb")
+    {
         Some(ArchiveFormat::Ar)
-    } else if lower.ends_with(".rar") {
+    } else if ends_with_ci(name, b".rar") {
         Some(ArchiveFormat::Rar)
-    } else if lower.ends_with(".7z") {
+    } else if ends_with_ci(name, b".7z") {
         Some(ArchiveFormat::SevenZ)
     } else {
         None
@@ -808,6 +836,29 @@ fn test_detect_extension() {
         Some(ArchiveFormat::SevenZ)
     );
     assert_eq!(detect_from_extension("file.txt"), None);
+
+    // Case-insensitivity is ASCII-only and must not depend on the rest of
+    // the name being text.
+    assert_eq!(detect_from_extension("FILE.ZIP"), Some(ArchiveFormat::Zip));
+    assert_eq!(
+        detect_from_extension("Backup.Tar.Gz"),
+        Some(ArchiveFormat::Tar)
+    );
+
+    // Non-UTF-8 names (design-decisions.md 261).  An archive's name comes
+    // off the filesystem, which permits any byte but `/` and NUL; while this
+    // took a `&str` such a file could not be classified at all, so the
+    // explorer would refuse to open an archive it was perfectly able to read.
+    assert_eq!(
+        detect_from_extension(Path::new(&b"/tmp/ar_\xFFn.zip"[..])),
+        Some(ArchiveFormat::Zip)
+    );
+    assert_eq!(
+        detect_from_extension(Path::new(&b"/tmp/ar_\xFFn.tar.zst"[..])),
+        Some(ArchiveFormat::Tar)
+    );
+    // A non-UTF-8 byte in the suffix position is not one of our extensions.
+    assert_eq!(detect_from_extension(Path::new(&b"/tmp/x.\xFFip"[..])), None);
     serial_println!("[archive]   detect extension: ok");
 }
 

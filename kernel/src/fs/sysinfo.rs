@@ -28,7 +28,6 @@
 #![allow(dead_code)]
 
 use crate::sync::PreemptSpinMutex as Mutex;
-use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
@@ -428,18 +427,14 @@ pub fn update_storage_free(device: impl AsRef<Path>, free_bytes: u64) -> KernelR
 // Helpers
 // ---------------------------------------------------------------------------
 
+/// Format a byte count for human-readable display.
+///
+/// Delegates to [`crate::bytesize::iec`]. Note the deliberate change: the
+/// private copy printed KiB with `{:.0}` — no decimal — so a size crossing
+/// 1 KiB lost the tenths digit that every larger unit kept. There was no
+/// reason for KiB alone to be coarser than MiB.
 fn format_bytes(bytes: u64) -> String {
-    if bytes >= 1_099_511_627_776 {
-        format!("{:.1} TiB", bytes as f64 / 1_099_511_627_776.0)
-    } else if bytes >= 1_073_741_824 {
-        format!("{:.1} GiB", bytes as f64 / 1_073_741_824.0)
-    } else if bytes >= 1_048_576 {
-        format!("{:.1} MiB", bytes as f64 / 1_048_576.0)
-    } else if bytes >= 1024 {
-        format!("{:.0} KiB", bytes as f64 / 1024.0)
-    } else {
-        format!("{} B", bytes)
-    }
+    crate::bytesize::iec(bytes)
 }
 
 // ---------------------------------------------------------------------------

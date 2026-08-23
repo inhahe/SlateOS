@@ -643,16 +643,12 @@ fn simple_glob(pattern: &str, text: impl AsRef<Path>) -> bool {
 }
 
 /// Format a byte size for display.
+///
+/// Delegates to [`crate::bytesize::iec`], which every size in the kernel now
+/// goes through. The private copy this replaced stopped at GiB and did the
+/// division in `f64`, which is silently lossy above 2^53 bytes.
 fn format_size(bytes: u64) -> String {
-    if bytes < 1024 {
-        alloc::format!("{} B", bytes)
-    } else if bytes < 1024 * 1024 {
-        alloc::format!("{:.1} KiB", bytes as f64 / 1024.0)
-    } else if bytes < 1024 * 1024 * 1024 {
-        alloc::format!("{:.1} MiB", bytes as f64 / (1024.0 * 1024.0))
-    } else {
-        alloc::format!("{:.1} GiB", bytes as f64 / (1024.0 * 1024.0 * 1024.0))
-    }
+    crate::bytesize::iec(bytes)
 }
 
 // ---------------------------------------------------------------------------

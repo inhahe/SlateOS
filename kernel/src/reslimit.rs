@@ -1318,16 +1318,12 @@ pub fn procfs_content() -> String {
 }
 
 /// Format a byte count as human-readable.
+///
+/// Delegates to [`crate::bytesize::iec`]. A resource limit is a `u64` and is
+/// routinely set near `UNLIMITED`, which the private copy this replaced would
+/// have reported as a sixteen-billion-GiB number.
 fn format_bytes(bytes: u64) -> String {
-    if bytes >= 1_073_741_824 {
-        format!("{:.1} GiB", bytes as f64 / 1_073_741_824.0)
-    } else if bytes >= 1_048_576 {
-        format!("{:.1} MiB", bytes as f64 / 1_048_576.0)
-    } else if bytes >= 1024 {
-        format!("{:.1} KiB", bytes as f64 / 1024.0)
-    } else {
-        format!("{} B", bytes)
-    }
+    crate::bytesize::iec(bytes)
 }
 
 /// Format a limit value (UNLIMITED → "∞").

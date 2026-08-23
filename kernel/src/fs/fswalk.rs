@@ -34,7 +34,6 @@
 
 #![allow(dead_code)]
 
-use alloc::format;
 use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
@@ -604,16 +603,12 @@ fn is_excluded(path: &Path, opts: &WalkOptions) -> bool {
 }
 
 /// Format a byte size for human-readable display.
+///
+/// Delegates to [`crate::bytesize::iec`]. A directory walk can total more than
+/// a TiB, which the private copy this replaced reported in GiB — a four- or
+/// five-digit number where a unit change was wanted.
 fn format_size(bytes: u64) -> String {
-    if bytes < 1024 {
-        format!("{} B", bytes)
-    } else if bytes < 1024 * 1024 {
-        format!("{:.1} KiB", bytes as f64 / 1024.0)
-    } else if bytes < 1024 * 1024 * 1024 {
-        format!("{:.1} MiB", bytes as f64 / (1024.0 * 1024.0))
-    } else {
-        format!("{:.1} GiB", bytes as f64 / (1024.0 * 1024.0 * 1024.0))
-    }
+    crate::bytesize::iec(bytes)
 }
 
 // ---------------------------------------------------------------------------

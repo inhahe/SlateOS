@@ -635,7 +635,8 @@ extern "C" fn kernel_main() -> ! {
             // Limine.  This is the first and only call to frame::init.  We are
             // single-threaded with interrupts disabled.
             console::boot_step(console::BootStatus::Running, "Memory manager");
-            if let Err(e) = unsafe { mm::frame::init(boot_info.hhdm_offset, boot_info.memory_map) } {
+            if let Err(e) = unsafe { mm::frame::init(boot_info.hhdm_offset, boot_info.memory_map) }
+            {
                 serial_println!("FATAL: Frame allocator init failed: {}", e);
                 cpu::halt_loop();
             }
@@ -5631,7 +5632,10 @@ extern "C" fn kernel_main() -> ! {
                 serial_println!("WARNING: accessibility self-test failed: {:?}", e);
             }
             if let Err(e) = fs::appnotify::self_test() {
-                serial_println!("WARNING: per-app notification settings self-test failed: {:?}", e);
+                serial_println!(
+                    "WARNING: per-app notification settings self-test failed: {:?}",
+                    e
+                );
             }
             if let Err(e) = fs::autostart::self_test() {
                 serial_println!("WARNING: autostart self-test failed: {:?}", e);
@@ -5682,7 +5686,10 @@ extern "C" fn kernel_main() -> ! {
                 serial_println!("WARNING: keyboard layout self-test failed: {:?}", e);
             }
             if let Err(e) = fs::mmtune::self_test() {
-                serial_println!("WARNING: memory-management tuning self-test failed: {:?}", e);
+                serial_println!(
+                    "WARNING: memory-management tuning self-test failed: {:?}",
+                    e
+                );
             }
             if let Err(e) = fs::netindicator::self_test() {
                 serial_println!("WARNING: network indicator self-test failed: {:?}", e);
@@ -7126,7 +7133,9 @@ extern "C" fn kernel_main() -> ! {
                             sched::yield_now();
                             spins = spins.saturating_add(1);
                             if spins >= 2_000_000 {
-                                serial_println!("[boot] WARNING: cgroup e2e task did not finish in time");
+                                serial_println!(
+                                    "[boot] WARNING: cgroup e2e task did not finish in time"
+                                );
                                 break;
                             }
                         }

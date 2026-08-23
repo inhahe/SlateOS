@@ -660,8 +660,12 @@ fn self_test_inner() {
     {
         assert_eq!(format_bytes(0), "0 B");
         assert_eq!(format_bytes(512), "512 B");
-        let mb = format_bytes(1_500_000);
-        assert!(mb.contains("MB"));
+        // IEC, not SI: 1_500_000 bytes is 1.4 *MiB*. This read `contains("MB")`
+        // until the formatter was consolidated, and passed only because the
+        // private copy labelled a 1024-based unit with the 1000-based name.
+        // `contains` also would not have caught a wrong *number*; assert the
+        // whole string.
+        assert_eq!(format_bytes(1_500_000), "1.4 MiB");
     }
     serial_println!("[datausage] 10/11 format_bytes OK");
 

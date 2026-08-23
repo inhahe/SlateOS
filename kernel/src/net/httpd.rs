@@ -1093,17 +1093,12 @@ fn directory_listing(vfs_path: &Path, uri_path: &Path) -> KernelResult<Vec<u8>> 
 }
 
 /// Format a file size in human-readable form.
-#[allow(clippy::arithmetic_side_effects)]
+///
+/// Delegates to [`crate::bytesize::iec`]. The `arithmetic_side_effects` allow
+/// the private copy needed went with it: `bytesize` is integer arithmetic that
+/// cannot overflow, so there is nothing left to suppress.
 fn format_size(size: u64) -> String {
-    if size < 1024 {
-        format!("{} B", size)
-    } else if size < 1024 * 1024 {
-        format!("{:.1} KiB", size as f64 / 1024.0)
-    } else if size < 1024 * 1024 * 1024 {
-        format!("{:.1} MiB", size as f64 / (1024.0 * 1024.0))
-    } else {
-        format!("{:.1} GiB", size as f64 / (1024.0 * 1024.0 * 1024.0))
-    }
+    crate::bytesize::iec(size)
 }
 
 // ---------------------------------------------------------------------------
@@ -2051,7 +2046,9 @@ pub fn self_test() -> KernelResult<()> {
             serial_println!("[httpd]   416 Range Not Satisfiable: OK");
 
             // Test 23: Range header in request parsing.
-            let req = parse_request(b"GET /bigfile.bin HTTP/1.1\r\nHost: x\r\nRange: bytes=0-1023\r\n\r\n");
+            let req = parse_request(
+                b"GET /bigfile.bin HTTP/1.1\r\nHost: x\r\nRange: bytes=0-1023\r\n\r\n",
+            );
             assert!(req.is_some());
             let r = req.unwrap();
             assert_eq!(r.range.as_deref(), Some("bytes=0-1023"));

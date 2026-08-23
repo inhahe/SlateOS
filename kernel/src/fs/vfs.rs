@@ -1625,7 +1625,11 @@ impl Vfs {
         }
 
         vfs.mounts.remove(idx);
-        crate::serial_println!("[vfs] Unmounted {} from '{}'", fs_type, mount_path.display());
+        crate::serial_println!(
+            "[vfs] Unmounted {} from '{}'",
+            fs_type,
+            mount_path.display()
+        );
 
         // Unmount changes affect path resolution — invalidate entire dcache.
         drop(vfs);

@@ -17518,7 +17518,8 @@ pub fn self_test() -> KernelResult<()> {
         // cross-generator comparison — procfs against sysfs, bytes against
         // bytes — lives in `sysfs::self_test`.)
         let osrelease = fs.read_file(Path::new("/sys/kernel/osrelease"))?;
-        if core::str::from_utf8(&osrelease).ok() != Some(&format!("{}\n", crate::uname::RELEASE)[..])
+        if core::str::from_utf8(&osrelease).ok()
+            != Some(&format!("{}\n", crate::uname::RELEASE)[..])
         {
             serial_println!("[procfs]   FAIL: osrelease = {:?}", osrelease);
             return Err(KernelError::InternalError);

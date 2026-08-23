@@ -9639,17 +9639,14 @@ fn format_perms(perms: u16) -> [u8; 9] {
     out
 }
 
-/// Format a byte count as a human-readable string (K/M/G).
+/// `ls -h`'s size column: `512`, `1.5K`, `2.0G`.
+///
+/// Delegates to [`crate::bytesize::compact`] — the fixed-width column form,
+/// not the prose form — so that `ls -h`, `df -h` and `du -h` finally print the
+/// same size the same way. They did not: `du` truncated to whole units, so a
+/// file `ls -h` showed as `1.9M` appeared as `1M` under `du`.
 fn format_size_human(size: u64) -> String {
-    if size >= 1_073_741_824 {
-        alloc::format!("{:.1}G", size as f64 / 1_073_741_824.0)
-    } else if size >= 1_048_576 {
-        alloc::format!("{:.1}M", size as f64 / 1_048_576.0)
-    } else if size >= 1024 {
-        alloc::format!("{:.1}K", size as f64 / 1024.0)
-    } else {
-        alloc::format!("{}", size)
-    }
+    crate::bytesize::compact(size)
 }
 
 fn cmd_ls(args: &str) {
@@ -10307,16 +10304,13 @@ fn cmd_df(args: &str) {
 
 /// Format a byte count as human-readable (K/M/G).
 #[allow(clippy::arithmetic_side_effects)]
+/// `df` and `du`'s size column: `512`, `1.5K`, `2.0G`.
+///
+/// Delegates to [`crate::bytesize::compact`], the same function `ls -h` uses.
+/// The private copy this replaced truncated to whole units, so `du` reported a
+/// 1.9 MiB directory as `1M` while `ls -h` called the file inside it `1.9M`.
 fn format_bytes(bytes: u64) -> alloc::string::String {
-    if bytes < 1024 {
-        alloc::format!("{}B", bytes)
-    } else if bytes < 1024 * 1024 {
-        alloc::format!("{}K", bytes / 1024)
-    } else if bytes < 1024 * 1024 * 1024 {
-        alloc::format!("{}M", bytes / (1024 * 1024))
-    } else {
-        alloc::format!("{}G", bytes / (1024 * 1024 * 1024))
-    }
+    crate::bytesize::compact(bytes)
 }
 
 /// Format a Unix epoch timestamp (nanoseconds) as YYYY-MM-DD HH:MM:SS.
@@ -11543,7 +11537,13 @@ fn cmd_dedup(args: &str) {
     shell_println!("=== Duplicate Report ===");
     shell_println!("  Duplicate groups:   {}", total_dup_groups);
     shell_println!("  Duplicate files:    {} (extra copies)", total_dup_files);
-    shell_println!("  Wasted space:       {}", format_size_human(total_wasted));
+    // Prose, not a column, so the spelled-out IEC form rather than `ls -h`'s
+    // one-letter one. This line reused the `ls` column formatter only because
+    // it was the byte formatter that happened to be in scope.
+    shell_println!(
+        "  Wasted space:       {}",
+        crate::bytesize::iec(total_wasted)
+    );
     shell_println!("  Files scanned:      {}", total_scanned);
     shell_println!("  Files hashed:       {}", files_hashed);
     if hash_errors > 0 {
@@ -11572,8 +11572,8 @@ fn cmd_dedup(args: &str) {
                 "[{}...] {} x {} (wasted: {})",
                 short_hash,
                 paths.len(),
-                format_size_human(*size),
-                format_size_human(size.saturating_mul((paths.len() as u64).saturating_sub(1)))
+                crate::bytesize::iec(*size),
+                crate::bytesize::iec(size.saturating_mul((paths.len() as u64).saturating_sub(1)))
             );
             for (pi, path) in paths.iter().enumerate() {
                 if pi == 0 {
@@ -11611,7 +11611,7 @@ fn cmd_dedup(args: &str) {
         shell_println!(
             "Deleted {} duplicate files, reclaimed {}.",
             deleted_count,
-            format_size_human(deleted_bytes)
+            crate::bytesize::iec(deleted_bytes)
         );
         if delete_errors > 0 {
             shell_println!("  {} files could not be deleted.", delete_errors);
@@ -12252,11 +12252,7 @@ fn cmd_assoc(args: &str) {
 
             match associations::default_app_for_file(&path) {
                 Some(app) => {
-                    shell_println!(
-                        "Open with: {} ({})",
-                        app.app_name,
-                        app.app_path.display()
-                    );
+                    shell_println!("Open with: {} ({})", app.app_name, app.app_path.display());
                 }
                 None => {
                     shell_println!("Open with: (no application registered)");

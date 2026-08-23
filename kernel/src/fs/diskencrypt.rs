@@ -442,16 +442,13 @@ pub fn list_volumes() -> Vec<EncryptedVolume> {
 }
 
 /// Format size in human-readable form.
+///
+/// Delegates to [`crate::bytesize::iec`]. The private copy this replaced had no
+/// KiB branch at all — it fell from MiB straight to bytes, so a 1 MiB-minus-one
+/// volume header printed as `1048575 B` — and truncated to whole units, so two
+/// volumes 900 MiB apart could both report `1 GiB`.
 fn format_size(bytes: u64) -> String {
-    if bytes >= 1024 * 1024 * 1024 * 1024 {
-        format!("{} TiB", bytes / (1024 * 1024 * 1024 * 1024))
-    } else if bytes >= 1024 * 1024 * 1024 {
-        format!("{} GiB", bytes / (1024 * 1024 * 1024))
-    } else if bytes >= 1024 * 1024 {
-        format!("{} MiB", bytes / (1024 * 1024))
-    } else {
-        format!("{} B", bytes)
-    }
+    crate::bytesize::iec(bytes)
 }
 
 /// Statistics: (volume_count, encrypted_count, unlocked_count, failed_unlocks, ops).

@@ -105,10 +105,17 @@ def bare_interpolated_name(line: str) -> str | None:
 
     Matches `eprintln!("prog: {ident}: ...` — the shape where `ident` reaches
     the message as a bare name.
+
+    `line` is a *logical* line: `join_wrapped_calls` has already pulled a call
+    that rustfmt split back onto one. What arrives here can therefore be
+    `eprintln!( "cut: {path}: {e}" );`, with the spaces the join left behind,
+    so the macro and its opening quote are matched with whitespace between
+    them allowed rather than by a bare `partition`.
     """
-    head, sep, after = line.partition('eprintln!("')
-    if not sep:
+    m = re.search(r'eprintln!\(\s*"', line)
+    if m is None:
         return None
+    after = line[m.end() :]
     prog, sep, tail = after.partition(": {")
     if not sep:
         return None
@@ -149,26 +156,120 @@ def is_prose(line: str) -> bool:
     return line.lstrip().startswith("//")
 
 
+# How many physical lines a single wrapped macro call may span before the
+# joiner gives up. A bound is needed because the scanner can be defeated by
+# Rust syntax it does not model (a raw string, a lifetime that looks like an
+# unterminated char literal), and an unbounded join would then swallow the
+# rest of the file. 40 is far above the longest real call in this tree.
+MAX_JOIN_LINES = 40
+
+
+def _delta(src: str) -> int | None:
+    """Net bracket depth of `src`, ignoring brackets inside literals.
+
+    `None` if a string literal is left open at the end, which means the text
+    is not something this scanner understands and the caller must not join.
+    A format string is full of `{`, `}` and often `(`, so skipping literals is
+    not an optimisation — counting them would make every call look unbalanced.
+    """
+    depth = 0
+    k, n = 0, len(src)
+    while k < n:
+        c = src[k]
+        if c == '"':
+            k += 1
+            while k < n and src[k] != '"':
+                k += 2 if src[k] == "\\" else 1
+            if k >= n:
+                return None
+        elif c == "'":
+            # `'x'` and `'\n'` are char literals; `'a` is a lifetime. Only the
+            # first two can hide a bracket, and only they are skipped.
+            if k + 1 < n and src[k + 1] == "\\":
+                end = src.find("'", k + 2)
+                if end != -1:
+                    k = end
+            elif k + 2 < n and src[k + 2] == "'":
+                k += 2
+        elif c in "([{":
+            depth += 1
+        elif c in ")]}":
+            depth -= 1
+        k += 1
+    return depth
+
+
+def join_wrapped_calls(text: str) -> list[tuple[int, int, str]]:
+    """Group physical lines into logical ones: `(first, last, source)`.
+
+    A `println!`/`eprintln!` whose arguments rustfmt split across lines is
+    rejoined into one entry. Without this the detectors are blind to exactly
+    the sites formatting touched -- and *measurably* so: running `cargo fmt`
+    over five untouched crates in this tree made three real violations
+    disappear from the count, because rustfmt had moved the macro name onto a
+    line of its own. A checker a formatter can silence is not a checker.
+
+    Lines that are not a wrapped call are returned unchanged, one per entry,
+    so callers can treat the result as "the lines, but correct".
+    """
+    lines = text.split("\n")
+    out: list[tuple[int, int, str]] = []
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        start = -1
+        for mac in ("eprintln!", "println!"):
+            at = line.find(mac)
+            if at != -1 and (start == -1 or at < start):
+                start = at
+        if start == -1 or is_prose(line):
+            out.append((i + 1, i + 1, line))
+            i += 1
+            continue
+        joined = line
+        j = i
+        while True:
+            d = _delta(joined[start:])
+            if d is not None and d <= 0:
+                break
+            j += 1
+            if j >= len(lines) or j - i >= MAX_JOIN_LINES:
+                j = i
+                joined = line
+                break
+            joined += " " + lines[j].strip()
+        out.append((i + 1, j + 1, joined))
+        i = j + 1
+    return out
+
+
 def violations(text: str) -> list[tuple[int, str, str]]:
-    """`(line number, what, source line)` for every flagged line in `text`."""
+    """`(line number, what, source)` for every flagged call in `text`.
+
+    The line number is the *first* physical line of the call, which is where a
+    reader looks and where `--fix` rewrites.
+    """
     out: list[tuple[int, str, str]] = []
-    for i, line in enumerate(text.splitlines(), 1):
+    for first, _last, line in join_wrapped_calls(text):
         if is_prose(line):
             continue
         ident = bare_interpolated_name(line)
         if ident is not None:
-            out.append((i, f"{{{ident}}} unquoted", line.strip()))
+            out.append((first, f"{{{ident}}} unquoted", line.strip()))
         elif hand_written_quotes(line):
-            out.append((i, "hand-written quotes", line.strip()))
+            out.append((first, "hand-written quotes", line.strip()))
     return out
 
 
-# A whole single-line `println!`/`eprintln!` call: indentation, the macro and
-# its format string, then the optional argument list, then `);`. `--fix`
-# refuses anything this does not match -- a call already split across lines is
-# exactly where a mechanical rewrite would go wrong, and there are few enough
-# of those to do by hand.
-_CALL = re.compile(r'^(?P<lead>\s*)(?P<mac>e?println!)\("(?P<fmt>(?:[^"\\]|\\.)*)"(?P<args>.*)\);$')
+# A whole `println!`/`eprintln!` call: indentation, the macro and its format
+# string, then the optional argument list, then `);`. Whitespace is allowed
+# after the `(` and before the `)` because the input may be a call
+# `join_wrapped_calls` reassembled from several physical lines; the rewrite
+# emits one line and leaves rustfmt to re-wrap it, which is the only way to
+# reformat a wrapped call without reimplementing rustfmt's decisions.
+_CALL = re.compile(
+    r'^(?P<lead>\s*)(?P<mac>e?println!)\(\s*"(?P<fmt>(?:[^"\\]|\\.)*)"(?P<args>.*?)\s*\);$'
+)
 
 # `'{ident}'` -- the hand-written-quote shape, with a plain identifier inside.
 _INLINE_QUOTED = re.compile(r"'\{([A-Za-z_][A-Za-z0-9_]*)\}'")
@@ -210,6 +311,12 @@ def _split_args(args: str) -> list[str] | None:
             cur += ch
     if cur.strip():
         out.append(cur.strip())
+    # A trailing comma before `)` is legal Rust and is what rustfmt writes on
+    # every call it wraps, so it is the *common* case here, not an oddity: the
+    # split leaves a final empty element that must be dropped rather than
+    # treated as a malformed argument list.
+    while out and not out[-1]:
+        out.pop()
     return out if all(out) else None
 
 
@@ -279,13 +386,21 @@ def fix_file(path: Path) -> tuple[int, list[str]]:
     lines = text.split("\n")
     fixed = 0
     skipped: list[str] = []
-    for line_no, _what, _src in violations(text):
-        i = line_no - 1
-        new, reason = fix_line(lines[i])
+    flagged = {first for first, _, _ in violations(text)}
+    # Latest-first, so that replacing a wrapped call with one line does not
+    # shift the line numbers of the sites still to be visited.
+    for first, last, joined in reversed(join_wrapped_calls(text)):
+        if first not in flagged:
+            continue
+        new, reason = fix_line(joined)
         if new is None:
-            skipped.append(f"{path.as_posix()}:{line_no}: {reason}\n      {lines[i].strip()}")
+            skipped.append(f"{path.as_posix()}:{first}: {reason}\n      {joined.strip()}")
         else:
-            lines[i] = new
+            # A rejoined call is emitted as one line and left to rustfmt to
+            # re-wrap: reproducing where rustfmt would have broken it means
+            # reproducing rustfmt, and getting that subtly wrong would put a
+            # formatting diff inside every one of these commits.
+            lines[first - 1 : last] = [new]
             fixed += 1
     if fixed:
         # newline="" for the same reason write_baseline uses it: Python would
@@ -348,6 +463,14 @@ def write_baseline(found: dict[str, list[tuple[int, str, str]]]) -> None:
         "#",
         "# Do NOT raise a number, and do NOT add a file, to turn a red `--check`",
         "# green: that is the defect being recorded, not an exception to it.",
+        "#",
+        "# There is exactly one legitimate reason a number here may go UP: the",
+        "# detector was corrected and now sees sites it used to miss. That is a",
+        "# commit which changes `quote-names.py` and no `.rs` file under the",
+        "# scanned roots, and it has happened once -- 2026-08-23, when calls that",
+        "# rustfmt had wrapped onto two lines turned out to be invisible, hiding",
+        "# 71 real sites. If a number rises in a commit that also edits code, the",
+        "# code is what raised it.",
         "#",
         f"# {sum(len(v) for v in found.values())} sites across {len(found)} files.",
         "",
@@ -422,7 +545,43 @@ def selftest() -> int:
         2,
     )
 
-    # 8. The rewriter. A fixer that is wrong is worse than no fixer: it edits
+    # 8. Calls rustfmt has wrapped. This is not a hypothetical shape: running
+    #    `cargo fmt` over five untouched crates in this tree moved three real
+    #    violations onto two lines each and they vanished from the count. A
+    #    checker that a formatter can silence reports a clean tree for a dirty
+    #    one, which is the single worst thing this tool can do.
+    expect(
+        "wrapped-fmt-on-own-line",
+        'eprintln!(\n    "cut: {path}: {e}"\n);',
+        1,
+    )
+    expect(
+        "wrapped-args-on-own-line",
+        'eprintln!(\n    "lp: printer \'{p}\' not found: {e}",\n    x,\n);',
+        1,
+    )
+    expect(
+        "wrapped-counts-once-not-per-line",
+        'eprintln!(\n    "cut: {path}: {e}"\n);\nlet y = 2;',
+        1,
+    )
+    #    ... and the join must not swallow the lines after a call it cannot
+    #    parse, or one unrecognised line would hide every violation below it.
+    expect(
+        "unterminated-does-not-swallow",
+        'let s = "oops;\neprintln!("cut: {path}: {e}");',
+        1,
+    )
+    #    Brackets inside the format string are text, not structure. `job(s)`
+    #    appears verbatim in `cancel`'s messages, and counting its parens
+    #    would leave the call permanently unbalanced.
+    expect(
+        "parens-inside-format-string",
+        'println!("cancel: purged {n} job(s) on \'{p}\'");',
+        1,
+    )
+
+    # 9. The rewriter. A fixer that is wrong is worse than no fixer: it edits
     #    775 files unattended, and a bad transform lands as a compile error at
     #    best and a mangled message at worst. Each case below asserts the exact
     #    output, and the `None` cases assert that it *declined* -- silence
@@ -477,9 +636,40 @@ def selftest() -> int:
         "eprintln!(\"lp: '{}'\", x.unwrap_or(\", \"));",
         None,
     )
+    # A wrapped call is rewritten as one line, from its own indentation.
+    expect_fix(
+        "wrapped-is-rejoined",
+        '    eprintln!( "lp: printer \'{p}\' not found", );',
+        '    eprintln!("lp: printer {} not found", quoteaf_os(&p));',
+    )
+    expect_fix(
+        "wrapped-positional-is-rejoined",
+        'eprintln!( "lp: bad value \'{}\'", args[i], );',
+        'eprintln!("lp: bad value {}", quoteaf_os(&args[i]));',
+    )
     # The fixed form must not be a violation any more, or --fix would loop.
     expect("fix-is-clean-inline", 'eprintln!("lp: printer {} not found", quoteaf_os(&p));', 0)
     expect("fix-is-clean-bare", 'eprintln!("cut: {}: {e}", quotef_os(&path));', 0)
+
+    # 10. End to end: a wrapped violation must survive the round trip through
+    #     `fix_file`'s span replacement and come back clean, since that is the
+    #     path every one of the ~1700 sites will actually take.
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as td:
+        probe = Path(td) / "probe.rs"
+        probe.write_text(
+            'fn f() {\n    eprintln!(\n        "lp: printer \'{p}\' not found"\n    );\n}\n',
+            encoding="utf-8",
+            newline="",
+        )
+        n, left = fix_file(probe)
+        after = probe.read_text(encoding="utf-8")
+        checked += 1
+        if n != 1 or left or violations(after):
+            failures.append(
+                f"round-trip: fixed={n} left={left} still={violations(after)}\n    {after!r}"
+            )
 
     for f in failures:
         print(f"selftest FAIL {f}")

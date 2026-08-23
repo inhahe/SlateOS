@@ -120,23 +120,55 @@ def wire_use(path: Path) -> str:
     return "wired"
 
 
-def main() -> int:
-    ap = argparse.ArgumentParser()
-    ap.add_argument("crate", type=Path)
-    ap.add_argument("--why", required=True, help="why this crate's words are untrusted")
-    a = ap.parse_args()
-
-    crate = a.crate if a.crate.is_absolute() else ROOT / a.crate
+def wire(crate: Path, why: str) -> int:
     if not (crate / "Cargo.toml").is_file():
         print(f"no Cargo.toml under {crate}", file=sys.stderr)
         return 2
-
-    print(f"{crate.name}: Cargo.toml {wire_cargo(crate, a.why)}")
+    print(f"{crate.name}: Cargo.toml {wire_cargo(crate, why)}")
     for p in entry_points(crate):
         r = wire_use(p)
         if r != "no-calls":
             print(f"{crate.name}: {p.relative_to(crate).as_posix()} {r}")
     return 0
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("crate", type=Path, nargs="?")
+    ap.add_argument("--why", help="why this crate's words are untrusted")
+    ap.add_argument(
+        "--batch",
+        type=Path,
+        help="a TSV of `<crate>\\t<why>`, as `quote-names-why.py --batch` "
+        "writes. Taking the rationales from a file rather than from argv is "
+        "not only convenience: several of these messages contain an em dash, "
+        "and a Windows console hands a non-ASCII argument to Python in the "
+        "OEM code page, so passing one on the command line writes mojibake "
+        "into the manifest -- silently, because a comment is never compiled.",
+    )
+    a = ap.parse_args()
+
+    if a.batch:
+        if a.crate or a.why:
+            ap.error("--batch takes the crates and the rationales from the file")
+        rc = 0
+        lines = a.batch.read_text(encoding="utf-8").splitlines()
+        for n, line in enumerate(lines, start=1):
+            if not line.strip():
+                continue
+            name, sep, why = line.partition("\t")
+            if not sep or not why.strip():
+                print(f"{a.batch}:{n}: no rationale after a tab", file=sys.stderr)
+                rc = 2
+                continue
+            name = name.strip()
+            crate = ROOT / (name if "/" in name else f"userspace/{name}")
+            rc = wire(crate, why.strip()) or rc
+        return rc
+
+    if not a.crate or not a.why:
+        ap.error("a crate and --why are required unless --batch is given")
+    return wire(a.crate if a.crate.is_absolute() else ROOT / a.crate, a.why)
 
 
 if __name__ == "__main__":

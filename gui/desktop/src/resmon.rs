@@ -57,10 +57,12 @@
 //! 3. **The grid is furniture.** It is a surface role, dimmer than any reading
 //!    drawn over it, and it must not collide with any of the six metric hues:
 //!    a gridline the colour of a line is a reading the user did not take.
-//! 4. **A metric's label, its sparkline and its bars are one colour said three
-//!    times**, derived from [`ResourceType::color`] rather than named beside
-//!    it — so adding a resource cannot leave a graph drawn in the old one's
-//!    hue.
+//! 4. **A metric's label and its sparkline are one colour said twice**,
+//!    derived from [`ResourceType::color`] rather than named beside it — so
+//!    adding a resource cannot leave a graph drawn in the old one's hue. Two,
+//!    not three: [`ResourceMonitor::render_bar_graph`] is a primitive this
+//!    module offers and never calls, so its hue is the caller's business and
+//!    not a claim this module gets to make.
 
 use appearance::Palette;
 use guitk::color::Color;
@@ -1771,14 +1773,24 @@ mod tests {
         }
     }
 
-    /// Judgement 4: a metric's label, its sparkline and its bars are one
-    /// colour said three times.
+    /// Judgement 4: a metric's label and its sparkline are one colour said
+    /// twice.
     ///
     /// Derived from [`ResourceType::color`] at each site rather than named
     /// beside it, so that adding a resource cannot leave a graph drawn in the
-    /// old one's hue. Asserted as a *relationship* between three commands,
-    /// which is a claim three hand-written constants would fail even if all
-    /// three happened to be plausible colours.
+    /// old one's hue. Asserted purely as a *relationship* between commands —
+    /// which colour is never said here, only that the two agree — because
+    /// pinning a metric to a named role is
+    /// [`each_measurement_is_pinned_to_the_role_it_names`]'s job and a test
+    /// that quietly does both cannot be read as a coverage claim about either.
+    ///
+    /// It used to do both, and the harness said so: four hue-map defects
+    /// reported this test as an **undeclared** catcher, because the bar-graph
+    /// section ended `== p.blue` — a pin wearing a relationship's docstring.
+    /// Those bars were doubly out of place, since `render_bar_graph` is a
+    /// primitive this module never calls; the claim that it draws in the hue
+    /// it is handed now lives beside the other bar tests, where it is about
+    /// the primitive rather than about a metric.
     #[test]
     fn a_metric_is_one_colour_wherever_it_appears() {
         for light in [false, true] {
@@ -1827,26 +1839,35 @@ mod tests {
                      uses, so the label names a graph that is not there"
                 );
             }
+        }
+    }
 
-            // The bar graph takes the same hue at the same site.
-            let mut bars = Vec::new();
+    /// The bar primitive draws in the colour it is handed, and in no other.
+    ///
+    /// A small claim, and deliberately about `render_bar_graph` rather than
+    /// about a metric: this module never calls it, so whichever hue reaches it
+    /// is the caller's decision. What the primitive owes its caller is that it
+    /// does not substitute a default — which is the one way a bar chart could
+    /// come out a colour nobody chose.
+    #[test]
+    fn the_bar_primitive_draws_in_the_colour_it_is_given() {
+        for light in [false, true] {
+            let p = accented(light);
             let data = monitor(DisplayMode::Expanded)
                 .graph_data(ResourceType::Cpu)
                 .clone();
-            ResourceMonitor::render_bar_graph(
-                &mut bars,
-                &data,
-                0.0,
-                0.0,
-                100.0,
-                50.0,
-                ResourceType::Cpu.color(&p),
-            );
-            assert!(!bars.is_empty(), "no bars were drawn to check");
-            assert!(
-                all_colors(&bars).iter().all(|c| *c == p.blue),
-                "a CPU bar graph is not drawn in the CPU hue"
-            );
+            // The accent, precisely because nothing in this module draws it:
+            // a bar that came back in a metric hue, an ink or a surface would
+            // be a bar the primitive chose for itself.
+            for handed in [p.accent, p.green, p.text] {
+                let mut bars = Vec::new();
+                ResourceMonitor::render_bar_graph(&mut bars, &data, 0.0, 0.0, 100.0, 50.0, handed);
+                assert!(!bars.is_empty(), "no bars were drawn to check");
+                assert!(
+                    all_colors(&bars).iter().all(|c| *c == handed),
+                    "the bar primitive substituted a colour of its own"
+                );
+            }
         }
     }
 

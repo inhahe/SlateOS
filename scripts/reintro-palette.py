@@ -71,6 +71,7 @@ TPAD = "gui/desktop/src/touchpad.rs"
 OV = "gui/desktop/src/overview.rs"
 CTX = "gui/desktop/src/context_ext.rs"
 WID = "gui/desktop/src/widgets.rs"
+SND = "gui/desktop/src/sound_settings.rs"
 
 # (name, file, [(old, new), ...], [packages], [tests expected to fail])
 DEFECTS = [
@@ -4565,6 +4566,687 @@ DEFECTS = [
         ["desktop"],
         [
             'a_hidden_widget_layer_draws_nothing',
+        ],
+    ),
+    # ---- sound_settings.rs (module 23 of 49) --------------------------------
+    (
+        "AAAAAAAAAAAAAAAAAAA: the panel background is frozen back to Mocha base",
+        SND,
+        [
+            ('color: p.base,',
+             'color: guitk::color::Color::from_hex(0x1E1E2E),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_sound_panel_draws_comes_from_its_palette',
+            'every_rectangle_the_sound_panel_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        "BBBBBBBBBBBBBBBBBBB: the panel background becomes a sidebar's",
+        SND,
+        [
+            ('color: p.base,',
+             'color: p.mantle,'),
+        ],
+        ["desktop"],
+        [
+            'every_rectangle_the_sound_panel_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        "CCCCCCCCCCCCCCCCCCC: the title is frozen back to Mocha text",
+        SND,
+        [
+            ('font_size: 20.0,\n            color: p.text,',
+             'font_size: 20.0,\n            color: guitk::color::Color::from_hex(0xCDD6F4),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_sound_panel_draws_comes_from_its_palette',
+            'every_text_the_sound_panel_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        "DDDDDDDDDDDDDDDDDDD: the title drops to secondary text",
+        SND,
+        [
+            ('font_size: 20.0,\n            color: p.text,',
+             'font_size: 20.0,\n            color: p.subtext0,'),
+        ],
+        ["desktop"],
+        [
+            'every_text_the_sound_panel_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        "EEEEEEEEEEEEEEEEEEE: a muted master volume stops going red",
+        SND,
+        [
+            ('master_muted {\n                p.red\n',
+             'master_muted {\n                p.text\n'),
+        ],
+        ["desktop"],
+        [
+            'every_text_the_sound_panel_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        "FFFFFFFFFFFFFFFFFFF: an unmuted master volume drops to secondary text",
+        SND,
+        [
+            ('p.red\n            } else {\n                p.text\n            },',
+             'p.red\n            } else {\n                p.subtext0\n            },'),
+        ],
+        ["desktop"],
+        [
+            'every_text_the_sound_panel_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        "GGGGGGGGGGGGGGGGGGG: the active tab stops being raised",
+        SND,
+        [
+            ('width: tab_w - 2.0,\n                height: 32.0,\n                color: if active { p.surface0 } else { p.mantle },',
+             'width: tab_w - 2.0,\n                height: 32.0,\n                color: if active { p.mantle } else { p.mantle },'),
+        ],
+        ["desktop"],
+        [
+            'the_fixtures_take_every_branch_the_sound_panel_has',
+            'every_rectangle_the_sound_panel_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        "HHHHHHHHHHHHHHHHHHH: every tab looks like the active one",
+        SND,
+        [
+            ('width: tab_w - 2.0,\n                height: 32.0,\n                color: if active { p.surface0 } else { p.mantle },',
+             'width: tab_w - 2.0,\n                height: 32.0,\n                color: if active { p.surface0 } else { p.surface0 },'),
+        ],
+        ["desktop"],
+        [
+            'the_fixtures_take_every_branch_the_sound_panel_has',
+            'every_rectangle_the_sound_panel_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        "IIIIIIIIIIIIIIIIIII: the active tab's label is frozen back to Mocha blue",
+        SND,
+        [
+            ('color: if active { p.accent } else { p.subtext0 },',
+             'color: if active { guitk::color::Color::from_hex(0x89B4FA) } else { p.subtext0 },'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_sound_panel_draws_comes_from_its_palette',
+            'every_text_the_sound_panel_draws_is_in_the_role_it_claims',
+            'the_three_accent_sites_follow_the_accent',
+        ],
+    ),
+    (
+        "JJJJJJJJJJJJJJJJJJJ: the active tab's label reads like an inactive one",
+        SND,
+        [
+            ('color: if active { p.accent } else { p.subtext0 },',
+             'color: if active { p.subtext0 } else { p.subtext0 },'),
+        ],
+        ["desktop"],
+        [
+            'every_text_the_sound_panel_draws_is_in_the_role_it_claims',
+            'the_three_accent_sites_follow_the_accent',
+            'every_pair_this_panel_uses_to_tell_things_apart_stays_apart',
+        ],
+    ),
+    (
+        "KKKKKKKKKKKKKKKKKKK: every tab's label takes the accent",
+        SND,
+        [
+            ('color: if active { p.accent } else { p.subtext0 },',
+             'color: if active { p.accent } else { p.accent },'),
+        ],
+        ["desktop"],
+        [
+            'every_text_the_sound_panel_draws_is_in_the_role_it_claims',
+            'every_pair_this_panel_uses_to_tell_things_apart_stays_apart',
+        ],
+    ),
+    (
+        "LLLLLLLLLLLLLLLLLLL: the empty-output line is promoted to secondary text",
+        SND,
+        [
+            ('text: "No output devices detected.".into(),\n                font_size: 13.0,\n                color: p.overlay0,',
+             'text: "No output devices detected.".into(),\n                font_size: 13.0,\n                color: p.subtext0,'),
+        ],
+        ["desktop"],
+        [
+            'every_text_the_sound_panel_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        "MMMMMMMMMMMMMMMMMMM: the default output device stops being raised",
+        SND,
+        [
+            ('let bg = if dev.is_default { p.surface0 } else { p.mantle };',
+             'let bg = if dev.is_default { p.mantle } else { p.mantle };'),
+        ],
+        ["desktop"],
+        [
+            'the_fixtures_take_every_branch_the_sound_panel_has',
+            'every_rectangle_the_sound_panel_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        "NNNNNNNNNNNNNNNNNNN: every output device looks like the default",
+        SND,
+        [
+            ('let bg = if dev.is_default { p.surface0 } else { p.mantle };',
+             'let bg = if dev.is_default { p.surface0 } else { p.surface0 };'),
+        ],
+        ["desktop"],
+        [
+            'the_fixtures_take_every_branch_the_sound_panel_has',
+            'every_rectangle_the_sound_panel_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        "OOOOOOOOOOOOOOOOOOO: an output device's name drops to secondary text",
+        SND,
+        [
+            ('text: format!("{}{}", dev.name, name_suffix),\n                font_size: 14.0,\n                color: p.text,',
+             'text: format!("{}{}", dev.name, name_suffix),\n                font_size: 14.0,\n                color: p.subtext0,'),
+        ],
+        ["desktop"],
+        [
+            'every_text_the_sound_panel_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        "PPPPPPPPPPPPPPPPPPP: an output device's format line drops to the faintest role",
+        SND,
+        [
+            ('text: dev.format_string(),\n                font_size: 11.0,\n                color: p.subtext0,\n                font_weight: FontWeightHint::Regular,\n                max_width: Some(width - 24.0),\n                overflow: TextOverflow::Ellipsis,\n            });\n\n            // Volume bar',
+             'text: dev.format_string(),\n                font_size: 11.0,\n                color: p.overlay0,\n                font_weight: FontWeightHint::Regular,\n                max_width: Some(width - 24.0),\n                overflow: TextOverflow::Ellipsis,\n            });\n\n            // Volume bar'),
+        ],
+        ["desktop"],
+        [
+            'every_text_the_sound_panel_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        "QQQQQQQQQQQQQQQQQQQ: the empty-input line is promoted to secondary text",
+        SND,
+        [
+            ('text: "No input devices detected.".into(),\n                font_size: 13.0,\n                color: p.overlay0,',
+             'text: "No input devices detected.".into(),\n                font_size: 13.0,\n                color: p.subtext0,'),
+        ],
+        ["desktop"],
+        [
+            'every_text_the_sound_panel_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        "RRRRRRRRRRRRRRRRRRR: the default input device stops being raised",
+        SND,
+        [
+            ('height: 48.0,\n                color: if dev.is_default { p.surface0 } else { p.mantle },',
+             'height: 48.0,\n                color: if dev.is_default { p.mantle } else { p.mantle },'),
+        ],
+        ["desktop"],
+        [
+            'the_fixtures_take_every_branch_the_sound_panel_has',
+            'every_rectangle_the_sound_panel_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        "SSSSSSSSSSSSSSSSSSS: every input device looks like the default",
+        SND,
+        [
+            ('height: 48.0,\n                color: if dev.is_default { p.surface0 } else { p.mantle },',
+             'height: 48.0,\n                color: if dev.is_default { p.surface0 } else { p.surface0 },'),
+        ],
+        ["desktop"],
+        [
+            'the_fixtures_take_every_branch_the_sound_panel_has',
+            'every_rectangle_the_sound_panel_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        "TTTTTTTTTTTTTTTTTTT: an input device's name drops to secondary text",
+        SND,
+        [
+            ('text: format!("{}{}", dev.name, def_txt),\n                font_size: 14.0,\n                color: p.text,',
+             'text: format!("{}{}", dev.name, def_txt),\n                font_size: 14.0,\n                color: p.subtext0,'),
+        ],
+        ["desktop"],
+        [
+            'every_text_the_sound_panel_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        "UUUUUUUUUUUUUUUUUUU: an input device's format line drops to the faintest role",
+        SND,
+        [
+            ('text: dev.format_string(),\n                font_size: 11.0,\n                color: p.subtext0,\n                font_weight: FontWeightHint::Regular,\n                max_width: Some(width - 24.0),\n                overflow: TextOverflow::Ellipsis,\n            });\n            y += 56.0;',
+             'text: dev.format_string(),\n                font_size: 11.0,\n                color: p.overlay0,\n                font_weight: FontWeightHint::Regular,\n                max_width: Some(width - 24.0),\n                overflow: TextOverflow::Ellipsis,\n            });\n            y += 56.0;'),
+        ],
+        ["desktop"],
+        [
+            'every_text_the_sound_panel_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        "VVVVVVVVVVVVVVVVVVV: the microphone heading follows the accent",
+        SND,
+        [
+            ('text: "Microphone Settings".into(),\n            font_size: 14.0,\n            color: p.lavender,',
+             'text: "Microphone Settings".into(),\n            font_size: 14.0,\n            color: p.accent,'),
+        ],
+        ["desktop"],
+        [
+            'every_text_the_sound_panel_draws_is_in_the_role_it_claims',
+            'nothing_that_reports_a_state_follows_the_accent',
+        ],
+    ),
+    (
+        "WWWWWWWWWWWWWWWWWWW: the empty-app line is promoted to secondary text",
+        SND,
+        [
+            ('text: "No applications are currently producing audio.".into(),\n                font_size: 13.0,\n                color: p.overlay0,',
+             'text: "No applications are currently producing audio.".into(),\n                font_size: 13.0,\n                color: p.subtext0,'),
+        ],
+        ["desktop"],
+        [
+            'every_text_the_sound_panel_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        "XXXXXXXXXXXXXXXXXXX: an app row is raised like a default device",
+        SND,
+        [
+            ('height: 48.0,\n                color: p.mantle,',
+             'height: 48.0,\n                color: p.surface0,'),
+        ],
+        ["desktop"],
+        [
+            'every_rectangle_the_sound_panel_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        "YYYYYYYYYYYYYYYYYYY: an app's name drops to secondary text",
+        SND,
+        [
+            ('text: entry.display_name.clone(),\n                font_size: 13.0,\n                color: p.text,',
+             'text: entry.display_name.clone(),\n                font_size: 13.0,\n                color: p.subtext0,'),
+        ],
+        ["desktop"],
+        [
+            'every_text_the_sound_panel_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        "ZZZZZZZZZZZZZZZZZZZ: a muted app's volume stops going red",
+        SND,
+        [
+            ('color: if entry.muted { p.red } else { p.subtext0 },',
+             'color: if entry.muted { p.subtext0 } else { p.subtext0 },'),
+        ],
+        ["desktop"],
+        [
+            'every_text_the_sound_panel_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        "AAAAAAAAAAAAAAAAAAAA: an unmuted app's volume is promoted to body text",
+        SND,
+        [
+            ('color: if entry.muted { p.red } else { p.subtext0 },',
+             'color: if entry.muted { p.red } else { p.text },'),
+        ],
+        ["desktop"],
+        [
+            'every_text_the_sound_panel_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        "BBBBBBBBBBBBBBBBBBBB: a system-sound row is raised off the panel",
+        SND,
+        [
+            ('height: 28.0,\n                color: p.mantle,',
+             'height: 28.0,\n                color: p.surface0,'),
+        ],
+        ["desktop"],
+        [
+            'every_rectangle_the_sound_panel_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        "CCCCCCCCCCCCCCCCCCCC: a system sound's label drops to secondary text",
+        SND,
+        [
+            ('text: label.into(),\n                font_size: 12.0,\n                color: p.text,',
+             'text: label.into(),\n                font_size: 12.0,\n                color: p.subtext0,'),
+        ],
+        ["desktop"],
+        [
+            'every_text_the_sound_panel_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        "DDDDDDDDDDDDDDDDDDDD: an enabled sound's status follows the accent",
+        SND,
+        [
+            ('color: if sc.enabled { p.green } else { p.overlay0 },',
+             'color: if sc.enabled { p.accent } else { p.overlay0 },'),
+        ],
+        ["desktop"],
+        [
+            'every_text_the_sound_panel_draws_is_in_the_role_it_claims',
+            'nothing_that_reports_a_state_follows_the_accent',
+        ],
+    ),
+    (
+        "EEEEEEEEEEEEEEEEEEEE: a disabled sound's status is promoted to secondary text",
+        SND,
+        [
+            ('color: if sc.enabled { p.green } else { p.overlay0 },',
+             'color: if sc.enabled { p.green } else { p.subtext0 },'),
+        ],
+        ["desktop"],
+        [
+            'every_text_the_sound_panel_draws_is_in_the_role_it_claims',
+            'nothing_that_reports_a_state_follows_the_accent',
+        ],
+    ),
+    (
+        "FFFFFFFFFFFFFFFFFFFF: a custom sound's name is promoted to body text",
+        SND,
+        [
+            ('text: custom.into(),\n                font_size: 12.0,\n                color: p.subtext0,',
+             'text: custom.into(),\n                font_size: 12.0,\n                color: p.text,'),
+        ],
+        ["desktop"],
+        [
+            'every_text_the_sound_panel_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        "GGGGGGGGGGGGGGGGGGGG: the spatial heading follows the accent",
+        SND,
+        [
+            ('text: "Spatial Audio".into(),\n            font_size: 14.0,\n            color: p.lavender,',
+             'text: "Spatial Audio".into(),\n            font_size: 14.0,\n            color: p.accent,'),
+        ],
+        ["desktop"],
+        [
+            'every_text_the_sound_panel_draws_is_in_the_role_it_claims',
+            'nothing_that_reports_a_state_follows_the_accent',
+        ],
+    ),
+    (
+        "HHHHHHHHHHHHHHHHHHHH: the selected spatial mode stops being raised",
+        SND,
+        [
+            ('width,\n                height: 32.0,\n                color: if active { p.surface0 } else { p.mantle },',
+             'width,\n                height: 32.0,\n                color: if active { p.mantle } else { p.mantle },'),
+        ],
+        ["desktop"],
+        [
+            'the_fixtures_take_every_branch_the_sound_panel_has',
+            'every_rectangle_the_sound_panel_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        "IIIIIIIIIIIIIIIIIIII: every spatial mode looks selected",
+        SND,
+        [
+            ('width,\n                height: 32.0,\n                color: if active { p.surface0 } else { p.mantle },',
+             'width,\n                height: 32.0,\n                color: if active { p.surface0 } else { p.surface0 },'),
+        ],
+        ["desktop"],
+        [
+            'the_fixtures_take_every_branch_the_sound_panel_has',
+            'every_rectangle_the_sound_panel_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        "JJJJJJJJJJJJJJJJJJJJ: the selected spatial mode's label is frozen back to Mocha blue",
+        SND,
+        [
+            ('color: if active { p.accent } else { p.text },',
+             'color: if active { guitk::color::Color::from_hex(0x89B4FA) } else { p.text },'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_sound_panel_draws_comes_from_its_palette',
+            'every_text_the_sound_panel_draws_is_in_the_role_it_claims',
+            'the_three_accent_sites_follow_the_accent',
+        ],
+    ),
+    (
+        "KKKKKKKKKKKKKKKKKKKK: the selected spatial mode's label reads like an unselected one",
+        SND,
+        [
+            ('color: if active { p.accent } else { p.text },',
+             'color: if active { p.text } else { p.text },'),
+        ],
+        ["desktop"],
+        [
+            'every_text_the_sound_panel_draws_is_in_the_role_it_claims',
+            'the_three_accent_sites_follow_the_accent',
+        ],
+    ),
+    (
+        "LLLLLLLLLLLLLLLLLLLL: every spatial mode's label takes the accent",
+        SND,
+        [
+            ('color: if active { p.accent } else { p.text },',
+             'color: if active { p.accent } else { p.accent },'),
+        ],
+        ["desktop"],
+        [
+            'every_text_the_sound_panel_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        "MMMMMMMMMMMMMMMMMMMM: a volume bar's track is frozen back to Mocha surface1",
+        SND,
+        [
+            ('height: bar_h,\n            color: p.surface1,',
+             'height: bar_h,\n            color: guitk::color::Color::from_hex(0x45475A),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_sound_panel_draws_comes_from_its_palette',
+            'every_rectangle_the_sound_panel_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        "NNNNNNNNNNNNNNNNNNNN: a volume bar's track drops a step, to surface0",
+        SND,
+        [
+            ('height: bar_h,\n            color: p.surface1,',
+             'height: bar_h,\n            color: p.surface0,'),
+        ],
+        ["desktop"],
+        [
+            'every_rectangle_the_sound_panel_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        "OOOOOOOOOOOOOOOOOOOO: a volume bar's fill is frozen back to Mocha blue",
+        SND,
+        [
+            ('let fill_color = if muted { p.red } else { p.accent };',
+             'let fill_color = if muted { p.red } else { guitk::color::Color::from_hex(0x89B4FA) };'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_sound_panel_draws_comes_from_its_palette',
+            'the_three_accent_sites_follow_the_accent',
+            'a_muted_volume_bar_never_looks_like_an_unmuted_one',
+        ],
+    ),
+    (
+        "PPPPPPPPPPPPPPPPPPPP: a muted volume bar stops going red",
+        SND,
+        [
+            ('let fill_color = if muted { p.red } else { p.accent };',
+             'let fill_color = if muted { p.accent } else { p.accent };'),
+        ],
+        ["desktop"],
+        [
+            'the_fixtures_take_every_branch_the_sound_panel_has',
+            'a_muted_volume_bar_never_looks_like_an_unmuted_one',
+        ],
+    ),
+    (
+        "QQQQQQQQQQQQQQQQQQQQ: an unmuted volume bar goes red too",
+        SND,
+        [
+            ('let fill_color = if muted { p.red } else { p.accent };',
+             'let fill_color = if muted { p.red } else { p.red };'),
+        ],
+        ["desktop"],
+        [
+            'the_fixtures_take_every_branch_the_sound_panel_has',
+            'the_three_accent_sites_follow_the_accent',
+            'a_muted_volume_bar_never_looks_like_an_unmuted_one',
+        ],
+    ),
+    (
+        "RRRRRRRRRRRRRRRRRRRR: a label-value row's label drops to the faintest role",
+        SND,
+        [
+            ('text: label.into(),\n            font_size: 13.0,\n            color: p.subtext0,\n            font_weight: FontWeightHint::Regular,\n            max_width: Some(width * 0.5),',
+             'text: label.into(),\n            font_size: 13.0,\n            color: p.overlay0,\n            font_weight: FontWeightHint::Regular,\n            max_width: Some(width * 0.5),'),
+        ],
+        ["desktop"],
+        [
+            'every_text_the_sound_panel_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        "SSSSSSSSSSSSSSSSSSSS: a label-value row's value drops to secondary text",
+        SND,
+        [
+            ('text: value.into(),\n            font_size: 13.0,\n            color: p.text,',
+             'text: value.into(),\n            font_size: 13.0,\n            color: p.subtext0,'),
+        ],
+        ["desktop"],
+        [
+            'every_text_the_sound_panel_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        "TTTTTTTTTTTTTTTTTTTT: a toggle row's label drops to the faintest role",
+        SND,
+        [
+            ('text: label.into(),\n            font_size: 13.0,\n            color: p.subtext0,\n            font_weight: FontWeightHint::Regular,\n            max_width: Some(width * 0.6),',
+             'text: label.into(),\n            font_size: 13.0,\n            color: p.overlay0,\n            font_weight: FontWeightHint::Regular,\n            max_width: Some(width * 0.6),'),
+        ],
+        ["desktop"],
+        [
+            'every_text_the_sound_panel_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        "UUUUUUUUUUUUUUUUUUUU: an on toggle's pill follows the accent",
+        SND,
+        [
+            ('let bg = if on { p.green } else { p.surface1 };',
+             'let bg = if on { p.accent } else { p.surface1 };'),
+        ],
+        ["desktop"],
+        [
+            'the_fixtures_take_every_branch_the_sound_panel_has',
+            'every_rectangle_the_sound_panel_draws_is_in_the_role_it_claims',
+            'nothing_that_reports_a_state_follows_the_accent',
+        ],
+    ),
+    (
+        "VVVVVVVVVVVVVVVVVVVV: an off toggle's pill is raised a step",
+        SND,
+        [
+            ('let bg = if on { p.green } else { p.surface1 };',
+             'let bg = if on { p.green } else { p.surface2 };'),
+        ],
+        ["desktop"],
+        [
+            'the_fixtures_take_every_branch_the_sound_panel_has',
+            'every_rectangle_the_sound_panel_draws_is_in_the_role_it_claims',
+            'nothing_that_reports_a_state_follows_the_accent',
+        ],
+    ),
+    (
+        "WWWWWWWWWWWWWWWWWWWW: a toggle's knob drops to secondary text",
+        SND,
+        [
+            ('width: 16.0,\n            height: 16.0,\n            color: p.text,',
+             'width: 16.0,\n            height: 16.0,\n            color: p.subtext0,'),
+        ],
+        ["desktop"],
+        [
+            'every_rectangle_the_sound_panel_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        "XXXXXXXXXXXXXXXXXXXX: the master volume label never admits to being muted",
+        SND,
+        [
+            ('                    " (Muted)"\n                } else {',
+             '                    ""\n                } else {'),
+        ],
+        ["desktop"],
+        [
+            # A fixture that stops reaching an arm stops checking it, silently.
+            # These four exist to prove the coverage test can tell.
+            'the_fixtures_take_every_branch_the_sound_panel_has',
+            'every_text_the_sound_panel_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        "YYYYYYYYYYYYYYYYYYYY: the monitor row is drawn only when monitoring is off",
+        SND,
+        [
+            ('if mic.monitor {\n            y = Self::render_label_val(',
+             'if !mic.monitor {\n            y = Self::render_label_val('),
+        ],
+        ["desktop"],
+        [
+            'the_fixtures_take_every_branch_the_sound_panel_has',
+            'every_text_the_sound_panel_draws_is_in_the_role_it_claims',
+            'monitor_loopback_renders_volume',
+        ],
+    ),
+    (
+        "ZZZZZZZZZZZZZZZZZZZZ: a disabled system sound still reads as on",
+        SND,
+        [
+            ('let status = if sc.enabled { "On" } else { "Off" };',
+             'let status = "On";'),
+        ],
+        ["desktop"],
+        [
+            'the_fixtures_take_every_branch_the_sound_panel_has',
+            'every_text_the_sound_panel_draws_is_in_the_role_it_claims',
+            'every_pair_this_panel_uses_to_tell_things_apart_stays_apart',
+            'nothing_that_reports_a_state_follows_the_accent',
+        ],
+    ),
+    (
+        "AAAAAAAAAAAAAAAAAAAAA: no tab is ever marked active",
+        SND,
+        [
+            ('let active = self.active_tab == i;',
+             'let active = false;'),
+        ],
+        ["desktop"],
+        [
+            'the_fixtures_take_every_branch_the_sound_panel_has',
+            'every_text_the_sound_panel_draws_is_in_the_role_it_claims',
+            'every_rectangle_the_sound_panel_draws_is_in_the_role_it_claims',
+            'the_three_accent_sites_follow_the_accent',
+            'every_pair_this_panel_uses_to_tell_things_apart_stays_apart',
         ],
     ),
 ]

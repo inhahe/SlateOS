@@ -50388,7 +50388,7 @@ commands that carry the colour in question, and assert the two renders agree.
 Candidates: anything drawn on the wallpaper, on a video surface, on a
 thumbnail, or on any other content the palette does not own.
 
-**Part 2 progress. 22 of 49 modules converted.**
+**Part 2 progress. 23 of 49 modules converted.**
 
 - [x] `security_dialog.rs` — 29 constants, done 2026-08-22. The method above
   survived contact: the sweep lives in `gui/desktop/src/palette_check.rs` as
@@ -51504,6 +51504,54 @@ thumbnail, or on any other content the palette does not own.
     (`[MISSING:]`), so nothing would have complained — but a declaration that
     understates what a defect proves is a declaration that will not notice when
     that coverage later disappears. All four were updated.
+
+- [x] `sound_settings.rs` — 11 constants, done 2026-08-22. Eight tests, harness
+  defects Ax19–Ax21 (fifty-three).
+  - **Four judgements, and the interesting one is the mirror of module 22's.**
+    Exactly three sites follow the accent — the active tab's label, the
+    selected spatial mode's label, and the volume-bar fill — and all three are
+    "you are here" or "drag me", which is the only thing the accent is allowed
+    to say. Section headings keep `lavender` (the accent never marks
+    *category*), and the on/off status pair stays frozen `green`/`overlay0`
+    (green *means* enabled rather than decorating it, which is module 19's
+    rule).
+  - **The one new rule: a meter is not a slider, but a volume bar is.** Module
+    22 froze the CPU/Memory/Disk bars because nobody can drag a read-out. A
+    volume bar is the same *shape* and the opposite *thing*: it is the control,
+    so module 19's slider rule applies unchanged — `surface1` track, accent
+    fill. The two rules together are one rule stated twice: **the accent marks
+    what you can move, not what you are being told.**
+  - **Mute is the one state that overrides the slider rule.** A muted bar draws
+    `p.red` and keeps drawing `p.red` on a red desktop, an orange one and a
+    green one, because at that moment the bar has stopped being a position and
+    become a reading — and a reading that matches the accent is a reading a
+    user cannot trust. `a_muted_volume_bar_never_looks_like_an_unmuted_one`
+    exists to hold that line; the sweep cannot, since red is a member of both
+    palettes.
+  - **Both halves of the width rule were applied up front, and for the first
+    time nothing escaped.** The fixtures were built by enumerating the
+    renderer's `if`s (module 21's half) and the assertion tables were written
+    one entry per *source* site rather than per *kind* (module 22's half), with
+    the anti-shortening comment copied across. Four of the fifty-three defects
+    do nothing but switch a branch off, to prove the coverage test notices.
+    Result: **53/53 caught, zero escapes** — against three lost in module 21
+    and two in module 22. The two halves are now cheap to apply and expensive
+    to skip, which is the whole return on having written them down.
+  - **The under-declaration audit paid off again, twice.** Two defects were
+    caught by a test their declaration did not name — the frozen-fill defect is
+    also caught by the mute test, and the disabled-sound defect by the
+    state-doesn't-follow-the-accent test. Neither would ever be reported by the
+    harness, which only flags the reverse. Both were widened. This audit is now
+    a standing step, not a module-22 one-off.
+  - **Two tooling traps worth not rediscovering.** (1) Windows Python resolves
+    `/tmp` to `D:\tmp` while MSYS bash resolves it to `C:\…\tmp`; writing the
+    defect-name filter list with one and reading it with the other silently
+    produced *no* filter arguments, so the harness began a full 454-defect run.
+    Never pass a path through both interpreters — generate the list inline into
+    a shell variable. (2) Killing the harness mid-run skips its `finally`
+    restore, leaving the in-flight defect patched on disk; `run_dialog.rs` was
+    left modified by that kill. **After any stop of a harness run, `git status`
+    must be checked and the damaged file restored with `git checkout --`.**
 
 **Trigger:** this is not blocked on anything. It is sequenced after the shell
 event loop (`TD-C-THE-SHELL-CAN-DRAW-ITSELF-AND-NOBODY-CAN-ASK-IT-TO`) only

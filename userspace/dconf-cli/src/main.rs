@@ -88,7 +88,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_dconf};
+    use super::run_dconf;
 
     #[test]
     fn help_exits_zero() {

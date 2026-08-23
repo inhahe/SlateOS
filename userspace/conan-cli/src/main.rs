@@ -95,7 +95,9 @@ fn run_conan(args: Vec<String>) -> i32 {
                     println!("  debug");
                     println!("  release");
                 }
-                _ => { println!("Profile operation: {}", sub); }
+                _ => {
+                    println!("Profile operation: {}", sub);
+                }
             }
             0
         }
@@ -129,7 +131,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_conan};
+    use super::run_conan;
 
     #[test]
     fn help_exits_zero() {

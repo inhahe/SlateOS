@@ -7,8 +7,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_bevy(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
@@ -28,8 +32,11 @@ fn run_bevy(args: &[String]) -> i32 {
         "--version" => println!("bevy-cli 0.1.0"),
         "new" => {
             let name = args.get(1).map(|s| s.as_str()).unwrap_or("my-game");
-            let template = args.windows(2).find(|w| w[0] == "--template")
-                .map(|w| w[1].as_str()).unwrap_or("2d");
+            let template = args
+                .windows(2)
+                .find(|w| w[0] == "--template")
+                .map(|w| w[1].as_str())
+                .unwrap_or("2d");
             println!("Creating new Bevy project '{}'...", name);
             println!("  Template: {}", template);
             println!("  Created: src/main.rs");
@@ -38,7 +45,9 @@ fn run_bevy(args: &[String]) -> i32 {
             println!("Done. cd {} && bevy run", name);
         }
         "run" => {
-            let features = args.windows(2).find(|w| w[0] == "--features")
+            let features = args
+                .windows(2)
+                .find(|w| w[0] == "--features")
                 .map(|w| w[1].as_str());
             println!("Building and running Bevy game...");
             if let Some(f) = features {
@@ -64,7 +73,10 @@ fn run_bevy(args: &[String]) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "bevy".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "bevy".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_bevy(&rest);
     process::exit(code);
@@ -72,7 +84,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_bevy};
+    use super::{basename, run_bevy, strip_ext};
 
     #[test]
     fn basename_strips_path() {

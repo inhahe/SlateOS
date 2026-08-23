@@ -128,7 +128,10 @@ impl MessageType {
     }
 
     fn is_login_related(&self) -> bool {
-        matches!(self, Self::UserLogin | Self::Login | Self::UserStart | Self::UserEnd)
+        matches!(
+            self,
+            Self::UserLogin | Self::Login | Self::UserStart | Self::UserEnd
+        )
     }
 }
 
@@ -270,7 +273,7 @@ struct FieldFilter {
 
 impl fmt::Display for FieldFilter {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}{}{}",self.field, self.op, self.value)
+        write!(f, "{}{}{}", self.field, self.op, self.value)
     }
 }
 
@@ -407,7 +410,9 @@ impl AuditRecord {
 
         // After "): " comes the field=value pairs
         let rest = &rest[paren_close..];
-        let rest = rest.strip_prefix("):").unwrap_or(rest.strip_prefix(")").unwrap_or(""));
+        let rest = rest
+            .strip_prefix("):")
+            .unwrap_or(rest.strip_prefix(")").unwrap_or(""));
         let rest = rest.trim_start();
 
         let mut fields = HashMap::new();
@@ -634,7 +639,11 @@ fn ymd_to_days(year: u64, month: u64, day: u64) -> Option<u64> {
         return None;
     }
     // Howard Hinnant's days_from_civil (inverse of days_to_ymd).
-    let y = if month <= 2 { year as i64 - 1 } else { year as i64 };
+    let y = if month <= 2 {
+        year as i64 - 1
+    } else {
+        year as i64
+    };
     let m = if month <= 2 { month + 9 } else { month - 3 };
     let era = if y >= 0 { y } else { y - 399 } / 400;
     let yoe = (y - era * 400) as u64;
@@ -653,9 +662,10 @@ fn simulated_now() -> f64 {
     // In a real OS this would use the system clock.
     // For simulation, use a fixed reference or env var.
     if let Ok(v) = env::var("AUDIT_SIMULATED_NOW")
-        && let Ok(t) = v.parse::<f64>() {
-            return t;
-        }
+        && let Ok(t) = v.parse::<f64>()
+    {
+        return t;
+    }
     // Default: 2025-01-01 00:00:00 UTC = 1735689600
     1_735_689_600.0
 }
@@ -684,7 +694,12 @@ impl RuleStore {
         self.rules.push(rule);
     }
 
-    fn delete_rule(&mut self, action: RuleAction, filter: RuleFilter, syscall: Option<&str>) -> bool {
+    fn delete_rule(
+        &mut self,
+        action: RuleAction,
+        filter: RuleFilter,
+        syscall: Option<&str>,
+    ) -> bool {
         let initial_len = self.rules.len();
         self.rules.retain(|r| {
             if let AuditRule::Syscall {
@@ -693,13 +708,16 @@ impl RuleStore {
                 syscall: sc,
                 ..
             } = r
-                && *a == action && *f == filter {
-                    if let Some(target_sc) = syscall
-                        && let Some(rule_sc) = sc {
-                            return rule_sc != target_sc;
-                        }
-                    return false;
+                && *a == action
+                && *f == filter
+            {
+                if let Some(target_sc) = syscall
+                    && let Some(rule_sc) = sc
+                {
+                    return rule_sc != target_sc;
                 }
+                return false;
+            }
             true
         });
         self.rules.len() < initial_len
@@ -866,7 +884,11 @@ impl fmt::Display for AuditdConfig {
         writeln!(f, "space_left = {}", self.space_left)?;
         writeln!(f, "space_left_action = {}", self.space_left_action)?;
         writeln!(f, "admin_space_left = {}", self.admin_space_left)?;
-        writeln!(f, "admin_space_left_action = {}", self.admin_space_left_action)?;
+        writeln!(
+            f,
+            "admin_space_left_action = {}",
+            self.admin_space_left_action
+        )?;
         writeln!(f, "disk_full_action = {}", self.disk_full_action)?;
         writeln!(f, "disk_error_action = {}", self.disk_error_action)?;
         writeln!(f, "flush = {}", self.flush)?;
@@ -874,7 +896,11 @@ impl fmt::Display for AuditdConfig {
         writeln!(f, "priority_boost = {}", self.priority_boost)?;
         writeln!(f, "disp_qos = {}", self.disp_qos)?;
         writeln!(f, "dispatcher = {}", self.dispatcher)?;
-        writeln!(f, "write_logs = {}", if self.write_logs { "yes" } else { "no" })
+        writeln!(
+            f,
+            "write_logs = {}",
+            if self.write_logs { "yes" } else { "no" }
+        )
     }
 }
 
@@ -891,9 +917,10 @@ fn load_audit_log(path: &str) -> Vec<AuditRecord> {
     let reader = io::BufReader::new(file);
     for line in reader.lines() {
         if let Ok(line) = line
-            && let Some(record) = AuditRecord::parse(&line) {
-                records.push(record);
-            }
+            && let Some(record) = AuditRecord::parse(&line)
+        {
+            records.push(record);
+        }
     }
     records
 }
@@ -974,17 +1001,20 @@ fn record_matches(record: &AuditRecord, criteria: &SearchCriteria) -> bool {
         }
     }
     if let Some(start) = criteria.start_time
-        && record.timestamp < start {
-            return false;
-        }
+        && record.timestamp < start
+    {
+        return false;
+    }
     if let Some(end) = criteria.end_time
-        && record.timestamp > end {
-            return false;
-        }
+        && record.timestamp > end
+    {
+        return false;
+    }
     if let Some(ref mtype) = criteria.message_type
-        && record.msg_type != *mtype {
-            return false;
-        }
+        && record.msg_type != *mtype
+    {
+        return false;
+    }
     true
 }
 
@@ -993,7 +1023,11 @@ fn format_record(record: &AuditRecord, format: &OutputFormat, _interpret: bool) 
         OutputFormat::Raw => record.raw_line.clone(),
         OutputFormat::Text => {
             let mut s = String::new();
-            s.push_str(&format!("----\ntime->{} : serial={}\n", record.format_timestamp(), record.serial));
+            s.push_str(&format!(
+                "----\ntime->{} : serial={}\n",
+                record.format_timestamp(),
+                record.serial
+            ));
             s.push_str(&format!("type={}", record.msg_type));
             for (k, v) in &record.fields {
                 s.push_str(&format!(" {}={}", k, v));
@@ -1071,7 +1105,10 @@ fn run_ausearch(args: &[String]) -> i32 {
                 if i < args.len() {
                     // Check if next arg is also part of time (e.g., "2025/01/01 12:00:00")
                     let mut time_str = args[i].clone();
-                    if i + 1 < args.len() && args[i + 1].contains(':') && !args[i + 1].starts_with('-') {
+                    if i + 1 < args.len()
+                        && args[i + 1].contains(':')
+                        && !args[i + 1].starts_with('-')
+                    {
                         time_str.push(' ');
                         time_str.push_str(&args[i + 1]);
                         i += 1;
@@ -1092,7 +1129,10 @@ fn run_ausearch(args: &[String]) -> i32 {
                 i += 1;
                 if i < args.len() {
                     let mut time_str = args[i].clone();
-                    if i + 1 < args.len() && args[i + 1].contains(':') && !args[i + 1].starts_with('-') {
+                    if i + 1 < args.len()
+                        && args[i + 1].contains(':')
+                        && !args[i + 1].starts_with('-')
+                    {
                         time_str.push(' ');
                         time_str.push_str(&args[i + 1]);
                         i += 1;
@@ -1173,7 +1213,10 @@ fn run_ausearch(args: &[String]) -> i32 {
     }
     for record in &records {
         if record_matches(record, &criteria) {
-            println!("{}", format_record(record, &criteria.format, criteria.interpret));
+            println!(
+                "{}",
+                format_record(record, &criteria.format, criteria.interpret)
+            );
             found = true;
         }
     }
@@ -1242,7 +1285,10 @@ fn run_aureport(args: &[String]) -> i32 {
                 i += 1;
                 if i < args.len() {
                     let mut time_str = args[i].clone();
-                    if i + 1 < args.len() && args[i + 1].contains(':') && !args[i + 1].starts_with('-') {
+                    if i + 1 < args.len()
+                        && args[i + 1].contains(':')
+                        && !args[i + 1].starts_with('-')
+                    {
                         time_str.push(' ');
                         time_str.push_str(&args[i + 1]);
                         i += 1;
@@ -1263,7 +1309,10 @@ fn run_aureport(args: &[String]) -> i32 {
                 i += 1;
                 if i < args.len() {
                     let mut time_str = args[i].clone();
-                    if i + 1 < args.len() && args[i + 1].contains(':') && !args[i + 1].starts_with('-') {
+                    if i + 1 < args.len()
+                        && args[i + 1].contains(':')
+                        && !args[i + 1].starts_with('-')
+                    {
                         time_str.push(' ');
                         time_str.push_str(&args[i + 1]);
                         i += 1;
@@ -1329,18 +1378,24 @@ fn run_aureport(args: &[String]) -> i32 {
     0
 }
 
-fn filter_by_time(records: &[AuditRecord], start: Option<f64>, end: Option<f64>) -> Vec<&AuditRecord> {
+fn filter_by_time(
+    records: &[AuditRecord],
+    start: Option<f64>,
+    end: Option<f64>,
+) -> Vec<&AuditRecord> {
     records
         .iter()
         .filter(|r| {
             if let Some(s) = start
-                && r.timestamp < s {
-                    return false;
-                }
+                && r.timestamp < s
+            {
+                return false;
+            }
             if let Some(e) = end
-                && r.timestamp > e {
-                    return false;
-                }
+                && r.timestamp > e
+            {
+                return false;
+            }
             true
         })
         .collect()
@@ -1414,7 +1469,10 @@ fn report_auth(records: &[&AuditRecord], summary: bool, failed_only: bool) {
             println!("{:<8}{}", count, user);
         }
     } else {
-        println!("{:<5} {:<20} {:<12} {:<12} {:<10} {:<8}", "#", "Date", "Account", "Host", "Terminal", "Result");
+        println!(
+            "{:<5} {:<20} {:<12} {:<12} {:<10} {:<8}",
+            "#", "Date", "Account", "Host", "Terminal", "Result"
+        );
         println!("{}", "=".repeat(70));
         for (idx, record) in filtered.iter().enumerate() {
             let date = record.format_timestamp();
@@ -1422,7 +1480,15 @@ fn report_auth(records: &[&AuditRecord], summary: bool, failed_only: bool) {
             let host = record.get_field("hostname").unwrap_or("?");
             let term = record.terminal().unwrap_or("?");
             let res = record.res().unwrap_or("?");
-            println!("{:<5} {:<20} {:<12} {:<12} {:<10} {:<8}", idx + 1, date, acct, host, term, res);
+            println!(
+                "{:<5} {:<20} {:<12} {:<12} {:<10} {:<8}",
+                idx + 1,
+                date,
+                acct,
+                host,
+                term,
+                res
+            );
         }
     }
     println!();
@@ -1447,7 +1513,11 @@ fn report_login(records: &[&AuditRecord], summary: bool, failed_only: bool) {
     if summary {
         let mut user_counts: HashMap<String, usize> = HashMap::new();
         for record in &filtered {
-            let user = record.acct().or_else(|| record.auid()).unwrap_or("unknown").to_string();
+            let user = record
+                .acct()
+                .or_else(|| record.auid())
+                .unwrap_or("unknown")
+                .to_string();
             *user_counts.entry(user).or_insert(0) += 1;
         }
         println!("Number  Account");
@@ -1458,7 +1528,10 @@ fn report_login(records: &[&AuditRecord], summary: bool, failed_only: bool) {
             println!("{:<8}{}", count, user);
         }
     } else {
-        println!("{:<5} {:<20} {:<12} {:<12} {:<10} {:<8}", "#", "Date", "Account", "Host", "Terminal", "Result");
+        println!(
+            "{:<5} {:<20} {:<12} {:<12} {:<10} {:<8}",
+            "#", "Date", "Account", "Host", "Terminal", "Result"
+        );
         println!("{}", "=".repeat(70));
         for (idx, record) in filtered.iter().enumerate() {
             let date = record.format_timestamp();
@@ -1466,7 +1539,15 @@ fn report_login(records: &[&AuditRecord], summary: bool, failed_only: bool) {
             let host = record.get_field("hostname").unwrap_or("?");
             let term = record.terminal().unwrap_or("?");
             let res = record.res().unwrap_or("?");
-            println!("{:<5} {:<20} {:<12} {:<12} {:<10} {:<8}", idx + 1, date, acct, host, term, res);
+            println!(
+                "{:<5} {:<20} {:<12} {:<12} {:<10} {:<8}",
+                idx + 1,
+                date,
+                acct,
+                host,
+                term,
+                res
+            );
         }
     }
     println!();
@@ -1502,7 +1583,10 @@ fn report_file(records: &[&AuditRecord], summary: bool, failed_only: bool) {
             println!("{:<8}{}", count, name);
         }
     } else {
-        println!("{:<5} {:<20} {:<30} {:<10} {:<10}", "#", "Date", "File", "Syscall", "Result");
+        println!(
+            "{:<5} {:<20} {:<30} {:<10} {:<10}",
+            "#", "Date", "File", "Syscall", "Result"
+        );
         println!("{}", "=".repeat(78));
         for (idx, record) in filtered.iter().enumerate() {
             let date = record.format_timestamp();
@@ -1513,7 +1597,14 @@ fn report_file(records: &[&AuditRecord], summary: bool, failed_only: bool) {
                 Some(false) => "no",
                 None => "?",
             };
-            println!("{:<5} {:<20} {:<30} {:<10} {:<10}", idx + 1, date, name, sc, success);
+            println!(
+                "{:<5} {:<20} {:<30} {:<10} {:<10}",
+                idx + 1,
+                date,
+                name,
+                sc,
+                success
+            );
         }
     }
     println!();
@@ -1549,7 +1640,10 @@ fn report_syscall(records: &[&AuditRecord], summary: bool, failed_only: bool) {
             println!("{:<8}{}", count, sc);
         }
     } else {
-        println!("{:<5} {:<20} {:<12} {:<10} {:<10} {:<10}", "#", "Date", "Syscall", "PID", "Exe", "Result");
+        println!(
+            "{:<5} {:<20} {:<12} {:<10} {:<10} {:<10}",
+            "#", "Date", "Syscall", "PID", "Exe", "Result"
+        );
         println!("{}", "=".repeat(70));
         for (idx, record) in filtered.iter().enumerate() {
             let date = record.format_timestamp();
@@ -1561,7 +1655,15 @@ fn report_syscall(records: &[&AuditRecord], summary: bool, failed_only: bool) {
                 Some(false) => "no",
                 None => "?",
             };
-            println!("{:<5} {:<20} {:<12} {:<10} {:<10} {:<10}", idx + 1, date, sc, pid, exe, success);
+            println!(
+                "{:<5} {:<20} {:<12} {:<10} {:<10} {:<10}",
+                idx + 1,
+                date,
+                sc,
+                pid,
+                exe,
+                success
+            );
         }
     }
     println!();
@@ -2023,10 +2125,11 @@ fn run_auditd(args: &[String]) -> i32 {
 
     // Create log directory
     if let Some(parent) = Path::new(&config.log_file).parent()
-        && let Err(e) = fs::create_dir_all(parent) {
-            eprintln!("auditd: cannot create log directory: {e}");
-            return 1;
-        }
+        && let Err(e) = fs::create_dir_all(parent)
+    {
+        eprintln!("auditd: cannot create log directory: {e}");
+        return 1;
+    }
 
     // Write PID file
     let pid_file = env::var("AUDIT_PID_FILE").unwrap_or_else(|_| DEFAULT_PID_FILE.to_string());
@@ -2041,36 +2144,40 @@ fn run_auditd(args: &[String]) -> i32 {
     println!("auditd: started (pid={pid})");
     println!("auditd: config loaded from {config_file}");
     println!("auditd: logging to {}", config.log_file);
-    println!("auditd: max_log_file={}MB, num_logs={}", config.max_log_file, config.num_logs);
+    println!(
+        "auditd: max_log_file={}MB, num_logs={}",
+        config.max_log_file, config.num_logs
+    );
     println!("auditd: max_log_file_action={}", config.max_log_file_action);
 
     if config.write_logs {
         // Ensure log file exists
         let log_path = Path::new(&config.log_file);
         if !log_path.exists()
-            && let Err(e) = fs::File::create(log_path) {
-                eprintln!("auditd: cannot create log file: {e}");
-                return 1;
-            }
+            && let Err(e) = fs::File::create(log_path)
+        {
+            eprintln!("auditd: cannot create log file: {e}");
+            return 1;
+        }
     }
 
     if foreground {
         println!("auditd: running in foreground mode");
         // In a real daemon we would enter event loop.
         // For simulation, write a startup event and exit.
-        write_audit_event(&config.log_file, MessageType::DaemonStart, &[
-            ("op", "start"),
-            ("ver", VERSION),
-            ("res", "success"),
-        ]);
+        write_audit_event(
+            &config.log_file,
+            MessageType::DaemonStart,
+            &[("op", "start"), ("ver", VERSION), ("res", "success")],
+        );
         println!("auditd: daemon event loop would run here");
     } else {
         println!("auditd: would fork to background (simulated)");
-        write_audit_event(&config.log_file, MessageType::DaemonStart, &[
-            ("op", "start"),
-            ("ver", VERSION),
-            ("res", "success"),
-        ]);
+        write_audit_event(
+            &config.log_file,
+            MessageType::DaemonStart,
+            &[("op", "start"), ("ver", VERSION), ("res", "success")],
+        );
     }
 
     // Clean up PID file on exit
@@ -2088,7 +2195,11 @@ fn write_audit_event(log_file: &str, msg_type: MessageType, fields: &[(&str, &st
     }
     line.push('\n');
 
-    if let Ok(mut file) = fs::OpenOptions::new().create(true).append(true).open(log_file) {
+    if let Ok(mut file) = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log_file)
+    {
         let _ = file.write_all(line.as_bytes());
     }
 }
@@ -2278,9 +2389,14 @@ mod tests {
     #[test]
     fn test_message_type_roundtrip() {
         let types = [
-            MessageType::Syscall, MessageType::Path, MessageType::Cwd,
-            MessageType::Execve, MessageType::UserAuth, MessageType::UserLogin,
-            MessageType::DaemonStart, MessageType::DaemonEnd,
+            MessageType::Syscall,
+            MessageType::Path,
+            MessageType::Cwd,
+            MessageType::Execve,
+            MessageType::UserAuth,
+            MessageType::UserLogin,
+            MessageType::DaemonStart,
+            MessageType::DaemonEnd,
         ];
         for t in &types {
             assert_eq!(MessageType::from_str(t.as_str()), *t);
@@ -2394,13 +2510,23 @@ mod tests {
 
     #[test]
     fn test_watch_perms_as_string() {
-        let p = WatchPerms { read: true, write: false, execute: true, attribute: false };
+        let p = WatchPerms {
+            read: true,
+            write: false,
+            execute: true,
+            attribute: false,
+        };
         assert_eq!(p.as_string(), "rx");
     }
 
     #[test]
     fn test_watch_perms_display() {
-        let p = WatchPerms { read: true, write: true, execute: false, attribute: true };
+        let p = WatchPerms {
+            read: true,
+            write: true,
+            execute: false,
+            attribute: true,
+        };
         assert_eq!(format!("{p}"), "rwa");
     }
 
@@ -2465,7 +2591,11 @@ mod tests {
 
     #[test]
     fn test_field_filter_display() {
-        let f = FieldFilter { field: "uid".into(), op: "=".into(), value: "0".into() };
+        let f = FieldFilter {
+            field: "uid".into(),
+            op: "=".into(),
+            value: "0".into(),
+        };
         assert_eq!(format!("{f}"), "uid=0");
     }
 
@@ -2499,12 +2629,17 @@ mod tests {
             action: RuleAction::Always,
             filter: RuleFilter::Exit,
             syscall: Some("open".into()),
-            fields: vec![
-                FieldFilter { field: "uid".into(), op: "=".into(), value: "0".into() },
-            ],
+            fields: vec![FieldFilter {
+                field: "uid".into(),
+                op: "=".into(),
+                value: "0".into(),
+            }],
             key: Some("root_open".into()),
         };
-        assert_eq!(format!("{r}"), "-a always,exit -S open -F uid=0 -k root_open");
+        assert_eq!(
+            format!("{r}"),
+            "-a always,exit -S open -F uid=0 -k root_open"
+        );
     }
 
     #[test]
@@ -2678,7 +2813,8 @@ mod tests {
 
     #[test]
     fn test_parse_path_record() {
-        let line = "type=PATH msg=audit(1735689600.000:100): item=0 name=\"/etc/passwd\" nametype=NORMAL";
+        let line =
+            "type=PATH msg=audit(1735689600.000:100): item=0 name=\"/etc/passwd\" nametype=NORMAL";
         let r = AuditRecord::parse(line).unwrap();
         assert_eq!(r.msg_type, MessageType::Path);
         assert_eq!(r.name_field(), Some("/etc/passwd"));
@@ -2987,7 +3123,13 @@ type=PATH msg=audit(1735689600.000:2): name=\"/tmp\"";
     // Search criteria / record matching tests
     // -----------------------------------------------------------------------
 
-    fn make_syscall_record(syscall: &str, success: &str, key: &str, uid: &str, ts: f64) -> AuditRecord {
+    fn make_syscall_record(
+        syscall: &str,
+        success: &str,
+        key: &str,
+        uid: &str,
+        ts: f64,
+    ) -> AuditRecord {
         let line = format!(
             "type=SYSCALL msg=audit({:.3}:{}): syscall={} success={} uid={} auid={} key=\"{}\" pid=100 exe=\"/bin/test\"",
             ts,
@@ -3022,56 +3164,80 @@ type=PATH msg=audit(1735689600.000:2): name=\"/tmp\"";
     #[test]
     fn test_record_matches_by_key() {
         let r = make_syscall_record("open", "yes", "file_access", "1000", 1_735_689_600.0);
-        let c = SearchCriteria { key: Some("file_access".into()), ..Default::default() };
+        let c = SearchCriteria {
+            key: Some("file_access".into()),
+            ..Default::default()
+        };
         assert!(record_matches(&r, &c));
     }
 
     #[test]
     fn test_record_no_match_wrong_key() {
         let r = make_syscall_record("open", "yes", "file_access", "1000", 1_735_689_600.0);
-        let c = SearchCriteria { key: Some("wrong_key".into()), ..Default::default() };
+        let c = SearchCriteria {
+            key: Some("wrong_key".into()),
+            ..Default::default()
+        };
         assert!(!record_matches(&r, &c));
     }
 
     #[test]
     fn test_record_matches_by_syscall() {
         let r = make_syscall_record("open", "yes", "test", "1000", 1_735_689_600.0);
-        let c = SearchCriteria { syscall: Some("open".into()), ..Default::default() };
+        let c = SearchCriteria {
+            syscall: Some("open".into()),
+            ..Default::default()
+        };
         assert!(record_matches(&r, &c));
     }
 
     #[test]
     fn test_record_no_match_wrong_syscall() {
         let r = make_syscall_record("open", "yes", "test", "1000", 1_735_689_600.0);
-        let c = SearchCriteria { syscall: Some("write".into()), ..Default::default() };
+        let c = SearchCriteria {
+            syscall: Some("write".into()),
+            ..Default::default()
+        };
         assert!(!record_matches(&r, &c));
     }
 
     #[test]
     fn test_record_matches_by_success() {
         let r = make_syscall_record("open", "yes", "test", "1000", 1_735_689_600.0);
-        let c = SearchCriteria { success: Some(true), ..Default::default() };
+        let c = SearchCriteria {
+            success: Some(true),
+            ..Default::default()
+        };
         assert!(record_matches(&r, &c));
     }
 
     #[test]
     fn test_record_no_match_wrong_success() {
         let r = make_syscall_record("open", "yes", "test", "1000", 1_735_689_600.0);
-        let c = SearchCriteria { success: Some(false), ..Default::default() };
+        let c = SearchCriteria {
+            success: Some(false),
+            ..Default::default()
+        };
         assert!(!record_matches(&r, &c));
     }
 
     #[test]
     fn test_record_matches_by_user() {
         let r = make_syscall_record("open", "yes", "test", "1000", 1_735_689_600.0);
-        let c = SearchCriteria { user: Some("1000".into()), ..Default::default() };
+        let c = SearchCriteria {
+            user: Some("1000".into()),
+            ..Default::default()
+        };
         assert!(record_matches(&r, &c));
     }
 
     #[test]
     fn test_record_no_match_wrong_user() {
         let r = make_syscall_record("open", "yes", "test", "1000", 1_735_689_600.0);
-        let c = SearchCriteria { user: Some("9999".into()), ..Default::default() };
+        let c = SearchCriteria {
+            user: Some("9999".into()),
+            ..Default::default()
+        };
         assert!(!record_matches(&r, &c));
     }
 
@@ -3129,7 +3295,10 @@ type=PATH msg=audit(1735689600.000:2): name=\"/tmp\"";
     #[test]
     fn test_record_matches_user_by_acct() {
         let r = make_auth_record("alice", "success", 1_735_689_600.0);
-        let c = SearchCriteria { user: Some("alice".into()), ..Default::default() };
+        let c = SearchCriteria {
+            user: Some("alice".into()),
+            ..Default::default()
+        };
         assert!(record_matches(&r, &c));
     }
 
@@ -3312,11 +3481,18 @@ type=PATH msg=audit(1735689600.000:2): name=\"/tmp\"";
     fn test_auditctl_add_watch_rule() {
         let mut store = RuleStore::new();
         let args: Vec<String> = vec!["-w", "/etc/passwd", "-p", "rwa", "-k", "passwd"]
-            .into_iter().map(|s| s.to_string()).collect();
+            .into_iter()
+            .map(|s| s.to_string())
+            .collect();
         let rc = process_auditctl_args(&args, &mut store);
         assert_eq!(rc, 0);
         assert_eq!(store.rules.len(), 1);
-        if let AuditRule::Watch { ref path, ref perms, ref key } = store.rules[0] {
+        if let AuditRule::Watch {
+            ref path,
+            ref perms,
+            ref key,
+        } = store.rules[0]
+        {
             assert_eq!(path, "/etc/passwd");
             assert!(perms.read && perms.write && !perms.execute && perms.attribute);
             assert_eq!(key.as_deref(), Some("passwd"));
@@ -3328,8 +3504,19 @@ type=PATH msg=audit(1735689600.000:2): name=\"/tmp\"";
     #[test]
     fn test_auditctl_add_syscall_rule() {
         let mut store = RuleStore::new();
-        let args: Vec<String> = vec!["-a", "always,exit", "-S", "open", "-F", "uid=0", "-k", "root_open"]
-            .into_iter().map(|s| s.to_string()).collect();
+        let args: Vec<String> = vec![
+            "-a",
+            "always,exit",
+            "-S",
+            "open",
+            "-F",
+            "uid=0",
+            "-k",
+            "root_open",
+        ]
+        .into_iter()
+        .map(|s| s.to_string())
+        .collect();
         let rc = process_auditctl_args(&args, &mut store);
         assert_eq!(rc, 0);
         assert_eq!(store.rules.len(), 1);
@@ -3346,7 +3533,9 @@ type=PATH msg=audit(1735689600.000:2): name=\"/tmp\"";
             key: None,
         });
         let args: Vec<String> = vec!["-d", "always,exit", "-S", "open"]
-            .into_iter().map(|s| s.to_string()).collect();
+            .into_iter()
+            .map(|s| s.to_string())
+            .collect();
         let rc = process_auditctl_args(&args, &mut store);
         assert_eq!(rc, 0);
         assert!(store.rules.is_empty());
@@ -3392,7 +3581,10 @@ type=PATH msg=audit(1735689600.000:2): name=\"/tmp\"";
     #[test]
     fn test_auditctl_backlog_limit() {
         let mut store = RuleStore::new();
-        let args: Vec<String> = vec!["-b", "16384"].into_iter().map(|s| s.to_string()).collect();
+        let args: Vec<String> = vec!["-b", "16384"]
+            .into_iter()
+            .map(|s| s.to_string())
+            .collect();
         let rc = process_auditctl_args(&args, &mut store);
         assert_eq!(rc, 0);
         assert_eq!(store.status.backlog_limit, 16384);
@@ -3401,7 +3593,10 @@ type=PATH msg=audit(1735689600.000:2): name=\"/tmp\"";
     #[test]
     fn test_auditctl_rate_limit() {
         let mut store = RuleStore::new();
-        let args: Vec<String> = vec!["-r", "100"].into_iter().map(|s| s.to_string()).collect();
+        let args: Vec<String> = vec!["-r", "100"]
+            .into_iter()
+            .map(|s| s.to_string())
+            .collect();
         let rc = process_auditctl_args(&args, &mut store);
         assert_eq!(rc, 0);
         assert_eq!(store.status.rate_limit, 100);
@@ -3411,7 +3606,9 @@ type=PATH msg=audit(1735689600.000:2): name=\"/tmp\"";
     fn test_auditctl_invalid_action() {
         let mut store = RuleStore::new();
         let args: Vec<String> = vec!["-a", "invalid,exit"]
-            .into_iter().map(|s| s.to_string()).collect();
+            .into_iter()
+            .map(|s| s.to_string())
+            .collect();
         let rc = process_auditctl_args(&args, &mut store);
         assert_eq!(rc, 1);
     }
@@ -3420,7 +3617,9 @@ type=PATH msg=audit(1735689600.000:2): name=\"/tmp\"";
     fn test_auditctl_invalid_filter() {
         let mut store = RuleStore::new();
         let args: Vec<String> = vec!["-a", "always,invalid"]
-            .into_iter().map(|s| s.to_string()).collect();
+            .into_iter()
+            .map(|s| s.to_string())
+            .collect();
         let rc = process_auditctl_args(&args, &mut store);
         assert_eq!(rc, 1);
     }
@@ -3429,7 +3628,9 @@ type=PATH msg=audit(1735689600.000:2): name=\"/tmp\"";
     fn test_auditctl_invalid_perms() {
         let mut store = RuleStore::new();
         let args: Vec<String> = vec!["-w", "/tmp", "-p", "rwz"]
-            .into_iter().map(|s| s.to_string()).collect();
+            .into_iter()
+            .map(|s| s.to_string())
+            .collect();
         let rc = process_auditctl_args(&args, &mut store);
         assert_eq!(rc, 1);
     }
@@ -3445,7 +3646,10 @@ type=PATH msg=audit(1735689600.000:2): name=\"/tmp\"";
     #[test]
     fn test_auditctl_invalid_backlog() {
         let mut store = RuleStore::new();
-        let args: Vec<String> = vec!["-b", "abc"].into_iter().map(|s| s.to_string()).collect();
+        let args: Vec<String> = vec!["-b", "abc"]
+            .into_iter()
+            .map(|s| s.to_string())
+            .collect();
         let rc = process_auditctl_args(&args, &mut store);
         assert_eq!(rc, 1);
     }
@@ -3453,7 +3657,10 @@ type=PATH msg=audit(1735689600.000:2): name=\"/tmp\"";
     #[test]
     fn test_auditctl_invalid_rate() {
         let mut store = RuleStore::new();
-        let args: Vec<String> = vec!["-r", "xyz"].into_iter().map(|s| s.to_string()).collect();
+        let args: Vec<String> = vec!["-r", "xyz"]
+            .into_iter()
+            .map(|s| s.to_string())
+            .collect();
         let rc = process_auditctl_args(&args, &mut store);
         assert_eq!(rc, 1);
     }
@@ -3461,7 +3668,10 @@ type=PATH msg=audit(1735689600.000:2): name=\"/tmp\"";
     #[test]
     fn test_auditctl_unknown_option() {
         let mut store = RuleStore::new();
-        let args: Vec<String> = vec!["--nonexistent"].into_iter().map(|s| s.to_string()).collect();
+        let args: Vec<String> = vec!["--nonexistent"]
+            .into_iter()
+            .map(|s| s.to_string())
+            .collect();
         let rc = process_auditctl_args(&args, &mut store);
         assert_eq!(rc, 1);
     }
@@ -3518,7 +3728,9 @@ type=PATH msg=audit(1735689600.000:2): name=\"/tmp\"";
     fn test_auditctl_no_comma_in_action_filter() {
         let mut store = RuleStore::new();
         let args: Vec<String> = vec!["-a", "alwaysexit"]
-            .into_iter().map(|s| s.to_string()).collect();
+            .into_iter()
+            .map(|s| s.to_string())
+            .collect();
         let rc = process_auditctl_args(&args, &mut store);
         assert_eq!(rc, 1);
     }
@@ -3551,11 +3763,15 @@ type=PATH msg=audit(1735689600.000:2): name=\"/tmp\"";
     fn test_auditctl_multiple_rules() {
         let mut store = RuleStore::new();
         let args1: Vec<String> = vec!["-w", "/etc/shadow", "-p", "rw", "-k", "shadow"]
-            .into_iter().map(|s| s.to_string()).collect();
+            .into_iter()
+            .map(|s| s.to_string())
+            .collect();
         process_auditctl_args(&args1, &mut store);
 
         let args2: Vec<String> = vec!["-a", "always,exit", "-S", "mount", "-k", "mounts"]
-            .into_iter().map(|s| s.to_string()).collect();
+            .into_iter()
+            .map(|s| s.to_string())
+            .collect();
         process_auditctl_args(&args2, &mut store);
 
         assert_eq!(store.rules.len(), 2);
@@ -3565,10 +3781,20 @@ type=PATH msg=audit(1735689600.000:2): name=\"/tmp\"";
     fn test_auditctl_syscall_with_multiple_fields() {
         let mut store = RuleStore::new();
         let args: Vec<String> = vec![
-            "-a", "always,exit", "-S", "open",
-            "-F", "uid=0", "-F", "auid!=4294967295",
-            "-k", "root_open",
-        ].into_iter().map(|s| s.to_string()).collect();
+            "-a",
+            "always,exit",
+            "-S",
+            "open",
+            "-F",
+            "uid=0",
+            "-F",
+            "auid!=4294967295",
+            "-k",
+            "root_open",
+        ]
+        .into_iter()
+        .map(|s| s.to_string())
+        .collect();
         let rc = process_auditctl_args(&args, &mut store);
         assert_eq!(rc, 0);
         if let AuditRule::Syscall { ref fields, .. } = store.rules[0] {
@@ -3582,7 +3808,9 @@ type=PATH msg=audit(1735689600.000:2): name=\"/tmp\"";
     fn test_auditctl_delete_nonexistent_returns_error() {
         let mut store = RuleStore::new();
         let args: Vec<String> = vec!["-d", "always,exit", "-S", "nonexistent"]
-            .into_iter().map(|s| s.to_string()).collect();
+            .into_iter()
+            .map(|s| s.to_string())
+            .collect();
         let rc = process_auditctl_args(&args, &mut store);
         assert_eq!(rc, 1);
     }
@@ -3790,14 +4018,24 @@ type=PATH msg=audit(1735689600.000:2): name=\"/tmp\"";
     #[test]
     fn test_ausearch_sv_success_alias() {
         // Just verifying parse doesn't crash — the actual log file won't exist.
-        let rc = run_ausearch(&["-sv".to_string(), "success".to_string(), "-if".to_string(), "/nonexistent".to_string()]);
+        let rc = run_ausearch(&[
+            "-sv".to_string(),
+            "success".to_string(),
+            "-if".to_string(),
+            "/nonexistent".to_string(),
+        ]);
         // Returns 1 because no matches (no file), but no crash
         assert_eq!(rc, 1);
     }
 
     #[test]
     fn test_ausearch_sv_failed_alias() {
-        let rc = run_ausearch(&["-sv".to_string(), "failed".to_string(), "-if".to_string(), "/nonexistent".to_string()]);
+        let rc = run_ausearch(&[
+            "-sv".to_string(),
+            "failed".to_string(),
+            "-if".to_string(),
+            "/nonexistent".to_string(),
+        ]);
         assert_eq!(rc, 1);
     }
 
@@ -3953,7 +4191,10 @@ type=PATH msg=audit(1735689600.000:2): name=\"/tmp\"";
             key: Some("file_access".into()),
             ..Default::default()
         };
-        let matches: Vec<_> = records.iter().filter(|r| record_matches(r, &criteria)).collect();
+        let matches: Vec<_> = records
+            .iter()
+            .filter(|r| record_matches(r, &criteria))
+            .collect();
         assert_eq!(matches.len(), 1);
         assert_eq!(matches[0].serial, 1);
     }
@@ -3965,7 +4206,10 @@ type=PATH msg=audit(1735689600.000:2): name=\"/tmp\"";
             syscall: Some("open".into()),
             ..Default::default()
         };
-        let matches: Vec<_> = records.iter().filter(|r| record_matches(r, &criteria)).collect();
+        let matches: Vec<_> = records
+            .iter()
+            .filter(|r| record_matches(r, &criteria))
+            .collect();
         assert_eq!(matches.len(), 1);
     }
 
@@ -3976,7 +4220,10 @@ type=PATH msg=audit(1735689600.000:2): name=\"/tmp\"";
             success: Some(false),
             ..Default::default()
         };
-        let matches: Vec<_> = records.iter().filter(|r| record_matches(r, &criteria)).collect();
+        let matches: Vec<_> = records
+            .iter()
+            .filter(|r| record_matches(r, &criteria))
+            .collect();
         assert_eq!(matches.len(), 1);
         assert_eq!(matches[0].syscall_name(), Some("write"));
     }
@@ -3988,7 +4235,10 @@ type=PATH msg=audit(1735689600.000:2): name=\"/tmp\"";
             user: Some("admin".into()),
             ..Default::default()
         };
-        let matches: Vec<_> = records.iter().filter(|r| record_matches(r, &criteria)).collect();
+        let matches: Vec<_> = records
+            .iter()
+            .filter(|r| record_matches(r, &criteria))
+            .collect();
         assert_eq!(matches.len(), 2); // USER_AUTH + USER_LOGIN for admin
     }
 
@@ -4000,7 +4250,10 @@ type=PATH msg=audit(1735689600.000:2): name=\"/tmp\"";
             end_time: Some(1_735_689_950.0),
             ..Default::default()
         };
-        let matches: Vec<_> = records.iter().filter(|r| record_matches(r, &criteria)).collect();
+        let matches: Vec<_> = records
+            .iter()
+            .filter(|r| record_matches(r, &criteria))
+            .collect();
         assert_eq!(matches.len(), 2); // auth records at 800 and 900
     }
 
@@ -4011,35 +4264,50 @@ type=PATH msg=audit(1735689600.000:2): name=\"/tmp\"";
             message_type: Some(MessageType::UserAuth),
             ..Default::default()
         };
-        let matches: Vec<_> = records.iter().filter(|r| record_matches(r, &criteria)).collect();
+        let matches: Vec<_> = records
+            .iter()
+            .filter(|r| record_matches(r, &criteria))
+            .collect();
         assert_eq!(matches.len(), 2);
     }
 
     #[test]
     fn test_sample_log_auth_records() {
         let records = load_audit_log_from_str(sample_log());
-        let auth: Vec<_> = records.iter().filter(|r| r.msg_type.is_auth_related()).collect();
+        let auth: Vec<_> = records
+            .iter()
+            .filter(|r| r.msg_type.is_auth_related())
+            .collect();
         assert_eq!(auth.len(), 2);
     }
 
     #[test]
     fn test_sample_log_login_records() {
         let records = load_audit_log_from_str(sample_log());
-        let login: Vec<_> = records.iter().filter(|r| r.msg_type.is_login_related()).collect();
+        let login: Vec<_> = records
+            .iter()
+            .filter(|r| r.msg_type.is_login_related())
+            .collect();
         assert_eq!(login.len(), 1);
     }
 
     #[test]
     fn test_sample_log_syscall_records() {
         let records = load_audit_log_from_str(sample_log());
-        let syscalls: Vec<_> = records.iter().filter(|r| r.msg_type == MessageType::Syscall).collect();
+        let syscalls: Vec<_> = records
+            .iter()
+            .filter(|r| r.msg_type == MessageType::Syscall)
+            .collect();
         assert_eq!(syscalls.len(), 3);
     }
 
     #[test]
     fn test_sample_log_path_records() {
         let records = load_audit_log_from_str(sample_log());
-        let paths: Vec<_> = records.iter().filter(|r| r.msg_type == MessageType::Path).collect();
+        let paths: Vec<_> = records
+            .iter()
+            .filter(|r| r.msg_type == MessageType::Path)
+            .collect();
         assert_eq!(paths.len(), 1);
     }
 
@@ -4051,7 +4319,10 @@ type=PATH msg=audit(1735689600.000:2): name=\"/tmp\"";
             success: Some(true),
             ..Default::default()
         };
-        let matches: Vec<_> = records.iter().filter(|r| record_matches(r, &criteria)).collect();
+        let matches: Vec<_> = records
+            .iter()
+            .filter(|r| record_matches(r, &criteria))
+            .collect();
         assert_eq!(matches.len(), 2); // open+mount succeeded, write failed
     }
 }

@@ -28,8 +28,14 @@ fn run_fontforge(args: Vec<String>) -> i32 {
         return 0;
     }
 
-    let script = args.windows(2).find(|w| w[0] == "-script").map(|w| w[1].as_str());
-    let command = args.windows(2).find(|w| w[0] == "-c").map(|w| w[1].as_str());
+    let script = args
+        .windows(2)
+        .find(|w| w[0] == "-script")
+        .map(|w| w[1].as_str());
+    let command = args
+        .windows(2)
+        .find(|w| w[0] == "-c")
+        .map(|w| w[1].as_str());
 
     if let Some(s) = script {
         println!("FontForge: running script '{}'...", s);
@@ -37,7 +43,11 @@ fn run_fontforge(args: Vec<String>) -> i32 {
     } else if let Some(c) = command {
         println!("FontForge: executing '{}'", c);
     } else {
-        let files: Vec<&str> = args.iter().filter(|a| !a.starts_with('-')).map(|s| s.as_str()).collect();
+        let files: Vec<&str> = args
+            .iter()
+            .filter(|a| !a.starts_with('-'))
+            .map(|s| s.as_str())
+            .collect();
         if files.is_empty() {
             println!("FontForge 20230101 (Slate OS)");
             println!("Starting FontForge GUI...");
@@ -59,7 +69,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_fontforge};
+    use super::run_fontforge;
 
     #[test]
     fn help_exits_zero() {

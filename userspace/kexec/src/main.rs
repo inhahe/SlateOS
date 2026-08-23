@@ -135,8 +135,16 @@ fn default_kdump_config() -> KdumpConfig {
 
 fn list_crash_dumps() -> Vec<(String, String, u64)> {
     vec![
-        ("/var/crash/2025-05-20-142355".to_string(), "6.1.0-slateos".to_string(), 128_000_000),
-        ("/var/crash/2025-05-15-091200".to_string(), "6.1.0-slateos".to_string(), 256_000_000),
+        (
+            "/var/crash/2025-05-20-142355".to_string(),
+            "6.1.0-slateos".to_string(),
+            128_000_000,
+        ),
+        (
+            "/var/crash/2025-05-15-091200".to_string(),
+            "6.1.0-slateos".to_string(),
+            256_000_000,
+        ),
     ]
 }
 
@@ -244,7 +252,8 @@ fn kexec_load(args: &[String]) -> i32 {
 }
 
 fn kexec_load_panic(args: &[String]) -> i32 {
-    let kernel = args.iter()
+    let kernel = args
+        .iter()
         .find(|a| !a.starts_with('-'))
         .map(|s| s.as_str())
         .unwrap_or(_VMLINUZ_PATH);
@@ -324,7 +333,10 @@ fn kexec_status() -> i32 {
 // ── kdump personality ─────────────────────────────────────────────────
 
 fn run_kdump(args: Vec<String>) -> i32 {
-    let cmd = args.first().cloned().unwrap_or_else(|| "status".to_string());
+    let cmd = args
+        .first()
+        .cloned()
+        .unwrap_or_else(|| "status".to_string());
 
     match cmd.as_str() {
         "--help" | "help" | "-h" => {
@@ -385,8 +397,22 @@ fn kdump_status() -> i32 {
     println!("Kdump Status");
     println!("============");
     println!();
-    println!("Service: {}", if crash.is_some() { "active" } else { "inactive" });
-    println!("Crash kernel: {}", if crash.is_some() { "loaded" } else { "not loaded" });
+    println!(
+        "Service: {}",
+        if crash.is_some() {
+            "active"
+        } else {
+            "inactive"
+        }
+    );
+    println!(
+        "Crash kernel: {}",
+        if crash.is_some() {
+            "loaded"
+        } else {
+            "not loaded"
+        }
+    );
     println!("Crash memory reserved: 256M");
     println!("Default action: reboot");
     println!("Dump target: {}", _KDUMP_DIR);
@@ -417,8 +443,7 @@ fn kdump_list() -> i32 {
     println!("Crash Dumps");
     println!("===========");
     println!();
-    println!("{:<40} {:<20} {:>12}",
-        "Path", "Kernel", "Size");
+    println!("{:<40} {:<20} {:>12}", "Path", "Kernel", "Size");
     println!("{}", "-".repeat(75));
 
     for (path, kernel, size) in &dumps {
@@ -450,7 +475,10 @@ fn kdump_estimate() -> i32 {
 // ── makedumpfile personality ──────────────────────────────────────────
 
 fn run_makedumpfile(args: Vec<String>) -> i32 {
-    let cmd = args.first().cloned().unwrap_or_else(|| "--help".to_string());
+    let cmd = args
+        .first()
+        .cloned()
+        .unwrap_or_else(|| "--help".to_string());
 
     match cmd.as_str() {
         "--help" | "help" | "-h" => {
@@ -506,7 +534,9 @@ fn makedumpfile_convert(args: &[String]) -> i32 {
             "-l" => compress = "lzo",
             "-p" => compress = "snappy",
             "-z" => compress = "zlib",
-            "--message-level" => { i += 1; }
+            "--message-level" => {
+                i += 1;
+            }
             s if !s.starts_with('-') => {
                 match positional {
                     0 => _vmcore = Some(s),
@@ -524,9 +554,10 @@ fn makedumpfile_convert(args: &[String]) -> i32 {
 
     println!("makedumpfile: processing vmcore");
     println!("  Compression: {}", compress);
-    println!("  Dump level: {} (filter: zero={} cache={} user={} free={})",
-        dump_level, filter.zero_pages, filter.cache_pages,
-        filter.user_pages, filter.free_pages);
+    println!(
+        "  Dump level: {} (filter: zero={} cache={} user={} free={})",
+        dump_level, filter.zero_pages, filter.cache_pages, filter.user_pages, filter.free_pages
+    );
     println!();
     println!("  Filtering pages...");
     println!("    Total pages:     2097152 (32 GB)");
@@ -566,7 +597,8 @@ fn makedumpfile_mem_usage() -> i32 {
 }
 
 fn makedumpfile_dry_run(args: &[String]) -> i32 {
-    let dump_level: u32 = args.iter()
+    let dump_level: u32 = args
+        .iter()
         .position(|a| a == "-d")
         .and_then(|i| args.get(i + 1))
         .and_then(|s| s.parse().ok())
@@ -577,14 +609,26 @@ fn makedumpfile_dry_run(args: &[String]) -> i32 {
     println!("makedumpfile: dry run (dump level {})", dump_level);
     println!();
     println!("Pages that would be excluded:");
-    if filter.zero_pages { println!("  [x] Zero-filled pages"); }
-    else { println!("  [ ] Zero-filled pages"); }
-    if filter.cache_pages { println!("  [x] Cache pages"); }
-    else { println!("  [ ] Cache pages"); }
-    if filter.user_pages { println!("  [x] User data pages"); }
-    else { println!("  [ ] User data pages"); }
-    if filter.free_pages { println!("  [x] Free pages"); }
-    else { println!("  [ ] Free pages"); }
+    if filter.zero_pages {
+        println!("  [x] Zero-filled pages");
+    } else {
+        println!("  [ ] Zero-filled pages");
+    }
+    if filter.cache_pages {
+        println!("  [x] Cache pages");
+    } else {
+        println!("  [ ] Cache pages");
+    }
+    if filter.user_pages {
+        println!("  [x] User data pages");
+    } else {
+        println!("  [ ] User data pages");
+    }
+    if filter.free_pages {
+        println!("  [x] Free pages");
+    } else {
+        println!("  [ ] Free pages");
+    }
 
     println!();
     println!("Estimated reduction: ~87% (32 GB -> ~4 GB before compression)");
@@ -594,7 +638,10 @@ fn makedumpfile_dry_run(args: &[String]) -> i32 {
 // ── vmcore-dmesg personality ──────────────────────────────────────────
 
 fn run_vmcore_dmesg(args: Vec<String>) -> i32 {
-    let cmd = args.first().cloned().unwrap_or_else(|| "--help".to_string());
+    let cmd = args
+        .first()
+        .cloned()
+        .unwrap_or_else(|| "--help".to_string());
 
     match cmd.as_str() {
         "--help" | "help" | "-h" => {
@@ -618,8 +665,12 @@ fn run_vmcore_dmesg(args: Vec<String>) -> i32 {
             println!("[    0.000000] Linux version 6.1.0-slateos (build@slateos) (gcc 13.2.0)");
             println!("[    0.000000] Command line: root=/dev/sda2 ro crashkernel=256M");
             println!("[    0.000000] BIOS-provided physical RAM map:");
-            println!("[    0.000000]  BIOS-e820: [mem 0x0000000000000000-0x000000000009ffff] usable");
-            println!("[    0.000000]  BIOS-e820: [mem 0x0000000000100000-0x00000007ffffffff] usable");
+            println!(
+                "[    0.000000]  BIOS-e820: [mem 0x0000000000000000-0x000000000009ffff] usable"
+            );
+            println!(
+                "[    0.000000]  BIOS-e820: [mem 0x0000000000100000-0x00000007ffffffff] usable"
+            );
             println!("[    1.234567] Memory: 32768MB total");
             println!("[    2.345678] smpboot: Estimated 8 CPUs");
             println!("...");

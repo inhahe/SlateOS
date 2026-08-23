@@ -25,14 +25,19 @@ fn run_lua(args: Vec<String>) -> i32 {
         return 0;
     }
 
-    let exec_str = args.iter().position(|a| a == "-e")
+    let exec_str = args
+        .iter()
+        .position(|a| a == "-e")
         .and_then(|i| args.get(i + 1));
     if let Some(code) = exec_str {
         println!("(executing: {})", code);
         return 0;
     }
 
-    let script = args.iter().find(|a| !a.starts_with('-')).map(|s| s.as_str());
+    let script = args
+        .iter()
+        .find(|a| !a.starts_with('-'))
+        .map(|s| s.as_str());
     if let Some(file) = script {
         println!("(running {})", file);
     } else {
@@ -56,7 +61,11 @@ fn run_luac(args: Vec<String>) -> i32 {
         println!("Lua 5.4.7 (Slate OS)");
         return 0;
     }
-    let files: Vec<&str> = args.iter().filter(|a| !a.starts_with('-')).map(|s| s.as_str()).collect();
+    let files: Vec<&str> = args
+        .iter()
+        .filter(|a| !a.starts_with('-'))
+        .map(|s| s.as_str())
+        .collect();
     for f in &files {
         println!("Compiling {}...", f);
     }
@@ -114,7 +123,9 @@ fn main() {
         let bytes = s.as_bytes();
         let mut last_sep = 0;
         for (i, &b) in bytes.iter().enumerate() {
-            if b == b'/' || b == b'\\' { last_sep = i + 1; }
+            if b == b'/' || b == b'\\' {
+                last_sep = i + 1;
+            }
         }
         let base = &s[last_sep..];
         base.strip_suffix(".exe").unwrap_or(base).to_string()
@@ -130,7 +141,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_lua};
+    use super::run_lua;
 
     #[test]
     fn help_exits_zero() {

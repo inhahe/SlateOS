@@ -38,12 +38,20 @@ fn run_asana(args: Vec<String>) -> i32 {
                 "list" => {
                     println!("GID           Completed  Due         Assignee     Name");
                     println!("1234567890    ☐          2024-01-20  alice        Fix login timeout");
-                    println!("2345678901    ☐          2024-01-18  bob          Add search filters");
+                    println!(
+                        "2345678901    ☐          2024-01-18  bob          Add search filters"
+                    );
                     println!("3456789012    ☑          2024-01-15  charlie      Update docs");
-                    println!("4567890123    ☐          2024-01-22  alice        Refactor API layer");
+                    println!(
+                        "4567890123    ☐          2024-01-22  alice        Refactor API layer"
+                    );
                 }
                 "create" => {
-                    let name = args.windows(2).find(|w| w[0] == "--name").map(|w| w[1].as_str()).unwrap_or("New task");
+                    let name = args
+                        .windows(2)
+                        .find(|w| w[0] == "--name")
+                        .map(|w| w[1].as_str())
+                        .unwrap_or("New task");
                     println!("✔ Created task: {} (GID: 5678901234)", name);
                 }
                 "complete" => {
@@ -61,7 +69,9 @@ fn run_asana(args: Vec<String>) -> i32 {
                     println!("  Section:    In Progress");
                     println!("  Tags:       bug, backend");
                 }
-                _ => { println!("Task operation: {}", sub); }
+                _ => {
+                    println!("Task operation: {}", sub);
+                }
             }
             0
         }
@@ -74,12 +84,18 @@ fn run_asana(args: Vec<String>) -> i32 {
                     println!("p-def456      Frontend          Engineering    8");
                     println!("p-ghi789      Design System     Design         15");
                 }
-                _ => { println!("Project operation: {}", sub); }
+                _ => {
+                    println!("Project operation: {}", sub);
+                }
             }
             0
         }
         "sections" => {
-            let project = args.windows(2).find(|w| w[0] == "--project").map(|w| w[1].as_str()).unwrap_or("p-abc123");
+            let project = args
+                .windows(2)
+                .find(|w| w[0] == "--project")
+                .map(|w| w[1].as_str())
+                .unwrap_or("p-abc123");
             println!("Sections in {}:", project);
             println!("  To Do         (4 tasks)");
             println!("  In Progress   (3 tasks)");
@@ -127,7 +143,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_asana};
+    use super::run_asana;
 
     #[test]
     fn help_exits_zero() {

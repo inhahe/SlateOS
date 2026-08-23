@@ -75,7 +75,10 @@ fn run_liquibase(args: Vec<String>) -> i32 {
             0
         }
         "validate" => {
-            let file = args.get(1).map(|s| s.as_str()).unwrap_or("db/changelog.xml");
+            let file = args
+                .get(1)
+                .map(|s| s.as_str())
+                .unwrap_or("db/changelog.xml");
             println!("Validating changelog: {}", file);
             println!("  No validation errors found.");
             println!("  5 changeset(s) validated.");
@@ -89,9 +92,15 @@ fn run_liquibase(args: Vec<String>) -> i32 {
         "history" => {
             println!("Liquibase History:");
             println!("  ID                        Author    Date                   Description");
-            println!("  001-create-users           admin     2024-01-10 10:00:00   createTable users");
-            println!("  002-create-orders           admin     2024-01-10 10:00:01   createTable orders");
-            println!("  003-add-email-index          admin     2024-01-15 14:00:00   createIndex idx_email");
+            println!(
+                "  001-create-users           admin     2024-01-10 10:00:00   createTable users"
+            );
+            println!(
+                "  002-create-orders           admin     2024-01-10 10:00:01   createTable orders"
+            );
+            println!(
+                "  003-add-email-index          admin     2024-01-15 14:00:00   createIndex idx_email"
+            );
             0
         }
         "snapshot" => {
@@ -123,7 +132,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_liquibase};
+    use super::run_liquibase;
 
     #[test]
     fn help_exits_zero() {

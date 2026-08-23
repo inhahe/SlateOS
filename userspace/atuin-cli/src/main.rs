@@ -7,8 +7,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_atuin(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
@@ -44,12 +48,19 @@ fn run_atuin(args: &[String], _prog: &str) -> i32 {
         println!("atuin 18.3.0 (Slate OS)");
         return 0;
     }
-    let cmd = args.iter().find(|a| !a.starts_with('-'))
-        .map(|s| s.as_str()).unwrap_or("history");
+    let cmd = args
+        .iter()
+        .find(|a| !a.starts_with('-'))
+        .map(|s| s.as_str())
+        .unwrap_or("history");
     match cmd {
         "history" => {
-            let sub = args.iter().skip_while(|a| a.as_str() != "history").nth(1)
-                .map(|s| s.as_str()).unwrap_or("list");
+            let sub = args
+                .iter()
+                .skip_while(|a| a.as_str() != "history")
+                .nth(1)
+                .map(|s| s.as_str())
+                .unwrap_or("list");
             match sub {
                 "list" => {
                     println!("2024-01-15 10:00:00  ls -la");
@@ -69,8 +80,12 @@ fn run_atuin(args: &[String], _prog: &str) -> i32 {
             println!("  3. git (87 times)");
         }
         "search" => {
-            let query = args.iter().skip_while(|a| a.as_str() != "search").nth(1)
-                .map(|s| s.as_str()).unwrap_or("");
+            let query = args
+                .iter()
+                .skip_while(|a| a.as_str() != "search")
+                .nth(1)
+                .map(|s| s.as_str())
+                .unwrap_or("");
             println!("atuin search: Results for '{}':", query);
         }
         "sync" => println!("atuin: Syncing history..."),
@@ -82,8 +97,12 @@ fn run_atuin(args: &[String], _prog: &str) -> i32 {
             println!("Last sync: never");
         }
         "init" => {
-            let shell = args.iter().skip_while(|a| a.as_str() != "init").nth(1)
-                .map(|s| s.as_str()).unwrap_or("bash");
+            let shell = args
+                .iter()
+                .skip_while(|a| a.as_str() != "init")
+                .nth(1)
+                .map(|s| s.as_str())
+                .unwrap_or("bash");
             println!("# atuin init for {}", shell);
             println!("eval \"$(atuin init {})\"", shell);
         }
@@ -109,7 +128,10 @@ fn run_atuin(args: &[String], _prog: &str) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "atuin".to_string());
+    let prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "atuin".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_atuin(&rest, &prog);
     process::exit(code);
@@ -117,7 +139,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_atuin};
+    use super::{basename, run_atuin, strip_ext};
 
     #[test]
     fn basename_strips_path() {

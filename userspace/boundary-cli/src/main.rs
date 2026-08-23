@@ -40,7 +40,8 @@ fn run_boundary(args: &[String]) -> i32 {
             println!("  Build Date: 2024-02-15T00:00:00Z");
         }
         "connect" => {
-            let target = args.windows(2)
+            let target = args
+                .windows(2)
                 .find(|w| w[0] == "-target-id")
                 .map(|w| w[1].as_str())
                 .unwrap_or("ttcp_1234567890");
@@ -87,7 +88,8 @@ fn run_boundary(args: &[String]) -> i32 {
             println!("  Type:     org");
         }
         "server" => {
-            let config = args.windows(2)
+            let config = args
+                .windows(2)
                 .find(|w| w[0] == "-config")
                 .map(|w| w[1].as_str())
                 .unwrap_or("boundary.hcl");
@@ -116,7 +118,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_boundary};
+    use super::run_boundary;
 
     #[test]
     fn help_exits_zero() {

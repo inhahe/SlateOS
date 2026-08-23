@@ -44,7 +44,11 @@ fn run_amcheck(args: &[String]) -> i32 {
         println!("  -s    Check server only");
         return 0;
     }
-    let config = args.iter().find(|a| !a.starts_with('-')).map(|s| s.as_str()).unwrap_or("DailySet1");
+    let config = args
+        .iter()
+        .find(|a| !a.starts_with('-'))
+        .map(|s| s.as_str())
+        .unwrap_or("DailySet1");
     println!("Amanda Tape Server Host Check");
     println!("----");
     println!("Holding disk /holding: 15.2 GB available, using 10.0 GB");
@@ -92,7 +96,11 @@ fn run_amstatus(args: &[String]) -> i32 {
         println!("amstatus — display Amanda backup status (Slate OS).");
         return 0;
     }
-    let config = args.iter().find(|a| !a.starts_with('-')).map(|s| s.as_str()).unwrap_or("DailySet1");
+    let config = args
+        .iter()
+        .find(|a| !a.starts_with('-'))
+        .map(|s| s.as_str())
+        .unwrap_or("DailySet1");
     println!("Using config '{}' from /etc/amanda", config);
     println!();
     println!("STATISTICS:");
@@ -113,7 +121,11 @@ fn run_amreport(args: &[String]) -> i32 {
         println!("amreport — generate Amanda report (Slate OS).");
         return 0;
     }
-    let config = args.iter().find(|a| !a.starts_with('-')).map(|s| s.as_str()).unwrap_or("DailySet1");
+    let config = args
+        .iter()
+        .find(|a| !a.starts_with('-'))
+        .map(|s| s.as_str())
+        .unwrap_or("DailySet1");
     println!("Amanda Backup Report for {} — 2024-01-15", config);
     println!();
     println!("FAILURE DUMP SUMMARY: (no failures)");
@@ -127,7 +139,8 @@ fn run_amreport(args: &[String]) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first()
+    let prog = args
+        .first()
         .map(|s| strip_ext(basename(s)).to_string())
         .unwrap_or_else(|| "amdump".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
@@ -145,7 +158,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_amdump};
+    use super::{basename, run_amdump, strip_ext};
 
     #[test]
     fn basename_strips_path() {

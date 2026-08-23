@@ -29,18 +29,38 @@ fn run_etcd(args: Vec<String>) -> i32 {
         println!("Go OS/Arch: slateos/amd64");
         return 0;
     }
-    let name = args.iter().position(|a| a == "--name")
+    let name = args
+        .iter()
+        .position(|a| a == "--name")
         .and_then(|i| args.get(i + 1))
         .map(|s| s.as_str())
         .unwrap_or("default");
-    println!("{{\"level\":\"info\",\"ts\":\"2025-05-22T10:00:00.000Z\",\"msg\":\"etcd Version: 3.5.13\"}}");
-    println!("{{\"level\":\"info\",\"ts\":\"2025-05-22T10:00:00.001Z\",\"msg\":\"Go Version: go1.22.2\"}}");
-    println!("{{\"level\":\"info\",\"ts\":\"2025-05-22T10:00:00.100Z\",\"msg\":\"name\",\"name\":\"{}\"}}",name);
-    println!("{{\"level\":\"info\",\"ts\":\"2025-05-22T10:00:00.200Z\",\"msg\":\"data dir\",\"dir\":\"{}.etcd\"}}", name);
-    println!("{{\"level\":\"info\",\"ts\":\"2025-05-22T10:00:00.500Z\",\"msg\":\"starting server\"}}");
-    println!("{{\"level\":\"info\",\"ts\":\"2025-05-22T10:00:01.000Z\",\"msg\":\"published local member to cluster\"}}");
-    println!("{{\"level\":\"info\",\"ts\":\"2025-05-22T10:00:01.001Z\",\"msg\":\"ready to serve client requests\"}}");
-    println!("{{\"level\":\"info\",\"ts\":\"2025-05-22T10:00:01.002Z\",\"msg\":\"serving client traffic\",\"address\":\"127.0.0.1:2379\"}}");
+    println!(
+        "{{\"level\":\"info\",\"ts\":\"2025-05-22T10:00:00.000Z\",\"msg\":\"etcd Version: 3.5.13\"}}"
+    );
+    println!(
+        "{{\"level\":\"info\",\"ts\":\"2025-05-22T10:00:00.001Z\",\"msg\":\"Go Version: go1.22.2\"}}"
+    );
+    println!(
+        "{{\"level\":\"info\",\"ts\":\"2025-05-22T10:00:00.100Z\",\"msg\":\"name\",\"name\":\"{}\"}}",
+        name
+    );
+    println!(
+        "{{\"level\":\"info\",\"ts\":\"2025-05-22T10:00:00.200Z\",\"msg\":\"data dir\",\"dir\":\"{}.etcd\"}}",
+        name
+    );
+    println!(
+        "{{\"level\":\"info\",\"ts\":\"2025-05-22T10:00:00.500Z\",\"msg\":\"starting server\"}}"
+    );
+    println!(
+        "{{\"level\":\"info\",\"ts\":\"2025-05-22T10:00:01.000Z\",\"msg\":\"published local member to cluster\"}}"
+    );
+    println!(
+        "{{\"level\":\"info\",\"ts\":\"2025-05-22T10:00:01.001Z\",\"msg\":\"ready to serve client requests\"}}"
+    );
+    println!(
+        "{{\"level\":\"info\",\"ts\":\"2025-05-22T10:00:01.002Z\",\"msg\":\"serving client traffic\",\"address\":\"127.0.0.1:2379\"}}"
+    );
     0
 }
 
@@ -110,7 +130,9 @@ fn run_etcdctl(args: Vec<String>) -> i32 {
             match sub {
                 "list" => {
                     println!("ID, Status, Name, Peer Addrs, Client Addrs, Is Learner");
-                    println!("8e9e05c52164694d, started, default, http://localhost:2380, http://localhost:2379, false");
+                    println!(
+                        "8e9e05c52164694d, started, default, http://localhost:2380, http://localhost:2379, false"
+                    );
                 }
                 "add" => {
                     let name = cmd_args.get(1).map(|s| s.as_str()).unwrap_or("new-member");
@@ -124,9 +146,13 @@ fn run_etcdctl(args: Vec<String>) -> i32 {
         "endpoint" => {
             let sub = cmd_args.first().map(|s| s.as_str()).unwrap_or("health");
             match sub {
-                "health" => println!("127.0.0.1:2379 is healthy: successfully committed proposal: took = 1.234ms"),
+                "health" => println!(
+                    "127.0.0.1:2379 is healthy: successfully committed proposal: took = 1.234ms"
+                ),
                 "status" => {
-                    println!("127.0.0.1:2379, 8e9e05c52164694d, 3.5.13, 20 kB, true, false, 3, 42, 42,");
+                    println!(
+                        "127.0.0.1:2379, 8e9e05c52164694d, 3.5.13, 20 kB, true, false, 3, 42, 42,"
+                    );
                 }
                 _ => println!("Usage: etcdctl endpoint <health|status>"),
             }
@@ -137,7 +163,10 @@ fn run_etcdctl(args: Vec<String>) -> i32 {
             match sub {
                 "save" => {
                     let path = cmd_args.get(1).map(|s| s.as_str()).unwrap_or("snapshot.db");
-                    println!("{{\"level\":\"info\",\"msg\":\"created snapshot\",\"path\":\"{}\",\"revision\":42}}", path);
+                    println!(
+                        "{{\"level\":\"info\",\"msg\":\"created snapshot\",\"path\":\"{}\",\"revision\":42}}",
+                        path
+                    );
                 }
                 "restore" => {
                     let path = cmd_args.get(1).map(|s| s.as_str()).unwrap_or("snapshot.db");
@@ -145,7 +174,10 @@ fn run_etcdctl(args: Vec<String>) -> i32 {
                 }
                 "status" => {
                     let path = cmd_args.get(1).map(|s| s.as_str()).unwrap_or("snapshot.db");
-                    println!("{}: hash=abc123, revision=42, total keys=150, total size=20 kB", path);
+                    println!(
+                        "{}: hash=abc123, revision=42, total keys=150, total size=20 kB",
+                        path
+                    );
                 }
                 _ => println!("Usage: etcdctl snapshot <save|restore|status> [file]"),
             }
@@ -193,7 +225,10 @@ fn run_etcdctl(args: Vec<String>) -> i32 {
             }
             0
         }
-        other => { eprintln!("etcdctl: unknown command '{}'", other); 1 }
+        other => {
+            eprintln!("etcdctl: unknown command '{}'", other);
+            1
+        }
     }
 }
 
@@ -216,7 +251,9 @@ fn run_etcdutl(args: Vec<String>) -> i32 {
             0
         }
         "defrag" => {
-            let path = cmd_args.iter().position(|a| a == "--data-dir")
+            let path = cmd_args
+                .iter()
+                .position(|a| a == "--data-dir")
                 .and_then(|i| cmd_args.get(i + 1))
                 .map(|s| s.as_str())
                 .unwrap_or("default.etcd");
@@ -228,14 +265,20 @@ fn run_etcdutl(args: Vec<String>) -> i32 {
             match sub {
                 "status" => {
                     let path = cmd_args.get(1).map(|s| s.as_str()).unwrap_or("snapshot.db");
-                    println!("{}: hash=abc123, revision=42, total keys=150, total size=20 kB", path);
+                    println!(
+                        "{}: hash=abc123, revision=42, total keys=150, total size=20 kB",
+                        path
+                    );
                 }
                 "restore" => println!("Snapshot restored successfully"),
                 _ => println!("Usage: etcdutl snapshot <status|restore>"),
             }
             0
         }
-        other => { eprintln!("etcdutl: unknown command '{}'", other); 1 }
+        other => {
+            eprintln!("etcdutl: unknown command '{}'", other);
+            1
+        }
     }
 }
 
@@ -246,7 +289,9 @@ fn main() {
         let bytes = s.as_bytes();
         let mut last_sep = 0;
         for (i, &b) in bytes.iter().enumerate() {
-            if b == b'/' || b == b'\\' { last_sep = i + 1; }
+            if b == b'/' || b == b'\\' {
+                last_sep = i + 1;
+            }
         }
         let base = &s[last_sep..];
         base.strip_suffix(".exe").unwrap_or(base).to_string()
@@ -262,7 +307,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_etcd};
+    use super::run_etcd;
 
     #[test]
     fn help_exits_zero() {

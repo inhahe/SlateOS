@@ -34,7 +34,10 @@ fn run_gsettings(args: Vec<String>) -> i32 {
 
     match cmd {
         "get" => {
-            let schema = args.get(1).map(|s| s.as_str()).unwrap_or("org.gnome.desktop.interface");
+            let schema = args
+                .get(1)
+                .map(|s| s.as_str())
+                .unwrap_or("org.gnome.desktop.interface");
             let key = args.get(2).map(|s| s.as_str()).unwrap_or("gtk-theme");
             let _ = schema;
             match key {
@@ -84,7 +87,10 @@ fn run_gsettings(args: Vec<String>) -> i32 {
         }
         "writable" => println!("true"),
         "monitor" => {
-            let schema = args.get(1).map(|s| s.as_str()).unwrap_or("org.gnome.desktop.interface");
+            let schema = args
+                .get(1)
+                .map(|s| s.as_str())
+                .unwrap_or("org.gnome.desktop.interface");
             println!("Monitoring '{}'...", schema);
         }
         _ => {
@@ -104,7 +110,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_gsettings};
+    use super::run_gsettings;
 
     #[test]
     fn help_exits_zero() {

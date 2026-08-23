@@ -49,7 +49,8 @@ fn run_atuin(args: Vec<String>) -> i32 {
         }
         "search" => {
             let interactive = args.iter().any(|a| a == "-i" || a == "--interactive");
-            let query: Vec<&str> = args.iter()
+            let query: Vec<&str> = args
+                .iter()
                 .skip(1)
                 .filter(|a| !a.starts_with('-'))
                 .map(|s| s.as_str())
@@ -143,7 +144,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_atuin};
+    use super::run_atuin;
 
     #[test]
     fn help_exits_zero() {

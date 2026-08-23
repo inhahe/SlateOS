@@ -42,7 +42,10 @@ fn run_cast(args: &[String]) -> i32 {
     let cmd = args.first().map(|s| s.as_str()).unwrap_or("");
     match cmd {
         "balance" => {
-            let addr = args.get(1).map(|s| s.as_str()).unwrap_or("0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045");
+            let addr = args
+                .get(1)
+                .map(|s| s.as_str())
+                .unwrap_or("0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045");
             println!("{}", addr);
             println!("  Balance: 1234.567890123456789 ETH");
             println!("  Wei:     1234567890123456789000");
@@ -104,7 +107,9 @@ fn run_cast(args: &[String]) -> i32 {
                 "address" => {
                     println!("0x742d35Cc6634C0532925a3b844Bc9e7595f2bD18");
                 }
-                _ => { println!("Wallet operation: {}", sub); }
+                _ => {
+                    println!("Wallet operation: {}", sub);
+                }
             }
             0
         }
@@ -134,8 +139,16 @@ fn run_anvil(args: &[String]) -> i32 {
         return 0;
     }
 
-    let port = args.windows(2).find(|w| w[0] == "--port").map(|w| w[1].as_str()).unwrap_or("8545");
-    let accounts = args.windows(2).find(|w| w[0] == "--accounts").map(|w| w[1].as_str()).unwrap_or("10");
+    let port = args
+        .windows(2)
+        .find(|w| w[0] == "--port")
+        .map(|w| w[1].as_str())
+        .unwrap_or("8545");
+    let accounts = args
+        .windows(2)
+        .find(|w| w[0] == "--accounts")
+        .map(|w| w[1].as_str())
+        .unwrap_or("10");
 
     println!("                             _   _");
     println!("                            (_) | |");
@@ -157,7 +170,10 @@ fn run_anvil(args: &[String]) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let argv0 = args.first().cloned().unwrap_or_else(|| String::from("cast"));
+    let argv0 = args
+        .first()
+        .cloned()
+        .unwrap_or_else(|| String::from("cast"));
     let p = personality(&argv0);
     let rest: Vec<String> = args.into_iter().skip(1).collect();
 
@@ -170,7 +186,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_cast};
+    use super::run_cast;
 
     #[test]
     fn help_exits_zero() {

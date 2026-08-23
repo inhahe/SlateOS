@@ -101,7 +101,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_mcfly};
+    use super::run_mcfly;
 
     #[test]
     fn help_exits_zero() {

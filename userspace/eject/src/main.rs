@@ -62,13 +62,7 @@ impl Default for EjectOptions {
 
 fn default_device() -> String {
     // Check common CD/DVD device paths.
-    let candidates = [
-        "/dev/cdrom",
-        "/dev/dvd",
-        "/dev/sr0",
-        "/dev/sr1",
-        "/dev/fd0",
-    ];
+    let candidates = ["/dev/cdrom", "/dev/dvd", "/dev/sr0", "/dev/sr1", "/dev/fd0"];
     for dev in &candidates {
         if std::path::Path::new(dev).exists() {
             return dev.to_string();
@@ -104,16 +98,14 @@ fn find_device_for_mountpoint(mountpoint: &str) -> Option<String> {
 fn find_mountpoint_for_device(device: &str) -> Option<String> {
     let mounts = fs::read_to_string("/proc/mounts").unwrap_or_default();
     // Also check the canonical path of the device.
-    let canonical = fs::canonicalize(device)
-        .unwrap_or_else(|_| std::path::PathBuf::from(device));
+    let canonical = fs::canonicalize(device).unwrap_or_else(|_| std::path::PathBuf::from(device));
     let canonical_str = canonical.to_string_lossy();
 
     for line in mounts.lines() {
         let parts: Vec<&str> = line.split_whitespace().collect();
-        if parts.len() >= 2
-            && (parts[0] == device || parts[0] == canonical_str.as_ref()) {
-                return Some(parts[1].to_string());
-            }
+        if parts.len() >= 2 && (parts[0] == device || parts[0] == canonical_str.as_ref()) {
+            return Some(parts[1].to_string());
+        }
     }
     None
 }
@@ -133,10 +125,7 @@ struct DeviceInfo {
 
 fn get_device_info(device: &str) -> DeviceInfo {
     // Extract base device name (e.g., "sr0" from "/dev/sr0").
-    let base_name = device
-        .rsplit('/')
-        .next()
-        .unwrap_or(device);
+    let base_name = device.rsplit('/').next().unwrap_or(device);
 
     let sys_path = format!("/sys/block/{base_name}");
 
@@ -215,11 +204,7 @@ fn read_volume_name(device: &str) -> Option<String> {
     let vol_id = &data[pvd_offset + 40..pvd_offset + 72];
     let name = String::from_utf8_lossy(vol_id).trim().to_string();
 
-    if name.is_empty() {
-        None
-    } else {
-        Some(name)
-    }
+    if name.is_empty() { None } else { Some(name) }
 }
 
 // ============================================================================
@@ -249,8 +234,10 @@ fn do_eject(opts: &EjectOptions) -> i32 {
     let info = get_device_info(device);
 
     if opts.verbose {
-        eprintln!("eject: device '{}' is {} (removable={})",
-            device, info.device_type, info.removable);
+        eprintln!(
+            "eject: device '{}' is {} (removable={})",
+            device, info.device_type, info.removable
+        );
     }
 
     if !opts.force && !info.removable {
@@ -261,13 +248,12 @@ fn do_eject(opts: &EjectOptions) -> i32 {
 
     match &opts.action {
         EjectAction::Eject => {
-            if !opts.no_unmount
-                && !unmount_device(device, opts.verbose) {
-                    eprintln!("eject: unmount of {device} failed");
-                    if !opts.force {
-                        return 1;
-                    }
+            if !opts.no_unmount && !unmount_device(device, opts.verbose) {
+                eprintln!("eject: unmount of {device} failed");
+                if !opts.force {
+                    return 1;
                 }
+            }
             if opts.verbose {
                 eprintln!("eject: ejecting {device}");
             }
@@ -308,8 +294,10 @@ fn do_eject(opts: &EjectOptions) -> i32 {
             if opts.verbose {
                 eprintln!("eject: setting auto-eject {state} on {device}");
             }
-            eprintln!("eject: would call CDROMEJECT_SW({}) on {device}",
-                if *enable { 1 } else { 0 });
+            eprintln!(
+                "eject: would call CDROMEJECT_SW({}) on {device}",
+                if *enable { 1 } else { 0 }
+            );
             0
         }
         EjectAction::DisplaySpeed => {

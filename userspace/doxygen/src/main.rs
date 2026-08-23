@@ -29,7 +29,9 @@ fn run_doxygen(args: Vec<String>) -> i32 {
     }
 
     if args.iter().any(|a| a == "-g") {
-        let file = args.iter().position(|a| a == "-g")
+        let file = args
+            .iter()
+            .position(|a| a == "-g")
             .and_then(|i| args.get(i + 1))
             .map(|s| s.as_str())
             .unwrap_or("Doxyfile");
@@ -41,7 +43,9 @@ fn run_doxygen(args: Vec<String>) -> i32 {
     }
 
     if args.iter().any(|a| a == "-l") {
-        let file = args.iter().position(|a| a == "-l")
+        let file = args
+            .iter()
+            .position(|a| a == "-l")
             .and_then(|i| args.get(i + 1))
             .map(|s| s.as_str())
             .unwrap_or("DoxygenLayout.xml");
@@ -49,7 +53,11 @@ fn run_doxygen(args: Vec<String>) -> i32 {
         return 0;
     }
 
-    let config = args.iter().find(|a| !a.starts_with('-')).map(|s| s.as_str()).unwrap_or("Doxyfile");
+    let config = args
+        .iter()
+        .find(|a| !a.starts_with('-'))
+        .map(|s| s.as_str())
+        .unwrap_or("Doxyfile");
     println!("Doxygen version 1.10.0 (Slate OS)");
     println!("Searching for include files...");
     println!("Searching for example files...");
@@ -82,7 +90,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_doxygen};
+    use super::run_doxygen;
 
     #[test]
     fn help_exits_zero() {

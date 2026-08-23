@@ -24,11 +24,11 @@ const VERSION: &str = "0.1.0";
 
 #[derive(Clone, Debug, PartialEq)]
 enum AccessType {
-    Cwd,     // c — current directory
-    Exec,    // e — executable being run
-    Open,    // f — open file (default)
-    Root,    // r — root directory
-    Mmap,    // m — mmap'd file or shared library
+    Cwd,      // c — current directory
+    Exec,     // e — executable being run
+    Open,     // f — open file (default)
+    Root,     // r — root directory
+    Mmap,     // m — mmap'd file or shared library
     _Fd(u32), // file descriptor number
 }
 
@@ -106,9 +106,10 @@ fn get_process_ids() -> Vec<u32> {
     if let Ok(entries) = fs::read_dir("/proc") {
         for entry in entries.flatten() {
             if let Some(name) = entry.file_name().to_str()
-                && let Ok(pid) = name.parse::<u32>() {
-                    pids.push(pid);
-                }
+                && let Ok(pid) = name.parse::<u32>()
+            {
+                pids.push(pid);
+            }
         }
     }
     pids
@@ -131,60 +132,60 @@ fn find_processes_for_path(search_path: &str) -> FuserResult {
 
         // Check cwd.
         if let Some(cwd) = resolve_link(&format!("/proc/{pid}/cwd"))
-            && path_matches(&cwd, &canonical) {
-                processes.push(ProcessMatch {
-                    pid,
-                    uid,
-                    command: comm.clone(),
-                    access: AccessType::Cwd,
-                    _fd: None,
-                });
-            }
+            && path_matches(&cwd, &canonical)
+        {
+            processes.push(ProcessMatch {
+                pid,
+                uid,
+                command: comm.clone(),
+                access: AccessType::Cwd,
+                _fd: None,
+            });
+        }
 
         // Check exe.
         if let Some(exe) = resolve_link(&format!("/proc/{pid}/exe"))
-            && path_matches(&exe, &canonical) {
-                processes.push(ProcessMatch {
-                    pid,
-                    uid,
-                    command: comm.clone(),
-                    access: AccessType::Exec,
-                    _fd: None,
-                });
-            }
+            && path_matches(&exe, &canonical)
+        {
+            processes.push(ProcessMatch {
+                pid,
+                uid,
+                command: comm.clone(),
+                access: AccessType::Exec,
+                _fd: None,
+            });
+        }
 
         // Check root.
         if let Some(root) = resolve_link(&format!("/proc/{pid}/root"))
-            && root != Path::new("/") && path_matches(&root, &canonical) {
-                processes.push(ProcessMatch {
-                    pid,
-                    uid,
-                    command: comm.clone(),
-                    access: AccessType::Root,
-                    _fd: None,
-                });
-            }
+            && root != Path::new("/")
+            && path_matches(&root, &canonical)
+        {
+            processes.push(ProcessMatch {
+                pid,
+                uid,
+                command: comm.clone(),
+                access: AccessType::Root,
+                _fd: None,
+            });
+        }
 
         // Check open fds.
         let fd_dir = format!("/proc/{pid}/fd");
         if let Ok(entries) = fs::read_dir(&fd_dir) {
             for entry in entries.flatten() {
-                if let Some(target) = resolve_link(
-                    entry.path().to_str().unwrap_or_default(),
-                )
-                    && path_matches(&target, &canonical) {
-                        let fd_num = entry
-                            .file_name()
-                            .to_str()
-                            .and_then(|s| s.parse().ok());
-                        processes.push(ProcessMatch {
-                            pid,
-                            uid,
-                            command: comm.clone(),
-                            access: AccessType::Open,
-                            _fd: fd_num,
-                        });
-                    }
+                if let Some(target) = resolve_link(entry.path().to_str().unwrap_or_default())
+                    && path_matches(&target, &canonical)
+                {
+                    let fd_num = entry.file_name().to_str().and_then(|s| s.parse().ok());
+                    processes.push(ProcessMatch {
+                        pid,
+                        uid,
+                        command: comm.clone(),
+                        access: AccessType::Open,
+                        _fd: fd_num,
+                    });
+                }
             }
         }
 
@@ -250,15 +251,14 @@ fn _find_processes_for_port(port: u16, protocol: &str) -> Vec<ProcessMatch> {
         let fd_dir = format!("/proc/{pid}/fd");
         if let Ok(entries) = fs::read_dir(&fd_dir) {
             for entry in entries.flatten() {
-                if let Some(target) = resolve_link(
-                    entry.path().to_str().unwrap_or_default(),
-                ) {
+                if let Some(target) = resolve_link(entry.path().to_str().unwrap_or_default()) {
                     let target_str = target.to_string_lossy();
                     if let Some(rest) = target_str.strip_prefix("socket:[")
-                        && let Some(inode) = rest.strip_suffix(']') {
-                            let comm = read_proc_comm(pid);
-                            inode_pids.insert(inode.to_string(), (pid, comm));
-                        }
+                        && let Some(inode) = rest.strip_suffix(']')
+                    {
+                        let comm = read_proc_comm(pid);
+                        inode_pids.insert(inode.to_string(), (pid, comm));
+                    }
                 }
             }
         }
@@ -276,18 +276,19 @@ fn _find_processes_for_port(port: u16, protocol: &str) -> Vec<ProcessMatch> {
         let local_addr = parts[1];
         if let Some(port_hex) = local_addr.split(':').nth(1)
             && let Ok(local_port) = u16::from_str_radix(port_hex, 16)
-                && local_port == port {
-                    let inode = parts[9];
-                    if let Some((pid, comm)) = inode_pids.get(inode) {
-                        matches.push(ProcessMatch {
-                            pid: *pid,
-                            uid: read_proc_uid(*pid),
-                            command: comm.clone(),
-                            access: AccessType::Open,
-                            _fd: None,
-                        });
-                    }
-                }
+            && local_port == port
+        {
+            let inode = parts[9];
+            if let Some((pid, comm)) = inode_pids.get(inode) {
+                matches.push(ProcessMatch {
+                    pid: *pid,
+                    uid: read_proc_uid(*pid),
+                    command: comm.clone(),
+                    access: AccessType::Open,
+                    _fd: None,
+                });
+            }
+        }
     }
 
     matches
@@ -303,9 +304,10 @@ fn uid_to_name(uid: u32) -> String {
         let parts: Vec<&str> = line.splitn(7, ':').collect();
         if parts.len() >= 3
             && let Ok(u) = parts[2].parse::<u32>()
-                && u == uid {
-                    return parts[0].to_string();
-                }
+            && u == uid
+        {
+            return parts[0].to_string();
+        }
     }
     uid.to_string()
 }
@@ -315,11 +317,7 @@ fn print_fuser_result(result: &FuserResult, verbose: bool) {
     let mut out = stdout.lock();
 
     if verbose {
-        let _ = writeln!(
-            out,
-            "{:>25} USER        PID ACCESS COMMAND",
-            ""
-        );
+        let _ = writeln!(out, "{:>25} USER        PID ACCESS COMMAND", "");
         let _ = write!(out, "{:>25}", result.path);
 
         for proc_match in &result.processes {
@@ -338,12 +336,7 @@ fn print_fuser_result(result: &FuserResult, verbose: bool) {
         // Standard fuser output: path: pid(access)pid(access)...
         let _ = write!(out, "{}:", result.path);
         for proc_match in &result.processes {
-            let _ = write!(
-                out,
-                " {}{}",
-                proc_match.pid,
-                proc_match.access.flag()
-            );
+            let _ = write!(out, " {}{}", proc_match.pid, proc_match.access.flag());
         }
         let _ = writeln!(out);
     }
@@ -397,9 +390,7 @@ fn lsof_scan_all() -> Vec<LsofEntry> {
         if let Ok(fd_entries) = fs::read_dir(&fd_dir) {
             for entry in fd_entries.flatten() {
                 let fd_name = entry.file_name().to_string_lossy().to_string();
-                if let Some(target) = resolve_link(
-                    entry.path().to_str().unwrap_or_default(),
-                ) {
+                if let Some(target) = resolve_link(entry.path().to_str().unwrap_or_default()) {
                     let target_str = target.to_string_lossy().to_string();
                     let type_str = if target_str.starts_with("socket:") {
                         "sock"
@@ -511,17 +502,20 @@ fn lsof_main(args: &[String]) -> i32 {
     for entry in &entries {
         // Apply filters.
         if let Some(pid) = filter_pid
-            && entry.pid != pid {
-                continue;
-            }
+            && entry.pid != pid
+        {
+            continue;
+        }
         if let Some(ref user) = filter_user
-            && &entry.user != user {
-                continue;
-            }
+            && &entry.user != user
+        {
+            continue;
+        }
         if let Some(ref path) = filter_path
-            && !entry.name.contains(path.as_str()) {
-                continue;
-            }
+            && !entry.name.contains(path.as_str())
+        {
+            continue;
+        }
 
         println!(
             "{:<12} {:>6} {:<10} {:>4} {:>6} {}",
@@ -638,10 +632,7 @@ fn fuser_main(args: &[String]) -> i32 {
                             continue;
                         }
                     }
-                    eprintln!(
-                        "fuser: would send {} to pid {}",
-                        signal, proc_match.pid
-                    );
+                    eprintln!("fuser: would send {} to pid {}", signal, proc_match.pid);
                 }
             }
         }

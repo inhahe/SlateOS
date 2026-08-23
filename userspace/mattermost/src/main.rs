@@ -26,12 +26,20 @@ fn run_mattermost_server(args: Vec<String>) -> i32 {
         println!("Build Hash: abc1234");
         return 0;
     }
-    println!("{{\"level\":\"info\",\"ts\":1716368400.000,\"caller\":\"app/server.go:100\",\"msg\":\"Starting Mattermost Server...\"}}");
-    println!("{{\"level\":\"info\",\"ts\":1716368400.100,\"msg\":\"Server version: 9.8.0 (Slate OS)\"}}");
+    println!(
+        "{{\"level\":\"info\",\"ts\":1716368400.000,\"caller\":\"app/server.go:100\",\"msg\":\"Starting Mattermost Server...\"}}"
+    );
+    println!(
+        "{{\"level\":\"info\",\"ts\":1716368400.100,\"msg\":\"Server version: 9.8.0 (Slate OS)\"}}"
+    );
     println!("{{\"level\":\"info\",\"ts\":1716368400.200,\"msg\":\"Database: postgres\"}}");
-    println!("{{\"level\":\"info\",\"ts\":1716368400.500,\"msg\":\"Loaded config from database\"}}");
+    println!(
+        "{{\"level\":\"info\",\"ts\":1716368400.500,\"msg\":\"Loaded config from database\"}}"
+    );
     println!("{{\"level\":\"info\",\"ts\":1716368401.000,\"msg\":\"Starting workers\"}}");
-    println!("{{\"level\":\"info\",\"ts\":1716368401.500,\"msg\":\"Server is listening on :8065\"}}");
+    println!(
+        "{{\"level\":\"info\",\"ts\":1716368401.500,\"msg\":\"Server is listening on :8065\"}}"
+    );
     println!("{{\"level\":\"info\",\"ts\":1716368401.501,\"msg\":\"Mattermost is ready\"}}");
     0
 }
@@ -135,7 +143,10 @@ fn run_mmctl(args: Vec<String>) -> i32 {
             }
             0
         }
-        other => { eprintln!("mmctl: unknown command '{}'", other); 1 }
+        other => {
+            eprintln!("mmctl: unknown command '{}'", other);
+            1
+        }
     }
 }
 
@@ -146,7 +157,9 @@ fn main() {
         let bytes = s.as_bytes();
         let mut last_sep = 0;
         for (i, &b) in bytes.iter().enumerate() {
-            if b == b'/' || b == b'\\' { last_sep = i + 1; }
+            if b == b'/' || b == b'\\' {
+                last_sep = i + 1;
+            }
         }
         let base = &s[last_sep..];
         base.strip_suffix(".exe").unwrap_or(base).to_string()
@@ -161,7 +174,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_mattermost_server};
+    use super::run_mattermost_server;
 
     #[test]
     fn help_exits_zero() {

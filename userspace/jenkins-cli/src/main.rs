@@ -42,12 +42,18 @@ fn run_jenkins_cli(args: &[String]) -> i32 {
             println!("slateos-deploy-staging    SUCCESS   #67 (6h ago)");
         }
         "build" => {
-            let job = args.get(1).map(|s| s.as_str()).unwrap_or("slateos-kernel-build");
+            let job = args
+                .get(1)
+                .map(|s| s.as_str())
+                .unwrap_or("slateos-kernel-build");
             println!("Build triggered for '{}'.", job);
             println!("Queue item: #143");
         }
         "console" => {
-            let job = args.get(1).map(|s| s.as_str()).unwrap_or("slateos-kernel-build");
+            let job = args
+                .get(1)
+                .map(|s| s.as_str())
+                .unwrap_or("slateos-kernel-build");
             println!("Console output for {} #142:", job);
             println!("[Pipeline] Start of Pipeline");
             println!("[Pipeline] stage (Build)");
@@ -82,7 +88,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_jenkins_cli};
+    use super::run_jenkins_cli;
 
     #[test]
     fn help_exits_zero() {

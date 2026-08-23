@@ -69,10 +69,7 @@
 // defensive `arithmetic_side_effects`, `indexing_slicing`, and
 // `slicing` lints fire on every such site (30+ warnings) with no real
 // DoS risk; the wire data is length-validated by the read layer.
-#![allow(
-    clippy::arithmetic_side_effects,
-    clippy::indexing_slicing,
-)]
+#![allow(clippy::arithmetic_side_effects, clippy::indexing_slicing)]
 
 use std::env;
 use std::fmt;

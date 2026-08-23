@@ -181,36 +181,36 @@ const LENGTH_TABLE: [(u16, u8); 29] = [
 
 /// (base_distance, extra_bits) for distance codes 0..29.
 const DISTANCE_TABLE: [(u16, u8); 30] = [
-    (1, 0),     // 0
-    (2, 0),     // 1
-    (3, 0),     // 2
-    (4, 0),     // 3
-    (5, 1),     // 4
-    (7, 1),     // 5
-    (9, 2),     // 6
-    (13, 2),    // 7
-    (17, 3),    // 8
-    (25, 3),    // 9
-    (33, 4),    // 10
-    (49, 4),    // 11
-    (65, 5),    // 12
-    (97, 5),    // 13
-    (129, 6),   // 14
-    (193, 6),   // 15
-    (257, 7),   // 16
-    (385, 7),   // 17
-    (513, 8),   // 18
-    (769, 8),   // 19
-    (1025, 9),  // 20
-    (1537, 9),  // 21
-    (2049, 10), // 22
-    (3073, 10), // 23
-    (4097, 11), // 24
-    (6145, 11), // 25
-    (8193, 12), // 26
-    (12289, 12),// 27
-    (16385, 13),// 28
-    (24577, 13),// 29
+    (1, 0),      // 0
+    (2, 0),      // 1
+    (3, 0),      // 2
+    (4, 0),      // 3
+    (5, 1),      // 4
+    (7, 1),      // 5
+    (9, 2),      // 6
+    (13, 2),     // 7
+    (17, 3),     // 8
+    (25, 3),     // 9
+    (33, 4),     // 10
+    (49, 4),     // 11
+    (65, 5),     // 12
+    (97, 5),     // 13
+    (129, 6),    // 14
+    (193, 6),    // 15
+    (257, 7),    // 16
+    (385, 7),    // 17
+    (513, 8),    // 18
+    (769, 8),    // 19
+    (1025, 9),   // 20
+    (1537, 9),   // 21
+    (2049, 10),  // 22
+    (3073, 10),  // 23
+    (4097, 11),  // 24
+    (6145, 11),  // 25
+    (8193, 12),  // 26
+    (12289, 12), // 27
+    (16385, 13), // 28
+    (24577, 13), // 29
 ];
 
 /// Find the length code (index into LENGTH_TABLE, i.e. 0-28) for a match length.
@@ -293,7 +293,11 @@ struct BitWriter<W: Write> {
 
 impl<W: Write> BitWriter<W> {
     fn new(inner: W) -> Self {
-        Self { inner, buf: 0, bits: 0 }
+        Self {
+            inner,
+            buf: 0,
+            bits: 0,
+        }
     }
 
     /// Write `n` bits of `val` (LSB-first into the stream).
@@ -332,7 +336,11 @@ struct BitReader<R: Read> {
 
 impl<R: Read> BitReader<R> {
     fn new(inner: R) -> Self {
-        Self { inner, buf: 0, bits: 0 }
+        Self {
+            inner,
+            buf: 0,
+            bits: 0,
+        }
     }
 
     /// Read the next byte from the underlying reader into the accumulator.
@@ -440,7 +448,13 @@ impl HuffmanTable {
 
         let max_len = lengths.iter().copied().fold(0u8, u8::max) as u32;
 
-        Ok(HuffmanTable { counts, symbols, first_code, first_sym, max_len })
+        Ok(HuffmanTable {
+            counts,
+            symbols,
+            first_code,
+            first_sym,
+            max_len,
+        })
     }
 
     /// Decode a single symbol from the bit reader.
@@ -456,11 +470,17 @@ impl HuffmanTable {
                 // this code length. We add the offset within this length's run.
                 let idx = (self.first_sym[bits as usize] + (code - f)) as usize;
                 return self.symbols.get(idx).copied().ok_or_else(|| {
-                    io::Error::new(io::ErrorKind::InvalidData, "huffman: symbol index out of range")
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "huffman: symbol index out of range",
+                    )
                 });
             }
         }
-        Err(io::Error::new(io::ErrorKind::InvalidData, "huffman: no symbol found"))
+        Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "huffman: no symbol found",
+        ))
     }
 }
 
@@ -519,7 +539,9 @@ fn deflate_decompress<R: Read>(
                     .map_err(|e| format!("deflate: read stored NLEN: {e}"))?
                     as usize;
                 if (len ^ nlen) != 0xFFFF {
-                    return Err(format!("deflate: stored block LEN/NLEN mismatch ({len} ^ {nlen} != 0xFFFF)"));
+                    return Err(format!(
+                        "deflate: stored block LEN/NLEN mismatch ({len} ^ {nlen} != 0xFFFF)"
+                    ));
                 }
                 let old_len = output.len();
                 output.resize(old_len + len, 0);
@@ -548,8 +570,9 @@ fn deflate_decompress<R: Read>(
                     .map_err(|e| format!("deflate: build fixed litlen table: {e}"))?;
                 let dist_table = fixed_dist_table()
                     .map_err(|e| format!("deflate: build fixed dist table: {e}"))?;
-                let (written, block_crc) = decode_huffman_block(reader, output, &litlen_table, &dist_table)
-                    .map_err(|e| format!("deflate: fixed block: {e}"))?;
+                let (written, block_crc) =
+                    decode_huffman_block(reader, output, &litlen_table, &dist_table)
+                        .map_err(|e| format!("deflate: fixed block: {e}"))?;
                 let _ = written;
                 crc = crc32_update(crc, &[]);
                 // Recompute crc over data we just wrote.
@@ -561,8 +584,9 @@ fn deflate_decompress<R: Read>(
                 // Dynamic Huffman codes.
                 let (litlen_table, dist_table) = decode_dynamic_headers(reader)
                     .map_err(|e| format!("deflate: dynamic header: {e}"))?;
-                let (_written, _block_crc) = decode_huffman_block(reader, output, &litlen_table, &dist_table)
-                    .map_err(|e| format!("deflate: dynamic block: {e}"))?;
+                let (_written, _block_crc) =
+                    decode_huffman_block(reader, output, &litlen_table, &dist_table)
+                        .map_err(|e| format!("deflate: dynamic block: {e}"))?;
             }
             _ => {
                 return Err(format!("deflate: reserved BTYPE {btype}"));
@@ -664,21 +688,21 @@ fn decode_dynamic_headers<R: Read>(
     reader: &mut BitReader<R>,
 ) -> io::Result<(HuffmanTable, HuffmanTable)> {
     let hlit = reader.read_bits(5)? as usize + 257; // number of literal/length codes
-    let hdist = reader.read_bits(5)? as usize + 1;  // number of distance codes
-    let hclen = reader.read_bits(4)? as usize + 4;  // number of code-length codes
+    let hdist = reader.read_bits(5)? as usize + 1; // number of distance codes
+    let hclen = reader.read_bits(4)? as usize + 4; // number of code-length codes
 
     // Code-length code order (RFC 1951 §3.2.7).
-    const CLEN_ORDER: [usize; 19] =
-        [16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15];
+    const CLEN_ORDER: [usize; 19] = [
+        16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15,
+    ];
 
     let mut clen_lengths = [0u8; 19];
     for i in 0..hclen {
         clen_lengths[CLEN_ORDER[i]] = reader.read_bits(3)? as u8;
     }
 
-    let clen_table = HuffmanTable::from_lengths(&clen_lengths).map_err(|e| {
-        io::Error::new(io::ErrorKind::InvalidData, e)
-    })?;
+    let clen_table = HuffmanTable::from_lengths(&clen_lengths)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
 
     // Decode the literal/length + distance code lengths.
     let total = hlit + hdist;
@@ -740,12 +764,10 @@ fn decode_dynamic_headers<R: Read>(
         }
     }
 
-    let litlen_table = HuffmanTable::from_lengths(&lengths[..hlit]).map_err(|e| {
-        io::Error::new(io::ErrorKind::InvalidData, e)
-    })?;
-    let dist_table = HuffmanTable::from_lengths(&lengths[hlit..]).map_err(|e| {
-        io::Error::new(io::ErrorKind::InvalidData, e)
-    })?;
+    let litlen_table = HuffmanTable::from_lengths(&lengths[..hlit])
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+    let dist_table = HuffmanTable::from_lengths(&lengths[hlit..])
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
 
     Ok((litlen_table, dist_table))
 }
@@ -769,8 +791,7 @@ fn hash3(data: &[u8], pos: usize) -> usize {
     if pos + 2 >= data.len() {
         return 0;
     }
-    let h = u32::from(data[pos])
-        .wrapping_mul(2654435761)
+    let h = u32::from(data[pos]).wrapping_mul(2654435761)
         ^ u32::from(data[pos + 1]).wrapping_mul(1234567)
         ^ u32::from(data[pos + 2]);
     (h as usize) & (HASH_SIZE - 1)
@@ -880,8 +901,10 @@ fn deflate_compress(input: &[u8], level: u8) -> Result<Vec<u8>, String> {
     let mut bw = BitWriter::new(&mut output);
 
     // Single final block, fixed Huffman.
-    bw.write_bits(1, 1).map_err(|e| format!("deflate: write BFINAL: {e}"))?;
-    bw.write_bits(1, 2).map_err(|e| format!("deflate: write BTYPE: {e}"))?;
+    bw.write_bits(1, 1)
+        .map_err(|e| format!("deflate: write BFINAL: {e}"))?;
+    bw.write_bits(1, 2)
+        .map_err(|e| format!("deflate: write BTYPE: {e}"))?;
 
     for token in &tokens {
         match *token {
@@ -991,7 +1014,7 @@ fn read_gzip_header(data: &[u8]) -> Result<(GzipHeader, usize), String> {
         return Err(format!("gzip: unsupported compression method {}", data[2]));
     }
     let flg = data[3];
-    if flg & !( FTEXT | FHCRC | FEXTRA | FNAME | FCOMMENT) != 0 {
+    if flg & !(FTEXT | FHCRC | FEXTRA | FNAME | FCOMMENT) != 0 {
         // Reserved bits set: technically an error but we'll ignore.
     }
     let mtime = u32::from_le_bytes([data[4], data[5], data[6], data[7]]);
@@ -1113,9 +1136,8 @@ fn gzip_decompress(input: &[u8]) -> Result<Vec<u8>, String> {
     let mut output = Vec::new();
     let cursor = io::Cursor::new(deflate_data);
     let mut reader = BitReader::new(cursor);
-    let (bytes_written, computed_crc) =
-        deflate_decompress(&mut reader, &mut output)
-            .map_err(|e| format!("gzip: decompress: {e}"))?;
+    let (bytes_written, computed_crc) = deflate_decompress(&mut reader, &mut output)
+        .map_err(|e| format!("gzip: decompress: {e}"))?;
 
     let isize_actual = (bytes_written & 0xFFFF_FFFF) as u32;
     if isize_actual != stored_isize {
@@ -1292,8 +1314,7 @@ fn parse_args() -> Result<Options, String> {
 
 /// Read an entire file into a Vec<u8>.
 fn read_file(path: &Path) -> Result<Vec<u8>, String> {
-    let mut f = File::open(path)
-        .map_err(|e| format!("{}: {e}", path.display()))?;
+    let mut f = File::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
     let mut data = Vec::new();
     f.read_to_end(&mut data)
         .map_err(|e| format!("{}: read error: {e}", path.display()))?;
@@ -1308,8 +1329,7 @@ fn write_file(path: &Path, data: &[u8], force: bool) -> Result<(), String> {
             path.display()
         ));
     }
-    let mut f = File::create(path)
-        .map_err(|e| format!("{}: {e}", path.display()))?;
+    let mut f = File::create(path).map_err(|e| format!("{}: {e}", path.display()))?;
     f.write_all(data)
         .map_err(|e| format!("{}: write error: {e}", path.display()))?;
     Ok(())
@@ -1345,9 +1365,7 @@ fn compress_file(opts: &Options, path: Option<&Path>) -> Result<(), String> {
         let data = read_file(p)?;
         let mtime = if opts.store_name { file_mtime(p) } else { 0 };
         let name = if opts.store_name {
-            p.file_name()
-                .and_then(|n| n.to_str())
-                .map(str::to_string)
+            p.file_name().and_then(|n| n.to_str()).map(str::to_string)
         } else {
             None
         };
@@ -1361,12 +1379,7 @@ fn compress_file(opts: &Options, path: Option<&Path>) -> Result<(), String> {
         (data, None, 0u32, "stdin".to_string())
     };
 
-    let compressed = gzip_compress(
-        &input,
-        fname.as_deref(),
-        mtime,
-        opts.level,
-    )?;
+    let compressed = gzip_compress(&input, fname.as_deref(), mtime, opts.level)?;
 
     if opts.verbose {
         let pct = if input.is_empty() {
@@ -1428,8 +1441,7 @@ fn decompress_file(opts: &Options, path: Option<&Path>) -> Result<(), String> {
         return Ok(());
     }
 
-    let decompressed = gzip_decompress(&input)
-        .map_err(|e| format!("{src_desc}: {e}"))?;
+    let decompressed = gzip_decompress(&input).map_err(|e| format!("{src_desc}: {e}"))?;
 
     if opts.verbose {
         let pct = if decompressed.is_empty() {
@@ -1453,9 +1465,10 @@ fn decompress_file(opts: &Options, path: Option<&Path>) -> Result<(), String> {
     } else if let Some(out_path) = inferred_out_path {
         write_file(&out_path, &decompressed, opts.force)?;
         if !opts.keep
-            && let Some(p) = path {
-                fs::remove_file(p).map_err(|e| format!("{}: remove: {e}", p.display()))?;
-            }
+            && let Some(p) = path
+        {
+            fs::remove_file(p).map_err(|e| format!("{}: remove: {e}", p.display()))?;
+        }
     } else {
         // No .gz suffix — with -f we can still decompress to stdout-like fallback.
         if opts.force {
@@ -2093,10 +2106,7 @@ mod tests {
     #[test]
     fn test_large_input_roundtrip() {
         // ~64 KiB — exercises stored-block boundaries and larger hash chains.
-        let input: Vec<u8> = (0u8..=255)
-            .cycle()
-            .take(65536)
-            .collect();
+        let input: Vec<u8> = (0u8..=255).cycle().take(65536).collect();
         let gz = gzip_compress(&input, None, 0, 6).unwrap();
         let out = gzip_decompress(&gz).unwrap();
         assert_eq!(out, input);

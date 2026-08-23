@@ -42,7 +42,11 @@ fn run_linear(args: Vec<String>) -> i32 {
                     println!("ENG-45      Done          Low       Clean up logs");
                 }
                 "create" => {
-                    let title = args.windows(2).find(|w| w[0] == "-t" || w[0] == "--title").map(|w| w[1].as_str()).unwrap_or("New issue");
+                    let title = args
+                        .windows(2)
+                        .find(|w| w[0] == "-t" || w[0] == "--title")
+                        .map(|w| w[1].as_str())
+                        .unwrap_or("New issue");
                     println!("✔ Created ENG-46: {}", title);
                 }
                 "view" => {
@@ -56,7 +60,9 @@ fn run_linear(args: Vec<String>) -> i32 {
                     println!("  Labels:    bug, backend");
                     println!("  Estimate:  3 points");
                 }
-                _ => { println!("Issue operation: {}", sub); }
+                _ => {
+                    println!("Issue operation: {}", sub);
+                }
             }
             0
         }
@@ -69,7 +75,9 @@ fn run_linear(args: Vec<String>) -> i32 {
                     println!("11      Cycle 11    completed 100%        Dec 25 - Jan 7");
                     println!("13      Cycle 13    upcoming  0%          Jan 22 - Feb 5");
                 }
-                _ => { println!("Cycle operation: {}", sub); }
+                _ => {
+                    println!("Cycle operation: {}", sub);
+                }
             }
             0
         }
@@ -117,7 +125,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_linear};
+    use super::run_linear;
 
     #[test]
     fn help_exits_zero() {

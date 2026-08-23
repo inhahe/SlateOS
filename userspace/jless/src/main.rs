@@ -29,7 +29,8 @@ fn run_jless(args: Vec<String>) -> i32 {
 
     let yaml_mode = args.iter().any(|a| a == "--yaml");
 
-    let file = args.iter()
+    let file = args
+        .iter()
         .find(|a| !a.starts_with('-'))
         .map(|s| s.as_str());
 
@@ -71,7 +72,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_jless};
+    use super::run_jless;
 
     #[test]
     fn help_exits_zero() {

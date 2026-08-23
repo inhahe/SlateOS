@@ -43,7 +43,9 @@ fn run_guix(args: &[String]) -> i32 {
             println!("License GPLv3+");
         }
         "install" => {
-            let pkgs: Vec<&str> = args.iter().skip(1)
+            let pkgs: Vec<&str> = args
+                .iter()
+                .skip(1)
                 .filter(|a| !a.starts_with('-'))
                 .map(|s| s.as_str())
                 .collect();
@@ -87,7 +89,9 @@ fn run_guix(args: &[String]) -> i32 {
             println!("/gnu/store/def-{}-2.12.1", pkg);
         }
         "shell" => {
-            let pkgs: Vec<&str> = args.iter().skip(1)
+            let pkgs: Vec<&str> = args
+                .iter()
+                .skip(1)
                 .filter(|a| !a.starts_with('-'))
                 .map(|s| s.as_str())
                 .collect();
@@ -108,7 +112,10 @@ fn run_guix(args: &[String]) -> i32 {
             println!("done.");
         }
         "system" => {
-            let action = args.get(1).map(|s| s.as_str()).unwrap_or("list-generations");
+            let action = args
+                .get(1)
+                .map(|s| s.as_str())
+                .unwrap_or("list-generations");
             match action {
                 "reconfigure" => println!("guix system: reconfiguring from config.scm..."),
                 "list-generations" => {
@@ -148,7 +155,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_guix};
+    use super::run_guix;
 
     #[test]
     fn help_exits_zero() {

@@ -74,9 +74,19 @@ fn run_flite(args: &[String]) -> i32 {
         return 0;
     }
 
-    let voice = args.windows(2).find(|w| w[0] == "-v").map(|w| w[1].as_str()).unwrap_or("slt");
-    let output = args.windows(2).find(|w| w[0] == "-o").map(|w| w[1].as_str());
-    let text = args.windows(2).find(|w| w[0] == "-t").map(|w| w[1].as_str());
+    let voice = args
+        .windows(2)
+        .find(|w| w[0] == "-v")
+        .map(|w| w[1].as_str())
+        .unwrap_or("slt");
+    let output = args
+        .windows(2)
+        .find(|w| w[0] == "-o")
+        .map(|w| w[1].as_str());
+    let text = args
+        .windows(2)
+        .find(|w| w[0] == "-t")
+        .map(|w| w[1].as_str());
 
     if let Some(wav) = output {
         println!("flite: synthesizing to '{}' (voice={})", wav, voice);
@@ -101,7 +111,11 @@ fn run_text2wave(args: &[String]) -> i32 {
         return 0;
     }
 
-    let output = args.windows(2).find(|w| w[0] == "-o").map(|w| w[1].as_str()).unwrap_or("output.wav");
+    let output = args
+        .windows(2)
+        .find(|w| w[0] == "-o")
+        .map(|w| w[1].as_str())
+        .unwrap_or("output.wav");
     println!("text2wave: reading text from stdin...");
     println!("text2wave: writing to '{}'", output);
     0
@@ -109,7 +123,8 @@ fn run_text2wave(args: &[String]) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first()
+    let prog = args
+        .first()
         .map(|s| strip_ext(basename(s)).to_string())
         .unwrap_or_else(|| "festival".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
@@ -124,7 +139,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_festival};
+    use super::{basename, run_festival, strip_ext};
 
     #[test]
     fn basename_strips_path() {

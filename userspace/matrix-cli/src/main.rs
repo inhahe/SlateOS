@@ -36,7 +36,11 @@ fn run_matrix(args: Vec<String>) -> i32 {
     let cmd = args.first().map(|s| s.as_str()).unwrap_or("");
     match cmd {
         "login" => {
-            let server = args.windows(2).find(|w| w[0] == "--homeserver").map(|w| w[1].as_str()).unwrap_or("https://matrix.org");
+            let server = args
+                .windows(2)
+                .find(|w| w[0] == "--homeserver")
+                .map(|w| w[1].as_str())
+                .unwrap_or("https://matrix.org");
             println!("Logging in to {}...", server);
             println!("Username: @user:matrix.org");
             println!("Password: ****");
@@ -54,7 +58,9 @@ fn run_matrix(args: Vec<String>) -> i32 {
             let sub = args.get(1).map(|s| s.as_str()).unwrap_or("list");
             match sub {
                 "list" => {
-                    println!("Room ID                          Name                 Members  Unread");
+                    println!(
+                        "Room ID                          Name                 Members  Unread"
+                    );
                     println!("!abc123:matrix.org               General Chat         42       3");
                     println!("!def456:matrix.org               Development          18       0");
                     println!("!ghi789:matrix.org               Random               35       12");
@@ -66,7 +72,10 @@ fn run_matrix(args: Vec<String>) -> i32 {
                     println!("  Room ID: !new123:matrix.org");
                 }
                 "info" => {
-                    let room = args.get(2).map(|s| s.as_str()).unwrap_or("!abc123:matrix.org");
+                    let room = args
+                        .get(2)
+                        .map(|s| s.as_str())
+                        .unwrap_or("!abc123:matrix.org");
                     println!("Room: {}", room);
                     println!("  Name:       General Chat");
                     println!("  Topic:      Welcome to the general chat room");
@@ -74,13 +83,23 @@ fn run_matrix(args: Vec<String>) -> i32 {
                     println!("  Encrypted:  true (megolm)");
                     println!("  Created:    2024-01-01");
                 }
-                _ => { println!("Room operation: {}", sub); }
+                _ => {
+                    println!("Room operation: {}", sub);
+                }
             }
             0
         }
         "send" => {
-            let room = args.windows(2).find(|w| w[0] == "-r" || w[0] == "--room").map(|w| w[1].as_str()).unwrap_or("!abc123:matrix.org");
-            let msg = args.windows(2).find(|w| w[0] == "-m" || w[0] == "--message").map(|w| w[1].as_str()).unwrap_or("Hello!");
+            let room = args
+                .windows(2)
+                .find(|w| w[0] == "-r" || w[0] == "--room")
+                .map(|w| w[1].as_str())
+                .unwrap_or("!abc123:matrix.org");
+            let msg = args
+                .windows(2)
+                .find(|w| w[0] == "-m" || w[0] == "--message")
+                .map(|w| w[1].as_str())
+                .unwrap_or("Hello!");
             println!("✔ Sent to {}", room);
             println!("  Event ID: $event123456");
             println!("  Content: {}", msg);
@@ -98,18 +117,31 @@ fn run_matrix(args: Vec<String>) -> i32 {
             0
         }
         "join" => {
-            let room = args.get(1).map(|s| s.as_str()).unwrap_or("!abc123:matrix.org");
+            let room = args
+                .get(1)
+                .map(|s| s.as_str())
+                .unwrap_or("!abc123:matrix.org");
             println!("✔ Joined room {}", room);
             0
         }
         "leave" => {
-            let room = args.get(1).map(|s| s.as_str()).unwrap_or("!abc123:matrix.org");
+            let room = args
+                .get(1)
+                .map(|s| s.as_str())
+                .unwrap_or("!abc123:matrix.org");
             println!("✔ Left room {}", room);
             0
         }
         "invite" => {
-            let user = args.get(1).map(|s| s.as_str()).unwrap_or("@newuser:matrix.org");
-            let room = args.windows(2).find(|w| w[0] == "-r" || w[0] == "--room").map(|w| w[1].as_str()).unwrap_or("!abc123:matrix.org");
+            let user = args
+                .get(1)
+                .map(|s| s.as_str())
+                .unwrap_or("@newuser:matrix.org");
+            let room = args
+                .windows(2)
+                .find(|w| w[0] == "-r" || w[0] == "--room")
+                .map(|w| w[1].as_str())
+                .unwrap_or("!abc123:matrix.org");
             println!("✔ Invited {} to {}", user, room);
             0
         }
@@ -128,7 +160,9 @@ fn run_matrix(args: Vec<String>) -> i32 {
                     println!("  Users:   12345");
                     println!("  Rooms:   6789");
                 }
-                _ => { println!("Server operation: {}", sub); }
+                _ => {
+                    println!("Server operation: {}", sub);
+                }
             }
             0
         }
@@ -152,7 +186,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_matrix};
+    use super::run_matrix;
 
     #[test]
     fn help_exits_zero() {

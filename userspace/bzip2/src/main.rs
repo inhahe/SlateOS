@@ -67,7 +67,10 @@ fn run_bzip2(args: Vec<String>, personality: &str) -> i32 {
 
     match personality {
         "bunzip2" => opts.action = Action::Decompress,
-        "bzcat" => { opts.action = Action::Decompress; opts.stdout = true; }
+        "bzcat" => {
+            opts.action = Action::Decompress;
+            opts.stdout = true;
+        }
         _ => {}
     }
 
@@ -140,16 +143,16 @@ fn bz2_compress(opts: &Bz2Options, personality: &str) -> i32 {
             };
 
             if opts.verbose {
-                eprintln!("  {}: {}00k block, ratio 3.52:1",
-                    file, opts.block_size);
+                eprintln!("  {}: {}00k block, ratio 3.52:1", file, opts.block_size);
             }
-            println!("{}: {} → {} (simulated, block size {}00k)",
-                personality, file, out, opts.block_size);
+            println!(
+                "{}: {} → {} (simulated, block size {}00k)",
+                personality, file, out, opts.block_size
+            );
 
-            if !opts.keep && !opts.stdout
-                && opts.verbose {
-                    eprintln!("{}: removed '{}'", personality, file);
-                }
+            if !opts.keep && !opts.stdout && opts.verbose {
+                eprintln!("{}: removed '{}'", personality, file);
+            }
         }
     }
     0
@@ -172,10 +175,9 @@ fn bz2_decompress(opts: &Bz2Options, personality: &str) -> i32 {
 
             println!("{}: {} → {} (simulated)", personality, file, out);
 
-            if !opts.keep && !opts.stdout
-                && opts.verbose {
-                    eprintln!("{}: removed '{}'", personality, file);
-                }
+            if !opts.keep && !opts.stdout && opts.verbose {
+                eprintln!("{}: removed '{}'", personality, file);
+            }
         }
     }
     0
@@ -215,8 +217,10 @@ fn run_bzip2recover(args: &[String]) -> i32 {
     println!("  block 1 runs from byte 80 to byte 135200 (simulated)");
     println!("  block 2 runs from byte 135200 to byte 270400 (simulated)");
     println!("  block 3 runs from byte 270400 to byte 405600 (simulated)");
-    println!("  writing rec00001{}.bz2, rec00002{}.bz2, rec00003{}.bz2",
-        file, file, file);
+    println!(
+        "  writing rec00001{}.bz2, rec00002{}.bz2, rec00003{}.bz2",
+        file, file, file
+    );
     println!("bzip2recover: finished. 3 blocks recovered.");
     0
 }
@@ -231,7 +235,9 @@ fn main() {
         let bytes = s.as_bytes();
         let mut last_sep = 0;
         for (i, &b) in bytes.iter().enumerate() {
-            if b == b'/' || b == b'\\' { last_sep = i + 1; }
+            if b == b'/' || b == b'\\' {
+                last_sep = i + 1;
+            }
         }
         let base = &s[last_sep..];
         let base = base.strip_suffix(".exe").unwrap_or(base);

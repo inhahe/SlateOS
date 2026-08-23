@@ -7,8 +7,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_dagster(args: &[String], is_dagit: bool) -> i32 {
     if is_dagit || (args.first().map(|s| s.as_str()) == Some("dev")) {
@@ -104,7 +108,10 @@ fn run_dagster(args: &[String], is_dagit: bool) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "dagster".to_string());
+    let prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "dagster".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let is_dagit = prog == "dagit";
     let code = run_dagster(&rest, is_dagit);
@@ -113,7 +120,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_dagster};
+    use super::{basename, run_dagster, strip_ext};
 
     #[test]
     fn basename_strips_path() {

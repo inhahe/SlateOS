@@ -47,7 +47,12 @@ fn run_virsh(args: Vec<String>) -> i32 {
     }
 
     let cmd = args.first().map(|s| s.as_str()).unwrap_or("");
-    let rest: Vec<&str> = args.iter().skip(1).filter(|a| !a.starts_with('-')).map(|s| s.as_str()).collect();
+    let rest: Vec<&str> = args
+        .iter()
+        .skip(1)
+        .filter(|a| !a.starts_with('-'))
+        .map(|s| s.as_str())
+        .collect();
 
     match cmd {
         "list" => {
@@ -142,7 +147,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_virsh};
+    use super::run_virsh;
 
     #[test]
     fn help_exits_zero() {

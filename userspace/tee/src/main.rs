@@ -144,9 +144,7 @@ fn parse_args(args: &[String]) -> ParseResult {
                     "exit" => OutputErrorMode::Exit,
                     "exit-nopipe" => OutputErrorMode::ExitNopipe,
                     _ => {
-                        eprintln!(
-                            "tee: invalid output error mode '{mode_str}'"
-                        );
+                        eprintln!("tee: invalid output error mode '{mode_str}'");
                         eprintln!("Valid modes: warn, warn-nopipe, exit, exit-nopipe");
                         eprintln!("Try 'tee --help' for more information.");
                         process::exit(1);

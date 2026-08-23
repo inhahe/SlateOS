@@ -425,12 +425,12 @@ fn format_paragraph(lines: &[&str], config: &Config) -> Vec<String> {
     // In tagged-paragraph mode, first line keeps its indent, rest use the
     // second line's indent.
     // In default mode, all lines use the first line's indent.
-    let (first_line_indent, continuation_indent) =
-        if config.crown_margin || config.tagged_paragraph {
-            (first_indent.to_string(), rest_indent.to_string())
-        } else {
-            (first_indent.to_string(), first_indent.to_string())
-        };
+    let (first_line_indent, continuation_indent) = if config.crown_margin || config.tagged_paragraph
+    {
+        (first_indent.to_string(), rest_indent.to_string())
+    } else {
+        (first_indent.to_string(), first_indent.to_string())
+    };
 
     if config.split_only {
         // Split-only mode: break long lines but never join short ones.
@@ -454,10 +454,7 @@ fn format_paragraph(lines: &[&str], config: &Config) -> Vec<String> {
     }
 
     // Collect all words from all lines in the paragraph.
-    let all_words: Vec<&str> = lines
-        .iter()
-        .flat_map(|line| split_words(line))
-        .collect();
+    let all_words: Vec<&str> = lines.iter().flat_map(|line| split_words(line)).collect();
 
     if all_words.is_empty() {
         return vec![String::new()];
@@ -518,8 +515,7 @@ fn format_text(input: &str, config: &Config) -> String {
 
         // Flush final prefix paragraph.
         if !stripped_paragraph.is_empty() {
-            let stripped_refs: Vec<&str> =
-                stripped_paragraph.iter().map(|s| s.as_str()).collect();
+            let stripped_refs: Vec<&str> = stripped_paragraph.iter().map(|s| s.as_str()).collect();
             let formatted = format_paragraph(&stripped_refs, config);
             for fline in &formatted {
                 output.push(format!("{pfx}{fline}"));
@@ -757,7 +753,10 @@ mod tests {
         };
         let input = "First paragraph words here.\n\nSecond paragraph words here.\n";
         let output = format_text(input, &config);
-        assert!(output.contains("\n\n"), "paragraphs should be separated by blank line");
+        assert!(
+            output.contains("\n\n"),
+            "paragraphs should be separated by blank line"
+        );
         assert!(output.contains("First paragraph"));
         assert!(output.contains("Second paragraph"));
     }
@@ -768,7 +767,10 @@ mod tests {
         let input = "Line one.\n\n\nLine two.\n";
         let output = format_text(input, &config);
         // Multiple blank lines should each be preserved.
-        assert!(output.contains("\n\n\n"), "multiple blank lines should be preserved");
+        assert!(
+            output.contains("\n\n\n"),
+            "multiple blank lines should be preserved"
+        );
     }
 
     #[test]
@@ -791,7 +793,10 @@ mod tests {
         let input = "    indented line one two three four five six.\n";
         let output = format_text(input, &config);
         // The output should start with the same indentation.
-        assert!(output.starts_with("    "), "indentation should be preserved");
+        assert!(
+            output.starts_with("    "),
+            "indentation should be preserved"
+        );
     }
 
     #[test]
@@ -862,8 +867,7 @@ mod tests {
             tagged_paragraph: true,
             ..test_config()
         };
-        let input =
-            "* This is a bullet point that has a lot of words and should wrap around.\n  The continuation has a different indent.\n";
+        let input = "* This is a bullet point that has a lot of words and should wrap around.\n  The continuation has a different indent.\n";
         let output = format_text(input, &config);
         let out_lines: Vec<&str> = output.lines().collect();
         assert!(!out_lines.is_empty());
@@ -1032,12 +1036,13 @@ mod tests {
         let output = format_text(input, &config);
         // Quoted lines should be reformatted with prefix.
         for line in output.lines() {
-            let acceptable = line.starts_with("> ")
-                || line == "Not quoted."
-                || line.is_empty();
+            let acceptable = line.starts_with("> ") || line == "Not quoted." || line.is_empty();
             assert!(acceptable, "unexpected line without prefix: '{line}'");
         }
-        assert!(output.contains("Not quoted."), "non-prefixed line preserved");
+        assert!(
+            output.contains("Not quoted."),
+            "non-prefixed line preserved"
+        );
     }
 
     #[test]
@@ -1182,11 +1187,7 @@ mod tests {
 
     #[test]
     fn test_parse_goal_flag() {
-        let args = vec![
-            "fmt".to_string(),
-            "-g".to_string(),
-            "50".to_string(),
-        ];
+        let args = vec!["fmt".to_string(), "-g".to_string(), "50".to_string()];
         if let ParseResult::Run(config) = parse_args(&args) {
             assert_eq!(config.goal, 50);
         } else {
@@ -1212,11 +1213,7 @@ mod tests {
 
     #[test]
     fn test_parse_prefix() {
-        let args = vec![
-            "fmt".to_string(),
-            "-p".to_string(),
-            "> ".to_string(),
-        ];
+        let args = vec!["fmt".to_string(), "-p".to_string(), "> ".to_string()];
         if let ParseResult::Run(config) = parse_args(&args) {
             assert_eq!(config.prefix, Some("> ".to_string()));
         } else {
@@ -1311,7 +1308,7 @@ mod tests {
         assert!(word_ends_sentence("hello.)"));
         assert!(!word_ends_sentence("hello"));
         assert!(!word_ends_sentence("hello,"));
-        assert!(word_ends_sentence("Dr."));  // Simple heuristic: abbreviations are detected too.
+        assert!(word_ends_sentence("Dr.")); // Simple heuristic: abbreviations are detected too.
     }
 
     #[test]

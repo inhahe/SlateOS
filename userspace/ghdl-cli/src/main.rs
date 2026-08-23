@@ -49,7 +49,10 @@ fn run_ghdl(args: &[String]) -> i32 {
         }
         "-r" | "--run" => {
             let unit = args.get(1).map(|s| s.as_str()).unwrap_or("testbench");
-            let vcd = args.windows(2).find(|w| w[0] == "--vcd").map(|w| w[1].as_str());
+            let vcd = args
+                .windows(2)
+                .find(|w| w[0] == "--vcd")
+                .map(|w| w[1].as_str());
             println!("ghdl: running '{}'", unit);
             if let Some(v) = vcd {
                 println!("VCD output: {}", v);
@@ -84,7 +87,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_ghdl};
+    use super::run_ghdl;
 
     #[test]
     fn help_exits_zero() {

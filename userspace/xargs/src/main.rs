@@ -324,10 +324,7 @@ fn parse_args(args: &[String]) -> Result<Config, i32> {
                         continue;
                     }
                     _ => {
-                        eprintln!(
-                            "xargs: invalid option -- '{}'",
-                            char::from(bytes[j])
-                        );
+                        eprintln!("xargs: invalid option -- '{}'", char::from(bytes[j]));
                         eprintln!("Try 'xargs --help' for more information.");
                         return Err(EXIT_INTERNAL);
                     }
@@ -590,10 +587,7 @@ fn batch_by_args(
         }
 
         // A single item that exceeds the limit on its own.
-        if current_batch.is_empty()
-            && base_len + item_len > max_chars
-            && exit_on_too_long
-        {
+        if current_batch.is_empty() && base_len + item_len > max_chars && exit_on_too_long {
             eprintln!(
                 "xargs: single argument too long ({} > {max_chars})",
                 base_len + item_len,
@@ -982,7 +976,12 @@ fn run_replace_mode(config: &Config, data: &[u8], replace_str: &str) -> i32 {
         return EXIT_SUCCESS;
     }
 
-    execute_batches(&cmd_lines, config.verbose, config.interactive, config.max_procs)
+    execute_batches(
+        &cmd_lines,
+        config.verbose,
+        config.interactive,
+        config.max_procs,
+    )
 }
 
 /// Execute in `-L` (max-lines) mode.
@@ -1033,7 +1032,12 @@ fn run_line_mode(config: &Config, data: &[u8], max_lines: usize) -> i32 {
         return EXIT_SUCCESS;
     }
 
-    execute_batches(&cmd_lines, config.verbose, config.interactive, config.max_procs)
+    execute_batches(
+        &cmd_lines,
+        config.verbose,
+        config.interactive,
+        config.max_procs,
+    )
 }
 
 /// Execute in default / `-n` (max-args) mode.
@@ -1081,7 +1085,12 @@ fn run_arg_mode(config: &Config, data: &[u8]) -> i32 {
         return EXIT_SUCCESS;
     }
 
-    execute_batches(&cmd_lines, config.verbose, config.interactive, config.max_procs)
+    execute_batches(
+        &cmd_lines,
+        config.verbose,
+        config.interactive,
+        config.max_procs,
+    )
 }
 
 /// Parse input items from raw data according to the delimiter configuration.

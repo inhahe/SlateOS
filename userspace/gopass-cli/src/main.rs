@@ -66,10 +66,15 @@ fn run_gopass(args: Vec<String>) -> i32 {
         "show" => {
             let name = args.get(1).map(|s| s.as_str()).unwrap_or("email/work");
             let clip = args.iter().any(|a| a == "-c" || a == "--clip");
-            let revision = args.windows(2).find(|w| w[0] == "--revision")
+            let revision = args
+                .windows(2)
+                .find(|w| w[0] == "--revision")
                 .map(|w| w[1].as_str());
             if clip {
-                println!("Copied {}/password to clipboard. Will clear in 45 seconds.", name);
+                println!(
+                    "Copied {}/password to clipboard. Will clear in 45 seconds.",
+                    name
+                );
             } else {
                 if let Some(rev) = revision {
                     println!("(revision: {})", rev);
@@ -99,7 +104,10 @@ fn run_gopass(args: Vec<String>) -> i32 {
             0
         }
         "clone" => {
-            let url = args.get(1).map(|s| s.as_str()).unwrap_or("git@github.com:team/pass-store.git");
+            let url = args
+                .get(1)
+                .map(|s| s.as_str())
+                .unwrap_or("git@github.com:team/pass-store.git");
             let name = args.get(2).map(|s| s.as_str()).unwrap_or("team");
             println!("Cloning {} as '{}' ...", url, name);
             println!("  Mounted at '{}'", name);
@@ -121,7 +129,9 @@ fn run_gopass(args: Vec<String>) -> i32 {
                     let name = args.get(2).map(|s| s.as_str()).unwrap_or("old-mount");
                     println!("Unmounted '{}'", name);
                 }
-                _ => { println!("Mount operation: {}", sub); }
+                _ => {
+                    println!("Mount operation: {}", sub);
+                }
             }
             0
         }
@@ -140,7 +150,9 @@ fn run_gopass(args: Vec<String>) -> i32 {
                     println!("Added recipient {} to store", id);
                     println!("  Re-encrypting 14 entries...");
                 }
-                _ => { println!("Recipient operation: {}", sub); }
+                _ => {
+                    println!("Recipient operation: {}", sub);
+                }
             }
             0
         }
@@ -190,7 +202,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_gopass};
+    use super::run_gopass;
 
     #[test]
     fn help_exits_zero() {

@@ -1114,7 +1114,11 @@ users:
         // immediately whatever the harness has connected to it.
         assert!(!authenticate(&mut auth, &record, "Password: ", "su"));
 
-        assert_eq!(auth.failures("grace"), before, "a refusal is not an attempt");
+        assert_eq!(
+            auth.failures("grace"),
+            before,
+            "a refusal is not an attempt"
+        );
         let delay_after = auth
             .rate_limited("grace")
             .expect("still delayed, but no further");
@@ -1161,16 +1165,16 @@ users:
         let missing = std::path::Path::new("/nonexistent/su-tests");
 
         // What `login` recorded.
-        let mut as_login = authlib::Authenticator::with_stores(missing, missing)
-            .with_faillock(&faillock);
+        let mut as_login =
+            authlib::Authenticator::with_stores(missing, missing).with_faillock(&faillock);
         for _ in 0..FREE_ATTEMPTS_HEADROOM {
             as_login.note_failure("ivan");
         }
 
         // What `su` sees: a separate process, a fresh in-memory tally, the
         // same file.
-        let mut as_su = authlib::Authenticator::with_stores(missing, missing)
-            .with_faillock(&faillock);
+        let mut as_su =
+            authlib::Authenticator::with_stores(missing, missing).with_faillock(&faillock);
         assert!(
             as_su.rate_limited("ivan").is_some(),
             "su must honour the delay login earned"

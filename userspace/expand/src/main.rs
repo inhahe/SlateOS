@@ -149,10 +149,7 @@ fn next_tab_stop(col: usize, stops: &TabStops) -> Option<usize> {
 /// Detect mode from argv[0].
 fn detect_mode(argv0: &str) -> Mode {
     // Extract the base name, stripping any directory prefix and extension.
-    let base = argv0
-        .rsplit(['/', '\\'])
-        .next()
-        .unwrap_or(argv0);
+    let base = argv0.rsplit(['/', '\\']).next().unwrap_or(argv0);
     let base_lower = base.to_ascii_lowercase();
     if base_lower.starts_with("unexpand") {
         Mode::Unexpand
@@ -478,8 +475,7 @@ fn run_unexpand(config: &Config) -> io::Result<i32> {
         for line_result in reader.lines() {
             match line_result {
                 Ok(line) => {
-                    let unexpanded =
-                        unexpand_line(&line, &config.tab_stops, config.initial_only);
+                    let unexpanded = unexpand_line(&line, &config.tab_stops, config.initial_only);
                     out.write_all(unexpanded.as_bytes())?;
                     out.write_all(b"\n")?;
                 }

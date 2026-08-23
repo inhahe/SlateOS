@@ -8187,7 +8187,7 @@ fn gen_fileshare() -> Vec<u8> {
             "{}: {} → {} [{}] {}{}\n",
             s.id,
             s.name,
-            s.path,
+            s.path.display(),
             s.protocol.label(),
             s.access.label(),
             en

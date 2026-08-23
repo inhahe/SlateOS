@@ -5355,6 +5355,12 @@ extern "C" fn kernel_main() -> ! {
             if let Err(e) = fs::fcompress::self_test() {
                 serial_println!("WARNING: file-compression self-test failed: {:?}", e);
             }
+            // fileshare was reachable only from a `kshell` subcommand, so its
+            // suite had never run in the boot test (TD-A-FS-SELFTESTS-NEVER-RUN).
+            // It contacts no network -- it is in-memory share bookkeeping --
+            // and now resets to the uninitialised state on the way out, so it
+            // leaves no residue for a boot run to inherit.
+            fs::fileshare::self_test();
             if let Err(e) = fs::fileselect::self_test() {
                 serial_println!("WARNING: file-select self-test failed: {:?}", e);
             }

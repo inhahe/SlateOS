@@ -40333,7 +40333,7 @@ fn cmd_fileshare(args: &str) {
                         "{:>4} {:<16} {:<30} {:>5} {:>10} {:>7}",
                         s.id,
                         s.name,
-                        s.path,
+                        s.path.display(),
                         s.protocol.label(),
                         s.access.label(),
                         s.enabled
@@ -40443,7 +40443,7 @@ fn cmd_fileshare(args: &str) {
                         r.id,
                         r.host,
                         r.share_name,
-                        r.mount_point,
+                        r.mount_point.display(),
                         r.protocol.label(),
                         r.status.label(),
                         auto

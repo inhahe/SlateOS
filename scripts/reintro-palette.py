@@ -69,6 +69,7 @@ STARTUP = "gui/desktop/src/startup_settings.rs"
 DTS = "gui/desktop/src/datetime_settings.rs"
 TPAD = "gui/desktop/src/touchpad.rs"
 OV = "gui/desktop/src/overview.rs"
+CTX = "gui/desktop/src/context_ext.rs"
 
 # (name, file, [(old, new), ...], [packages], [tests expected to fail])
 DEFECTS = [
@@ -3570,6 +3571,396 @@ DEFECTS = [
             'a_wash_keeps_its_own_alpha_and_the_colour_of_its_role',
         ],
     ),
+    # ---- context_ext.rs (module 21 of 49) ---------------------------------
+    (
+        "AAAAAAAAAAAAAAA: the menu's background keeps Mocha's base",
+        CTX,
+        [
+            ('        height: total_height,\n        color: p.base,',
+             '        height: total_height,\n        color: guitk::color::Color::from_hex(0x1E1E2E),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_context_menu_draws_comes_from_its_palette',
+            'the_menus_own_surfaces_come_from_the_palette',
+        ],
+    ),
+    (
+        "BBBBBBBBBBBBBBB: the menu's border keeps Mocha's surface1",
+        CTX,
+        [
+            ('        height: total_height,\n        color: p.surface1,',
+             '        height: total_height,\n        color: guitk::color::Color::from_hex(0x45475A),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_context_menu_draws_comes_from_its_palette',
+            'the_menus_own_surfaces_come_from_the_palette',
+        ],
+    ),
+    (
+        "CCCCCCCCCCCCCCC: the separator keeps Mocha's surface0",
+        CTX,
+        [
+            ('                    color: p.surface0,\n                    width: 1.0,',
+             '                    color: guitk::color::Color::from_hex(0x313244),\n                    width: 1.0,'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_context_menu_draws_comes_from_its_palette',
+        ],
+    ),
+    (
+        "DDDDDDDDDDDDDDD: a hovered built-in row keeps Mocha's surface0",
+        CTX,
+        [
+            ('                        height: item_height,\n                        color: p.surface0,\n                        corner_radii: CornerRadii::all(4.0),\n                    });\n                }\n\n                // Icon.',
+             '                        height: item_height,\n                        color: guitk::color::Color::from_hex(0x313244),\n                        corner_radii: CornerRadii::all(4.0),\n                    });\n                }\n\n                // Icon.'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_context_menu_draws_comes_from_its_palette',
+            'the_menus_own_surfaces_come_from_the_palette',
+        ],
+    ),
+    (
+        "EEEEEEEEEEEEEEE: a hovered built-in item's icon keeps Mocha's text",
+        CTX,
+        [
+            ('                    text: item.icon().to_string(),\n                    font_size: 13.0,\n                    color: if hovered { p.text }',
+             '                    text: item.icon().to_string(),\n                    font_size: 13.0,\n                    color: if hovered { guitk::color::Color::from_hex(0xCDD6F4) }'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_context_menu_draws_comes_from_its_palette',
+        ],
+    ),
+    (
+        "FFFFFFFFFFFFFFF: an idle built-in item's icon keeps Mocha's subtext1",
+        CTX,
+        [
+            ('                    text: item.icon().to_string(),\n                    font_size: 13.0,\n                    color: if hovered { p.text } else { p.subtext1 },',
+             '                    text: item.icon().to_string(),\n                    font_size: 13.0,\n                    color: if hovered { p.text } else { guitk::color::Color::from_hex(0xBAC2DE) },'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_context_menu_draws_comes_from_its_palette',
+        ],
+    ),
+    (
+        "GGGGGGGGGGGGGGG: a shortcut hint keeps Mocha's overlay0",
+        CTX,
+        [
+            ('                        font_size: 11.0,\n                        color: p.overlay0,\n                        font_weight: FontWeightHint::Light,\n                        max_width: None,\n                        overflow: TextOverflow::Clip,\n                    });\n                }\n\n                cy += item_height;\n            }\n            ContextMenuEntry::Extension {',
+             '                        font_size: 11.0,\n                        color: guitk::color::Color::from_hex(0x6C7086),\n                        font_weight: FontWeightHint::Light,\n                        max_width: None,\n                        overflow: TextOverflow::Clip,\n                    });\n                }\n\n                cy += item_height;\n            }\n            ContextMenuEntry::Extension {'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_context_menu_draws_comes_from_its_palette',
+        ],
+    ),
+    (
+        "HHHHHHHHHHHHHHH: an idle extension icon keeps Mocha's subtext0",
+        CTX,
+        [
+            ('                    color: if hovered { p.accent } else { p.subtext0 },',
+             '                    color: if hovered { p.accent } else { guitk::color::Color::from_hex(0xA6ADC8) },'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_context_menu_draws_comes_from_its_palette',
+            'a_hovered_extensions_icon_follows_the_accent',
+        ],
+    ),
+    (
+        "IIIIIIIIIIIIIII: a slow extension's label keeps Mocha's overlay0",
+        CTX,
+        [
+            ('                    color: if *slow {\n                        p.overlay0',
+             '                    color: if *slow {\n                        guitk::color::Color::from_hex(0x6C7086)'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_context_menu_draws_comes_from_its_palette',
+        ],
+    ),
+    (
+        "JJJJJJJJJJJJJJJ: the submenu arrow keeps Mocha's subtext0",
+        CTX,
+        [
+            ('                        text: "\\u{25B6}".to_string(),\n                        font_size: 10.0,\n                        color: p.subtext0,',
+             '                        text: "\\u{25B6}".to_string(),\n                        font_size: 10.0,\n                        color: guitk::color::Color::from_hex(0xA6ADC8),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_context_menu_draws_comes_from_its_palette',
+        ],
+    ),
+    (
+        "KKKKKKKKKKKKKKK: the settings title keeps Mocha's text",
+        CTX,
+        [
+            ('            font_size: 18.0,\n            color: p.text,',
+             '            font_size: 18.0,\n            color: guitk::color::Color::from_hex(0xCDD6F4),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_context_menu_draws_comes_from_its_palette',
+        ],
+    ),
+    (
+        "LLLLLLLLLLLLLLL: the settings search bar keeps Mocha's surface0",
+        CTX,
+        [
+            ('            height: 28.0,\n            color: p.surface0,',
+             '            height: 28.0,\n            color: guitk::color::Color::from_hex(0x313244),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_context_menu_draws_comes_from_its_palette',
+        ],
+    ),
+    (
+        "MMMMMMMMMMMMMMM: a selected settings row keeps Mocha's surface0",
+        CTX,
+        [
+            ('                let row_bg = if selected { p.surface0 } else { p.mantle };',
+             '                let row_bg = if selected { guitk::color::Color::from_hex(0x313244) } else { p.mantle };'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_context_menu_draws_comes_from_its_palette',
+            'the_menus_own_surfaces_come_from_the_palette',
+        ],
+    ),
+    (
+        "NNNNNNNNNNNNNNN: an unselected settings row keeps Mocha's mantle",
+        CTX,
+        [
+            ('                let row_bg = if selected { p.surface0 } else { p.mantle };',
+             '                let row_bg = if selected { p.surface0 } else { guitk::color::Color::from_hex(0x181825) };'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_context_menu_draws_comes_from_its_palette',
+            'the_menus_own_surfaces_come_from_the_palette',
+        ],
+    ),
+    (
+        "OOOOOOOOOOOOOOO: the enabled dot keeps Mocha's green",
+        CTX,
+        [
+            ('                let status_color = if ext.enabled { p.green } else { p.red };',
+             '                let status_color = if ext.enabled { guitk::color::Color::from_hex(0xA6E3A1) } else { p.red };'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_context_menu_draws_comes_from_its_palette',
+            'an_enabled_extension_and_a_disabled_one_never_look_alike',
+        ],
+    ),
+    (
+        "PPPPPPPPPPPPPPP: the disabled dot keeps Mocha's red",
+        CTX,
+        [
+            ('                let status_color = if ext.enabled { p.green } else { p.red };',
+             '                let status_color = if ext.enabled { p.green } else { guitk::color::Color::from_hex(0xF38BA8) };'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_context_menu_draws_comes_from_its_palette',
+            'an_enabled_extension_and_a_disabled_one_never_look_alike',
+        ],
+    ),
+    (
+        "QQQQQQQQQQQQQQQ: the Slow badge keeps Mocha's yellow",
+        CTX,
+        [
+            ('                        text: "Slow".to_string(),\n                        font_size: 10.0,\n                        color: p.yellow,',
+             '                        text: "Slow".to_string(),\n                        font_size: 10.0,\n                        color: guitk::color::Color::from_hex(0xF9E2AF),'),
+        ],
+        ["desktop"],
+        [
+            # Not the frozen test: a badge nailed to a hardcoded yellow still
+            # does not move with the accent, which is all that test claims.
+            # Only the sweep can see a literal.
+            'every_colour_the_context_menu_draws_comes_from_its_palette',
+        ],
+    ),
+    (
+        "RRRRRRRRRRRRRRR: a hovered extension's icon keeps its hardcoded blue",
+        CTX,
+        [
+            ('                    color: if hovered { p.accent } else { p.subtext0 },',
+             '                    color: if hovered { guitk::color::Color::from_hex(0x89B4FA) } else { p.subtext0 },'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_context_menu_draws_comes_from_its_palette',
+            'a_hovered_extensions_icon_follows_the_accent',
+        ],
+    ),
+    (
+        "SSSSSSSSSSSSSSS: a hovered extension's icon is drawn like an idle one",
+        CTX,
+        [
+            ('                    color: if hovered { p.accent } else { p.subtext0 },',
+             '                    color: if hovered { p.subtext0 } else { p.subtext0 },'),
+        ],
+        ["desktop"],
+        [
+            'a_hovered_extensions_icon_follows_the_accent',
+        ],
+    ),
+    (
+        "TTTTTTTTTTTTTTT: an extension's icon takes the accent whether it is pointed at or not",
+        CTX,
+        [
+            ('                    color: if hovered { p.accent } else { p.subtext0 },',
+             '                    color: if hovered { p.accent } else { p.accent },'),
+        ],
+        ["desktop"],
+        [
+            'a_hovered_extensions_icon_follows_the_accent',
+        ],
+    ),
+    (
+        "UUUUUUUUUUUUUUU: a hovered extension's icon is drawn in the body text colour",
+        CTX,
+        [
+            ('                    color: if hovered { p.accent } else { p.subtext0 },',
+             '                    color: if hovered { p.text } else { p.subtext0 },'),
+        ],
+        ["desktop"],
+        [
+            'a_hovered_extensions_icon_follows_the_accent',
+        ],
+    ),
+    (
+        "VVVVVVVVVVVVVVV: the enabled dot follows the desktop's accent",
+        CTX,
+        [
+            ('                let status_color = if ext.enabled { p.green } else { p.red };',
+             '                let status_color = if ext.enabled { p.accent } else { p.red };'),
+        ],
+        ["desktop"],
+        [
+            'nothing_that_reports_a_fact_follows_the_accent',
+            'an_enabled_extension_and_a_disabled_one_never_look_alike',
+        ],
+    ),
+    (
+        "WWWWWWWWWWWWWWW: the disabled dot follows the desktop's accent",
+        CTX,
+        [
+            ('                let status_color = if ext.enabled { p.green } else { p.red };',
+             '                let status_color = if ext.enabled { p.green } else { p.accent };'),
+        ],
+        ["desktop"],
+        [
+            'nothing_that_reports_a_fact_follows_the_accent',
+            'an_enabled_extension_and_a_disabled_one_never_look_alike',
+        ],
+    ),
+    (
+        "XXXXXXXXXXXXXXX: the Slow badge follows the desktop's accent",
+        CTX,
+        [
+            ('                        text: "Slow".to_string(),\n                        font_size: 10.0,\n                        color: p.yellow,',
+             '                        text: "Slow".to_string(),\n                        font_size: 10.0,\n                        color: p.accent,'),
+        ],
+        ["desktop"],
+        [
+            'nothing_that_reports_a_fact_follows_the_accent',
+        ],
+    ),
+    (
+        'YYYYYYYYYYYYYYY: an enabled extension and a disabled one are told apart by nothing',
+        CTX,
+        [
+            ('                let status_color = if ext.enabled { p.green } else { p.red };',
+             '                let status_color = if ext.enabled { p.green } else { p.green };'),
+        ],
+        ["desktop"],
+        [
+            'an_enabled_extension_and_a_disabled_one_never_look_alike',
+        ],
+    ),
+    (
+        'ZZZZZZZZZZZZZZZ: the hovered row is the same colour as the menu under it',
+        CTX,
+        [
+            ('                        height: item_height,\n                        color: p.surface0,\n                        corner_radii: CornerRadii::all(4.0),\n                    });\n                }\n\n                // Icon.',
+             '                        height: item_height,\n                        color: p.base,\n                        corner_radii: CornerRadii::all(4.0),\n                    });\n                }\n\n                // Icon.'),
+        ],
+        ["desktop"],
+        [
+            'the_menus_own_surfaces_come_from_the_palette',
+        ],
+    ),
+    (
+        'AAAAAAAAAAAAAAAA: a selected settings row looks exactly like an unselected one',
+        CTX,
+        [
+            ('                let row_bg = if selected { p.surface0 } else { p.mantle };',
+             '                let row_bg = if selected { p.mantle } else { p.mantle };'),
+        ],
+        ["desktop"],
+        [
+            'the_menus_own_surfaces_come_from_the_palette',
+        ],
+    ),
+    (
+        "BBBBBBBBBBBBBBBB: the menu's background is drawn on the mantle instead of the base",
+        CTX,
+        [
+            ('        height: total_height,\n        color: p.base,',
+             '        height: total_height,\n        color: p.mantle,'),
+        ],
+        ["desktop"],
+        [
+            'the_menus_own_surfaces_come_from_the_palette',
+        ],
+    ),
+    (
+        "CCCCCCCCCCCCCCCC: the menu's shadow goes back to its own private depth",
+        CTX,
+        [
+            ('        color: p.shadow(),',
+             '        color: guitk::color::Color::rgba(0, 0, 0, 80),'),
+        ],
+        ["desktop"],
+        [
+            'the_menu_casts_the_shared_popup_shadow',
+        ],
+    ),
+    (
+        "DDDDDDDDDDDDDDDD: the menu's shadow loses the opacity that makes it a shadow",
+        CTX,
+        [
+            ('        color: p.shadow(),',
+             '        color: guitk::color::Color::rgba(0, 0, 0, 255),'),
+        ],
+        ["desktop"],
+        [
+            'the_menu_casts_the_shared_popup_shadow',
+        ],
+    ),
+    (
+        "EEEEEEEEEEEEEEEE: the menu's shadow is drawn in a palette role instead of black",
+        CTX,
+        [
+            ('        color: p.shadow(),',
+             '        color: p.crust,'),
+        ],
+        ["desktop"],
+        [
+            # `p.crust` is a palette member in both modes, so the membership
+            # sweep is *supposed* to be blind to it. That blind spot is the
+            # whole reason the shadow test exists.
+            'the_menu_casts_the_shared_popup_shadow',
+        ],
+    ),
 ]
 
 
@@ -3673,9 +4064,23 @@ def main():
 
             all_failed, note, broke = set(), "", False
             for pkg in pkgs:
-                failed, _out = run_tests(pkg)
+                failed, out = run_tests(pkg)
                 if failed is None:
-                    broke, note = True, f"{pkg} did not compile"
+                    # Carry the compiler's own words. A bare "did not compile"
+                    # sends the reader looking for a bug in the *test*, when the
+                    # cause is almost always that the defect cannot be spelled
+                    # in the converted source's namespace -- e.g. reinstating a
+                    # hex literal in a module whose `Color` import became
+                    # test-only. Twenty minutes of a run were spent rediscovering
+                    # that once; the error message was there all along.
+                    why = [
+                        ln.rstrip()
+                        for ln in out.splitlines()
+                        if ln.startswith("error[") or ln.startswith("error:")
+                    ]
+                    broke, note = True, f"{pkg} did not compile: " + (
+                        "; ".join(why[:3]) if why else "no error line found"
+                    )
                     break
                 all_failed |= failed
             (ROOT / path).write_bytes(snap[path])

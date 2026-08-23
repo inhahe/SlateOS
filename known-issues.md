@@ -50335,7 +50335,7 @@ commands that carry the colour in question, and assert the two renders agree.
 Candidates: anything drawn on the wallpaper, on a video surface, on a
 thumbnail, or on any other content the palette does not own.
 
-**Part 2 progress. 20 of 49 modules converted.**
+**Part 2 progress. 21 of 49 modules converted.**
 
 - [x] `security_dialog.rs` — 29 constants, done 2026-08-22. The method above
   survived contact: the sweep lives in `gui/desktop/src/palette_check.rs` as
@@ -51295,6 +51295,104 @@ thumbnail, or on any other content the palette does not own.
     card extractor `w > 40.0 && h > 40.0 && w != 400.0` also matched the
     1920×1080 backdrop, which is a mantle wash — so the "a card is `surface0`"
     assertion was being handed the backdrop's `mantle`. Bounded with `w < SW`.
+- [x] `context_ext.rs` — 12 constants, done 2026-08-22. Seven tests, harness
+  defects AAAAAAAAAAAAAAA–EEEEEEEEEEEEEEEE (thirty-one).
+  - **The first module whose constants were *unprefixed*.** They were `BASE`,
+    `TEXT`, `BLUE` and so on rather than `MOCHA_BASE`, which is worth noting for
+    the twenty-eight modules still to come: the bulk rewrite has to be anchored
+    on `\b` word boundaries, and the post-conversion leftover grep cannot key on
+    the string `MOCHA_` the way every previous module's could. Verified instead
+    by grepping the twelve bare names, which came back empty.
+  - **The shadow joins the shared popup shadow, and that is a small deliberate
+    behaviour change rather than a rebinding.** It was `rgba(0, 0, 0, 80)`,
+    chosen alone; `Palette::shadow()` is `rgba(0, 0, 0, 120)` and its doc
+    comment already says it exists because three modules drawing the same kind
+    of popup had each picked a depth without reference to the others. This menu
+    is the fourth, and the point of the change is precisely that four popups
+    which used to sit at four different depths now sit at one.
+  - **A shadow is exactly what the membership sweep waves through.**
+    `assert_drawn_from` allows black at any alpha — it must, because a shadow is
+    not a role — so the depth could drift back to 80, or to fully opaque, with
+    the sweep silent. `the_menu_casts_the_shared_popup_shadow` asserts equality
+    with `p.shadow()` *and* that the alpha is below 255. This is the same shape
+    as module 20's wash rule arriving from the other side: **the sweep's
+    deliberate blind spots are a list of the tests a module still owes.**
+  - **The module's one accent site is the icon of a hovered extension item, and
+    the reason it is one is worth stating generally: a colour that appears in
+    exactly one state marks that state.** The hardcoded blue was drawn only
+    while the pointer was over the row, which makes it a hover mark, and hover
+    is a position. A built-in item's icon merely brightens to `text` instead —
+    a hierarchy rather than an inconsistency, since an extension item invokes
+    code the shell did not write. The test asserts both halves: the accent when
+    hovered, `subtext0` when not, so the accent is carrying the state rather
+    than decorating the row.
+  - **Nothing else here takes the accent, and two established rules did the
+    deciding without a new judgement being needed.** Pointing at a menu row
+    lifts it one surface step (`base` → `surface0`), which is what
+    `notif_pane`'s hovered list row already did; a selected settings row does
+    the same over `mantle`, which is what `storage_settings` and
+    `update_settings` already did. The enabled/disabled dot and the "Slow"
+    badge are frozen because they report facts about an extension, which is
+    module 19's rule. **Twenty-one modules in, most sites now have a precedent
+    rather than a decision**, and the value of having written the earlier ones
+    down is that this module needed four judgements instead of twenty-six.
+  - **`Color` left the production imports entirely.** The module no longer names
+    a colour type outside its tests — it reads roles off the palette it was
+    handed and never constructs one. That is a small but real signal that the
+    conversion is complete in a way a grep for leftovers cannot show.
+  - **…and that signal broke the proof, which is the more useful half of the
+    story.** Twenty of the thirty-one defects came back `DID NOT COMPILE` on
+    the first proof run, for a reason that had nothing to do with the tests:
+    each of them reinstates a hardcoded `Color::from_hex(…)` in production
+    code, and after the conversion there is no `Color` in production scope to
+    say it with. The harness had been left unable to *state* the very defect it
+    exists to state. **A defect has to be expressible in the converted source's
+    namespace, not the original's** — a constraint that only appears once a
+    conversion is thorough enough to shrink that namespace, and one that will
+    recur in every remaining module whose `Color` import likewise becomes
+    test-only. The fix is to spell the type by its full path
+    (`guitk::color::Color::from_hex(…)`), which needs no import and leaves the
+    production code's imports alone; the alternative — keeping a `Color` import
+    alive purely so the harness can corrupt the file — would have meant
+    carrying a dead import in shipped code to please a test tool, which is
+    backwards.
+  - **The most important finding of this module, and it is not about this
+    module: three defects escaped because the *fixture* never drew them.** A
+    built-in item's shortcut hint, a slow extension's "loading..." label and the
+    submenu arrow all came back `*** NO TEST FAILED ***`, and not one of them
+    was a weak assertion. The fixture menu held a built-in with no shortcut
+    (`Open`), an extension with `slow: false`, and an extension with an empty
+    submenu — so all three colour sites were drawn by no test at all, and the
+    sweep was handed a render in which they simply did not appear. **The sweep
+    is only as wide as the render it is given.** Strengthening an assertion can
+    never fix this, because there is no assertion: a branch nothing takes is a
+    colour nothing checks.
+    - Fixed by widening `ext_menu()` to take every branch the renderer has —
+      `Open` *and* `Copy` (no shortcut / shortcut), an extension with an icon,
+      a shortcut and no submenu, and one that is slow, has no icon of its own
+      and does have a submenu — and then by pinning that coverage with
+      `the_fixture_menu_takes_every_branch_the_renderer_has`, which asserts
+      against the emitted commands rather than the fixture's shape, since a
+      branch can stop drawing without the entry that feeds it changing.
+    - **This is a standing hazard for the twenty-eight modules still to come,
+      and it is invisible without a defect run.** Every previous module's sweep
+      was equally at the mercy of its fixture and nothing said so; the only
+      reason it surfaced here is that the harness names each colour site
+      individually and so notices when one of them is unreachable. Treat a
+      `*** NO TEST FAILED ***` on a plain membership defect as a fixture-coverage
+      report first and a test-strength report second — in this module it was the
+      former three times out of three. The practical rule when writing a
+      module's fixtures: **enumerate the renderer's `if`s, not its colours.**
+  - **One defect's declaration was wrong rather than its test.** "The menu's
+    shadow is drawn in a palette role instead of black" was declared as
+    something the membership sweep should catch. It is not: `p.crust` is a
+    member of both palettes, so the sweep passing it is the sweep behaving
+    exactly as documented. Corrected the declaration to expect only the shadow
+    test. Worth stating because it is the failure mode of writing the expected
+    catchers from intent rather than from the sweep's stated contract — and
+    because a `[MISSING:]` note is ambiguous between "the test has a hole" and
+    "the declaration overclaims", so each one has to be read against the
+    contract before it is believed.
 
 **Trigger:** this is not blocked on anything. It is sequenced after the shell
 event loop (`TD-C-THE-SHELL-CAN-DRAW-ITSELF-AND-NOBODY-CAN-ASK-IT-TO`) only

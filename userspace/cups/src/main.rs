@@ -29,6 +29,14 @@ use std::env;
 use std::fmt;
 use std::process;
 
+// A printer name, a PPD file name and an option word are all attacker-chosen
+// text: a path may hold any byte but `/` and NUL, including a newline, and
+// argv holds whatever the caller typed. `quoteaf_os` renders an ordinary word
+// as `'abc'` -- byte for byte what the hand-written quotes here used to print
+// -- and escapes a hostile one so it cannot close the quotes and keep writing.
+// See `userspace/quoting`.
+use quoting::quoteaf_os;
+
 // ============================================================================
 // Constants
 // ============================================================================
@@ -1822,7 +1830,7 @@ fn run_cupsd(args: &[String]) -> i32 {
                 return 0;
             }
             other => {
-                eprintln!("cupsd: unknown option '{other}'");
+                eprintln!("cupsd: unknown option {}", quoteaf_os(other));
                 return 1;
             }
         }
@@ -1911,7 +1919,7 @@ fn run_lp(args: &[String]) -> i32 {
                     match args[i].parse::<u32>() {
                         Ok(n) if n > 0 => copies = Some(n),
                         _ => {
-                            eprintln!("lp: invalid copies value '{}'", args[i]);
+                            eprintln!("lp: invalid copies value {}", quoteaf_os(&args[i]));
                             return 1;
                         }
                     }
@@ -1987,7 +1995,7 @@ fn run_lp(args: &[String]) -> i32 {
                 files.push(arg.to_string());
             }
             other => {
-                eprintln!("lp: unknown option '{other}'");
+                eprintln!("lp: unknown option {}", quoteaf_os(other));
                 return 1;
             }
         }
@@ -2000,7 +2008,7 @@ fn run_lp(args: &[String]) -> i32 {
 
     let pname = printer_name.unwrap_or_else(|| system.default_printer_name());
     if system.find_printer(&pname).is_none() {
-        eprintln!("lp: printer '{pname}' not found");
+        eprintln!("lp: printer {} not found", quoteaf_os(&pname));
         return 1;
     }
 
@@ -2147,7 +2155,7 @@ fn run_lpstat(args: &[String]) -> i32 {
                         "not-completed" => show_completed = false,
                         "all" => show_completed = true,
                         other => {
-                            eprintln!("lpstat: unknown -W value '{other}'");
+                            eprintln!("lpstat: unknown -W value {}", quoteaf_os(other));
                             return 1;
                         }
                     }
@@ -2162,7 +2170,7 @@ fn run_lpstat(args: &[String]) -> i32 {
                 return 0;
             }
             other => {
-                eprintln!("lpstat: unknown option '{other}'");
+                eprintln!("lpstat: unknown option {}", quoteaf_os(other));
                 return 1;
             }
         }
@@ -2441,7 +2449,7 @@ fn run_lpadmin(args: &[String]) -> i32 {
                 return 0;
             }
             other => {
-                eprintln!("lpadmin: unknown option '{other}'");
+                eprintln!("lpadmin: unknown option {}", quoteaf_os(other));
                 return 1;
             }
         }
@@ -2460,7 +2468,7 @@ fn run_lpadmin(args: &[String]) -> i32 {
     if delete {
         match system.remove_printer(&pname) {
             Ok(()) => {
-                println!("lpadmin: printer '{pname}' deleted");
+                println!("lpadmin: printer {} deleted", quoteaf_os(&pname));
                 return 0;
             }
             Err(e) => {
@@ -2474,7 +2482,7 @@ fn run_lpadmin(args: &[String]) -> i32 {
     if set_default {
         match system.set_default_printer(&pname) {
             Ok(()) => {
-                println!("lpadmin: default printer set to '{pname}'");
+                println!("lpadmin: default printer set to {}", quoteaf_os(&pname));
                 return 0;
             }
             Err(e) => {
@@ -2516,7 +2524,7 @@ fn run_lpadmin(args: &[String]) -> i32 {
         for (key, value) in &options {
             printer.set_option(key, value);
         }
-        println!("lpadmin: printer '{pname}' modified");
+        println!("lpadmin: printer {} modified", quoteaf_os(&pname));
     } else {
         // Create new printer - need a URI
         let uri = match device_uri {
@@ -2551,7 +2559,7 @@ fn run_lpadmin(args: &[String]) -> i32 {
             eprintln!("lpadmin: {e}");
             return 1;
         }
-        println!("lpadmin: printer '{pname}' created");
+        println!("lpadmin: printer {} created", quoteaf_os(&pname));
     }
 
     0
@@ -2615,7 +2623,7 @@ fn run_cancel(args: &[String]) -> i32 {
                 job_ids.push(arg.to_string());
             }
             other => {
-                eprintln!("cancel: unknown option '{other}'");
+                eprintln!("cancel: unknown option {}", quoteaf_os(other));
                 return 1;
             }
         }
@@ -2629,9 +2637,15 @@ fn run_cancel(args: &[String]) -> i32 {
         match system.cancel_all_jobs(&pname_owned) {
             Ok(count) => {
                 if purge {
-                    println!("cancel: purged {count} job(s) on '{pname_owned}'");
+                    println!(
+                        "cancel: purged {count} job(s) on {}",
+                        quoteaf_os(&pname_owned)
+                    );
                 } else {
-                    println!("cancel: canceled {count} job(s) on '{pname_owned}'");
+                    println!(
+                        "cancel: canceled {count} job(s) on {}",
+                        quoteaf_os(&pname_owned)
+                    );
                 }
                 return 0;
             }
@@ -2688,7 +2702,7 @@ fn run_cancel(args: &[String]) -> i32 {
                 && let Some((_, job)) = system.find_job_globally(id)
                 && job.owner != user.as_str()
             {
-                eprintln!("cancel: job {id} not owned by '{user}'");
+                eprintln!("cancel: job {id} not owned by {}", quoteaf_os(user));
                 exit_code = 1;
                 continue;
             }
@@ -2705,7 +2719,10 @@ fn run_cancel(args: &[String]) -> i32 {
             let pn_clone = pn.clone();
             match system.cancel_all_jobs(&pn_clone) {
                 Ok(count) => {
-                    println!("cancel: canceled {count} job(s) on '{pn_clone}'");
+                    println!(
+                        "cancel: canceled {count} job(s) on {}",
+                        quoteaf_os(&pn_clone)
+                    );
                 }
                 Err(e) => {
                     eprintln!("cancel: {e}");
@@ -2781,7 +2798,7 @@ fn run_accept_reject(args: &[String], accept: bool) -> i32 {
                 printer_names.push(arg.to_string());
             }
             other => {
-                eprintln!("{cmd_name}: unknown option '{other}'");
+                eprintln!("{cmd_name}: unknown option {}", quoteaf_os(other));
                 return 1;
             }
         }
@@ -2802,13 +2819,19 @@ fn run_accept_reject(args: &[String], accept: bool) -> i32 {
                     printer.state_message = r.clone();
                 }
                 if accept {
-                    println!("{cmd_name}: printer '{name}' now accepting jobs");
+                    println!(
+                        "{cmd_name}: printer {} now accepting jobs",
+                        quoteaf_os(name)
+                    );
                 } else {
-                    println!("{cmd_name}: printer '{name}' now rejecting jobs");
+                    println!(
+                        "{cmd_name}: printer {} now rejecting jobs",
+                        quoteaf_os(name)
+                    );
                 }
             }
             None => {
-                eprintln!("{cmd_name}: printer '{name}' not found");
+                eprintln!("{cmd_name}: printer {} not found", quoteaf_os(name));
                 exit_code = 1;
             }
         }
@@ -2869,7 +2892,7 @@ fn run_enable_disable(args: &[String], enable: bool) -> i32 {
                 printer_names.push(arg.to_string());
             }
             other => {
-                eprintln!("{cmd_name}: unknown option '{other}'");
+                eprintln!("{cmd_name}: unknown option {}", quoteaf_os(other));
                 return 1;
             }
         }
@@ -2888,7 +2911,7 @@ fn run_enable_disable(args: &[String], enable: bool) -> i32 {
                 if enable {
                     printer.state = PrinterState::Idle;
                     printer.state_message.clear();
-                    println!("{cmd_name}: printer '{name}' enabled");
+                    println!("{cmd_name}: printer {} enabled", quoteaf_os(name));
                 } else {
                     printer.state = PrinterState::Stopped;
                     if let Some(ref r) = reason {
@@ -2904,11 +2927,11 @@ fn run_enable_disable(args: &[String], enable: bool) -> i32 {
                             }
                         }
                     }
-                    println!("{cmd_name}: printer '{name}' disabled");
+                    println!("{cmd_name}: printer {} disabled", quoteaf_os(name));
                 }
             }
             None => {
-                eprintln!("{cmd_name}: printer '{name}' not found");
+                eprintln!("{cmd_name}: printer {} not found", quoteaf_os(name));
                 exit_code = 1;
             }
         }
@@ -2965,7 +2988,7 @@ fn run_lpinfo(args: &[String]) -> i32 {
                     match args[i].parse::<u32>() {
                         Ok(t) => timeout = Some(t),
                         Err(_) => {
-                            eprintln!("lpinfo: invalid timeout value '{}'", args[i]);
+                            eprintln!("lpinfo: invalid timeout value {}", quoteaf_os(&args[i]));
                             return 1;
                         }
                     }
@@ -2983,7 +3006,7 @@ fn run_lpinfo(args: &[String]) -> i32 {
                 return 0;
             }
             other => {
-                eprintln!("lpinfo: unknown option '{other}'");
+                eprintln!("lpinfo: unknown option {}", quoteaf_os(other));
                 return 1;
             }
         }
@@ -3119,7 +3142,7 @@ fn run_lpoptions(args: &[String]) -> i32 {
                 return 0;
             }
             other => {
-                eprintln!("lpoptions: unknown option '{other}'");
+                eprintln!("lpoptions: unknown option {}", quoteaf_os(other));
                 return 1;
             }
         }
@@ -3133,7 +3156,7 @@ fn run_lpoptions(args: &[String]) -> i32 {
         let printer = match system.find_printer(&pname) {
             Some(p) => p,
             None => {
-                eprintln!("lpoptions: printer '{pname}' not found");
+                eprintln!("lpoptions: printer {} not found", quoteaf_os(&pname));
                 return 1;
             }
         };
@@ -3154,7 +3177,7 @@ fn run_lpoptions(args: &[String]) -> i32 {
                 println!("{}/{}: {}", opt.keyword, opt.text, choices_str.join(" "));
             }
         } else {
-            println!("lpoptions: no PPD options for '{pname}'");
+            println!("lpoptions: no PPD options for {}", quoteaf_os(&pname));
         }
 
         // Also show instance options
@@ -3177,7 +3200,7 @@ fn run_lpoptions(args: &[String]) -> i32 {
         let printer = match system.find_printer(&pname) {
             Some(p) => p,
             None => {
-                eprintln!("lpoptions: printer '{pname}' not found");
+                eprintln!("lpoptions: printer {} not found", quoteaf_os(&pname));
                 return 1;
             }
         };
@@ -3199,13 +3222,17 @@ fn run_lpoptions(args: &[String]) -> i32 {
         let printer = match system.find_printer_mut(&pname) {
             Some(p) => p,
             None => {
-                eprintln!("lpoptions: printer '{pname}' not found");
+                eprintln!("lpoptions: printer {} not found", quoteaf_os(&pname));
                 return 1;
             }
         };
         for opt_name in &remove_options {
             printer.remove_option(opt_name);
-            println!("lpoptions: removed option '{opt_name}' from '{pname}'");
+            println!(
+                "lpoptions: removed option {} from {}",
+                quoteaf_os(opt_name),
+                quoteaf_os(&pname)
+            );
         }
         return 0;
     }
@@ -3215,7 +3242,7 @@ fn run_lpoptions(args: &[String]) -> i32 {
         let printer = match system.find_printer_mut(&pname) {
             Some(p) => p,
             None => {
-                eprintln!("lpoptions: printer '{pname}' not found");
+                eprintln!("lpoptions: printer {} not found", quoteaf_os(&pname));
                 return 1;
             }
         };
@@ -3233,7 +3260,7 @@ fn run_lpoptions(args: &[String]) -> i32 {
     let printer = match system.find_printer(&pname) {
         Some(p) => p,
         None => {
-            eprintln!("lpoptions: printer '{pname}' not found");
+            eprintln!("lpoptions: printer {} not found", quoteaf_os(&pname));
             return 1;
         }
     };
@@ -3291,7 +3318,10 @@ fn run_cupstestppd(args: &[String]) -> i32 {
                     match PpdConformance::from_str(&args[i]) {
                         Some(c) => conformance = c,
                         None => {
-                            eprintln!("cupstestppd: unknown conformance level '{}'", args[i]);
+                            eprintln!(
+                                "cupstestppd: unknown conformance level {}",
+                                quoteaf_os(&args[i])
+                            );
                             return 1;
                         }
                     }
@@ -3312,7 +3342,7 @@ fn run_cupstestppd(args: &[String]) -> i32 {
                 filenames.push(arg.to_string());
             }
             other => {
-                eprintln!("cupstestppd: unknown option '{other}'");
+                eprintln!("cupstestppd: unknown option {}", quoteaf_os(other));
                 return 1;
             }
         }

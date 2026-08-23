@@ -11,7 +11,7 @@
 # Do NOT raise a number, and do NOT add a file, to turn a red `--check`
 # green: that is the defect being recorded, not an exception to it.
 #
-# 1714 sites across 775 files.
+# 1678 sites across 774 files.
 
 init/servicebus/src/main.rs:4
 userspace/abduco-cli/src/main.rs:5
@@ -160,7 +160,6 @@ userspace/crossplane-cli/src/main.rs:3
 userspace/crystal-cli/src/main.rs:2
 userspace/ctags/src/main.rs:5
 userspace/cups-cli/src/main.rs:4
-userspace/cups/src/main.rs:36
 userspace/curl/src/main.rs:1
 userspace/cut/src/main.rs:5
 userspace/cyberark-cli/src/main.rs:1

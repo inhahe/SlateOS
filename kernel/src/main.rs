@@ -5732,6 +5732,52 @@ extern "C" fn kernel_main() -> ! {
     }
 
     {
+        // The second batch of suites that had to stop deleting the user's
+        // data before they could be wired -- see the block above for why the
+        // order matters.
+        //
+        // Eleven of the 16 were invisible to the survey that gated the first
+        // batch, which recognised a whole-table clear by name from a list of
+        // six spellings. These use ten others (`cliphistory::clear`,
+        // `crashreport::clear_reports`, `datausage::reset_usage`,
+        // `tracemon::clear_buffer`, ...) and so read as "quiet -- probably
+        // safe to wire". They were caught instead by a structural test:
+        // a destructive-sounding call that takes *no arguments* acts on the
+        // whole table almost by definition, since destroying one row requires
+        // being told which row. The other five were known to be destructive
+        // but are lazy-init (`Mutex<Option<T>>`), a shape the first
+        // converter did not handle.
+        //
+        // Each names nothing outside its own module except
+        // `sysresource`, which reads `hpet::elapsed_ns` -- a clock query,
+        // read-only. So none of them can damage state that
+        // `with_pristine` does not put back.
+        //
+        // These return `()` rather than `KernelResult<()>`, hence the bare
+        // calls.
+        #[inline(never)]
+        fn case() {
+            fs::autofix::self_test();
+            fs::cliphistory::self_test();
+            fs::crashreport::self_test();
+            fs::datausage::self_test();
+            fs::dmevent::self_test();
+            fs::dnssettings::self_test();
+            fs::dumpanalyzer::self_test();
+            fs::hwmonitor::self_test();
+            fs::location::self_test();
+            fs::multiclip::self_test();
+            fs::nameservice::self_test();
+            fs::printmgr::self_test();
+            fs::recentsearch::self_test();
+            fs::startuprepair::self_test();
+            fs::sysresource::self_test();
+            fs::tracemon::self_test();
+        }
+        case();
+    }
+
+    {
         #[inline(never)]
         fn case() {
             // Run cryptographic self-tests.

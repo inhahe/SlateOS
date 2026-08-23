@@ -18310,7 +18310,7 @@ fn cmd_fsfreeze(args: &str) {
                     let ttl_s = entry.time_until_thaw_ns / 1_000_000_000;
                     shell_println!(
                         "{:20} {:>5} {:>8} {:>8} {:>8} {}",
-                        entry.mountpoint,
+                        entry.mountpoint.display(),
                         entry.freeze_level,
                         dur_s,
                         ttl_s,

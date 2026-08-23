@@ -4995,7 +4995,7 @@ fn gen_freeze() -> Vec<u8> {
             let until_s = entry.time_until_thaw_ns / 1_000_000_000;
             out.push_str(&format!(
                 "{:20} {:>5} {:>10}s {:>10}s {:>8} {}\n",
-                entry.mountpoint,
+                entry.mountpoint.display(),
                 entry.freeze_level,
                 dur_s,
                 until_s,

@@ -63649,6 +63649,20 @@ concludes the module is covered. It is the same "a test that never runs is
 not a test" trap the earlier locale/timezone sweep hit, at about ten times
 the scale.
 
+**Confirmed: the wiring finds real bugs, not just stale tests.** The very
+first batch to be enabled panicked the boot on `fs::pinnedapps` test 6, and
+the assertion was right — `reorder` was broken. It set `pin.position =
+new_position` and touched nothing else, so the moved pin and the incumbent
+both claimed the slot; `list_pins` sorts by position with a *stable* sort,
+so the incumbent stayed first and `pinnedapps move taskbar terminal 0`
+reported success while changing no order at all. It now performs a real
+move and renumbers the location contiguously. `pin` had a smaller sibling
+defect found in the same read: `max().unwrap_or(0) + 1` put the first pin
+in an empty location at position 1, leaving slot 0 permanently vacant.
+Both are fixed in `82155959a`. Note what this says about the batching
+advice above — the panic is the *feature*; enable in batches precisely so
+each panic points at one module.
+
 ---
 
 ## TD-A-SPARSE-FSTRIM-WRONG-DEVICE — hole punching queued discards for a nonexistent device at a file offset

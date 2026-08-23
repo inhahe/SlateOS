@@ -819,22 +819,37 @@ pub fn exclusions() -> Vec<PathBuf> {
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// Format byte count as human-readable string.
+/// Format byte count as human-readable string, to one decimal place.
+///
+/// Below 1 KiB the count is exact and is printed in bytes; there is no `0.5
+/// KiB`.
+///
+/// The fractional digit is `remainder * 10 / unit` rather than the more obvious
+/// `remainder / (unit / 10)`.  The latter is what this used to do and it is
+/// wrong at the top of every unit: `1023 / 100` is `10`, so `format_size(2047)`
+/// printed `1.10 KiB` — two digits after the point, and a value that reads as
+/// larger than the `1.9 KiB` just below it.  Scaling before dividing keeps the
+/// digit in `0..=9` by construction.  Nothing here can overflow: the remainder
+/// is under 2^30, so the product is under 2^34.
 pub fn format_size(bytes: u64) -> String {
-    if bytes >= 1024 * 1024 * 1024 {
-        format!(
-            "{}.{} GiB",
-            bytes / (1024 * 1024 * 1024),
-            (bytes % (1024 * 1024 * 1024)) / (100 * 1024 * 1024)
-        )
-    } else if bytes >= 1024 * 1024 {
-        format!(
-            "{}.{} MiB",
-            bytes / (1024 * 1024),
-            (bytes % (1024 * 1024)) / (100 * 1024)
-        )
-    } else if bytes >= 1024 {
-        format!("{}.{} KiB", bytes / 1024, (bytes % 1024) / 100)
+    /// Split `bytes` into whole units and a tenths digit in `0..=9`.
+    fn split(bytes: u64, unit: u64) -> (u64, u64) {
+        (bytes / unit, (bytes % unit).saturating_mul(10) / unit)
+    }
+
+    const KIB: u64 = 1024;
+    const MIB: u64 = 1024 * 1024;
+    const GIB: u64 = 1024 * 1024 * 1024;
+
+    if bytes >= GIB {
+        let (whole, tenths) = split(bytes, GIB);
+        format!("{}.{} GiB", whole, tenths)
+    } else if bytes >= MIB {
+        let (whole, tenths) = split(bytes, MIB);
+        format!("{}.{} MiB", whole, tenths)
+    } else if bytes >= KIB {
+        let (whole, tenths) = split(bytes, KIB);
+        format!("{}.{} KiB", whole, tenths)
     } else {
         format!("{} B", bytes)
     }
@@ -931,10 +946,20 @@ fn self_test_inner() {
     // Test 3: format_size helper
     {
         assert_eq!(format_size(0), "0 B");
-        assert_eq!(format_size(512), "0.5 KiB");
+        // Under a KiB the count is exact and stays in bytes. This asserted
+        // "0.5 KiB" until the suite was first actually run at boot, which is
+        // the whole point of wiring these in: the assertion was wrong, not the
+        // helper, and nothing had ever executed it.
+        assert_eq!(format_size(512), "512 B");
+        assert_eq!(format_size(1023), "1023 B");
         assert_eq!(format_size(1024), "1.0 KiB");
-        assert!(format_size(1024 * 1024).contains("MiB"));
-        assert!(format_size(1024 * 1024 * 1024).contains("GiB"));
+        assert_eq!(format_size(1536), "1.5 KiB");
+        // Top of a unit: the tenths digit must stay a single digit. This
+        // printed "1.10 KiB" before `format_size` scaled before dividing.
+        assert_eq!(format_size(2047), "1.9 KiB");
+        assert_eq!(format_size(1024 * 1024 - 1), "1023.9 KiB");
+        assert_eq!(format_size(1024 * 1024), "1.0 MiB");
+        assert_eq!(format_size(1024 * 1024 * 1024), "1.0 GiB");
         serial_println!("[storageclean]   3. format_size helper — OK");
     }
 

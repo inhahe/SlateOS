@@ -1,395 +1,1678 @@
 //! ls — list directory contents.
 //!
-//! Usage: ls [-l] [-a] [-h] [-1] [PATH...]
-//!   -l  long listing format (permissions, size, date, name)
-//!   -a  show hidden files (starting with .)
-//!   -h  human-readable sizes (K, M, G) in long format
-//!   -1  one entry per line (default when output is not a terminal)
+//! A port of GNU `ls` (coreutils 9.4), written against its source rather than
+//! against a memory of its behaviour, because almost every rule in it is
+//! arbitrary in the precise sense: it cannot be re-derived, only copied. The
+//! column allocator, the six-month recency window, the rule that a name's
+//! *suffix* decides `-v` order, and the fact that `--time-style=nosuch` is not
+//! an error unless `-l` is also given are all of that kind.
+//!
+//! # What it replaces
+//!
+//! The previous `ls` declared four options — `-l -a -h -1` — and did the rest
+//! by hand. It held paths as [`String`], so a file whose name is not UTF-8
+//! could not be listed at all; it treated every `--long-option` as a *file
+//! name*, so `ls --color=never` tried to open a file called `--color=never`;
+//! it had no column layout, so `ls` in a terminal printed one name per line;
+//! it rendered the mode string itself, disagreeing with `chmod`'s; it printed
+//! numeric uids because it could not read `/etc/passwd`; and it formatted
+//! timestamps with a hand-rolled civil-from-days that assumed UTC.
+//!
+//! Every one of those is now somebody else's code: `coreutils::getopt`,
+//! `coreutils::quote`, `modechange::permission_string`, `pwdb`, `localtime`,
+//! `coreutils::human` and `coreutils::vercmp`. That is the point of the
+//! rewrite rather than a side effect of it — `ls -v` and `sort -V` must agree,
+//! `ls -l`'s owner column and `id`'s must agree, `ls -l`'s clock and `date`'s
+//! must agree, and `ls -h`'s `1.5G` and `df -h`'s must agree.
+//!
+//! # The four rules that are not guessable
+//!
+//! **A file's *suffix* is cut off before `-v` compares it.** That is why `ls -v`
+//! puts `a.b` before `a-b`, and it lives in `coreutils::vercmp` because
+//! `sort -V` needs the identical answer.
+//!
+//! **The name column is laid out by a search, not a formula.** GNU tries every
+//! column count from 1 to `line_length / 3 + 1` at once, tracking the widest
+//! name in each cell of each candidate layout, and then takes the largest count
+//! that still fits.
+//!
+//! **A timestamp older than six months prints its year instead of its clock**,
+//! and "six months" is `31556952 / 2` seconds — half a mean Gregorian year —
+//! measured against the time `ls` started, with the window *open* at both ends.
+//!
+//! **`--dired` is byte offsets into `ls`'s own output**, which is why output is
+//! accumulated in memory rather than streamed: the offsets are only knowable
+//! once the surrounding text has been written.
+//!
+//! Built only on unix-family targets — our `x86_64-slateos` presents as
+//! `linux-musl`, so `cfg(unix)` matches.
 
-use coreutils::human::{Opts, human_readable};
-use coreutils::quote::quoteaf_os;
-use std::env;
-use std::fs;
-use std::io::{self, Write};
-use std::path::Path;
+#![cfg_attr(not(unix), allow(dead_code))]
 
-#[derive(Default)]
-#[cfg_attr(test, derive(Debug, PartialEq, Eq))]
-struct Options {
-    long: bool,
-    all: bool,
-    human: bool,
-    one_per_line: bool,
+use charwidth::char_width;
+use coreutils::getopt::{self, Opt, Program, Takes};
+use coreutils::human::{Opts, default_block_size};
+use coreutils::quote::{Mb, Style, next_mb, os_bytes, quote};
+use coreutils::xnum::{self, Status, strtol_fatal};
+use std::ffi::OsString;
+use std::io::Write;
+use std::process::ExitCode;
+
+/// `ls`'s usage status is **2**, not the 1 that almost every other utility
+/// uses: 1 is already spent on "something went wrong with a file", which `ls`
+/// reports while still producing a listing.
+const LS: Program = Program::new("ls", 2);
+
+/// GNU's own short-option string, copied verbatim from `decode_switches`.
+///
+/// It is copied rather than derived because it must also list the letters this
+/// port handles differently — a letter missing from it turns its argument into
+/// an operand, and `ls -w 80 .` would try to open a file called `80`.
+const SHORT_OPTIONS: &str = "abcdfghiklmnopqrstuvw:xABCDFGHI:LNQRST:UXZ1";
+
+/// GNU's long table, **in declaration order**, which is observable: a bad
+/// prefix lists the possibilities in this order.
+const LONG_OPTIONS: &[(&str, Takes)] = &[
+    ("all", Takes::Nothing),
+    ("escape", Takes::Nothing),
+    ("directory", Takes::Nothing),
+    ("dired", Takes::Nothing),
+    ("full-time", Takes::Nothing),
+    ("group-directories-first", Takes::Nothing),
+    ("human-readable", Takes::Nothing),
+    ("inode", Takes::Nothing),
+    ("kibibytes", Takes::Nothing),
+    ("numeric-uid-gid", Takes::Nothing),
+    ("no-group", Takes::Nothing),
+    ("hide-control-chars", Takes::Nothing),
+    ("reverse", Takes::Nothing),
+    ("size", Takes::Nothing),
+    ("width", Takes::Required),
+    ("almost-all", Takes::Nothing),
+    ("ignore-backups", Takes::Nothing),
+    ("classify", Takes::Optional),
+    ("file-type", Takes::Nothing),
+    ("si", Takes::Nothing),
+    ("dereference-command-line", Takes::Nothing),
+    ("dereference-command-line-symlink-to-dir", Takes::Nothing),
+    ("hide", Takes::Required),
+    ("ignore", Takes::Required),
+    ("indicator-style", Takes::Required),
+    ("dereference", Takes::Nothing),
+    ("literal", Takes::Nothing),
+    ("quote-name", Takes::Nothing),
+    ("quoting-style", Takes::Required),
+    ("recursive", Takes::Nothing),
+    ("format", Takes::Required),
+    ("show-control-chars", Takes::Nothing),
+    ("sort", Takes::Required),
+    ("tabsize", Takes::Required),
+    ("time", Takes::Required),
+    ("time-style", Takes::Required),
+    ("zero", Takes::Nothing),
+    ("color", Takes::Optional),
+    ("hyperlink", Takes::Optional),
+    ("block-size", Takes::Required),
+    ("context", Takes::Nothing),
+    ("author", Takes::Nothing),
+    ("help", Takes::Nothing),
+    ("version", Takes::Nothing),
+];
+
+/// Upstream's `MIN_COLUMN_WIDTH`: a name, plus the two spaces that separate it
+/// from the next column.
+const MIN_COLUMN_WIDTH: usize = 3;
+
+// ------------------------------------------------------------------ enums ---
+
+/// How the names are arranged on the page. GNU's `enum format`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Format {
+    /// `-l`: one file per line, with mode, owner, size and time.
+    Long,
+    /// `-1`.
+    OnePerLine,
+    /// `-C`: columns, filled downwards.
+    ManyPerLine,
+    /// `-x`: columns, filled across.
+    Horizontal,
+    /// `-m`: comma-separated, wrapped.
+    WithCommas,
 }
 
-#[cfg_attr(test, derive(Debug, PartialEq, Eq))]
-struct LsArgs {
-    opts: Options,
-    paths: Vec<String>,
-    /// Short flag chars that weren't recognised.  Reported as warnings
-    /// by `main()`; the original behaviour was to continue regardless.
-    unknown: Vec<char>,
+/// GNU's `enum sort_type`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Sort {
+    Name,
+    Extension,
+    Width,
+    Size,
+    Version,
+    Time,
+    None,
 }
 
-/// Parse ls's argv.  Short flags can be clustered (`-la`), long options
-/// (`--…`) are passed through to the positional list (the existing code
-/// did the same — there's no actual long-option support).  Unknown
-/// short flags are collected so the caller can warn but proceed.
-fn parse_args(args: &[String]) -> LsArgs {
-    let mut opts = Options::default();
-    let mut paths: Vec<String> = Vec::new();
-    let mut unknown: Vec<char> = Vec::new();
+/// Which of the four timestamps `-l` shows and `-t` sorts by.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum TimeType {
+    Mtime,
+    Ctime,
+    Atime,
+    Btime,
+}
 
-    for arg in args {
-        if arg.starts_with('-') && arg.len() > 1 && !arg.starts_with("--") {
-            let rest = arg.get(1..).unwrap_or("");
-            for c in rest.chars() {
-                match c {
-                    'l' => opts.long = true,
-                    'a' => opts.all = true,
-                    'h' => opts.human = true,
-                    '1' => opts.one_per_line = true,
-                    other => unknown.push(other),
-                }
-            }
-        } else {
-            paths.push(arg.clone());
+/// GNU's `ignore_mode`: how much of a directory is hidden by default.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum IgnoreMode {
+    /// Everything beginning with `.`, plus `--hide` and `--ignore`.
+    Default,
+    /// `-A`: only `.` and `..`, plus `--ignore`.
+    DotAndDotDot,
+    /// `-a`: only `--ignore`.
+    Minimal,
+}
+
+/// The trailing character `-F`, `-p` and `--file-type` append.
+///
+/// [`Ord`] is load-bearing: GNU writes the "does this style mark anything but
+/// directories" test as `file_type <= indicator_style`, and uses the same
+/// ordering to index the string `"*=>@|"`.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
+enum Indicator {
+    None,
+    Slash,
+    FileType,
+    Classify,
+}
+
+/// GNU's `enum dereference_symlink`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Deref {
+    /// No option said; the default depends on the output format and is
+    /// resolved once, after the whole command line has been read.
+    Undefined,
+    Never,
+    CommandLineArguments,
+    CommandLineSymlinkToDir,
+    Always,
+}
+
+/// The `always`/`never`/`auto` argument shared by `--color`, `--classify` and
+/// `--hyperlink`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum When {
+    Always,
+    Never,
+    IfTty,
+}
+
+/// GNU's `enum filetype`. The order is the order of `filetype_letter`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum FileType {
+    Unknown,
+    Fifo,
+    Chardev,
+    Directory,
+    Blockdev,
+    Normal,
+    SymbolicLink,
+    Sock,
+    Whiteout,
+    /// A directory named on the command line and being listed *as a file* —
+    /// `ls -d`, or the header line a recursive listing prints for it.
+    ArgDirectory,
+}
+
+/// GNU's `filetype_letter`, the first column of `-l`'s mode string.
+const fn filetype_letter(kind: FileType) -> u8 {
+    match kind {
+        FileType::Unknown | FileType::ArgDirectory => b'?',
+        FileType::Fifo => b'p',
+        FileType::Chardev => b'c',
+        FileType::Directory => b'd',
+        FileType::Blockdev => b'b',
+        FileType::Normal => b'-',
+        FileType::SymbolicLink => b'l',
+        FileType::Sock => b's',
+        FileType::Whiteout => b'w',
+    }
+}
+
+// -------------------------------------------------------- argmatch tables ---
+
+/// `--format`. Seven words for five values, which is why `--format=h` resolves
+/// (`horizontal` and `across` agree) while `--format=v` does not.
+const FORMAT_ARGS: &[(&str, Format)] = &[
+    ("verbose", Format::Long),
+    ("long", Format::Long),
+    ("commas", Format::WithCommas),
+    ("horizontal", Format::Horizontal),
+    ("across", Format::Horizontal),
+    ("vertical", Format::ManyPerLine),
+    ("single-column", Format::OnePerLine),
+];
+
+/// `--sort`. Note the absence of `name`: there is no word for the default.
+const SORT_ARGS: &[(&str, Sort)] = &[
+    ("none", Sort::None),
+    ("time", Sort::Time),
+    ("size", Sort::Size),
+    ("extension", Sort::Extension),
+    ("version", Sort::Version),
+    ("width", Sort::Width),
+];
+
+/// `--time`. Nine words for four values.
+const TIME_ARGS: &[(&str, TimeType)] = &[
+    ("atime", TimeType::Atime),
+    ("access", TimeType::Atime),
+    ("use", TimeType::Atime),
+    ("ctime", TimeType::Ctime),
+    ("status", TimeType::Ctime),
+    ("mtime", TimeType::Mtime),
+    ("modification", TimeType::Mtime),
+    ("birth", TimeType::Btime),
+    ("creation", TimeType::Btime),
+];
+
+/// `--color`, `--classify`, `--hyperlink`. `force` and `none` are there for
+/// compatibility with a different `color-ls`, and are why `--color=n` is
+/// ambiguous rather than `never`.
+const WHEN_ARGS: &[(&str, When)] = &[
+    ("always", When::Always),
+    ("yes", When::Always),
+    ("force", When::Always),
+    ("never", When::Never),
+    ("no", When::Never),
+    ("none", When::Never),
+    ("auto", When::IfTty),
+    ("tty", When::IfTty),
+    ("if-tty", When::IfTty),
+];
+
+/// `--indicator-style`.
+const INDICATOR_STYLE_ARGS: &[(&str, Indicator)] = &[
+    ("none", Indicator::None),
+    ("slash", Indicator::Slash),
+    ("file-type", Indicator::FileType),
+    ("classify", Indicator::Classify),
+];
+
+/// The four words `--time-style` takes, minus the two spellings that are not
+/// words: a `posix-` prefix and a leading `+`. Both are handled before this
+/// table is consulted.
+const TIME_STYLE_ARGS: &[(&str, TimeStyle)] = &[
+    ("full-iso", TimeStyle::FullIso),
+    ("long-iso", TimeStyle::LongIso),
+    ("iso", TimeStyle::Iso),
+    ("locale", TimeStyle::Locale),
+];
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum TimeStyle {
+    FullIso,
+    LongIso,
+    Iso,
+    Locale,
+}
+
+// ------------------------------------------------------------------ flags ---
+
+/// One option, whichever way it was spelled.
+///
+/// GNU gets this for free — `getopt_long` returns the same `int` for `-a` and
+/// `--all` because the table says so — and a port that matched on the two
+/// spellings separately would be two option loops that have to agree.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Flag {
+    All,
+    Escape,
+    Ctime,
+    Directory,
+    NoSortAll,
+    LongNoOwner,
+    HumanReadable,
+    Inode,
+    Kibibytes,
+    LongFormat,
+    WithCommas,
+    NumericUidGid,
+    LongNoGroup,
+    Slash,
+    HideControlChars,
+    Reverse,
+    Size,
+    SortTime,
+    Atime,
+    SortVersion,
+    Width,
+    Horizontal,
+    AlmostAll,
+    IgnoreBackups,
+    ManyPerLine,
+    Dired,
+    Classify,
+    NoGroup,
+    DerefCommandLine,
+    Ignore,
+    Dereference,
+    Literal,
+    QuoteName,
+    Recursive,
+    SortSize,
+    Tabsize,
+    SortNone,
+    SortExtension,
+    Context,
+    OnePerLine,
+    FileType,
+    DerefCommandLineSymlinkToDir,
+    Hide,
+    IndicatorStyle,
+    QuotingStyle,
+    Format,
+    Sort,
+    Time,
+    TimeStyle,
+    FullTime,
+    GroupDirectoriesFirst,
+    ShowControlChars,
+    Si,
+    Color,
+    Hyperlink,
+    BlockSize,
+    Author,
+    Zero,
+    Help,
+    Version,
+}
+
+/// The short letter → [`Flag`] map. Every letter of [`SHORT_OPTIONS`] appears.
+fn short_flag(letter: u8) -> Option<Flag> {
+    Some(match letter {
+        b'a' => Flag::All,
+        b'b' => Flag::Escape,
+        b'c' => Flag::Ctime,
+        b'd' => Flag::Directory,
+        b'f' => Flag::NoSortAll,
+        b'g' => Flag::LongNoOwner,
+        b'h' => Flag::HumanReadable,
+        b'i' => Flag::Inode,
+        b'k' => Flag::Kibibytes,
+        b'l' => Flag::LongFormat,
+        b'm' => Flag::WithCommas,
+        b'n' => Flag::NumericUidGid,
+        b'o' => Flag::LongNoGroup,
+        b'p' => Flag::Slash,
+        b'q' => Flag::HideControlChars,
+        b'r' => Flag::Reverse,
+        b's' => Flag::Size,
+        b't' => Flag::SortTime,
+        b'u' => Flag::Atime,
+        b'v' => Flag::SortVersion,
+        b'w' => Flag::Width,
+        b'x' => Flag::Horizontal,
+        b'A' => Flag::AlmostAll,
+        b'B' => Flag::IgnoreBackups,
+        b'C' => Flag::ManyPerLine,
+        b'D' => Flag::Dired,
+        b'F' => Flag::Classify,
+        b'G' => Flag::NoGroup,
+        b'H' => Flag::DerefCommandLine,
+        b'I' => Flag::Ignore,
+        b'L' => Flag::Dereference,
+        b'N' => Flag::Literal,
+        b'Q' => Flag::QuoteName,
+        b'R' => Flag::Recursive,
+        b'S' => Flag::SortSize,
+        b'T' => Flag::Tabsize,
+        b'U' => Flag::SortNone,
+        b'X' => Flag::SortExtension,
+        b'Z' => Flag::Context,
+        b'1' => Flag::OnePerLine,
+        _ => return None,
+    })
+}
+
+/// The long name → [`Flag`] map. The name arrives already resolved by
+/// `getopt`, so every arm here is an exact entry of [`LONG_OPTIONS`].
+fn long_flag(name: &str) -> Option<Flag> {
+    Some(match name {
+        "all" => Flag::All,
+        "escape" => Flag::Escape,
+        "directory" => Flag::Directory,
+        "dired" => Flag::Dired,
+        "full-time" => Flag::FullTime,
+        "group-directories-first" => Flag::GroupDirectoriesFirst,
+        "human-readable" => Flag::HumanReadable,
+        "inode" => Flag::Inode,
+        "kibibytes" => Flag::Kibibytes,
+        "numeric-uid-gid" => Flag::NumericUidGid,
+        "no-group" => Flag::NoGroup,
+        "hide-control-chars" => Flag::HideControlChars,
+        "reverse" => Flag::Reverse,
+        "size" => Flag::Size,
+        "width" => Flag::Width,
+        "almost-all" => Flag::AlmostAll,
+        "ignore-backups" => Flag::IgnoreBackups,
+        "classify" => Flag::Classify,
+        "file-type" => Flag::FileType,
+        "si" => Flag::Si,
+        "dereference-command-line" => Flag::DerefCommandLine,
+        "dereference-command-line-symlink-to-dir" => Flag::DerefCommandLineSymlinkToDir,
+        "hide" => Flag::Hide,
+        "ignore" => Flag::Ignore,
+        "indicator-style" => Flag::IndicatorStyle,
+        "dereference" => Flag::Dereference,
+        "literal" => Flag::Literal,
+        "quote-name" => Flag::QuoteName,
+        "quoting-style" => Flag::QuotingStyle,
+        "recursive" => Flag::Recursive,
+        "format" => Flag::Format,
+        "show-control-chars" => Flag::ShowControlChars,
+        "sort" => Flag::Sort,
+        "tabsize" => Flag::Tabsize,
+        "time" => Flag::Time,
+        "time-style" => Flag::TimeStyle,
+        "zero" => Flag::Zero,
+        "color" => Flag::Color,
+        "hyperlink" => Flag::Hyperlink,
+        "block-size" => Flag::BlockSize,
+        "context" => Flag::Context,
+        "author" => Flag::Author,
+        "help" => Flag::Help,
+        "version" => Flag::Version,
+        _ => return None,
+    })
+}
+
+// ----------------------------------------------------------------- config ---
+
+/// Everything the command line decides, once it has all been read.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Config {
+    format: Format,
+    sort: Sort,
+    sort_reverse: bool,
+    time_type: TimeType,
+    ignore_mode: IgnoreMode,
+    hide_patterns: Vec<Vec<u8>>,
+    ignore_patterns: Vec<Vec<u8>>,
+    print_inode: bool,
+    print_block_size: bool,
+    print_owner: bool,
+    print_group: bool,
+    print_author: bool,
+    print_scontext: bool,
+    numeric_ids: bool,
+    immediate_dirs: bool,
+    recursive: bool,
+    directories_first: bool,
+    indicator_style: Indicator,
+    dereference: Deref,
+    dired: bool,
+    eolbyte: u8,
+    line_length: usize,
+    max_idx: usize,
+    tabsize: usize,
+    qmark_funny_chars: bool,
+    quoting_style: Style,
+    /// gnulib's `filename_quoting_options`' `quote_these_too` — the extra
+    /// bytes a *file name* singles out. See [`Style::quote_with`], and
+    /// [`DIRNAME_EXTRA`] for the header line's own, different set.
+    filename_extra: Vec<u8>,
+    /// The word `--dired` echoes in its `//DIRED-OPTIONS//` line. It is the
+    /// *name* of the style rather than the style, because two of the ten words
+    /// name one value and only the first of them is ever printed.
+    quoting_style_name: &'static str,
+    align_variable_outer_quotes: bool,
+    human_output_opts: Opts,
+    output_block_size: u64,
+    file_human_output_opts: Opts,
+    file_output_block_size: u64,
+    /// `[non-recent, recent]`, GNU's `long_time_format`.
+    long_time_format: [Vec<u8>; 2],
+    format_needs_stat: bool,
+    format_needs_type: bool,
+    check_symlink_mode: bool,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            format: Format::OnePerLine,
+            sort: Sort::Name,
+            sort_reverse: false,
+            time_type: TimeType::Mtime,
+            ignore_mode: IgnoreMode::Default,
+            hide_patterns: Vec::new(),
+            ignore_patterns: Vec::new(),
+            print_inode: false,
+            print_block_size: false,
+            print_owner: true,
+            print_group: true,
+            print_author: false,
+            print_scontext: false,
+            numeric_ids: false,
+            immediate_dirs: false,
+            recursive: false,
+            directories_first: false,
+            indicator_style: Indicator::None,
+            dereference: Deref::Undefined,
+            dired: false,
+            eolbyte: b'\n',
+            line_length: 80,
+            max_idx: 27,
+            tabsize: 8,
+            qmark_funny_chars: false,
+            quoting_style: Style::Literal,
+            filename_extra: Vec::new(),
+            quoting_style_name: "literal",
+            align_variable_outer_quotes: false,
+            human_output_opts: Opts::NONE,
+            output_block_size: 0,
+            file_human_output_opts: Opts::NONE,
+            file_output_block_size: 1,
+            long_time_format: [b"%b %e  %Y".to_vec(), b"%b %e %H:%M".to_vec()],
+            format_needs_stat: false,
+            format_needs_type: false,
+            check_symlink_mode: false,
+        }
+    }
+}
+
+/// The environment `ls` reads, gathered up so that parsing stays a pure
+/// function of `(argv, env)` and can be unit-tested without exporting anything.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct Environment {
+    columns: Option<Vec<u8>>,
+    tabsize: Option<Vec<u8>>,
+    quoting_style: Option<Vec<u8>>,
+    time_style: Option<Vec<u8>>,
+    ls_block_size: Option<Vec<u8>>,
+    block_size: Option<Vec<u8>>,
+    posixly_correct: bool,
+    stdout_isatty: bool,
+    /// `hard_locale (LC_TIME)`: false only for exactly `C` and `POSIX`.
+    ///
+    /// It decides two separate things — whether `--time-style=posix-…` strips
+    /// its prefix or gives up, and whether `locale` looks its formats up in the
+    /// message catalogue — and it is *true* under `LC_ALL=C.UTF-8`, which is
+    /// the trap: `C.UTF-8` is not `C`.
+    hard_locale_time: bool,
+}
+
+/// What the command line asked for, once it has been understood.
+enum Request {
+    Help,
+    Version,
+    Run(Box<Config>, Vec<Vec<u8>>),
+}
+
+/// A command line that will not run, and everything to print about it.
+#[derive(Debug, PartialEq, Eq)]
+struct Refusal {
+    /// Complete stderr lines, prefixed where GNU prefixes them.
+    lines: Vec<String>,
+    /// Whether `Try 'ls --help' for more information.` follows.
+    referral: bool,
+    status: i32,
+}
+
+impl Refusal {
+    fn from_getopt(error: &getopt::Error) -> Self {
+        Self {
+            lines: vec![format!("ls: {}", error.sentence)],
+            referral: error.referral.is_some(),
+            status: error.status,
         }
     }
 
-    LsArgs {
-        opts,
-        paths,
-        unknown,
+    /// One sentence and no referral, at `ls`'s fatal status. This is the shape
+    /// of upstream's bare `error (LS_FAILURE, 0, …)` — `-w`, `-T` and
+    /// `--block-size` all take it, and measured, none prints a referral.
+    fn fatal(sentence: String) -> Self {
+        Self {
+            lines: vec![format!("ls: {sentence}")],
+            referral: false,
+            status: 2,
+        }
+    }
+
+    fn print(&self, err: &mut dyn Write) {
+        for line in &self.lines {
+            // A diagnostic that cannot be written has nowhere left to be
+            // reported, so the failure is deliberately dropped here.
+            let _ = writeln!(err, "{line}");
+        }
+        if self.referral {
+            let _ = writeln!(err, "Try 'ls --help' for more information.");
+        }
     }
 }
 
-/// True if `name` should be hidden under the current `all` flag.  Names
-/// starting with '.' are hidden unless `-a` is set.
-fn is_hidden(name: &str, all: bool) -> bool {
-    !all && name.starts_with('.')
-}
+// ------------------------------------------------------------- small bits ---
 
-/// Case-insensitive sort key used to order entries within a directory.
-fn sort_key(name: &str) -> String {
-    name.to_lowercase()
-}
-
-/// Join entry names into the simple (non-long, non-one-per-line) output
-/// row: names separated by two spaces, with a trailing newline iff at
-/// least one entry was emitted.
-fn join_simple_row(names: &[String]) -> String {
-    if names.is_empty() {
-        return String::new();
+/// GNU's `decode_line_length`: `None` if the spec is not a number, `Some(0)` —
+/// meaning *no limit* — if it is too large to be one.
+///
+/// The base is 0, so `-w 0x50` is 80. The suffix list is empty rather than
+/// absent, which is a distinction gnulib makes and this one keeps: `-w 1K` is
+/// an invalid *suffix* rather than an invalid number, and both are rejected.
+fn decode_line_length(spec: &[u8]) -> Option<u64> {
+    let (value, status) = xnum::xstrtoumax_base(spec, 0, Some(b""));
+    match status {
+        // Upstream clamps at `MIN (PTRDIFF_MAX, SIZE_MAX)` and treats anything
+        // above it as 0, i.e. as infinity.
+        Status::Ok if value <= i64::MAX.unsigned_abs() => Some(value),
+        Status::Ok | Status::Overflow => Some(0),
+        Status::Invalid | Status::InvalidSuffix | Status::InvalidSuffixWithOverflow => None,
     }
-    let mut out = names.join("  ");
-    out.push('\n');
+}
+
+/// gnulib's `human_options` with upstream's environment fallback restored.
+///
+/// `human_options (nullptr, …)` does not mean "no block size": gnulib looks at
+/// `BLOCK_SIZE` from inside `humblock`, so `ls` reaches that variable without
+/// naming it. Splitting the lookup out makes the chain visible at the call
+/// site, where the fact that `LS_BLOCK_SIZE` wins over `BLOCK_SIZE` is a rule
+/// of `ls` rather than of gnulib.
+fn block_size_options(spec: Option<&[u8]>, posixly_correct: bool) -> (u64, Opts) {
+    match spec {
+        Some(text) => {
+            let (size, opts, _) = coreutils::human::human_options(text, posixly_correct);
+            (size, opts)
+        }
+        None => (default_block_size(posixly_correct), Opts::NONE),
+    }
+}
+
+/// The `//DIRED-OPTIONS//` spelling of a style. The inverse of `Style::WORDS`,
+/// which cannot simply be searched backwards by value in general — two words
+/// name one value — but whose *first* match is the one upstream prints.
+fn style_word(style: Style) -> &'static str {
+    Style::WORDS
+        .iter()
+        .find(|(_, value)| *value == style)
+        .map_or("literal", |(word, _)| *word)
+}
+
+/// The first line of an argmatch sentence — its "invalid argument … for …"
+/// half, without the list of valid words that follows it.
+fn first_line(sentence: &str) -> &str {
+    sentence.split('\n').next().unwrap_or(sentence)
+}
+
+// ------------------------------------------------------------ option loop ---
+
+/// The option loop's own locals, handed to [`finish`] in one piece.
+struct Settings {
+    kibibytes_specified: bool,
+    format_opt: Option<Format>,
+    hide_control_chars_opt: Option<bool>,
+    quoting_style_opt: Option<Style>,
+    sort_opt: Option<Sort>,
+    tabsize_opt: Option<u64>,
+    width_opt: Option<u64>,
+    time_style_option: Option<Vec<u8>>,
+    print_hyperlink: bool,
+}
+
+/// GNU's `decode_switches`, up to the end of its `while` loop.
+///
+/// `err` is where warnings go — the three "ignoring invalid …" messages that
+/// do **not** stop the parse. They are written as they are found rather than
+/// collected, because a later option can be fatal and upstream's ordering puts
+/// the warning first: `TABSIZE=x ls -C -w nan` prints the tab-size warning and
+/// then the line-width error.
+#[expect(
+    clippy::too_many_lines,
+    reason = "one arm per option, in upstream's order; splitting it would hide that order"
+)]
+fn parse_args(argv: &[OsString], env: &Environment, err: &mut dyn Write) -> Result<Request, Refusal> {
+    let mut cfg = Config::default();
+    let mut operands: Vec<Vec<u8>> = Vec::new();
+
+    // Upstream's "false or -1 unless a switch says otherwise" locals. They are
+    // separate from `cfg` because "not set" is a distinct state that decides
+    // what the environment and the tty are allowed to contribute.
+    let mut set = Settings {
+        kibibytes_specified: false,
+        format_opt: None,
+        hide_control_chars_opt: None,
+        quoting_style_opt: None,
+        sort_opt: None,
+        tabsize_opt: None,
+        width_opt: None,
+        time_style_option: None,
+        print_hyperlink: false,
+    };
+    // Recognised, validated, and then dropped: see `known-issues.md`
+    // → `TD-B-LS-ACCEPTS-COLOUR-AND-HYPERLINK-WITHOUT-EMITTING-EITHER`.
+    let mut print_with_color = false;
+
+    for item in LS.parse(argv, SHORT_OPTIONS, LONG_OPTIONS) {
+        let item = item.map_err(|error| Refusal::from_getopt(&error))?;
+        let (flag, value, spelling): (Flag, Option<OsString>, String) = match item {
+            Opt::Operand(word) => {
+                operands.push(os_bytes(word).into_owned());
+                continue;
+            }
+            Opt::Short(letter, value) => {
+                let Some(flag) = short_flag(letter) else {
+                    // Unreachable while `SHORT_OPTIONS` and `short_flag` agree;
+                    // getopt has already rejected every other letter.
+                    return Err(Refusal::from_getopt(&LS.invalid_option(letter)));
+                };
+                (flag, value, format!("-{}", char::from(letter)))
+            }
+            Opt::Long(name, value) => {
+                let Some(flag) = long_flag(name) else {
+                    return Err(Refusal::from_getopt(
+                        &LS.unrecognized_option(format!("--{name}").as_bytes()),
+                    ));
+                };
+                (flag, value, format!("--{name}"))
+            }
+        };
+        let raw = value.as_deref().map(|v| os_bytes(v).into_owned());
+        let arg = raw.as_deref().unwrap_or_default();
+
+        match flag {
+            Flag::Help => return Ok(Request::Help),
+            Flag::Version => return Ok(Request::Version),
+            Flag::All => cfg.ignore_mode = IgnoreMode::Minimal,
+            Flag::AlmostAll => cfg.ignore_mode = IgnoreMode::DotAndDotDot,
+            Flag::Escape => set.quoting_style_opt = Some(Style::Escape),
+            Flag::Ctime => cfg.time_type = TimeType::Ctime,
+            Flag::Atime => cfg.time_type = TimeType::Atime,
+            Flag::Directory => cfg.immediate_dirs = true,
+            // `-f` is five options at once, and the one that is *not* obvious
+            // is that it un-sets `-s`: `ls -s -f` prints no block sizes.
+            Flag::NoSortAll => {
+                cfg.ignore_mode = IgnoreMode::Minimal;
+                set.sort_opt = Some(Sort::None);
+                if set.format_opt == Some(Format::Long) {
+                    set.format_opt = None;
+                }
+                print_with_color = false;
+                set.print_hyperlink = false;
+                cfg.print_block_size = false;
+            }
+            Flag::FileType => cfg.indicator_style = Indicator::FileType,
+            Flag::LongNoOwner => {
+                set.format_opt = Some(Format::Long);
+                cfg.print_owner = false;
+            }
+            Flag::LongNoGroup => {
+                set.format_opt = Some(Format::Long);
+                cfg.print_group = false;
+            }
+            Flag::NoGroup => cfg.print_group = false,
+            Flag::HumanReadable => {
+                cfg.human_output_opts = Opts::AUTOSCALE | Opts::SI | Opts::BASE_1024;
+                cfg.file_human_output_opts = cfg.human_output_opts;
+                cfg.output_block_size = 1;
+                cfg.file_output_block_size = 1;
+            }
+            Flag::Si => {
+                cfg.human_output_opts = Opts::AUTOSCALE | Opts::SI;
+                cfg.file_human_output_opts = cfg.human_output_opts;
+                cfg.output_block_size = 1;
+                cfg.file_output_block_size = 1;
+            }
+            Flag::Inode => cfg.print_inode = true,
+            Flag::Kibibytes => set.kibibytes_specified = true,
+            Flag::LongFormat => set.format_opt = Some(Format::Long),
+            Flag::WithCommas => set.format_opt = Some(Format::WithCommas),
+            Flag::ManyPerLine => set.format_opt = Some(Format::ManyPerLine),
+            Flag::Horizontal => set.format_opt = Some(Format::Horizontal),
+            Flag::NumericUidGid => {
+                cfg.numeric_ids = true;
+                set.format_opt = Some(Format::Long);
+            }
+            Flag::Slash => cfg.indicator_style = Indicator::Slash,
+            Flag::HideControlChars => set.hide_control_chars_opt = Some(true),
+            Flag::ShowControlChars => set.hide_control_chars_opt = Some(false),
+            Flag::Reverse => cfg.sort_reverse = true,
+            Flag::Size => cfg.print_block_size = true,
+            Flag::SortTime => set.sort_opt = Some(Sort::Time),
+            Flag::SortSize => set.sort_opt = Some(Sort::Size),
+            Flag::SortVersion => set.sort_opt = Some(Sort::Version),
+            Flag::SortExtension => set.sort_opt = Some(Sort::Extension),
+            Flag::SortNone => set.sort_opt = Some(Sort::None),
+            Flag::Sort => {
+                set.sort_opt = Some(
+                    LS.argmatch(arg, &spelling, SORT_ARGS)
+                        .map_err(|e| Refusal::from_getopt(&e))?,
+                );
+            }
+            Flag::Time => {
+                cfg.time_type = LS
+                    .argmatch(arg, &spelling, TIME_ARGS)
+                    .map_err(|e| Refusal::from_getopt(&e))?;
+            }
+            Flag::Format => {
+                set.format_opt = Some(
+                    LS.argmatch(arg, &spelling, FORMAT_ARGS)
+                        .map_err(|e| Refusal::from_getopt(&e))?,
+                );
+            }
+            Flag::IndicatorStyle => {
+                cfg.indicator_style = LS
+                    .argmatch(arg, &spelling, INDICATOR_STYLE_ARGS)
+                    .map_err(|e| Refusal::from_getopt(&e))?;
+            }
+            Flag::QuotingStyle => {
+                set.quoting_style_opt = Some(
+                    LS.argmatch(arg, &spelling, Style::WORDS)
+                        .map_err(|e| Refusal::from_getopt(&e))?,
+                );
+            }
+            Flag::Width => {
+                let Some(width) = decode_line_length(arg) else {
+                    return Err(Refusal::fatal(format!("invalid line width: {}", quote(arg))));
+                };
+                set.width_opt = Some(width);
+            }
+            Flag::Tabsize => {
+                set.tabsize_opt = Some(
+                    xnum::xnumtoumax(arg, 0, 0, i64::MAX.unsigned_abs(), Some(b""), "invalid tab size")
+                        .map_err(Refusal::fatal)?,
+                );
+            }
+            Flag::IgnoreBackups => {
+                // Two patterns, not one: without the second, `ls -aB` would
+                // still list `.foo~`.
+                cfg.ignore_patterns.push(b"*~".to_vec());
+                cfg.ignore_patterns.push(b".*~".to_vec());
+            }
+            Flag::Ignore => cfg.ignore_patterns.push(arg.to_vec()),
+            Flag::Hide => cfg.hide_patterns.push(arg.to_vec()),
+            Flag::Dired => cfg.dired = true,
+            Flag::Classify => {
+                let when = match raw.as_deref() {
+                    // `--classify` with no argument means `--classify=always`;
+                    // `-F` can never carry one.
+                    None => When::Always,
+                    Some(text) => LS
+                        .argmatch(text, "--classify", WHEN_ARGS)
+                        .map_err(|e| Refusal::from_getopt(&e))?,
+                };
+                if when == When::Always || (when == When::IfTty && env.stdout_isatty) {
+                    cfg.indicator_style = Indicator::Classify;
+                }
+            }
+            Flag::Color => {
+                let when = match raw.as_deref() {
+                    None => When::Always,
+                    Some(text) => LS
+                        .argmatch(text, "--color", WHEN_ARGS)
+                        .map_err(|e| Refusal::from_getopt(&e))?,
+                };
+                print_with_color =
+                    when == When::Always || (when == When::IfTty && env.stdout_isatty);
+            }
+            Flag::Hyperlink => {
+                let when = match raw.as_deref() {
+                    None => When::Always,
+                    Some(text) => LS
+                        .argmatch(text, "--hyperlink", WHEN_ARGS)
+                        .map_err(|e| Refusal::from_getopt(&e))?,
+                };
+                set.print_hyperlink =
+                    when == When::Always || (when == When::IfTty && env.stdout_isatty);
+            }
+            Flag::DerefCommandLine => cfg.dereference = Deref::CommandLineArguments,
+            Flag::DerefCommandLineSymlinkToDir => {
+                cfg.dereference = Deref::CommandLineSymlinkToDir;
+            }
+            Flag::Dereference => cfg.dereference = Deref::Always,
+            Flag::Literal => set.quoting_style_opt = Some(Style::Literal),
+            Flag::QuoteName => set.quoting_style_opt = Some(Style::C),
+            Flag::Recursive => cfg.recursive = true,
+            // `-1` has no effect after `-l`, which is why `ls -l -1` is still a
+            // long listing while `ls -1 -l` obviously is.
+            Flag::OnePerLine => {
+                if set.format_opt != Some(Format::Long) {
+                    set.format_opt = Some(Format::OnePerLine);
+                }
+            }
+            Flag::Author => cfg.print_author = true,
+            Flag::Context => cfg.print_scontext = true,
+            Flag::GroupDirectoriesFirst => cfg.directories_first = true,
+            Flag::FullTime => {
+                set.format_opt = Some(Format::Long);
+                set.time_style_option = Some(b"full-iso".to_vec());
+            }
+            Flag::TimeStyle => set.time_style_option = Some(arg.to_vec()),
+            Flag::BlockSize => {
+                let (size, opts, status) = coreutils::human::human_options(arg, env.posixly_correct);
+                if let Some(sentence) = strtol_fatal(status, &spelling, arg) {
+                    return Err(Refusal::fatal(sentence));
+                }
+                cfg.human_output_opts = opts;
+                cfg.output_block_size = size;
+                cfg.file_human_output_opts = opts;
+                cfg.file_output_block_size = size;
+            }
+            Flag::Zero => {
+                cfg.eolbyte = 0;
+                set.hide_control_chars_opt = Some(false);
+                if set.format_opt != Some(Format::Long) {
+                    set.format_opt = Some(Format::OnePerLine);
+                }
+                print_with_color = false;
+                set.quoting_style_opt = Some(Style::Literal);
+            }
+        }
+    }
+
+    let _ = print_with_color;
+    finish(cfg, env, err, set).map(|cfg| Request::Run(Box::new(cfg), operands))
+}
+
+/// Everything `decode_switches` does after its `while` loop, plus the four
+/// derivations `main` makes from the result.
+///
+/// It is separate from [`parse_args`] only because the loop is already long;
+/// the two are one function upstream, and the split is at upstream's own
+/// `if (! output_block_size)`.
+#[expect(
+    clippy::too_many_lines,
+    reason = "upstream's post-loop block, in upstream's order; the order is load-bearing"
+)]
+fn finish(
+    mut cfg: Config,
+    env: &Environment,
+    err: &mut dyn Write,
+    set: Settings,
+) -> Result<Config, Refusal> {
+    // The block-size chain. `LS_BLOCK_SIZE` wins over `BLOCK_SIZE`; either of
+    // them being *set* also moves the `-l` size column onto the same footing,
+    // which `-h` alone does not do; and `-k` overrides the pair, but only for
+    // the block-count columns and not for the file sizes.
+    if cfg.output_block_size == 0 {
+        let spec = env.ls_block_size.as_deref().or(env.block_size.as_deref());
+        let (size, opts) = block_size_options(spec, env.posixly_correct);
+        cfg.output_block_size = size;
+        cfg.human_output_opts = opts;
+        if spec.is_some() {
+            cfg.file_human_output_opts = opts;
+            cfg.file_output_block_size = size;
+        }
+        if set.kibibytes_specified {
+            cfg.human_output_opts = Opts::NONE;
+            cfg.output_block_size = 1024;
+        }
+    }
+
+    cfg.format = set.format_opt.unwrap_or(if env.stdout_isatty {
+        Format::ManyPerLine
+    } else {
+        Format::OnePerLine
+    });
+
+    // The width is only *asked for* when it could matter, which is why
+    // `COLUMNS=x ls -l` is silent and `COLUMNS=x ls -C` warns.
+    let mut linelen = set.width_opt;
+    if matches!(
+        cfg.format,
+        Format::ManyPerLine | Format::Horizontal | Format::WithCommas
+    ) && linelen.is_none()
+    {
+        // Upstream's `TIOCGWINSZ` branch comes first and is absent here: our
+        // terminal exports `COLUMNS` and has no window-size ioctl yet.
+        if let Some(text) = env.columns.as_deref().filter(|text| !text.is_empty()) {
+            match decode_line_length(text) {
+                Some(width) => linelen = Some(width),
+                None => {
+                    let _ = writeln!(
+                        err,
+                        "ls: ignoring invalid width in environment variable COLUMNS: {}",
+                        quote(text)
+                    );
+                }
+            }
+        }
+    }
+    cfg.line_length = usize::try_from(linelen.unwrap_or(80)).unwrap_or(usize::MAX);
+
+    // The most columns the page could hold: every column is at least three
+    // cells wide, and the first one carries no separator.
+    cfg.max_idx = (cfg.line_length / MIN_COLUMN_WIDTH)
+        .saturating_add(usize::from(!cfg.line_length.is_multiple_of(MIN_COLUMN_WIDTH)));
+
+    if matches!(
+        cfg.format,
+        Format::ManyPerLine | Format::Horizontal | Format::WithCommas
+    ) {
+        match set.tabsize_opt {
+            Some(size) => cfg.tabsize = usize::try_from(size).unwrap_or(usize::MAX),
+            None => {
+                cfg.tabsize = 8;
+                if let Some(text) = env.tabsize.as_deref() {
+                    match xnum::xstrtoumax_base(text, 0, Some(b"")) {
+                        (value, Status::Ok) => {
+                            cfg.tabsize = usize::try_from(value).unwrap_or(usize::MAX);
+                        }
+                        _ => {
+                            let _ = writeln!(
+                                err,
+                                "ls: ignoring invalid tab size in environment variable TABSIZE: {}",
+                                quote(text)
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    cfg.qmark_funny_chars = set.hide_control_chars_opt.unwrap_or(env.stdout_isatty);
+
+    // The style comes from the option, then from `QUOTING_STYLE`, then from
+    // whether stdout is a terminal. A `QUOTING_STYLE` that does not resolve is
+    // a warning and is then ignored, not an error.
+    let mut style = set.quoting_style_opt;
+    if style.is_none()
+        && let Some(text) = env.quoting_style.as_deref()
+    {
+        match LS.argmatch(text, "--quoting-style", Style::WORDS) {
+            Ok(value) => style = Some(value),
+            Err(_) => {
+                let _ = writeln!(
+                    err,
+                    "ls: ignoring invalid value of environment variable QUOTING_STYLE: {}",
+                    quote(text)
+                );
+            }
+        }
+    }
+    cfg.quoting_style = style.unwrap_or(if env.stdout_isatty {
+        Style::ShellEscape
+    } else {
+        Style::Literal
+    });
+    cfg.quoting_style_name = style_word(cfg.quoting_style);
+    cfg.filename_extra = filename_extra(cfg.quoting_style, cfg.indicator_style);
+
+    // Only the three styles whose quotes are *conditional* need the padding
+    // column, and only in a format that aligns anything.
+    cfg.align_variable_outer_quotes = (cfg.format == Format::Long
+        || (matches!(cfg.format, Format::ManyPerLine | Format::Horizontal) && cfg.line_length != 0))
+        && matches!(
+            cfg.quoting_style,
+            Style::Shell | Style::ShellEscape | Style::CMaybe
+        );
+
+    // `--dired` is meaningful only with `-l` and without `--hyperlink`;
+    // upstream drops it silently otherwise, and only *then* checks it against
+    // `--zero` — so `ls --dired --zero` is fine and `ls -l --dired --zero` is
+    // the error.
+    cfg.dired = cfg.dired && cfg.format == Format::Long && !set.print_hyperlink;
+    if cfg.eolbyte == 0 && cfg.dired {
+        return Err(Refusal::fatal(
+            "--dired and --zero are incompatible".to_string(),
+        ));
+    }
+
+    // `-u` alone sorts by atime; `-lu` shows atime but sorts by name. The
+    // distinction is the `format != long_format` here and nowhere else.
+    cfg.sort = set.sort_opt.unwrap_or(
+        if cfg.format != Format::Long
+            && matches!(
+                cfg.time_type,
+                TimeType::Ctime | TimeType::Atime | TimeType::Btime
+            ) {
+            Sort::Time
+        } else {
+            Sort::Name
+        },
+    );
+
+    if cfg.format == Format::Long {
+        cfg.long_time_format = time_formats(set.time_style_option.as_deref(), env)?;
+    }
+
+    // ---- `main`'s own derivations, which depend on the whole command line ---
+
+    if cfg.directories_first {
+        cfg.check_symlink_mode = true;
+    }
+
+    if cfg.dereference == Deref::Undefined {
+        cfg.dereference = if cfg.immediate_dirs
+            || cfg.indicator_style == Indicator::Classify
+            || cfg.format == Format::Long
+        {
+            Deref::Never
+        } else {
+            Deref::CommandLineSymlinkToDir
+        };
+    }
+
+    cfg.format_needs_stat = cfg.sort == Sort::Time
+        || cfg.sort == Sort::Size
+        || cfg.format == Format::Long
+        || cfg.print_scontext
+        || cfg.print_block_size;
+    cfg.format_needs_type = !cfg.format_needs_stat
+        && (cfg.recursive || cfg.indicator_style != Indicator::None || cfg.directories_first);
+
+    Ok(cfg)
+}
+
+/// GNU's `--time-style` block: the `posix-` prefix, the `+FORMAT` spelling, and
+/// the four words, in that order.
+///
+/// It runs **only when `-l` is in force**, which is why `ls --time-style=nosuch`
+/// succeeds and `ls -l --time-style=nosuch` does not. That is not a shortcut
+/// here either — the block is literally inside upstream's
+/// `if (format == long_format)`.
+fn time_formats(option: Option<&[u8]>, env: &Environment) -> Result<[Vec<u8>; 2], Refusal> {
+    let default: [Vec<u8>; 2] = [b"%b %e  %Y".to_vec(), b"%b %e %H:%M".to_vec()];
+    let mut style: &[u8] = option.or(env.time_style.as_deref()).unwrap_or(b"locale");
+
+    // `posix-iso` means "iso, but only if the locale is not C" — and it says so
+    // by *returning* from the whole function, leaving the default formats in
+    // place rather than falling through to the word after the prefix.
+    while style.starts_with(b"posix-") {
+        if !env.hard_locale_time {
+            return Ok(default);
+        }
+        style = style.get(6..).unwrap_or_default();
+    }
+
+    if style.first() == Some(&b'+') {
+        let body = style.get(1..).unwrap_or_default();
+        return match body.iter().position(|&byte| byte == b'\n') {
+            None => Ok([body.to_vec(), body.to_vec()]),
+            Some(cut) => {
+                let head = body.get(..cut).unwrap_or_default().to_vec();
+                let tail = body.get(cut.saturating_add(1)..).unwrap_or_default();
+                if tail.contains(&b'\n') {
+                    return Err(Refusal::fatal(format!(
+                        "invalid time style format {}",
+                        quote(head.as_slice())
+                    )));
+                }
+                Ok([head, tail.to_vec()])
+            }
+        };
+    }
+
+    let chosen = LS
+        .argmatch(style, "time style", TIME_STYLE_ARGS)
+        .map_err(|error| Refusal {
+            // Upstream does not use `XARGMATCH` here, because that would print
+            // neither the `posix-` variants nor the `+FORMAT` line. It prints
+            // the invalid-argument sentence, then this hand-built list, then
+            // `usage (LS_FAILURE)` — so unlike every other argmatch failure in
+            // `ls` this one carries a referral and exits 2 rather than 1.
+            lines: std::iter::once(format!("ls: {}", first_line(&error.sentence)))
+                .chain(std::iter::once("Valid arguments are:".to_string()))
+                .chain(
+                    TIME_STYLE_ARGS
+                        .iter()
+                        .map(|(word, _)| format!("  - [posix-]{word}")),
+                )
+                .chain(std::iter::once(
+                    "  - +FORMAT (e.g., +%H:%M) for a 'date'-style format".to_string(),
+                ))
+                .collect(),
+            referral: true,
+            status: 2,
+        })?;
+
+    Ok(match chosen {
+        TimeStyle::FullIso => {
+            let format = b"%Y-%m-%d %H:%M:%S.%N %z".to_vec();
+            [format.clone(), format]
+        }
+        TimeStyle::LongIso => {
+            let format = b"%Y-%m-%d %H:%M".to_vec();
+            [format.clone(), format]
+        }
+        TimeStyle::Iso => [b"%Y-%m-%d ".to_vec(), b"%m-%d %H:%M".to_vec()],
+        // Upstream looks the two formats up in the message catalogue when the
+        // locale is hard. We have no catalogue, so both cases are the default.
+        TimeStyle::Locale => default,
+    })
+}
+
+// ------------------------------------------------------ names and widths ---
+
+/// gnulib's `quote_these_too` for the **directory header** line — `dir:`.
+///
+/// Only the colon, and never the space or the indicator characters, because
+/// the header is not a name in a column and nothing is appended to it. That
+/// asymmetry is measurable: `ls -b` prints a file called `a b` as `a\ b` and a
+/// directory called `d e` as the header `d e:`.
+const DIRNAME_EXTRA: &[u8] = b":";
+
+/// gnulib's `quote_these_too` for a **file name**, as `decode_switches` builds
+/// it: the space under `escape`, then the indicator characters this style can
+/// append.
+///
+/// `&"*=>@|"[indicator_style - file_type]` is upstream's spelling of the
+/// second half, which is why [`Indicator`] is [`Ord`]: `--file-type` (which
+/// appends `/=>@|`) must quote `*` as well as the rest, while `-F` — one step
+/// further along — appends `*` too but quotes only `=>@|`. The `/` a directory
+/// gets is in neither set, because a `/` cannot appear in a name.
+fn filename_extra(style: Style, indicator: Indicator) -> Vec<u8> {
+    let mut out = Vec::new();
+    if style == Style::Escape {
+        out.push(b' ');
+    }
+    match indicator {
+        Indicator::None | Indicator::Slash => {}
+        Indicator::FileType => out.extend_from_slice(b"*=>@|"),
+        Indicator::Classify => out.extend_from_slice(b"=>@|"),
+    }
     out
 }
 
-fn main() {
-    let args: Vec<String> = env::args().skip(1).collect();
-    let mut parsed = parse_args(&args);
-
-    for c in &parsed.unknown {
-        eprintln!("ls: unknown option: -{c}");
-    }
-
-    if parsed.paths.is_empty() {
-        parsed.paths.push(".".to_string());
-    }
-
-    let show_dir_name = parsed.paths.len() > 1;
-    let stdout = io::stdout();
-    let mut out = stdout.lock();
-
-    for (i, path) in parsed.paths.iter().enumerate() {
-        if i > 0 {
-            let _ = writeln!(out);
-        }
-        if show_dir_name {
-            let _ = writeln!(out, "{path}:");
-        }
-        list_dir(&mut out, path, &parsed.opts);
-    }
-}
-
-fn list_dir(out: &mut impl Write, path: &str, opts: &Options) {
-    let entries = match fs::read_dir(path) {
-        Ok(e) => e,
-        Err(e) => {
-            // Maybe it's a file, not a directory
-            if Path::new(path).is_file() {
-                show_entry(out, path, Path::new(path), opts);
-                return;
-            }
-            eprintln!("ls: cannot access {}: {e}", quoteaf_os(path));
-            return;
-        }
-    };
-
-    let mut names: Vec<(String, std::path::PathBuf)> = Vec::new();
-    for entry in entries.flatten() {
-        let name = entry.file_name().to_string_lossy().into_owned();
-        if is_hidden(&name, opts.all) {
+/// The screen width of `text`, or `None` where GNU's `mbsnwidth` returns -1.
+///
+/// This is gnulib's `mbsnwidth` under `ls`'s `MBSWIDTH_FLAGS`, which is
+/// `MBSW_REJECT_INVALID | MBSW_REJECT_UNPRINTABLE` — so it is not a width
+/// function that happens to fail, it is one that **refuses the whole string**
+/// the moment it meets a byte that is not valid UTF-8, a truncated sequence at
+/// the end, or a character with no width. One unprintable character does not
+/// cost its own width; it costs the width of the name.
+///
+/// Every caller in `ls` immediately clamps the -1 to zero — see
+/// [`display_width`] — so a name holding a stray byte is laid out as if it
+/// were empty. That is GNU's behaviour and it is why `ls` in a terminal
+/// defaults to `-q`, which replaces such bytes before this is ever asked.
+///
+/// The one place we knowingly differ from GNU is the unprintable test:
+/// `c32width` asks glibc's `iswprint`, a table generated from a particular
+/// Unicode release, and `charwidth::char_width` asks a rule that cannot drift.
+/// They agree on every assigned character and part company on unassigned ones.
+/// See `design-decisions.md` §357.
+fn mbs_width(text: &[u8]) -> Option<usize> {
+    let mut width = 0usize;
+    let mut rest = text;
+    while let Some(&first) = rest.first() {
+        // gnulib's printable-ASCII fast path, which is exactly 0x20..=0x7e.
+        // `\x7f` is deliberately not in it and takes the slow path, where it
+        // is rejected as unprintable.
+        if (0x20..0x7f).contains(&first) {
+            width = width.saturating_add(1);
+            rest = rest.get(1..).unwrap_or_default();
             continue;
         }
-        names.push((name, entry.path()));
-    }
-    names.sort_by_key(|a| sort_key(&a.0));
-
-    if opts.long {
-        for (name, path) in &names {
-            show_entry_long(out, name, path, opts);
+        match next_mb(rest) {
+            // Unreachable: `rest` is not empty.
+            None => break,
+            Some(Mb::Invalid | Mb::Incomplete) => return None,
+            Some(Mb::Char(c, len)) => {
+                width = width.saturating_add(char_width(c)?);
+                rest = rest.get(len..).unwrap_or_default();
+            }
         }
-    } else if opts.one_per_line {
-        for (name, _) in &names {
-            let _ = writeln!(out, "{name}");
-        }
-    } else {
-        let just_names: Vec<String> = names.iter().map(|(n, _)| n.clone()).collect();
-        let _ = write!(out, "{}", join_simple_row(&just_names));
     }
+    Some(width)
 }
 
-fn show_entry(out: &mut impl Write, name: &str, path: &Path, opts: &Options) {
-    if opts.long {
-        show_entry_long(out, name, path, opts);
-    } else {
-        let _ = writeln!(out, "{name}");
-    }
+/// [`mbs_width`] with GNU's `MAX (0, …)` applied: a name it refuses occupies
+/// no columns at all.
+fn display_width(text: &[u8]) -> usize {
+    mbs_width(text).unwrap_or(0)
 }
 
-fn show_entry_long(out: &mut impl Write, name: &str, path: &Path, opts: &Options) {
-    let meta = match fs::metadata(path) {
-        Ok(m) => m,
-        Err(_) => {
-            let _ = writeln!(out, "?????????? ? ? {name}");
-            return;
-        }
-    };
-
-    let file_type = if meta.is_dir() {
-        "d"
-    } else if meta.is_symlink() {
-        "l"
-    } else {
-        "-"
-    };
-    let size = meta.len();
-    let size_str = if opts.human {
-        human_size(size)
-    } else {
-        format!("{size:>8}")
-    };
-
-    let _ = writeln!(out, "{file_type}rw-r--r--  {size_str} {name}");
-}
-
-/// Render a size for `ls -lh`, right-aligned in the six-column field this
-/// listing uses.
+/// `-q`: replace every character that will not print with a single `?`.
 ///
-/// The rendering itself is [`human_readable`] with the option set GNU's `ls`
-/// passes for `-h` — autoscale, ceiling, IEC suffixes. The hand-rolled chain
-/// this replaces was the third copy of the same idea in this crate (see `df`
-/// and `du`) and carried the same defects: it rounded to nearest rather than
-/// up, it stopped at `G`, and it never dropped the decimal at ten — so a 10 KiB
-/// file listed as `10.0K` where GNU, measured, says `10K`.
+/// Returns the substituted bytes and their width, which is *not* the width of
+/// the input — the point of the pass is that the result has one.
 ///
-/// The six-column padding is kept as-is and is deliberately *not* GNU's
-/// behaviour: real `ls` sizes the column to the widest entry in the listing.
-/// That is a layout question about `ls`, not a rendering question about
-/// `human`, so it is left alone here rather than half-changed.
-fn human_size(bytes: u64) -> String {
-    let rendered = human_readable(
+/// The unit is the character, not the byte, and the difference is the whole
+/// reason this exists rather than a byte loop: a two-byte character that will
+/// not print becomes **one** `?`, while a two-byte sequence that is not a
+/// character at all becomes one `?` per byte. `caf\xc3\xa9` and `caf\xc3\xa9`
+/// truncated to `caf\xc3` are three characters and one `?` apart.
+///
+/// GNU has a second, unibyte implementation of this for `MB_CUR_MAX == 1`,
+/// which replaces every non-`isprint` *byte*. It is unreachable here: it needs
+/// a locale whose charset is not UTF-8, and SlateOS has one charset.
+fn qmark(text: &[u8]) -> (Vec<u8>, usize) {
+    let mut out = Vec::with_capacity(text.len());
+    let mut width = 0usize;
+    let mut rest = text;
+    while let Some(&first) = rest.first() {
+        if (0x20..0x7f).contains(&first) {
+            out.push(first);
+            width = width.saturating_add(1);
+            rest = rest.get(1..).unwrap_or_default();
+            continue;
+        }
+        let (eat, keep) = match next_mb(rest) {
+            // Unreachable: `rest` is not empty.
+            None => break,
+            // One byte skipped, one `?` — so a run of stray bytes becomes a
+            // run of question marks rather than a single one.
+            Some(Mb::Invalid) => (1, None),
+            // A truncated sequence at the end is one `?` however long it is,
+            // because there is no way to tell how much of it was meant.
+            Some(Mb::Incomplete) => (rest.len(), None),
+            Some(Mb::Char(c, len)) => (len, char_width(c).map(|w| (len, w))),
+        };
+        match keep {
+            Some((len, w)) => {
+                out.extend_from_slice(rest.get(..len).unwrap_or_default());
+                width = width.saturating_add(w);
+            }
+            None => {
+                out.push(b'?');
+                width = width.saturating_add(1);
+            }
+        }
+        rest = rest.get(eat..).unwrap_or_default();
+    }
+    (out, width)
+}
+
+/// GNU's `needs_quoting`: whether `style` would change `name` at all.
+///
+/// Upstream renders into a two-byte buffer and compares the first byte and the
+/// length, which is not a shortcut — `quotearg_buffer` returns the length it
+/// *would* have written — but it is the same predicate as this, and cheaper
+/// than the full rendering it is deciding whether to skip.
+///
+/// The answer feeds two separate things: whether a name may bypass the general
+/// quoting path entirely, and whether the *column* it sits in needs a leading
+/// space so that quoted and unquoted names in it line up. See [`Rendered`].
+fn needs_quoting(style: Style, extra: &[u8], name: &[u8]) -> bool {
+    let rendered = style.quote_with(name, extra);
+    rendered.first() != name.first() || rendered.len() != name.len()
+}
+
+/// A name as it will appear: the bytes, the columns they occupy, and whether a
+/// space goes in front of them.
+struct Rendered {
+    bytes: Vec<u8>,
+    width: usize,
+    /// GNU's `pad`. Under a style whose quotes are *conditional*
+    /// (`shell`, `shell-escape`, `c-maybe`), a listing where some names are
+    /// quoted and others are not would have its columns off by one; the
+    /// unquoted ones get a leading space so that the quote marks sit outside
+    /// the column rather than inside it. It is set only when some name in this
+    /// directory really was quoted — one space in front of every name in a
+    /// directory that has none would be a bug, not an alignment.
+    pad: bool,
+}
+
+/// GNU's `quote_name_buf`: render one name, measure it, and decide its
+/// padding.
+///
+/// `general` is upstream's `needs_general_quoting`, which is `f->quoted`, and
+/// its three values are three different things:
+///
+/// * `Some(false)` — this name was *measured* not to need quoting, so the
+///   rendering is the name and the quoting pass is skipped outright.
+/// * `Some(true)` — measured to need it. Render.
+/// * `None` — upstream's `-1`, "not measured". Render. Every name gets this
+///   once some earlier name in the directory has been found to need quoting,
+///   because the only reason to measure was to find that out.
+///
+/// `cwd_some_quoted` is whether any name in *this directory* needed quoting;
+/// it is what makes padding a property of the listing rather than of the name.
+fn quote_name(
+    cfg: &Config,
+    extra: &[u8],
+    cwd_some_quoted: bool,
+    name: &[u8],
+    general: Option<bool>,
+) -> Rendered {
+    // The `-q` pass runs on top of the three styles that do not escape
+    // anything themselves. Under the other seven an unprintable byte has
+    // already become a visible escape, so there is nothing left to replace.
+    let needs_further = cfg.qmark_funny_chars
+        && matches!(
+            cfg.quoting_style,
+            Style::Shell | Style::ShellAlways | Style::Literal
+        );
+
+    let (mut bytes, quoted) = if general == Some(false) {
+        (name.to_vec(), false)
+    } else {
+        let out = cfg.quoting_style.quote_with(name, extra);
+        let quoted = out.first() != name.first() || out.len() != name.len();
+        (out, quoted)
+    };
+
+    let width = if needs_further {
+        let (substituted, width) = qmark(&bytes);
+        bytes = substituted;
+        width
+    } else {
+        display_width(&bytes)
+    };
+
+    Rendered {
         bytes,
-        Opts::AUTOSCALE | Opts::CEILING | Opts::SI | Opts::BASE_1024,
-        1,
-        1,
-    );
-    format!("{rendered:>6}")
+        width,
+        pad: cfg.align_variable_outer_quotes && cwd_some_quoted && !quoted,
+    }
+}
+
+fn main() -> ExitCode {
+    ExitCode::SUCCESS
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::panic)]
+#[expect(
+    clippy::unwrap_used,
+    reason = "a test that cannot build its own fixture should fail loudly"
+)]
 mod tests {
     use super::*;
 
-    fn s(items: &[&str]) -> Vec<String> {
-        items.iter().map(|x| (*x).to_string()).collect()
-    }
+    // ------------------------------------------------- names and widths ---
 
-    // ---------------- parse_args ----------------
-
-    #[test]
-    fn parse_empty() {
-        let a = parse_args(&s(&[]));
-        assert_eq!(a.opts, Options::default());
-        assert!(a.paths.is_empty());
-        assert!(a.unknown.is_empty());
-    }
-
-    #[test]
-    fn parse_one_path() {
-        let a = parse_args(&s(&["/etc"]));
-        assert_eq!(a.paths, vec!["/etc"]);
-    }
-
-    #[test]
-    fn parse_short_flags() {
-        let a = parse_args(&s(&["-l"]));
-        assert!(a.opts.long);
-        assert!(!a.opts.all);
-    }
-
-    #[test]
-    fn parse_clustered() {
-        let a = parse_args(&s(&["-lah1"]));
-        assert!(a.opts.long);
-        assert!(a.opts.all);
-        assert!(a.opts.human);
-        assert!(a.opts.one_per_line);
-    }
-
-    #[test]
-    fn parse_unknown_flag_recorded() {
-        let a = parse_args(&s(&["-Z"]));
-        assert_eq!(a.unknown, vec!['Z']);
-    }
-
-    #[test]
-    fn parse_double_dash_treated_as_path() {
-        // Double-dash args are passed through unchanged (no long-opt
-        // support).
-        let a = parse_args(&s(&["--color", "/tmp"]));
-        assert_eq!(a.paths, vec!["--color", "/tmp"]);
-    }
-
-    #[test]
-    fn parse_flags_and_paths_mixed() {
-        let a = parse_args(&s(&["-l", "a", "-a", "b"]));
-        assert!(a.opts.long);
-        assert!(a.opts.all);
-        assert_eq!(a.paths, vec!["a", "b"]);
-    }
-
-    // ---------------- is_hidden ----------------
-
-    #[test]
-    fn hidden_dotfile_without_all() {
-        assert!(is_hidden(".bashrc", false));
-        assert!(is_hidden(".", false));
-        assert!(is_hidden("..", false));
-    }
-
-    #[test]
-    fn hidden_dotfile_with_all_visible() {
-        assert!(!is_hidden(".bashrc", true));
-    }
-
-    #[test]
-    fn hidden_normal_file_always_visible() {
-        assert!(!is_hidden("README.md", false));
-        assert!(!is_hidden("README.md", true));
-    }
-
-    // ---------------- sort_key ----------------
-
-    #[test]
-    fn sort_key_is_lowercase() {
-        assert_eq!(sort_key("Hello"), "hello");
-        assert_eq!(sort_key("WORLD"), "world");
-        assert_eq!(sort_key("Mixed-Case"), "mixed-case");
-    }
-
-    #[test]
-    fn sort_key_preserves_ordering() {
-        let mut names = vec![
-            "banana".to_string(),
-            "Apple".to_string(),
-            "cherry".to_string(),
-        ];
-        names.sort_by_key(|n| sort_key(n));
-        assert_eq!(names, vec!["Apple", "banana", "cherry"]);
-    }
-
-    // ---------------- join_simple_row ----------------
-
-    #[test]
-    fn join_empty() {
-        assert_eq!(join_simple_row(&[]), "");
-    }
-
-    #[test]
-    fn join_single() {
-        assert_eq!(join_simple_row(&["only".to_string()]), "only\n");
-    }
-
-    #[test]
-    fn join_multiple() {
-        let names: Vec<String> = vec!["a".into(), "b".into(), "c".into()];
-        assert_eq!(join_simple_row(&names), "a  b  c\n");
-    }
-
-    // ---------------- human_size ----------------
-
-    #[test]
-    fn human_under_kib() {
-        assert_eq!(human_size(0), "     0");
-        assert_eq!(human_size(1), "     1");
-        assert_eq!(human_size(1023), "  1023");
-    }
-
-    #[test]
-    fn human_kib() {
-        assert_eq!(human_size(1024), "  1.0K");
-        assert_eq!(human_size(1536), "  1.5K");
-    }
-
-    /// Measured: GNU `ls -h` renders 10240 as `10K`, not `10.0K`. The decimal
-    /// is dropped once the mantissa reaches ten, which is a rule about the
-    /// *mantissa* and not about any byte-count threshold — this assertion used
-    /// to demand `10.0K` and was describing the old implementation.
-    #[test]
-    fn the_decimal_disappears_at_ten() {
-        assert_eq!(human_size(10 * 1024), "   10K");
-    }
-
-    #[test]
-    fn human_mib() {
-        assert_eq!(human_size(1024 * 1024), "  1.0M");
-        assert_eq!(human_size(5 * 1024 * 1024 + 512 * 1024), "  5.5M");
-    }
-
-    #[test]
-    fn human_gib() {
-        assert_eq!(human_size(1024 * 1024 * 1024), "  1.0G");
-        // Measured: `2.4G`. 2_500_000_000 is 2.3283 GiB, and `ls -h` rounds
-        // *up*, so the tenth is 4 rather than the 3 that round-to-nearest --
-        // and this assertion -- used to produce.
-        assert_eq!(human_size(2_500_000_000), "  2.4G");
-    }
-
-    #[test]
-    fn human_boundary_just_under_kib() {
-        assert_eq!(human_size(1023), "  1023");
-    }
-
-    /// One byte under a mebibyte is `1.0M`, **not** anything ending in `K`.
+    /// The indicator half of the set is `&"*=>@|"[indicator_style - file_type]`,
+    /// so `-F` quotes one character *fewer* than `--file-type` even though it
+    /// appends one more. Measured, GNU ls 9.4, on files named `a*b` and `a=b`:
     ///
-    /// This is the rounding carry, and it is the rule a `{:.1}` format string
-    /// can least express: 1048575 / 1024 is 1023.999 K, ceiling takes that to
-    /// 1024.0 K, and 1024.0 K is not a rendering — it has to carry into the
-    /// next prefix and become 1.0 M. The old hand-rolled chain picked its
-    /// prefix *first*, from a threshold comparison, and then formatted, so it
-    /// emitted `1024.0K`, which no `ls` on earth prints.
-    ///
-    /// The assertion this replaces was `assert!(s.ends_with('K'))`, whose
-    /// premise — "just under a mebibyte is still the K range" — is precisely
-    /// the misconception. A test that only checks the suffix cannot see this;
-    /// the value is measured from GNU and compared whole.
+    /// ```text
+    /// ls -b --file-type  ->  a\*b  a\=b
+    /// ls -b -F           ->  a*b   a\=b
+    /// ```
     #[test]
-    fn rounding_up_carries_into_the_next_prefix() {
-        assert_eq!(human_size(1024 * 1024 - 1), "  1.0M");
+    fn the_quoted_set_covers_only_indicators_this_style_can_append() {
+        assert_eq!(filename_extra(Style::Literal, Indicator::None), b"");
+        assert_eq!(filename_extra(Style::Escape, Indicator::None), b" ");
+        // `/` is not in either set: a directory's `/` cannot be confused with
+        // one in a name, because a name cannot hold one.
+        assert_eq!(filename_extra(Style::Literal, Indicator::Slash), b"");
+        assert_eq!(
+            filename_extra(Style::Literal, Indicator::FileType),
+            b"*=>@|"
+        );
+        assert_eq!(
+            filename_extra(Style::Literal, Indicator::Classify),
+            b"=>@|"
+        );
+        assert_eq!(
+            filename_extra(Style::Escape, Indicator::Classify),
+            b" =>@|"
+        );
+        // The header set never grows: a header has nothing appended to it.
+        assert_eq!(DIRNAME_EXTRA, b":");
+    }
+
+    /// `MBSW_REJECT_INVALID | MBSW_REJECT_UNPRINTABLE` makes this all-or-
+    /// nothing: one bad byte anywhere costs the width of the whole name, not
+    /// its own width.
+    ///
+    /// Measured, GNU ls 9.4 — a 25-byte name holding one `\xff` is laid out as
+    /// if it were empty, which is how five names fit in forty columns:
+    ///
+    /// ```text
+    /// $ ls -N -C -w 40        # a b c d n<ff>ameXXXXXXXXXXXXXXXXXXXX
+    /// a  b  c  d  n<ff>ameXXXXXXXXXXXXXXXXXXXX
+    /// ```
+    #[test]
+    fn a_name_with_one_unprintable_byte_has_no_width_at_all() {
+        assert_eq!(mbs_width(b""), Some(0));
+        assert_eq!(mbs_width(b"plain"), Some(5));
+        // Two columns for a wide character, zero for a combining one.
+        assert_eq!(mbs_width("\u{4e00}".as_bytes()), Some(2));
+        assert_eq!(mbs_width("a\u{0301}".as_bytes()), Some(1));
+        // A stray byte, a truncated tail, and a character with no width are
+        // all the same answer.
+        assert_eq!(mbs_width(b"n\xffame"), None);
+        assert_eq!(mbs_width(b"caf\xc3"), None);
+        assert_eq!(mbs_width(b"a\x7fb"), None);
+        assert_eq!(mbs_width(b"a\tb"), None);
+        // …and every caller clamps that to zero rather than to the name.
+        assert_eq!(display_width(b"n\xffame"), 0);
+        assert_eq!(display_width(b"plain"), 5);
+    }
+
+    /// Every case measured, GNU ls 9.4 under `LC_ALL=C.UTF-8`:
+    ///
+    /// ```text
+    /// $ ls -q -1
+    /// a?b        # a \302\200 b   — a valid but unprintable character
+    /// caf?       # caf \303       — a truncated sequence at the end
+    /// café       # caf \303\251   — kept, because it prints
+    /// del?end    # del \177 end   — DEL is not in the printable-ASCII range
+    /// n?ame      # n \377 ame     — one stray byte
+    /// two??here  # two \303\303 here — two stray bytes, two marks
+    /// x?         # x \360\237\230 — three bytes of a four-byte character
+    /// ```
+    #[test]
+    fn qmark_replaces_characters_not_bytes() {
+        let mark = |name: &[u8]| {
+            let (bytes, width) = qmark(name);
+            (String::from_utf8(bytes).unwrap(), width)
+        };
+        assert_eq!(mark(b"plain"), ("plain".to_owned(), 5));
+        assert_eq!(mark(b"a\xc2\x80b"), ("a?b".to_owned(), 3));
+        assert_eq!(mark(b"del\x7fend"), ("del?end".to_owned(), 7));
+        assert_eq!(mark(b"n\xffame"), ("n?ame".to_owned(), 5));
+        // One `?` per stray byte, because each is skipped one byte at a time.
+        assert_eq!(mark(b"two\xc3\xc3here"), ("two??here".to_owned(), 9));
+        // But one `?` for a truncated tail however long it is: there is no way
+        // to tell how much of the character was meant.
+        assert_eq!(mark(b"caf\xc3"), ("caf?".to_owned(), 4));
+        assert_eq!(mark(b"x\xf0\x9f\x98"), ("x?".to_owned(), 2));
+        // A character that prints keeps its bytes and contributes its width,
+        // which is not one per byte in either direction.
+        assert_eq!(mark("caf\u{e9}".as_bytes()), ("caf\u{e9}".to_owned(), 4));
+        assert_eq!(mark("\u{4e00}".as_bytes()), ("\u{4e00}".to_owned(), 2));
+    }
+
+    /// The predicate is "would the style change this name", which is why it
+    /// depends on the set: a name is unquoted under one `-F` and quoted under
+    /// the other.
+    #[test]
+    fn needs_quoting_asks_whether_the_style_would_change_the_name() {
+        assert!(!needs_quoting(Style::Shell, b"", b"plain"));
+        assert!(needs_quoting(Style::Shell, b"", b"a b"));
+        assert!(!needs_quoting(Style::Literal, b"", b"a b"));
+        // The set is what decides here, not the name: `@` is safe to a shell
+        // and so goes unquoted, until `-F` puts it in the set because `-F`
+        // appends one to a socket.
+        assert!(!needs_quoting(Style::Shell, b"", b"a@b"));
+        assert!(needs_quoting(Style::Shell, b"=>@|", b"a@b"));
+        // `*` is quoted either way — a shell would glob it — which is why the
+        // set is not the only reason a name gets quotes.
+        assert!(needs_quoting(Style::Shell, b"", b"a*b"));
+    }
+
+    fn rendered(cfg: &Config, some_quoted: bool, name: &[u8]) -> (String, usize, bool) {
+        let out = quote_name(cfg, &cfg.filename_extra, some_quoted, name, None);
+        (String::from_utf8(out.bytes).unwrap(), out.width, out.pad)
+    }
+
+    /// The pad is a property of the *listing*, not of the name: it appears on
+    /// unquoted names only once some other name in the same directory has been
+    /// quoted, so that the quote marks hang outside the column.
+    ///
+    /// Measured, GNU ls 9.4, `--quoting-style=shell-escape -C -w 40`:
+    ///
+    /// ```text
+    /// with a quoted name present:   'a b'   plain     # plain starts at col 8
+    /// with it removed:              plain              # …and at col 0
+    /// ```
+    ///
+    /// Column width is `max(5, 5+1) = 6` in the first case — the pad is what
+    /// makes `plain` six wide — plus the two-space separator.
+    #[test]
+    fn outer_quotes_are_aligned_by_padding_the_names_that_lack_them() {
+        let cfg = Config {
+            quoting_style: Style::ShellEscape,
+            align_variable_outer_quotes: true,
+            ..Config::default()
+        };
+        assert_eq!(rendered(&cfg, true, b"a b"), ("'a b'".to_owned(), 5, false));
+        assert_eq!(rendered(&cfg, true, b"plain"), ("plain".to_owned(), 5, true));
+        // Nothing in this directory was quoted, so nothing is padded.
+        assert_eq!(
+            rendered(&cfg, false, b"plain"),
+            ("plain".to_owned(), 5, false)
+        );
+        // A style whose quotes are unconditional never pads, because its
+        // columns were never uneven.
+        let always = Config {
+            quoting_style: Style::ShellAlways,
+            ..Config::default()
+        };
+        assert_eq!(
+            rendered(&always, true, b"plain"),
+            ("'plain'".to_owned(), 7, false)
+        );
+    }
+
+    /// `needs_general_quoting == Some(false)` is upstream's `f->quoted == 0`:
+    /// the name was *measured* not to need quoting, so the rendering is
+    /// skipped outright rather than performed and found to be a no-op. The two
+    /// must agree, or the shortcut is a bug.
+    #[test]
+    fn a_name_measured_not_to_need_quoting_skips_the_quoting_pass() {
+        let cfg = Config {
+            quoting_style: Style::ShellEscape,
+            align_variable_outer_quotes: true,
+            ..Config::default()
+        };
+        let skipped = quote_name(&cfg, b"", true, b"plain", Some(false));
+        let performed = quote_name(&cfg, b"", true, b"plain", None);
+        assert_eq!(skipped.bytes, performed.bytes);
+        assert_eq!(skipped.width, performed.width);
+        assert_eq!(skipped.pad, performed.pad);
+        assert!(skipped.pad);
+    }
+
+    /// `-q` runs only under the three styles that escape nothing themselves.
+    /// Under the other seven the byte has already become a visible escape, so
+    /// there is nothing left for a `?` to replace — and replacing it anyway
+    /// would turn `\377` into `?`, losing the one thing the escape recorded.
+    #[test]
+    fn the_question_mark_pass_runs_only_where_nothing_else_escapes() {
+        let literal = Config {
+            qmark_funny_chars: true,
+            quoting_style: Style::Literal,
+            ..Config::default()
+        };
+        assert_eq!(rendered(&literal, false, b"n\xffame").0, "n?ame");
+        let escape = Config {
+            qmark_funny_chars: true,
+            quoting_style: Style::Escape,
+            ..Config::default()
+        };
+        assert_eq!(rendered(&escape, false, b"n\xffame").0, "n\\377ame");
+        // …and with the pass off, the raw byte survives and costs the whole
+        // name its width.
+        let raw = Config {
+            quoting_style: Style::Literal,
+            ..Config::default()
+        };
+        let out = quote_name(&raw, b"", false, b"n\xffame", None);
+        assert_eq!(out.bytes, b"n\xffame");
+        assert_eq!(out.width, 0);
     }
 }

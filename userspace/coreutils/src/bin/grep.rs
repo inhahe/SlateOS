@@ -23,8 +23,10 @@
 //! | `-H` / `-h` | always / never prefix a line with its file name |
 //! | `-q` | print nothing; the exit status is the answer |
 //! | `-s` | do not report unreadable files |
-//! | `-m N` | stop after N selected lines per file |
+//! | `-m N` | stop after N selected lines per file; `-m 0` prints nothing |
 //! | `-r` | search directories recursively |
+//! | `-Z` | write a NUL after a file name instead of the `:` or newline |
+//! | `-z` | the input is NUL-separated too, and so is the output |
 //! | `-a` | accepted and ignored: this grep never suppresses binary output |
 //! | `--` | end of options; what follows is a pattern or a file |
 //!
@@ -40,10 +42,19 @@
 //! because every test asserted the substring behaviour it had. See
 //! `design-decisions.md` §322.
 //!
-//! Patterns are POSIX **Basic** regular expressions by default, **Extended**
-//! under `-E`, and literal text under `-F`. Lines are bytes: a path on this
-//! system may hold any byte but `/` and NUL, so a grep that insisted on UTF-8
-//! could not search a file listing.
+//! Patterns are POSIX **Basic** regular expressions by default, *egrep*
+//! syntax under `-E` — which is not quite POSIX-extended; see `ere::Syntax` —
+//! and literal text under `-F`. Lines are bytes: a path on this system may
+//! hold any byte but `/` and NUL, so a grep that insisted on UTF-8 could not
+//! search a file listing.
+//!
+//! ## `-Z` and `-z` are not decoration here
+//!
+//! On a system whose paths may contain a newline, `grep -rl … | xargs` is
+//! ambiguous by construction: the delimiter is a byte a name is allowed to
+//! hold. `-Z` delimits names with the one byte a name cannot hold, and `-z`
+//! makes grep read such a stream, so `find -print0 | xargs -0 grep -z` and
+//! `grep -rlZ … | xargs -0` are the spellings that are actually correct.
 
 use coreutils::quote::{self, quotef_os};
 use std::env;
@@ -96,6 +107,36 @@ struct Options {
     /// than one file" rule.
     filename: Option<bool>,
     max_count: Option<usize>,
+    /// `-Z`: write a NUL after a file name instead of the `:` or newline that
+    /// normally follows it.
+    ///
+    /// Not a convenience. A path on this system may hold any byte but `/` and
+    /// NUL — newline included — so `grep -rl … | xargs` is ambiguous by
+    /// construction and `grep -rlZ … | xargs -0` is the only spelling that is
+    /// not. The one byte a name cannot contain is the one that delimits it.
+    null_name: bool,
+    /// `-z`: the *input* is NUL-separated too, and so is the output.
+    ///
+    /// The other half of the same pipeline: `find -print0 | xargs -0 grep -z`
+    /// only works if grep agrees about what a line is. Kept separate from
+    /// `null_name` because GNU keeps them separate, and because `-z` alone
+    /// changes what a line *is* while `-Z` alone only changes how a name is
+    /// punctuated.
+    null_data: bool,
+}
+
+impl Options {
+    /// The byte that ends a line of input and of output: `\n`, or NUL under
+    /// `-z`.
+    fn line_sep(&self) -> u8 {
+        if self.null_data { 0 } else { b'\n' }
+    }
+
+    /// What follows a file name that is being used as a prefix — `:` normally,
+    /// NUL under `-Z`.
+    fn name_sep(&self) -> u8 {
+        if self.null_name { 0 } else { b':' }
+    }
 }
 
 #[cfg_attr(test, derive(Debug, PartialEq, Eq))]
@@ -184,6 +225,8 @@ fn parse_args(args: &[String]) -> Result<GrepArgs, String> {
                 'h' => opts.filename = Some(false),
                 'q' => opts.quiet = true,
                 's' => opts.no_messages = true,
+                'Z' => opts.null_name = true,
+                'z' => opts.null_data = true,
                 // Accepted and ignored: this grep does not suppress output for
                 // input it thinks is binary, so there is nothing for `-a` to
                 // turn off. Refusing it would break callers that pass it
@@ -267,6 +310,8 @@ fn parse_long(
         "no-filename" => opts.filename = Some(false),
         "quiet" | "silent" => opts.quiet = true,
         "no-messages" => opts.no_messages = true,
+        "null" => opts.null_name = true,
+        "null-data" => opts.null_data = true,
         "text" | "binary-files" => {}
         "regexp" => patterns.push(need(value)?.into_bytes()),
         "file" => pattern_files.push(need(value)?),
@@ -484,21 +529,27 @@ fn display_name(path: &str) -> &str {
 
 /// The prefix shown before a printed line: file name, line number, both or
 /// neither.
+///
+/// Bytes rather than `String` because `-Z` puts a NUL after the name, and
+/// because the name itself is a path — which on this system may hold any byte
+/// but `/` and NUL. Only the *name's* separator changes under `-Z`; the one
+/// after a line number stays `:`, which is what GNU does and is what keeps
+/// `-nZ` output parseable at all.
 fn line_prefix(
     filename: &str,
     line_idx_zero_based: usize,
     show_filename: bool,
-    line_numbers: bool,
-) -> String {
-    let mut prefix = String::new();
+    opts: &Options,
+) -> Vec<u8> {
+    let mut prefix = Vec::new();
     if show_filename {
-        prefix.push_str(filename);
-        prefix.push(':');
+        prefix.extend_from_slice(filename.as_bytes());
+        prefix.push(opts.name_sep());
     }
-    if line_numbers {
+    if opts.line_numbers {
         // Zero-based internally, one-based on the way out.
-        prefix.push_str(&line_idx_zero_based.saturating_add(1).to_string());
-        prefix.push(':');
+        prefix.extend_from_slice(line_idx_zero_based.saturating_add(1).to_string().as_bytes());
+        prefix.push(b':');
     }
     prefix
 }
@@ -606,7 +657,17 @@ fn main() {
                 let name_it = (parsed.opts.files_with_matches && matched)
                     || (parsed.opts.files_without_match && !matched);
                 if name_it {
-                    let _ = writeln!(out, "{shown}");
+                    // NUL after the name under `-Z`, newline otherwise — and
+                    // *not* `-z`'s separator, which describes the input. This
+                    // is the half of `-Z` that matters: `grep -rlZ | xargs -0`
+                    // is the only listing of paths that survives a path
+                    // containing a newline, which this system permits.
+                    let _ = out.write_all(shown.as_bytes());
+                    let _ = out.write_all(if parsed.opts.null_name {
+                        &b"\0"[..]
+                    } else {
+                        &b"\n"[..]
+                    });
                 }
             }
             Err(e) => {
@@ -639,11 +700,21 @@ fn search_stream(
     show_filename: bool,
     opts: &Options,
 ) -> io::Result<bool> {
+    // `-m 0` is not "no limit", and it is not "stop after the first" either:
+    // GNU prints nothing at all — not even the `-c` count line, which is the
+    // surprising half — and reports the file as not matching. Answering it
+    // before opening a line is also the only way to get that, since the count
+    // line below is printed unconditionally.
+    if opts.max_count == Some(0) {
+        return Ok(false);
+    }
+
     let mut buf = BufReader::new(reader);
     // Printing nothing means the first selected line settles it, and reading
     // the rest of a file is work whose result is discarded — which for `-q` on
     // a pipe is also the difference between returning and waiting.
     let stop_at_first = opts.quiet || opts.files_with_matches || opts.files_without_match;
+    let sep = opts.line_sep();
     let mut match_count: usize = 0;
     let mut line_idx: usize = 0;
     let mut line: Vec<u8> = Vec::new();
@@ -652,12 +723,12 @@ fn search_stream(
         line.clear();
         // Lines are read as bytes: a file this system can name may hold any
         // byte but `/` and NUL, and `String`-typed input could not carry one.
-        if buf.read_until(b'\n', &mut line)? == 0 {
+        if buf.read_until(sep, &mut line)? == 0 {
             break;
         }
         // The separator is not part of the line, and a final line without one
         // is still a line.
-        let body = line.strip_suffix(b"\n").unwrap_or(&line);
+        let body = line.strip_suffix(&[sep][..]).unwrap_or(&line);
 
         if line_selected(body, pats, opts).map_err(limit_err)? {
             match_count = match_count.saturating_add(1);
@@ -665,22 +736,32 @@ fn search_stream(
                 return Ok(true);
             }
             if !opts.count_only {
-                let prefix = line_prefix(filename, line_idx, show_filename, opts.line_numbers);
+                let prefix = line_prefix(filename, line_idx, show_filename, opts);
                 if opts.only_matching {
                     // `-o` with `-v` prints nothing: the part of the line that
                     // did not match is the whole line, and GNU declines to call
                     // that a match.
                     if !opts.invert {
                         for (s, e) in matches_in(pats, body, opts).map_err(limit_err)? {
-                            out.write_all(prefix.as_bytes())?;
-                            out.write_all(body.get(s..e).unwrap_or_default())?;
-                            out.write_all(b"\n")?;
+                            // An *empty* match is skipped rather than printed.
+                            // `grep -o 'o*'` on "foo bar" prints one `oo`, not
+                            // an `oo` surrounded by six blank lines: a pattern
+                            // that can match nothing matches at every position,
+                            // so printing those would make `-o` unusable for
+                            // exactly the patterns people write it for. The
+                            // *line* still counts as selected, which is why
+                            // this loop can legitimately print nothing.
+                            if e > s {
+                                out.write_all(&prefix)?;
+                                out.write_all(body.get(s..e).unwrap_or_default())?;
+                                out.write_all(&[sep])?;
+                            }
                         }
                     }
                 } else {
-                    out.write_all(prefix.as_bytes())?;
+                    out.write_all(&prefix)?;
                     out.write_all(body)?;
-                    out.write_all(b"\n")?;
+                    out.write_all(&[sep])?;
                 }
             }
             if opts.max_count.is_some_and(|m| match_count >= m) {
@@ -691,12 +772,16 @@ fn search_stream(
     }
 
     if opts.count_only {
-        let prefix = if show_filename {
-            format!("{filename}:")
-        } else {
-            String::new()
-        };
-        writeln!(out, "{prefix}{match_count}")?;
+        if show_filename {
+            out.write_all(filename.as_bytes())?;
+            out.write_all(&[opts.name_sep()])?;
+        }
+        out.write_all(match_count.to_string().as_bytes())?;
+        // A newline, not `sep`: `-z` says what a *line of input* is, and a
+        // count is not one. Measured — `grep -zHc` ends its count with `\n`
+        // even though every matched line it would otherwise print ends with
+        // NUL.
+        out.write_all(b"\n")?;
     }
 
     Ok(match_count > 0)
@@ -779,9 +864,25 @@ mod tests {
 
     #[test]
     fn parse_unknown_flag_errors() {
-        let err = parse_args(&s(&["-Z", "foo"])).unwrap_err();
+        // `-Q` rather than `-Z`, which this test used until `-Z` was
+        // implemented: an "unknown option" test has to name a letter grep does
+        // not have, and every such test is one feature away from asserting the
+        // wrong thing.
+        let err = parse_args(&s(&["-Q", "foo"])).unwrap_err();
         assert!(err.contains("unknown option"), "{err}");
-        assert!(err.contains('Z'), "{err}");
+        assert!(err.contains('Q'), "{err}");
+        let err = parse_args(&s(&["--zzz", "foo"])).unwrap_err();
+        assert!(err.contains("unknown option"), "{err}");
+    }
+
+    #[test]
+    fn parse_the_two_null_flags_are_different_flags() {
+        let a = parse_args(&s(&["-Z", "foo"])).unwrap();
+        assert!(a.opts.null_name && !a.opts.null_data);
+        let a = parse_args(&s(&["-z", "foo"])).unwrap();
+        assert!(a.opts.null_data && !a.opts.null_name);
+        let a = parse_args(&s(&["--null", "--null-data", "foo"])).unwrap();
+        assert!(a.opts.null_name && a.opts.null_data);
     }
 
     #[test]
@@ -1117,36 +1218,73 @@ mod tests {
 
     // ---------------- line_prefix ----------------
 
+    /// `line_prefix` reads two fields off `Options`; these name them without
+    /// making every assertion below construct a whole struct.
+    fn pfx_opts(line_numbers: bool, null_name: bool) -> Options {
+        Options {
+            line_numbers,
+            null_name,
+            ..Options::default()
+        }
+    }
+
     #[test]
     fn standard_input_has_a_name_of_its_own() {
         assert_eq!(display_name("-"), "(standard input)");
         assert_eq!(display_name("a.txt"), "a.txt");
         // `grep -H pattern -` printing `-:line` reads as part of the line.
         assert_eq!(
-            line_prefix(display_name("-"), 0, true, false),
-            "(standard input):"
+            line_prefix(display_name("-"), 0, true, &pfx_opts(false, false)),
+            b"(standard input):"
         );
     }
 
     #[test]
     fn prefix_none() {
-        assert_eq!(line_prefix("f", 0, false, false), "");
+        assert_eq!(line_prefix("f", 0, false, &pfx_opts(false, false)), b"");
     }
 
     #[test]
     fn prefix_filename_only() {
-        assert_eq!(line_prefix("a.txt", 0, true, false), "a.txt:");
+        assert_eq!(
+            line_prefix("a.txt", 0, true, &pfx_opts(false, false)),
+            b"a.txt:"
+        );
     }
 
     #[test]
     fn prefix_line_number_only() {
-        assert_eq!(line_prefix("ignored", 0, false, true), "1:");
-        assert_eq!(line_prefix("ignored", 41, false, true), "42:");
+        assert_eq!(
+            line_prefix("ignored", 0, false, &pfx_opts(true, false)),
+            b"1:"
+        );
+        assert_eq!(
+            line_prefix("ignored", 41, false, &pfx_opts(true, false)),
+            b"42:"
+        );
     }
 
     #[test]
     fn prefix_filename_and_line_number() {
-        assert_eq!(line_prefix("a.txt", 9, true, true), "a.txt:10:");
+        assert_eq!(
+            line_prefix("a.txt", 9, true, &pfx_opts(true, false)),
+            b"a.txt:10:"
+        );
+    }
+
+    #[test]
+    fn null_ends_the_name_but_never_the_line_number() {
+        // `-Z` is about the byte that follows a *file name*. Applying it to the
+        // line number too would make `-nZ` output unparseable, and it is not
+        // what GNU does.
+        assert_eq!(
+            line_prefix("a.txt", 0, true, &pfx_opts(false, true)),
+            b"a.txt\0"
+        );
+        assert_eq!(
+            line_prefix("a.txt", 9, true, &pfx_opts(true, true)),
+            b"a.txt\x0010:"
+        );
     }
 
     // ---------------- search_stream ----------------
@@ -1266,6 +1404,97 @@ mod tests {
         };
         let (out, _) = run(b"a\na\na\na\n", "a", opts, "f", false);
         assert_eq!(out, "a\na\n");
+    }
+
+    #[test]
+    fn max_count_zero_is_not_no_limit_and_not_one() {
+        // Measured against GNU grep 3.0: `-m 0` prints nothing and reports no
+        // match, and — the part that is easy to get wrong — suppresses the
+        // `-c` count line entirely rather than printing `0`.
+        let opts = Options {
+            max_count: Some(0),
+            ..Options::default()
+        };
+        let (out, matched) = run(b"a\na\n", "a", opts, "f", false);
+        assert_eq!(out, "");
+        assert!(!matched);
+
+        let opts = Options {
+            max_count: Some(0),
+            count_only: true,
+            ..Options::default()
+        };
+        let (out, matched) = run(b"a\na\n", "a", opts, "f", true);
+        assert_eq!(out, "");
+        assert!(!matched);
+    }
+
+    #[test]
+    fn only_matching_skips_the_empty_matches() {
+        // `o*` matches the empty string at every position that is not an `o`,
+        // and GNU prints none of them: `-o` on "foo bar" is one line, `oo`.
+        // Printing the empty ones would surround it with six blank lines and
+        // make `-o` useless for exactly the patterns it exists for.
+        let opts = Options {
+            only_matching: true,
+            ..Options::default()
+        };
+        let (out, matched) = run(b"foo bar\n", "o*", opts, "f", false);
+        assert_eq!(out, "oo\n");
+        assert!(matched);
+
+        // A line whose *only* matches are empty prints nothing at all, yet is
+        // still a selected line — which is why the exit status is 0.
+        let opts = Options {
+            only_matching: true,
+            ..Options::default()
+        };
+        let (out, matched) = run(b"xyz\n", "o*", opts, "f", false);
+        assert_eq!(out, "");
+        assert!(matched);
+    }
+
+    #[test]
+    fn null_data_changes_what_a_line_is_on_both_sides() {
+        let opts = Options {
+            null_data: true,
+            ..Options::default()
+        };
+        let (out, matched) = run(b"foo\0bar\0", "o", opts, "f", false);
+        assert_eq!(out, "foo\0");
+        assert!(matched);
+
+        // A NUL-separated stream has no newlines in it, so a `-z` grep that
+        // still split on `\n` would return the whole file as one line.
+        let opts = Options {
+            null_data: true,
+            line_numbers: true,
+            ..Options::default()
+        };
+        let (out, _) = run(b"foo\0bar\0", "a", opts, "f", false);
+        assert_eq!(out, "2:bar\0");
+    }
+
+    #[test]
+    fn a_count_is_not_a_line_so_z_does_not_reach_it() {
+        // Measured: `grep -zHc` ends its count with a newline even though the
+        // matched lines it would otherwise print end with NUL.
+        let opts = Options {
+            null_data: true,
+            count_only: true,
+            ..Options::default()
+        };
+        let (out, _) = run(b"foo\0bar\0", "o", opts, "f.txt", true);
+        assert_eq!(out, "f.txt:1\n");
+
+        // `-Z` *does* reach it: it is the byte after a file name.
+        let opts = Options {
+            null_name: true,
+            count_only: true,
+            ..Options::default()
+        };
+        let (out, _) = run(b"foo\nbar\n", "o", opts, "f.txt", true);
+        assert_eq!(out, "f.txt\x001\n");
     }
 
     #[test]

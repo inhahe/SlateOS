@@ -91,6 +91,25 @@ pub const SYS_THREAD_EXIT: u64 = 511;
 pub const SYS_THREAD_JOIN: u64 = 512;
 pub const SYS_PROCESS_KILL: u64 = 506;
 pub const SYS_PROCESS_SPAWN_EX: u64 = 517;
+/// Spawn with an explicit capability policy. arg0 = `*const SpawnEx2Args`.
+///
+/// [`SYS_PROCESS_SPAWN_EX`] (517) gives the child the parent's *entire*
+/// capability table, which is right for a shell starting a helper it trusts
+/// and wrong for one starting a program it does not — "everything I can do"
+/// is not a sandbox. 559 is how a parent says "just these".
+///
+/// A separate number rather than fields appended to `SpawnExArgs`, because
+/// that struct carries no length and no version and the kernel reads
+/// `size_of::<SpawnExArgs>()` bytes from the pointer: appending would make it
+/// read 16 bytes past every existing caller's 96-byte struct and interpret
+/// them as a pointer and a count. The `clone3` escape — size in a second
+/// register, 0 meaning "legacy" — is unavailable because [`syscall1`] sets
+/// only `rax` and `rdi`, so the kernel's `arg1` holds whatever the caller
+/// left in `rsi`. See `design-decisions.md` §279 (lane A — why a new number)
+/// and §363 (lane B — how userspace reaches it).
+///
+/// Purely additive: 517 is untouched and still inherits everything.
+pub const SYS_PROCESS_SPAWN_EX2: u64 = 559;
 pub const SYS_PROCESS_GET_INITIAL_FDS: u64 = 518;
 pub const SYS_PROCESS_GET_ARGS: u64 = 519;
 /// Record the current userspace fd table so it survives `execve`
@@ -1075,6 +1094,7 @@ mod tests {
         assert!((500..600).contains(&SYS_THREAD_EXIT));
         assert!((500..600).contains(&SYS_THREAD_JOIN));
         assert!((500..600).contains(&SYS_PROCESS_SPAWN_EX));
+        assert!((500..600).contains(&SYS_PROCESS_SPAWN_EX2));
         assert!((500..600).contains(&SYS_PROCESS_GET_INITIAL_FDS));
         assert!((500..600).contains(&SYS_PROCESS_GET_ARGS));
 

@@ -659,7 +659,7 @@ pub fn self_test() -> KernelResult<()> {
         //     leave the tree exactly as it was.
         let rn_inner = rn_dir.join("inner");
         crate::fs::Vfs::mkdir(&rn_inner)?;
-        match crate::fs::Vfs::rename(&rn_dir, &rn_inner.join("moved")) {
+        match crate::fs::Vfs::rename(&rn_dir, rn_inner.join("moved")) {
             Err(crate::error::KernelError::InvalidArgument) => {}
             other => {
                 serial_println!(

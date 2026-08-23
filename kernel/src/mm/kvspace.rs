@@ -212,34 +212,117 @@ const ALL_REGIONS: &[Region] = &[
 ];
 
 // ---------------------------------------------------------------------------
-// Public API
+// Overlap check — enforced at build time
 // ---------------------------------------------------------------------------
 
-/// Validate that no kernel regions overlap.
+/// Do two regions share any address?
 ///
-/// Call once at boot to catch configuration errors.
-/// Panics if overlaps are detected.
-pub fn validate() {
-    for i in 0..ALL_REGIONS.len() {
-        for j in (i + 1)..ALL_REGIONS.len() {
-            let a = &ALL_REGIONS[i];
-            let b = &ALL_REGIONS[j];
-            // Two regions overlap if: a.start < b.end && b.start < a.end
-            if a.start < b.end() && b.start < a.end() {
-                serial_println!(
-                    "FATAL: kernel VA regions overlap: {} [{:#x}..{:#x}] vs {} [{:#x}..{:#x}]",
-                    a.name,
-                    a.start,
-                    a.end(),
-                    b.name,
-                    b.start,
-                    b.end()
-                );
-                panic!("kernel VA region overlap detected");
-            }
-        }
-    }
+/// Both are half-open — `[start, end)` — so they overlap iff each starts
+/// strictly before the other ends. The strictness is the whole predicate:
+/// with `<=` in place of `<`, two *adjacent* regions would report as
+/// overlapping and the build below would never succeed; with the comparison
+/// inverted, nothing would ever report and the build gate would certify
+/// exactly the layouts it exists to reject. `self_test` pins both edges.
+///
+/// The size guards are not redundant. A zero-size region contains no address,
+/// so it can share none, but `start < end` is false for it in *both*
+/// directions and the two-comparison form reports it as overlapping whatever
+/// it sits inside. This was not a hypothetical: the assertion in `self_test`
+/// saying so failed on its first boot, which is the entire reason that test
+/// covers the degenerate case rather than only the interesting ones. A
+/// zero-size region is still a bug, but it is a different bug and gets its own
+/// message below — "overlap" would send the reader looking for a second region
+/// that is not the problem.
+const fn overlaps(a: &Region, b: &Region) -> bool {
+    a.size > 0 && b.size > 0 && a.start < b.end() && b.start < a.end()
 }
+
+/// The first zero-size region in [`ALL_REGIONS`], if any.
+///
+/// Its own check because a region with no addresses in it is always a mistake —
+/// a typo'd size constant, or a subsystem whose region was added before its
+/// extent was known — and because [`overlaps`] deliberately reports such a
+/// region as clashing with nothing, so the overlap gate cannot catch it.
+const fn first_empty() -> Option<usize> {
+    let n = ALL_REGIONS.len();
+    let mut i = 0;
+    while i < n {
+        #[allow(clippy::indexing_slicing)]
+        let empty = ALL_REGIONS[i].size == 0;
+        if empty {
+            return Some(i);
+        }
+        i += 1;
+    }
+    None
+}
+
+/// The first pair of overlapping regions in [`ALL_REGIONS`], as indices into it.
+///
+/// Every region above is a compile-time constant, so this whole search is a
+/// compile-time question — and the `const` item below asks it at compile time.
+/// This is a `const fn` rather than a `const` so the pair of indices survives
+/// for a caller that wants to report *which* regions clashed: a
+/// const-evaluated `panic!` takes only a literal, so the assertion itself
+/// cannot name them.
+const fn first_overlap() -> Option<(usize, usize)> {
+    let n = ALL_REGIONS.len();
+    let mut i = 0;
+    while i < n {
+        let mut j = i + 1;
+        while j < n {
+            // `while` rather than `for`, and indexing rather than iteration,
+            // because neither `for` nor `Iterator` is available in a const fn.
+            // Both indices are bounded by `n` on the enclosing line, so they
+            // cannot be out of range — and const evaluation would reject the
+            // build outright rather than panic at runtime if they ever were.
+            #[allow(clippy::indexing_slicing)]
+            let (a, b) = (&ALL_REGIONS[i], &ALL_REGIONS[j]);
+            if overlaps(a, b) {
+                return Some((i, j));
+            }
+            j += 1;
+        }
+        i += 1;
+    }
+    None
+}
+
+// Two kernel VA regions overlap. Fix the constants in this file.
+//
+// This fires at **build** time. It replaces a `validate()` function whose doc
+// comment said "call once at boot to catch configuration errors" — but no boot
+// path ever called it. Its only caller was this module's own `self_test`, so
+// the check ran when the self-test ran and never otherwise, and the module's
+// blanket `allow(dead_code)` meant nothing pointed out the discrepancy.
+//
+// A guard over compile-time constants that must be *invoked* to work is a
+// guard that can be silently dropped — by reordering boot, by a self-test that
+// stops being run, by a caller that never existed. As an anonymous `const`
+// item it is evaluated because it exists. There is no way to build a kernel
+// whose regions overlap, and no boot is needed to find that out.
+//
+// The error points here rather than at the offending pair, because a
+// const-evaluated `panic!` accepts only a string literal — no formatting, so
+// no region names. `first_overlap` returns the indices into `ALL_REGIONS` for
+// whoever wants them; in practice the pair is whichever region was just added
+// or resized.
+const _: () = assert!(
+    first_overlap().is_none(),
+    "kernel VA regions overlap - see ALL_REGIONS in kernel/src/mm/kvspace.rs"
+);
+
+// A kernel VA region has size 0. Checked separately from the overlap above
+// because `overlaps` reports an empty region as clashing with nothing, so it
+// would otherwise pass silently and hand out an address range of no addresses.
+const _: () = assert!(
+    first_empty().is_none(),
+    "a kernel VA region has size 0 - see ALL_REGIONS in kernel/src/mm/kvspace.rs"
+);
+
+// ---------------------------------------------------------------------------
+// Public API
+// ---------------------------------------------------------------------------
 
 /// Look up which kernel region (if any) contains the given address.
 ///
@@ -281,9 +364,39 @@ pub fn all_regions() -> &'static [Region] {
 pub fn self_test() {
     serial_println!("[kvspace] Running self-test...");
 
-    // Test 1: No overlaps.
-    validate();
-    serial_println!("[kvspace]   No region overlaps: OK");
+    // Test 1: the overlap predicate the build gate rests on.
+    //
+    // That no *real* region overlaps is settled at build time by the `const`
+    // assertion above, so re-asserting `first_overlap().is_none()` here would
+    // be a tautology: it cannot fail in a kernel that exists to run it. What
+    // can still be wrong is `overlaps` itself, and a gate with a broken
+    // comparison passes everything — it would certify the very layouts it was
+    // written to reject, silently and forever. So test the predicate against
+    // cases with known answers, including both boundaries.
+    const A: Region = Region { name: "a", start: 0x1000, size: 0x1000 };
+    let case = |start: u64, size: u64| overlaps(&A, &Region { name: "x", start, size });
+    assert!(!case(0x2000, 0x1000), "regions that merely abut must not overlap");
+    assert!(!case(0x0000, 0x1000), "regions that merely abut from below must not overlap");
+    assert!(case(0x1FFF, 0x1000), "a one-byte overlap at the top must be detected");
+    assert!(case(0x0001, 0x1000), "a one-byte overlap at the bottom must be detected");
+    assert!(case(0x1000, 0x1000), "an identical region must overlap");
+    assert!(case(0x1400, 0x0100), "a fully contained region must overlap");
+    // The degenerate case, which is here because it failed. `overlaps` was
+    // originally the textbook two-comparison form, and that form calls an
+    // empty region an overlap of whatever contains it — `start < end` is false
+    // in both directions, so both comparisons pass. The first boot after this
+    // assertion was written panicked on it.
+    assert!(!case(0x1400, 0x0000), "an empty region overlaps nothing");
+    assert!(!case(0x1000, 0x0000), "an empty region at a shared start overlaps nothing");
+    {
+        const EMPTY: Region = Region { name: "e", start: 0x1400, size: 0 };
+        assert!(!overlaps(&EMPTY, &A), "emptiness must be checked on both sides");
+    }
+    // Zero-size regions are caught by their own build assertion, since the
+    // line above means the overlap gate will never see them.
+    assert!(first_empty().is_none());
+    assert!(first_overlap().is_none());
+    serial_println!("[kvspace]   No region overlaps or empties (build-enforced), predicate: OK");
 
     // Test 2: Identify known addresses.
     let id = identify(KSTACK.start);

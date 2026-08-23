@@ -5933,11 +5933,10 @@ fn bench_page_fault() -> KernelResult<()> {
         // the only thing that could have published it is the `map_frame` that
         // just failed.
         let outcome = frame::alloc_frame_zeroed().and_then(|f| unsafe {
-            page_table::map_frame(pml4, virt, f, flags).map_err(|e| {
+            page_table::map_frame(pml4, virt, f, flags).inspect_err(|_| {
                 // Hand the frame back rather than leaking it; the mapping error
                 // is the one worth reporting, so a failure to free is dropped.
                 let _ = frame::free_frame(f);
-                e
             })
         });
         if outcome.is_ok() {

@@ -371,8 +371,13 @@ pub fn strftime(fmt: &[u8], tm: &Tm) -> Vec<u8> {
             b'p' => out.extend_from_slice(if tm.hour < 12 { b"AM" } else { b"PM" }),
             b'P' => out.extend_from_slice(if tm.hour < 12 { b"am" } else { b"pm" }),
             b's' => push_int(&mut out, tm.epoch),
-            b'u' => push_int(&mut out, if tm.wday == 0 { 7 } else { i64::from(tm.wday) }),
+            b'u' => push_int(&mut out, i64::from(iso_wday(tm))),
             b'w' => push_int(&mut out, i64::from(tm.wday)),
+            b'U' => pad_zero(&mut out, i64::from(week_of_year(tm, 0)), 2),
+            b'W' => pad_zero(&mut out, i64::from(week_of_year(tm, 1)), 2),
+            b'V' => pad_zero(&mut out, i64::from(iso_week(tm).1), 2),
+            b'G' => push_int(&mut out, iso_week(tm).0),
+            b'g' => pad_zero(&mut out, iso_week(tm).0.rem_euclid(100), 2),
             b'y' => pad_zero(&mut out, tm.year.rem_euclid(100), 2),
             b'Y' => push_int(&mut out, tm.year),
             b'z' => push_offset(&mut out, tm.gmtoff),
@@ -393,6 +398,68 @@ fn pick(table: &[&'static [u8]], index: usize) -> &'static [u8] {
 
 fn month_index(tm: &Tm) -> usize {
     (tm.month as usize).saturating_sub(1)
+}
+
+/// The ISO weekday: Monday is 1 and Sunday is 7, where [`Tm::wday`] has Sunday
+/// at 0.
+fn iso_wday(tm: &Tm) -> u32 {
+    if tm.wday == 0 { 7 } else { tm.wday }
+}
+
+/// `%U` (`first = 0`, weeks start on Sunday) and `%W` (`first = 1`, Monday).
+///
+/// Week 1 is the one containing the first `first`-day of the year; the days
+/// before it are week 0. That is glibc's rule and it is *not* the ISO one —
+/// `%U`, `%W` and `%V` can all three differ on the same date, which is why
+/// there are three of them.
+fn week_of_year(tm: &Tm, first: u32) -> u32 {
+    // How far into its week this day sits, counting from `first`. The `+ 7`
+    // keeps the subtraction above zero for a Sunday under `%W`; it is written
+    // saturating only because every arithmetic operator in this crate is.
+    let offset = tm.wday.saturating_add(7).saturating_sub(first) % 7;
+    tm.yday.saturating_add(7).saturating_sub(offset) / 7
+}
+
+/// `%G` and `%V`: the ISO 8601 week-based year and week number.
+///
+/// A week belongs to the year that holds its Thursday, so the first days of
+/// January can be week 52 or 53 of the *previous* year and the last days of
+/// December can be week 1 of the next.
+fn iso_week(tm: &Tm) -> (i64, u32) {
+    let yday1 = i64::from(tm.yday).saturating_add(1);
+    let week = yday1
+        .saturating_sub(i64::from(iso_wday(tm)))
+        .saturating_add(10)
+        .div_euclid(7);
+    if week < 1 {
+        let prev = tm.year.saturating_sub(1);
+        return (prev, weeks_in_year(prev));
+    }
+    let week = u32::try_from(week).unwrap_or(1);
+    if week > weeks_in_year(tm.year) {
+        return (tm.year.saturating_add(1), 1);
+    }
+    (tm.year, week)
+}
+
+/// 52 or 53, by the ISO rule: a year is long when it starts on a Thursday, or
+/// when it is a leap year starting on a Wednesday.
+///
+/// Expressed the usual way, over `p(y)` — the weekday of 31 December of year
+/// `y` counted from Sunday — because the two conditions above then collapse to
+/// `p(y) == 4 || p(y-1) == 3` and no leap-year test is needed at all.
+fn weeks_in_year(year: i64) -> u32 {
+    let p = |y: i64| {
+        y.saturating_add(y.div_euclid(4))
+            .saturating_sub(y.div_euclid(100))
+            .saturating_add(y.div_euclid(400))
+            .rem_euclid(7)
+    };
+    if p(year) == 4 || p(year.saturating_sub(1)) == 3 {
+        53
+    } else {
+        52
+    }
 }
 
 /// The 12-hour clock's reading, where midnight and noon are both 12.
@@ -533,6 +600,54 @@ mod tests {
         // `strftime` as two bytes and leaves as one newline.
         let tm = utc_tm(0);
         assert_eq!(fmt("%Y%n%H", &tm), "1970\n00");
+    }
+
+    #[test]
+    fn the_three_week_numbers_are_three_different_questions() {
+        // Every row measured from GNU `date -u -d DATE +'%U %W %V %G %g %u'`
+        // under `LC_ALL=C TZ=UTC`. The dates are the ones where the three
+        // definitions come apart: a year whose first days belong to the
+        // previous ISO year, a year with 53 ISO weeks, and a Sunday — which is
+        // week 0 for `%W` and week 1 for `%U` in the same breath.
+        for &(y, m, d, u, w, v, g, g2, iso_dow) in &[
+            (1970, 1, 1, "00", "00", "01", "1970", "70", "4"),
+            (2000, 1, 1, "00", "00", "52", "1999", "99", "6"),
+            (2015, 12, 28, "52", "52", "53", "2015", "15", "1"),
+            (2016, 1, 3, "01", "00", "53", "2015", "15", "7"),
+            (2019, 12, 30, "52", "52", "01", "2020", "20", "1"),
+            (2020, 12, 31, "52", "52", "53", "2020", "20", "4"),
+            (2021, 1, 1, "00", "00", "53", "2020", "20", "5"),
+            (2021, 1, 3, "01", "00", "53", "2020", "20", "7"),
+            (2024, 12, 29, "52", "52", "52", "2024", "24", "7"),
+            (2026, 8, 23, "34", "33", "34", "2026", "26", "7"),
+        ] {
+            let tm = utc_tm(tzrules::days_from_civil(y, m, d) * 86_400);
+            let got = fmt("%U %W %V %G %g %u", &tm);
+            assert_eq!(
+                got,
+                format!("{u} {w} {v} {g} {g2} {iso_dow}"),
+                "{y:04}-{m:02}-{d:02}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_long_iso_year_is_the_one_that_gains_a_week() {
+        // 53 when the year starts on a Thursday (2015, 2020) or is a leap year
+        // starting on a Wednesday (2020 again, 1992); 52 otherwise. The
+        // constant this guards is the `p(y-1) == 3` half, which a naive
+        // implementation drops because it never fires on a non-leap year.
+        for &(y, n) in &[
+            (1992, 53),
+            (2015, 53),
+            (2016, 52),
+            (2020, 53),
+            (2021, 52),
+            (2024, 52),
+            (2026, 53),
+        ] {
+            assert_eq!(weeks_in_year(y), n, "{y}");
+        }
     }
 
     #[test]

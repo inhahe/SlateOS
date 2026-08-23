@@ -5559,6 +5559,11 @@ extern "C" fn kernel_main() -> ! {
             if let Err(e) = fs::kernelbuild::self_test() {
                 serial_println!("WARNING: kernelbuild self-test failed: {:?}", e);
             }
+            // userprofile was reachable only from a `kshell` subcommand
+            // (TD-A-FS-SELFTESTS-NEVER-RUN). Safe here: it creates one profile
+            // and deletes it again, and every other change it makes it undoes,
+            // so it leaves the two default profiles exactly as it found them.
+            fs::userprofile::self_test();
             if let Err(e) = crate::sockact::self_test() {
                 serial_println!("WARNING: socket-activation self-test failed: {:?}", e);
             }

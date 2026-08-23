@@ -69564,12 +69564,38 @@ fn cmd_userprofile(args: &str) {
                     shell_println!("User #{}: {}", p.id, p.username);
                     shell_println!("  Display: {}", p.display_name);
                     shell_println!("  Type: {}", p.account_type.label());
-                    shell_println!("  Home: {}", p.home_dir);
-                    shell_println!("  Shell: {}", p.shell);
+                    shell_println!("  Home: {}", p.home_dir.display());
+                    shell_println!("  Shell: {}", p.shell.display());
+                    if let Some(av) = p.avatar_path.as_deref() {
+                        shell_println!("  Avatar: {}", av.display());
+                    }
                     shell_println!("  Logins: {}", p.login_count);
                     shell_println!("  Active: {}, Locked: {}", p.is_active, p.is_locked);
                 }
                 None => shell_println!("Profile {} not found", id),
+            }
+        }
+        "home" | "shell" | "avatar" => {
+            let id: u32 = match parts.get(1).and_then(|s| s.parse().ok()) {
+                Some(v) => v,
+                None => {
+                    shell_println!("Usage: userprofile {} <id> <path>", sub);
+                    return;
+                }
+            };
+            // The rest of the line, not one token: a path may contain spaces.
+            let path = parts.get(2..).map(|s| s.join(" ")).unwrap_or_default();
+            let res = match sub {
+                "home" => userprofile::set_home_dir(id, &path),
+                "shell" => userprofile::set_shell(id, &path),
+                _ => userprofile::set_avatar(id, &path),
+            };
+            match res {
+                Ok(()) if path.is_empty() => {
+                    shell_println!("Cleared {} for profile {}", sub, id);
+                }
+                Ok(()) => shell_println!("Profile {} {} set to '{}'", id, sub, path),
+                Err(e) => shell_println!("Error: {:?}", e),
             }
         }
         "stats" => {
@@ -69589,8 +69615,9 @@ fn cmd_userprofile(args: &str) {
         "test" => userprofile::self_test(),
         _ => {
             shell_println!(
-                "Usage: userprofile <list|create|delete|switch|lock|unlock|rename|whoami|info|stats|init|test>"
+                "Usage: userprofile <list|create|delete|switch|lock|unlock|rename|whoami|info|home|shell|avatar|stats|init|test>"
             );
+            shell_println!("  home|shell|avatar <id> <path>   Set path (avatar: empty clears)");
             shell_println!("Aliases: uprof");
         }
     }

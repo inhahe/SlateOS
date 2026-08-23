@@ -41,6 +41,7 @@ use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::error::{KernelError, KernelResult};
+use crate::fs::path::{Path, PathBuf};
 use crate::sync::PreemptSpinMutex;
 
 // ---------------------------------------------------------------------------
@@ -138,9 +139,14 @@ pub enum OpState {
 #[derive(Debug, Clone)]
 pub struct OpItem {
     /// Source path.
-    pub source: String,
+    ///
+    /// A `PathBuf`, not a `String` (design-decisions.md 261): this is a
+    /// filesystem path, and our filesystems permit any byte but `/` and NUL
+    /// in a name.  A copy engine that cannot name a file is a copy engine
+    /// that silently operates on the wrong one.
+    pub source: PathBuf,
     /// Destination path (empty for delete operations).
-    pub dest: String,
+    pub dest: PathBuf,
     /// Whether this is a directory.
     pub is_dir: bool,
     /// File size in bytes (0 for directories).
@@ -148,8 +154,8 @@ pub struct OpItem {
     /// Current status.
     pub status: ItemStatus,
     /// Actual destination name if renamed.
-    pub actual_dest: String,
-    /// Error message if failed.
+    pub actual_dest: PathBuf,
+    /// Error message if failed.  Text we generate, so a `String`.
     pub error: String,
 }
 
@@ -159,9 +165,9 @@ pub struct UndoEntry {
     /// What was done.
     pub action: UndoAction,
     /// Source path involved.
-    pub source: String,
+    pub source: PathBuf,
     /// Destination path involved.
-    pub dest: String,
+    pub dest: PathBuf,
 }
 
 /// Possible undo actions.
@@ -195,7 +201,7 @@ pub struct Progress {
     /// Bytes transferred so far.
     pub transferred_bytes: u64,
     /// Current item being processed.
-    pub current_item: String,
+    pub current_item: PathBuf,
     /// Items that were skipped.
     pub skipped: usize,
     /// Items that failed.
@@ -206,9 +212,9 @@ pub struct Progress {
 #[derive(Debug, Clone)]
 pub struct Conflict {
     /// Source file path.
-    pub source: String,
+    pub source: PathBuf,
     /// Destination path that already exists.
-    pub dest: String,
+    pub dest: PathBuf,
     /// Whether both are directories (merge is possible).
     pub both_dirs: bool,
     /// Source file size.
@@ -267,45 +273,69 @@ static OPERATIONS: PreemptSpinMutex<Vec<FileOperation>> = PreemptSpinMutex::name
 // ---------------------------------------------------------------------------
 
 /// Generate a rename for a conflicting path: "file.txt" → "file (2).txt".
-pub fn auto_rename(path: &str) -> String {
-    // Split into parent + name + extension.
-    let (parent, name) = match path.rfind('/') {
-        Some(pos) => {
-            let p = path.get(..pos).unwrap_or("");
-            let n = path.get(pos.saturating_add(1)..).unwrap_or("");
-            (p, n)
-        }
-        None => ("", path),
+///
+/// Operates on bytes (design-decisions.md 261): the conflicting path came off
+/// the filesystem, which permits any byte but `/` and NUL, and the renamed
+/// copy must sit beside the original in the same directory — so the parent
+/// and stem have to be carried through byte-exactly.  Only the inserted
+/// ` (n)` is text, and that text is ours.
+pub fn auto_rename(path: impl AsRef<Path>) -> PathBuf {
+    let path = path.as_ref().as_bytes();
+
+    // Split into parent + name.  Note this is a *byte* split on the last `/`,
+    // deliberately not `Path::parent`/`Path::file_name`: a trailing slash
+    // must not be silently dropped here, because the caller is about to
+    // create a file at the name we return.
+    let (parent, name) = match path.iter().rposition(|&b| b == b'/') {
+        Some(pos) => (
+            path.get(..pos).unwrap_or(b""),
+            path.get(pos.saturating_add(1)..).unwrap_or(b""),
+        ),
+        None => (&b""[..], path),
     };
 
-    let (stem, ext) = match name.rfind('.') {
-        Some(dot) if dot > 0 => {
-            let s = name.get(..dot).unwrap_or("");
-            let e = name.get(dot..).unwrap_or("");
-            (s, e)
-        }
-        _ => (name, ""),
+    // Split the name at the last `.`, but only if it is not the first byte —
+    // a leading dot makes a hidden file, not an extension, so `.bashrc`
+    // becomes `.bashrc (2)` rather than ` (2).bashrc`.
+    let (stem, ext) = match name.iter().rposition(|&b| b == b'.') {
+        Some(dot) if dot > 0 => (
+            name.get(..dot).unwrap_or(b""),
+            name.get(dot..).unwrap_or(b""),
+        ),
+        _ => (name, &b""[..]),
     };
+
+    /// Assemble `parent/stem<infix>ext` without requiring any part to be text.
+    fn build(parent: &[u8], stem: &[u8], infix: &str, ext: &[u8]) -> PathBuf {
+        let mut out = PathBuf::with_capacity(
+            parent
+                .len()
+                .saturating_add(1)
+                .saturating_add(stem.len())
+                .saturating_add(infix.len())
+                .saturating_add(ext.len()),
+        );
+        if !parent.is_empty() {
+            out.extend_bytes(parent);
+            out.extend_bytes(b"/");
+        }
+        out.extend_bytes(stem);
+        out.extend_bytes(infix.as_bytes());
+        out.extend_bytes(ext);
+        out
+    }
 
     // Try "foo (2).ext", "foo (3).ext", etc.
     for n in 2..=MAX_RENAME_ATTEMPTS {
-        let candidate = if parent.is_empty() {
-            format!("{} ({}){}", stem, n, ext)
-        } else {
-            format!("{}/{} ({}){}", parent, stem, n, ext)
-        };
+        let candidate = build(parent, stem, &format!(" ({})", n), ext);
         // Check if this name is free (via VFS).
-        if crate::fs::vfs::Vfs::metadata(&candidate).is_err() {
+        if crate::fs::vfs::Vfs::metadata(candidate.as_path()).is_err() {
             return candidate;
         }
     }
 
     // Fallback (extremely unlikely: 9999 collisions).
-    if parent.is_empty() {
-        format!("{} (copy){}", stem, ext)
-    } else {
-        format!("{}/{} (copy){}", parent, stem, ext)
-    }
+    build(parent, stem, " (copy)", ext)
 }
 
 // ---------------------------------------------------------------------------
@@ -318,17 +348,18 @@ pub fn auto_rename(path: &str) -> String {
 /// The items list is populated by scanning source paths.
 pub fn create(
     kind: OpKind,
-    sources: &[&str],
-    dest: &str,
+    sources: &[impl AsRef<Path>],
+    dest: impl AsRef<Path>,
     policy: ConflictPolicy,
 ) -> KernelResult<u64> {
+    let dest = dest.as_ref();
     if sources.is_empty() {
         return Err(KernelError::InvalidArgument);
     }
     if sources.len() > MAX_ITEMS {
         return Err(KernelError::InvalidArgument);
     }
-    if kind != OpKind::Delete && dest.is_empty() {
+    if kind != OpKind::Delete && dest.as_bytes().is_empty() {
         return Err(KernelError::InvalidArgument);
     }
 
@@ -354,6 +385,7 @@ pub fn create(
     let mut total_bytes: u64 = 0;
 
     for src in sources {
+        let src = src.as_ref();
         let meta = crate::fs::vfs::Vfs::metadata(src);
         let (is_dir, size) = match &meta {
             Ok(m) => (m.entry_type == crate::fs::EntryType::Directory, m.size),
@@ -361,20 +393,18 @@ pub fn create(
         };
 
         let item_dest = if kind == OpKind::Delete {
-            String::new()
+            PathBuf::new()
         } else {
-            // Compute destination path: dest/basename(src)
-            let basename = src.rsplit('/').next().unwrap_or(src);
-            if dest == "/" {
-                format!("/{}", basename)
-            } else {
-                format!("{}/{}", dest, basename)
-            }
+            // Compute destination path: dest/basename(src).  `Path::join`
+            // handles the root case (it does not double the separator) and
+            // carries the basename's bytes through unexamined.
+            let basename = src.file_name().unwrap_or(src);
+            dest.join(basename)
         };
 
         total_bytes = total_bytes.saturating_add(size);
         items.push(OpItem {
-            source: String::from(*src),
+            source: src.to_path_buf(),
             dest: item_dest.clone(),
             is_dir,
             size,
@@ -389,7 +419,7 @@ pub fn create(
         kind.label(),
         items.len(),
         if items.len() == 1 { "" } else { "s" },
-        dest
+        dest.display()
     );
 
     let mut ops = OPERATIONS.lock();
@@ -479,7 +509,14 @@ pub fn execute(op_id: u64) -> KernelResult<Progress> {
         }
 
         // Process the item (without holding the lock).
-        let result = process_item(kind, &item_source, &item_dest, is_dir, policy, op_id);
+        let result = process_item(
+            kind,
+            item_source.as_path(),
+            item_dest.as_path(),
+            is_dir,
+            policy,
+            op_id,
+        );
 
         // Update item status.
         {
@@ -534,7 +571,7 @@ pub fn execute(op_id: u64) -> KernelResult<Progress> {
             processed_items: op.processed,
             total_bytes: op.total_bytes,
             transferred_bytes: op.transferred_bytes,
-            current_item: String::new(),
+            current_item: PathBuf::new(),
             skipped: op.skipped,
             failed: op.failed,
         };
@@ -552,12 +589,12 @@ enum ProcessError {
 /// Process a single item in a file operation.
 fn process_item(
     kind: OpKind,
-    source: &str,
-    dest: &str,
+    source: &Path,
+    dest: &Path,
     is_dir: bool,
     policy: ConflictPolicy,
     op_id: u64,
-) -> Result<String, ProcessError> {
+) -> Result<PathBuf, ProcessError> {
     match kind {
         OpKind::Copy => copy_item(source, dest, is_dir, policy, op_id),
         OpKind::Move => move_item(source, dest, is_dir, policy, op_id),
@@ -567,29 +604,29 @@ fn process_item(
 
 /// Copy a single file or directory.
 fn copy_item(
-    source: &str,
-    dest: &str,
+    source: &Path,
+    dest: &Path,
     is_dir: bool,
     policy: ConflictPolicy,
     op_id: u64,
-) -> Result<String, ProcessError> {
+) -> Result<PathBuf, ProcessError> {
     let actual_dest = resolve_conflict(dest, policy)?;
 
     if is_dir {
         // Create directory at destination.
-        if let Err(e) = crate::fs::vfs::Vfs::mkdir(&actual_dest) {
+        if let Err(e) = crate::fs::vfs::Vfs::mkdir(actual_dest.as_path()) {
             if e != KernelError::AlreadyExists {
                 return Err(ProcessError::Failed(format!("mkdir: {:?}", e)));
             }
         }
-        add_undo(op_id, UndoAction::DirCreated, source, &actual_dest);
+        add_undo(op_id, UndoAction::DirCreated, source, actual_dest.as_path());
     } else {
         // Read source, write to destination.
         let data = crate::fs::vfs::Vfs::read_file(source)
             .map_err(|e| ProcessError::Failed(format!("read: {:?}", e)))?;
-        crate::fs::vfs::Vfs::write_file(&actual_dest, &data)
+        crate::fs::vfs::Vfs::write_file(actual_dest.as_path(), &data)
             .map_err(|e| ProcessError::Failed(format!("write: {:?}", e)))?;
-        add_undo(op_id, UndoAction::FileCopied, source, &actual_dest);
+        add_undo(op_id, UndoAction::FileCopied, source, actual_dest.as_path());
     }
 
     Ok(actual_dest)
@@ -597,12 +634,12 @@ fn copy_item(
 
 /// Move a single file or directory.
 fn move_item(
-    source: &str,
-    dest: &str,
+    source: &Path,
+    dest: &Path,
     is_dir: bool,
     policy: ConflictPolicy,
     op_id: u64,
-) -> Result<String, ProcessError> {
+) -> Result<PathBuf, ProcessError> {
     // First copy, then delete source.
     let actual_dest = copy_item(source, dest, is_dir, policy, op_id)?;
 
@@ -627,7 +664,7 @@ fn move_item(
             // Log but don't fail the whole item.
             crate::serial_println!(
                 "[fileops] warning: could not delete source {}: {:?}",
-                source,
+                source.display(),
                 e
             );
         }
@@ -644,36 +681,36 @@ fn move_item(
 }
 
 /// Delete a single file or directory.
-fn delete_item(source: &str, _is_dir: bool, op_id: u64) -> Result<String, ProcessError> {
+fn delete_item(source: &Path, _is_dir: bool, op_id: u64) -> Result<PathBuf, ProcessError> {
     // Try delete via VFS.
     crate::fs::vfs::Vfs::remove(source)
         .map_err(|e| ProcessError::Failed(format!("delete: {:?}", e)))?;
 
-    add_undo(op_id, UndoAction::FileDeleted, source, "");
+    add_undo(op_id, UndoAction::FileDeleted, source, Path::new(""));
 
-    Ok(String::new())
+    Ok(PathBuf::new())
 }
 
 /// Resolve a destination conflict according to policy.
-fn resolve_conflict(dest: &str, policy: ConflictPolicy) -> Result<String, ProcessError> {
+fn resolve_conflict(dest: &Path, policy: ConflictPolicy) -> Result<PathBuf, ProcessError> {
     // Check if destination already exists.
     let exists = crate::fs::vfs::Vfs::metadata(dest).is_ok();
 
     if !exists {
-        return Ok(String::from(dest));
+        return Ok(dest.to_path_buf());
     }
 
     match policy {
         ConflictPolicy::AutoRename => Ok(auto_rename(dest)),
         ConflictPolicy::Overwrite => {
             // Will overwrite — return same dest.
-            Ok(String::from(dest))
+            Ok(dest.to_path_buf())
         }
         ConflictPolicy::Skip => Err(ProcessError::Skipped),
         ConflictPolicy::MergeDir => {
             // For directories, merge is OK — create if needed.
             // For files within merged dirs, use AutoRename fallback.
-            Ok(String::from(dest))
+            Ok(dest.to_path_buf())
         }
         ConflictPolicy::Ask => {
             // In non-interactive mode, fall back to skip.
@@ -683,14 +720,14 @@ fn resolve_conflict(dest: &str, policy: ConflictPolicy) -> Result<String, Proces
 }
 
 /// Add an entry to an operation's undo log.
-fn add_undo(op_id: u64, action: UndoAction, source: &str, dest: &str) {
+fn add_undo(op_id: u64, action: UndoAction, source: &Path, dest: &Path) {
     let mut ops = OPERATIONS.lock();
     if let Some(op) = ops.iter_mut().find(|o| o.id == op_id) {
         if op.undo_log.len() < MAX_UNDO_LOG {
             op.undo_log.push(UndoEntry {
                 action,
-                source: String::from(source),
-                dest: String::from(dest),
+                source: source.to_path_buf(),
+                dest: dest.to_path_buf(),
             });
         }
     }
@@ -748,20 +785,20 @@ pub fn undo(op_id: u64) -> KernelResult<(usize, usize)> {
         let result = match entry.action {
             UndoAction::FileCopied => {
                 // Delete the copied file.
-                crate::fs::vfs::Vfs::remove(&entry.dest)
+                crate::fs::vfs::Vfs::remove(entry.dest.as_path())
             }
             UndoAction::DirCreated => {
                 // Try to remove directory (only succeeds if empty).
-                crate::fs::vfs::Vfs::rmdir(&entry.dest)
+                crate::fs::vfs::Vfs::rmdir(entry.dest.as_path())
             }
             UndoAction::FileMoved => {
                 // Move file back to original location.
-                let data = crate::fs::vfs::Vfs::read_file(&entry.dest);
+                let data = crate::fs::vfs::Vfs::read_file(entry.dest.as_path());
                 match data {
                     Ok(d) => {
-                        let w = crate::fs::vfs::Vfs::write_file(&entry.source, &d);
+                        let w = crate::fs::vfs::Vfs::write_file(entry.source.as_path(), &d);
                         if w.is_ok() {
-                            let _ = crate::fs::vfs::Vfs::remove(&entry.dest);
+                            let _ = crate::fs::vfs::Vfs::remove(entry.dest.as_path());
                         }
                         w
                     }
@@ -774,7 +811,7 @@ pub fn undo(op_id: u64) -> KernelResult<(usize, usize)> {
             }
             UndoAction::FileRenamed => {
                 // Just delete the renamed copy.
-                crate::fs::vfs::Vfs::remove(&entry.dest)
+                crate::fs::vfs::Vfs::remove(entry.dest.as_path())
             }
         };
 
@@ -879,10 +916,31 @@ pub fn self_test() -> KernelResult<()> {
 
     // Test 1: auto_rename logic.
     {
-        let renamed = auto_rename("/tmp/file.txt");
-        // Should produce /tmp/file (2).txt or similar (depends on VFS state).
-        assert!(renamed.contains("file"));
-        assert!(renamed.contains('('));
+        // Names chosen so nothing else in the boot sequence can occupy the
+        // " (2)" slot and turn this into " (3)".
+        let renamed = auto_rename("/tmp/_ar_uniq.txt");
+        // The parent, stem and extension are all preserved; only a " (n)"
+        // is inserted before the extension.
+        assert_eq!(renamed.as_path(), Path::new("/tmp/_ar_uniq (2).txt"));
+
+        // A leading dot makes a hidden file, not an extension.
+        assert_eq!(
+            auto_rename("/tmp/._ar_uniq").as_path(),
+            Path::new("/tmp/._ar_uniq (2)")
+        );
+        // A bare name with no parent stays parentless.
+        assert_eq!(
+            auto_rename("_ar_uniq.txt").as_path(),
+            Path::new("_ar_uniq (2).txt")
+        );
+
+        // The counter really does advance past an occupied slot.
+        crate::fs::vfs::Vfs::write_file("/tmp/_ar_uniq (2).txt", b"")?;
+        assert_eq!(
+            auto_rename("/tmp/_ar_uniq.txt").as_path(),
+            Path::new("/tmp/_ar_uniq (3).txt")
+        );
+        let _ = crate::fs::vfs::Vfs::remove("/tmp/_ar_uniq (2).txt");
         serial_println!("[fileops] test 1 passed: auto_rename");
     }
 
@@ -941,10 +999,52 @@ pub fn self_test() -> KernelResult<()> {
         serial_println!("[fileops] test 6 passed: conflict policies");
     }
 
+    // Test 7: non-UTF-8 paths (design-decisions.md 261).
+    //
+    // Everything this engine touches is a filesystem path, and a name may
+    // contain any byte but `/` and NUL.  While these were `String`s the
+    // explorer could not copy, move or delete such a file at all — and a
+    // caller that reached the engine through a lossy conversion would have
+    // copied, or worse *deleted*, some other file entirely while reporting
+    // success.
+    {
+        let src = Path::new(&b"/tmp/fo_\xFFs.txt"[..]);
+        let dstdir = Path::new(&b"/tmp/fo_\xFEd"[..]);
+        crate::fs::vfs::Vfs::write_file(src, b"payload")?;
+        crate::fs::vfs::Vfs::mkdir(dstdir)?;
+
+        // auto_rename carries every byte of parent and stem through.
+        let renamed = auto_rename(src);
+        assert_eq!(renamed.as_path(), Path::new(&b"/tmp/fo_\xFFs (2).txt"[..]));
+
+        // The destination is composed from the destination directory and the
+        // source's basename, both non-UTF-8.
+        let op_id = create(OpKind::Copy, &[src], dstdir, ConflictPolicy::AutoRename)?;
+        let op = get_op(op_id).ok_or(KernelError::NotFound)?;
+        let item = op.items.first().ok_or(KernelError::NotFound)?;
+        assert_eq!(item.source.as_path(), src);
+        assert_eq!(
+            item.dest.as_path(),
+            Path::new(&b"/tmp/fo_\xFEd/fo_\xFFs.txt"[..])
+        );
+
+        // And it actually runs: the copy lands at that byte-exact path.
+        let _ = execute(op_id)?;
+        assert_eq!(
+            crate::fs::vfs::Vfs::read_file(item.dest.as_path())?,
+            b"payload"
+        );
+
+        let _ = crate::fs::vfs::Vfs::remove(item.dest.as_path());
+        let _ = crate::fs::vfs::Vfs::remove(src);
+        let _ = crate::fs::vfs::Vfs::rmdir(dstdir);
+        serial_println!("[fileops] test 7 passed: non-UTF-8 paths");
+    }
+
     // Clean up.
     let _ = crate::fs::vfs::Vfs::remove("/tmp/fileops_test.txt");
     clear();
 
-    serial_println!("[fileops] all 6 self-tests passed");
+    serial_println!("[fileops] all 7 self-tests passed");
     Ok(())
 }

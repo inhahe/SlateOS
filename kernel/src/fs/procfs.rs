@@ -8351,7 +8351,7 @@ fn gen_fileversion() -> Vec<u8> {
 
     let watches = super::fileversion::list_watches();
     for w in &watches {
-        out.push_str(&format!("{}: {}\n", w.path, w.policy.label()));
+        out.push_str(&format!("{}: {}\n", w.path.display(), w.policy.label()));
     }
 
     out.into_bytes()

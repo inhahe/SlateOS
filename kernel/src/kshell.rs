@@ -41936,7 +41936,7 @@ fn cmd_fileversion(args: &str) {
             };
             match fileversion::get_version(id) {
                 Ok(v) => {
-                    shell_println!("Version #{} of {}", v.id, v.path);
+                    shell_println!("Version #{} of {}", v.id, v.path.display());
                     shell_println!("  Version:  v{}", v.version);
                     shell_println!("  Size:     {} bytes", v.size);
                     shell_println!("  Checksum: 0x{:016x}", v.checksum);
@@ -41982,7 +41982,7 @@ fn cmd_fileversion(args: &str) {
                 Ok(v) => shell_println!(
                     "Restored version {} of {} ({} bytes)",
                     v.version,
-                    v.path,
+                    v.path.display(),
                     v.size
                 ),
                 Err(e) => shell_println!("Error: {:?}", e),
@@ -42022,7 +42022,7 @@ fn cmd_fileversion(args: &str) {
                     shell_println!("No watched paths.");
                 } else {
                     for w in &watches {
-                        shell_println!("  {} — {}", w.path, w.policy.label());
+                        shell_println!("  {} — {}", w.path.display(), w.policy.label());
                     }
                 }
             } else if parts.len() >= 3 && parts[1] == "add" {

@@ -5522,6 +5522,12 @@ extern "C" fn kernel_main() -> ! {
             // conflict and exclude lists exactly, so it cannot disturb a user's
             // cloud configuration -- and at boot there is none yet anyway.
             fs::cloudsync::self_test();
+            // fileversion was reachable only from a `kshell` subcommand, so its
+            // suite had never run in the boot test (TD-A-FS-SELFTESTS-NEVER-RUN).
+            // Safe here: it is baseline-relative, refuses to run at all if a
+            // pre-existing watch covers its fixture, and purges every version it
+            // captures -- so it cannot destroy a real file's version history.
+            fs::fileversion::self_test();
             if let Err(e) = crate::sockact::self_test() {
                 serial_println!("WARNING: socket-activation self-test failed: {:?}", e);
             }

@@ -232,24 +232,65 @@ fn printable_char(c: char) -> bool {
     !c.is_control() && c != '\u{2028}' && c != '\u{2029}'
 }
 
-/// The piece beginning at byte `i`, or `None` at the end of the string.
-fn piece_at(s: &[u8], i: usize) -> Option<Piece> {
-    let rest = s.get(i..)?;
-    let &first = rest.first()?;
+/// One step of `mbrtowc`, with its two failures kept apart.
+///
+/// C's `mbrtowc` answers three ways and callers act differently on each, so a
+/// decoder that collapses the two failures into "not a character" cannot serve
+/// them all. `ls`'s `-q` is the caller that needs the distinction: an **invalid**
+/// byte costs one `?` and the scan resumes at the next byte, while an
+/// **incomplete** sequence at the end of the name costs one `?` for the whole
+/// remaining tail. `ls -q` on a name ending in a lone `\xc3` therefore prints
+/// one `?`, and on `\xc3\xc3` prints two.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Mb {
+    /// A character and the number of bytes it occupied. `mbrtowc`'s positive
+    /// return.
+    Char(char, usize),
+    /// A byte that begins no valid sequence — `mbrtowc`'s `(size_t) -1`.
+    /// Consumes exactly one byte, whatever follows it.
+    Invalid,
+    /// A valid *prefix* cut short by the end of the string — `(size_t) -2`.
+    /// Consumes the rest of the string, because there is no more input coming.
+    Incomplete,
+}
+
+/// The [`Mb`] at the front of `text`, or `None` if `text` is empty.
+///
+/// ```
+/// use coreutils::quote::{Mb, next_mb};
+/// assert_eq!(next_mb(b"abc"), Some(Mb::Char('a', 1)));
+/// assert_eq!(next_mb("é".as_bytes()), Some(Mb::Char('é', 2)));
+/// // `\xff` can begin no sequence at all, so it is invalid rather than short.
+/// assert_eq!(next_mb(b"\xff"), Some(Mb::Invalid));
+/// // `\xc3` is a valid two-byte lead, so alone at the end it is incomplete...
+/// assert_eq!(next_mb(b"\xc3"), Some(Mb::Incomplete));
+/// // ...but followed by a byte that cannot continue it, it is invalid.
+/// assert_eq!(next_mb(b"\xc3("), Some(Mb::Invalid));
+/// assert_eq!(next_mb(b""), None);
+/// ```
+#[must_use]
+pub fn next_mb(text: &[u8]) -> Option<Mb> {
+    text.first()?;
     // Four bytes is the longest a UTF-8 character can be, so a window that
     // size can never cut a valid one short -- which is what lets the decode
     // below be a plain `from_utf8` rather than a hand-rolled state machine.
-    let head = rest.get(..rest.len().min(4)).unwrap_or(rest);
+    let head = text.get(..text.len().min(4)).unwrap_or(text);
     let valid = match std::str::from_utf8(head) {
         Ok(t) => t,
         Err(e) => {
             // `valid_up_to() == 0` is the interesting case: the string does
-            // not decode *here*, so this byte is a `Byte` piece and the next
-            // attempt starts one byte along. Anything else means the window
-            // held a character followed by trouble, and the character is ours.
+            // not decode *here*, so the answer is one of the two failures.
+            // Anything else means the window held a character followed by
+            // trouble, and the character is ours.
             let n = e.valid_up_to();
             if n == 0 {
-                return Some(Piece::Byte(first));
+                // `error_len() == None` is std's spelling of "ran out of
+                // input", which is exactly `mbrtowc`'s `-2`.
+                return Some(if e.error_len().is_none() {
+                    Mb::Incomplete
+                } else {
+                    Mb::Invalid
+                });
             }
             head.get(..n)
                 .and_then(|v| std::str::from_utf8(v).ok())
@@ -257,8 +298,22 @@ fn piece_at(s: &[u8], i: usize) -> Option<Piece> {
         }
     };
     Some(match valid.chars().next() {
-        Some(c) => Piece::Char(c, c.len_utf8()),
-        None => Piece::Byte(first),
+        Some(c) => Mb::Char(c, c.len_utf8()),
+        None => Mb::Invalid,
+    })
+}
+
+/// The piece beginning at byte `i`, or `None` at the end of the string.
+///
+/// The escaping styles do not care *why* a byte failed to decode — both
+/// failures render as one escape per byte — so [`Mb`]'s two failures collapse
+/// back into one [`Piece::Byte`] here.
+fn piece_at(s: &[u8], i: usize) -> Option<Piece> {
+    let rest = s.get(i..)?;
+    let &first = rest.first()?;
+    Some(match next_mb(rest)? {
+        Mb::Char(c, n) => Piece::Char(c, n),
+        Mb::Invalid | Mb::Incomplete => Piece::Byte(first),
     })
 }
 

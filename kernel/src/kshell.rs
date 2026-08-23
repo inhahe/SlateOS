@@ -17415,7 +17415,11 @@ fn cmd_atime(args: &str) {
                 shell_println!();
                 shell_println!("  Per-mount overrides:");
                 for ovr in &overrides {
-                    shell_println!("    {:20} → {}", ovr.mount_path, ovr.policy.label());
+                    shell_println!(
+                        "    {:20} → {}",
+                        ovr.mount_path.display(),
+                        ovr.policy.label()
+                    );
                 }
             }
         }

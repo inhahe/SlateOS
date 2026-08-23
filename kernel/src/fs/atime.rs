@@ -34,10 +34,10 @@
 
 #![allow(dead_code)]
 
-use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
 
+use super::path::{Path, PathBuf};
 use crate::serial_println;
 use crate::sync::PreemptSpinMutex;
 
@@ -94,7 +94,14 @@ impl AtimePolicy {
 #[derive(Debug, Clone)]
 pub struct MountOverride {
     /// Mount path prefix (e.g., "/tmp", "/home").
-    pub mount_path: String,
+    ///
+    /// A `PathBuf`, not a `String`: this is a filesystem path, and ours
+    /// admit every byte but `/` and NUL. A `String` field cannot hold a
+    /// legal mountpoint whose name is not UTF-8, so the override for it
+    /// would be unsettable — or worse, would fold onto a *different*
+    /// mountpoint's key and silently change its policy.  See
+    /// `design-decisions.md` §261.
+    pub mount_path: PathBuf,
     /// Policy override for this mount.
     pub policy: AtimePolicy,
 }
@@ -152,19 +159,36 @@ pub fn set_global_policy(policy: AtimePolicy) {
 }
 
 /// Get the effective policy for a given path (checks mount overrides first).
-pub fn effective_policy(path: &str) -> AtimePolicy {
+///
+/// When several overrides cover the path, the *deepest* mountpoint wins —
+/// an override on `/home/user` beats one on `/home`, which is what makes a
+/// nested mount able to relax or tighten its parent's policy.
+pub fn effective_policy(path: impl AsRef<Path>) -> AtimePolicy {
+    let path = path.as_ref();
     let overrides = MOUNT_OVERRIDES.lock();
-    // Longest prefix match.
+    // Longest (deepest) prefix match.
     let mut best: Option<&MountOverride> = None;
-    let mut best_len = 0;
+    let mut best_depth = 0usize;
     for entry in overrides.iter() {
-        if (path == entry.mount_path
-            || (path.starts_with(&entry.mount_path)
-                && path.as_bytes().get(entry.mount_path.len()) == Some(&b'/')))
-            && entry.mount_path.len() > best_len
-        {
+        // The canonical subtree predicate (see `fs::pathutil`) rather than a
+        // hand-rolled prefix test plus a separator probe.  Besides being
+        // byte-clean, it is more correct: the old form indexed by byte
+        // offset, so a mountpoint recorded with a trailing slash — `/tmp/`
+        // — probed the byte *after* its own separator and therefore matched
+        // no child at all, silently reverting every file under it to the
+        // global policy.
+        if !crate::fs::pathutil::path_in_subtree(path, entry.mount_path.as_path()) {
+            continue;
+        }
+        // Depth in components, not bytes: `/tmp` and `/tmp/` name the same
+        // mountpoint at the same depth, so a trailing slash must not change
+        // which of two overlapping overrides wins.
+        let depth = entry.mount_path.as_path().components().count();
+        // `best.is_none()` is load-bearing for a root override: `/` has zero
+        // components, so a bare `depth > best_depth` would never select it.
+        if best.is_none() || depth > best_depth {
             best = Some(entry);
-            best_len = entry.mount_path.len();
+            best_depth = depth;
         }
     }
     match best {
@@ -174,15 +198,16 @@ pub fn effective_policy(path: &str) -> AtimePolicy {
 }
 
 /// Add a per-mount atime policy override.
-pub fn add_override(mount_path: &str, policy: AtimePolicy) {
+pub fn add_override(mount_path: impl AsRef<Path>, policy: AtimePolicy) {
+    let mount_path = mount_path.as_ref();
     let mut overrides = MOUNT_OVERRIDES.lock();
     // Update existing or insert new.
     for entry in overrides.iter_mut() {
-        if entry.mount_path == mount_path {
+        if entry.mount_path.as_path() == mount_path {
             entry.policy = policy;
             serial_println!(
                 "[atime] Updated override: {} → {}",
-                mount_path,
+                mount_path.display(),
                 policy.label()
             );
             return;
@@ -190,22 +215,28 @@ pub fn add_override(mount_path: &str, policy: AtimePolicy) {
     }
     if overrides.len() < 64 {
         overrides.push(MountOverride {
-            mount_path: String::from(mount_path),
+            mount_path: mount_path.to_path_buf(),
             policy,
         });
         serial_println!(
             "[atime] Added override: {} → {}",
-            mount_path,
+            mount_path.display(),
             policy.label()
         );
     }
 }
 
 /// Remove a per-mount override.
-pub fn remove_override(mount_path: &str) -> bool {
+///
+/// Matches the recorded mountpoint byte-for-byte, so an override added as
+/// `/tmp/` is not removed by `/tmp`.  Exact-key removal is deliberate: the
+/// caller that adds an override is the mount path that owns it, and it
+/// passes back the same bytes.
+pub fn remove_override(mount_path: impl AsRef<Path>) -> bool {
+    let mount_path = mount_path.as_ref();
     let mut overrides = MOUNT_OVERRIDES.lock();
     let len_before = overrides.len();
-    overrides.retain(|e| e.mount_path != mount_path);
+    overrides.retain(|e| e.mount_path.as_path() != mount_path);
     overrides.len() < len_before
 }
 
@@ -222,7 +253,11 @@ pub fn list_overrides() -> Vec<MountOverride> {
 /// - `current_mtime_ns`: file's current mtime in nanoseconds
 ///
 /// Returns `true` if atime should be updated to `now`.
-pub fn should_update(path: &str, current_atime_ns: u64, current_mtime_ns: u64) -> bool {
+pub fn should_update(
+    path: impl AsRef<Path>,
+    current_atime_ns: u64,
+    current_mtime_ns: u64,
+) -> bool {
     CHECK_COUNT.fetch_add(1, Ordering::Relaxed);
 
     let policy = effective_policy(path);
@@ -280,8 +315,11 @@ pub fn self_test() -> crate::error::KernelResult<()> {
     test_should_update_noatime();
     test_should_update_relatime();
     test_overrides();
+    test_non_utf8_mountpoint();
+    test_trailing_slash_mountpoint();
+    test_deepest_override_wins();
 
-    serial_println!("[atime] Self-test passed (6 tests).");
+    serial_println!("[atime] Self-test passed (9 tests).");
     Ok(())
 }
 
@@ -372,4 +410,86 @@ fn test_overrides() {
     assert_eq!(effective_policy("/tmp/foo.txt"), AtimePolicy::Relative);
 
     serial_println!("[atime]   overrides: ok");
+}
+
+/// Two mountpoints differing only in a byte that cannot appear in UTF-8
+/// must key separate overrides.  A lossy `String` key mapped both to the
+/// same U+FFFD-bearing name, so setting a policy on one silently changed
+/// the other's — and `remove_override` on one removed the other.
+fn test_non_utf8_mountpoint() {
+    set_global_policy(AtimePolicy::Relative);
+
+    let a = Path::new(&b"/mnt/\xFFdisk"[..]);
+    let b = Path::new(&b"/mnt/\xFEdisk"[..]);
+
+    add_override(a, AtimePolicy::NoAtime);
+    assert_eq!(effective_policy(a), AtimePolicy::NoAtime);
+    assert_eq!(
+        effective_policy(Path::new(&b"/mnt/\xFFdisk/file"[..])),
+        AtimePolicy::NoAtime
+    );
+    // The sibling must be untouched: with a lossy key it would read back
+    // `NoAtime` here.
+    assert_eq!(effective_policy(b), AtimePolicy::Relative);
+
+    add_override(b, AtimePolicy::Always);
+    assert_eq!(effective_policy(a), AtimePolicy::NoAtime);
+    assert_eq!(effective_policy(b), AtimePolicy::Always);
+
+    assert!(remove_override(a));
+    // Removing one must not remove the other.
+    assert_eq!(effective_policy(b), AtimePolicy::Always);
+    assert!(remove_override(b));
+    assert_eq!(effective_policy(a), AtimePolicy::Relative);
+
+    serial_println!("[atime]   non_utf8_mountpoint: ok");
+}
+
+/// A mountpoint recorded with a trailing slash must still cover its
+/// children, and must still *not* cover a sibling that merely shares its
+/// spelling as a byte prefix.  The old hand-rolled predicate got the first
+/// wrong (it probed the byte after the trailing `/`, so no child matched)
+/// and only got the second right by accident.
+fn test_trailing_slash_mountpoint() {
+    set_global_policy(AtimePolicy::Relative);
+
+    add_override("/atslash/", AtimePolicy::NoAtime);
+
+    // Children are covered.
+    assert_eq!(effective_policy("/atslash/data"), AtimePolicy::NoAtime);
+    assert_eq!(effective_policy("/atslash/a/b/c"), AtimePolicy::NoAtime);
+    // The mountpoint itself, spelled either way.
+    assert_eq!(effective_policy("/atslash"), AtimePolicy::NoAtime);
+    assert_eq!(effective_policy("/atslash/"), AtimePolicy::NoAtime);
+    // A sibling sharing the byte prefix is NOT covered.
+    assert_eq!(effective_policy("/atslashed"), AtimePolicy::Relative);
+    assert_eq!(effective_policy("/atslashed/x"), AtimePolicy::Relative);
+
+    assert!(remove_override("/atslash/"));
+    assert_eq!(effective_policy("/atslash/data"), AtimePolicy::Relative);
+
+    serial_println!("[atime]   trailing_slash_mountpoint: ok");
+}
+
+/// Overlapping overrides resolve to the deepest one, and a trailing slash
+/// must not change which wins — depth is counted in components, not bytes.
+fn test_deepest_override_wins() {
+    set_global_policy(AtimePolicy::Relative);
+
+    add_override("/atdeep", AtimePolicy::NoAtime);
+    add_override("/atdeep/inner/", AtimePolicy::Always);
+
+    assert_eq!(effective_policy("/atdeep/file"), AtimePolicy::NoAtime);
+    assert_eq!(effective_policy("/atdeep/inner"), AtimePolicy::Always);
+    assert_eq!(effective_policy("/atdeep/inner/file"), AtimePolicy::Always);
+    // Insertion order must not matter, so check the shallower one again
+    // after the deeper one exists.
+    assert_eq!(effective_policy("/atdeep/other/x"), AtimePolicy::NoAtime);
+
+    assert!(remove_override("/atdeep/inner/"));
+    assert_eq!(effective_policy("/atdeep/inner/file"), AtimePolicy::NoAtime);
+    assert!(remove_override("/atdeep"));
+    assert_eq!(effective_policy("/atdeep/file"), AtimePolicy::Relative);
+
+    serial_println!("[atime]   deepest_override_wins: ok");
 }

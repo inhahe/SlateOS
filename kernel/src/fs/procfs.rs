@@ -4646,7 +4646,7 @@ fn gen_atime() -> Vec<u8> {
         for ovr in &overrides {
             out.push_str(&format!(
                 "  {:20} → {}\n",
-                ovr.mount_path,
+                ovr.mount_path.display(),
                 ovr.policy.label()
             ));
         }

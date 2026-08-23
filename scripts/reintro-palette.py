@@ -78,6 +78,7 @@ PRINTMGR = "gui/desktop/src/print_manager.rs"
 POWER = "gui/desktop/src/power.rs"
 LOGIN = "gui/desktop/src/login_screen.rs"
 TB = "gui/desktop/src/taskbar.rs"
+LANG = "gui/desktop/src/language_settings.rs"
 
 # (name, file, [(old, new), ...], [packages], [tests expected to fail])
 DEFECTS = [
@@ -10154,6 +10155,772 @@ DEFECTS = [
             # first — it looks for the literal text "Terminal", which an
             # icon-only bar never draws.
             'test_render_label_mode',
+        ],
+    ),
+    # ------------------------------------------------------------------
+    # Module 30: language_settings.rs. Eleven constants over three tabs.
+    #
+    # The module's five judgements are in its docs; these defects break
+    # each one in the two ways that matter -- a role frozen to the Mocha
+    # value it used to be (which only the light render can see), and a
+    # role swapped for a neighbouring role (which no membership sweep can
+    # see at all, because both are legal). The second kind is why this
+    # module grew a per-site table; several of the defects below are
+    # caught by nothing else.
+    # ------------------------------------------------------------------
+    (
+        'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA: the panel background is frozen to Mocha base',
+        LANG,
+        [
+            ('            color: p.base,\n            corner_radii: CornerRadii::all(8.0),\n        });\n\n        // Title',
+             '            color: guitk::color::Color::from_hex(0x1E1E2E),\n            corner_radii: CornerRadii::all(8.0),\n        });\n\n        // Title'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_panel_draws_comes_from_its_palette',
+            'every_site_draws_the_role_it_claims',
+            'none_of_the_eleven_deleted_constants_is_still_drawn',
+        ],
+    ),
+    (
+        'BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB: the panel background follows the accent',
+        LANG,
+        [
+            ('            color: p.base,\n            corner_radii: CornerRadii::all(8.0),\n        });\n\n        // Title',
+             '            color: p.accent,\n            corner_radii: CornerRadii::all(8.0),\n        });\n\n        // Title'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'only_the_three_position_marks_carry_the_accent',
+        ],
+    ),
+    (
+        'CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC: the panel title is frozen to Mocha text',
+        LANG,
+        [
+            ('            font_size: 22.0,\n            color: p.text,',
+             '            font_size: 22.0,\n            color: guitk::color::Color::from_hex(0xCDD6F4),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_panel_draws_comes_from_its_palette',
+            'every_site_draws_the_role_it_claims',
+            'none_of_the_eleven_deleted_constants_is_still_drawn',
+        ],
+    ),
+    (
+        'DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD: the tab strip stops marking which tab is open',
+        LANG,
+        [
+            ('                color: if active { p.accent } else { p.surface0 },',
+             '                color: p.surface0,'),
+        ],
+        ["desktop"],
+        [
+            'the_fixture_reaches_every_branch_this_module_has',
+            'only_the_three_position_marks_carry_the_accent',
+        ],
+    ),
+    (
+        'EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE: the active and inactive tab fills are exchanged',
+        LANG,
+        [
+            ('                color: if active { p.accent } else { p.surface0 },',
+             '                color: if active { p.surface0 } else { p.accent },'),
+        ],
+        ["desktop"],
+        [
+            'the_fixture_reaches_every_branch_this_module_has',
+            'only_the_three_position_marks_carry_the_accent',
+        ],
+    ),
+    (
+        'FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF: the active tab is raised a rung instead of accented',
+        LANG,
+        [
+            ('                color: if active { p.accent } else { p.surface0 },',
+             '                color: if active { p.surface1 } else { p.surface0 },'),
+        ],
+        ["desktop"],
+        [
+            'the_fixture_reaches_every_branch_this_module_has',
+            'only_the_three_position_marks_carry_the_accent',
+        ],
+    ),
+    (
+        "GGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGG: the active tab's label is frozen to near-black instead of computed",
+        LANG,
+        [
+            ('                color: if active {\n                    readable_on(p.accent)\n                } else {\n                    p.subtext0\n                },',
+             '                color: if active {\n                    guitk::color::Color::from_hex(0x11111B)\n                } else {\n                    p.subtext0\n                },'),
+        ],
+        ["desktop"],
+        [
+            # Only the accent sweep. The membership sweep is blind here by
+            # construction: 0x11111B is a `readable_on` endpoint, so it is
+            # allowed in both renders, and it is also Mocha `crust`, which
+            # is why the deleted-constants test excludes it. A site whose
+            # ink is one of the two endpoints contributes nothing to "did
+            # this module read its palette" -- it has to be driven.
+            'the_active_tabs_label_is_computed_from_the_accent_under_it',
+        ],
+    ),
+    (
+        "HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH: the active tab's label takes the accent it is sitting on",
+        LANG,
+        [
+            ('                color: if active {\n                    readable_on(p.accent)\n                } else {\n                    p.subtext0\n                },',
+             '                color: if active {\n                    p.accent\n                } else {\n                    p.subtext0\n                },'),
+        ],
+        ["desktop"],
+        [
+            'the_active_tabs_label_is_computed_from_the_accent_under_it',
+            'only_the_three_position_marks_carry_the_accent',
+        ],
+    ),
+    (
+        "IIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIII: an inactive tab's label is frozen to Mocha subtext0",
+        LANG,
+        [
+            ('                color: if active {\n                    readable_on(p.accent)\n                } else {\n                    p.subtext0\n                },',
+             '                color: if active {\n                    readable_on(p.accent)\n                } else {\n                    guitk::color::Color::from_hex(0xA6ADC8)\n                },'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_panel_draws_comes_from_its_palette',
+            'none_of_the_eleven_deleted_constants_is_still_drawn',
+        ],
+    ),
+    (
+        "JJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJ: the current-language card drops to the list rows' rung",
+        LANG,
+        [
+            ('                height: 50.0,\n                color: p.surface1,',
+             '                height: 50.0,\n                color: p.surface0,'),
+        ],
+        ["desktop"],
+        [
+            # Caught by nothing but the per-site table: both rungs are roles,
+            # so the membership sweep accepts either, and the card is still
+            # exactly one 552x50 fill so every count still balances. This is
+            # the defect that motivated writing that table.
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        'KKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKK: the current-language card is frozen to Mocha surface1',
+        LANG,
+        [
+            ('                height: 50.0,\n                color: p.surface1,',
+             '                height: 50.0,\n                color: guitk::color::Color::from_hex(0x45475A),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_panel_draws_comes_from_its_palette',
+            'every_site_draws_the_role_it_claims',
+            'none_of_the_eleven_deleted_constants_is_still_drawn',
+        ],
+    ),
+    (
+        "LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLL: the card's title drops to the secondary rung",
+        LANG,
+        [
+            ('                font_size: 14.0,\n                color: p.text,',
+             '                font_size: 14.0,\n                color: p.subtext0,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM: the card's native name is frozen to Mocha subtext0",
+        LANG,
+        [
+            ('                font_size: 12.0,\n                color: p.subtext0,',
+             '                font_size: 12.0,\n                color: guitk::color::Color::from_hex(0xA6ADC8),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_panel_draws_comes_from_its_palette',
+            'every_site_draws_the_role_it_claims',
+            'none_of_the_eleven_deleted_constants_is_still_drawn',
+        ],
+    ),
+    (
+        "NNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNN: the search box is raised to the card's rung",
+        LANG,
+        [
+            ('            height: 30.0,\n            color: p.surface0,',
+             '            height: 30.0,\n            color: p.surface1,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        'OOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOO: the search box is frozen to Mocha surface0',
+        LANG,
+        [
+            ('            height: 30.0,\n            color: p.surface0,',
+             '            height: 30.0,\n            color: guitk::color::Color::from_hex(0x313244),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_panel_draws_comes_from_its_palette',
+            'every_site_draws_the_role_it_claims',
+            'none_of_the_eleven_deleted_constants_is_still_drawn',
+        ],
+    ),
+    (
+        'PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPP: the placeholder is as bright as a query the user typed',
+        LANG,
+        [
+            ('            color: if self.language_search.is_empty() {\n                p.overlay0\n            } else {\n                p.text\n            },',
+             '            color: p.text,'),
+        ],
+        ["desktop"],
+        [
+            'an_empty_search_box_is_dimmer_than_one_with_a_query_in_it',
+        ],
+    ),
+    (
+        'QQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQ: the placeholder and the typed-query rungs are exchanged',
+        LANG,
+        [
+            ('            color: if self.language_search.is_empty() {\n                p.overlay0\n            } else {\n                p.text\n            },',
+             '            color: if self.language_search.is_empty() {\n                p.text\n            } else {\n                p.overlay0\n            },'),
+        ],
+        ["desktop"],
+        [
+            'an_empty_search_box_is_dimmer_than_one_with_a_query_in_it',
+        ],
+    ),
+    (
+        'RRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRR: the typed query is frozen to Mocha text',
+        LANG,
+        [
+            ('            color: if self.language_search.is_empty() {\n                p.overlay0\n            } else {\n                p.text\n            },',
+             '            color: if self.language_search.is_empty() {\n                p.overlay0\n            } else {\n                guitk::color::Color::from_hex(0xCDD6F4)\n            },'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_panel_draws_comes_from_its_palette',
+            'an_empty_search_box_is_dimmer_than_one_with_a_query_in_it',
+            'none_of_the_eleven_deleted_constants_is_still_drawn',
+        ],
+    ),
+    (
+        'SSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSS: the selected and unselected list-row rungs are exchanged',
+        LANG,
+        [
+            ('                color: if is_selected { p.surface1 } else { p.surface0 },',
+             '                color: if is_selected { p.surface0 } else { p.surface1 },'),
+        ],
+        ["desktop"],
+        [
+            # A permutation of {surface0, surface0, surface1}. The set is
+            # unchanged, so a count sees nothing; only the positional vector
+            # in the per-site table can tell which row was raised.
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        'TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT: a list row stops showing whether it is selected',
+        LANG,
+        [
+            ('                color: if is_selected { p.surface1 } else { p.surface0 },',
+             '                color: p.surface0,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        'UUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUU: an unselected list row is frozen to Mocha surface0',
+        LANG,
+        [
+            ('                color: if is_selected { p.surface1 } else { p.surface0 },',
+             '                color: if is_selected {\n                    p.surface1\n                } else {\n                    guitk::color::Color::from_hex(0x313244)\n                },'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_panel_draws_comes_from_its_palette',
+            'every_site_draws_the_role_it_claims',
+            'none_of_the_eleven_deleted_constants_is_still_drawn',
+        ],
+    ),
+    (
+        "VVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVV: the current language's marker bar stops being the accent",
+        LANG,
+        [
+            ('                    color: p.accent,\n                    corner_radii: CornerRadii::all(2.0),',
+             '                    color: p.text,\n                    corner_radii: CornerRadii::all(2.0),'),
+        ],
+        ["desktop"],
+        [
+            'only_the_three_position_marks_carry_the_accent',
+        ],
+    ),
+    (
+        "WWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWW: the current language's marker bar is not drawn at all",
+        LANG,
+        [
+            ('            if is_current {\n                cmds.push(RenderCommand::FillRect {\n                    x: x + 4.0,\n                    y: cy + 4.0,\n                    width: 4.0,\n                    height: 32.0,\n                    color: p.accent,\n                    corner_radii: CornerRadii::all(2.0),\n                });\n            }\n\n',
+             ''),
+        ],
+        ["desktop"],
+        [
+            'the_fixture_reaches_every_branch_this_module_has',
+            'only_the_three_position_marks_carry_the_accent',
+        ],
+    ),
+    (
+        "XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX: the current language's name stops being accented",
+        LANG,
+        [
+            ('                color: if is_current { p.accent } else { p.text },\n                font_weight: if is_current {',
+             '                color: p.text,\n                font_weight: if is_current {'),
+        ],
+        ["desktop"],
+        [
+            'only_the_three_position_marks_carry_the_accent',
+        ],
+    ),
+    (
+        'YYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYY: every list row is accented, not just the current one',
+        LANG,
+        [
+            ('                color: if is_current { p.accent } else { p.text },\n                font_weight: if is_current {',
+             '                color: p.accent,\n                font_weight: if is_current {'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'only_the_three_position_marks_carry_the_accent',
+        ],
+    ),
+    (
+        "ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ: an ordinary row's name is frozen to Mocha text",
+        LANG,
+        [
+            ('                color: if is_current { p.accent } else { p.text },\n                font_weight: if is_current {',
+             '                color: if is_current {\n                    p.accent\n                } else {\n                    guitk::color::Color::from_hex(0xCDD6F4)\n                },\n                font_weight: if is_current {'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_panel_draws_comes_from_its_palette',
+            'every_site_draws_the_role_it_claims',
+            'none_of_the_eleven_deleted_constants_is_still_drawn',
+        ],
+    ),
+    (
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA: a row's native name is frozen to Mocha subtext0",
+        LANG,
+        [
+            ('                font_size: 11.0,\n                color: p.subtext0,',
+             '                font_size: 11.0,\n                color: guitk::color::Color::from_hex(0xA6ADC8),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_panel_draws_comes_from_its_palette',
+            'every_site_draws_the_role_it_claims',
+            'none_of_the_eleven_deleted_constants_is_still_drawn',
+        ],
+    ),
+    (
+        "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB: a row's native name is promoted to the primary rung",
+        LANG,
+        [
+            ('                font_size: 11.0,\n                color: p.subtext0,',
+             '                font_size: 11.0,\n                color: p.text,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        'CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC: the Partial badge follows the accent',
+        LANG,
+        [
+            ('                    color: p.yellow,\n                    corner_radii: CornerRadii::all(9.0),',
+             '                    color: p.accent,\n                    corner_radii: CornerRadii::all(9.0),'),
+        ],
+        ["desktop"],
+        [
+            'the_partial_badge_is_a_property_of_the_language_not_a_selection',
+            'the_badge_ink_is_computed_from_the_badge_it_sits_on',
+            'only_the_three_position_marks_carry_the_accent',
+        ],
+    ),
+    (
+        'DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD: the Partial badge is frozen to Mocha yellow',
+        LANG,
+        [
+            ('                    color: p.yellow,\n                    corner_radii: CornerRadii::all(9.0),',
+             '                    color: guitk::color::Color::from_hex(0xF9E2AF),\n                    corner_radii: CornerRadii::all(9.0),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_panel_draws_comes_from_its_palette',
+            'the_partial_badge_is_a_property_of_the_language_not_a_selection',
+            'the_badge_ink_is_computed_from_the_badge_it_sits_on',
+            'none_of_the_eleven_deleted_constants_is_still_drawn',
+        ],
+    ),
+    (
+        "EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE: the Partial badge's ink is frozen to near-black",
+        LANG,
+        [
+            ('                    color: readable_on(p.yellow),',
+             '                    color: guitk::color::Color::from_hex(0x11111B),'),
+        ],
+        ["desktop"],
+        [
+            # The second instance of the endpoint blindness, and the sharper
+            # one: near-black is the *right* answer in the dark render, so
+            # the branch-coverage test -- which runs dark only -- passes too.
+            # Only the two-mode comparison sees it.
+            'the_badge_ink_is_computed_from_the_badge_it_sits_on',
+        ],
+    ),
+    (
+        "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF: the Partial badge's ink is computed from the panel, not the badge",
+        LANG,
+        [
+            ('                    color: readable_on(p.yellow),',
+             '                    color: readable_on(p.base),'),
+        ],
+        ["desktop"],
+        [
+            'the_fixture_reaches_every_branch_this_module_has',
+            'the_badge_ink_is_computed_from_the_badge_it_sits_on',
+        ],
+    ),
+    (
+        'GGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGG: the Partial badge marks the complete languages instead of the incomplete ones',
+        LANG,
+        [
+            ('            if !lang.complete {',
+             '            if lang.complete {'),
+        ],
+        ["desktop"],
+        [
+            'the_fixture_reaches_every_branch_this_module_has',
+            'the_partial_badge_is_a_property_of_the_language_not_a_selection',
+            'the_badge_ink_is_computed_from_the_badge_it_sits_on',
+        ],
+    ),
+    (
+        'HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH: the count line is frozen to Mocha overlay0',
+        LANG,
+        [
+            ('            font_size: 11.0,\n            color: p.overlay0,',
+             '            font_size: 11.0,\n            color: guitk::color::Color::from_hex(0x6C7086),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_panel_draws_comes_from_its_palette',
+            'every_site_draws_the_role_it_claims',
+            'none_of_the_eleven_deleted_constants_is_still_drawn',
+        ],
+    ),
+    (
+        'IIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIII: the count line is promoted to the primary text rung',
+        LANG,
+        [
+            ('            font_size: 11.0,\n            color: p.overlay0,',
+             '            font_size: 11.0,\n            color: p.text,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        'JJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJ: the Date Format heading is frozen to Mocha lavender',
+        LANG,
+        [
+            ('            text: "Date Format".into(),\n            font_size: 15.0,\n            color: p.lavender,',
+             '            text: "Date Format".into(),\n            font_size: 15.0,\n            color: guitk::color::Color::from_hex(0xB4BEFE),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_panel_draws_comes_from_its_palette',
+            'headings_keep_their_own_rung_under_every_accent',
+            'none_of_the_eleven_deleted_constants_is_still_drawn',
+        ],
+    ),
+    (
+        'KKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKK: the Time Format heading follows the accent',
+        LANG,
+        [
+            ('            text: "Time Format".into(),\n            font_size: 15.0,\n            color: p.lavender,',
+             '            text: "Time Format".into(),\n            font_size: 15.0,\n            color: p.accent,'),
+        ],
+        ["desktop"],
+        [
+            'headings_keep_their_own_rung_under_every_accent',
+            'only_the_three_position_marks_carry_the_accent',
+        ],
+    ),
+    (
+        'LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLL: the Measurement heading drops to the sub-heading rung',
+        LANG,
+        [
+            ('            text: "Measurement".into(),\n            font_size: 15.0,\n            color: p.lavender,',
+             '            text: "Measurement".into(),\n            font_size: 15.0,\n            color: p.subtext1,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'headings_keep_their_own_rung_under_every_accent',
+        ],
+    ),
+    (
+        'MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM: the Available Currencies sub-heading is promoted to the heading rung',
+        LANG,
+        [
+            ('            font_size: 13.0,\n            color: p.subtext1,',
+             '            font_size: 13.0,\n            color: p.lavender,'),
+        ],
+        ["desktop"],
+        [
+            'the_fixture_reaches_every_branch_this_module_has',
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        'NNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNN: the Currency heading is frozen to Mocha lavender',
+        LANG,
+        [
+            ('            text: "Currency".into(),\n            font_size: 15.0,\n            color: p.lavender,',
+             '            text: "Currency".into(),\n            font_size: 15.0,\n            color: guitk::color::Color::from_hex(0xB4BEFE),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_panel_draws_comes_from_its_palette',
+            'headings_keep_their_own_rung_under_every_accent',
+            'none_of_the_eleven_deleted_constants_is_still_drawn',
+        ],
+    ),
+    (
+        'OOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOO: the label and value rungs of every settings row are exchanged',
+        LANG,
+        [
+            ('            text: label.into(),\n            font_size: 13.0,\n            color: p.subtext0,',
+             '            text: label.into(),\n            font_size: 13.0,\n            color: p.text,'),
+            ('            text: value.into(),\n            font_size: 13.0,\n            color: p.text,',
+             '            text: value.into(),\n            font_size: 13.0,\n            color: p.subtext0,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPP: a settings row's label is frozen to Mocha subtext0",
+        LANG,
+        [
+            ('            text: label.into(),\n            font_size: 13.0,\n            color: p.subtext0,',
+             '            text: label.into(),\n            font_size: 13.0,\n            color: guitk::color::Color::from_hex(0xA6ADC8),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_panel_draws_comes_from_its_palette',
+            'every_site_draws_the_role_it_claims',
+            'none_of_the_eleven_deleted_constants_is_still_drawn',
+        ],
+    ),
+    (
+        "QQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQ: a settings row's value is frozen to Mocha text",
+        LANG,
+        [
+            ('            text: value.into(),\n            font_size: 13.0,\n            color: p.text,',
+             '            text: value.into(),\n            font_size: 13.0,\n            color: guitk::color::Color::from_hex(0xCDD6F4),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_panel_draws_comes_from_its_palette',
+            'every_site_draws_the_role_it_claims',
+            'none_of_the_eleven_deleted_constants_is_still_drawn',
+        ],
+    ),
+    (
+        "RRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRR: the default currency's row loses its raised rung",
+        LANG,
+        [
+            ('                color: if is_current { p.surface1 } else { p.surface0 },',
+             '                color: p.surface0,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "SSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSS: the default currency's row stops being accented",
+        LANG,
+        [
+            ('                color: if is_current { p.accent } else { p.text },\n                font_weight: FontWeightHint::Regular,',
+             '                color: p.text,\n                font_weight: FontWeightHint::Regular,'),
+        ],
+        ["desktop"],
+        [
+            # The Region tab's only position mark. It went unguarded until
+            # the accent count was extended past the first two tabs -- the
+            # module doc named it from the start, which is what made the
+            # gap findable.
+            'only_the_three_position_marks_carry_the_accent',
+        ],
+    ),
+    (
+        'TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT: every currency row is accented, not just the default one',
+        LANG,
+        [
+            ('                color: if is_current { p.accent } else { p.text },\n                font_weight: FontWeightHint::Regular,',
+             '                color: p.accent,\n                font_weight: FontWeightHint::Regular,'),
+        ],
+        ["desktop"],
+        [
+            'only_the_three_position_marks_carry_the_accent',
+        ],
+    ),
+    (
+        'UUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUU: render resolves its own palette instead of using the one it was handed',
+        LANG,
+        [
+            ('    pub fn render(&self, p: &Palette, width: f32, height: f32) -> Vec<RenderCommand> {\n        let mut cmds = Vec::new();',
+             '    pub fn render(&self, p: &Palette, width: f32, height: f32) -> Vec<RenderCommand> {\n        let p = &Palette::for_mode(p.light);\n        let mut cmds = Vec::new();'),
+        ],
+        ["desktop"],
+        [
+            # The whole point of part 2. Every role still matches, because
+            # the palette it resolves agrees with the one it was given about
+            # everything except the user's accent -- so only the tests that
+            # drive the accent notice, and the membership sweep does not.
+            'the_fixture_reaches_every_branch_this_module_has',
+            'only_the_three_position_marks_carry_the_accent',
+            'the_active_tabs_label_is_computed_from_the_accent_under_it',
+        ],
+    ),
+    (
+        "VVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVV: the probe palette's accent goes back to a stock role",
+        LANG,
+        [
+            ('        p.accent = Color::from_hex(0xFF00FF);',
+             '        p.accent = p.blue;'),
+        ],
+        ["desktop"],
+        [
+            # The guard inside `accented()` itself, which every test in the
+            # module runs -- including the three pre-conversion render tests,
+            # which assert nothing but non-emptiness and so can only ever
+            # fail this way.
+            'every_colour_this_panel_draws_comes_from_its_palette',
+            'the_fixture_reaches_every_branch_this_module_has',
+            'every_site_draws_the_role_it_claims',
+            'only_the_three_position_marks_carry_the_accent',
+            'the_partial_badge_is_a_property_of_the_language_not_a_selection',
+            'the_badge_ink_is_computed_from_the_badge_it_sits_on',
+            'headings_keep_their_own_rung_under_every_accent',
+            'an_empty_search_box_is_dimmer_than_one_with_a_query_in_it',
+            'the_render_is_not_the_same_in_both_modes',
+            'none_of_the_eleven_deleted_constants_is_still_drawn',
+            'test_ui_render_language_tab',
+            'test_ui_render_formats_tab',
+            'test_ui_render_region_tab',
+        ],
+    ),
+    (
+        "WWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWW: the fixture's query filters the current language out of the list",
+        LANG,
+        [
+            ('        ui.language_search = "n".to_string();',
+             '        ui.language_search = "an".to_string();'),
+        ],
+        ["desktop"],
+        [
+            # "an" matches Poland and German but not English, so the row
+            # carrying the marker bar and the accented name disappears --
+            # which is how the first draft of this fixture silently lost two
+            # branches at once.
+            'the_fixture_reaches_every_branch_this_module_has',
+            'every_site_draws_the_role_it_claims',
+            'only_the_three_position_marks_carry_the_accent',
+            'an_empty_search_box_is_dimmer_than_one_with_a_query_in_it',
+        ],
+    ),
+    (
+        "XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX: the fixture's languages are all complete, so the badge site goes unchecked",
+        LANG,
+        [
+            ('            Language::new("pl-PL", "Polish (Poland)", "Polski", false),',
+             '            Language::new("pl-PL", "Polish (Poland)", "Polski", true),'),
+        ],
+        ["desktop"],
+        [
+            'the_fixture_reaches_every_branch_this_module_has',
+            'the_partial_badge_is_a_property_of_the_language_not_a_selection',
+            'the_badge_ink_is_computed_from_the_badge_it_sits_on',
+        ],
+    ),
+    (
+        "YYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYY: the fixture selects the row that is already current, so the two marks coincide",
+        LANG,
+        [
+            ('        ui.selected_language_index = Some(2);',
+             '        ui.selected_language_index = Some(0);'),
+        ],
+        ["desktop"],
+        [
+            # Every count is unchanged -- three rows, one raised, three
+            # accents. Only the positional row vector notices that the
+            # raised row moved, which is the same blindness as defect S but
+            # arriving through the fixture rather than the renderer.
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ: the fixture's search box is empty, so the typed-text branch goes unchecked",
+        LANG,
+        [
+            ('        ui.language_search = "n".to_string();',
+             '        ui.language_search = String::new();'),
+        ],
+        ["desktop"],
+        [
+            'the_fixture_reaches_every_branch_this_module_has',
+            'an_empty_search_box_is_dimmer_than_one_with_a_query_in_it',
+        ],
+    ),
+    (
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA: the fixture drops its third language, so the selected-row branch goes unchecked",
+        LANG,
+        [
+            ('            Language::new("de-DE", "German (Germany)", "Deutsch", true),\n',
+             ''),
+        ],
+        ["desktop"],
+        [
+            'the_fixture_reaches_every_branch_this_module_has',
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB: the active tab's label is computed from the panel instead of the tab",
+        LANG,
+        [
+            ('                color: if active {\n                    readable_on(p.accent)\n                } else {\n                    p.subtext0\n                },',
+             '                color: if active {\n                    readable_on(p.base)\n                } else {\n                    p.subtext0\n                },'),
+        ],
+        ["desktop"],
+        [
+            'the_active_tabs_label_is_computed_from_the_accent_under_it',
         ],
     ),
 ]

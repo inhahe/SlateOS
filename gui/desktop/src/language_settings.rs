@@ -1794,21 +1794,32 @@ mod tests {
     }
 
     /// Judgement 5: the placeholder is dimmer than a real query.
+    ///
+    /// Run in **both** modes, and that is not decoration. This test first ran
+    /// dark only, and dark is the palette these constants were converted
+    /// *from* — `p.text` in Mocha is exactly the `0xCDD6F4` that used to be
+    /// written here, so `assert_eq!(query_ink, p.text)` compared a frozen
+    /// constant against itself and could not fail. Harness defect Rx39 froze
+    /// the query's ink and this test, the one named for that very site, missed
+    /// it; only the light render caught it. Every colour assertion in this
+    /// module therefore runs both modes or sweeps the accent.
     #[test]
     fn an_empty_search_box_is_dimmer_than_one_with_a_query_in_it() {
-        let p = accented(false);
-        let mut ui = full_ui();
-        ui.language_search = String::new();
-        let empty = ui.render(&p, 600.0, 800.0);
-        assert_eq!(text_color(&empty, "Search languages..."), p.overlay0);
+        for light in [false, true] {
+            let p = accented(light);
+            let mut ui = full_ui();
+            ui.language_search = String::new();
+            let empty = ui.render(&p, 600.0, 800.0);
+            assert_eq!(text_color(&empty, "Search languages..."), p.overlay0);
 
-        let typed = full_ui().render(&p, 600.0, 800.0);
-        assert_eq!(text_color(&typed, "n"), p.text);
-        assert_ne!(
-            p.overlay0, p.text,
-            "if these were equal a user could not tell a placeholder from a \
-             query they typed"
-        );
+            let typed = full_ui().render(&p, 600.0, 800.0);
+            assert_eq!(text_color(&typed, "n"), p.text);
+            assert_ne!(
+                p.overlay0, p.text,
+                "if these were equal a user could not tell a placeholder from \
+                 a query they typed"
+            );
+        }
     }
 
     /// The panel is not the same picture in both modes.

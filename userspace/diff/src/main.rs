@@ -259,22 +259,24 @@ fn parse_args(args: &[String]) -> ParseResult {
                     // Check for optional inline number: `-u3`
                     let rest: String = chars[j + 1..].iter().collect();
                     if !rest.is_empty()
-                        && let Ok(n) = rest.parse::<usize>() {
-                            context_lines = Some(n);
-                            // Consumed rest of this arg group.
-                            j = chars.len();
-                            continue;
-                        }
+                        && let Ok(n) = rest.parse::<usize>()
+                    {
+                        context_lines = Some(n);
+                        // Consumed rest of this arg group.
+                        j = chars.len();
+                        continue;
+                    }
                 }
                 'c' => {
                     format = Format::Context;
                     let rest: String = chars[j + 1..].iter().collect();
                     if !rest.is_empty()
-                        && let Ok(n) = rest.parse::<usize>() {
-                            context_lines = Some(n);
-                            j = chars.len();
-                            continue;
-                        }
+                        && let Ok(n) = rest.parse::<usize>()
+                    {
+                        context_lines = Some(n);
+                        j = chars.len();
+                        continue;
+                    }
                 }
                 'y' => format = Format::SideBySide,
                 'W' => {
@@ -413,8 +415,7 @@ enum FileContent {
 /// Read a file into lines. Returns `Err` on I/O errors, `Ok(Binary)` if the
 /// file contains NUL bytes, or `Ok(Text(lines))` for normal text files.
 fn read_file(path: &Path) -> Result<FileContent, String> {
-    let metadata = fs::metadata(path)
-        .map_err(|e| format!("{}: {e}", path.display()))?;
+    let metadata = fs::metadata(path).map_err(|e| format!("{}: {e}", path.display()))?;
 
     if metadata.len() > MAX_FILE_SIZE {
         return Err(format!(
@@ -425,8 +426,7 @@ fn read_file(path: &Path) -> Result<FileContent, String> {
         ));
     }
 
-    let data = fs::read(path)
-        .map_err(|e| format!("{}: {e}", path.display()))?;
+    let data = fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
 
     // Check for binary content in the first BINARY_DETECT_LEN bytes.
     let check_len = data.len().min(BINARY_DETECT_LEN);
@@ -566,13 +566,12 @@ fn myers_diff(
 
         let mut k = -d_signed;
         while k <= d_signed {
-            let x: isize = if k == -d_signed
-                || (k != d_signed && old_v[idx(k - 1)] < old_v[idx(k + 1)])
-            {
-                old_v[idx(k + 1)]
-            } else {
-                old_v[idx(k - 1)] + 1
-            };
+            let x: isize =
+                if k == -d_signed || (k != d_signed && old_v[idx(k - 1)] < old_v[idx(k + 1)]) {
+                    old_v[idx(k + 1)]
+                } else {
+                    old_v[idx(k - 1)] + 1
+                };
 
             let mut x_curr = x;
             let mut y_curr = x_curr - k;
@@ -615,15 +614,18 @@ fn myers_diff(
         let k = cx - cy;
         let vd = &v_history[d];
 
-        let prev_k: isize = if k == -d_signed
-            || (k != d_signed && vd[idx(k - 1)] < vd[idx(k + 1)])
+        let prev_k: isize = if k == -d_signed || (k != d_signed && vd[idx(k - 1)] < vd[idx(k + 1)])
         {
             k + 1
         } else {
             k - 1
         };
 
-        let prev_x = if d > 0 { v_history[d - 1][idx(prev_k)] } else { 0 };
+        let prev_x = if d > 0 {
+            v_history[d - 1][idx(prev_k)]
+        } else {
+            0
+        };
         let prev_y = prev_x - prev_k;
 
         // Record diagonal moves first (equal lines), walking backward.
@@ -868,8 +870,16 @@ fn print_normal(hunks: &[Hunk], config: &Config) {
         let has_del = hunk.lines.iter().any(|(op, _)| *op == Op::Delete);
         let has_ins = hunk.lines.iter().any(|(op, _)| *op == Op::Insert);
 
-        let del_count = hunk.lines.iter().filter(|(op, _)| *op == Op::Delete).count();
-        let ins_count = hunk.lines.iter().filter(|(op, _)| *op == Op::Insert).count();
+        let del_count = hunk
+            .lines
+            .iter()
+            .filter(|(op, _)| *op == Op::Delete)
+            .count();
+        let ins_count = hunk
+            .lines
+            .iter()
+            .filter(|(op, _)| *op == Op::Insert)
+            .count();
 
         // Compute file-1 and file-2 ranges for the changed lines only (not context).
         // We need start positions relative to the hunk's changes.
@@ -983,11 +993,7 @@ fn print_context(hunks: &[Hunk], path1: &str, path2: &str, config: &Config) {
     let mut w = out.lock();
 
     let _ = writeln!(w, "{}", color_red(&format!("*** {path1}"), config.color));
-    let _ = writeln!(
-        w,
-        "{}",
-        color_green(&format!("--- {path2}"), config.color)
-    );
+    let _ = writeln!(w, "{}", color_green(&format!("--- {path2}"), config.color));
 
     for hunk in hunks {
         let _ = writeln!(w, "***************");
@@ -999,7 +1005,11 @@ fn print_context(hunks: &[Hunk], path1: &str, path2: &str, config: &Config) {
             w,
             "{}",
             color_cyan(
-                &format!("*** {},{} ****", f1_start, if f1_end == 0 { f1_start } else { f1_end }),
+                &format!(
+                    "*** {},{} ****",
+                    f1_start,
+                    if f1_end == 0 { f1_start } else { f1_end }
+                ),
                 config.color,
             )
         );
@@ -1026,7 +1036,11 @@ fn print_context(hunks: &[Hunk], path1: &str, path2: &str, config: &Config) {
             w,
             "{}",
             color_cyan(
-                &format!("--- {},{} ----", f2_start, if f2_end == 0 { f2_start } else { f2_end }),
+                &format!(
+                    "--- {},{} ----",
+                    f2_start,
+                    if f2_end == 0 { f2_start } else { f2_end }
+                ),
                 config.color,
             )
         );
@@ -1092,7 +1106,7 @@ fn truncate_or_pad(s: &str, width: usize) -> String {
     if char_count <= width {
         format!("{s}{}", " ".repeat(width - char_count))
     } else {
-        let truncated: String = s.chars().take(width) .collect();
+        let truncated: String = s.chars().take(width).collect();
         truncated
     }
 }
@@ -1243,20 +1257,14 @@ fn diff_dirs(path1: &Path, path2: &Path, config: &Config) -> i32 {
         let e2 = p2.exists();
 
         if !e1 && !config.new_file {
-            eprintln!(
-                "Only in {}: {name}",
-                path2.display()
-            );
+            eprintln!("Only in {}: {name}", path2.display());
             if worst_exit < 1 {
                 worst_exit = 1;
             }
             continue;
         }
         if !e2 && !config.new_file {
-            eprintln!(
-                "Only in {}: {name}",
-                path1.display()
-            );
+            eprintln!("Only in {}: {name}", path1.display());
             if worst_exit < 1 {
                 worst_exit = 1;
             }
@@ -1281,11 +1289,7 @@ fn diff_dirs(path1: &Path, path2: &Path, config: &Config) -> i32 {
                 worst_exit = 1;
             }
         } else {
-            let code = diff_files(
-                &p1.to_string_lossy(),
-                &p2.to_string_lossy(),
-                config,
-            );
+            let code = diff_files(&p1.to_string_lossy(), &p2.to_string_lossy(), config);
             if code > worst_exit {
                 worst_exit = code;
             }
@@ -1297,8 +1301,7 @@ fn diff_dirs(path1: &Path, path2: &Path, config: &Config) -> i32 {
 
 /// List entries in a directory, returning just the file/dir names.
 fn list_dir(path: &Path) -> Result<Vec<String>, String> {
-    let entries = fs::read_dir(path)
-        .map_err(|e| format!("{}: {e}", path.display()))?;
+    let entries = fs::read_dir(path).map_err(|e| format!("{}: {e}", path.display()))?;
 
     let mut names = Vec::new();
     for entry in entries {
@@ -1511,11 +1514,7 @@ fn main() {
             } else if is_dir1 || is_dir2 {
                 // One is a directory, one is a file -- diff the file against
                 // the same-named file in the directory.
-                let (dir, file) = if is_dir1 {
-                    (&p1, &p2)
-                } else {
-                    (&p2, &p1)
-                };
+                let (dir, file) = if is_dir1 { (&p1, &p2) } else { (&p2, &p1) };
 
                 if let Some(fname) = file.file_name() {
                     let target = dir.join(fname);

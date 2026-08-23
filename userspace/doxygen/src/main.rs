@@ -4,6 +4,7 @@
 //!
 //! Single personality: `doxygen`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -35,7 +36,7 @@ fn run_doxygen(args: Vec<String>) -> i32 {
             .and_then(|i| args.get(i + 1))
             .map(|s| s.as_str())
             .unwrap_or("Doxyfile");
-        println!("Configuration file '{}' created.", file);
+        println!("Configuration file {} created.", quoteaf_os(file));
         println!();
         println!("Now edit the configuration file and set at least INPUT to your source files.");
         println!("Then run doxygen with the config file as argument.");
@@ -49,7 +50,7 @@ fn run_doxygen(args: Vec<String>) -> i32 {
             .and_then(|i| args.get(i + 1))
             .map(|s| s.as_str())
             .unwrap_or("DoxygenLayout.xml");
-        println!("Layout file '{}' created.", file);
+        println!("Layout file {} created.", quoteaf_os(file));
         return 0;
     }
 

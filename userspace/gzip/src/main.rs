@@ -15,6 +15,7 @@
 //! The decompressor handles all three DEFLATE block types: stored, fixed
 //! Huffman, and dynamic Huffman.
 
+use quoting::quotef_os;
 use std::env;
 use std::fs::{self, File};
 use std::io::{self, Read, Write};
@@ -1636,14 +1637,17 @@ fn main() {
                     had_error = true;
                 }
             } else {
-                eprintln!("gzip: {file_arg}: is a directory -- ignored (use -r for recursive)");
+                eprintln!(
+                    "gzip: {}: is a directory -- ignored (use -r for recursive)",
+                    quotef_os(file_arg)
+                );
                 had_error = true;
             }
             continue;
         }
 
         if !path.exists() {
-            eprintln!("gzip: {file_arg}: No such file or directory");
+            eprintln!("gzip: {}: No such file or directory", quotef_os(file_arg));
             had_error = true;
             continue;
         }

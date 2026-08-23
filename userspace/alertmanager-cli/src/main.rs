@@ -4,6 +4,7 @@
 //!
 //! Multi-personality: `alertmanager`, `amtool`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -105,7 +106,7 @@ fn run_amtool(args: &[String]) -> i32 {
                 .get(1)
                 .map(|s| s.as_str())
                 .unwrap_or("/etc/alertmanager/alertmanager.yml");
-            println!("Checking '{}'  SUCCESS", file);
+            println!("Checking {}  SUCCESS", quoteaf_os(file));
             println!("Found:");
             println!(" - global config");
             println!(" - route");
@@ -126,7 +127,7 @@ fn run_amtool(args: &[String]) -> i32 {
             println!("    email_configs:");
             println!("      - to: admin@slateos.local");
         }
-        _ => println!("amtool: command '{}' completed", subcmd),
+        _ => println!("amtool: command {} completed", quoteaf_os(subcmd)),
     }
     0
 }

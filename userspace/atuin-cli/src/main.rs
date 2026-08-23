@@ -4,6 +4,7 @@
 //!
 //! Single personality: `atuin`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -86,7 +87,7 @@ fn run_atuin(args: &[String], _prog: &str) -> i32 {
                 .nth(1)
                 .map(|s| s.as_str())
                 .unwrap_or("");
-            println!("atuin search: Results for '{}':", query);
+            println!("atuin search: Results for {}:", quoteaf_os(query));
         }
         "sync" => println!("atuin: Syncing history..."),
         "login" => println!("atuin: Login required. Use 'atuin login -u USER'."),
@@ -121,7 +122,7 @@ fn run_atuin(args: &[String], _prog: &str) -> i32 {
             println!("filter_mode = \"global\"");
         }
         "import" => println!("atuin: Importing history..."),
-        _ => println!("atuin: unknown command '{}'", cmd),
+        _ => println!("atuin: unknown command {}", quoteaf_os(cmd)),
     }
     0
 }

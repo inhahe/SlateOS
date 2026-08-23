@@ -4,6 +4,7 @@
 //!
 //! Single personality: `matrix`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -68,7 +69,7 @@ fn run_matrix(args: Vec<String>) -> i32 {
                 }
                 "create" => {
                     let name = args.get(2).map(|s| s.as_str()).unwrap_or("New Room");
-                    println!("✔ Created room '{}'", name);
+                    println!("✔ Created room {}", quoteaf_os(name));
                     println!("  Room ID: !new123:matrix.org");
                 }
                 "info" => {
@@ -170,7 +171,7 @@ fn run_matrix(args: Vec<String>) -> i32 {
             if cmd.is_empty() {
                 eprintln!("Usage: matrix <command>. See --help.");
             } else {
-                eprintln!("Error: unknown command '{}'. See --help.", cmd);
+                eprintln!("Error: unknown command {}. See --help.", quoteaf_os(cmd));
             }
             1
         }

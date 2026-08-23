@@ -4,6 +4,7 @@
 //!
 //! Multi-personality: `boundary`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -71,7 +72,7 @@ fn run_boundary(args: &[String]) -> i32 {
                     println!("  Port:        22");
                 }
                 "create" => println!("Target created: ttcp_newid"),
-                _ => println!("boundary targets: '{}' completed", action),
+                _ => println!("boundary targets: {} completed", quoteaf_os(action)),
             }
         }
         "sessions" => {
@@ -104,7 +105,7 @@ fn run_boundary(args: &[String]) -> i32 {
             println!("boundary database {}", action);
             println!("  Database initialized successfully.");
         }
-        _ => println!("boundary: '{}' completed", subcmd),
+        _ => println!("boundary: {} completed", quoteaf_os(subcmd)),
     }
     0
 }

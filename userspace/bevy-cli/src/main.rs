@@ -4,6 +4,7 @@
 //!
 //! Multi-personality: `bevy`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -37,7 +38,7 @@ fn run_bevy(args: &[String]) -> i32 {
                 .find(|w| w[0] == "--template")
                 .map(|w| w[1].as_str())
                 .unwrap_or("2d");
-            println!("Creating new Bevy project '{}'...", name);
+            println!("Creating new Bevy project {}...", quoteaf_os(name));
             println!("  Template: {}", template);
             println!("  Created: src/main.rs");
             println!("  Created: Cargo.toml");
@@ -66,7 +67,7 @@ fn run_bevy(args: &[String]) -> i32 {
             println!("Linting Bevy code...");
             println!("  No issues found.");
         }
-        _ => println!("bevy: '{}' completed", subcmd),
+        _ => println!("bevy: {} completed", quoteaf_os(subcmd)),
     }
     0
 }

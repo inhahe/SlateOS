@@ -12,6 +12,7 @@
 
 #![deny(clippy::all)]
 
+use quoting::quoteaf_os;
 use std::collections::HashMap;
 use std::env;
 use std::fmt;
@@ -2259,7 +2260,7 @@ fn run_autrace(args: &[String]) -> i32 {
     let program = &args[i];
     let prog_args = &args[i + 1..];
 
-    println!("autrace: tracing program '{program}'");
+    println!("autrace: tracing program {}", quoteaf_os(program));
     if !prog_args.is_empty() {
         println!("autrace: with arguments: {}", prog_args.join(" "));
     }
@@ -2273,7 +2274,7 @@ fn run_autrace(args: &[String]) -> i32 {
 
     println!("autrace: adding audit rules for tracing...");
     println!("autrace: rule -a always,exit -F arch=b64 -S all -F pid=<target> -k autrace");
-    println!("autrace: executing '{program}'...");
+    println!("autrace: executing {}...", quoteaf_os(program));
     println!("autrace: program completed");
     println!("autrace: cleaning up audit rules...");
     println!("autrace: trace complete. Use 'ausearch -k autrace' to view results.");

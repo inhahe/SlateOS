@@ -4,6 +4,7 @@
 //!
 //! Multi-personality: `gz`, `ign`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -43,7 +44,7 @@ fn run_gz(args: &[String]) -> i32 {
         }
         "sim" => {
             let world = args.get(1).map(|s| s.as_str()).unwrap_or("empty.sdf");
-            println!("gz sim: loading world '{}'", world);
+            println!("gz sim: loading world {}", quoteaf_os(world));
             println!("  Physics engine: bullet");
             println!("  Rendering engine: ogre2");
             println!("  Step size: 1ms");
@@ -81,7 +82,7 @@ fn run_gz(args: &[String]) -> i32 {
             println!("  URL: https://fuel.gazebosim.org");
             println!("  Cached models: 12");
         }
-        _ => println!("gz: '{}' completed", subcmd),
+        _ => println!("gz: {} completed", quoteaf_os(subcmd)),
     }
     0
 }

@@ -8,6 +8,7 @@
 //! - `mcelog` (default) — machine check exception logger/daemon
 //! - `mcelog-client` — query running mcelog daemon
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -277,7 +278,7 @@ fn run_mcelog(args: Vec<String>) -> i32 {
         "--drop-old-memory" => cmd_drop_old_memory(&cmd_args),
         "--dmi" | "dmi" => cmd_dmi(),
         other => {
-            eprintln!("mcelog: unknown command '{}'", other);
+            eprintln!("mcelog: unknown command {}", quoteaf_os(other));
             eprintln!("Try 'mcelog --help' for more information.");
             1
         }
@@ -469,7 +470,7 @@ fn run_client(args: Vec<String>) -> i32 {
         }
         "dump" => cmd_show(),
         other => {
-            eprintln!("mcelog-client: unknown command '{}'", other);
+            eprintln!("mcelog-client: unknown command {}", quoteaf_os(other));
             1
         }
     }

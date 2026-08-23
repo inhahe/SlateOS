@@ -4,6 +4,7 @@
 //!
 //! Multi-personality: `cast`, `anvil`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -93,7 +94,7 @@ fn run_cast(args: &[String]) -> i32 {
         "keccak" => {
             let data = args.get(1).map(|s| s.as_str()).unwrap_or("hello");
             println!("0x1c8aff950685c2ed4bc3174f3472287b56d9517b9c948127319a09a7a36deac8");
-            println!("(keccak256 of '{}')", data);
+            println!("(keccak256 of {})", quoteaf_os(data));
             0
         }
         "wallet" => {
@@ -117,7 +118,7 @@ fn run_cast(args: &[String]) -> i32 {
             if cmd.is_empty() {
                 eprintln!("Usage: cast <command>. See --help.");
             } else {
-                eprintln!("Error: unknown command '{}'. See --help.", cmd);
+                eprintln!("Error: unknown command {}. See --help.", quoteaf_os(cmd));
             }
             1
         }

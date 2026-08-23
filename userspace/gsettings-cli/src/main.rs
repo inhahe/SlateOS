@@ -4,6 +4,7 @@
 //!
 //! Single personality: `gsettings`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -91,10 +92,13 @@ fn run_gsettings(args: Vec<String>) -> i32 {
                 .get(1)
                 .map(|s| s.as_str())
                 .unwrap_or("org.gnome.desktop.interface");
-            println!("Monitoring '{}'...", schema);
+            println!("Monitoring {}...", quoteaf_os(schema));
         }
         _ => {
-            eprintln!("gsettings: unknown command '{}'. See --help.", cmd);
+            eprintln!(
+                "gsettings: unknown command {}. See --help.",
+                quoteaf_os(cmd)
+            );
             return 1;
         }
     }

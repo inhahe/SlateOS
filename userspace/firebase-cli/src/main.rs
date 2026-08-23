@@ -4,6 +4,7 @@
 //!
 //! Multi-personality: `firebase`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -85,7 +86,7 @@ fn run_firebase(args: &[String]) -> i32 {
                     println!("  UI:        http://localhost:4000");
                 }
                 "exec" => println!("firebase emulators: exec completed"),
-                _ => println!("firebase emulators: '{}' completed", sub),
+                _ => println!("firebase emulators: {} completed", quoteaf_os(sub)),
             }
         }
         "projects" => {
@@ -101,7 +102,7 @@ fn run_firebase(args: &[String]) -> i32 {
         }
         "login" => println!("Already logged in as user@example.com"),
         "logout" => println!("Logged out."),
-        _ => println!("firebase: '{}' completed", subcmd),
+        _ => println!("firebase: {} completed", quoteaf_os(subcmd)),
     }
     0
 }

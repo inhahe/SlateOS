@@ -9,6 +9,7 @@
 
 #![deny(clippy::all)]
 
+use quoting::quoteaf_os;
 use std::collections::HashMap;
 use std::env;
 use std::fs;
@@ -485,7 +486,7 @@ fn lsof_main(args: &[String]) -> i32 {
                 filter_path = Some(s.to_string());
             }
             other => {
-                eprintln!("lsof: unknown option '{other}'");
+                eprintln!("lsof: unknown option {}", quoteaf_os(other));
             }
         }
         i += 1;
@@ -598,7 +599,7 @@ fn fuser_main(args: &[String]) -> i32 {
                 paths.push(s.to_string());
             }
             other => {
-                eprintln!("fuser: unknown option '{other}'");
+                eprintln!("fuser: unknown option {}", quoteaf_os(other));
             }
         }
         i += 1;

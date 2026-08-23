@@ -4,6 +4,7 @@
 //!
 //! Multi-personality: `ceph`, `rados`, `rbd`, `ceph-fuse`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -76,7 +77,7 @@ fn run_ceph(args: &[String]) -> i32 {
         "mon" => println!(
             "e3: 3 mons at {{a=[v2:192.168.1.10:3300],b=[v2:192.168.1.11:3300],c=[v2:192.168.1.12:3300]}}"
         ),
-        _ => println!("ceph: command '{}' completed", subcmd),
+        _ => println!("ceph: command {} completed", quoteaf_os(subcmd)),
     }
     0
 }
@@ -96,7 +97,7 @@ fn run_rbd(args: &[String]) -> i32 {
         }
         "info" => {
             let img = args.get(1).map(|s| s.as_str()).unwrap_or("vm-disk-1");
-            println!("rbd image '{}':", img);
+            println!("rbd image {}:", quoteaf_os(img));
             println!("\tsize 100 GiB in 25600 objects");
             println!("\torder 22 (4 MiB objects)");
             println!("\tformat: 2");

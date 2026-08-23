@@ -4,6 +4,7 @@
 //!
 //! Multi-personality: `crystal`, `shards`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -83,7 +84,7 @@ fn run_crystal(args: &[String]) -> i32 {
             let tool = args.get(1).map(|s| s.as_str()).unwrap_or("format");
             println!("crystal tool {}: done", tool);
         }
-        _ => println!("crystal: '{}' completed", subcmd),
+        _ => println!("crystal: {} completed", quoteaf_os(subcmd)),
     }
     0
 }
@@ -117,7 +118,7 @@ fn run_shards(args: &[String]) -> i32 {
         }
         "check" => println!("Dependencies are satisfied."),
         "init" => println!("Created shard.yml"),
-        _ => println!("shards: '{}' completed", subcmd),
+        _ => println!("shards: {} completed", quoteaf_os(subcmd)),
     }
     0
 }

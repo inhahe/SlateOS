@@ -2,3 +2,8 @@
 name = "bundler-cli"
 version = "0.1.0"
 edition = "2024"
+
+[dependencies]
+# `bundle exec` names the command it runs, and the subcommand name is echoed
+# back; both are argv words.
+quoting = { path = "../quoting" }

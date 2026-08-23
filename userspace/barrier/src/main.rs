@@ -4,6 +4,7 @@
 //!
 //! Multi-personality: `barriers`, `barrierc`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -39,7 +40,7 @@ fn run_barriers(args: Vec<String>) -> i32 {
         .and_then(|i| args.get(i + 1))
         .map(|s| s.as_str())
         .unwrap_or("0.0.0.0:24800");
-    println!("Barrier server '{}' listening on {}", name, addr);
+    println!("Barrier server {} listening on {}", quoteaf_os(name), addr);
     0
 }
 
@@ -66,7 +67,11 @@ fn run_barrierc(args: Vec<String>) -> i32 {
         .and_then(|i| args.get(i + 1))
         .map(|s| s.as_str())
         .unwrap_or("client");
-    println!("Barrier client '{}' connecting to {}", name, server);
+    println!(
+        "Barrier client {} connecting to {}",
+        quoteaf_os(name),
+        server
+    );
     0
 }
 

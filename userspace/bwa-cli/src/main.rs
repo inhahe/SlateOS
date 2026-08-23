@@ -4,6 +4,7 @@
 //!
 //! Multi-personality: `bwa`, `bwa-mem2`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -55,7 +56,7 @@ fn run_bwa(args: &[String]) -> i32 {
             println!("[bwa_aln] Processing reads...");
             println!("[bwa_aln] 1234567 reads processed.");
         }
-        _ => println!("bwa: '{}' completed", subcmd),
+        _ => println!("bwa: {} completed", quoteaf_os(subcmd)),
     }
     0
 }
@@ -89,7 +90,7 @@ fn run_bwa_mem2(args: &[String]) -> i32 {
             println!("[bwa-mem2] 1234567 reads aligned");
             println!("[bwa-mem2] Real time: 123.45 sec (2x faster than bwa)");
         }
-        _ => println!("bwa-mem2: '{}' completed", subcmd),
+        _ => println!("bwa-mem2: {} completed", quoteaf_os(subcmd)),
     }
     0
 }

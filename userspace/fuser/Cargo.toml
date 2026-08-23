@@ -4,3 +4,6 @@ version = "0.1.0"
 edition = "2024"
 description = "SlateOS fuser utility"
 [dependencies]
+# The unknown-option messages in lsof and fuser echo the offending argv word
+# itself.
+quoting = { path = "../quoting" }

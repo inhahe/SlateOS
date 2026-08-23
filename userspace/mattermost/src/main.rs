@@ -4,6 +4,7 @@
 //!
 //! Multi-personality: `mattermost` (server), `mmctl` (CLI admin)
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -81,7 +82,7 @@ fn run_mmctl(args: Vec<String>) -> i32 {
                 "deactivate" => println!("User deactivated"),
                 "search" => {
                     let query = cmd_args.get(1).map(|s| s.as_str()).unwrap_or("user");
-                    println!("Search results for '{}':", query);
+                    println!("Search results for {}:", quoteaf_os(query));
                     println!("  alice  alice@example.com");
                 }
                 _ => println!("Usage: mmctl user <list|create|deactivate|search>"),
@@ -144,7 +145,7 @@ fn run_mmctl(args: Vec<String>) -> i32 {
             0
         }
         other => {
-            eprintln!("mmctl: unknown command '{}'", other);
+            eprintln!("mmctl: unknown command {}", quoteaf_os(other));
             1
         }
     }

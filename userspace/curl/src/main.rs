@@ -33,6 +33,7 @@
 #![deny(clippy::all)]
 #![allow(clippy::manual_range_contains)] // clearer as explicit comparisons
 
+use quoting::quoteaf_os;
 use std::env;
 use std::fs::File;
 use std::io::{self, Write};
@@ -1607,7 +1608,7 @@ fn do_request(
         parse_ipv4(&url.host).ok_or_else(|| CurlError::DnsFailure(url.host.clone()))?
     } else {
         if opts.verbose {
-            eprintln!("* Trying to resolve host '{}'...", url.host);
+            eprintln!("* Trying to resolve host {}...", quoteaf_os(&url.host));
         }
         dns_resolve(&url.host)?
     };
@@ -1889,8 +1890,8 @@ fn transfer_url(url: &str, opts: &Options) -> Result<(), CurlError> {
                 // Not following redirects; just report it.
                 if !opts.silent {
                     eprintln!(
-                        "curl: (47) Redirect to '{}' not followed (use -L to follow)",
-                        redirect_url
+                        "curl: (47) Redirect to {} not followed (use -L to follow)",
+                        quoteaf_os(&redirect_url)
                     );
                 }
                 break;

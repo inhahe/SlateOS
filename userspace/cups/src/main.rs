@@ -1935,8 +1935,8 @@ fn run_lp(args: &[String]) -> i32 {
                         Ok(p) if p <= MAX_PRIORITY => priority = Some(p),
                         _ => {
                             eprintln!(
-                                "lp: invalid priority '{}' (must be 0-{MAX_PRIORITY})",
-                                args[i]
+                                "lp: invalid priority {} (must be 0-{MAX_PRIORITY})",
+                                quoteaf_os(&args[i])
                             );
                             return 1;
                         }
@@ -3250,8 +3250,9 @@ fn run_lpoptions(args: &[String]) -> i32 {
             printer.set_option(key, value);
         }
         println!(
-            "lpoptions: set {} option(s) on '{pname}'",
-            set_options.len()
+            "lpoptions: set {} option(s) on {}",
+            set_options.len(),
+            quoteaf_os(&pname)
         );
         return 0;
     }

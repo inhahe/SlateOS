@@ -4,6 +4,7 @@
 //!
 //! Multi-personality: `cortextool`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -40,7 +41,7 @@ fn run_cortextool(args: &[String]) -> i32 {
                 }
                 "sync" => println!("Rules synced successfully."),
                 "lint" => println!("All rules are valid."),
-                _ => println!("cortextool rules: '{}' completed", sub),
+                _ => println!("cortextool rules: {} completed", quoteaf_os(sub)),
             }
         }
         "analyse" => {
@@ -48,7 +49,7 @@ fn run_cortextool(args: &[String]) -> i32 {
             println!("  Total active series: 12345");
             println!("  Ingestion rate: 5000 samples/s");
         }
-        _ => println!("cortextool: '{}' completed", subcmd),
+        _ => println!("cortextool: {} completed", quoteaf_os(subcmd)),
     }
     0
 }

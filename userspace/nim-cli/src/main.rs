@@ -4,6 +4,7 @@
 //!
 //! Multi-personality: `nim`, `nimble`, `nimsuggest`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -71,7 +72,7 @@ fn run_nim(args: &[String]) -> i32 {
             let expr = args.get(1).map(|s| s.as_str()).unwrap_or("echo 42");
             println!("nim e: {}", expr);
         }
-        _ => println!("nim: '{}' completed", subcmd),
+        _ => println!("nim: {} completed", quoteaf_os(subcmd)),
     }
     0
 }
@@ -125,7 +126,7 @@ fn run_nimble(args: &[String]) -> i32 {
             println!("  jester    Sinatra-like web framework  (url: ...)",);
             let _ = term;
         }
-        _ => println!("nimble: '{}' completed", subcmd),
+        _ => println!("nimble: {} completed", quoteaf_os(subcmd)),
     }
     0
 }

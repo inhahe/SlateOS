@@ -4,6 +4,7 @@
 //!
 //! Multi-personality: `iscsiadm`, `tgtadm`, `targetcli`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -65,7 +66,7 @@ fn run_iscsiadm(args: &[String]) -> i32 {
                 println!("Logout of [sid: 1, ... portal: 192.168.1.200,3260] successful.");
             }
         }
-        _ => println!("iscsiadm: mode '{}' completed", mode),
+        _ => println!("iscsiadm: mode {} completed", quoteaf_os(mode)),
     }
     0
 }
@@ -126,7 +127,7 @@ fn run_targetcli(args: &[String]) -> i32 {
             "  o- loopback ......................................................... [Targets: 0]"
         );
     } else {
-        println!("targetcli: command '{}' executed", subcmd);
+        println!("targetcli: command {} executed", quoteaf_os(subcmd));
     }
     0
 }

@@ -4,6 +4,7 @@
 //!
 //! Single personality: `dbt`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -37,7 +38,7 @@ fn run_dbt(args: Vec<String>) -> i32 {
     match cmd {
         "init" => {
             let name = args.get(1).map(|s| s.as_str()).unwrap_or("my_project");
-            println!("Creating dbt project '{}'...", name);
+            println!("Creating dbt project {}...", quoteaf_os(name));
             println!("  Created {}/dbt_project.yml", name);
             println!("  Created {}/models/", name);
             println!("  Created {}/seeds/", name);
@@ -244,7 +245,7 @@ fn run_dbt(args: Vec<String>) -> i32 {
             if cmd.is_empty() {
                 eprintln!("Usage: dbt <command>. See --help.");
             } else {
-                eprintln!("Error: unknown command '{}'. See --help.", cmd);
+                eprintln!("Error: unknown command {}. See --help.", quoteaf_os(cmd));
             }
             1
         }

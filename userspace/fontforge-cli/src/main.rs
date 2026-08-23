@@ -4,6 +4,7 @@
 //!
 //! Single personality: `fontforge`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -38,10 +39,10 @@ fn run_fontforge(args: Vec<String>) -> i32 {
         .map(|w| w[1].as_str());
 
     if let Some(s) = script {
-        println!("FontForge: running script '{}'...", s);
+        println!("FontForge: running script {}...", quoteaf_os(s));
         println!("  Script completed.");
     } else if let Some(c) = command {
-        println!("FontForge: executing '{}'", c);
+        println!("FontForge: executing {}", quoteaf_os(c));
     } else {
         let files: Vec<&str> = args
             .iter()

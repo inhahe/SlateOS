@@ -9,6 +9,7 @@
 
 #![deny(clippy::all)]
 
+use quoting::quoteaf_os;
 use std::env;
 use std::fs;
 use std::process;
@@ -235,8 +236,10 @@ fn do_eject(opts: &EjectOptions) -> i32 {
 
     if opts.verbose {
         eprintln!(
-            "eject: device '{}' is {} (removable={})",
-            device, info.device_type, info.removable
+            "eject: device {} is {} (removable={})",
+            quoteaf_os(device),
+            info.device_type,
+            info.removable
         );
     }
 
@@ -397,7 +400,7 @@ fn eject_main(args: &[String]) -> i32 {
                 opts.device = resolve_device(s);
             }
             other => {
-                eprintln!("eject: unknown option '{other}'");
+                eprintln!("eject: unknown option {}", quoteaf_os(other));
                 return 1;
             }
         }

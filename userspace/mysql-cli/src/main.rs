@@ -4,6 +4,7 @@
 //!
 //! Multi-personality: `mysql`, `mysqldump`, `mysqladmin`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -83,7 +84,7 @@ fn run_mysqldump(args: &[String]) -> i32 {
         println!("-- MySQL dump");
         println!("-- Server version\t8.4.0");
         println!("--");
-        println!("-- Dumping data for database '{}'", db);
+        println!("-- Dumping data for database {}", quoteaf_os(db));
     }
     println!("-- Dump completed");
     0
@@ -126,7 +127,7 @@ fn run_mysqladmin(args: &[String]) -> i32 {
             println!("1   root    localhost      mydb   Sleep    123          ");
             println!("2   app     192.168.1.10   mydb   Query    0     exec   SELECT 1");
         }
-        _ => println!("mysqladmin: '{}' completed", subcmd),
+        _ => println!("mysqladmin: {} completed", quoteaf_os(subcmd)),
     }
     0
 }

@@ -4,6 +4,7 @@
 //!
 //! Multi-personality: `dovecot`, `doveconf`, `doveadm`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -115,7 +116,7 @@ fn run_doveadm(args: &[String]) -> i32 {
                 "status" => {
                     println!("INBOX messages=42 unseen=3 recent=2");
                 }
-                _ => println!("doveadm: unknown mailbox subcommand '{}'", subcmd),
+                _ => println!("doveadm: unknown mailbox subcommand {}", quoteaf_os(subcmd)),
             }
         }
         "user" => {
@@ -134,7 +135,7 @@ fn run_doveadm(args: &[String]) -> i32 {
         "stop" => println!("doveadm: server stopped"),
         "log" => println!("(no errors)"),
         _ => {
-            eprintln!("doveadm: unknown command '{}'", cmd);
+            eprintln!("doveadm: unknown command {}", quoteaf_os(cmd));
             return 1;
         }
     }

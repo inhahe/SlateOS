@@ -4,6 +4,7 @@
 //!
 //! Single personality: `borg`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -51,7 +52,7 @@ fn run_borg(args: Vec<String>) -> i32 {
                 .iter()
                 .find(|a| !a.starts_with('-'))
                 .unwrap_or(&"/backup/repo");
-            println!("Initializing repository at '{}'", repo);
+            println!("Initializing repository at {}", quoteaf_os(repo));
             println!("Encryption: repokey-blake2");
             println!("Repository initialized.");
         }
@@ -126,7 +127,7 @@ fn run_borg(args: Vec<String>) -> i32 {
             println!("  changed   4096 B home/user/.bashrc");
         }
         _ => {
-            eprintln!("borg: unknown command '{}'. See --help.", cmd);
+            eprintln!("borg: unknown command {}. See --help.", quoteaf_os(cmd));
             return 1;
         }
     }

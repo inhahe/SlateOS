@@ -2,3 +2,8 @@
 name = "jenkins-cli"
 version = "0.1.0"
 edition = "2024"
+
+[dependencies]
+# The Jenkins job name and the subcommand name are argv words; a job name is
+# free-form text a Jenkins user chose.
+quoting = { path = "../quoting" }

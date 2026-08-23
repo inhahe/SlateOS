@@ -4,6 +4,7 @@
 //!
 //! Multi-personality: `networkctl`, `resolvectl`, `systemd-resolve`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -66,7 +67,7 @@ fn run_networkctl(args: &[String]) -> i32 {
             println!("LINK  CHASSIS ID        SYSTEM NAME  PORT ID   PORT DESCRIPTION  CAPS");
             println!("eth0  aa:bb:cc:dd:ee:ff Switch-1     Gi0/1     GigabitEthernet   BR");
         }
-        _ => println!("Unknown command '{}'", subcmd),
+        _ => println!("Unknown command {}", quoteaf_os(subcmd)),
     }
     0
 }
@@ -133,7 +134,7 @@ fn run_resolvectl(args: &[String]) -> i32 {
             println!("Global: 8.8.8.8 8.8.4.4");
             println!("Link 2 (eth0): 192.168.1.1");
         }
-        _ => println!("resolvectl: command '{}' completed", subcmd),
+        _ => println!("resolvectl: command {} completed", quoteaf_os(subcmd)),
     }
     0
 }

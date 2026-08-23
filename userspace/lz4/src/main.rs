@@ -9,6 +9,7 @@
 //! - `lz4cat` — decompress to stdout
 //! - `unlz4` — decompress LZ4 files
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -186,7 +187,7 @@ fn lz4_compress(opts: &Lz4Options, personality: &str) -> i32 {
             println!("Compressed {} into {} (ratio 2.10:1, simulated)", file, out);
 
             if !opts.keep && !opts.stdout && opts.verbose {
-                eprintln!("{}: removed '{}'", personality, file);
+                eprintln!("{}: removed {}", personality, quoteaf_os(file));
             }
         }
     }
@@ -207,7 +208,7 @@ fn lz4_decompress(opts: &Lz4Options, personality: &str) -> i32 {
             println!("{}: {} → {} (simulated)", personality, file, out);
 
             if !opts.keep && !opts.stdout && opts.verbose {
-                eprintln!("{}: removed '{}'", personality, file);
+                eprintln!("{}: removed {}", personality, quoteaf_os(file));
             }
         }
     }

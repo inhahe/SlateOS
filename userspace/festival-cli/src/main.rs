@@ -4,6 +4,7 @@
 //!
 //! Multi-personality: `festival`, `flite`, `text2wave`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -89,7 +90,11 @@ fn run_flite(args: &[String]) -> i32 {
         .map(|w| w[1].as_str());
 
     if let Some(wav) = output {
-        println!("flite: synthesizing to '{}' (voice={})", wav, voice);
+        println!(
+            "flite: synthesizing to {} (voice={})",
+            quoteaf_os(wav),
+            voice
+        );
     } else if let Some(t) = text {
         println!("Speaking: \"{}\" (voice={})", t, voice);
     } else {
@@ -117,7 +122,7 @@ fn run_text2wave(args: &[String]) -> i32 {
         .map(|w| w[1].as_str())
         .unwrap_or("output.wav");
     println!("text2wave: reading text from stdin...");
-    println!("text2wave: writing to '{}'", output);
+    println!("text2wave: writing to {}", quoteaf_os(output));
     0
 }
 

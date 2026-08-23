@@ -2,3 +2,8 @@
 name = "matrix-cli"
 version = "0.1.0"
 edition = "2024"
+
+[dependencies]
+# The room name is an argv word, and room names are free-form text chosen
+# for display, not for parsing.
+quoting = { path = "../quoting" }

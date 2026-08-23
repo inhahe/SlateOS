@@ -4,6 +4,7 @@
 //!
 //! Single personality: `dvc`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -114,7 +115,11 @@ fn run_dvc(args: Vec<String>) -> i32 {
                         .get(3)
                         .map(|s| s.as_str())
                         .unwrap_or("s3://bucket/path");
-                    println!("Setting up remote '{} → {}'", name, url);
+                    println!(
+                        "Setting up remote {} → {}",
+                        quoteaf_os(name),
+                        quoteaf_os(url)
+                    );
                 }
                 _ => {
                     println!("Remote operation: {}", sub);
@@ -134,7 +139,7 @@ fn run_dvc(args: Vec<String>) -> i32 {
             if cmd.is_empty() {
                 eprintln!("Usage: dvc <command>. See --help.");
             } else {
-                eprintln!("Error: unknown command '{}'. See --help.", cmd);
+                eprintln!("Error: unknown command {}. See --help.", quoteaf_os(cmd));
             }
             1
         }

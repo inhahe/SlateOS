@@ -30,6 +30,7 @@
 //! killall -i <name>               Interactive confirmation
 //! ```
 
+use quoting::quoteaf_os;
 use std::env;
 use std::fs;
 use std::process;
@@ -1036,15 +1037,16 @@ fn main() {
         let pids = find_pids_by_name(name);
         if pids.is_empty() {
             if !opts.quiet {
-                eprintln!("kill: no process found with name '{name}'");
+                eprintln!("kill: no process found with name {}", quoteaf_os(name));
             }
             process::exit(1);
         }
 
         if opts.verbose {
             eprintln!(
-                "kill: found {} process(es) named '{name}': {:?}",
+                "kill: found {} process(es) named {}: {:?}",
                 pids.len(),
+                quoteaf_os(name),
                 pids
             );
         }

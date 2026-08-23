@@ -4,6 +4,7 @@
 //!
 //! Multi-personality: `composer`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -108,7 +109,7 @@ fn run_composer(args: &[String]) -> i32 {
         }
         "search" => {
             let term = args.get(1).map(|s| s.as_str()).unwrap_or("http");
-            println!("Searching for '{}'...", term);
+            println!("Searching for {}...", quoteaf_os(term));
             println!("guzzlehttp/guzzle         PHP HTTP client");
             println!("symfony/http-foundation   HTTP Foundation component");
             println!("nyholm/psr7               PSR-7 implementation");
@@ -133,7 +134,7 @@ fn run_composer(args: &[String]) -> i32 {
         "audit" => {
             println!("Found 0 security vulnerability advisories affecting 0 packages.");
         }
-        _ => println!("composer: '{}' completed", subcmd),
+        _ => println!("composer: {} completed", quoteaf_os(subcmd)),
     }
     0
 }

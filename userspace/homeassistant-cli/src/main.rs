@@ -4,6 +4,7 @@
 //!
 //! Multi-personality: `ha`, `hass-cli`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -88,7 +89,7 @@ fn run_ha(args: &[String]) -> i32 {
             println!("  OS: Slate OS");
             println!("  Kernel: 6.6.0-slateos");
         }
-        _ => println!("ha: '{}' completed", subcmd),
+        _ => println!("ha: {} completed", quoteaf_os(subcmd)),
     }
     0
 }
@@ -138,7 +139,7 @@ fn run_hass_cli(args: &[String]) -> i32 {
                 println!("  Service called successfully.");
             }
         }
-        _ => println!("hass-cli: '{}' completed", subcmd),
+        _ => println!("hass-cli: {} completed", quoteaf_os(subcmd)),
     }
     0
 }

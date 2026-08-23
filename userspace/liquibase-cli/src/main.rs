@@ -4,6 +4,7 @@
 //!
 //! Single personality: `liquibase`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -86,7 +87,7 @@ fn run_liquibase(args: Vec<String>) -> i32 {
         }
         "tag" => {
             let tag = args.get(1).map(|s| s.as_str()).unwrap_or("v1.0.0");
-            println!("Successfully tagged database state as '{}'", tag);
+            println!("Successfully tagged database state as {}", quoteaf_os(tag));
             0
         }
         "history" => {
@@ -116,7 +117,7 @@ fn run_liquibase(args: Vec<String>) -> i32 {
             if cmd.is_empty() {
                 eprintln!("Usage: liquibase <command>. See --help.");
             } else {
-                eprintln!("Error: unknown command '{}'. See --help.", cmd);
+                eprintln!("Error: unknown command {}. See --help.", quoteaf_os(cmd));
             }
             1
         }

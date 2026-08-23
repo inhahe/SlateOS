@@ -9,6 +9,7 @@
 //! - `bzcat` — decompress to stdout
 //! - `bzip2recover` — recover data from damaged bzip2 files
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -151,7 +152,7 @@ fn bz2_compress(opts: &Bz2Options, personality: &str) -> i32 {
             );
 
             if !opts.keep && !opts.stdout && opts.verbose {
-                eprintln!("{}: removed '{}'", personality, file);
+                eprintln!("{}: removed {}", personality, quoteaf_os(file));
             }
         }
     }
@@ -176,7 +177,7 @@ fn bz2_decompress(opts: &Bz2Options, personality: &str) -> i32 {
             println!("{}: {} → {} (simulated)", personality, file, out);
 
             if !opts.keep && !opts.stdout && opts.verbose {
-                eprintln!("{}: removed '{}'", personality, file);
+                eprintln!("{}: removed {}", personality, quoteaf_os(file));
             }
         }
     }

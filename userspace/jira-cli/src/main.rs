@@ -4,6 +4,7 @@
 //!
 //! Single personality: `jira`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -84,7 +85,7 @@ fn run_jira(args: Vec<String>) -> i32 {
                 "move" => {
                     let key = args.get(2).map(|s| s.as_str()).unwrap_or("PROJ-123");
                     let status = args.get(3).map(|s| s.as_str()).unwrap_or("Done");
-                    println!("✔ {} moved to '{}'", key, status);
+                    println!("✔ {} moved to {}", key, quoteaf_os(status));
                 }
                 _ => {
                     println!("Issue operation: {}", sub);
@@ -160,7 +161,7 @@ fn run_jira(args: Vec<String>) -> i32 {
             if cmd.is_empty() {
                 eprintln!("Usage: jira <command>. See --help.");
             } else {
-                eprintln!("Error: unknown command '{}'. See --help.", cmd);
+                eprintln!("Error: unknown command {}. See --help.", quoteaf_os(cmd));
             }
             1
         }

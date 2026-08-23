@@ -2,3 +2,8 @@
 name = "barrier"
 version = "0.1.0"
 edition = "2024"
+
+[dependencies]
+# The screen name given with --name is echoed by both the server and the
+# client banner.
+quoting = { path = "../quoting" }

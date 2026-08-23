@@ -31,6 +31,7 @@
 //! fw --json <listing-command>     JSON output for any listing command
 //! ```
 
+use quoting::quoteaf_os;
 use std::env;
 use std::fs;
 use std::io::{self, BufRead, Write};
@@ -588,16 +589,15 @@ impl Firewall {
                     let ret = fw_add_rule(&rec);
                     if ret < 0 {
                         eprintln!(
-                            "fw: warning: kernel rejected rule '{}' (errno {ret})",
-                            rule.describe()
+                            "fw: warning: kernel rejected rule {} (errno {ret})",
+                            quoteaf_os(rule.describe())
                         );
                     }
                 }
                 None => {
                     eprintln!(
-                        "fw: warning: skipping rule '{}' — the kernel firewall cannot \
-                         represent a source port or destination IP constraint",
-                        rule.describe()
+                        "fw: warning: skipping rule {} — the kernel firewall cannot represent a source port or destination IP constraint",
+                        quoteaf_os(rule.describe())
                     );
                 }
             }

@@ -4,6 +4,7 @@
 //!
 //! Multi-personality: `iw`, `iwconfig`, `iwlist`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -65,7 +66,7 @@ fn run_iw(args: &[String]) -> i32 {
                     println!("\tsignal: -70.00 dBm");
                     println!("\tSSID: Neighbor-WiFi");
                 }
-                _ => println!("iw: command '{}' completed", cmd),
+                _ => println!("iw: command {} completed", quoteaf_os(cmd)),
             }
         }
         "phy" => {
@@ -88,7 +89,7 @@ fn run_iw(args: &[String]) -> i32 {
             println!("\t(5170 - 5250 @ 80), (N/A, 23), (N/A), AUTO-BW");
             println!("\t(5250 - 5330 @ 80), (N/A, 23), (0 ms), DFS, AUTO-BW");
         }
-        _ => println!("iw: unknown object '{}'", obj),
+        _ => println!("iw: unknown object {}", quoteaf_os(obj)),
     }
     0
 }

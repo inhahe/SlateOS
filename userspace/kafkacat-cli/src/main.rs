@@ -4,6 +4,7 @@
 //!
 //! Multi-personality: `kcat`, `kafkacat`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -66,13 +67,21 @@ fn run_kcat(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-C") {
-        println!("% Consuming from topic '{}' (broker: {})", topic, broker);
+        println!(
+            "% Consuming from topic {} (broker: {})",
+            quoteaf_os(topic),
+            broker
+        );
         println!("hello world");
         println!("test message");
         return 0;
     }
     if args.iter().any(|a| a == "-P") {
-        println!("% Producing to topic '{}' (broker: {})", topic, broker);
+        println!(
+            "% Producing to topic {} (broker: {})",
+            quoteaf_os(topic),
+            broker
+        );
         println!("% Type messages, one per line. Ctrl+D to finish.");
         return 0;
     }

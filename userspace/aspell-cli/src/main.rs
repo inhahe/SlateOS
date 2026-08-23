@@ -4,6 +4,7 @@
 //!
 //! Single personality: `aspell`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -86,10 +87,10 @@ fn run_aspell(args: Vec<String>) -> i32 {
         }
         "check" => {
             let file = args.get(1).map(|s| s.as_str()).unwrap_or("(stdin)");
-            println!("aspell: checking '{}'...", file);
+            println!("aspell: checking {}...", quoteaf_os(file));
         }
         _ => {
-            eprintln!("aspell: unknown command '{}'. See --help.", cmd);
+            eprintln!("aspell: unknown command {}. See --help.", quoteaf_os(cmd));
             return 1;
         }
     }

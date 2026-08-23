@@ -4,6 +4,7 @@
 //!
 //! Single personality: `conan`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -60,7 +61,10 @@ fn run_conan(args: Vec<String>) -> i32 {
         }
         "search" => {
             let pattern = args.get(1).map(|s| s.as_str()).unwrap_or("*");
-            println!("Searching for '{}' in remote 'conancenter'...", pattern);
+            println!(
+                "Searching for {} in remote 'conancenter'...",
+                quoteaf_os(pattern)
+            );
             println!("  zlib/1.3.1");
             println!("  openssl/3.2.0");
             println!("  boost/1.84.0");
@@ -115,7 +119,7 @@ fn run_conan(args: Vec<String>) -> i32 {
             if cmd.is_empty() {
                 eprintln!("Usage: conan <command>. See --help.");
             } else {
-                eprintln!("Error: unknown command '{}'. See --help.", cmd);
+                eprintln!("Error: unknown command {}. See --help.", quoteaf_os(cmd));
             }
             1
         }

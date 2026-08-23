@@ -4,3 +4,7 @@ version = "0.1.0"
 edition = "2024"
 description = "SlateOS gzip/gunzip/zcat compression utility"
 [dependencies]
+# Both diagnostics name the input file in the `gzip: <name>: reason` shape,
+# so the name is a prefix a crafted path could extend with a line of its
+# own.
+quoting = { path = "../quoting" }

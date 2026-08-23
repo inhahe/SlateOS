@@ -972,16 +972,16 @@ fn cmd_remote_add(args: &[String]) -> i32 {
 
     if !is_valid_remote_name(name) {
         eprintln!(
-            "error: '{}' is not a valid remote name (use alphanumeric, -, _)",
-            name
+            "error: {} is not a valid remote name (use alphanumeric, -, _)",
+            quoteaf_os(name)
         );
         return 1;
     }
 
     if !is_valid_url(url) {
         eprintln!(
-            "error: '{}' does not look like a valid URL (must start with http://, https://, file://, or oci+)",
-            url
+            "error: {} does not look like a valid URL (must start with http://, https://, file://, or oci+)",
+            quoteaf_os(url)
         );
         return 1;
     }

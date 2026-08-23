@@ -10,6 +10,7 @@
 //! - `makedumpfile` — convert/filter kernel crash dumps
 //! - `vmcore-dmesg` — extract dmesg from vmcore crash dumps
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -177,7 +178,7 @@ fn run_kexec(args: Vec<String>) -> i32 {
             if !other.starts_with('-') {
                 kexec_load(&args)
             } else {
-                eprintln!("kexec: unknown option '{}'", other);
+                eprintln!("kexec: unknown option {}", quoteaf_os(other));
                 1
             }
         }
@@ -385,7 +386,7 @@ fn run_kdump(args: Vec<String>) -> i32 {
         }
         "estimate" => kdump_estimate(),
         other => {
-            eprintln!("kdump: unknown command '{}'", other);
+            eprintln!("kdump: unknown command {}", quoteaf_os(other));
             1
         }
     }

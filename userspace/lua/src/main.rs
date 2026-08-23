@@ -4,6 +4,7 @@
 //!
 //! Multi-personality: `lua`, `luac`, `luarocks`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -101,7 +102,7 @@ fn run_luarocks(args: Vec<String>) -> i32 {
         }
         "search" => {
             let query = args.get(1).map(|s| s.as_str()).unwrap_or("");
-            println!("Search results for '{}': (simulated)", query);
+            println!("Search results for {}: (simulated)", quoteaf_os(query));
         }
         "path" => {
             println!("export LUA_PATH='./?.lua;./?/init.lua;/usr/local/share/lua/5.4/?.lua'");
@@ -109,7 +110,7 @@ fn run_luarocks(args: Vec<String>) -> i32 {
         }
         "install" | "remove" | "show" | "make" => println!("({} — simulated)", cmd),
         _ => {
-            eprintln!("Unknown command '{}'. Use --help.", cmd);
+            eprintln!("Unknown command {}. Use --help.", quoteaf_os(cmd));
             return 1;
         }
     }

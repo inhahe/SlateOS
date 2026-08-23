@@ -4,6 +4,7 @@
 //!
 //! Multi-personality: `amdump`, `amcheck`, `amrecover`, `amrestore`, `amstatus`, `amreport`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -23,7 +24,10 @@ fn run_amdump(args: &[String]) -> i32 {
         return 0;
     }
     let config = args.first().map(|s| s.as_str()).unwrap_or("DailySet1");
-    println!("amdump: starting backup for configuration '{}'", config);
+    println!(
+        "amdump: starting backup for configuration {}",
+        quoteaf_os(config)
+    );
     println!("  Planner: estimating 5 hosts");
     println!("  Driver: starting dumper processes");
     println!("  Dumper: /home/user level 0 (245.6 MB)");
@@ -101,7 +105,7 @@ fn run_amstatus(args: &[String]) -> i32 {
         .find(|a| !a.starts_with('-'))
         .map(|s| s.as_str())
         .unwrap_or("DailySet1");
-    println!("Using config '{}' from /etc/amanda", config);
+    println!("Using config {} from /etc/amanda", quoteaf_os(config));
     println!();
     println!("STATISTICS:");
     println!("                       Total   Full   Incr");

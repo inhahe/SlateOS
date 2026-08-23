@@ -4,6 +4,7 @@
 //!
 //! Multi-personality: `luarocks`, `luarocks-admin`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -49,7 +50,7 @@ fn run_luarocks(args: &[String]) -> i32 {
         }
         "search" => {
             let term = args.get(1).map(|s| s.as_str()).unwrap_or("socket");
-            println!("Search results for '{}':", term);
+            println!("Search results for {}:", quoteaf_os(term));
             println!("  luasocket   3.1.0-1    Network support for Lua");
             println!("  copas       4.7.1-1    Coroutine Oriented Portable Async Services");
         }
@@ -75,7 +76,7 @@ fn run_luarocks(args: &[String]) -> i32 {
             println!("Created {}-dev-1.rockspec", name);
             println!("Created .luarocks/config-5.4.lua");
         }
-        _ => println!("luarocks: '{}' completed", subcmd),
+        _ => println!("luarocks: {} completed", quoteaf_os(subcmd)),
     }
     0
 }

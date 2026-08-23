@@ -2,3 +2,7 @@
 name = "bwa-cli"
 version = "0.1.0"
 edition = "2024"
+
+[dependencies]
+# The subcommand names both bwa and bwa-mem2 echo back are argv words.
+quoting = { path = "../quoting" }

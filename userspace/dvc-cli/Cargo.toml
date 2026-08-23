@@ -2,3 +2,8 @@
 name = "dvc-cli"
 version = "0.1.0"
 edition = "2024"
+
+[dependencies]
+# The remote's name and its URL are both argv words, echoed together in one
+# line.
+quoting = { path = "../quoting" }

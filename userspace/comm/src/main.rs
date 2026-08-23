@@ -27,6 +27,7 @@
 //! Use `-` as FILE1 or FILE2 to read from standard input.
 //! ```
 
+use quoting::{quoteaf, quoteaf_os};
 use std::cmp::Ordering;
 use std::env;
 use std::fs::File;
@@ -134,7 +135,7 @@ fn parse_args(args: &[String]) -> ParseResult {
                 }
                 output_delimiter = Some(args[i].clone());
             } else {
-                eprintln!("comm: unrecognized option '{arg}'");
+                eprintln!("comm: unrecognized option {}", quoteaf_os(arg));
                 eprintln!("Try 'comm --help' for more information.");
                 process::exit(1);
             }
@@ -154,8 +155,11 @@ fn parse_args(args: &[String]) -> ParseResult {
                 b'i' => case_insensitive = true,
                 b'z' => zero_terminated = true,
                 _ => {
-                    let ch = arg_bytes[j] as char;
-                    eprintln!("comm: invalid option -- '{ch}'");
+                    // The byte, not `as char`: `u8 as char` is a Latin-1
+                    // widening, so an option byte of 0xE9 would be reported
+                    // as 'é' -- a character that cannot have been typed as
+                    // the single byte that actually arrived.
+                    eprintln!("comm: invalid option -- {}", quoteaf(&[arg_bytes[j]]));
                     eprintln!("Try 'comm --help' for more information.");
                     process::exit(1);
                 }

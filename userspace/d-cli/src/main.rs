@@ -4,6 +4,7 @@
 //!
 //! Multi-personality: `dmd`, `dub`, `rdmd`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -89,7 +90,7 @@ fn run_dub(args: &[String]) -> i32 {
         }
         "init" => {
             let name = args.get(1).map(|s| s.as_str()).unwrap_or("myproject");
-            println!("Creating project '{}'...", name);
+            println!("Creating project {}...", quoteaf_os(name));
             println!("  Created: {}/source/app.d", name);
             println!("  Created: {}/dub.sdl", name);
         }
@@ -98,7 +99,7 @@ fn run_dub(args: &[String]) -> i32 {
             println!("Fetching {}...", pkg);
         }
         "clean" => println!("Cleaning build files..."),
-        _ => println!("dub: '{}' completed", subcmd),
+        _ => println!("dub: {} completed", quoteaf_os(subcmd)),
     }
     0
 }

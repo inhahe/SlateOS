@@ -4,6 +4,7 @@
 //!
 //! Multi-personality: `etcd` (server), `etcdctl` (CLI), `etcdutl` (utilities)
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -226,7 +227,7 @@ fn run_etcdctl(args: Vec<String>) -> i32 {
             0
         }
         other => {
-            eprintln!("etcdctl: unknown command '{}'", other);
+            eprintln!("etcdctl: unknown command {}", quoteaf_os(other));
             1
         }
     }
@@ -276,7 +277,7 @@ fn run_etcdutl(args: Vec<String>) -> i32 {
             0
         }
         other => {
-            eprintln!("etcdutl: unknown command '{}'", other);
+            eprintln!("etcdutl: unknown command {}", quoteaf_os(other));
             1
         }
     }

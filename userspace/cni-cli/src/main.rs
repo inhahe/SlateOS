@@ -4,6 +4,7 @@
 //!
 //! Multi-personality: `cnitool`, `flannel`, `calico`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -54,7 +55,7 @@ fn run_cnitool(args: &[String]) -> i32 {
         }
         "del" => println!("Network removed successfully."),
         "check" => println!("Network check passed."),
-        _ => println!("cnitool: unknown command '{}'", subcmd),
+        _ => println!("cnitool: unknown command {}", quoteaf_os(subcmd)),
     }
     0
 }
@@ -120,7 +121,7 @@ fn run_calico(args: &[String]) -> i32 {
             println!("slateos-node-1      (64512)   192.168.1.100 up");
             println!("slateos-node-2      (64512)   192.168.1.101 up");
         }
-        _ => println!("calico: command '{}' completed", subcmd),
+        _ => println!("calico: command {} completed", quoteaf_os(subcmd)),
     }
     0
 }

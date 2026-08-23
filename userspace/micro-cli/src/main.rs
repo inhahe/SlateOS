@@ -4,6 +4,7 @@
 //!
 //! Single personality: `micro`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -81,7 +82,7 @@ fn run_micro(args: &[String], _prog: &str) -> i32 {
                     .nth(1)
                     .map(|s| s.as_str())
                     .unwrap_or("<plugin>");
-                println!("micro: Installing plugin '{}'...", name);
+                println!("micro: Installing plugin {}...", quoteaf_os(name));
             }
             _ => println!("micro plugin: {}", action),
         }
@@ -92,7 +93,7 @@ fn run_micro(args: &[String], _prog: &str) -> i32 {
         .find(|a| !a.starts_with('-'))
         .map(|s| s.as_str());
     if let Some(f) = file {
-        println!("micro: Editing '{}'", f);
+        println!("micro: Editing {}", quoteaf_os(f));
     } else {
         println!("micro: New buffer");
     }

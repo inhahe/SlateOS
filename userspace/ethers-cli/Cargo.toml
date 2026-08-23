@@ -2,3 +2,8 @@
 name = "ethers-cli"
 version = "0.1.0"
 edition = "2024"
+
+[dependencies]
+# The data being hashed is echoed back alongside its digest, and the
+# rejected command name is an argv word.
+quoting = { path = "../quoting" }

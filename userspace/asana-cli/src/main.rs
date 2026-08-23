@@ -4,6 +4,7 @@
 //!
 //! Single personality: `asana`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -118,7 +119,7 @@ fn run_asana(args: Vec<String>) -> i32 {
         }
         "search" => {
             let query = args.get(1).map(|s| s.as_str()).unwrap_or("login");
-            println!("Results for '{}':", query);
+            println!("Results for {}:", quoteaf_os(query));
             println!("  1234567890  Fix login timeout     In Progress");
             println!("  0987654321  Login page redesign   Done");
             0
@@ -127,7 +128,7 @@ fn run_asana(args: Vec<String>) -> i32 {
             if cmd.is_empty() {
                 eprintln!("Usage: asana <command>. See --help.");
             } else {
-                eprintln!("Error: unknown command '{}'. See --help.", cmd);
+                eprintln!("Error: unknown command {}. See --help.", quoteaf_os(cmd));
             }
             1
         }

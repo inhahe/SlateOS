@@ -4,6 +4,7 @@
 //!
 //! Multi-personality: `flask`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -72,10 +73,10 @@ fn run_flask(args: &[String]) -> i32 {
                 }
                 "upgrade" => println!("Running upgrade: head"),
                 "downgrade" => println!("Running downgrade: -1"),
-                _ => println!("flask db: '{}' completed", sub),
+                _ => println!("flask db: {} completed", quoteaf_os(sub)),
             }
         }
-        _ => println!("flask: '{}' completed", subcmd),
+        _ => println!("flask: {} completed", quoteaf_os(subcmd)),
     }
     0
 }

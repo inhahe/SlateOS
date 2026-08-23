@@ -4,6 +4,7 @@
 //!
 //! Single personality: `linear`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -99,7 +100,7 @@ fn run_linear(args: Vec<String>) -> i32 {
         }
         "search" => {
             let query = args.get(1).map(|s| s.as_str()).unwrap_or("auth");
-            println!("Results for '{}':", query);
+            println!("Results for {}:", quoteaf_os(query));
             println!("  ENG-42  In Progress  Fix auth flow");
             println!("  ENG-38  Done         Auth token refresh");
             println!("  ENG-30  Done         OAuth2 integration");
@@ -109,7 +110,7 @@ fn run_linear(args: Vec<String>) -> i32 {
             if cmd.is_empty() {
                 eprintln!("Usage: linear <command>. See --help.");
             } else {
-                eprintln!("Error: unknown command '{}'. See --help.", cmd);
+                eprintln!("Error: unknown command {}. See --help.", quoteaf_os(cmd));
             }
             1
         }

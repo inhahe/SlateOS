@@ -2,3 +2,7 @@
 name = "dconf-cli"
 version = "0.1.0"
 edition = "2024"
+
+[dependencies]
+# The dconf path being watched and the rejected command name are argv words.
+quoting = { path = "../quoting" }

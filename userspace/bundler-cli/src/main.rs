@@ -4,6 +4,7 @@
 //!
 //! Multi-personality: `bundle`, `bundler`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -76,7 +77,7 @@ fn run_bundler(args: &[String]) -> i32 {
         }
         "exec" => {
             let cmd = args.get(1).map(|s| s.as_str()).unwrap_or("ruby");
-            println!("bundle exec: running '{}'", cmd);
+            println!("bundle exec: running {}", quoteaf_os(cmd));
         }
         "list" => {
             println!("Gems included by the bundle:");
@@ -112,7 +113,7 @@ fn run_bundler(args: &[String]) -> i32 {
             println!("Bundle doctor: checking for common problems...");
             println!("No issues found.");
         }
-        _ => println!("bundle: '{}' completed", subcmd),
+        _ => println!("bundle: {} completed", quoteaf_os(subcmd)),
     }
     0
 }

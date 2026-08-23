@@ -4,6 +4,7 @@
 //!
 //! Multi-personality: `guix`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -123,7 +124,7 @@ fn run_guix(args: &[String]) -> i32 {
                     println!("Generation 2  Feb 15 2024 14:30:00 (current)");
                 }
                 "roll-back" => println!("guix system: rolling back to generation 1"),
-                _ => println!("guix system: '{}' completed", action),
+                _ => println!("guix system: {} completed", quoteaf_os(action)),
             }
         }
         "size" => {
@@ -141,7 +142,7 @@ fn run_guix(args: &[String]) -> i32 {
             println!("  home-page: ok");
             println!("  source: ok");
         }
-        _ => println!("guix: '{}' completed", subcmd),
+        _ => println!("guix: {} completed", quoteaf_os(subcmd)),
     }
     0
 }

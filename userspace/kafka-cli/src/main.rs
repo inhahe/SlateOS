@@ -4,6 +4,7 @@
 //!
 //! Multi-personality: `kafka-topics`, `kafka-console-producer`, `kafka-console-consumer`, `kafka-consumer-groups`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -85,7 +86,7 @@ fn run_producer(args: &[String]) -> i32 {
         .find(|w| w[0] == "--bootstrap-server")
         .map(|w| w[1].as_str())
         .unwrap_or("localhost:9092");
-    println!("Producing to topic '{}' on {}...", topic, broker);
+    println!("Producing to topic {} on {}...", quoteaf_os(topic), broker);
     println!("> (interactive mode - type messages, Ctrl+C to quit)");
     0
 }
@@ -102,7 +103,11 @@ fn run_consumer(args: &[String]) -> i32 {
         .map(|w| w[1].as_str())
         .unwrap_or("localhost:9092");
     let from_beginning = args.iter().any(|a| a == "--from-beginning");
-    println!("Consuming from topic '{}' on {}...", topic, broker);
+    println!(
+        "Consuming from topic {} on {}...",
+        quoteaf_os(topic),
+        broker
+    );
     if from_beginning {
         println!("  (starting from beginning)");
     }

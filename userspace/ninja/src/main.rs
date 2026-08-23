@@ -7,6 +7,7 @@
 //! - `ninja` (default) — build tool
 //! - `samu` — samurai (ninja-compatible build tool)
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -112,7 +113,7 @@ fn run_ninja(args: Vec<String>) -> i32 {
 
     // Build mode
     if let Some(ref d) = build_dir {
-        println!("ninja: Entering directory '{}'", d);
+        println!("ninja: Entering directory {}", quoteaf_os(d));
     }
 
     let edges = _sample_edges();
@@ -255,7 +256,7 @@ fn run_tool(tool: &str, _args: &[String]) -> i32 {
             0
         }
         other => {
-            eprintln!("ninja: unknown tool '{}'", other);
+            eprintln!("ninja: unknown tool {}", quoteaf_os(other));
             1
         }
     }

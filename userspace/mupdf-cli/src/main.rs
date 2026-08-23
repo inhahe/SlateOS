@@ -4,6 +4,7 @@
 //!
 //! Multi-personality: `mutool`, `mupdf`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -26,7 +27,7 @@ fn run_mupdf(args: &[String], prog: &str) -> i32 {
             .rfind(|a| !a.starts_with('-'))
             .map(|s| s.as_str())
             .unwrap_or("doc.pdf");
-        println!("mupdf: Opening '{}'", file);
+        println!("mupdf: Opening {}", quoteaf_os(file));
         return 0;
     }
     // mutool
@@ -64,7 +65,7 @@ fn run_mupdf(args: &[String], prog: &str) -> i32 {
             println!("  1: 612 x 792 (letter)");
             println!("  2: 612 x 792 (letter)");
         }
-        _ => println!("mutool: unknown command '{}'", cmd),
+        _ => println!("mutool: unknown command {}", quoteaf_os(cmd)),
     }
     0
 }

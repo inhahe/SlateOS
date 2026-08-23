@@ -2461,6 +2461,43 @@ check_user_access_sites() {
 
 check_user_access_sites
 
+# Keep `.unwrap()` / `.expect()` out of kernel production paths.
+#
+# The count reached zero on 2026-08-22 and the script that measured it was
+# documented as gateable ("exit status is 1 when it finds something") -- but it
+# returned 0 unconditionally, and no caller existed to notice. A count at zero
+# with nothing holding it there is a count on its way back up: the only reason
+# it is cheap to keep at zero is that a regression is caught by the commit that
+# introduces it, and that only happens if something checks.
+check_production_unwrap() {
+    local py=""
+    if command -v python &>/dev/null; then
+        py=python
+    elif command -v python3 &>/dev/null; then
+        py=python3
+    else
+        echo "=== Production unwrap/expect check: skipped (no python) ===" >&2
+        return 0
+    fi
+
+    echo "=== Checking for unwrap/expect in kernel production paths ==="
+    if "$py" "$PROJECT_ROOT/scripts/scan-unwrap.py" --summary; then
+        return 0
+    fi
+
+    echo "" >&2
+    echo "ERROR: refusing to build.  Each site above is an .unwrap()/.expect()" >&2
+    echo "reachable from a kernel production path, where a panic takes the" >&2
+    echo "machine down -- a denial of service for any of them an attacker can" >&2
+    echo "steer.  Return the error with ?, or restructure so the failure cannot" >&2
+    echo "be represented (design-decisions.md 282 lists the three shapes)." >&2
+    echo "Test code is exempt and detected automatically; if a genuine test" >&2
+    echo "site is being reported, its enclosing fn needs 'test' in its name." >&2
+    exit 1
+}
+
+check_production_unwrap
+
 # Step 1: Build
 if [ "$NO_BUILD" -eq 0 ]; then
     check_free_space "before building"

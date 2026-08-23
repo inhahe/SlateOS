@@ -715,8 +715,7 @@ fn cmd_change_password(target: &str, caller_uid: u32) -> i32 {
                     }
                 };
                 let mut auth = authlib::Authenticator::new();
-                let outcome =
-                    authlib::check_stored(old_pw.as_bytes(), entry.hash.as_bytes());
+                let outcome = authlib::check_stored(old_pw.as_bytes(), entry.hash.as_bytes());
                 match judge_old_password(&mut auth, target, outcome) {
                     OldPasswordVerdict::Proceed => {}
                     OldPasswordVerdict::Unverifiable => {

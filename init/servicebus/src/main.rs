@@ -960,7 +960,13 @@ pub struct PolicyRule {
 
 impl PolicyRule {
     /// Checks if this rule matches the given message context.
-    fn matches_message(&self, sender: &str, dest: &str, iface: Option<&str>, member: Option<&str>) -> bool {
+    fn matches_message(
+        &self,
+        sender: &str,
+        dest: &str,
+        iface: Option<&str>,
+        member: Option<&str>,
+    ) -> bool {
         if let Some(ref rule_sender) = self.sender {
             if rule_sender != sender {
                 return false;
@@ -1225,9 +1231,7 @@ impl ServiceBus {
 
         for segment in &segments {
             if segment.is_empty() {
-                return Err(BusError::InvalidName(
-                    "empty segment in name".to_owned(),
-                ));
+                return Err(BusError::InvalidName("empty segment in name".to_owned()));
             }
             let first = segment.as_bytes().first().copied();
             match first {
@@ -1564,11 +1568,7 @@ impl ServiceBus {
     /// Adds a signal subscription with a match rule.
     ///
     /// Signals matching the rule will be delivered to the subscribing connection.
-    pub fn add_match_rule(
-        &mut self,
-        subscriber: &str,
-        rule: MatchRule,
-    ) -> Result<(), BusError> {
+    pub fn add_match_rule(&mut self, subscriber: &str, rule: MatchRule) -> Result<(), BusError> {
         if !self.connections.contains_key(subscriber) {
             return Err(BusError::ConnectionNotFound(subscriber.to_owned()));
         }
@@ -1811,10 +1811,7 @@ impl ServiceBus {
         let timeout = Duration::from_secs(entry.timeout_secs);
 
         if self.debug_mode {
-            eprintln!(
-                "[servicebus] activating '{name}' via '{}'",
-                entry.exec_path
-            );
+            eprintln!("[servicebus] activating '{name}' via '{}'", entry.exec_path);
         }
 
         self.pending_activations.push(PendingActivation {
@@ -1899,16 +1896,23 @@ impl ServiceBus {
         let mut offset = 4;
 
         // Serialize header fields
-        offset = serialize_value(&mut buf, offset, &Value::String(msg.header.sender.clone()), 0)?;
-        offset =
-            serialize_value(&mut buf, offset, &Value::String(msg.header.destination.clone()), 0)?;
+        offset = serialize_value(
+            &mut buf,
+            offset,
+            &Value::String(msg.header.sender.clone()),
+            0,
+        )?;
+        offset = serialize_value(
+            &mut buf,
+            offset,
+            &Value::String(msg.header.destination.clone()),
+            0,
+        )?;
         offset = serialize_value(&mut buf, offset, &Value::U64(msg.header.serial), 0)?;
         offset = serialize_value(
             &mut buf,
             offset,
-            &Value::Optional(
-                msg.header.reply_serial.map(|s| Box::new(Value::U64(s))),
-            ),
+            &Value::Optional(msg.header.reply_serial.map(|s| Box::new(Value::U64(s)))),
             0,
         )?;
         offset = serialize_value(
@@ -1926,7 +1930,10 @@ impl ServiceBus {
             &mut buf,
             offset,
             &Value::Optional(
-                msg.header.interface.as_ref().map(|s| Box::new(Value::String(s.clone()))),
+                msg.header
+                    .interface
+                    .as_ref()
+                    .map(|s| Box::new(Value::String(s.clone()))),
             ),
             0,
         )?;
@@ -1934,7 +1941,10 @@ impl ServiceBus {
             &mut buf,
             offset,
             &Value::Optional(
-                msg.header.member.as_ref().map(|s| Box::new(Value::String(s.clone()))),
+                msg.header
+                    .member
+                    .as_ref()
+                    .map(|s| Box::new(Value::String(s.clone()))),
             ),
             0,
         )?;
@@ -2640,13 +2650,11 @@ mod tests {
 
         let msgs = bus.drain_outbox(&watcher);
         assert_eq!(msgs.len(), 1);
-        assert_eq!(
-            msgs[0].header.member,
-            Some("NameAcquired".to_owned())
-        );
+        assert_eq!(msgs[0].header.member, Some("NameAcquired".to_owned()));
 
         // Unregister triggers NameLost
-        bus.unregister_service(&owner, "org.slateos.watched").unwrap();
+        bus.unregister_service(&owner, "org.slateos.watched")
+            .unwrap();
 
         let msgs = bus.drain_outbox(&watcher);
         assert_eq!(msgs.len(), 1);
@@ -2746,7 +2754,8 @@ mod tests {
 
         bus.register_service(&c1, "org.slateos.alpha", vec![])
             .unwrap();
-        bus.register_service(&c2, "org.slateos.beta", vec![]).unwrap();
+        bus.register_service(&c2, "org.slateos.beta", vec![])
+            .unwrap();
 
         let names = bus.list_names();
         assert_eq!(names.len(), 2);

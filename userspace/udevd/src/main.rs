@@ -282,10 +282,12 @@ impl DeviceEvent {
             }
         }
         // Extract kernel_name from devpath if not set via DEVNAME.
-        if ev.kernel_name.is_empty() && !ev.devpath.is_empty()
-            && let Some(name) = ev.devpath.rsplit('/').next() {
-                ev.kernel_name = name.to_string();
-            }
+        if ev.kernel_name.is_empty()
+            && !ev.devpath.is_empty()
+            && let Some(name) = ev.devpath.rsplit('/').next()
+        {
+            ev.kernel_name = name.to_string();
+        }
         Some(ev)
     }
 
@@ -734,9 +736,10 @@ impl DeviceDatabase {
         if let Ok(content) = fs::read_to_string(&path) {
             for line in content.lines() {
                 if let Some(rest) = line.strip_prefix("E:")
-                    && let Some((k, v)) = rest.split_once('=') {
-                        props.insert(k.to_string(), v.to_string());
-                    }
+                    && let Some((k, v)) = rest.split_once('=')
+                {
+                    props.insert(k.to_string(), v.to_string());
+                }
             }
         }
         props
@@ -812,8 +815,7 @@ fn enumerate_subsystem(subsystem: &str) -> Vec<String> {
             for entry in entries.flatten() {
                 let p = entry.path();
                 // Resolve symlink to get canonical sysfs path.
-                let resolved = fs::canonicalize(&p)
-                    .unwrap_or_else(|_| p.clone());
+                let resolved = fs::canonicalize(&p).unwrap_or_else(|_| p.clone());
                 paths.push(resolved.to_string_lossy().to_string());
             }
         }
@@ -921,13 +923,11 @@ fn check_match(cond: &MatchKey, event: &DeviceEvent) -> bool {
             !glob_match(pat, &driver)
         }
         MatchKey::Attr(attr_name, pat) => {
-            let val = read_sysfs_attr(&event.devpath, attr_name)
-                .unwrap_or_default();
+            let val = read_sysfs_attr(&event.devpath, attr_name).unwrap_or_default();
             glob_match(pat, &val)
         }
         MatchKey::AttrNot(attr_name, pat) => {
-            let val = read_sysfs_attr(&event.devpath, attr_name)
-                .unwrap_or_default();
+            let val = read_sysfs_attr(&event.devpath, attr_name).unwrap_or_default();
             !glob_match(pat, &val)
         }
         MatchKey::Env(env_key, pat) => {
@@ -962,7 +962,9 @@ fn substitute_value(template: &str, event: &DeviceEvent, result: &RuleResult) ->
                 }
                 b'n' => {
                     // Device number suffix: "sda1" -> "1", "sda" -> "".
-                    let num: String = event.kernel_name.chars()
+                    let num: String = event
+                        .kernel_name
+                        .chars()
                         .rev()
                         .take_while(|c| c.is_ascii_digit())
                         .collect::<Vec<_>>()
@@ -1002,7 +1004,9 @@ fn substitute_value(template: &str, event: &DeviceEvent, result: &RuleResult) ->
                     let rest = &template[i + 3..];
                     if let Some(end) = rest.find('}') {
                         let key = &rest[..end];
-                        let val = event.env.get(key)
+                        let val = event
+                            .env
+                            .get(key)
                             .or_else(|| result.extra_env.get(key))
                             .cloned()
                             .unwrap_or_default();
@@ -1029,7 +1033,9 @@ fn substitute_value(template: &str, event: &DeviceEvent, result: &RuleResult) ->
                 out.push_str(&event.kernel_name);
                 i += 7;
             } else if rest.starts_with("number") {
-                let num: String = event.kernel_name.chars()
+                let num: String = event
+                    .kernel_name
+                    .chars()
                     .rev()
                     .take_while(|c| c.is_ascii_digit())
                     .collect::<Vec<_>>()
@@ -1050,7 +1056,9 @@ fn substitute_value(template: &str, event: &DeviceEvent, result: &RuleResult) ->
             } else if let Some(after) = rest.strip_prefix("env{") {
                 if let Some(end) = after.find('}') {
                     let key = &after[..end];
-                    let val = event.env.get(key)
+                    let val = event
+                        .env
+                        .get(key)
                         .or_else(|| result.extra_env.get(key))
                         .cloned()
                         .unwrap_or_default();
@@ -1081,9 +1089,10 @@ fn apply_rules(rules: &[Rule], event: &DeviceEvent) -> RuleResult {
     for rule in rules {
         // Handle GOTO: skip rules until we reach the target LABEL.
         if let Some(ref target) = skip_to_label {
-            let has_label = rule.assigns.iter().any(|a| {
-                matches!(a, AssignKey::Label(l) if l == target)
-            });
+            let has_label = rule
+                .assigns
+                .iter()
+                .any(|a| matches!(a, AssignKey::Label(l) if l == target));
             if has_label {
                 skip_to_label = None;
             }
@@ -1144,19 +1153,17 @@ fn apply_rules(rules: &[Rule], event: &DeviceEvent) -> RuleResult {
                     // after rule evaluation. Store in extra_env for
                     // downstream processing.
                     let expanded = substitute_value(val, event, &result);
-                    result.extra_env.insert(
-                        format!("_ATTR_SET_{attr}"),
-                        expanded,
-                    );
+                    result
+                        .extra_env
+                        .insert(format!("_ATTR_SET_{attr}"), expanded);
                 }
                 AssignKey::Import(import_type, source) => {
                     // Import operations fetch properties from external
                     // sources. Record the request for daemon processing.
                     let expanded = substitute_value(source, event, &result);
-                    result.extra_env.insert(
-                        format!("_IMPORT_{import_type}"),
-                        expanded,
-                    );
+                    result
+                        .extra_env
+                        .insert(format!("_IMPORT_{import_type}"), expanded);
                 }
             }
         }
@@ -1198,21 +1205,24 @@ fn compute_persistent_links(event: &DeviceEvent) -> Vec<String> {
 
     // by-uuid: from partition UUID.
     if let Some(uuid) = event.env.get("ID_FS_UUID")
-        && !uuid.is_empty() {
-            links.push(format!("disk/by-uuid/{uuid}"));
-        }
+        && !uuid.is_empty()
+    {
+        links.push(format!("disk/by-uuid/{uuid}"));
+    }
 
     // by-label: from filesystem label.
     if let Some(label) = event.env.get("ID_FS_LABEL")
-        && !label.is_empty() {
-            links.push(format!("disk/by-label/{label}"));
-        }
+        && !label.is_empty()
+    {
+        links.push(format!("disk/by-label/{label}"));
+    }
 
     // by-partuuid: for GPT partition UUID.
     if let Some(partuuid) = event.env.get("ID_PART_ENTRY_UUID")
-        && !partuuid.is_empty() {
-            links.push(format!("disk/by-partuuid/{partuuid}"));
-        }
+        && !partuuid.is_empty()
+    {
+        links.push(format!("disk/by-partuuid/{partuuid}"));
+    }
 
     links
 }
@@ -1251,16 +1261,9 @@ const _SYS_UNLINK: u64 = 623;
 const _SYS_MKDIR: u64 = 624;
 
 /// Create device node, apply permissions, and create symlinks.
-fn apply_device_node(
-    event: &DeviceEvent,
-    rule_result: &RuleResult,
-    log_level: LogLevel,
-) {
+fn apply_device_node(event: &DeviceEvent, rule_result: &RuleResult, log_level: LogLevel) {
     // Determine the device node name.
-    let dev_name = rule_result
-        .name
-        .as_deref()
-        .unwrap_or(&event.kernel_name);
+    let dev_name = rule_result.name.as_deref().unwrap_or(&event.kernel_name);
 
     let dev_path = format!("{DEV_DIR}/{dev_name}");
 
@@ -1292,9 +1295,10 @@ fn apply_device_node(
 
             // Apply permissions.
             if let Some(ref mode) = rule_result.mode
-                && log_level >= LogLevel::Debug {
-                    eprintln!("udevd: chmod {mode} {dev_path}");
-                }
+                && log_level >= LogLevel::Debug
+            {
+                eprintln!("udevd: chmod {mode} {dev_path}");
+            }
 
             // Create rule-defined symlinks.
             for link in &rule_result.symlinks {
@@ -1322,10 +1326,7 @@ fn apply_device_node(
         _ => {
             // Change, move, etc. -- update properties but don't recreate node.
             if log_level >= LogLevel::Debug {
-                eprintln!(
-                    "udevd: event {} for {dev_path}",
-                    event.action.as_str()
-                );
+                eprintln!("udevd: event {} for {dev_path}", event.action.as_str());
             }
         }
     }
@@ -1457,20 +1458,10 @@ fn read_uevent_from_sysfs(devpath: &str) -> Option<DeviceEvent> {
         .or_else(|| props.get("SUBSYSTEM").cloned())
         .unwrap_or_default();
 
-    let kernel_name = devpath
-        .rsplit('/')
-        .next()
-        .unwrap_or("")
-        .to_string();
+    let kernel_name = devpath.rsplit('/').next().unwrap_or("").to_string();
 
-    let major = props
-        .get("MAJOR")
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(0);
-    let minor = props
-        .get("MINOR")
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(0);
+    let major = props.get("MAJOR").and_then(|s| s.parse().ok()).unwrap_or(0);
+    let minor = props.get("MINOR").and_then(|s| s.parse().ok()).unwrap_or(0);
 
     Some(DeviceEvent {
         action: DeviceAction::Add,
@@ -1557,8 +1548,14 @@ fn cmd_info(args: &[String]) -> i32 {
 
     // Build property list from uevent + database.
     let mut props = uevent_props;
-    let major = props.get("MAJOR").and_then(|s| s.parse().ok()).unwrap_or(0u32);
-    let minor = props.get("MINOR").and_then(|s| s.parse().ok()).unwrap_or(0u32);
+    let major = props
+        .get("MAJOR")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0u32);
+    let minor = props
+        .get("MINOR")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0u32);
     let db_key = DeviceDatabase::dev_key(major, minor);
     let db_props = db.load(&db_key);
     for (k, v) in &db_props {
@@ -1619,10 +1616,7 @@ fn show_attr_walk(devpath: &str) -> i32 {
                     }
                     if let Ok(val) = fs::read_to_string(entry.path()) {
                         let trimmed = val.trim_end();
-                        if !trimmed.is_empty()
-                            && trimmed.len() < 256
-                            && !trimmed.contains('\0')
-                        {
+                        if !trimmed.is_empty() && trimmed.len() < 256 && !trimmed.contains('\0') {
                             println!("    ATTR{{{name_str}}}==\"{trimmed}\"");
                         }
                     }
@@ -1633,9 +1627,7 @@ fn show_attr_walk(devpath: &str) -> i32 {
 
         // Walk up to parent.
         match current.parent() {
-            Some(p) if p.as_os_str() != current.as_os_str()
-                && p.starts_with(SYS_DIR) =>
-            {
+            Some(p) if p.as_os_str() != current.as_os_str() && p.starts_with(SYS_DIR) => {
                 current = p.to_path_buf();
             }
             _ => break,
@@ -1824,7 +1816,9 @@ fn cmd_settle(args: &[String]) -> i32 {
                 println!("Usage: udevadm settle [OPTIONS]");
                 println!();
                 println!("Options:");
-                println!("  -t, --timeout=SEC  Maximum wait time (default: {DEFAULT_SETTLE_TIMEOUT})");
+                println!(
+                    "  -t, --timeout=SEC  Maximum wait time (default: {DEFAULT_SETTLE_TIMEOUT})"
+                );
                 println!("  -h, --help         Show this help");
                 return 0;
             }
@@ -1919,9 +1913,10 @@ fn cmd_monitor(args: &[String]) -> i32 {
                     if let Some(event) = DeviceEvent::parse(block) {
                         // Apply subsystem filter.
                         if let Some(ref sub) = filter_subsystem
-                            && !glob_match(sub, &event.subsystem) {
-                                continue;
-                            }
+                            && !glob_match(sub, &event.subsystem)
+                        {
+                            continue;
+                        }
                         println!("{}", event.format_monitor(show_properties));
                     }
                 }
@@ -2033,7 +2028,11 @@ fn set_log_level(level: &str) -> i32 {
 
 /// Run the udevd daemon: load rules, listen for events, process them.
 fn run_daemon(debug: bool, resolve_early: bool) -> i32 {
-    let log_level = if debug { LogLevel::Debug } else { LogLevel::Info };
+    let log_level = if debug {
+        LogLevel::Debug
+    } else {
+        LogLevel::Info
+    };
 
     if log_level >= LogLevel::Info {
         eprintln!("udevd v{VERSION}: starting device manager");
@@ -2064,7 +2063,10 @@ fn run_daemon(debug: bool, resolve_early: bool) -> i32 {
                 state.reload_rules();
             } else if trimmed == "exit" {
                 if state.log_level >= LogLevel::Info {
-                    eprintln!("udevd: shutting down (processed {} events)", state.event_count);
+                    eprintln!(
+                        "udevd: shutting down (processed {} events)",
+                        state.event_count
+                    );
                 }
                 return 0;
             } else if let Some(level) = trimmed.strip_prefix("log-level=") {
@@ -2076,27 +2078,27 @@ fn run_daemon(debug: bool, resolve_early: bool) -> i32 {
                 if state.log_level >= LogLevel::Info {
                     eprintln!("udevd: exec queue stopped");
                 }
-            } else if trimmed == "start-exec-queue"
-                && state.log_level >= LogLevel::Info {
-                    eprintln!("udevd: exec queue started");
-                }
+            } else if trimmed == "start-exec-queue" && state.log_level >= LogLevel::Info {
+                eprintln!("udevd: exec queue started");
+            }
         }
     }
 
     // Read uevent source for new events.
     let uevent_source = "/run/udev/uevent_source";
     if let Ok(content) = fs::read_to_string(uevent_source)
-        && !content.trim().is_empty() {
-            let _ = fs::write(uevent_source, "");
-            for block in content.split("\n\n") {
-                if block.trim().is_empty() {
-                    continue;
-                }
-                if let Some(event) = DeviceEvent::parse(block) {
-                    state.process_event(&event);
-                }
+        && !content.trim().is_empty()
+    {
+        let _ = fs::write(uevent_source, "");
+        for block in content.split("\n\n") {
+            if block.trim().is_empty() {
+                continue;
+            }
+            if let Some(event) = DeviceEvent::parse(block) {
+                state.process_event(&event);
             }
         }
+    }
 
     if state.log_level >= LogLevel::Info {
         eprintln!(
@@ -2153,10 +2155,7 @@ fn run() -> i32 {
     }
 
     // Determine personality from argv[0].
-    let prog = args[0]
-        .rsplit('/')
-        .next()
-        .unwrap_or(&args[0]);
+    let prog = args[0].rsplit('/').next().unwrap_or(&args[0]);
 
     if prog == "udevadm" || (args.len() > 1 && args[1] == "--udevadm") {
         // udevadm mode: dispatch subcommand.
@@ -2353,7 +2352,9 @@ mod tests {
 
     #[test]
     fn device_action_roundtrip() {
-        for action_str in &["add", "remove", "change", "move", "online", "offline", "bind", "unbind"] {
+        for action_str in &[
+            "add", "remove", "change", "move", "online", "offline", "bind", "unbind",
+        ] {
             let action = DeviceAction::from_str(action_str).unwrap();
             assert_eq!(action.as_str(), *action_str);
         }
@@ -2399,7 +2400,8 @@ mod tests {
 
     #[test]
     fn parse_uevent_basic() {
-        let text = "ACTION=add\nDEVPATH=/devices/pci/sda\nSUBSYSTEM=block\nMAJOR=8\nMINOR=0\nSEQNUM=42\n";
+        let text =
+            "ACTION=add\nDEVPATH=/devices/pci/sda\nSUBSYSTEM=block\nMAJOR=8\nMINOR=0\nSEQNUM=42\n";
         let ev = DeviceEvent::parse(text).unwrap();
         assert_eq!(ev.action, DeviceAction::Add);
         assert_eq!(ev.devpath, "/devices/pci/sda");
@@ -2421,7 +2423,10 @@ mod tests {
     fn parse_uevent_extra_env() {
         let text = "ACTION=add\nDEVPATH=/devices/sda\nSUBSYSTEM=block\nID_MODEL=Virtual_Disk\n";
         let ev = DeviceEvent::parse(text).unwrap();
-        assert_eq!(ev.env.get("ID_MODEL").map(|s| s.as_str()), Some("Virtual_Disk"));
+        assert_eq!(
+            ev.env.get("ID_MODEL").map(|s| s.as_str()),
+            Some("Virtual_Disk")
+        );
     }
 
     #[test]
@@ -2549,12 +2554,18 @@ mod tests {
 
     #[test]
     fn brace_arg_basic() {
-        assert_eq!(extract_brace_arg("ATTR{size}", "ATTR"), Some("size".to_string()));
+        assert_eq!(
+            extract_brace_arg("ATTR{size}", "ATTR"),
+            Some("size".to_string())
+        );
     }
 
     #[test]
     fn brace_arg_env() {
-        assert_eq!(extract_brace_arg("ENV{ID_MODEL}", "ENV"), Some("ID_MODEL".to_string()));
+        assert_eq!(
+            extract_brace_arg("ENV{ID_MODEL}", "ENV"),
+            Some("ID_MODEL".to_string())
+        );
     }
 
     #[test]
@@ -2576,11 +2587,7 @@ mod tests {
 
     #[test]
     fn parse_simple_rule() {
-        let rule = parse_rule_line(
-            r#"KERNEL=="sda", NAME="mydisk""#,
-            "test.rules",
-            1,
-        );
+        let rule = parse_rule_line(r#"KERNEL=="sda", NAME="mydisk""#, "test.rules", 1);
         assert!(rule.is_some());
         let r = rule.unwrap();
         assert_eq!(r.matches.len(), 1);
@@ -2651,14 +2658,14 @@ mod tests {
 
     #[test]
     fn parse_rule_goto_label() {
-        let rule = parse_rule_line(
-            r#"KERNEL=="loop*", GOTO="skip_loop""#,
-            "test.rules",
-            1,
-        );
+        let rule = parse_rule_line(r#"KERNEL=="loop*", GOTO="skip_loop""#, "test.rules", 1);
         assert!(rule.is_some());
         let r = rule.unwrap();
-        assert!(r.assigns.iter().any(|a| matches!(a, AssignKey::Goto(t) if t == "skip_loop")));
+        assert!(
+            r.assigns
+                .iter()
+                .any(|a| matches!(a, AssignKey::Goto(t) if t == "skip_loop"))
+        );
     }
 
     // ---- Rule evaluation tests ----
@@ -3172,7 +3179,9 @@ mod tests {
     #[test]
     fn make_assign_env() {
         let a = make_assign_key("ENV{MY_VAR}", "hello", "=");
-        assert!(matches!(a, Some(AssignKey::EnvSet(ref k, ref v)) if k == "MY_VAR" && v == "hello"));
+        assert!(
+            matches!(a, Some(AssignKey::EnvSet(ref k, ref v)) if k == "MY_VAR" && v == "hello")
+        );
     }
 
     #[test]
@@ -3254,23 +3263,21 @@ LABEL="end_loop"
 
     #[test]
     fn integration_block_device_event() {
-        let rules = vec![
-            Rule {
-                matches: vec![
-                    MatchKey::Kernel("sd[a-z]".to_string()),
-                    MatchKey::Subsystem("block".to_string()),
-                    MatchKey::Action("add".to_string()),
-                ],
-                assigns: vec![
-                    AssignKey::Name("%k".to_string()),
-                    AssignKey::Mode("0660".to_string()),
-                    AssignKey::Group("disk".to_string()),
-                    AssignKey::Symlink("disk/by-kernel/%k".to_string()),
-                ],
-                _source_file: "50-block.rules".to_string(),
-                _source_line: 1,
-            },
-        ];
+        let rules = vec![Rule {
+            matches: vec![
+                MatchKey::Kernel("sd[a-z]".to_string()),
+                MatchKey::Subsystem("block".to_string()),
+                MatchKey::Action("add".to_string()),
+            ],
+            assigns: vec![
+                AssignKey::Name("%k".to_string()),
+                AssignKey::Mode("0660".to_string()),
+                AssignKey::Group("disk".to_string()),
+                AssignKey::Symlink("disk/by-kernel/%k".to_string()),
+            ],
+            _source_file: "50-block.rules".to_string(),
+            _source_line: 1,
+        }];
 
         let ev = DeviceEvent {
             action: DeviceAction::Add,
@@ -3320,7 +3327,10 @@ LABEL="end_loop"
 
         let result = apply_rules(&rules, &ev);
         assert_eq!(result.name.as_deref(), Some("net/eth0"));
-        assert_eq!(result.extra_env.get("NM_MANAGED").map(|s| s.as_str()), Some("1"));
+        assert_eq!(
+            result.extra_env.get("NM_MANAGED").map(|s| s.as_str()),
+            Some("1")
+        );
     }
 
     #[test]
@@ -3396,8 +3406,14 @@ LABEL="end_loop"
             env: HashMap::new(),
         };
 
-        assert!(check_match(&MatchKey::DevPath("/devices/*/sda".to_string()), &ev));
-        assert!(!check_match(&MatchKey::DevPathNot("/devices/*/sda".to_string()), &ev));
+        assert!(check_match(
+            &MatchKey::DevPath("/devices/*/sda".to_string()),
+            &ev
+        ));
+        assert!(!check_match(
+            &MatchKey::DevPathNot("/devices/*/sda".to_string()),
+            &ev
+        ));
     }
 
     #[test]

@@ -224,8 +224,7 @@ fn parse_args(args: &[String]) -> ParseResult {
             } else if arg == "--number-separator" || arg.starts_with("--number-separator=") {
                 let val = long_opt_value(arg, "--number-separator", args, &mut i);
                 separator = val;
-            } else if arg == "--starting-line-number"
-                || arg.starts_with("--starting-line-number=")
+            } else if arg == "--starting-line-number" || arg.starts_with("--starting-line-number=")
             {
                 let val = long_opt_value(arg, "--starting-line-number", args, &mut i);
                 start = parse_i64_arg("--starting-line-number", &val);
@@ -523,9 +522,10 @@ fn regex_match_here(pattern: &str, text: &str) -> bool {
             let rest_pat = &pattern[atom_len + 1..]; // skip the `?`
             // Try matching the atom (one occurrence), then try zero.
             if let Some(consumed) = match_atom(atom_pat, text)
-                && regex_match_here(rest_pat, &text[consumed..]) {
-                    return true;
-                }
+                && regex_match_here(rest_pat, &text[consumed..])
+            {
+                return true;
+            }
             regex_match_here(rest_pat, text)
         }
     }
@@ -846,11 +846,7 @@ fn process_lines<R: BufRead>(
 }
 
 /// Write output lines in text format.
-fn write_text<W: Write>(
-    out: &mut W,
-    lines: &[OutputLine],
-    config: &Config,
-) -> io::Result<()> {
+fn write_text<W: Write>(out: &mut W, lines: &[OutputLine], config: &Config) -> io::Result<()> {
     let blank = blank_prefix(config.width, &config.separator);
 
     for ol in lines {
@@ -871,10 +867,7 @@ fn write_text<W: Write>(
 }
 
 /// Write output lines in JSON format.
-fn write_json<W: Write>(
-    out: &mut W,
-    lines: &[OutputLine],
-) -> io::Result<()> {
+fn write_json<W: Write>(out: &mut W, lines: &[OutputLine]) -> io::Result<()> {
     writeln!(out, "[")?;
     let total = lines.len();
     for (idx, ol) in lines.iter().enumerate() {
@@ -912,9 +905,8 @@ fn process_source(
         let mut reader = BufReader::new(stdin.lock());
         process_lines(&mut reader, config, line_number)
     } else {
-        let file = File::open(path).map_err(|e| {
-            io::Error::new(e.kind(), format!("{path}: {e}"))
-        })?;
+        let file =
+            File::open(path).map_err(|e| io::Error::new(e.kind(), format!("{path}: {e}")))?;
         let mut reader = BufReader::new(file);
         process_lines(&mut reader, config, line_number)
     }
@@ -952,16 +944,18 @@ fn run(config: &Config) -> i32 {
     };
 
     if let Err(e) = write_result
-        && e.kind() != io::ErrorKind::BrokenPipe {
-            eprintln!("nl: write error: {e}");
-            return 1;
-        }
+        && e.kind() != io::ErrorKind::BrokenPipe
+    {
+        eprintln!("nl: write error: {e}");
+        return 1;
+    }
 
     if let Err(e) = out.flush()
-        && e.kind() != io::ErrorKind::BrokenPipe {
-            eprintln!("nl: write error: {e}");
-            return 1;
-        }
+        && e.kind() != io::ErrorKind::BrokenPipe
+    {
+        eprintln!("nl: write error: {e}");
+        return 1;
+    }
 
     if had_error { 1 } else { 0 }
 }

@@ -7,8 +7,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_influx(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
@@ -46,13 +50,18 @@ fn run_influx(args: &[String]) -> i32 {
             println!("Setup complete!");
         }
         "write" => {
-            let bucket = args.windows(2).find(|w| w[0] == "-b" || w[0] == "--bucket")
-                .map(|w| w[1].as_str()).unwrap_or("mybucket");
+            let bucket = args
+                .windows(2)
+                .find(|w| w[0] == "-b" || w[0] == "--bucket")
+                .map(|w| w[1].as_str())
+                .unwrap_or("mybucket");
             println!("Writing to bucket '{}'...", bucket);
             println!("Success. 1 point(s) written.");
         }
         "query" => {
-            let query = args.get(1).map(|s| s.as_str())
+            let query = args
+                .get(1)
+                .map(|s| s.as_str())
                 .unwrap_or("from(bucket:\"mybucket\") |> range(start:-1h)");
             println!("Executing query:");
             println!("  {}", query);
@@ -100,8 +109,12 @@ fn run_influx(args: &[String]) -> i32 {
             let sub = args.get(1).map(|s| s.as_str()).unwrap_or("list");
             match sub {
                 "list" | "ls" => {
-                    println!("ID                   Description       Token                      Permissions");
-                    println!("abc123456789         admin token       xxxxxxxxxxxxxxxxxxxxxxxx   [read:*,write:*]");
+                    println!(
+                        "ID                   Description       Token                      Permissions"
+                    );
+                    println!(
+                        "abc123456789         admin token       xxxxxxxxxxxxxxxxxxxxxxxx   [read:*,write:*]"
+                    );
                 }
                 "create" => println!("Token created: xxxxxxxxxxxxxxxxxxxx"),
                 _ => println!("influx auth: '{}' completed", sub),
@@ -127,7 +140,10 @@ fn run_influx(args: &[String]) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "influx".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "influx".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_influx(&rest);
     process::exit(code);
@@ -135,7 +151,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_influx};
+    use super::{basename, run_influx, strip_ext};
 
     #[test]
     fn basename_strips_path() {

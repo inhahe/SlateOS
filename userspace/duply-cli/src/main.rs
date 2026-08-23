@@ -56,7 +56,10 @@ fn run_duply(args: Vec<String>) -> i32 {
             println!("  /home/user/.duply/{}/conf  — configuration", profile);
             println!("  /home/user/.duply/{}/exclude — exclude patterns", profile);
             println!("  /home/user/.duply/{}/pre    — pre-backup script", profile);
-            println!("  /home/user/.duply/{}/post   — post-backup script", profile);
+            println!(
+                "  /home/user/.duply/{}/post   — post-backup script",
+                profile
+            );
             println!("Profile '{}' created. Edit 'conf' to configure.", profile);
         }
         "backup" | "bkp" => {
@@ -135,7 +138,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_duply};
+    use super::run_duply;
 
     #[test]
     fn help_exits_zero() {

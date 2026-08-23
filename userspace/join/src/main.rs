@@ -127,9 +127,7 @@ fn parse_filenum(s: &str, opt_name: &str) -> u8 {
         "1" => 1,
         "2" => 2,
         _ => {
-            eprintln!(
-                "join: invalid file number '{s}' for {opt_name} (must be 1 or 2)"
-            );
+            eprintln!("join: invalid file number '{s}' for {opt_name} (must be 1 or 2)");
             process::exit(1);
         }
     }
@@ -260,9 +258,7 @@ fn parse_args(args: &[String]) -> ParseResult {
                 match (chars.next(), chars.next()) {
                     (Some(c), None) => separator = Some(c),
                     _ => {
-                        eprintln!(
-                            "join: -t separator must be a single character"
-                        );
+                        eprintln!("join: -t separator must be a single character");
                         process::exit(1);
                     }
                 }
@@ -321,10 +317,7 @@ fn parse_args(args: &[String]) -> ParseResult {
     }
 
     if positionals.len() != 2 {
-        eprintln!(
-            "join: expected 2 file operands, got {}",
-            positionals.len()
-        );
+        eprintln!("join: expected 2 file operands, got {}", positionals.len());
         eprintln!("Try 'join --help' for more information.");
         process::exit(1);
     }
@@ -405,11 +398,7 @@ fn write_sep(out: &mut dyn Write, config: &Config) -> io::Result<()> {
 }
 
 /// Get a field value, substituting the empty-filler if the field is missing.
-fn field_or_filler<'a>(
-    fields: &[&'a str],
-    index: usize,
-    filler: &'a str,
-) -> &'a str {
+fn field_or_filler<'a>(fields: &[&'a str], index: usize, filler: &'a str) -> &'a str {
     if index >= 1 && index <= fields.len() {
         let val = fields[index - 1];
         if val.is_empty() { filler } else { val }
@@ -563,8 +552,16 @@ fn json_escape(s: &str) -> String {
 
 /// A collected JSON output entry.
 enum JsonEntry {
-    Paired { fields1: Vec<String>, fields2: Vec<String>, join_key: String },
-    Unpaired { file_num: u8, fields: Vec<String>, join_key: String },
+    Paired {
+        fields1: Vec<String>,
+        fields2: Vec<String>,
+        join_key: String,
+    },
+    Unpaired {
+        file_num: u8,
+        fields: Vec<String>,
+        join_key: String,
+    },
 }
 
 fn write_json_output(out: &mut dyn Write, entries: &[JsonEntry]) -> io::Result<()> {
@@ -572,12 +569,14 @@ fn write_json_output(out: &mut dyn Write, entries: &[JsonEntry]) -> io::Result<(
     let total = entries.len();
     for (idx, entry) in entries.iter().enumerate() {
         match entry {
-            JsonEntry::Paired { fields1, fields2, join_key } => {
+            JsonEntry::Paired {
+                fields1,
+                fields2,
+                join_key,
+            } => {
                 let key_e = json_escape(join_key);
-                let f1: Vec<String> =
-                    fields1.iter().map(|f| json_escape(f)).collect();
-                let f2: Vec<String> =
-                    fields2.iter().map(|f| json_escape(f)).collect();
+                let f1: Vec<String> = fields1.iter().map(|f| json_escape(f)).collect();
+                let f2: Vec<String> = fields2.iter().map(|f| json_escape(f)).collect();
                 write!(out, "  {{\"type\": \"paired\", \"join_key\": \"{key_e}\"")?;
                 write!(out, ", \"file1_fields\": [")?;
                 for (fi, f) in f1.iter().enumerate() {
@@ -595,10 +594,13 @@ fn write_json_output(out: &mut dyn Write, entries: &[JsonEntry]) -> io::Result<(
                 }
                 write!(out, "]}}")?;
             }
-            JsonEntry::Unpaired { file_num, fields, join_key } => {
+            JsonEntry::Unpaired {
+                file_num,
+                fields,
+                join_key,
+            } => {
                 let key_e = json_escape(join_key);
-                let fs: Vec<String> =
-                    fields.iter().map(|f| json_escape(f)).collect();
+                let fs: Vec<String> = fields.iter().map(|f| json_escape(f)).collect();
                 write!(
                     out,
                     "  {{\"type\": \"unpaired\", \"file\": {file_num}, \"join_key\": \"{key_e}\""
@@ -709,10 +711,11 @@ fn run_join(config: &Config) -> i32 {
     };
 
     if let Err(e) = out.flush()
-        && e.kind() != io::ErrorKind::BrokenPipe {
-            eprintln!("join: write error: {e}");
-            return 1;
-        }
+        && e.kind() != io::ErrorKind::BrokenPipe
+    {
+        eprintln!("join: write error: {e}");
+        return 1;
+    }
 
     exit_code
 }
@@ -742,9 +745,7 @@ fn run_join_text(
             }
         } else if !lines1.is_empty() && config.print_unpaired1 {
             let f1 = split_fields(&lines1[0], config.separator);
-            if let Err(e) =
-                write_unpaired_line(out, config, &f1, 1, config.field1)
-            {
+            if let Err(e) = write_unpaired_line(out, config, &f1, 1, config.field1) {
                 if e.kind() != io::ErrorKind::BrokenPipe {
                     eprintln!("join: write error: {e}");
                 }
@@ -752,9 +753,7 @@ fn run_join_text(
             }
         } else if !lines2.is_empty() && config.print_unpaired2 {
             let f2 = split_fields(&lines2[0], config.separator);
-            if let Err(e) =
-                write_unpaired_line(out, config, &f2, 2, config.field2)
-            {
+            if let Err(e) = write_unpaired_line(out, config, &f2, 2, config.field2) {
                 if e.kind() != io::ErrorKind::BrokenPipe {
                     eprintln!("join: write error: {e}");
                 }
@@ -777,53 +776,41 @@ fn run_join_text(
         // Check sort order.
         if config.check_order {
             if let Some(ref pk) = prev_key1
-                && let Some(msg) =
-                    check_sort_order(pk, key1, "file 1", config.ignore_case)
-                {
-                    eprintln!("{msg}");
-                    exit_code = 1;
-                }
+                && let Some(msg) = check_sort_order(pk, key1, "file 1", config.ignore_case)
+            {
+                eprintln!("{msg}");
+                exit_code = 1;
+            }
             if let Some(ref pk) = prev_key2
-                && let Some(msg) =
-                    check_sort_order(pk, key2, "file 2", config.ignore_case)
-                {
-                    eprintln!("{msg}");
-                    exit_code = 1;
-                }
+                && let Some(msg) = check_sort_order(pk, key2, "file 2", config.ignore_case)
+            {
+                eprintln!("{msg}");
+                exit_code = 1;
+            }
         }
 
         match compare_keys(key1, key2, config.ignore_case) {
             Ordering::Less => {
                 if config.print_unpaired1
-                    && let Err(e) = write_unpaired_line(
-                        out,
-                        config,
-                        &fields1,
-                        1,
-                        config.field1,
-                    ) {
-                        if e.kind() != io::ErrorKind::BrokenPipe {
-                            eprintln!("join: write error: {e}");
-                        }
-                        return 1;
+                    && let Err(e) = write_unpaired_line(out, config, &fields1, 1, config.field1)
+                {
+                    if e.kind() != io::ErrorKind::BrokenPipe {
+                        eprintln!("join: write error: {e}");
                     }
+                    return 1;
+                }
                 prev_key1 = Some(key1.to_string());
                 i += 1;
             }
             Ordering::Greater => {
                 if config.print_unpaired2
-                    && let Err(e) = write_unpaired_line(
-                        out,
-                        config,
-                        &fields2,
-                        2,
-                        config.field2,
-                    ) {
-                        if e.kind() != io::ErrorKind::BrokenPipe {
-                            eprintln!("join: write error: {e}");
-                        }
-                        return 1;
+                    && let Err(e) = write_unpaired_line(out, config, &fields2, 2, config.field2)
+                {
+                    if e.kind() != io::ErrorKind::BrokenPipe {
+                        eprintln!("join: write error: {e}");
                     }
+                    return 1;
+                }
                 prev_key2 = Some(key2.to_string());
                 j += 1;
             }
@@ -837,9 +824,7 @@ fn run_join_text(
                 while i < lines1.len() {
                     let f = split_fields(&lines1[i], config.separator);
                     let k = get_field(&f, config.field1);
-                    if compare_keys(k, &match_key, config.ignore_case)
-                        != Ordering::Equal
-                    {
+                    if compare_keys(k, &match_key, config.ignore_case) != Ordering::Equal {
                         break;
                     }
                     i += 1;
@@ -847,9 +832,7 @@ fn run_join_text(
                 while j < lines2.len() {
                     let f = split_fields(&lines2[j], config.separator);
                     let k = get_field(&f, config.field2);
-                    if compare_keys(k, &match_key, config.ignore_case)
-                        != Ordering::Equal
-                    {
+                    if compare_keys(k, &match_key, config.ignore_case) != Ordering::Equal {
                         break;
                     }
                     j += 1;
@@ -862,9 +845,7 @@ fn run_join_text(
                         for l2 in &lines2[j_start..j] {
                             let f2 = split_fields(l2, config.separator);
                             let jk = get_field(&f1, config.field1);
-                            if let Err(e) = write_paired_line(
-                                out, config, jk, &f1, &f2,
-                            ) {
+                            if let Err(e) = write_paired_line(out, config, jk, &f1, &f2) {
                                 if e.kind() != io::ErrorKind::BrokenPipe {
                                     eprintln!("join: write error: {e}");
                                 }
@@ -887,18 +868,12 @@ fn run_join_text(
             let key1 = get_field(&fields1, config.field1);
             if config.check_order
                 && let Some(ref pk) = prev_key1
-                    && let Some(msg) = check_sort_order(
-                        pk,
-                        key1,
-                        "file 1",
-                        config.ignore_case,
-                    ) {
-                        eprintln!("{msg}");
-                        exit_code = 1;
-                    }
-            if let Err(e) =
-                write_unpaired_line(out, config, &fields1, 1, config.field1)
+                && let Some(msg) = check_sort_order(pk, key1, "file 1", config.ignore_case)
             {
+                eprintln!("{msg}");
+                exit_code = 1;
+            }
+            if let Err(e) = write_unpaired_line(out, config, &fields1, 1, config.field1) {
                 if e.kind() != io::ErrorKind::BrokenPipe {
                     eprintln!("join: write error: {e}");
                 }
@@ -916,18 +891,12 @@ fn run_join_text(
             let key2 = get_field(&fields2, config.field2);
             if config.check_order
                 && let Some(ref pk) = prev_key2
-                    && let Some(msg) = check_sort_order(
-                        pk,
-                        key2,
-                        "file 2",
-                        config.ignore_case,
-                    ) {
-                        eprintln!("{msg}");
-                        exit_code = 1;
-                    }
-            if let Err(e) =
-                write_unpaired_line(out, config, &fields2, 2, config.field2)
+                && let Some(msg) = check_sort_order(pk, key2, "file 2", config.ignore_case)
             {
+                eprintln!("{msg}");
+                exit_code = 1;
+            }
+            if let Err(e) = write_unpaired_line(out, config, &fields2, 2, config.field2) {
                 if e.kind() != io::ErrorKind::BrokenPipe {
                     eprintln!("join: write error: {e}");
                 }
@@ -979,19 +948,17 @@ fn run_join_json(
 
         if config.check_order {
             if let Some(ref pk) = prev_key1
-                && let Some(msg) =
-                    check_sort_order(pk, key1, "file 1", config.ignore_case)
-                {
-                    eprintln!("{msg}");
-                    exit_code = 1;
-                }
+                && let Some(msg) = check_sort_order(pk, key1, "file 1", config.ignore_case)
+            {
+                eprintln!("{msg}");
+                exit_code = 1;
+            }
             if let Some(ref pk) = prev_key2
-                && let Some(msg) =
-                    check_sort_order(pk, key2, "file 2", config.ignore_case)
-                {
-                    eprintln!("{msg}");
-                    exit_code = 1;
-                }
+                && let Some(msg) = check_sort_order(pk, key2, "file 2", config.ignore_case)
+            {
+                eprintln!("{msg}");
+                exit_code = 1;
+            }
         }
 
         match compare_keys(key1, key2, config.ignore_case) {
@@ -1025,9 +992,7 @@ fn run_join_json(
                 while i < lines1.len() {
                     let f = split_fields(&lines1[i], config.separator);
                     let k = get_field(&f, config.field1);
-                    if compare_keys(k, &match_key, config.ignore_case)
-                        != Ordering::Equal
-                    {
+                    if compare_keys(k, &match_key, config.ignore_case) != Ordering::Equal {
                         break;
                     }
                     i += 1;
@@ -1035,9 +1000,7 @@ fn run_join_json(
                 while j < lines2.len() {
                     let f = split_fields(&lines2[j], config.separator);
                     let k = get_field(&f, config.field2);
-                    if compare_keys(k, &match_key, config.ignore_case)
-                        != Ordering::Equal
-                    {
+                    if compare_keys(k, &match_key, config.ignore_case) != Ordering::Equal {
                         break;
                     }
                     j += 1;
@@ -1050,14 +1013,8 @@ fn run_join_json(
                             let f2 = split_fields(l2, config.separator);
                             let jk = get_field(&f1, config.field1).to_string();
                             entries.push(JsonEntry::Paired {
-                                fields1: f1
-                                    .iter()
-                                    .map(|s| s.to_string())
-                                    .collect(),
-                                fields2: f2
-                                    .iter()
-                                    .map(|s| s.to_string())
-                                    .collect(),
+                                fields1: f1.iter().map(|s| s.to_string()).collect(),
+                                fields2: f2.iter().map(|s| s.to_string()).collect(),
                                 join_key: jk,
                             });
                         }
@@ -1077,15 +1034,11 @@ fn run_join_json(
             let key1 = get_field(&fields1, config.field1);
             if config.check_order
                 && let Some(ref pk) = prev_key1
-                    && let Some(msg) = check_sort_order(
-                        pk,
-                        key1,
-                        "file 1",
-                        config.ignore_case,
-                    ) {
-                        eprintln!("{msg}");
-                        exit_code = 1;
-                    }
+                && let Some(msg) = check_sort_order(pk, key1, "file 1", config.ignore_case)
+            {
+                eprintln!("{msg}");
+                exit_code = 1;
+            }
             entries.push(JsonEntry::Unpaired {
                 file_num: 1,
                 fields: fields1.iter().map(|s| s.to_string()).collect(),
@@ -1101,15 +1054,11 @@ fn run_join_json(
             let key2 = get_field(&fields2, config.field2);
             if config.check_order
                 && let Some(ref pk) = prev_key2
-                    && let Some(msg) = check_sort_order(
-                        pk,
-                        key2,
-                        "file 2",
-                        config.ignore_case,
-                    ) {
-                        eprintln!("{msg}");
-                        exit_code = 1;
-                    }
+                && let Some(msg) = check_sort_order(pk, key2, "file 2", config.ignore_case)
+            {
+                eprintln!("{msg}");
+                exit_code = 1;
+            }
             entries.push(JsonEntry::Unpaired {
                 file_num: 2,
                 fields: fields2.iter().map(|s| s.to_string()).collect(),

@@ -46,12 +46,24 @@ struct LogEntry {
 
 fn sample_log() -> Vec<LogEntry> {
     vec![
-        LogEntry { hash: "abc1234".to_string(), _author: "Dev <dev@slateos.local>".to_string(),
-            date: "2025-05-22".to_string(), message: "Add feature X".to_string() },
-        LogEntry { hash: "def5678".to_string(), _author: "Dev <dev@slateos.local>".to_string(),
-            date: "2025-05-21".to_string(), message: "Fix bug in parser".to_string() },
-        LogEntry { hash: "ghi9012".to_string(), _author: "Dev <dev@slateos.local>".to_string(),
-            date: "2025-05-20".to_string(), message: "Initial commit".to_string() },
+        LogEntry {
+            hash: "abc1234".to_string(),
+            _author: "Dev <dev@slateos.local>".to_string(),
+            date: "2025-05-22".to_string(),
+            message: "Add feature X".to_string(),
+        },
+        LogEntry {
+            hash: "def5678".to_string(),
+            _author: "Dev <dev@slateos.local>".to_string(),
+            date: "2025-05-21".to_string(),
+            message: "Fix bug in parser".to_string(),
+        },
+        LogEntry {
+            hash: "ghi9012".to_string(),
+            _author: "Dev <dev@slateos.local>".to_string(),
+            date: "2025-05-20".to_string(),
+            message: "Initial commit".to_string(),
+        },
     ]
 }
 
@@ -97,11 +109,26 @@ fn run_git(args: Vec<String>) -> i32 {
             println!("   remote   Manage set of tracked repositories");
             0
         }
-        "--version" => { println!("git version 0.1.0 (Slate OS)"); 0 }
-        "init" => { println!("Initialized empty Git repository in .git/ (simulated)"); 0 }
+        "--version" => {
+            println!("git version 0.1.0 (Slate OS)");
+            0
+        }
+        "init" => {
+            println!("Initialized empty Git repository in .git/ (simulated)");
+            0
+        }
         "clone" => {
-            let url = cmd_args.first().map(|s| s.as_str()).unwrap_or("https://example.com/repo.git");
-            println!("Cloning into '{}'...", url.rsplit('/').next().unwrap_or("repo").trim_end_matches(".git"));
+            let url = cmd_args
+                .first()
+                .map(|s| s.as_str())
+                .unwrap_or("https://example.com/repo.git");
+            println!(
+                "Cloning into '{}'...",
+                url.rsplit('/')
+                    .next()
+                    .unwrap_or("repo")
+                    .trim_end_matches(".git")
+            );
             println!("remote: Enumerating objects: 150, done.");
             println!("remote: Counting objects: 100%");
             println!("remote: Compressing objects: 100%");
@@ -114,17 +141,23 @@ fn run_git(args: Vec<String>) -> i32 {
             println!("On branch {}", s.branch);
             if !s.staged.is_empty() {
                 println!("Changes to be committed:");
-                for f in &s.staged { println!("\tmodified:   {}", f); }
+                for f in &s.staged {
+                    println!("\tmodified:   {}", f);
+                }
             }
             if !s.modified.is_empty() {
                 println!();
                 println!("Changes not staged for commit:");
-                for f in &s.modified { println!("\tmodified:   {}", f); }
+                for f in &s.modified {
+                    println!("\tmodified:   {}", f);
+                }
             }
             if !s.untracked.is_empty() {
                 println!();
                 println!("Untracked files:");
-                for f in &s.untracked { println!("\t{}", f); }
+                for f in &s.untracked {
+                    println!("\t{}", f);
+                }
             }
             0
         }
@@ -163,12 +196,16 @@ fn run_git(args: Vec<String>) -> i32 {
             if files.is_empty() || files.contains(&"-h") {
                 println!("usage: git add <pathspec>...");
             } else {
-                for f in &files { println!("add '{}'", f); }
+                for f in &files {
+                    println!("add '{}'", f);
+                }
             }
             0
         }
         "commit" => {
-            let msg = cmd_args.iter().position(|a| a == "-m")
+            let msg = cmd_args
+                .iter()
+                .position(|a| a == "-m")
                 .and_then(|i| cmd_args.get(i + 1));
             match msg {
                 Some(m) => {
@@ -220,7 +257,10 @@ fn run_git(args: Vec<String>) -> i32 {
                 }
                 "add" => {
                     let name = cmd_args.get(1).map(|s| s.as_str()).unwrap_or("origin");
-                    let url = cmd_args.get(2).map(|s| s.as_str()).unwrap_or("https://example.com/repo.git");
+                    let url = cmd_args
+                        .get(2)
+                        .map(|s| s.as_str())
+                        .unwrap_or("https://example.com/repo.git");
                     println!("Added remote '{}' → {}", name, url);
                 }
                 _ => println!("origin"),
@@ -230,7 +270,10 @@ fn run_git(args: Vec<String>) -> i32 {
         "push" | "pull" | "fetch" => {
             let remote = cmd_args.first().map(|s| s.as_str()).unwrap_or("origin");
             println!("{}: from {} (simulated)", cmd, remote);
-            if cmd == "push" { println!("To {}", remote); println!("   abc1234..def5678  main -> main"); }
+            if cmd == "push" {
+                println!("To {}", remote);
+                println!("   abc1234..def5678  main -> main");
+            }
             0
         }
         "tag" => {
@@ -252,9 +295,23 @@ fn run_git(args: Vec<String>) -> i32 {
             }
             0
         }
-        "show" => { println!("commit abc1234"); println!("Author: Dev"); println!("    Add feature X"); 0 }
-        "rebase" => { println!("rebase: rebasing onto {} (simulated)", cmd_args.first().map(|s| s.as_str()).unwrap_or("main")); 0 }
-        other => { eprintln!("git: '{}' is not a git command.", other); 1 }
+        "show" => {
+            println!("commit abc1234");
+            println!("Author: Dev");
+            println!("    Add feature X");
+            0
+        }
+        "rebase" => {
+            println!(
+                "rebase: rebasing onto {} (simulated)",
+                cmd_args.first().map(|s| s.as_str()).unwrap_or("main")
+            );
+            0
+        }
+        other => {
+            eprintln!("git: '{}' is not a git command.", other);
+            1
+        }
     }
 }
 

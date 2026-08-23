@@ -4,6 +4,7 @@
 //!
 //! Multi-personality: `woodpecker-cli`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -52,7 +53,7 @@ fn run_woodpecker(args: &[String]) -> i32 {
                     println!("  Branch: main");
                     println!("  Duration: 1m 45s");
                 }
-                _ => println!("woodpecker pipeline: '{}' completed", sub),
+                _ => println!("woodpecker pipeline: {} completed", quoteaf_os(sub)),
             }
         }
         "repo" => {
@@ -61,7 +62,7 @@ fn run_woodpecker(args: &[String]) -> i32 {
                 println!("myorg/myapp");
                 println!("myorg/backend");
             } else {
-                println!("woodpecker repo: '{}' completed", sub);
+                println!("woodpecker repo: {} completed", quoteaf_os(sub));
             }
         }
         "lint" => {
@@ -83,7 +84,7 @@ fn run_woodpecker(args: &[String]) -> i32 {
             println!("[test] go test ./...");
             println!("[test] ok  ./... 2.345s");
         }
-        _ => println!("woodpecker-cli: '{}' completed", subcmd),
+        _ => println!("woodpecker-cli: {} completed", quoteaf_os(subcmd)),
     }
     0
 }

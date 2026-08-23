@@ -4,6 +4,7 @@
 //!
 //! Multi-personality: `pdm`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -125,7 +126,7 @@ fn run_pdm(args: &[String]) -> i32 {
         }
         "run" => {
             let cmd = args.get(1).map(|s| s.as_str()).unwrap_or("python");
-            println!("pdm: running '{}' in project environment", cmd);
+            println!("pdm: running {} in project environment", quoteaf_os(cmd));
         }
         "use" => {
             let ver = args.get(1).map(|s| s.as_str()).unwrap_or("3.12");
@@ -141,10 +142,10 @@ fn run_pdm(args: &[String]) -> i32 {
                     println!("Size: 1.2 GB");
                 }
                 "clear" => println!("Cache cleared."),
-                _ => println!("pdm cache: '{}' completed", sub),
+                _ => println!("pdm cache: {} completed", quoteaf_os(sub)),
             }
         }
-        _ => println!("pdm: '{}' completed", subcmd),
+        _ => println!("pdm: {} completed", quoteaf_os(subcmd)),
     }
     0
 }

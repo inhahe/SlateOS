@@ -8,6 +8,7 @@
 //! - `dockerd` — Docker daemon
 //! - `docker-compose` — multi-container orchestration
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -144,7 +145,7 @@ fn run_docker(args: Vec<String>) -> i32 {
             if detach {
                 println!("a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2");
             } else {
-                println!("Unable to find image '{}' locally", image);
+                println!("Unable to find image {} locally", quoteaf_os(image));
                 println!(
                     "latest: Pulling from library/{}",
                     image.split(':').next().unwrap_or(image)
@@ -380,7 +381,7 @@ fn run_docker(args: Vec<String>) -> i32 {
             0
         }
         other => {
-            eprintln!("docker: '{}' is not a docker command.", other);
+            eprintln!("docker: {} is not a docker command.", quoteaf_os(other));
             1
         }
     }
@@ -447,7 +448,7 @@ fn run_compose(args: Vec<String>) -> i32 {
             0
         }
         other => {
-            eprintln!("docker-compose: '{}' is not a command.", other);
+            eprintln!("docker-compose: {} is not a command.", quoteaf_os(other));
             1
         }
     }

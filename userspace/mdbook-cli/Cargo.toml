@@ -2,3 +2,8 @@
 name = "mdbook-cli"
 version = "0.1.0"
 edition = "2024"
+
+[dependencies]
+# mdbook-cli names books, chapters and source files, read from the command
+# line and from SUMMARY.md in the book tree.
+quoting = { path = "../quoting" }

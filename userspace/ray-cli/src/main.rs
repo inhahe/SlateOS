@@ -4,6 +4,7 @@
 //!
 //! Multi-personality: `ray`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -66,7 +67,7 @@ fn run_ray(args: &[String]) -> i32 {
         }
         "submit" => {
             let script = args.get(1).map(|s| s.as_str()).unwrap_or("train.py");
-            println!("Submitting job '{}'...", script);
+            println!("Submitting job {}...", quoteaf_os(script));
             println!("  Job ID: raysubmit_abc123");
             println!("  Status: PENDING");
         }
@@ -96,7 +97,7 @@ fn run_ray(args: &[String]) -> i32 {
                     println!("  [INFO] Workers: 4");
                     println!("  [INFO] Training complete. Accuracy: 0.95");
                 }
-                _ => println!("ray job: '{}' completed", sub),
+                _ => println!("ray job: {} completed", quoteaf_os(sub)),
             }
         }
         "up" => {
@@ -110,7 +111,7 @@ fn run_ray(args: &[String]) -> i32 {
             println!("Tearing down cluster...");
             println!("  All nodes terminated.");
         }
-        _ => println!("ray: '{}' completed", subcmd),
+        _ => println!("ray: {} completed", quoteaf_os(subcmd)),
     }
     0
 }

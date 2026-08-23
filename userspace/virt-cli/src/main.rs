@@ -4,6 +4,7 @@
 //!
 //! Multi-personality: `virt-install`, `virt-clone`, `virt-viewer`, `virt-xml`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -87,9 +88,9 @@ fn run_virt_clone(args: &[String]) -> i32 {
         .map(|w| w[1].as_str())
         .unwrap_or("vm1-clone");
 
-    println!("Cloning '{}' → '{}'...", orig, name);
+    println!("Cloning {} → {}...", quoteaf_os(orig), quoteaf_os(name));
     println!("  Cloning disk...");
-    println!("Clone '{}' created successfully.", name);
+    println!("Clone {} created successfully.", quoteaf_os(name));
     0
 }
 
@@ -111,7 +112,7 @@ fn run_virt_viewer(args: &[String]) -> i32 {
         .find(|a| !a.starts_with('-'))
         .map(|s| s.as_str())
         .unwrap_or("vm1");
-    println!("Connecting to '{}' console...", domain);
+    println!("Connecting to {} console...", quoteaf_os(domain));
     println!("Connected via SPICE.");
     0
 }

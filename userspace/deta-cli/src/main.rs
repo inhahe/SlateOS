@@ -4,6 +4,7 @@
 //!
 //! Multi-personality: `space`, `deta`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -36,10 +37,10 @@ fn run_space(args: &[String]) -> i32 {
         "version" | "--version" => println!("space v0.5.1"),
         "new" => {
             let name = args.get(1).map(|s| s.as_str()).unwrap_or("my-app");
-            println!("Creating project '{}'...", name);
+            println!("Creating project {}...", quoteaf_os(name));
             println!("  Created Spacefile");
             println!("  Created Discovery.md");
-            println!("Project '{}' created.", name);
+            println!("Project {} created.", quoteaf_os(name));
         }
         "push" => {
             println!("Pushing to Deta Space...");
@@ -68,7 +69,7 @@ fn run_space(args: &[String]) -> i32 {
         "login" => {
             println!("Logged in as user@example.com");
         }
-        _ => println!("space: '{}' completed", subcmd),
+        _ => println!("space: {} completed", quoteaf_os(subcmd)),
     }
     0
 }

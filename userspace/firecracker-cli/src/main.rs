@@ -4,6 +4,7 @@
 //!
 //! Multi-personality: `firecracker`, `jailer`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -50,7 +51,7 @@ fn run_firecracker(args: &[String]) -> i32 {
 
     if let Some(cfg) = config {
         println!("Firecracker v1.7.0");
-        println!("  Loading config from '{}'...", cfg);
+        println!("  Loading config from {}...", quoteaf_os(cfg));
         println!("  Boot source: vmlinux");
         println!("  Root drive: rootfs.ext4");
         println!("  Memory: 128 MiB");
@@ -58,7 +59,7 @@ fn run_firecracker(args: &[String]) -> i32 {
         println!("  MicroVM started successfully.");
     } else {
         println!("Firecracker v1.7.0");
-        println!("  API server listening on '{}'", api_sock);
+        println!("  API server listening on {}", quoteaf_os(api_sock));
         println!("  Waiting for configuration via API...");
     }
     0
@@ -91,7 +92,7 @@ fn run_jailer(args: &[String]) -> i32 {
         .find(|w| w[0] == "--id")
         .map(|w| w[1].as_str())
         .unwrap_or("vm1");
-    println!("jailer: setting up jail for '{}'", id);
+    println!("jailer: setting up jail for {}", quoteaf_os(id));
     println!("  Chroot: /srv/jailer/firecracker/{}/root", id);
     println!("  Starting firecracker in jail...");
     0

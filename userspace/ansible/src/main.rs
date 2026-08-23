@@ -12,6 +12,7 @@
 //! - `ansible-config` — show configuration
 //! - `ansible-doc` — documentation viewer
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -153,7 +154,7 @@ fn run_galaxy(args: Vec<String>) -> i32 {
                 }
                 "install" => {
                     let name = cmd_args.get(1).map(|s| s.as_str()).unwrap_or("role");
-                    println!("- downloading role '{}' ...", name);
+                    println!("- downloading role {} ...", quoteaf_os(name));
                     println!(
                         "- extracting {} to /home/user/.ansible/roles/{}",
                         name, name
@@ -170,7 +171,7 @@ fn run_galaxy(args: Vec<String>) -> i32 {
             0
         }
         other => {
-            eprintln!("ansible-galaxy: unknown type '{}'", other);
+            eprintln!("ansible-galaxy: unknown type {}", quoteaf_os(other));
             1
         }
     }
@@ -222,7 +223,7 @@ fn run_vault(args: Vec<String>) -> i32 {
             0
         }
         other => {
-            eprintln!("ansible-vault: unknown command '{}'", other);
+            eprintln!("ansible-vault: unknown command {}", quoteaf_os(other));
             1
         }
     }

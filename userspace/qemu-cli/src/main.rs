@@ -4,6 +4,7 @@
 //!
 //! Multi-personality: `qemu-system-x86_64`, `qemu-img`, `qemu-nbd`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -107,7 +108,7 @@ fn run_qemu_img(args: &[String]) -> i32 {
                 .collect();
             let file = positional.first().unwrap_or(&"disk.qcow2");
             let size = positional.get(1).unwrap_or(&"10G");
-            println!("Formatting '{}', fmt={} size={}", file, fmt, size);
+            println!("Formatting {}, fmt={fmt} size={size}", quoteaf_os(file));
         }
         "info" => {
             let file = args
@@ -137,13 +138,13 @@ fn run_qemu_img(args: &[String]) -> i32 {
                 .find(|a| !a.starts_with('-'))
                 .map(|s| s.as_str())
                 .unwrap_or("disk.qcow2");
-            println!("Image '{}' resized.", file);
+            println!("Image {} resized.", quoteaf_os(file));
         }
         "check" => {
             println!("No errors were found on the image.");
         }
         _ => {
-            eprintln!("qemu-img: unknown command '{}'. See --help.", cmd);
+            eprintln!("qemu-img: unknown command {}. See --help.", quoteaf_os(cmd));
             return 1;
         }
     }

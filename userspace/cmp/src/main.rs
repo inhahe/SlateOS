@@ -30,6 +30,7 @@
 //! - 1: files differ
 //! - 2: error occurred
 
+use quoting::quoteaf_os;
 use std::env;
 use std::fs::File;
 use std::io::{self, Read, Write};
@@ -77,7 +78,7 @@ fn parse_byte_count(s: &str, opt_name: &str) -> u64 {
     match s.parse::<u64>() {
         Ok(n) => n,
         Err(_) => {
-            eprintln!("cmp: invalid {opt_name} value '{s}'");
+            eprintln!("cmp: invalid {opt_name} value {}", quoteaf_os(s));
             process::exit(2);
         }
     }
@@ -160,7 +161,7 @@ fn parse_args(args: &[String]) -> ParseResult {
             } else if arg == "--version" {
                 return ParseResult::Version;
             } else {
-                eprintln!("cmp: unrecognized option '{arg}'");
+                eprintln!("cmp: unrecognized option {}", quoteaf_os(arg));
                 eprintln!("Try 'cmp --help' for more information.");
                 process::exit(2);
             }
@@ -213,7 +214,7 @@ fn parse_args(args: &[String]) -> ParseResult {
                     continue;
                 }
                 other => {
-                    eprintln!("cmp: invalid option -- '{other}'");
+                    eprintln!("cmp: invalid option -- {}", quoteaf_os(other.to_string()));
                     eprintln!("Try 'cmp --help' for more information.");
                     process::exit(2);
                 }

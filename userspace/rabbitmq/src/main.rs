@@ -4,6 +4,7 @@
 //!
 //! Multi-personality: `rabbitmq-server`, `rabbitmqctl`, `rabbitmq-plugins`, `rabbitmq-diagnostics`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -160,7 +161,7 @@ fn run_ctl(args: Vec<String>) -> i32 {
             0
         }
         other => {
-            eprintln!("rabbitmqctl: unknown command '{}'", other);
+            eprintln!("rabbitmqctl: unknown command {}", quoteaf_os(other));
             1
         }
     }
@@ -216,7 +217,7 @@ fn run_plugins(args: Vec<String>) -> i32 {
             0
         }
         other => {
-            eprintln!("rabbitmq-plugins: unknown command '{}'", other);
+            eprintln!("rabbitmq-plugins: unknown command {}", quoteaf_os(other));
             1
         }
     }
@@ -276,7 +277,10 @@ fn run_diagnostics(args: Vec<String>) -> i32 {
             0
         }
         other => {
-            eprintln!("rabbitmq-diagnostics: unknown command '{}'", other);
+            eprintln!(
+                "rabbitmq-diagnostics: unknown command {}",
+                quoteaf_os(other)
+            );
             1
         }
     }

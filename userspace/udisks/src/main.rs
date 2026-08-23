@@ -10,6 +10,7 @@
 
 #![deny(clippy::all)]
 
+use quoting::quoteaf_os;
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -292,7 +293,7 @@ fn udisksctl_main(args: &[String]) -> i32 {
             0
         }
         other => {
-            eprintln!("udisksctl: unknown command '{other}'");
+            eprintln!("udisksctl: unknown command {}", quoteaf_os(other));
             1
         }
     }
@@ -404,7 +405,7 @@ fn cmd_info(args: &[String]) -> i32 {
             0
         }
         None => {
-            eprintln!("udisksctl: device '{device}' not found");
+            eprintln!("udisksctl: device {} not found", quoteaf_os(&device));
             1
         }
     }
@@ -629,7 +630,7 @@ fn udisksd_main(args: &[String]) -> i32 {
                 return 0;
             }
             other => {
-                eprintln!("udisksd: unknown option '{other}'");
+                eprintln!("udisksd: unknown option {}", quoteaf_os(other));
             }
         }
     }

@@ -8,6 +8,7 @@
 //! - `fscrypt` (default) — filesystem encryption management
 //! - `fscryptctl` — low-level fscrypt control
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -166,7 +167,7 @@ fn run_fscrypt(args: Vec<String>) -> i32 {
         "purge" => fscrypt_purge(&cmd_args),
         "metadata" => fscrypt_metadata(&cmd_args),
         other => {
-            eprintln!("fscrypt: unknown command '{}'", other);
+            eprintln!("fscrypt: unknown command {}", quoteaf_os(other));
             1
         }
     }
@@ -332,7 +333,7 @@ fn fscrypt_metadata(args: &[String]) -> i32 {
             0
         }
         other => {
-            eprintln!("fscrypt metadata: unknown subcommand '{}'", other);
+            eprintln!("fscrypt metadata: unknown subcommand {}", quoteaf_os(other));
             1
         }
     }
@@ -387,7 +388,7 @@ fn run_fscryptctl(args: Vec<String>) -> i32 {
             0
         }
         other => {
-            eprintln!("fscryptctl: unknown command '{}'", other);
+            eprintln!("fscryptctl: unknown command {}", quoteaf_os(other));
             1
         }
     }

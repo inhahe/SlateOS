@@ -19,6 +19,7 @@
 //! watch --json <command>         Output each run as JSON
 //! ```
 
+use quoting::quoteaf_os;
 use std::env;
 use std::fmt::Write as FmtWrite;
 use std::process;
@@ -156,8 +157,8 @@ fn parse_args(args: &[String]) -> Option<Config> {
                     }
                     _ => {
                         eprintln!(
-                            "watch: invalid interval '{}' (must be a positive number)",
-                            args[i]
+                            "watch: invalid interval {} (must be a positive number)",
+                            quoteaf_os(&args[i])
                         );
                         process::exit(1);
                     }
@@ -198,8 +199,8 @@ fn parse_args(args: &[String]) -> Option<Config> {
                                         }
                                         _ => {
                                             eprintln!(
-                                                "watch: invalid interval '{rest}' \
-                                                 (must be a positive number)"
+                                                "watch: invalid interval {} (must be a positive number)",
+                                                quoteaf_os(rest)
                                             );
                                             process::exit(1);
                                         }
@@ -212,9 +213,8 @@ fn parse_args(args: &[String]) -> Option<Config> {
                                         }
                                         _ => {
                                             eprintln!(
-                                                "watch: invalid interval '{}' \
-                                                 (must be a positive number)",
-                                                args[i]
+                                                "watch: invalid interval {} (must be a positive number)",
+                                                quoteaf_os(&args[i])
                                             );
                                             process::exit(1);
                                         }

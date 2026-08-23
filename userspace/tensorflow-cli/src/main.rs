@@ -4,6 +4,7 @@
 //!
 //! Multi-personality: `tensorflow`, `tf`, `saved_model_cli`, `tflite`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -72,7 +73,7 @@ fn run_tensorflow(args: &[String]) -> i32 {
             println!("test_lite: 567 passed");
             println!("All 9714 tests passed.");
         }
-        _ => println!("tensorflow: command '{}' completed", subcmd),
+        _ => println!("tensorflow: command {} completed", quoteaf_os(subcmd)),
     }
     0
 }
@@ -112,7 +113,7 @@ fn run_saved_model_cli(args: &[String]) -> i32 {
             println!("Optimization: DEFAULT");
             println!("Wrote: model.tflite (4.2 MB)");
         }
-        _ => println!("saved_model_cli: command '{}' completed", subcmd),
+        _ => println!("saved_model_cli: command {} completed", quoteaf_os(subcmd)),
     }
     0
 }
@@ -161,7 +162,7 @@ fn run_tflite(args: &[String]) -> i32 {
             println!("  Delegates: GPU, NNAPI, XNNPACK");
             println!("  Validation: PASSED");
         }
-        _ => println!("tflite: command '{}' completed", subcmd),
+        _ => println!("tflite: command {} completed", quoteaf_os(subcmd)),
     }
     0
 }

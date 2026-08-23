@@ -4,6 +4,7 @@
 //!
 //! Multi-personality: `aplay`, `arecord`, `amixer`, `alsamixer`, `alsactl`, `speaker-test`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -49,13 +50,13 @@ fn run_aplay(args: Vec<String>, recording: bool) -> i32 {
         .unwrap_or("audio.wav");
     if recording {
         println!(
-            "Recording WAVE '{}' : Signed 16 bit LE, Rate 44100 Hz, Stereo",
-            file
+            "Recording WAVE {} : Signed 16 bit LE, Rate 44100 Hz, Stereo",
+            quoteaf_os(file)
         );
     } else {
         println!(
-            "Playing WAVE '{}' : Signed 16 bit LE, Rate 44100 Hz, Stereo",
-            file
+            "Playing WAVE {} : Signed 16 bit LE, Rate 44100 Hz, Stereo",
+            quoteaf_os(file)
         );
     }
     0
@@ -93,7 +94,7 @@ fn run_amixer(args: Vec<String>) -> i32 {
         "sset" => {
             let name = args.get(1).map(|s| s.as_str()).unwrap_or("Master");
             let val = args.get(2).map(|s| s.as_str()).unwrap_or("85%");
-            println!("Simple mixer control '{}',0", name);
+            println!("Simple mixer control {},0", quoteaf_os(name));
             println!("  Front Left: Playback {} [on]", val);
             println!("  Front Right: Playback {} [on]", val);
         }

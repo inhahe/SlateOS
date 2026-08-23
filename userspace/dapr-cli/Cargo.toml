@@ -2,3 +2,8 @@
 name = "dapr-cli"
 version = "0.1.0"
 edition = "2024"
+
+[dependencies]
+# dapr-cli names app IDs, methods, topics and pubsub components, every one
+# of them registered by another process.
+quoting = { path = "../quoting" }

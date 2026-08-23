@@ -4,6 +4,7 @@
 //!
 //! Multi-personality: `mimirtool`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -43,7 +44,7 @@ fn run_mimirtool(args: &[String]) -> i32 {
                 "sync" => println!("Rules synced: 5 rules in 2 groups."),
                 "lint" => println!("Rules linted: all valid."),
                 "check" => println!("Rules checked: all valid."),
-                _ => println!("mimirtool rules: '{}' completed", sub),
+                _ => println!("mimirtool rules: {} completed", quoteaf_os(sub)),
             }
         }
         "analyse" => {
@@ -60,7 +61,7 @@ fn run_mimirtool(args: &[String]) -> i32 {
                     println!("  Recording rules: 15");
                     println!("  Alert rules: 8");
                 }
-                _ => println!("mimirtool analyse: '{}' completed", sub),
+                _ => println!("mimirtool analyse: {} completed", quoteaf_os(sub)),
             }
         }
         "bucket" => {
@@ -72,7 +73,7 @@ fn run_mimirtool(args: &[String]) -> i32 {
                 println!("  Oldest block: 2024-01-01");
             }
         }
-        _ => println!("mimirtool: '{}' completed", subcmd),
+        _ => println!("mimirtool: {} completed", quoteaf_os(subcmd)),
     }
     0
 }

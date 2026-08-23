@@ -2,3 +2,8 @@
 name = "asdf-cli"
 version = "0.1.0"
 edition = "2024"
+
+[dependencies]
+# asdf-cli names plugins and tool versions, read from the command line and
+# from .tool-versions in the project tree.
+quoting = { path = "../quoting" }

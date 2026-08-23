@@ -4,6 +4,7 @@
 //!
 //! Multi-personality: `crossplane`, `crank`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -39,7 +40,7 @@ fn run_crossplane(args: &[String]) -> i32 {
             match sub2 {
                 "init" => {
                     let name = args.get(2).map(|s| s.as_str()).unwrap_or("my-provider");
-                    println!("Initializing package '{}'...", name);
+                    println!("Initializing package {}...", quoteaf_os(name));
                     println!("  Created crossplane.yaml");
                     println!("  Created apis/");
                     println!("Done.");
@@ -62,10 +63,10 @@ fn run_crossplane(args: &[String]) -> i32 {
                     println!("Installing {}...", pkg);
                     println!("Package installed successfully.");
                 }
-                _ => println!("crossplane xpkg: '{}' completed", sub2),
+                _ => println!("crossplane xpkg: {} completed", quoteaf_os(sub2)),
             }
         }
-        _ => println!("crossplane: '{}' completed", subcmd),
+        _ => println!("crossplane: {} completed", quoteaf_os(subcmd)),
     }
     0
 }

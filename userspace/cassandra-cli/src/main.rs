@@ -4,6 +4,7 @@
 //!
 //! Multi-personality: `cqlsh` and `nodetool`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -138,8 +139,8 @@ fn run_nodetool(args: Vec<String>) -> i32 {
         "repair" => {
             let keyspace = args.get(1).map(|s| s.as_str()).unwrap_or("myks");
             println!(
-                "[2024-01-15 14:00:00] Starting repair for keyspace '{}'...",
-                keyspace
+                "[2024-01-15 14:00:00] Starting repair for keyspace {}...",
+                quoteaf_os(keyspace)
             );
             println!("[2024-01-15 14:00:05] Repair session 1 of 3 completed");
             println!("[2024-01-15 14:00:10] Repair session 2 of 3 completed");
@@ -149,7 +150,7 @@ fn run_nodetool(args: Vec<String>) -> i32 {
         }
         "flush" => {
             let keyspace = args.get(1).map(|s| s.as_str()).unwrap_or("myks");
-            println!("Flushing keyspace '{}'...", keyspace);
+            println!("Flushing keyspace {}...", quoteaf_os(keyspace));
             println!("  Flushed memtables for 5 tables");
             0
         }
@@ -157,7 +158,7 @@ fn run_nodetool(args: Vec<String>) -> i32 {
             if cmd.is_empty() {
                 eprintln!("Usage: nodetool <command>. See --help.");
             } else {
-                eprintln!("Error: unknown command '{}'. See --help.", cmd);
+                eprintln!("Error: unknown command {}. See --help.", quoteaf_os(cmd));
             }
             1
         }

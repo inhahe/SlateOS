@@ -4,6 +4,7 @@
 //!
 //! Multi-personality: `cml`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -38,12 +39,12 @@ fn run_cml(args: &[String]) -> i32 {
                 println!("Comment posted successfully.");
                 println!("URL: https://github.com/myorg/myrepo/pull/42#issuecomment-123");
             } else {
-                println!("cml comment: '{}' completed", sub);
+                println!("cml comment: {} completed", quoteaf_os(sub));
             }
         }
         "publish" => {
             let file = args.get(1).map(|s| s.as_str()).unwrap_or("metrics.png");
-            println!("Publishing '{}'...", file);
+            println!("Publishing {}...", quoteaf_os(file));
             println!("https://asset.cml.dev/abc123.png");
         }
         "runner" => {
@@ -66,7 +67,7 @@ fn run_cml(args: &[String]) -> i32 {
             println!("Creating pull request...");
             println!("  PR created: https://github.com/myorg/myrepo/pull/43");
         }
-        _ => println!("cml: '{}' completed", subcmd),
+        _ => println!("cml: {} completed", quoteaf_os(subcmd)),
     }
     0
 }

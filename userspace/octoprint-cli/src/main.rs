@@ -4,6 +4,7 @@
 //!
 //! Multi-personality: `octoprint`, `octoprint-cli`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -57,14 +58,14 @@ fn run_octoprint(args: &[String]) -> i32 {
                     println!("  OctoPrint-PrintTimeGenius 2.2.8");
                     println!("  OctoPrint-Themeify 1.2.2");
                 }
-                _ => println!("octoprint plugins: '{}' completed", action),
+                _ => println!("octoprint plugins: {} completed", quoteaf_os(action)),
             }
         }
         "user" => {
             println!("Users:");
             println!("  admin (admin, active)");
         }
-        _ => println!("octoprint: '{}' completed", subcmd),
+        _ => println!("octoprint: {} completed", quoteaf_os(subcmd)),
     }
     0
 }
@@ -97,7 +98,7 @@ fn run_octoprint_cli(args: &[String]) -> i32 {
             println!("  Hotend: 22.5°C (target: 0°C)");
             println!("  Bed: 21.8°C (target: 0°C)");
         }
-        _ => println!("octoprint-cli: '{}' completed", subcmd),
+        _ => println!("octoprint-cli: {} completed", quoteaf_os(subcmd)),
     }
     0
 }

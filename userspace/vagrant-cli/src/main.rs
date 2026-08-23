@@ -4,6 +4,7 @@
 //!
 //! Single personality: `vagrant`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -98,7 +99,10 @@ fn run_vagrant(args: Vec<String>) -> i32 {
                 "save" => println!("==> default: Snapshotting the machine as 'snapshot1'..."),
                 "restore" => println!("==> default: Restoring snapshot 'snapshot1'..."),
                 "delete" => println!("==> default: Deleting snapshot 'snapshot1'..."),
-                _ => println!("vagrant snapshot: unknown subcommand '{}'", subcmd),
+                _ => println!(
+                    "vagrant snapshot: unknown subcommand {}",
+                    quoteaf_os(subcmd)
+                ),
             }
         }
         "box" => {
@@ -110,7 +114,7 @@ fn run_vagrant(args: Vec<String>) -> i32 {
                 }
                 "add" => println!("==> box: Adding box..."),
                 "remove" => println!("==> box: Removing box..."),
-                _ => println!("vagrant box: unknown subcommand '{}'", subcmd),
+                _ => println!("vagrant box: unknown subcommand {}", quoteaf_os(subcmd)),
             }
         }
         "validate" => println!("Vagrantfile validated successfully."),
@@ -119,7 +123,7 @@ fn run_vagrant(args: Vec<String>) -> i32 {
             println!("  22 (guest) => 2222 (host)");
         }
         _ => {
-            eprintln!("vagrant: unknown command '{}'. See --help.", cmd);
+            eprintln!("vagrant: unknown command {}. See --help.", quoteaf_os(cmd));
             return 1;
         }
     }

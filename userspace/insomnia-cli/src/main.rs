@@ -4,6 +4,7 @@
 //!
 //! Multi-personality: `inso`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -42,7 +43,7 @@ fn run_inso(args: &[String]) -> i32 {
                     println!();
                     println!("3 passing (157ms)");
                 }
-                _ => println!("inso run: '{}' completed", sub),
+                _ => println!("inso run: {} completed", quoteaf_os(sub)),
             }
         }
         "generate" => {
@@ -53,7 +54,7 @@ fn run_inso(args: &[String]) -> i32 {
                     println!("  Output: kong.yaml");
                     println!("Done.");
                 }
-                _ => println!("inso generate: '{}' completed", sub),
+                _ => println!("inso generate: {} completed", quoteaf_os(sub)),
             }
         }
         "lint" => {
@@ -66,7 +67,7 @@ fn run_inso(args: &[String]) -> i32 {
             println!("Exporting {}...", sub);
             println!("Done.");
         }
-        _ => println!("inso: '{}' completed", subcmd),
+        _ => println!("inso: {} completed", quoteaf_os(subcmd)),
     }
     0
 }

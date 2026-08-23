@@ -2,3 +2,8 @@
 name = "octoprint-cli"
 version = "0.1.0"
 edition = "2024"
+
+[dependencies]
+# octoprint-cli names printers, print jobs and G-code files; a job name is a
+# file name uploaded by whoever has access to the printer.
+quoting = { path = "../quoting" }

@@ -4,6 +4,7 @@
 //!
 //! Multi-personality: `drone`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -57,7 +58,7 @@ fn run_drone(args: &[String]) -> i32 {
                     println!("  Commit: abc1234");
                     println!("  Duration: 2m 34s");
                 }
-                _ => println!("drone build: '{}' completed", sub),
+                _ => println!("drone build: {} completed", quoteaf_os(sub)),
             }
         }
         "exec" => {
@@ -79,10 +80,10 @@ fn run_drone(args: &[String]) -> i32 {
                 println!("myorg/backend");
                 println!("myorg/frontend");
             } else {
-                println!("drone repo: '{}' completed", sub);
+                println!("drone repo: {} completed", quoteaf_os(sub));
             }
         }
-        _ => println!("drone: '{}' completed", subcmd),
+        _ => println!("drone: {} completed", quoteaf_os(subcmd)),
     }
     0
 }

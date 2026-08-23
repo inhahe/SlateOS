@@ -4,6 +4,7 @@
 //!
 //! Multi-personality: `fly`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -37,7 +38,7 @@ fn run_fly(args: &[String]) -> i32 {
         "--version" => println!("7.11.0"),
         "login" | "-t" => {
             let target = args.get(1).map(|s| s.as_str()).unwrap_or("main");
-            println!("logging in to team 'main' on target '{}'", target);
+            println!("logging in to team 'main' on target {}", quoteaf_os(target));
             println!("target saved");
         }
         "targets" => {
@@ -58,7 +59,7 @@ fn run_fly(args: &[String]) -> i32 {
                 .find(|w| w[0] == "-p")
                 .map(|w| w[1].as_str())
                 .unwrap_or("my-pipeline");
-            println!("Setting pipeline '{}'...", pipeline);
+            println!("Setting pipeline {}...", quoteaf_os(pipeline));
             println!("  resources:");
             println!("    resource my-repo has been added");
             println!("  jobs:");
@@ -95,7 +96,7 @@ fn run_fly(args: &[String]) -> i32 {
             println!("  running task...");
             println!("  task completed successfully.");
         }
-        _ => println!("fly: '{}' completed", subcmd),
+        _ => println!("fly: {} completed", quoteaf_os(subcmd)),
     }
     0
 }

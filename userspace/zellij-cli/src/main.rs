@@ -4,6 +4,7 @@
 //!
 //! Single personality: `zellij`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -73,7 +74,7 @@ fn run_zellij(args: &[String], _prog: &str) -> i32 {
                 .find(|w| w[0] == "-s" || w[0] == "--session")
                 .map(|w| w[1].as_str())
                 .unwrap_or("default");
-            println!("zellij: Attaching to session '{}'...", name);
+            println!("zellij: Attaching to session {}...", quoteaf_os(name));
         }
         Some("setup") => {
             println!("zellij: Setup wizard");
@@ -96,7 +97,7 @@ fn run_zellij(args: &[String], _prog: &str) -> i32 {
                 .nth(1)
                 .map(|s| s.as_str())
                 .unwrap_or("sh");
-            println!("zellij run: Starting '{}'", command);
+            println!("zellij run: Starting {}", quoteaf_os(command));
         }
         Some("convert-config") => println!("zellij: Config converted."),
         Some("convert-layout") => println!("zellij: Layout converted."),
@@ -106,7 +107,7 @@ fn run_zellij(args: &[String], _prog: &str) -> i32 {
                 .find(|w| w[0] == "-s" || w[0] == "--session")
                 .map(|w| w[1].as_str())
                 .unwrap_or("default");
-            println!("zellij: Starting session '{}'...", session);
+            println!("zellij: Starting session {}...", quoteaf_os(session));
         }
     }
     0

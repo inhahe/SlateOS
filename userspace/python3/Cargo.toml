@@ -3,3 +3,6 @@ name = "python3"
 version = "0.1.0"
 edition = "2024"
 [dependencies]
+# python3 names script paths, module names and the traceback file names it
+# prints, all drawn from the command line and from the files it imported.
+quoting = { path = "../quoting" }

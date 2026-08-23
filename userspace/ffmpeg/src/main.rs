@@ -8,6 +8,7 @@
 //! - `ffprobe` — media analyzer
 //! - `ffplay` — media player
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -109,14 +110,14 @@ fn run_ffmpeg(args: Vec<String>) -> i32 {
         .unwrap_or("input.mp4");
     let output = args.last().map(|s| s.as_str()).unwrap_or("output.mp4");
 
-    println!("Input #0, mov,mp4, from '{}':", input);
+    println!("Input #0, mov,mp4, from {}:", quoteaf_os(input));
     println!("  Duration: 00:05:32.40, start: 0.000000, bitrate: 8500 kb/s");
     println!("  Stream #0:0: Video: h264 (High), yuv420p, 1920x1080, 8000 kb/s, 30 fps");
     println!("  Stream #0:1: Audio: aac (LC), 48000 Hz, stereo, 192 kb/s");
     println!("Stream mapping:");
     println!("  Stream #0:0 -> #0:0 (h264 -> h264)");
     println!("  Stream #0:1 -> #0:1 (aac -> aac)");
-    println!("Output #0, mp4, to '{}':", output);
+    println!("Output #0, mp4, to {}:", quoteaf_os(output));
     println!("  Stream #0:0: Video: h264, 1920x1080, 8000 kb/s");
     println!("  Stream #0:1: Audio: aac, 48000 Hz, stereo, 192 kb/s");
     println!(
@@ -171,7 +172,7 @@ fn run_ffprobe(args: Vec<String>) -> i32 {
         println!("  ]");
         println!("}}");
     } else {
-        println!("Input #0, mov,mp4, from '{}':", input);
+        println!("Input #0, mov,mp4, from {}:", quoteaf_os(input));
         println!("  Metadata:");
         println!("    major_brand     : isom");
         println!("    encoder         : Lavf61.1.100");

@@ -9,6 +9,7 @@
 //! - `gpg-agent` — GPG key agent daemon
 //! - `gpgconf` — GPG configuration utility
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -194,7 +195,7 @@ fn run_gpg(args: Vec<String>) -> i32 {
         "--search-keys" => gpg_search_keys(&cmd_args),
         _ => {
             // Could be a file to process
-            eprintln!("gpg: unknown option '{}'", cmd);
+            eprintln!("gpg: unknown option {}", quoteaf_os(&cmd));
             1
         }
     }
@@ -463,7 +464,7 @@ fn run_gpg_agent(args: Vec<String>) -> i32 {
             0
         }
         _ => {
-            eprintln!("gpg-agent: unknown option '{}'", cmd);
+            eprintln!("gpg-agent: unknown option {}", quoteaf_os(&cmd));
             1
         }
     }
@@ -528,7 +529,7 @@ fn run_gpgconf(args: Vec<String>) -> i32 {
             0
         }
         _ => {
-            eprintln!("gpgconf: unknown command '{}'", cmd);
+            eprintln!("gpgconf: unknown command {}", quoteaf_os(&cmd));
             1
         }
     }

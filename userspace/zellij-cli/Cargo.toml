@@ -2,3 +2,8 @@
 name = "zellij-cli"
 version = "0.1.0"
 edition = "2024"
+
+[dependencies]
+# zellij-cli names sessions, tabs and panes; a session name is what the user
+# typed and a tab name is set by the program running in it.
+quoting = { path = "../quoting" }

@@ -2,3 +2,8 @@
 name = "promtool-cli"
 version = "0.1.0"
 edition = "2024"
+
+[dependencies]
+# promtool-cli names rule files, metric names and label values; a label
+# value comes from whatever target Prometheus scraped.
+quoting = { path = "../quoting" }

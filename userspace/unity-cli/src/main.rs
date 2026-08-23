@@ -4,6 +4,7 @@
 //!
 //! Multi-personality: `unity-hub`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -42,7 +43,7 @@ fn run_unity(args: &[String]) -> i32 {
                 println!("  2023.2.20f1    LTS");
                 println!("  2022.3.47f1    LTS");
             } else {
-                println!("unity-hub editors: '{}' completed", sub);
+                println!("unity-hub editors: {} completed", quoteaf_os(sub));
             }
         }
         "install" => {
@@ -64,7 +65,7 @@ fn run_unity(args: &[String]) -> i32 {
                 .find(|w| w[0] == "--template")
                 .map(|w| w[1].as_str())
                 .unwrap_or("3d-core");
-            println!("Creating project '{}'...", name);
+            println!("Creating project {}...", quoteaf_os(name));
             println!("  Template: {}", template);
             println!("  Project created at ./{}/", name);
         }
@@ -79,7 +80,7 @@ fn run_unity(args: &[String]) -> i32 {
             println!("  Building player...");
             println!("  Build complete: build/{}/", target);
         }
-        _ => println!("unity-hub: '{}' completed", subcmd),
+        _ => println!("unity-hub: {} completed", quoteaf_os(subcmd)),
     }
     0
 }

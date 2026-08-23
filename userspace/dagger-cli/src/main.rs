@@ -4,6 +4,7 @@
 //!
 //! Multi-personality: `dagger`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -45,7 +46,7 @@ fn run_dagger(args: &[String]) -> i32 {
                 .find(|w| w[0] == "--sdk")
                 .map(|w| w[1].as_str())
                 .unwrap_or("go");
-            println!("Initializing module '{}'...", name);
+            println!("Initializing module {}...", quoteaf_os(name));
             println!("  SDK: {}", sdk);
             println!("  Created: dagger.json");
             println!("  Created: main.go");
@@ -53,7 +54,7 @@ fn run_dagger(args: &[String]) -> i32 {
         }
         "call" => {
             let func = args.get(1).map(|s| s.as_str()).unwrap_or("build");
-            println!("Calling function '{}'...", func);
+            println!("Calling function {}...", quoteaf_os(func));
             println!("  ✔ Container initialized");
             println!("  ✔ Source mounted");
             println!("  ✔ Dependencies installed");
@@ -84,7 +85,7 @@ fn run_dagger(args: &[String]) -> i32 {
         "login" => {
             println!("Logged in to Dagger Cloud.");
         }
-        _ => println!("dagger: '{}' completed", subcmd),
+        _ => println!("dagger: {} completed", quoteaf_os(subcmd)),
     }
     0
 }

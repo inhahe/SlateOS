@@ -4,6 +4,7 @@
 //!
 //! Multi-personality: `sox`, `soxi`, `play`, `rec`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -53,12 +54,18 @@ fn run_sox(args: Vec<String>) -> i32 {
         .map(|s| s.as_str())
         .collect();
     if files.len() >= 2 {
-        println!("Input File     : '{}'", files.first().unwrap_or(&"input"));
+        println!(
+            "Input File     : {}",
+            quoteaf_os(files.first().unwrap_or(&"input"))
+        );
         println!("Channels       : 2");
         println!("Sample Rate    : 44100");
         println!("Duration       : 00:03:45.00 = 9922050 samples");
         println!();
-        println!("Output File    : '{}'", files.get(1).unwrap_or(&"output"));
+        println!(
+            "Output File    : {}",
+            quoteaf_os(files.get(1).unwrap_or(&"output"))
+        );
         println!("(conversion complete — simulated)");
     } else {
         eprintln!("sox: need at least an input and output file. Use --help.");
@@ -78,7 +85,7 @@ fn run_soxi(args: Vec<String>) -> i32 {
         .find(|a| !a.starts_with('-'))
         .map(|s| s.as_str())
         .unwrap_or("audio.wav");
-    println!("Input File     : '{}'", file);
+    println!("Input File     : {}", quoteaf_os(file));
     println!("Channels       : 2");
     println!("Sample Rate    : 44100");
     println!("Precision      : 16-bit");

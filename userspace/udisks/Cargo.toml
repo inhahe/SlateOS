@@ -4,3 +4,7 @@ version = "0.1.0"
 edition = "2024"
 description = "SlateOS udisks utility"
 [dependencies]
+# udisks names block devices, filesystem labels and mount points -- and a
+# filesystem label is written into the superblock of whatever removable disk
+# was just plugged in.
+quoting = { path = "../quoting" }

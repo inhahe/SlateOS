@@ -4,6 +4,7 @@
 //!
 //! Multi-personality: `ros2`, `colcon`, `rosdep`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -86,7 +87,7 @@ fn run_ros2(args: &[String]) -> i32 {
                 println!("  Topics: 5");
             }
         }
-        _ => println!("ros2: '{}' completed", subcmd),
+        _ => println!("ros2: {} completed", quoteaf_os(subcmd)),
     }
     0
 }
@@ -118,7 +119,7 @@ fn run_colcon(args: &[String]) -> i32 {
             println!("Finished <<< my_robot_pkg [1.2s]");
             println!("Summary: 1 package finished, 0 failures");
         }
-        _ => println!("colcon: '{}' completed", subcmd),
+        _ => println!("colcon: {} completed", quoteaf_os(subcmd)),
     }
     0
 }
@@ -145,7 +146,7 @@ fn run_rosdep(args: &[String]) -> i32 {
         "check" => {
             println!("All system dependencies have been satisfied");
         }
-        _ => println!("rosdep: '{}' completed", subcmd),
+        _ => println!("rosdep: {} completed", quoteaf_os(subcmd)),
     }
     0
 }

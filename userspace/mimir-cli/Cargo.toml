@@ -2,3 +2,8 @@
 name = "mimir-cli"
 version = "0.1.0"
 edition = "2024"
+
+[dependencies]
+# mimir-cli names tenants, rule groups and metric names; a metric name comes
+# from whatever process is writing to the store.
+quoting = { path = "../quoting" }

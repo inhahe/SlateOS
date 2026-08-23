@@ -4,6 +4,7 @@
 //!
 //! Multi-personality: `mdbook`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -33,7 +34,7 @@ fn run_mdbook(args: &[String]) -> i32 {
         "--version" => println!("mdbook 0.4.37"),
         "init" => {
             let dir = args.get(1).map(|s| s.as_str()).unwrap_or("my-book");
-            println!("Creating a new book in '{}'...", dir);
+            println!("Creating a new book in {}...", quoteaf_os(dir));
             println!("  Created book.toml");
             println!("  Created src/SUMMARY.md");
             println!("  Created src/chapter_1.md");
@@ -41,7 +42,7 @@ fn run_mdbook(args: &[String]) -> i32 {
         }
         "build" => {
             let dir = args.get(1).map(|s| s.as_str()).unwrap_or(".");
-            println!("[INFO] Building book in '{}'...", dir);
+            println!("[INFO] Building book in {}...", quoteaf_os(dir));
             println!("[INFO] Running 0 preprocessors");
             println!("[INFO] Running HTML backend");
             println!("[INFO] Building 12 chapters");
@@ -73,7 +74,7 @@ fn run_mdbook(args: &[String]) -> i32 {
             println!("[INFO] Deleting book/");
             println!("Done.");
         }
-        _ => println!("mdbook: '{}' completed", subcmd),
+        _ => println!("mdbook: {} completed", quoteaf_os(subcmd)),
     }
     0
 }

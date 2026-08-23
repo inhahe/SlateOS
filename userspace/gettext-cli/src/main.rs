@@ -4,6 +4,7 @@
 //!
 //! Multi-personality: `gettext`, `xgettext`, `msgfmt`, `msginit`, `msgmerge`, `msgcat`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -70,7 +71,11 @@ fn run_xgettext(args: &[String]) -> i32 {
         .filter(|a| !a.starts_with('-'))
         .map(|s| s.as_str())
         .collect();
-    println!("Extracting from {} file(s) → '{}'", files.len(), output);
+    println!(
+        "Extracting from {} file(s) → {}",
+        files.len(),
+        quoteaf_os(output)
+    );
     0
 }
 
@@ -98,7 +103,7 @@ fn run_msgfmt(args: &[String]) -> i32 {
         .map(|s| s.as_str())
         .collect();
     for f in &files {
-        println!("Compiling '{}'...", f);
+        println!("Compiling {}...", quoteaf_os(f));
         if stats {
             println!("  42 translated messages, 3 fuzzy, 1 untranslated.");
         }
@@ -128,7 +133,11 @@ fn run_msginit(args: &[String]) -> i32 {
         .find(|w| w[0] == "-o" || w[0] == "--output")
         .map(|w| w[1].as_str())
         .unwrap_or("messages.po");
-    println!("Creating '{}' for locale '{}'...", output, locale);
+    println!(
+        "Creating {} for locale {}...",
+        quoteaf_os(output),
+        quoteaf_os(locale)
+    );
     println!("Done.");
     0
 }

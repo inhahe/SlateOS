@@ -4,6 +4,7 @@
 //!
 //! Single personality: `az`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -80,7 +81,7 @@ fn run_az(args: Vec<String>) -> i32 {
                 }
                 "set" => {
                     let sub = args.get(2).map(|s| s.as_str()).unwrap_or("My Subscription");
-                    println!("Subscription set to '{}'.", sub);
+                    println!("Subscription set to {}.", quoteaf_os(sub));
                 }
                 _ => {
                     eprintln!("Usage: az account <list|show|set>. See --help.");
@@ -153,7 +154,11 @@ fn run_az(args: Vec<String>) -> i32 {
                         .find(|w| w[0] == "-n" || w[0] == "--name")
                         .map(|w| w[1].as_str())
                         .unwrap_or("web-vm-1");
-                    println!("VM '{}' operation '{}' completed.", name, command);
+                    println!(
+                        "VM {} operation {} completed.",
+                        quoteaf_os(name),
+                        quoteaf_os(command)
+                    );
                 }
                 _ => {
                     eprintln!("Usage: az vm <list|create|start|stop|delete|...>. See --help.");
@@ -267,7 +272,7 @@ fn run_az(args: Vec<String>) -> i32 {
             if group.is_empty() {
                 eprintln!("Usage: az <group> <command>. See --help.");
             } else {
-                eprintln!("Error: unknown group '{}'. See --help.", group);
+                eprintln!("Error: unknown group {}. See --help.", quoteaf_os(group));
             }
             1
         }

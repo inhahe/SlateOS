@@ -4,6 +4,7 @@
 //!
 //! Single personality: `mlflow`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -50,7 +51,7 @@ fn run_mlflow(args: Vec<String>) -> i32 {
                 }
                 "create" => {
                     let name = args.get(2).map(|s| s.as_str()).unwrap_or("my-experiment");
-                    println!("Created experiment '{}' with ID 4", name);
+                    println!("Created experiment {} with ID 4", quoteaf_os(name));
                 }
                 _ => {
                     println!("Experiment operation: {}", sub);
@@ -98,8 +99,8 @@ fn run_mlflow(args: Vec<String>) -> i32 {
                         .map(|w| w[1].as_str())
                         .unwrap_or("5001");
                     println!(
-                        "Serving model '{}' at http://localhost:{}/invocations",
-                        model, port
+                        "Serving model {} at http://localhost:{port}/invocations",
+                        quoteaf_os(model)
                     );
                 }
                 _ => {
@@ -129,7 +130,7 @@ fn run_mlflow(args: Vec<String>) -> i32 {
             if cmd.is_empty() {
                 eprintln!("Usage: mlflow <command>. See --help.");
             } else {
-                eprintln!("Error: unknown command '{}'. See --help.", cmd);
+                eprintln!("Error: unknown command {}. See --help.", quoteaf_os(cmd));
             }
             1
         }

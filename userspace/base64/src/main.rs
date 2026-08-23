@@ -8,6 +8,7 @@
 
 #![allow(unexpected_cfgs)]
 
+use quoting::quoteaf_os;
 use std::env;
 use std::fs;
 use std::io::{self, Read, Write};
@@ -427,14 +428,14 @@ fn parse_args(mode: Mode) -> Args {
                     process::exit(1);
                 }
                 args.wrap = argv[i].parse::<usize>().unwrap_or_else(|_| {
-                    eprintln!("{}: invalid wrap size '{}'", argv[0], argv[i]);
+                    eprintln!("{}: invalid wrap size {}", argv[0], quoteaf_os(&argv[i]));
                     process::exit(1);
                 });
             }
             _ if arg.starts_with("--wrap=") => {
                 let val = &arg["--wrap=".len()..];
                 args.wrap = val.parse::<usize>().unwrap_or_else(|_| {
-                    eprintln!("{}: invalid wrap size '{val}'", argv[0]);
+                    eprintln!("{}: invalid wrap size {}", argv[0], quoteaf_os(val));
                     process::exit(1);
                 });
             }
@@ -465,7 +466,7 @@ fn parse_args(mode: Mode) -> Args {
                 break;
             }
             _ if arg.starts_with('-') && arg.len() > 1 => {
-                eprintln!("{}: unknown option '{arg}'", argv[0]);
+                eprintln!("{}: unknown option {}", argv[0], quoteaf_os(arg));
                 process::exit(1);
             }
             _ => {

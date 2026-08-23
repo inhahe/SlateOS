@@ -4,6 +4,7 @@
 //!
 //! Single personality: `shortcut`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -77,7 +78,7 @@ fn run_shortcut(args: Vec<String>) -> i32 {
                         .find(|w| w[0] == "--state")
                         .map(|w| w[1].as_str())
                         .unwrap_or("In Review");
-                    println!("✔ {} moved to '{}'", id, state);
+                    println!("✔ {} moved to {}", quoteaf_os(id), quoteaf_os(state));
                 }
                 _ => {
                     println!("Story operation: {}", sub);
@@ -134,7 +135,7 @@ fn run_shortcut(args: Vec<String>) -> i32 {
         }
         "search" => {
             let query = args.get(1).map(|s| s.as_str()).unwrap_or("search");
-            println!("Results for '{}':", query);
+            println!("Results for {}:", quoteaf_os(query));
             println!("  sc-123  feature  In Development  Add search filters");
             println!("  sc-115  chore    Completed       Add search indexing");
             0
@@ -152,7 +153,7 @@ fn run_shortcut(args: Vec<String>) -> i32 {
             if cmd.is_empty() {
                 eprintln!("Usage: shortcut <command>. See --help.");
             } else {
-                eprintln!("Error: unknown command '{}'. See --help.", cmd);
+                eprintln!("Error: unknown command {}. See --help.", quoteaf_os(cmd));
             }
             1
         }

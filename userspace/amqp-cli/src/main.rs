@@ -4,6 +4,7 @@
 //!
 //! Multi-personality: `amqp-publish`, `amqp-consume`, `amqp-declare-queue`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -66,8 +67,9 @@ fn run_amqp(args: &[String], prog_name: &str) -> i32 {
                 .map(|w| w[1].as_str())
                 .unwrap_or("hello");
             println!(
-                "Publishing to {} exchange='{}' routing_key='{}'",
-                url, exchange, key
+                "Publishing to {url} exchange={} routing_key={}",
+                quoteaf_os(exchange),
+                quoteaf_os(key)
             );
             println!("Body: {}", body);
             println!("Published.");
@@ -78,7 +80,7 @@ fn run_amqp(args: &[String], prog_name: &str) -> i32 {
                 .find(|w| w[0] == "-q")
                 .map(|w| w[1].as_str())
                 .unwrap_or("test-queue");
-            println!("Consuming from {} queue='{}'", url, queue);
+            println!("Consuming from {url} queue={}", quoteaf_os(queue));
             println!("  [msg 1] hello");
             println!("  [msg 2] world");
         }
@@ -90,8 +92,8 @@ fn run_amqp(args: &[String], prog_name: &str) -> i32 {
                 .unwrap_or("test-queue");
             let durable = args.iter().any(|a| a == "--durable");
             println!(
-                "Declaring queue '{}' at {} (durable={})",
-                queue, url, durable
+                "Declaring queue {} at {url} (durable={durable})",
+                quoteaf_os(queue)
             );
             println!("Queue declared: 0 messages, 0 consumers.");
         }

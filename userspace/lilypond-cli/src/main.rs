@@ -4,6 +4,7 @@
 //!
 //! Multi-personality: `lilypond`, `lilypond-book`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -45,15 +46,14 @@ fn run_lilypond(args: &[String]) -> i32 {
         "pdf"
     };
     println!("GNU LilyPond 2.24.3");
-    println!("Processing '{}'", file);
+    println!("Processing {}", quoteaf_os(file));
     println!("Parsing...");
     println!("Interpreting music...");
     println!("Preprocessing graphical objects...");
     println!("Finding ideal line breaks...");
     println!(
-        "Layout output to '{}.{}'...",
-        file.trim_end_matches(".ly"),
-        format
+        "Layout output to {}...",
+        quoteaf_os(format!("{}.{format}", file.trim_end_matches(".ly")))
     );
     println!("Success: compilation successfully completed");
     0
@@ -76,7 +76,7 @@ fn run_lilypond_book(args: &[String]) -> i32 {
         .find(|a| !a.starts_with('-'))
         .map(|s| s.as_str())
         .unwrap_or("document.lytex");
-    println!("lilypond-book: processing '{}'", file);
+    println!("lilypond-book: processing {}", quoteaf_os(file));
     println!("  Extracting music fragments...");
     println!("  Compiling 3 music fragments...");
     println!("  Output written.");

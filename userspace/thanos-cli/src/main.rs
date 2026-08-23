@@ -4,6 +4,7 @@
 //!
 //! Multi-personality: `thanos`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -76,13 +77,13 @@ fn run_thanos(args: &[String]) -> i32 {
                         "inspect" => {
                             println!("Block details: 1234 series, 567890 samples, 2h duration")
                         }
-                        _ => println!("thanos tools bucket: '{}' completed", action),
+                        _ => println!("thanos tools bucket: {} completed", quoteaf_os(action)),
                     }
                 }
-                _ => println!("thanos tools: '{}' completed", sub),
+                _ => println!("thanos tools: {} completed", quoteaf_os(sub)),
             }
         }
-        _ => println!("thanos: '{}' completed", subcmd),
+        _ => println!("thanos: {} completed", quoteaf_os(subcmd)),
     }
     0
 }

@@ -2,3 +2,8 @@
 name = "az-cli"
 version = "0.1.0"
 edition = "2024"
+
+[dependencies]
+# az-cli names resource groups, VMs and storage accounts, identifiers the
+# user chose or the API returned.
+quoting = { path = "../quoting" }

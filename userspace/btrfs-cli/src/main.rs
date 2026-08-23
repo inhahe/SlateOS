@@ -4,6 +4,7 @@
 //!
 //! Multi-personality: `btrfs`, `mkfs.btrfs`, `btrfs-convert`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -69,11 +70,11 @@ fn run_btrfs(args: &[String]) -> i32 {
         }
         ("subvolume" | "sub", "create") => {
             let sv = args.get(2).map(|s| s.as_str()).unwrap_or("new-subvol");
-            println!("Create subvolume '{}'", sv);
+            println!("Create subvolume {}", quoteaf_os(sv));
         }
         ("subvolume" | "sub", "delete") => {
             let sv = args.get(2).map(|s| s.as_str()).unwrap_or("old-subvol");
-            println!("Delete subvolume (no-commit): '{}'", sv);
+            println!("Delete subvolume (no-commit): {}", quoteaf_os(sv));
         }
         ("subvolume" | "sub", "snapshot") => {
             let src = args.get(2).map(|s| s.as_str()).unwrap_or("/home");
@@ -81,7 +82,11 @@ fn run_btrfs(args: &[String]) -> i32 {
                 .get(3)
                 .map(|s| s.as_str())
                 .unwrap_or("/snapshots/home-snap");
-            println!("Create a snapshot of '{}' in '{}'", src, dst);
+            println!(
+                "Create a snapshot of {} in {}",
+                quoteaf_os(src),
+                quoteaf_os(dst)
+            );
         }
         ("scrub", "start") => {
             let path = args.get(2).map(|s| s.as_str()).unwrap_or("/");

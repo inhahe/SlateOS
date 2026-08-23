@@ -4,6 +4,7 @@
 //!
 //! Multi-personality: `newrelic`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -50,7 +51,7 @@ fn run_newrelic(args: &[String]) -> i32 {
             match sub {
                 "search" => {
                     let name = args.get(2).map(|s| s.as_str()).unwrap_or("my-app");
-                    println!("Searching for entities matching '{}'...", name);
+                    println!("Searching for entities matching {}...", quoteaf_os(name));
                     println!(
                         "  GUID                                  Name        Type        Health"
                     );
@@ -59,7 +60,7 @@ fn run_newrelic(args: &[String]) -> i32 {
                     );
                 }
                 "tags" => println!("Tags: env:production, team:backend, version:1.2.3"),
-                _ => println!("newrelic entity: '{}' completed", sub),
+                _ => println!("newrelic entity: {} completed", quoteaf_os(sub)),
             }
         }
         "apm" => {
@@ -85,7 +86,7 @@ fn run_newrelic(args: &[String]) -> i32 {
                 println!("default    1234567    US       *");
             }
         }
-        _ => println!("newrelic: '{}' completed", subcmd),
+        _ => println!("newrelic: {} completed", quoteaf_os(subcmd)),
     }
     0
 }

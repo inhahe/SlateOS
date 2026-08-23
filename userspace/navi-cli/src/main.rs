@@ -4,6 +4,7 @@
 //!
 //! Single personality: `navi`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -66,7 +67,7 @@ fn run_navi(args: &[String], _prog: &str) -> i32 {
                         .nth(1)
                         .map(|s| s.as_str())
                         .unwrap_or("<url>");
-                    println!("navi: Adding repo '{}'...", url);
+                    println!("navi: Adding repo {}...", quoteaf_os(url));
                 }
                 "browse" => println!("navi: Opening cheat repo browser..."),
                 _ => println!("navi repo: {}", sub),
@@ -89,7 +90,10 @@ fn run_navi(args: &[String], _prog: &str) -> i32 {
                 .nth(1)
                 .map(|s| s.as_str())
                 .unwrap_or("find");
-            println!("navi best match for '{}': find . -name '*.txt'", query);
+            println!(
+                "navi best match for {}: find . -name '*.txt'",
+                quoteaf_os(query)
+            );
         }
         Some("fn") => {
             let func = args
@@ -98,7 +102,7 @@ fn run_navi(args: &[String], _prog: &str) -> i32 {
                 .nth(1)
                 .map(|s| s.as_str())
                 .unwrap_or("<func>");
-            println!("navi fn: Executing '{}'", func);
+            println!("navi fn: Executing {}", quoteaf_os(func));
         }
         _ => {
             if args.iter().any(|a| a == "--cheatsh") {

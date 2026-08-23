@@ -8,6 +8,7 @@
 
 #![deny(clippy::all)]
 
+use quoting::quoteaf_os;
 use std::collections::BTreeMap;
 use std::env;
 use std::fs;
@@ -413,7 +414,7 @@ fn cmd_set_keymap(keymap: &str, toggle: Option<&str>) -> i32 {
 
     match write_key_value_file(VCONSOLE_CONF, &map) {
         Ok(()) => {
-            println!("localectl: VC keymap set to '{keymap}'");
+            println!("localectl: VC keymap set to {}", quoteaf_os(keymap));
             0
         }
         Err(e) => {
@@ -455,7 +456,7 @@ fn cmd_set_x11_keymap(
 
     match fs::write(X11_CONF, conf) {
         Ok(()) => {
-            println!("localectl: X11 keymap set to '{layout}'");
+            println!("localectl: X11 keymap set to {}", quoteaf_os(layout));
             0
         }
         Err(e) => {
@@ -556,7 +557,7 @@ fn main() {
             0
         }
         other => {
-            eprintln!("localectl: unknown command '{other}'");
+            eprintln!("localectl: unknown command {}", quoteaf_os(other));
             1
         }
     };

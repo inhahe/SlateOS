@@ -4,6 +4,7 @@
 //!
 //! Multi-personality: `puppet`, `facter`, `hiera`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -51,8 +52,8 @@ fn run_puppet(args: &[String]) -> i32 {
                 "Notice: Compiled catalog for slateos-desktop.local in environment production"
             );
             println!(
-                "Info: Applying configuration from '{}' version '1716364800'",
-                manifest
+                "Info: Applying configuration from {} version '1716364800'",
+                quoteaf_os(manifest)
             );
             println!("Notice: /Stage[main]/Main/Package[nginx]/ensure: created");
             println!(
@@ -86,12 +87,12 @@ fn run_puppet(args: &[String]) -> i32 {
             let cmd = args.get(1).map(|s| s.as_str()).unwrap_or("validate");
             if cmd == "validate" {
                 let file = args.get(2).map(|s| s.as_str()).unwrap_or("site.pp");
-                println!("Notice: Parsed '{}' with no errors", file);
+                println!("Notice: Parsed {} with no errors", quoteaf_os(file));
             } else {
                 println!("puppet parser {} completed", cmd);
             }
         }
-        _ => println!("puppet: subcommand '{}' completed", subcmd),
+        _ => println!("puppet: subcommand {} completed", quoteaf_os(subcmd)),
     }
     0
 }

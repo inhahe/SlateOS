@@ -4,6 +4,7 @@
 //!
 //! Multi-personality: `linuxcnc`, `halcmd`, `halrun`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -81,7 +82,7 @@ fn run_halcmd(args: &[String]) -> i32 {
         }
         "loadrt" => {
             let module = args.get(1).map(|s| s.as_str()).unwrap_or("stepgen");
-            println!("halcmd: loading realtime module '{}'", module);
+            println!("halcmd: loading realtime module {}", quoteaf_os(module));
             println!("Module loaded.");
         }
         "net" => {
@@ -90,7 +91,7 @@ fn run_halcmd(args: &[String]) -> i32 {
         "setp" => {
             println!("halcmd: parameter set.");
         }
-        _ => println!("halcmd: '{}' completed", subcmd),
+        _ => println!("halcmd: {} completed", quoteaf_os(subcmd)),
     }
     0
 }
@@ -107,7 +108,7 @@ fn run_halrun(args: &[String]) -> i32 {
         .find(|a| a.ends_with(".hal"))
         .map(|s| s.as_str());
     if let Some(f) = file {
-        println!("halrun: executing '{}'", f);
+        println!("halrun: executing {}", quoteaf_os(f));
         println!("HAL configuration loaded.");
     } else {
         println!("halcmd:");

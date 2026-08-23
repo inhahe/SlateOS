@@ -4,6 +4,7 @@
 //!
 //! Single personality: `dapr`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -130,7 +131,11 @@ fn run_dapr(args: Vec<String>) -> i32 {
                 .find(|w| w[0] == "--method")
                 .map(|w| w[1].as_str())
                 .unwrap_or("healthz");
-            println!("Invoking method '{}' on app '{}'...", method, app_id);
+            println!(
+                "Invoking method {} on app {}...",
+                quoteaf_os(method),
+                quoteaf_os(app_id)
+            );
             println!("  Status: 200 OK");
             println!("  Response: {{\"status\": \"healthy\"}}");
             0
@@ -146,7 +151,11 @@ fn run_dapr(args: Vec<String>) -> i32 {
                 .find(|w| w[0] == "--topic")
                 .map(|w| w[1].as_str())
                 .unwrap_or("orders");
-            println!("Published to topic '{}' via '{}'", topic, pubsub);
+            println!(
+                "Published to topic {} via {}",
+                quoteaf_os(topic),
+                quoteaf_os(pubsub)
+            );
             0
         }
         "status" => {
@@ -161,7 +170,7 @@ fn run_dapr(args: Vec<String>) -> i32 {
             if cmd.is_empty() {
                 eprintln!("Usage: dapr <command>. See --help.");
             } else {
-                eprintln!("Error: unknown command '{}'. See --help.", cmd);
+                eprintln!("Error: unknown command {}. See --help.", quoteaf_os(cmd));
             }
             1
         }

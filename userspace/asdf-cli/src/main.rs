@@ -4,6 +4,7 @@
 //!
 //! Single personality: `asdf`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -81,11 +82,11 @@ fn run_asdf(args: &[String], _prog: &str) -> i32 {
                 }
                 "add" => {
                     let name = args.get(2).map(|s| s.as_str()).unwrap_or("<plugin>");
-                    println!("asdf: Adding plugin '{}'...", name);
+                    println!("asdf: Adding plugin {}...", quoteaf_os(name));
                 }
                 "remove" => {
                     let name = args.get(2).map(|s| s.as_str()).unwrap_or("<plugin>");
-                    println!("asdf: Removing plugin '{}'.", name);
+                    println!("asdf: Removing plugin {}.", quoteaf_os(name));
                 }
                 _ => println!("asdf plugin: {}", sub),
             }
@@ -115,7 +116,7 @@ fn run_asdf(args: &[String], _prog: &str) -> i32 {
             println!("~/.asdf/installs/{}/{}", name, ver);
         }
         "reshim" => println!("asdf: Shims recreated."),
-        _ => println!("asdf: unknown command '{}'", cmd),
+        _ => println!("asdf: unknown command {}", quoteaf_os(cmd)),
     }
     0
 }

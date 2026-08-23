@@ -2,3 +2,8 @@
 name = "lilypond-cli"
 version = "0.1.0"
 edition = "2024"
+
+[dependencies]
+# lilypond-cli names the .ly source it compiles and the output file it
+# derives from that name, both from the command line.
+quoting = { path = "../quoting" }

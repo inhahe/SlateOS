@@ -10,6 +10,7 @@
 //! - `acpi_listen` — listen for and display ACPI events
 //! - `acpi` — show battery/thermal/AC adapter status
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -256,7 +257,7 @@ fn run_acpid(args: Vec<String>) -> i32 {
             if other.starts_with('-') {
                 run_daemon(&args)
             } else {
-                eprintln!("acpid: unknown option '{}'", other);
+                eprintln!("acpid: unknown option {}", quoteaf_os(other));
                 1
             }
         }
@@ -309,7 +310,11 @@ fn run_daemon(args: &[String]) -> i32 {
                 .starts_with(r.event_pattern.split('*').next().unwrap_or(""))
             {
                 if debug {
-                    println!("  -> matched rule '{}', action: {}", r.name, r.action);
+                    println!(
+                        "  -> matched rule {}, action: {}",
+                        quoteaf_os(&r.name),
+                        quoteaf_os(&r.action)
+                    );
                 }
                 break;
             }
@@ -443,7 +448,7 @@ fn run_acpi(args: Vec<String>) -> i32 {
                 show_ac();
                 0
             } else {
-                eprintln!("acpi: unknown option '{}'", other);
+                eprintln!("acpi: unknown option {}", quoteaf_os(other));
                 1
             }
         }

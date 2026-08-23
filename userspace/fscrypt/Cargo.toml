@@ -3,3 +3,7 @@ name = "fscrypt"
 version = "0.1.0"
 edition = "2024"
 [dependencies]
+# fscrypt names protectors, policies and the directories it encrypts. It
+# guards filesystem encryption, so a diagnostic that misreports which
+# directory was locked is a diagnostic that matters.
+quoting = { path = "../quoting" }

@@ -10,6 +10,7 @@
 //! - `pip` — Python package installer
 //! - `pip3` — alias for pip
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -138,7 +139,7 @@ fn run_pydoc(args: Vec<String>) -> i32 {
 
     if let Some(pos) = args.iter().position(|a| a == "-k") {
         let keyword = args.get(pos + 1).map(|s| s.as_str()).unwrap_or("help");
-        println!("Searching for '{}':", keyword);
+        println!("Searching for {}:", quoteaf_os(keyword));
         println!("os - OS routines for NT or Posix");
         println!("sys - System-specific parameters and functions");
         return 0;
@@ -168,7 +169,7 @@ fn run_pydoc(args: Vec<String>) -> i32 {
             println!("    platform = 'slateos'");
             println!("    version = '3.13.0 (Slate OS)'");
         }
-        _ => println!("Help on '{}': (simulated)", topic),
+        _ => println!("Help on {}: (simulated)", quoteaf_os(topic)),
     }
     0
 }
@@ -267,7 +268,7 @@ fn run_pip(args: Vec<String>) -> i32 {
             0
         }
         other => {
-            eprintln!("pip: unknown command '{}'", other);
+            eprintln!("pip: unknown command {}", quoteaf_os(other));
             1
         }
     }

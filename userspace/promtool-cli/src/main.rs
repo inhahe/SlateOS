@@ -4,6 +4,7 @@
 //!
 //! Multi-personality: `promtool`, `prometheus`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -37,7 +38,7 @@ fn run_promtool(args: &[String]) -> i32 {
                 "config" => println!("Checking {}... SUCCESS. {} is valid.", file, file),
                 "rules" => println!("Checking {}... SUCCESS. 5 rules found.", file),
                 "metrics" => println!("Checking metrics... all valid."),
-                _ => println!("promtool check: '{}' completed", what),
+                _ => println!("promtool check: {} completed", quoteaf_os(what)),
             }
         }
         "query" => {
@@ -64,10 +65,10 @@ fn run_promtool(args: &[String]) -> i32 {
                     println!("  Samples: 567890");
                 }
                 "compact" => println!("Compaction completed."),
-                _ => println!("promtool tsdb: '{}' completed", sub),
+                _ => println!("promtool tsdb: {} completed", quoteaf_os(sub)),
             }
         }
-        _ => println!("promtool: '{}' completed", subcmd),
+        _ => println!("promtool: {} completed", quoteaf_os(subcmd)),
     }
     0
 }

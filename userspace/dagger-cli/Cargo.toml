@@ -2,3 +2,8 @@
 name = "dagger-cli"
 version = "0.1.0"
 edition = "2024"
+
+[dependencies]
+# dagger-cli names pipelines and modules, taken from the command line and
+# from a module fetched off the network.
+quoting = { path = "../quoting" }

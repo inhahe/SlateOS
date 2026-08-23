@@ -4,6 +4,7 @@
 //!
 //! Multi-personality: `cdktf`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -62,7 +63,7 @@ fn run_cdktf(args: &[String]) -> i32 {
         }
         "deploy" => {
             let stack = args.get(1).map(|s| s.as_str()).unwrap_or("my-stack");
-            println!("Deploying stack '{}'...", stack);
+            println!("Deploying stack {}...", quoteaf_os(stack));
             println!("  Synthesizing...");
             println!("  Planning...");
             println!();
@@ -89,7 +90,7 @@ fn run_cdktf(args: &[String]) -> i32 {
         }
         "destroy" => {
             let stack = args.get(1).map(|s| s.as_str()).unwrap_or("my-stack");
-            println!("Destroying stack '{}'...", stack);
+            println!("Destroying stack {}...", quoteaf_os(stack));
             println!("  Destroy complete! Resources: 2 destroyed.");
         }
         "convert" => {
@@ -97,7 +98,7 @@ fn run_cdktf(args: &[String]) -> i32 {
             println!("  Converted 3 resources, 2 data sources");
             println!("  Output written to stdout");
         }
-        _ => println!("cdktf: '{}' completed", subcmd),
+        _ => println!("cdktf: {} completed", quoteaf_os(subcmd)),
     }
     0
 }

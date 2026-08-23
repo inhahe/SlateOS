@@ -2,3 +2,8 @@
 name = "rabbitmq"
 version = "0.1.0"
 edition = "2024"
+
+[dependencies]
+# rabbitmq names vhosts, queues and users, every one of which any client
+# with access to the broker can create.
+quoting = { path = "../quoting" }

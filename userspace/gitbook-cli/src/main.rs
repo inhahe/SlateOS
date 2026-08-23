@@ -4,6 +4,7 @@
 //!
 //! Multi-personality: `gitbook`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -34,7 +35,7 @@ fn run_gitbook(args: &[String]) -> i32 {
         "--version" => println!("gitbook 2.3.3"),
         "init" => {
             let dir = args.get(1).map(|s| s.as_str()).unwrap_or(".");
-            println!("Initializing book in '{}'...", dir);
+            println!("Initializing book in {}...", quoteaf_os(dir));
             println!("  Created README.md");
             println!("  Created SUMMARY.md");
             println!("  Created book.json");
@@ -42,7 +43,7 @@ fn run_gitbook(args: &[String]) -> i32 {
         }
         "build" => {
             let dir = args.get(1).map(|s| s.as_str()).unwrap_or(".");
-            println!("Building book in '{}'...", dir);
+            println!("Building book in {}...", quoteaf_os(dir));
             println!("  info: loading book configuration...");
             println!("  info: found 15 pages");
             println!("  info: generating...");
@@ -78,7 +79,7 @@ fn run_gitbook(args: &[String]) -> i32 {
             println!("  Output: {}", output);
             println!("Done.");
         }
-        _ => println!("gitbook: '{}' completed", subcmd),
+        _ => println!("gitbook: {} completed", quoteaf_os(subcmd)),
     }
     0
 }

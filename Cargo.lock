@@ -60,6 +60,9 @@ version = "0.1.0"
 [[package]]
 name = "acpid"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "acpid-cli"
@@ -214,6 +217,9 @@ version = "0.1.0"
 [[package]]
 name = "alsa-utils"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "alteryx-cli"
@@ -250,6 +256,9 @@ version = "0.1.0"
 [[package]]
 name = "amqp-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "amtool-cli"
@@ -282,6 +291,9 @@ version = "0.1.0"
 [[package]]
 name = "ansible"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "ansible-cli"
@@ -449,6 +461,9 @@ version = "0.1.0"
 [[package]]
 name = "asdf-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "aspell-cli"
@@ -636,6 +651,9 @@ version = "0.1.0"
 [[package]]
 name = "az-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "azion-cli"
@@ -729,6 +747,9 @@ version = "0.1.0"
 [[package]]
 name = "base64"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "basecamp-cli"
@@ -953,6 +974,9 @@ version = "0.1.0"
 [[package]]
 name = "bluez"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "bluez-cli"
@@ -1132,6 +1156,9 @@ dependencies = [
 [[package]]
 name = "btrfs-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "bubble-cli"
@@ -1179,6 +1206,9 @@ version = "0.1.0"
 [[package]]
 name = "bun-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "bundler-cli"
@@ -1355,6 +1385,9 @@ version = "0.1.0"
 [[package]]
 name = "cassandra-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "cast-cli"
@@ -1391,6 +1424,9 @@ version = "0.1.0"
 [[package]]
 name = "cdktf-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "cdn77-cli"
@@ -1607,6 +1643,9 @@ version = "0.1.0"
 [[package]]
 name = "circleci-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "citra-cli"
@@ -1700,10 +1739,16 @@ version = "0.1.0"
 [[package]]
 name = "cml-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "cmp"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "cmus"
@@ -1827,6 +1872,9 @@ version = "0.1.0"
 [[package]]
 name = "concourse-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "concur-cli"
@@ -2069,6 +2117,9 @@ version = "0.1.0"
 [[package]]
 name = "crossplane-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "crossword"
@@ -2195,6 +2246,9 @@ version = "0.1.0"
 [[package]]
 name = "dagger-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "dagster-cli"
@@ -2206,6 +2260,9 @@ dependencies = [
 [[package]]
 name = "dapr-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "dar-cli"
@@ -2395,6 +2452,9 @@ version = "0.1.0"
 [[package]]
 name = "deta-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "devcycle-cli"
@@ -2608,6 +2668,9 @@ dependencies = [
 [[package]]
 name = "docker"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "docker-cli"
@@ -2715,6 +2778,9 @@ version = "0.1.0"
 [[package]]
 name = "drone-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "druid-cli"
@@ -3227,6 +3293,9 @@ version = "0.1.0"
 [[package]]
 name = "ffmpeg"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "ffmpeg-cli"
@@ -3327,6 +3396,9 @@ version = "0.1.0"
 [[package]]
 name = "firecracker-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "firefox-cli"
@@ -3641,6 +3713,9 @@ version = "0.1.0"
 [[package]]
 name = "fscrypt"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "fsharp-cli"
@@ -3868,6 +3943,9 @@ version = "0.1.0"
 [[package]]
 name = "gettext-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "getty"
@@ -3942,6 +4020,9 @@ version = "0.1.0"
 [[package]]
 name = "gitbook-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "gitea"
@@ -4124,6 +4205,9 @@ version = "0.1.0"
 [[package]]
 name = "gpg"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "gpg-cli"
@@ -4823,6 +4907,9 @@ version = "0.1.0"
 [[package]]
 name = "insomnia-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "inspectrum-cli"
@@ -5714,6 +5801,9 @@ version = "0.1.0"
 [[package]]
 name = "lilypond-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "line-cli"
@@ -5742,6 +5832,9 @@ version = "0.1.0"
 [[package]]
 name = "linuxcnc-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "liquibase-cli"
@@ -5802,6 +5895,9 @@ version = "0.1.0"
 [[package]]
 name = "localectl"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "localtime"
@@ -6222,6 +6318,9 @@ version = "0.1.0"
 [[package]]
 name = "man"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "mandelbrot"
@@ -6410,6 +6509,9 @@ version = "0.1.0"
 [[package]]
 name = "mcfly-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "md5"
@@ -6433,6 +6535,9 @@ version = "0.1.0"
 [[package]]
 name = "mdbook-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "mdcat"
@@ -6610,6 +6715,9 @@ version = "0.1.0"
 [[package]]
 name = "mimir-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "mindmap"
@@ -6742,6 +6850,9 @@ dependencies = [
 [[package]]
 name = "mlflow-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "mlrun-cli"
@@ -7050,6 +7161,9 @@ version = "0.1.0"
 [[package]]
 name = "navi-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "nc"
@@ -7193,6 +7307,9 @@ version = "0.1.0"
 [[package]]
 name = "newrelic-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "nextcloud"
@@ -7526,6 +7643,9 @@ version = "0.1.0"
 [[package]]
 name = "ocaml-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "ocrmypdf-cli"
@@ -7546,6 +7666,9 @@ version = "0.1.0"
 [[package]]
 name = "octoprint-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "ode-cli"
@@ -8137,6 +8260,9 @@ dependencies = [
 [[package]]
 name = "pdm-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "pdns-recursor-cli"
@@ -8649,6 +8775,9 @@ version = "0.1.0"
 [[package]]
 name = "promtool-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "propelauth-cli"
@@ -8760,6 +8889,9 @@ version = "0.1.0"
 [[package]]
 name = "puppet-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "pv"
@@ -8808,6 +8940,9 @@ version = "0.1.0"
 [[package]]
 name = "python3"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "pytorch-cli"
@@ -8828,6 +8963,9 @@ version = "0.1.0"
 [[package]]
 name = "qemu-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "qgis-cli"
@@ -8920,6 +9058,9 @@ version = "0.1.0"
 [[package]]
 name = "rabbitmq"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "rabbitmq-cli"
@@ -8994,6 +9135,9 @@ version = "0.1.0"
 [[package]]
 name = "ray-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "raylib-cli"
@@ -9300,6 +9444,9 @@ version = "0.1.0"
 [[package]]
 name = "ros-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "ros2-cli"
@@ -9770,6 +9917,9 @@ version = "0.1.0"
 [[package]]
 name = "service"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "servicebus"
@@ -9873,6 +10023,9 @@ version = "0.1.0"
 [[package]]
 name = "shortcut-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "shotcut-cli"
@@ -10249,6 +10402,9 @@ version = "0.1.0"
 [[package]]
 name = "sox"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "sox-cli"
@@ -10655,6 +10811,7 @@ name = "sudo"
 version = "0.1.0"
 dependencies = [
  "authlib",
+ "quoting",
  "scratchdir",
  "userdb",
 ]
@@ -11050,6 +11207,9 @@ version = "0.1.0"
 [[package]]
 name = "tensorflow-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "teradata-cli"
@@ -11120,6 +11280,9 @@ version = "0.1.0"
 [[package]]
 name = "thanos-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "thermald"
@@ -11378,6 +11541,9 @@ version = "0.1.0"
 [[package]]
 name = "trello-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "trendmicro-cli"
@@ -11514,6 +11680,9 @@ dependencies = [
 [[package]]
 name = "udisks"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "uim-cli"
@@ -11526,6 +11695,9 @@ version = "0.1.0"
 [[package]]
 name = "uname"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "unbound"
@@ -11573,6 +11745,9 @@ version = "0.1.0"
 [[package]]
 name = "unity-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "unleash-cli"
@@ -11694,6 +11869,9 @@ version = "0.1.0"
 [[package]]
 name = "vagrant-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "vale-cli"
@@ -11847,6 +12025,9 @@ version = "0.1.0"
 [[package]]
 name = "virt-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "virt-manager-cli"
@@ -11980,6 +12161,9 @@ version = "0.1.0"
 [[package]]
 name = "watch"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "watchexec"
@@ -12305,6 +12489,9 @@ version = "0.1.0"
 [[package]]
 name = "woodpecker-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "wordle"
@@ -12720,6 +12907,9 @@ version = "0.1.0"
 [[package]]
 name = "zellij-cli"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "zencastr-cli"

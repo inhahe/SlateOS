@@ -4,6 +4,7 @@
 //!
 //! Single personality: `trello`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -88,7 +89,7 @@ fn run_trello(args: Vec<String>) -> i32 {
                         .find(|w| w[0] == "--list")
                         .map(|w| w[1].as_str())
                         .unwrap_or("Done");
-                    println!("✔ Moved {} to '{}'", card, list);
+                    println!("✔ Moved {} to {}", quoteaf_os(card), quoteaf_os(list));
                 }
                 _ => {
                     println!("Card operation: {}", sub);
@@ -116,7 +117,7 @@ fn run_trello(args: Vec<String>) -> i32 {
         }
         "search" => {
             let query = args.get(1).map(|s| s.as_str()).unwrap_or("fix");
-            println!("Results for '{}':", query);
+            println!("Results for {}:", quoteaf_os(query));
             println!("  crd-abc123  Fix timeout       In Progress");
             println!("  crd-jkl012  Fix typo          Done");
             0
@@ -125,7 +126,7 @@ fn run_trello(args: Vec<String>) -> i32 {
             if cmd.is_empty() {
                 eprintln!("Usage: trello <command>. See --help.");
             } else {
-                eprintln!("Error: unknown command '{}'. See --help.", cmd);
+                eprintln!("Error: unknown command {}. See --help.", quoteaf_os(cmd));
             }
             1
         }

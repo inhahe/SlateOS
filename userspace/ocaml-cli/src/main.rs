@@ -4,6 +4,7 @@
 //!
 //! Multi-personality: `ocaml`, `ocamlc`, `ocamlopt`, `opam`, `dune`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -107,10 +108,10 @@ fn run_opam(args: &[String]) -> i32 {
                     let name = args.get(2).map(|s| s.as_str()).unwrap_or("5.1.1");
                     println!("Switch {} created.", name);
                 }
-                _ => println!("opam switch: '{}' completed", action),
+                _ => println!("opam switch: {} completed", quoteaf_os(action)),
             }
         }
-        _ => println!("opam: '{}' completed", subcmd),
+        _ => println!("opam: {} completed", quoteaf_os(subcmd)),
     }
     0
 }
@@ -147,7 +148,7 @@ fn run_dune(args: &[String]) -> i32 {
             println!("dune init {}: created", kind);
         }
         "fmt" => println!("Formatting 8 files..."),
-        _ => println!("dune: '{}' completed", subcmd),
+        _ => println!("dune: {} completed", quoteaf_os(subcmd)),
     }
     0
 }

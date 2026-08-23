@@ -2,3 +2,8 @@
 name = "puppet-cli"
 version = "0.1.0"
 edition = "2024"
+
+[dependencies]
+# puppet-cli names nodes, classes and manifests, read out of manifests on
+# disk and from a node's own facts.
+quoting = { path = "../quoting" }

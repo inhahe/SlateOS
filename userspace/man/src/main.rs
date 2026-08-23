@@ -28,6 +28,7 @@
 //!   8  System administration commands
 //! ```
 
+use quoting::quoteaf_os;
 use std::env;
 use std::fmt::Write as FmtWrite;
 use std::fs;
@@ -869,7 +870,7 @@ fn cmd_display(name: &str, section: Option<u8>, show_all: bool) {
 
     if pages.is_empty() {
         let sec_hint = section.map_or(String::new(), |s| format!(" in section {s}"));
-        eprintln!("man: no manual entry for '{name}'{sec_hint}");
+        eprintln!("man: no manual entry for {}{sec_hint}", quoteaf_os(name));
         process::exit(1);
     }
 
@@ -893,7 +894,7 @@ fn cmd_display(name: &str, section: Option<u8>, show_all: bool) {
             PageSource::File(path) => match fs::read_to_string(path) {
                 Ok(content) => content,
                 Err(e) => {
-                    eprintln!("man: cannot read '{}': {e}", path.display());
+                    eprintln!("man: cannot read {}: {e}", quoteaf_os(path));
                     continue;
                 }
             },
@@ -914,7 +915,7 @@ fn cmd_where(name: &str, section: Option<u8>) {
 
     if pages.is_empty() {
         let sec_hint = section.map_or(String::new(), |s| format!(" in section {s}"));
-        eprintln!("man: no manual entry for '{name}'{sec_hint}");
+        eprintln!("man: no manual entry for {}{sec_hint}", quoteaf_os(name));
         process::exit(1);
     }
 

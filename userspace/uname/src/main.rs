@@ -22,6 +22,7 @@
 //! uname -sr              Combine flags: kernel name + release
 //! ```
 
+use quoting::quoteaf_os;
 use std::env;
 use std::fs;
 use std::process;
@@ -307,7 +308,7 @@ fn parse_args(args: &[String]) -> Request {
                 "--help" => return Request::Help,
                 "--version" => return Request::Version,
                 _ => {
-                    eprintln!("uname: unrecognized option '{arg_str}'");
+                    eprintln!("uname: unrecognized option {}", quoteaf_os(arg_str));
                     eprintln!("Try 'uname --help' for more information.");
                     process::exit(1);
                 }
@@ -332,7 +333,7 @@ fn parse_args(args: &[String]) -> Request {
                     'o' => push_unique(&mut fields, Field::OperatingSystem),
                     'h' => return Request::Help,
                     _ => {
-                        eprintln!("uname: invalid option -- '{ch}'");
+                        eprintln!("uname: invalid option -- {}", quoteaf_os(ch.to_string()));
                         eprintln!("Try 'uname --help' for more information.");
                         process::exit(1);
                     }
@@ -342,7 +343,7 @@ fn parse_args(args: &[String]) -> Request {
         }
 
         // Bare argument — not expected for uname.
-        eprintln!("uname: extra operand '{arg_str}'");
+        eprintln!("uname: extra operand {}", quoteaf_os(arg_str));
         eprintln!("Try 'uname --help' for more information.");
         process::exit(1);
     }

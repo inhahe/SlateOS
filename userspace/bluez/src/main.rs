@@ -11,6 +11,7 @@
 //! - `btmon` — Bluetooth monitor/sniffer
 //! - `rfcomm` — RFCOMM channel management
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -272,7 +273,7 @@ fn run_bluetoothctl(args: Vec<String>) -> i32 {
             0
         }
         other => {
-            eprintln!("bluetoothctl: unknown command '{}'", other);
+            eprintln!("bluetoothctl: unknown command {}", quoteaf_os(other));
             1
         }
     }
@@ -666,7 +667,7 @@ fn run_hcitool(args: Vec<String>) -> i32 {
             }
         }
         other => {
-            eprintln!("hcitool: unknown command '{}'", other);
+            eprintln!("hcitool: unknown command {}", quoteaf_os(other));
             1
         }
     }
@@ -754,7 +755,7 @@ fn run_rfcomm(args: Vec<String>) -> i32 {
             0
         }
         other => {
-            eprintln!("rfcomm: unknown command '{}'", other);
+            eprintln!("rfcomm: unknown command {}", quoteaf_os(other));
             1
         }
     }

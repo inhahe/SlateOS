@@ -4,6 +4,7 @@
 //!
 //! Multi-personality: `bun`, `bunx`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -44,7 +45,7 @@ fn run_bun(args: &[String]) -> i32 {
                 println!("bun: running {}", script);
             } else {
                 println!("$ bun run {}", script);
-                println!("bun: executing script '{}'", script);
+                println!("bun: executing script {}", quoteaf_os(script));
             }
         }
         "install" | "i" => {
@@ -124,7 +125,7 @@ fn run_bun(args: &[String]) -> i32 {
                 }
                 "cache" => println!("bun cache: /home/user/.bun/install/cache (1.8 GB)"),
                 "hash" => println!("lockfile hash: 0xabc12345"),
-                _ => println!("bun pm: '{}' completed", sub),
+                _ => println!("bun pm: {} completed", quoteaf_os(sub)),
             }
         }
         _ => {
@@ -132,7 +133,7 @@ fn run_bun(args: &[String]) -> i32 {
             if subcmd.ends_with(".ts") || subcmd.ends_with(".js") || subcmd.ends_with(".tsx") {
                 println!("bun: running {}", subcmd);
             } else {
-                println!("bun: '{}' completed", subcmd);
+                println!("bun: {} completed", quoteaf_os(subcmd));
             }
         }
     }

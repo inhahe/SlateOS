@@ -4,3 +4,6 @@ version = "0.1.0"
 edition = "2024"
 description = "SlateOS service management CLI — start, stop, status, and control system services"
 [dependencies]
+# service names init services and the actions run on them, read out of the
+# services directory on disk.
+quoting = { path = "../quoting" }

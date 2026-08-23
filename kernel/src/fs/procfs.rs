@@ -5028,7 +5028,7 @@ fn gen_sealing() -> Vec<u8> {
     } else {
         out.push_str(&format!("{:40} {}\n", "PATH", "SEALS"));
         for (path, flags) in &files {
-            out.push_str(&format!("{:40} {}\n", path, flags.label()));
+            out.push_str(&format!("{:40} {}\n", path.display(), flags.label()));
         }
     }
 

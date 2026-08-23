@@ -18407,7 +18407,7 @@ fn cmd_seal(args: &str) {
                 shell_println!("{:40} {}", "PATH", "SEALS");
                 shell_println!("{}", "-".repeat(60));
                 for (path, flags) in &files {
-                    shell_println!("{:40} {}", path, flags.label());
+                    shell_println!("{:40} {}", path.display(), flags.label());
                 }
             }
         }

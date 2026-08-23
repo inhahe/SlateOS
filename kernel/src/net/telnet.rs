@@ -903,12 +903,28 @@ fn self_test_inner() -> KernelResult<()> {
 
     // --- Test 6: Stats with no server ---
     {
+        // Every field is asserted exactly, which this test could not do until
+        // the suite was de-fanged. It used to run against whatever the live
+        // server was doing, so all it could honestly claim was
+        // `port == DEFAULT_PORT || port > 0` -- a disjunction whose left half
+        // is subsumed by its right, since DEFAULT_PORT is 23 -- and a
+        // `let _ = s.active_sessions;` with a comment explaining that the
+        // count could not be checked at all. Now `self_test` pins every atomic
+        // and installs a fresh `TelnetState`, so "no server" is a state with
+        // exactly one description, and the test can assert it.
+        //
+        // Test 5 above builds its own local `TelnetState`, so it leaves no
+        // sessions behind here.
         let s = stats();
-        // Stats should work even when server hasn't been initialized.
-        assert!(s.port == DEFAULT_PORT || s.port > 0, "port valid");
-        // active_sessions should be >= 0 (it's usize, so always true, but
-        // verify the function doesn't panic).
-        let _ = s.active_sessions;
+        assert!(!s.initialized, "no server has been initialized");
+        assert!(!s.enabled, "and it is not enabled");
+        assert_eq!(s.port, DEFAULT_PORT, "an uninitialized server reports 23");
+        assert_eq!(s.active_sessions, 0, "no server, no sessions");
+        assert_eq!(s.total_connections, 0);
+        assert_eq!(s.total_commands, 0);
+        assert_eq!(s.total_bytes_tx, 0);
+        assert_eq!(s.total_bytes_rx, 0);
+        assert_eq!(s.rejected_connections, 0);
 
         passed = passed.saturating_add(1);
         crate::serial_println!("[telnet]   test 6 (stats without init) PASSED");

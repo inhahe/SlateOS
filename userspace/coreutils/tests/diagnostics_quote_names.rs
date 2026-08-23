@@ -123,6 +123,14 @@ fn bracket_delta(src: &str) -> Option<isize> {
 /// a line of `tar`'s stderr. A checker that a formatter can silence reports a
 /// clean tree for a dirty one.
 ///
+/// A physical line ending in an odd number of backslashes is Rust's *line
+/// continuation* inside a string literal: the backslash, the newline and the
+/// next line's leading whitespace all vanish from the string's value. That
+/// boundary is therefore joined with nothing rather than a space, so the text
+/// this test reads is the text the compiler sees. `diskutil` in the wider tree
+/// is written that way, and joining it with a space put a `\ ` in the middle of
+/// its message — which is not a valid escape at all.
+///
 /// Returns `(first physical line number, source)`, so a report still points at
 /// the line a reader would go to.
 fn logical_lines(text: &str) -> Vec<(usize, String)> {
@@ -152,13 +160,25 @@ fn logical_lines(text: &str) -> Vec<(usize, String)> {
                 joined = line.to_string();
                 break;
             }
-            joined.push(' ');
-            joined.push_str(lines[j].trim());
+            if is_continuation(&joined) {
+                joined.pop();
+                joined.push_str(lines[j].trim_start());
+            } else {
+                joined.push(' ');
+                joined.push_str(lines[j].trim());
+            }
         }
         out.push((i + 1, joined));
         i = j + 1;
     }
     out
+}
+
+/// Does `src` end in a string-literal line continuation? An *odd* number of
+/// trailing backslashes: `"a\` continues, `"a\\` is an escaped backslash and
+/// ends the line for real.
+fn is_continuation(src: &str) -> bool {
+    (src.len() - src.trim_end_matches('\\').len()) % 2 == 1
 }
 
 /// `eprintln!("prog: {ident}: ...")` — the shape where `ident` ends up as a
@@ -266,6 +286,34 @@ fn the_detector_sees_a_call_rustfmt_wrapped() {
     let parens = "println!(\"cancel: purged {n} job(s) on '{p}'\");\nlet y = 2;\n";
     let joined = logical_lines(parens);
     assert_eq!(joined.len(), 2, "over-joined past a paren in a literal");
+
+    // A literal broken with a trailing `\` is a line continuation: the
+    // backslash, the newline and the next line's indent are all absent from
+    // the string's value, so joining that boundary with a space reads a
+    // message the compiler never compiled. `diskutil` in the wider tree is
+    // written this way.
+    let continued = "eprintln!(\n\
+                     \x20   \"diskutil: cannot format '{other}' yet -- the FAT \\\n\
+                     \x20    family only\"\n\
+                     );\n";
+    let joined = logical_lines(continued);
+    assert_eq!(joined.len(), 1, "continuation not joined: {joined:?}");
+    assert!(
+        joined[0].1.contains("the FAT family only"),
+        "continuation joined with a stray space or backslash: {:?}",
+        joined[0].1
+    );
+
+    // An *escaped* backslash is a real backslash and ends the line for real,
+    // so that boundary keeps its separator.
+    let escaped = "eprintln!(\n    \"a\\\\\",\n    x\n);\n";
+    let joined = logical_lines(escaped);
+    assert_eq!(joined.len(), 1);
+    assert!(
+        joined[0].1.contains("\"a\\\\\", x"),
+        "escaped backslash was treated as a continuation: {:?}",
+        joined[0].1
+    );
 
     // And an unparseable line must not swallow what follows it, or one odd
     // line would blind the test to every call below it in the file.

@@ -211,6 +211,18 @@ def join_wrapped_calls(text: str) -> list[tuple[int, int, str]]:
 
     Lines that are not a wrapped call are returned unchanged, one per entry,
     so callers can treat the result as "the lines, but correct".
+
+    A physical line ending in a backslash is Rust's *line continuation* inside
+    a string literal: the backslash, the newline and the next line's leading
+    whitespace all vanish from the string's value. That boundary is therefore
+    joined with nothing rather than with a space, and the backslash dropped --
+    otherwise the reassembled literal is not the one the compiler sees. It
+    matters twice over: a spurious space lands in the middle of the message the
+    detector reads, and `--fix` writes the joined text *back to disk*, where
+    `\\ ` is not a valid escape and the file stops compiling. That is not
+    hypothetical; it is what this function did to `userspace/diskutil` before
+    the continuation branch below existed. Outside a literal a trailing
+    backslash is a syntax error in Rust, so there is nothing else it can be.
     """
     lines = text.split("\n")
     out: list[tuple[int, int, str]] = []
@@ -237,10 +249,23 @@ def join_wrapped_calls(text: str) -> list[tuple[int, int, str]]:
                 j = i
                 joined = line
                 break
-            joined += " " + lines[j].strip()
+            if _is_continuation(joined):
+                joined = joined[:-1] + lines[j].lstrip()
+            else:
+                joined += " " + lines[j].strip()
         out.append((i + 1, j + 1, joined))
         i = j + 1
     return out
+
+
+def _is_continuation(src: str) -> bool:
+    """Does `src` end in a string-literal line continuation?
+
+    An *odd* number of trailing backslashes: `"a\\` continues, `"a\\\\` is an
+    escaped backslash and ends the line for real.
+    """
+    n = len(src) - len(src.rstrip("\\"))
+    return n % 2 == 1
 
 
 def violations(text: str) -> list[tuple[int, str, str]]:
@@ -503,6 +528,20 @@ def selftest() -> int:
         if got != want:
             failures.append(f"{label}: want {want}, got {got}\n    {src}")
 
+    def expect_join(label: str, src: str, want_in: str) -> None:
+        """Assert the *reassembled* text, not just the count.
+
+        A count says the site was seen; it says nothing about whether the text
+        that was seen is the text the compiler sees. `--fix` writes this string
+        back to disk, so a join that is off by one space is a source edit that
+        is off by one space.
+        """
+        nonlocal checked
+        checked += 1
+        joined = " || ".join(s for _f, _l, s in join_wrapped_calls(src))
+        if want_in not in joined:
+            failures.append(f"{label}: {want_in!r} not in {joined!r}")
+
     # 1. The base case, in the exact shape the recorded sites are written in.
     expect("bare", 'eprintln!("cut: {path}: {e}");', 1)
     expect("bare-nested-prog", 'eprintln!("tar_x: {name}: {e}");', 1)
@@ -579,6 +618,31 @@ def selftest() -> int:
         "parens-inside-format-string",
         'println!("cancel: purged {n} job(s) on \'{p}\'");',
         1,
+    )
+    #    A literal broken with a trailing `\` is Rust's line continuation: the
+    #    backslash, the newline and the next line's indent all vanish from the
+    #    string. Joining that boundary with a space instead put `\ ` -- not a
+    #    valid escape -- in the middle of `diskutil`'s message, and because
+    #    `--fix` writes the joined text back, it stopped the crate compiling.
+    cont = (
+        'eprintln!(\n'
+        '    "diskutil: cannot format \'{other}\' yet -- only the FAT \\\n'
+        '     family has a backend"\n'
+        ');'
+    )
+    expect("continuation-is-still-detected", cont, 1)
+    expect_join(
+        "continuation-joins-without-a-space",
+        cont,
+        '"diskutil: cannot format \'{other}\' yet -- only the FAT family has a '
+        'backend"',
+    )
+    #    ... but an *escaped* backslash at end of line is a real backslash and
+    #    ends the line for real, so that boundary keeps its separator.
+    expect_join(
+        "escaped-backslash-is-not-a-continuation",
+        'eprintln!(\n    "a\\\\",\n    x\n);',
+        '"a\\\\", x',
     )
 
     # 9. The rewriter. A fixer that is wrong is worse than no fixer: it edits
@@ -775,9 +839,15 @@ def fix(targets: list[str]) -> int:
     print(f"\n{total_fixed} rewritten, {len(all_skipped)} left for a human")
     if total_fixed:
         print(
-            "Add `quoting = { path = \"../quoting\" }` to the crate's Cargo.toml and\n"
-            "`use quoting::{quoteaf_os, quotef_os};` (whichever it now calls), then\n"
-            "`cargo clippy --fix` to drop the borrows that turn out unnecessary."
+            "Wire the crate up with `scripts/quote-names-wire.py <crate> --why ...`,\n"
+            "then `cargo clippy --fix` to drop the borrows that turn out unnecessary.\n"
+            "\n"
+            "Then BUILD it. This tool cannot see types, so it will happily wrap a\n"
+            "value that is not a name -- a `char` holding an unknown option letter\n"
+            "is the shape that occurs, and `quoteaf_os` does not take one. That is a\n"
+            "compile error rather than a wrong message, which is the right way round,\n"
+            "but it is yours to resolve: `quoteaf(&[byte])` for a single byte, or\n"
+            "revert that one site if the value really is not a name."
         )
     return 0
 

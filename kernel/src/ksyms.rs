@@ -24,11 +24,28 @@
 //! ~24 bytes (address, size, name index), plus the string table.
 //! Total: ~100-200 KiB — acceptable for better diagnostics.
 //!
+//! Both function symbols (`STT_FUNC`) and data symbols (`STT_OBJECT`) are
+//! indexed. Data symbols are what turn a reported lock *address* into a lock
+//! *name*: most locks in the tree take `sync::Mutex::new`'s default name of
+//! `"?"`, so `lockdep`'s violation reports and `sync`'s spin-stall reports
+//! identify a lock by the address of the static it lives in, and without a
+//! data symbol that address resolves to nothing. They are also cheap — this
+//! kernel has ~124k function symbols and ~2.3k data symbols, so including
+//! them costs under 2% more entries and ~120 KiB of names.
+//!
+//! Mixing the two in one address-ordered table is safe because [`lookup`]
+//! bounds each hit by the symbol's own `st_size`: an address inside `.text`
+//! cannot land on a `.data` symbol, and one inside `.data` cannot land on
+//! the last function of `.text`.
+//!
+//! [`lookup`]: SymbolTable::lookup
+//!
 //! ## Limitations
 //!
-//! - Only function symbols (`STT_FUNC`) are loaded (not data symbols).
 //! - Symbols without a size are given a default size of 1 byte.
-//! - If the kernel is stripped, no symbols will be available.
+//! - If the kernel is stripped, no symbols will be available. Note that a
+//!   bare `llvm-strip` does this: `scripts/boot-test.sh` must use
+//!   `--strip-debug`, which drops DWARF but keeps `.symtab`.
 //!
 //! ## References
 //!
@@ -97,6 +114,7 @@ const SHT_SYMTAB: u32 = 2;
 const SHT_STRTAB: u32 = 3;
 
 // ELF symbol types (low 4 bits of st_info).
+const STT_OBJECT: u8 = 1;
 const STT_FUNC: u8 = 2;
 
 // ---------------------------------------------------------------------------
@@ -116,6 +134,31 @@ struct KernelSymbol {
 
 /// Global symbol table.
 static SYMBOLS: Mutex<SymbolTable> = Mutex::new(SymbolTable::empty());
+
+/// Lock-free view of [`SYMBOLS`], published once the table is filled and
+/// valid for the rest of the kernel's life.
+///
+/// [`resolve`] takes `SYMBOLS.lock()` and returns an allocated `String`.
+/// Neither is permissible in the places that most need a symbol name — the
+/// panic handler, the spin-stall reporter, and lockdep's violation reporter
+/// — because each of those runs *while a lock is held or contended*, so
+/// both `Mutex::lock` and the heap's own lock re-enter the very machinery
+/// being reported on.
+///
+/// lockdep is the sharpest case. `SYMBOLS.lock()` called from inside
+/// `report_violation` would register a new acquisition in the dependency
+/// graph currently being walked; if that acquisition itself raised a
+/// violation, `report_violation` would recurse with `SYMBOLS` already held
+/// and spin forever — a hang in the one code path whose entire job is to
+/// diagnose hangs.
+///
+/// The pointer is safe to follow without a lock because the table is
+/// **write-once**: [`parse_elf_symbols`] fills it exactly once and nothing
+/// mutates it afterwards, so the `Vec` buffers never reallocate and the
+/// pointer never dangles. It addresses the interior of a `static`, which
+/// outlives every caller.
+static SNAPSHOT: core::sync::atomic::AtomicPtr<SymbolTable> =
+    core::sync::atomic::AtomicPtr::new(core::ptr::null_mut());
 
 /// Whether symbols have been loaded.
 static LOADED: AtomicBool = AtomicBool::new(false);
@@ -253,6 +296,38 @@ pub fn resolve(addr: u64) -> Option<String> {
     })
 }
 
+/// Resolve a kernel address to a symbol name and offset **without taking a
+/// lock and without allocating**.
+///
+/// This is the form to use from a panic handler, a spin-stall report, or a
+/// lockdep violation report — anywhere that runs while a lock is held or
+/// contended, where [`resolve`]'s `SYMBOLS.lock()` and `String` allocation
+/// would re-enter the machinery being diagnosed. See [`SNAPSHOT`] for why
+/// reading the table unlocked is sound.
+///
+/// Returns `(name, offset_from_symbol_start)`, or `None` if symbols were
+/// never loaded or the address falls in no known symbol.
+#[must_use]
+pub fn resolve_static(addr: u64) -> Option<(&'static str, u64)> {
+    if !LOADED.load(Ordering::Acquire) {
+        return None;
+    }
+    let ptr = SNAPSHOT.load(Ordering::Acquire);
+    if ptr.is_null() {
+        return None;
+    }
+    // SAFETY: `SNAPSHOT` is non-null only after `parse_elf_symbols` stored
+    // the address of `SYMBOLS`' interior with Release ordering, which this
+    // Acquire load synchronises with. `SYMBOLS` is a `static`, so the
+    // pointee outlives `'static`; and the table is never mutated after that
+    // single store, so no `&mut` alias can exist and the `Vec` buffers the
+    // returned `&str` borrows from can never reallocate.
+    let table: &'static SymbolTable = unsafe { &*ptr };
+    table
+        .lookup(addr)
+        .map(|(sym, offset)| (table.name_of(sym), offset))
+}
+
 /// Resolve an address and format it for display.
 ///
 /// Returns `"function+0xNN"` if resolved, or `"0xADDR"` if not.
@@ -367,9 +442,11 @@ fn parse_elf_symbols(elf: &[u8]) -> Option<usize> {
         }
         let sym = unsafe { &*(elf.as_ptr().add(entry_offset) as *const Elf64Sym) };
 
-        // Only include function symbols with a valid address.
+        // Include code and data, but nothing else: SECTION and FILE symbols
+        // carry addresses that would shadow real ones in the table, and
+        // NOTYPE covers assembler labels whose extent is unknown.
         let sym_type = sym.st_info & 0xF;
-        if sym_type != STT_FUNC || sym.st_value == 0 {
+        if (sym_type != STT_FUNC && sym_type != STT_OBJECT) || sym.st_value == 0 {
             continue;
         }
 
@@ -416,6 +493,15 @@ fn parse_elf_symbols(elf: &[u8]) -> Option<usize> {
     let mut table = SYMBOLS.lock();
     table.entries = entries;
     table.names = names;
+
+    // Publish the lock-free view. This is the only write the table ever
+    // receives, so from here on the pointer is stable and the data behind
+    // it immutable — the invariant `resolve_static` relies on. Released
+    // before the guard drops so no reader can observe a half-filled table.
+    SNAPSHOT.store(
+        core::ptr::from_ref::<SymbolTable>(&table).cast_mut(),
+        Ordering::Release,
+    );
 
     Some(count)
 }

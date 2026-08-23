@@ -7,8 +7,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_fly(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
@@ -38,7 +42,9 @@ fn run_fly(args: &[String]) -> i32 {
         }
         "targets" => {
             println!("name    url                            team    expiry");
-            println!("main    https://ci.example.com         main    Wed, 22 May 2026 12:00:00 UTC");
+            println!(
+                "main    https://ci.example.com         main    Wed, 22 May 2026 12:00:00 UTC"
+            );
         }
         "pipelines" => {
             println!("name            paused  public  last updated");
@@ -47,8 +53,11 @@ fn run_fly(args: &[String]) -> i32 {
             println!("nightly-tests   no      yes     2024-01-15");
         }
         "set-pipeline" | "sp" => {
-            let pipeline = args.windows(2).find(|w| w[0] == "-p")
-                .map(|w| w[1].as_str()).unwrap_or("my-pipeline");
+            let pipeline = args
+                .windows(2)
+                .find(|w| w[0] == "-p")
+                .map(|w| w[1].as_str())
+                .unwrap_or("my-pipeline");
             println!("Setting pipeline '{}'...", pipeline);
             println!("  resources:");
             println!("    resource my-repo has been added");
@@ -59,14 +68,21 @@ fn run_fly(args: &[String]) -> i32 {
             println!("pipeline created.");
         }
         "trigger-job" | "tj" => {
-            let job = args.windows(2).find(|w| w[0] == "-j")
-                .map(|w| w[1].as_str()).unwrap_or("my-pipeline/build");
+            let job = args
+                .windows(2)
+                .find(|w| w[0] == "-j")
+                .map(|w| w[1].as_str())
+                .unwrap_or("my-pipeline/build");
             println!("started {}/42", job);
         }
         "builds" => {
             println!("id  pipeline/job             build  status     start                 end");
-            println!("42  my-pipeline/build        42     succeeded  2024-01-15 10:00:00   2024-01-15 10:02:34");
-            println!("41  my-pipeline/test         41     succeeded  2024-01-15 10:02:35   2024-01-15 10:05:12");
+            println!(
+                "42  my-pipeline/build        42     succeeded  2024-01-15 10:00:00   2024-01-15 10:02:34"
+            );
+            println!(
+                "41  my-pipeline/test         41     succeeded  2024-01-15 10:02:35   2024-01-15 10:05:12"
+            );
         }
         "workers" => {
             println!("name      containers  platform  tags  team  state    version");
@@ -86,7 +102,10 @@ fn run_fly(args: &[String]) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "fly".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "fly".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_fly(&rest);
     process::exit(code);
@@ -94,7 +113,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_fly};
+    use super::{basename, run_fly, strip_ext};
 
     #[test]
     fn basename_strips_path() {

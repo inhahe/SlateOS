@@ -186,31 +186,42 @@ fn list_available_locales() -> Vec<String> {
     if let Ok(content) = fs::read_to_string(SUPPORTED_LOCALES) {
         for line in content.lines() {
             let line = line.trim();
-            if !line.is_empty() && !line.starts_with('#')
-                && let Some(locale) = line.split_whitespace().next() {
-                    locales.push(locale.to_string());
-                }
+            if !line.is_empty()
+                && !line.starts_with('#')
+                && let Some(locale) = line.split_whitespace().next()
+            {
+                locales.push(locale.to_string());
+            }
         }
     }
 
     // Try locale -a style from /usr/lib/locale.
     if locales.is_empty()
-        && let Ok(entries) = fs::read_dir("/usr/lib/locale") {
-            for entry in entries.flatten() {
-                locales.push(entry.file_name().to_string_lossy().to_string());
-            }
+        && let Ok(entries) = fs::read_dir("/usr/lib/locale")
+    {
+        for entry in entries.flatten() {
+            locales.push(entry.file_name().to_string_lossy().to_string());
         }
+    }
 
     // Fallback built-in list.
     if locales.is_empty() {
         locales = vec![
-            "C".to_string(), "C.UTF-8".to_string(), "POSIX".to_string(),
-            "en_US.UTF-8".to_string(), "en_GB.UTF-8".to_string(),
-            "de_DE.UTF-8".to_string(), "fr_FR.UTF-8".to_string(),
-            "es_ES.UTF-8".to_string(), "it_IT.UTF-8".to_string(),
-            "ja_JP.UTF-8".to_string(), "ko_KR.UTF-8".to_string(),
-            "zh_CN.UTF-8".to_string(), "zh_TW.UTF-8".to_string(),
-            "pt_BR.UTF-8".to_string(), "ru_RU.UTF-8".to_string(),
+            "C".to_string(),
+            "C.UTF-8".to_string(),
+            "POSIX".to_string(),
+            "en_US.UTF-8".to_string(),
+            "en_GB.UTF-8".to_string(),
+            "de_DE.UTF-8".to_string(),
+            "fr_FR.UTF-8".to_string(),
+            "es_ES.UTF-8".to_string(),
+            "it_IT.UTF-8".to_string(),
+            "ja_JP.UTF-8".to_string(),
+            "ko_KR.UTF-8".to_string(),
+            "zh_CN.UTF-8".to_string(),
+            "zh_TW.UTF-8".to_string(),
+            "pt_BR.UTF-8".to_string(),
+            "ru_RU.UTF-8".to_string(),
         ];
     }
 
@@ -234,10 +245,18 @@ fn list_available_keymaps() -> Vec<String> {
     // Fallback.
     if keymaps.is_empty() {
         keymaps = vec![
-            "us".to_string(), "uk".to_string(), "de".to_string(),
-            "fr".to_string(), "es".to_string(), "it".to_string(),
-            "jp".to_string(), "kr".to_string(), "ru".to_string(),
-            "br".to_string(), "dvorak".to_string(), "colemak".to_string(),
+            "us".to_string(),
+            "uk".to_string(),
+            "de".to_string(),
+            "fr".to_string(),
+            "es".to_string(),
+            "it".to_string(),
+            "jp".to_string(),
+            "kr".to_string(),
+            "ru".to_string(),
+            "br".to_string(),
+            "dvorak".to_string(),
+            "colemak".to_string(),
         ];
     }
 
@@ -281,18 +300,26 @@ fn list_x11_layouts() -> Vec<String> {
                 in_layouts = false;
                 continue;
             }
-            if in_layouts && !line.is_empty()
-                && let Some(name) = line.split_whitespace().next() {
-                    layouts.push(name.to_string());
-                }
+            if in_layouts
+                && !line.is_empty()
+                && let Some(name) = line.split_whitespace().next()
+            {
+                layouts.push(name.to_string());
+            }
         }
     }
 
     if layouts.is_empty() {
         layouts = vec![
-            "us".to_string(), "gb".to_string(), "de".to_string(),
-            "fr".to_string(), "es".to_string(), "it".to_string(),
-            "jp".to_string(), "kr".to_string(), "ru".to_string(),
+            "us".to_string(),
+            "gb".to_string(),
+            "de".to_string(),
+            "fr".to_string(),
+            "es".to_string(),
+            "it".to_string(),
+            "jp".to_string(),
+            "kr".to_string(),
+            "ru".to_string(),
         ];
     }
 
@@ -308,7 +335,14 @@ fn cmd_status() -> i32 {
     let keymap = read_keymap_settings();
     let x11 = read_x11_settings();
 
-    println!("   System Locale: LANG={}", if locale.lang.is_empty() { "n/a" } else { &locale.lang });
+    println!(
+        "   System Locale: LANG={}",
+        if locale.lang.is_empty() {
+            "n/a"
+        } else {
+            &locale.lang
+        }
+    );
     let locale_map = locale.to_map();
     for (key, value) in &locale_map {
         if key != "LANG" {
@@ -316,12 +350,26 @@ fn cmd_status() -> i32 {
         }
     }
 
-    println!("       VC Keymap: {}", if keymap.keymap.is_empty() { "n/a" } else { &keymap.keymap });
+    println!(
+        "       VC Keymap: {}",
+        if keymap.keymap.is_empty() {
+            "n/a"
+        } else {
+            &keymap.keymap
+        }
+    );
     if !keymap.keymap_toggle.is_empty() {
         println!("  VC Toggle Keymap: {}", keymap.keymap_toggle);
     }
 
-    println!("      X11 Layout: {}", if x11.layout.is_empty() { "n/a" } else { &x11.layout });
+    println!(
+        "      X11 Layout: {}",
+        if x11.layout.is_empty() {
+            "n/a"
+        } else {
+            &x11.layout
+        }
+    );
     if !x11.model.is_empty() {
         println!("       X11 Model: {}", x11.model);
     }
@@ -375,7 +423,12 @@ fn cmd_set_keymap(keymap: &str, toggle: Option<&str>) -> i32 {
     }
 }
 
-fn cmd_set_x11_keymap(layout: &str, model: Option<&str>, variant: Option<&str>, options: Option<&str>) -> i32 {
+fn cmd_set_x11_keymap(
+    layout: &str,
+    model: Option<&str>,
+    variant: Option<&str>,
+    options: Option<&str>,
+) -> i32 {
     let conf = format!(
         "Section \"InputClass\"\n\
          \tIdentifier \"system-keyboard\"\n\
@@ -385,9 +438,15 @@ fn cmd_set_x11_keymap(layout: &str, model: Option<&str>, variant: Option<&str>, 
          {}\
          {}\
          EndSection\n",
-        model.map(|m| format!("\tOption \"XkbModel\" \"{m}\"\n")).unwrap_or_default(),
-        variant.map(|v| format!("\tOption \"XkbVariant\" \"{v}\"\n")).unwrap_or_default(),
-        options.map(|o| format!("\tOption \"XkbOptions\" \"{o}\"\n")).unwrap_or_default(),
+        model
+            .map(|m| format!("\tOption \"XkbModel\" \"{m}\"\n"))
+            .unwrap_or_default(),
+        variant
+            .map(|v| format!("\tOption \"XkbVariant\" \"{v}\"\n"))
+            .unwrap_or_default(),
+        options
+            .map(|o| format!("\tOption \"XkbOptions\" \"{o}\"\n"))
+            .unwrap_or_default(),
     );
 
     if let Some(parent) = Path::new(X11_CONF).parent() {

@@ -47,8 +47,16 @@ fn run_qemu_system(args: &[String]) -> i32 {
         return 0;
     }
 
-    let mem = args.windows(2).find(|w| w[0] == "-m").map(|w| w[1].as_str()).unwrap_or("128M");
-    let smp = args.windows(2).find(|w| w[0] == "-smp").map(|w| w[1].as_str()).unwrap_or("1");
+    let mem = args
+        .windows(2)
+        .find(|w| w[0] == "-m")
+        .map(|w| w[1].as_str())
+        .unwrap_or("128M");
+    let smp = args
+        .windows(2)
+        .find(|w| w[0] == "-smp")
+        .map(|w| w[1].as_str())
+        .unwrap_or("1");
     let kvm = args.iter().any(|a| a == "-enable-kvm");
 
     println!("QEMU x86_64 system emulator v8.2.2");
@@ -86,14 +94,28 @@ fn run_qemu_img(args: &[String]) -> i32 {
     let cmd = args.first().map(|s| s.as_str()).unwrap_or("");
     match cmd {
         "create" => {
-            let fmt = args.windows(2).find(|w| w[0] == "-f").map(|w| w[1].as_str()).unwrap_or("qcow2");
-            let positional: Vec<&str> = args.iter().skip(1).filter(|a| !a.starts_with('-')).map(|s| s.as_str()).collect();
+            let fmt = args
+                .windows(2)
+                .find(|w| w[0] == "-f")
+                .map(|w| w[1].as_str())
+                .unwrap_or("qcow2");
+            let positional: Vec<&str> = args
+                .iter()
+                .skip(1)
+                .filter(|a| !a.starts_with('-'))
+                .map(|s| s.as_str())
+                .collect();
             let file = positional.first().unwrap_or(&"disk.qcow2");
             let size = positional.get(1).unwrap_or(&"10G");
             println!("Formatting '{}', fmt={} size={}", file, fmt, size);
         }
         "info" => {
-            let file = args.iter().skip(1).find(|a| !a.starts_with('-')).map(|s| s.as_str()).unwrap_or("disk.qcow2");
+            let file = args
+                .iter()
+                .skip(1)
+                .find(|a| !a.starts_with('-'))
+                .map(|s| s.as_str())
+                .unwrap_or("disk.qcow2");
             println!("image: {}", file);
             println!("file format: qcow2");
             println!("virtual size: 10 GiB (10737418240 bytes)");
@@ -109,7 +131,12 @@ fn run_qemu_img(args: &[String]) -> i32 {
             println!("    (100.00/100%)");
         }
         "resize" => {
-            let file = args.iter().skip(1).find(|a| !a.starts_with('-')).map(|s| s.as_str()).unwrap_or("disk.qcow2");
+            let file = args
+                .iter()
+                .skip(1)
+                .find(|a| !a.starts_with('-'))
+                .map(|s| s.as_str())
+                .unwrap_or("disk.qcow2");
             println!("Image '{}' resized.", file);
         }
         "check" => {
@@ -147,7 +174,8 @@ fn run_qemu_nbd(args: &[String]) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first()
+    let prog = args
+        .first()
         .map(|s| strip_ext(basename(s)).to_string())
         .unwrap_or_else(|| "qemu-system-x86_64".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
@@ -162,7 +190,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_qemu_system};
+    use super::{basename, run_qemu_system, strip_ext};
 
     #[test]
     fn basename_strips_path() {

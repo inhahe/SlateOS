@@ -99,14 +99,12 @@ fn read_keyring() -> Vec<GpgKey> {
             trust: KeyTrust::Ultimate,
             key_type: KeyType::Ed25519,
             _bits: 256,
-            _subkeys: vec![
-                SubKey {
-                    _keyid: "1111222233334444".to_string(),
-                    _key_type: KeyType::_Cv25519,
-                    _bits: 256,
-                    _usage: "[E]".to_string(),
-                },
-            ],
+            _subkeys: vec![SubKey {
+                _keyid: "1111222233334444".to_string(),
+                _key_type: KeyType::_Cv25519,
+                _bits: 256,
+                _usage: "[E]".to_string(),
+            }],
         },
         GpgKey {
             keyid: "9876543210FEDCBA".to_string(),
@@ -118,14 +116,12 @@ fn read_keyring() -> Vec<GpgKey> {
             trust: KeyTrust::Full,
             key_type: KeyType::Rsa,
             _bits: 4096,
-            _subkeys: vec![
-                SubKey {
-                    _keyid: "5555666677778888".to_string(),
-                    _key_type: KeyType::Rsa,
-                    _bits: 4096,
-                    _usage: "[E]".to_string(),
-                },
-            ],
+            _subkeys: vec![SubKey {
+                _keyid: "5555666677778888".to_string(),
+                _key_type: KeyType::Rsa,
+                _bits: 4096,
+                _usage: "[E]".to_string(),
+            }],
         },
     ]
 }
@@ -133,7 +129,10 @@ fn read_keyring() -> Vec<GpgKey> {
 // ── gpg personality ──────────────────────────────────────────────────
 
 fn run_gpg(args: Vec<String>) -> i32 {
-    let cmd = args.first().cloned().unwrap_or_else(|| "--help".to_string());
+    let cmd = args
+        .first()
+        .cloned()
+        .unwrap_or_else(|| "--help".to_string());
     let cmd_args: Vec<String> = args.into_iter().skip(1).collect();
 
     match cmd.as_str() {
@@ -209,14 +208,18 @@ fn gpg_list_keys(secret: bool) -> i32 {
     println!("---------------------------------------");
 
     for key in &keys {
-        println!("{}   {}  {} [SC]  created: {}  expires: {}",
-            label, key.key_type, key.keyid, key.created, key.expires);
+        println!(
+            "{}   {}  {} [SC]  created: {}  expires: {}",
+            label, key.key_type, key.keyid, key.created, key.expires
+        );
         println!("      {}", key.fingerprint);
         println!("uid           [{}] {}", key.trust, key.uid);
         for sk in &key._subkeys {
             let sub_label = if secret { "ssb" } else { "sub" };
-            println!("{}   {} {} {}  {}", sub_label, sk._key_type, sk._keyid,
-                sk._usage, key.created);
+            println!(
+                "{}   {} {} {}  {}",
+                sub_label, sk._key_type, sk._keyid, sk._usage, key.created
+            );
         }
         println!();
     }
@@ -268,7 +271,11 @@ fn gpg_fingerprint(args: &[String]) -> i32 {
 }
 
 fn gpg_sign(args: &[String], mode: &str) -> i32 {
-    let file = args.iter().find(|a| !a.starts_with('-')).map(|s| s.as_str()).unwrap_or("stdin");
+    let file = args
+        .iter()
+        .find(|a| !a.starts_with('-'))
+        .map(|s| s.as_str())
+        .unwrap_or("stdin");
 
     match mode {
         "clear" => {
@@ -303,9 +310,13 @@ fn gpg_verify(args: &[String]) -> i32 {
 }
 
 fn gpg_encrypt(args: &[String]) -> i32 {
-    let recipient = args.iter().position(|a| a == "-r" || a == "--recipient")
+    let recipient = args
+        .iter()
+        .position(|a| a == "-r" || a == "--recipient")
         .and_then(|i| args.get(i + 1));
-    let file = args.iter().find(|a| !a.starts_with('-') && *a != recipient.map(|s| s.as_str()).unwrap_or(""))
+    let file = args
+        .iter()
+        .find(|a| !a.starts_with('-') && *a != recipient.map(|s| s.as_str()).unwrap_or(""))
         .map(|s| s.as_str())
         .unwrap_or("stdin");
 
@@ -323,7 +334,11 @@ fn gpg_encrypt(args: &[String]) -> i32 {
 }
 
 fn gpg_decrypt(args: &[String]) -> i32 {
-    let file = args.iter().find(|a| !a.starts_with('-')).map(|s| s.as_str()).unwrap_or("stdin");
+    let file = args
+        .iter()
+        .find(|a| !a.starts_with('-'))
+        .map(|s| s.as_str())
+        .unwrap_or("stdin");
 
     println!("gpg: encrypted with 256-bit ECDH key, ID 1111222233334444");
     println!("gpg: decrypting {} (simulated)", file);
@@ -332,17 +347,28 @@ fn gpg_decrypt(args: &[String]) -> i32 {
 }
 
 fn gpg_symmetric(args: &[String]) -> i32 {
-    let file = args.iter().find(|a| !a.starts_with('-')).map(|s| s.as_str()).unwrap_or("stdin");
+    let file = args
+        .iter()
+        .find(|a| !a.starts_with('-'))
+        .map(|s| s.as_str())
+        .unwrap_or("stdin");
 
     println!("Enter passphrase: ********");
     println!("Repeat passphrase: ********");
-    println!("gpg: AES256.CFB encrypted {} → {}.gpg (simulated)", file, file);
+    println!(
+        "gpg: AES256.CFB encrypted {} → {}.gpg (simulated)",
+        file, file
+    );
     0
 }
 
 fn gpg_export(args: &[String]) -> i32 {
     let armor = args.iter().any(|a| a == "-a" || a == "--armor");
-    let keyid = args.iter().find(|a| !a.starts_with('-')).map(|s| s.as_str()).unwrap_or("all");
+    let keyid = args
+        .iter()
+        .find(|a| !a.starts_with('-'))
+        .map(|s| s.as_str())
+        .unwrap_or("all");
 
     if armor {
         println!("-----BEGIN PGP PUBLIC KEY BLOCK-----");
@@ -355,7 +381,11 @@ fn gpg_export(args: &[String]) -> i32 {
 }
 
 fn gpg_import(args: &[String]) -> i32 {
-    let file = args.iter().find(|a| !a.starts_with('-')).map(|s| s.as_str()).unwrap_or("stdin");
+    let file = args
+        .iter()
+        .find(|a| !a.starts_with('-'))
+        .map(|s| s.as_str())
+        .unwrap_or("stdin");
 
     println!("gpg: key 9876543210FEDCBA: \"Alice Smith <alice@example.com>\" imported");
     println!("gpg: Total number processed: 1");
@@ -365,22 +395,34 @@ fn gpg_import(args: &[String]) -> i32 {
 }
 
 fn gpg_send_keys(args: &[String]) -> i32 {
-    let keyid = args.first().map(|s| s.as_str()).unwrap_or("ABCDEF1234567890");
+    let keyid = args
+        .first()
+        .map(|s| s.as_str())
+        .unwrap_or("ABCDEF1234567890");
     println!("gpg: sending key {} to hkps://keys.openpgp.org", keyid);
     println!("gpg: key {} sent successfully (simulated)", keyid);
     0
 }
 
 fn gpg_recv_keys(args: &[String]) -> i32 {
-    let keyid = args.first().map(|s| s.as_str()).unwrap_or("ABCDEF1234567890");
+    let keyid = args
+        .first()
+        .map(|s| s.as_str())
+        .unwrap_or("ABCDEF1234567890");
     println!("gpg: requesting key {} from hkps://keys.openpgp.org", keyid);
     println!("gpg: key {}: public key imported (simulated)", keyid);
     0
 }
 
 fn gpg_search_keys(args: &[String]) -> i32 {
-    let query = args.first().map(|s| s.as_str()).unwrap_or("user@example.com");
-    println!("gpg: searching for \"{}\" from hkps://keys.openpgp.org", query);
+    let query = args
+        .first()
+        .map(|s| s.as_str())
+        .unwrap_or("user@example.com");
+    println!(
+        "gpg: searching for \"{}\" from hkps://keys.openpgp.org",
+        query
+    );
     println!("(1) Alice Smith <alice@example.com>");
     println!("      4096 bit RSA key 9876543210FEDCBA, created: 2023-06-01");
     println!("(2) Bob Jones <bob@example.com>");
@@ -391,7 +433,10 @@ fn gpg_search_keys(args: &[String]) -> i32 {
 // ── gpg-agent personality ────────────────────────────────────────────
 
 fn run_gpg_agent(args: Vec<String>) -> i32 {
-    let cmd = args.first().cloned().unwrap_or_else(|| "--daemon".to_string());
+    let cmd = args
+        .first()
+        .cloned()
+        .unwrap_or_else(|| "--daemon".to_string());
 
     match cmd.as_str() {
         "--help" | "-h" => {
@@ -408,20 +453,29 @@ fn run_gpg_agent(args: Vec<String>) -> i32 {
             println!("  --version         Show version");
             0
         }
-        "--version" => { println!("gpg-agent 0.1.0 (Slate OS)"); 0 }
+        "--version" => {
+            println!("gpg-agent 0.1.0 (Slate OS)");
+            0
+        }
         "--daemon" | "--server" | "--supervised" => {
             println!("gpg-agent: starting (simulated)");
             println!("gpg-agent: listening on {}", _GPG_AGENT_SOCK);
             0
         }
-        _ => { eprintln!("gpg-agent: unknown option '{}'", cmd); 1 }
+        _ => {
+            eprintln!("gpg-agent: unknown option '{}'", cmd);
+            1
+        }
     }
 }
 
 // ── gpgconf personality ──────────────────────────────────────────────
 
 fn run_gpgconf(args: Vec<String>) -> i32 {
-    let cmd = args.first().cloned().unwrap_or_else(|| "--list-components".to_string());
+    let cmd = args
+        .first()
+        .cloned()
+        .unwrap_or_else(|| "--list-components".to_string());
 
     match cmd.as_str() {
         "--help" | "-h" => {
@@ -440,7 +494,10 @@ fn run_gpgconf(args: Vec<String>) -> i32 {
             println!("  --version            Show version");
             0
         }
-        "--version" => { println!("gpgconf 0.1.0 (Slate OS)"); 0 }
+        "--version" => {
+            println!("gpgconf 0.1.0 (Slate OS)");
+            0
+        }
         "--list-components" => {
             println!("gpg:OpenPGP:/usr/bin/gpg");
             println!("gpg-agent:Private Keys:/usr/bin/gpg-agent");
@@ -453,7 +510,10 @@ fn run_gpgconf(args: Vec<String>) -> i32 {
             println!("sysconfdir:/etc/gnupg");
             println!("bindir:/usr/bin");
             println!("libdir:/usr/lib/gnupg");
-            println!("homedir:{}/.gnupg", env::var("HOME").unwrap_or_else(|_| "/root".to_string()));
+            println!(
+                "homedir:{}/.gnupg",
+                env::var("HOME").unwrap_or_else(|_| "/root".to_string())
+            );
             println!("socketdir:/run/user/1000/gnupg");
             0
         }
@@ -467,7 +527,10 @@ fn run_gpgconf(args: Vec<String>) -> i32 {
             println!("gpgconf: {} {}", cmd.trim_start_matches("--"), target);
             0
         }
-        _ => { eprintln!("gpgconf: unknown command '{}'", cmd); 1 }
+        _ => {
+            eprintln!("gpgconf: unknown command '{}'", cmd);
+            1
+        }
     }
 }
 
@@ -481,7 +544,9 @@ fn main() {
         let bytes = s.as_bytes();
         let mut last_sep = 0;
         for (i, &b) in bytes.iter().enumerate() {
-            if b == b'/' || b == b'\\' { last_sep = i + 1; }
+            if b == b'/' || b == b'\\' {
+                last_sep = i + 1;
+            }
         }
         let base = &s[last_sep..];
         let base = base.strip_suffix(".exe").unwrap_or(base);

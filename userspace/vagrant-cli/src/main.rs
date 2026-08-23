@@ -41,7 +41,10 @@ fn run_vagrant(args: Vec<String>) -> i32 {
 
     match cmd {
         "init" => {
-            let box_name = args.get(1).map(|s| s.as_str()).unwrap_or("hashicorp/bionic64");
+            let box_name = args
+                .get(1)
+                .map(|s| s.as_str())
+                .unwrap_or("hashicorp/bionic64");
             println!("A `Vagrantfile` has been placed in this directory.");
             println!("Box: {}", box_name);
             println!("You are now ready to `vagrant up`.");
@@ -132,7 +135,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_vagrant};
+    use super::run_vagrant;
 
     #[test]
     fn help_exits_zero() {

@@ -125,7 +125,9 @@ fn run_pydoc(args: Vec<String>) -> i32 {
     }
 
     if args.iter().any(|a| a == "-p") {
-        let port = args.iter().position(|a| a == "-p")
+        let port = args
+            .iter()
+            .position(|a| a == "-p")
             .and_then(|i| args.get(i + 1))
             .and_then(|s| s.parse::<u16>().ok())
             .unwrap_or(8080);
@@ -200,7 +202,9 @@ fn run_pip(args: Vec<String>) -> i32 {
         }
         "install" => {
             for pkg in &cmd_args {
-                if pkg.starts_with('-') { continue; }
+                if pkg.starts_with('-') {
+                    continue;
+                }
                 println!("Collecting {}", pkg);
                 println!("  Downloading {}-1.0.0-py3-none-any.whl (simulated)", pkg);
                 println!("Installing collected packages: {}", pkg);
@@ -210,7 +214,9 @@ fn run_pip(args: Vec<String>) -> i32 {
         }
         "uninstall" => {
             for pkg in &cmd_args {
-                if pkg.starts_with('-') { continue; }
+                if pkg.starts_with('-') {
+                    continue;
+                }
                 println!("Found existing installation: {} 1.0.0", pkg);
                 println!("Uninstalling {}-1.0.0:", pkg);
                 println!("  Successfully uninstalled {}-1.0.0", pkg);
@@ -256,8 +262,14 @@ fn run_pip(args: Vec<String>) -> i32 {
             }
             0
         }
-        "check" => { println!("No broken requirements found."); 0 }
-        other => { eprintln!("pip: unknown command '{}'", other); 1 }
+        "check" => {
+            println!("No broken requirements found.");
+            0
+        }
+        other => {
+            eprintln!("pip: unknown command '{}'", other);
+            1
+        }
     }
 }
 
@@ -271,7 +283,9 @@ fn main() {
         let bytes = s.as_bytes();
         let mut last_sep = 0;
         for (i, &b) in bytes.iter().enumerate() {
-            if b == b'/' || b == b'\\' { last_sep = i + 1; }
+            if b == b'/' || b == b'\\' {
+                last_sep = i + 1;
+            }
         }
         let base = &s[last_sep..];
         let base = base.strip_suffix(".exe").unwrap_or(base);
@@ -293,7 +307,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_python};
+    use super::run_python;
 
     #[test]
     fn help_exits_zero() {

@@ -34,7 +34,9 @@ fn run_trello(args: Vec<String>) -> i32 {
                     println!("brd-def456      Product Backlog       3      42     3");
                     println!("brd-ghi789      Design Tasks          3      12     4");
                 }
-                _ => { println!("Board operation: {}", sub); }
+                _ => {
+                    println!("Board operation: {}", sub);
+                }
             }
             0
         }
@@ -42,14 +44,20 @@ fn run_trello(args: Vec<String>) -> i32 {
             let sub = args.get(1).map(|s| s.as_str()).unwrap_or("list");
             match sub {
                 "list" => {
-                    let board = args.windows(2).find(|w| w[0] == "--board").map(|w| w[1].as_str()).unwrap_or("brd-abc123");
+                    let board = args
+                        .windows(2)
+                        .find(|w| w[0] == "--board")
+                        .map(|w| w[1].as_str())
+                        .unwrap_or("brd-abc123");
                     println!("Lists in {}:", board);
                     println!("  To Do          (5 cards)");
                     println!("  In Progress    (4 cards)");
                     println!("  Review         (3 cards)");
                     println!("  Done           (6 cards)");
                 }
-                _ => { println!("List operation: {}", sub); }
+                _ => {
+                    println!("List operation: {}", sub);
+                }
             }
             0
         }
@@ -60,19 +68,31 @@ fn run_trello(args: Vec<String>) -> i32 {
                     println!("ID              List          Labels       Due          Name");
                     println!("crd-abc123      In Progress   bug,high     2024-01-20   Fix timeout");
                     println!("crd-def456      To Do         feature      2024-01-22   Add filters");
-                    println!("crd-ghi789      Review        docs         -            Update API docs");
+                    println!(
+                        "crd-ghi789      Review        docs         -            Update API docs"
+                    );
                     println!("crd-jkl012      Done          bug          2024-01-15   Fix typo");
                 }
                 "create" => {
-                    let name = args.windows(2).find(|w| w[0] == "--name").map(|w| w[1].as_str()).unwrap_or("New card");
+                    let name = args
+                        .windows(2)
+                        .find(|w| w[0] == "--name")
+                        .map(|w| w[1].as_str())
+                        .unwrap_or("New card");
                     println!("✔ Created card: {} (crd-new123)", name);
                 }
                 "move" => {
                     let card = args.get(2).map(|s| s.as_str()).unwrap_or("crd-abc123");
-                    let list = args.windows(2).find(|w| w[0] == "--list").map(|w| w[1].as_str()).unwrap_or("Done");
+                    let list = args
+                        .windows(2)
+                        .find(|w| w[0] == "--list")
+                        .map(|w| w[1].as_str())
+                        .unwrap_or("Done");
                     println!("✔ Moved {} to '{}'", card, list);
                 }
-                _ => { println!("Card operation: {}", sub); }
+                _ => {
+                    println!("Card operation: {}", sub);
+                }
             }
             0
         }
@@ -121,7 +141,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_trello};
+    use super::run_trello;
 
     #[test]
     fn help_exits_zero() {

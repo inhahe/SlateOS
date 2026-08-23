@@ -220,9 +220,7 @@ fn parse_args(args: &[String]) -> Option<Config> {
                                         }
                                     }
                                 } else {
-                                    eprintln!(
-                                        "watch: -n requires a numeric argument"
-                                    );
+                                    eprintln!("watch: -n requires a numeric argument");
                                     process::exit(1);
                                 }
                                 // After processing 'n' (possibly with inline
@@ -313,8 +311,7 @@ fn format_current_time() -> String {
     // Year/month/day from days since epoch.
     let (year, month, day) = days_to_ymd(days);
     let month_names = [
-        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct",
-        "Nov", "Dec",
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
     ];
     let month_idx = if (1..=12).contains(&month) {
         (month - 1) as usize
@@ -323,9 +320,7 @@ fn format_current_time() -> String {
     };
     let month_name = month_names.get(month_idx).copied().unwrap_or("???");
 
-    format!(
-        "{day_name} {month_name} {day:2} {hours:02}:{minutes:02}:{seconds:02} {year}"
-    )
+    format!("{day_name} {month_name} {day:2} {hours:02}:{minutes:02}:{seconds:02} {year}")
 }
 
 /// Convert days since Unix epoch to (year, month, day).
@@ -380,10 +375,7 @@ fn run_command(cfg: &Config) -> RunResult {
     } else {
         // Shell mode: join args and pass to sh -c.
         let shell_cmd = cfg.command.join(" ");
-        Command::new(SHELL)
-            .arg("-c")
-            .arg(&shell_cmd)
-            .output()
+        Command::new(SHELL).arg("-c").arg(&shell_cmd).output()
     };
 
     match result {
@@ -427,15 +419,16 @@ fn strip_ansi(s: &str) -> String {
             // Skip the escape sequence: ESC followed by '[' then parameters
             // ending with an alphabetic character.
             if let Some(next) = chars.next()
-                && next == '[' {
-                    // CSI sequence: consume until we hit a letter.
-                    for c in chars.by_ref() {
-                        if c.is_ascii_alphabetic() {
-                            break;
-                        }
+                && next == '['
+            {
+                // CSI sequence: consume until we hit a letter.
+                for c in chars.by_ref() {
+                    if c.is_ascii_alphabetic() {
+                        break;
                     }
                 }
-                // OSC or other sequences: skip one character and continue.
+            }
+            // OSC or other sequences: skip one character and continue.
         } else {
             out.push(ch);
         }
@@ -620,9 +613,7 @@ fn run_watch(cfg: &Config) -> i32 {
                 if !cfg.json {
                     display_output(cfg, &result.output, prev_output.as_deref());
                     let code = result.exit_code.unwrap_or(1);
-                    eprintln!(
-                        "\nwatch: command exited with status {code}"
-                    );
+                    eprintln!("\nwatch: command exited with status {code}");
                 } else {
                     print_json_run(run_number, cfg, &result);
                 }
@@ -632,23 +623,20 @@ fn run_watch(cfg: &Config) -> i32 {
 
         // Check for output changes (for --chgexit).
         if cfg.chgexit
-            && let Some(ref prev) = prev_output {
-                // Compare stripped versions to ignore ANSI differences.
-                let prev_stripped = strip_ansi(prev);
-                let curr_stripped = strip_ansi(&result.output);
-                if prev_stripped != curr_stripped {
-                    if !cfg.json {
-                        display_output(
-                            cfg,
-                            &result.output,
-                            Some(prev),
-                        );
-                    } else {
-                        print_json_run(run_number, cfg, &result);
-                    }
-                    return 0;
+            && let Some(ref prev) = prev_output
+        {
+            // Compare stripped versions to ignore ANSI differences.
+            let prev_stripped = strip_ansi(prev);
+            let curr_stripped = strip_ansi(&result.output);
+            if prev_stripped != curr_stripped {
+                if !cfg.json {
+                    display_output(cfg, &result.output, Some(prev));
+                } else {
+                    print_json_run(run_number, cfg, &result);
                 }
+                return 0;
             }
+        }
 
         // Display or emit output.
         if cfg.json {
@@ -664,9 +652,10 @@ fn run_watch(cfg: &Config) -> i32 {
         if cfg.precise {
             // Precise mode: subtract execution time from the interval.
             if let Some(remaining) = interval.checked_sub(elapsed)
-                && !remaining.is_zero() {
-                    std::thread::sleep(remaining);
-                }
+                && !remaining.is_zero()
+            {
+                std::thread::sleep(remaining);
+            }
             // If execution took longer than the interval, run again immediately.
         } else {
             std::thread::sleep(interval);

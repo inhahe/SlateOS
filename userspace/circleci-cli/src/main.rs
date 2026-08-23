@@ -35,7 +35,10 @@ fn run_circleci(args: Vec<String>) -> i32 {
             let sub = args.get(1).map(|s| s.as_str()).unwrap_or("validate");
             match sub {
                 "validate" => {
-                    let file = args.get(2).map(|s| s.as_str()).unwrap_or(".circleci/config.yml");
+                    let file = args
+                        .get(2)
+                        .map(|s| s.as_str())
+                        .unwrap_or(".circleci/config.yml");
                     println!("Config file at {} is valid.", file);
                 }
                 "process" => {
@@ -57,7 +60,8 @@ fn run_circleci(args: Vec<String>) -> i32 {
         "local" => {
             let sub = args.get(1).map(|s| s.as_str()).unwrap_or("execute");
             if sub == "execute" {
-                let job = args.windows(2)
+                let job = args
+                    .windows(2)
                     .find(|w| w[0] == "--job")
                     .map(|w| w[1].as_str())
                     .unwrap_or("build");
@@ -112,7 +116,9 @@ fn run_circleci(args: Vec<String>) -> i32 {
                     let name = args.get(2).map(|s| s.as_str()).unwrap_or("new-context");
                     println!("Context '{}' created.", name);
                 }
-                _ => println!("Usage: circleci context <list|create|delete|show|store-secret|remove-secret>"),
+                _ => println!(
+                    "Usage: circleci context <list|create|delete|show|store-secret|remove-secret>"
+                ),
             }
             0
         }
@@ -140,7 +146,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_circleci};
+    use super::run_circleci;
 
     #[test]
     fn help_exits_zero() {

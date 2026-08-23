@@ -68,11 +68,7 @@ const SECTION_NAMES: &[(u8, &str)] = &[
 ];
 
 /// Default MANPATH directories to search for on-disk man pages.
-const DEFAULT_MANPATH: &[&str] = &[
-    "/usr/share/man",
-    "/usr/local/share/man",
-    "/usr/local/man",
-];
+const DEFAULT_MANPATH: &[&str] = &["/usr/share/man", "/usr/local/share/man", "/usr/local/man"];
 
 // ============================================================================
 // Embedded man pages
@@ -273,9 +269,7 @@ fn format_manpage(source: &str, width: usize) -> Vec<String> {
         if let Some(rest) = line.strip_prefix(".SS") {
             let text = rest.trim().trim_matches('"');
             out.push(String::new());
-            out.push(format!(
-                "{pad}{ESC_YELLOW_BOLD}{text}{ESC_RESET}"
-            ));
+            out.push(format!("{pad}{ESC_YELLOW_BOLD}{text}{ESC_RESET}"));
             tp_pending = false;
             continue;
         }
@@ -321,7 +315,11 @@ fn format_manpage(source: &str, width: usize) -> Vec<String> {
         if let Some(rest) = line.strip_prefix(".B ") {
             let text = inline_format(rest.trim());
             let extra_indent = " ".repeat(indent);
-            push_wrapped(&mut out, &format!("{pad}{extra_indent}{ESC_BOLD}{text}{ESC_RESET}"), effective_width);
+            push_wrapped(
+                &mut out,
+                &format!("{pad}{extra_indent}{ESC_BOLD}{text}{ESC_RESET}"),
+                effective_width,
+            );
             continue;
         }
 
@@ -347,7 +345,11 @@ fn format_manpage(source: &str, width: usize) -> Vec<String> {
                 }
             }
             let extra_indent = " ".repeat(indent);
-            push_wrapped(&mut out, &format!("{pad}{extra_indent}{buf}"), effective_width);
+            push_wrapped(
+                &mut out,
+                &format!("{pad}{extra_indent}{buf}"),
+                effective_width,
+            );
             continue;
         }
 
@@ -362,7 +364,11 @@ fn format_manpage(source: &str, width: usize) -> Vec<String> {
                 }
             }
             let extra_indent = " ".repeat(indent);
-            push_wrapped(&mut out, &format!("{pad}{extra_indent}{buf}"), effective_width);
+            push_wrapped(
+                &mut out,
+                &format!("{pad}{extra_indent}{buf}"),
+                effective_width,
+            );
             continue;
         }
 
@@ -371,7 +377,11 @@ fn format_manpage(source: &str, width: usize) -> Vec<String> {
             let directive_end = line.find(' ').unwrap_or(line.len());
             let directive = &line[1..directive_end];
             // Only skip if it looks like a real directive (uppercase or known).
-            if directive.chars().next().is_some_and(|c| c.is_ascii_uppercase()) {
+            if directive
+                .chars()
+                .next()
+                .is_some_and(|c| c.is_ascii_uppercase())
+            {
                 continue;
             }
         }
@@ -569,9 +579,7 @@ fn find_pages(name: &str, section: Option<u8>) -> Vec<(u8, PageSource)> {
             let filepath = dir.join(&filename);
             if filepath.is_file() {
                 // Skip if we already have an embedded page for same section.
-                let dominated = results
-                    .iter()
-                    .any(|(s, _)| *s == *sec);
+                let dominated = results.iter().any(|(s, _)| *s == *sec);
                 if !dominated {
                     results.push((*sec, PageSource::File(filepath)));
                 }
@@ -831,10 +839,7 @@ fn display_page(lines: &[String]) {
 fn try_less(lines: &[String]) -> bool {
     use std::process::{Command, Stdio};
 
-    let child = Command::new("less")
-        .arg("-R")
-        .stdin(Stdio::piped())
-        .spawn();
+    let child = Command::new("less").arg("-R").stdin(Stdio::piped()).spawn();
 
     match child {
         Ok(mut proc) => {
@@ -878,9 +883,7 @@ fn cmd_display(name: &str, section: Option<u8>, show_all: bool) {
         if !first {
             // Separator between multiple pages.
             println!();
-            println!(
-                "{ESC_BOLD}--- {name}({sec}) ---{ESC_RESET}"
-            );
+            println!("{ESC_BOLD}--- {name}({sec}) ---{ESC_RESET}");
             println!();
         }
         first = false;
@@ -933,10 +936,11 @@ fn cmd_whatis(name: &str) {
 
     for page in EMBEDDED_PAGES {
         if page.name.eq_ignore_ascii_case(name)
-            && let Some(desc) = extract_name_line(page.source) {
-                println!("{}({}) - {desc}", page.name, page.section);
-                found = true;
-            }
+            && let Some(desc) = extract_name_line(page.source)
+        {
+            println!("{}({}) - {desc}", page.name, page.section);
+            found = true;
+        }
     }
 
     // Also check filesystem pages.
@@ -944,10 +948,11 @@ fn cmd_whatis(name: &str) {
     for (sec, source) in &pages {
         if let PageSource::File(path) = source
             && let Ok(content) = fs::read_to_string(path)
-                && let Some(desc) = extract_name_line(&content) {
-                    println!("{name}({sec}) - {desc}");
-                    found = true;
-                }
+            && let Some(desc) = extract_name_line(&content)
+        {
+            println!("{name}({sec}) - {desc}");
+            found = true;
+        }
     }
 
     if !found {
@@ -966,8 +971,8 @@ fn cmd_apropos(keyword: &str) {
         let name_match = page.name.to_lowercase().contains(&kw_lower);
 
         // Check description match.
-        let desc_match = extract_name_line(page.source)
-            .is_some_and(|d| d.to_lowercase().contains(&kw_lower));
+        let desc_match =
+            extract_name_line(page.source).is_some_and(|d| d.to_lowercase().contains(&kw_lower));
 
         // Check full-text match.
         let text_match = page.source.to_lowercase().contains(&kw_lower);

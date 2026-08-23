@@ -7,8 +7,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_newrelic(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
@@ -33,7 +37,9 @@ fn run_newrelic(args: &[String]) -> i32 {
         "nrql" => {
             let sub = args.get(1).map(|s| s.as_str()).unwrap_or("query");
             if sub == "query" {
-                let query = args.get(2).map(|s| s.as_str())
+                let query = args
+                    .get(2)
+                    .map(|s| s.as_str())
                     .unwrap_or("SELECT count(*) FROM Transaction SINCE 1 hour ago");
                 println!("Executing NRQL: {}", query);
                 println!("  count: 12345");
@@ -45,8 +51,12 @@ fn run_newrelic(args: &[String]) -> i32 {
                 "search" => {
                     let name = args.get(2).map(|s| s.as_str()).unwrap_or("my-app");
                     println!("Searching for entities matching '{}'...", name);
-                    println!("  GUID                                  Name        Type        Health");
-                    println!("  MjEyNDU2...                           my-app      APM_APP     GREEN");
+                    println!(
+                        "  GUID                                  Name        Type        Health"
+                    );
+                    println!(
+                        "  MjEyNDU2...                           my-app      APM_APP     GREEN"
+                    );
                 }
                 "tags" => println!("Tags: env:production, team:backend, version:1.2.3"),
                 _ => println!("newrelic entity: '{}' completed", sub),
@@ -82,7 +92,10 @@ fn run_newrelic(args: &[String]) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "newrelic".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "newrelic".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_newrelic(&rest);
     process::exit(code);
@@ -90,7 +103,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_newrelic};
+    use super::{basename, run_newrelic, strip_ext};
 
     #[test]
     fn basename_strips_path() {

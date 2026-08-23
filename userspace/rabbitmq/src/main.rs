@@ -22,7 +22,9 @@ fn run_server(args: Vec<String>) -> i32 {
         println!("Erlang/OTP 26");
         return 0;
     }
-    let node = args.iter().position(|a| a == "--nodename")
+    let node = args
+        .iter()
+        .position(|a| a == "--nodename")
         .and_then(|i| args.get(i + 1))
         .map(|s| s.as_str())
         .unwrap_or("rabbit@localhost");
@@ -149,9 +151,18 @@ fn run_ctl(args: Vec<String>) -> i32 {
             println!("rabbit@localhost");
             0
         }
-        "stop_app" => { println!("Stopping rabbit application on node rabbit@localhost ..."); 0 }
-        "start_app" => { println!("Starting node rabbit@localhost ..."); 0 }
-        other => { eprintln!("rabbitmqctl: unknown command '{}'", other); 1 }
+        "stop_app" => {
+            println!("Stopping rabbit application on node rabbit@localhost ...");
+            0
+        }
+        "start_app" => {
+            println!("Starting node rabbit@localhost ...");
+            0
+        }
+        other => {
+            eprintln!("rabbitmqctl: unknown command '{}'", other);
+            1
+        }
     }
 }
 
@@ -186,7 +197,10 @@ fn run_plugins(args: Vec<String>) -> i32 {
             0
         }
         "enable" => {
-            let plugin = cmd_args.first().map(|s| s.as_str()).unwrap_or("rabbitmq_management");
+            let plugin = cmd_args
+                .first()
+                .map(|s| s.as_str())
+                .unwrap_or("rabbitmq_management");
             println!("Enabling plugins on node rabbit@localhost:");
             println!("  {}", plugin);
             println!("The following plugins have been configured:");
@@ -201,7 +215,10 @@ fn run_plugins(args: Vec<String>) -> i32 {
             println!("  {}", plugin);
             0
         }
-        other => { eprintln!("rabbitmq-plugins: unknown command '{}'", other); 1 }
+        other => {
+            eprintln!("rabbitmq-plugins: unknown command '{}'", other);
+            1
+        }
     }
 }
 
@@ -221,9 +238,18 @@ fn run_diagnostics(args: Vec<String>) -> i32 {
             println!("  environment         Node environment");
             0
         }
-        "ping" => { println!("Ping succeeded on node rabbit@localhost"); 0 }
-        "check_running" => { println!("Node rabbit@localhost is running"); 0 }
-        "check_alarms" => { println!("Node rabbit@localhost reported no alarms, OK"); 0 }
+        "ping" => {
+            println!("Ping succeeded on node rabbit@localhost");
+            0
+        }
+        "check_running" => {
+            println!("Node rabbit@localhost is running");
+            0
+        }
+        "check_alarms" => {
+            println!("Node rabbit@localhost reported no alarms, OK");
+            0
+        }
         "memory_breakdown" => {
             println!("Reporting memory breakdown on node rabbit@localhost ...");
             println!();
@@ -249,18 +275,26 @@ fn run_diagnostics(args: Vec<String>) -> i32 {
             println!("  vm_memory_high_watermark: 0.4");
             0
         }
-        other => { eprintln!("rabbitmq-diagnostics: unknown command '{}'", other); 1 }
+        other => {
+            eprintln!("rabbitmq-diagnostics: unknown command '{}'", other);
+            1
+        }
     }
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
     let prog_name = {
-        let s = args.first().map(|s| s.as_str()).unwrap_or("rabbitmq-server");
+        let s = args
+            .first()
+            .map(|s| s.as_str())
+            .unwrap_or("rabbitmq-server");
         let bytes = s.as_bytes();
         let mut last_sep = 0;
         for (i, &b) in bytes.iter().enumerate() {
-            if b == b'/' || b == b'\\' { last_sep = i + 1; }
+            if b == b'/' || b == b'\\' {
+                last_sep = i + 1;
+            }
         }
         let base = &s[last_sep..];
         base.strip_suffix(".exe").unwrap_or(base).to_string()
@@ -277,7 +311,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_server};
+    use super::run_server;
 
     #[test]
     fn help_exits_zero() {

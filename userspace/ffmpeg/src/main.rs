@@ -16,7 +16,9 @@ use std::process;
 fn run_ffmpeg(args: Vec<String>) -> i32 {
     if args.is_empty() || args.iter().any(|a| a == "--help" || a == "-h") {
         println!("ffmpeg version 7.0 (Slate OS) — Hyper fast Audio and Video encoder");
-        println!("usage: ffmpeg [options] [[infile options] -i infile]... {{[outfile options] outfile}}...");
+        println!(
+            "usage: ffmpeg [options] [[infile options] -i infile]... {{[outfile options] outfile}}..."
+        );
         println!();
         println!("Common options:");
         println!("  -i filename      Input file");
@@ -44,7 +46,9 @@ fn run_ffmpeg(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "-version") {
         println!("ffmpeg version 7.0 (Slate OS)");
         println!("built with gcc 13.2.0");
-        println!("configuration: --enable-gpl --enable-nonfree --enable-libx264 --enable-libx265 --enable-libvpx --enable-libopus");
+        println!(
+            "configuration: --enable-gpl --enable-nonfree --enable-libx264 --enable-libx265 --enable-libvpx --enable-libopus"
+        );
         println!("libavutil      59. 2.100");
         println!("libavcodec     61. 3.100");
         println!("libavformat    61. 1.100");
@@ -97,7 +101,9 @@ fn run_ffmpeg(args: Vec<String>) -> i32 {
     }
 
     // Simulated encoding
-    let input = args.iter().position(|a| a == "-i")
+    let input = args
+        .iter()
+        .position(|a| a == "-i")
         .and_then(|i| args.get(i + 1))
         .map(|s| s.as_str())
         .unwrap_or("input.mp4");
@@ -113,7 +119,9 @@ fn run_ffmpeg(args: Vec<String>) -> i32 {
     println!("Output #0, mp4, to '{}':", output);
     println!("  Stream #0:0: Video: h264, 1920x1080, 8000 kb/s");
     println!("  Stream #0:1: Audio: aac, 48000 Hz, stereo, 192 kb/s");
-    println!("frame= 9972 fps=120 q=28.0 size=  262144kB time=00:05:32.40 bitrate=6450.3kbits/s speed=4.0x");
+    println!(
+        "frame= 9972 fps=120 q=28.0 size=  262144kB time=00:05:32.40 bitrate=6450.3kbits/s speed=4.0x"
+    );
     println!("video:240000kB audio:7500kB subtitle:0kB global headers:0kB muxing overhead: 0.5%");
     0
 }
@@ -132,9 +140,18 @@ fn run_ffprobe(args: Vec<String>) -> i32 {
         return 0;
     }
 
-    let input = args.iter().rfind(|a| !a.starts_with('-')).map(|s| s.as_str()).unwrap_or("input.mp4");
-    let json_output = args.iter().any(|a| a == "json") ||
-        args.iter().position(|a| a == "-of").and_then(|i| args.get(i + 1)).map(|s| s == "json").unwrap_or(false);
+    let input = args
+        .iter()
+        .rfind(|a| !a.starts_with('-'))
+        .map(|s| s.as_str())
+        .unwrap_or("input.mp4");
+    let json_output = args.iter().any(|a| a == "json")
+        || args
+            .iter()
+            .position(|a| a == "-of")
+            .and_then(|i| args.get(i + 1))
+            .map(|s| s == "json")
+            .unwrap_or(false);
 
     if json_output {
         println!("{{");
@@ -145,8 +162,12 @@ fn run_ffprobe(args: Vec<String>) -> i32 {
         println!("    \"bit_rate\": \"8500000\"");
         println!("  }},");
         println!("  \"streams\": [");
-        println!("    {{\"codec_type\": \"video\", \"codec_name\": \"h264\", \"width\": 1920, \"height\": 1080, \"r_frame_rate\": \"30/1\"}},");
-        println!("    {{\"codec_type\": \"audio\", \"codec_name\": \"aac\", \"sample_rate\": \"48000\", \"channels\": 2}}");
+        println!(
+            "    {{\"codec_type\": \"video\", \"codec_name\": \"h264\", \"width\": 1920, \"height\": 1080, \"r_frame_rate\": \"30/1\"}},"
+        );
+        println!(
+            "    {{\"codec_type\": \"audio\", \"codec_name\": \"aac\", \"sample_rate\": \"48000\", \"channels\": 2}}"
+        );
         println!("  ]");
         println!("}}");
     } else {
@@ -155,7 +176,9 @@ fn run_ffprobe(args: Vec<String>) -> i32 {
         println!("    major_brand     : isom");
         println!("    encoder         : Lavf61.1.100");
         println!("  Duration: 00:05:32.40, start: 0.000000, bitrate: 8500 kb/s");
-        println!("  Stream #0:0(und): Video: h264 (High), yuv420p(tv), 1920x1080 [SAR 1:1 DAR 16:9], 8000 kb/s, 30 fps");
+        println!(
+            "  Stream #0:0(und): Video: h264 (High), yuv420p(tv), 1920x1080 [SAR 1:1 DAR 16:9], 8000 kb/s, 30 fps"
+        );
         println!("  Stream #0:1(und): Audio: aac (LC), 48000 Hz, stereo, fltp, 192 kb/s");
     }
     0
@@ -178,7 +201,11 @@ fn run_ffplay(args: Vec<String>) -> i32 {
         return 0;
     }
 
-    let input = args.iter().rfind(|a| !a.starts_with('-')).map(|s| s.as_str()).unwrap_or("input.mp4");
+    let input = args
+        .iter()
+        .rfind(|a| !a.starts_with('-'))
+        .map(|s| s.as_str())
+        .unwrap_or("input.mp4");
     println!("Playing: {}", input);
     println!("  Duration: 00:05:32.40");
     println!("  Video: h264, 1920x1080, 30 fps");
@@ -197,7 +224,9 @@ fn main() {
         let bytes = s.as_bytes();
         let mut last_sep = 0;
         for (i, &b) in bytes.iter().enumerate() {
-            if b == b'/' || b == b'\\' { last_sep = i + 1; }
+            if b == b'/' || b == b'\\' {
+                last_sep = i + 1;
+            }
         }
         let base = &s[last_sep..];
         let base = base.strip_suffix(".exe").unwrap_or(base);
@@ -219,7 +248,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_ffmpeg};
+    use super::run_ffmpeg;
 
     #[test]
     fn help_exits_zero() {

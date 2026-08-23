@@ -32,14 +32,30 @@ fn run_shortcut(args: Vec<String>) -> i32 {
             match sub {
                 "list" => {
                     println!("ID      Type      State          Estimate  Owner    Name");
-                    println!("sc-123  feature   In Development 3         alice    Add search filters");
-                    println!("sc-124  bug       Ready for Dev  2         bob      Fix login timeout");
-                    println!("sc-125  chore     In Review      1         charlie  Update CI config");
-                    println!("sc-126  feature   Completed      5         alice    Dashboard redesign");
+                    println!(
+                        "sc-123  feature   In Development 3         alice    Add search filters"
+                    );
+                    println!(
+                        "sc-124  bug       Ready for Dev  2         bob      Fix login timeout"
+                    );
+                    println!(
+                        "sc-125  chore     In Review      1         charlie  Update CI config"
+                    );
+                    println!(
+                        "sc-126  feature   Completed      5         alice    Dashboard redesign"
+                    );
                 }
                 "create" => {
-                    let name = args.windows(2).find(|w| w[0] == "--name").map(|w| w[1].as_str()).unwrap_or("New story");
-                    let story_type = args.windows(2).find(|w| w[0] == "--type").map(|w| w[1].as_str()).unwrap_or("feature");
+                    let name = args
+                        .windows(2)
+                        .find(|w| w[0] == "--name")
+                        .map(|w| w[1].as_str())
+                        .unwrap_or("New story");
+                    let story_type = args
+                        .windows(2)
+                        .find(|w| w[0] == "--type")
+                        .map(|w| w[1].as_str())
+                        .unwrap_or("feature");
                     println!("✔ Created {} sc-127: {}", story_type, name);
                 }
                 "view" => {
@@ -56,10 +72,16 @@ fn run_shortcut(args: Vec<String>) -> i32 {
                 }
                 "move" => {
                     let id = args.get(2).map(|s| s.as_str()).unwrap_or("sc-123");
-                    let state = args.windows(2).find(|w| w[0] == "--state").map(|w| w[1].as_str()).unwrap_or("In Review");
+                    let state = args
+                        .windows(2)
+                        .find(|w| w[0] == "--state")
+                        .map(|w| w[1].as_str())
+                        .unwrap_or("In Review");
                     println!("✔ {} moved to '{}'", id, state);
                 }
-                _ => { println!("Story operation: {}", sub); }
+                _ => {
+                    println!("Story operation: {}", sub);
+                }
             }
             0
         }
@@ -75,12 +97,16 @@ fn run_shortcut(args: Vec<String>) -> i32 {
             let sub = args.get(1).map(|s| s.as_str()).unwrap_or("list");
             match sub {
                 "list" => {
-                    println!("Name          Status      Start         End           Stories  Points");
+                    println!(
+                        "Name          Status      Start         End           Stories  Points"
+                    );
                     println!("Sprint 12     started     2024-01-08    2024-01-22    8        21");
                     println!("Sprint 11     done        2023-12-25    2024-01-07    10       25");
                     println!("Sprint 13     unstarted   2024-01-22    2024-02-05    0        0");
                 }
-                _ => { println!("Iteration operation: {}", sub); }
+                _ => {
+                    println!("Iteration operation: {}", sub);
+                }
             }
             0
         }
@@ -142,7 +168,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_shortcut};
+    use super::run_shortcut;
 
     #[test]
     fn help_exits_zero() {

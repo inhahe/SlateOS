@@ -37,9 +37,21 @@ fn run_virt_install(args: &[String]) -> i32 {
         return 0;
     }
 
-    let name = args.windows(2).find(|w| w[0] == "--name").map(|w| w[1].as_str()).unwrap_or("vm1");
-    let mem = args.windows(2).find(|w| w[0] == "--memory").map(|w| w[1].as_str()).unwrap_or("1024");
-    let vcpus = args.windows(2).find(|w| w[0] == "--vcpus").map(|w| w[1].as_str()).unwrap_or("1");
+    let name = args
+        .windows(2)
+        .find(|w| w[0] == "--name")
+        .map(|w| w[1].as_str())
+        .unwrap_or("vm1");
+    let mem = args
+        .windows(2)
+        .find(|w| w[0] == "--memory")
+        .map(|w| w[1].as_str())
+        .unwrap_or("1024");
+    let vcpus = args
+        .windows(2)
+        .find(|w| w[0] == "--vcpus")
+        .map(|w| w[1].as_str())
+        .unwrap_or("1");
 
     println!("Starting install...");
     println!("  Name: {}", name);
@@ -64,8 +76,16 @@ fn run_virt_clone(args: &[String]) -> i32 {
         return 0;
     }
 
-    let orig = args.windows(2).find(|w| w[0] == "--original").map(|w| w[1].as_str()).unwrap_or("vm1");
-    let name = args.windows(2).find(|w| w[0] == "--name").map(|w| w[1].as_str()).unwrap_or("vm1-clone");
+    let orig = args
+        .windows(2)
+        .find(|w| w[0] == "--original")
+        .map(|w| w[1].as_str())
+        .unwrap_or("vm1");
+    let name = args
+        .windows(2)
+        .find(|w| w[0] == "--name")
+        .map(|w| w[1].as_str())
+        .unwrap_or("vm1-clone");
 
     println!("Cloning '{}' → '{}'...", orig, name);
     println!("  Cloning disk...");
@@ -86,7 +106,11 @@ fn run_virt_viewer(args: &[String]) -> i32 {
         println!("  --auto-resize      Auto-resize window");
         return 0;
     }
-    let domain = args.iter().find(|a| !a.starts_with('-')).map(|s| s.as_str()).unwrap_or("vm1");
+    let domain = args
+        .iter()
+        .find(|a| !a.starts_with('-'))
+        .map(|s| s.as_str())
+        .unwrap_or("vm1");
     println!("Connecting to '{}' console...", domain);
     println!("Connected via SPICE.");
     0
@@ -111,7 +135,8 @@ fn run_virt_xml(args: &[String]) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first()
+    let prog = args
+        .first()
         .map(|s| strip_ext(basename(s)).to_string())
         .unwrap_or_else(|| "virt-install".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
@@ -127,7 +152,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_virt_install};
+    use super::{basename, run_virt_install, strip_ext};
 
     #[test]
     fn basename_strips_path() {

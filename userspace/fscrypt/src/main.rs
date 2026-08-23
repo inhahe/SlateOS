@@ -93,16 +93,14 @@ fn read_mountpoints() -> Vec<MountpointStatus> {
             encryption_supported: true,
             _max_key_size: 64,
             _has_metadata: true,
-            policies: vec![
-                EncryptionPolicy {
-                    _id: "policy1".to_string(),
-                    descriptor: "ab12cd34ef56".to_string(),
-                    contents_mode: EncryptionMode::Aes256Xts,
-                    filenames_mode: EncryptionMode::Aes256Cts,
-                    _flags: 0x0C,
-                    _protector_ids: vec!["prot1".to_string()],
-                },
-            ],
+            policies: vec![EncryptionPolicy {
+                _id: "policy1".to_string(),
+                descriptor: "ab12cd34ef56".to_string(),
+                contents_mode: EncryptionMode::Aes256Xts,
+                filenames_mode: EncryptionMode::Aes256Cts,
+                _flags: 0x0C,
+                _protector_ids: vec!["prot1".to_string()],
+            }],
             protectors: vec![
                 Protector {
                     _id: "prot1".to_string(),
@@ -133,7 +131,10 @@ fn read_mountpoints() -> Vec<MountpointStatus> {
 // ── fscrypt personality ───────────────────────────────────────────────
 
 fn run_fscrypt(args: Vec<String>) -> i32 {
-    let cmd = args.first().cloned().unwrap_or_else(|| "status".to_string());
+    let cmd = args
+        .first()
+        .cloned()
+        .unwrap_or_else(|| "status".to_string());
     let cmd_args: Vec<String> = args.into_iter().skip(1).collect();
 
     match cmd.as_str() {
@@ -153,7 +154,10 @@ fn run_fscrypt(args: Vec<String>) -> i32 {
             println!("  --version              Show version");
             0
         }
-        "--version" | "-V" => { println!("fscrypt 0.1.0 (Slate OS)"); 0 }
+        "--version" | "-V" => {
+            println!("fscrypt 0.1.0 (Slate OS)");
+            0
+        }
         "status" => fscrypt_status(&cmd_args),
         "setup" => fscrypt_setup(&cmd_args),
         "encrypt" => fscrypt_encrypt(&cmd_args),
@@ -161,7 +165,10 @@ fn run_fscrypt(args: Vec<String>) -> i32 {
         "lock" => fscrypt_lock(&cmd_args),
         "purge" => fscrypt_purge(&cmd_args),
         "metadata" => fscrypt_metadata(&cmd_args),
-        other => { eprintln!("fscrypt: unknown command '{}'", other); 1 }
+        other => {
+            eprintln!("fscrypt: unknown command '{}'", other);
+            1
+        }
     }
 }
 
@@ -173,9 +180,24 @@ fn fscrypt_status(args: &[String]) -> i32 {
         // Status of specific path
         match mounts.iter().find(|m| m.path == p) {
             Some(m) => {
-                println!("{} filesystem \"{}\":", if m.encryption_supported { "Encrypted" } else { "Unencrypted" }, m.path);
+                println!(
+                    "{} filesystem \"{}\":",
+                    if m.encryption_supported {
+                        "Encrypted"
+                    } else {
+                        "Unencrypted"
+                    },
+                    m.path
+                );
                 println!("  Filesystem type: {}", m._filesystem);
-                println!("  Encryption: {}", if m.encryption_supported { "supported" } else { "not supported" });
+                println!(
+                    "  Encryption: {}",
+                    if m.encryption_supported {
+                        "supported"
+                    } else {
+                        "not supported"
+                    }
+                );
                 println!("  Policies: {}", m.policies.len());
                 println!("  Protectors: {}", m.protectors.len());
                 println!();
@@ -199,8 +221,14 @@ fn fscrypt_status(args: &[String]) -> i32 {
         println!();
         for m in &mounts {
             let status = if m.encryption_supported { "yes" } else { "no" };
-            println!("  {} ({}): encryption={}, policies={}, protectors={}",
-                m.path, m._filesystem, status, m.policies.len(), m.protectors.len());
+            println!(
+                "  {} ({}): encryption={}, policies={}, protectors={}",
+                m.path,
+                m._filesystem,
+                status,
+                m.policies.len(),
+                m.protectors.len()
+            );
         }
     }
     0
@@ -218,7 +246,10 @@ fn fscrypt_setup(args: &[String]) -> i32 {
 fn fscrypt_encrypt(args: &[String]) -> i32 {
     let dir = match args.first() {
         Some(d) => d.as_str(),
-        None => { eprintln!("fscrypt: encrypt requires a directory"); return 1; }
+        None => {
+            eprintln!("fscrypt: encrypt requires a directory");
+            return 1;
+        }
     };
 
     println!("fscrypt: encrypting {}", dir);
@@ -236,7 +267,10 @@ fn fscrypt_encrypt(args: &[String]) -> i32 {
 fn fscrypt_unlock(args: &[String]) -> i32 {
     let dir = match args.first() {
         Some(d) => d.as_str(),
-        None => { eprintln!("fscrypt: unlock requires a directory"); return 1; }
+        None => {
+            eprintln!("fscrypt: unlock requires a directory");
+            return 1;
+        }
     };
 
     println!("fscrypt: unlocking {}", dir);
@@ -248,7 +282,10 @@ fn fscrypt_unlock(args: &[String]) -> i32 {
 fn fscrypt_lock(args: &[String]) -> i32 {
     let dir = match args.first() {
         Some(d) => d.as_str(),
-        None => { eprintln!("fscrypt: lock requires a directory"); return 1; }
+        None => {
+            eprintln!("fscrypt: lock requires a directory");
+            return 1;
+        }
     };
 
     println!("fscrypt: locking {}", dir);
@@ -274,8 +311,10 @@ fn fscrypt_metadata(args: &[String]) -> i32 {
                 println!("Mountpoint: {}", m.path);
                 println!("  Policies:");
                 for p in &m.policies {
-                    println!("    {} (contents={}, filenames={})",
-                        p.descriptor, p.contents_mode, p.filenames_mode);
+                    println!(
+                        "    {} (contents={}, filenames={})",
+                        p.descriptor, p.contents_mode, p.filenames_mode
+                    );
                 }
                 println!("  Protectors:");
                 for p in &m.protectors {
@@ -284,9 +323,18 @@ fn fscrypt_metadata(args: &[String]) -> i32 {
             }
             0
         }
-        "create" => { println!("fscrypt metadata: creating metadata (simulated)"); 0 }
-        "destroy" => { println!("fscrypt metadata: destroying metadata (simulated)"); 0 }
-        other => { eprintln!("fscrypt metadata: unknown subcommand '{}'", other); 1 }
+        "create" => {
+            println!("fscrypt metadata: creating metadata (simulated)");
+            0
+        }
+        "destroy" => {
+            println!("fscrypt metadata: destroying metadata (simulated)");
+            0
+        }
+        other => {
+            eprintln!("fscrypt metadata: unknown subcommand '{}'", other);
+            1
+        }
     }
 }
 
@@ -309,7 +357,10 @@ fn run_fscryptctl(args: Vec<String>) -> i32 {
             println!("  remove_key KEY_DESC    Remove key from keyring");
             0
         }
-        "--version" | "-V" => { println!("fscryptctl 0.1.0 (Slate OS)"); 0 }
+        "--version" | "-V" => {
+            println!("fscryptctl 0.1.0 (Slate OS)");
+            0
+        }
         "get_policy" => {
             let dir = args.get(1).map(|s| s.as_str()).unwrap_or(".");
             println!("Encryption policy for {}:", dir);
@@ -335,7 +386,10 @@ fn run_fscryptctl(args: Vec<String>) -> i32 {
             println!("fscryptctl: key {} removed (simulated)", desc);
             0
         }
-        other => { eprintln!("fscryptctl: unknown command '{}'", other); 1 }
+        other => {
+            eprintln!("fscryptctl: unknown command '{}'", other);
+            1
+        }
     }
 }
 
@@ -349,7 +403,9 @@ fn main() {
         let bytes = s.as_bytes();
         let mut last_sep = 0;
         for (i, &b) in bytes.iter().enumerate() {
-            if b == b'/' || b == b'\\' { last_sep = i + 1; }
+            if b == b'/' || b == b'\\' {
+                last_sep = i + 1;
+            }
         }
         let base = &s[last_sep..];
         let base = base.strip_suffix(".exe").unwrap_or(base);
@@ -405,6 +461,9 @@ mod tests {
     #[test]
     fn test_protector_type_display() {
         assert_eq!(format!("{}", ProtectorType::Login), "login protector");
-        assert_eq!(format!("{}", ProtectorType::CustomPassphrase), "custom passphrase");
+        assert_eq!(
+            format!("{}", ProtectorType::CustomPassphrase),
+            "custom passphrase"
+        );
     }
 }

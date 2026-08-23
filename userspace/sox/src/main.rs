@@ -9,7 +9,9 @@ use std::process;
 
 fn run_sox(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
-        println!("Usage: sox [global-options] [input-options] INFILE... [output-options] OUTFILE [effect...]");
+        println!(
+            "Usage: sox [global-options] [input-options] INFILE... [output-options] OUTFILE [effect...]"
+        );
         println!();
         println!("Global options:");
         println!("  --buffer BYTES   Set buffer size");
@@ -45,7 +47,11 @@ fn run_sox(args: Vec<String>) -> i32 {
         return 0;
     }
 
-    let files: Vec<&str> = args.iter().filter(|a| !a.starts_with('-')).map(|s| s.as_str()).collect();
+    let files: Vec<&str> = args
+        .iter()
+        .filter(|a| !a.starts_with('-'))
+        .map(|s| s.as_str())
+        .collect();
     if files.len() >= 2 {
         println!("Input File     : '{}'", files.first().unwrap_or(&"input"));
         println!("Channels       : 2");
@@ -67,7 +73,11 @@ fn run_soxi(args: Vec<String>) -> i32 {
         return 0;
     }
 
-    let file = args.iter().find(|a| !a.starts_with('-')).map(|s| s.as_str()).unwrap_or("audio.wav");
+    let file = args
+        .iter()
+        .find(|a| !a.starts_with('-'))
+        .map(|s| s.as_str())
+        .unwrap_or("audio.wav");
     println!("Input File     : '{}'", file);
     println!("Channels       : 2");
     println!("Sample Rate    : 44100");
@@ -84,7 +94,11 @@ fn run_play(args: Vec<String>) -> i32 {
         println!("Usage: play [options] INFILE [effect...]");
         return 0;
     }
-    let file = args.iter().find(|a| !a.starts_with('-')).map(|s| s.as_str()).unwrap_or("audio.wav");
+    let file = args
+        .iter()
+        .find(|a| !a.starts_with('-'))
+        .map(|s| s.as_str())
+        .unwrap_or("audio.wav");
     println!("{}: 44100Hz, 16-bit, stereo, 00:03:45.00", file);
     println!("In:100%  00:03:45.00 [00:00:00.00] Out:9.92M [      |      ]");
     println!("Done.");
@@ -96,7 +110,11 @@ fn run_rec(args: Vec<String>) -> i32 {
         println!("Usage: rec [options] OUTFILE [effect...]");
         return 0;
     }
-    let file = args.iter().find(|a| !a.starts_with('-')).map(|s| s.as_str()).unwrap_or("recording.wav");
+    let file = args
+        .iter()
+        .find(|a| !a.starts_with('-'))
+        .map(|s| s.as_str())
+        .unwrap_or("recording.wav");
     println!("Recording: {} (44100Hz, 16-bit, stereo)", file);
     println!("In:0.00% 00:00:05.00 [00:00:00.00] Out:220k  [      |      ]");
     let _ = args;
@@ -110,7 +128,9 @@ fn main() {
         let bytes = s.as_bytes();
         let mut last_sep = 0;
         for (i, &b) in bytes.iter().enumerate() {
-            if b == b'/' || b == b'\\' { last_sep = i + 1; }
+            if b == b'/' || b == b'\\' {
+                last_sep = i + 1;
+            }
         }
         let base = &s[last_sep..];
         base.strip_suffix(".exe").unwrap_or(base).to_string()
@@ -127,7 +147,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_sox};
+    use super::run_sox;
 
     #[test]
     fn help_exits_zero() {

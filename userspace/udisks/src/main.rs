@@ -181,17 +181,9 @@ fn discover_partitions(block_path: &Path, parent_name: &str) -> Vec<Partition> {
                 continue;
             }
 
-            let partition_num: u32 = read_sys(&part_path.join("partition"))
-                .parse()
-                .unwrap_or(0);
-            let start: u64 = read_sys(&part_path.join("start"))
-                .parse()
-                .unwrap_or(0)
-                * 512;
-            let size: u64 = read_sys(&part_path.join("size"))
-                .parse()
-                .unwrap_or(0)
-                * 512;
+            let partition_num: u32 = read_sys(&part_path.join("partition")).parse().unwrap_or(0);
+            let start: u64 = read_sys(&part_path.join("start")).parse().unwrap_or(0) * 512;
+            let size: u64 = read_sys(&part_path.join("size")).parse().unwrap_or(0) * 512;
 
             partitions.push(Partition {
                 device: format!("/dev/{name}"),
@@ -220,16 +212,14 @@ fn read_sys(path: &Path) -> String {
 fn find_mountpoints(device: &str) -> Vec<String> {
     let mut mounts = Vec::new();
     let content = fs::read_to_string("/proc/mounts").unwrap_or_default();
-    let canonical = fs::canonicalize(device)
-        .unwrap_or_else(|_| PathBuf::from(device));
+    let canonical = fs::canonicalize(device).unwrap_or_else(|_| PathBuf::from(device));
     let canonical_str = canonical.to_string_lossy();
 
     for line in content.lines() {
         let parts: Vec<&str> = line.split_whitespace().collect();
-        if parts.len() >= 2
-            && (parts[0] == device || parts[0] == canonical_str.as_ref()) {
-                mounts.push(parts[1].to_string());
-            }
+        if parts.len() >= 2 && (parts[0] == device || parts[0] == canonical_str.as_ref()) {
+            mounts.push(parts[1].to_string());
+        }
     }
     mounts
 }
@@ -373,7 +363,10 @@ fn cmd_info(args: &[String]) -> i32 {
 
     match dev {
         Some(d) => {
-            println!("/org/freedesktop/UDisks2/block_devices/{}", strip_dev(&d.device));
+            println!(
+                "/org/freedesktop/UDisks2/block_devices/{}",
+                strip_dev(&d.device)
+            );
             println!("  org.freedesktop.UDisks2.Block:");
             println!("    Device:          {}", d.device);
             println!("    Size:            {} ({})", d.size, format_size(d.size));
@@ -435,8 +428,7 @@ fn cmd_mount(args: &[String]) -> i32 {
     if !mountpoints.is_empty() {
         eprintln!(
             "udisksctl: {} is already mounted at {}",
-            device,
-            mountpoints[0]
+            device, mountpoints[0]
         );
         return 1;
     }
@@ -590,9 +582,7 @@ fn parse_block_arg(args: &[String]) -> Option<String> {
         }
     }
     // Also accept a positional device path.
-    args.iter()
-        .find(|a| a.starts_with("/dev/"))
-        .cloned()
+    args.iter().find(|a| a.starts_with("/dev/")).cloned()
 }
 
 fn parse_option_arg(args: &[String], flag: &str) -> Option<String> {
@@ -605,10 +595,7 @@ fn parse_option_arg(args: &[String], flag: &str) -> Option<String> {
 }
 
 fn strip_dev(device: &str) -> String {
-    device
-        .strip_prefix("/dev/")
-        .unwrap_or(device)
-        .to_string()
+    device.strip_prefix("/dev/").unwrap_or(device).to_string()
 }
 
 // ============================================================================
@@ -700,9 +687,7 @@ fn umount_main(args: &[String]) -> i32 {
         let mounts = read_mounts();
         for mount in &mounts {
             // Skip virtual filesystems.
-            if ["proc", "sysfs", "devtmpfs", "tmpfs", "devpts"]
-                .contains(&mount.fstype.as_str())
-            {
+            if ["proc", "sysfs", "devtmpfs", "tmpfs", "devpts"].contains(&mount.fstype.as_str()) {
                 continue;
             }
             eprintln!("umount: would unmount {}", mount.mountpoint);

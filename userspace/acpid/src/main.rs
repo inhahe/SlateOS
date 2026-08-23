@@ -33,9 +33,11 @@ struct AcpiEvent {
 
 impl std::fmt::Display for AcpiEvent {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{} {} {:08x} {:08x}",
-            self.device_class, self.bus_id,
-            self.event_type, self.event_data)
+        write!(
+            f,
+            "{} {} {:08x} {:08x}",
+            self.device_class, self.bus_id, self.event_type, self.event_data
+        )
     }
 }
 
@@ -104,19 +106,17 @@ struct AcAdapter {
 // ── Simulated data ────────────────────────────────────────────────────
 
 fn read_batteries() -> Vec<BatteryInfo> {
-    vec![
-        BatteryInfo {
-            name: "BAT0".to_string(),
-            present: true,
-            state: BatteryState::Discharging,
-            percent: 72,
-            _voltage_mv: 11400,
-            _rate_mw: 15000,
-            remaining_min: Some(180),
-            _design_capacity_mah: 5000,
-            _last_full_mah: 4800,
-        },
-    ]
+    vec![BatteryInfo {
+        name: "BAT0".to_string(),
+        present: true,
+        state: BatteryState::Discharging,
+        percent: 72,
+        _voltage_mv: 11400,
+        _rate_mw: 15000,
+        remaining_min: Some(180),
+        _design_capacity_mah: 5000,
+        _last_full_mah: 4800,
+    }]
 }
 
 fn read_thermal_zones() -> Vec<ThermalZone> {
@@ -148,12 +148,10 @@ fn read_thermal_zones() -> Vec<ThermalZone> {
 }
 
 fn read_ac_adapters() -> Vec<AcAdapter> {
-    vec![
-        AcAdapter {
-            name: "AC0".to_string(),
-            online: true,
-        },
-    ]
+    vec![AcAdapter {
+        name: "AC0".to_string(),
+        online: true,
+    }]
 }
 
 fn default_event_rules() -> Vec<EventRule> {
@@ -218,7 +216,10 @@ fn sample_events() -> Vec<AcpiEvent> {
 // ── acpid personality ─────────────────────────────────────────────────
 
 fn run_acpid(args: Vec<String>) -> i32 {
-    let cmd = args.first().cloned().unwrap_or_else(|| "--help-check".to_string());
+    let cmd = args
+        .first()
+        .cloned()
+        .unwrap_or_else(|| "--help-check".to_string());
 
     match cmd.as_str() {
         "--help" | "help" | "-h" => {
@@ -229,8 +230,14 @@ fn run_acpid(args: Vec<String>) -> i32 {
             println!("Options:");
             println!("  -f, --foreground   Run in foreground (don't daemonize)");
             println!("  -l, --logevents    Log all events to syslog");
-            println!("  -c DIR             Config directory (default: {})", _ACPID_CONF_DIR);
-            println!("  -s SOCKET          Socket path (default: {})", _ACPID_SOCKET);
+            println!(
+                "  -c DIR             Config directory (default: {})",
+                _ACPID_CONF_DIR
+            );
+            println!(
+                "  -s SOCKET          Socket path (default: {})",
+                _ACPID_SOCKET
+            );
             println!("  -d                 Debug mode (implies -f -l)");
             println!("  --status           Show daemon status");
             println!("  --rules            Show loaded event rules");
@@ -257,14 +264,19 @@ fn run_acpid(args: Vec<String>) -> i32 {
 }
 
 fn run_daemon(args: &[String]) -> i32 {
-    let foreground = args.iter().any(|a| a == "-f" || a == "--foreground" || a == "-d");
+    let foreground = args
+        .iter()
+        .any(|a| a == "-f" || a == "--foreground" || a == "-d");
     let debug = args.iter().any(|a| a == "-d");
     let log_events = args.iter().any(|a| a == "-l" || a == "--logevents") || debug;
 
     println!("acpid: starting ACPI event daemon");
     println!("  Socket: {}", _ACPID_SOCKET);
     println!("  Config: {}", _ACPID_CONF_DIR);
-    println!("  Mode: {}", if foreground { "foreground" } else { "daemon" });
+    println!(
+        "  Mode: {}",
+        if foreground { "foreground" } else { "daemon" }
+    );
     if log_events {
         println!("  Event logging: enabled");
     }
@@ -292,7 +304,10 @@ fn run_daemon(args: &[String]) -> i32 {
         }
         // Find matching rule
         for r in &rules {
-            if event.device_class.starts_with(r.event_pattern.split('*').next().unwrap_or("")) {
+            if event
+                .device_class
+                .starts_with(r.event_pattern.split('*').next().unwrap_or(""))
+            {
                 if debug {
                     println!("  -> matched rule '{}', action: {}", r.name, r.action);
                 }
@@ -331,7 +346,10 @@ fn show_rules() -> i32 {
 // ── acpi_listen personality ───────────────────────────────────────────
 
 fn run_listen(args: Vec<String>) -> i32 {
-    let cmd = args.first().cloned().unwrap_or_else(|| "listen".to_string());
+    let cmd = args
+        .first()
+        .cloned()
+        .unwrap_or_else(|| "listen".to_string());
 
     match cmd.as_str() {
         "--help" | "help" | "-h" => {
@@ -342,11 +360,15 @@ fn run_listen(args: Vec<String>) -> i32 {
             println!("Options:");
             println!("  -c COUNT    Exit after receiving COUNT events");
             println!("  -t SECS     Timeout after SECS seconds");
-            println!("  -s SOCKET   Connect to SOCKET (default: {})", _ACPID_SOCKET);
+            println!(
+                "  -s SOCKET   Connect to SOCKET (default: {})",
+                _ACPID_SOCKET
+            );
             0
         }
         _ => {
-            let count: Option<usize> = args.iter()
+            let count: Option<usize> = args
+                .iter()
                 .position(|a| a == "-c")
                 .and_then(|i| args.get(i + 1))
                 .and_then(|s| s.parse().ok());
@@ -373,7 +395,10 @@ fn run_listen(args: Vec<String>) -> i32 {
 // ── acpi personality ──────────────────────────────────────────────────
 
 fn run_acpi(args: Vec<String>) -> i32 {
-    let cmd = args.first().cloned().unwrap_or_else(|| "--everything".to_string());
+    let cmd = args
+        .first()
+        .cloned()
+        .unwrap_or_else(|| "--everything".to_string());
 
     match cmd.as_str() {
         "--help" | "help" | "-h" => {
@@ -438,7 +463,10 @@ fn show_battery(details: bool) -> i32 {
             None => "rate information unavailable".to_string(),
         };
 
-        println!("{}: {}, {}%, {}", bat.name, bat.state, bat.percent, time_str);
+        println!(
+            "{}: {}, {}%, {}",
+            bat.name, bat.state, bat.percent, time_str
+        );
 
         if details {
             println!("  Design capacity:    {} mAh", bat._design_capacity_mah);
@@ -461,7 +489,10 @@ fn show_thermal(details: bool) -> i32 {
         if details {
             for tp in &zone._trip_points {
                 let trip_c = tp._temp_mc as f64 / 1000.0;
-                println!("  {} trip point: {:.1} degrees C ({})", tp._name, trip_c, tp._trip_type);
+                println!(
+                    "  {} trip point: {:.1} degrees C ({})",
+                    tp._name, trip_c, tp._trip_type
+                );
             }
             if !zone._cooling_devices.is_empty() {
                 println!("  Cooling: {}", zone._cooling_devices.join(", "));
@@ -474,7 +505,11 @@ fn show_thermal(details: bool) -> i32 {
 fn show_ac() -> i32 {
     let adapters = read_ac_adapters();
     for ac in &adapters {
-        println!("{}: {}", ac.name, if ac.online { "on-line" } else { "off-line" });
+        println!(
+            "{}: {}",
+            ac.name,
+            if ac.online { "on-line" } else { "off-line" }
+        );
     }
     0
 }

@@ -7,8 +7,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_ocaml(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -41,7 +45,11 @@ fn run_ocamlc(args: &[String]) -> i32 {
         println!("5.1.1");
         return 0;
     }
-    let files: Vec<&str> = args.iter().filter(|a| a.ends_with(".ml")).map(|s| s.as_str()).collect();
+    let files: Vec<&str> = args
+        .iter()
+        .filter(|a| a.ends_with(".ml"))
+        .map(|s| s.as_str())
+        .collect();
     for f in &files {
         let base = f.rsplit_once('.').map_or(*f, |(b, _)| b);
         println!("ocamlc: {} -> {}.cmo", f, base);
@@ -146,7 +154,10 @@ fn run_dune(args: &[String]) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "ocaml".to_string());
+    let prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "ocaml".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = match prog.as_str() {
         "ocamlc" | "ocamlopt" => run_ocamlc(&rest),
@@ -159,7 +170,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_ocaml};
+    use super::{basename, run_ocaml, strip_ext};
 
     #[test]
     fn basename_strips_path() {

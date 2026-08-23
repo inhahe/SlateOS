@@ -37,12 +37,14 @@ fn run_firecracker(args: &[String]) -> i32 {
         return 0;
     }
 
-    let api_sock = args.windows(2)
+    let api_sock = args
+        .windows(2)
         .find(|w| w[0] == "--api-sock")
         .map(|w| w[1].as_str())
         .unwrap_or("/tmp/firecracker.socket");
 
-    let config = args.windows(2)
+    let config = args
+        .windows(2)
         .find(|w| w[0] == "--config-file")
         .map(|w| w[1].as_str());
 
@@ -84,7 +86,11 @@ fn run_jailer(args: &[String]) -> i32 {
         return 0;
     }
 
-    let id = args.windows(2).find(|w| w[0] == "--id").map(|w| w[1].as_str()).unwrap_or("vm1");
+    let id = args
+        .windows(2)
+        .find(|w| w[0] == "--id")
+        .map(|w| w[1].as_str())
+        .unwrap_or("vm1");
     println!("jailer: setting up jail for '{}'", id);
     println!("  Chroot: /srv/jailer/firecracker/{}/root", id);
     println!("  Starting firecracker in jail...");
@@ -93,7 +99,8 @@ fn run_jailer(args: &[String]) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first()
+    let prog = args
+        .first()
         .map(|s| strip_ext(basename(s)).to_string())
         .unwrap_or_else(|| "firecracker".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
@@ -107,7 +114,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_firecracker};
+    use super::{basename, run_firecracker, strip_ext};
 
     #[test]
     fn basename_strips_path() {

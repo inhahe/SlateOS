@@ -7,8 +7,12 @@
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_lilypond(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
@@ -28,7 +32,11 @@ fn run_lilypond(args: &[String]) -> i32 {
         println!("Running Guile 3.0");
         return 0;
     }
-    let file = args.iter().find(|a| a.ends_with(".ly")).map(|s| s.as_str()).unwrap_or("score.ly");
+    let file = args
+        .iter()
+        .find(|a| a.ends_with(".ly"))
+        .map(|s| s.as_str())
+        .unwrap_or("score.ly");
     let format = if args.iter().any(|a| a == "--png") {
         "png"
     } else if args.iter().any(|a| a == "--svg") {
@@ -42,7 +50,11 @@ fn run_lilypond(args: &[String]) -> i32 {
     println!("Interpreting music...");
     println!("Preprocessing graphical objects...");
     println!("Finding ideal line breaks...");
-    println!("Layout output to '{}.{}'...", file.trim_end_matches(".ly"), format);
+    println!(
+        "Layout output to '{}.{}'...",
+        file.trim_end_matches(".ly"),
+        format
+    );
     println!("Success: compilation successfully completed");
     0
 }
@@ -59,7 +71,11 @@ fn run_lilypond_book(args: &[String]) -> i32 {
         println!("lilypond-book (GNU LilyPond) 2.24.3 (Slate OS)");
         return 0;
     }
-    let file = args.iter().find(|a| !a.starts_with('-')).map(|s| s.as_str()).unwrap_or("document.lytex");
+    let file = args
+        .iter()
+        .find(|a| !a.starts_with('-'))
+        .map(|s| s.as_str())
+        .unwrap_or("document.lytex");
     println!("lilypond-book: processing '{}'", file);
     println!("  Extracting music fragments...");
     println!("  Compiling 3 music fragments...");
@@ -69,7 +85,10 @@ fn run_lilypond_book(args: &[String]) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "lilypond".to_string());
+    let prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "lilypond".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = match prog.as_str() {
         "lilypond-book" => run_lilypond_book(&rest),
@@ -80,7 +99,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_lilypond};
+    use super::{basename, run_lilypond, strip_ext};
 
     #[test]
     fn basename_strips_path() {

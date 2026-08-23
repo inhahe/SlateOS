@@ -38156,6 +38156,91 @@ the two properties a caller can actually be broken by: that `RELEASE` parses to
 at least 6.6 the way glibc parses it, and that every field except `VERSION` is a
 single whitespace-free token.
 
+## §365 — `du` is measured against GNU inside WSL, on WSL's own ext4, with a second Rust toolchain — because there is no other place where its inputs exist
+
+**Date:** 2026-08-22
+**Decided by:** Claude (autonomous)
+**Where it bites:** `scripts/du-diff.sh` (new); `userspace/coreutils/src/bin/du.rs`;
+by precedent every future harness for `ls -l`, `find`, `stat`, `df` and `ln`.
+
+**In short:** Every other utility in this tree is checked by running our
+version and GNU's version side by side on the development machine and
+comparing what they print. `du` cannot be checked that way, because the
+numbers `du` reports come from three pieces of information Windows does not
+have: which disk a file is on, which file it *is* (so two names for one file
+are counted once), and how many disk blocks it actually occupies. Our Windows
+build of `du` is therefore a stub that does nothing. The choice was between
+leaving `du` unmeasured and building a harness that runs the comparison
+somewhere the information exists — inside WSL, the Linux environment already
+installed on this machine. It runs inside WSL.
+
+### The options
+
+| | *What changes* |
+|---|---|
+| **A. Re-exec into WSL and build a Linux binary** (chosen) | `du` is compared against real GNU on 193 command lines; a second Rust toolchain (~1 GB) lives inside WSL; the harness is skipped, with the install command printed, on a machine without one. |
+| **B. Record a fixture, as `fnmatch` and `human` do** | No second toolchain; but the recording would have to include a whole filesystem — inode numbers, device numbers, block counts — not just an answer per input. |
+| **C. Leave `du` covered by unit tests only** | Nothing new to install; `du` stays checked only against what a person believed GNU does. |
+
+### Why not B, which is the house style
+
+`tests/fnmatch_glibc.rs` and `tests/human_gnu.rs` both work by recording what
+the real thing answered and replaying the recording, and §338 gives the
+reasons: the host is Windows, a test must not go quiet when a tool is missing,
+and a fixture is diffable. Those reasons all still hold. They do not apply
+here, because the *input* to `du` is not a string.
+
+`fnmatch`'s input is a pattern and a name; `human`'s is a number and a format.
+Both fit in a line of a text file, so a recording is a table. `du`'s input is a
+directory tree — with a hard link in it, a sparse file, a device boundary, an
+unreadable directory and a symlink loop. A recording of what GNU answered for
+that tree only replays if the tree is reconstructed exactly, block counts
+included, which means the fixture is not a table of answers but a filesystem
+image plus a synthetic `stat`. We already have that synthetic `stat`: it is the
+`FakeTree` the 41 unit tests run against. So B would not add coverage over C —
+it would only move the same invented numbers into a different file and make
+them look measured.
+
+What B cannot do at all is catch the class of bug this harness actually found.
+All five differences were in *diagnostics and ordering*, not arithmetic: an
+empty name in a `--files0-from` list reported in a pass of its own rather than
+where it stands, `read error` versus `cannot open … for reading`, `du ''`
+refused without a position, and `--files0-from=` and `-X ''` treated as
+standard input when only `-` is. None of those depend on a single block count.
+All of them require running the two programs against the same command line.
+
+### The costs, taken deliberately
+
+**A second toolchain.** rustup plus stable inside WSL, per-user, ~1 GB, and a
+build directory at `$HOME/du-diff-target` — deliberately outside the
+repository, both because `/mnt/d` is 9p and an order of magnitude slower and
+because a second `target/` inside the worktree is a tens-of-gigabytes surprise
+for whoever next runs `du -sh` on it. The harness prints the one-line install
+command and exits 0 when cargo is missing, so a machine without it reports
+SKIPPED rather than failing — the same rule §338 states.
+
+**A dependency on WSL.** `wsl -e true` decides it, and its absence is likewise
+a skip. This is a harness, not a test: `cargo test` does not need WSL and
+`cargo test --workspace` is unaffected.
+
+**The comparison is against glibc's `du`, not against the target's.** Our `du`
+built for `x86_64-unknown-linux-gnu` is the same source as the one built for
+`x86_64-slateos` — both take the `cfg(unix)` arm, which is what
+`toolchain/x86_64-slateos.json`'s `"target-family": ["unix"]` selects — so what
+is measured is the code that ships. What is *not* measured is our filesystem's
+own `st_blocks` accounting, which is a separate question and belongs to
+whoever writes the ext4 tests.
+
+### The one thing the harness had to be told
+
+Both sides are invoked through a `PATH` lookup of the bare word `du`, not by
+running a path. gnulib's `set_program_name` keeps the whole of `argv[0]`, so
+GNU invoked as `/usr/bin/du` prefixes every diagnostic with `/usr/bin/du: `,
+while ours always says `du: ` because each utility here spells its own name
+(`Program::new("du", 1)`). The first run reported 48 differences, every one of
+them that prefix. A harness that measures how it started the program rather
+than what the program does is worse than no harness, because the real
+differences were invisible underneath.
 ## §285 — The one kernel path that wrote to user memory through a physical alias was replaced with the audited primitive, and the audit was turned into a build gate
 
 **Date:** 2026-08-22
@@ -38452,3 +38537,333 @@ confirming the build fails with the size message rather than the overlap one.
 The general form: when a predicate is corrected so that it deliberately stops
 reporting a class of input, check what *was* catching that class. Usually the
 answer is "only this", and the correction has quietly deleted a check.
+
+## §366 — `ls` is reproduced against coreutils **9.5**, not the 9.4 that ships in WSL, because 9.5 changed every width measurement and both binaries are on hand
+
+**Date:** 2026-08-22
+**Decided by:** Claude (autonomous)
+
+**In short:** GNU `ls` lines up its columns by asking "how many columns wide is
+this text?" Version 9.4 and version 9.5 answer that question differently for
+text containing a byte that cannot be displayed — a control character in a
+group name, say. 9.4 says "that byte is worth zero columns, the rest is worth
+one each"; 9.5 says "I cannot measure this at all", and then pads it by
+nothing. The two produce visibly different output. We had to pick one to copy,
+and picked 9.5.
+
+### What the difference actually is
+
+gnulib's `mbsnwidth (text, len, flags)` takes a flags word. With
+`MBSW_REJECT_INVALID | MBSW_REJECT_UNPRINTABLE` set it returns **-1** for the
+whole string the moment it meets an invalid UTF-8 byte, a truncated sequence at
+the end, or a character with no width. With flags `0` it cannot fail: an
+invalid byte counts one column, a truncated tail counts one and swallows the
+rest, and an unprintable character counts one unless it is a control character,
+in which case zero.
+
+`ls` calls it in nine places — the two directory-wide width accumulations, the
+owner/group name width and its padding, the block-size and file-size padding,
+the timestamp fallback width, and the quoted name's own width.
+
+* **9.4 passes `0` at every one of the nine.** There is no strict measurement
+  anywhere in 9.4's `ls`.
+* **9.5 passes `MBSWIDTH_FLAGS` at every one of the nine**, and each caller
+  handles the -1 itself: the accumulations skip it (`if (width < len)` never
+  fires for -1), the padding sites emit no padding
+  (`name_width < 0 ? 0 : width - name_width`), and the two remaining sites
+  clamp with `MAX (0, …)`.
+
+Measured, with a group named `g\002bad` (five characters, one of them a control
+character) alongside `gwide一` (seven columns) and `root` (four), so that the
+group column is seven wide:
+
+```text
+$ ls -l --time-style=+T | od -c        # 9.4
+  ... r o o t  sp  g 002 b a d  sp sp sp sp  0 ...     <- padded as width 4
+$ .../coreutils-9.5/src/ls -l --time-style=+T | od -c  # 9.5
+  ... r o o t  sp  g 002 b a d  sp  0 ...              <- padded as width 0
+```
+
+### Why 9.5
+
+* **It is measurable.** This was the whole objection to targeting a version we
+  do not have: every claim would become a source-reading rather than an
+  observation, against a standing rule that says measure. It turned out not to
+  apply — a 9.5 tree was already configured and built at
+  `/tmp/coreutils-spike-os-lane-b/coreutils-9.5/src/ls` for the earlier `du`
+  work, so both binaries can be run side by side, and the table above is an
+  observation of both.
+* **It is the newer behaviour**, and the change was deliberate: 9.5 moved all
+  nine call sites in one go, which is a decision and not a drift.
+* **Half of our `ls` had already been written to it.** The quoting pass reads
+  9.5's `quote_name_buf`, including its `MAX (0, displayed_width)` clamp. The
+  alternative was to rewrite that half backwards.
+
+### Why not 9.4
+
+It is what `/usr/bin/ls` is in this WSL image, so it is the version a
+carelessly-written diff harness would compare against. That is a property of
+the harness, not a reason — `scripts/ls-diff.sh` names the 9.5 binary
+explicitly, which it should do regardless so that the reference cannot change
+under an `apt upgrade`.
+
+### What it costs
+
+The difference is only visible for text that cannot be measured, which in
+practice means a file, user or group name holding an unprintable or invalid
+byte. For *file* names `ls` defaults to `-q` on a terminal, which replaces such
+bytes with `?` before any of this is reached, so the divergence is confined to
+piped output and to owner/group names — which come from `/etc/passwd` and
+`/etc/group`, where such bytes are already pathological.
+
+### The general form
+
+Two GNU versions that differ in one shared helper's *flags* will not differ
+anywhere obvious; they differ in nine scattered call sites at once. Reading one
+version's source and measuring another version's binary is then a way to
+produce two correct-looking answers that contradict each other — which is
+exactly what happened here, across two commits, before the contradiction
+surfaced. Pin the version, name the binary, and read the source of the version
+you named.
+
+---
+
+## §367 — GNU `ls` 9.5's width underflow is reproduced, bug and all, rather than repaired
+
+**Date:** 2026-08-22
+**Decided by:** Claude (autonomous)
+
+**In short:** GNU `ls` measures how wide a filename is so it can line up
+columns. For a name holding a byte it cannot display — a control character, or
+a byte that is not valid text — the measuring routine answers "I cannot measure
+this", which it signals by returning **-1**. `ls` then tries to turn that -1
+into a 0, and fails to, because of a C type mistake: the -1 has already become
+the largest number the machine can hold, about 18 quintillion. Every column
+calculation done from that number then wraps around, and the output visibly
+shifts — a name gets no padding after it at all, or one space too many, or the
+line breaks early. Our `ls` copies that behaviour exactly. The alternative was
+to do what GNU obviously *meant* to do and pad such a name as if it were empty.
+
+### The mistake, in GNU's own source
+
+`src/ls.c`, in `quote_name_buf`, unchanged from 9.5 through master:
+
+```c
+size_t displayed_width IF_LINT ( = 0);
+…
+displayed_width = mbsnwidth (buf, len, MBSWIDTH_FLAGS);
+displayed_width = MAX (0, displayed_width);
+```
+
+`mbsnwidth` returns `int`, and returns `-1` when
+`MBSW_REJECT_INVALID | MBSW_REJECT_UNPRINTABLE` makes it refuse the string (see
+§366 for what triggers that). The assignment to a `size_t` converts the -1 to
+`SIZE_MAX` **before** `MAX` runs, so `MAX (0, SIZE_MAX)` is `SIZE_MAX` and the
+clamp is a no-op. The line reads as defensive and does nothing.
+
+Nine call sites downstream do `size_t` arithmetic on that value, and all of
+them wrap. Three effects are visible, all measured on GNU `ls` 9.5 with names
+`\abell`/`\acell` (a BEL byte followed by four letters) beside `AAAA BBBB CCCC`
+(`.` = space, `>` = tab):
+
+| Order | 9.5 output | Why |
+|---|---|---|
+| `\abell AAAA BBBB CCCC` | `\abellAAAA..BBBB..CCCC` | `indent (pos + SIZE_MAX, …)` at `pos == 0` starts *past* its target, so it pads nothing |
+| `AAAA \abell BBBB CCCC` | `AAAA..\abell>.BBBB..CCCC` | elsewhere it starts one column *before* `pos`, so it pads one column too many |
+| `-m`, refused name first | `\abell,` then a line break | the wrap guard's `pos <= SIZE_MAX - len - 2` fails once `pos` is `SIZE_MAX` |
+
+The column *widths* are unaffected: `calculate_columns` charges
+`SIZE_MAX + 2 == 1`, which never beats `MIN_COLUMN_WIDTH` of 3. Only the
+padding underflows, which is why the damage is a byte or two rather than a
+screen of garbage.
+
+### Why reproduce it
+
+* **Byte-identity with the pinned 9.5 binary is the acceptance test.** The
+  whole `ls` rewrite is measured by diffing our output against
+  `coreutils-9.5/src/ls` over a few hundred invocations. A "fix" is a diff, and
+  a diff is a failure — there is no way for the harness to distinguish a repair
+  we chose from a bug we introduced.
+* **It is not a transient regression.** It was checked against upstream master
+  on 2026-08-22 and both lines are still there verbatim. This is GNU's
+  behaviour from 9.5 onward, not a slip that 9.6 will quietly undo.
+* **Repairing it means choosing a different wrong answer.** The obvious repair
+  (clamp to 0) reproduces *9.4*, which we deliberately rejected in §366. The
+  other repair — measure the name honestly, as if the flags were 0 — matches no
+  GNU version at all. There is no repair that is also "what GNU does".
+* **The blast radius is tiny.** It needs a name holding a control character or
+  an invalid byte, printed in a column format, to something that is not a
+  terminal. On a terminal `ls` defaults to `-q`, which turns those bytes into
+  `?` before any width is asked for.
+
+### Why one might not
+
+Reproducing a bug means our `ls` is wrong on purpose, and a future reader who
+finds `wrapping_add` in nine places may "fix" them one at a time and get a
+listing that matches neither GNU nor itself. Two things guard against that: the
+arithmetic is spelled `wrapping_*` rather than plain `+`, which is a compile-time
+marker that the wrap is intended, and every one of the nine sites carries a
+comment pointing at `display_width`, which points here. The regression test
+`a_refused_name_is_laid_out_as_usize_max_columns_wide` pins all seven measured
+byte strings, so a partial repair fails the suite rather than shipping.
+
+### The rule this is an instance of
+
+**When the acceptance criterion is "byte-identical to a named binary", the
+binary's bugs are part of the specification.** A bug that is reachable, stable
+across releases, and observable in the output is not a defect in the reference
+— it *is* the reference. The place to record disagreement with it is a
+document like this one, not a divergence in the code. The moment we start
+repairing the reference, the diff harness stops being able to tell us anything,
+and the only remaining oracle is our own reading of GNU's source — which §366
+records getting the wrong answer twice.
+
+---
+
+## §368 — `ls --color` reproduces GNU's `--dired` offsets *without* the colour bytes, and ships two deliberate holes: `ca` and `put_indicator`'s signal handling
+
+**Date:** 2026-08-22
+**Decided by:** Claude (autonomous)
+
+**In short:** `ls --color=always` now paints its listing, and it matches GNU
+coreutils 9.5 byte for byte across 36 cases in `scripts/ls-diff.sh`. Three
+choices inside it are worth writing down, because each is a place where the
+obviously-correct code would have produced *different* bytes from GNU. First,
+GNU's `--dired` byte offsets do not count the colour escapes, and ours do not
+either — GNU's are, strictly, wrong, and we copy them. Second, the `ca` colour
+(for a file carrying a Linux "capability", a permission bit stored in an
+extended attribute) is parsed but never chosen, because deciding it needs a
+system call SlateOS does not have. Third, GNU installs signal handlers while a
+colour escape is half-written so that a killed `ls` puts the terminal back; the
+design forbids Unix signals, so we do not.
+
+### The `--dired` offsets
+
+`--dired` prints a trailing `//DIRED// 58 59 107 109 …` line: the byte offset,
+within `ls`'s own output, of the start and end of every file name, so that Emacs
+can find them without re-parsing the listing. Upstream tracks the position in a
+global `dired_pos` that it increments **by hand** at every write, and gets away
+with it because every write goes through one of four `dired_*` helpers.
+
+Every write except one. `put_indicator` — the function that emits a colour
+escape — calls `fwrite` directly:
+
+```c
+static void
+put_indicator (const struct bin_str *ind)
+{
+  ...
+  fwrite (ind->string, ind->len, 1, stdout);   /* no dired_pos += */
+}
+```
+
+So with `--color` on, the offsets are short by exactly the number of escape
+bytes emitted so far, and point into the middle of an escape rather than at the
+name. Measured, GNU ls 9.5, the same eleven-entry directory with and without
+colour:
+
+```text
+$ ls --color=always -l --dired c | tail -1
+//DIRED// 58 59 107 109 157 163 222 225 …
+$ ls -l --dired c | tail -1
+//DIRED// 58 59 107 109 157 163 222 225 …      # identical
+```
+
+The two are the same number, and only one of them is right.
+
+Our `Out` cannot make this mistake by accident: it accumulates the output in a
+`Vec` and derives the position from `flushed + buf.len()`, which is always the
+true offset. Reproducing GNU therefore took *added* code — an `Out::uncounted`
+counter that `put_str` advances and `Out::pos` subtracts.
+
+**Why do it.** The acceptance criterion for this port is "byte-identical to
+coreutils 9.5" (§367 states the rule and §366 records the cost of departing from
+it). An offset is not a rendering detail an editor can shrug off: Emacs' dired
+mode uses it to place point. A listing whose offsets are *more correct* than
+GNU's is a listing Emacs will mis-navigate in a different way — not a fix, a
+second incompatibility. And the combination is already documented as unsupported
+upstream; nobody is relying on the right answer, because there isn't one.
+
+**Why one might not.** It is a bug, reproduced knowingly, in code that had to be
+made worse to do it. The guard is the same as §367's: the field is named
+`uncounted`, its doc comment says outright that it exists to copy a bug, and
+`the_dired_offsets_do_not_count_the_colour_escapes` pins both halves — that the
+offsets do not move when colour is switched on, and that the *line* grew by
+exactly the escape bytes they are missing. A future reader who "fixes" it fails
+the test and lands here.
+
+### `ca`, and why it is parsed but never chosen
+
+`LS_COLORS`' `ca` slot colours a file carrying a POSIX capability — a bit of
+elevated privilege stored in the `security.capability` extended attribute, which
+is how a Linux binary gets to bind port 80 without being setuid root. Deciding
+whether a file has one requires `getxattr(2)`. SlateOS has no `getxattr`, and
+the capability model it does have is the microkernel's unforgeable handles,
+which are not a file attribute at all and have no on-disk representation to
+read.
+
+`Ind::Cap` is therefore parsed, defaulted and stored, and `get_color_indicator`
+has no arm that can return it. That is not a divergence: GNU's own
+`has_capability` is a stub returning false when coreutils is built without
+libcap, which is the common distribution configuration, and `ca` is unset in the
+default table for exactly that reason. Ours behaves as a GNU built without
+libcap — a supported configuration of the reference, not a departure from it.
+
+The same reasoning covers `Ind::Door`: a Solaris door is `S_ISDOOR`, which is a
+constant `0` on every target we have.
+
+### `put_indicator`'s signal handling, and why it is absent
+
+Upstream's `put_indicator` does more than write:
+
+```c
+put_indicator (const struct bin_str *ind)
+{
+  if (! used_color)
+    {
+      used_color = true;
+
+      /* If the standard output is a controlling terminal, watch out
+         for signals, so that the colors can be restored to the
+         default state if "ls" is suspended or interrupted.  */
+
+      if (0 <= tcgetpgrp (STDOUT_FILENO))
+        signal_init ();
+
+      prep_non_filename_text ();
+    }
+
+  fwrite (ind->string, ind->len, 1, stdout);
+}
+```
+
+The purpose is real: a `ls --color` killed between `\033[` and `m` leaves the
+terminal painted, and every subsequent prompt is bright blue. GNU catches the
+signal, writes the reset, and re-raises.
+
+We do not implement it, because `design.txt` forbids Unix signals for process
+control outright — the mechanism does not exist to hook. The observable
+consequence is confined to an interrupted run, so it never appears in the diff
+harness, which measures completed runs only.
+
+What we *did* keep is the latch that sits in the same `if`: `used_color` is set
+before the bytes are looked at, so the first indicator — even an empty one —
+is preceded by a `prep_non_filename_text`. That is why a coloured listing opens
+with a stray `\033[0m`, and why `LS_COLORS='ec='` (an `ec` that exists and is
+empty) still changes the output. The latch and the signal setup are the same
+`if` upstream; separating them was the actual work.
+
+**Recorded as tech debt** in `known-issues.md` as
+`TD-B-LS-CANNOT-RESTORE-THE-TERMINAL-ON-AN-ABNORMAL-EXIT`: if SlateOS ever grows
+a terminal-restore hook for abnormal exit — which the shell will want for its
+own reasons — `ls` should use it here.
+
+### The rule this is an instance of
+
+**A hole in a port should be a hole the reference itself has, or it should be
+written down.** `ca` and `do` are the first kind: a GNU built without libcap, on
+a system without doors, behaves exactly as we do, so there is nothing to record
+beyond a comment at the unreachable arm. The signal handling is the second kind:
+no configuration of GNU behaves this way, so it goes in a document. Confusing
+the two — treating a genuine omission as "just another build configuration" —
+is how a port acquires undocumented divergence.

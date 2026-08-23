@@ -1615,7 +1615,10 @@ pub extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
 )]
 #[cfg(test)]
 mod tests {
+    // Scratch directories come from the shared guard: a fixed name races
+    // between concurrent test binaries and the clock is not a unique id.
     use super::*;
+    use scratchdir::ScratchDir;
 
     /// A user record for authorization tests.
     ///
@@ -1810,17 +1813,13 @@ mod tests {
     /// pointed at one file stand in for two programs.
     #[test]
     fn polkit_honours_a_delay_earned_at_another_prompt() {
-        // Tagged with the clock, not a fixed name: two runs of this test on one
-        // machine — two lanes, or a re-run started before the first finished —
-        // would otherwise `remove_dir_all` each other's fixture mid-test, since
-        // opening the directory begins by deleting it.
-        let stamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |d| d.as_nanos());
-        let dir = std::env::temp_dir().join(format!("polkit-faillock-share-test-{stamp}"));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("a scratch directory under the temp dir");
-        let faillock = dir.join("faillock");
+        // Tagged by `ScratchDir`, not by the clock. The clock was the previous
+        // fix here and it is not a unique id at any resolution: it is refreshed
+        // on a timer interrupt, so two threads reading it inside one tick read
+        // the same value, and `cargo test` runs a suite's tests as threads of
+        // one process. Lane C measured 2133 collisions in 16000 draws.
+        let scratch = ScratchDir::new("polkit-faillock-share-test");
+        let faillock = scratch.path("faillock");
         let missing = std::path::Path::new("/nonexistent/polkit-tests");
 
         // Build the admin *before* earning the delay. `set_password_with_salt`
@@ -1851,8 +1850,6 @@ mod tests {
             refusal_before_prompting(&mut auth, &admin).is_some(),
             "a delay earned at another prompt must be honoured here"
         );
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     // --- AuthResult ---

@@ -50388,7 +50388,7 @@ commands that carry the colour in question, and assert the two renders agree.
 Candidates: anything drawn on the wallpaper, on a video surface, on a
 thumbnail, or on any other content the palette does not own.
 
-**Part 2 progress. 22 of 49 modules converted.**
+**Part 2 progress. 29 of 49 modules converted.**
 
 - [x] `security_dialog.rs` — 29 constants, done 2026-08-22. The method above
   survived contact: the sweep lives in `gui/desktop/src/palette_check.rs` as
@@ -51504,6 +51504,485 @@ thumbnail, or on any other content the palette does not own.
     (`[MISSING:]`), so nothing would have complained — but a declaration that
     understates what a defect proves is a declaration that will not notice when
     that coverage later disappears. All four were updated.
+
+- [x] `sound_settings.rs` — 11 constants, done 2026-08-22. Eight tests, harness
+  defects Ax19–Ax21 (fifty-three).
+  - **Four judgements, and the interesting one is the mirror of module 22's.**
+    Exactly three sites follow the accent — the active tab's label, the
+    selected spatial mode's label, and the volume-bar fill — and all three are
+    "you are here" or "drag me", which is the only thing the accent is allowed
+    to say. Section headings keep `lavender` (the accent never marks
+    *category*), and the on/off status pair stays frozen `green`/`overlay0`
+    (green *means* enabled rather than decorating it, which is module 19's
+    rule).
+  - **The one new rule: a meter is not a slider, but a volume bar is.** Module
+    22 froze the CPU/Memory/Disk bars because nobody can drag a read-out. A
+    volume bar is the same *shape* and the opposite *thing*: it is the control,
+    so module 19's slider rule applies unchanged — `surface1` track, accent
+    fill. The two rules together are one rule stated twice: **the accent marks
+    what you can move, not what you are being told.**
+  - **Mute is the one state that overrides the slider rule.** A muted bar draws
+    `p.red` and keeps drawing `p.red` on a red desktop, an orange one and a
+    green one, because at that moment the bar has stopped being a position and
+    become a reading — and a reading that matches the accent is a reading a
+    user cannot trust. `a_muted_volume_bar_never_looks_like_an_unmuted_one`
+    exists to hold that line; the sweep cannot, since red is a member of both
+    palettes.
+  - **Both halves of the width rule were applied up front, and for the first
+    time nothing escaped.** The fixtures were built by enumerating the
+    renderer's `if`s (module 21's half) and the assertion tables were written
+    one entry per *source* site rather than per *kind* (module 22's half), with
+    the anti-shortening comment copied across. Four of the fifty-three defects
+    do nothing but switch a branch off, to prove the coverage test notices.
+    Result: **53/53 caught, zero escapes** — against three lost in module 21
+    and two in module 22. The two halves are now cheap to apply and expensive
+    to skip, which is the whole return on having written them down.
+  - **The under-declaration audit paid off again, twice.** Two defects were
+    caught by a test their declaration did not name — the frozen-fill defect is
+    also caught by the mute test, and the disabled-sound defect by the
+    state-doesn't-follow-the-accent test. Neither would ever be reported by the
+    harness, which only flags the reverse. Both were widened. This audit is now
+    a standing step, not a module-22 one-off.
+  - **Two tooling traps worth not rediscovering.** (1) Windows Python resolves
+    `/tmp` to `D:\tmp` while MSYS bash resolves it to `C:\…\tmp`; writing the
+    defect-name filter list with one and reading it with the other silently
+    produced *no* filter arguments, so the harness began a full 454-defect run.
+    Never pass a path through both interpreters — generate the list inline into
+    a shell variable. (2) Killing the harness mid-run skips its `finally`
+    restore, leaving the in-flight defect patched on disk; `run_dialog.rs` was
+    left modified by that kill. **After any stop of a harness run, `git status`
+    must be checked and the damaged file restored with `git checkout --`.**
+- [x] `osd.rs` — 11 constants, done 2026-08-23. Eleven tests, harness defects
+  Ax22–Ax25 (ninety-eight). **98/98 caught, zero escapes.**
+  - **The width rule has a third gap, and this module is where it showed.**
+    Modules 21 and 22 taught that the sweep is only as wide as the render it is
+    given, and that a per-*kind* assertion table is not a per-*site* one. Both
+    were applied here up front — and both still missed a whole class. A
+    per-source-site *text* table and a per-source-site *rectangle* table check
+    the colours that reach the renderer; neither can see the **choice** sites,
+    the `match`/`if` expressions that decide *which* role gets handed to a
+    shared renderer. `render_content` makes 15 such decisions and `icon_info`
+    another 10, and not one was reachable: the sweep waves them through
+    (every arm names a role, and a role is a member of both palettes) and the
+    two role tables render only two fixtures. That is 25 sites checked by
+    nothing, which is worse than modules 21 and 22 lost combined. The fix is an
+    eleventh test, `every_kind_draws_its_icon_in_the_colour_that_kind_claims`,
+    which spells out all 25 mappings. **Generalised: n source sites means n
+    assertions — and a site that only *selects* a colour is a source site too,
+    even though it draws nothing itself.**
+  - **An OSD overlay takes no accent at all — the deliberate mirror of module
+    23.** Module 23's rule was "the accent marks what you can move, not what
+    you are being told"; a volume *bar* is draggable so it takes the accent.
+    The volume *overlay* is the same subject and the opposite answer: it is
+    pure feedback that appears, reports and fades, and nothing in it is
+    touchable. So zero of the overlay's sites follow the accent, held by
+    `no_colour_the_overlay_draws_ever_follows_the_accent`. The settings panel
+    below it *is* interactive and has exactly three accent sites, held by a
+    test that counts them — a count, not a list, so a fourth site added later
+    fails rather than passing unnoticed.
+  - **Volume-blue and brightness-yellow are a category pair, so both freeze.**
+    Tempting to give volume the accent since it is the most-shown overlay; that
+    would make the two indistinguishable on a blue desktop and identical on a
+    yellow one. The pair is what carries the meaning, so neither half may move
+    independently, and `volume_and_brightness_stay_a_pair_you_can_tell_apart`
+    says exactly that.
+  - **Proving ink is *derived* needs the accent to vary, and the stock accents
+    are all too similar to do it.** `ink_drawn_on_a_coloured_fill_is_readable_
+    in_both_modes` originally used the four `SAFE_ACCENTS`, which are all
+    pastel — `readable_on` answers the same dark endpoint for every one of
+    them, so a hard-coded constant passed. The test only bites once it renders
+    a deliberately dark accent (`0x0020_3050`) *and* a deliberately pale one
+    (`0x00F5_D0E0`) and demands the ink flip between them. Any future
+    `on_accent`/`readable_on` test needs the same treatment; four similar
+    fixtures prove nothing about a derivation.
+  - **`text_saying` — one source site, many rendered instances.** The helper
+    first asserted exactly one match and failed, because the settings panel
+    draws four ticks from one `"✓"` expression. The correct question is not
+    "which one" but "do they all agree": at least one match, and all matches
+    the same colour. If they ever disagree the site has grown a branch that
+    needs naming, so the assertion catches that too rather than silently
+    reporting whichever came first.
+  - **The under-declaration audit found four, and over-declaration one.** Four
+    defects were caught by tests their declaration did not name (an album
+    branch-killer also trips the text-bounding test; two battery defects also
+    trip the text-role table; the Success-icon defect also trips the
+    pair-distinctness test). One declared a test that did *not* fire — recolouring
+    the selected position dot changes no branch, so
+    `the_fixtures_take_every_branch_the_osd_has` was wrong to list. The harness
+    reports only that second direction, which is the rarer one; the audit
+    script is what catches the first.
+  - **clippy trap: `unusual_byte_groupings`.** `Color::from_hex(0x2030_50)` is
+    rejected — hex digits must group in equal-size runs. Write the full eight
+    (`0x0020_3050`), which is what the rest of the file does anyway.
+- [x] `privacy_settings.rs` — 11 constants, done 2026-08-23. Eight tests,
+  harness defects Ax26–Zx27 (fifty-two).
+  - **The width rule has a fourth gap: an assertion is only as
+    discriminating as the palette it renders under.** Modules 21/22/24 taught
+    that the sweep is only as wide as its render, that a per-kind table is not
+    a per-site one, and that a site which only *selects* a colour is a source
+    site too. All three were applied here up front, and the first proof run
+    still left 19 defects declared-but-uncaught — because the three role
+    tables rendered **Mocha only, with the stock accent**. That is structurally
+    blind to exactly the two mistakes this conversion makes: a constant frozen
+    back to its Mocha value is *identical* to the role that replaced it when
+    viewed in Mocha, and a site naming `p.blue` instead of following the accent
+    is identical to the stock accent, which *is* blue. **Testing a conversion
+    in the palette it was converted from hides precisely the failures that
+    conversion causes.** The fix is `table_palettes()` — both modes, and in
+    each an accent (`0x00FF_8C1A`) deliberately outside either palette — which
+    every role table now loops over, with `"{mode}"` in all 38 failure
+    messages. 15 of the 19 resolved on that change alone.
+  - **An expectation written in terms of the code under test cannot fail.**
+    The text table asserted the app-state label against
+    `PermissionState::Allowed.color(&p)`. Swap the `Allowed => p.green` arm and
+    *both sides of the comparison move together*: the row a user reads as
+    "allowed" can turn any colour at all and the table stays green. Two arm-swap
+    defects walked through it. Assert the **role literal** instead, and list all
+    three states — that pins the value, and the three-way spread still proves
+    the call site asks the method, because a flat literal there would give all
+    three rows one colour. Generalised: **if the expected value is computed by
+    the thing being tested, the assertion is checking that a function equals
+    itself.**
+  - **An exemption defined by the property under test exempts the bug too —
+    the accent test had to be written three times.** *Attempt 1* collected
+    every colour equal to green, red or overlay0 and compared *that list*
+    across accents. The filter runs before the comparison, so a site that stops
+    drawing green and starts drawing the accent drops out of the list — for
+    every accent equally. The lists still matched; it was checking that the
+    sites which stayed put stayed put. *Attempt 2* fixed that by comparing every
+    command under two out-of-palette accents A and B, and skipping any site that
+    drew A in the first render and B in the second, "because that is a site
+    meant to follow the accent". Three defects walked through it — an enabled
+    resource, an allowed log entry and a switched-on toggle, all reporting state
+    in the accent — because **a site that wrongly follows the accent satisfies
+    the exemption exactly.** *Attempt 3* is the one that works: every command
+    must match under both accents, any command that moves must move exactly
+    A→B, and the number that move must equal a **declared per-state count**
+    (one for the tab strip's active label; two on the general tab, which adds
+    the selected telemetry level). Generalised: **you cannot recognise the
+    legitimate instances of a property by testing for that property — the bug
+    has it too. Count them instead**, so a new one fails rather than joining
+    the exemption. This is the same shape as module 24's "count, not list" rule
+    for accent sites, arrived at from the opposite direction, and it is now the
+    third time a *whitelist by description* has silently absorbed a defect.
+  - **Four judgements, all recorded in the module's prose header.** (1) Two
+    sites follow the accent, both meaning "you are here" — the active tab's
+    label and the selected telemetry level's label; held by a test that
+    **counts** them, so a third added later fails. (2) Allowed/Denied is a
+    *category*, not a decoration, so green and red freeze across every accent —
+    a privacy panel whose status a user cannot trust at a glance is worse than
+    no status at all. (3) Section headings stay `lavender`; the accent never
+    marks category. (4) The tab strip's own fill is position but not accent
+    (`p.surface0`/`p.mantle`) — only the label moves.
+  - **Traps.** `gen` is a reserved keyword in Rust 2024 and cannot name a
+    fixture variable. Harness patterns must contain literal `✓`/`✕`; the Rust
+    source stores the characters, not `\u{}` escapes. And `text_containing`
+    fired its ambiguity guard on `"Permissions"`, which is a substring of the
+    title `"Privacy & Permissions"` — the guard converted a silent
+    wrong-site comparison into a loud failure, which is what it is for; tab
+    labels now use a `text_exact` helper.
+  - **The harness now reports both directions of declaration error.** It only
+    ever printed `[MISSING:]` — a test a defect *declared* but that did not
+    fire. The reverse, a test that fired but was not declared, was found by an
+    audit script run by hand, which meant it was found when someone remembered
+    to run it. This module had **sixteen** of them, all created the moment one
+    test became far more discriminating than its declarations claimed. That
+    direction matters because the declarations are the only record of what the
+    suite is known to prove: left stale, the next person to prune a
+    "redundant" test cannot see what they would be giving up. Both directions
+    are now inline as `[MISSING:]` / `[UNDECLARED:]`, with a closing tally.
+- [x] `print_manager.rs` — 11 constants, done 2026-08-23. Eight tests, harness
+  defects Ax28–Nx29 (forty).
+  - **The first module where the previous module's lesson was applied before
+    the proof run rather than after it.** Module 25 lost 19 defects to role
+    tables that rendered Mocha with the stock accent; every table here renders
+    both modes with an accent outside either palette from the first line of
+    the first test. This module needed it more than any so far, because
+    `JobState::Queued` is `p.blue` — and the stock accent *is* blue, so under
+    it "correctly frozen to blue" and "wrongly following the accent" are the
+    same pixels. Two of the forty defects exist purely to hold that line.
+  - **Both colour-choice methods are unreachable from `render`.**
+    `Printer::status_color` and `JobState::color` are called by nothing else in
+    the file — they are pure *selection* sites in module 24's sense. Without an
+    explicit table naming all nine arms, every one of them is checked by
+    nothing at all: the membership sweep waves them through, because each arm
+    names a role and a role belongs to both palettes. A colour method with no
+    call site is the easiest kind of site to forget, because grepping the
+    render function for colours will never show it.
+  - **Four judgements.** (1) `status_color`'s offline/busy/ready red/yellow/
+    green is a category — red *means* "this printer will not print" — so it
+    freezes. (2) `JobState::color` is the same, six ways, with all fifteen
+    pairs asserted distinct under five accents and both modes. (3) The Print
+    button is the dialog's default action, which *is* the accent's job, so
+    `p.accent` fill with `p.on_accent()` ink; Cancel is not the default action
+    and keeps `p.surface1`/`p.text`. (4) The selected printer's name marks the
+    choice you have made and takes the accent, while the field it sits in stays
+    `p.surface0` — position is marked by the label, not by repainting the
+    furniture, the same split as module 25's tab strip.
+  - **The accent count has to allow for derived ink.** The counting rule from
+    module 25 says every command must match across two accents except a
+    declared number. Here three commands move, not two: the printer name and
+    the button fill take the accent, and the button's *ink* moves as well
+    because `on_accent` is derived from it. The test classifies each moving
+    command as accent-valued or derived-ink and fails on anything that is
+    neither, so the derived site is accounted for rather than exempted.
+  - **Two sites drew the identical string in different roles.** The dialog
+    title and the Print button both draw exactly `"Print"`, and the caption
+    `"Printer:"` contains it — three sites, two roles, one substring. A
+    `text_containing` lookup would have compared the wrong one silently. Added
+    `text_exact(cmds, want, size)`, matching text *and* font size. Whenever a
+    module draws one word in two roles, the lookup helper needs a second
+    discriminator; the ambiguity guard only tells you that you have the
+    problem, not which site you meant.
+- [x] `power.rs` — 9 constants, done 2026-08-23. Ten tests, harness defects
+  Ax30–Bx32 (fifty-four).
+  - **The first module whose surface deliberately does not follow the user's
+    mode**, and that turns out to matter for the proof, not just the pixels. A
+    screen saver blacks out the display in both modes — a light one is a lamp
+    pointed at a sleeping user — so Latte's roles, which are picked to sit on
+    white, are the wrong palette for that surface: Latte `text` is nearly black
+    and would vanish on it. The saver pins itself to the dark palette and, since
+    nothing it draws is a position or an invitation, takes no palette argument
+    at all. Making the independence *structural* rather than asserted is the
+    better half of the fix: a later edit cannot accidentally make the saver
+    follow the theme, because there is no theme in scope to follow.
+  - **Seventh lesson for the width rule: pinning a surface to one mode disarms
+    the membership sweep for that surface.** The sweep works by rendering in
+    Latte and finding a value Latte does not contain. A surface pinned to Mocha
+    contains every Mocha value *by construction*, in both modes — so a leftover
+    `COL_LAVENDER` is bit-for-bit `screen_palette().lavender` and there is no
+    observable difference for any test to see. The sweep is still worth running
+    (it catches an inline literal that is no role at all, and it pins the star
+    field's greys and the rain's greens to the two ramp shapes they are allowed
+    to have), but for such a surface the per-site role tables are not a
+    supplement to it: they are the entire proof, and anyone who trims them as
+    redundant is deleting the only check there is. The harness block says the
+    same thing from the other side — the saver's sites carry no freeze-to-Mocha
+    defect, because such a defect would be undetectable and declaring it would
+    be declaring a test that cannot exist. They reach for the *light* palette
+    instead, which is the failure pinning can genuinely suffer.
+  - **Lesson 5 applies to which palette, not just which role.** The saver's role
+    tables first wrote their expectations as `screen_palette().lavender`. That
+    is the module-25 tautology one level up: a `screen_palette` that started
+    returning the light palette takes both sides of the comparison with it. The
+    expectations now name `Palette::for_mode(false)` directly, and the defect
+    that flips the pinning is caught by three tests instead of none.
+  - **Four judgements.** (1) The saver follows neither mode nor accent. (2) The
+    battery gauge is a *measurement* — red at critical, yellow at low, green
+    when nearly full, blue otherwise — so it freezes; note its "otherwise" arm
+    is `p.blue` and must stay `p.blue`, which is the module-26 trap again and is
+    why every table renders under an off-palette accent. (3) The four power
+    profiles are a category, so none of them is the accent, not even Balanced.
+    (4) A star's grey is its depth and a glyph's green is its age in the column:
+    both are computed ramps, not roles that were missed, and the sweep declares
+    them as the two shapes `rgba(v, v, v, 255)` and `rgba(0, v, 0, 255)` rather
+    than waving arbitrary colour through.
+  - **The logo's ink is derived but cannot be proved so.** `readable_on(sp.blue)`
+    sits on a plate that never varies, so — unlike the accent cases, where the
+    fill moves and the ink must move with it — a frozen endpoint and a
+    derivation are indistinguishable here. The test asserts ink ==
+    `readable_on(plate as actually drawn)`, which is a consistency check rather
+    than a derivation proof; what it does catch is the failure that matters and
+    the one the code actually had, a *named* role (`COL_BASE`, dark) on a plate
+    whose lightness a later change could flip.
+  - **The membership sweep can never catch a site that reaches for the accent,
+    in any module.** `accent` is one of the palette's twenty-one roles, so a
+    command drawing it is accounted for by construction — in either mode, under
+    any accent value. Thirteen of this module's defects were declared against
+    the sweep on the assumption that an off-palette accent would make them
+    visible to it; it caught none of the thirteen, and the accent count and the
+    role tables caught all thirteen. This is not a gap to fix — the sweep asks
+    "is this a colour the palette can account for?", and the accent is one. It
+    is a fact about what the sweep is *for*: it finds a **leftover constant**,
+    and nothing else. For every site that must not follow the accent, the accent
+    count is not a supplement to the sweep; together with the per-site table it
+    is the whole check. Read with lesson 7 above, the sweep's reach is now
+    precise: it cannot see a wrong role, it cannot see the accent, and on a
+    mode-pinned surface it cannot see a leftover constant either.
+  - **`Palette::for_mode(true).base` is exactly the `readable_on` light
+    endpoint,** which the sweep allows everywhere on purpose, so "the screen
+    saver lights the display with Latte's background" is invisible to it. The
+    black-out test catches it, which is the test that owns that property.
+    Generally: the two endpoint values are sweep-transparent, so a defect that
+    happens to land on one is only ever caught by a property test.
+- [x] `login_screen.rs` — 11 constants, done 2026-08-23. Sixteen new tests (50
+  in the module), harness defects Ax33–Lx35 (sixty-four), all sixty-four
+  caught, none escaped.
+  - **Eighth lesson for the width rule: the sweep is blind to the two
+    `readable_on` endpoints, and this module draws one of them nearly
+    everywhere.** Most of what a greeter draws sits on a background the shell
+    did not choose — a photograph, a gradient, a colour a user picked — so no
+    palette role is legible on all of them. The answer (the `icons.rs`
+    precedent) is `on_wallpaper()` plus a hard `text_shadow()` at +1/+1. But
+    `on_wallpaper()` is the constant `LIGHT_EXTREME` = `#EFF1F5`, which is
+    *also* the light `readable_on` endpoint, which the sweep allows
+    unconditionally in **both** modes. So a site that took `on_wallpaper()`
+    where it owed `p.text`, or the reverse, is invisible to the sweep — and it
+    is a legibility bug that looks perfect in every screenshot taken against
+    the default background. Five defects reproduce exactly that confusion
+    (Kx33, Ox33, Dx34, Vx34, Xx34) and the sweep caught none of them.
+  - **The fix was to make the boundary a shape, not a colour.** Text on the
+    background goes through one helper, `push_on_background`, which emits *two*
+    commands; text on a panel this module filled is pushed directly and emits
+    *one*. The test helpers mirror that exactly — `panel_text` asserts one
+    command, `floating_text` asserts two with the shadow one pixel down-right —
+    so a site that changes sides fails whichever helper names it, without any
+    colour comparison being involved. `exactly_seven_things_in_the_full_render_sit_on_the_background`
+    then counts the shadows, so a *new* floating site nobody named is caught
+    too. That is lesson 6 (count them, don't recognise them) applied to a
+    property the sweep structurally cannot see.
+  - **Sharpest measurement of the session: the wallpaper-ink tests cannot
+    detect a module that ignores its palette entirely.** Defect Ix35 makes
+    `render` shadow its parameter with `Palette::for_mode(false)` — the exact
+    failure this whole conversion exists to prevent. Nine tests caught it. The
+    two wallpaper-ink tests did not, and could not: `on_wallpaper()` is a
+    constant, `on_wallpaper_dim()` is that constant at alpha 200, and
+    `text_shadow()` is black, so all three are mode-independent *by
+    construction* and a frozen render still draws them correctly. The corollary
+    is a rule for every later module: **a site whose colour does not vary with
+    the mode contributes nothing to the "did this module read its palette at
+    all" question, and needs a separate site that does.** Here that is the role
+    tables on the panels.
+  - **A near-miss with the same root cause, found by the harness rather than
+    reasoned out.** Defect Cx33 resolves the theme background to `p.base`
+    instead of `p.crust`, and unexpectedly tripped the floating-text count —
+    because Latte `base` *is* `LIGHT_EXTREME`, so the background fill was
+    counted as a seventh piece of wallpaper ink. Harmless here, but it means
+    the counting test is coupled to which role the background takes; if a later
+    edit makes the login background `base`, that test needs re-reading rather
+    than re-baselining.
+  - **`Default` could not name a colour, so it stopped trying.** The default
+    background was `SolidColor(CRUST)` with `CRUST` a Mocha literal in this
+    file — a default that had already made the choice the palette exists to
+    make, and the direct cause of the greeter staying black for a user who had
+    asked for the light theme. `Default::default` takes no arguments and so can
+    never be handed a `Palette`; the fix is a payload-free `Theme` variant
+    resolved at render time. `the_default_background_defers_its_colour_to_the_palette`
+    pins that the default carries *no* payload, which is not a restatement of
+    the code: it is what stops a future edit reintroducing a literal by
+    changing an argument. The `match` in `render_background` names the three
+    colourless variants explicitly rather than using `_`, so adding a variant
+    is a compile error instead of a silent dark rectangle.
+  - **Three judgements about the accent, consistent with modules 19–27.** A
+    *default action* is an invitation, so Sign In takes the accent and its label
+    is `on_accent()` — derived, and proved derived by sweeping the accent from
+    `0x00` to `0xF0` and requiring both `readable_on` endpoints to be observed.
+    A *selection marker* is position, so the chosen avatar carries the accent in
+    the row list and keeps it in the password panel. A *refusal* is neither, so
+    the error border and message stay `p.red` and the lockout notice stays
+    `p.yellow` under every accent. Note that defect Ox34 — freezing the Sign In
+    label to `#11111B` — is caught by **one** test only: the sweep allows it (it
+    is an endpoint), the deleted-constants test exempts it (it is `CRUST`), and
+    the role table passes it (under the off-palette accent, `readable_on`
+    genuinely answers `#11111B`). Only the accent-sweep test sees it. A module
+    that draws a coloured button and has no such test has no check on that
+    label at all.
+  - **The sweep found a real rendering bug that nobody put there.** It rejected
+    `#CBA5F7` — one step off Mocha `mauve` — in a gradient whose two endpoints
+    were *both* `mauve`. The band arithmetic truncated rather than rounded, and
+    `a*(1-t) + a*t` lands a hair below `a` in `f32` for most `t`, so a flat
+    "gradient" came out as twenty stripes alternating between the colour the
+    user chose and one darker, and every real gradient was biased a step dark
+    along its whole length — invisible there, because a gradient is expected to
+    change. Extracted as `lerp_channel` with `.round().clamp(0.0, 255.0)` and
+    pinned by two tests, one for the flat case and one for the midpoint (127.5
+    rounds to 128 and truncates to 127, so the fix cannot be "special-case
+    equal endpoints"). Worth recording as evidence for the method: a membership
+    sweep written to catch a missed *constant* caught an arithmetic error in
+    code that had nothing to do with the conversion.
+- [x] `taskbar.rs` — 10 constants plus four inline `Color::rgba(…)` triples,
+  done 2026-08-23. Nineteen tests in the module (ten new, six reworked),
+  harness defects Ax36–Ix38 (sixty-one), all sixty-one caught, none escaped.
+  - **Ninth lesson for the width rule: a set-membership table cannot see a
+    *permutation* of the set.** The button-background ladder has four rungs —
+    `with_alpha(surface0, 128)` running, `surface1` focused, `surface2`
+    hovered, `with_alpha(surface1, 180)` for the dragged ghost — and the first
+    version of `each_button_state_draws_the_background_its_role_names` asked
+    `bgs.contains(&p.surface1)` and `bgs.contains(&p.surface2)` for each. That
+    is a test of the *set* of colours drawn, and a render that swapped the
+    hovered and focused rungs draws exactly the same set. The whole defect
+    class this module is most likely to have — a ladder re-seated one rung
+    off — was invisible. The fix is that `fills()` now carries each rect's `x`
+    and a `button_x(i)` helper reproduces the layout arithmetic, so every
+    assertion names a *site* (`at(button_x(1)) == p.surface1`) rather than
+    asking whether a colour is present anywhere. Generally: **whenever the
+    per-site table's sites are interchangeable in shape, index it by position,
+    or it degrades from a table into a checklist.** `bgs.len() == 4` plus an
+    explicit "no background at `button_x(2)`" close the two remaining holes
+    (an extra rung, and an idle button that drew one).
+  - **Corollary found in the same pass: an assertion made at a stock default
+    value cannot fail.** `every_colour_in_the_context_menu_is_in_the_role_it_claims`
+    asserts the menu is filled with `p.panel_bg()` rather than `p.base` — a
+    real distinction, because a floating menu is a panel and a panel is
+    translucent. Except that `Palette::for_mode` sets `panel_alpha: 255` in
+    *both* branches, at which `panel_bg() == base` exactly, so the assertion
+    was true of a menu filled with either and proved nothing. The probe
+    palette now sets `panel_alpha = 200`, and `accented()` carries
+    `assert_ne!(p.panel_bg(), p.base, …)` so the day someone changes the
+    default back the fixture fails instead of quietly going vacuous. This is
+    the same shape as the module-26 accent trap: **a test fixture must move
+    every value the assertions discriminate on, and the stock palette is not a
+    fixture — it is the one input guaranteed to make defaults indistinguishable.**
+  - **The one principled exception to "the accent marks position, never
+    category".** Modules 19–28 established that the accent marks position and
+    invitation. A taskbar draws two position-ish marks *simultaneously and a
+    few pixels apart* during a drag: the focus underline ("you are here", 16×3)
+    and the drag insertion caret ("release here", 2×36). Both are small bars;
+    if both take the accent they are told apart only by aspect ratio. So the
+    caret takes `p.green` — `drop_target()`'s hue, matching the precedent in
+    `appearance` that a drop target differs from a selection *by hue and not
+    merely by alpha* — but at full opacity, because a 2px bar has no area in
+    which to be translucent.
+    `the_drop_caret_is_never_the_same_hue_as_the_focus_underline` pins it in
+    both modes and under an off-palette accent, so the rule cannot be undone
+    by someone "unifying" the two marks.
+  - **The window-count badge is a *measurement*, so it keeps its named hue.**
+    It reports how many windows an app has; that is a quantity, not a position
+    or an invitation, so it stays `p.red` under every accent
+    (`the_count_badge_does_not_follow_the_accent`). Its digit is the reverse
+    case — ink on a coloured fill, so `readable_on(p.red)`, and *proved*
+    derived rather than frozen by the two modes disagreeing about it: Mocha
+    `red` `#F38BA8` is light enough to want `#11111B`, Latte `red` `#D20F39`
+    is dark enough to want `#EFF1F5`. A single-mode test could not tell that
+    from a leftover `MOCHA_MANTLE`.
+  - **The ladder was re-seated, not merely renamed.** The old constants had
+    hovered = `SURFACE1` and focused = `SURFACE0`, which puts the *transient*
+    state a rung above the *persistent* one on a bar where both are visible at
+    once. The roles now name the ordering they mean —
+    `with_alpha(surface0, 128)` < `surface1` < `surface2` for running <
+    focused < hovered — and idle draws no rect at all rather than a
+    transparent one. Similarly the section divider moved from `surface2` to
+    `overlay0`, the role that actually means "separator"; `surface2` remains
+    only where it is an outline (the context menu's stroke). A pure
+    find-and-replace conversion would have preserved both mistakes, which is
+    the argument for reading every site rather than mapping constant names to
+    role names.
+  - **The lesson generalises past colour, and the harness proved it.** Defect
+    Hx38 clears the fixture's `hover_index` and was caught by *one* test — the
+    positional ladder table. `the_fixture_takes_every_branch_this_module_has`,
+    whose entire job is to notice a fixture that stopped covering something,
+    missed it: it asserted `bgs.len() == 4`, and the hovered app is *also*
+    running, so it kept drawing a background — just a different one. A count
+    of four cannot tell "hovered, focused, running" from "running, running,
+    running". The branch test now checks each of the three rungs is present by
+    colour. Worth stating as a rule, because it is the same failure at one
+    remove: **a coverage test that counts is as blind to a permutation as a
+    membership table is, and a fixture-coverage test is exactly where that
+    blindness is most expensive** — everything downstream of it is then
+    vacuous rather than merely wrong.
+  - **Four of the five under-caught verdicts were mis-declarations worth
+    recording, because each names a limit of a *kind* of test.** (1) A
+    pre-conversion test named for a site often asserts that site's *geometry*
+    and never its colour (`test_render_empty_taskbar` against a frozen bar
+    background). (2) **A consistency check cannot see a change that moves both
+    sides:** the digit test compares ink against `readable_on(badge as
+    actually drawn)`, so re-rolling the badge to another role keeps the pair
+    consistent — and Mocha yellow and Mocha red happen to want the same
+    near-black ink, so it does not even shift the value. (3) A fixture
+    weakened by removing one item is caught only by whichever test reads the
+    value that actually changed: dropping the third window still leaves a
+    badge (any count above one draws one) and still leaves it `p.red`, so only
+    the digit test — which selects the text by its content, `"3"` — notices.
 
 **Trigger:** this is not blocked on anything. It is sequenced after the shell
 event loop (`TD-C-THE-SHELL-CAN-DRAW-ITSELF-AND-NOBODY-CAN-ASK-IT-TO`) only
@@ -63237,6 +63716,526 @@ Next on the list, unchanged: the decompressors (`fs/zstd.rs` 299, `fs/xz.rs`
 144, `fs/compress.rs` 110, `fs/sevenz.rs` 92, `fs/bzip2.rs` 88), the wire
 parsers (`net/tcp.rs` 182, `net/ssh.rs` 104, `net/tls.rs` 99,
 `net/firewall.rs` 87), then `fs/fat.rs` 140 and `fs/ext4/driver.rs` 104.
+
+## B-TEST-FIXTURES-SHARE-TEMP-PATHS-ACROSS-CONCURRENT-RUNS (lane B, 2026-08-22) — lane B's half FIXED, lane C's half FILED
+
+**In short:** a test that names its scratch directory after a fixed string, or
+after the clock, shares that path with every other copy of the suite running at
+the same time. Two `cargo test` runs overlapping is ordinary, not exotic, so the
+tests delete and overwrite each other's fixtures. The failures land on the code
+under test — `du: cannot access …`, `save: Io(NotFound)` — which is why they
+were not recognised as fixture bugs for as long as they were.
+
+**How it was found.** A workspace run of mine failed two `apps/screenshot` tests
+while a second workspace run was still in flight. Chasing that rather than
+re-running it turned up the same defect in twelve crates.
+
+**Why the clock is not a fix, only a disguise.** The system clock is refreshed
+on a timer interrupt rather than recomputed per read, so two threads reading it
+inside one tick get the same value however many digits it carries — and `cargo
+test` runs a suite's tests as threads of one process. Lane C measured 2133
+collisions in 16000 draws (13%); the figure is recorded in
+`userspace/scratchdir/src/lib.rs`. Adding the pid separates concurrent *runs*
+and does nothing for concurrent *threads*. `userspace/scratchdir` draws from the
+pid **and** a process-wide `AtomicU64`, which covers both axes by construction.
+
+**Measured, 2026-08-22** — six copies of one test binary, run at once, no source
+changes:
+
+| suite | runs failing (of 6) | distinct tests |
+|---|---|---|
+| `screenshot` (lane C) | 6 | 6 |
+| `explorer` (lane C) | 3 | 2 |
+| `imageviewer` (lane C) | 1 | 1 |
+| `du` (lane B, before the fix) | 1 | 1 |
+
+**Lane B — fixed.** `ca36f3e47` (du, 3 sites) and `d733787ee` (crond2 4, userdb
+2, vi 2, polkit 1). All now use `ScratchDir`; the hand-written cleanup tails are
+gone with them, since `Drop` covers the failing test that a trailing
+`remove_dir_all` structurally cannot reach. Re-measured at 15 binaries running
+at once: green.
+
+Deliberately left alone, and sound as they stand: `fio` (pid plus a distinct
+per-test tag), `filekind` and `tail` (pid plus `ThreadId`, which Rust guarantees
+is never reused).
+
+**Lane C — filed**, not fixed, because `apps/**` and `gui/**` are not mine to
+edit: `requests/b-c-test-fixtures-in-apps-and-gui-race-on-shared-temp-paths.md`
+lists 6 fixed-name sites and 12 clock-tagged ones with file and line, the
+one-command reproduction, and the conversion. `apps/installer/src/grub.rs`
+already does it correctly and is left alone.
+
+**The lesson worth keeping.** `polkit` had already been fixed once — from a
+fixed name to a nanosecond tag — with a comment that diagnoses the race
+correctly and then picks a fix that does not work. A rarer, stranger failure is
+worse than an obvious one. When a fixture needs to be unique, take the
+uniqueness from a counter, never from a clock.
+
+### Addendum (2026-08-23): the race poisons its path permanently — and blocked the merge gate
+
+The entry above described a probabilistic failure. It is worse: the race can
+convert itself into a **deterministic, permanent** failure that survives the run
+that caused it, and it did.
+
+A clean single-run `cargo test --workspace` — nothing else in flight — failed in
+`screenshot` at `apps/screenshot/src/main.rs:2044` with `AlreadyExists` from
+`create_dir_all`. The cause was that
+`std::env::temp_dir()/slateos-screenshot-litter` had become **a 118-byte 4×4 BMP
+file** where the helper expects a directory: `remove_dir_all` therefore failed
+(not a directory), the helper discarded that error with `let _ =`, and
+`create_dir_all` failed on the file already there. Measured both ways — poisoned:
+3 runs, 3 failures; after deleting that one file: 69 passed, 0 failed.
+
+The poison is written by the very test that then cannot run.
+`a_save_leaves_no_temporary_files_behind` ends with a deliberate negative case
+that writes **to the directory path itself** and asserts the write fails —
+which holds only while that path *is* a directory. When a concurrent run's
+`temp_dir("litter")` deletes the path in the window before that line, the write
+succeeds and leaves a BMP at the directory's name.
+
+Three properties make this materially worse than the parent entry:
+
+- It is **not cleared by `cargo clean`** — the poison is in the system temp
+  directory, not `target/`.
+- It is **invisible from the repository**: nothing in the tree names
+  `slateos-screenshot-litter`, so the next reader gets `AlreadyExists` from a
+  line that says `create_dir_all` and no reason to suspect a file.
+- It **blocks all three lanes**, because `cargo test --workspace` is the shared
+  merge gate. It blocked lane B's merge to `main` on 2026-08-23, for a defect in
+  a crate lane B may not edit.
+
+Recorded in full, with the mechanism and the `write_bmp(&dir, …)` line that
+writes the poison, in the addendum to
+`requests/b-c-test-fixtures-in-apps-and-gui-race-on-shared-temp-paths.md`.
+`ScratchDir` prevents both halves: it never reuses a name and never opens by
+deleting. Workaround until then: delete `%TEMP%/slateos-screenshot-litter` — it
+is a file, so `rmdir` will not remove it.
+
+---
+
+## TD-C-THE-SHELL-DRAWS-FOUR-OF-ITS-FIFTY-SEVEN-MODULES (lane C, 2026-08-22)
+
+**In short:** The desktop shell crate contains about fifty-seven modules, and
+roughly fifty of them are complete, tested user interfaces — a sound panel, a
+display panel, a privacy panel, an on-screen volume overlay, a login screen, a
+run dialog, a print manager — that **nothing in the running system can put on
+screen.** The shell's paint path reaches exactly four of them. The rest are
+drawn only by their own unit tests. Separately, `apps/settings` is a *second*,
+independent implementation of most of the same panels, and it is the one that
+would actually run.
+
+**Where:** `gui/desktop/src/session.rs`, `ShellSession::paint_background`
+(`:334`) and `ShellSession::paint_chrome` (`:353`), are the only two functions
+that hand render commands to a compositor. Between them they call:
+
+| Called | Which module actually draws |
+|---|---|
+| `self.wallpaper.get_render_commands` | `wallpaper.rs` |
+| `self.shell.render_taskbar` | **`lib.rs` inline** — not `taskbar.rs` |
+| `self.shell.render_start_menu` | **`lib.rs` inline** — not `launcher.rs` |
+| `self.shell.render_alt_tab` | **`lib.rs` inline** |
+| `self.shell.render_calendar` | `calendar.rs` |
+| `self.shell.render_zone_overlay` | `snap.rs` |
+| `self.shell.render_overview` | `overview.rs` |
+
+So four modules — `wallpaper`, `calendar`, `snap`, `overview` — plus whatever
+`lib.rs` draws by hand. A grep for `pub fn render` in `gui/desktop/src` returns
+**seventy-eight** entry points; six of those are the `lib.rs` ones above, and
+of the remaining seventy-two only four are reached.
+
+Note the two rows in bold especially. `taskbar.rs` defines a
+`TaskbarUI::render(&mut self, bar_width, bar_height)` and `launcher.rs` an
+`AppLauncher::render(&self)`, and `lib.rs` draws its own taskbar and its own
+start menu without consulting either. Those two are not merely uncalled; they
+are uncalled *while a second implementation of the same surface ships*.
+
+**And `apps/settings` is a third copy of the settings half.**
+`apps/settings/src/main.rs` (8,227 lines) declares its own `SettingsPage` enum
+— `Display`, `Sound`, `Mouse`, `Notifications`, `Power`, `NetworkStatus`,
+`WiFi`, `Wallpaper`, `LockScreen`, `DefaultApps`, `StartupApps`,
+`UserAccounts`, `SystemUpdates` and more — and its own `AudioDevice` /
+`AppVolume` types. It does not depend on the `desktop` crate at all (`grep -r
+'desktop::' apps/settings` finds nothing). Every one of those pages has a twin
+module in `gui/desktop/src` with the same name and the same job.
+
+**Why this is worth a file entry rather than a shrug.** Three separate costs,
+and the third is the one that bites:
+
+1. *Nothing exercises the panels against a real caller.* Their arguments,
+   their sizes and their assumptions about what the shell would pass are
+   asserted only by tests written next to them, by the same reasoning that
+   wrote the code. A panel that expects a width the shell would never give it
+   is not detectably wrong today.
+2. *Two implementations drift.* The `desktop` and `apps/settings` sound pages
+   already disagree about their data model; nothing forces them together and
+   nothing reports when they part.
+3. *It silently doubles the cost of every crate-wide change.* The palette
+   conversion (`TD-C-FORTY-NINE-SHELL-MODULES-CARRY-THEIR-OWN-COPY-OF-THE-PALETTE`)
+   is threading a `&Palette` through fifty modules that nobody draws — and the
+   same work will be needed a second time in `apps/settings`, where the count
+   is 2,258 constants (`TD-C-EVERY-APPLICATION-CARRIES-ITS-OWN-COPY-OF-THE-PALETTE-TOO`).
+   That is not an argument against doing it: leaving the modules frozen
+   guarantees the bug returns the moment they *are* wired up, and a module
+   converted now is converted once. It is an argument for deciding **which of
+   the two implementations survives** before converting the second one.
+
+**This is not `TD-C-THE-SHELL-CAN-DRAW-ITSELF-AND-NOBODY-CAN-ASK-IT-TO`**,
+which was resolved on 2026-08-21 and was about the shell having no event loop
+at all. The loop exists now and paints every frame. This entry is about what it
+paints *into* that loop, which is four modules.
+
+**Proper fix, and it starts with a decision, not with code.** The question is
+whether the shell's settings panels or `apps/settings` is the real one:
+
+- **`apps/settings` survives** — then some fifty modules in `gui/desktop/src`
+  are dead code and should be deleted, not converted, and this entry closes by
+  shrinking the crate by tens of thousands of lines. Against: the shell's
+  panels are the better-tested of the two and several have no counterpart in
+  `apps/settings` (the OSD overlay, the print manager, the security dialog,
+  the login screen, window rules).
+- **The shell's panels survive** — then `apps/settings` becomes a thin host
+  that depends on the `desktop` crate and draws them, and the duplicated data
+  models in `main.rs` go. Against: a settings *application* that links the
+  desktop shell inverts the dependency you would expect, and the shell crate
+  is already 60 files.
+- **Split by kind** — the panels that are genuinely *shell surfaces* (OSD,
+  taskbar, start menu, alt-tab, run dialog, security dialog, login screen)
+  stay in `desktop` and get wired into `paint_chrome`; the ones that are
+  genuinely *settings pages* move to `apps/settings` and the shell copies are
+  deleted. This is probably right, and it is the most work.
+
+Whichever is chosen, the wiring for the shell-surface half is small: each is a
+`Vec<RenderCommand>` already, and `paint_chrome` already knows how to build a
+`RenderTree` from several parts and show or hide the popup surface.
+
+**If never fixed:** the desktop crate keeps growing interfaces that cannot be
+seen, every crate-wide sweep pays for them, and the day someone wires one up is
+the day they discover what it assumed. Nothing breaks in the meantime, which is
+exactly why it has gone unnoticed for so long — a module nobody draws also
+never looks wrong.
+
+## TD-B-FIVE-COPIES-OF-THE-FILE-TYPE-HALF-OF-A-MODE-WORD (lane B, 2026-08-22) — RESOLVED 2026-08-22
+
+**In short:** A file's *mode* is one integer holding two unrelated things: what
+kind of file it is (regular, directory, symlink, pipe, socket, device) and who
+may read, write and run it. Five utilities each wrote out the seven "what kind"
+values by hand. Two of them got it wrong in a way a user could see. They now
+share one definition, in `userspace/modechange` — the crate that already owned
+the other half of the same integer.
+
+**The two real bugs, not just the duplication:**
+
+1. **`userspace/stat` printed `unknown` where GNU prints `weird file`.** `%F` is
+   the format `stat -c %F` uses to name a file's type, and a type this system
+   has no name for is `weird file` in gnulib's wording (`lib/c-file-type.c`).
+   A script matching on the GNU wording matched nothing.
+2. **`mkinitramfs` tested the type as if it were a bit field.** Its test filter
+   was `e.mode & 0o040000 != 0`, which is wrong because the `S_IF*` values are
+   *not* flags: `S_IFCHR | S_IFDIR == S_IFBLK`, exactly. That filter counts a
+   block device (`0o060000`) and a socket (`0o140000`) as directories. It only
+   escaped notice because the fixture it ran on has neither. Now
+   `mode & S_IFMT == S_IFDIR`.
+
+**Where it lived, and what it is now:**
+
+| Site | Before | After |
+|---|---|---|
+| `userspace/coreutils/src/bin/stat.rs` | own `S_IFMT` + two 7-arm matches | `modechange::{S_IFMT, S_IFREG, file_type_name, mode_string}` |
+| `userspace/stat/src/main.rs` | own 8 `u64` constants + two 7-arm matches + a hand-written `strmode` | `modechange`, widened to `u64` at the boundary |
+| `userspace/cpio/src/main.rs` | own 4 constants | `modechange::{S_IFDIR, S_IFLNK, S_IFMT, S_IFREG}` |
+| `userspace/mkinitramfs/src/main.rs` | 5 bare octal literals | `modechange::{S_IFCHR, S_IFDIR, S_IFLNK, S_IFREG}` |
+| `userspace/coreutils/src/bin/ls.rs` | (being written) | `modechange::{S_IFDIR, S_IFMT}` |
+
+**What `modechange` gained:** `S_IFMT` and the seven type values, plus
+`file_type_letter` (gnulib's `ftypelet` — the first character of `ls -l`'s mode
+column), `file_type_name` (GNU `stat`'s `%F` wording) and `mode_string` (the
+whole ten-character `-rw-r--r--`, which is `file_type_letter` followed by the
+existing `permission_string`). Every value measured against GNU coreutils 9.4:
+
+```text
+$ stat -c '%A %F' reg d sym pipe sock /dev/null /dev/loop0
+-rw-r--r-- regular file        drwxr-xr-x directory
+lrwxrwxrwx symbolic link       prw-r--r-- fifo
+srwxr-xr-x socket              crw-rw-rw- character special file
+brw-rw---- block special file
+```
+
+`userspace/stat` and `userspace/coreutils`' `stat` remain two separate binaries
+with the same name; that duplication is a different item and is blocked on
+question B-Q7. This entry is only about the seven numbers they both needed.
+
+---
+
+### [B] TD-B-LS-INVENTS-A-POSITION-FOR-THE-DOT-ENTRIES — 2026-08-22 — OPEN (tech debt)
+
+**What it is.** `ls -a` has to list `.` and `..`, and `std::fs::read_dir`
+discards them. `RealTree::read_dir` in `userspace/coreutils/src/bin/ls.rs`
+puts them back at the front of the stream. That position is a guess, and on
+ext4 it is the wrong one.
+
+**How to see it.** Under `-U`, `-f` or `--sort=none` — the three listings whose
+order is the directory's own and not a sort — we disagree with GNU. Measured on
+WSL's ext4, in a directory of twelve entries built by `touch`:
+
+```text
+$ ls -f t          (GNU 9.5, and a raw readdir(3) loop, byte for byte)
+y.tar.gz  ..  x  a  dir  f9  z.txt  f2  f10  bb  .hidden  .
+
+$ ls -f t          (ours)
+.  ..  y.tar.gz  x  a  dir  f9  z.txt  f2  f10  bb  .hidden
+```
+
+ext4's hashed directory index put `.` last in that directory; another
+directory puts it somewhere else again. Under every *sorted* listing the dots
+sort to the front regardless, so the default `ls -a` is unaffected — this is
+visible only with the three order-preserving flags.
+
+**Why it is not simply fixed.** There is nothing to recover the position from.
+`std::fs::read_dir` filters the dot entries out inside the iterator, so by the
+time we see the stream the information is gone. The fix has to read the
+directory below std:
+
+- a raw `getdents64` on Linux and on SlateOS, `cfg`-forked per target, with the
+  `unsafe` that implies; or
+- a `libc` dependency — **rejected**, and worth writing down why: `libc` has no
+  `x86_64-slateos` support, so it would have to be a
+  `[target.'cfg(target_os = "linux")'.dependencies]` entry. That fixes the
+  measurement harness and leaves the shipping binary exactly as wrong, which is
+  strictly worse than the current state: the harness would go green while the
+  bug stayed.
+
+**What the proper fix looks like.** Give `Tree::read_dir` a real directory read
+that yields the dot entries in their own positions. The natural home is not
+`ls` — `find`, `du` and the shell's globber all walk directories — so it wants
+to be a small crate (`userspace/dirread`, say) with one `getdents64` per
+supported target behind a safe iterator, in the same shape as `pwdb` and
+`localtime`. Until then `ls -aU` on SlateOS reports SlateOS's own readdir order
+with the dots prepended, which is self-consistent and merely not GNU's.
+
+**Trigger:** do it when a second utility needs the dot entries, or when
+`ls -f`'s order starts mattering to something (a test, a script in the image).
+
+### [B] TD-B-LS-WRITES-A-DIAGNOSTIC-WITHOUT-FLUSHING-THE-LISTING-FIRST — 2026-08-22 — FIXED 2026-08-22
+
+**What it is.** `ls` accumulates its whole listing in `Out::buf` and writes it
+once, at the end of `main`. Diagnostics go to stderr the moment they happen. So
+when both streams land in the same place — `ls -R t 2>&1 | …`, or a terminal —
+every diagnostic appears *before* the entire listing instead of at the point in
+it where the failure occurred.
+
+GNU does not do this: gnulib's `error()` calls `fflush (stdout)` before it
+writes, so a message lands between the lines already printed and the ones still
+to come.
+
+**How to see it.** With an unreadable subdirectory `t/noperm`:
+
+```text
+$ ls -R t 2>&1
+GNU:   …23 lines of t's listing…  ls: cannot open directory 't/noperm': …
+ours:  ls: cannot open directory 't/noperm': …  …23 lines of t's listing…
+```
+
+It is the one remaining non-deliberate failure in `scripts/ls-diff.sh`.
+
+**What the proper fix looks like.** `Out` gains a `flushed: usize` (bytes
+already written) and a sink, `Out::mark` uses `flushed + buf.len()` so
+`--dired`'s offsets are unaffected, and every write to stderr flushes first.
+The four diagnostic sites are `Listing::file_failure`, the
+`not listing already-listed directory` branch in `Listing::print_dir`, and
+`gobble_file`'s two — the last needs the sink plumbed in beside its existing
+`err`, which is the only awkward part.
+
+Flushing *more* often than GNU is unobservable (the bytes and their order are
+identical), so the fix does not have to match gnulib's flush points — only to
+guarantee that no stderr write happens while stdout has unflushed bytes.
+
+**Fixed 2026-08-22**, exactly as described above. `Out` became `Out<'a>` with a
+`sink: Option<&'a mut dyn Write>`, a `flushed: usize` and a `broken: bool`;
+`Out::mark` counts from `flushed + buf.len()`; `Out::flush` writes the buffer
+and clears it. `gobble_file` took an `out` parameter beside `err`, and all four
+diagnostic sites flush first. `main` holds the stdout lock, flushes once at the
+end, and exits 2 if the sink ever refused a write — a listing that could not be
+written is an exit status, because the only place to report it is the stream
+that just failed.
+
+Two tests cover it:
+`a_diagnostic_lands_where_it_happened_and_not_in_front_of_the_listing` points
+both streams at one buffer and asserts the byte-for-byte interleaving, and
+`flushing_does_not_move_the_dired_offsets` asserts a flush between two `mark`s
+leaves `--dired`'s offsets where they were. `scripts/ls-diff.sh`'s `ls -R t`
+case dropped its `!` deferral and now passes: 159 cases, 148 passed, 0 differed.
+
+One measurement corrected while writing the test: there is **no blank line**
+before the diagnostic. `print_dir` emits the separating newline only in front
+of a heading it is about to print, and `t/noperm` never gets one, because the
+`opendir` that would have led to that heading is the thing that failed. GNU
+9.5, `ls -R t 2>&1 | cat -A`, prints `t:$ a$ noperm$ z$` then the message. The
+exit status is **1**, not 2: `t/noperm` was reached by recursing rather than
+named on the command line, and GNU reserves 2 for the latter.
+
+### [B] TD-B-OUR-WIDTH-TABLE-IS-BASHS-AND-COREUTILS-9.5S-IS-NOT — 2026-08-22 — OPEN (tech debt, blocked on B-Q8)
+
+**What it is.** `userspace/charwidth` holds the system's only table of terminal
+column widths, and it was generated and verified against **bash 5.2.37**, which
+gets its widths from glibc's `wcwidth`. Coreutils **9.5** does not use glibc's
+`wcwidth`: gnulib's `lib/wcwidth.c` *defines* `wcwidth` itself and, in any
+UTF-8 locale, returns `uc_width()` from its own Unicode 15.1.0 tables —
+
+```c
+int wcwidth (wchar_t wc)
+#undef wcwidth
+{
+  if (is_locale_utf8_cached ())
+    return uc_width (wc, "UTF-8");
+  ...
+}
+```
+
+— so `ls`, `wc -L`, `sort`, `pr`, `df` and `numfmt` all measure with gnulib's
+table while bash measures with glibc's. Coreutils **9.4 did not** do this; the
+override arrived in 9.5, which is the version we pin. The two tables disagree
+on **626 code points in 71 ranges**.
+
+**How to measure it (exact, no recall).** In WSL, against the cached reference
+tree `$HOME/.cache/slateos-ls-diff/coreutils-9.5`:
+
+```c
+/* Dump the oracle ls actually uses, per code point. Link libcoreutils.a;
+   do NOT put lib/ on the include path -- gnulib's replacement headers
+   shadow the system ones and refuse to compile without config.h. */
+extern int mbsnwidth (const char *buf, size_t nbytes, int flags);
+/* encode cp as UTF-8 into b, then: mbsnwidth (b, n, 3) */
+```
+
+`gcc -o mw2 mw2.c "$C/lib/libcoreutils.a"`, run under `LC_ALL=C.UTF-8`, and
+collapse to ranges. The result is identical to `uc_width` (912 ranges vs 911,
+differing only on the surrogates, which no UTF-8 sequence can carry) and
+differs from a direct glibc `wcwidth` sweep on the 626 code points below.
+
+**The 71 ranges.** Four kinds:
+
+| Kind | Examples | ours | gnulib |
+|---|---|---|---|
+| `Cf` policy — gnulib zeroes *every* format character | `00AD` | 1 | 0 |
+| `Cf` carve-outs gnulib makes and we do not (prepended concatenation marks) | `0600–0605`, `06DD`, `070F`, `0890–0891`, `0897`, `08E2`, `110BD`, `110CD`, `11A07–11A08`, … | 0 | 1 |
+| conjoining Jamo, extended blocks | `D7B0–D7C6`, `D7CB–D7FB` | 1 | 0 |
+| Unicode-version drift, and gnulib rounding *unassigned* code points inside East Asian blocks up to 2 | `2630–2637`, `2E9A`, `3040`, `4DC0–4DFF`, `1F203–1F20F`, `1F6DC`, `1FA75–1FA77`, `2FFFE–2FFFF`, … | 1 or 2 | 2 or 1 |
+
+**Why it is not simply fixed.** `charwidth` is deliberately the *only* copy, so
+changing it changes `ls`, `wc -L`, `expand`, `fold`, `nl`, `column` and osh's
+`select` menu together. Matching gnulib wins the `ls` byte-diff and loses the
+osh-versus-bash byte-diff (`userspace/oils/tests/gen_display_width.py
+--diff-osh`), which passes today. That is a user-visible layout choice, so it
+is the operator's: **`open-questions.md` B-Q8**.
+
+**What the proper fix looks like**, if B-Q8 answers "follow gnulib": replace
+`gen_display_width.py`'s derivation from Python's `unicodedata` with the
+measured dump above — the project's own rule is to measure the reference rather
+than re-derive its rule — regenerate `ZERO_WIDTH` and `WIDE`, rewrite the
+module doc that claims a bash provenance, repoint `--check` at the dump, and
+drop the two `!` cases and the `y/` fixture from `scripts/ls-diff.sh`.
+
+**Where it shows.** `scripts/ls-diff.sh` fixture `y/`, cases
+`ls --sort=width -1 y` and `ls -C -w 20 y`, both marked `!`.
+
+### [B] TD-B-LS-ACCEPTS-HYPERLINK-WITHOUT-EMITTING-IT — 2026-08-22 — OPEN (tech debt)
+
+**What it is.** `ls --hyperlink[=WHEN]` parses, validates its argument and sets
+`Settings::print_hyperlink`, and then nothing reads it. GNU wraps each name in
+an OSC 8 escape — `\033]8;;file://HOST/ABS/PATH\a` before it and `\033]8;;\a`
+after — so a terminal that understands the sequence turns the listing into
+links. We print the bare names.
+
+The flag is not inert, though: it already suppresses `--dired`, because
+upstream's `dired` is `dired && format == long_format && !print_hyperlink`.
+So `ls -l --dired --hyperlink=always` correctly prints no `//DIRED//` line on
+both sides, which is the one observable thing the flag does here.
+
+**How to see it.** `scripts/ls-diff.sh`, the two cases marked
+`!hyperlinks are not implemented`:
+
+```text
+$ ls --hyperlink=always t | cat -v
+GNU:   ^[]8;;file:///tmp/…/t/a^Ga^[]8;;^G  …
+ours:  a  …
+```
+
+**Why it was not done with the colour half.** The escape carries an *absolute*
+path and a hostname, and both are missing pieces rather than missing code:
+
+- The path is upstream's `f->absolute_name`, built by gnulib's `canonicalize_filename_mode
+  (name, CAN_MISSING)` when the operand is relative. We have no `canonicalize`
+  and no `getcwd` wrapper in `userspace/coreutils`; the nearest thing is
+  `coreutils::pathname`, which is pure string work and deliberately does not
+  touch the filesystem.
+- The hostname is `xgethostname()`, i.e. `gethostname(2)`. SlateOS has no
+  syscall for it yet and no `/etc/hostname` convention settled, so there is
+  nothing to read.
+
+Doing it without those two would mean emitting a link that resolves to the
+wrong file, which is worse than emitting none: a terminal would offer to open
+something the user did not list.
+
+**What the proper fix looks like.** Three pieces, in order:
+
+1. A `getcwd` + `canonicalize` pair. The natural home is a small
+   `userspace/canonpath` crate (the same shape as `pwdb` and `localtime`),
+   because `readlink -f`, `realpath`, `pwd -P` and `find` all want it and none
+   of them has it either.
+2. A hostname source — a syscall, or `/etc/hostname` with the empty string as
+   the documented fallback (GNU's `xgethostname` cannot fail, and an empty host
+   in a `file://` URI means "this machine", which is exactly right).
+3. In `ls.rs`: set `FileInfo::absolute_name` in `gobble_file` when
+   `print_hyperlink` is on, and in `print_name_with_quoting` emit the two
+   escapes around the name. The `skip_quotes` branch goes with it — when outer
+   quotes are being aligned, upstream puts the opening quote *outside* the link
+   so the underline starts at the name — and both escapes must go through
+   `Out::put_str` so that they do not advance `Out::pos`, for the same reason
+   the colour escapes do not.
+
+**Trigger:** do it when `userspace/canonpath` exists for another reason, or
+when a terminal in the image starts honouring OSC 8.
+
+**Where it shows.** `scripts/ls-diff.sh`, cases `ls --hyperlink=always t` and
+`ls --hyperlink=always -l t`, both marked `!`.
+
+### [B] TD-B-LS-CANNOT-RESTORE-THE-TERMINAL-ON-AN-ABNORMAL-EXIT — 2026-08-22 — OPEN (tech debt)
+
+**What it is.** GNU `ls --color` installs signal handlers the first time it
+writes a colour escape, so that a run killed or suspended part-way through
+puts the terminal back before it dies. `put_indicator` does it:
+
+```c
+      /* If the standard output is a controlling terminal, watch out
+         for signals, so that the colors can be restored to the
+         default state if "ls" is suspended or interrupted.  */
+      if (0 <= tcgetpgrp (STDOUT_FILENO))
+        signal_init ();
+```
+
+`Out::put_str` in `userspace/coreutils/src/bin/ls.rs` is that function and does
+not, because SlateOS has no Unix signals and `design.txt` forbids adding them
+("No Unix signals for process control", "Hardware exceptions → language-level
+exceptions"). There is no mechanism to hook.
+
+**How to see it.** Interrupt a coloured listing of a large directory:
+`ls --color=always -R / ` then Ctrl-C. GNU's terminal comes back white; ours
+stays in whatever colour the escape that was in flight had selected, and every
+subsequent prompt is painted until `reset` or `tput sgr0`.
+
+It cannot appear in `scripts/ls-diff.sh`: that harness measures completed runs.
+
+**What the proper fix looks like.** Not signals — a terminal-restore hook that
+SlateOS's own process-teardown path runs. The shell wants the same thing for
+its own reasons (raw mode, bracketed paste, the alternate screen), so this
+belongs wherever that lands rather than in `ls`. When it exists, `Out::put_str`
+registers `restore_default_color`'s bytes with it at the moment the `used_color`
+latch fires, which is exactly where GNU calls `signal_init`.
+
+**Trigger:** do it when the terminal layer grows an abnormal-exit hook, or when
+a second program in the image starts leaving the terminal in a modified state.
+
+Recorded in `design-decisions.md` §368.
 
 ---
 

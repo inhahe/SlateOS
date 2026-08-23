@@ -125,7 +125,19 @@
 //! guessed, and each was found by comparing bytes.
 
 /// Bytes a shell needs no quoting for, wherever they appear in a word.
-const SAFE: &[u8] = b"%+,-./0123456789@ABCDEFGHIJKLMNOPQRSTUVWXYZ]_\
+///
+/// `:` is here because a shell does not mind a colon — `ls
+/// --quoting-style=shell-escape` leaves `a:z` bare. The callers which reach
+/// [`quotef`] *do* mind: they are writing `prog: what happened: NAME`, and a
+/// colon inside `NAME` would read as another layer of that structure. gnulib
+/// gives them `quotearg_style_colon`, which adds `:` to `quote_these_too` —
+/// the set of bytes that force the outer quotes on. That is expressed here as
+/// the `allow_bare` argument [`quotef`] computes, not as a hole in this table;
+/// see [`Style::quote_with`] for why the two are the same thing. Measured, and
+/// the *only* difference between the two renderings: of 2904 names rendered
+/// both ways, the four that disagree are `:`, `a:`, `:z` and `a:z`. See
+/// `scripts/ls-quote-probe.py`.
+const SAFE: &[u8] = b"%+,-./0123456789:@ABCDEFGHIJKLMNOPQRSTUVWXYZ]_\
                       abcdefghijklmnopqrstuvwxyz{}";
 
 /// Safe too, but not as the first byte: `#` starts a comment and `~` starts a
@@ -222,24 +234,65 @@ fn printable_char(c: char) -> bool {
     !c.is_control() && c != '\u{2028}' && c != '\u{2029}'
 }
 
-/// The piece beginning at byte `i`, or `None` at the end of the string.
-fn piece_at(s: &[u8], i: usize) -> Option<Piece> {
-    let rest = s.get(i..)?;
-    let &first = rest.first()?;
+/// One step of `mbrtowc`, with its two failures kept apart.
+///
+/// C's `mbrtowc` answers three ways and callers act differently on each, so a
+/// decoder that collapses the two failures into "not a character" cannot serve
+/// them all. `ls`'s `-q` is the caller that needs the distinction: an **invalid**
+/// byte costs one `?` and the scan resumes at the next byte, while an
+/// **incomplete** sequence at the end of the name costs one `?` for the whole
+/// remaining tail. `ls -q` on a name ending in a lone `\xc3` therefore prints
+/// one `?`, and on `\xc3\xc3` prints two.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Mb {
+    /// A character and the number of bytes it occupied. `mbrtowc`'s positive
+    /// return.
+    Char(char, usize),
+    /// A byte that begins no valid sequence — `mbrtowc`'s `(size_t) -1`.
+    /// Consumes exactly one byte, whatever follows it.
+    Invalid,
+    /// A valid *prefix* cut short by the end of the string — `(size_t) -2`.
+    /// Consumes the rest of the string, because there is no more input coming.
+    Incomplete,
+}
+
+/// The [`Mb`] at the front of `text`, or `None` if `text` is empty.
+///
+/// ```
+/// use coreutils::quote::{Mb, next_mb};
+/// assert_eq!(next_mb(b"abc"), Some(Mb::Char('a', 1)));
+/// assert_eq!(next_mb("é".as_bytes()), Some(Mb::Char('é', 2)));
+/// // `\xff` can begin no sequence at all, so it is invalid rather than short.
+/// assert_eq!(next_mb(b"\xff"), Some(Mb::Invalid));
+/// // `\xc3` is a valid two-byte lead, so alone at the end it is incomplete...
+/// assert_eq!(next_mb(b"\xc3"), Some(Mb::Incomplete));
+/// // ...but followed by a byte that cannot continue it, it is invalid.
+/// assert_eq!(next_mb(b"\xc3("), Some(Mb::Invalid));
+/// assert_eq!(next_mb(b""), None);
+/// ```
+#[must_use]
+pub fn next_mb(text: &[u8]) -> Option<Mb> {
+    text.first()?;
     // Four bytes is the longest a UTF-8 character can be, so a window that
     // size can never cut a valid one short -- which is what lets the decode
     // below be a plain `from_utf8` rather than a hand-rolled state machine.
-    let head = rest.get(..rest.len().min(4)).unwrap_or(rest);
+    let head = text.get(..text.len().min(4)).unwrap_or(text);
     let valid = match std::str::from_utf8(head) {
         Ok(t) => t,
         Err(e) => {
             // `valid_up_to() == 0` is the interesting case: the string does
-            // not decode *here*, so this byte is a `Byte` piece and the next
-            // attempt starts one byte along. Anything else means the window
-            // held a character followed by trouble, and the character is ours.
+            // not decode *here*, so the answer is one of the two failures.
+            // Anything else means the window held a character followed by
+            // trouble, and the character is ours.
             let n = e.valid_up_to();
             if n == 0 {
-                return Some(Piece::Byte(first));
+                // `error_len() == None` is std's spelling of "ran out of
+                // input", which is exactly `mbrtowc`'s `-2`.
+                return Some(if e.error_len().is_none() {
+                    Mb::Incomplete
+                } else {
+                    Mb::Invalid
+                });
             }
             head.get(..n)
                 .and_then(|v| std::str::from_utf8(v).ok())
@@ -247,8 +300,22 @@ fn piece_at(s: &[u8], i: usize) -> Option<Piece> {
         }
     };
     Some(match valid.chars().next() {
-        Some(c) => Piece::Char(c, c.len_utf8()),
-        None => Piece::Byte(first),
+        Some(c) => Mb::Char(c, c.len_utf8()),
+        None => Mb::Invalid,
+    })
+}
+
+/// The piece beginning at byte `i`, or `None` at the end of the string.
+///
+/// The escaping styles do not care *why* a byte failed to decode — both
+/// failures render as one escape per byte — so [`Mb`]'s two failures collapse
+/// back into one [`Piece::Byte`] here.
+fn piece_at(s: &[u8], i: usize) -> Option<Piece> {
+    let rest = s.get(i..)?;
+    let &first = rest.first()?;
+    Some(match next_mb(rest)? {
+        Mb::Char(c, n) => Piece::Char(c, n),
+        Mb::Invalid | Mb::Incomplete => Piece::Byte(first),
     })
 }
 
@@ -459,6 +526,13 @@ pub fn escape_unprintable(text: &[u8]) -> String {
 /// ```
 #[must_use]
 pub fn quote(arg: &[u8]) -> String {
+    locale_quote(arg, b"")
+}
+
+/// [`quote`], parameterised by gnulib's `quote_these_too` set — see
+/// [`Style::quote_with`]. The locale styles escape rather than elide, so a
+/// byte in `extra` comes back with a `\` in front of it.
+fn locale_quote(arg: &[u8], extra: &[u8]) -> String {
     // Six bytes of delimiter, not two: each curly mark is three bytes of UTF-8.
     let mut out = String::with_capacity(arg.len().saturating_add(6));
     out.push(LEFT_QUOTE);
@@ -469,12 +543,28 @@ pub fn quote(arg: &[u8]) -> String {
                 out.push('\\');
                 out.push(RIGHT_QUOTE);
             }
-            Piece::Char(c, _) if printable_char(c) => out.push(c),
+            Piece::Char(c, _) if printable_char(c) => push_maybe_escaped(c, extra, &mut out),
             other => escape_piece(other, &mut out),
         }
     }
     out.push(RIGHT_QUOTE);
     out
+}
+
+/// Emit one printable character, with a `\` in front if it is in `extra`.
+///
+/// This is gnulib's `store_escape` for the non-eliding styles: `START_ESC()`
+/// stores a backslash and the character follows it unchanged. It is reached
+/// only for characters that fall off the end of `quotearg_buffer_restyled`'s
+/// switch, which is to say the printable ones — a control byte was already
+/// escaped by its own `case` and never consults the set.
+fn push_maybe_escaped(c: char, extra: &[u8], out: &mut String) {
+    // `extra` is a set of ASCII bytes, so a non-ASCII character can never be
+    // in it, and `c as u8` of one would be wrong rather than merely useless.
+    if c.is_ascii() && extra.contains(&(c as u8)) {
+        out.push('\\');
+    }
+    out.push(c);
 }
 
 /// Render `arg` inside straight `'...'`, the way **glibc's `getopt_long`**
@@ -610,16 +700,18 @@ fn c_maybe(text: &[u8], quote_these_too: &[u8]) -> String {
         }
         Piece::Byte(_) => false,
     };
-    all_bare(text, bare).unwrap_or_else(|| c_always(text))
+    all_bare(text, bare).unwrap_or_else(|| c_always(text, b""))
 }
 
 /// The forced pass: gnulib's `c_quoting_style` with the outer quotes present.
 ///
-/// Note what `quote_these_too` does *not* do here. gnulib drops it on the
-/// restart — "don't reuse quote_these_too, since the addition of outer quotes
-/// sufficiently quotes the specified characters" — so a `:` that forced the
-/// quotes on then appears inside them as a plain colon, not as an escape.
-fn c_always(text: &[u8]) -> String {
+/// Note what `quote_these_too` does *not* do when [`c_maybe`] restarts here.
+/// gnulib drops it — "don't reuse quote_these_too, since the addition of outer
+/// quotes sufficiently quotes the specified characters" — so a `:` that forced
+/// the quotes on then appears inside them as a plain colon, not as an escape.
+/// That is why `c_maybe` passes an empty `extra` and [`Style::C`], which never
+/// elides and so never restarts, passes its own.
+fn c_always(text: &[u8], extra: &[u8]) -> String {
     let mut out = String::with_capacity(text.len().saturating_add(2));
     out.push('"');
     for (i, p) in pieces(text) {
@@ -628,18 +720,8 @@ fn c_always(text: &[u8]) -> String {
                 out.push('\\');
                 out.push(c);
             }
-            Piece::Char('\0', _) => {
-                // `\0` is padded to `\000` before a digit, because `\0` then
-                // `7` would read back as the single byte `\07`.
-                out.push_str("\\0");
-                if text
-                    .get(i.saturating_add(1))
-                    .is_some_and(u8::is_ascii_digit)
-                {
-                    out.push_str("00");
-                }
-            }
-            Piece::Char(c, _) if printable_char(c) => out.push(c),
+            Piece::Char('\0', _) => nul_escape(text, i, &mut out),
+            Piece::Char(c, _) if printable_char(c) => push_maybe_escaped(c, extra, &mut out),
             other => escape_piece(other, &mut out),
         }
     }
@@ -673,7 +755,11 @@ fn c_always(text: &[u8]) -> String {
 /// ```
 #[must_use]
 pub fn quotef(name: &[u8]) -> String {
-    render(name, true)
+    // gnulib's `quotearg_style_colon`: `:` in `quote_these_too`. Under an
+    // eliding style that set does exactly one thing -- force the quotes on --
+    // so it is spelled here as the condition rather than as a rule inside the
+    // renderer. See [`Style::quote_with`].
+    render(name, !name.contains(&b':'))
 }
 
 /// Render `name` the way GNU's `quoteaf()` does: the same shell-pasteable form
@@ -704,12 +790,17 @@ pub fn quotef(name: &[u8]) -> String {
 /// ```
 #[must_use]
 pub fn quoteaf(name: &[u8]) -> String {
+    // No colon set here, and gnulib does not pass one either: `quoteaf` is
+    // plain `quotearg_style (shell_escape_always_quoting_style, …)`. It would
+    // make no difference if it did -- the quotes are already on.
     render(name, false)
 }
 
-/// The body of both shell-escaping styles. `allow_bare` is the whole
-/// difference between them: gnulib calls it "elide outer quotes", and it is a
-/// property of the sentence the name is going into, not of the name.
+/// The body of both shell-escaping styles.
+///
+/// `allow_bare` is the difference between them: gnulib calls it "elide outer
+/// quotes", and it is a property of the sentence the name is going into, not
+/// of the name.
 fn render(name: &[u8], allow_bare: bool) -> String {
     if allow_bare && !name.is_empty() {
         // Safe as it stands. This is the overwhelmingly common case and the
@@ -828,6 +919,308 @@ fn shell_escape(name: &[u8]) -> String {
         out.push('\'');
     }
     out
+}
+
+/// gnulib's ten quoting styles: the set `ls --quoting-style` names.
+///
+/// Everything above is a *diagnostic* renderer, and a diagnostic gets no say —
+/// the sentence it sits in decides. `ls` is the other kind of caller: it prints
+/// names as its output rather than inside a message, and it lets the user pick
+/// the rendering, so it needs all ten by name. `cp -v`, `mv -v` and `install`
+/// have the same shape and can use this too.
+///
+/// Three of these are the functions above under gnulib's own names, and the
+/// naming is worth stating because one of the three is *not* an alias:
+///
+/// | Variant | Same as | |
+/// |---|---|---|
+/// | [`Style::ShellEscapeAlways`] | [`quoteaf`] | exactly |
+/// | [`Style::Locale`], [`Style::Clocale`] | [`quote`] | exactly |
+/// | [`Style::ShellEscape`] | [`quotef`] | **except for `:`** — see [`SAFE`] |
+///
+/// [`Style::Clocale`] is a separate word `ls` accepts and, under a UTF-8
+/// locale, an identical rendering to [`Style::Locale`]; it is kept as its own
+/// variant so that `--quoting-style=clocale` round-trips through
+/// [`Style::WORDS`] rather than silently becoming a different word in `--help`
+/// output or an error list.
+///
+/// ## What the seven new ones do that the three did not
+///
+/// [`Style::Literal`] and the two `Shell` ones can emit bytes that are not
+/// valid UTF-8 — that is the point of `literal`, and `shell` quotes without
+/// escaping — so the rendering is a [`Vec<u8>`] rather than a [`String`]. The
+/// diagnostic renderers can return a [`String`] only because they escape
+/// everything unprintable, which is exactly what these do not.
+///
+/// Every rule below was measured; see `scripts/ls-quote-probe.py` and
+/// `tests/quotearg-ls-gnu.txt`, which records all ten answers for each of 2905
+/// names.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Style {
+    /// The name unchanged. `ls`'s default when standard output is not a
+    /// terminal, and the only style that can print a control byte.
+    Literal,
+    /// Quoted where a shell would need it, and **nothing escaped**: a name
+    /// holding a tab comes back as `'a<TAB>b'`, with the tab still a tab.
+    Shell,
+    /// [`Style::Shell`], never bare.
+    ShellAlways,
+    /// Quoted where a shell would need it, with unprintable bytes escaped into
+    /// `$'...'`. `ls`'s default when standard output is a terminal.
+    ShellEscape,
+    /// [`Style::ShellEscape`], never bare. `-Q`'s companion in spirit, though
+    /// `-Q` is [`Style::C`].
+    ShellEscapeAlways,
+    /// A C string literal, quotes and all: `"a\tb"`. What `-Q` selects.
+    C,
+    /// [`Style::C`] with the quotes left off where nothing needs them.
+    CMaybe,
+    /// C escapes with no surrounding quotes at all. What `-b` selects.
+    ///
+    /// A space comes back as a space, not as `\ `. `ls -b` does print `a\ b`,
+    /// but that is `ls` adding `' '` to `quote_these_too` for file names only
+    /// — pass it through [`Style::quote_with`], as `ls` does, and not through
+    /// this style.
+    Escape,
+    /// The locale's quotation marks — `‘...’` here — around C escapes.
+    Locale,
+    /// The same, from the C locale's table rather than the message catalogue's.
+    /// Indistinguishable from [`Style::Locale`] in every locale we have.
+    Clocale,
+}
+
+impl Style {
+    /// The words `--quoting-style` accepts, in the order `ls` lists them when
+    /// it rejects one.
+    ///
+    /// Shaped for [`crate::getopt::Program::argmatch`], which prefix-matches
+    /// and prints this list back on a miss — so the order here *is* the order
+    /// in the diagnostic, and the values are what decides whether a prefix is
+    /// ambiguous. Every value is distinct except the last two, which means
+    /// `--quoting-style=c` is exact, `--quoting-style=cl` resolves (both
+    /// spellings agree), and `--quoting-style=s` does not.
+    pub const WORDS: &'static [(&'static str, Self)] = &[
+        ("literal", Self::Literal),
+        ("shell", Self::Shell),
+        ("shell-always", Self::ShellAlways),
+        ("shell-escape", Self::ShellEscape),
+        ("shell-escape-always", Self::ShellEscapeAlways),
+        ("c", Self::C),
+        ("c-maybe", Self::CMaybe),
+        ("escape", Self::Escape),
+        ("locale", Self::Locale),
+        ("clocale", Self::Clocale),
+    ];
+
+    /// `text` rendered in this style.
+    ///
+    /// ```
+    /// use coreutils::quote::Style;
+    /// assert_eq!(Style::Literal.quote(b"a\tb"), b"a\tb");
+    /// assert_eq!(Style::Shell.quote(b"a\tb"), b"'a\tb'");
+    /// assert_eq!(Style::ShellEscape.quote(b"a\tb"), br"'a'$'\t''b'");
+    /// assert_eq!(Style::C.quote(b"a\tb"), br#""a\tb""#);
+    /// assert_eq!(Style::Escape.quote(b"a\tb"), br"a\tb");
+    /// assert_eq!(Style::Locale.quote(b"a\tb"), "‘a\\tb’".as_bytes());
+    /// // The one place a name that is not text survives the round trip.
+    /// assert_eq!(Style::Literal.quote(b"caf\xe9"), b"caf\xe9");
+    /// ```
+    #[must_use]
+    pub fn quote(self, text: &[u8]) -> Vec<u8> {
+        self.quote_with(text, b"")
+    }
+
+    /// [`Style::quote`], plus gnulib's `quote_these_too` — the set of extra
+    /// bytes a caller wants singled out.
+    ///
+    /// This is `set_char_quoting`, which `ls` calls three times and which has
+    /// no equivalent in the plain rendering. `ls` needs it because the
+    /// characters it appends to a name are ordinary characters that a name
+    /// could also contain:
+    ///
+    /// | `ls` sets | on | so that |
+    /// |---|---|---|
+    /// | `' '` | file names, `--quoting-style=escape` | a space in a name cannot end the word |
+    /// | `*=>@\|` | `--file-type` | a name ending in one is not read as the indicator |
+    /// | `=>@\|` | `-F` (`--classify`) | the same, minus `*`, which `-F` does not append |
+    /// | `':'` | the `dir:` header line | a colon in a directory name is not the separator |
+    ///
+    /// ## The set does two different things, and for three styles it does nothing
+    ///
+    /// gnulib consults it only when `(backslash_escapes && quoting_style !=
+    /// shell_always) || elide_outer_quotes`, and what happens then depends on
+    /// which half of that was true:
+    ///
+    /// - **Eliding styles** ([`Style::Shell`], [`Style::ShellEscape`],
+    ///   [`Style::CMaybe`]) jump to `force_outer_quoting_style`, which
+    ///   *re-renders from scratch with the set dropped*. So the set only ever
+    ///   turns the quotes on; inside them the byte appears as itself. That is
+    ///   why the three are spelled here as an `allow_bare` argument rather
+    ///   than as a rule inside the renderer, and why [`quotef`] can express
+    ///   `quotearg_style_colon` the same way.
+    /// - **Escaping styles** ([`Style::C`], [`Style::Escape`],
+    ///   [`Style::Locale`], [`Style::Clocale`]) put a `\` before the byte and
+    ///   leave everything else alone.
+    /// - **[`Style::Literal`], [`Style::ShellAlways`] and
+    ///   [`Style::ShellEscapeAlways`] ignore it entirely.** The first two
+    ///   because neither escapes nor elides; the third because the switch
+    ///   rewrites `quoting_style` to `shell_always` before the guard reads it,
+    ///   and its quotes are already on. `ls` passes the set to all ten; for
+    ///   these three it is measurably a no-op.
+    ///
+    /// ```
+    /// use coreutils::quote::Style;
+    /// // Eliding: the set forces the quotes on, and is gone inside them.
+    /// assert_eq!(Style::Shell.quote_with(b"a=b", b"="), b"'a=b'");
+    /// assert_eq!(Style::CMaybe.quote_with(b"a=b", b"="), br#""a=b""#);
+    /// // Escaping: the byte keeps a backslash.
+    /// assert_eq!(Style::C.quote_with(b"a=b", b"="), br#""a\=b""#);
+    /// assert_eq!(Style::Escape.quote_with(b"a=b", b"="), br"a\=b");
+    /// // `ls -b`'s space is this and nothing else; the style itself has none.
+    /// assert_eq!(Style::Escape.quote(b"a b"), b"a b");
+    /// assert_eq!(Style::Escape.quote_with(b"a b", b" "), br"a\ b");
+    /// // Ignored outright.
+    /// assert_eq!(Style::Literal.quote_with(b"a=b", b"="), b"a=b");
+    /// assert_eq!(Style::ShellEscapeAlways.quote_with(b"a=b", b"="), b"'a=b'");
+    /// ```
+    #[must_use]
+    pub fn quote_with(self, text: &[u8], extra: &[u8]) -> Vec<u8> {
+        // An ASCII byte is a whole character wherever it appears in valid
+        // UTF-8, and a standalone byte where the text is not UTF-8 at all, so
+        // scanning bytewise for an ASCII set cannot match half a character.
+        let forced = || text.iter().any(|b| extra.contains(b));
+        match self {
+            Self::Literal => text.to_vec(),
+            Self::Shell => shell_unescaped(text, !forced()),
+            Self::ShellAlways => shell_unescaped(text, false),
+            // Forcing here restarts as `shell_escape_always`, which is what
+            // `render` with the quotes on already is.
+            Self::ShellEscape => render(text, !forced()).into_bytes(),
+            Self::ShellEscapeAlways => render(text, false).into_bytes(),
+            Self::C => c_always(text, extra).into_bytes(),
+            Self::CMaybe => c_maybe(text, extra).into_bytes(),
+            Self::Escape => escape_style(text, extra).into_bytes(),
+            Self::Locale | Self::Clocale => locale_quote(text, extra).into_bytes(),
+        }
+    }
+}
+
+/// The `shell` and `shell-always` styles: quoted, but never escaped.
+///
+/// The shape is [`render`]'s — bare if it can be, else `"..."` when the only
+/// obstacle is a `'`, else `'...'` with each `'` spliced as `'\''` — with the
+/// one difference that a byte which does not print is emitted **as itself**
+/// rather than as a `$'...'` escape. That is why the result is bytes: a name
+/// that was never text does not become text by being quoted.
+///
+/// Two consequences that look like bugs and are not, both measured:
+///
+/// * `\x01` alone comes back **bare**. Under this style an unprintable byte is
+///   not a reason to quote; only a byte a *shell* gives meaning to is. See
+///   [`shell_bare_ok`].
+/// * There is no `''` prefix. gnulib's stray-quote wart (see [`shell_escape`])
+///   is emitted beside a `$'...'`, and this style never writes one.
+fn shell_unescaped(name: &[u8], allow_bare: bool) -> Vec<u8> {
+    if allow_bare
+        && !name.is_empty()
+        && name
+            .iter()
+            .enumerate()
+            .all(|(i, &b)| shell_bare_ok(name, i, b))
+    {
+        return name.to_vec();
+    }
+    // `all_bare` accepts only characters, so a `Some` here also proves `name`
+    // is valid UTF-8 and its bytes are the rendering.
+    if !name.is_empty() && name.contains(&b'\'') && all_bare(name, dq_ok).is_some() {
+        let mut out = Vec::with_capacity(name.len().saturating_add(2));
+        out.push(b'"');
+        out.extend_from_slice(name);
+        out.push(b'"');
+        return out;
+    }
+    let mut out = Vec::with_capacity(name.len().saturating_add(2));
+    out.push(b'\'');
+    for &b in name {
+        if b == b'\'' {
+            // Close, escape the quote outside any quoting, reopen.
+            out.extend_from_slice(b"'\\''");
+        } else {
+            out.push(b);
+        }
+    }
+    out.push(b'\'');
+    out
+}
+
+/// Whether byte `b` at offset `i` of `name` needs no quoting under
+/// [`Style::Shell`].
+///
+/// Bytewise rather than piecewise, and that is the measured rule rather than a
+/// simplification: under this style `a\u{0378}z`, `a\u{2028}z` and `a\xffz` all
+/// come back bare, so no decoding happens and printability is never consulted.
+/// The only bytes above the ASCII range that could matter are ones a shell
+/// gives meaning to, and there are none.
+///
+/// Below the ASCII range the rule is the surprising half: **every** control
+/// byte goes bare except `\t`, `\n` and `\r`, which are the three a shell
+/// splits words on. `\a`, `\b`, `\v`, `\f` and `\x7f` do not, and are left
+/// bare. Measured over all 255 usable byte values; `\0` is unreachable in a
+/// path and follows the same branch.
+fn shell_bare_ok(name: &[u8], i: usize, b: u8) -> bool {
+    if b >= 0x80 || b == 0x7f {
+        return true;
+    }
+    if b < 0x20 {
+        return !matches!(b, b'\t' | b'\n' | b'\r');
+    }
+    if SAFE_UNLESS_ALONE.contains(&b) {
+        return name.len() > 1;
+    }
+    SAFE.contains(&b) || (i > 0 && SAFE_NOT_FIRST.contains(&b))
+}
+
+/// The `escape` style, which `ls -b` selects: C escapes and no quotes at all.
+///
+/// The backslash that introduces an escape is the only printable byte escaped
+/// for its own sake. `"` and `'` are left alone, which [`c_always`] does not
+/// do for `"`: there, the double quote is the delimiter and must be escaped;
+/// here there is no delimiter.
+///
+/// **A space is left bare**, which looks wrong and is what gnulib does. `ls
+/// -b` prints `a\ b` only because `decode_switches` calls `set_char_quoting
+/// (filename_quoting_options, ' ', 1)` for this style — so it is `extra`'s
+/// job, not this function's. The distinction is measurable rather than
+/// pedantic: `ls -b` gives the *directory header* its own options, with `:` in
+/// the set and no space, and prints a directory called `d e` as `d e:` while
+/// printing a file called `a b` as `a\ b`.
+fn escape_style(text: &[u8], extra: &[u8]) -> String {
+    let mut out = String::with_capacity(text.len());
+    for (at, p) in pieces(text) {
+        match p {
+            Piece::Char('\\', _) => out.push_str("\\\\"),
+            Piece::Char('\0', _) => nul_escape(text, at, &mut out),
+            Piece::Char(c, _) if printable_char(c) => push_maybe_escaped(c, extra, &mut out),
+            other => escape_piece(other, &mut out),
+        }
+    }
+    out
+}
+
+/// gnulib's `\0` shorthand, and the padding that keeps it unambiguous.
+///
+/// `\0` then a literal `7` would read back as the single byte `\07`, so a NUL
+/// followed by a digit is written `\000` instead. (A path cannot hold a NUL;
+/// this is reachable only through the byte-slice API, and is here because the
+/// two callers must agree.)
+fn nul_escape(text: &[u8], at: usize, out: &mut String) {
+    out.push_str("\\0");
+    if text
+        .get(at.saturating_add(1))
+        .is_some_and(u8::is_ascii_digit)
+    {
+        out.push_str("00");
+    }
 }
 
 /// The bytes behind an `OsStr`.

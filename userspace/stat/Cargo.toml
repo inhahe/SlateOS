@@ -4,3 +4,6 @@ version = "0.1.0"
 edition = "2024"
 description = "SlateOS file status and manipulation tools"
 [dependencies]
+# One definition of a mode word's file-type field, and one `rwxrwxrwx`
+# rendering, shared with `chmod`, `ls -l` and coreutils' own `stat`.
+modechange = { path = "../modechange" }

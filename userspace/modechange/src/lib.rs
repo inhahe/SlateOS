@@ -109,9 +109,19 @@
 //! [`permission_string`] is gnulib's `strmode`, and is here rather than in a
 //! caller because the same twelve bits are involved and the same overload has
 //! to be got right: setuid, setgid and sticky have no column of their own and
-//! are shown in the execute slot. `chmod -v` needs it to say what it did, `ls
-//! -l` and `stat` need it for the same reason, and `stat.rs` currently has its
-//! own copy — see `known-issues.md`.
+//! are shown in the execute slot. `chmod -v` needs it to say what it did, and
+//! `ls -l` and `stat` need it for the same reason.
+//!
+//! [`file_type_letter`], [`file_type_name`] and the `S_IF*` constants are here
+//! for the mirror-image reason: they are the *other* half of the same integer.
+//! A mode word carries a file's type and its permissions in one number, and a
+//! caller holding one half needs the mask that separates them. Five places had
+//! written the seven type values out by hand — coreutils' `stat`,
+//! `userspace/stat`, `cpio`, `mkinitramfs` and `ls` — and two of them had a
+//! measurable bug for it: `userspace/stat` answered `unknown` where GNU
+//! answers `weird file`, and `mkinitramfs` tested `mode & S_IFDIR` as though
+//! the values were flags, which counts a block device and a socket as
+//! directories because `S_IFCHR | S_IFDIR == S_IFBLK`.
 
 /// Every bit a mode string can name: setuid, setgid, sticky, and `rwx` for all
 /// three of user, group and other.
@@ -121,19 +131,30 @@
 /// masked with it.
 pub const CHMOD_MODE_BITS: u32 = 0o7777;
 
-const SUID: u32 = 0o4000;
-const SGID: u32 = 0o2000;
-const SVTX: u32 = 0o1000;
+/// `S_ISUID`, `S_ISGID` and `S_ISVTX` — the three bits above the nine
+/// permission bits, exported under their POSIX names because the callers that
+/// *read* a mode need them as much as the parser that writes one. `ls --color`
+/// picks `su`, `sg`, `st` and `tw` out of exactly these.
+pub const S_ISUID: u32 = 0o4000;
+pub const S_ISGID: u32 = 0o2000;
+pub const S_ISVTX: u32 = 0o1000;
+
+/// The world-writable bit, which `ls --color` colours `ow`/`tw` by.
+pub const S_IWOTH: u32 = 0o0002;
+
+/// The three execute bits together, gnulib's `S_IXUGO` — what `-F` stars a
+/// file for, what `--color` picks `ex` by, and what a bare `+x` sets.
+pub const S_IXUGO: u32 = 0o0111;
 
 /// `rwx` for the owner, plus the setuid bit that `u` also selects.
 const IRWXU: u32 = 0o0700;
 const IRWXG: u32 = 0o0070;
 const IRWXO: u32 = 0o0007;
 
-/// The read bit of all three groups; likewise write and execute.
+/// The read bit of all three groups; likewise write. (Execute is
+/// [`S_IXUGO`], which callers outside this crate need too.)
 const R_ALL: u32 = 0o0444;
 const W_ALL: u32 = 0o0222;
-const X_ALL: u32 = 0o0111;
 
 /// What a change does beyond adding or removing the bits it names.
 ///
@@ -239,7 +260,7 @@ pub fn compile(spec: &[u8]) -> Option<Changes> {
         // them, which is what leaves a directory's setgid bit alone under
         // `chmod 755` and clears it under `chmod 00755`.
         let mentioned = if i < 5 {
-            (octal & (SUID | SGID)) | SVTX | 0o0777
+            (octal & (S_ISUID | S_ISGID)) | S_ISVTX | 0o0777
         } else {
             CHMOD_MODE_BITS
         };
@@ -268,9 +289,9 @@ fn compile_symbolic(spec: &[u8]) -> Option<Changes> {
         let mut affected: u32 = 0;
         loop {
             match spec.get(p) {
-                Some(b'u') => affected |= SUID | IRWXU,
-                Some(b'g') => affected |= SGID | IRWXG,
-                Some(b'o') => affected |= SVTX | IRWXO,
+                Some(b'u') => affected |= S_ISUID | IRWXU,
+                Some(b'g') => affected |= S_ISGID | IRWXG,
+                Some(b'o') => affected |= S_ISVTX | IRWXO,
                 Some(b'a') => affected |= CHMOD_MODE_BITS,
                 // The operator ends the `who` and starts the work below.
                 Some(b'=' | b'+' | b'-') => break,
@@ -334,11 +355,11 @@ fn compile_symbolic(spec: &[u8]) -> Option<Changes> {
                         match spec.get(p) {
                             Some(b'r') => value |= R_ALL,
                             Some(b'w') => value |= W_ALL,
-                            Some(b'x') => value |= X_ALL,
+                            Some(b'x') => value |= S_IXUGO,
                             Some(b'X') => flag = Special::XIfAnyX,
                             // Both, and let `affected` decide which survives.
-                            Some(b's') => value |= SUID | SGID,
-                            Some(b't') => value |= SVTX,
+                            Some(b's') => value |= S_ISUID | S_ISGID,
+                            Some(b't') => value |= S_ISVTX,
                             // Not an error *here* — see the module docs. The
                             // clause ends, and whatever this byte is has to be
                             // a `,` or the end of the string to be accepted.
@@ -420,7 +441,7 @@ pub fn adjust(oldmode: u32, dir: bool, umask_value: u32, changes: &Changes) -> A
         let affected = change.affected;
         // On a directory, setuid and setgid survive anything that did not name
         // them. This is why `chmod -R 755 d` does not strip a setgid directory.
-        let omit_change = if dir { SUID | SGID } else { 0 } & !change.mentioned;
+        let omit_change = if dir { S_ISUID | S_ISGID } else { 0 } & !change.mentioned;
         let mut value = change.value;
 
         match change.flag {
@@ -432,11 +453,11 @@ pub fn adjust(oldmode: u32, dir: bool, umask_value: u32, changes: &Changes) -> A
                 value &= newmode;
                 value |= (if value & R_ALL != 0 { R_ALL } else { 0 })
                     | (if value & W_ALL != 0 { W_ALL } else { 0 })
-                    | (if value & X_ALL != 0 { X_ALL } else { 0 });
+                    | (if value & S_IXUGO != 0 { S_IXUGO } else { 0 });
             }
             Special::XIfAnyX => {
-                if newmode & X_ALL != 0 || dir {
-                    value |= X_ALL;
+                if newmode & S_IXUGO != 0 || dir {
+                    value |= S_IXUGO;
                 }
             }
         }
@@ -494,9 +515,9 @@ pub fn adjust(oldmode: u32, dir: bool, umask_value: u32, changes: &Changes) -> A
 pub fn permission_string(mode: u32) -> String {
     let mut s = String::with_capacity(9);
     for (read, write, execute, special, letter) in [
-        (0o400, 0o200, 0o100, SUID, 's'),
-        (0o040, 0o020, 0o010, SGID, 's'),
-        (0o004, 0o002, 0o001, SVTX, 't'),
+        (0o400, 0o200, 0o100, S_ISUID, 's'),
+        (0o040, 0o020, 0o010, S_ISGID, 's'),
+        (0o004, 0o002, 0o001, S_ISVTX, 't'),
     ] {
         s.push(if mode & read != 0 { 'r' } else { '-' });
         s.push(if mode & write != 0 { 'w' } else { '-' });
@@ -507,6 +528,87 @@ pub fn permission_string(mode: u32) -> String {
             (false, true) => letter.to_ascii_uppercase(),
         });
     }
+    s
+}
+
+// ----------------------------------------------------------- file types ---
+
+/// The bits of a mode word that hold the file's *type* — POSIX's `S_IFMT`.
+///
+/// This is the part [`CHMOD_MODE_BITS`] masks off, and the two together are the
+/// whole reason both live here: a mode word carries two unrelated things in one
+/// integer, and a caller that forgets which half it is holding gets a
+/// permission string with a directory bit in it.
+pub const S_IFMT: u32 = 0o170000;
+
+/// A named pipe (`p`).
+pub const S_IFIFO: u32 = 0o010000;
+/// A character device (`c`).
+pub const S_IFCHR: u32 = 0o020000;
+/// A directory (`d`).
+pub const S_IFDIR: u32 = 0o040000;
+/// A block device (`b`).
+pub const S_IFBLK: u32 = 0o060000;
+/// A regular file (`-`).
+pub const S_IFREG: u32 = 0o100000;
+/// A symbolic link (`l`).
+pub const S_IFLNK: u32 = 0o120000;
+/// A socket (`s`).
+pub const S_IFSOCK: u32 = 0o140000;
+
+/// The first character of `ls -l`'s mode string — gnulib's `ftypelet`.
+///
+/// `?` is the answer for a type this system has no letter for, which is not a
+/// hypothetical: it is what a Solaris door or a filesystem the kernel knows and
+/// we do not comes out as, and printing a wrong letter would be worse than
+/// printing an honest question mark.
+///
+/// The `S_IF*` values are not bit flags despite looking like them — `S_IFBLK`
+/// is `0o060000` and `S_IFCHR | S_IFDIR` is the same number — so this must
+/// compare the masked field for equality and never test a bit.
+#[must_use]
+pub const fn file_type_letter(mode: u32) -> u8 {
+    match mode & S_IFMT {
+        S_IFIFO => b'p',
+        S_IFCHR => b'c',
+        S_IFDIR => b'd',
+        S_IFBLK => b'b',
+        S_IFREG => b'-',
+        S_IFLNK => b'l',
+        S_IFSOCK => b's',
+        _ => b'?',
+    }
+}
+
+/// The type as `stat`'s `%F` names it.
+///
+/// The wording is GNU's and is not free: "character special file" rather than
+/// "character device", "fifo" rather than "named pipe". A script that greps
+/// `stat -c %F` for one of these strings is matching the exact words.
+#[must_use]
+pub const fn file_type_name(mode: u32) -> &'static str {
+    match mode & S_IFMT {
+        S_IFIFO => "fifo",
+        S_IFCHR => "character special file",
+        S_IFDIR => "directory",
+        S_IFBLK => "block special file",
+        S_IFREG => "regular file",
+        S_IFLNK => "symbolic link",
+        S_IFSOCK => "socket",
+        _ => "weird file",
+    }
+}
+
+/// The whole ten-character mode string: the type letter and the nine
+/// permission characters.
+///
+/// This is gnulib's `strmode` minus its eleventh character, the alternate-access
+/// marker, which every caller in coreutils strips before printing.
+#[must_use]
+pub fn mode_string(mode: u32) -> String {
+    let mut s = String::with_capacity(10);
+    s.push(char::from(file_type_letter(mode)));
+    s.push_str(&permission_string(mode));
     s
 }
 
@@ -526,6 +628,66 @@ mod tests {
     /// The common case: a regular file and no umask in play.
     fn f(old: u32, spec: &str) -> u32 {
         go(old, spec, 0, false)
+    }
+
+    // -------------------------------------------------------- file types ---
+
+    /// Every row measured, GNU coreutils 9.4:
+    ///
+    /// ```text
+    /// $ stat -c '%A %F' reg d sym pipe sock /dev/null /dev/loop0
+    /// -rw-r--r-- regular file
+    /// drwxr-xr-x directory
+    /// lrwxrwxrwx symbolic link
+    /// prw-r--r-- fifo
+    /// srwxr-xr-x socket
+    /// crw-rw-rw- character special file
+    /// brw-rw---- block special file
+    /// ```
+    #[test]
+    fn every_file_type_has_a_letter_and_a_name() {
+        for (bits, letter, name) in [
+            (S_IFREG, b'-', "regular file"),
+            (S_IFDIR, b'd', "directory"),
+            (S_IFLNK, b'l', "symbolic link"),
+            (S_IFIFO, b'p', "fifo"),
+            (S_IFSOCK, b's', "socket"),
+            (S_IFCHR, b'c', "character special file"),
+            (S_IFBLK, b'b', "block special file"),
+        ] {
+            assert_eq!(file_type_letter(bits | 0o644), letter);
+            assert_eq!(file_type_name(bits | 0o644), name);
+        }
+        // A type this system has no letter for. gnulib prints `?` and
+        // `weird file` rather than guessing, and so does this.
+        assert_eq!(file_type_letter(0o160000), b'?');
+        assert_eq!(file_type_name(0o160000), "weird file");
+        // …including a mode with no type field at all, which is what a
+        // caller that already masked with `CHMOD_MODE_BITS` would pass.
+        assert_eq!(file_type_letter(0o644), b'?');
+    }
+
+    /// The `S_IF*` values look like flags and are not: `S_IFCHR | S_IFDIR`
+    /// *is* `S_IFBLK`. Anything that tests a bit rather than comparing the
+    /// masked field answers `b` for a directory, which is the mistake this
+    /// pins against.
+    #[test]
+    fn the_type_field_is_a_number_and_not_a_set_of_flags() {
+        assert_eq!(S_IFCHR | S_IFDIR, S_IFBLK);
+        assert_eq!(file_type_letter(S_IFDIR), b'd');
+        assert_eq!(file_type_letter(S_IFBLK), b'b');
+    }
+
+    /// The ten-character string is the letter and the nine permission
+    /// characters, which is `stat -c %A` and `ls -l`'s first column.
+    #[test]
+    fn the_mode_string_is_the_type_letter_and_the_permissions() {
+        assert_eq!(mode_string(S_IFREG | 0o644), "-rw-r--r--");
+        assert_eq!(mode_string(S_IFDIR | 0o755), "drwxr-xr-x");
+        assert_eq!(mode_string(S_IFLNK | 0o777), "lrwxrwxrwx");
+        assert_eq!(mode_string(S_IFDIR | 0o1777), "drwxrwxrwt");
+        assert_eq!(mode_string(S_IFREG | 0o4755), "-rwsr-xr-x");
+        assert_eq!(mode_string(S_IFREG | 0o2644), "-rw-r-Sr--");
     }
 
     fn bad(spec: &str) -> bool {
@@ -818,7 +980,7 @@ mod tests {
         assert_eq!(adjust(0o666, false, 0, &changes).mode_bits, 0o022);
         // `=` with a `who` covers everything that `who` selects, set or not.
         let changes = compile(b"u=r").unwrap();
-        assert_eq!(adjust(0o000, false, 0, &changes).mode_bits, SUID | IRWXU);
+        assert_eq!(adjust(0o000, false, 0, &changes).mode_bits, S_ISUID | IRWXU);
         // `=` with no `who` covers every bit there is.
         let changes = compile(b"=r").unwrap();
         assert_eq!(adjust(0o000, false, 0, &changes).mode_bits, CHMOD_MODE_BITS);

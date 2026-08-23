@@ -16,6 +16,14 @@ description = "SlateOS sudo utility"
 authlib = { path = "../authlib" }
 userdb = { path = "../userdb" }
 
+# The faillock-sharing test needs a real file that two authenticators can both
+# open. `scratchdir` gives it one that is unique per process *and* per thread,
+# and that is removed on an unwind — which a `remove_dir_all` in the test's own
+# tail structurally cannot do, since the tail is reached only when the test
+# passed, and a passing test is the one with nothing worth leaving behind.
+[dev-dependencies]
+scratchdir = { path = "../scratchdir" }
+
 # The defensive lint set from `CLAUDE.md`. The crate that grants root is the
 # last one that should panic on an argument someone chose.
 [lints]

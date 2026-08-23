@@ -71,6 +71,13 @@ TPAD = "gui/desktop/src/touchpad.rs"
 OV = "gui/desktop/src/overview.rs"
 CTX = "gui/desktop/src/context_ext.rs"
 WID = "gui/desktop/src/widgets.rs"
+SND = "gui/desktop/src/sound_settings.rs"
+OSD = "gui/desktop/src/osd.rs"
+PRIV = "gui/desktop/src/privacy_settings.rs"
+PRINTMGR = "gui/desktop/src/print_manager.rs"
+POWER = "gui/desktop/src/power.rs"
+LOGIN = "gui/desktop/src/login_screen.rs"
+TB = "gui/desktop/src/taskbar.rs"
 
 # (name, file, [(old, new), ...], [packages], [tests expected to fail])
 DEFECTS = [
@@ -4567,6 +4574,5588 @@ DEFECTS = [
             'a_hidden_widget_layer_draws_nothing',
         ],
     ),
+    # ---- sound_settings.rs (module 23 of 49) --------------------------------
+    (
+        "AAAAAAAAAAAAAAAAAAA: the panel background is frozen back to Mocha base",
+        SND,
+        [
+            ('color: p.base,',
+             'color: guitk::color::Color::from_hex(0x1E1E2E),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_sound_panel_draws_comes_from_its_palette',
+            'every_rectangle_the_sound_panel_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        "BBBBBBBBBBBBBBBBBBB: the panel background becomes a sidebar's",
+        SND,
+        [
+            ('color: p.base,',
+             'color: p.mantle,'),
+        ],
+        ["desktop"],
+        [
+            'every_rectangle_the_sound_panel_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        "CCCCCCCCCCCCCCCCCCC: the title is frozen back to Mocha text",
+        SND,
+        [
+            ('font_size: 20.0,\n            color: p.text,',
+             'font_size: 20.0,\n            color: guitk::color::Color::from_hex(0xCDD6F4),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_sound_panel_draws_comes_from_its_palette',
+            'every_text_the_sound_panel_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        "DDDDDDDDDDDDDDDDDDD: the title drops to secondary text",
+        SND,
+        [
+            ('font_size: 20.0,\n            color: p.text,',
+             'font_size: 20.0,\n            color: p.subtext0,'),
+        ],
+        ["desktop"],
+        [
+            'every_text_the_sound_panel_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        "EEEEEEEEEEEEEEEEEEE: a muted master volume stops going red",
+        SND,
+        [
+            ('master_muted {\n                p.red\n',
+             'master_muted {\n                p.text\n'),
+        ],
+        ["desktop"],
+        [
+            'every_text_the_sound_panel_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        "FFFFFFFFFFFFFFFFFFF: an unmuted master volume drops to secondary text",
+        SND,
+        [
+            ('p.red\n            } else {\n                p.text\n            },',
+             'p.red\n            } else {\n                p.subtext0\n            },'),
+        ],
+        ["desktop"],
+        [
+            'every_text_the_sound_panel_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        "GGGGGGGGGGGGGGGGGGG: the active tab stops being raised",
+        SND,
+        [
+            ('width: tab_w - 2.0,\n                height: 32.0,\n                color: if active { p.surface0 } else { p.mantle },',
+             'width: tab_w - 2.0,\n                height: 32.0,\n                color: if active { p.mantle } else { p.mantle },'),
+        ],
+        ["desktop"],
+        [
+            'the_fixtures_take_every_branch_the_sound_panel_has',
+            'every_rectangle_the_sound_panel_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        "HHHHHHHHHHHHHHHHHHH: every tab looks like the active one",
+        SND,
+        [
+            ('width: tab_w - 2.0,\n                height: 32.0,\n                color: if active { p.surface0 } else { p.mantle },',
+             'width: tab_w - 2.0,\n                height: 32.0,\n                color: if active { p.surface0 } else { p.surface0 },'),
+        ],
+        ["desktop"],
+        [
+            'the_fixtures_take_every_branch_the_sound_panel_has',
+            'every_rectangle_the_sound_panel_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        "IIIIIIIIIIIIIIIIIII: the active tab's label is frozen back to Mocha blue",
+        SND,
+        [
+            ('color: if active { p.accent } else { p.subtext0 },',
+             'color: if active { guitk::color::Color::from_hex(0x89B4FA) } else { p.subtext0 },'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_sound_panel_draws_comes_from_its_palette',
+            'every_text_the_sound_panel_draws_is_in_the_role_it_claims',
+            'the_three_accent_sites_follow_the_accent',
+        ],
+    ),
+    (
+        "JJJJJJJJJJJJJJJJJJJ: the active tab's label reads like an inactive one",
+        SND,
+        [
+            ('color: if active { p.accent } else { p.subtext0 },',
+             'color: if active { p.subtext0 } else { p.subtext0 },'),
+        ],
+        ["desktop"],
+        [
+            'every_text_the_sound_panel_draws_is_in_the_role_it_claims',
+            'the_three_accent_sites_follow_the_accent',
+            'every_pair_this_panel_uses_to_tell_things_apart_stays_apart',
+        ],
+    ),
+    (
+        "KKKKKKKKKKKKKKKKKKK: every tab's label takes the accent",
+        SND,
+        [
+            ('color: if active { p.accent } else { p.subtext0 },',
+             'color: if active { p.accent } else { p.accent },'),
+        ],
+        ["desktop"],
+        [
+            'every_text_the_sound_panel_draws_is_in_the_role_it_claims',
+            'every_pair_this_panel_uses_to_tell_things_apart_stays_apart',
+        ],
+    ),
+    (
+        "LLLLLLLLLLLLLLLLLLL: the empty-output line is promoted to secondary text",
+        SND,
+        [
+            ('text: "No output devices detected.".into(),\n                font_size: 13.0,\n                color: p.overlay0,',
+             'text: "No output devices detected.".into(),\n                font_size: 13.0,\n                color: p.subtext0,'),
+        ],
+        ["desktop"],
+        [
+            'every_text_the_sound_panel_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        "MMMMMMMMMMMMMMMMMMM: the default output device stops being raised",
+        SND,
+        [
+            ('let bg = if dev.is_default { p.surface0 } else { p.mantle };',
+             'let bg = if dev.is_default { p.mantle } else { p.mantle };'),
+        ],
+        ["desktop"],
+        [
+            'the_fixtures_take_every_branch_the_sound_panel_has',
+            'every_rectangle_the_sound_panel_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        "NNNNNNNNNNNNNNNNNNN: every output device looks like the default",
+        SND,
+        [
+            ('let bg = if dev.is_default { p.surface0 } else { p.mantle };',
+             'let bg = if dev.is_default { p.surface0 } else { p.surface0 };'),
+        ],
+        ["desktop"],
+        [
+            'the_fixtures_take_every_branch_the_sound_panel_has',
+            'every_rectangle_the_sound_panel_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        "OOOOOOOOOOOOOOOOOOO: an output device's name drops to secondary text",
+        SND,
+        [
+            ('text: format!("{}{}", dev.name, name_suffix),\n                font_size: 14.0,\n                color: p.text,',
+             'text: format!("{}{}", dev.name, name_suffix),\n                font_size: 14.0,\n                color: p.subtext0,'),
+        ],
+        ["desktop"],
+        [
+            'every_text_the_sound_panel_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        "PPPPPPPPPPPPPPPPPPP: an output device's format line drops to the faintest role",
+        SND,
+        [
+            ('text: dev.format_string(),\n                font_size: 11.0,\n                color: p.subtext0,\n                font_weight: FontWeightHint::Regular,\n                max_width: Some(width - 24.0),\n                overflow: TextOverflow::Ellipsis,\n            });\n\n            // Volume bar',
+             'text: dev.format_string(),\n                font_size: 11.0,\n                color: p.overlay0,\n                font_weight: FontWeightHint::Regular,\n                max_width: Some(width - 24.0),\n                overflow: TextOverflow::Ellipsis,\n            });\n\n            // Volume bar'),
+        ],
+        ["desktop"],
+        [
+            'every_text_the_sound_panel_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        "QQQQQQQQQQQQQQQQQQQ: the empty-input line is promoted to secondary text",
+        SND,
+        [
+            ('text: "No input devices detected.".into(),\n                font_size: 13.0,\n                color: p.overlay0,',
+             'text: "No input devices detected.".into(),\n                font_size: 13.0,\n                color: p.subtext0,'),
+        ],
+        ["desktop"],
+        [
+            'every_text_the_sound_panel_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        "RRRRRRRRRRRRRRRRRRR: the default input device stops being raised",
+        SND,
+        [
+            ('height: 48.0,\n                color: if dev.is_default { p.surface0 } else { p.mantle },',
+             'height: 48.0,\n                color: if dev.is_default { p.mantle } else { p.mantle },'),
+        ],
+        ["desktop"],
+        [
+            'the_fixtures_take_every_branch_the_sound_panel_has',
+            'every_rectangle_the_sound_panel_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        "SSSSSSSSSSSSSSSSSSS: every input device looks like the default",
+        SND,
+        [
+            ('height: 48.0,\n                color: if dev.is_default { p.surface0 } else { p.mantle },',
+             'height: 48.0,\n                color: if dev.is_default { p.surface0 } else { p.surface0 },'),
+        ],
+        ["desktop"],
+        [
+            'the_fixtures_take_every_branch_the_sound_panel_has',
+            'every_rectangle_the_sound_panel_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        "TTTTTTTTTTTTTTTTTTT: an input device's name drops to secondary text",
+        SND,
+        [
+            ('text: format!("{}{}", dev.name, def_txt),\n                font_size: 14.0,\n                color: p.text,',
+             'text: format!("{}{}", dev.name, def_txt),\n                font_size: 14.0,\n                color: p.subtext0,'),
+        ],
+        ["desktop"],
+        [
+            'every_text_the_sound_panel_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        "UUUUUUUUUUUUUUUUUUU: an input device's format line drops to the faintest role",
+        SND,
+        [
+            ('text: dev.format_string(),\n                font_size: 11.0,\n                color: p.subtext0,\n                font_weight: FontWeightHint::Regular,\n                max_width: Some(width - 24.0),\n                overflow: TextOverflow::Ellipsis,\n            });\n            y += 56.0;',
+             'text: dev.format_string(),\n                font_size: 11.0,\n                color: p.overlay0,\n                font_weight: FontWeightHint::Regular,\n                max_width: Some(width - 24.0),\n                overflow: TextOverflow::Ellipsis,\n            });\n            y += 56.0;'),
+        ],
+        ["desktop"],
+        [
+            'every_text_the_sound_panel_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        "VVVVVVVVVVVVVVVVVVV: the microphone heading follows the accent",
+        SND,
+        [
+            ('text: "Microphone Settings".into(),\n            font_size: 14.0,\n            color: p.lavender,',
+             'text: "Microphone Settings".into(),\n            font_size: 14.0,\n            color: p.accent,'),
+        ],
+        ["desktop"],
+        [
+            'every_text_the_sound_panel_draws_is_in_the_role_it_claims',
+            'nothing_that_reports_a_state_follows_the_accent',
+        ],
+    ),
+    (
+        "WWWWWWWWWWWWWWWWWWW: the empty-app line is promoted to secondary text",
+        SND,
+        [
+            ('text: "No applications are currently producing audio.".into(),\n                font_size: 13.0,\n                color: p.overlay0,',
+             'text: "No applications are currently producing audio.".into(),\n                font_size: 13.0,\n                color: p.subtext0,'),
+        ],
+        ["desktop"],
+        [
+            'every_text_the_sound_panel_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        "XXXXXXXXXXXXXXXXXXX: an app row is raised like a default device",
+        SND,
+        [
+            ('height: 48.0,\n                color: p.mantle,',
+             'height: 48.0,\n                color: p.surface0,'),
+        ],
+        ["desktop"],
+        [
+            'every_rectangle_the_sound_panel_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        "YYYYYYYYYYYYYYYYYYY: an app's name drops to secondary text",
+        SND,
+        [
+            ('text: entry.display_name.clone(),\n                font_size: 13.0,\n                color: p.text,',
+             'text: entry.display_name.clone(),\n                font_size: 13.0,\n                color: p.subtext0,'),
+        ],
+        ["desktop"],
+        [
+            'every_text_the_sound_panel_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        "ZZZZZZZZZZZZZZZZZZZ: a muted app's volume stops going red",
+        SND,
+        [
+            ('color: if entry.muted { p.red } else { p.subtext0 },',
+             'color: if entry.muted { p.subtext0 } else { p.subtext0 },'),
+        ],
+        ["desktop"],
+        [
+            'every_text_the_sound_panel_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        "AAAAAAAAAAAAAAAAAAAA: an unmuted app's volume is promoted to body text",
+        SND,
+        [
+            ('color: if entry.muted { p.red } else { p.subtext0 },',
+             'color: if entry.muted { p.red } else { p.text },'),
+        ],
+        ["desktop"],
+        [
+            'every_text_the_sound_panel_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        "BBBBBBBBBBBBBBBBBBBB: a system-sound row is raised off the panel",
+        SND,
+        [
+            ('height: 28.0,\n                color: p.mantle,',
+             'height: 28.0,\n                color: p.surface0,'),
+        ],
+        ["desktop"],
+        [
+            'every_rectangle_the_sound_panel_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        "CCCCCCCCCCCCCCCCCCCC: a system sound's label drops to secondary text",
+        SND,
+        [
+            ('text: label.into(),\n                font_size: 12.0,\n                color: p.text,',
+             'text: label.into(),\n                font_size: 12.0,\n                color: p.subtext0,'),
+        ],
+        ["desktop"],
+        [
+            'every_text_the_sound_panel_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        "DDDDDDDDDDDDDDDDDDDD: an enabled sound's status follows the accent",
+        SND,
+        [
+            ('color: if sc.enabled { p.green } else { p.overlay0 },',
+             'color: if sc.enabled { p.accent } else { p.overlay0 },'),
+        ],
+        ["desktop"],
+        [
+            'every_text_the_sound_panel_draws_is_in_the_role_it_claims',
+            'nothing_that_reports_a_state_follows_the_accent',
+        ],
+    ),
+    (
+        "EEEEEEEEEEEEEEEEEEEE: a disabled sound's status is promoted to secondary text",
+        SND,
+        [
+            ('color: if sc.enabled { p.green } else { p.overlay0 },',
+             'color: if sc.enabled { p.green } else { p.subtext0 },'),
+        ],
+        ["desktop"],
+        [
+            'every_text_the_sound_panel_draws_is_in_the_role_it_claims',
+            'nothing_that_reports_a_state_follows_the_accent',
+        ],
+    ),
+    (
+        "FFFFFFFFFFFFFFFFFFFF: a custom sound's name is promoted to body text",
+        SND,
+        [
+            ('text: custom.into(),\n                font_size: 12.0,\n                color: p.subtext0,',
+             'text: custom.into(),\n                font_size: 12.0,\n                color: p.text,'),
+        ],
+        ["desktop"],
+        [
+            'every_text_the_sound_panel_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        "GGGGGGGGGGGGGGGGGGGG: the spatial heading follows the accent",
+        SND,
+        [
+            ('text: "Spatial Audio".into(),\n            font_size: 14.0,\n            color: p.lavender,',
+             'text: "Spatial Audio".into(),\n            font_size: 14.0,\n            color: p.accent,'),
+        ],
+        ["desktop"],
+        [
+            'every_text_the_sound_panel_draws_is_in_the_role_it_claims',
+            'nothing_that_reports_a_state_follows_the_accent',
+        ],
+    ),
+    (
+        "HHHHHHHHHHHHHHHHHHHH: the selected spatial mode stops being raised",
+        SND,
+        [
+            ('width,\n                height: 32.0,\n                color: if active { p.surface0 } else { p.mantle },',
+             'width,\n                height: 32.0,\n                color: if active { p.mantle } else { p.mantle },'),
+        ],
+        ["desktop"],
+        [
+            'the_fixtures_take_every_branch_the_sound_panel_has',
+            'every_rectangle_the_sound_panel_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        "IIIIIIIIIIIIIIIIIIII: every spatial mode looks selected",
+        SND,
+        [
+            ('width,\n                height: 32.0,\n                color: if active { p.surface0 } else { p.mantle },',
+             'width,\n                height: 32.0,\n                color: if active { p.surface0 } else { p.surface0 },'),
+        ],
+        ["desktop"],
+        [
+            'the_fixtures_take_every_branch_the_sound_panel_has',
+            'every_rectangle_the_sound_panel_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        "JJJJJJJJJJJJJJJJJJJJ: the selected spatial mode's label is frozen back to Mocha blue",
+        SND,
+        [
+            ('color: if active { p.accent } else { p.text },',
+             'color: if active { guitk::color::Color::from_hex(0x89B4FA) } else { p.text },'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_sound_panel_draws_comes_from_its_palette',
+            'every_text_the_sound_panel_draws_is_in_the_role_it_claims',
+            'the_three_accent_sites_follow_the_accent',
+        ],
+    ),
+    (
+        "KKKKKKKKKKKKKKKKKKKK: the selected spatial mode's label reads like an unselected one",
+        SND,
+        [
+            ('color: if active { p.accent } else { p.text },',
+             'color: if active { p.text } else { p.text },'),
+        ],
+        ["desktop"],
+        [
+            'every_text_the_sound_panel_draws_is_in_the_role_it_claims',
+            'the_three_accent_sites_follow_the_accent',
+        ],
+    ),
+    (
+        "LLLLLLLLLLLLLLLLLLLL: every spatial mode's label takes the accent",
+        SND,
+        [
+            ('color: if active { p.accent } else { p.text },',
+             'color: if active { p.accent } else { p.accent },'),
+        ],
+        ["desktop"],
+        [
+            'every_text_the_sound_panel_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        "MMMMMMMMMMMMMMMMMMMM: a volume bar's track is frozen back to Mocha surface1",
+        SND,
+        [
+            ('height: bar_h,\n            color: p.surface1,',
+             'height: bar_h,\n            color: guitk::color::Color::from_hex(0x45475A),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_sound_panel_draws_comes_from_its_palette',
+            'every_rectangle_the_sound_panel_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        "NNNNNNNNNNNNNNNNNNNN: a volume bar's track drops a step, to surface0",
+        SND,
+        [
+            ('height: bar_h,\n            color: p.surface1,',
+             'height: bar_h,\n            color: p.surface0,'),
+        ],
+        ["desktop"],
+        [
+            'every_rectangle_the_sound_panel_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        "OOOOOOOOOOOOOOOOOOOO: a volume bar's fill is frozen back to Mocha blue",
+        SND,
+        [
+            ('let fill_color = if muted { p.red } else { p.accent };',
+             'let fill_color = if muted { p.red } else { guitk::color::Color::from_hex(0x89B4FA) };'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_sound_panel_draws_comes_from_its_palette',
+            'the_three_accent_sites_follow_the_accent',
+            'a_muted_volume_bar_never_looks_like_an_unmuted_one',
+        ],
+    ),
+    (
+        "PPPPPPPPPPPPPPPPPPPP: a muted volume bar stops going red",
+        SND,
+        [
+            ('let fill_color = if muted { p.red } else { p.accent };',
+             'let fill_color = if muted { p.accent } else { p.accent };'),
+        ],
+        ["desktop"],
+        [
+            'the_fixtures_take_every_branch_the_sound_panel_has',
+            'a_muted_volume_bar_never_looks_like_an_unmuted_one',
+        ],
+    ),
+    (
+        "QQQQQQQQQQQQQQQQQQQQ: an unmuted volume bar goes red too",
+        SND,
+        [
+            ('let fill_color = if muted { p.red } else { p.accent };',
+             'let fill_color = if muted { p.red } else { p.red };'),
+        ],
+        ["desktop"],
+        [
+            'the_fixtures_take_every_branch_the_sound_panel_has',
+            'the_three_accent_sites_follow_the_accent',
+            'a_muted_volume_bar_never_looks_like_an_unmuted_one',
+        ],
+    ),
+    (
+        "RRRRRRRRRRRRRRRRRRRR: a label-value row's label drops to the faintest role",
+        SND,
+        [
+            ('text: label.into(),\n            font_size: 13.0,\n            color: p.subtext0,\n            font_weight: FontWeightHint::Regular,\n            max_width: Some(width * 0.5),',
+             'text: label.into(),\n            font_size: 13.0,\n            color: p.overlay0,\n            font_weight: FontWeightHint::Regular,\n            max_width: Some(width * 0.5),'),
+        ],
+        ["desktop"],
+        [
+            'every_text_the_sound_panel_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        "SSSSSSSSSSSSSSSSSSSS: a label-value row's value drops to secondary text",
+        SND,
+        [
+            ('text: value.into(),\n            font_size: 13.0,\n            color: p.text,',
+             'text: value.into(),\n            font_size: 13.0,\n            color: p.subtext0,'),
+        ],
+        ["desktop"],
+        [
+            'every_text_the_sound_panel_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        "TTTTTTTTTTTTTTTTTTTT: a toggle row's label drops to the faintest role",
+        SND,
+        [
+            ('text: label.into(),\n            font_size: 13.0,\n            color: p.subtext0,\n            font_weight: FontWeightHint::Regular,\n            max_width: Some(width * 0.6),',
+             'text: label.into(),\n            font_size: 13.0,\n            color: p.overlay0,\n            font_weight: FontWeightHint::Regular,\n            max_width: Some(width * 0.6),'),
+        ],
+        ["desktop"],
+        [
+            'every_text_the_sound_panel_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        "UUUUUUUUUUUUUUUUUUUU: an on toggle's pill follows the accent",
+        SND,
+        [
+            ('let bg = if on { p.green } else { p.surface1 };',
+             'let bg = if on { p.accent } else { p.surface1 };'),
+        ],
+        ["desktop"],
+        [
+            'the_fixtures_take_every_branch_the_sound_panel_has',
+            'every_rectangle_the_sound_panel_draws_is_in_the_role_it_claims',
+            'nothing_that_reports_a_state_follows_the_accent',
+        ],
+    ),
+    (
+        "VVVVVVVVVVVVVVVVVVVV: an off toggle's pill is raised a step",
+        SND,
+        [
+            ('let bg = if on { p.green } else { p.surface1 };',
+             'let bg = if on { p.green } else { p.surface2 };'),
+        ],
+        ["desktop"],
+        [
+            'the_fixtures_take_every_branch_the_sound_panel_has',
+            'every_rectangle_the_sound_panel_draws_is_in_the_role_it_claims',
+            'nothing_that_reports_a_state_follows_the_accent',
+        ],
+    ),
+    (
+        "WWWWWWWWWWWWWWWWWWWW: a toggle's knob drops to secondary text",
+        SND,
+        [
+            ('width: 16.0,\n            height: 16.0,\n            color: p.text,',
+             'width: 16.0,\n            height: 16.0,\n            color: p.subtext0,'),
+        ],
+        ["desktop"],
+        [
+            'every_rectangle_the_sound_panel_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        "XXXXXXXXXXXXXXXXXXXX: the master volume label never admits to being muted",
+        SND,
+        [
+            ('                    " (Muted)"\n                } else {',
+             '                    ""\n                } else {'),
+        ],
+        ["desktop"],
+        [
+            # A fixture that stops reaching an arm stops checking it, silently.
+            # These four exist to prove the coverage test can tell.
+            'the_fixtures_take_every_branch_the_sound_panel_has',
+            'every_text_the_sound_panel_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        "YYYYYYYYYYYYYYYYYYYY: the monitor row is drawn only when monitoring is off",
+        SND,
+        [
+            ('if mic.monitor {\n            y = Self::render_label_val(',
+             'if !mic.monitor {\n            y = Self::render_label_val('),
+        ],
+        ["desktop"],
+        [
+            'the_fixtures_take_every_branch_the_sound_panel_has',
+            'every_text_the_sound_panel_draws_is_in_the_role_it_claims',
+            'monitor_loopback_renders_volume',
+        ],
+    ),
+    (
+        "ZZZZZZZZZZZZZZZZZZZZ: a disabled system sound still reads as on",
+        SND,
+        [
+            ('let status = if sc.enabled { "On" } else { "Off" };',
+             'let status = "On";'),
+        ],
+        ["desktop"],
+        [
+            'the_fixtures_take_every_branch_the_sound_panel_has',
+            'every_text_the_sound_panel_draws_is_in_the_role_it_claims',
+            'every_pair_this_panel_uses_to_tell_things_apart_stays_apart',
+            'nothing_that_reports_a_state_follows_the_accent',
+        ],
+    ),
+    (
+        "AAAAAAAAAAAAAAAAAAAAA: no tab is ever marked active",
+        SND,
+        [
+            ('let active = self.active_tab == i;',
+             'let active = false;'),
+        ],
+        ["desktop"],
+        [
+            'the_fixtures_take_every_branch_the_sound_panel_has',
+            'every_text_the_sound_panel_draws_is_in_the_role_it_claims',
+            'every_rectangle_the_sound_panel_draws_is_in_the_role_it_claims',
+            'the_three_accent_sites_follow_the_accent',
+            'every_pair_this_panel_uses_to_tell_things_apart_stays_apart',
+        ],
+    ),
+    # ---- osd.rs (module 24 of 49) -------------------------------------------
+    (
+        "AAAAAAAAAAAAAAAAAAAAAA: the overlay's shadow becomes a role instead of an absence of light",
+        OSD,
+        [
+            ('color: Color::rgba(0, 0, 0, base_alpha / 2),',
+             'color: Color::rgba(p.crust.r, p.crust.g, p.crust.b, base_alpha / 2),'),
+        ],
+        ["desktop"],
+        [
+            'every_rectangle_the_osd_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        "BBBBBBBBBBBBBBBBBBBBBB: the overlay's shadow stops following the overlay's own fade",
+        OSD,
+        [
+            ('color: Color::rgba(0, 0, 0, base_alpha / 2),',
+             'color: Color::rgba(0, 0, 0, base_alpha),'),
+        ],
+        ["desktop"],
+        [
+            'every_rectangle_the_osd_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        "CCCCCCCCCCCCCCCCCCCCCC: the overlay's panel is frozen back to Mocha base",
+        OSD,
+        [
+            ('color: Color::rgba(p.base.r, p.base.g, p.base.b, base_alpha),',
+             'color: Color::rgba(0x1E, 0x1E, 0x2E, base_alpha),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_osd_draws_comes_from_its_palette',
+            'every_rectangle_the_osd_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        "DDDDDDDDDDDDDDDDDDDDDD: the overlay's panel becomes a sidebar's mantle",
+        OSD,
+        [
+            ('color: Color::rgba(p.base.r, p.base.g, p.base.b, base_alpha),',
+             'color: Color::rgba(p.mantle.r, p.mantle.g, p.mantle.b, base_alpha),'),
+        ],
+        ["desktop"],
+        [
+            'every_rectangle_the_osd_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        "EEEEEEEEEEEEEEEEEEEEEE: the overlay's panel follows the accent",
+        OSD,
+        [
+            ('color: Color::rgba(p.base.r, p.base.g, p.base.b, base_alpha),',
+             'color: Color::rgba(p.accent.r, p.accent.g, p.accent.b, base_alpha),'),
+        ],
+        ["desktop"],
+        [
+            'no_colour_the_overlay_draws_ever_follows_the_accent',
+            'every_rectangle_the_osd_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        "FFFFFFFFFFFFFFFFFFFFFF: the overlay's border is frozen back to Mocha surface1",
+        OSD,
+        [
+            ('color: Color::rgba(p.surface1.r, p.surface1.g, p.surface1.b, base_alpha),',
+             'color: Color::rgba(0x45, 0x47, 0x5A, base_alpha),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_osd_draws_comes_from_its_palette',
+            'every_rectangle_the_osd_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        "GGGGGGGGGGGGGGGGGGGGGG: the overlay's border sinks into its own fill",
+        OSD,
+        [
+            ('color: Color::rgba(p.surface1.r, p.surface1.g, p.surface1.b, base_alpha),',
+             'color: Color::rgba(p.surface0.r, p.surface0.g, p.surface0.b, base_alpha),'),
+        ],
+        ["desktop"],
+        [
+            'every_rectangle_the_osd_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        "HHHHHHHHHHHHHHHHHHHHHH: the slider's icon is frozen back to Mocha blue",
+        OSD,
+        [
+            ('font_size: icon_size,\n            color: Color::rgba(accent.r, accent.g, accent.b, text_alpha),',
+             'font_size: icon_size,\n            color: Color::rgba(0x89, 0xB4, 0xFA, text_alpha),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_osd_draws_comes_from_its_palette',
+            'every_text_the_osd_draws_is_in_the_role_it_claims',
+            'every_kind_draws_its_icon_in_the_colour_that_kind_claims',
+        ],
+    ),
+    (
+        "IIIIIIIIIIIIIIIIIIIIII: the slider's icon stops saying which kind of slider it is",
+        OSD,
+        [
+            ('font_size: icon_size,\n            color: Color::rgba(accent.r, accent.g, accent.b, text_alpha),',
+             'font_size: icon_size,\n            color: Color::rgba(p.text.r, p.text.g, p.text.b, text_alpha),'),
+        ],
+        ["desktop"],
+        [
+            'every_text_the_osd_draws_is_in_the_role_it_claims',
+            'every_kind_draws_its_icon_in_the_colour_that_kind_claims',
+        ],
+    ),
+    (
+        "JJJJJJJJJJJJJJJJJJJJJJ: the slider's label is frozen back to Mocha text",
+        OSD,
+        [
+            ('font_size: 14.0,\n            color: Color::rgba(p.text.r, p.text.g, p.text.b, text_alpha),\n            font_weight: FontWeightHint::Bold,\n            max_width: None,',
+             'font_size: 14.0,\n            color: Color::rgba(0xCD, 0xD6, 0xF4, text_alpha),\n            font_weight: FontWeightHint::Bold,\n            max_width: None,'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_osd_draws_comes_from_its_palette',
+            'every_text_the_osd_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        "KKKKKKKKKKKKKKKKKKKKKK: the slider's label drops to secondary text",
+        OSD,
+        [
+            ('font_size: 14.0,\n            color: Color::rgba(p.text.r, p.text.g, p.text.b, text_alpha),\n            font_weight: FontWeightHint::Bold,\n            max_width: None,',
+             'font_size: 14.0,\n            color: Color::rgba(p.subtext0.r, p.subtext0.g, p.subtext0.b, text_alpha),\n            font_weight: FontWeightHint::Bold,\n            max_width: None,'),
+        ],
+        ["desktop"],
+        [
+            'every_text_the_osd_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        "LLLLLLLLLLLLLLLLLLLLLL: the slider's track is frozen back to Mocha surface0",
+        OSD,
+        [
+            ('color: Color::rgba(p.surface0.r, p.surface0.g, p.surface0.b, text_alpha),',
+             'color: Color::rgba(0x31, 0x32, 0x44, text_alpha),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_osd_draws_comes_from_its_palette',
+            'every_rectangle_the_osd_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        "MMMMMMMMMMMMMMMMMMMMMM: the slider's track lightens one step",
+        OSD,
+        [
+            ('color: Color::rgba(p.surface0.r, p.surface0.g, p.surface0.b, text_alpha),',
+             'color: Color::rgba(p.surface1.r, p.surface1.g, p.surface1.b, text_alpha),'),
+        ],
+        ["desktop"],
+        [
+            'every_rectangle_the_osd_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        "NNNNNNNNNNNNNNNNNNNNNN: the slider's fill is frozen back to Mocha blue",
+        OSD,
+        [
+            ('width: fill_w,\n                height: track_h,\n                color: Color::rgba(accent.r, accent.g, accent.b, text_alpha),',
+             'width: fill_w,\n                height: track_h,\n                color: Color::rgba(0x89, 0xB4, 0xFA, text_alpha),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_osd_draws_comes_from_its_palette',
+            'every_rectangle_the_osd_draws_is_in_the_role_it_claims',
+            'volume_and_brightness_stay_a_pair_you_can_tell_apart',
+        ],
+    ),
+    (
+        "OOOOOOOOOOOOOOOOOOOOOO: the slider's fill follows the accent, as if you could drag an OSD",
+        OSD,
+        [
+            ('width: fill_w,\n                height: track_h,\n                color: Color::rgba(accent.r, accent.g, accent.b, text_alpha),',
+             'width: fill_w,\n                height: track_h,\n                color: Color::rgba(p.accent.r, p.accent.g, p.accent.b, text_alpha),'),
+        ],
+        ["desktop"],
+        [
+            'no_colour_the_overlay_draws_ever_follows_the_accent',
+            'every_rectangle_the_osd_draws_is_in_the_role_it_claims',
+            'volume_and_brightness_stay_a_pair_you_can_tell_apart',
+        ],
+    ),
+    (
+        "PPPPPPPPPPPPPPPPPPPPPP: the slider's knob is frozen back to Mocha text",
+        OSD,
+        [
+            ('height: 10.0,\n            color: Color::rgba(p.text.r, p.text.g, p.text.b, text_alpha),',
+             'height: 10.0,\n            color: Color::rgba(0xCD, 0xD6, 0xF4, text_alpha),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_osd_draws_comes_from_its_palette',
+            'every_rectangle_the_osd_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        "QQQQQQQQQQQQQQQQQQQQQQ: the slider's knob sinks into its own track",
+        OSD,
+        [
+            ('height: 10.0,\n            color: Color::rgba(p.text.r, p.text.g, p.text.b, text_alpha),',
+             'height: 10.0,\n            color: Color::rgba(p.surface0.r, p.surface0.g, p.surface0.b, text_alpha),'),
+        ],
+        ["desktop"],
+        [
+            'every_rectangle_the_osd_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        'RRRRRRRRRRRRRRRRRRRRRR: a slider at zero draws a fill anyway',
+        OSD,
+        [
+            ('if fill_w > 0.0 {',
+             'if fill_w >= 0.0 {'),
+        ],
+        ["desktop"],
+        [
+            'the_fixtures_take_every_branch_the_osd_has',
+        ],
+    ),
+    (
+        'SSSSSSSSSSSSSSSSSSSSSS: a slider never draws its fill at all',
+        OSD,
+        [
+            ('if fill_w > 0.0 {',
+             'if fill_w < 0.0 {'),
+        ],
+        ["desktop"],
+        [
+            'the_fixtures_take_every_branch_the_osd_has',
+            'every_rectangle_the_osd_draws_is_in_the_role_it_claims',
+            'volume_and_brightness_stay_a_pair_you_can_tell_apart',
+        ],
+    ),
+    (
+        'TTTTTTTTTTTTTTTTTTTTTT: the music note is frozen back to Mocha lavender',
+        OSD,
+        [
+            ('font_size: 28.0,\n            color: Color::rgba(p.lavender.r, p.lavender.g, p.lavender.b, text_alpha),',
+             'font_size: 28.0,\n            color: Color::rgba(0xB4, 0xBE, 0xFE, text_alpha),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_osd_draws_comes_from_its_palette',
+            'every_text_the_osd_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        'UUUUUUUUUUUUUUUUUUUUUU: the music note stops being a music note and becomes text',
+        OSD,
+        [
+            ('font_size: 28.0,\n            color: Color::rgba(p.lavender.r, p.lavender.g, p.lavender.b, text_alpha),',
+             'font_size: 28.0,\n            color: Color::rgba(p.text.r, p.text.g, p.text.b, text_alpha),'),
+        ],
+        ["desktop"],
+        [
+            'every_text_the_osd_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        'VVVVVVVVVVVVVVVVVVVVVV: the track title is frozen back to Mocha text',
+        OSD,
+        [
+            ('font_size: 14.0,\n            color: Color::rgba(p.text.r, p.text.g, p.text.b, text_alpha),\n            font_weight: FontWeightHint::Bold,\n            max_width: Some(max_text_w),',
+             'font_size: 14.0,\n            color: Color::rgba(0xCD, 0xD6, 0xF4, text_alpha),\n            font_weight: FontWeightHint::Bold,\n            max_width: Some(max_text_w),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_osd_draws_comes_from_its_palette',
+            'every_text_the_osd_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        "WWWWWWWWWWWWWWWWWWWWWW: the track title drops to the artist's secondary text",
+        OSD,
+        [
+            ('font_size: 14.0,\n            color: Color::rgba(p.text.r, p.text.g, p.text.b, text_alpha),\n            font_weight: FontWeightHint::Bold,\n            max_width: Some(max_text_w),',
+             'font_size: 14.0,\n            color: Color::rgba(p.subtext0.r, p.subtext0.g, p.subtext0.b, text_alpha),\n            font_weight: FontWeightHint::Bold,\n            max_width: Some(max_text_w),'),
+        ],
+        ["desktop"],
+        [
+            'every_text_the_osd_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        'XXXXXXXXXXXXXXXXXXXXXX: the track title follows the accent',
+        OSD,
+        [
+            ('font_size: 14.0,\n            color: Color::rgba(p.text.r, p.text.g, p.text.b, text_alpha),\n            font_weight: FontWeightHint::Bold,\n            max_width: Some(max_text_w),',
+             'font_size: 14.0,\n            color: Color::rgba(p.accent.r, p.accent.g, p.accent.b, text_alpha),\n            font_weight: FontWeightHint::Bold,\n            max_width: Some(max_text_w),'),
+        ],
+        ["desktop"],
+        [
+            'no_colour_the_overlay_draws_ever_follows_the_accent',
+            'every_text_the_osd_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        'YYYYYYYYYYYYYYYYYYYYYY: the artist line is frozen back to Mocha subtext0',
+        OSD,
+        [
+            ('font_size: 12.0,\n            color: Color::rgba(p.subtext0.r, p.subtext0.g, p.subtext0.b, text_alpha),',
+             'font_size: 12.0,\n            color: Color::rgba(0xA6, 0xAD, 0xC8, text_alpha),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_osd_draws_comes_from_its_palette',
+            'every_text_the_osd_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        "ZZZZZZZZZZZZZZZZZZZZZZ: the artist line is promoted to the title's own weight of text",
+        OSD,
+        [
+            ('font_size: 12.0,\n            color: Color::rgba(p.subtext0.r, p.subtext0.g, p.subtext0.b, text_alpha),',
+             'font_size: 12.0,\n            color: Color::rgba(p.text.r, p.text.g, p.text.b, text_alpha),'),
+        ],
+        ["desktop"],
+        [
+            'every_text_the_osd_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        'AAAAAAAAAAAAAAAAAAAAAAA: the album line is frozen back to Mocha subtext0',
+        OSD,
+        [
+            ('color: Color::rgba(p.subtext0.r, p.subtext0.g, p.subtext0.b, text_alpha / 2),',
+             'color: Color::rgba(0xA6, 0xAD, 0xC8, text_alpha / 2),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_osd_draws_comes_from_its_palette',
+            'every_text_the_osd_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        'BBBBBBBBBBBBBBBBBBBBBBB: the album line is promoted to primary text',
+        OSD,
+        [
+            ('color: Color::rgba(p.subtext0.r, p.subtext0.g, p.subtext0.b, text_alpha / 2),',
+             'color: Color::rgba(p.text.r, p.text.g, p.text.b, text_alpha / 2),'),
+        ],
+        ["desktop"],
+        [
+            'every_text_the_osd_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        'CCCCCCCCCCCCCCCCCCCCCCC: the media bar is frozen back to Mocha lavender',
+        OSD,
+        [
+            ('color: Color::rgba(p.lavender.r, p.lavender.g, p.lavender.b, text_alpha / 3),',
+             'color: Color::rgba(0xB4, 0xBE, 0xFE, text_alpha / 3),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_osd_draws_comes_from_its_palette',
+            'every_rectangle_the_osd_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        'DDDDDDDDDDDDDDDDDDDDDDD: the media bar follows the accent',
+        OSD,
+        [
+            ('color: Color::rgba(p.lavender.r, p.lavender.g, p.lavender.b, text_alpha / 3),',
+             'color: Color::rgba(p.accent.r, p.accent.g, p.accent.b, text_alpha / 3),'),
+        ],
+        ["desktop"],
+        [
+            'no_colour_the_overlay_draws_ever_follows_the_accent',
+            'every_rectangle_the_osd_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        'EEEEEEEEEEEEEEEEEEEEEEE: a track with no album draws an empty album line',
+        OSD,
+        [
+            ('if !album.is_empty() {',
+             'if true {'),
+        ],
+        ["desktop"],
+        [
+            'the_fixtures_take_every_branch_the_osd_has',
+        ],
+    ),
+    (
+        'FFFFFFFFFFFFFFFFFFFFFFF: a track with an album never draws it',
+        OSD,
+        [
+            ('if !album.is_empty() {',
+             'if false {'),
+        ],
+        ["desktop"],
+        [
+            'the_fixtures_take_every_branch_the_osd_has',
+            'every_text_the_osd_draws_is_in_the_role_it_claims',
+            'osd_text_is_bounded_by_width_not_pre_truncated',
+        ],
+    ),
+    (
+        'GGGGGGGGGGGGGGGGGGGGGGG: the notice icon is frozen back to Mocha red',
+        OSD,
+        [
+            ('font_size: 20.0,\n            color: Color::rgba(accent.r, accent.g, accent.b, text_alpha),',
+             'font_size: 20.0,\n            color: Color::rgba(0xF3, 0x8B, 0xA8, text_alpha),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_osd_draws_comes_from_its_palette',
+            'every_text_the_osd_draws_is_in_the_role_it_claims',
+            'every_kind_draws_its_icon_in_the_colour_that_kind_claims',
+        ],
+    ),
+    (
+        'HHHHHHHHHHHHHHHHHHHHHHH: the notice icon stops saying what kind of notice it is',
+        OSD,
+        [
+            ('font_size: 20.0,\n            color: Color::rgba(accent.r, accent.g, accent.b, text_alpha),',
+             'font_size: 20.0,\n            color: Color::rgba(p.text.r, p.text.g, p.text.b, text_alpha),'),
+        ],
+        ["desktop"],
+        [
+            'every_text_the_osd_draws_is_in_the_role_it_claims',
+            'every_kind_draws_its_icon_in_the_colour_that_kind_claims',
+        ],
+    ),
+    (
+        'IIIIIIIIIIIIIIIIIIIIIII: the notice label is frozen back to Mocha text',
+        OSD,
+        [
+            ('font_size: OSD_LABEL_SIZE,\n            color: Color::rgba(p.text.r, p.text.g, p.text.b, text_alpha),',
+             'font_size: OSD_LABEL_SIZE,\n            color: Color::rgba(0xCD, 0xD6, 0xF4, text_alpha),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_osd_draws_comes_from_its_palette',
+            'every_text_the_osd_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        'JJJJJJJJJJJJJJJJJJJJJJJ: the notice label drops to secondary text',
+        OSD,
+        [
+            ('font_size: OSD_LABEL_SIZE,\n            color: Color::rgba(p.text.r, p.text.g, p.text.b, text_alpha),',
+             'font_size: OSD_LABEL_SIZE,\n            color: Color::rgba(p.subtext0.r, p.subtext0.g, p.subtext0.b, text_alpha),'),
+        ],
+        ["desktop"],
+        [
+            'every_text_the_osd_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        'KKKKKKKKKKKKKKKKKKKKKKK: an unmuted volume overlay reads as muted',
+        OSD,
+        [
+            ('if *muted { p.red } else { p.blue },',
+             'p.red,'),
+        ],
+        ["desktop"],
+        [
+            'every_text_the_osd_draws_is_in_the_role_it_claims',
+            'every_rectangle_the_osd_draws_is_in_the_role_it_claims',
+            'every_kind_draws_its_icon_in_the_colour_that_kind_claims',
+            'volume_and_brightness_stay_a_pair_you_can_tell_apart',
+        ],
+    ),
+    (
+        'LLLLLLLLLLLLLLLLLLLLLLL: a muted volume overlay reads as unmuted',
+        OSD,
+        [
+            ('if *muted { p.red } else { p.blue },',
+             'p.blue,'),
+        ],
+        ["desktop"],
+        [
+            'every_kind_draws_its_icon_in_the_colour_that_kind_claims',
+            'volume_and_brightness_stay_a_pair_you_can_tell_apart',
+        ],
+    ),
+    (
+        "MMMMMMMMMMMMMMMMMMMMMMM: brightness takes volume's blue, so the pair collapses",
+        OSD,
+        [
+            ('p.yellow,\n                    commands,',
+             'p.blue,\n                    commands,'),
+        ],
+        ["desktop"],
+        [
+            'every_kind_draws_its_icon_in_the_colour_that_kind_claims',
+            'volume_and_brightness_stay_a_pair_you_can_tell_apart',
+        ],
+    ),
+    (
+        'NNNNNNNNNNNNNNNNNNNNNNN: brightness follows the accent',
+        OSD,
+        [
+            ('p.yellow,\n                    commands,',
+             'p.accent,\n                    commands,'),
+        ],
+        ["desktop"],
+        [
+            'no_colour_the_overlay_draws_ever_follows_the_accent',
+            'every_kind_draws_its_icon_in_the_colour_that_kind_claims',
+            'volume_and_brightness_stay_a_pair_you_can_tell_apart',
+        ],
+    ),
+    (
+        'OOOOOOOOOOOOOOOOOOOOOOO: play/pause loses its own colour to plain text',
+        OSD,
+        [
+            ('p, ox, oy, osd_w, text_alpha, icon, label, p.lavender, commands,',
+             'p, ox, oy, osd_w, text_alpha, icon, label, p.text, commands,'),
+        ],
+        ["desktop"],
+        [
+            'every_kind_draws_its_icon_in_the_colour_that_kind_claims',
+        ],
+    ),
+    (
+        'PPPPPPPPPPPPPPPPPPPPPPP: a lock that is on reads as off',
+        OSD,
+        [
+            ('let color = if *active { p.green } else { p.subtext0 };',
+             'let color = p.subtext0;'),
+        ],
+        ["desktop"],
+        [
+            'every_kind_draws_its_icon_in_the_colour_that_kind_claims',
+        ],
+    ),
+    (
+        'QQQQQQQQQQQQQQQQQQQQQQQ: a lock that is off reads as on',
+        OSD,
+        [
+            ('let color = if *active { p.green } else { p.subtext0 };',
+             'let color = p.green;'),
+        ],
+        ["desktop"],
+        [
+            'every_kind_draws_its_icon_in_the_colour_that_kind_claims',
+        ],
+    ),
+    (
+        'RRRRRRRRRRRRRRRRRRRRRRR: an ejected device still reads as connected',
+        OSD,
+        [
+            ('let color = if *ejected { p.subtext0 } else { p.green };',
+             'let color = p.green;'),
+        ],
+        ["desktop"],
+        [
+            'every_kind_draws_its_icon_in_the_colour_that_kind_claims',
+        ],
+    ),
+    (
+        'SSSSSSSSSSSSSSSSSSSSSSS: a connected device reads as ejected',
+        OSD,
+        [
+            ('let color = if *ejected { p.subtext0 } else { p.green };',
+             'let color = p.subtext0;'),
+        ],
+        ["desktop"],
+        [
+            'every_kind_draws_its_icon_in_the_colour_that_kind_claims',
+        ],
+    ),
+    (
+        'TTTTTTTTTTTTTTTTTTTTTTT: the screenshot notice is frozen back to Mocha green',
+        OSD,
+        [
+            ('"\\u{1F4F7}",\n                    &label,\n                    p.green,',
+             '"\\u{1F4F7}",\n                    &label,\n                    Color::from_hex(0xA6E3A1),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_osd_draws_comes_from_its_palette',
+            'every_kind_draws_its_icon_in_the_colour_that_kind_claims',
+        ],
+    ),
+    (
+        'UUUUUUUUUUUUUUUUUUUUUUU: the screenshot notice follows the accent',
+        OSD,
+        [
+            ('"\\u{1F4F7}",\n                    &label,\n                    p.green,',
+             '"\\u{1F4F7}",\n                    &label,\n                    p.accent,'),
+        ],
+        ["desktop"],
+        [
+            'no_colour_the_overlay_draws_ever_follows_the_accent',
+            'every_kind_draws_its_icon_in_the_colour_that_kind_claims',
+        ],
+    ),
+    (
+        'VVVVVVVVVVVVVVVVVVVVVVV: a muted microphone still reads as live',
+        OSD,
+        [
+            ('let color = if *muted { p.red } else { p.green };',
+             'let color = p.green;'),
+        ],
+        ["desktop"],
+        [
+            'every_kind_draws_its_icon_in_the_colour_that_kind_claims',
+        ],
+    ),
+    (
+        'WWWWWWWWWWWWWWWWWWWWWWW: a live microphone reads as muted',
+        OSD,
+        [
+            ('let color = if *muted { p.red } else { p.green };',
+             'let color = p.red;'),
+        ],
+        ["desktop"],
+        [
+            'every_kind_draws_its_icon_in_the_colour_that_kind_claims',
+        ],
+    ),
+    (
+        'XXXXXXXXXXXXXXXXXXXXXXX: a dropped network connection still reads as connected',
+        OSD,
+        [
+            ('let color = if *connected { p.green } else { p.red };',
+             'let color = p.green;'),
+        ],
+        ["desktop"],
+        [
+            'every_kind_draws_its_icon_in_the_colour_that_kind_claims',
+        ],
+    ),
+    (
+        'YYYYYYYYYYYYYYYYYYYYYYY: a live network connection reads as dropped',
+        OSD,
+        [
+            ('let color = if *connected { p.green } else { p.red };',
+             'let color = p.red;'),
+        ],
+        ["desktop"],
+        [
+            'every_kind_draws_its_icon_in_the_colour_that_kind_claims',
+        ],
+    ),
+    (
+        'ZZZZZZZZZZZZZZZZZZZZZZZ: a low battery stops being a warning and becomes a caution',
+        OSD,
+        [
+            ('"\\u{1F50B}",\n                    &label,\n                    p.red,',
+             '"\\u{1F50B}",\n                    &label,\n                    p.peach,'),
+        ],
+        ["desktop"],
+        [
+            'every_kind_draws_its_icon_in_the_colour_that_kind_claims',
+            'every_text_the_osd_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        'AAAAAAAAAAAAAAAAAAAAAAAA: a low battery is frozen back to Mocha red',
+        OSD,
+        [
+            ('"\\u{1F50B}",\n                    &label,\n                    p.red,',
+             '"\\u{1F50B}",\n                    &label,\n                    Color::from_hex(0xF38BA8),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_osd_draws_comes_from_its_palette',
+            'every_kind_draws_its_icon_in_the_colour_that_kind_claims',
+            'every_text_the_osd_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        'BBBBBBBBBBBBBBBBBBBBBBBB: the Info icon stops being informational and turns into a success',
+        OSD,
+        [
+            ('OsdIcon::Info => ("\\u{2139}", p.blue),',
+             'OsdIcon::Info => ("\\u{2139}", p.green),'),
+        ],
+        ["desktop"],
+        [
+            'every_kind_draws_its_icon_in_the_colour_that_kind_claims',
+            'every_pair_this_module_uses_to_tell_things_apart_stays_apart',
+        ],
+    ),
+    (
+        'CCCCCCCCCCCCCCCCCCCCCCCC: the Success icon stops being green',
+        OSD,
+        [
+            ('OsdIcon::Success => ("\\u{2705}", p.green),',
+             'OsdIcon::Success => ("\\u{2705}", p.blue),'),
+        ],
+        ["desktop"],
+        [
+            'every_kind_draws_its_icon_in_the_colour_that_kind_claims',
+            'every_pair_this_module_uses_to_tell_things_apart_stays_apart',
+        ],
+    ),
+    (
+        'DDDDDDDDDDDDDDDDDDDDDDDD: the Warning icon is frozen back to Mocha yellow',
+        OSD,
+        [
+            ('OsdIcon::Warning => ("\\u{26A0}", p.yellow),',
+             'OsdIcon::Warning => ("\\u{26A0}", Color::from_hex(0xF9E2AF)),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_osd_draws_comes_from_its_palette',
+            'every_kind_draws_its_icon_in_the_colour_that_kind_claims',
+        ],
+    ),
+    (
+        'EEEEEEEEEEEEEEEEEEEEEEEE: the Error icon collides with the battery warning',
+        OSD,
+        [
+            ('OsdIcon::Error => ("\\u{274C}", p.red),',
+             'OsdIcon::Error => ("\\u{274C}", p.peach),'),
+        ],
+        ["desktop"],
+        [
+            'every_kind_draws_its_icon_in_the_colour_that_kind_claims',
+            'every_pair_this_module_uses_to_tell_things_apart_stays_apart',
+        ],
+    ),
+    (
+        "FFFFFFFFFFFFFFFFFFFFFFFF: the Speaker icon stops sharing the volume overlay's blue",
+        OSD,
+        [
+            ('OsdIcon::Speaker => ("\\u{1F50A}", p.blue),',
+             'OsdIcon::Speaker => ("\\u{1F50A}", p.text),'),
+        ],
+        ["desktop"],
+        [
+            'every_kind_draws_its_icon_in_the_colour_that_kind_claims',
+        ],
+    ),
+    (
+        "GGGGGGGGGGGGGGGGGGGGGGGG: the Brightness icon stops sharing the brightness overlay's yellow",
+        OSD,
+        [
+            ('OsdIcon::Brightness => ("\\u{2600}", p.yellow),',
+             'OsdIcon::Brightness => ("\\u{2600}", p.green),'),
+        ],
+        ["desktop"],
+        [
+            'every_kind_draws_its_icon_in_the_colour_that_kind_claims',
+        ],
+    ),
+    (
+        'HHHHHHHHHHHHHHHHHHHHHHHH: the Network icon turns into an error',
+        OSD,
+        [
+            ('OsdIcon::Network => ("\\u{1F310}", p.green),',
+             'OsdIcon::Network => ("\\u{1F310}", p.red),'),
+        ],
+        ["desktop"],
+        [
+            'every_kind_draws_its_icon_in_the_colour_that_kind_claims',
+        ],
+    ),
+    (
+        'IIIIIIIIIIIIIIIIIIIIIIII: the Battery icon loses its peach and collides with the error red',
+        OSD,
+        [
+            ('OsdIcon::Battery => ("\\u{1F50B}", p.peach),',
+             'OsdIcon::Battery => ("\\u{1F50B}", p.red),'),
+        ],
+        ["desktop"],
+        [
+            'every_kind_draws_its_icon_in_the_colour_that_kind_claims',
+            'every_pair_this_module_uses_to_tell_things_apart_stays_apart',
+        ],
+    ),
+    (
+        'JJJJJJJJJJJJJJJJJJJJJJJJ: the Lock icon loses its lavender and collides with the info blue',
+        OSD,
+        [
+            ('OsdIcon::Lock => ("\\u{1F512}", p.lavender),',
+             'OsdIcon::Lock => ("\\u{1F512}", p.blue),'),
+        ],
+        ["desktop"],
+        [
+            'every_kind_draws_its_icon_in_the_colour_that_kind_claims',
+            'every_pair_this_module_uses_to_tell_things_apart_stays_apart',
+        ],
+    ),
+    (
+        'KKKKKKKKKKKKKKKKKKKKKKKK: the Camera icon stops confirming anything',
+        OSD,
+        [
+            ('OsdIcon::Camera => ("\\u{1F4F7}", p.green),',
+             'OsdIcon::Camera => ("\\u{1F4F7}", p.subtext0),'),
+        ],
+        ["desktop"],
+        [
+            'every_kind_draws_its_icon_in_the_colour_that_kind_claims',
+        ],
+    ),
+    (
+        'LLLLLLLLLLLLLLLLLLLLLLLL: the medium volume icon collapses into the low one',
+        OSD,
+        [
+            ('} else if level < 66 {\n        "\\u{1F509}" // medium',
+             '} else if level < 66 {\n        "\\u{1F508}" // medium'),
+        ],
+        ["desktop"],
+        [
+            'the_fixtures_take_every_branch_the_osd_has',
+            'volume_icon_levels',
+        ],
+    ),
+    (
+        'MMMMMMMMMMMMMMMMMMMMMMMM: the settings title is frozen back to Mocha text',
+        OSD,
+        [
+            ('font_size: 18.0,\n            color: p.text,',
+             'font_size: 18.0,\n            color: Color::from_hex(0xCDD6F4),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_osd_draws_comes_from_its_palette',
+            'every_text_the_osd_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        "NNNNNNNNNNNNNNNNNNNNNNNN: the settings title drops to a heading's secondary text",
+        OSD,
+        [
+            ('font_size: 18.0,\n            color: p.text,',
+             'font_size: 18.0,\n            color: p.subtext0,'),
+        ],
+        ["desktop"],
+        [
+            'every_text_the_osd_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        'OOOOOOOOOOOOOOOOOOOOOOOO: the enable pill is frozen back to Mocha green',
+        OSD,
+        [
+            ('let enable_color = if self.config.enabled {\n            p.green\n        } else {\n            p.subtext0\n        };',
+             'let enable_color = if self.config.enabled {\n            Color::from_hex(0xA6E3A1)\n        } else {\n            p.subtext0\n        };'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_osd_draws_comes_from_its_palette',
+            'every_rectangle_the_osd_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        "PPPPPPPPPPPPPPPPPPPPPPPP: a disabled OSD's pill still reads as enabled",
+        OSD,
+        [
+            ('let enable_color = if self.config.enabled {\n            p.green\n        } else {\n            p.subtext0\n        };',
+             'let enable_color = p.green;'),
+        ],
+        ["desktop"],
+        [
+            'every_rectangle_the_osd_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        'QQQQQQQQQQQQQQQQQQQQQQQQ: the enable pill reports its state in the accent',
+        OSD,
+        [
+            ('let enable_color = if self.config.enabled {\n            p.green\n        } else {\n            p.subtext0\n        };',
+             'let enable_color = p.accent;'),
+        ],
+        ["desktop"],
+        [
+            'nothing_that_reports_a_state_follows_the_accent',
+            'the_settings_panel_has_exactly_three_accent_sites',
+            'every_rectangle_the_osd_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        "RRRRRRRRRRRRRRRRRRRRRRRR: the pill's knob is frozen back to Mocha text",
+        OSD,
+        [
+            ('height: 16.0,\n            color: p.text,',
+             'height: 16.0,\n            color: Color::from_hex(0xCDD6F4),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_osd_draws_comes_from_its_palette',
+            'every_rectangle_the_osd_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        "SSSSSSSSSSSSSSSSSSSSSSSS: the pill's knob sinks into an unselected grey",
+        OSD,
+        [
+            ('height: 16.0,\n            color: p.text,',
+             'height: 16.0,\n            color: p.surface1,'),
+        ],
+        ["desktop"],
+        [
+            'every_rectangle_the_osd_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        'TTTTTTTTTTTTTTTTTTTTTTTT: the enable label is frozen back to Mocha text',
+        OSD,
+        [
+            ('text: "Enable OSD overlays".to_string(),\n            font_size: 14.0,\n            color: p.text,',
+             'text: "Enable OSD overlays".to_string(),\n            font_size: 14.0,\n            color: Color::from_hex(0xCDD6F4),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_osd_draws_comes_from_its_palette',
+            'every_text_the_osd_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        'UUUUUUUUUUUUUUUUUUUUUUUU: the enable label drops to secondary text',
+        OSD,
+        [
+            ('text: "Enable OSD overlays".to_string(),\n            font_size: 14.0,\n            color: p.text,',
+             'text: "Enable OSD overlays".to_string(),\n            font_size: 14.0,\n            color: p.subtext0,'),
+        ],
+        ["desktop"],
+        [
+            'every_text_the_osd_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        'VVVVVVVVVVVVVVVVVVVVVVVV: the Position heading is frozen back to Mocha subtext0',
+        OSD,
+        [
+            ('text: "Position".to_string(),\n            font_size: 13.0,\n            color: p.subtext0,',
+             'text: "Position".to_string(),\n            font_size: 13.0,\n            color: Color::from_hex(0xA6ADC8),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_osd_draws_comes_from_its_palette',
+            'every_text_the_osd_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        'WWWWWWWWWWWWWWWWWWWWWWWW: the Position heading is promoted to primary text',
+        OSD,
+        [
+            ('text: "Position".to_string(),\n            font_size: 13.0,\n            color: p.subtext0,',
+             'text: "Position".to_string(),\n            font_size: 13.0,\n            color: p.text,'),
+        ],
+        ["desktop"],
+        [
+            'every_text_the_osd_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        'XXXXXXXXXXXXXXXXXXXXXXXX: the selected position dot stops following the accent',
+        OSD,
+        [
+            ('let dot_color = if selected { p.accent } else { p.surface1 };',
+             'let dot_color = if selected { p.blue } else { p.surface1 };'),
+        ],
+        ["desktop"],
+        [
+            'the_settings_panel_has_exactly_three_accent_sites',
+            'every_rectangle_the_osd_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        'YYYYYYYYYYYYYYYYYYYYYYYY: every position dot reads as selected',
+        OSD,
+        [
+            ('let dot_color = if selected { p.accent } else { p.surface1 };',
+             'let dot_color = p.accent;'),
+        ],
+        ["desktop"],
+        [
+            'the_fixtures_take_every_branch_the_osd_has',
+            'the_settings_panel_has_exactly_three_accent_sites',
+            'every_rectangle_the_osd_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        "ZZZZZZZZZZZZZZZZZZZZZZZZ: an unselected position's label reads as selected",
+        OSD,
+        [
+            ('color: if selected { p.text } else { p.subtext0 },',
+             'color: p.text,'),
+        ],
+        ["desktop"],
+        [
+            'every_text_the_osd_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        "AAAAAAAAAAAAAAAAAAAAAAAAA: the selected position's label is frozen back to Mocha text",
+        OSD,
+        [
+            ('color: if selected { p.text } else { p.subtext0 },',
+             'color: if selected { Color::from_hex(0xCDD6F4) } else { p.subtext0 },'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_osd_draws_comes_from_its_palette',
+            'every_text_the_osd_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        'BBBBBBBBBBBBBBBBBBBBBBBBB: the Timeout heading is frozen back to Mocha subtext0',
+        OSD,
+        [
+            ('text: format!("Timeout: {}ms", self.config.timeout_ms),\n            font_size: 13.0,\n            color: p.subtext0,',
+             'text: format!("Timeout: {}ms", self.config.timeout_ms),\n            font_size: 13.0,\n            color: Color::from_hex(0xA6ADC8),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_osd_draws_comes_from_its_palette',
+            'every_text_the_osd_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        'CCCCCCCCCCCCCCCCCCCCCCCCC: the Timeout heading is promoted to primary text',
+        OSD,
+        [
+            ('text: format!("Timeout: {}ms", self.config.timeout_ms),\n            font_size: 13.0,\n            color: p.subtext0,',
+             'text: format!("Timeout: {}ms", self.config.timeout_ms),\n            font_size: 13.0,\n            color: p.text,'),
+        ],
+        ["desktop"],
+        [
+            'every_text_the_osd_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        "DDDDDDDDDDDDDDDDDDDDDDDDD: the timeout slider's track is frozen back to Mocha surface0",
+        OSD,
+        [
+            ('height: 4.0,\n            color: p.surface0,',
+             'height: 4.0,\n            color: Color::from_hex(0x313244),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_osd_draws_comes_from_its_palette',
+            'every_rectangle_the_osd_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        "EEEEEEEEEEEEEEEEEEEEEEEEE: the timeout slider's track takes the accent too, so the fill vanishes into it",
+        OSD,
+        [
+            ('height: 4.0,\n            color: p.surface0,',
+             'height: 4.0,\n            color: p.accent,'),
+        ],
+        ["desktop"],
+        [
+            'the_settings_panel_has_exactly_three_accent_sites',
+            'every_rectangle_the_osd_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        "FFFFFFFFFFFFFFFFFFFFFFFFF: the timeout slider's fill stops following the accent",
+        OSD,
+        [
+            ('height: 4.0,\n            color: p.accent,',
+             'height: 4.0,\n            color: p.blue,'),
+        ],
+        ["desktop"],
+        [
+            'the_settings_panel_has_exactly_three_accent_sites',
+            'every_rectangle_the_osd_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        'GGGGGGGGGGGGGGGGGGGGGGGGG: the Show-OSD-for heading is frozen back to Mocha subtext0',
+        OSD,
+        [
+            ('text: "Show OSD for:".to_string(),\n            font_size: 13.0,\n            color: p.subtext0,',
+             'text: "Show OSD for:".to_string(),\n            font_size: 13.0,\n            color: Color::from_hex(0xA6ADC8),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_osd_draws_comes_from_its_palette',
+            'every_text_the_osd_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        'HHHHHHHHHHHHHHHHHHHHHHHHH: the Show-OSD-for heading is promoted to primary text',
+        OSD,
+        [
+            ('text: "Show OSD for:".to_string(),\n            font_size: 13.0,\n            color: p.subtext0,',
+             'text: "Show OSD for:".to_string(),\n            font_size: 13.0,\n            color: p.text,'),
+        ],
+        ["desktop"],
+        [
+            'every_text_the_osd_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        'IIIIIIIIIIIIIIIIIIIIIIIII: the checkbox is frozen back to Mocha green',
+        OSD,
+        [
+            ('let check_color = if *enabled { p.green } else { p.surface1 };',
+             'let check_color = if *enabled { Color::from_hex(0xA6E3A1) } else { p.surface1 };'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_osd_draws_comes_from_its_palette',
+            'every_rectangle_the_osd_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        'JJJJJJJJJJJJJJJJJJJJJJJJJ: an unchecked box still reads as checked',
+        OSD,
+        [
+            ('let check_color = if *enabled { p.green } else { p.surface1 };',
+             'let check_color = p.green;'),
+        ],
+        ["desktop"],
+        [
+            'every_rectangle_the_osd_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        'KKKKKKKKKKKKKKKKKKKKKKKKK: the checkbox reports its state in the accent',
+        OSD,
+        [
+            ('let check_color = if *enabled { p.green } else { p.surface1 };',
+             'let check_color = p.accent;'),
+        ],
+        ["desktop"],
+        [
+            'nothing_that_reports_a_state_follows_the_accent',
+            'the_settings_panel_has_exactly_three_accent_sites',
+            'every_rectangle_the_osd_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        'LLLLLLLLLLLLLLLLLLLLLLLLL: the tick inside the box is frozen back to Mocha base',
+        OSD,
+        [
+            ('color: appearance::readable_on(p.green),',
+             'color: Color::from_hex(0x1E1E2E),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_osd_draws_comes_from_its_palette',
+            'every_text_the_osd_draws_is_in_the_role_it_claims',
+            'ink_drawn_on_a_coloured_fill_is_readable_in_both_modes',
+        ],
+    ),
+    (
+        'MMMMMMMMMMMMMMMMMMMMMMMMM: the tick is named instead of derived from the box it sits on',
+        OSD,
+        [
+            ('color: appearance::readable_on(p.green),',
+             'color: p.text,'),
+        ],
+        ["desktop"],
+        [
+            'every_text_the_osd_draws_is_in_the_role_it_claims',
+            'ink_drawn_on_a_coloured_fill_is_readable_in_both_modes',
+        ],
+    ),
+    (
+        'NNNNNNNNNNNNNNNNNNNNNNNNN: an unchecked box draws a tick anyway',
+        OSD,
+        [
+            ('if *enabled {\n                commands.push(RenderCommand::Text {',
+             'if true {\n                commands.push(RenderCommand::Text {'),
+        ],
+        ["desktop"],
+        [
+            'the_fixtures_take_every_branch_the_osd_has',
+        ],
+    ),
+    (
+        'OOOOOOOOOOOOOOOOOOOOOOOOO: a checked box never draws its tick',
+        OSD,
+        [
+            ('if *enabled {\n                commands.push(RenderCommand::Text {',
+             'if false {\n                commands.push(RenderCommand::Text {'),
+        ],
+        ["desktop"],
+        [
+            'the_fixtures_take_every_branch_the_osd_has',
+            'every_text_the_osd_draws_is_in_the_role_it_claims',
+            'ink_drawn_on_a_coloured_fill_is_readable_in_both_modes',
+        ],
+    ),
+    (
+        'PPPPPPPPPPPPPPPPPPPPPPPPP: the toggle labels are frozen back to Mocha text',
+        OSD,
+        [
+            ('font_size: 12.0,\n                color: p.text,',
+             'font_size: 12.0,\n                color: Color::from_hex(0xCDD6F4),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_osd_draws_comes_from_its_palette',
+            'every_text_the_osd_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        'QQQQQQQQQQQQQQQQQQQQQQQQQ: the toggle labels drop to secondary text',
+        OSD,
+        [
+            ('font_size: 12.0,\n                color: p.text,',
+             'font_size: 12.0,\n                color: p.subtext0,'),
+        ],
+        ["desktop"],
+        [
+            'every_text_the_osd_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        'RRRRRRRRRRRRRRRRRRRRRRRRR: the Preview button stops following the accent',
+        OSD,
+        [
+            ('height: 32.0,\n            color: p.accent,',
+             'height: 32.0,\n            color: p.blue,'),
+        ],
+        ["desktop"],
+        [
+            'the_settings_panel_has_exactly_three_accent_sites',
+            'every_rectangle_the_osd_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        "SSSSSSSSSSSSSSSSSSSSSSSSS: the Preview button's label is frozen back to Mocha base",
+        OSD,
+        [
+            ('color: p.on_accent(),',
+             'color: Color::from_hex(0x1E1E2E),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_osd_draws_comes_from_its_palette',
+            'every_text_the_osd_draws_is_in_the_role_it_claims',
+            'ink_drawn_on_a_coloured_fill_is_readable_in_both_modes',
+        ],
+    ),
+    (
+        "TTTTTTTTTTTTTTTTTTTTTTTTT: the Preview button's label is named instead of derived from the accent",
+        OSD,
+        [
+            ('color: p.on_accent(),',
+             'color: p.text,'),
+        ],
+        ["desktop"],
+        [
+            'every_text_the_osd_draws_is_in_the_role_it_claims',
+            'ink_drawn_on_a_coloured_fill_is_readable_in_both_modes',
+        ],
+    ),
+
+    # ---- privacy_settings.rs (module 25 of 49) ----
+    (
+        'AAAAAAAAAAAAAAAAAAAAAAAAAA: the panel background is frozen back to Mocha base',
+        PRIV,
+        [
+            ('height: 900.0,\n            color: p.base,',
+             'height: 900.0,\n            color: Color::from_hex(0x1E1E2E),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_panel_draws_comes_from_its_palette',
+            'every_rectangle_this_panel_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        'BBBBBBBBBBBBBBBBBBBBBBBBBB: the panel background sinks to the recessed role',
+        PRIV,
+        [
+            ('height: 900.0,\n            color: p.base,',
+             'height: 900.0,\n            color: p.mantle,'),
+        ],
+        ["desktop"],
+        [
+            'every_rectangle_this_panel_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        'CCCCCCCCCCCCCCCCCCCCCCCCCC: the panel title is frozen back to Mocha text',
+        PRIV,
+        [
+            ('font_size: 20.0,\n            color: p.text,',
+             'font_size: 20.0,\n            color: Color::from_hex(0xCDD6F4),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_panel_draws_comes_from_its_palette',
+            'every_text_this_panel_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        'DDDDDDDDDDDDDDDDDDDDDDDDDD: the panel title drops to secondary text',
+        PRIV,
+        [
+            ('font_size: 20.0,\n            color: p.text,',
+             'font_size: 20.0,\n            color: p.subtext0,'),
+        ],
+        ["desktop"],
+        [
+            'every_text_this_panel_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        'EEEEEEEEEEEEEEEEEEEEEEEEEE: the tab strip highlights every tab except the one you are on',
+        PRIV,
+        [
+            ('height: 30.0,\n                color: if active { p.surface0 } else { p.mantle },',
+             'height: 30.0,\n                color: if active { p.mantle } else { p.surface0 },'),
+        ],
+        ["desktop"],
+        [
+            'every_choice_this_panel_makes_hands_over_the_role_it_claims',
+        ],
+    ),
+    (
+        "FFFFFFFFFFFFFFFFFFFFFFFFFF: the selected tab's fill takes the accent as well as its label",
+        PRIV,
+        [
+            ('height: 30.0,\n                color: if active { p.surface0 } else { p.mantle },',
+             'height: 30.0,\n                color: if active { p.accent } else { p.mantle },'),
+        ],
+        ["desktop"],
+        [
+            'every_choice_this_panel_makes_hands_over_the_role_it_claims',
+            'nothing_but_the_selection_labels_moves_when_the_accent_does',
+            'only_the_two_selection_labels_follow_the_accent',
+        ],
+    ),
+    (
+        "GGGGGGGGGGGGGGGGGGGGGGGGGG: the active tab's label is frozen back to Mocha blue",
+        PRIV,
+        [
+            ('font_size: 12.0,\n                color: if active { p.accent } else { p.subtext0 },',
+             'font_size: 12.0,\n                color: if active { Color::from_hex(0x89B4FA) } else { p.subtext0 },'),
+        ],
+        ["desktop"],
+        [
+            'every_choice_this_panel_makes_hands_over_the_role_it_claims',
+            'every_colour_this_panel_draws_comes_from_its_palette',
+            'nothing_but_the_selection_labels_moves_when_the_accent_does',
+            'only_the_two_selection_labels_follow_the_accent',
+        ],
+    ),
+    (
+        "HHHHHHHHHHHHHHHHHHHHHHHHHH: the active tab's label names blue instead of following the accent",
+        PRIV,
+        [
+            ('font_size: 12.0,\n                color: if active { p.accent } else { p.subtext0 },',
+             'font_size: 12.0,\n                color: if active { p.blue } else { p.subtext0 },'),
+        ],
+        ["desktop"],
+        [
+            'every_choice_this_panel_makes_hands_over_the_role_it_claims',
+            'nothing_but_the_selection_labels_moves_when_the_accent_does',
+            'only_the_two_selection_labels_follow_the_accent',
+        ],
+    ),
+    (
+        'IIIIIIIIIIIIIIIIIIIIIIIIII: every tab but the active one reads as selected',
+        PRIV,
+        [
+            ('font_size: 12.0,\n                color: if active { p.accent } else { p.subtext0 },',
+             'font_size: 12.0,\n                color: if active { p.subtext0 } else { p.accent },'),
+        ],
+        ["desktop"],
+        [
+            'every_choice_this_panel_makes_hands_over_the_role_it_claims',
+            'nothing_but_the_selection_labels_moves_when_the_accent_does',
+            'only_the_two_selection_labels_follow_the_accent',
+        ],
+    ),
+    (
+        'JJJJJJJJJJJJJJJJJJJJJJJJJJ: the resource heading is frozen back to Mocha lavender',
+        PRIV,
+        [
+            ('font_size: 16.0,\n                color: p.lavender,',
+             'font_size: 16.0,\n                color: Color::from_hex(0xB4BEFE),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_panel_draws_comes_from_its_palette',
+            'every_text_this_panel_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        'KKKKKKKKKKKKKKKKKKKKKKKKKK: the resource heading takes the accent, so a category reads as a position',
+        PRIV,
+        [
+            ('font_size: 16.0,\n                color: p.lavender,',
+             'font_size: 16.0,\n                color: p.accent,'),
+        ],
+        ["desktop"],
+        [
+            'every_text_this_panel_draws_is_in_the_role_it_claims',
+            'nothing_but_the_selection_labels_moves_when_the_accent_does',
+        ],
+    ),
+    (
+        'LLLLLLLLLLLLLLLLLLLLLLLLLL: the resource description drops to the dimmest role',
+        PRIV,
+        [
+            ('font_size: 12.0,\n                color: p.subtext0,',
+             'font_size: 12.0,\n                color: p.overlay0,'),
+        ],
+        ["desktop"],
+        [
+            'every_text_this_panel_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        'MMMMMMMMMMMMMMMMMMMMMMMMMM: the no-apps notice is frozen back to Mocha overlay0',
+        PRIV,
+        [
+            ('font_size: 12.0,\n                    color: p.overlay0,',
+             'font_size: 12.0,\n                    color: Color::from_hex(0x6C7086),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_panel_draws_comes_from_its_palette',
+            'every_text_this_panel_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        'NNNNNNNNNNNNNNNNNNNNNNNNNN: the no-apps notice is promoted to ordinary secondary text',
+        PRIV,
+        [
+            ('font_size: 12.0,\n                    color: p.overlay0,',
+             'font_size: 12.0,\n                    color: p.subtext0,'),
+        ],
+        ["desktop"],
+        [
+            'every_text_this_panel_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        "OOOOOOOOOOOOOOOOOOOOOOOOOO: an app row's background rises out of its well",
+        PRIV,
+        [
+            ('height: 32.0,\n                        color: p.mantle,',
+             'height: 32.0,\n                        color: p.surface0,'),
+        ],
+        ["desktop"],
+        [
+            'every_rectangle_this_panel_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        "PPPPPPPPPPPPPPPPPPPPPPPPPP: an app's name is frozen back to Mocha text",
+        PRIV,
+        [
+            ('text: app.app_name.clone(),\n                        font_size: 13.0,\n                        color: p.text,',
+             'text: app.app_name.clone(),\n                        font_size: 13.0,\n                        color: Color::from_hex(0xCDD6F4),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_panel_draws_comes_from_its_palette',
+            'every_text_this_panel_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        "QQQQQQQQQQQQQQQQQQQQQQQQQQ: an app's name drops to secondary text",
+        PRIV,
+        [
+            ('text: app.app_name.clone(),\n                        font_size: 13.0,\n                        color: p.text,',
+             'text: app.app_name.clone(),\n                        font_size: 13.0,\n                        color: p.subtext0,'),
+        ],
+        ["desktop"],
+        [
+            'every_text_this_panel_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        "RRRRRRRRRRRRRRRRRRRRRRRRRR: an app's permission state stops being drawn in that state's colour",
+        PRIV,
+        [
+            ('color: app.state.color(p),',
+             'color: p.text,'),
+        ],
+        ["desktop"],
+        [
+            'every_text_this_panel_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        'SSSSSSSSSSSSSSSSSSSSSSSSSS: the access counter is promoted to secondary text',
+        PRIV,
+        [
+            ('font_size: 11.0,\n                        color: p.overlay0,',
+             'font_size: 11.0,\n                        color: p.subtext0,'),
+        ],
+        ["desktop"],
+        [
+            'every_text_this_panel_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        "TTTTTTTTTTTTTTTTTTTTTTTTTT: an overview row's background rises out of its well",
+        PRIV,
+        [
+            ('height: 40.0,\n                    color: p.mantle,',
+             'height: 40.0,\n                    color: p.surface0,'),
+        ],
+        ["desktop"],
+        [
+            'every_rectangle_this_panel_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        "UUUUUUUUUUUUUUUUUUUUUUUUUU: an overview row's resource name drops to secondary text",
+        PRIV,
+        [
+            ('font_size: 14.0,\n                    color: p.text,',
+             'font_size: 14.0,\n                    color: p.subtext0,'),
+        ],
+        ["desktop"],
+        [
+            'every_text_this_panel_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        'VVVVVVVVVVVVVVVVVVVVVVVVVV: the overview status line reports allowed as denied and denied as allowed',
+        PRIV,
+        [
+            ('color: if enabled { p.green } else { p.red },',
+             'color: if enabled { p.red } else { p.green },'),
+        ],
+        ["desktop"],
+        [
+            'every_choice_this_panel_makes_hands_over_the_role_it_claims',
+        ],
+    ),
+    (
+        'WWWWWWWWWWWWWWWWWWWWWWWWWW: an enabled resource reports its state in the accent',
+        PRIV,
+        [
+            ('color: if enabled { p.green } else { p.red },',
+             'color: if enabled { p.accent } else { p.red },'),
+        ],
+        ["desktop"],
+        [
+            'every_choice_this_panel_makes_hands_over_the_role_it_claims',
+            'nothing_but_the_selection_labels_moves_when_the_accent_does',
+        ],
+    ),
+    (
+        'XXXXXXXXXXXXXXXXXXXXXXXXXX: the overview status line is frozen back to Mocha green',
+        PRIV,
+        [
+            ('color: if enabled { p.green } else { p.red },',
+             'color: if enabled { Color::from_hex(0xA6E3A1) } else { p.red },'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_panel_draws_comes_from_its_palette',
+            'every_choice_this_panel_makes_hands_over_the_role_it_claims',
+        ],
+    ),
+    (
+        'YYYYYYYYYYYYYYYYYYYYYYYYYY: the overview description is promoted to secondary text',
+        PRIV,
+        [
+            ('font_size: 10.0,\n                    color: p.overlay0,',
+             'font_size: 10.0,\n                    color: p.subtext0,'),
+        ],
+        ["desktop"],
+        [
+            'every_text_this_panel_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        'ZZZZZZZZZZZZZZZZZZZZZZZZZZ: the empty-log notice is frozen back to Mocha overlay0',
+        PRIV,
+        [
+            ('text: "No activity recorded yet.".into(),\n                font_size: 13.0,\n                color: p.overlay0,',
+             'text: "No activity recorded yet.".into(),\n                font_size: 13.0,\n                color: Color::from_hex(0x6C7086),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_panel_draws_comes_from_its_palette',
+            'every_text_this_panel_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        'AAAAAAAAAAAAAAAAAAAAAAAAAAA: the empty-log notice is promoted to secondary text',
+        PRIV,
+        [
+            ('text: "No activity recorded yet.".into(),\n                font_size: 13.0,\n                color: p.overlay0,',
+             'text: "No activity recorded yet.".into(),\n                font_size: 13.0,\n                color: p.subtext0,'),
+        ],
+        ["desktop"],
+        [
+            'every_text_this_panel_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        'BBBBBBBBBBBBBBBBBBBBBBBBBBB: the activity count heading drops to secondary text',
+        PRIV,
+        [
+            ('text: format!("{} recent access events", log.len()),\n            font_size: 13.0,\n            color: p.text,',
+             'text: format!("{} recent access events", log.len()),\n            font_size: 13.0,\n            color: p.subtext0,'),
+        ],
+        ["desktop"],
+        [
+            'every_text_this_panel_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        "CCCCCCCCCCCCCCCCCCCCCCCCCCC: an activity row's background rises out of its well",
+        PRIV,
+        [
+            ('height: 28.0,\n                color: p.mantle,',
+             'height: 28.0,\n                color: p.surface0,'),
+        ],
+        ["desktop"],
+        [
+            'every_rectangle_this_panel_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        'DDDDDDDDDDDDDDDDDDDDDDDDDDD: the activity log reports allowed accesses as denied and denied as allowed',
+        PRIV,
+        [
+            ('let color = if entry.allowed { p.green } else { p.red };',
+             'let color = if entry.allowed { p.red } else { p.green };'),
+        ],
+        ["desktop"],
+        [
+            'every_choice_this_panel_makes_hands_over_the_role_it_claims',
+        ],
+    ),
+    (
+        'EEEEEEEEEEEEEEEEEEEEEEEEEEE: an allowed access is logged in the accent instead of green',
+        PRIV,
+        [
+            ('let color = if entry.allowed { p.green } else { p.red };',
+             'let color = if entry.allowed { p.accent } else { p.red };'),
+        ],
+        ["desktop"],
+        [
+            'every_choice_this_panel_makes_hands_over_the_role_it_claims',
+            'nothing_but_the_selection_labels_moves_when_the_accent_does',
+        ],
+    ),
+    (
+        'FFFFFFFFFFFFFFFFFFFFFFFFFFF: the Telemetry heading takes the accent, so a category reads as a position',
+        PRIV,
+        [
+            ('text: "Telemetry".into(),\n            font_size: 14.0,\n            color: p.lavender,',
+             'text: "Telemetry".into(),\n            font_size: 14.0,\n            color: p.accent,'),
+        ],
+        ["desktop"],
+        [
+            'every_text_this_panel_draws_is_in_the_role_it_claims',
+            'nothing_but_the_selection_labels_moves_when_the_accent_does',
+            'only_the_two_selection_labels_follow_the_accent',
+        ],
+    ),
+    (
+        'GGGGGGGGGGGGGGGGGGGGGGGGGGG: the Telemetry heading is frozen back to Mocha lavender',
+        PRIV,
+        [
+            ('text: "Telemetry".into(),\n            font_size: 14.0,\n            color: p.lavender,',
+             'text: "Telemetry".into(),\n            font_size: 14.0,\n            color: Color::from_hex(0xB4BEFE),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_panel_draws_comes_from_its_palette',
+            'every_text_this_panel_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        'HHHHHHHHHHHHHHHHHHHHHHHHHHH: every telemetry level looks selected except the one that is',
+        PRIV,
+        [
+            ('height: 28.0,\n                color: if active { p.surface0 } else { p.mantle },',
+             'height: 28.0,\n                color: if active { p.mantle } else { p.surface0 },'),
+        ],
+        ["desktop"],
+        [
+            'every_choice_this_panel_makes_hands_over_the_role_it_claims',
+        ],
+    ),
+    (
+        "IIIIIIIIIIIIIIIIIIIIIIIIIII: the selected telemetry row's fill takes the accent as well as its label",
+        PRIV,
+        [
+            ('height: 28.0,\n                color: if active { p.surface0 } else { p.mantle },',
+             'height: 28.0,\n                color: if active { p.accent } else { p.mantle },'),
+        ],
+        ["desktop"],
+        [
+            'every_choice_this_panel_makes_hands_over_the_role_it_claims',
+            'nothing_but_the_selection_labels_moves_when_the_accent_does',
+            'only_the_two_selection_labels_follow_the_accent',
+        ],
+    ),
+    (
+        'JJJJJJJJJJJJJJJJJJJJJJJJJJJ: every telemetry label reads as selected except the one that is',
+        PRIV,
+        [
+            ('font_size: 13.0,\n                color: if active { p.accent } else { p.text },',
+             'font_size: 13.0,\n                color: if active { p.text } else { p.accent },'),
+        ],
+        ["desktop"],
+        [
+            'every_choice_this_panel_makes_hands_over_the_role_it_claims',
+            'nothing_but_the_selection_labels_moves_when_the_accent_does',
+            'only_the_two_selection_labels_follow_the_accent',
+        ],
+    ),
+    (
+        'KKKKKKKKKKKKKKKKKKKKKKKKKKK: the selected telemetry label names blue instead of following the accent',
+        PRIV,
+        [
+            ('font_size: 13.0,\n                color: if active { p.accent } else { p.text },',
+             'font_size: 13.0,\n                color: if active { p.blue } else { p.text },'),
+        ],
+        ["desktop"],
+        [
+            'every_choice_this_panel_makes_hands_over_the_role_it_claims',
+            'nothing_but_the_selection_labels_moves_when_the_accent_does',
+            'only_the_two_selection_labels_follow_the_accent',
+        ],
+    ),
+    (
+        'LLLLLLLLLLLLLLLLLLLLLLLLLLL: the Other heading drops to secondary text',
+        PRIV,
+        [
+            ('text: "Other".into(),\n            font_size: 14.0,\n            color: p.lavender,',
+             'text: "Other".into(),\n            font_size: 14.0,\n            color: p.subtext0,'),
+        ],
+        ["desktop"],
+        [
+            'every_text_this_panel_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        "MMMMMMMMMMMMMMMMMMMMMMMMMMM: a toggle's label is promoted to primary text",
+        PRIV,
+        [
+            ('text: label.into(),\n            font_size: 13.0,\n            color: p.subtext0,',
+             'text: label.into(),\n            font_size: 13.0,\n            color: p.text,'),
+        ],
+        ["desktop"],
+        [
+            'every_text_this_panel_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        'NNNNNNNNNNNNNNNNNNNNNNNNNNN: every toggle pill reports the opposite of its switch',
+        PRIV,
+        [
+            ('let bg = if on { p.green } else { p.surface1 };',
+             'let bg = if on { p.surface1 } else { p.green };'),
+        ],
+        ["desktop"],
+        [
+            'every_choice_this_panel_makes_hands_over_the_role_it_claims',
+        ],
+    ),
+    (
+        'OOOOOOOOOOOOOOOOOOOOOOOOOOO: a switched-on toggle reports its state in the accent',
+        PRIV,
+        [
+            ('let bg = if on { p.green } else { p.surface1 };',
+             'let bg = if on { p.accent } else { p.surface1 };'),
+        ],
+        ["desktop"],
+        [
+            'every_choice_this_panel_makes_hands_over_the_role_it_claims',
+            'nothing_but_the_selection_labels_moves_when_the_accent_does',
+            'only_the_two_selection_labels_follow_the_accent',
+        ],
+    ),
+    (
+        'PPPPPPPPPPPPPPPPPPPPPPPPPPP: the on-pill is frozen back to Mocha green',
+        PRIV,
+        [
+            ('let bg = if on { p.green } else { p.surface1 };',
+             'let bg = if on { Color::from_hex(0xA6E3A1) } else { p.surface1 };'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_panel_draws_comes_from_its_palette',
+            'every_choice_this_panel_makes_hands_over_the_role_it_claims',
+        ],
+    ),
+    (
+        'QQQQQQQQQQQQQQQQQQQQQQQQQQQ: the toggle knob is frozen back to Mocha text',
+        PRIV,
+        [
+            ('height: 16.0,\n            color: p.text,',
+             'height: 16.0,\n            color: Color::from_hex(0xCDD6F4),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_panel_draws_comes_from_its_palette',
+            'every_rectangle_this_panel_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        'RRRRRRRRRRRRRRRRRRRRRRRRRRR: the toggle knob dims to secondary text',
+        PRIV,
+        [
+            ('height: 16.0,\n            color: p.text,',
+             'height: 16.0,\n            color: p.subtext0,'),
+        ],
+        ["desktop"],
+        [
+            'every_rectangle_this_panel_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        'SSSSSSSSSSSSSSSSSSSSSSSSSSS: an allowed permission stops being green',
+        PRIV,
+        [
+            ('Self::Allowed => p.green,',
+             'Self::Allowed => p.blue,'),
+        ],
+        ["desktop"],
+        [
+            'every_choice_this_panel_makes_hands_over_the_role_it_claims',
+            'every_text_this_panel_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        'TTTTTTTTTTTTTTTTTTTTTTTTTTT: a denied permission is reported in the same green as an allowed one',
+        PRIV,
+        [
+            ('Self::Denied => p.red,',
+             'Self::Denied => p.green,'),
+        ],
+        ["desktop"],
+        [
+            'allowed_and_denied_stay_apart_under_every_accent_and_mode',
+            'every_choice_this_panel_makes_hands_over_the_role_it_claims',
+            'every_text_this_panel_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        'UUUUUUUUUUUUUUUUUUUUUUUUUUU: an undecided permission is dressed up as an ordinary secondary label',
+        PRIV,
+        [
+            ('Self::NotDecided => p.overlay0,',
+             'Self::NotDecided => p.subtext0,'),
+        ],
+        ["desktop"],
+        [
+            'every_choice_this_panel_makes_hands_over_the_role_it_claims',
+            'every_text_this_panel_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        'VVVVVVVVVVVVVVVVVVVVVVVVVVV: an allowed permission follows the accent instead of meaning allowed',
+        PRIV,
+        [
+            ('Self::Allowed => p.green,',
+             'Self::Allowed => p.accent,'),
+        ],
+        ["desktop"],
+        [
+            'allowed_and_denied_stay_apart_under_every_accent_and_mode',
+            'every_choice_this_panel_makes_hands_over_the_role_it_claims',
+            'every_text_this_panel_draws_is_in_the_role_it_claims',
+            'nothing_but_the_selection_labels_moves_when_the_accent_does',
+        ],
+    ),
+    (
+        'WWWWWWWWWWWWWWWWWWWWWWWWWWW: the detail view never shows its no-apps notice',
+        PRIV,
+        [
+            ('if apps.is_empty() {',
+             'if false {'),
+        ],
+        ["desktop"],
+        [
+            'every_text_this_panel_draws_is_in_the_role_it_claims',
+            'the_fixtures_take_every_branch_this_panel_has',
+        ],
+    ),
+    (
+        'XXXXXXXXXXXXXXXXXXXXXXXXXXX: the activity tab never shows its empty state',
+        PRIV,
+        [
+            ('if log.is_empty() {',
+             'if false {'),
+        ],
+        ["desktop"],
+        [
+            'every_text_this_panel_draws_is_in_the_role_it_claims',
+            'the_fixtures_take_every_branch_this_panel_has',
+        ],
+    ),
+    (
+        'YYYYYYYYYYYYYYYYYYYYYYYYYYY: the overview never reports how many apps are allowed',
+        PRIV,
+        [
+            ('} else if count > 0 {',
+             '} else if false {'),
+        ],
+        ["desktop"],
+        [
+            'every_choice_this_panel_makes_hands_over_the_role_it_claims',
+            'the_fixtures_take_every_branch_this_panel_has',
+        ],
+    ),
+    (
+        'ZZZZZZZZZZZZZZZZZZZZZZZZZZZ: a denied access is logged with the tick of an allowed one',
+        PRIV,
+        [
+            ('let status = if entry.allowed { "✓" } else { "✕" };',
+             'let status = if entry.allowed { "✓" } else { "✓" };'),
+        ],
+        ["desktop"],
+        [
+            'every_choice_this_panel_makes_hands_over_the_role_it_claims',
+            'the_fixtures_take_every_branch_this_panel_has',
+        ],
+    ),
+    # ---- print_manager.rs (module 26 of 49) ----
+    (
+        'AAAAAAAAAAAAAAAAAAAAAAAAAAAA: the dialog box is frozen back to Mocha base',
+        PRINTMGR,
+        [
+            ('            height: dh,\n            color: p.base,',
+             '            height: dh,\n            color: Color::from_hex(0x1E1E2E),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_dialog_draws_comes_from_its_palette',
+            'every_rectangle_this_dialog_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        'BBBBBBBBBBBBBBBBBBBBBBBBBBBB: the dialog box sinks to the recessed role',
+        PRINTMGR,
+        [
+            ('            height: dh,\n            color: p.base,',
+             '            height: dh,\n            color: p.mantle,'),
+        ],
+        ["desktop"],
+        [
+            'every_rectangle_this_dialog_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        'CCCCCCCCCCCCCCCCCCCCCCCCCCCC: the title is frozen back to Mocha text',
+        PRINTMGR,
+        [
+            ('            font_size: 16.0,\n            color: p.text,',
+             '            font_size: 16.0,\n            color: Color::from_hex(0xCDD6F4),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_dialog_draws_comes_from_its_palette',
+            'every_text_this_dialog_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        'DDDDDDDDDDDDDDDDDDDDDDDDDDDD: the title drops to secondary text',
+        PRINTMGR,
+        [
+            ('            font_size: 16.0,\n            color: p.text,',
+             '            font_size: 16.0,\n            color: p.subtext0,'),
+        ],
+        ["desktop"],
+        [
+            'every_text_this_dialog_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        'EEEEEEEEEEEEEEEEEEEEEEEEEEEE: the document name is promoted to primary text',
+        PRINTMGR,
+        [
+            ('            text: format!("Document: {}", self.document_name),\n            font_size: 12.0,\n            color: p.subtext0,',
+             '            text: format!("Document: {}", self.document_name),\n            font_size: 12.0,\n            color: p.text,'),
+        ],
+        ["desktop"],
+        [
+            'every_text_this_dialog_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        'FFFFFFFFFFFFFFFFFFFFFFFFFFFF: the document name is frozen back to Mocha subtext',
+        PRINTMGR,
+        [
+            ('            text: format!("Document: {}", self.document_name),\n            font_size: 12.0,\n            color: p.subtext0,',
+             '            text: format!("Document: {}", self.document_name),\n            font_size: 12.0,\n            color: Color::from_hex(0xA6ADC8),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_dialog_draws_comes_from_its_palette',
+            'every_text_this_dialog_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        'GGGGGGGGGGGGGGGGGGGGGGGGGGGG: the printer caption dims to secondary text',
+        PRINTMGR,
+        [
+            ('            text: "Printer:".to_string(),\n            font_size: 12.0,\n            color: p.text,',
+             '            text: "Printer:".to_string(),\n            font_size: 12.0,\n            color: p.subtext0,'),
+        ],
+        ["desktop"],
+        [
+            'every_text_this_dialog_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        "HHHHHHHHHHHHHHHHHHHHHHHHHHHH: the selected printer's name stops following the accent",
+        PRINTMGR,
+        [
+            ('            text: printer_name.to_string(),\n            font_size: 12.0,\n            color: p.accent,',
+             '            text: printer_name.to_string(),\n            font_size: 12.0,\n            color: p.blue,'),
+        ],
+        ["desktop"],
+        [
+            'every_text_this_dialog_draws_is_in_the_role_it_claims',
+            'nothing_but_the_selection_and_the_default_action_moves_with_the_accent',
+        ],
+    ),
+    (
+        "IIIIIIIIIIIIIIIIIIIIIIIIIIII: the selected printer's name is drawn as ordinary body text",
+        PRINTMGR,
+        [
+            ('            text: printer_name.to_string(),\n            font_size: 12.0,\n            color: p.accent,',
+             '            text: printer_name.to_string(),\n            font_size: 12.0,\n            color: p.text,'),
+        ],
+        ["desktop"],
+        [
+            'every_text_this_dialog_draws_is_in_the_role_it_claims',
+            'nothing_but_the_selection_and_the_default_action_moves_with_the_accent',
+        ],
+    ),
+    (
+        "JJJJJJJJJJJJJJJJJJJJJJJJJJJJ: the printer field's fill takes the accent as well as its label",
+        PRINTMGR,
+        [
+            ('            height: 24.0,\n            color: p.surface0,',
+             '            height: 24.0,\n            color: p.accent,'),
+        ],
+        ["desktop"],
+        [
+            'every_rectangle_this_dialog_draws_is_in_the_role_it_claims',
+            'nothing_but_the_selection_and_the_default_action_moves_with_the_accent',
+        ],
+    ),
+    (
+        'KKKKKKKKKKKKKKKKKKKKKKKKKKKK: the printer field is frozen back to Mocha surface0',
+        PRINTMGR,
+        [
+            ('            height: 24.0,\n            color: p.surface0,',
+             '            height: 24.0,\n            color: Color::from_hex(0x313244),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_dialog_draws_comes_from_its_palette',
+            'every_rectangle_this_dialog_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        'LLLLLLLLLLLLLLLLLLLLLLLLLLLL: every settings label dims to secondary text',
+        PRINTMGR,
+        [
+            ('                font_size: 12.0,\n                color: p.text,',
+             '                font_size: 12.0,\n                color: p.subtext0,'),
+        ],
+        ["desktop"],
+        [
+            'every_text_this_dialog_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        'MMMMMMMMMMMMMMMMMMMMMMMMMMMM: every settings value is promoted to primary text',
+        PRINTMGR,
+        [
+            ('                text: value.clone(),\n                font_size: 12.0,\n                color: p.subtext0,',
+             '                text: value.clone(),\n                font_size: 12.0,\n                color: p.text,'),
+        ],
+        ["desktop"],
+        [
+            'every_text_this_dialog_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        'NNNNNNNNNNNNNNNNNNNNNNNNNNNN: a validation error is reported in the accent instead of red',
+        PRINTMGR,
+        [
+            ('                font_size: 11.0,\n                color: p.red,',
+             '                font_size: 11.0,\n                color: p.accent,'),
+        ],
+        ["desktop"],
+        [
+            'every_text_this_dialog_draws_is_in_the_role_it_claims',
+            'nothing_but_the_selection_and_the_default_action_moves_with_the_accent',
+        ],
+    ),
+    (
+        'OOOOOOOOOOOOOOOOOOOOOOOOOOOO: a validation error is frozen back to Mocha red',
+        PRINTMGR,
+        [
+            ('                font_size: 11.0,\n                color: p.red,',
+             '                font_size: 11.0,\n                color: Color::from_hex(0xF38BA8),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_dialog_draws_comes_from_its_palette',
+            'every_text_this_dialog_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        'PPPPPPPPPPPPPPPPPPPPPPPPPPPP: a validation error is drawn as ordinary body text',
+        PRINTMGR,
+        [
+            ('                font_size: 11.0,\n                color: p.red,',
+             '                font_size: 11.0,\n                color: p.text,'),
+        ],
+        ["desktop"],
+        [
+            'every_text_this_dialog_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        'QQQQQQQQQQQQQQQQQQQQQQQQQQQQ: the Print button stops being the accent-coloured default action',
+        PRINTMGR,
+        [
+            ('            height: 28.0,\n            color: p.accent,',
+             '            height: 28.0,\n            color: p.blue,'),
+        ],
+        ["desktop"],
+        [
+            'every_rectangle_this_dialog_draws_is_in_the_role_it_claims',
+            'nothing_but_the_selection_and_the_default_action_moves_with_the_accent',
+        ],
+    ),
+    (
+        'RRRRRRRRRRRRRRRRRRRRRRRRRRRR: the Print button is frozen back to Mocha blue',
+        PRINTMGR,
+        [
+            ('            height: 28.0,\n            color: p.accent,',
+             '            height: 28.0,\n            color: Color::from_hex(0x89B4FA),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_dialog_draws_comes_from_its_palette',
+            'every_rectangle_this_dialog_draws_is_in_the_role_it_claims',
+            'nothing_but_the_selection_and_the_default_action_moves_with_the_accent',
+        ],
+    ),
+    (
+        "SSSSSSSSSSSSSSSSSSSSSSSSSSSS: the Print button's ink is named rather than derived from its fill",
+        PRINTMGR,
+        [
+            ('            text: "Print".to_string(),\n            font_size: 12.0,\n            color: p.on_accent(),',
+             '            text: "Print".to_string(),\n            font_size: 12.0,\n            color: p.base,'),
+        ],
+        ["desktop"],
+        [
+            'every_text_this_dialog_draws_is_in_the_role_it_claims',
+            'nothing_but_the_selection_and_the_default_action_moves_with_the_accent',
+            'the_default_action_ink_stays_readable_in_both_modes',
+        ],
+    ),
+    (
+        "TTTTTTTTTTTTTTTTTTTTTTTTTTTT: the Print button's ink is frozen back to Mocha base",
+        PRINTMGR,
+        [
+            ('            text: "Print".to_string(),\n            font_size: 12.0,\n            color: p.on_accent(),',
+             '            text: "Print".to_string(),\n            font_size: 12.0,\n            color: Color::from_hex(0x1E1E2E),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_dialog_draws_comes_from_its_palette',
+            'every_text_this_dialog_draws_is_in_the_role_it_claims',
+            'nothing_but_the_selection_and_the_default_action_moves_with_the_accent',
+            'the_default_action_ink_stays_readable_in_both_modes',
+        ],
+    ),
+    (
+        'UUUUUUUUUUUUUUUUUUUUUUUUUUUU: the Cancel button is dressed up as a second default action',
+        PRINTMGR,
+        [
+            ('            width: 80.0,\n            height: 28.0,\n            color: p.surface1,',
+             '            width: 80.0,\n            height: 28.0,\n            color: p.accent,'),
+        ],
+        ["desktop"],
+        [
+            'every_rectangle_this_dialog_draws_is_in_the_role_it_claims',
+            'nothing_but_the_selection_and_the_default_action_moves_with_the_accent',
+        ],
+    ),
+    (
+        'VVVVVVVVVVVVVVVVVVVVVVVVVVVV: the Cancel button is frozen back to Mocha surface1',
+        PRINTMGR,
+        [
+            ('            width: 80.0,\n            height: 28.0,\n            color: p.surface1,',
+             '            width: 80.0,\n            height: 28.0,\n            color: Color::from_hex(0x45475A),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_dialog_draws_comes_from_its_palette',
+            'every_rectangle_this_dialog_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        'WWWWWWWWWWWWWWWWWWWWWWWWWWWW: the Cancel label is inked as though it sat on the accent',
+        PRINTMGR,
+        [
+            ('            text: "Cancel".to_string(),\n            font_size: 12.0,\n            color: p.text,',
+             '            text: "Cancel".to_string(),\n            font_size: 12.0,\n            color: p.on_accent(),'),
+        ],
+        ["desktop"],
+        [
+            'every_text_this_dialog_draws_is_in_the_role_it_claims',
+            'nothing_but_the_selection_and_the_default_action_moves_with_the_accent',
+        ],
+    ),
+    (
+        'XXXXXXXXXXXXXXXXXXXXXXXXXXXX: an offline printer stops reporting itself in red',
+        PRINTMGR,
+        [
+            ('        if !self.online {\n            p.red',
+             '        if !self.online {\n            p.yellow'),
+        ],
+        ["desktop"],
+        [
+            'every_choice_this_module_makes_hands_over_the_role_it_claims',
+        ],
+    ),
+    (
+        'YYYYYYYYYYYYYYYYYYYYYYYYYYYY: an offline printer reports its state in the accent',
+        PRINTMGR,
+        [
+            ('        if !self.online {\n            p.red',
+             '        if !self.online {\n            p.accent'),
+        ],
+        ["desktop"],
+        [
+            'every_choice_this_module_makes_hands_over_the_role_it_claims',
+        ],
+    ),
+    (
+        'ZZZZZZZZZZZZZZZZZZZZZZZZZZZZ: a busy printer is reported as ready',
+        PRINTMGR,
+        [
+            ('        } else if self.queue_count > 0 {\n            p.yellow',
+             '        } else if self.queue_count > 0 {\n            p.green'),
+        ],
+        ["desktop"],
+        [
+            'every_choice_this_module_makes_hands_over_the_role_it_claims',
+        ],
+    ),
+    (
+        'AAAAAAAAAAAAAAAAAAAAAAAAAAAAA: a ready printer is reported as offline',
+        PRINTMGR,
+        [
+            ('        } else {\n            p.green\n        }\n    }',
+             '        } else {\n            p.red\n        }\n    }'),
+        ],
+        ["desktop"],
+        [
+            'every_choice_this_module_makes_hands_over_the_role_it_claims',
+        ],
+    ),
+    (
+        'BBBBBBBBBBBBBBBBBBBBBBBBBBBBB: a queued job follows the accent instead of meaning queued',
+        PRINTMGR,
+        [
+            ('            Self::Queued => p.blue,',
+             '            Self::Queued => p.accent,'),
+        ],
+        ["desktop"],
+        [
+            'every_choice_this_module_makes_hands_over_the_role_it_claims',
+        ],
+    ),
+    (
+        'CCCCCCCCCCCCCCCCCCCCCCCCCCCCC: a queued job is frozen back to Mocha blue',
+        PRINTMGR,
+        [
+            ('            Self::Queued => p.blue,',
+             '            Self::Queued => Color::from_hex(0x89B4FA),'),
+        ],
+        ["desktop"],
+        [
+            'every_choice_this_module_makes_hands_over_the_role_it_claims',
+        ],
+    ),
+    (
+        'DDDDDDDDDDDDDDDDDDDDDDDDDDDDD: a queued job is coloured as though it had finished',
+        PRINTMGR,
+        [
+            ('            Self::Queued => p.blue,',
+             '            Self::Queued => p.green,'),
+        ],
+        ["desktop"],
+        [
+            'every_choice_this_module_makes_hands_over_the_role_it_claims',
+            'every_state_a_job_can_be_in_stays_apart_from_every_other',
+        ],
+    ),
+    (
+        'EEEEEEEEEEEEEEEEEEEEEEEEEEEEE: a printing job is indistinguishable from a queued one',
+        PRINTMGR,
+        [
+            ('            Self::Printing => p.peach,',
+             '            Self::Printing => p.blue,'),
+        ],
+        ["desktop"],
+        [
+            'every_choice_this_module_makes_hands_over_the_role_it_claims',
+            'every_state_a_job_can_be_in_stays_apart_from_every_other',
+        ],
+    ),
+    (
+        'FFFFFFFFFFFFFFFFFFFFFFFFFFFFF: a paused job is indistinguishable from a cancelled one',
+        PRINTMGR,
+        [
+            ('            Self::Paused => p.yellow,',
+             '            Self::Paused => p.overlay0,'),
+        ],
+        ["desktop"],
+        [
+            'every_choice_this_module_makes_hands_over_the_role_it_claims',
+            'every_state_a_job_can_be_in_stays_apart_from_every_other',
+        ],
+    ),
+    (
+        'GGGGGGGGGGGGGGGGGGGGGGGGGGGGG: a completed job is reported in the red of a failed one',
+        PRINTMGR,
+        [
+            ('            Self::Completed => p.green,',
+             '            Self::Completed => p.red,'),
+        ],
+        ["desktop"],
+        [
+            'every_choice_this_module_makes_hands_over_the_role_it_claims',
+            'every_state_a_job_can_be_in_stays_apart_from_every_other',
+        ],
+    ),
+    (
+        'HHHHHHHHHHHHHHHHHHHHHHHHHHHHH: a failed job is reported in the green of a completed one',
+        PRINTMGR,
+        [
+            ('            Self::Failed => p.red,',
+             '            Self::Failed => p.green,'),
+        ],
+        ["desktop"],
+        [
+            'every_choice_this_module_makes_hands_over_the_role_it_claims',
+            'every_state_a_job_can_be_in_stays_apart_from_every_other',
+        ],
+    ),
+    (
+        'IIIIIIIIIIIIIIIIIIIIIIIIIIIII: a cancelled job follows the accent',
+        PRINTMGR,
+        [
+            ('            Self::Cancelled => p.overlay0,',
+             '            Self::Cancelled => p.accent,'),
+        ],
+        ["desktop"],
+        [
+            'every_choice_this_module_makes_hands_over_the_role_it_claims',
+        ],
+    ),
+    (
+        'JJJJJJJJJJJJJJJJJJJJJJJJJJJJJ: the hidden dialog draws itself anyway',
+        PRINTMGR,
+        [
+            ('        if !self.visible {\n            return cmds;',
+             '        if false {\n            return cmds;'),
+        ],
+        ["desktop"],
+        [
+            'nothing_but_the_selection_and_the_default_action_moves_with_the_accent',
+            'test_dialog_render_hidden',
+            'the_fixtures_take_every_branch_this_dialog_has',
+        ],
+    ),
+    (
+        'KKKKKKKKKKKKKKKKKKKKKKKKKKKKK: the orientation row always reads Portrait',
+        PRINTMGR,
+        [
+            ('                if self.settings.orientation == Orientation::Portrait {',
+             '                if true {'),
+        ],
+        ["desktop"],
+        [
+            'the_fixtures_take_every_branch_this_dialog_has',
+        ],
+    ),
+    (
+        'LLLLLLLLLLLLLLLLLLLLLLLLLLLLL: the duplex row always reads Off',
+        PRINTMGR,
+        [
+            ('                if self.settings.duplex { "On" } else { "Off" }.to_string(),',
+             '                if false { "On" } else { "Off" }.to_string(),'),
+        ],
+        ["desktop"],
+        [
+            'the_fixtures_take_every_branch_this_dialog_has',
+        ],
+    ),
+    (
+        'MMMMMMMMMMMMMMMMMMMMMMMMMMMMM: the printer field never names the selected printer',
+        PRINTMGR,
+        [
+            ('            .map(|p| p.name.as_str())\n            .unwrap_or("None");',
+             '            .map(|_p| "None")\n            .unwrap_or("None");'),
+        ],
+        ["desktop"],
+        [
+            'every_text_this_dialog_draws_is_in_the_role_it_claims',
+            'the_fixtures_take_every_branch_this_dialog_has',
+        ],
+    ),
+    (
+        'NNNNNNNNNNNNNNNNNNNNNNNNNNNNN: validation errors are never drawn',
+        PRINTMGR,
+        [
+            ('        for err in &self.validation_errors {',
+             '        for err in &self.validation_errors[..0] {'),
+        ],
+        ["desktop"],
+        [
+            'every_text_this_dialog_draws_is_in_the_role_it_claims',
+            'the_fixtures_take_every_branch_this_dialog_has',
+        ],
+    ),
+    # ---- power.rs (module 27 of 49) ----
+    (
+        'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAA: the AC hint is frozen back to Mocha subtext0',
+        POWER,
+        [
+            ('            text: "AC".to_string(),\n            color: p.subtext0,',
+             '            text: "AC".to_string(),\n            color: Color::from_hex(0xA6ADC8),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_taskbar_and_settings_draw_comes_from_their_palette',
+            'every_text_this_module_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        'BBBBBBBBBBBBBBBBBBBBBBBBBBBBBB: the AC hint is promoted to primary text',
+        POWER,
+        [
+            ('            text: "AC".to_string(),\n            color: p.subtext0,',
+             '            text: "AC".to_string(),\n            color: p.text,'),
+        ],
+        ["desktop"],
+        [
+            'every_text_this_module_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        'CCCCCCCCCCCCCCCCCCCCCCCCCCCCCC: the AC hint takes the accent',
+        POWER,
+        [
+            ('            text: "AC".to_string(),\n            color: p.subtext0,',
+             '            text: "AC".to_string(),\n            color: p.accent,'),
+        ],
+        ["desktop"],
+        [
+            'every_text_this_module_draws_is_in_the_role_it_claims',
+            'nothing_this_module_draws_moves_when_the_accent_does',
+        ],
+    ),
+    (
+        'DDDDDDDDDDDDDDDDDDDDDDDDDDDDDD: the battery outline is frozen back to Mocha text',
+        POWER,
+        [
+            ('        width: batt_w,\n        height: batt_h,\n        color: p.text,',
+             '        width: batt_w,\n        height: batt_h,\n        color: Color::from_hex(0xCDD6F4),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_taskbar_and_settings_draw_comes_from_their_palette',
+            'every_rectangle_this_module_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        'EEEEEEEEEEEEEEEEEEEEEEEEEEEEEE: the battery outline fades to secondary ink',
+        POWER,
+        [
+            ('        width: batt_w,\n        height: batt_h,\n        color: p.text,',
+             '        width: batt_w,\n        height: batt_h,\n        color: p.subtext0,'),
+        ],
+        ["desktop"],
+        [
+            'every_rectangle_this_module_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        'FFFFFFFFFFFFFFFFFFFFFFFFFFFFFF: the battery outline takes the accent',
+        POWER,
+        [
+            ('        width: batt_w,\n        height: batt_h,\n        color: p.text,',
+             '        width: batt_w,\n        height: batt_h,\n        color: p.accent,'),
+        ],
+        ["desktop"],
+        [
+            'every_rectangle_this_module_draws_is_in_the_role_it_claims',
+            'nothing_this_module_draws_moves_when_the_accent_does',
+        ],
+    ),
+    (
+        'GGGGGGGGGGGGGGGGGGGGGGGGGGGGGG: the battery tip is frozen back to Mocha text',
+        POWER,
+        [
+            ('        width: tip_w,\n        height: tip_h,\n        color: p.text,',
+             '        width: tip_w,\n        height: tip_h,\n        color: Color::from_hex(0xCDD6F4),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_taskbar_and_settings_draw_comes_from_their_palette',
+            'every_rectangle_this_module_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        'HHHHHHHHHHHHHHHHHHHHHHHHHHHHHH: the battery tip fades to the dimmest ink',
+        POWER,
+        [
+            ('        width: tip_w,\n        height: tip_h,\n        color: p.text,',
+             '        width: tip_w,\n        height: tip_h,\n        color: p.overlay0,'),
+        ],
+        ["desktop"],
+        [
+            'every_rectangle_this_module_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        'IIIIIIIIIIIIIIIIIIIIIIIIIIIIII: the battery tip takes the accent',
+        POWER,
+        [
+            ('        width: tip_w,\n        height: tip_h,\n        color: p.text,',
+             '        width: tip_w,\n        height: tip_h,\n        color: p.accent,'),
+        ],
+        ["desktop"],
+        [
+            'every_rectangle_this_module_draws_is_in_the_role_it_claims',
+            'nothing_this_module_draws_moves_when_the_accent_does',
+        ],
+    ),
+    (
+        "JJJJJJJJJJJJJJJJJJJJJJJJJJJJJJ: the gauge's critical step is frozen back to its Mocha value",
+        POWER,
+        [
+            ('        p.red\n',
+             '        Color::from_hex(0xF38BA8)\n'),
+        ],
+        ["desktop"],
+        [
+            'every_choice_this_module_makes_hands_over_the_role_it_claims',
+            'every_colour_the_taskbar_and_settings_draw_comes_from_their_palette',
+        ],
+    ),
+    (
+        "KKKKKKKKKKKKKKKKKKKKKKKKKKKKKK: the gauge's critical step is swapped with its neighbour",
+        POWER,
+        [
+            ('        p.red\n',
+             '        p.yellow\n'),
+        ],
+        ["desktop"],
+        [
+            'every_choice_this_module_makes_hands_over_the_role_it_claims',
+            'the_fixtures_take_every_branch_this_module_has',
+        ],
+    ),
+    (
+        "LLLLLLLLLLLLLLLLLLLLLLLLLLLLLL: the gauge's critical step takes the accent",
+        POWER,
+        [
+            ('        p.red\n',
+             '        p.accent\n'),
+        ],
+        ["desktop"],
+        [
+            'every_choice_this_module_makes_hands_over_the_role_it_claims',
+            'nothing_this_module_draws_moves_when_the_accent_does',
+            'the_fixtures_take_every_branch_this_module_has',
+        ],
+    ),
+    (
+        "MMMMMMMMMMMMMMMMMMMMMMMMMMMMMM: the gauge's low step is frozen back to its Mocha value",
+        POWER,
+        [
+            ('        p.yellow\n',
+             '        Color::from_hex(0xF9E2AF)\n'),
+        ],
+        ["desktop"],
+        [
+            'every_choice_this_module_makes_hands_over_the_role_it_claims',
+            'every_colour_the_taskbar_and_settings_draw_comes_from_their_palette',
+        ],
+    ),
+    (
+        "NNNNNNNNNNNNNNNNNNNNNNNNNNNNNN: the gauge's low step is swapped with its neighbour",
+        POWER,
+        [
+            ('        p.yellow\n',
+             '        p.red\n'),
+        ],
+        ["desktop"],
+        [
+            'every_choice_this_module_makes_hands_over_the_role_it_claims',
+            'the_fixtures_take_every_branch_this_module_has',
+        ],
+    ),
+    (
+        "OOOOOOOOOOOOOOOOOOOOOOOOOOOOOO: the gauge's low step takes the accent",
+        POWER,
+        [
+            ('        p.yellow\n',
+             '        p.accent\n'),
+        ],
+        ["desktop"],
+        [
+            'every_choice_this_module_makes_hands_over_the_role_it_claims',
+            'nothing_this_module_draws_moves_when_the_accent_does',
+            'the_fixtures_take_every_branch_this_module_has',
+        ],
+    ),
+    (
+        "PPPPPPPPPPPPPPPPPPPPPPPPPPPPPP: the gauge's nearly full step is frozen back to its Mocha value",
+        POWER,
+        [
+            ('        p.green\n',
+             '        Color::from_hex(0xA6E3A1)\n'),
+        ],
+        ["desktop"],
+        [
+            'every_choice_this_module_makes_hands_over_the_role_it_claims',
+            'every_colour_the_taskbar_and_settings_draw_comes_from_their_palette',
+        ],
+    ),
+    (
+        "QQQQQQQQQQQQQQQQQQQQQQQQQQQQQQ: the gauge's nearly full step is swapped with its neighbour",
+        POWER,
+        [
+            ('        p.green\n',
+             '        p.blue\n'),
+        ],
+        ["desktop"],
+        [
+            'every_choice_this_module_makes_hands_over_the_role_it_claims',
+            'the_fixtures_take_every_branch_this_module_has',
+        ],
+    ),
+    (
+        "RRRRRRRRRRRRRRRRRRRRRRRRRRRRRR: the gauge's nearly full step takes the accent",
+        POWER,
+        [
+            ('        p.green\n',
+             '        p.accent\n'),
+        ],
+        ["desktop"],
+        [
+            'every_choice_this_module_makes_hands_over_the_role_it_claims',
+            'nothing_this_module_draws_moves_when_the_accent_does',
+            'the_fixtures_take_every_branch_this_module_has',
+        ],
+    ),
+    (
+        "SSSSSSSSSSSSSSSSSSSSSSSSSSSSSS: the gauge's normal step is frozen back to its Mocha value",
+        POWER,
+        [
+            ('        p.blue\n',
+             '        Color::from_hex(0x89B4FA)\n'),
+        ],
+        ["desktop"],
+        [
+            'every_choice_this_module_makes_hands_over_the_role_it_claims',
+            'every_colour_the_taskbar_and_settings_draw_comes_from_their_palette',
+        ],
+    ),
+    (
+        "TTTTTTTTTTTTTTTTTTTTTTTTTTTTTT: the gauge's normal step is swapped with its neighbour",
+        POWER,
+        [
+            ('        p.blue\n',
+             '        p.green\n'),
+        ],
+        ["desktop"],
+        [
+            'every_choice_this_module_makes_hands_over_the_role_it_claims',
+            'the_fixtures_take_every_branch_this_module_has',
+        ],
+    ),
+    (
+        "UUUUUUUUUUUUUUUUUUUUUUUUUUUUUU: the gauge's normal step takes the accent",
+        POWER,
+        [
+            ('        p.blue\n',
+             '        p.accent\n'),
+        ],
+        ["desktop"],
+        [
+            'every_choice_this_module_makes_hands_over_the_role_it_claims',
+            'nothing_this_module_draws_moves_when_the_accent_does',
+        ],
+    ),
+    (
+        'VVVVVVVVVVVVVVVVVVVVVVVVVVVVVV: the charging bolt is frozen back to Mocha yellow',
+        POWER,
+        [
+            ('            text: "\\u{26A1}".to_string(), // ⚡\n            color: p.yellow,',
+             '            text: "\\u{26A1}".to_string(), // ⚡\n            color: Color::from_hex(0xF9E2AF),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_taskbar_and_settings_draw_comes_from_their_palette',
+            'every_text_this_module_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        'WWWWWWWWWWWWWWWWWWWWWWWWWWWWWW: the charging bolt turns into an alarm',
+        POWER,
+        [
+            ('            text: "\\u{26A1}".to_string(), // ⚡\n            color: p.yellow,',
+             '            text: "\\u{26A1}".to_string(), // ⚡\n            color: p.red,'),
+        ],
+        ["desktop"],
+        [
+            'every_text_this_module_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        'XXXXXXXXXXXXXXXXXXXXXXXXXXXXXX: the charging bolt takes the accent',
+        POWER,
+        [
+            ('            text: "\\u{26A1}".to_string(), // ⚡\n            color: p.yellow,',
+             '            text: "\\u{26A1}".to_string(), // ⚡\n            color: p.accent,'),
+        ],
+        ["desktop"],
+        [
+            'every_text_this_module_draws_is_in_the_role_it_claims',
+            'nothing_this_module_draws_moves_when_the_accent_does',
+        ],
+    ),
+    (
+        'YYYYYYYYYYYYYYYYYYYYYYYYYYYYYY: the percentage readout is frozen back to Mocha subtext0',
+        POWER,
+        [
+            ('            text: format!("{}%", battery.charge_pct),\n            color: p.subtext0,',
+             '            text: format!("{}%", battery.charge_pct),\n            color: Color::from_hex(0xA6ADC8),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_taskbar_and_settings_draw_comes_from_their_palette',
+            'every_text_this_module_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        'ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ: the percentage readout is promoted to primary text',
+        POWER,
+        [
+            ('            text: format!("{}%", battery.charge_pct),\n            color: p.subtext0,',
+             '            text: format!("{}%", battery.charge_pct),\n            color: p.text,'),
+        ],
+        ["desktop"],
+        [
+            'every_text_this_module_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA: the percentage readout takes the accent',
+        POWER,
+        [
+            ('            text: format!("{}%", battery.charge_pct),\n            color: p.subtext0,',
+             '            text: format!("{}%", battery.charge_pct),\n            color: p.accent,'),
+        ],
+        ["desktop"],
+        [
+            'every_text_this_module_draws_is_in_the_role_it_claims',
+            'nothing_this_module_draws_moves_when_the_accent_does',
+        ],
+    ),
+    (
+        'BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB: the Balanced badge is frozen back to its Mocha value',
+        POWER,
+        [
+            ('        PowerProfile::Balanced => ("Balanced", p.blue),',
+             '        PowerProfile::Balanced => ("Balanced", Color::from_hex(0x89B4FA)),'),
+        ],
+        ["desktop"],
+        [
+            'every_choice_this_module_makes_hands_over_the_role_it_claims',
+            'every_colour_the_taskbar_and_settings_draw_comes_from_their_palette',
+            'every_text_this_module_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        "CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC: the Balanced badge is swapped with another profile's hue",
+        POWER,
+        [
+            ('        PowerProfile::Balanced => ("Balanced", p.blue),',
+             '        PowerProfile::Balanced => ("Balanced", p.peach),'),
+        ],
+        ["desktop"],
+        [
+            'every_choice_this_module_makes_hands_over_the_role_it_claims',
+            'every_text_this_module_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        'DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD: the Balanced badge takes the accent',
+        POWER,
+        [
+            ('        PowerProfile::Balanced => ("Balanced", p.blue),',
+             '        PowerProfile::Balanced => ("Balanced", p.accent),'),
+        ],
+        ["desktop"],
+        [
+            'every_choice_this_module_makes_hands_over_the_role_it_claims',
+            'every_text_this_module_draws_is_in_the_role_it_claims',
+            'nothing_this_module_draws_moves_when_the_accent_does',
+        ],
+    ),
+    (
+        'EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE: the Performance badge is frozen back to its Mocha value',
+        POWER,
+        [
+            ('        PowerProfile::Performance => ("Performance", p.peach),',
+             '        PowerProfile::Performance => ("Performance", Color::from_hex(0xFAB387)),'),
+        ],
+        ["desktop"],
+        [
+            'every_choice_this_module_makes_hands_over_the_role_it_claims',
+            'every_colour_the_taskbar_and_settings_draw_comes_from_their_palette',
+        ],
+    ),
+    (
+        "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF: the Performance badge is swapped with another profile's hue",
+        POWER,
+        [
+            ('        PowerProfile::Performance => ("Performance", p.peach),',
+             '        PowerProfile::Performance => ("Performance", p.blue),'),
+        ],
+        ["desktop"],
+        [
+            'every_choice_this_module_makes_hands_over_the_role_it_claims',
+        ],
+    ),
+    (
+        'GGGGGGGGGGGGGGGGGGGGGGGGGGGGGGG: the Performance badge takes the accent',
+        POWER,
+        [
+            ('        PowerProfile::Performance => ("Performance", p.peach),',
+             '        PowerProfile::Performance => ("Performance", p.accent),'),
+        ],
+        ["desktop"],
+        [
+            'every_choice_this_module_makes_hands_over_the_role_it_claims',
+            'nothing_this_module_draws_moves_when_the_accent_does',
+        ],
+    ),
+    (
+        'HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH: the Power Saver badge is frozen back to its Mocha value',
+        POWER,
+        [
+            ('        PowerProfile::PowerSaver => ("Power Saver", p.green),',
+             '        PowerProfile::PowerSaver => ("Power Saver", Color::from_hex(0xA6E3A1)),'),
+        ],
+        ["desktop"],
+        [
+            'every_choice_this_module_makes_hands_over_the_role_it_claims',
+            'every_colour_the_taskbar_and_settings_draw_comes_from_their_palette',
+        ],
+    ),
+    (
+        "IIIIIIIIIIIIIIIIIIIIIIIIIIIIIII: the Power Saver badge is swapped with another profile's hue",
+        POWER,
+        [
+            ('        PowerProfile::PowerSaver => ("Power Saver", p.green),',
+             '        PowerProfile::PowerSaver => ("Power Saver", p.lavender),'),
+        ],
+        ["desktop"],
+        [
+            'every_choice_this_module_makes_hands_over_the_role_it_claims',
+        ],
+    ),
+    (
+        'JJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJ: the Power Saver badge takes the accent',
+        POWER,
+        [
+            ('        PowerProfile::PowerSaver => ("Power Saver", p.green),',
+             '        PowerProfile::PowerSaver => ("Power Saver", p.accent),'),
+        ],
+        ["desktop"],
+        [
+            'every_choice_this_module_makes_hands_over_the_role_it_claims',
+            'nothing_this_module_draws_moves_when_the_accent_does',
+        ],
+    ),
+    (
+        'KKKKKKKKKKKKKKKKKKKKKKKKKKKKKKK: the Custom badge is frozen back to its Mocha value',
+        POWER,
+        [
+            ('        PowerProfile::Custom => ("Custom", p.lavender),',
+             '        PowerProfile::Custom => ("Custom", Color::from_hex(0xB4BEFE)),'),
+        ],
+        ["desktop"],
+        [
+            'every_choice_this_module_makes_hands_over_the_role_it_claims',
+            'every_colour_the_taskbar_and_settings_draw_comes_from_their_palette',
+        ],
+    ),
+    (
+        "LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLL: the Custom badge is swapped with another profile's hue",
+        POWER,
+        [
+            ('        PowerProfile::Custom => ("Custom", p.lavender),',
+             '        PowerProfile::Custom => ("Custom", p.green),'),
+        ],
+        ["desktop"],
+        [
+            'every_choice_this_module_makes_hands_over_the_role_it_claims',
+        ],
+    ),
+    (
+        'MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM: the Custom badge takes the accent',
+        POWER,
+        [
+            ('        PowerProfile::Custom => ("Custom", p.lavender),',
+             '        PowerProfile::Custom => ("Custom", p.accent),'),
+        ],
+        ["desktop"],
+        [
+            'every_choice_this_module_makes_hands_over_the_role_it_claims',
+            'nothing_this_module_draws_moves_when_the_accent_does',
+        ],
+    ),
+    (
+        "NNNNNNNNNNNNNNNNNNNNNNNNNNNNNNN: the badge's wash names a role instead of tinting the badge's own hue",
+        POWER,
+        [
+            ('            color: Color::rgba(color.r, color.g, color.b, 40),',
+             '            color: Color::rgba(p.blue.r, p.blue.g, p.blue.b, 40),'),
+        ],
+        ["desktop"],
+        [
+            'every_rectangle_this_module_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        "OOOOOOOOOOOOOOOOOOOOOOOOOOOOOOO: the badge's wash is drawn at full strength",
+        POWER,
+        [
+            ('            color: Color::rgba(color.r, color.g, color.b, 40),',
+             '            color: Color::rgba(color.r, color.g, color.b, 255),'),
+        ],
+        ["desktop"],
+        [
+            'every_rectangle_this_module_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        "PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPP: the saver's clock is drawn in the wrong hue",
+        POWER,
+        [
+            ('            text: "12:00".to_string(),\n            color: screen_palette().lavender,',
+             '            text: "12:00".to_string(),\n            color: screen_palette().blue,'),
+        ],
+        ["desktop"],
+        [
+            'every_text_this_module_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        "QQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQ: the saver's clock reaches into the light palette",
+        POWER,
+        [
+            ('            text: "12:00".to_string(),\n            color: screen_palette().lavender,',
+             '            text: "12:00".to_string(),\n            color: Palette::for_mode(true).lavender,'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_screen_saver_draws_is_a_dark_role_or_one_of_its_two_ramps',
+            'every_text_this_module_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        'RRRRRRRRRRRRRRRRRRRRRRRRRRRRRRR: the saver stops pinning itself to the dark palette',
+        POWER,
+        [
+            ('fn screen_palette() -> Palette {\n    Palette::for_mode(false)\n}',
+             'fn screen_palette() -> Palette {\n    Palette::for_mode(true)\n}'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_screen_saver_draws_is_a_dark_role_or_one_of_its_two_ramps',
+            'every_rectangle_this_module_draws_is_in_the_role_it_claims',
+            'every_text_this_module_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        'SSSSSSSSSSSSSSSSSSSSSSSSSSSSSSS: the logo plate is drawn in the wrong hue',
+        POWER,
+        [
+            ('            width: logo_w,\n            height: logo_h,\n            color: sp.blue,',
+             '            width: logo_w,\n            height: logo_h,\n            color: sp.green,'),
+        ],
+        ["desktop"],
+        [
+            'every_rectangle_this_module_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        "TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT: the logo's label names a role instead of deriving from the plate",
+        POWER,
+        [
+            ('            text: "Slate OS".to_string(),\n            color: appearance::readable_on(sp.blue),',
+             '            text: "Slate OS".to_string(),\n            color: sp.base,'),
+        ],
+        ["desktop"],
+        [
+            'every_text_this_module_draws_is_in_the_role_it_claims',
+            'the_logo_label_is_readable_on_the_logo_plate',
+        ],
+    ),
+    (
+        "UUUUUUUUUUUUUUUUUUUUUUUUUUUUUUU: the logo's label is drawn in the ink of the wrong surface",
+        POWER,
+        [
+            ('            text: "Slate OS".to_string(),\n            color: appearance::readable_on(sp.blue),',
+             '            text: "Slate OS".to_string(),\n            color: sp.text,'),
+        ],
+        ["desktop"],
+        [
+            'every_text_this_module_draws_is_in_the_role_it_claims',
+            'the_logo_label_is_readable_on_the_logo_plate',
+        ],
+    ),
+    (
+        'VVVVVVVVVVVVVVVVVVVVVVVVVVVVVVV: the blank saver lights the display instead of blacking it out',
+        POWER,
+        [
+            ('        vec![RenderCommand::FillRect {\n            x: 0.0,\n            y: 0.0,\n            width: self.width as f32,\n            height: self.height as f32,\n            color: Color::from_hex(0x000000),',
+             '        vec![RenderCommand::FillRect {\n            x: 0.0,\n            y: 0.0,\n            width: self.width as f32,\n            height: self.height as f32,\n            color: Palette::for_mode(false).base,'),
+        ],
+        ["desktop"],
+        [
+            'the_screen_saver_blacks_out_the_display_in_every_style_it_draws',
+        ],
+    ),
+    (
+        'WWWWWWWWWWWWWWWWWWWWWWWWWWWWWWW: the clock saver lights the display with the light palette',
+        POWER,
+        [
+            ('        // Black background.\n        cmds.push(RenderCommand::FillRect {\n            x: 0.0,\n            y: 0.0,\n            width: self.width as f32,\n            height: self.height as f32,\n            color: Color::from_hex(0x000000),',
+             '        // Black background.\n        cmds.push(RenderCommand::FillRect {\n            x: 0.0,\n            y: 0.0,\n            width: self.width as f32,\n            height: self.height as f32,\n            color: Palette::for_mode(true).base,'),
+        ],
+        ["desktop"],
+        [
+            'the_screen_saver_blacks_out_the_display_in_every_style_it_draws',
+        ],
+    ),
+    (
+        'XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX: the star field lights the display instead of blacking it out',
+        POWER,
+        [
+            ('        let mut cmds = Vec::with_capacity(self.stars.len().saturating_add(1));\n\n        cmds.push(RenderCommand::FillRect {\n            x: 0.0,\n            y: 0.0,\n            width: self.width as f32,\n            height: self.height as f32,\n            color: Color::from_hex(0x000000),',
+             '        let mut cmds = Vec::with_capacity(self.stars.len().saturating_add(1));\n\n        cmds.push(RenderCommand::FillRect {\n            x: 0.0,\n            y: 0.0,\n            width: self.width as f32,\n            height: self.height as f32,\n            color: Palette::for_mode(false).surface0,'),
+        ],
+        ["desktop"],
+        [
+            'the_screen_saver_blacks_out_the_display_in_every_style_it_draws',
+        ],
+    ),
+    (
+        'YYYYYYYYYYYYYYYYYYYYYYYYYYYYYYY: the bouncing logo lights the display instead of blacking it out',
+        POWER,
+        [
+            ('        let mut cmds = Vec::with_capacity(4);\n\n        cmds.push(RenderCommand::FillRect {\n            x: 0.0,\n            y: 0.0,\n            width: self.width as f32,\n            height: self.height as f32,\n            color: Color::from_hex(0x000000),',
+             '        let mut cmds = Vec::with_capacity(4);\n\n        cmds.push(RenderCommand::FillRect {\n            x: 0.0,\n            y: 0.0,\n            width: self.width as f32,\n            height: self.height as f32,\n            color: Palette::for_mode(false).blue,'),
+        ],
+        ["desktop"],
+        [
+            'the_screen_saver_blacks_out_the_display_in_every_style_it_draws',
+        ],
+    ),
+    (
+        "ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ: the rain's trail overlay stops being black",
+        POWER,
+        [
+            ('        // Semi-transparent black overlay for trail effect.\n        cmds.push(RenderCommand::FillRect {\n            x: 0.0,\n            y: 0.0,\n            width: self.width as f32,\n            height: self.height as f32,\n            color: Color::rgba(0, 0, 0, 220),',
+             '        // Semi-transparent black overlay for trail effect.\n        cmds.push(RenderCommand::FillRect {\n            x: 0.0,\n            y: 0.0,\n            width: self.width as f32,\n            height: self.height as f32,\n            color: Color::rgba(20, 0, 0, 220),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_screen_saver_draws_is_a_dark_role_or_one_of_its_two_ramps',
+            'the_screen_saver_blacks_out_the_display_in_every_style_it_draws',
+        ],
+    ),
+    (
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA: a star's depth is drawn as a red ramp rather than a grey one",
+        POWER,
+        [
+            ('                    color: Color::rgba(brightness, brightness, brightness, 255),',
+             '                    color: Color::rgba(brightness, 0, 0, 255),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_screen_saver_draws_is_a_dark_role_or_one_of_its_two_ramps',
+        ],
+    ),
+    (
+        "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB: a glyph's age is drawn as a magenta ramp rather than a green one",
+        POWER,
+        [
+            ('                    color: Color::rgba(0, green, 0, 255),',
+             '                    color: Color::rgba(green, 0, green, 255),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_screen_saver_draws_is_a_dark_role_or_one_of_its_two_ramps',
+        ],
+    ),
+    # ---- login_screen.rs (module 28 of 49) ----
+    (
+        'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA: the theme background is frozen back to Mocha crust',
+        LOGIN,
+        [
+            ('                    height: self.screen_height,\n                    color: p.crust,',
+             '                    height: self.screen_height,\n                    color: Color::from_hex(0x11111B),'),
+        ],
+        ["desktop"],
+        [
+            'a_background_with_no_colour_of_its_own_takes_the_theme',
+        ],
+    ),
+    (
+        'BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB: the theme background takes the accent',
+        LOGIN,
+        [
+            ('                    height: self.screen_height,\n                    color: p.crust,',
+             '                    height: self.screen_height,\n                    color: p.accent,'),
+        ],
+        ["desktop"],
+        [
+            'a_background_with_no_colour_of_its_own_takes_the_theme',
+            'exactly_two_things_in_the_password_panel_carry_the_accent',
+        ],
+    ),
+    (
+        'CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC: the theme background resolves to base instead of the deepest surface',
+        LOGIN,
+        [
+            ('                    height: self.screen_height,\n                    color: p.crust,',
+             '                    height: self.screen_height,\n                    color: p.base,'),
+        ],
+        ["desktop"],
+        [
+            'a_background_with_no_colour_of_its_own_takes_the_theme',
+            # Undeclared when this was written, and the reason earns the line:
+            # Latte `base` *is* `LIGHT_EXTREME`, which is what
+            # `on_wallpaper()` answers in both modes. A background that
+            # resolves to `base` is therefore counted as a seventh piece of
+            # wallpaper ink by a test that is not looking at the background.
+            'exactly_seven_things_in_the_full_render_sit_on_the_background',
+        ],
+    ),
+    (
+        'DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD: a solid background the user chose is re-themed',
+        LOGIN,
+        [
+            ('                    height: self.screen_height,\n                    color: *color,',
+             '                    height: self.screen_height,\n                    color: p.crust,'),
+        ],
+        ["desktop"],
+        [
+            'a_user_chosen_background_is_never_re_themed',
+        ],
+    ),
+    (
+        'EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE: the gradient band truncates again instead of rounding',
+        LOGIN,
+        [
+            ('        v.round().clamp(0.0, 255.0) as u8',
+             '        v.clamp(0.0, 255.0) as u8'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_login_screen_draws_comes_from_its_palette',
+            'a_gradient_between_a_colour_and_itself_is_flat',
+            'a_gradient_band_rounds_to_the_nearest_step',
+        ],
+    ),
+    (
+        "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF: the gradient's far endpoint is re-themed",
+        LOGIN,
+        [
+            ('                    let r = lerp_channel(top.r, bottom.r, t);',
+             '                    let r = lerp_channel(top.r, p.base.r, t);'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_login_screen_draws_comes_from_its_palette',
+            'a_user_chosen_background_is_never_re_themed',
+            'a_gradient_between_a_colour_and_itself_is_flat',
+            'a_gradient_band_rounds_to_the_nearest_step',
+        ],
+    ),
+    (
+        'GGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGG: text on the login background loses its shadow',
+        LOGIN,
+        [
+            ('    commands.push(RenderCommand::Text {\n        x: x + 1.0,\n        y: y + 1.0,\n        text: body.clone(),\n        font_size: *font_size,\n        color: p.text_shadow(),\n        font_weight: *font_weight,\n        max_width: *max_width,\n        overflow: *overflow,\n    });\n    commands.push(text);',
+             '    let _ = (p, body, font_size, font_weight, max_width, overflow, x, y);\n    commands.push(text);'),
+        ],
+        ["desktop"],
+        [
+            'the_clock_and_the_status_lines_are_wallpaper_ink',
+            'every_colour_in_the_password_entry_is_in_the_role_it_claims',
+            'exactly_seven_things_in_the_full_render_sit_on_the_background',
+        ],
+    ),
+    (
+        'HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH: the shadow is drawn exactly under the ink, so it never shows',
+        LOGIN,
+        [
+            ('        x: x + 1.0,\n        y: y + 1.0,',
+             '        x: *x,\n        y: *y,'),
+        ],
+        ["desktop"],
+        [
+            'the_clock_and_the_status_lines_are_wallpaper_ink',
+            'every_colour_in_the_password_entry_is_in_the_role_it_claims',
+            # Not the counting test, which was declared here and did not fire:
+            # the shadow is still black at 180 and still drawn once per
+            # floating text, so the count is unchanged. Only the position
+            # assertion inside `floating_text` sees this, which is the whole
+            # reason that helper checks the offset rather than just the pair.
+        ],
+    ),
+    (
+        'IIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIII: the shadow is a theme role rather than black',
+        LOGIN,
+        [
+            ('        color: p.text_shadow(),',
+             '        color: p.crust,'),
+        ],
+        ["desktop"],
+        [
+            'exactly_seven_things_in_the_full_render_sit_on_the_background',
+        ],
+    ),
+    (
+        'JJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJ: the clock is frozen back to Mocha text',
+        LOGIN,
+        [
+            ('                font_size: 64.0,\n                color: p.on_wallpaper(),',
+             '                font_size: 64.0,\n                color: Color::from_hex(0xCDD6F4),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_login_screen_draws_comes_from_its_palette',
+            'the_clock_and_the_status_lines_are_wallpaper_ink',
+            'none_of_the_eleven_deleted_constants_is_still_drawn',
+            'exactly_seven_things_in_the_full_render_sit_on_the_background',
+        ],
+    ),
+    (
+        'KKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKK: the clock takes panel ink on a background the shell did not choose',
+        LOGIN,
+        [
+            ('                font_size: 64.0,\n                color: p.on_wallpaper(),',
+             '                font_size: 64.0,\n                color: p.text,'),
+        ],
+        ["desktop"],
+        [
+            'the_clock_and_the_status_lines_are_wallpaper_ink',
+            'exactly_seven_things_in_the_full_render_sit_on_the_background',
+        ],
+    ),
+    (
+        'LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLL: the clock is dimmed to the level of the date under it',
+        LOGIN,
+        [
+            ('                font_size: 64.0,\n                color: p.on_wallpaper(),',
+             '                font_size: 64.0,\n                color: p.on_wallpaper_dim(),'),
+        ],
+        ["desktop"],
+        [
+            'the_clock_and_the_status_lines_are_wallpaper_ink',
+            'exactly_seven_things_in_the_full_render_sit_on_the_background',
+        ],
+    ),
+    (
+        'MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM: the date is frozen back to Mocha subtext0',
+        LOGIN,
+        [
+            ('\n                    color: p.on_wallpaper_dim(),',
+             '\n                    color: Color::from_hex(0xA6ADC8),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_login_screen_draws_comes_from_its_palette',
+            'the_clock_and_the_status_lines_are_wallpaper_ink',
+            'none_of_the_eleven_deleted_constants_is_still_drawn',
+            'exactly_seven_things_in_the_full_render_sit_on_the_background',
+        ],
+    ),
+    (
+        'NNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNN: the date is promoted to the same strength as the time',
+        LOGIN,
+        [
+            ('\n                    color: p.on_wallpaper_dim(),',
+             '\n                    color: p.on_wallpaper(),'),
+        ],
+        ["desktop"],
+        [
+            'the_clock_and_the_status_lines_are_wallpaper_ink',
+            'exactly_seven_things_in_the_full_render_sit_on_the_background',
+        ],
+    ),
+    (
+        'OOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOO: the date takes panel ink on the background',
+        LOGIN,
+        [
+            ('\n                    color: p.on_wallpaper_dim(),',
+             '\n                    color: p.subtext0,'),
+        ],
+        ["desktop"],
+        [
+            'the_clock_and_the_status_lines_are_wallpaper_ink',
+            'exactly_seven_things_in_the_full_render_sit_on_the_background',
+        ],
+    ),
+    (
+        'PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPP: the selected row is frozen back to Mocha surface0',
+        LOGIN,
+        [
+            ('                color: if selected {\n                    p.surface0',
+             '                color: if selected {\n                    Color::from_hex(0x313244)'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_login_screen_draws_comes_from_its_palette',
+            'every_colour_in_the_user_list_is_in_the_role_it_claims',
+            'none_of_the_eleven_deleted_constants_is_still_drawn',
+        ],
+    ),
+    (
+        'QQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQ: the selected row fills with the accent instead of a surface',
+        LOGIN,
+        [
+            ('                color: if selected {\n                    p.surface0',
+             '                color: if selected {\n                    p.accent'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_in_the_user_list_is_in_the_role_it_claims',
+            'exactly_two_things_in_the_password_panel_carry_the_accent',
+        ],
+    ),
+    (
+        'RRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRR: an unselected row is frozen back to Mocha base',
+        LOGIN,
+        [
+            ('                    Color::rgba(p.base.r, p.base.g, p.base.b, 180)',
+             '                    Color::rgba(0x1E, 0x1E, 0x2E, 180)'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_login_screen_draws_comes_from_its_palette',
+            'every_colour_in_the_user_list_is_in_the_role_it_claims',
+            'none_of_the_eleven_deleted_constants_is_still_drawn',
+        ],
+    ),
+    (
+        'SSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSS: an unselected row loses the transparency that sets it apart',
+        LOGIN,
+        [
+            ('                    Color::rgba(p.base.r, p.base.g, p.base.b, 180)',
+             '                    p.base'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_in_the_user_list_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        'TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT: the selected avatar is frozen back to Mocha blue',
+        LOGIN,
+        [
+            ('                color: if selected { p.accent } else { p.subtext0 },',
+             '                color: if selected { Color::from_hex(0x89B4FA) } else { p.subtext0 },'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_login_screen_draws_comes_from_its_palette',
+            'every_colour_in_the_user_list_is_in_the_role_it_claims',
+            'none_of_the_eleven_deleted_constants_is_still_drawn',
+            'exactly_two_things_in_the_password_panel_carry_the_accent',
+        ],
+    ),
+    (
+        'UUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUU: no avatar is accented, so nothing marks which row you are on',
+        LOGIN,
+        [
+            ('                color: if selected { p.accent } else { p.subtext0 },',
+             '                color: p.subtext0,'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_in_the_user_list_is_in_the_role_it_claims',
+            'exactly_two_things_in_the_password_panel_carry_the_accent',
+        ],
+    ),
+    (
+        'VVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVV: every avatar is accented, so the accent marks nothing',
+        LOGIN,
+        [
+            ('                color: if selected { p.accent } else { p.subtext0 },',
+             '                color: if selected { p.accent } else { p.accent },'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_in_the_user_list_is_in_the_role_it_claims',
+            'exactly_two_things_in_the_password_panel_carry_the_accent',
+        ],
+    ),
+    (
+        'WWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWW: a row name is frozen back to Mocha text',
+        LOGIN,
+        [
+            ('                text: user.display_name.clone(),\n                font_size: 16.0,\n                color: p.text,',
+             '                text: user.display_name.clone(),\n                font_size: 16.0,\n                color: Color::from_hex(0xCDD6F4),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_login_screen_draws_comes_from_its_palette',
+            'every_colour_in_the_user_list_is_in_the_role_it_claims',
+            'none_of_the_eleven_deleted_constants_is_still_drawn',
+        ],
+    ),
+    (
+        'XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX: a row name takes the accent',
+        LOGIN,
+        [
+            ('                text: user.display_name.clone(),\n                font_size: 16.0,\n                color: p.text,',
+             '                text: user.display_name.clone(),\n                font_size: 16.0,\n                color: p.accent,'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_in_the_user_list_is_in_the_role_it_claims',
+            'exactly_two_things_in_the_password_panel_carry_the_accent',
+        ],
+    ),
+    (
+        'YYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYY: the account type is frozen back to Mocha overlay0',
+        LOGIN,
+        [
+            ('                font_size: 11.0,\n                color: p.overlay0,',
+             '                font_size: 11.0,\n                color: Color::from_hex(0x6C7086),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_login_screen_draws_comes_from_its_palette',
+            'every_colour_in_the_user_list_is_in_the_role_it_claims',
+            'none_of_the_eleven_deleted_constants_is_still_drawn',
+        ],
+    ),
+    (
+        'ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ: the account type is promoted to primary text',
+        LOGIN,
+        [
+            ('                font_size: 11.0,\n                color: p.overlay0,',
+             '                font_size: 11.0,\n                color: p.text,'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_in_the_user_list_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA: the signing-in user's avatar is frozen back to Mocha blue",
+        LOGIN,
+        [
+            ('                    font_size: 48.0,\n                    color: p.accent,',
+             '                    font_size: 48.0,\n                    color: Color::from_hex(0x89B4FA),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_login_screen_draws_comes_from_its_palette',
+            'every_colour_in_the_password_entry_is_in_the_role_it_claims',
+            'none_of_the_eleven_deleted_constants_is_still_drawn',
+            'exactly_two_things_in_the_password_panel_carry_the_accent',
+        ],
+    ),
+    (
+        "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB: the signing-in user's avatar loses the accent it carried in the list",
+        LOGIN,
+        [
+            ('                    font_size: 48.0,\n                    color: p.accent,',
+             '                    font_size: 48.0,\n                    color: p.on_wallpaper(),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_in_the_password_entry_is_in_the_role_it_claims',
+            'exactly_two_things_in_the_password_panel_carry_the_accent',
+            'exactly_seven_things_in_the_full_render_sit_on_the_background',
+        ],
+    ),
+    (
+        'CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC: the name over the password field is frozen back to Mocha text',
+        LOGIN,
+        [
+            ('                    font_size: 18.0,\n                    color: p.on_wallpaper(),',
+             '                    font_size: 18.0,\n                    color: Color::from_hex(0xCDD6F4),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_login_screen_draws_comes_from_its_palette',
+            'every_colour_in_the_password_entry_is_in_the_role_it_claims',
+            'none_of_the_eleven_deleted_constants_is_still_drawn',
+            'exactly_seven_things_in_the_full_render_sit_on_the_background',
+        ],
+    ),
+    (
+        'DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD: the name over the password field takes panel ink',
+        LOGIN,
+        [
+            ('                    font_size: 18.0,\n                    color: p.on_wallpaper(),',
+             '                    font_size: 18.0,\n                    color: p.text,'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_in_the_password_entry_is_in_the_role_it_claims',
+            'exactly_seven_things_in_the_full_render_sit_on_the_background',
+        ],
+    ),
+    (
+        'EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE: the rejected-password border is frozen back to Mocha red',
+        LOGIN,
+        [
+            ('            let border_color = if self.error_message.is_some() {\n                p.red',
+             '            let border_color = if self.error_message.is_some() {\n                Color::from_hex(0xF38BA8)'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_login_screen_draws_comes_from_its_palette',
+            'every_colour_in_the_password_entry_is_in_the_role_it_claims',
+            'none_of_the_eleven_deleted_constants_is_still_drawn',
+        ],
+    ),
+    (
+        'FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF: the rejected-password border takes the accent, so a refusal is decoration',
+        LOGIN,
+        [
+            ('            let border_color = if self.error_message.is_some() {\n                p.red',
+             '            let border_color = if self.error_message.is_some() {\n                p.accent'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_in_the_password_entry_is_in_the_role_it_claims',
+            'exactly_two_things_in_the_password_panel_carry_the_accent',
+        ],
+    ),
+    (
+        'GGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGG: the border at rest is frozen back to Mocha surface1',
+        LOGIN,
+        [
+            ('            } else {\n                p.surface1\n            };',
+             '            } else {\n                Color::from_hex(0x45475A)\n            };'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_login_screen_draws_comes_from_its_palette',
+            'every_colour_in_the_password_entry_is_in_the_role_it_claims',
+            'none_of_the_eleven_deleted_constants_is_still_drawn',
+        ],
+    ),
+    (
+        'HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH: the password field is frozen back to Mocha surface0',
+        LOGIN,
+        [
+            ('                height: field_h,\n                color: p.surface0,',
+             '                height: field_h,\n                color: Color::from_hex(0x313244),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_login_screen_draws_comes_from_its_palette',
+            'every_colour_in_the_password_entry_is_in_the_role_it_claims',
+            'none_of_the_eleven_deleted_constants_is_still_drawn',
+        ],
+    ),
+    (
+        'IIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIII: the placeholder is frozen back to Mocha overlay0',
+        LOGIN,
+        [
+            ('                color: if self.password_input.is_empty() {\n                    p.overlay0',
+             '                color: if self.password_input.is_empty() {\n                    Color::from_hex(0x6C7086)'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_login_screen_draws_comes_from_its_palette',
+            'every_colour_in_the_password_entry_is_in_the_role_it_claims',
+            'none_of_the_eleven_deleted_constants_is_still_drawn',
+        ],
+    ),
+    (
+        'JJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJ: the typed password is frozen back to Mocha text',
+        LOGIN,
+        [
+            ('                } else {\n                    p.text\n                },',
+             '                } else {\n                    Color::from_hex(0xCDD6F4)\n                },'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_login_screen_draws_comes_from_its_palette',
+            'every_colour_in_the_password_entry_is_in_the_role_it_claims',
+            'none_of_the_eleven_deleted_constants_is_still_drawn',
+        ],
+    ),
+    (
+        'KKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKK: the typed password is drawn at placeholder strength',
+        LOGIN,
+        [
+            ('                } else {\n                    p.text\n                },',
+             '                } else {\n                    p.overlay0\n                },'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_in_the_password_entry_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        'LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLL: the reveal toggle is frozen back to Mocha subtext0',
+        LOGIN,
+        [
+            ('                }\n                .to_string(),\n                font_size: 14.0,\n                color: p.subtext0,',
+             '                }\n                .to_string(),\n                font_size: 14.0,\n                color: Color::from_hex(0xA6ADC8),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_login_screen_draws_comes_from_its_palette',
+            'every_colour_in_the_password_entry_is_in_the_role_it_claims',
+            'none_of_the_eleven_deleted_constants_is_still_drawn',
+        ],
+    ),
+    (
+        'MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM: the Sign In fill is frozen back to Mocha blue',
+        LOGIN,
+        [
+            ('                width: 100.0,\n                height: 32.0,\n                color: p.accent,',
+             '                width: 100.0,\n                height: 32.0,\n                color: Color::from_hex(0x89B4FA),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_login_screen_draws_comes_from_its_palette',
+            'every_colour_in_the_password_entry_is_in_the_role_it_claims',
+            'none_of_the_eleven_deleted_constants_is_still_drawn',
+            'exactly_two_things_in_the_password_panel_carry_the_accent',
+        ],
+    ),
+    (
+        'NNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNN: the Sign In fill drops to a surface, so the default action stops inviting',
+        LOGIN,
+        [
+            ('                width: 100.0,\n                height: 32.0,\n                color: p.accent,',
+             '                width: 100.0,\n                height: 32.0,\n                color: p.surface0,'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_in_the_password_entry_is_in_the_role_it_claims',
+            'exactly_two_things_in_the_password_panel_carry_the_accent',
+        ],
+    ),
+    (
+        'OOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOO: the Sign In label is named rather than derived from the fill under it',
+        LOGIN,
+        [
+            ('                text: "Sign In".to_string(),\n                font_size: 13.0,\n                color: p.on_accent(),',
+             '                text: "Sign In".to_string(),\n                font_size: 13.0,\n                color: Color::from_hex(0x11111B),'),
+        ],
+        ["desktop"],
+        [
+            'the_sign_in_label_follows_the_accent_it_sits_on',
+        ],
+    ),
+    (
+        'PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPP: the Sign In label takes a role instead of the ink its fill demands',
+        LOGIN,
+        [
+            ('                text: "Sign In".to_string(),\n                font_size: 13.0,\n                color: p.on_accent(),',
+             '                text: "Sign In".to_string(),\n                font_size: 13.0,\n                color: p.text,'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_in_the_password_entry_is_in_the_role_it_claims',
+            'the_sign_in_label_follows_the_accent_it_sits_on',
+        ],
+    ),
+    (
+        'QQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQ: the error message is frozen back to Mocha red',
+        LOGIN,
+        [
+            ('                        font_size: 12.0,\n                        color: p.red,',
+             '                        font_size: 12.0,\n                        color: Color::from_hex(0xF38BA8),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_login_screen_draws_comes_from_its_palette',
+            'every_colour_in_the_password_entry_is_in_the_role_it_claims',
+            'none_of_the_eleven_deleted_constants_is_still_drawn',
+        ],
+    ),
+    (
+        'RRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRR: the error message takes the accent',
+        LOGIN,
+        [
+            ('                        font_size: 12.0,\n                        color: p.red,',
+             '                        font_size: 12.0,\n                        color: p.accent,'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_in_the_password_entry_is_in_the_role_it_claims',
+            'exactly_two_things_in_the_password_panel_carry_the_accent',
+        ],
+    ),
+    (
+        'SSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSS: the lockout notice is frozen back to Mocha yellow',
+        LOGIN,
+        [
+            ('                        font_size: 12.0,\n                        color: p.yellow,',
+             '                        font_size: 12.0,\n                        color: Color::from_hex(0xF9E2AF),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_login_screen_draws_comes_from_its_palette',
+            'every_colour_in_the_password_entry_is_in_the_role_it_claims',
+            'none_of_the_eleven_deleted_constants_is_still_drawn',
+        ],
+    ),
+    (
+        'TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT: the lockout notice takes the accent',
+        LOGIN,
+        [
+            ('                        font_size: 12.0,\n                        color: p.yellow,',
+             '                        font_size: 12.0,\n                        color: p.accent,'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_in_the_password_entry_is_in_the_role_it_claims',
+            'exactly_two_things_in_the_password_panel_carry_the_accent',
+        ],
+    ),
+    (
+        'UUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUU: the back arrow is frozen back to Mocha subtext0',
+        LOGIN,
+        [
+            ('                        font_size: 20.0,\n                        color: p.on_wallpaper_dim(),',
+             '                        font_size: 20.0,\n                        color: Color::from_hex(0xA6ADC8),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_login_screen_draws_comes_from_its_palette',
+            'every_colour_in_the_password_entry_is_in_the_role_it_claims',
+            'none_of_the_eleven_deleted_constants_is_still_drawn',
+            'exactly_seven_things_in_the_full_render_sit_on_the_background',
+        ],
+    ),
+    (
+        'VVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVV: the back arrow takes panel ink on the background',
+        LOGIN,
+        [
+            ('                        font_size: 20.0,\n                        color: p.on_wallpaper_dim(),',
+             '                        font_size: 20.0,\n                        color: p.subtext0,'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_in_the_password_entry_is_in_the_role_it_claims',
+            'exactly_seven_things_in_the_full_render_sit_on_the_background',
+        ],
+    ),
+    (
+        'WWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWW: the authenticating notice is frozen back to Mocha text',
+        LOGIN,
+        [
+            ('                text: "Signing in...".to_string(),\n                font_size: 16.0,\n                color: p.on_wallpaper(),',
+             '                text: "Signing in...".to_string(),\n                font_size: 16.0,\n                color: Color::from_hex(0xCDD6F4),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_login_screen_draws_comes_from_its_palette',
+            'the_clock_and_the_status_lines_are_wallpaper_ink',
+            'none_of_the_eleven_deleted_constants_is_still_drawn',
+        ],
+    ),
+    (
+        'XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX: the greeting takes panel ink on the background',
+        LOGIN,
+        [
+            ('                    text: format!("Welcome, {}!", user.display_name),\n                    font_size: 20.0,\n                    color: p.on_wallpaper(),',
+             '                    text: format!("Welcome, {}!", user.display_name),\n                    font_size: 20.0,\n                    color: p.text,'),
+        ],
+        ["desktop"],
+        [
+            'the_clock_and_the_status_lines_are_wallpaper_ink',
+        ],
+    ),
+    (
+        'YYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYY: the bottom bar is frozen back to Mocha crust',
+        LOGIN,
+        [
+            ('            color: Color::rgba(p.crust.r, p.crust.g, p.crust.b, 180),',
+             '            color: Color::rgba(0x11, 0x11, 0x1B, 180),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_in_the_bar_and_the_power_menu_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        'ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ: the bottom bar loses its transparency',
+        LOGIN,
+        [
+            ('            color: Color::rgba(p.crust.r, p.crust.g, p.crust.b, 180),',
+             '            color: p.crust,'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_in_the_bar_and_the_power_menu_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA: the keyboard-layout indicator is frozen back to Mocha subtext0',
+        LOGIN,
+        [
+            ('                text: self.keyboard_layout.clone(),\n                font_size: 12.0,\n                color: p.subtext0,',
+             '                text: self.keyboard_layout.clone(),\n                font_size: 12.0,\n                color: Color::from_hex(0xA6ADC8),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_login_screen_draws_comes_from_its_palette',
+            'every_colour_in_the_bar_and_the_power_menu_is_in_the_role_it_claims',
+            'none_of_the_eleven_deleted_constants_is_still_drawn',
+        ],
+    ),
+    (
+        "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB: the bar's power button is frozen back to Mocha subtext0",
+        LOGIN,
+        [
+            ('                text: "\\u{23FB}".to_string(),\n                font_size: 16.0,\n                color: p.subtext0,',
+             '                text: "\\u{23FB}".to_string(),\n                font_size: 16.0,\n                color: Color::from_hex(0xA6ADC8),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_login_screen_draws_comes_from_its_palette',
+            'every_colour_in_the_bar_and_the_power_menu_is_in_the_role_it_claims',
+            'none_of_the_eleven_deleted_constants_is_still_drawn',
+        ],
+    ),
+    (
+        'CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC: the accessibility button takes the accent',
+        LOGIN,
+        [
+            ('                text: "\\u{267F}".to_string(),\n                font_size: 16.0,\n                color: p.subtext0,',
+             '                text: "\\u{267F}".to_string(),\n                font_size: 16.0,\n                color: p.accent,'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_in_the_bar_and_the_power_menu_is_in_the_role_it_claims',
+            'exactly_two_things_in_the_password_panel_carry_the_accent',
+        ],
+    ),
+    (
+        'DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD: the on-screen-keyboard button is frozen back to Mocha subtext0',
+        LOGIN,
+        [
+            ('                text: "\\u{2328}".to_string(),\n                font_size: 16.0,\n                color: p.subtext0,',
+             '                text: "\\u{2328}".to_string(),\n                font_size: 16.0,\n                color: Color::from_hex(0xA6ADC8),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_login_screen_draws_comes_from_its_palette',
+            'every_colour_in_the_bar_and_the_power_menu_is_in_the_role_it_claims',
+            'none_of_the_eleven_deleted_constants_is_still_drawn',
+        ],
+    ),
+    (
+        'EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE: the power menu is frozen back to Mocha mantle',
+        LOGIN,
+        [
+            ('            width: menu_w,\n            height: menu_h,\n            color: p.mantle,',
+             '            width: menu_w,\n            height: menu_h,\n            color: Color::from_hex(0x181825),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_login_screen_draws_comes_from_its_palette',
+            'every_colour_in_the_bar_and_the_power_menu_is_in_the_role_it_claims',
+            'none_of_the_eleven_deleted_constants_is_still_drawn',
+        ],
+    ),
+    (
+        "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF: the power menu's border is frozen back to Mocha surface1",
+        LOGIN,
+        [
+            ('            width: menu_w,\n            height: menu_h,\n            color: p.surface1,',
+             '            width: menu_w,\n            height: menu_h,\n            color: Color::from_hex(0x45475A),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_login_screen_draws_comes_from_its_palette',
+            'every_colour_in_the_bar_and_the_power_menu_is_in_the_role_it_claims',
+            'none_of_the_eleven_deleted_constants_is_still_drawn',
+        ],
+    ),
+    (
+        'GGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGG: a power-menu icon is frozen back to Mocha subtext0',
+        LOGIN,
+        [
+            ('                text: icon.to_string(),\n                font_size: 14.0,\n                color: p.subtext0,',
+             '                text: icon.to_string(),\n                font_size: 14.0,\n                color: Color::from_hex(0xA6ADC8),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_login_screen_draws_comes_from_its_palette',
+            'every_colour_in_the_bar_and_the_power_menu_is_in_the_role_it_claims',
+            'none_of_the_eleven_deleted_constants_is_still_drawn',
+        ],
+    ),
+    (
+        'HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH: a power-menu label takes the accent',
+        LOGIN,
+        [
+            ('                text: label.to_string(),\n                font_size: 13.0,\n                color: p.text,',
+             '                text: label.to_string(),\n                font_size: 13.0,\n                color: p.accent,'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_in_the_bar_and_the_power_menu_is_in_the_role_it_claims',
+            'exactly_two_things_in_the_password_panel_carry_the_accent',
+        ],
+    ),
+    (
+        'IIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIII: the whole screen ignores the palette it is handed',
+        LOGIN,
+        [
+            ('    pub fn render(&self, p: &Palette) -> Vec<RenderCommand> {\n        let mut commands = Vec::new();',
+             '    pub fn render(&self, p: &Palette) -> Vec<RenderCommand> {\n        let p = &Palette::for_mode(false);\n        let mut commands = Vec::new();'),
+        ],
+        ["desktop"],
+        [
+            'the_render_is_not_the_same_in_both_modes',
+            'every_colour_the_login_screen_draws_comes_from_its_palette',
+            'every_colour_in_the_user_list_is_in_the_role_it_claims',
+            'every_colour_in_the_password_entry_is_in_the_role_it_claims',
+            'every_colour_in_the_bar_and_the_power_menu_is_in_the_role_it_claims',
+            'a_background_with_no_colour_of_its_own_takes_the_theme',
+            'exactly_two_things_in_the_password_panel_carry_the_accent',
+            'the_sign_in_label_follows_the_accent_it_sits_on',
+            'none_of_the_eleven_deleted_constants_is_still_drawn',
+            # The two wallpaper-ink tests were declared here and did not fire,
+            # which is the sharpest measurement this module produced. Nine
+            # tests see a render that threw its palette away; those two cannot,
+            # because every colour they check is mode-independent *by
+            # construction*: `on_wallpaper()` is the constant `LIGHT_EXTREME`,
+            # `on_wallpaper_dim()` is that at alpha 200, and `text_shadow()` is
+            # black. A module that ignores the palette still draws all three
+            # correctly. Those tests earn their keep against the role-versus-
+            # wallpaper confusion — Kx33, Ox33, Dx34, Vx34, Xx34 — not this.
+        ],
+    ),
+    (
+        'JJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJ: the power-menu fixture is dropped from the sweep',
+        LOGIN,
+        [
+            ('        let mut s = base();\n        s.power_menu_open = true;\n        v.push(("power menu".to_string(), s));',
+             '        let mut s = base();\n        s.power_menu_open = true;\n        let _ = s;'),
+        ],
+        ["desktop"],
+        [
+            'the_fixtures_take_every_branch_this_module_has',
+        ],
+    ),
+    (
+        'KKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKK: the no-user fixture is dropped from the sweep',
+        LOGIN,
+        [
+            ('        s.phase = LoginPhase::PasswordEntry;\n        v.push(("no user".to_string(), s));',
+             '        s.phase = LoginPhase::PasswordEntry;\n        let _ = s;'),
+        ],
+        ["desktop"],
+        [
+            'the_fixtures_take_every_branch_this_module_has',
+        ],
+    ),
+    (
+        'LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLL: the default background names a colour again',
+        LOGIN,
+        [
+            ('#[derive(Clone, Debug, Default, PartialEq)]\npub enum LoginBackground {',
+             '#[derive(Clone, Debug, PartialEq)]\npub enum LoginBackground {'),
+            ('    #[default]\n    Theme,',
+             '    Theme,'),
+            ('    Gradient { top: Color, bottom: Color },\n}',
+             '    Gradient { top: Color, bottom: Color },\n}\n\nimpl Default for LoginBackground {\n    fn default() -> Self {\n        Self::SolidColor(Color::from_hex(0x11111B))\n    }\n}'),
+        ],
+        ["desktop"],
+        [
+            'the_default_background_defers_its_colour_to_the_palette',
+        ],
+    ),
+    # ---- taskbar.rs (module 29 of 49) ----
+    (
+        'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA: the bar background is frozen back to Mocha base',
+        TB,
+        [
+            ('            height: bar_height,\n            color: p.base,',
+             '            height: bar_height,\n            color: Color::from_hex(0x1E1E2E),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_taskbar_draws_comes_from_its_palette',
+            'every_colour_on_the_bar_is_in_the_role_it_claims',
+            # NOT test_render_empty_taskbar: it asserts the bar's *geometry*
+            # (one full-width rect exists), never its colour. Declared here
+            # originally on the strength of its name.
+            'none_of_the_ten_deleted_constants_is_still_drawn',
+        ],
+    ),
+    (
+        "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB: the bar background resolves to the desktop's own surface",
+        TB,
+        [
+            ('            height: bar_height,\n            color: p.base,',
+             '            height: bar_height,\n            color: p.crust,'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_on_the_bar_is_in_the_role_it_claims',
+            'test_render_empty_taskbar',
+        ],
+    ),
+    (
+        'CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC: the whole bar takes the accent',
+        TB,
+        [
+            ('            height: bar_height,\n            color: p.base,',
+             '            height: bar_height,\n            color: p.accent,'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_on_the_bar_is_in_the_role_it_claims',
+            'test_render_empty_taskbar',
+            'exactly_one_thing_on_the_taskbar_carries_the_accent',
+        ],
+    ),
+    (
+        'DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD: the bar background sits one step behind itself',
+        TB,
+        [
+            ('            height: bar_height,\n            color: p.base,',
+             '            height: bar_height,\n            color: p.mantle,'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_on_the_bar_is_in_the_role_it_claims',
+            'test_render_empty_taskbar',
+        ],
+    ),
+    (
+        'EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE: the top border is frozen back to Mocha surface0',
+        TB,
+        [
+            ('            y2: 0.0,\n            color: p.surface0,',
+             '            y2: 0.0,\n            color: Color::from_hex(0x313244),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_taskbar_draws_comes_from_its_palette',
+            'every_colour_on_the_bar_is_in_the_role_it_claims',
+            'none_of_the_ten_deleted_constants_is_still_drawn',
+        ],
+    ),
+    (
+        'FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF: the top border takes the separator role the divider uses',
+        TB,
+        [
+            ('            y2: 0.0,\n            color: p.surface0,',
+             '            y2: 0.0,\n            color: p.overlay0,'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_on_the_bar_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        'GGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGG: the section divider goes back to being a raised surface',
+        TB,
+        [
+            ("                    // Judgement 6: a separator, which is `overlay0`'s job.\n                    color: p.overlay0,",
+             '                    color: p.surface2,'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_on_the_bar_is_in_the_role_it_claims',
+            'test_render_divider_between_pinned_and_running',
+        ],
+    ),
+    (
+        'HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH: the section divider is frozen back to Mocha surface2',
+        TB,
+        [
+            ("                    // Judgement 6: a separator, which is `overlay0`'s job.\n                    color: p.overlay0,",
+             '                    color: Color::from_hex(0x585B70),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_taskbar_draws_comes_from_its_palette',
+            'every_colour_on_the_bar_is_in_the_role_it_claims',
+            'test_render_divider_between_pinned_and_running',
+            'none_of_the_ten_deleted_constants_is_still_drawn',
+        ],
+    ),
+    (
+        'IIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIII: the section divider is never drawn',
+        TB,
+        [
+            ('            if i == pinned_count && pinned_count > 0 && i < self.buttons.len() {',
+             '            if i == pinned_count && pinned_count > 0 && i > self.buttons.len() {'),
+        ],
+        ["desktop"],
+        [
+            'the_fixture_takes_every_branch_this_module_has',
+            'every_colour_on_the_bar_is_in_the_role_it_claims',
+            'test_render_divider_between_pinned_and_running',
+        ],
+    ),
+    (
+        'JJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJ: the drop caret takes the accent, so it cannot be told from the focus mark',
+        TB,
+        [
+            ('                        color: p.green,',
+             '                        color: p.accent,'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_on_the_bar_is_in_the_role_it_claims',
+            'exactly_one_thing_on_the_taskbar_carries_the_accent',
+            'the_drop_caret_is_never_the_same_hue_as_the_focus_underline',
+        ],
+    ),
+    (
+        'KKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKK: the drop caret is frozen back to Mocha blue',
+        TB,
+        [
+            ('                        color: p.green,',
+             '                        color: Color::from_hex(0x89B4FA),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_taskbar_draws_comes_from_its_palette',
+            'every_colour_on_the_bar_is_in_the_role_it_claims',
+            'none_of_the_ten_deleted_constants_is_still_drawn',
+        ],
+    ),
+    (
+        "LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLL: the drop caret takes drop_target's alpha as well as its hue, and vanishes",
+        TB,
+        [
+            ('                        color: p.green,',
+             '                        color: with_alpha(p.green, 60),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_on_the_bar_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        'MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM: the dragged ghost is opaque, so it stops reading as a ghost',
+        TB,
+        [
+            ('                        color: with_alpha(p.surface1, 180),',
+             '                        color: p.surface1,'),
+        ],
+        ["desktop"],
+        [
+            'the_fixture_takes_every_branch_this_module_has',
+            'each_button_state_draws_the_background_its_role_names',
+        ],
+    ),
+    (
+        'NNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNN: the dragged ghost is frozen back to its Mocha rgba triple',
+        TB,
+        [
+            ('                        color: with_alpha(p.surface1, 180),',
+             '                        color: Color::rgba(69, 71, 90, 180),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_taskbar_draws_comes_from_its_palette',
+            'each_button_state_draws_the_background_its_role_names',
+            'none_of_the_ten_deleted_constants_is_still_drawn',
+        ],
+    ),
+    (
+        'OOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOO: the dragged ghost is built from the hover rung instead of the resting one',
+        TB,
+        [
+            ('                        color: with_alpha(p.surface1, 180),',
+             '                        color: with_alpha(p.surface2, 180),'),
+        ],
+        ["desktop"],
+        [
+            'each_button_state_draws_the_background_its_role_names',
+        ],
+    ),
+    (
+        'PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPP: the hover rung goes back to where the focus rung belongs',
+        TB,
+        [
+            ('                (_, true) => p.surface2,',
+             '                (_, true) => p.surface1,'),
+        ],
+        ["desktop"],
+        [
+            'each_button_state_draws_the_background_its_role_names',
+        ],
+    ),
+    (
+        'QQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQ: the hover and focus rungs of the ladder are exchanged',
+        TB,
+        [
+            ('                (_, true) => p.surface2,',
+             '                (_, true) => p.surface1,'),
+            ('                (ButtonState::Focused, false) => p.surface1,',
+             '                (ButtonState::Focused, false) => p.surface2,'),
+        ],
+        ["desktop"],
+        [
+            'each_button_state_draws_the_background_its_role_names',
+        ],
+    ),
+    (
+        'RRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRR: the focused button drops a rung to surface0',
+        TB,
+        [
+            ('                (ButtonState::Focused, false) => p.surface1,',
+             '                (ButtonState::Focused, false) => p.surface0,'),
+        ],
+        ["desktop"],
+        [
+            'each_button_state_draws_the_background_its_role_names',
+        ],
+    ),
+    (
+        "SSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSS: the running button's background loses its transparency",
+        TB,
+        [
+            ('                (ButtonState::Running, false) => with_alpha(p.surface0, 128),',
+             '                (ButtonState::Running, false) => p.surface0,'),
+        ],
+        ["desktop"],
+        [
+            'each_button_state_draws_the_background_its_role_names',
+        ],
+    ),
+    (
+        'TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT: an idle button paints a background it should not have',
+        TB,
+        [
+            ('                (ButtonState::Idle, false) => Color::TRANSPARENT,',
+             '                (ButtonState::Idle, false) => p.base,'),
+        ],
+        ["desktop"],
+        [
+            'the_fixture_takes_every_branch_this_module_has',
+            'each_button_state_draws_the_background_its_role_names',
+        ],
+    ),
+    (
+        'UUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUU: the hover rung is frozen back to Mocha surface1',
+        TB,
+        [
+            ('                (_, true) => p.surface2,',
+             '                (_, true) => Color::from_hex(0x45475A),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_taskbar_draws_comes_from_its_palette',
+            'each_button_state_draws_the_background_its_role_names',
+            'none_of_the_ten_deleted_constants_is_still_drawn',
+        ],
+    ),
+    (
+        "VVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVV: the focused button's background takes the accent",
+        TB,
+        [
+            ('                (ButtonState::Focused, false) => p.surface1,',
+             '                (ButtonState::Focused, false) => p.accent,'),
+        ],
+        ["desktop"],
+        [
+            'each_button_state_draws_the_background_its_role_names',
+            'exactly_one_thing_on_the_taskbar_carries_the_accent',
+        ],
+    ),
+    (
+        "WWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWW: the focus underline reaches for blue, which is the stock accent's twin",
+        TB,
+        [
+            ('                let indicator_color = if button.state == ButtonState::Focused {\n                    p.accent\n                } else {\n                    p.subtext0\n                };',
+             '                let indicator_color = if button.state == ButtonState::Focused {\n                    p.blue\n                } else {\n                    p.subtext0\n                };'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_on_the_bar_is_in_the_role_it_claims',
+            'exactly_one_thing_on_the_taskbar_carries_the_accent',
+        ],
+    ),
+    (
+        'XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX: the focus underline is frozen back to Mocha blue',
+        TB,
+        [
+            ('                let indicator_color = if button.state == ButtonState::Focused {\n                    p.accent\n                } else {\n                    p.subtext0\n                };',
+             '                let indicator_color = if button.state == ButtonState::Focused {\n                    Color::from_hex(0x89B4FA)\n                } else {\n                    p.subtext0\n                };'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_taskbar_draws_comes_from_its_palette',
+            'every_colour_on_the_bar_is_in_the_role_it_claims',
+            'exactly_one_thing_on_the_taskbar_carries_the_accent',
+            'none_of_the_ten_deleted_constants_is_still_drawn',
+        ],
+    ),
+    (
+        'YYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYY: a merely-running app claims the accent too',
+        TB,
+        [
+            ('                let indicator_color = if button.state == ButtonState::Focused {\n                    p.accent\n                } else {\n                    p.subtext0\n                };',
+             '                let indicator_color = if button.state == ButtonState::Focused {\n                    p.accent\n                } else {\n                    p.accent\n                };'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_on_the_bar_is_in_the_role_it_claims',
+            'exactly_one_thing_on_the_taskbar_carries_the_accent',
+            # This one was written before the conversion and only checks that
+            # *some* 3px-high bar is drawn in `p.subtext0`; a merely-running
+            # app taking the accent leaves no such bar, so it fails too. Worth
+            # keeping declared — it is the oldest guard on this site.
+            'test_render_shows_indicator_for_running',
+        ],
+    ),
+    (
+        'ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ: the running underline goes back to lavender',
+        TB,
+        [
+            ('                let indicator_color = if button.state == ButtonState::Focused {\n                    p.accent\n                } else {\n                    p.subtext0\n                };',
+             '                let indicator_color = if button.state == ButtonState::Focused {\n                    p.accent\n                } else {\n                    p.lavender\n                };'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_on_the_bar_is_in_the_role_it_claims',
+            'test_render_shows_indicator_for_running',
+        ],
+    ),
+    (
+        'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA: the running underline is frozen back to Mocha lavender',
+        TB,
+        [
+            ('                let indicator_color = if button.state == ButtonState::Focused {\n                    p.accent\n                } else {\n                    p.subtext0\n                };',
+             '                let indicator_color = if button.state == ButtonState::Focused {\n                    p.accent\n                } else {\n                    Color::from_hex(0xB4BEFE)\n                };'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_taskbar_draws_comes_from_its_palette',
+            'every_colour_on_the_bar_is_in_the_role_it_claims',
+            'test_render_shows_indicator_for_running',
+            'none_of_the_ten_deleted_constants_is_still_drawn',
+        ],
+    ),
+    (
+        'BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB: nothing on the bar says which window you are in',
+        TB,
+        [
+            ('                let indicator_color = if button.state == ButtonState::Focused {\n                    p.accent\n                } else {\n                    p.subtext0\n                };',
+             '                let indicator_color = if button.state == ButtonState::Focused {\n                    p.subtext0\n                } else {\n                    p.subtext0\n                };'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_on_the_bar_is_in_the_role_it_claims',
+            'exactly_one_thing_on_the_taskbar_carries_the_accent',
+        ],
+    ),
+    (
+        'CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC: the two underline widths are exchanged',
+        TB,
+        [
+            ('                let indicator_w = if button.state == ButtonState::Focused {\n                    16.0\n                } else {\n                    8.0\n                };',
+             '                let indicator_w = if button.state == ButtonState::Focused {\n                    8.0\n                } else {\n                    16.0\n                };'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_on_the_bar_is_in_the_role_it_claims',
+            'the_focus_underline_is_wider_than_the_running_one',
+            # Exchanging the widths also swaps which bar the caret test finds
+            # as "the focus underline" (it selects by width, 16x3), so it ends
+            # up comparing the caret's hue against `subtext0` instead of the
+            # accent. It fails for the right reason: after this edit there is
+            # no 16x3 accent bar at all.
+            'the_drop_caret_is_never_the_same_hue_as_the_focus_underline',
+        ],
+    ),
+    (
+        'DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD: the window count follows the accent, so it means something different per machine',
+        TB,
+        [
+            ('                    color: p.red,',
+             '                    color: p.accent,'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_on_the_bar_is_in_the_role_it_claims',
+            'exactly_one_thing_on_the_taskbar_carries_the_accent',
+            'the_count_badge_does_not_follow_the_accent',
+            'the_badge_digit_is_computed_from_the_badge_it_sits_on',
+            'test_render_shows_badge_for_multiple_windows',
+        ],
+    ),
+    (
+        'EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE: the window count is drawn in the wrong named hue',
+        TB,
+        [
+            ('                    color: p.red,',
+             '                    color: p.yellow,'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_on_the_bar_is_in_the_role_it_claims',
+            'the_count_badge_does_not_follow_the_accent',
+            # NOT the_badge_digit test: it compares the digit against
+            # `readable_on(badge as actually drawn)`, so swapping the badge to
+            # another role keeps the pair consistent. Mocha yellow and Mocha
+            # red are both light enough to want the same near-black ink, so it
+            # does not even shift the value. A consistency check cannot see a
+            # change that moves both sides.
+            'test_render_shows_badge_for_multiple_windows',
+        ],
+    ),
+    (
+        'FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF: the window count is frozen back to Mocha red',
+        TB,
+        [
+            ('                    color: p.red,',
+             '                    color: Color::from_hex(0xF38BA8),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_taskbar_draws_comes_from_its_palette',
+            'every_colour_on_the_bar_is_in_the_role_it_claims',
+            'the_badge_digit_is_computed_from_the_badge_it_sits_on',
+            # The role table is what actually names the badge `p.red`, so a
+            # frozen Mocha literal fails it in the light render. Not declared
+            # originally because the defect looked like a sweep case.
+            'the_count_badge_does_not_follow_the_accent',
+            # NOT test_render_shows_badge_for_multiple_windows: it asserts a
+            # 12x12 rect exists, and a frozen colour is still a rect.
+            'none_of_the_ten_deleted_constants_is_still_drawn',
+        ],
+    ),
+    (
+        'GGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGG: the badge digit is named again, as the Mocha mantle it used to be',
+        TB,
+        [
+            ('                    color: readable_on(p.red),',
+             '                    color: Color::from_hex(0x181825),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_taskbar_draws_comes_from_its_palette',
+            'every_colour_on_the_bar_is_in_the_role_it_claims',
+            'the_badge_digit_is_computed_from_the_badge_it_sits_on',
+            'none_of_the_ten_deleted_constants_is_still_drawn',
+        ],
+    ),
+    (
+        'HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH: the badge digit is a role instead of a reading of its own fill',
+        TB,
+        [
+            ('                    color: readable_on(p.red),',
+             '                    color: p.text,'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_on_the_bar_is_in_the_role_it_claims',
+            'the_badge_digit_is_computed_from_the_badge_it_sits_on',
+        ],
+    ),
+    (
+        'IIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIII: the badge digit is read off the accent rather than off the badge',
+        TB,
+        [
+            ('                    color: readable_on(p.red),',
+             '                    color: p.on_accent(),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_on_the_bar_is_in_the_role_it_claims',
+            'the_badge_digit_is_computed_from_the_badge_it_sits_on',
+        ],
+    ),
+    (
+        'JJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJ: the badge digit is frozen to the pale legibility endpoint',
+        TB,
+        [
+            ('                    color: readable_on(p.red),',
+             '                    color: Color::from_hex(0xEFF1F5),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_on_the_bar_is_in_the_role_it_claims',
+            'the_badge_digit_is_computed_from_the_badge_it_sits_on',
+        ],
+    ),
+    (
+        'KKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKK: a button being carried is drawn at full strength',
+        TB,
+        [
+            ('            with_alpha(p.text, 140)',
+             '            p.text'),
+        ],
+        ["desktop"],
+        [
+            'button_ink_follows_the_button_state',
+        ],
+    ),
+    (
+        "LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLL: the carried button's ink is frozen back to its Mocha rgba triple",
+        TB,
+        [
+            ('            with_alpha(p.text, 140)',
+             '            Color::rgba(205, 214, 244, 140)'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_taskbar_draws_comes_from_its_palette',
+            'button_ink_follows_the_button_state',
+            'none_of_the_ten_deleted_constants_is_still_drawn',
+        ],
+    ),
+    (
+        "MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM: an idle button's icon is as loud as a running one's",
+        TB,
+        [
+            ('                ButtonState::Idle => p.subtext0,',
+             '                ButtonState::Idle => p.text,'),
+        ],
+        ["desktop"],
+        [
+            'button_ink_follows_the_button_state',
+        ],
+    ),
+    (
+        'NNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNN: the idle icon is frozen back to Mocha subtext0',
+        TB,
+        [
+            ('                ButtonState::Idle => p.subtext0,',
+             '                ButtonState::Idle => Color::from_hex(0xA6ADC8),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_taskbar_draws_comes_from_its_palette',
+            'button_ink_follows_the_button_state',
+            'none_of_the_ten_deleted_constants_is_still_drawn',
+        ],
+    ),
+    (
+        "OOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOO: a running button's icon drops to the secondary heading role",
+        TB,
+        [
+            ('                ButtonState::Running | ButtonState::Focused => p.text,',
+             '                ButtonState::Running | ButtonState::Focused => p.subtext1,'),
+        ],
+        ["desktop"],
+        [
+            'button_ink_follows_the_button_state',
+        ],
+    ),
+    (
+        'PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPP: the running icon is frozen back to Mocha text',
+        TB,
+        [
+            ('                ButtonState::Running | ButtonState::Focused => p.text,',
+             '                ButtonState::Running | ButtonState::Focused => Color::from_hex(0xCDD6F4),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_taskbar_draws_comes_from_its_palette',
+            'button_ink_follows_the_button_state',
+            'none_of_the_ten_deleted_constants_is_still_drawn',
+        ],
+    ),
+    (
+        "QQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQ: the label stops sharing the icon's colour and names Mocha text",
+        TB,
+        [
+            ('                text: button.display_name.clone(),\n                color: icon_color,',
+             '                text: button.display_name.clone(),\n                color: Color::from_hex(0xCDD6F4),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_taskbar_draws_comes_from_its_palette',
+            'button_ink_follows_the_button_state',
+            'none_of_the_ten_deleted_constants_is_still_drawn',
+        ],
+    ),
+    (
+        "RRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRR: the label stops sharing the icon's colour and is always secondary",
+        TB,
+        [
+            ('                text: button.display_name.clone(),\n                color: icon_color,',
+             '                text: button.display_name.clone(),\n                color: p.subtext0,'),
+        ],
+        ["desktop"],
+        [
+            'button_ink_follows_the_button_state',
+        ],
+    ),
+    (
+        "SSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSS: the menu's shadow becomes a colour, so it flips with the mode",
+        TB,
+        [
+            ('            color: p.shadow(),',
+             '            color: with_alpha(p.crust, 120),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_in_the_context_menu_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        "TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT: the menu's shadow goes back to this file's private alpha",
+        TB,
+        [
+            ('            color: p.shadow(),',
+             '            color: Color::rgba(0, 0, 0, 80),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_in_the_context_menu_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        'UUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUU: the menu stops floating and ignores the transparency setting',
+        TB,
+        [
+            ('            color: p.panel_bg(),',
+             '            color: p.base,'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_in_the_context_menu_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        'VVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVV: the menu panel is frozen back to Mocha surface0',
+        TB,
+        [
+            ('            color: p.panel_bg(),',
+             '            color: Color::from_hex(0x313244),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_taskbar_draws_comes_from_its_palette',
+            'every_colour_in_the_context_menu_is_in_the_role_it_claims',
+            'none_of_the_ten_deleted_constants_is_still_drawn',
+        ],
+    ),
+    (
+        'WWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWW: the menu panel is a flat raised surface again',
+        TB,
+        [
+            ('            color: p.panel_bg(),',
+             '            color: p.surface0,'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_in_the_context_menu_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        "XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX: the menu's outline drops to the separator role",
+        TB,
+        [
+            ('            color: p.surface2,\n            line_width: 1.0,',
+             '            color: p.overlay0,\n            line_width: 1.0,'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_in_the_context_menu_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        "YYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYY: the menu's outline is frozen back to Mocha surface2",
+        TB,
+        [
+            ('            color: p.surface2,\n            line_width: 1.0,',
+             '            color: Color::from_hex(0x585B70),\n            line_width: 1.0,'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_taskbar_draws_comes_from_its_palette',
+            'every_colour_in_the_context_menu_is_in_the_role_it_claims',
+            'none_of_the_ten_deleted_constants_is_still_drawn',
+        ],
+    ),
+    (
+        "ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ: the menu's items are drawn in secondary ink",
+        TB,
+        [
+            ('                text: label.to_string(),\n                color: p.text,',
+             '                text: label.to_string(),\n                color: p.subtext0,'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_in_the_context_menu_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA: the menu's items are frozen back to Mocha text",
+        TB,
+        [
+            ('                text: label.to_string(),\n                color: p.text,',
+             '                text: label.to_string(),\n                color: Color::from_hex(0xCDD6F4),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_taskbar_draws_comes_from_its_palette',
+            'every_colour_in_the_context_menu_is_in_the_role_it_claims',
+            'none_of_the_ten_deleted_constants_is_still_drawn',
+        ],
+    ),
+    (
+        'BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB: the taskbar throws away the palette it was handed and resolves its own',
+        TB,
+        [
+            ('        let mut cmds = Vec::new();\n\n        // Background.',
+             '        let p = &Palette::for_mode(false);\n\n        let mut cmds = Vec::new();\n\n        // Background.'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_taskbar_draws_comes_from_its_palette',
+            'every_colour_on_the_bar_is_in_the_role_it_claims',
+            'each_button_state_draws_the_background_its_role_names',
+            'button_ink_follows_the_button_state',
+            'every_colour_in_the_context_menu_is_in_the_role_it_claims',
+            'exactly_one_thing_on_the_taskbar_carries_the_accent',
+            'the_badge_digit_is_computed_from_the_badge_it_sits_on',
+            # A frozen dark render draws Mocha red where the light palette
+            # names Latte red, so the badge's role table fails too. This is
+            # the defect the whole conversion exists to prevent, and it should
+            # be declared against every table that reads a role in both modes.
+            'the_count_badge_does_not_follow_the_accent',
+            'the_render_is_not_the_same_in_both_modes',
+            'none_of_the_ten_deleted_constants_is_still_drawn',
+        ],
+    ),
+    (
+        "CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC: the probe palette's accent collides with a role again",
+        TB,
+        [
+            ('        p.accent = Color::from_hex(0xFF00FF);',
+             '        p.accent = p.blue;'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_taskbar_draws_comes_from_its_palette',
+            'the_fixture_takes_every_branch_this_module_has',
+            'every_colour_on_the_bar_is_in_the_role_it_claims',
+            'each_button_state_draws_the_background_its_role_names',
+            'button_ink_follows_the_button_state',
+            'every_colour_in_the_context_menu_is_in_the_role_it_claims',
+            'exactly_one_thing_on_the_taskbar_carries_the_accent',
+            'the_drop_caret_is_never_the_same_hue_as_the_focus_underline',
+            'the_count_badge_does_not_follow_the_accent',
+            'the_badge_digit_is_computed_from_the_badge_it_sits_on',
+            'the_focus_underline_is_wider_than_the_running_one',
+            # Every test in this module builds its palette with `accented()`,
+            # whose guard assertions this defect trips, so the pre-conversion
+            # tests fail too.
+            'test_render_shows_indicator_for_running',
+            'the_render_is_not_the_same_in_both_modes',
+            'none_of_the_ten_deleted_constants_is_still_drawn',
+        ],
+    ),
+    (
+        'DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD: the probe palette goes back to a fully opaque panel',
+        TB,
+        [
+            ('        p.panel_alpha = 200;',
+             '        p.panel_alpha = 255;'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_taskbar_draws_comes_from_its_palette',
+            'the_fixture_takes_every_branch_this_module_has',
+            'every_colour_on_the_bar_is_in_the_role_it_claims',
+            'each_button_state_draws_the_background_its_role_names',
+            'button_ink_follows_the_button_state',
+            'every_colour_in_the_context_menu_is_in_the_role_it_claims',
+            'exactly_one_thing_on_the_taskbar_carries_the_accent',
+            'the_drop_caret_is_never_the_same_hue_as_the_focus_underline',
+            'the_count_badge_does_not_follow_the_accent',
+            'the_badge_digit_is_computed_from_the_badge_it_sits_on',
+            'the_focus_underline_is_wider_than_the_running_one',
+            # Every test in this module builds its palette with `accented()`,
+            # whose guard assertions this defect trips, so the pre-conversion
+            # tests fail too.
+            'test_render_shows_indicator_for_running',
+            'the_render_is_not_the_same_in_both_modes',
+            'none_of_the_ten_deleted_constants_is_still_drawn',
+        ],
+    ),
+    (
+        "EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE: the fixture's drag never becomes active, so the ghost and caret go unchecked",
+        TB,
+        [
+            ('            start_y: 20.0,\n            active: true,',
+             '            start_y: 20.0,\n            active: false,'),
+        ],
+        ["desktop"],
+        [
+            'the_fixture_takes_every_branch_this_module_has',
+            'every_colour_on_the_bar_is_in_the_role_it_claims',
+            'each_button_state_draws_the_background_its_role_names',
+            'button_ink_follows_the_button_state',
+            'the_drop_caret_is_never_the_same_hue_as_the_focus_underline',
+        ],
+    ),
+    (
+        "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF: the fixture's context menu is closed, so the popup goes unchecked",
+        TB,
+        [
+            ('            x: 200.0,\n            y: 300.0,\n            visible: true,',
+             '            x: 200.0,\n            y: 300.0,\n            visible: false,'),
+        ],
+        ["desktop"],
+        [
+            'the_fixture_takes_every_branch_this_module_has',
+            'every_colour_in_the_context_menu_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        "GGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGG: the fixture's third window is gone, so the count badge goes unchecked",
+        TB,
+        [
+            ('        s.add_running_window(WindowId(12), "many", "Many 3");\n',
+             ''),
+        ],
+        ["desktop"],
+        [
+            'the_fixture_takes_every_branch_this_module_has',
+            'every_colour_on_the_bar_is_in_the_role_it_claims',
+            'the_badge_digit_is_computed_from_the_badge_it_sits_on',
+            # NOT the_count_badge test: dropping the third window leaves two,
+            # and a badge is drawn for any count above one — so the badge is
+            # still there and still `p.red`. Only the digit test notices,
+            # because it selects the text by its content ("3"). A defect that
+            # weakens a fixture is caught by whichever test reads the value
+            # that changed, not by every test that touches the site.
+        ],
+    ),
+    (
+        'HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH: nothing in the fixture is hovered, so the top rung of the ladder goes unchecked',
+        TB,
+        [
+            ('        s.hover_index = Some(3);',
+             '        s.hover_index = None;'),
+        ],
+        ["desktop"],
+        [
+            'the_fixture_takes_every_branch_this_module_has',
+            'each_button_state_draws_the_background_its_role_names',
+        ],
+    ),
+    (
+        'IIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIII: the fixture stops being in label mode, so the label site goes unchecked',
+        TB,
+        [
+            ('        let mut s = TaskbarState::new(TaskbarConfig {\n            icon_only: false,',
+             '        let mut s = TaskbarState::new(TaskbarConfig {\n            icon_only: true,'),
+        ],
+        ["desktop"],
+        [
+            'the_fixture_takes_every_branch_this_module_has',
+            'button_ink_follows_the_button_state',
+            # The pre-conversion label test uses the same fixture, so it goes
+            # first — it looks for the literal text "Terminal", which an
+            # icon-only bar never draws.
+            'test_render_label_mode',
+        ],
+    ),
 ]
 
 
@@ -4700,6 +10289,16 @@ def main():
                 missing = [t for t in expect if t not in all_failed]
                 if missing:
                     verdict += f"  [MISSING: {missing}]"
+                # Report the other direction too. A test that fired but was
+                # not declared means the declaration understates what the
+                # suite proves -- and the declarations are the only record of
+                # that, so the next person to prune a "redundant" test has no
+                # way to see what they would be giving up. This half used to
+                # be an out-of-band audit script run by hand, which meant it
+                # was run when someone remembered to.
+                extra = [t for t in sorted(all_failed) if t not in expect]
+                if extra:
+                    verdict += f"  [UNDECLARED: {extra}]"
             verdicts.append((name, verdict))
             print(f"{name}\n    {verdict}\n", flush=True)
     finally:
@@ -4716,6 +10315,16 @@ def main():
     print("\n=== summary ===")
     for name, verdict in verdicts:
         print(f"{name}\n    {verdict}")
+
+    def tally(mark):
+        return sum(1 for _, v in verdicts if mark in v)
+
+    escaped = tally("NO TEST FAILED") + tally("DID NOT COMPILE")
+    print(
+        f"\n{len(verdicts)} defects: {len(verdicts) - escaped} caught, "
+        f"{escaped} escaped, {tally('[MISSING:')} under-caught, "
+        f"{tally('[UNDECLARED:')} under-declared"
+    )
 
 
 if __name__ == "__main__":

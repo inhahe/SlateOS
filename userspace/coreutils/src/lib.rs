@@ -7,7 +7,7 @@
 //! to read and no faster to build. This library is for the exceptions: the
 //! things where two utilities disagreeing would itself be the bug.
 //!
-//! There are twelve so far. Three are about the interface these programs share
+//! There are thirteen so far. Three are about the interface these programs share
 //! whether or not anyone designed it that way: a script that reads `grep`'s
 //! diagnostic and a script that reads `cp`'s are the same script, and a person
 //! who learned to type `ls --col` expects `cat --squeeze` to work too.
@@ -167,6 +167,31 @@
 //!   is `/`, which the previous implementation's own unit test asserted was
 //!   `.`.
 //!
+//! The thirteenth is the [`human`] story again, but with eight copies instead
+//! of three and with the disagreements reaching further than the output column:
+//!
+//! - [`fnmatch`] — the shell glob. `find -name`, `du --exclude`,
+//!   `tar --exclude` and `cpio`'s pattern list are all POSIX `fnmatch(3)`, and
+//!   eight binaries here had each written their own. They agreed on `*` and `?`
+//!   and on nothing else. `find`'s copy is representative: it matched `char`s,
+//!   which on a filesystem whose names are arbitrary bytes means it could not
+//!   be handed the name at all; its `*` recursed once per possible split, so
+//!   `find . -name '*x*x*x*x*x*y'` is a hang reachable from a command line; its
+//!   `[…]` was a set of literal characters, so `[a-z]` matched exactly `a`, `-`
+//!   and `z` and `[!o]` matched `!` and `o` — wrong files, silently, rather
+//!   than an error; and `\` was not an escape, so no pattern could name a file
+//!   containing a `*`.
+//!
+//!   The flags are glibc's, and the two that decide what a `/` means are the
+//!   reason this is a parameterised matcher rather than one function.
+//!   [`Flags::PATHNAME`] and [`Flags::PERIOD`] are what a *shell's* own globbing
+//!   wants and what the utilities here want **off**: `find -name` is given a
+//!   single component, and `du --exclude` deliberately lets `*` cross a
+//!   separator — measured, `du --exclude='*/keep'` prunes `ex/aa/keep`.
+//!
+//! [`Flags::PATHNAME`]: fnmatch::Flags::PATHNAME
+//! [`Flags::PERIOD`]: fnmatch::Flags::PERIOD
+//!
 //! The regex engine, which is the other thing they must not disagree about,
 //! lives in `userspace/ere` rather than here — the shell needs it too, and it
 //! cannot depend on the coreutils. See `design-decisions.md` §322.
@@ -177,10 +202,12 @@ pub mod cfmt;
 pub mod errmsg;
 pub mod extfloat;
 pub mod filekind;
+pub mod fnmatch;
 pub mod getopt;
 pub mod human;
 pub mod pathname;
 pub mod quote;
 pub mod shell;
 pub mod tabstops;
+pub mod vercmp;
 pub mod xnum;

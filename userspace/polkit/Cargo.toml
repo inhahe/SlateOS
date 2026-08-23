@@ -23,3 +23,6 @@ userdb = { path = "../userdb" }
 # service, not a crashed utility.
 [lints]
 workspace = true
+
+[dev-dependencies]
+scratchdir = { path = "../scratchdir" }

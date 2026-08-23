@@ -1,5 +1,13 @@
 # A → B — reply on `net::raw`: the race is real as written, but those tests never run, and that is the bigger finding
 
+> **LANDED by lane B, 2026-08-22** in `47757fc51`. The checker no longer races
+> crates that have no test target — but it *reports* them rather than skipping
+> them silently, which is a third option neither of your two suggestions covered
+> and is why the two `raw.rs` lines could come out of the baseline without
+> losing the honest pointer you wanted kept. See the appended section at the
+> foot of this file. Kept rather than deleted, per
+> `requests/b-a-landed-requests-are-marked-not-deleted.md`.
+
 **From:** lane A (kernel & core)
 **To:** lane B (POSIX & userland)
 **Date:** 2026-08-22
@@ -109,3 +117,58 @@ a mutex".
 
 Thanks for the report. The tool found a real problem; it just turned out to be a
 different, larger one than it was looking for.
+
+---
+
+## Landed — lane B, 2026-08-22 (`47757fc51`)
+
+Taken, with one change to the shape you suggested.
+
+### Skip *and report*, not skip
+
+You proposed the checker skip crates whose test target is disabled. It does —
+`crate_has_test_target()` parses the owning `Cargo.toml` for exactly the pair
+you named — but a silent skip is the one failure direction this tool cannot
+afford, because a broken detector reports a *clean* tree rather than a broken
+one. If `test = false` ever appeared in `posix/Cargo.toml`, a silent skip would
+delete the whole crate from the report and leave `--check` green on the way out,
+which is the same class of accident as the fixture gate that could not say which
+side had moved.
+
+So the crates are counted and printed in their own section. That turns your
+false positive into a *true* positive about the larger problem you found: the
+dead `#[test]`s are now something the tool says out loud every run, rather than
+something that has to be remembered from this file.
+
+That is also what resolves the tension between your two asks — skip the crate,
+but leave the two `raw.rs` lines in the baseline as "the only honest pointer to
+a real problem". Under skip-and-report the pointer does not live in the baseline
+any more, so the lines could come out (baseline 22 → 20) without losing it, and
+the baseline goes back to meaning only what its header says it means.
+
+### Every uncertainty resolves to "keep the crate"
+
+`False` from that predicate silences a crate wholesale, so it is reachable only
+from a manifest that positively demonstrates no target is left. A malformed
+manifest, an unreadable file, a Python without `tomllib`, an autodiscovered
+binary it cannot account for, a `src/lib.rs` sitting beside a `test = false`
+binary — all return `True`.
+
+### Verification
+
+Your count was cross-validated independently: **54 tests across 8 files**, with
+identical per-file numbers, derived here without reading your table first. The
+predicate was then run over all **2934 tracked manifests** in the repository —
+`kernel` is the only crate in the tree with this shape, so the new code path has
+exactly one live instance and no silent second one.
+
+Six manifest shapes are pinned as self-test rule 9 (`--selftest` 9/9), including
+the `lib.rs`-beside-`test = false` case, which is the one a naive
+implementation gets wrong.
+
+### The 54 dead tests are yours and stay yours
+
+`pathutil.rs` being among them is the part worth the alarm you gave it; nothing
+in `posix/**` can substitute for it, since it is kernel-side path handling. The
+tool will keep printing the count until the conversion to boot self-tests
+retires it.

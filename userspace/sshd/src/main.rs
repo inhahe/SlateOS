@@ -4699,10 +4699,37 @@ DenyGroups nogroup
 
     use scratchdir::ScratchDir;
 
+    /// The clock every fixture here authenticates against, frozen.
+    ///
+    /// The rate limit earned by `FREE_ATTEMPTS + 1` failures is **one second**
+    /// (`delay_for(4) == 1`), and it is measured from the last failure. Earning
+    /// it costs four real `posix::crypt` verifications, which are slow by
+    /// design — that is the entire point of a password hash. On a machine
+    /// running a three-lane `cargo test --workspace` those four can take longer
+    /// than the second they are trying to fit inside, at which point the delay
+    /// has already expired, `authenticate` correctly declines to refuse, and
+    /// the test that asserts a refusal fails. Lane C observed exactly that; see
+    /// `requests/c-b-auth-daemon-rate-limit-tests-race-a-one-second-window.md`.
+    ///
+    /// `authlib` is not wrong — a one-second delay expiring after one second is
+    /// the specification — so the fix is to take wall time out of a property
+    /// that never depended on it, rather than to earn a longer delay and make
+    /// the race rare instead of impossible.
+    ///
+    /// Freezing also makes the assertions stronger: with `now` pinned, the
+    /// `retry_after_secs` a refusal reports is a known number rather than
+    /// whatever the scheduler left of the window, so these tests can name it
+    /// instead of accepting any `RateLimited` at all.
+    fn frozen_clock() -> u64 {
+        // Any fixed value; only differences matter, and there are none.
+        1_700_000_000
+    }
+
     /// An `Authenticator` over a throwaway `/etc/shadow` holding one line.
     ///
     /// The users.yaml path deliberately points at a file that does not exist,
-    /// so the shadow branch is the one under test.
+    /// so the shadow branch is the one under test. The clock is frozen — see
+    /// [`frozen_clock`].
     ///
     /// The returned `ScratchDir` is a guard: it must stay bound for as long as the
     /// `Authenticator` is used, because dropping it deletes the shadow file the
@@ -4712,7 +4739,10 @@ DenyGroups nogroup
         let shadow = dir.path("shadow");
         std::fs::write(&shadow, line).expect("write shadow");
         let missing = dir.path("no_such_users.yaml");
-        (authlib::Authenticator::with_stores(&missing, &shadow), dir)
+        (
+            authlib::Authenticator::with_stores(&missing, &shadow).with_clock(frozen_clock),
+            dir,
+        )
     }
 
     /// The fixture's own wiring, which a shared guard cannot check for us.
@@ -4898,18 +4928,34 @@ DenyGroups nogroup
 
         // The daemon-wide verifier now refuses without even looking, and would
         // do so for a brand new connection: nothing about `conn` is consulted.
+        //
+        // The exact second is asserted, not just "some rate limit": under a
+        // frozen clock `delay_for(FREE_ATTEMPTS + 1)` is 1 and no time has
+        // passed since the fourth failure, so 1 is the only right answer. A
+        // `matches!(.., RateLimited { .. })` here would also be satisfied by a
+        // delay mis-computed as 60, which is the failure this is meant to catch.
         let outcome = handle_password_auth(&wrong, 0, "alice", &mut auth).expect("parse");
-        assert!(
-            matches!(outcome, authlib::Outcome::RateLimited { .. }),
-            "expected a rate limit, got {outcome:?}"
+        assert_eq!(
+            outcome,
+            authlib::Outcome::RateLimited {
+                retry_after_secs: 1
+            },
+            "expected the one-second limit earned by {} failures",
+            authlib::FREE_ATTEMPTS + 1
         );
 
         // And the *correct* password is refused too while the delay stands --
         // that is the cost of the protection, and it is why the delay is
-        // capped rather than unbounded.
+        // capped rather than unbounded. Still one second: a refusal returns
+        // before the tally is touched, so being refused does not extend it.
         let right = password_request(b"correct horse");
         let outcome = handle_password_auth(&right, 0, "alice", &mut auth).expect("parse");
-        assert!(matches!(outcome, authlib::Outcome::RateLimited { .. }));
+        assert_eq!(
+            outcome,
+            authlib::Outcome::RateLimited {
+                retry_after_secs: 1
+            }
+        );
     }
 
     #[test]

@@ -1027,6 +1027,110 @@ worth correcting whichever way this goes); `userspace/coreutils/` (86 bins,
 
 ---
 
+## B-Q8 — [B] Two of the programs we copy disagree about how wide 626 characters are. Which one do we copy? — Status: OPEN
+
+**In short:** Text on a terminal is laid out in fixed cells, and every program
+that lines things up in columns has to agree on how many cells each character
+takes — a Chinese character takes two, an accent mark that sits on the previous
+letter takes none, most things take one. We keep one table of those numbers and
+every one of our programs reads it. The trouble is that the two programs we
+copy from — the shell **bash** and the **GNU command-line tools** — disagree
+with each other about 626 characters, and we can only match one of them. Today
+we match bash. Matching bash means our `ls` puts a filename in the wrong column
+for those characters; matching the GNU tools means our shell's menus do.
+
+### The question
+
+Our table lives in `userspace/charwidth` and is the only such table in the
+system — deliberately, because `ls`, `wc -L` (longest-line), `expand`, `fold`,
+`nl`, `column` and the shell's `select` menu all draw onto the *same* screen,
+so two of them disagreeing is not a difference of opinion, it is a crooked
+screen. The table was built to match bash 5.2.37 and was checked against it at
+1701 places, so today it is bash's answer.
+
+On Linux, though, bash and the GNU tools do not get their numbers from the same
+place. bash asks the C library (glibc). GNU coreutils 9.5 ships its own table
+(from the "gnulib" support library) and **deliberately overrides the C
+library's** in any UTF-8 setting — its own source comment says the system's
+answer is not Unicode-aware enough. Coreutils 9.4 did not do this; 9.5 does.
+Measured here, exhaustively over all 1.1 million characters, the two tables
+disagree on **626 characters in 71 stretches**. Examples:
+
+| Character | bash / glibc | GNU 9.5 / gnulib | Why they differ |
+|---|---|---|---|
+| U+00AD soft hyphen (an invisible "you may break the word here" mark) | 1 cell | 0 cells | A rule disagreement: gnulib gives *every* invisible formatting mark 0; glibc makes this one an exception |
+| U+D7B0–U+D7FB (extra Korean vowel/consonant pieces that fuse onto the letter before them) | 1 cell | 0 cells | Same rule disagreement, applied to a newer Korean block |
+| U+0600–U+0605 (Arabic marks printed *before* the number they belong to) | 0 cells | 1 cell | gnulib carves these out because they really do occupy a cell |
+| U+1F203, U+1FA75, U+4DC0–U+4DFF, … | varies | varies | Different Unicode releases; and gnulib rounds *unassigned* characters inside East-Asian blocks up to 2 cells, we do not |
+
+This is visible today: our `ls`-versus-GNU byte-diff harness has two cases that
+differ for exactly this reason and no other.
+
+### Options
+
+**(a) Follow the GNU tools (gnulib's table).** Regenerate `charwidth` from the
+reference implementation itself — we already have an exact dump of all 1.1
+million answers, taken by calling GNU 9.5's own width routine.
+*What changes:* our `ls` and `wc -L` line up with GNU's byte for byte on those
+626 characters; our shell's `select` menu stops lining up with bash's on them.
+- **Pro:** matches the six utilities that consult a width at all (`ls`, `wc -L`,
+  and `sort`, `pr`, `df`, `numfmt` when we write them) against one shell.
+- **Pro:** it is a *named, pinned* source — Unicode 15.1.0, one file, and we can
+  re-dump it at will. Our present table came from whatever Unicode version the
+  Python on the build machine happened to ship.
+- **Con:** it breaks a passing test. `userspace/oils/tests/gen_display_width.py
+  --diff-osh` compares our shell's menu against real bash at every table edge
+  and currently agrees everywhere; it would start reporting 626 disagreements.
+- **Con:** gnulib's table is *newer*, not *agreed*. Terminals have their own
+  tables too, and nothing says gnulib's matches the terminal we will ship.
+
+**(b) Keep bash's table (what we do today).**
+*What changes:* nothing observable; our `ls` keeps putting those 626 characters
+one cell off from GNU's.
+- **Pro:** no change, and the one end-to-end byte-diff we have that involves a
+  human-visible layout (shell menu vs bash) keeps passing.
+- **Con:** every `ls` case containing one of those characters stays permanently
+  marked "differs on purpose" in the harness, which dulls the harness.
+- **Con:** we are copying the *older* of the two answers on the characters where
+  they differ for a Unicode-version reason.
+
+**(c) Two tables — the shell reads one, the utilities the other.**
+*What changes:* both byte-diffs pass; the shell and `ls` can disagree by one
+cell about the same filename on the same screen.
+- **Pro:** maximum fidelity to both upstreams.
+- **Con:** this is precisely the thing `charwidth` exists to prevent, and the
+  symptom (a menu and a listing that do not line up) is the one a user actually
+  sees. I do not recommend it.
+
+### If never answered
+
+Safe, and it does not get worse on its own. Today's behaviour is (b). The cost
+is confined to two permanently-deferred cases in the `ls` harness and to the
+626 characters themselves, which are mostly invisible marks and unassigned
+code points — nobody has a filename made of them by accident.
+
+### Claude's recommendation
+
+**(a)**, but not strongly enough to do it without you: the deciding fact for me
+is that the count is six utilities to one shell and that gnulib's table is a
+pinned upstream we can re-derive mechanically, whereas ours is not. What stops
+me from just doing it is that it silently changes the on-screen layout of the
+shell and five other programs to win a byte-diff in one — a user-visible
+behaviour change, which is yours. Meanwhile I have kept (b) and isolated the
+divergence in the harness (fixture `y/`) so it costs two cases and not twenty.
+
+### Where it bites
+
+`userspace/charwidth/src/lib.rs` (`ZERO_WIDTH`, `WIDE`, and the doc comment
+that says the tables were measured against bash);
+`userspace/oils/tests/gen_display_width.py` (the generator and its `--check` /
+`--diff-osh` measurement against bash); `userspace/oils/src/width.rs`;
+`userspace/coreutils/src/bin/ls.rs` and `wc.rs`; `userspace/column/src/main.rs`;
+`scripts/ls-diff.sh` (fixture `y/`, two `!` cases);
+`known-issues.md` → `TD-B-OUR-WIDTH-TABLE-IS-BASHS-AND-COREUTILS-9.5S-IS-NOT`.
+
+---
+
 ## Q57 — [A] Should a program be able to pop up a prompt asking you for permission to read the keyboard, the microphone or the camera? — Status: OPEN
 
 **In short:** SlateOS has a mechanism where a program that lacks permission for
@@ -1096,6 +1200,77 @@ written assuming one answer.
 **Where it bites:** `kernel/src/syscall/handlers.rs:6181` (the fifteen-entry
 match), `kernel/src/cap/mod.rs:194-360` (types 16–30), `kernel/src/cap/request.rs`
 (the broker itself).
+
+
+## C-Q6 — [C] We have written the Settings screens twice, in two different places, and neither copy is finished. Which one is the real one? — Status: OPEN
+
+**In short:** There are two separate, independently-written sets of Settings
+pages in this tree — one inside the desktop shell, one inside a standalone
+Settings application — covering mostly the same ground (sound, display, mouse,
+power, network, wallpaper, accounts, updates…). Neither knows the other exists.
+The shell's copy is better tested but **nothing can display it**; the app's copy
+is the one that would actually open if a user clicked "Settings". I need to know
+which one to keep, because everything I do to one I currently have to do twice.
+
+**Glossary:** the *shell* is the always-on desktop furniture — taskbar, start
+menu, wallpaper, the volume popup. An *application* is a separate program the
+user launches. A *panel* or *page* here means one screen of settings.
+
+**Where:**
+
+| | |
+|---|---|
+| Copy 1 | `gui/desktop/src/*_settings.rs` and friends — about 50 modules |
+| Copy 2 | `apps/settings/src/main.rs` — 8,227 lines, its own page list and its own data types |
+| What connects them | nothing (`apps/settings` does not depend on the `desktop` crate at all) |
+
+Copy 1 has one further problem on its own: the shell paints exactly **four** of
+its fifty-seven modules (`wallpaper`, `calendar`, `snap`, `overview`). Every
+other panel it contains — including a few with no counterpart in copy 2, such as
+the on-screen volume overlay, the print manager and the login screen — is drawn
+only by its own unit tests. Full detail is in `known-issues.md` →
+`TD-C-THE-SHELL-DRAWS-FOUR-OF-ITS-FIFTY-SEVEN-MODULES`.
+
+### The options
+
+**A. The standalone app is the real one; delete the shell's settings panels.**
+*What changes:* the desktop crate loses tens of thousands of lines; nothing a
+user can see changes today. Cheapest, and it deletes the copy nobody can open.
+Against: it throws away the better-tested implementation, and it does not
+account for the shell-only surfaces (volume overlay, login screen, print
+manager, security dialog) that are not settings pages at all and have nowhere
+else to go.
+
+**B. The shell's panels are the real ones; the app becomes a thin window that
+displays them.**
+*What changes:* the Settings app starts showing the shell's pages instead of its
+own; the duplicate data types in `apps/settings/src/main.rs` go. Keeps the
+tested code. Against: a Settings *application* that has to link the desktop
+shell to draw itself is a backwards dependency, and the shell crate is already
+sixty files.
+
+**C. Split by kind — shell surfaces stay in the shell and get wired up; settings
+pages move to the app and the shell copies are deleted.**
+*What changes:* the volume overlay and the login screen actually appear on
+screen for the first time; the Settings app gains the shell's better-tested
+pages; each page exists once. Most work, and I think it is right — the dividing
+line ("is this something the desktop shows you, or a screen you open?") is a
+real one rather than a compromise.
+
+**If it is never answered:** nothing breaks and nothing gets worse on its own.
+The concrete cost is that every crate-wide change is paid for twice. The one in
+flight is the palette conversion — 549 hardcoded colours in the shell's copy,
+2,258 in the app's — and I am partway through the shell's. I will keep going
+either way, because a converted module is converted once and leaving a module
+frozen guarantees the bug comes back when it is finally wired up. But I would
+rather not start the app's 2,258 without knowing whether half of them are about
+to be deleted.
+
+**Recommendation:** C. B is the tempting middle and I would push back on it: the
+dependency direction is wrong and it papers over the fact that four modules of
+fifty-seven are reachable. A is defensible if the answer is simply "the shell's
+settings pages were a mistake" — and if that is the answer, say so plainly and I
+will delete them rather than convert them.
 
 
 # Resolved

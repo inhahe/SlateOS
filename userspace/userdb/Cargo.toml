@@ -17,3 +17,6 @@ posix = { path = "../../posix" }
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+scratchdir = { path = "../scratchdir" }

@@ -5,6 +5,7 @@
 //! OSD overlays appear centered near the bottom of the screen and auto-dismiss
 //! after a configurable timeout.
 
+use appearance::Palette;
 use guitk::color::Color;
 use guitk::idseq::IdSeq;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
@@ -12,20 +13,49 @@ use guitk::style::CornerRadii;
 use guitk::text;
 
 // ============================================================================
-// Theme constants — Catppuccin Mocha
+// Colour
 // ============================================================================
-
-const BASE: Color = Color::from_hex(0x1E1E2E);
-const SURFACE0: Color = Color::from_hex(0x313244);
-const SURFACE1: Color = Color::from_hex(0x45475A);
-const TEXT: Color = Color::from_hex(0xCDD6F4);
-const SUBTEXT0: Color = Color::from_hex(0xA6ADC8);
-const BLUE: Color = Color::from_hex(0x89B4FA);
-const GREEN: Color = Color::from_hex(0xA6E3A1);
-const RED: Color = Color::from_hex(0xF38BA8);
-const YELLOW: Color = Color::from_hex(0xF9E2AF);
-const PEACH: Color = Color::from_hex(0xFAB387);
-const LAVENDER: Color = Color::from_hex(0xB4BEFE);
+//
+// Eleven hardcoded Catppuccin Mocha constants used to live here. They are gone;
+// both renderers in this file take the resolved `&Palette` and read roles off
+// it, so the OSD follows the desktop's mode and accent. Four judgements were
+// made in the process, and the first is the one worth reading:
+//
+// 1. **Nothing the overlay draws follows the accent.** An OSD is pure
+//    feedback: there is nothing in it to select, nothing to drag, nothing that
+//    says "you are here". Every colour it uses is a surface, a piece of text,
+//    or a reading. So `p.accent` does not appear anywhere in `OsdManager` at
+//    all, and `no_colour_the_overlay_draws_ever_follows_the_accent` says so
+//    out loud rather than leaving it as an accident of the mapping.
+//
+// 2. **Volume and brightness are a category pair, so both freeze.** The volume
+//    overlay's bar is the thing here that looks most like a slider, and it is
+//    the thing that most needs not to follow the accent: blue means volume and
+//    yellow means brightness, and two readings told apart by hue stop being
+//    two readings the moment one accent claims both. This is module 22's meter
+//    rule (`widgets.rs`), and it is the deliberate counterpart to module 23's
+//    (`sound_settings.rs`), where the volume bar *does* take the accent —
+//    because there you can drag it. One rule stated twice: the accent marks
+//    what you can move, not what you are being told.
+//
+// 3. **Ink drawn on a coloured fill is derived, never named.** The tick inside
+//    an enabled checkbox is `readable_on(p.green)` and the Preview button's
+//    label is `p.on_accent()`. Both were Mocha `base` — a dark ink that is
+//    invisible on a Latte green and on a pale accent. A colour drawn *on* a
+//    fill has to be computed from that fill.
+//
+// 4. **On/off pairs stay frozen.** Green/`subtext0`, green/`surface1` and
+//    green/red report a state; they do not decorate one. Module 19's rule.
+//
+// The settings panel below the overlay is a different surface with a different
+// answer: it has three accent sites — the selected position dot, the timeout
+// slider's fill and the Preview button — because those are, respectively, a
+// selection, a drag and an invitation.
+//
+// The overlay's shadow stays `rgba(0, 0, 0, base_alpha / 2)` rather than
+// becoming `Palette::shadow()`, for the reason module 22 gives for the
+// per-widget shadow: its depth is a function of the overlay's own fade, so a
+// half-faded OSD must cast a half-faded shadow.
 
 // ============================================================================
 // OSD types
@@ -396,7 +426,7 @@ impl OsdManager {
     }
 
     /// Render all active overlays into render commands.
-    pub fn render(&self) -> Vec<RenderCommand> {
+    pub fn render(&self, p: &Palette) -> Vec<RenderCommand> {
         let mut commands = Vec::new();
         let osd_w = self.config.width;
 
@@ -441,7 +471,7 @@ impl OsdManager {
                 y: oy,
                 width: osd_w,
                 height: osd_h,
-                color: Color::rgba(BASE.r, BASE.g, BASE.b, base_alpha),
+                color: Color::rgba(p.base.r, p.base.g, p.base.b, base_alpha),
                 corner_radii: CornerRadii::all(self.config.corner_radius),
             });
 
@@ -451,13 +481,13 @@ impl OsdManager {
                 y: oy,
                 width: osd_w,
                 height: osd_h,
-                color: Color::rgba(SURFACE1.r, SURFACE1.g, SURFACE1.b, base_alpha),
+                color: Color::rgba(p.surface1.r, p.surface1.g, p.surface1.b, base_alpha),
                 line_width: 1.0,
                 corner_radii: CornerRadii::all(self.config.corner_radius),
             });
 
             // Content.
-            self.render_content(overlay, ox, oy, osd_w, osd_h, text_alpha, &mut commands);
+            self.render_content(p, overlay, ox, oy, osd_w, osd_h, text_alpha, &mut commands);
         }
 
         commands
@@ -503,6 +533,7 @@ impl OsdManager {
     /// Render the content for a specific overlay.
     fn render_content(
         &self,
+        p: &Palette,
         overlay: &OsdOverlay,
         ox: f32,
         oy: f32,
@@ -514,6 +545,7 @@ impl OsdManager {
         match &overlay.kind {
             OsdKind::Volume { level, muted } => {
                 self.render_slider_osd(
+                    p,
                     ox,
                     oy,
                     osd_w,
@@ -525,12 +557,13 @@ impl OsdManager {
                         volume_icon(*level)
                     },
                     *level,
-                    if *muted { RED } else { BLUE },
+                    if *muted { p.red } else { p.blue },
                     commands,
                 );
             }
             OsdKind::Brightness { level } => {
                 self.render_slider_osd(
+                    p,
                     ox,
                     oy,
                     osd_w,
@@ -538,7 +571,7 @@ impl OsdManager {
                     "Brightness",
                     brightness_icon(*level),
                     *level,
-                    YELLOW,
+                    p.yellow,
                     commands,
                 );
             }
@@ -547,13 +580,13 @@ impl OsdManager {
                 artist,
                 album,
             } => {
-                self.render_media_osd(ox, oy, osd_w, text_alpha, title, artist, album, commands);
+                self.render_media_osd(p, ox, oy, osd_w, text_alpha, title, artist, album, commands);
             }
             OsdKind::MediaPlayPause { playing } => {
                 let label = if *playing { "Playing" } else { "Paused" };
                 let icon = if *playing { "\u{25B6}" } else { "\u{23F8}" };
                 self.render_icon_text_osd(
-                    ox, oy, osd_w, text_alpha, icon, label, LAVENDER, commands,
+                    p, ox, oy, osd_w, text_alpha, icon, label, p.lavender, commands,
                 );
             }
             OsdKind::KeyboardLock { lock_type, active } => {
@@ -564,8 +597,9 @@ impl OsdManager {
                 };
                 let status = if *active { "ON" } else { "OFF" };
                 let label = format!("{name}: {status}");
-                let color = if *active { GREEN } else { SUBTEXT0 };
+                let color = if *active { p.green } else { p.subtext0 };
                 self.render_icon_text_osd(
+                    p,
                     ox,
                     oy,
                     osd_w,
@@ -585,9 +619,9 @@ impl OsdManager {
                 } else {
                     format!("{device_name} connected")
                 };
-                let color = if *ejected { SUBTEXT0 } else { GREEN };
+                let color = if *ejected { p.subtext0 } else { p.green };
                 self.render_icon_text_osd(
-                    ox, oy, osd_w, text_alpha, "\u{23CF}", &label, color, commands,
+                    p, ox, oy, osd_w, text_alpha, "\u{23CF}", &label, color, commands,
                 );
             }
             OsdKind::ScreenshotTaken { path } => {
@@ -609,20 +643,22 @@ impl OsdManager {
                     text::elide_start(path, room, "\u{2026}", OSD_LABEL_SIZE, OSD_LABEL_WEIGHT);
                 let label = format!("{prefix}{display_path}");
                 self.render_icon_text_osd(
+                    p,
                     ox,
                     oy,
                     osd_w,
                     text_alpha,
                     "\u{1F4F7}",
                     &label,
-                    GREEN,
+                    p.green,
                     commands,
                 );
             }
             OsdKind::Microphone { muted } => {
                 let label = if *muted { "Mic: Muted" } else { "Mic: Active" };
-                let color = if *muted { RED } else { GREEN };
+                let color = if *muted { p.red } else { p.green };
                 self.render_icon_text_osd(
+                    p,
                     ox,
                     oy,
                     osd_w,
@@ -639,8 +675,9 @@ impl OsdManager {
                 } else {
                     format!("Disconnected: {name}")
                 };
-                let color = if *connected { GREEN } else { RED };
+                let color = if *connected { p.green } else { p.red };
                 self.render_icon_text_osd(
+                    p,
                     ox,
                     oy,
                     osd_w,
@@ -654,20 +691,21 @@ impl OsdManager {
             OsdKind::BatteryLow { percent } => {
                 let label = format!("Battery Low: {percent}%");
                 self.render_icon_text_osd(
+                    p,
                     ox,
                     oy,
                     osd_w,
                     text_alpha,
                     "\u{1F50B}",
                     &label,
-                    RED,
+                    p.red,
                     commands,
                 );
             }
             OsdKind::Custom { icon, message } => {
-                let (icon_str, color) = icon_info(*icon);
+                let (icon_str, color) = icon_info(p, *icon);
                 self.render_icon_text_osd(
-                    ox, oy, osd_w, text_alpha, icon_str, message, color, commands,
+                    p, ox, oy, osd_w, text_alpha, icon_str, message, color, commands,
                 );
             }
         }
@@ -676,6 +714,7 @@ impl OsdManager {
     /// Render a slider-style OSD (volume, brightness).
     fn render_slider_osd(
         &self,
+        p: &Palette,
         ox: f32,
         oy: f32,
         osd_w: f32,
@@ -708,7 +747,7 @@ impl OsdManager {
             y: oy + 16.0,
             text: pct_str,
             font_size: 14.0,
-            color: Color::rgba(TEXT.r, TEXT.g, TEXT.b, text_alpha),
+            color: Color::rgba(p.text.r, p.text.g, p.text.b, text_alpha),
             font_weight: FontWeightHint::Bold,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -725,7 +764,7 @@ impl OsdManager {
             y: track_y,
             width: track_w,
             height: track_h,
-            color: Color::rgba(SURFACE0.r, SURFACE0.g, SURFACE0.b, text_alpha),
+            color: Color::rgba(p.surface0.r, p.surface0.g, p.surface0.b, text_alpha),
             corner_radii: CornerRadii::all(3.0),
         });
 
@@ -750,7 +789,7 @@ impl OsdManager {
             y: knob_y,
             width: 10.0,
             height: 10.0,
-            color: Color::rgba(TEXT.r, TEXT.g, TEXT.b, text_alpha),
+            color: Color::rgba(p.text.r, p.text.g, p.text.b, text_alpha),
             corner_radii: CornerRadii::all(5.0),
         });
     }
@@ -758,6 +797,7 @@ impl OsdManager {
     /// Render a media track OSD with title/artist/album.
     fn render_media_osd(
         &self,
+        p: &Palette,
         ox: f32,
         oy: f32,
         osd_w: f32,
@@ -775,7 +815,7 @@ impl OsdManager {
             y: oy + 14.0,
             text: "\u{266B}".to_string(),
             font_size: 28.0,
-            color: Color::rgba(LAVENDER.r, LAVENDER.g, LAVENDER.b, text_alpha),
+            color: Color::rgba(p.lavender.r, p.lavender.g, p.lavender.b, text_alpha),
             font_weight: FontWeightHint::Regular,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -790,7 +830,7 @@ impl OsdManager {
             y: oy + 14.0,
             text: title.to_string(),
             font_size: 14.0,
-            color: Color::rgba(TEXT.r, TEXT.g, TEXT.b, text_alpha),
+            color: Color::rgba(p.text.r, p.text.g, p.text.b, text_alpha),
             font_weight: FontWeightHint::Bold,
             max_width: Some(max_text_w),
             overflow: TextOverflow::Ellipsis,
@@ -802,7 +842,7 @@ impl OsdManager {
             y: oy + 38.0,
             text: artist.to_string(),
             font_size: 12.0,
-            color: Color::rgba(SUBTEXT0.r, SUBTEXT0.g, SUBTEXT0.b, text_alpha),
+            color: Color::rgba(p.subtext0.r, p.subtext0.g, p.subtext0.b, text_alpha),
             font_weight: FontWeightHint::Regular,
             max_width: Some(max_text_w),
             overflow: TextOverflow::Ellipsis,
@@ -815,7 +855,7 @@ impl OsdManager {
                 y: oy + 58.0,
                 text: album.to_string(),
                 font_size: 11.0,
-                color: Color::rgba(SUBTEXT0.r, SUBTEXT0.g, SUBTEXT0.b, text_alpha / 2),
+                color: Color::rgba(p.subtext0.r, p.subtext0.g, p.subtext0.b, text_alpha / 2),
                 font_weight: FontWeightHint::Light,
                 max_width: Some(max_text_w),
                 overflow: TextOverflow::Ellipsis,
@@ -828,7 +868,7 @@ impl OsdManager {
             y: oy + 84.0,
             width: osd_w - padding * 2.0,
             height: 2.0,
-            color: Color::rgba(LAVENDER.r, LAVENDER.g, LAVENDER.b, text_alpha / 3),
+            color: Color::rgba(p.lavender.r, p.lavender.g, p.lavender.b, text_alpha / 3),
             corner_radii: CornerRadii::all(1.0),
         });
     }
@@ -836,6 +876,7 @@ impl OsdManager {
     /// Render a simple icon + text OSD.
     fn render_icon_text_osd(
         &self,
+        p: &Palette,
         ox: f32,
         oy: f32,
         osd_w: f32,
@@ -870,7 +911,7 @@ impl OsdManager {
             y: center_y + 2.0,
             text: label.to_string(),
             font_size: OSD_LABEL_SIZE,
-            color: Color::rgba(TEXT.r, TEXT.g, TEXT.b, text_alpha),
+            color: Color::rgba(p.text.r, p.text.g, p.text.b, text_alpha),
             font_weight: OSD_LABEL_WEIGHT,
             max_width: Some(osd_label_width(osd_w)),
             overflow: TextOverflow::Ellipsis,
@@ -928,18 +969,18 @@ fn brightness_icon(level: u8) -> &'static str {
 }
 
 /// Get icon string and color for a generic OsdIcon.
-fn icon_info(icon: OsdIcon) -> (&'static str, Color) {
+fn icon_info(p: &Palette, icon: OsdIcon) -> (&'static str, Color) {
     match icon {
-        OsdIcon::Info => ("\u{2139}", BLUE),
-        OsdIcon::Success => ("\u{2705}", GREEN),
-        OsdIcon::Warning => ("\u{26A0}", YELLOW),
-        OsdIcon::Error => ("\u{274C}", RED),
-        OsdIcon::Speaker => ("\u{1F50A}", BLUE),
-        OsdIcon::Brightness => ("\u{2600}", YELLOW),
-        OsdIcon::Network => ("\u{1F310}", GREEN),
-        OsdIcon::Battery => ("\u{1F50B}", PEACH),
-        OsdIcon::Lock => ("\u{1F512}", LAVENDER),
-        OsdIcon::Camera => ("\u{1F4F7}", GREEN),
+        OsdIcon::Info => ("\u{2139}", p.blue),
+        OsdIcon::Success => ("\u{2705}", p.green),
+        OsdIcon::Warning => ("\u{26A0}", p.yellow),
+        OsdIcon::Error => ("\u{274C}", p.red),
+        OsdIcon::Speaker => ("\u{1F50A}", p.blue),
+        OsdIcon::Brightness => ("\u{2600}", p.yellow),
+        OsdIcon::Network => ("\u{1F310}", p.green),
+        OsdIcon::Battery => ("\u{1F50B}", p.peach),
+        OsdIcon::Lock => ("\u{1F512}", p.lavender),
+        OsdIcon::Camera => ("\u{1F4F7}", p.green),
     }
 }
 
@@ -985,7 +1026,7 @@ impl OsdSettingsUI {
     }
 
     /// Render the settings panel.
-    pub fn render(&self, x: f32, y: f32, width: f32) -> Vec<RenderCommand> {
+    pub fn render(&self, p: &Palette, x: f32, y: f32, width: f32) -> Vec<RenderCommand> {
         let mut commands = Vec::new();
         let padding = 12.0;
         let mut cy = y + padding - self.scroll_y;
@@ -996,7 +1037,7 @@ impl OsdSettingsUI {
             y: cy,
             text: "On-Screen Display Settings".to_string(),
             font_size: 18.0,
-            color: TEXT,
+            color: p.text,
             font_weight: FontWeightHint::Bold,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -1004,7 +1045,11 @@ impl OsdSettingsUI {
         cy += 36.0;
 
         // Enable toggle.
-        let enable_color = if self.config.enabled { GREEN } else { SUBTEXT0 };
+        let enable_color = if self.config.enabled {
+            p.green
+        } else {
+            p.subtext0
+        };
         commands.push(RenderCommand::FillRect {
             x: x + padding,
             y: cy,
@@ -1023,7 +1068,7 @@ impl OsdSettingsUI {
             y: cy + 2.0,
             width: 16.0,
             height: 16.0,
-            color: TEXT,
+            color: p.text,
             corner_radii: CornerRadii::all(8.0),
         });
         commands.push(RenderCommand::Text {
@@ -1031,7 +1076,7 @@ impl OsdSettingsUI {
             y: cy + 2.0,
             text: "Enable OSD overlays".to_string(),
             font_size: 14.0,
-            color: TEXT,
+            color: p.text,
             font_weight: FontWeightHint::Regular,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -1044,7 +1089,7 @@ impl OsdSettingsUI {
             y: cy,
             text: "Position".to_string(),
             font_size: 13.0,
-            color: SUBTEXT0,
+            color: p.subtext0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -1060,7 +1105,7 @@ impl OsdSettingsUI {
         ];
         for (label, pos) in &positions {
             let selected = self.config.position == *pos;
-            let dot_color = if selected { BLUE } else { SURFACE1 };
+            let dot_color = if selected { p.accent } else { p.surface1 };
             commands.push(RenderCommand::FillRect {
                 x: x + padding + 4.0,
                 y: cy + 2.0,
@@ -1074,7 +1119,7 @@ impl OsdSettingsUI {
                 y: cy,
                 text: label.to_string(),
                 font_size: 12.0,
-                color: if selected { TEXT } else { SUBTEXT0 },
+                color: if selected { p.text } else { p.subtext0 },
                 font_weight: if selected {
                     FontWeightHint::Bold
                 } else {
@@ -1093,7 +1138,7 @@ impl OsdSettingsUI {
             y: cy,
             text: format!("Timeout: {}ms", self.config.timeout_ms),
             font_size: 13.0,
-            color: SUBTEXT0,
+            color: p.subtext0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -1106,7 +1151,7 @@ impl OsdSettingsUI {
             y: cy,
             width: track_w,
             height: 4.0,
-            color: SURFACE0,
+            color: p.surface0,
             corner_radii: CornerRadii::all(2.0),
         });
         commands.push(RenderCommand::FillRect {
@@ -1114,7 +1159,7 @@ impl OsdSettingsUI {
             y: cy,
             width: track_w * timeout_frac.clamp(0.0, 1.0),
             height: 4.0,
-            color: BLUE,
+            color: p.accent,
             corner_radii: CornerRadii::all(2.0),
         });
         cy += 20.0;
@@ -1125,7 +1170,7 @@ impl OsdSettingsUI {
             y: cy,
             text: "Show OSD for:".to_string(),
             font_size: 13.0,
-            color: SUBTEXT0,
+            color: p.subtext0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -1139,7 +1184,7 @@ impl OsdSettingsUI {
             ("Lock key indicators", self.config.show_lock_keys),
         ];
         for (label, enabled) in &toggles {
-            let check_color = if *enabled { GREEN } else { SURFACE1 };
+            let check_color = if *enabled { p.green } else { p.surface1 };
             commands.push(RenderCommand::FillRect {
                 x: x + padding + 4.0,
                 y: cy + 1.0,
@@ -1154,7 +1199,7 @@ impl OsdSettingsUI {
                     y: cy,
                     text: "\u{2713}".to_string(),
                     font_size: 11.0,
-                    color: BASE,
+                    color: appearance::readable_on(p.green),
                     font_weight: FontWeightHint::Bold,
                     max_width: None,
                     overflow: TextOverflow::Clip,
@@ -1165,7 +1210,7 @@ impl OsdSettingsUI {
                 y: cy + 1.0,
                 text: label.to_string(),
                 font_size: 12.0,
-                color: TEXT,
+                color: p.text,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
                 overflow: TextOverflow::Clip,
@@ -1180,7 +1225,7 @@ impl OsdSettingsUI {
             y: cy,
             width: 120.0,
             height: 32.0,
-            color: BLUE,
+            color: p.accent,
             corner_radii: CornerRadii::all(6.0),
         });
         commands.push(RenderCommand::Text {
@@ -1188,7 +1233,7 @@ impl OsdSettingsUI {
             y: cy + 8.0,
             text: "Preview OSD".to_string(),
             font_size: 13.0,
-            color: BASE,
+            color: p.on_accent(),
             font_weight: FontWeightHint::Bold,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -1216,6 +1261,29 @@ mod tests {
     )]
 
     use super::*;
+    use crate::palette_check::assert_drawn_from;
+
+    /// The dark palette, which is what every constant deleted from this module
+    /// used to be: the tests below that predate the conversion asserted against
+    /// Mocha values, and asking for Mocha explicitly keeps them saying exactly
+    /// what they said before rather than quietly re-baselining onto whatever
+    /// the default happens to become.
+    fn mocha() -> Palette {
+        Palette::for_mode(false)
+    }
+
+    fn rgb(c: Color) -> (u8, u8, u8) {
+        (c.r, c.g, c.b)
+    }
+
+    /// Accents that are not a role of either palette, so that "this followed
+    /// the accent" and "this is a leftover constant" can never be confused.
+    const SAFE_ACCENTS: [Color; 4] = [
+        appearance::MAUVE,
+        appearance::TEAL,
+        appearance::SAPPHIRE,
+        appearance::PINK,
+    ];
 
     // Helper: create a default manager.
     fn make_manager() -> OsdManager {
@@ -1608,14 +1676,14 @@ mod tests {
             0,
         );
         mgr.tick(0);
-        let cmds = mgr.render();
+        let cmds = mgr.render(&mocha());
         assert!(!cmds.is_empty());
     }
 
     #[test]
     fn manager_render_empty_when_no_overlays() {
         let mgr = make_manager();
-        let cmds = mgr.render();
+        let cmds = mgr.render(&mocha());
         assert!(cmds.is_empty());
     }
 
@@ -1625,7 +1693,7 @@ mod tests {
         mgr.config.fade_in_ms = 0;
         mgr.show(OsdKind::Brightness { level: 100 }, 0);
         mgr.tick(0);
-        let cmds = mgr.render();
+        let cmds = mgr.render(&mocha());
         assert!(cmds.len() > 3);
     }
 
@@ -1642,7 +1710,7 @@ mod tests {
             0,
         );
         mgr.tick(0);
-        let cmds = mgr.render();
+        let cmds = mgr.render(&mocha());
         assert!(cmds.len() > 3);
     }
 
@@ -1652,7 +1720,7 @@ mod tests {
         mgr.config.fade_in_ms = 0;
         mgr.show(OsdKind::MediaPlayPause { playing: true }, 0);
         mgr.tick(0);
-        let cmds = mgr.render();
+        let cmds = mgr.render(&mocha());
         assert!(cmds.len() > 3);
     }
 
@@ -1668,7 +1736,7 @@ mod tests {
             0,
         );
         mgr.tick(0);
-        let cmds = mgr.render();
+        let cmds = mgr.render(&mocha());
         assert!(cmds.len() > 3);
     }
 
@@ -1684,7 +1752,7 @@ mod tests {
             0,
         );
         mgr.tick(0);
-        let cmds = mgr.render();
+        let cmds = mgr.render(&mocha());
         assert!(cmds.len() > 3);
     }
 
@@ -1699,7 +1767,7 @@ mod tests {
             0,
         );
         mgr.tick(0);
-        let cmds = mgr.render();
+        let cmds = mgr.render(&mocha());
         assert!(cmds.len() > 3);
     }
 
@@ -1709,7 +1777,7 @@ mod tests {
         mgr.config.fade_in_ms = 0;
         mgr.show(OsdKind::Microphone { muted: true }, 0);
         mgr.tick(0);
-        let cmds = mgr.render();
+        let cmds = mgr.render(&mocha());
         assert!(cmds.len() > 3);
     }
 
@@ -1725,7 +1793,7 @@ mod tests {
             0,
         );
         mgr.tick(0);
-        let cmds = mgr.render();
+        let cmds = mgr.render(&mocha());
         assert!(cmds.len() > 3);
     }
 
@@ -1735,7 +1803,7 @@ mod tests {
         mgr.config.fade_in_ms = 0;
         mgr.show(OsdKind::BatteryLow { percent: 5 }, 0);
         mgr.tick(0);
-        let cmds = mgr.render();
+        let cmds = mgr.render(&mocha());
         assert!(cmds.len() > 3);
     }
 
@@ -1751,7 +1819,7 @@ mod tests {
             0,
         );
         mgr.tick(0);
-        let cmds = mgr.render();
+        let cmds = mgr.render(&mocha());
         assert!(cmds.len() > 3);
     }
 
@@ -1837,7 +1905,7 @@ mod tests {
             OsdIcon::Camera,
         ];
         for v in variants {
-            let (s, _c) = icon_info(v);
+            let (s, _c) = icon_info(&mocha(), v);
             assert!(!s.is_empty());
         }
     }
@@ -1859,7 +1927,7 @@ mod tests {
             },
             0,
         );
-        let cmds = osd.render();
+        let cmds = osd.render(&mocha());
         let bounded: Vec<_> = cmds
             .into_iter()
             .filter_map(|cmd| match cmd {
@@ -1926,7 +1994,7 @@ mod tests {
     #[test]
     fn settings_ui_render_not_empty() {
         let ui = OsdSettingsUI::new(OsdConfig::default());
-        let cmds = ui.render(0.0, 0.0, 400.0);
+        let cmds = ui.render(&mocha(), 0.0, 0.0, 400.0);
         assert!(!cmds.is_empty());
     }
 
@@ -1935,7 +2003,7 @@ mod tests {
         let mut config = OsdConfig::default();
         config.enabled = false;
         let ui = OsdSettingsUI::new(config);
-        let cmds = ui.render(0.0, 0.0, 400.0);
+        let cmds = ui.render(&mocha(), 0.0, 0.0, 400.0);
         assert!(!cmds.is_empty());
     }
 
@@ -1960,7 +2028,7 @@ mod tests {
             0,
         );
         mgr.tick(0);
-        let cmds = mgr.render();
+        let cmds = mgr.render(&mocha());
         // Should have commands for both overlays (at least 6 each: shadow + bg + border + content).
         assert!(cmds.len() >= 10);
     }
@@ -1979,7 +2047,7 @@ mod tests {
             0,
         );
         mgr.tick(0);
-        let cmds = mgr.render();
+        let cmds = mgr.render(&mocha());
         assert!(cmds.len() > 3);
     }
 
@@ -1998,7 +2066,7 @@ mod tests {
         );
         mgr.tick(0);
         // Should not panic during render.
-        let cmds = mgr.render();
+        let cmds = mgr.render(&mocha());
         assert!(!cmds.is_empty());
     }
 
@@ -2024,7 +2092,7 @@ mod tests {
         );
         mgr.tick(0);
         let label = mgr
-            .render()
+            .render(&mocha())
             .into_iter()
             .find_map(|cmd| match cmd {
                 RenderCommand::Text { text, .. } if text.starts_with("Screenshot: ") => Some(text),
@@ -2066,7 +2134,7 @@ mod tests {
             0,
         );
         mgr.tick(0);
-        assert!(!mgr.render().is_empty());
+        assert!(!mgr.render(&mocha()).is_empty());
     }
 
     #[test]
@@ -2082,7 +2150,7 @@ mod tests {
             0,
         );
         mgr.tick(0);
-        let cmds = mgr.render();
+        let cmds = mgr.render(&mocha());
         assert!(!cmds.is_empty());
     }
 
@@ -2124,5 +2192,1291 @@ mod tests {
 
         mgr.tick(500); // should be dismissed
         assert!(!mgr.has_visible());
+    }
+
+    // ========================================================================
+    // The palette conversion
+    // ========================================================================
+    //
+    // Part 2 of `TD-C-FORTY-NINE-SHELL-MODULES-CARRY-THEIR-OWN-COPY-OF-THE-
+    // PALETTE`. Eleven Mocha constants were deleted from this module; the
+    // tests below are what stands between that edit and a leftover.
+    //
+    // The sweep (`every_colour_the_osd_draws_comes_from_its_palette`) finds a
+    // leftover *constant*. It cannot find a wrong *role*, because every role
+    // is a member of both palettes — so everything this module promises about
+    // *which* role goes where needs a test of its own, and the eight tests
+    // after the sweep are those promises written down.
+
+    /// One fixture per arm of `render_content`'s `match`, and both sides of
+    /// every `if` inside those arms.
+    ///
+    /// The sweep is only as wide as the render it is given, so this list is
+    /// enumerated from the renderer's branches rather than from its colours:
+    /// a branch missing here is a branch nothing below checks.
+    fn every_kind() -> Vec<(String, OsdKind)> {
+        let mut v: Vec<(String, OsdKind)> = vec![
+            (
+                "volume".into(),
+                OsdKind::Volume {
+                    level: 60,
+                    muted: false,
+                },
+            ),
+            (
+                "volume muted".into(),
+                OsdKind::Volume {
+                    level: 60,
+                    muted: true,
+                },
+            ),
+            // level 0 takes the `fill_w > 0.0` branch the other way, and the
+            // first arm of `volume_icon`.
+            (
+                "volume silent".into(),
+                OsdKind::Volume {
+                    level: 0,
+                    muted: false,
+                },
+            ),
+            (
+                "volume low".into(),
+                OsdKind::Volume {
+                    level: 20,
+                    muted: false,
+                },
+            ),
+            (
+                "volume medium".into(),
+                OsdKind::Volume {
+                    level: 50,
+                    muted: false,
+                },
+            ),
+            // `level.min(100)` clamps, so a level past 100 is its own branch.
+            (
+                "volume over".into(),
+                OsdKind::Volume {
+                    level: 200,
+                    muted: false,
+                },
+            ),
+            ("brightness dark".into(), OsdKind::Brightness { level: 10 }),
+            (
+                "brightness medium".into(),
+                OsdKind::Brightness { level: 50 },
+            ),
+            (
+                "brightness bright".into(),
+                OsdKind::Brightness { level: 90 },
+            ),
+            (
+                "media track".into(),
+                OsdKind::MediaTrack {
+                    title: "Clair de Lune".into(),
+                    artist: "Debussy".into(),
+                    album: "Suite bergamasque".into(),
+                },
+            ),
+            // The album line is guarded on a non-empty album.
+            (
+                "media track without album".into(),
+                OsdKind::MediaTrack {
+                    title: "Clair de Lune".into(),
+                    artist: "Debussy".into(),
+                    album: String::new(),
+                },
+            ),
+            ("playing".into(), OsdKind::MediaPlayPause { playing: true }),
+            ("paused".into(), OsdKind::MediaPlayPause { playing: false }),
+            (
+                "device connected".into(),
+                OsdKind::DeviceEvent {
+                    device_name: "SanDisk".into(),
+                    ejected: false,
+                },
+            ),
+            (
+                "device ejected".into(),
+                OsdKind::DeviceEvent {
+                    device_name: "SanDisk".into(),
+                    ejected: true,
+                },
+            ),
+            (
+                "screenshot".into(),
+                OsdKind::ScreenshotTaken {
+                    path: "/home/user/pictures/shot.png".into(),
+                },
+            ),
+            ("mic active".into(), OsdKind::Microphone { muted: false }),
+            ("mic muted".into(), OsdKind::Microphone { muted: true }),
+            (
+                "network up".into(),
+                OsdKind::NetworkStatus {
+                    connected: true,
+                    name: "home".into(),
+                },
+            ),
+            (
+                "network down".into(),
+                OsdKind::NetworkStatus {
+                    connected: false,
+                    name: "home".into(),
+                },
+            ),
+            ("battery low".into(), OsdKind::BatteryLow { percent: 7 }),
+        ];
+        for (lock_type, name) in [
+            (LockType::CapsLock, "caps"),
+            (LockType::NumLock, "num"),
+            (LockType::ScrollLock, "scroll"),
+        ] {
+            for active in [true, false] {
+                v.push((
+                    format!("{name} lock {}", if active { "on" } else { "off" }),
+                    OsdKind::KeyboardLock { lock_type, active },
+                ));
+            }
+        }
+        for icon in every_icon() {
+            v.push((
+                format!("custom {icon:?}"),
+                OsdKind::Custom {
+                    icon,
+                    message: "hello".into(),
+                },
+            ));
+        }
+        v
+    }
+
+    /// Every arm of `icon_info`'s `match`.
+    fn every_icon() -> [OsdIcon; 10] {
+        [
+            OsdIcon::Info,
+            OsdIcon::Success,
+            OsdIcon::Warning,
+            OsdIcon::Error,
+            OsdIcon::Speaker,
+            OsdIcon::Brightness,
+            OsdIcon::Network,
+            OsdIcon::Battery,
+            OsdIcon::Lock,
+            OsdIcon::Camera,
+        ]
+    }
+
+    /// One fully-visible overlay of `kind`, rendered from `p`.
+    ///
+    /// `tick(150)` is exactly `fade_in_ms`, which takes the overlay to
+    /// `Visible` at opacity 1.0 — so `text_alpha` is 255 and the assertions
+    /// below can compare whole colours where they want to.
+    fn overlay(kind: OsdKind, p: &Palette) -> Vec<RenderCommand> {
+        let mut mgr = make_manager();
+        mgr.show(kind, 0);
+        mgr.tick(150);
+        mgr.render(p)
+    }
+
+    /// The settings panel at its defaults, 400px wide at the origin.
+    fn settings(p: &Palette) -> Vec<RenderCommand> {
+        OsdSettingsUI::new(OsdConfig::default()).render(p, 0.0, 0.0, 400.0)
+    }
+
+    fn texts_of(cmds: &[RenderCommand]) -> Vec<(String, f32, Color)> {
+        cmds.iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text {
+                    text,
+                    font_size,
+                    color,
+                    ..
+                } => Some((text.clone(), *font_size, *color)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The colour of the one text drawn at `size`.
+    ///
+    /// Panics unless there is exactly one, which is the point: an assertion
+    /// that silently picked the first of several would stop meaning anything
+    /// the moment the renderer grew a second text that size.
+    fn text_at(cmds: &[RenderCommand], size: f32) -> Color {
+        let hits: Vec<Color> = texts_of(cmds)
+            .into_iter()
+            .filter(|(_, s, _)| (*s - size).abs() < 0.01)
+            .map(|(_, _, c)| c)
+            .collect();
+        assert_eq!(
+            hits.len(),
+            1,
+            "expected exactly one text at size {size}, found {}",
+            hits.len()
+        );
+        hits[0]
+    }
+
+    /// The colour every text whose content is exactly `want` is drawn in.
+    ///
+    /// Panics if there are none, and panics if they disagree. Four ticks come
+    /// out of one source site, so "the tick's colour" is a well-formed
+    /// question only as long as all four answer the same — and if they ever
+    /// stop, the site has grown a branch that needs naming here rather than
+    /// being silently represented by whichever one this picked first.
+    fn text_saying(cmds: &[RenderCommand], want: &str) -> Color {
+        let hits: Vec<Color> = texts_of(cmds)
+            .into_iter()
+            .filter(|(t, _, _)| t == want)
+            .map(|(_, _, c)| c)
+            .collect();
+        assert!(!hits.is_empty(), "no text {want:?} is drawn");
+        assert!(
+            hits.iter().all(|c| rgb(*c) == rgb(hits[0])),
+            "the {} texts saying {want:?} are not all the same colour",
+            hits.len()
+        );
+        hits[0]
+    }
+
+    fn says(cmds: &[RenderCommand], want: &str) -> usize {
+        texts_of(cmds).iter().filter(|(t, _, _)| t == want).count()
+    }
+
+    /// Colours of every `FillRect` of exactly `w` x `h`, in draw order.
+    fn fills(cmds: &[RenderCommand], w: f32, h: f32) -> Vec<Color> {
+        cmds.iter()
+            .filter_map(|c| match c {
+                RenderCommand::FillRect {
+                    width,
+                    height,
+                    color,
+                    ..
+                } if (*width - w).abs() < 0.01 && (*height - h).abs() < 0.01 => Some(*color),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Colours of every `FillRect` of height `h`, whatever its width.
+    ///
+    /// The one way to pick out a track and the fill sitting on top of it,
+    /// whose whole difference is that the fill's width moves.
+    fn fills_h(cmds: &[RenderCommand], h: f32) -> Vec<Color> {
+        cmds.iter()
+            .filter_map(|c| match c {
+                RenderCommand::FillRect { height, color, .. } if (*height - h).abs() < 0.01 => {
+                    Some(*color)
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn every_color(cmds: &[RenderCommand]) -> Vec<Color> {
+        cmds.iter()
+            .filter_map(|c| match c {
+                RenderCommand::FillRect { color, .. }
+                | RenderCommand::StrokeRect { color, .. }
+                | RenderCommand::Text { color, .. }
+                | RenderCommand::BoxShadow { color, .. } => Some(*color),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// A settings panel whose config the caller has adjusted.
+    fn settings_with(p: &Palette, f: impl FnOnce(&mut OsdConfig)) -> Vec<RenderCommand> {
+        let mut cfg = OsdConfig::default();
+        f(&mut cfg);
+        OsdSettingsUI::new(cfg).render(p, 0.0, 0.0, 400.0)
+    }
+
+    /// The sweep: in the *light* palette a surviving Mocha constant is a dark
+    /// value Latte does not contain, so it names itself.
+    ///
+    /// `derived` is empty because the only two colours this module computes —
+    /// `readable_on(p.green)` and `p.on_accent()` — are `readable_on`
+    /// endpoints, which the sweep already allows.
+    #[test]
+    fn every_colour_the_osd_draws_comes_from_its_palette() {
+        for light in [false, true] {
+            for accent in SAFE_ACCENTS {
+                let mut p = Palette::for_mode(light);
+                p.accent = accent;
+                for (what, kind) in every_kind() {
+                    assert_drawn_from(&p, &overlay(kind, &p), &[], &format!("osd ({what})"));
+                }
+                assert_drawn_from(&p, &settings(&p), &[], "osd settings");
+                assert_drawn_from(
+                    &p,
+                    &settings_with(&p, |c| {
+                        c.enabled = false;
+                        c.show_volume = false;
+                        c.show_brightness = false;
+                        c.show_media = false;
+                        c.show_lock_keys = false;
+                        c.position = OsdPosition::Center;
+                    }),
+                    &[],
+                    "osd settings (all off)",
+                );
+            }
+        }
+    }
+
+    /// The fixtures actually reach every branch the two renderers have.
+    ///
+    /// The sweep is only as wide as the render it is given. Each assertion
+    /// here names the `if` or `match` arm it stands for; a branch that stops
+    /// being drawn stops being checked by everything above, silently, unless
+    /// this fails first.
+    #[test]
+    fn the_fixtures_take_every_branch_the_osd_has() {
+        let p = mocha();
+
+        // render_content: Volume, both sides of `muted`.
+        assert_eq!(
+            says(
+                &overlay(
+                    OsdKind::Volume {
+                        level: 60,
+                        muted: false
+                    },
+                    &p
+                ),
+                "Volume  60%"
+            ),
+            1,
+            "the unmuted volume label is not drawn"
+        );
+        assert_eq!(
+            says(
+                &overlay(
+                    OsdKind::Volume {
+                        level: 60,
+                        muted: true
+                    },
+                    &p
+                ),
+                "Muted  60%"
+            ),
+            1,
+            "the muted volume label is not drawn"
+        );
+
+        // render_slider_osd: `if fill_w > 0.0`, both ways. A track with no
+        // fill draws one 6px-high rect; a filled one draws two.
+        assert_eq!(
+            fills_h(
+                &overlay(
+                    OsdKind::Volume {
+                        level: 0,
+                        muted: false
+                    },
+                    &p
+                ),
+                6.0
+            )
+            .len(),
+            1,
+            "a zero-level slider still draws a fill"
+        );
+        assert_eq!(
+            fills_h(
+                &overlay(
+                    OsdKind::Volume {
+                        level: 60,
+                        muted: false
+                    },
+                    &p
+                ),
+                6.0
+            )
+            .len(),
+            2,
+            "a filled slider does not draw its fill"
+        );
+
+        // volume_icon: all four arms, and brightness_icon: all three.
+        for (level, icon) in [
+            (0_u8, "\u{1F507}"),
+            (20, "\u{1F508}"),
+            (50, "\u{1F509}"),
+            (80, "\u{1F50A}"),
+        ] {
+            assert_eq!(
+                says(
+                    &overlay(
+                        OsdKind::Volume {
+                            level,
+                            muted: false
+                        },
+                        &p
+                    ),
+                    icon
+                ),
+                1,
+                "volume level {level} does not draw its own icon"
+            );
+        }
+        for (level, icon) in [(10_u8, "\u{1F315}"), (50, "\u{2600}"), (90, "\u{2B50}")] {
+            assert_eq!(
+                says(&overlay(OsdKind::Brightness { level }, &p), icon),
+                1,
+                "brightness level {level} does not draw its own icon"
+            );
+        }
+
+        // render_media_osd: `if !album.is_empty()`, both ways. The album is
+        // the only 11px text in the overlay.
+        let with_album = overlay(
+            OsdKind::MediaTrack {
+                title: "T".into(),
+                artist: "A".into(),
+                album: "Album".into(),
+            },
+            &p,
+        );
+        assert_eq!(says(&with_album, "Album"), 1, "the album line is not drawn");
+        let no_album = overlay(
+            OsdKind::MediaTrack {
+                title: "T".into(),
+                artist: "A".into(),
+                album: String::new(),
+            },
+            &p,
+        );
+        assert_eq!(
+            texts_of(&no_album)
+                .iter()
+                .filter(|(_, s, _)| (*s - 11.0).abs() < 0.01)
+                .count(),
+            0,
+            "an empty album still draws a line"
+        );
+
+        // render_content: MediaPlayPause, KeyboardLock (three types x two
+        // states), DeviceEvent, Microphone, NetworkStatus, BatteryLow.
+        for (kind, want) in [
+            (OsdKind::MediaPlayPause { playing: true }, "Playing"),
+            (OsdKind::MediaPlayPause { playing: false }, "Paused"),
+            (
+                OsdKind::KeyboardLock {
+                    lock_type: LockType::CapsLock,
+                    active: true,
+                },
+                "Caps Lock: ON",
+            ),
+            (
+                OsdKind::KeyboardLock {
+                    lock_type: LockType::CapsLock,
+                    active: false,
+                },
+                "Caps Lock: OFF",
+            ),
+            (
+                OsdKind::KeyboardLock {
+                    lock_type: LockType::NumLock,
+                    active: true,
+                },
+                "Num Lock: ON",
+            ),
+            (
+                OsdKind::KeyboardLock {
+                    lock_type: LockType::ScrollLock,
+                    active: true,
+                },
+                "Scroll Lock: ON",
+            ),
+            (
+                OsdKind::DeviceEvent {
+                    device_name: "SanDisk".into(),
+                    ejected: false,
+                },
+                "SanDisk connected",
+            ),
+            (
+                OsdKind::DeviceEvent {
+                    device_name: "SanDisk".into(),
+                    ejected: true,
+                },
+                "SanDisk ejected",
+            ),
+            (OsdKind::Microphone { muted: false }, "Mic: Active"),
+            (OsdKind::Microphone { muted: true }, "Mic: Muted"),
+            (
+                OsdKind::NetworkStatus {
+                    connected: true,
+                    name: "home".into(),
+                },
+                "Connected: home",
+            ),
+            (
+                OsdKind::NetworkStatus {
+                    connected: false,
+                    name: "home".into(),
+                },
+                "Disconnected: home",
+            ),
+            (OsdKind::BatteryLow { percent: 7 }, "Battery Low: 7%"),
+        ] {
+            assert_eq!(
+                says(&overlay(kind, &p), want),
+                1,
+                "the {want:?} branch is not drawn"
+            );
+        }
+
+        // render_content: ScreenshotTaken. The path is elided from its start,
+        // so assert on the prefix rather than the whole label.
+        let shot = overlay(
+            OsdKind::ScreenshotTaken {
+                path: "/home/user/pictures/shot.png".into(),
+            },
+            &p,
+        );
+        assert_eq!(
+            texts_of(&shot)
+                .iter()
+                .filter(|(t, _, _)| t.starts_with("Screenshot: "))
+                .count(),
+            1,
+            "the screenshot branch is not drawn"
+        );
+
+        // icon_info: all ten arms, each identified by its own icon string.
+        for icon in every_icon() {
+            let (want, _) = icon_info(&p, icon);
+            assert_eq!(
+                says(
+                    &overlay(
+                        OsdKind::Custom {
+                            icon,
+                            message: "hello".into()
+                        },
+                        &p
+                    ),
+                    want
+                ),
+                1,
+                "the {icon:?} arm of icon_info is not drawn"
+            );
+        }
+
+        // OsdSettingsUI::render: `if self.config.enabled`, both ways — the
+        // pill knob moves, which is the only difference in geometry.
+        assert_eq!(fills(&settings(&p), 16.0, 16.0).len(), 1);
+        assert_eq!(
+            fills(&settings_with(&p, |c| c.enabled = false), 16.0, 16.0).len(),
+            1
+        );
+
+        // OsdSettingsUI::render: `let selected = …`, every position.
+        for pos in [
+            OsdPosition::TopCenter,
+            OsdPosition::BottomCenter,
+            OsdPosition::Center,
+            OsdPosition::TopRight,
+            OsdPosition::BottomRight,
+        ] {
+            let cmds = settings_with(&p, |c| c.position = pos);
+            let dots = fills(&cmds, 12.0, 12.0);
+            assert_eq!(dots.len(), 5, "the position selector is not five dots");
+            assert_eq!(
+                dots.iter().filter(|c| rgb(**c) == rgb(p.accent)).count(),
+                1,
+                "{pos:?} is not the only selected position"
+            );
+        }
+
+        // OsdSettingsUI::render: `if *enabled` in the toggle loop, both ways.
+        // The tick is drawn only when the toggle is on.
+        assert_eq!(
+            says(&settings(&p), "\u{2713}"),
+            4,
+            "four enabled toggles do not draw four ticks"
+        );
+        assert_eq!(
+            says(
+                &settings_with(&p, |c| {
+                    c.show_volume = false;
+                    c.show_brightness = false;
+                    c.show_media = false;
+                    c.show_lock_keys = false;
+                }),
+                "\u{2713}"
+            ),
+            0,
+            "a disabled toggle still draws a tick"
+        );
+    }
+
+    /// Every text site, one entry per site in the source — not per rendered
+    /// instance, and not per *kind* of site.
+    ///
+    /// Do not shorten this to "a representative sample": a table that lists
+    /// one entry per kind leaves the sites it did not list checked by
+    /// nothing, which is how two defects escaped module 22's version of it.
+    /// Eight overlay sites and ten panel sites; if the renderer grows a
+    /// nineteenth, this grows with it.
+    #[test]
+    fn every_text_the_osd_draws_is_in_the_role_it_claims() {
+        for light in [false, true] {
+            let mut p = Palette::for_mode(light);
+            p.accent = SAFE_ACCENTS[0];
+
+            // ---- render_slider_osd ----
+            let vol = overlay(
+                OsdKind::Volume {
+                    level: 60,
+                    muted: false,
+                },
+                &p,
+            );
+            // S4: the slider's icon takes the kind's own colour.
+            assert_eq!(rgb(text_at(&vol, 24.0)), rgb(p.blue), "slider icon");
+            // S5: the label and percentage are plain text.
+            assert_eq!(rgb(text_at(&vol, 14.0)), rgb(p.text), "slider label");
+
+            // ---- render_media_osd ----
+            let media = overlay(
+                OsdKind::MediaTrack {
+                    title: "T".into(),
+                    artist: "A".into(),
+                    album: "B".into(),
+                },
+                &p,
+            );
+            // S9: the music note.
+            assert_eq!(rgb(text_at(&media, 28.0)), rgb(p.lavender), "media note");
+            // S10: the title.
+            assert_eq!(rgb(text_at(&media, 14.0)), rgb(p.text), "media title");
+            // S11: the artist, one step down.
+            assert_eq!(rgb(text_at(&media, 12.0)), rgb(p.subtext0), "media artist");
+            // S12: the album, same role, drawn at half alpha.
+            assert_eq!(rgb(text_at(&media, 11.0)), rgb(p.subtext0), "media album");
+
+            // ---- render_icon_text_osd ----
+            let batt = overlay(OsdKind::BatteryLow { percent: 7 }, &p);
+            // S14: the icon takes the kind's own colour.
+            assert_eq!(rgb(text_at(&batt, 20.0)), rgb(p.red), "icon-text icon");
+            // S15: the label is plain text.
+            assert_eq!(rgb(text_at(&batt, 14.0)), rgb(p.text), "icon-text label");
+
+            // ---- OsdSettingsUI::render ----
+            let s = settings(&p);
+            // T1: the panel title.
+            assert_eq!(
+                rgb(text_saying(&s, "On-Screen Display Settings")),
+                rgb(p.text),
+                "panel title"
+            );
+            // T4: the enable toggle's label.
+            assert_eq!(
+                rgb(text_saying(&s, "Enable OSD overlays")),
+                rgb(p.text),
+                "enable label"
+            );
+            // T5, T8, T11: the three section headings are all secondary.
+            for heading in ["Position", "Timeout: 2000ms", "Show OSD for:"] {
+                assert_eq!(
+                    rgb(text_saying(&s, heading)),
+                    rgb(p.subtext0),
+                    "heading {heading:?}"
+                );
+            }
+            // T7: a position label, selected and not. This is one source site
+            // with an `if` in it, so both sides are named.
+            assert_eq!(
+                rgb(text_saying(&s, "Bottom Center")),
+                rgb(p.text),
+                "the selected position's label"
+            );
+            assert_eq!(
+                rgb(text_saying(&s, "Top Center")),
+                rgb(p.subtext0),
+                "an unselected position's label"
+            );
+            // T13: the tick sits *on* the green box, so it is derived from it.
+            assert_eq!(
+                rgb(text_saying(&s, "\u{2713}")),
+                rgb(appearance::readable_on(p.green)),
+                "the checkbox tick"
+            );
+            // T14: the toggle labels.
+            assert_eq!(
+                rgb(text_saying(&s, "Volume changes")),
+                rgb(p.text),
+                "a toggle label"
+            );
+            // T16: the Preview button's label sits on the accent.
+            assert_eq!(
+                rgb(text_saying(&s, "Preview OSD")),
+                rgb(p.on_accent()),
+                "the preview button's label"
+            );
+        }
+    }
+
+    /// Every rectangle site, one entry per site in the source.
+    ///
+    /// Same rule as the text table above: per source site, not per rendered
+    /// instance and not per kind. Seven overlay sites and seven panel sites.
+    #[test]
+    fn every_rectangle_the_osd_draws_is_in_the_role_it_claims() {
+        for light in [false, true] {
+            let mut p = Palette::for_mode(light);
+            p.accent = SAFE_ACCENTS[0];
+
+            let vol = overlay(
+                OsdKind::Volume {
+                    level: 60,
+                    muted: false,
+                },
+                &p,
+            );
+            // S1: the drop shadow is black at the overlay's own fade, not a
+            // role — a shadow is an absence of light, and its depth follows
+            // the thing casting it.
+            let shadows: Vec<Color> = vol
+                .iter()
+                .filter_map(|c| match c {
+                    RenderCommand::BoxShadow { color, .. } => Some(*color),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(shadows.len(), 1, "the overlay draws one shadow");
+            assert_eq!(rgb(shadows[0]), (0, 0, 0), "the shadow is black");
+            assert_eq!(shadows[0].a, 110, "the shadow is half the panel's alpha");
+            // S2: the panel.
+            assert_eq!(
+                fills(&vol, 320.0, 72.0),
+                vec![Color::rgba(p.base.r, p.base.g, p.base.b, 220)]
+            );
+            // S3: the border.
+            let borders: Vec<Color> = vol
+                .iter()
+                .filter_map(|c| match c {
+                    RenderCommand::StrokeRect { color, .. } => Some(*color),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(borders.len(), 1, "the overlay draws one border");
+            assert_eq!(rgb(borders[0]), rgb(p.surface1), "the border");
+            // S6, S7: the slider's track and the fill on top of it. The fill
+            // takes the kind's own colour, which the track must not.
+            let bar = fills_h(&vol, 6.0);
+            assert_eq!(bar.len(), 2, "the slider is a track and a fill");
+            assert_eq!(rgb(bar[0]), rgb(p.surface0), "the slider track");
+            assert_eq!(rgb(bar[1]), rgb(p.blue), "the slider fill");
+            // S8: the knob.
+            assert_eq!(
+                fills(&vol, 10.0, 10.0)
+                    .iter()
+                    .map(|c| rgb(*c))
+                    .collect::<Vec<_>>(),
+                vec![rgb(p.text)],
+                "the slider knob"
+            );
+
+            // S13: the media overlay's decorative bar.
+            let media = overlay(
+                OsdKind::MediaTrack {
+                    title: "T".into(),
+                    artist: "A".into(),
+                    album: "B".into(),
+                },
+                &p,
+            );
+            assert_eq!(
+                fills_h(&media, 2.0)
+                    .iter()
+                    .map(|c| rgb(*c))
+                    .collect::<Vec<_>>(),
+                vec![rgb(p.lavender)],
+                "the media bar"
+            );
+
+            // ---- OsdSettingsUI::render ----
+            let s = settings(&p);
+            // T2: the enable pill, both sides of its `if`.
+            assert_eq!(
+                fills(&s, 40.0, 20.0)
+                    .iter()
+                    .map(|c| rgb(*c))
+                    .collect::<Vec<_>>(),
+                vec![rgb(p.green)],
+                "the enable pill, on"
+            );
+            assert_eq!(
+                fills(&settings_with(&p, |c| c.enabled = false), 40.0, 20.0)
+                    .iter()
+                    .map(|c| rgb(*c))
+                    .collect::<Vec<_>>(),
+                vec![rgb(p.subtext0)],
+                "the enable pill, off"
+            );
+            // T3: the pill's knob.
+            assert_eq!(
+                fills(&s, 16.0, 16.0)
+                    .iter()
+                    .map(|c| rgb(*c))
+                    .collect::<Vec<_>>(),
+                vec![rgb(p.text)],
+                "the pill knob"
+            );
+            // T6: the position dots — one selected, four not.
+            let dots = fills(&s, 12.0, 12.0);
+            assert_eq!(dots.len(), 5);
+            assert_eq!(
+                dots.iter().filter(|c| rgb(**c) == rgb(p.accent)).count(),
+                1,
+                "the selected dot"
+            );
+            assert_eq!(
+                dots.iter().filter(|c| rgb(**c) == rgb(p.surface1)).count(),
+                4,
+                "the unselected dots"
+            );
+            // T9, T10: the timeout slider's track and its accent fill.
+            let track = fills_h(&s, 4.0);
+            assert_eq!(track.len(), 2, "the timeout slider is a track and a fill");
+            assert_eq!(rgb(track[0]), rgb(p.surface0), "the timeout track");
+            assert_eq!(rgb(track[1]), rgb(p.accent), "the timeout fill");
+            // T12: the checkboxes, both sides of their `if`.
+            assert_eq!(
+                fills(&s, 14.0, 14.0)
+                    .iter()
+                    .filter(|c| rgb(**c) == rgb(p.green))
+                    .count(),
+                4,
+                "the enabled checkboxes"
+            );
+            assert_eq!(
+                fills(
+                    &settings_with(&p, |c| {
+                        c.show_volume = false;
+                        c.show_brightness = false;
+                        c.show_media = false;
+                        c.show_lock_keys = false;
+                    }),
+                    14.0,
+                    14.0
+                )
+                .iter()
+                .filter(|c| rgb(**c) == rgb(p.surface1))
+                .count(),
+                4,
+                "the disabled checkboxes"
+            );
+            // T15: the Preview button.
+            assert_eq!(
+                fills(&s, 120.0, 32.0)
+                    .iter()
+                    .map(|c| rgb(*c))
+                    .collect::<Vec<_>>(),
+                vec![rgb(p.accent)],
+                "the preview button"
+            );
+        }
+    }
+
+    /// Every kind draws its icon in the colour that kind claims — one entry
+    /// per colour *decision* in `render_content` and `icon_info`, not one per
+    /// kind and not one per representative.
+    ///
+    /// `render_content` chooses fifteen colours and `icon_info` chooses ten.
+    /// Those twenty-five decisions are the module's whole vocabulary, and
+    /// nothing else here checks them: the sweep cannot, because every one of
+    /// them is a role of both palettes, and the role tables above see only the
+    /// two fixtures they happen to render. Written out as roles rather than as
+    /// `icon_info(p, icon).1`, which would only prove the function agrees with
+    /// itself.
+    #[test]
+    fn every_kind_draws_its_icon_in_the_colour_that_kind_claims() {
+        for light in [false, true] {
+            let p = Palette::for_mode(light);
+            let mode = if light { "light" } else { "dark" };
+
+            // The two slider kinds draw their icon at 24px.
+            for (what, kind, want) in [
+                (
+                    "volume",
+                    OsdKind::Volume {
+                        level: 60,
+                        muted: false,
+                    },
+                    p.blue,
+                ),
+                (
+                    "a muted volume",
+                    OsdKind::Volume {
+                        level: 60,
+                        muted: true,
+                    },
+                    p.red,
+                ),
+                ("brightness", OsdKind::Brightness { level: 60 }, p.yellow),
+            ] {
+                assert_eq!(
+                    rgb(text_at(&overlay(kind, &p), 24.0)),
+                    rgb(want),
+                    "{mode}: {what} does not draw its icon in its own colour"
+                );
+            }
+
+            // Every other kind draws its icon at 20px.
+            let mut cases: Vec<(String, OsdKind, Color)> = vec![
+                (
+                    "play/pause".into(),
+                    OsdKind::MediaPlayPause { playing: true },
+                    p.lavender,
+                ),
+                (
+                    "a lock that is on".into(),
+                    OsdKind::KeyboardLock {
+                        lock_type: LockType::CapsLock,
+                        active: true,
+                    },
+                    p.green,
+                ),
+                (
+                    "a lock that is off".into(),
+                    OsdKind::KeyboardLock {
+                        lock_type: LockType::CapsLock,
+                        active: false,
+                    },
+                    p.subtext0,
+                ),
+                (
+                    "a device that connected".into(),
+                    OsdKind::DeviceEvent {
+                        device_name: "d".into(),
+                        ejected: false,
+                    },
+                    p.green,
+                ),
+                (
+                    "a device that ejected".into(),
+                    OsdKind::DeviceEvent {
+                        device_name: "d".into(),
+                        ejected: true,
+                    },
+                    p.subtext0,
+                ),
+                (
+                    "a screenshot".into(),
+                    OsdKind::ScreenshotTaken {
+                        path: "/p/s.png".into(),
+                    },
+                    p.green,
+                ),
+                (
+                    "a live mic".into(),
+                    OsdKind::Microphone { muted: false },
+                    p.green,
+                ),
+                (
+                    "a muted mic".into(),
+                    OsdKind::Microphone { muted: true },
+                    p.red,
+                ),
+                (
+                    "a network that is up".into(),
+                    OsdKind::NetworkStatus {
+                        connected: true,
+                        name: "n".into(),
+                    },
+                    p.green,
+                ),
+                (
+                    "a network that is down".into(),
+                    OsdKind::NetworkStatus {
+                        connected: false,
+                        name: "n".into(),
+                    },
+                    p.red,
+                ),
+                (
+                    "a low battery".into(),
+                    OsdKind::BatteryLow { percent: 7 },
+                    p.red,
+                ),
+            ];
+            for (icon, want) in [
+                (OsdIcon::Info, p.blue),
+                (OsdIcon::Success, p.green),
+                (OsdIcon::Warning, p.yellow),
+                (OsdIcon::Error, p.red),
+                (OsdIcon::Speaker, p.blue),
+                (OsdIcon::Brightness, p.yellow),
+                (OsdIcon::Network, p.green),
+                (OsdIcon::Battery, p.peach),
+                (OsdIcon::Lock, p.lavender),
+                (OsdIcon::Camera, p.green),
+            ] {
+                cases.push((
+                    format!("the {icon:?} icon"),
+                    OsdKind::Custom {
+                        icon,
+                        message: "hello".into(),
+                    },
+                    want,
+                ));
+            }
+            for (what, kind, want) in cases {
+                assert_eq!(
+                    rgb(text_at(&overlay(kind, &p), 20.0)),
+                    rgb(want),
+                    "{mode}: {what} does not draw its icon in its own colour"
+                );
+            }
+        }
+    }
+
+    /// Nothing the overlay draws follows the accent.
+    ///
+    /// An OSD is pure feedback: there is nothing in it to select, nothing to
+    /// drag, nothing that says "you are here". The accent marks what you can
+    /// move, not what you are being told — so `p.accent` must not appear
+    /// anywhere in `OsdManager`, and this says so rather than leaving it to be
+    /// an accident of the mapping that the next edit quietly undoes.
+    #[test]
+    fn no_colour_the_overlay_draws_ever_follows_the_accent() {
+        for light in [false, true] {
+            for accent in SAFE_ACCENTS {
+                let mut p = Palette::for_mode(light);
+                p.accent = accent;
+                for (what, kind) in every_kind() {
+                    for c in every_color(&overlay(kind, &p)) {
+                        assert_ne!(
+                            rgb(c),
+                            rgb(accent),
+                            "the {what} overlay draws the accent; an OSD is \
+                             feedback, and nothing in it is yours to move"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// Volume and brightness are a category pair, and a pair told apart by
+    /// hue stops being a pair the moment one colour claims both.
+    ///
+    /// This is the deliberate counterpart to `sound_settings.rs`, where the
+    /// volume bar *does* take the accent — because there you can drag it.
+    #[test]
+    fn volume_and_brightness_stay_a_pair_you_can_tell_apart() {
+        for light in [false, true] {
+            let p = Palette::for_mode(light);
+            let vol = overlay(
+                OsdKind::Volume {
+                    level: 60,
+                    muted: false,
+                },
+                &p,
+            );
+            let bright = overlay(OsdKind::Brightness { level: 60 }, &p);
+            let vol_fill = fills_h(&vol, 6.0)[1];
+            let bright_fill = fills_h(&bright, 6.0)[1];
+            assert_eq!(rgb(vol_fill), rgb(p.blue), "volume is blue");
+            assert_eq!(rgb(bright_fill), rgb(p.yellow), "brightness is yellow");
+            assert_ne!(
+                rgb(vol_fill),
+                rgb(bright_fill),
+                "volume and brightness are the same colour, so the overlay no \
+                 longer says which one changed"
+            );
+            // Muting is a reading, not a level, and it overrides the hue.
+            let muted = overlay(
+                OsdKind::Volume {
+                    level: 60,
+                    muted: true,
+                },
+                &p,
+            );
+            assert_eq!(rgb(fills_h(&muted, 6.0)[1]), rgb(p.red), "muted is red");
+            assert_ne!(
+                rgb(fills_h(&muted, 6.0)[1]),
+                rgb(vol_fill),
+                "a muted volume bar looks exactly like an unmuted one"
+            );
+        }
+    }
+
+    /// The settings panel is a different surface with a different answer: it
+    /// has exactly three accent sites, and they are a selection, a drag and an
+    /// invitation.
+    ///
+    /// Counted rather than spot-checked, so that a fourth site added later has
+    /// to be argued for here instead of appearing by itself.
+    #[test]
+    fn the_settings_panel_has_exactly_three_accent_sites() {
+        for light in [false, true] {
+            for accent in SAFE_ACCENTS {
+                let mut p = Palette::for_mode(light);
+                p.accent = accent;
+                let hits = every_color(&settings(&p))
+                    .into_iter()
+                    .filter(|c| rgb(*c) == rgb(accent))
+                    .count();
+                assert_eq!(
+                    hits, 3,
+                    "the OSD settings panel has {hits} accent sites, not the \
+                     three it claims: the selected position dot, the timeout \
+                     slider's fill and the Preview button"
+                );
+            }
+        }
+    }
+
+    /// Ink drawn on a coloured fill is derived from that fill, never named.
+    ///
+    /// Both sites were Mocha `base` — a dark ink that vanishes on a Latte
+    /// green and on a pale accent. The proof that they are *computed* is that
+    /// they move: a dark accent must flip the Preview label to the light
+    /// endpoint, which no constant would do. All four `SAFE_ACCENTS` are
+    /// pastel and would all answer the same way, so this adds one deliberately
+    /// dark accent and one deliberately pale one.
+    #[test]
+    fn ink_drawn_on_a_coloured_fill_is_readable_in_both_modes() {
+        const DARK: Color = Color::from_hex(0x0020_3050);
+        const PALE: Color = Color::from_hex(0x00F5_D0E0);
+
+        for light in [false, true] {
+            let mut p = Palette::for_mode(light);
+
+            // The tick sits on `p.green`, whose value differs by mode.
+            let tick = text_saying(&settings(&p), "\u{2713}");
+            assert_eq!(rgb(tick), rgb(appearance::readable_on(p.green)));
+            assert_ne!(rgb(tick), rgb(p.green), "the tick is invisible on its box");
+
+            // The Preview label sits on the accent, which the user chooses.
+            p.accent = DARK;
+            let on_dark = text_saying(&settings(&p), "Preview OSD");
+            p.accent = PALE;
+            let on_pale = text_saying(&settings(&p), "Preview OSD");
+            assert_ne!(
+                rgb(on_dark),
+                rgb(on_pale),
+                "the Preview label is the same colour on a dark accent and a \
+                 pale one, so it is a constant rather than a derivation"
+            );
+            assert!(
+                on_dark.r > 0x80,
+                "a dark accent wants light ink, got #{:02X}{:02X}{:02X}",
+                on_dark.r,
+                on_dark.g,
+                on_dark.b
+            );
+            assert!(
+                on_pale.r < 0x80,
+                "a pale accent wants dark ink, got #{:02X}{:02X}{:02X}",
+                on_pale.r,
+                on_pale.g,
+                on_pale.b
+            );
+        }
+    }
+
+    /// Nothing that reports a state follows the accent.
+    ///
+    /// A lock that is on, a device that ejected, a mic that is muted, a
+    /// network that dropped, a setting that is off — these are readings. The
+    /// accent is the user's choice of decoration, and a reading painted in it
+    /// stops being a reading. Covers the settings panel's two state widgets
+    /// as well as the overlay's, which is why it is not subsumed by
+    /// `no_colour_the_overlay_draws_ever_follows_the_accent`.
+    #[test]
+    fn nothing_that_reports_a_state_follows_the_accent() {
+        for light in [false, true] {
+            for accent in SAFE_ACCENTS {
+                let mut p = Palette::for_mode(light);
+                p.accent = accent;
+
+                // The enable pill, both states.
+                for (on, what) in [(true, "on"), (false, "off")] {
+                    let pill = fills(&settings_with(&p, |c| c.enabled = on), 40.0, 20.0);
+                    assert_eq!(pill.len(), 1);
+                    assert_ne!(
+                        rgb(pill[0]),
+                        rgb(accent),
+                        "the enable pill reports {what} in the accent"
+                    );
+                }
+                // The checkboxes, both states.
+                for (on, what) in [(true, "checked"), (false, "unchecked")] {
+                    let boxes = fills(
+                        &settings_with(&p, |c| {
+                            c.show_volume = on;
+                            c.show_brightness = on;
+                            c.show_media = on;
+                            c.show_lock_keys = on;
+                        }),
+                        14.0,
+                        14.0,
+                    );
+                    assert_eq!(boxes.len(), 4);
+                    for b in boxes {
+                        assert_ne!(
+                            rgb(b),
+                            rgb(accent),
+                            "a {what} checkbox reports its state in the accent"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// Every pair this module uses to tell two things apart stays apart in
+    /// both modes.
+    ///
+    /// A role mapping can be wrong without leaving a constant behind: two
+    /// states mapped to the same role compile, render, and say nothing. The
+    /// sweep cannot see it, because both roles are members of both palettes.
+    #[test]
+    fn every_pair_this_module_uses_to_tell_things_apart_stays_apart() {
+        for light in [false, true] {
+            let p = Palette::for_mode(light);
+            let mode = if light { "light" } else { "dark" };
+            for (a, b, what) in [
+                (p.green, p.subtext0, "a lock that is on vs one that is off"),
+                (p.green, p.red, "a mic that is live vs one that is muted"),
+                (p.green, p.surface1, "a checked box vs an unchecked one"),
+                (p.blue, p.yellow, "volume vs brightness"),
+                (p.text, p.subtext0, "a selected label vs an unselected one"),
+                (p.base, p.surface1, "the overlay's fill vs its border"),
+                (p.surface0, p.text, "a slider's track vs its knob"),
+            ] {
+                assert_ne!(rgb(a), rgb(b), "{mode}: {what} are the same colour");
+            }
+            // icon_info's five distinguishable severities. Info/Speaker share
+            // blue, Warning/Brightness share yellow and Success/Network/Camera
+            // share green on purpose — those are the same thing said twice —
+            // but these five must never collapse into one another.
+            let severities = [
+                ("Info", icon_info(&p, OsdIcon::Info).1),
+                ("Warning", icon_info(&p, OsdIcon::Warning).1),
+                ("Error", icon_info(&p, OsdIcon::Error).1),
+                ("Success", icon_info(&p, OsdIcon::Success).1),
+                ("Battery", icon_info(&p, OsdIcon::Battery).1),
+                ("Lock", icon_info(&p, OsdIcon::Lock).1),
+            ];
+            for i in 0..severities.len() {
+                for j in (i + 1)..severities.len() {
+                    assert_ne!(
+                        rgb(severities[i].1),
+                        rgb(severities[j].1),
+                        "{mode}: the {} and {} icons are the same colour",
+                        severities[i].0,
+                        severities[j].0
+                    );
+                }
+            }
+        }
     }
 }

@@ -2504,8 +2504,26 @@ mod tests {
         // the native one is absent, which is what this fixture wants to test.
         let missing = dir.path("absent-users-yaml");
         let mut d = test_daemon();
-        d.set_verifier(authlib::Authenticator::with_stores(&missing, &shadow));
+        d.set_verifier(
+            authlib::Authenticator::with_stores(&missing, &shadow).with_clock(frozen_clock),
+        );
         (d, dir)
+    }
+
+    /// The clock the fixture above authenticates against, frozen.
+    ///
+    /// The rate limit earned by `FREE_ATTEMPTS + 1` failures is one second, and
+    /// it is measured from the last failure — so a test that earns it by
+    /// running that many real `posix::crypt` verifications is racing its own
+    /// setup. `authlib` is right to let a one-second delay expire after one
+    /// second; the test is wrong to depend on it not having. Pinning `now`
+    /// takes wall time out of a property that never depended on it, and makes
+    /// `retry_after_secs` a number the test can name rather than a leftover of
+    /// the window. See
+    /// `requests/c-b-auth-daemon-rate-limit-tests-race-a-one-second-window.md`.
+    fn frozen_clock() -> u64 {
+        // Any fixed value; only differences matter, and there are none.
+        1_700_000_000
     }
 
     /// The fixture's own wiring, which a shared guard cannot check for us.
@@ -2635,23 +2653,36 @@ mod tests {
         let (mut d, _dir) = authenticating_daemon("rate_limited");
         d.lock_session("1").unwrap();
 
-        // The clock is the real one here, so this asserts only that the
-        // limit engages at all — `authlib` owns the timing table and tests it
-        // against a fake clock.
-        let mut saw_limit = false;
-        for _ in 0..8 {
-            if matches!(
-                d.authenticate_session("1", b"hunter2").unwrap(),
-                authlib::Outcome::RateLimited { .. }
-            ) {
-                saw_limit = true;
-                break;
-            }
+        // The clock is frozen, so this can say exactly *when* the limit
+        // engages rather than only that eight tries reach it somewhere. The
+        // first `FREE_ATTEMPTS` guesses are free by design — a lock screen that
+        // refused the first typo would be unusable — and the one after them is
+        // refused for one second.
+        for attempt in 1..=authlib::FREE_ATTEMPTS {
+            let outcome = d.authenticate_session("1", b"hunter2").unwrap();
+            assert_eq!(
+                outcome,
+                authlib::Outcome::Rejected,
+                "guess {attempt} of the first {} must be answered, not deferred",
+                authlib::FREE_ATTEMPTS
+            );
         }
-        assert!(
-            saw_limit,
-            "a lock screen that accepts guesses as fast as they arrive is a \
-             lock screen that is guessed"
+
+        let outcome = d.authenticate_session("1", b"hunter2").unwrap();
+        assert_eq!(
+            outcome,
+            authlib::Outcome::Rejected,
+            "the guess that earns the delay is still answered; the delay starts after it"
+        );
+
+        // And now the screen stops answering: a lock screen that accepts
+        // guesses as fast as they arrive is a lock screen that is guessed.
+        let outcome = d.authenticate_session("1", b"hunter2").unwrap();
+        assert_eq!(
+            outcome,
+            authlib::Outcome::RateLimited {
+                retry_after_secs: 1
+            }
         );
     }
 

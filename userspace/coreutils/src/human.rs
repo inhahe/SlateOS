@@ -63,9 +63,27 @@ impl Opts {
     /// the identity, which is why it has no separate code path below.
     pub const GROUP_DIGITS: Self = Self(4);
     /// Print `1K` rather than `1.0K`: drop a decimal point followed by a zero.
-    /// `df -h` and `du -h` pass this; `dd` does not, which is the whole reason
-    /// `dd` says `1.0 kB` where `df` would say `1.0K` only when the tenth is
-    /// nonzero.
+    ///
+    /// **No coreutils caller passes this, and an earlier version of this
+    /// comment claiming `df -h` and `du -h` did was wrong.** The claim was
+    /// reasoned from `df -h`'s `16G` rather than measured, and `16G` is not
+    /// evidence: 16 is at or above ten, where the decimal is dropped by the
+    /// rule above whatever this bit says. Measured on GNU coreutils 9.4, on
+    /// inputs that are *exactly* a power of the base — the only inputs that can
+    /// tell the two apart:
+    ///
+    /// ```text
+    /// $ du -h --apparent-size k1     ->  1.0K      (1024-byte file)
+    /// $ ls -lh k1                    ->  1.0K
+    /// $ ls -s -h m1                  ->  1.0M
+    /// $ ls -l --block-size=human-readable k1  ->  1.0K
+    /// ```
+    ///
+    /// So `du.rs` must **not** set it, and neither must `ls` or `df`; the
+    /// option is here because gnulib's `human_readable` has it and this is a
+    /// port of that function rather than of its coreutils call sites. If a
+    /// caller is ever found — upstream `tar` is the likely one — record the
+    /// measurement here rather than the inference.
     pub const SUPPRESS_POINT_ZERO: Self = Self(8);
     /// Divide by the base until the value is below it, and report the
     /// exponent as a letter. Without this the value is printed whole.
@@ -448,6 +466,147 @@ fn format_fixed(value: f64, precision: usize) -> String {
     format!("{value:.precision$}")
 }
 
+// ------------------------------------------------------------ block sizes ---
+//
+// The other half of gnulib `lib/human.c`: the parser that turns a
+// `--block-size` spec, or an environment variable, into the divisor and the
+// [`Opts`] that [`human_readable`] above is then called with. `du -B`, `ls
+// --block-size`, `df -B`, `LS_BLOCK_SIZE`, `DU_BLOCK_SIZE` and `BLOCK_SIZE` all
+// go through it, and they must agree: `BLOCK_SIZE=K` in a profile has to mean
+// the same thing to every utility that reads it, or one column of a `du | ls`
+// comparison is in different units from the other.
+
+/// The two words a block-size spec accepts instead of a number, in `argmatch`
+/// order.
+pub const BLOCK_SIZE_WORDS: [&[u8]; 2] = [b"human-readable", b"si"];
+
+/// The suffix letters `humblock` hands to [`crate::xnum::xstrtoumax`].
+///
+/// Note what is *absent*: no `R`, no `Q`, and no `B`. `-B R` is therefore
+/// `invalid -B argument 'R'` rather than a ronnabyte, even though `du --help`
+/// advertises `R` in the SIZE paragraph — the paragraph describes `-t`'s list,
+/// which is a different one.
+pub const BLOCK_SIZE_SUFFIXES: &[u8] = b"eEgGkKmMpPtTyYzZ0";
+
+/// gnulib's `argmatch` against [`BLOCK_SIZE_WORDS`]: an unambiguous prefix, or
+/// nothing.
+///
+/// The empty string is a prefix of both, so it is *ambiguous* rather than a
+/// match — which is why `-B ''` falls through to the number parser and comes
+/// back as `invalid -B argument ''` rather than as `human-readable`.
+fn block_size_word(spec: &[u8]) -> Option<usize> {
+    let mut found = None;
+    for (index, word) in BLOCK_SIZE_WORDS.iter().enumerate() {
+        if !word.starts_with(spec) {
+            continue;
+        }
+        if spec == *word {
+            return Some(index);
+        }
+        if found.is_some() {
+            return None;
+        }
+        found = Some(index);
+    }
+    found
+}
+
+/// gnulib's `humblock`: read a block-size spec into a divisor and a set of
+/// [`Opts`].
+///
+/// The rule that surprises everyone is the last one. After the number is
+/// parsed, gnulib walks the spec looking for a digit; if it reaches the end
+/// without finding one, the spec was a bare unit like `K` or `KiB`, and the
+/// *suffix is switched on in the output* as well as applied as a divisor. That
+/// single `for` loop is the whole difference between these two, measured on a
+/// 3153920-byte tree:
+///
+/// ```text
+/// $ du -s -B 1K  t   ->  3080
+/// $ du -s -B K   t   ->  3080K
+/// $ du -s -B KB  t   ->  3154kB
+/// $ du -s -B KiB t   ->  3080KiB
+/// $ du -s -B G   t   ->  1G
+/// ```
+///
+/// A leading `'` is consumed and means "group the digits"; it is the reason
+/// `-B '1048576` is a valid spec and `-B 1'024` is not.
+#[must_use]
+pub fn humblock(spec: &[u8]) -> (u64, Opts, crate::xnum::Status) {
+    use crate::xnum::{Status, xstrtoumax_base};
+
+    let mut opts = Opts::NONE;
+    let rest = match spec.split_first() {
+        Some((b'\'', tail)) => {
+            opts = opts | Opts::GROUP_DIGITS;
+            tail
+        }
+        _ => spec,
+    };
+
+    match block_size_word(rest) {
+        Some(0) => (
+            1,
+            opts | Opts::AUTOSCALE | Opts::SI | Opts::BASE_1024,
+            Status::Ok,
+        ),
+        Some(1) => (1, opts | Opts::AUTOSCALE | Opts::SI, Status::Ok),
+        _ => {
+            let (value, status) = xstrtoumax_base(rest, 0, Some(BLOCK_SIZE_SUFFIXES));
+            if status != Status::Ok {
+                return (value, opts, status);
+            }
+            if !rest.iter().any(u8::is_ascii_digit) {
+                let last = rest.last().copied();
+                let before = rest
+                    .len()
+                    .checked_sub(2)
+                    .and_then(|index| rest.get(index))
+                    .copied();
+                opts = opts | Opts::SI;
+                if last == Some(b'B') {
+                    opts = opts | Opts::B;
+                }
+                if last != Some(b'B') || before == Some(b'i') {
+                    opts = opts | Opts::BASE_1024;
+                }
+            }
+            (value, opts, status)
+        }
+    }
+}
+
+/// gnulib's `default_block_size`: 512 under `POSIXLY_CORRECT`, else 1024.
+#[must_use]
+pub const fn default_block_size(posixly_correct: bool) -> u64 {
+    if posixly_correct { 512 } else { 1024 }
+}
+
+/// gnulib's `human_options`: [`humblock`] plus the rule that a block size of
+/// zero is not a block size.
+///
+/// The zero rule is why `-B 0` says `invalid -B argument '0'` — the *number*
+/// parsed perfectly, so the diagnostic cannot have come from the number parser.
+/// It is also why `DU_BLOCK_SIZE=0` is silently the default rather than a
+/// division by zero: the environment caller discards the status this returns
+/// and keeps the repaired block size, and only the `-B` caller makes it fatal.
+///
+/// The returned [`Opts`] are kept even when the status is bad, which is
+/// upstream's behaviour and is observable: `LS_BLOCK_SIZE=0` leaves the
+/// autoscaling off but the block size at the default.
+#[must_use]
+pub fn human_options(spec: &[u8], posixly_correct: bool) -> (u64, Opts, crate::xnum::Status) {
+    let (block_size, opts, status) = humblock(spec);
+    if block_size == 0 {
+        return (
+            default_block_size(posixly_correct),
+            opts,
+            crate::xnum::Status::Invalid,
+        );
+    }
+    (block_size, opts, status)
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::panic)]
 mod tests {
@@ -532,21 +691,33 @@ mod tests {
         assert_eq!(iec(999_949), "977 KiB");
     }
 
-    /// `SUPPRESS_POINT_ZERO` is what separates `df -h`'s `16G` from `dd`'s
-    /// `16 GB` — the exponent and the value are identical.
+    /// `SUPPRESS_POINT_ZERO` drops the `.0` and nothing else.
+    ///
+    /// It is exercised through a synthetic option set rather than a named
+    /// utility's, because — see [`Opts::SUPPRESS_POINT_ZERO`] — no coreutils
+    /// utility passes it. The last two assertions are the ones that matter:
+    /// they pin the *only* inputs on which the bit is observable at all, which
+    /// is why an earlier version of this test naming `df` and `16G` proved
+    /// nothing.
     #[test]
     fn suppress_point_zero_drops_a_trailing_zero_decimal() {
-        let df = Opts::AUTOSCALE
+        let terse = Opts::AUTOSCALE
             | Opts::ROUND_TO_NEAREST
             | Opts::BASE_1024
             | Opts::SUPPRESS_POINT_ZERO
             | Opts::SI;
-        assert_eq!(human_readable(1024, df, 1, 1), "1K");
-        assert_eq!(human_readable(1536, df, 1, 1), "1.5K");
-        assert_eq!(human_readable(16 * 1024 * 1024 * 1024, df, 1, 1), "16G");
-        // Without the option the same numbers keep the zero.
-        let keep = df.0 & !Opts::SUPPRESS_POINT_ZERO.0;
-        assert_eq!(human_readable(1024, Opts(keep), 1, 1), "1.0K");
+        let keep = Opts(terse.0 & !Opts::SUPPRESS_POINT_ZERO.0);
+        assert_eq!(human_readable(1024, terse, 1, 1), "1K");
+        assert_eq!(human_readable(1024, keep, 1, 1), "1.0K");
+        // A nonzero tenth keeps its decimal either way.
+        assert_eq!(human_readable(1536, terse, 1, 1), "1.5K");
+        assert_eq!(human_readable(1536, keep, 1, 1), "1.5K");
+        // At ten and above the decimal is already gone, so the bit changes
+        // nothing — which is exactly why GNU's `16G` is not evidence that
+        // `df` sets it.
+        let sixteen = 16 * 1024 * 1024 * 1024;
+        assert_eq!(human_readable(sixteen, terse, 1, 1), "16G");
+        assert_eq!(human_readable(sixteen, keep, 1, 1), "16G");
     }
 
     /// A zero exponent still gets its space when `B` is asked for, and does not

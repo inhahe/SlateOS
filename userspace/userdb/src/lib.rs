@@ -910,7 +910,10 @@ fn quote(value: &str) -> String {
 )]
 #[cfg(test)]
 mod tests {
+    // Scratch directories come from the shared guard: a fixed name races
+    // between concurrent test binaries and the clock is not a unique id.
     use super::*;
+    use scratchdir::ScratchDir;
 
     /// A database as the login manager used to write it.
     const LOGIN_MANAGER_DIALECT: &str = "\
@@ -1226,10 +1229,8 @@ users:
     /// no accounts in it, because the caller's next act is to write it back.
     #[test]
     fn an_unreadable_file_is_an_error_and_a_missing_one_is_empty() {
-        let dir = std::env::temp_dir().join("userdb-load-test");
-        std::fs::create_dir_all(&dir).expect("temp dir");
-        let missing = dir.join("does-not-exist.yaml");
-        let _ = std::fs::remove_file(&missing);
+        let scratch = ScratchDir::new("userdb-load-test");
+        let missing = scratch.path("does-not-exist.yaml");
         assert!(
             UserDb::load(&missing)
                 .expect("missing is empty")
@@ -1239,14 +1240,13 @@ users:
 
         // A directory stands in for "present but unreadable": every platform
         // refuses to read one as a file, and it is not a `NotFound`.
-        assert!(UserDb::load(&dir).is_err());
+        assert!(UserDb::load(scratch.dir()).is_err());
     }
 
     #[test]
     fn a_save_replaces_the_file_and_leaves_no_temporary_behind() {
-        let dir = std::env::temp_dir().join("userdb-save-test");
-        std::fs::create_dir_all(&dir).expect("temp dir");
-        let path = dir.join("users.yaml");
+        let scratch = ScratchDir::new("userdb-save-test");
+        let path = scratch.path("users.yaml");
         let mut db = UserDb::new();
         let mut record = Record::new();
         record.set_uid(1000);
@@ -1259,7 +1259,6 @@ users:
         let mut temp = path.as_os_str().to_os_string();
         temp.push(".tmp");
         assert!(!std::path::Path::new(&temp).exists());
-        let _ = std::fs::remove_file(&path);
     }
 
     #[test]

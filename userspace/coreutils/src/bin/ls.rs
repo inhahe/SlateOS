@@ -1,11 +1,18 @@
 //! ls — list directory contents.
 //!
-//! A port of GNU `ls` (coreutils 9.4), written against its source rather than
-//! against a memory of its behaviour, because almost every rule in it is
+//! A port of GNU `ls` (coreutils **9.5**), written against its source rather
+//! than against a memory of its behaviour, because almost every rule in it is
 //! arbitrary in the precise sense: it cannot be re-derived, only copied. The
 //! column allocator, the six-month recency window, the rule that a name's
 //! *suffix* decides `-v` order, and the fact that `--time-style=nosuch` is not
 //! an error unless `-l` is also given are all of that kind.
+//!
+//! The version matters and is not a detail: 9.5 changed how *every* width in
+//! the program is measured — text that cannot be measured now widens no column
+//! and is padded to no column, where 9.4 counted it at roughly a column per
+//! byte. Some comments below cite measurements taken from the 9.4 that ships in
+//! WSL; where they do, they say so, and the behaviour reproduced is 9.5's. See
+//! `design-decisions.md` §366.
 //!
 //! # What it replaces
 //!
@@ -57,7 +64,7 @@ use coreutils::pathname::{base_len, last_component, last_component_offset};
 use coreutils::quote::{Mb, Style, next_mb, os_bytes, quote};
 use coreutils::vercmp::version;
 use coreutils::xnum::{self, Status, strtol_fatal};
-use modechange::{S_IFBLK, S_IFCHR, S_IFDIR, S_IFMT};
+use modechange::{S_IFBLK, S_IFCHR, S_IFDIR, S_IFIFO, S_IFLNK, S_IFMT, S_IFREG, S_IFSOCK};
 use std::cmp::Ordering;
 use std::ffi::OsString;
 use std::io::Write;
@@ -229,12 +236,23 @@ enum FileType {
 }
 
 /// GNU's `filetype_letter`, the first column of `-l`'s mode string.
+///
+/// Upstream spells it as the string `"?pcdb-lswd"` indexed by the enum, with a
+/// `static_assert` tying the two lengths together. Note its last two
+/// characters: [`FileType::ArgDirectory`] is a directory and takes `d`, the
+/// *same* letter as [`FileType::Directory`] — the two differ in where the
+/// listing puts them, not in what they are. Only [`FileType::Unknown`] takes
+/// the `?`.
+///
+/// This is reached only for a file whose `stat` failed; anything stated gets
+/// the letter from its mode instead. So the case it decides is `ls -ld` on a
+/// directory that could not be stated, which prints `d?????????`.
 const fn filetype_letter(kind: FileType) -> u8 {
     match kind {
-        FileType::Unknown | FileType::ArgDirectory => b'?',
+        FileType::Unknown => b'?',
         FileType::Fifo => b'p',
         FileType::Chardev => b'c',
-        FileType::Directory => b'd',
+        FileType::Directory | FileType::ArgDirectory => b'd',
         FileType::Blockdev => b'b',
         FileType::Normal => b'-',
         FileType::SymbolicLink => b'l',
@@ -2338,6 +2356,398 @@ fn system_clock() -> Ts {
     }
 }
 
+// ------------------------------------------------------------ the long line ---
+
+/// GNU's `stdout` plus its two `--dired` obstacks, kept together because the
+/// offsets in the obstacks are indices into the bytes.
+///
+/// Upstream tracks the position in a global `dired_pos` that it increments by
+/// hand at every write, and gets away with it because every write goes through
+/// one of the four `dired_*` helpers. Here the bytes are accumulated in a
+/// [`Vec`] for the whole run — which `--dired` forces anyway, since an offset
+/// is only knowable once the text in front of it exists — so the position is
+/// [`Vec::len`] and cannot drift from the output it describes.
+#[derive(Default, Debug)]
+struct Out {
+    buf: Vec<u8>,
+    /// GNU's `dired_obstack`: the begin and end offset of every **file name**,
+    /// printed as the `//DIRED//` line.
+    dired: Vec<usize>,
+    /// GNU's `subdired_obstack`: the same for the `dir:` **header** lines that
+    /// `-R` prints, printed as `//SUBDIRED//`. They are separate because an
+    /// editor following the output wants to descend into the second kind and
+    /// visit the first.
+    subdired: Vec<usize>,
+}
+
+/// Which `--dired` list a name's offsets belong in, or neither.
+///
+/// Upstream passes the obstack itself, and a null pointer for "do not record" —
+/// which is what `print_long_format` passes for a symlink *target*, since the
+/// target is not a file in this listing and an editor must not offer to open
+/// it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Dired {
+    No,
+    Names,
+    Headers,
+}
+
+impl Out {
+    /// GNU's `dired_indent`: `--dired` shifts every long line right by two, so
+    /// that the offsets it reports are not the offsets of an ordinary listing.
+    fn indent(&mut self, cfg: &Config) {
+        if cfg.dired {
+            self.buf.extend_from_slice(b"  ");
+        }
+    }
+
+    /// GNU's `push_current_dired_pos`, which is a no-op without `--dired` —
+    /// the position is still tracked, but nothing asks for it.
+    fn mark(&mut self, cfg: &Config, which: Dired) {
+        if !cfg.dired {
+            return;
+        }
+        let pos = self.buf.len();
+        match which {
+            Dired::No => {}
+            Dired::Names => self.dired.push(pos),
+            Dired::Headers => self.subdired.push(pos),
+        }
+    }
+}
+
+/// GNU's `print_name_with_quoting`: write one name and return the bytes it
+/// took, **including** the alignment space in front of it.
+///
+/// The return is a byte count and not a screen width. That is upstream's, and
+/// its comment says why: the number only feeds `start_col`, which exists so the
+/// colour code can tell whether a name straddles a line boundary, and a byte
+/// count is always at least the width it bounds — so the cheap number is the
+/// safe one. It is reproduced because [`print_long_format`] passes it on to the
+/// symlink target.
+///
+/// `symlink_target` swaps the name for [`FileInfo::linkname`] and, with it, two
+/// other things: the target gets no alignment space (upstream's
+/// `allow_pad = !symlink_target`, since padding the target would put a space
+/// after the `->`), and it is not recorded in `//DIRED//`.
+///
+/// The target is rendered under the *name*'s [`FileInfo::quoted`] measurement,
+/// which would be wrong — a name needing no quoting could point at a target
+/// that does — were it not for the repair in `gobble_file`: upstream sets
+/// `f->quoted = -1` when the link name needs quoting and the name did not, so
+/// the "skip the quoting pass" shortcut is withdrawn from both.
+fn print_name_with_quoting(
+    out: &mut Out,
+    cfg: &Config,
+    cwd_some_quoted: bool,
+    f: &FileInfo,
+    symlink_target: bool,
+    stack: Dired,
+) -> usize {
+    let empty = Vec::new();
+    let name = if symlink_target {
+        f.linkname.as_ref().unwrap_or(&empty)
+    } else {
+        &f.name
+    };
+    let rendered = quote_name(cfg, &cfg.filename_extra, cwd_some_quoted, name, f.quoted);
+
+    let pad = usize::from(rendered.pad && !symlink_target);
+    if pad == 1 {
+        out.buf.push(b' ');
+    }
+    out.mark(cfg, stack);
+    out.buf.extend_from_slice(&rendered.bytes);
+    out.mark(cfg, stack);
+
+    rendered.bytes.len().saturating_add(pad)
+}
+
+/// `S_IXUGO`: the three execute bits, which are what `-F` marks with `*`.
+const S_IXUGO: u32 = 0o111;
+
+/// GNU's `get_type_indicator`: the character `-F`, `-p` or `--file-type`
+/// appends, or `None` for the files that get nothing.
+///
+/// Every test is `stat_ok ? <mode test> : <type test>`, so a file whose stat
+/// failed is still classified — from what `readdir` said it was. The order is
+/// upstream's and is not arbitrary:
+///
+/// * A **regular file** is decided first and takes `*` only under `-F`, and
+///   only if it is executable *and* was stated — a `readdir` type cannot know
+///   about the execute bits, so an unstated regular file is never starred.
+/// * A **directory** takes `/` under all three styles, which is why the `-p`
+///   test sits *after* it: `-p` marks directories and nothing else, so it
+///   returns here and not before.
+/// * The rest — `@`, `|`, `=` — are reached only by `--file-type` and `-F`.
+///
+/// Solaris doors (`>`) are omitted: `S_ISDOOR` expands to a constant `0` on
+/// every system that lacks them, which is every system we target.
+fn get_type_indicator(cfg: &Config, stat_ok: bool, mode: u32, kind: FileType) -> Option<u8> {
+    // Upstream's `stat_ok ? S_ISxxx (mode) : type == xxx`, once.
+    let is = |m: u32, k: FileType| {
+        if stat_ok {
+            mode & S_IFMT == m
+        } else {
+            kind == k
+        }
+    };
+
+    if is(S_IFREG, FileType::Normal) {
+        return (stat_ok && cfg.indicator_style == Indicator::Classify && mode & S_IXUGO != 0)
+            .then_some(b'*');
+    }
+    // `arg_directory` is a directory too, and only the non-stat branch can
+    // ever see it — a stated one is `S_ISDIR`.
+    if is(S_IFDIR, FileType::Directory) || (!stat_ok && kind == FileType::ArgDirectory) {
+        return Some(b'/');
+    }
+    if cfg.indicator_style == Indicator::Slash {
+        return None;
+    }
+    if is(S_IFLNK, FileType::SymbolicLink) {
+        return Some(b'@');
+    }
+    if is(S_IFIFO, FileType::Fifo) {
+        return Some(b'|');
+    }
+    if is(S_IFSOCK, FileType::Sock) {
+        return Some(b'=');
+    }
+    None
+}
+
+/// GNU's `print_type_indicator`: [`get_type_indicator`], written out.
+fn print_type_indicator(out: &mut Out, cfg: &Config, stat_ok: bool, mode: u32, kind: FileType) {
+    if let Some(c) = get_type_indicator(cfg, stat_ok, mode, kind) {
+        out.buf.push(c);
+    }
+}
+
+/// GNU's mode string for one file: ten characters, or the type letter and nine
+/// `?` when the stat failed.
+///
+/// Upstream builds eleven and then truncates: the eleventh is POSIX's
+/// "optional alternate access method flag", which becomes `+` for a file with
+/// an ACL and `.` for one with only a security context. It is truncated
+/// whenever *no* file in the directory has either — and since SlateOS has
+/// neither ACLs nor SELinux, `any_has_acl` is false for every listing and the
+/// character is always cut. That is why this returns ten and
+/// [`modechange::mode_string`] returns ten: the eleventh has no source to come
+/// from.
+fn mode_string(f: &FileInfo) -> Vec<u8> {
+    if f.stat_ok {
+        modechange::mode_string(f.stat.mode).into_bytes()
+    } else {
+        let mut s = vec![b'?'; 10];
+        if let Some(first) = s.first_mut() {
+            *first = filetype_letter(f.filetype);
+        }
+        s
+    }
+}
+
+/// The timestamp `--time` selected. `--time=birth` is the only one that can be
+/// absent, and it reports its absence as [`Ts::UNKNOWN`] — upstream's
+/// `btime_ok`, which is exactly `!(tv_sec == -1 && tv_nsec == -1)`.
+const fn chosen_time(cfg: &Config, f: &FileInfo) -> Ts {
+    match cfg.time_type {
+        TimeType::Ctime => f.stat.ctime,
+        TimeType::Mtime => f.stat.mtime,
+        TimeType::Atime => f.stat.atime,
+        TimeType::Btime => f.stat.btime,
+    }
+}
+
+/// A number right-aligned in `width` columns, followed by the field separator.
+///
+/// This is upstream's `sprintf (p, "%*s ", width, text)` for the columns whose
+/// content is digits — the inode, the link count, the two halves of a device
+/// number. They cannot fail to measure, so unlike the owner column there is no
+/// unmeasurable case to skip.
+fn pad_left(out: &mut Vec<u8>, width: usize, text: &[u8]) {
+    let pad = width.saturating_sub(text.len());
+    out.resize(out.len().saturating_add(pad), b' ');
+    out.extend_from_slice(text);
+    out.push(b' ');
+}
+
+/// A *measured* value right-aligned in `width` columns, followed by the field
+/// separator — the block-size and file-size columns.
+///
+/// Distinct from [`pad_left`] because these are measured with [`mbs_width`] and
+/// so can refuse, in which case upstream emits no padding at all:
+/// `for (int pad = size_width < 0 ? 0 : file_size_width - size_width; ...)`.
+/// See `design-decisions.md` §366.
+fn pad_left_measured(out: &mut Vec<u8>, width: usize, text: &[u8]) {
+    let pad = mbs_width(text).map_or(0, |w| width.saturating_sub(w));
+    out.resize(out.len().saturating_add(pad), b' ');
+    out.extend_from_slice(text);
+    out.push(b' ');
+}
+
+/// GNU's `print_long_format`: one line of `ls -l`.
+///
+/// The columns, in the order they are written:
+///
+/// | Column | When | Alignment |
+/// |---|---|---|
+/// | inode | `-i` | right, in `w.inode` |
+/// | blocks | `-s` | right, in `w.block_size`, measured |
+/// | mode | always | fixed ten |
+/// | links | always | right, in `w.nlink` |
+/// | owner | unless `-g` | left if a name, right if a number |
+/// | group | unless `-G`/`-o` | as owner |
+/// | author | `--author` | as owner |
+/// | context | `-Z` | as owner |
+/// | size *or* `major, minor` | always | right, in `w.file_size`, measured |
+/// | time | always | as rendered |
+/// | name | always | left, and last |
+///
+/// `--dired`'s two-space [`Out::indent`] goes in **front of the inode**, at the
+/// very start of the line. Upstream's `dired_indent ()` call sits several
+/// columns further down — after the link count — but the columns above it are
+/// `sprintf`'d into a local buffer that is not flushed until later, while
+/// `dired_indent` writes straight to `stdout`. So the two spaces overtake them
+/// in the stream. Measured, GNU ls 9.5:
+///
+/// ```text
+/// $ ls -lis --dired --time-style=long-iso plain
+///   636229 4 -rw-r--r-- 1 inhahe inhahe 5 2023-11-14 22:13 plain
+/// //DIRED// 57 62
+/// ```
+///
+/// A file whose `stat` failed prints `?` in every column above that came from
+/// the stat — but keeps its inode's width, its name and its indicator, because
+/// those did not.
+fn print_long_format(
+    out: &mut Out,
+    cfg: &Config,
+    names: &Names,
+    times: &mut Times,
+    w: &Widths,
+    cwd_some_quoted: bool,
+    f: &FileInfo,
+) {
+    let when = chosen_time(cfg, f);
+
+    out.indent(cfg);
+
+    if cfg.print_inode {
+        pad_left(&mut out.buf, w.inode, &format_inode(f));
+    }
+
+    if cfg.print_block_size {
+        let blocks = if f.stat_ok {
+            human_readable(
+                f.stat.blocks,
+                cfg.human_output_opts,
+                ST_NBLOCKSIZE,
+                cfg.output_block_size,
+            )
+        } else {
+            "?".to_owned()
+        };
+        pad_left_measured(&mut out.buf, w.block_size, blocks.as_bytes());
+    }
+
+    out.buf.extend_from_slice(&mode_string(f));
+    out.buf.push(b' ');
+    let nlink = if f.stat_ok {
+        f.stat.nlink.to_string()
+    } else {
+        "?".to_owned()
+    };
+    pad_left(&mut out.buf, w.nlink, nlink.as_bytes());
+
+    // A failed stat sends every one of these through the *name* branch with
+    // the literal `?`, so they are left-aligned like a name and not
+    // right-aligned like the id they stand in for.
+    let failed: Option<&[u8]> = (!f.stat_ok).then_some(b"?");
+    if cfg.print_owner {
+        let name = failed.or_else(|| names.user(f.stat.uid));
+        format_user_or_group(&mut out.buf, name, u64::from(f.stat.uid), w.owner);
+    }
+    if cfg.print_group {
+        let name = failed.or_else(|| names.group(f.stat.gid));
+        format_user_or_group(&mut out.buf, name, u64::from(f.stat.gid), w.group);
+    }
+    if cfg.print_author {
+        // GNU/Hurd's `st_author`, which is `st_uid` everywhere else.
+        let name = failed.or_else(|| names.user(f.stat.uid));
+        format_user_or_group(&mut out.buf, name, u64::from(f.stat.uid), w.author);
+    }
+    if cfg.print_scontext {
+        // Upstream passes `f->scontext` as the *name* and a zero id, so this
+        // column can never take the numeric branch.
+        format_user_or_group(&mut out.buf, Some(SCONTEXT_UNKNOWN), 0, w.scontext);
+    }
+
+    let kind = f.stat.mode & S_IFMT;
+    if f.stat_ok && (kind == S_IFCHR || kind == S_IFBLK) {
+        // The size column has to hold `major, minor` too, so the major half
+        // absorbs whatever slack the size column has over the pair — which is
+        // what keeps a device line's *name* aligned with a plain file's.
+        let major = major_of(f.stat.rdev).to_string();
+        let minor = minor_of(f.stat.rdev).to_string();
+        let together = w
+            .major_device
+            .saturating_add(2)
+            .saturating_add(w.minor_device);
+        let blanks = w.file_size.saturating_sub(together);
+        pad_left_zero_sep(
+            &mut out.buf,
+            w.major_device.saturating_add(blanks),
+            major.as_bytes(),
+        );
+        pad_left(&mut out.buf, w.minor_device, minor.as_bytes());
+    } else {
+        let size = if f.stat_ok {
+            human_readable(
+                unsigned_file_size(f.stat.size),
+                cfg.file_human_output_opts,
+                1,
+                cfg.file_output_block_size,
+            )
+        } else {
+            "?".to_owned()
+        };
+        pad_left_measured(&mut out.buf, w.file_size, size.as_bytes());
+    }
+
+    times.format(&mut out.buf, cfg, f.stat_ok, when);
+
+    print_name_with_quoting(out, cfg, cwd_some_quoted, f, false, Dired::Names);
+
+    if f.filetype == FileType::SymbolicLink {
+        // A link whose target could not be *read* prints as a bare name: there
+        // is nothing to put after the arrow, so upstream prints no arrow. It
+        // also prints no indicator, which is why this is not an `else`.
+        if f.linkname.is_some() {
+            out.buf.extend_from_slice(b" -> ");
+            print_name_with_quoting(out, cfg, cwd_some_quoted, f, true, Dired::No);
+            if cfg.indicator_style != Indicator::None {
+                // The indicator describes the *target*, and is chosen from the
+                // target's mode with `unknown` as the fallback type — so a
+                // dangling link that was still readable gets nothing.
+                print_type_indicator(out, cfg, true, f.link_mode, FileType::Unknown);
+            }
+        }
+    } else if cfg.indicator_style != Indicator::None {
+        print_type_indicator(out, cfg, f.stat_ok, f.stat.mode, f.filetype);
+    }
+}
+
+/// The major half of a device number: right-aligned in `width`, then `, `
+/// rather than the single space [`pad_left`] appends.
+fn pad_left_zero_sep(out: &mut Vec<u8>, width: usize, text: &[u8]) {
+    let pad = width.saturating_sub(text.len());
+    out.resize(out.len().saturating_add(pad), b' ');
+    out.extend_from_slice(text);
+    out.extend_from_slice(b", ");
+}
+
 fn main() -> ExitCode {
     ExitCode::SUCCESS
 }
@@ -3606,5 +4016,402 @@ mod tests {
         Times::new(&cfg, zone, frozen_clock).format(&mut out, &cfg, true, at(0));
         // The epoch was 19:00 on New Year's Eve in New York.
         assert_eq!(String::from_utf8_lossy(&out), "Dec 31  1969 ");
+    }
+
+    // --------------------------------------------------------- the long line ---
+
+    /// `--time-style=long-iso`, which gives the two formats the same fixed
+    /// sixteen columns and so lets a test assert a whole line without knowing
+    /// when it ran.
+    fn long_cfg() -> Config {
+        Config {
+            format: Format::Long,
+            long_time_format: [b"%Y-%m-%d %H:%M".to_vec(), b"%Y-%m-%d %H:%M".to_vec()],
+            ..Config::default()
+        }
+    }
+
+    /// The `/etc/passwd` and `/etc/group` the measurements below were taken
+    /// against.
+    fn inhahe() -> Names {
+        named(
+            b"root:x:0:0:::\ninhahe:x:1000:1000:,,,:/home/inhahe:/bin/bash\n",
+            b"root:x:0:\ndisk:x:6:\ninhahe:x:1000:\n",
+        )
+    }
+
+    /// One long line, as a string, with the clock frozen so `is_recent` is
+    /// deterministic. The format is fixed-width either way, so recency does
+    /// not change the rendering — only the padding of a *missing* timestamp,
+    /// which is what the failed-stat test looks at.
+    fn long_line(cfg: &Config, names: &Names, w: &Widths, f: &FileInfo) -> String {
+        let mut out = Out::default();
+        let mut times = Times::new(cfg, localtime::Zone::utc(), frozen_clock);
+        print_long_format(&mut out, cfg, names, &mut times, w, false, f);
+        String::from_utf8_lossy(&out.buf).into_owned()
+    }
+
+    /// A file as `stat` leaves it: mode, links, ids, size and mtime, all of
+    /// them the numbers the fixture in WSL actually had.
+    fn stated(name: &str, mode: u32, kind: FileType) -> FileInfo {
+        FileInfo {
+            name: name.as_bytes().to_vec(),
+            stat_ok: true,
+            filetype: kind,
+            stat: Stat {
+                mode,
+                nlink: 1,
+                uid: 1000,
+                gid: 1000,
+                size: 5,
+                blocks: 8,
+                ino: 636_229,
+                // 2023-11-14 22:13:20 UTC.
+                mtime: at(1_700_000_000),
+                btime: Ts::UNKNOWN,
+                ..Stat::default()
+            },
+            ..FileInfo::default()
+        }
+    }
+
+    /// The eleven columns, in the one order they are ever printed. Measured,
+    /// GNU ls 9.5, on a five-byte file beside a directory (so the size column
+    /// is four wide, from `4096`):
+    ///
+    /// ```text
+    /// $ TZ=UTC ls -l --time-style=long-iso
+    /// -rw-r--r-- 1 inhahe inhahe    5 2023-11-14 22:13 plain
+    /// drwxr-xr-x 2 inhahe inhahe 4096 2023-11-14 22:13 sub
+    /// ```
+    #[test]
+    fn a_long_line_is_its_columns_in_one_fixed_order() {
+        let cfg = long_cfg();
+        let w = Widths {
+            nlink: 1,
+            owner: 6,
+            group: 6,
+            file_size: 4,
+            ..Widths::default()
+        };
+        let plain = stated("plain", S_IFREG | 0o644, FileType::Normal);
+        assert_eq!(
+            long_line(&cfg, &inhahe(), &w, &plain),
+            "-rw-r--r-- 1 inhahe inhahe    5 2023-11-14 22:13 plain"
+        );
+
+        let base = stated("sub", S_IFDIR | 0o755, FileType::Directory);
+        let sub = FileInfo {
+            stat: Stat {
+                nlink: 2,
+                size: 4096,
+                ..base.stat
+            },
+            ..base
+        };
+        assert_eq!(
+            long_line(&cfg, &inhahe(), &w, &sub),
+            "drwxr-xr-x 2 inhahe inhahe 4096 2023-11-14 22:13 sub"
+        );
+    }
+
+    /// Everything the stat would have filled becomes `?` — and each `?` keeps
+    /// its column's *alignment*, which is why the owner's is on the left and
+    /// the inode's on the right. Measured, GNU ls 9.5, on a broken symlink
+    /// listed with `-lLi` (so the stat of the target fails):
+    ///
+    /// ```text
+    ///      ? l????????? ? ?      ?      ?                ? broken
+    /// 636227 -rw-r--r-- 1 inhahe inhahe 2 2026-08-23 08:12 real
+    /// ```
+    ///
+    /// Three things in that line are worth naming. The mode's first letter is
+    /// `l` and not `?`, because it comes from what `readdir` said rather than
+    /// from the stat. The owner and group `?` are left-aligned in six columns,
+    /// because a `?` is passed as a *name*. And the sixteen spaces before the
+    /// time's `?` are `long_time_expected_width` — the non-recent format
+    /// rendered at the epoch — which is the one place that width is used.
+    #[test]
+    fn a_failed_stat_prints_a_question_mark_in_every_column_it_would_have_filled() {
+        let cfg = Config {
+            print_inode: true,
+            ..long_cfg()
+        };
+        let w = Widths {
+            inode: 6,
+            nlink: 1,
+            owner: 6,
+            group: 6,
+            file_size: 1,
+            ..Widths::default()
+        };
+        let broken = FileInfo {
+            name: b"broken".to_vec(),
+            filetype: FileType::SymbolicLink,
+            stat_ok: false,
+            ..FileInfo::default()
+        };
+        assert_eq!(
+            long_line(&cfg, &inhahe(), &w, &broken),
+            "     ? l????????? ? ?      ?      ?                ? broken"
+        );
+    }
+
+    /// A device spends the size column on `major, minor`, and the *major* half
+    /// absorbs the slack — so the two halves stay put while the pair as a whole
+    /// stays right-aligned with the sizes above it. Measured, GNU ls 9.5:
+    ///
+    /// ```text
+    /// $ TZ=UTC ls -l --time-style=long-iso /dev/null /tmp/lfix/big
+    /// crw-rw-rw- 1 root   root       1, 3 2026-08-20 23:35 /dev/null
+    /// -rw-r--r-- 1 inhahe inhahe 12345678 2023-11-14 22:13 /tmp/lfix/big
+    /// ```
+    ///
+    /// Four of the seven spaces between `root` and `1` are that slack:
+    /// `file_size` is 8 and `major, minor` needs only 4.
+    #[test]
+    fn a_device_spends_the_size_column_on_a_major_and_a_minor() {
+        let cfg = long_cfg();
+        let w = Widths {
+            nlink: 1,
+            owner: 6,
+            group: 6,
+            file_size: 8,
+            major_device: 1,
+            minor_device: 1,
+            ..Widths::default()
+        };
+        let base = stated("/dev/null", S_IFCHR | 0o666, FileType::Chardev);
+        let null = FileInfo {
+            stat: Stat {
+                uid: 0,
+                gid: 0,
+                rdev: makedev(1, 3),
+                ..base.stat
+            },
+            ..base
+        };
+        assert_eq!(
+            long_line(&cfg, &inhahe(), &w, &null),
+            "crw-rw-rw- 1 root   root       1, 3 2023-11-14 22:13 /dev/null"
+        );
+
+        // With no slack at all the major half is exactly its own width.
+        let tight = Widths { file_size: 4, ..w };
+        assert_eq!(
+            long_line(&cfg, &inhahe(), &tight, &null),
+            "crw-rw-rw- 1 root   root   1, 3 2023-11-14 22:13 /dev/null"
+        );
+    }
+
+    /// A symlink prints its target after ` -> `, and the indicator that follows
+    /// describes the **target** and not the link. Measured, GNU ls 9.5:
+    ///
+    /// ```text
+    /// $ TZ=UTC ls -lF --time-style=long-iso
+    /// lrwxrwxrwx 1 inhahe inhahe 3 2026-08-23 08:12 dlink -> sub/
+    /// lrwxrwxrwx 1 inhahe inhahe 3 2026-08-23 08:12 elink -> exe*
+    /// lrwxrwxrwx 1 inhahe inhahe 5 2023-11-14 22:13 link -> plain
+    /// lrwxrwxrwx 1 inhahe inhahe 7 2023-11-14 22:13 dangle -> nowhere
+    /// ```
+    ///
+    /// The last two get nothing: a plain target is unmarked, and a target that
+    /// could not be reached leaves `link_mode` at zero, which is no file type
+    /// at all.
+    #[test]
+    fn a_symlink_shows_its_target_and_the_targets_own_indicator() {
+        let cfg = Config {
+            indicator_style: Indicator::Classify,
+            ..long_cfg()
+        };
+        let w = Widths {
+            nlink: 1,
+            owner: 6,
+            group: 6,
+            file_size: 1,
+            ..Widths::default()
+        };
+        let link = |name: &str, target: &[u8], link_mode: u32| FileInfo {
+            linkname: Some(target.to_vec()),
+            link_mode,
+            link_ok: link_mode != 0,
+            stat: Stat {
+                size: 3,
+                ..stated(name, S_IFLNK | 0o777, FileType::SymbolicLink).stat
+            },
+            ..stated(name, S_IFLNK | 0o777, FileType::SymbolicLink)
+        };
+        let head = "lrwxrwxrwx 1 inhahe inhahe 3 2023-11-14 22:13 ";
+
+        for (target, mode, tail) in [
+            (&b"sub"[..], S_IFDIR | 0o755, "dlink -> sub/"),
+            (&b"exe"[..], S_IFREG | 0o755, "elink -> exe*"),
+            (&b"plain"[..], S_IFREG | 0o644, "link -> plain"),
+            (&b"nowhere"[..], 0, "dangle -> nowhere"),
+        ] {
+            let name = tail.split(' ').next().unwrap_or_default();
+            let f = link(name, target, mode);
+            assert_eq!(long_line(&cfg, &inhahe(), &w, &f), format!("{head}{tail}"));
+        }
+    }
+
+    /// `--dired`'s two spaces go in **front of the inode**, even though
+    /// upstream's `dired_indent ()` call sits four columns later: the columns
+    /// before it are still in a local buffer when it writes. And the offsets it
+    /// records bracket the name alone. Measured, GNU ls 9.5:
+    ///
+    /// ```text
+    /// $ TZ=UTC ls -lis --dired --time-style=long-iso plain
+    ///   636229 4 -rw-r--r-- 1 inhahe inhahe 5 2023-11-14 22:13 plain
+    /// //DIRED// 57 62
+    /// ```
+    #[test]
+    fn dired_indents_in_front_of_the_inode_and_brackets_only_the_name() {
+        let cfg = Config {
+            dired: true,
+            print_inode: true,
+            print_block_size: true,
+            ..long_cfg()
+        };
+        let w = Widths {
+            inode: 6,
+            block_size: 1,
+            nlink: 1,
+            owner: 6,
+            group: 6,
+            file_size: 1,
+            ..Widths::default()
+        };
+        let plain = stated("plain", S_IFREG | 0o644, FileType::Normal);
+
+        let mut out = Out::default();
+        let mut times = Times::new(&cfg, localtime::Zone::utc(), frozen_clock);
+        print_long_format(&mut out, &cfg, &inhahe(), &mut times, &w, false, &plain);
+
+        assert_eq!(
+            String::from_utf8_lossy(&out.buf),
+            "  636229 4 -rw-r--r-- 1 inhahe inhahe 5 2023-11-14 22:13 plain"
+        );
+        assert_eq!(out.dired, vec![57, 62]);
+        assert!(out.subdired.is_empty(), "a file is not a directory header");
+
+        // Without `--dired` the same line is two columns narrower and nothing
+        // is recorded at all.
+        let plain_cfg = Config {
+            dired: false,
+            ..cfg
+        };
+        let mut out = Out::default();
+        let mut times = Times::new(&plain_cfg, localtime::Zone::utc(), frozen_clock);
+        print_long_format(
+            &mut out,
+            &plain_cfg,
+            &inhahe(),
+            &mut times,
+            &w,
+            false,
+            &plain,
+        );
+        assert!(out.buf.starts_with(b"636229 "));
+        assert!(out.dired.is_empty());
+    }
+
+    /// The indicator is chosen from the stat when there was one and from what
+    /// `readdir` said when there was not, and the two paths must agree. The
+    /// order of the tests is upstream's and decides two things: a regular file
+    /// is settled before `-p` is consulted (so `-p` never stars one), and a
+    /// directory is settled before it (so `-p` does mark one).
+    #[test]
+    fn an_indicator_comes_from_the_stat_or_from_readdir_and_never_from_neither() {
+        let classify = Config {
+            indicator_style: Indicator::Classify,
+            ..Config::default()
+        };
+        let file_type = Config {
+            indicator_style: Indicator::FileType,
+            ..Config::default()
+        };
+        let slash = Config {
+            indicator_style: Indicator::Slash,
+            ..Config::default()
+        };
+
+        // Stated: the mode decides.
+        let ind = |cfg: &Config, mode: u32| get_type_indicator(cfg, true, mode, FileType::Unknown);
+        assert_eq!(ind(&classify, S_IFREG | 0o755), Some(b'*'));
+        assert_eq!(
+            ind(&file_type, S_IFREG | 0o755),
+            None,
+            "-F stars, --file-type does not"
+        );
+        assert_eq!(ind(&classify, S_IFREG | 0o644), None);
+        assert_eq!(ind(&slash, S_IFDIR | 0o755), Some(b'/'));
+        assert_eq!(
+            ind(&slash, S_IFLNK | 0o777),
+            None,
+            "-p marks directories and nothing else"
+        );
+        assert_eq!(ind(&file_type, S_IFLNK | 0o777), Some(b'@'));
+        assert_eq!(ind(&file_type, S_IFIFO | 0o644), Some(b'|'));
+        assert_eq!(ind(&file_type, S_IFSOCK | 0o755), Some(b'='));
+        assert_eq!(
+            ind(&file_type, S_IFBLK | 0o660),
+            None,
+            "a device gets nothing"
+        );
+
+        // Unstated: the readdir type decides, and it cannot know about the
+        // execute bits — so an unstated regular file is never starred, however
+        // executable it turns out to be.
+        let kind = |cfg: &Config, k: FileType| get_type_indicator(cfg, false, S_IFREG | 0o755, k);
+        assert_eq!(kind(&classify, FileType::Normal), None);
+        assert_eq!(kind(&classify, FileType::Directory), Some(b'/'));
+        assert_eq!(
+            kind(&classify, FileType::ArgDirectory),
+            Some(b'/'),
+            "a directory named on the command line is still a directory"
+        );
+        assert_eq!(kind(&classify, FileType::SymbolicLink), Some(b'@'));
+        assert_eq!(kind(&slash, FileType::SymbolicLink), None);
+        assert_eq!(kind(&classify, FileType::Unknown), None);
+    }
+
+    /// A directory that could not be stated keeps its `d`: upstream's
+    /// `filetype_letter` is `"?pcdb-lswd"`, whose *last two* entries are both
+    /// `d` — `directory` and `arg_directory` differ in where the listing puts
+    /// them, not in what they are. Only a genuinely unknown type takes the `?`.
+    #[test]
+    fn the_mode_strings_first_letter_survives_a_failed_stat() {
+        let unstated = |kind: FileType| {
+            String::from_utf8_lossy(&mode_string(&FileInfo {
+                filetype: kind,
+                stat_ok: false,
+                ..FileInfo::default()
+            }))
+            .into_owned()
+        };
+        assert_eq!(unstated(FileType::Unknown), "??????????");
+        assert_eq!(unstated(FileType::SymbolicLink), "l?????????");
+        assert_eq!(unstated(FileType::Directory), "d?????????");
+        assert_eq!(unstated(FileType::ArgDirectory), "d?????????");
+        assert_eq!(unstated(FileType::Fifo), "p?????????");
+        assert_eq!(unstated(FileType::Chardev), "c?????????");
+        assert_eq!(unstated(FileType::Blockdev), "b?????????");
+        assert_eq!(unstated(FileType::Normal), "-?????????");
+        assert_eq!(unstated(FileType::Sock), "s?????????");
+        assert_eq!(unstated(FileType::Whiteout), "w?????????");
+
+        // A stated file takes all ten from its mode, and never eleven: the
+        // alternate-access flag has no source on a system with no ACLs.
+        let stated_mode = mode_string(&FileInfo {
+            stat_ok: true,
+            stat: Stat {
+                mode: S_IFREG | 0o4755,
+                ..Stat::default()
+            },
+            ..FileInfo::default()
+        });
+        assert_eq!(String::from_utf8_lossy(&stated_mode), "-rwsr-xr-x");
+        assert_eq!(stated_mode.len(), 10);
     }
 }

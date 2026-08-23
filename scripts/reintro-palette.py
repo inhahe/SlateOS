@@ -108,6 +108,7 @@ HOTKEYS = "gui/desktop/src/hotkeys.rs"
 SCRCAP = "gui/desktop/src/screen_capture.rs"
 SNAP = "gui/desktop/src/snap.rs"
 DISP = "gui/desktop/src/display_settings.rs"
+A11Y = "gui/desktop/src/accessibility_settings.rs"
 
 # (name, file, [(old, new), ...], [packages], [tests expected to fail])
 DEFECTS = [
@@ -16207,6 +16208,736 @@ DEFECTS = [
         ["desktop"],
         [
             'the_night_light_swatch_shows_the_temperature_not_the_theme',
+        ],
+    ),
+    (
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA: the panel keeps its own Mocha base",
+        A11Y,
+        [
+            ('            height,\n            color: p.base,',
+             '            height,\n            color: guitk::color::Color::from_hex(0x1E1E2E),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_panel_draws_comes_from_its_palette',
+            'none_of_the_nine_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+            'every_site_changes_when_the_mode_does',
+        ],
+    ),
+    (
+        "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB: the panel is drawn on the sidebar rung",
+        A11Y,
+        [
+            ('            height,\n            color: p.base,',
+             '            height,\n            color: p.mantle,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC: the panel is drawn on the behind-the-window rung",
+        A11Y,
+        [
+            ('            height,\n            color: p.base,',
+             '            height,\n            color: p.crust,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD: the title keeps its own Mocha text",
+        A11Y,
+        [
+            ('            font_size: 22.0,\n            color: p.text,',
+             '            font_size: 22.0,\n            color: guitk::color::Color::from_hex(0xCDD6F4),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_panel_draws_comes_from_its_palette',
+            'none_of_the_nine_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+            'every_site_changes_when_the_mode_does',
+        ],
+    ),
+    (
+        "EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE: the title is drawn as a section heading",
+        A11Y,
+        [
+            ('            font_size: 22.0,\n            color: p.text,',
+             '            font_size: 22.0,\n            color: p.lavender,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF: the title drops to the load-bearing-secondary rung",
+        A11Y,
+        [
+            ('            font_size: 22.0,\n            color: p.text,',
+             '            font_size: 22.0,\n            color: p.subtext1,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "GGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGG: the active-feature count keeps its own Mocha green",
+        A11Y,
+        [
+            ('                font_size: 12.0,\n                color: p.green,',
+             '                font_size: 12.0,\n                color: guitk::color::Color::from_hex(0xA6E3A1),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_panel_draws_comes_from_its_palette',
+            'none_of_the_nine_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+            'the_active_feature_line_is_green_and_only_drawn_when_there_is_one',
+            'every_site_changes_when_the_mode_does',
+        ],
+    ),
+    (
+        "HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH: the active-feature count follows the accent instead of reporting state",
+        A11Y,
+        [
+            ('                font_size: 12.0,\n                color: p.green,',
+             '                font_size: 12.0,\n                color: p.accent,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'the_active_feature_line_is_green_and_only_drawn_when_there_is_one',
+        ],
+    ),
+    (
+        "IIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIII: the active-feature count is drawn as body text",
+        A11Y,
+        [
+            ('                font_size: 12.0,\n                color: p.green,',
+             '                font_size: 12.0,\n                color: p.text,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'the_active_feature_line_is_green_and_only_drawn_when_there_is_one',
+        ],
+    ),
+    (
+        "JJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJ: the chosen tab keeps its own Mocha blue",
+        A11Y,
+        [
+            ('                color: if active_tab { p.accent } else { p.surface0 },',
+             '                color: if active_tab { guitk::color::Color::from_hex(0x89B4FA) } else { p.surface0 },'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_panel_draws_comes_from_its_palette',
+            'none_of_the_nine_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+            'the_selected_tab_is_lettered_for_its_own_fill',
+            'exactly_one_tab_is_accented_and_it_is_the_chosen_one',
+            'green_means_on_and_the_accent_means_chosen',
+            'every_site_changes_when_the_mode_does',
+        ],
+    ),
+    (
+        "KKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKK: the unchosen tabs keep their own Mocha surface0",
+        A11Y,
+        [
+            ('                color: if active_tab { p.accent } else { p.surface0 },',
+             '                color: if active_tab { p.accent } else { guitk::color::Color::from_hex(0x313244) },'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_panel_draws_comes_from_its_palette',
+            'none_of_the_nine_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+            'exactly_one_tab_is_accented_and_it_is_the_chosen_one',
+            'every_site_changes_when_the_mode_does',
+        ],
+    ),
+    (
+        "LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLL: the tab pill's chosen and unchosen branches are swapped",
+        A11Y,
+        [
+            ('                color: if active_tab { p.accent } else { p.surface0 },',
+             '                color: if active_tab { p.surface0 } else { p.accent },'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'the_selected_tab_is_lettered_for_its_own_fill',
+            'exactly_one_tab_is_accented_and_it_is_the_chosen_one',
+            'green_means_on_and_the_accent_means_chosen',
+        ],
+    ),
+    (
+        "MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM: every tab is accented, chosen or not",
+        A11Y,
+        [
+            ('                color: if active_tab { p.accent } else { p.surface0 },',
+             '                color: p.accent,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'exactly_one_tab_is_accented_and_it_is_the_chosen_one',
+        ],
+    ),
+    (
+        "NNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNN: no tab is ever accented",
+        A11Y,
+        [
+            ('                color: if active_tab { p.accent } else { p.surface0 },',
+             '                color: p.surface0,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'the_selected_tab_is_lettered_for_its_own_fill',
+            'exactly_one_tab_is_accented_and_it_is_the_chosen_one',
+            'green_means_on_and_the_accent_means_chosen',
+        ],
+    ),
+    (
+        "OOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOO: the unchosen tabs sit one rung too high",
+        A11Y,
+        [
+            ('                color: if active_tab { p.accent } else { p.surface0 },',
+             '                color: if active_tab { p.accent } else { p.surface1 },'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'exactly_one_tab_is_accented_and_it_is_the_chosen_one',
+        ],
+    ),
+    (
+        "PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPP: the chosen tab's lettering keeps its own Mocha crust",
+        A11Y,
+        [
+            ('                color: if active_tab {\n                    p.on_accent()\n                } else {\n                    p.subtext0\n                },',
+             '                color: if active_tab {\n                    guitk::color::Color::from_hex(0x11111B)\n                } else {\n                    p.subtext0\n                },'),
+        ],
+        ["desktop"],
+        [
+            'none_of_the_nine_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+            'the_selected_tab_is_lettered_for_its_own_fill',
+            'every_site_changes_when_the_mode_does',
+        ],
+    ),
+    (
+        "QQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQ: the chosen tab's lettering is the crust role rather than the legible one",
+        A11Y,
+        [
+            ('                color: if active_tab {\n                    p.on_accent()\n                } else {\n                    p.subtext0\n                },',
+             '                color: if active_tab {\n                    p.crust\n                } else {\n                    p.subtext0\n                },'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'the_selected_tab_is_lettered_for_its_own_fill',
+        ],
+    ),
+    (
+        "RRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRR: the chosen tab's lettering is body text",
+        A11Y,
+        [
+            ('                color: if active_tab {\n                    p.on_accent()\n                } else {\n                    p.subtext0\n                },',
+             '                color: if active_tab {\n                    p.text\n                } else {\n                    p.subtext0\n                },'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'the_selected_tab_is_lettered_for_its_own_fill',
+        ],
+    ),
+    (
+        "SSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSS: the chosen tab's lettering is read off the panel instead of off the fill",
+        A11Y,
+        [
+            ('                color: if active_tab {\n                    p.on_accent()\n                } else {\n                    p.subtext0\n                },',
+             '                color: if active_tab {\n                    appearance::readable_on(p.base)\n                } else {\n                    p.subtext0\n                },'),
+        ],
+        ["desktop"],
+        [
+            'none_of_the_nine_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+            'the_selected_tab_is_lettered_for_its_own_fill',
+        ],
+    ),
+    (
+        "TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT: the unchosen tabs' lettering keeps its own Mocha subtext0",
+        A11Y,
+        [
+            ('                color: if active_tab {\n                    p.on_accent()\n                } else {\n                    p.subtext0\n                },',
+             '                color: if active_tab {\n                    p.on_accent()\n                } else {\n                    guitk::color::Color::from_hex(0xA6ADC8)\n                },'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_panel_draws_comes_from_its_palette',
+            'none_of_the_nine_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+            'exactly_one_tab_is_accented_and_it_is_the_chosen_one',
+            'every_site_changes_when_the_mode_does',
+        ],
+    ),
+    (
+        "UUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUU: the unchosen tabs' lettering is as loud as the chosen one's",
+        A11Y,
+        [
+            ('                color: if active_tab {\n                    p.on_accent()\n                } else {\n                    p.subtext0\n                },',
+             '                color: if active_tab {\n                    p.text\n                } else {\n                    p.text\n                },'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'the_selected_tab_is_lettered_for_its_own_fill',
+            'exactly_one_tab_is_accented_and_it_is_the_chosen_one',
+        ],
+    ),
+    (
+        "VVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVV: the tab lettering's chosen and unchosen branches are swapped",
+        A11Y,
+        [
+            ('                color: if active_tab {\n                    p.on_accent()\n                } else {\n                    p.subtext0\n                },',
+             '                color: if active_tab {\n                    p.subtext0\n                } else {\n                    p.on_accent()\n                },'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'the_selected_tab_is_lettered_for_its_own_fill',
+            'exactly_one_tab_is_accented_and_it_is_the_chosen_one',
+        ],
+    ),
+    (
+        "WWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWW: every tab is lettered for the accent, chosen or not",
+        A11Y,
+        [
+            ('                color: if active_tab {\n                    p.on_accent()\n                } else {\n                    p.subtext0\n                },',
+             '                color: p.on_accent(),'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'exactly_one_tab_is_accented_and_it_is_the_chosen_one',
+        ],
+    ),
+    (
+        "XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX: a tab's fill and its lettering are traded",
+        A11Y,
+        [
+            ('                color: if active_tab { p.accent } else { p.surface0 },',
+             '                color: if active_tab { p.on_accent() } else { p.subtext0 },'),
+            ('                color: if active_tab {\n                    p.on_accent()\n                } else {\n                    p.subtext0\n                },',
+             '                color: if active_tab {\n                    p.accent\n                } else {\n                    p.surface0\n                },'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'the_selected_tab_is_lettered_for_its_own_fill',
+            'exactly_one_tab_is_accented_and_it_is_the_chosen_one',
+            'green_means_on_and_the_accent_means_chosen',
+        ],
+    ),
+    (
+        "YYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYY: the Sticky Keys heading keeps its own Mocha lavender",
+        A11Y,
+        [
+            ('            text: "Sticky Keys".into(),\n            font_size: 15.0,\n            color: p.lavender,',
+             '            text: "Sticky Keys".into(),\n            font_size: 15.0,\n            color: guitk::color::Color::from_hex(0xB4BEFE),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_panel_draws_comes_from_its_palette',
+            'none_of_the_nine_deleted_constants_is_still_drawn',
+            'the_section_headings_keep_their_hue_in_both_modes',
+            'every_site_changes_when_the_mode_does',
+        ],
+    ),
+    (
+        "ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ: the Sticky Keys heading drifts to the neighbouring hue",
+        A11Y,
+        [
+            ('            text: "Sticky Keys".into(),\n            font_size: 15.0,\n            color: p.lavender,',
+             '            text: "Sticky Keys".into(),\n            font_size: 15.0,\n            color: p.mauve,'),
+        ],
+        ["desktop"],
+        [
+            'the_section_headings_keep_their_hue_in_both_modes',
+        ],
+    ),
+    (
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA: the Filter Keys heading drifts to the neighbouring hue",
+        A11Y,
+        [
+            ('            text: "Filter Keys".into(),\n            font_size: 15.0,\n            color: p.lavender,',
+             '            text: "Filter Keys".into(),\n            font_size: 15.0,\n            color: p.sapphire,'),
+        ],
+        ["desktop"],
+        [
+            'the_section_headings_keep_their_hue_in_both_modes',
+        ],
+    ),
+    (
+        "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB: the Mouse Keys heading is demoted to body text",
+        A11Y,
+        [
+            ('            text: "Mouse Keys".into(),\n            font_size: 15.0,\n            color: p.lavender,',
+             '            text: "Mouse Keys".into(),\n            font_size: 15.0,\n            color: p.text,'),
+        ],
+        ["desktop"],
+        [
+            'the_section_headings_keep_their_hue_in_both_modes',
+        ],
+    ),
+    (
+        "CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC: the Captions heading drifts to the neighbouring hue",
+        A11Y,
+        [
+            ('            text: "Captions".into(),\n            font_size: 15.0,\n            color: p.lavender,',
+             '            text: "Captions".into(),\n            font_size: 15.0,\n            color: p.teal,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'the_section_headings_keep_their_hue_in_both_modes',
+        ],
+    ),
+    (
+        "DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD: the Captions heading stops being 15pt and so stops being a heading",
+        A11Y,
+        [
+            ('            text: "Captions".into(),\n            font_size: 15.0,',
+             '            text: "Captions".into(),\n            font_size: 14.0,'),
+        ],
+        ["desktop"],
+        [
+            'the_section_headings_keep_their_hue_in_both_modes',
+        ],
+    ),
+    (
+        "EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE: a toggle's label keeps its own Mocha text",
+        A11Y,
+        [
+            ('            font_size: 14.0,\n            color: p.text,',
+             '            font_size: 14.0,\n            color: guitk::color::Color::from_hex(0xCDD6F4),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_panel_draws_comes_from_its_palette',
+            'none_of_the_nine_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+            'every_site_changes_when_the_mode_does',
+        ],
+    ),
+    (
+        "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF: a toggle's label drops to the secondary rung",
+        A11Y,
+        [
+            ('            font_size: 14.0,\n            color: p.text,',
+             '            font_size: 14.0,\n            color: p.subtext0,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "GGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGG: the on switch keeps its own Mocha green",
+        A11Y,
+        [
+            ('            color: if enabled { p.green } else { p.surface2 },',
+             '            color: if enabled { guitk::color::Color::from_hex(0xA6E3A1) } else { p.surface2 },'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_panel_draws_comes_from_its_palette',
+            'none_of_the_nine_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+            'green_means_on_and_the_accent_means_chosen',
+            'every_site_changes_when_the_mode_does',
+        ],
+    ),
+    (
+        "HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH: the off switch keeps its own Mocha surface2",
+        A11Y,
+        [
+            ('            color: if enabled { p.green } else { p.surface2 },',
+             '            color: if enabled { p.green } else { guitk::color::Color::from_hex(0x585B70) },'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_panel_draws_comes_from_its_palette',
+            'none_of_the_nine_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+            'green_means_on_and_the_accent_means_chosen',
+            'every_site_changes_when_the_mode_does',
+        ],
+    ),
+    (
+        "IIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIII: the on switch follows the accent, so on means chosen",
+        A11Y,
+        [
+            ('            color: if enabled { p.green } else { p.surface2 },',
+             '            color: if enabled { p.accent } else { p.surface2 },'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'green_means_on_and_the_accent_means_chosen',
+        ],
+    ),
+    (
+        "JJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJ: the switch's on and off branches are swapped",
+        A11Y,
+        [
+            ('            color: if enabled { p.green } else { p.surface2 },',
+             '            color: if enabled { p.surface2 } else { p.green },'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'green_means_on_and_the_accent_means_chosen',
+            'the_active_feature_line_is_green_and_only_drawn_when_there_is_one',
+        ],
+    ),
+    (
+        "KKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKK: every switch reads as on",
+        A11Y,
+        [
+            ('            color: if enabled { p.green } else { p.surface2 },',
+             '            color: p.green,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'green_means_on_and_the_accent_means_chosen',
+            'the_active_feature_line_is_green_and_only_drawn_when_there_is_one',
+        ],
+    ),
+    (
+        "LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLL: every switch reads as off",
+        A11Y,
+        [
+            ('            color: if enabled { p.green } else { p.surface2 },',
+             '            color: p.surface2,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'green_means_on_and_the_accent_means_chosen',
+        ],
+    ),
+    (
+        "MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM: the off switch sits a rung too low",
+        A11Y,
+        [
+            ('            color: if enabled { p.green } else { p.surface2 },',
+             '            color: if enabled { p.green } else { p.surface0 },'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'green_means_on_and_the_accent_means_chosen',
+        ],
+    ),
+    (
+        "NNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNN: the switch knob keeps its own Mocha text",
+        A11Y,
+        [
+            ('            height: 18.0,\n            color: p.text,',
+             '            height: 18.0,\n            color: guitk::color::Color::from_hex(0xCDD6F4),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_panel_draws_comes_from_its_palette',
+            'none_of_the_nine_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+            'green_means_on_and_the_accent_means_chosen',
+            'every_site_changes_when_the_mode_does',
+        ],
+    ),
+    (
+        "OOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOO: the switch knob drops to the secondary rung",
+        A11Y,
+        [
+            ('            height: 18.0,\n            color: p.text,',
+             '            height: 18.0,\n            color: p.subtext0,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'green_means_on_and_the_accent_means_chosen',
+        ],
+    ),
+    (
+        "PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPP: the switch knob turns green, so every row reads as on",
+        A11Y,
+        [
+            ('            height: 18.0,\n            color: p.text,',
+             '            height: 18.0,\n            color: p.green,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'green_means_on_and_the_accent_means_chosen',
+            'the_active_feature_line_is_green_and_only_drawn_when_there_is_one',
+        ],
+    ),
+    (
+        "QQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQ: a switch's pill and its knob are traded",
+        A11Y,
+        [
+            ('            color: if enabled { p.green } else { p.surface2 },',
+             '            color: p.text,'),
+            ('            height: 18.0,\n            color: p.text,',
+             '            height: 18.0,\n            color: if enabled { p.green } else { p.surface2 },'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'green_means_on_and_the_accent_means_chosen',
+        ],
+    ),
+    (
+        "RRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRR: a row's label keeps its own Mocha subtext0",
+        A11Y,
+        [
+            ('            font_size: 13.0,\n            color: p.subtext0,',
+             '            font_size: 13.0,\n            color: guitk::color::Color::from_hex(0xA6ADC8),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_panel_draws_comes_from_its_palette',
+            'none_of_the_nine_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+            'every_site_changes_when_the_mode_does',
+        ],
+    ),
+    (
+        "SSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSS: a row's value keeps its own Mocha text",
+        A11Y,
+        [
+            ('            font_size: 13.0,\n            color: p.text,',
+             '            font_size: 13.0,\n            color: guitk::color::Color::from_hex(0xCDD6F4),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_panel_draws_comes_from_its_palette',
+            'none_of_the_nine_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+            'every_site_changes_when_the_mode_does',
+        ],
+    ),
+    (
+        "TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT: a row's label and its value are traded",
+        A11Y,
+        [
+            ('            text: label.into(),\n            font_size: 13.0,\n            color: p.subtext0,',
+             '            text: label.into(),\n            font_size: 13.0,\n            color: p.text,'),
+            ('            text: value.into(),\n            font_size: 13.0,\n            color: p.text,',
+             '            text: value.into(),\n            font_size: 13.0,\n            color: p.subtext0,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "UUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUU: a row's label drops below the legible rung",
+        A11Y,
+        [
+            ('            font_size: 13.0,\n            color: p.subtext0,',
+             '            font_size: 13.0,\n            color: p.overlay0,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "VVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVV: a row's value is as quiet as its label",
+        A11Y,
+        [
+            ('            font_size: 13.0,\n            color: p.text,',
+             '            font_size: 13.0,\n            color: p.subtext0,'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "WWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWW: the Audio tab is handed a palette of its own instead of the caller's",
+        A11Y,
+        [
+            ('            A11yTab::Audio => self.render_audio(&mut cmds, p, 24.0, cy, cw),',
+             '            A11yTab::Audio => {\n                self.render_audio(&mut cmds, &Palette::for_mode(false), 24.0, cy, cw)\n            }'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_panel_draws_comes_from_its_palette',
+            'none_of_the_nine_deleted_constants_is_still_drawn',
+            'every_site_draws_the_role_it_claims',
+            'the_section_headings_keep_their_hue_in_both_modes',
+            'every_site_changes_when_the_mode_does',
+        ],
+    ),
+    (
+        "XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX: the panel rebuilds the palette from the mode and loses the accent",
+        A11Y,
+        [
+            ('    pub fn render(&self, p: &Palette, width: f32, height: f32) -> Vec<RenderCommand> {\n        let mut cmds = Vec::new();',
+             '    pub fn render(&self, p: &Palette, width: f32, height: f32) -> Vec<RenderCommand> {\n        let p = &Palette::for_mode(p.light);\n        let mut cmds = Vec::new();'),
+        ],
+        ["desktop"],
+        [
+            'every_site_draws_the_role_it_claims',
+            'the_selected_tab_is_lettered_for_its_own_fill',
+            'exactly_one_tab_is_accented_and_it_is_the_chosen_one',
+            'green_means_on_and_the_accent_means_chosen',
+        ],
+    ),
+    (
+        "YYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYY: the active-feature line is drawn even when no feature is active",
+        A11Y,
+        [
+            ('        let active = self.settings.active_feature_count();\n        if active > 0 {',
+             '        let active = self.settings.active_feature_count();\n        if active < 100 {'),
+        ],
+        ["desktop"],
+        [
+            'the_active_feature_line_is_green_and_only_drawn_when_there_is_one',
+        ],
+    ),
+    (
+        "ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ: the tab bar draws its tabs in a different order than A11yTab::ALL",
+        A11Y,
+        [
+            ('    pub const ALL: [Self; 5] = [\n        Self::Visual,\n        Self::Input,',
+             '    pub const ALL: [Self; 5] = [\n        Self::Input,\n        Self::Visual,'),
+        ],
+        ["desktop"],
+        # Not the two tab tests, though both read the tab bar: each walks
+        # `A11yTab::ALL.iter().enumerate()` and indexes the render by the same
+        # `i`, so permuting `ALL` permutes the expectation identically and the
+        # defect is invisible to them by construction. Only a test whose
+        # expected order was written out independently of the renderer's list
+        # can see a permutation of that list -- here the ordered-vector pin and
+        # the green/accent test, which reads `tabs(&cmds)[0]` outright.
+        [
+            'every_site_draws_the_role_it_claims',
+            'green_means_on_and_the_accent_means_chosen',
         ],
     ),
 ]

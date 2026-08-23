@@ -82774,7 +82774,7 @@ fn cmd_viewstate(args: &str) {
                 for (path, settings) in &saved {
                     shell_println!(
                         "{:40} {:12} {:10} {:6}",
-                        path,
+                        path.display(),
                         settings.mode.label(),
                         settings.sort.column,
                         if settings.sort.ascending { "yes" } else { "no" }

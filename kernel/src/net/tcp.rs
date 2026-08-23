@@ -938,6 +938,50 @@ fn tcp_now_ms() -> u32 {
 /// plus 8 bytes per block.  With 28 bytes left: 4 + 3×8 = 28 → max 3 blocks.
 const MAX_SACK_BLOCKS_WITH_TS: usize = 3;
 
+/// The most option bytes a TCP segment can carry.
+///
+/// The header's data-offset field is four bits, so the header is at most
+/// 15 four-byte words: 60 bytes, of which 20 are the fixed header.
+/// `build_segment_with_options` computes that field as
+/// `(header_len / 4) as u8`, so exceeding this does not merely overflow a
+/// buffer — it silently truncates the offset and puts a malformed segment
+/// on the wire.
+const MAX_TCP_OPT_SPACE: usize = 40;
+
+/// Bytes used by the Timestamp option, including its two NOP pad bytes.
+const TS_OPT_LEN: usize = 12;
+
+/// Bytes used by a SACK option carrying `n` blocks, including NOP padding.
+///
+/// NOP + NOP + kind + length, then a 4-byte left and right edge per block.
+const fn sack_opt_len(n: usize) -> usize {
+    // Evaluated only in const context, where an overflow is a compile
+    // error rather than a wrap — which is the failure mode we want.
+    #[allow(clippy::arithmetic_side_effects)]
+    {
+        4 + n * 8
+    }
+}
+
+/// Buffer size for the SACK-only option builder.
+const SACK_OPT_BUF: usize = sack_opt_len(MAX_SACK_BLOCKS);
+
+// The two option builders previously hard-coded `[u8; 40]` and `[u8; 36]`,
+// each of which happened to be *exactly* the size its contents needed.
+// Nothing tied those literals to the block counts they were derived from,
+// so raising `MAX_SACK_BLOCKS` from 4 to 5 -- an ordinary tuning change --
+// would have indexed past the end of both arrays and panicked the kernel
+// on the send path.  Deriving the sizes turns that into these assertions,
+// which fail at compile time instead.
+const _: () = assert!(
+    TS_OPT_LEN + sack_opt_len(MAX_SACK_BLOCKS_WITH_TS) <= MAX_TCP_OPT_SPACE,
+    "timestamp + SACK options exceed the 40-byte TCP option space"
+);
+const _: () = assert!(
+    SACK_OPT_BUF <= MAX_TCP_OPT_SPACE,
+    "SACK-only options exceed the 40-byte TCP option space"
+);
+
 /// Parsed TCP options from an incoming segment.
 struct TcpOptions {
     /// MSS value from the peer (0 if not present).
@@ -2212,19 +2256,24 @@ fn seq_lt(a: u32, b: u32) -> bool {
     (a.wrapping_sub(b) as i32) < 0
 }
 
-/// Build SACK option bytes for an outgoing ACK.
+/// Append `bytes` at `pos`, returning the position just past them.
 ///
-/// Returns the option bytes to append to the TCP header (including NOP
-/// padding and the SACK option header).  Returns empty if no SACK blocks
-/// or SACK not negotiated.
-///
-/// SACK option format (RFC 2018 §3):
-///   NOP, NOP  (alignment padding)
-///   kind=5, length=2+8*N
-///   [left_edge1, right_edge1]  (each 4 bytes, big-endian)
-///   [left_edge2, right_edge2]
-///   ...
-#[allow(clippy::arithmetic_side_effects)]
+/// Returns `pos` unchanged if they do not fit, so a builder can never
+/// write past its buffer nor report a length it did not write. The
+/// callers below size their buffers from `sack_opt_len`, and the
+/// `const` assertions beside it prove the short return unreachable —
+/// it is the safety net, not the mechanism.
+fn put_opt(buf: &mut [u8], pos: usize, bytes: &[u8]) -> usize {
+    let Some(end) = pos.checked_add(bytes.len()) else {
+        return pos;
+    };
+    let Some(dst) = buf.get_mut(pos..end) else {
+        return pos;
+    };
+    dst.copy_from_slice(bytes);
+    end
+}
+
 /// Build combined options (Timestamp + optional SACK) for outgoing segments.
 ///
 /// When timestamps are negotiated, every outgoing segment must carry the
@@ -2234,20 +2283,19 @@ fn seq_lt(a: u32, b: u32) -> bool {
 ///
 /// Returns `(buffer, length)`.  `length` is the total option bytes to
 /// include.  If neither timestamps nor SACK is active, returns length 0.
-fn build_ts_and_sack_options(conn: &TcpConnection) -> ([u8; 40], usize) {
-    let mut buf = [0u8; 40];
+fn build_ts_and_sack_options(conn: &TcpConnection) -> ([u8; MAX_TCP_OPT_SPACE], usize) {
+    let mut buf = [0u8; MAX_TCP_OPT_SPACE];
     let mut pos = 0;
 
     if conn.ts_ok {
-        // Timestamp option: NOP(1) + NOP(1) + kind(1) + len(1) + TSval(4) + TSecr(4) = 12.
-        buf[pos] = TCP_OPT_NOP;
-        buf[pos + 1] = TCP_OPT_NOP;
-        buf[pos + 2] = TCP_OPT_TIMESTAMP;
-        buf[pos + 3] = 10;
-        let tsval = tcp_now_ms();
-        buf[pos + 4..pos + 8].copy_from_slice(&tsval.to_be_bytes());
-        buf[pos + 8..pos + 12].copy_from_slice(&conn.ts_recent.to_be_bytes());
-        pos += 12;
+        // NOP, NOP, kind, len=10, TSval(4), TSecr(4) -- `TS_OPT_LEN` bytes.
+        pos = put_opt(
+            &mut buf,
+            pos,
+            &[TCP_OPT_NOP, TCP_OPT_NOP, TCP_OPT_TIMESTAMP, 10],
+        );
+        pos = put_opt(&mut buf, pos, &tcp_now_ms().to_be_bytes());
+        pos = put_opt(&mut buf, pos, &conn.ts_recent.to_be_bytes());
     }
 
     // SACK blocks (if negotiated and present).
@@ -2259,52 +2307,86 @@ fn build_ts_and_sack_options(conn: &TcpConnection) -> ([u8; 40], usize) {
         } else {
             MAX_SACK_BLOCKS
         };
-        let n = (conn.sack_block_count as usize).min(max_blocks);
-        let opt_len = 2 + n * 8; // kind + length + blocks.
+        // Bound by the room actually left as well, so the length byte
+        // written below and the writes that follow it are derived from a
+        // single `n`.  Previously the byte said `2 + n * 8` while the
+        // writes ran to wherever `n` took them; the two agreed only
+        // because the buffer had been hand-sized to make them agree.
+        let room = buf
+            .len()
+            .saturating_sub(pos)
+            .saturating_sub(4)
+            .saturating_div(8);
+        let n = (conn.sack_block_count as usize).min(max_blocks).min(room);
 
-        buf[pos] = TCP_OPT_NOP;
-        buf[pos + 1] = TCP_OPT_NOP;
-        buf[pos + 2] = TCP_OPT_SACK;
-        buf[pos + 3] = opt_len as u8;
-        pos += 4;
+        if n > 0 {
+            // kind + length + the blocks themselves.
+            let opt_len = 2usize.saturating_add(n.saturating_mul(8));
+            // `n <= MAX_SACK_BLOCKS` (4), so `opt_len <= 34` and the cast
+            // is exact; the const assertions beside `sack_opt_len` are
+            // what keep that true if the block count is ever raised.
+            #[allow(clippy::cast_possible_truncation)]
+            let opt_len_byte = opt_len as u8;
 
-        for i in 0..n {
-            let (left, right) = conn.sack_blocks[i];
-            buf[pos..pos + 4].copy_from_slice(&left.to_be_bytes());
-            buf[pos + 4..pos + 8].copy_from_slice(&right.to_be_bytes());
-            pos += 8;
+            pos = put_opt(
+                &mut buf,
+                pos,
+                &[TCP_OPT_NOP, TCP_OPT_NOP, TCP_OPT_SACK, opt_len_byte],
+            );
+
+            for &(left, right) in conn.sack_blocks.iter().take(n) {
+                pos = put_opt(&mut buf, pos, &left.to_be_bytes());
+                pos = put_opt(&mut buf, pos, &right.to_be_bytes());
+            }
         }
     }
 
     (buf, pos)
 }
 
-fn build_sack_option(conn: &TcpConnection) -> ([u8; 36], usize) {
-    // Max: 2 (NOP+NOP) + 2 (kind+len) + 4*8 (4 blocks × 8 bytes) = 36.
-    let mut buf = [0u8; 36];
+/// Build SACK option bytes for an outgoing ACK.
+///
+/// Returns the option bytes to append to the TCP header (including NOP
+/// padding and the SACK option header).  Returns length 0 if there are no
+/// SACK blocks or SACK was not negotiated.
+///
+/// SACK option format (RFC 2018 §3):
+///   NOP, NOP  (alignment padding)
+///   kind=5, length=2+8*N
+///   [left_edge1, right_edge1]  (each 4 bytes, big-endian)
+///   [left_edge2, right_edge2]
+///   ...
+///
+/// Used when timestamps are *not* negotiated; `build_ts_and_sack_options`
+/// covers the combined case.
+fn build_sack_option(conn: &TcpConnection) -> ([u8; SACK_OPT_BUF], usize) {
+    let mut buf = [0u8; SACK_OPT_BUF];
 
     if !conn.sack_ok || conn.sack_block_count == 0 {
         return (buf, 0);
     }
 
     let n = (conn.sack_block_count as usize).min(MAX_SACK_BLOCKS);
-    let opt_len = 2 + n * 8; // kind + length + blocks.
-    let total = 2 + opt_len; // NOP + NOP + option.
+    // kind + length + the blocks themselves.
+    let opt_len = 2usize.saturating_add(n.saturating_mul(8));
+    // `n <= MAX_SACK_BLOCKS` (4), so `opt_len <= 34` and the cast is exact.
+    #[allow(clippy::cast_possible_truncation)]
+    let opt_len_byte = opt_len as u8;
 
-    buf[0] = TCP_OPT_NOP;
-    buf[1] = TCP_OPT_NOP;
-    buf[2] = TCP_OPT_SACK;
-    buf[3] = opt_len as u8;
-
-    let mut pos = 4;
-    for i in 0..n {
-        let (left, right) = conn.sack_blocks[i];
-        buf[pos..pos + 4].copy_from_slice(&left.to_be_bytes());
-        buf[pos + 4..pos + 8].copy_from_slice(&right.to_be_bytes());
-        pos += 8;
+    let mut pos = put_opt(
+        &mut buf,
+        0,
+        &[TCP_OPT_NOP, TCP_OPT_NOP, TCP_OPT_SACK, opt_len_byte],
+    );
+    for &(left, right) in conn.sack_blocks.iter().take(n) {
+        pos = put_opt(&mut buf, pos, &left.to_be_bytes());
+        pos = put_opt(&mut buf, pos, &right.to_be_bytes());
     }
 
-    (buf, total)
+    // The returned length is now the cursor itself.  It used to be a
+    // separately computed `2 + opt_len`, which is a third place the same
+    // arithmetic had to come out right.
+    (buf, pos)
 }
 
 /// Send data on an established TCP connection.

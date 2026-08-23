@@ -1027,6 +1027,110 @@ worth correcting whichever way this goes); `userspace/coreutils/` (86 bins,
 
 ---
 
+## B-Q8 — [B] Two of the programs we copy disagree about how wide 626 characters are. Which one do we copy? — Status: OPEN
+
+**In short:** Text on a terminal is laid out in fixed cells, and every program
+that lines things up in columns has to agree on how many cells each character
+takes — a Chinese character takes two, an accent mark that sits on the previous
+letter takes none, most things take one. We keep one table of those numbers and
+every one of our programs reads it. The trouble is that the two programs we
+copy from — the shell **bash** and the **GNU command-line tools** — disagree
+with each other about 626 characters, and we can only match one of them. Today
+we match bash. Matching bash means our `ls` puts a filename in the wrong column
+for those characters; matching the GNU tools means our shell's menus do.
+
+### The question
+
+Our table lives in `userspace/charwidth` and is the only such table in the
+system — deliberately, because `ls`, `wc -L` (longest-line), `expand`, `fold`,
+`nl`, `column` and the shell's `select` menu all draw onto the *same* screen,
+so two of them disagreeing is not a difference of opinion, it is a crooked
+screen. The table was built to match bash 5.2.37 and was checked against it at
+1701 places, so today it is bash's answer.
+
+On Linux, though, bash and the GNU tools do not get their numbers from the same
+place. bash asks the C library (glibc). GNU coreutils 9.5 ships its own table
+(from the "gnulib" support library) and **deliberately overrides the C
+library's** in any UTF-8 setting — its own source comment says the system's
+answer is not Unicode-aware enough. Coreutils 9.4 did not do this; 9.5 does.
+Measured here, exhaustively over all 1.1 million characters, the two tables
+disagree on **626 characters in 71 stretches**. Examples:
+
+| Character | bash / glibc | GNU 9.5 / gnulib | Why they differ |
+|---|---|---|---|
+| U+00AD soft hyphen (an invisible "you may break the word here" mark) | 1 cell | 0 cells | A rule disagreement: gnulib gives *every* invisible formatting mark 0; glibc makes this one an exception |
+| U+D7B0–U+D7FB (extra Korean vowel/consonant pieces that fuse onto the letter before them) | 1 cell | 0 cells | Same rule disagreement, applied to a newer Korean block |
+| U+0600–U+0605 (Arabic marks printed *before* the number they belong to) | 0 cells | 1 cell | gnulib carves these out because they really do occupy a cell |
+| U+1F203, U+1FA75, U+4DC0–U+4DFF, … | varies | varies | Different Unicode releases; and gnulib rounds *unassigned* characters inside East-Asian blocks up to 2 cells, we do not |
+
+This is visible today: our `ls`-versus-GNU byte-diff harness has two cases that
+differ for exactly this reason and no other.
+
+### Options
+
+**(a) Follow the GNU tools (gnulib's table).** Regenerate `charwidth` from the
+reference implementation itself — we already have an exact dump of all 1.1
+million answers, taken by calling GNU 9.5's own width routine.
+*What changes:* our `ls` and `wc -L` line up with GNU's byte for byte on those
+626 characters; our shell's `select` menu stops lining up with bash's on them.
+- **Pro:** matches the six utilities that consult a width at all (`ls`, `wc -L`,
+  and `sort`, `pr`, `df`, `numfmt` when we write them) against one shell.
+- **Pro:** it is a *named, pinned* source — Unicode 15.1.0, one file, and we can
+  re-dump it at will. Our present table came from whatever Unicode version the
+  Python on the build machine happened to ship.
+- **Con:** it breaks a passing test. `userspace/oils/tests/gen_display_width.py
+  --diff-osh` compares our shell's menu against real bash at every table edge
+  and currently agrees everywhere; it would start reporting 626 disagreements.
+- **Con:** gnulib's table is *newer*, not *agreed*. Terminals have their own
+  tables too, and nothing says gnulib's matches the terminal we will ship.
+
+**(b) Keep bash's table (what we do today).**
+*What changes:* nothing observable; our `ls` keeps putting those 626 characters
+one cell off from GNU's.
+- **Pro:** no change, and the one end-to-end byte-diff we have that involves a
+  human-visible layout (shell menu vs bash) keeps passing.
+- **Con:** every `ls` case containing one of those characters stays permanently
+  marked "differs on purpose" in the harness, which dulls the harness.
+- **Con:** we are copying the *older* of the two answers on the characters where
+  they differ for a Unicode-version reason.
+
+**(c) Two tables — the shell reads one, the utilities the other.**
+*What changes:* both byte-diffs pass; the shell and `ls` can disagree by one
+cell about the same filename on the same screen.
+- **Pro:** maximum fidelity to both upstreams.
+- **Con:** this is precisely the thing `charwidth` exists to prevent, and the
+  symptom (a menu and a listing that do not line up) is the one a user actually
+  sees. I do not recommend it.
+
+### If never answered
+
+Safe, and it does not get worse on its own. Today's behaviour is (b). The cost
+is confined to two permanently-deferred cases in the `ls` harness and to the
+626 characters themselves, which are mostly invisible marks and unassigned
+code points — nobody has a filename made of them by accident.
+
+### Claude's recommendation
+
+**(a)**, but not strongly enough to do it without you: the deciding fact for me
+is that the count is six utilities to one shell and that gnulib's table is a
+pinned upstream we can re-derive mechanically, whereas ours is not. What stops
+me from just doing it is that it silently changes the on-screen layout of the
+shell and five other programs to win a byte-diff in one — a user-visible
+behaviour change, which is yours. Meanwhile I have kept (b) and isolated the
+divergence in the harness (fixture `y/`) so it costs two cases and not twenty.
+
+### Where it bites
+
+`userspace/charwidth/src/lib.rs` (`ZERO_WIDTH`, `WIDE`, and the doc comment
+that says the tables were measured against bash);
+`userspace/oils/tests/gen_display_width.py` (the generator and its `--check` /
+`--diff-osh` measurement against bash); `userspace/oils/src/width.rs`;
+`userspace/coreutils/src/bin/ls.rs` and `wc.rs`; `userspace/column/src/main.rs`;
+`scripts/ls-diff.sh` (fixture `y/`, two `!` cases);
+`known-issues.md` → `TD-B-OUR-WIDTH-TABLE-IS-BASHS-AND-COREUTILS-9.5S-IS-NOT`.
+
+---
+
 ## Q57 — [A] Should a program be able to pop up a prompt asking you for permission to read the keyboard, the microphone or the camera? — Status: OPEN
 
 **In short:** SlateOS has a mechanism where a program that lacks permission for

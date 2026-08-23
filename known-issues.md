@@ -63617,3 +63617,68 @@ The four diagnostic sites are `Listing::file_failure`, the
 Flushing *more* often than GNU is unobservable (the bytes and their order are
 identical), so the fix does not have to match gnulib's flush points — only to
 guarantee that no stderr write happens while stdout has unflushed bytes.
+
+### [B] TD-B-OUR-WIDTH-TABLE-IS-BASHS-AND-COREUTILS-9.5S-IS-NOT — 2026-08-22 — OPEN (tech debt, blocked on B-Q8)
+
+**What it is.** `userspace/charwidth` holds the system's only table of terminal
+column widths, and it was generated and verified against **bash 5.2.37**, which
+gets its widths from glibc's `wcwidth`. Coreutils **9.5** does not use glibc's
+`wcwidth`: gnulib's `lib/wcwidth.c` *defines* `wcwidth` itself and, in any
+UTF-8 locale, returns `uc_width()` from its own Unicode 15.1.0 tables —
+
+```c
+int wcwidth (wchar_t wc)
+#undef wcwidth
+{
+  if (is_locale_utf8_cached ())
+    return uc_width (wc, "UTF-8");
+  ...
+}
+```
+
+— so `ls`, `wc -L`, `sort`, `pr`, `df` and `numfmt` all measure with gnulib's
+table while bash measures with glibc's. Coreutils **9.4 did not** do this; the
+override arrived in 9.5, which is the version we pin. The two tables disagree
+on **626 code points in 71 ranges**.
+
+**How to measure it (exact, no recall).** In WSL, against the cached reference
+tree `$HOME/.cache/slateos-ls-diff/coreutils-9.5`:
+
+```c
+/* Dump the oracle ls actually uses, per code point. Link libcoreutils.a;
+   do NOT put lib/ on the include path -- gnulib's replacement headers
+   shadow the system ones and refuse to compile without config.h. */
+extern int mbsnwidth (const char *buf, size_t nbytes, int flags);
+/* encode cp as UTF-8 into b, then: mbsnwidth (b, n, 3) */
+```
+
+`gcc -o mw2 mw2.c "$C/lib/libcoreutils.a"`, run under `LC_ALL=C.UTF-8`, and
+collapse to ranges. The result is identical to `uc_width` (912 ranges vs 911,
+differing only on the surrogates, which no UTF-8 sequence can carry) and
+differs from a direct glibc `wcwidth` sweep on the 626 code points below.
+
+**The 71 ranges.** Four kinds:
+
+| Kind | Examples | ours | gnulib |
+|---|---|---|---|
+| `Cf` policy — gnulib zeroes *every* format character | `00AD` | 1 | 0 |
+| `Cf` carve-outs gnulib makes and we do not (prepended concatenation marks) | `0600–0605`, `06DD`, `070F`, `0890–0891`, `0897`, `08E2`, `110BD`, `110CD`, `11A07–11A08`, … | 0 | 1 |
+| conjoining Jamo, extended blocks | `D7B0–D7C6`, `D7CB–D7FB` | 1 | 0 |
+| Unicode-version drift, and gnulib rounding *unassigned* code points inside East Asian blocks up to 2 | `2630–2637`, `2E9A`, `3040`, `4DC0–4DFF`, `1F203–1F20F`, `1F6DC`, `1FA75–1FA77`, `2FFFE–2FFFF`, … | 1 or 2 | 2 or 1 |
+
+**Why it is not simply fixed.** `charwidth` is deliberately the *only* copy, so
+changing it changes `ls`, `wc -L`, `expand`, `fold`, `nl`, `column` and osh's
+`select` menu together. Matching gnulib wins the `ls` byte-diff and loses the
+osh-versus-bash byte-diff (`userspace/oils/tests/gen_display_width.py
+--diff-osh`), which passes today. That is a user-visible layout choice, so it
+is the operator's: **`open-questions.md` B-Q8**.
+
+**What the proper fix looks like**, if B-Q8 answers "follow gnulib": replace
+`gen_display_width.py`'s derivation from Python's `unicodedata` with the
+measured dump above — the project's own rule is to measure the reference rather
+than re-derive its rule — regenerate `ZERO_WIDTH` and `WIDE`, rewrite the
+module doc that claims a bash provenance, repoint `--check` at the dump, and
+drop the two `!` cases and the `y/` fixture from `scripts/ls-diff.sh`.
+
+**Where it shows.** `scripts/ls-diff.sh` fixture `y/`, cases
+`ls --sort=width -1 y` and `ls -C -w 20 y`, both marked `!`.

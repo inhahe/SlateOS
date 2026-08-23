@@ -50388,7 +50388,7 @@ commands that carry the colour in question, and assert the two renders agree.
 Candidates: anything drawn on the wallpaper, on a video surface, on a
 thumbnail, or on any other content the palette does not own.
 
-**Part 2 progress. 25 of 49 modules converted.**
+**Part 2 progress. 26 of 49 modules converted.**
 
 - [x] `security_dialog.rs` — 29 constants, done 2026-08-22. The method above
   survived contact: the sweep lives in `gui/desktop/src/palette_check.rs` as
@@ -51681,6 +51681,59 @@ thumbnail, or on any other content the palette does not own.
     title `"Privacy & Permissions"` — the guard converted a silent
     wrong-site comparison into a loud failure, which is what it is for; tab
     labels now use a `text_exact` helper.
+  - **The harness now reports both directions of declaration error.** It only
+    ever printed `[MISSING:]` — a test a defect *declared* but that did not
+    fire. The reverse, a test that fired but was not declared, was found by an
+    audit script run by hand, which meant it was found when someone remembered
+    to run it. This module had **sixteen** of them, all created the moment one
+    test became far more discriminating than its declarations claimed. That
+    direction matters because the declarations are the only record of what the
+    suite is known to prove: left stale, the next person to prune a
+    "redundant" test cannot see what they would be giving up. Both directions
+    are now inline as `[MISSING:]` / `[UNDECLARED:]`, with a closing tally.
+- [x] `print_manager.rs` — 11 constants, done 2026-08-23. Eight tests, harness
+  defects Ax28–Nx29 (forty).
+  - **The first module where the previous module's lesson was applied before
+    the proof run rather than after it.** Module 25 lost 19 defects to role
+    tables that rendered Mocha with the stock accent; every table here renders
+    both modes with an accent outside either palette from the first line of
+    the first test. This module needed it more than any so far, because
+    `JobState::Queued` is `p.blue` — and the stock accent *is* blue, so under
+    it "correctly frozen to blue" and "wrongly following the accent" are the
+    same pixels. Two of the forty defects exist purely to hold that line.
+  - **Both colour-choice methods are unreachable from `render`.**
+    `Printer::status_color` and `JobState::color` are called by nothing else in
+    the file — they are pure *selection* sites in module 24's sense. Without an
+    explicit table naming all nine arms, every one of them is checked by
+    nothing at all: the membership sweep waves them through, because each arm
+    names a role and a role belongs to both palettes. A colour method with no
+    call site is the easiest kind of site to forget, because grepping the
+    render function for colours will never show it.
+  - **Four judgements.** (1) `status_color`'s offline/busy/ready red/yellow/
+    green is a category — red *means* "this printer will not print" — so it
+    freezes. (2) `JobState::color` is the same, six ways, with all fifteen
+    pairs asserted distinct under five accents and both modes. (3) The Print
+    button is the dialog's default action, which *is* the accent's job, so
+    `p.accent` fill with `p.on_accent()` ink; Cancel is not the default action
+    and keeps `p.surface1`/`p.text`. (4) The selected printer's name marks the
+    choice you have made and takes the accent, while the field it sits in stays
+    `p.surface0` — position is marked by the label, not by repainting the
+    furniture, the same split as module 25's tab strip.
+  - **The accent count has to allow for derived ink.** The counting rule from
+    module 25 says every command must match across two accents except a
+    declared number. Here three commands move, not two: the printer name and
+    the button fill take the accent, and the button's *ink* moves as well
+    because `on_accent` is derived from it. The test classifies each moving
+    command as accent-valued or derived-ink and fails on anything that is
+    neither, so the derived site is accounted for rather than exempted.
+  - **Two sites drew the identical string in different roles.** The dialog
+    title and the Print button both draw exactly `"Print"`, and the caption
+    `"Printer:"` contains it — three sites, two roles, one substring. A
+    `text_containing` lookup would have compared the wrong one silently. Added
+    `text_exact(cmds, want, size)`, matching text *and* font size. Whenever a
+    module draws one word in two roles, the lookup helper needs a second
+    discriminator; the ambiguity guard only tells you that you have the
+    problem, not which site you meant.
 
 **Trigger:** this is not blocked on anything. It is sequenced after the shell
 event loop (`TD-C-THE-SHELL-CAN-DRAW-ITSELF-AND-NOBODY-CAN-ASK-IT-TO`) only

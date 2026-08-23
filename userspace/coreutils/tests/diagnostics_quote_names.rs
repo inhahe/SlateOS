@@ -103,6 +103,55 @@ fn bracket_delta(src: &str) -> Option<isize> {
     Some(depth)
 }
 
+/// Do hand-written single quotes in `line` wrap an actual format
+/// *placeholder*?
+///
+/// The naive test — "contains `'{` and contains `}'`" — cannot tell a
+/// placeholder from a doubled brace. `{{` and `}}` are Rust's escapes for a
+/// literal `{` and `}`, so a usage line reading
+///
+/// ```text
+/// aws events put-rule --event-pattern '{{"source":["aws.s3"]}}'
+/// ```
+///
+/// prints a JSON example with no interpolation at all, yet contains both
+/// substrings. Reporting it is not merely noise: there is no name in it, so
+/// no edit can ever resolve the report — it is a permanent false positive
+/// that a reader must re-dismiss on every run. `eventbridge-cli`'s help text
+/// in the wider tree has two.
+///
+/// The scan starts at the macro's opening quote so that a brace belonging to
+/// enclosing *code* — `if x { println!(…) }` joined onto one logical line —
+/// cannot be mistaken for a placeholder and swallow the real one after it.
+fn quotes_around_placeholder(line: &str) -> bool {
+    let Some(open) = line.find("println!") else {
+        return false;
+    };
+    let Some(quote) = line[open..].find('"') else {
+        return false;
+    };
+    let fmt: Vec<char> = line[open + quote + 1..].chars().collect();
+    let mut i = 0;
+    while i < fmt.len() {
+        match fmt[i] {
+            '{' if fmt.get(i + 1) == Some(&'{') => i += 2,
+            '{' => {
+                let Some(off) = fmt[i..].iter().position(|&c| c == '}') else {
+                    return false;
+                };
+                let close = i + off;
+                if i > 0 && fmt[i - 1] == '\'' && fmt.get(close + 1) == Some(&'\'') {
+                    return true;
+                }
+                i = close + 1;
+            }
+            '}' if fmt.get(i + 1) == Some(&'}') => i += 2,
+            _ => i += 1,
+        }
+    }
+    false
+}
+
 /// The lines of `text`, but with a `println!`/`eprintln!` that rustfmt split
 /// across several of them rejoined into one.
 ///
@@ -256,6 +305,27 @@ fn the_detector_finds_what_the_sweep_removed() {
 }
 
 #[test]
+fn a_doubled_brace_is_a_literal_brace_not_a_name() {
+    // The quote detector's whole job is the shape on the left; the shape on
+    // the right merely *contains the same two substrings*, and firing on it
+    // would emit a report no edit can satisfy.
+    for line in [
+        r#"    eprintln!("cut: cannot open '{path}': {e}");"#,
+        r#"        println!("{}: removed '{}'", personality, file);"#,
+        r#"    eprintln!("cut: {{literal}} '{path}': {e}");"#,
+    ] {
+        assert!(quotes_around_placeholder(line), "detector missed {line:?}");
+    }
+    for line in [
+        r#"    println!("  aws events put-rule --event-pattern '{{\"source\":[\"aws.s3\"]}}'");"#,
+        r#"    println!("  aws scheduler create-schedule --target '{{\"Arn\":\"<a>\"}}'");"#,
+        r#"    println!("usage: prog '{{...}}'");"#,
+    ] {
+        assert!(!quotes_around_placeholder(line), "detector fired on {line:?}");
+    }
+}
+
+#[test]
 fn the_detector_sees_a_call_rustfmt_wrapped() {
     // The regression this exists for. `tar.rs` really did contain the call
     // below, and both detectors walked straight past it for as long as they
@@ -363,7 +433,7 @@ fn no_diagnostic_hand_writes_quotes_around_a_name() {
             if !line.contains("eprintln!(") && !line.contains("println!(") {
                 continue;
             }
-            if line.contains("'{") && line.contains("}'") {
+            if quotes_around_placeholder(&line) {
                 found.push(format!("  {file}:{line_no}: {}", line.trim()));
             }
         }

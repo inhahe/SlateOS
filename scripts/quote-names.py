@@ -133,15 +133,60 @@ def bare_interpolated_name(line: str) -> str | None:
     return ident
 
 
+def quotes_around_placeholder(fmt: str) -> bool:
+    """Do hand-written single quotes wrap an actual format *placeholder*?
+
+    Scanned the way Rust scans a format string, because the naive test --
+    "contains `'{` and contains `}'`" -- cannot tell a placeholder from a
+    doubled brace. `{{` and `}}` are Rust's escapes for a literal `{` and `}`,
+    so a usage line reading
+
+        aws events put-rule --event-pattern '{{"source":["aws.s3"]}}'
+
+    prints a JSON example with no interpolation whatsoever, yet contains both
+    substrings. Reporting it is not merely noise: there is no edit that
+    resolves it, so it sits in the backlog forever as a site that must be
+    "declined" by hand on every pass. eventbridge-cli's help text has two.
+
+    The scan skips a doubled brace and, at a real placeholder, asks only
+    whether the characters immediately around it are quotes.
+    """
+    i, n = 0, len(fmt)
+    while i < n:
+        c = fmt[i]
+        if c == "{":
+            if i + 1 < n and fmt[i + 1] == "{":
+                i += 2
+                continue
+            j = fmt.find("}", i)
+            if j == -1:
+                return False
+            if i and fmt[i - 1] == "'" and j + 1 < n and fmt[j + 1] == "'":
+                return True
+            i = j + 1
+            continue
+        if c == "}" and i + 1 < n and fmt[i + 1] == "}":
+            i += 2
+            continue
+        i += 1
+    return False
+
+
 def hand_written_quotes(line: str) -> bool:
     """Port of the `no_diagnostic_hand_writes_quotes_around_a_name` detector.
 
     `'{path}'` is worse than `{path}`, not better: it *looks* quoted, so it
     survives review, while a name containing a `'` still breaks out.
+
+    The scan starts at the macro's opening quote, not at the start of the
+    line, so a brace belonging to enclosing *code* (`if x { println!(...) }`
+    joined onto one logical line) cannot be mistaken for a placeholder and
+    swallow the real one that follows it.
     """
-    if "eprintln!(" not in line and "println!(" not in line:
+    m = re.search(r'e?println!\s*\(\s*"', line)
+    if m is None:
         return False
-    return "'{" in line and "}'" in line
+    return quotes_around_placeholder(line[m.end() :])
 
 
 def is_prose(line: str) -> bool:
@@ -592,6 +637,24 @@ def selftest() -> int:
     expect("hand-quotes", "eprintln!(\"cut: '{path}': {e}\");", 1)
     expect("hand-quotes-stdout", "println!(\"cut: '{path}'\");", 1)
     expect("hand-quotes-no-macro", "let s = format!(\"'{path}'\");", 0)
+
+    # 5a. A *doubled* brace is Rust's escape for a literal one, so quotes around
+    #     it wrap printed text, not a name. Help text full of JSON examples is
+    #     the shape this arises in, and it is unfixable by construction: there
+    #     is no name to quote, so a report here is a permanent decline.
+    expect(
+        "escaped-braces-in-help-text",
+        'println!("    aws events put-rule --event-pattern \'{{\\"source\\":[\\"aws.s3\\"]}}\'");',
+        0,
+    )
+    expect(
+        "escaped-braces-then-a-real-name",
+        "eprintln!(\"cut: {{literal}} '{path}': {e}\");",
+        1,
+    )
+    # A brace belonging to enclosing code must not consume the real placeholder
+    # that follows it -- the scan starts at the macro's quote for this reason.
+    expect("code-brace-before-the-call", "if x { println!(\"a '{p}'\"); }", 1)
 
     # 6. Prose is not code. Seven doc-comments in this tree quote the bad form
     #    in order to warn about it; counting them would overstate the backlog

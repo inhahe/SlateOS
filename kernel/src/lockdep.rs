@@ -991,15 +991,23 @@ fn report_violation(held_class: u16, acquired_class: u16, cpu: usize) {
     // alone reads `Holding lock "?" … acquiring lock "?"` — a report that
     // cannot be acted on, because it does not say which two locks inverted.
     // `dump_held_locks` reached the same conclusion for the same reason; this
-    // report was simply left behind. The address identifies the instance and
-    // resolves to its static offline against the kernel ELF.
+    // report was simply left behind.
+    //
+    // The address is also run through `ksyms`, which since it began indexing
+    // data symbols resolves a lock living in a `static` to that static's name
+    // — turning `"?" @ 0xffffffff828d9c48` into the one thing the reader
+    // actually needs. It does not resolve heap-allocated locks (a per-mount
+    // filesystem lock, say), which is why the raw address is still printed
+    // beside it: that value is what `sync::report_spin_stall` and
+    // `dump_held_locks` print too, so the three reports can be cross-read,
+    // and it remains resolvable offline against the kernel ELF.
     serial_println!(
-        "[lockdep]   Holding lock {:?} @ {:#x} (class {}), acquiring lock {:?} @ {:#x} (class {})",
+        "[lockdep]   Holding lock {:?} @ {} (class {}), acquiring lock {:?} @ {} (class {})",
         held_name,
-        class_addr(held_class),
+        AddrDesc(class_addr(held_class)),
         held_class,
         acq_name,
-        class_addr(acquired_class),
+        AddrDesc(class_addr(acquired_class)),
         acquired_class
     );
     serial_println!("[lockdep]   But the reverse order was observed previously.");
@@ -1089,6 +1097,37 @@ fn class_addr(idx: u16) -> usize {
         return 0;
     }
     class_id(idx).unwrap_or(0)
+}
+
+/// Renders a lock instance address as `0xADDR (symbol+0xNN)` when it can be
+/// named, and as a bare `0xADDR` when it cannot.
+///
+/// A lock that lives in a `static` resolves, because [`crate::ksyms`] indexes
+/// data symbols; a heap-allocated one (a per-mount filesystem lock, say) does
+/// not, and there is nothing to add for it. The address is always printed
+/// either way — it is the identity that ties this report to
+/// [`dump_held_locks`] and to `sync::report_spin_stall`, and it is what a
+/// reader resolves offline if symbols were unavailable at boot (which happens
+/// if the image was stripped of `.symtab`; see [`crate::ksyms`]).
+///
+/// This is a `Display` adapter rather than a function returning `String`
+/// because it is used from a lock-violation report, which must neither
+/// allocate nor take a lock: it uses
+/// [`crate::ksyms::resolve_static`], which does neither, and it formats
+/// straight into the caller's `Formatter`. The rest of this module is
+/// entirely lock-free and allocation-free for the same reason, and this
+/// keeps it that way.
+struct AddrDesc(usize);
+
+impl core::fmt::Display for AddrDesc {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "{:#x}", self.0)?;
+        match crate::ksyms::resolve_static(self.0 as u64) {
+            Some((name, 0)) => write!(f, " ({name})"),
+            Some((name, offset)) => write!(f, " ({name}+{offset:#x})"),
+            None => Ok(()),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

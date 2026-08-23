@@ -8,3 +8,6 @@ description = "SlateOS file ownership and permission utility (chown/chmod)"
 # parser of that file. See `design-decisions.md` §330.
 [dependencies]
 userdb = { path = "../userdb" }
+
+# The one mode-string grammar. See design-decisions.md 364.
+modechange = { path = "../modechange" }

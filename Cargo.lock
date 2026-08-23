@@ -1515,6 +1515,7 @@ version = "0.1.0"
 name = "chown"
 version = "0.1.0"
 dependencies = [
+ "modechange",
  "userdb",
 ]
 
@@ -1885,6 +1886,7 @@ dependencies = [
  "bignum",
  "charwidth",
  "ere",
+ "modechange",
  "sha2",
 ]
 
@@ -4678,6 +4680,7 @@ name = "install"
 version = "0.1.0"
 dependencies = [
  "embed-manifest",
+ "modechange",
 ]
 
 [[package]]
@@ -6549,6 +6552,10 @@ version = "0.1.0"
 
 [[package]]
 name = "modal-cli"
+version = "0.1.0"
+
+[[package]]
+name = "modechange"
 version = "0.1.0"
 
 [[package]]

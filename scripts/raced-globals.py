@@ -228,6 +228,100 @@ def _relpath(p: Path) -> str:
         return p.as_posix()
 
 
+def crate_dir(path: Path) -> Path | None:
+    """Directory of the nearest ancestor holding a `Cargo.toml`, or `None`.
+
+    Stops at `ROOT` so a synthetic file in a temp directory (the self-test)
+    does not walk out to the filesystem root looking for one.
+    """
+    d = path.parent
+    while True:
+        if (d / "Cargo.toml").is_file():
+            return d
+        if d == ROOT or d.parent == d:
+            return None
+        d = d.parent
+
+
+_TEST_TARGET_CACHE: dict[Path, bool] = {}
+
+
+def crate_has_test_target(d: Path) -> bool:
+    """Can `cargo test` build *anything* out of this crate?
+
+    A `#[test]` needs a target for the harness to attach to. `kernel` has no
+    `lib.rs` and declares its single binary `test = false` -- correctly, since a
+    `#![no_std]` binary supplying its own `panic_impl` cannot link against host
+    `std` -- so `cargo test -p kernel` compiles nothing and runs nothing. Its
+    `#[test]`s are not merely unrun, they are not even type-checked.
+
+    That matters here because "these two tests race" presupposes two tests that
+    execute. Reporting a race in code that never runs is right about the code
+    and wrong about the consequence, and the consequence is what a reader acts
+    on. Lane A raised this against `kernel/src/net/raw.rs` in
+    `requests/a-b-raced-globals-flags-tests-that-cannot-run.md`.
+
+    **Every uncertainty resolves to `True`**, because `False` here silences a
+    whole crate. A malformed manifest, an unreadable file, an old Python
+    without `tomllib`, an autodiscovered binary this cannot account for: all
+    keep the crate in the report. The only path to `False` is a manifest that
+    positively demonstrates there is no target left.
+    """
+    if d in _TEST_TARGET_CACHE:
+        return _TEST_TARGET_CACHE[d]
+    result = _crate_has_test_target_uncached(d)
+    _TEST_TARGET_CACHE[d] = result
+    return result
+
+
+def _crate_has_test_target_uncached(d: Path) -> bool:
+    try:
+        import tomllib
+
+        data = tomllib.loads((d / "Cargo.toml").read_text(encoding="utf-8"))
+    except (OSError, ValueError, ImportError):
+        return True
+
+    # A library target is testable unless it says otherwise. `[lib]` may be
+    # absent and the target still exist, by autodiscovery of `src/lib.rs`.
+    lib = data.get("lib")
+    if isinstance(lib, dict):
+        if lib.get("test", True):
+            return True
+    elif (d / "src" / "lib.rs").is_file():
+        return True
+
+    # Anything under `tests/` is its own target and is unaffected by what the
+    # binaries say, so its mere existence keeps the crate testable.
+    tests_dir = d / "tests"
+    if tests_dir.is_dir() and any(p.suffix == ".rs" for p in tests_dir.iterdir()):
+        return True
+
+    bins = data.get("bin")
+    if not isinstance(bins, list) or not bins:
+        # No explicit `[[bin]]` to have disabled anything: if a binary exists at
+        # all it is autodiscovered, and autodiscovered targets are testable.
+        return True
+    if any(b.get("test", True) for b in bins if isinstance(b, dict)):
+        return True
+
+    # Every declared binary is `test = false`. Autodiscovery could still have
+    # added one the manifest never mentions, so account for those explicitly
+    # rather than assuming the list is complete.
+    claimed = {
+        (d / b["path"]).resolve()
+        for b in bins
+        if isinstance(b, dict) and isinstance(b.get("path"), str)
+    }
+    main_rs = d / "src" / "main.rs"
+    if main_rs.is_file() and main_rs.resolve() not in claimed:
+        return True
+    bin_dir = d / "src" / "bin"
+    if bin_dir.is_dir() and any(p.suffix == ".rs" for p in bin_dir.iterdir()):
+        return True
+    return False
+
+
 def rust_files() -> list[Path]:
     """Every `.rs` we wrote.
 
@@ -799,6 +893,76 @@ fn d() { helper2(); }
         [["a", "b"], ["c", "d"]],
     )
 
+    # 9. A crate with no test target has no tests, so it has no test races.
+    #    Every uncertainty must resolve the *other* way: `False` here silences
+    #    a whole crate at once, which is the failure this tool cannot afford.
+    #    Lane A's `kernel` is the real instance -- 54 `#[test]`s, no target.
+    rule("no-test-target")
+
+    def manifest_says_no_tests(manifest: str, files: dict[str, str] | None = None) -> bool:
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            (root / "Cargo.toml").write_text(manifest, encoding="utf-8")
+            (root / "src").mkdir()
+            for rel, content in (files or {}).items():
+                p = root / rel
+                p.parent.mkdir(parents=True, exist_ok=True)
+                p.write_text(content, encoding="utf-8")
+            _TEST_TARGET_CACHE.pop(root, None)
+            return not crate_has_test_target(root)
+
+    kernel_shaped = """
+[package]
+name = "k"
+[[bin]]
+name = "k"
+path = "src/main.rs"
+test = false
+"""
+    expect(
+        "no-test-target/kernel-shape",
+        manifest_says_no_tests(kernel_shaped, {"src/main.rs": "fn main() {}"}),
+        True,
+    )
+    # A `src/lib.rs` beside it is a target the binary's `test = false` says
+    # nothing about.
+    expect(
+        "no-test-target/lib-rs-wins",
+        manifest_says_no_tests(
+            kernel_shaped, {"src/main.rs": "fn main() {}", "src/lib.rs": ""}
+        ),
+        False,
+    )
+    # So is an autodiscovered binary the manifest never claimed.
+    expect(
+        "no-test-target/unclaimed-bin",
+        manifest_says_no_tests(
+            kernel_shaped, {"src/main.rs": "fn main() {}", "src/bin/other.rs": ""}
+        ),
+        False,
+    )
+    # So is anything under `tests/`.
+    expect(
+        "no-test-target/integration-tests",
+        manifest_says_no_tests(
+            kernel_shaped, {"src/main.rs": "fn main() {}", "tests/it.rs": ""}
+        ),
+        False,
+    )
+    # An ordinary crate must never be silenced.
+    expect(
+        "no-test-target/ordinary-crate",
+        manifest_says_no_tests('[package]\nname = "p"\n', {"src/lib.rs": ""}),
+        False,
+    )
+    # A manifest that will not parse is an uncertainty, and uncertainty keeps
+    # the crate in the report.
+    expect(
+        "no-test-target/unparseable-manifest",
+        manifest_says_no_tests("this is not toml [[[", {"src/main.rs": ""}),
+        False,
+    )
+
     for f in failures:
         print(f"FAIL {f}", file=sys.stderr)
     bad = {f.split(":", 1)[0] for f in failures}
@@ -815,12 +979,48 @@ def main() -> int:
 
     raced: list[tuple[str, str, list[str], list[str]]] = []
     guarded: list[tuple[str, str, list[str], list[str]]] = []
+    # Crate dir -> [(file, how many `#[test]` fns it declares)], for crates that
+    # have no target for a harness to attach to.
+    dead: dict[Path, list[tuple[str, int]]] = {}
+
     for path in rust_files():
+        d = crate_dir(path)
+        if d is not None and not crate_has_test_target(d):
+            # These `#[test]`s never execute, so nothing in this file can race
+            # by way of them. Counted and reported separately rather than
+            # dropped: a crate falling silent is precisely the thing that must
+            # not happen quietly, and the count is a finding in its own right.
+            n = sum(
+                1 for line in path.read_text(encoding="utf-8", errors="replace").splitlines()
+                if _TEST_ATTR.match(line)
+            )
+            if n:
+                dead.setdefault(d, []).append((_relpath(path), n))
+            continue
         for name, site, unser, ser in analyse(path):
             if len(unser) >= 2:
                 raced.append((name, site, unser, ser))
             elif ser:
                 guarded.append((name, site, unser, ser))
+
+    if dead:
+        total = sum(n for files in dead.values() for _f, n in files)
+        names = ", ".join(sorted(_relpath(d) for d in dead))
+        print(
+            f"--- {total} `#[test]` fn(s) in {len(dead)} crate(s) with no test "
+            f"target: {names} ---"
+        )
+        print(
+            "    They look like tests and are not: `cargo test` builds no target "
+            "for them,\n    so they never run and are never even type-checked. "
+            "Not counted as raced\n    below -- tests that cannot execute cannot "
+            "interleave."
+        )
+        if not check:
+            for d in sorted(dead, key=_relpath):
+                for f, n in sorted(dead[d]):
+                    print(f"      {f}  {n}")
+        print()
 
     if show_all:
         print(f"--- {len(guarded)} global(s) reached by tests and serialised ---")

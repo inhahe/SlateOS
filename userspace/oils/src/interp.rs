@@ -43835,10 +43835,23 @@ impl Shell {
             // octal, not a symbolic clause), and masks a valid value to the low
             // 9 bits. Any malformed octal (non-octal digit, letter, or overflow)
             // is reported as "octal number out of range".
+            //
+            // "Out of range" is bash's `read_octal`, which gives up as soon as
+            // the running value passes `07777` — not at `0777`, and not at the
+            // width of the integer. Measured against bash 5.2.21: `7777` and
+            // `07777` are accepted and land on `0777` (the mask keeps only the
+            // low nine bits), while `10000` is rejected. The ceiling has to be
+            // spelled out, because parsing into a `u32` would accept every
+            // value up to 2^32 and quietly mask it to something plausible —
+            // `umask 10000` would have set `0000`, the most permissive mask
+            // there is, in answer to a string bash refuses outright.
             let new = if m.first().is_some_and(u8::is_ascii_digit) {
                 // An octal number is ASCII digits, so a mode that is not text is
                 // not a number either — the same answer `umask 8` gets.
-                match bytes::as_str(m).and_then(|s| u32::from_str_radix(s, 8).ok()) {
+                match bytes::as_str(m)
+                    .and_then(|s| u32::from_str_radix(s, 8).ok())
+                    .filter(|v| *v <= 0o7777)
+                {
                     Some(v) => v & 0o777,
                     None => {
                         self.berrln(&bfmt![
@@ -67843,10 +67856,6 @@ fn symbolic_umask_string(mask: u32) -> String {
     parts.join(",")
 }
 
-/// Parse a symbolic umask clause list (`u=rwx,g=rx,o=` / `a+r` / `go-w`) against
-/// the current mask, returning the new mask value. The symbolic notation
-/// operates on the *permission* set (the complement of the mask); the result is
-/// re-complemented back into mask bits. Returns `None` on a malformed clause.
 /// A failure parsing a symbolic umask clause. bash reports two distinct
 /// diagnostics, quoting the exact offending character:
 /// `` `X': invalid symbolic mode operator `` (a `who` list not followed by one
@@ -67860,6 +67869,24 @@ enum SymUmaskErr {
     Character(bytes::Ch),
 }
 
+/// Parse a symbolic umask clause list (`u=rwx,g=rx,o=` / `a+r` / `go-w`) against
+/// the current mask, returning the new mask value. The symbolic notation
+/// operates on the *permission* set (the complement of the mask); the result is
+/// re-complemented back into mask bits.
+///
+/// **This is bash's grammar, not the coreutils one, and deliberately does not
+/// use the `modechange` crate that `chmod`, `install`, `mkdir` and `mkfifo`
+/// share.** It looks like the same language and is not. Measured against bash
+/// 5.2.21, the shell rejects `X`, `s` and `t` as permission characters, rejects
+/// the copy-source triads (`u=g`), and rejects more than one operator in a
+/// clause (`u+r-w`) — all three of which `modechange` accepts. It also works on
+/// the complement rather than on a file's mode bits, so a `who`-less clause is
+/// not umask-filtered (the value *is* the umask), and it reports errors by
+/// naming the offending character rather than the whole spec. Routing it
+/// through `modechange` would therefore *widen* what the shell accepts and
+/// throw the diagnostics away. See `known-issues.md`
+/// → `TD-B-THREE-UTILITIES-STILL-CARRY-THEIR-OWN-MODE-PARSER` for the full
+/// comparison table.
 fn parse_symbolic_umask(current: u32, spec: BStr<'_>) -> Result<u32, SymUmaskErr> {
     // Work in "allowed permission" space, then invert back to a mask at the end.
     let mut allowed = !current & 0o777;
@@ -102408,6 +102435,37 @@ st=1
         );
         // A valid octal above 0o777 is masked to the low nine bits.
         assert_eq!(run("umask 7777; umask").0, "0777\n");
+    }
+
+    #[test]
+    fn umask_octal_range_stops_at_07777() {
+        // bash's `read_octal` abandons the parse the moment the running value
+        // passes `07777`, so the ceiling sits there rather than at `0777` or at
+        // the width of the integer. Measured against bash 5.2.21.
+        //
+        // Everything up to the ceiling is accepted and then masked to the low
+        // nine bits, so the high bits are silently dropped rather than refused.
+        assert_eq!(run("umask 07777; umask").0, "0777\n");
+        assert_eq!(run("umask 1777; umask").0, "0777\n");
+        assert_eq!(run("umask 4000; umask").0, "0000\n");
+        assert_eq!(run("umask 1000; umask").0, "0000\n");
+
+        // One past the ceiling is refused. This is the case worth a test: a
+        // parse into a `u32` would accept `10000` and mask it to `0000` — the
+        // most permissive mask there is — in answer to a string bash rejects.
+        assert_eq!(
+            run("umask 10000 2>&1").0,
+            "osh: umask: 10000: octal number out of range\n"
+        );
+        assert_eq!(run("umask 10000").1, 1);
+        assert_eq!(run("umask 10000 2>/dev/null; umask").0, "0022\n");
+
+        // And so is a value too wide for the integer at all, which must not
+        // reach a different message by way of an overflow.
+        assert_eq!(
+            run("umask 777777777777777 2>&1").0,
+            "osh: umask: 777777777777777: octal number out of range\n"
+        );
     }
 
     #[test]

@@ -10,8 +10,6 @@
 # A genuine false positive belongs in the IGNORE table in the script, which
 # records *why*, not here, which records only *that*.
 
-kernel/src/net/raw.rs:CLAIMED
-kernel/src/net/raw.rs:OWNER
 posix/src/crt.rs:EXCEPTION_BUF
 posix/src/crt.rs:INIT_FDS_BUF
 posix/src/crt.rs:ON_EXIT_COUNT

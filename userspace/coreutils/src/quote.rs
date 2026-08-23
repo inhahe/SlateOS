@@ -852,6 +852,38 @@ pub fn os_bytes(s: &std::ffi::OsStr) -> std::borrow::Cow<'_, [u8]> {
     }
 }
 
+/// [`os_bytes`]'s inverse: a name that has been taken apart as bytes, put back
+/// together as something a syscall will accept.
+///
+/// A utility that does path *arithmetic* — `rmdir -p` walking to a parent,
+/// `dirname`, `basename` — has to cut the name somewhere, and the only place it
+/// may cut is a byte boundary, because on this OS a path is bytes and `/` is
+/// the one separator (`design.txt`). Cutting `Path::parent`-wise instead is not
+/// a stylistic difference: measured, `rmdir -p ./cc` removes `cc` and then
+/// tries to remove `.`, which `Path::parent` would never produce.
+///
+/// Round-tripping through this pair is exact on the target, where an `OsStr`
+/// *is* its bytes. On a Windows host it is not — [`os_bytes`] is lossy there —
+/// so a name the host cannot represent comes back with replacement characters.
+/// That only affects developing and testing on Windows, and it is the same
+/// limitation [`os_bytes`] already documents; the alternative is having no byte
+/// view at all, which would mean no path arithmetic that is correct on the
+/// target.
+#[cfg(unix)]
+#[must_use]
+pub fn os_from_bytes(b: &[u8]) -> std::ffi::OsString {
+    use std::os::unix::ffi::OsStringExt;
+    std::ffi::OsString::from_vec(b.to_vec())
+}
+
+#[cfg(not(unix))]
+#[must_use]
+pub fn os_from_bytes(b: &[u8]) -> std::ffi::OsString {
+    // The bytes a non-unix `os_bytes` hands out came from a `String`, so they
+    // are valid UTF-8 and this second conversion loses nothing further.
+    std::ffi::OsString::from(String::from_utf8_lossy(b).into_owned())
+}
+
 /// [`quotef`] for a path, a `String`, or anything else a call site already
 /// holds — which is the form nearly every caller wants.
 ///

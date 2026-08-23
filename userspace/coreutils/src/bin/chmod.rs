@@ -1,17 +1,56 @@
-//! chmod — change file mode bits.
+//! `chmod` — change file mode bits.
 //!
-//! Usage: chmod [-R|--recursive] [--] MODE FILE...
-//!   MODE is an octal number (e.g. 755) or symbolic (e.g. u+x,g-w).
-//!   -R, --recursive  operate recursively on directories.
-//!   --               end of options; everything after is MODE then FILEs.
+//! # What was here before
 //!
-//! Note the asymmetry between `-R` and `-r`: **`-R` is the recursion flag and
-//! `-r` is a mode**, the `-` operator applied to the read bit, exactly like the
-//! `-w` in `chmod -w file`. POSIX specifies the mode operand may begin with a
-//! `-`, which is why `parse_args` cannot simply treat every leading dash as an
-//! option. Getting this wrong is not a cosmetic incompatibility: `chmod -r f`
-//! is the ordinary way to make a file unreadable, and reading its `-r` as
-//! "recurse" leaves the file readable while reporting a usage error.
+//! A `Vec<String>` argv, a hand-written symbolic-mode parser, and a walk that
+//! re-parsed the mode string once per file. The parser is gone: it is
+//! [`modechange`] now, whose module docs list the thirteen measured ways it and
+//! its three siblings were wrong. What is left here is argv, the walk, and the
+//! diagnostics — and each of those had defects of its own:
+//!
+//! 1. **`env::args()` panicked on a non-UTF-8 argument**, which on this OS is a
+//!    legal file name.
+//! 2. **`-c`, `-f`, `-v`, `--reference`, `--preserve-root`, `--help` and
+//!    `--version` did not exist.** `chmod --reference=f g` treated
+//!    `--reference=f` as an unrecognised option and `chmod --help` printed a
+//!    usage error.
+//! 3. **The mode was recompiled for every file** — which is not merely wasteful:
+//!    it is why the setuid-on-a-directory rule could not be expressed, since
+//!    "did the string *mention* setgid" is a property of the string that has to
+//!    outlive the parse.
+//! 4. **The umask was never read**, so `chmod +w f` granted `a+w`.
+//! 5. **Every error was worded `chmod: PATH: MESSAGE`**, where GNU words each
+//!    failure for what it was: `cannot access`, `cannot read directory`,
+//!    `changing permissions of`. A script grepping for one of those found
+//!    nothing.
+//! 6. **The mode operand's leading `-` was guessed at** with a table of
+//!    characters that "may follow a `-` in a mode". GNU does not guess: every
+//!    one of those characters is a *declared option letter* taking an optional
+//!    argument, which is why `chmod -w` works and `chmod -Rw` is an error rather
+//!    than "recurse, remove write".
+//!
+//! # `-R` is recursion and `-r` is a mode
+//!
+//! POSIX allows the mode operand to begin with `-`, so a leading dash is not
+//! proof of an option. GNU resolves this inside `getopt` rather than beside it:
+//! its option string is
+//!
+//! ```text
+//! Rcfvr::w::x::X::s::t::u::g::o::a::,::+::=::0::1::2::3::4::5::6::7::
+//! ```
+//!
+//! — every permission letter, every `who` letter, every operator and every
+//! octal digit is an option taking an *optional* argument. `chmod -w f` is
+//! therefore the option `w` with no value, and the mode string is rebuilt from
+//! **the whole argv word** it came out of (`argv[optind - 1]`), several such
+//! words being joined with commas. That last detail is why this file asks the
+//! parser for [`current_word`](coreutils::getopt::Parser::current_word):
+//! reconstructing `-` + `w` would turn `chmod -Rw d` into a silent recursive
+//! `-w`, where GNU answers `chmod: invalid mode: ‘-Rw’`. Measured.
+//!
+//! Getting the `-r`/`-R` distinction wrong is not cosmetic: `chmod -r f` is the
+//! ordinary way to make a file unreadable, and reading its `-r` as "recurse"
+//! leaves the file readable while reporting a usage error.
 //!
 //! # Symbolic links, and why `-R` never touches one
 //!
@@ -24,24 +63,328 @@
 //! 1. **It is not descended into.** The recursion used to test `path.is_dir()`,
 //!    which follows links, so `srv/x -> /etc` turned `chmod -R 777 srv/` into
 //!    `chmod -R 777 /etc`. It now tests the link's own type.
-//! 2. **It is skipped entirely**, as GNU chmod skips it. A symlink's own mode
-//!    bits are never consulted by anything, so the only effect a `chmod` on one
-//!    can have is on its target — and `srv/x -> /etc/shadow` would otherwise
-//!    make `/etc/shadow` world-writable.
+//! 2. **It is skipped entirely**, as GNU chmod skips it (`process_file` acts
+//!    only `if (! S_ISLNK (…))`). A symlink's own mode bits are never consulted
+//!    by anything, so the only effect a `chmod` on one can have is on its
+//!    target — and `srv/x -> /etc/shadow` would otherwise make `/etc/shadow`
+//!    world-writable.
 //!
 //! A link named directly on the command line *is* followed, also matching GNU
 //! (`fts` with `FTS_COMFOLLOW`): the caller typed that name and can see what it
-//! is.
+//! is. Measured: `chmod 755 s/link` changes `s/real`.
 //!
 //! Built only on unix-family targets (our x86_64-slateos presents as
-//! linux-musl, so `cfg(unix)` matches).  On non-unix hosts (e.g.
-//! Windows when running `cargo test --workspace`), a stub `main` keeps
-//! the workspace compile-clean.
-//!
-//! The pure helpers (`parse_args`, `parse_symbolic`, `apply_mode_string`)
-//! are exposed on all platforms so they can be unit-tested anywhere.
+//! linux-musl, so `cfg(unix)` matches). On non-unix hosts — Windows, where
+//! `cargo test --workspace` runs — a stub `main` keeps the workspace
+//! compile-clean, and everything that does not touch a file is still compiled
+//! and tested there.
 
 #![cfg_attr(not(unix), allow(dead_code))]
+
+use coreutils::getopt::{self, Opt, Program, Takes};
+use coreutils::quote::{os_bytes, quote, quoteaf_os};
+use modechange::{Changes, compile, permission_string};
+use std::ffi::{OsStr, OsString};
+
+/// `chmod`'s usage status is 1 — measured: `chmod; echo $?` prints 1.
+const CHMOD: Program = Program::new("chmod", 1);
+
+/// GNU `chmod`'s `getopt_long` string, exactly.
+///
+/// See the module docs for what the twenty-two optional-argument letters after
+/// `Rcfv` are doing there. They are what makes `chmod -w f` parse.
+const SHORT_OPTIONS: &str = concat!(
+    "Rcfvr::w::x::X::s::t::u::g::o::a::,::+::=::",
+    "0::1::2::3::4::5::6::7::"
+);
+
+/// GNU `chmod`'s `long_options[]`, in its declaration order.
+const LONG_OPTIONS: &[(&str, Takes)] = &[
+    ("changes", Takes::Nothing),
+    ("recursive", Takes::Nothing),
+    ("no-preserve-root", Takes::Nothing),
+    ("preserve-root", Takes::Nothing),
+    ("quiet", Takes::Nothing),
+    ("reference", Takes::Required),
+    ("silent", Takes::Nothing),
+    ("verbose", Takes::Nothing),
+    ("help", Takes::Nothing),
+    ("version", Takes::Nothing),
+];
+
+/// `--quiet` and `--silent` are one option. Without this the parser would call
+/// `--s` ambiguous, which it is not: it resolves to `silent`, an alias of
+/// `quiet`, and GNU accepts it.
+const LONG_ALIASES: &[(&str, &str)] = &[("silent", "quiet")];
+
+/// How much `chmod` says about each file it visits.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Verbosity {
+    /// `-v`: a line for every file, changed or not.
+    High,
+    /// `-c`: a line only for a file whose mode actually moved.
+    ChangesOnly,
+    /// The default: nothing.
+    Off,
+}
+
+/// Where the new mode comes from.
+#[derive(Clone, PartialEq, Eq, Debug)]
+enum Source {
+    /// A mode string, already compiled, along with the umask to apply to any
+    /// clause that named no `who`.
+    Spec(Changes),
+    /// `--reference=RFILE`: whatever mode that file turns out to have. Resolved
+    /// late because it needs a `stat`, and this parse touches no filesystem.
+    Reference(OsString),
+}
+
+#[derive(Clone, PartialEq, Eq, Debug)]
+struct Settings {
+    recursive: bool,
+    /// `-f`: suppress the diagnostics, but not the exit status.
+    force_silent: bool,
+    verbosity: Verbosity,
+    /// `--preserve-root`: refuse to recurse from `/`.
+    preserve_root: bool,
+    /// Set by any mode given as option letters, which is the only way a mode
+    /// can be surprising enough to warrant the check: `chmod -w f` under a
+    /// umask does less than it looks like it does.
+    diagnose_surprises: bool,
+    source: Source,
+    files: Vec<OsString>,
+}
+
+/// What the command line asked for.
+#[derive(Clone, PartialEq, Eq, Debug)]
+enum Request {
+    Help,
+    Version,
+    Run(Box<Settings>),
+}
+
+fn help_text() -> String {
+    "\
+Usage: chmod [OPTION]... MODE[,MODE]... FILE...
+  or:  chmod [OPTION]... OCTAL-MODE FILE...
+  or:  chmod [OPTION]... --reference=RFILE FILE...
+Change the mode of each FILE to MODE.
+With --reference, change the mode of each FILE to that of RFILE.
+
+  -c, --changes          like verbose but report only when a change is made
+  -f, --silent, --quiet  suppress most error messages
+  -v, --verbose          output a diagnostic for every file processed
+      --no-preserve-root  do not treat '/' specially (the default)
+      --preserve-root    fail to operate recursively on '/'
+      --reference=RFILE  use RFILE's mode instead of specifying MODE values.
+                         RFILE is always dereferenced if a symbolic link.
+  -R, --recursive        change files and directories recursively
+      --help        display this help and exit
+      --version     output version information and exit
+
+Each MODE is of the form '[ugoa]*([-+=]([rwxXst]*|[ugo]))+|[-+=][0-7]+'.
+"
+    .to_string()
+}
+
+// ---------------------------------------------------------------- parsing ---
+
+/// Whether `flag` is one of the option letters that are really mode text.
+fn is_mode_letter(flag: u8) -> bool {
+    matches!(flag, b'r' | b'w' | b'x' | b'X' | b's' | b't')
+        || matches!(flag, b'u' | b'g' | b'o' | b'a')
+        || matches!(flag, b',' | b'+' | b'=')
+        || flag.is_ascii_digit() && flag != b'8' && flag != b'9'
+}
+
+/// Parse `chmod`'s argv, compiling the mode as it goes.
+///
+/// The order of the three failures at the end is upstream's and is observable:
+/// `chmod xyz` is `missing operand after ‘xyz’` rather than `invalid mode`,
+/// because the operand count is checked before the string is compiled.
+///
+/// # Errors
+///
+/// An unknown option, a mode given both as option letters and by
+/// `--reference`, no operands, or a mode string that is not one.
+fn parse_args(args: &[OsString]) -> Result<Request, getopt::Error> {
+    let mut recursive = false;
+    let mut force_silent = false;
+    let mut verbosity = Verbosity::Off;
+    let mut preserve_root = false;
+    let mut reference: Option<OsString> = None;
+    // The mode as GNU builds it: the whole argv words that carried mode
+    // letters, joined with commas. `None` until one is seen, which is what
+    // distinguishes `chmod -w` (mode, no file) from `chmod` (nothing at all).
+    let mut spec: Option<Vec<u8>> = None;
+    let mut operands: Vec<OsString> = Vec::new();
+
+    let mut parser = CHMOD.parse_aliased(args, SHORT_OPTIONS, LONG_OPTIONS, LONG_ALIASES);
+    while let Some(item) = parser.next() {
+        // Taken before the match: `current_word` describes the item just
+        // yielded, and the next `next()` will move it on.
+        let word = parser.current_word().map(OsString::as_os_str);
+        match item? {
+            Opt::Operand(name) => operands.push(name.clone()),
+            Opt::Short(b'R', _) | Opt::Long("recursive", _) => recursive = true,
+            Opt::Short(b'c', _) | Opt::Long("changes", _) => verbosity = Verbosity::ChangesOnly,
+            // Both spellings, because an exact long option resolves to the name
+            // that was typed rather than to the alias's target — the alias map
+            // settles ambiguity and nothing else. See `resolve_long_aliased`.
+            Opt::Short(b'f', _) | Opt::Long("quiet" | "silent", _) => force_silent = true,
+            Opt::Short(b'v', _) | Opt::Long("verbose", _) => verbosity = Verbosity::High,
+            Opt::Long("preserve-root", _) => preserve_root = true,
+            Opt::Long("no-preserve-root", _) => preserve_root = false,
+            Opt::Long("reference", value) => reference = value,
+            Opt::Long("help", _) => return Ok(Request::Help),
+            Opt::Long("version", _) => return Ok(Request::Version),
+            Opt::Short(flag, _) if is_mode_letter(flag) => {
+                // The whole word, not the letter: see the module docs.
+                let fragment = word.map(os_bytes).unwrap_or_default();
+                let accumulated = spec.get_or_insert_with(Vec::new);
+                if !accumulated.is_empty() {
+                    accumulated.push(b',');
+                }
+                accumulated.extend_from_slice(&fragment);
+            }
+            // Unreachable: the table lists nothing else, and every entry is
+            // handled above. Refusing rather than ignoring, so an option added
+            // to the table without a handler fails loudly.
+            Opt::Long(other, _) => {
+                return Err(CHMOD.usage_referring(format!("option '--{other}' is unhandled")));
+            }
+            Opt::Short(other, _) => return Err(CHMOD.invalid_option(other)),
+        }
+    }
+
+    // Only a mode spelt as option *letters* collides with `--reference`; a mode
+    // operand does not, because `--reference` never consumes one.
+    if reference.is_some() && spec.is_some() {
+        return Err(
+            CHMOD.usage_referring("cannot combine mode and --reference options".to_string())
+        );
+    }
+    // Hence the three ways there is no mode operand to take: `--reference`
+    // supplied the mode and leaves the operand alone — measured, `chmod
+    // --reference=f 644 g` reports `cannot access '644'`, i.e. it treated `644`
+    // as a second file; the option letters already spelt one; or there is
+    // nothing left on the command line at all.
+    let mode_from_operand = if reference.is_some() || spec.is_some() || operands.is_empty() {
+        None
+    } else {
+        Some(operands.remove(0))
+    };
+
+    if operands.is_empty() {
+        // Which of the two wordings depends on where the mode came from: only
+        // an operand can be named, since option letters were spread over words
+        // that no longer exist as a unit.
+        return Err(match &mode_from_operand {
+            Some(mode) => CHMOD.usage_referring(format!(
+                "missing operand after {}",
+                quote(&os_bytes(mode.as_os_str()))
+            )),
+            None => CHMOD.usage_referring("missing operand".to_string()),
+        });
+    }
+
+    let diagnose_surprises = spec.is_some();
+    let source = match reference {
+        Some(rfile) => Source::Reference(rfile),
+        None => {
+            let text = match &mode_from_operand {
+                Some(mode) => os_bytes(mode.as_os_str()).into_owned(),
+                // One of the two is always set here: `reference` is `None`, and
+                // a missing mode was caught as `missing operand` above.
+                None => spec.clone().unwrap_or_default(),
+            };
+            let Some(changes) = compile(&text) else {
+                return Err(CHMOD.usage_referring(format!("invalid mode: {}", quote(&text))));
+            };
+            Source::Spec(changes)
+        }
+    };
+
+    Ok(Request::Run(Box::new(Settings {
+        recursive,
+        force_silent,
+        verbosity,
+        preserve_root,
+        diagnose_surprises,
+        source,
+        files: operands,
+    })))
+}
+
+// ------------------------------------------------------------ diagnostics ---
+
+/// What happened to one file, in the vocabulary `describe_change` speaks.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Outcome {
+    /// The mode was set, and it moved.
+    Succeeded,
+    /// `chmod(2)` failed, or the surprise check below condemned the result.
+    Failed,
+    /// The mode was set and came out exactly as it already was.
+    NoChangeRequested,
+    /// A symbolic link met during the walk: neither it nor its target touched.
+    NotApplied,
+    /// The file could not be stat'ed.
+    NoStat,
+}
+
+/// GNU's `describe_change`, verbatim in wording.
+///
+/// The old and new modes are printed both in octal and as `rwxrwxrwx`, which is
+/// the whole reason `-v` is worth having: `4644` and `0644` differ by a bit that
+/// the octal makes easy to miss and that the `S` in `rwSr--r--` does not.
+fn describe_change(file: &OsStr, outcome: Outcome, old_mode: u32, new_mode: u32) -> Option<String> {
+    let quoted = quoteaf_os(file);
+    let old_m = old_mode & modechange::CHMOD_MODE_BITS;
+    let new_m = new_mode & modechange::CHMOD_MODE_BITS;
+    Some(match outcome {
+        Outcome::NotApplied => {
+            format!("neither symbolic link {quoted} nor referent has been changed")
+        }
+        Outcome::NoStat => format!("{quoted} could not be accessed"),
+        Outcome::NoChangeRequested => format!(
+            "mode of {quoted} retained as {new_m:04o} ({})",
+            permission_string(new_mode)
+        ),
+        Outcome::Succeeded => format!(
+            "mode of {quoted} changed from {old_m:04o} ({}) to {new_m:04o} ({})",
+            permission_string(old_mode),
+            permission_string(new_mode)
+        ),
+        Outcome::Failed => format!(
+            "failed to change mode of {quoted} from {old_m:04o} ({}) to {new_m:04o} ({})",
+            permission_string(old_mode),
+            permission_string(new_mode)
+        ),
+    })
+}
+
+/// GNU's surprise check, for a mode written as option letters.
+///
+/// `chmod -w f` looks like it removes write from everybody, and under a umask it
+/// does not: a clause with no `who` is masked by the umask, so under `umask 022`
+/// only the owner's bit goes. Rather than silently doing less than asked, GNU
+/// compares the result against what the same string would have done with no
+/// umask, and complains if any bit survived that the naive reading would have
+/// cleared. The complaint is also a *failure* — it changes the exit status —
+/// because the file is not in the state the command line described.
+///
+/// Returns the message body, without the file name that precedes it.
+fn surprise(new_mode: u32, naively_expected: u32) -> Option<String> {
+    if new_mode & !naively_expected == 0 {
+        return None;
+    }
+    Some(format!(
+        "new permissions are {}, not {}",
+        permission_string(new_mode),
+        permission_string(naively_expected)
+    ))
+}
 
 #[cfg(not(unix))]
 fn main() {
@@ -49,579 +392,643 @@ fn main() {
     std::process::exit(1);
 }
 
+// ------------------------------------------------------------------- unix ---
+
 #[cfg(unix)]
-use coreutils::quote::quotef_os;
-#[cfg(unix)]
-use std::env;
-#[cfg(unix)]
-use std::fs;
-#[cfg(unix)]
-use std::os::unix::fs::PermissionsExt;
-#[cfg(unix)]
-use std::path::Path;
-#[cfg(unix)]
-use std::process;
+mod imp {
+    use super::{
+        CHMOD, Outcome, Request, Settings, Source, Verbosity, describe_change, help_text,
+        parse_args, surprise,
+    };
+    use coreutils::errmsg::strerror;
+    use coreutils::quote::{quoteaf_os, quotef_os};
+    use modechange::{Changes, adjust, from_reference};
+    use std::ffi::{OsStr, OsString};
+    use std::fs;
+    use std::io::{self, Write};
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    use std::path::{Path, PathBuf};
+    use std::process::ExitCode;
 
-#[derive(Default)]
-#[cfg_attr(test, derive(Debug, PartialEq, Eq))]
-struct ChmodArgs {
-    recursive: bool,
-    mode: String,
-    paths: Vec<String>,
-}
-
-/// Characters that may follow a leading `-` in a *mode operand* rather than an
-/// option: the three operators, the permission letters, the `ugoa` who-letters,
-/// the `st` special bits, and the `,` that separates clauses. Deliberately does
-/// not contain `R`, which is the recursion flag — that one letter is the whole
-/// difference between `chmod -R` and `chmod -r`.
-const MODE_OPERAND_CHARS: &str = "rwxXstugoa,+-=";
-
-/// What a recursive walk does with one entry it found.
-#[cfg_attr(test, derive(Debug, PartialEq, Eq))]
-enum WalkAction {
-    /// A symbolic link: leave it, and everything it points at, alone.
-    Skip,
-    /// A real directory: walk into it.
-    Descend,
-    /// Anything else: chmod it.
-    Apply,
-}
-
-/// Decide what to do with a walk entry from its `lstat` file type.
-///
-/// Extracted as a pure function purely so it can be tested: the walk itself is
-/// `cfg(unix)`, so on the build host — where `cargo test --workspace` runs —
-/// not one line of it is compiled, and a rule nobody can test is a rule that
-/// quietly stops holding. `is_symlink` is checked first and wins outright,
-/// which is the entire fix: `is_dir` alone had already followed the link by the
-/// time it answered.
-fn walk_action(is_symlink: bool, is_dir: bool) -> WalkAction {
-    if is_symlink {
-        WalkAction::Skip
-    } else if is_dir {
-        WalkAction::Descend
-    } else {
-        WalkAction::Apply
-    }
-}
-
-/// Whether `arg` is a mode written with a leading `-`, e.g. `-r`, `-w`, `-rw`.
-///
-/// POSIX allows the mode operand to start with `-`, so a leading dash cannot be
-/// taken as proof of an option. This is the test that separates the two.
-fn is_mode_operand(arg: &str) -> bool {
-    match arg.strip_prefix('-') {
-        Some(rest) => !rest.is_empty() && rest.chars().all(|c| MODE_OPERAND_CHARS.contains(c)),
-        None => false,
-    }
-}
-
-/// Parse chmod's argv.  The first positional argument is the mode string; the
-/// rest are file paths.  Returns an error if there are fewer than two
-/// positionals (i.e. nothing to chmod), or if an argument is an option we do
-/// not recognise.
-///
-/// An unknown leading-dash argument is rejected rather than silently taken as a
-/// path, because the alternative is a `chmod -v 644 f` that reports
-/// `invalid operator in mode: -v` — an error about the wrong thing, pointing
-/// the reader at their mode instead of at the flag we do not implement.
-fn parse_args(args: &[String]) -> Result<ChmodArgs, String> {
-    let mut out = ChmodArgs::default();
-    let mut positional: Vec<&str> = Vec::new();
-    let mut end_of_options = false;
-
-    for arg in args {
-        if end_of_options {
-            positional.push(arg);
-            continue;
-        }
-        // `--` exists so a file genuinely named `-r` can be addressed.
-        if arg == "--" {
-            end_of_options = true;
-            continue;
-        }
-        if arg == "-R" || arg == "--recursive" {
-            out.recursive = true;
-            continue;
-        }
-        // A bare `-` is not an option; let it fall through and fail as a mode,
-        // which is what it is being used as.
-        if arg.starts_with('-') && arg != "-" && !is_mode_operand(arg) {
-            return Err(if arg.starts_with("--") {
-                format!("unrecognized option '{arg}'")
-            } else {
-                format!("invalid option -- '{}'", arg.trim_start_matches('-'))
-            });
-        }
-        positional.push(arg);
+    // SAFETY (declaration): `umask` is POSIX, takes and returns `mode_t`, and
+    // has no failure mode. `mode_t` is `u32` on Linux and on x86_64-slateos.
+    unsafe extern "C" {
+        fn umask(mask: u32) -> u32;
     }
 
-    if positional.len() < 2 {
-        return Err("missing operand".to_string());
+    /// Read the process umask.
+    ///
+    /// POSIX offers no way to read it without writing it, so this does what GNU
+    /// does: set it to 0 and keep the answer. Not restoring it is deliberate and
+    /// upstream's — `chmod` creates no files, and the process is about to exit.
+    fn read_umask() -> u32 {
+        // SAFETY: no arguments to get wrong, no pointers, no failure.
+        unsafe { umask(0) }
     }
 
-    out.mode = positional.first().copied().unwrap_or_default().to_string();
-    out.paths = positional
-        .get(1..)
-        .unwrap_or(&[])
-        .iter()
-        .map(|s| (*s).to_string())
-        .collect();
-    Ok(out)
-}
-
-/// Resolve a mode spec (octal or symbolic) against an optional current
-/// permission word, returning the new u32 mode.  Octal specs ignore the
-/// current value entirely; symbolic specs mask `current` to its permission
-/// bits and apply each clause in order.
-fn apply_mode_string(spec: &str, current: u32) -> Result<u32, String> {
-    if let Ok(mode) = u32::from_str_radix(spec, 8) {
-        return Ok(mode);
+    /// Everything the walk needs that does not change from file to file.
+    struct Job {
+        settings: Settings,
+        changes: Changes,
+        umask_value: u32,
+        /// `(dev, ino)` of `/`, when `--preserve-root` and `-R` are both on.
+        root_dev_ino: Option<(u64, u64)>,
+        status: u8,
     }
-    parse_symbolic(current, spec)
-}
 
-/// Parse symbolic mode like "u+x,g-w,o=r" and apply to `current`.
-fn parse_symbolic(current: u32, spec: &str) -> Result<u32, String> {
-    let mut mode = current & 0o7777; // keep only permission bits
-
-    for part in spec.split(',') {
-        let part = part.trim();
-        if part.is_empty() {
-            continue;
-        }
-
-        // Parse who: u, g, o, a (default = a)
-        let mut who_mask: u32 = 0;
-        let mut i: usize = 0;
-        let bytes = part.as_bytes();
-
-        while i < bytes.len() {
-            let Some(b) = bytes.get(i) else { break };
-            match *b {
-                b'u' => who_mask |= 0o700,
-                b'g' => who_mask |= 0o070,
-                b'o' => who_mask |= 0o007,
-                b'a' => who_mask |= 0o777,
-                _ => break,
+    impl Job {
+        /// Report a failure, unless `-f` said not to. The status moves either
+        /// way: silence is about the message, not about the answer.
+        fn fail(&mut self, message: &str) {
+            if !self.settings.force_silent {
+                eprintln!("chmod: {message}");
             }
-            i = i.saturating_add(1);
+            self.status = 1;
         }
 
-        if who_mask == 0 {
-            who_mask = 0o777; // default = 'a'
+        fn say(&self, line: &str) {
+            println!("{line}");
         }
+    }
 
-        if i >= bytes.len() {
-            return Err(format!("invalid mode: {part}"));
-        }
+    pub fn main() -> ExitCode {
+        let args: Vec<OsString> = std::env::args_os().skip(1).collect();
+        let settings = match parse_args(&args) {
+            Ok(Request::Help) => {
+                print!("{}", help_text());
+                return ExitCode::SUCCESS;
+            }
+            Ok(Request::Version) => {
+                println!("chmod (SlateOS coreutils) 0.1.0");
+                return ExitCode::SUCCESS;
+            }
+            Ok(Request::Run(settings)) => *settings,
+            Err(e) => {
+                eprintln!("chmod: {e}");
+                return ExitCode::from(u8::try_from(e.status).unwrap_or(1));
+            }
+        };
 
-        let op = *bytes.get(i).unwrap_or(&0);
-        i = i.saturating_add(1);
-
-        // Parse permission chars.  `perm_bits` collects the rwx bits
-        // (masked by `who_mask`); `high_bits` collects setuid/setgid/
-        // sticky, which live outside the 0o777 range and would be
-        // erased if naively masked by who_mask.
-        let mut perm_bits: u32 = 0;
-        let mut high_bits: u32 = 0;
-        while i < bytes.len() {
-            let Some(b) = bytes.get(i) else { break };
-            match *b {
-                b'r' => perm_bits |= 0o444,
-                b'w' => perm_bits |= 0o222,
-                b'x' => perm_bits |= 0o111,
-                b's' => {
-                    // `s` on `u` → setuid (0o4000); on `g` → setgid
-                    // (0o2000).  POSIX leaves "o+s" implementation-
-                    // defined; we treat it as a no-op.
-                    if who_mask & 0o700 != 0 {
-                        high_bits |= 0o4000;
-                    }
-                    if who_mask & 0o070 != 0 {
-                        high_bits |= 0o2000;
+        // The umask matters only to a mode string; `--reference` copies bits
+        // that are already decided. GNU reads it in exactly that branch.
+        let (changes, umask_value) = match &settings.source {
+            Source::Spec(changes) => (changes.clone(), read_umask()),
+            Source::Reference(rfile) => {
+                // Dereferenced: `metadata`, not `symlink_metadata`. GNU's help
+                // text promises this in as many words.
+                match fs::metadata(Path::new(rfile)) {
+                    Ok(meta) => (from_reference(meta.permissions().mode()), 0),
+                    Err(e) => {
+                        eprintln!(
+                            "chmod: failed to get attributes of {}: {}",
+                            quoteaf_os(rfile),
+                            strerror(&e)
+                        );
+                        return ExitCode::from(1);
                     }
                 }
-                b't' => high_bits |= 0o1000, // sticky (not who-scoped)
-                _ => break,
             }
-            i = i.saturating_add(1);
-        }
+        };
 
-        let effective = (perm_bits & who_mask) | high_bits;
-
-        match op {
-            b'+' => mode |= effective,
-            b'-' => mode &= !effective,
-            b'=' => {
-                mode &= !who_mask;
-                mode |= effective;
+        let root_dev_ino = if settings.recursive && settings.preserve_root {
+            match fs::metadata(Path::new("/")) {
+                Ok(meta) => Some((meta.dev(), meta.ino())),
+                Err(e) => {
+                    eprintln!(
+                        "chmod: failed to get attributes of {}: {}",
+                        quoteaf_os("/"),
+                        strerror(&e)
+                    );
+                    return ExitCode::from(1);
+                }
             }
-            _ => return Err(format!("invalid operator in mode: {part}")),
+        } else {
+            None
+        };
+
+        let mut job = Job {
+            settings,
+            changes,
+            umask_value,
+            root_dev_ino,
+            status: 0,
+        };
+
+        for file in job.settings.files.clone() {
+            // Level 0 follows a symbolic link, as `FTS_COMFOLLOW` does: the
+            // caller typed this name. Every path below it does not.
+            visit(&mut job, &PathBuf::from(&file), true);
         }
+
+        // A closed stdout must not pass for success when `-v` had things to say.
+        if io::stdout().flush().is_err() {
+            job.status = 1;
+        }
+        ExitCode::from(job.status)
     }
 
-    Ok(mode)
-}
+    /// Apply the mode to one path, and — under `-R`, and only for a real
+    /// directory — to everything beneath it.
+    ///
+    /// Errors are reported and recorded rather than returned, because a walk
+    /// that stops at the first failure leaves the caller with a tree in an
+    /// unknown state: `chmod -R 700 ~` hitting one unreadable subdirectory used
+    /// to abandon every sibling after it, silently leaving them world-readable.
+    fn visit(job: &mut Job, path: &Path, top_level: bool) {
+        // `metadata` follows, `symlink_metadata` does not. Which one is right is
+        // the whole symlink policy in one line: at the top the caller named this
+        // path, below it a stranger did.
+        let meta = if top_level {
+            fs::metadata(path)
+        } else {
+            fs::symlink_metadata(path)
+        };
+        let meta = match meta {
+            Ok(m) => m,
+            Err(e) => {
+                job.fail(&format!(
+                    "cannot access {}: {}",
+                    quoteaf_os(path),
+                    strerror(&e)
+                ));
+                if job.settings.verbosity == Verbosity::High {
+                    if let Some(line) = describe_change(path.as_os_str(), Outcome::NoStat, 0, 0) {
+                        job.say(&line);
+                    }
+                }
+                return;
+            }
+        };
 
-#[cfg(unix)]
-fn main() {
-    let args: Vec<String> = env::args().skip(1).collect();
-    let parsed = match parse_args(&args) {
-        Ok(p) => p,
-        Err(e) => {
-            eprintln!("chmod: {e}");
-            eprintln!("Usage: chmod [-R|--recursive] [--] MODE FILE...");
-            process::exit(1);
-        }
-    };
-
-    let mut exit_code = 0;
-    for path_str in &parsed.paths {
-        let path = Path::new(path_str);
-        // `is_dir()` follows, which is correct *here*: a command-line symlink
-        // is dereferenced, as it is by GNU chmod. Inside `chmod_recursive` the
-        // opposite rule applies — see the module doc.
-        if parsed.recursive && path.is_dir() {
-            chmod_recursive(path, &parsed.mode, &mut exit_code);
-        } else if let Err(e) = apply_chmod(path, &parsed.mode) {
-            eprintln!("chmod: {}: {e}", quotef_os(path_str));
-            exit_code = 1;
-        }
-    }
-
-    process::exit(exit_code);
-}
-
-/// Apply `mode_str` to `dir` and everything beneath it.
-///
-/// Errors are reported and recorded in `exit_code` rather than returned,
-/// because a walk that stops at the first failure leaves the caller with a tree
-/// in an unknown state: `chmod -R 700 ~` hitting one unreadable subdirectory
-/// used to abandon every sibling after it, silently leaving them world-
-/// readable. GNU chmod reports and keeps going, and so does this.
-#[cfg(unix)]
-fn chmod_recursive(dir: &Path, mode_str: &str, exit_code: &mut i32) {
-    if let Err(e) = apply_chmod(dir, mode_str) {
-        eprintln!("chmod: {}: {e}", quotef_os(dir));
-        *exit_code = 1;
-    }
-
-    let entries = match fs::read_dir(dir) {
-        Ok(e) => e,
-        Err(e) => {
-            eprintln!("chmod: {}: {e}", quotef_os(dir));
-            *exit_code = 1;
+        // A link below the top level is left alone entirely — see the module
+        // docs. `-v` still says so, as GNU does.
+        if !top_level && meta.file_type().is_symlink() {
+            if job.settings.verbosity == Verbosity::High {
+                if let Some(line) = describe_change(path.as_os_str(), Outcome::NotApplied, 0, 0) {
+                    job.say(&line);
+                }
+            }
             return;
         }
-    };
-    for entry_result in entries {
-        let entry = match entry_result {
-            Ok(e) => e,
-            Err(e) => {
-                eprintln!("chmod: {}: {e}", quotef_os(dir));
-                *exit_code = 1;
-                continue;
-            }
-        };
-        let path = entry.path();
-        // `file_type()` is lstat-based: a symlink to a directory reports
-        // `is_symlink()`, not `is_dir()`, so neither branch below can leave the
-        // tree. An entry whose type cannot be read is treated as a link — the
-        // conservative guess, costing at worst one file left unchanged.
-        let Ok(ft) = entry.file_type() else {
-            eprintln!(
-                "chmod: {}: cannot determine file type; skipping",
-                quotef_os(&path)
-            );
-            *exit_code = 1;
-            continue;
-        };
-        match walk_action(ft.is_symlink(), ft.is_dir()) {
-            // Deliberately silent: GNU chmod skips links without comment, and
-            // a tree full of them would otherwise bury the real diagnostics.
-            WalkAction::Skip => {}
-            WalkAction::Descend => chmod_recursive(&path, mode_str, exit_code),
-            WalkAction::Apply => {
-                if let Err(e) = apply_chmod(&path, mode_str) {
-                    eprintln!("chmod: {}: {e}", quotef_os(&path));
-                    *exit_code = 1;
-                }
+
+        if let Some((dev, ino)) = job.root_dev_ino {
+            if meta.dev() == dev && meta.ino() == ino {
+                warn_about_root(job, path);
+                return;
             }
         }
+
+        let old_mode = meta.permissions().mode();
+        let is_dir = meta.file_type().is_dir();
+        let new_mode = adjust(old_mode, is_dir, job.umask_value, &job.changes).mode;
+
+        let mut outcome = match fs::set_permissions(path, fs::Permissions::from_mode(new_mode)) {
+            Ok(()) => Outcome::Succeeded,
+            Err(e) => {
+                job.fail(&format!(
+                    "changing permissions of {}: {}",
+                    quoteaf_os(path),
+                    strerror(&e)
+                ));
+                Outcome::Failed
+            }
+        };
+
+        // Whether anything moved can only be answered by looking: the kernel
+        // silently drops setuid and setgid in cases the caller cannot predict,
+        // so a `chmod` that "succeeded" may have changed nothing at all.
+        if job.settings.verbosity != Verbosity::Off && outcome == Outcome::Succeeded {
+            let stored = if new_mode & 0o7000 != 0 {
+                fs::metadata(path).map_or(new_mode, |m| m.permissions().mode())
+            } else {
+                new_mode
+            };
+            if (old_mode ^ stored) & modechange::CHMOD_MODE_BITS == 0 {
+                outcome = Outcome::NoChangeRequested;
+            }
+        }
+
+        if matches!(outcome, Outcome::Succeeded | Outcome::NoChangeRequested)
+            && job.settings.diagnose_surprises
+        {
+            // The same string with no umask: what the command line looked like
+            // it asked for.
+            let naive = adjust(old_mode, is_dir, 0, &job.changes).mode;
+            if let Some(body) = surprise(new_mode, naive) {
+                job.fail(&format!("{}: {body}", quotef_os(path)));
+                outcome = Outcome::Failed;
+            }
+        }
+
+        if job.settings.verbosity == Verbosity::High
+            || (job.settings.verbosity == Verbosity::ChangesOnly && outcome == Outcome::Succeeded)
+        {
+            if let Some(line) = describe_change(path.as_os_str(), outcome, old_mode, new_mode) {
+                job.say(&line);
+            }
+        }
+
+        if !job.settings.recursive || !is_dir {
+            return;
+        }
+        descend(job, path);
+    }
+
+    /// Read one directory and visit every name in it.
+    fn descend(job: &mut Job, dir: &Path) {
+        let entries = match fs::read_dir(dir) {
+            Ok(entries) => entries,
+            Err(e) => {
+                job.fail(&format!(
+                    "cannot read directory {}: {}",
+                    quoteaf_os(dir),
+                    strerror(&e)
+                ));
+                return;
+            }
+        };
+        for entry in entries {
+            match entry {
+                Ok(entry) => visit(job, &entry.path(), false),
+                Err(e) => job.fail(&format!(
+                    "cannot read directory {}: {}",
+                    quoteaf_os(dir),
+                    strerror(&e)
+                )),
+            }
+        }
+    }
+
+    /// gnulib's `ROOT_DEV_INO_WARN`, which is two messages rather than one so
+    /// that the second names the escape hatch.
+    fn warn_about_root(job: &mut Job, path: &Path) {
+        let named: &OsStr = path.as_os_str();
+        if named == OsStr::new("/") {
+            job.fail(&format!(
+                "it is dangerous to operate recursively on {}",
+                quoteaf_os(named)
+            ));
+        } else {
+            job.fail(&format!(
+                "it is dangerous to operate recursively on {} (same as {})",
+                quoteaf_os(named),
+                quoteaf_os("/")
+            ));
+        }
+        // Deliberately routed through `fail` as well, so `-f` silences both
+        // halves together; a lone "use --no-preserve-root" would be baffling.
+        job.fail("use --no-preserve-root to override this failsafe");
     }
 }
 
 #[cfg(unix)]
-fn apply_chmod(path: &Path, mode_str: &str) -> Result<(), String> {
-    // The current mode is the base a symbolic spec modifies, so a failure to
-    // read it is fatal to the operation rather than something to paper over.
-    // This used to be `.unwrap_or(0)`, which turned an unreadable mode into
-    // "no bits set" and made `chmod u+x f` *clear every other permission on
-    // the file* instead of failing.
-    let current = fs::metadata(path)
-        .map(|m| m.permissions().mode())
-        .map_err(|e| format!("{e}"))?;
-    let new_mode = apply_mode_string(mode_str, current)?;
-    let perms = fs::Permissions::from_mode(new_mode);
-    fs::set_permissions(path, perms).map_err(|e| format!("{e}"))
+fn main() -> std::process::ExitCode {
+    imp::main()
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::panic)]
+#[allow(clippy::unwrap_used, clippy::panic, clippy::indexing_slicing)]
 mod tests {
     use super::*;
+    // Applying a mode is `imp`'s job, not this module's, so the top level does
+    // not import it; the tests do it directly to check what `imp` would compute.
+    use modechange::adjust;
 
-    fn s(items: &[&str]) -> Vec<String> {
-        items.iter().map(|x| (*x).to_string()).collect()
+    fn argv(args: &[&str]) -> Vec<OsString> {
+        args.iter().map(OsString::from).collect()
     }
 
-    // ---------------- walk_action (symlink policy) ----------------
-    //
-    // These guard a security boundary, so they are written as the rule rather
-    // than as the code: a red one here is a question about the rule, not an
-    // assertion to update. See known-issues.md →
-    // `B-chmod-FOLLOWS-SYMLINKS-WHILE-RECURSING`.
-
-    #[test]
-    fn walk_skips_a_symlink() {
-        assert_eq!(walk_action(true, false), WalkAction::Skip);
-    }
-
-    #[test]
-    fn walk_skips_a_symlink_to_a_directory_rather_than_descending() {
-        // The whole bug in one assertion. `is_dir()` on a link to a directory
-        // answers true, and answering "descend" to that is how `chmod -R`
-        // walked out of the tree it was given.
-        assert_eq!(walk_action(true, true), WalkAction::Skip);
-    }
-
-    #[test]
-    fn walk_descends_into_a_real_directory() {
-        assert_eq!(walk_action(false, true), WalkAction::Descend);
-    }
-
-    #[test]
-    fn walk_applies_to_a_regular_file() {
-        assert_eq!(walk_action(false, false), WalkAction::Apply);
-    }
-
-    // ---------------- parse_args ----------------
-
-    #[test]
-    fn parse_no_args_errors() {
-        let err = parse_args(&s(&[])).unwrap_err();
-        assert!(err.contains("missing operand"));
-    }
-
-    #[test]
-    fn parse_mode_only_errors() {
-        let err = parse_args(&s(&["755"])).unwrap_err();
-        assert!(err.contains("missing operand"));
-    }
-
-    #[test]
-    fn parse_mode_and_one_file() {
-        let a = parse_args(&s(&["755", "a.txt"])).unwrap();
-        assert!(!a.recursive);
-        assert_eq!(a.mode, "755");
-        assert_eq!(a.paths, vec!["a.txt"]);
-    }
-
-    #[test]
-    fn parse_recursive_dash_r_uppercase() {
-        let a = parse_args(&s(&["-R", "755", "dir"])).unwrap();
-        assert!(a.recursive);
-        assert_eq!(a.mode, "755");
-        assert_eq!(a.paths, vec!["dir"]);
-    }
-
-    // `-r` is a MODE, not a flag. This previously asserted the opposite, which
-    // is how the bug survived: fixing the parser turned an existing test red,
-    // which reads like a regression rather than the fix it is.
-    #[test]
-    fn parse_lowercase_r_is_a_mode_not_recursion() {
-        let a = parse_args(&s(&["-r", "f"])).unwrap();
-        assert!(!a.recursive);
-        assert_eq!(a.mode, "-r");
-        assert_eq!(a.paths, vec!["f"]);
-    }
-
-    #[test]
-    fn parse_lowercase_r_alone_is_missing_operand() {
-        let err = parse_args(&s(&["-r"])).unwrap_err();
-        assert!(err.contains("missing operand"));
-    }
-
-    // The symmetry that was broken: `-w` always worked because it fell through
-    // to the mode parser; `-r` did not, only because it was special-cased.
-    #[test]
-    fn parse_dash_w_and_dash_r_behave_alike() {
-        for spec in ["-r", "-w", "-x", "-rw", "-rwx"] {
-            let a = parse_args(&s(&[spec, "f"])).unwrap();
-            assert!(!a.recursive, "{spec} must not imply recursion");
-            assert_eq!(a.mode, spec);
+    fn settings(args: &[&str]) -> Settings {
+        match parse_args(&argv(args)).unwrap() {
+            Request::Run(settings) => *settings,
+            other => panic!("expected a run, got {other:?}"),
         }
     }
 
+    /// The mode a command line resolves to, applied to `start`.
+    fn resolves_to(args: &[&str], start: u32, dir: bool, umask: u32) -> u32 {
+        match settings(args).source {
+            Source::Spec(changes) => adjust(start, dir, umask, &changes).mode,
+            Source::Reference(_) => panic!("expected a compiled mode"),
+        }
+    }
+
+    fn err(args: &[&str]) -> String {
+        parse_args(&argv(args)).unwrap_err().message()
+    }
+
+    // ------------------------------------------------------------- operands ---
+
     #[test]
-    fn parse_long_recursive() {
-        let a = parse_args(&s(&["--recursive", "755", "dir"])).unwrap();
-        assert!(a.recursive);
-        assert_eq!(a.mode, "755");
-        assert_eq!(a.paths, vec!["dir"]);
+    fn the_first_operand_is_the_mode_and_the_rest_are_files() {
+        let s = settings(&["644", "a", "b", "c"]);
+        assert_eq!(s.files, argv(&["a", "b", "c"]));
+        assert_eq!(resolves_to(&["644", "a"], 0o777, false, 0), 0o644);
     }
 
     #[test]
-    fn parse_double_dash_ends_options() {
+    fn recursion_is_an_option_wherever_it_appears() {
+        assert!(settings(&["-R", "755", "d"]).recursive);
+        assert!(settings(&["--recursive", "755", "d"]).recursive);
+        assert!(settings(&["755", "-R", "d"]).recursive);
+        assert!(!settings(&["755", "d"]).recursive);
+    }
+
+    #[test]
+    fn double_dash_ends_options() {
         // Without `--` there is no way to name a file `-R`.
-        let a = parse_args(&s(&["--", "644", "-R"])).unwrap();
-        assert!(!a.recursive);
-        assert_eq!(a.mode, "644");
-        assert_eq!(a.paths, vec!["-R"]);
+        let s = settings(&["--", "644", "-R"]);
+        assert!(!s.recursive);
+        assert_eq!(s.files, argv(&["-R"]));
+    }
+
+    // --------------------------------------------------- a mode spelt as flags ---
+
+    /// The rule the old parser guessed at: `-r` is a mode, `-R` is recursion.
+    #[test]
+    fn lowercase_r_is_a_mode_and_uppercase_r_is_recursion() {
+        assert!(!settings(&["-r", "f"]).recursive);
+        assert_eq!(resolves_to(&["-r", "f"], 0o777, false, 0), 0o333);
+        assert!(settings(&["-R", "755", "d"]).recursive);
     }
 
     #[test]
-    fn parse_unknown_short_option_rejected() {
-        let err = parse_args(&s(&["-v", "644", "f"])).unwrap_err();
-        assert!(err.contains("invalid option"), "got: {err}");
-    }
-
-    #[test]
-    fn parse_unknown_long_option_rejected() {
-        let err = parse_args(&s(&["--verbose", "644", "f"])).unwrap_err();
-        assert!(err.contains("unrecognized option"), "got: {err}");
-    }
-
-    #[test]
-    fn mode_operand_classification() {
-        for yes in ["-r", "-w", "-x", "-rwx", "-u+x", "-a=r", "-rw,-x"] {
-            assert!(is_mode_operand(yes), "{yes} should be a mode operand");
+    fn the_other_letters_behave_the_same_way() {
+        for (spec, want) in [
+            ("-r", 0o333),
+            ("-w", 0o555),
+            ("-x", 0o666),
+            ("-rw", 0o111),
+            ("-rwx", 0o000),
+        ] {
+            assert_eq!(
+                resolves_to(&[spec, "f"], 0o777, false, 0),
+                want,
+                "{spec} from 0777"
+            );
         }
-        for no in ["-R", "-v", "--recursive", "644", "u+x", "-", ""] {
-            assert!(!is_mode_operand(no), "{no} should not be a mode operand");
+    }
+
+    /// Several such words are joined with commas, exactly as upstream does when
+    /// it concatenates `argv[optind - 1]`.
+    #[test]
+    fn several_flag_words_make_one_comma_separated_mode() {
+        // `-s` then `-w`, which is `-s,-w`: strip setuid and setgid, then write.
+        assert_eq!(resolves_to(&["-s", "-w", "f"], 0o6777, false, 0), 0o555);
+    }
+
+    /// The reason this file asks the parser which *word* an option came from.
+    /// Reconstructing the option would give `-w` and silently recurse.
+    #[test]
+    fn a_mode_letter_bundled_behind_a_real_option_is_an_invalid_mode() {
+        assert_eq!(
+            err(&["-Rw", "d"]),
+            "invalid mode: \u{2018}-Rw\u{2019}\nTry 'chmod --help' for more information."
+        );
+        assert_eq!(
+            err(&["-vw", "d"]),
+            "invalid mode: \u{2018}-vw\u{2019}\nTry 'chmod --help' for more information."
+        );
+    }
+
+    /// A mode given as flags sets the surprise check; one given as an operand
+    /// does not. `chmod -w f` can do less than it says; `chmod 644 f` cannot.
+    #[test]
+    fn only_a_mode_spelt_as_flags_is_checked_for_surprises() {
+        assert!(settings(&["-w", "f"]).diagnose_surprises);
+        assert!(!settings(&["644", "f"]).diagnose_surprises);
+        assert!(!settings(&["u+w", "f"]).diagnose_surprises);
+    }
+
+    // ------------------------------------------------------------ the umask ---
+
+    /// A clause with no `who` is masked by the umask — the rule none of the
+    /// four hand-written parsers had. Here it is reaching `chmod` end to end.
+    #[test]
+    fn a_clause_with_no_who_is_masked_by_the_umask() {
+        assert_eq!(resolves_to(&["+w", "f"], 0o444, false, 0o022), 0o644);
+        assert_eq!(resolves_to(&["+w", "f"], 0o444, false, 0o000), 0o666);
+        assert_eq!(resolves_to(&["a+w", "f"], 0o444, false, 0o022), 0o666);
+    }
+
+    /// And an octal is never masked, however the umask is set.
+    #[test]
+    fn an_octal_mode_ignores_the_umask() {
+        assert_eq!(resolves_to(&["666", "f"], 0o000, false, 0o077), 0o666);
+    }
+
+    // ------------------------------------------------------------ reference ---
+
+    #[test]
+    fn reference_is_kept_unresolved_for_the_caller_to_stat() {
+        let s = settings(&["--reference=rfile", "a", "b"]);
+        assert_eq!(s.source, Source::Reference(OsString::from("rfile")));
+        assert_eq!(s.files, argv(&["a", "b"]));
+    }
+
+    /// With `--reference` the mode operand is not consumed, so what looks like
+    /// a mode is a file. Measured: GNU reports `cannot access '644'`.
+    #[test]
+    fn reference_does_not_eat_the_first_operand() {
+        let s = settings(&["--reference=rfile", "644", "g"]);
+        assert_eq!(s.files, argv(&["644", "g"]));
+    }
+
+    #[test]
+    fn a_mode_in_flags_cannot_be_combined_with_reference() {
+        assert_eq!(
+            err(&["--reference=rfile", "-w", "g"]),
+            "cannot combine mode and --reference options\n\
+             Try 'chmod --help' for more information."
+        );
+    }
+
+    // ---------------------------------------------------------- diagnostics ---
+
+    #[test]
+    fn no_arguments_at_all_is_missing_operand() {
+        assert_eq!(
+            err(&[]),
+            "missing operand\nTry 'chmod --help' for more information."
+        );
+    }
+
+    /// The two wordings, and what picks between them: a mode that came from an
+    /// operand can be named, one that came from flags cannot.
+    #[test]
+    fn a_mode_with_no_files_names_the_mode_only_when_it_was_an_operand() {
+        assert_eq!(
+            err(&["644"]),
+            "missing operand after \u{2018}644\u{2019}\n\
+             Try 'chmod --help' for more information."
+        );
+        assert_eq!(
+            err(&["-w"]),
+            "missing operand\nTry 'chmod --help' for more information."
+        );
+        assert_eq!(
+            err(&["--reference=rfile"]),
+            "missing operand\nTry 'chmod --help' for more information."
+        );
+    }
+
+    /// The operand count is checked before the mode is compiled, so this is not
+    /// `invalid mode`. Upstream's order, and observable.
+    #[test]
+    fn a_nonsense_mode_with_no_files_is_still_missing_operand() {
+        assert_eq!(
+            err(&["xyz"]),
+            "missing operand after \u{2018}xyz\u{2019}\n\
+             Try 'chmod --help' for more information."
+        );
+    }
+
+    #[test]
+    fn a_mode_that_is_not_one_is_refused_with_the_string_quoted() {
+        assert_eq!(
+            err(&["999", "f"]),
+            "invalid mode: \u{2018}999\u{2019}\nTry 'chmod --help' for more information."
+        );
+        assert_eq!(
+            err(&["u+rZZZ", "f"]),
+            "invalid mode: \u{2018}u+rZZZ\u{2019}\nTry 'chmod --help' for more information."
+        );
+    }
+
+    #[test]
+    fn an_unknown_option_is_refused_rather_than_taken_as_a_mode() {
+        assert_eq!(
+            err(&["-z", "f"]),
+            "invalid option -- 'z'\nTry 'chmod --help' for more information."
+        );
+        assert_eq!(
+            err(&["--nope", "f"]),
+            "unrecognized option '--nope'\nTry 'chmod --help' for more information."
+        );
+    }
+
+    #[test]
+    fn help_and_version_are_requests() {
+        assert_eq!(parse_args(&argv(&["--help"])).unwrap(), Request::Help);
+        assert_eq!(parse_args(&argv(&["--version"])).unwrap(), Request::Version);
+    }
+
+    /// `--silent` and `--quiet` are one option, so `--s` is unambiguous.
+    #[test]
+    fn silent_and_quiet_are_the_same_option() {
+        assert!(settings(&["--silent", "644", "f"]).force_silent);
+        assert!(settings(&["--quiet", "644", "f"]).force_silent);
+        assert!(settings(&["--s", "644", "f"]).force_silent);
+        assert!(settings(&["-f", "644", "f"]).force_silent);
+    }
+
+    #[test]
+    fn verbosity_is_the_last_of_c_and_v_that_was_given() {
+        assert_eq!(settings(&["644", "f"]).verbosity, Verbosity::Off);
+        assert_eq!(
+            settings(&["-c", "644", "f"]).verbosity,
+            Verbosity::ChangesOnly
+        );
+        assert_eq!(settings(&["-v", "644", "f"]).verbosity, Verbosity::High);
+        assert_eq!(
+            settings(&["-v", "-c", "644", "f"]).verbosity,
+            Verbosity::ChangesOnly
+        );
+        assert_eq!(
+            settings(&["-c", "-v", "644", "f"]).verbosity,
+            Verbosity::High
+        );
+    }
+
+    #[test]
+    fn preserve_root_is_off_by_default_and_the_last_word_wins() {
+        assert!(!settings(&["-R", "755", "d"]).preserve_root);
+        assert!(settings(&["--preserve-root", "-R", "755", "d"]).preserve_root);
+        assert!(
+            !settings(&["--preserve-root", "--no-preserve-root", "-R", "755", "d"]).preserve_root
+        );
+    }
+
+    // ---------------------------------------------------------- descriptions ---
+
+    #[test]
+    fn a_change_is_described_in_octal_and_in_letters() {
+        assert_eq!(
+            describe_change(OsStr::new("f"), Outcome::Succeeded, 0o644, 0o755).unwrap(),
+            "mode of 'f' changed from 0644 (rw-r--r--) to 0755 (rwxr-xr-x)"
+        );
+        assert_eq!(
+            describe_change(OsStr::new("f"), Outcome::NoChangeRequested, 0o755, 0o755).unwrap(),
+            "mode of 'f' retained as 0755 (rwxr-xr-x)"
+        );
+        assert_eq!(
+            describe_change(OsStr::new("f"), Outcome::Failed, 0o644, 0o755).unwrap(),
+            "failed to change mode of 'f' from 0644 (rw-r--r--) to 0755 (rwxr-xr-x)"
+        );
+    }
+
+    /// The case `-v` exists for: a setuid bit that the octal alone would hide.
+    #[test]
+    fn a_setuid_bit_shows_as_an_s_in_the_execute_column() {
+        assert_eq!(
+            describe_change(OsStr::new("f"), Outcome::Succeeded, 0o644, 0o4644).unwrap(),
+            "mode of 'f' changed from 0644 (rw-r--r--) to 4644 (rwSr--r--)"
+        );
+    }
+
+    #[test]
+    fn a_link_and_an_unreadable_file_have_their_own_wordings() {
+        assert_eq!(
+            describe_change(OsStr::new("l"), Outcome::NotApplied, 0, 0).unwrap(),
+            "neither symbolic link 'l' nor referent has been changed"
+        );
+        assert_eq!(
+            describe_change(OsStr::new("f"), Outcome::NoStat, 0, 0).unwrap(),
+            "'f' could not be accessed"
+        );
+    }
+
+    // ------------------------------------------------------------- surprises ---
+
+    /// `chmod -w f` under `umask 022` from `0666`: only the owner's write bit
+    /// goes, so group and other keep theirs and the naive reading is betrayed.
+    #[test]
+    fn a_umask_that_held_bits_back_is_reported() {
+        let changes = compile(b"-w").unwrap();
+        let masked = adjust(0o666, false, 0o022, &changes).mode;
+        let naive = adjust(0o666, false, 0, &changes).mode;
+        assert_eq!(masked, 0o466);
+        assert_eq!(naive, 0o444);
+        assert_eq!(
+            surprise(masked, naive).unwrap(),
+            "new permissions are r--rw-rw-, not r--r--r--"
+        );
+    }
+
+    /// And when the umask changed nothing, nothing is said. `0644` has no group
+    /// or other write bit to keep, so `-w` under `umask 022` lands where the
+    /// naive reading expected.
+    #[test]
+    fn no_surprise_when_the_umask_made_no_difference() {
+        let changes = compile(b"-w").unwrap();
+        let masked = adjust(0o644, false, 0o022, &changes).mode;
+        let naive = adjust(0o644, false, 0, &changes).mode;
+        assert_eq!(masked, naive);
+        assert_eq!(surprise(masked, naive), None);
+    }
+
+    // ------------------------------------------------------- mode letter set ---
+
+    /// The letters that are really mode text, against the ones that are not.
+    /// `8` and `9` are digits that no octal contains, and `R`, `c`, `f` and `v`
+    /// are the real options.
+    #[test]
+    fn the_mode_letters_are_exactly_the_grammars_alphabet() {
+        for yes in b"rwxXstugoa,+=01234567" {
+            assert!(is_mode_letter(*yes), "{} should be mode text", *yes as char);
         }
-    }
-
-    #[test]
-    fn parse_multiple_files() {
-        let a = parse_args(&s(&["644", "a", "b", "c"])).unwrap();
-        assert_eq!(a.paths, vec!["a", "b", "c"]);
-    }
-
-    #[test]
-    fn parse_recursive_flag_anywhere() {
-        let a = parse_args(&s(&["755", "-R", "dir"])).unwrap();
-        assert!(a.recursive);
-        assert_eq!(a.mode, "755");
-        assert_eq!(a.paths, vec!["dir"]);
-    }
-
-    // ---------------- apply_mode_string ----------------
-
-    #[test]
-    fn apply_octal_ignores_current() {
-        assert_eq!(apply_mode_string("755", 0o000).unwrap(), 0o755);
-        assert_eq!(apply_mode_string("755", 0o777).unwrap(), 0o755);
-        assert_eq!(apply_mode_string("0", 0o777).unwrap(), 0);
-    }
-
-    #[test]
-    fn apply_octal_four_digit() {
-        assert_eq!(apply_mode_string("4755", 0).unwrap(), 0o4755);
-    }
-
-    #[test]
-    fn apply_symbolic_falls_through_to_parse_symbolic() {
-        // "u+x" against 0o644 → 0o744
-        assert_eq!(apply_mode_string("u+x", 0o644).unwrap(), 0o744);
-    }
-
-    // ---------------- parse_symbolic ----------------
-
-    #[test]
-    fn sym_u_plus_x() {
-        assert_eq!(parse_symbolic(0o644, "u+x").unwrap(), 0o744);
-    }
-
-    #[test]
-    fn sym_g_minus_w() {
-        assert_eq!(parse_symbolic(0o664, "g-w").unwrap(), 0o644);
-    }
-
-    #[test]
-    fn sym_o_equals_r() {
-        // "o=r": clear other bits, then set r.
-        assert_eq!(parse_symbolic(0o777, "o=r").unwrap(), 0o774);
-    }
-
-    #[test]
-    fn sym_a_plus_x() {
-        // "a+x" = "ugo+x".
-        assert_eq!(parse_symbolic(0o644, "a+x").unwrap(), 0o755);
-    }
-
-    #[test]
-    fn sym_default_who_is_a() {
-        // "+x" with no who-mask defaults to 'a'.
-        assert_eq!(parse_symbolic(0o644, "+x").unwrap(), 0o755);
-    }
-
-    #[test]
-    fn sym_multiple_clauses_comma_separated() {
-        // 0o644 → u+x → 0o744 → g-r → 0o704
-        assert_eq!(parse_symbolic(0o644, "u+x,g-r").unwrap(), 0o704);
-    }
-
-    #[test]
-    fn sym_setuid_with_s() {
-        // "u+s" sets setuid (0o4000), masked by who=u → 0o4000.
-        assert_eq!(parse_symbolic(0o755, "u+s").unwrap(), 0o4755);
-    }
-
-    #[test]
-    fn sym_sticky_with_t() {
-        // "+t" sets sticky bit (0o1000); default who=a but 0o1000 isn't
-        // affected by who-mask (only the 0o777 bits are).
-        let m = parse_symbolic(0o777, "+t").unwrap();
-        assert_eq!(m & 0o1000, 0o1000);
-    }
-
-    #[test]
-    fn sym_high_bits_in_current_are_preserved_until_explicit_change() {
-        // 0o7755 & 0o7777 → kept; u+x adds nothing new.
-        let m = parse_symbolic(0o7755, "u+x").unwrap();
-        assert_eq!(m, 0o7755);
-    }
-
-    #[test]
-    fn sym_empty_string_keeps_current_perms() {
-        // No clauses → mode = current & 0o7777, unchanged.
-        assert_eq!(parse_symbolic(0o644, "").unwrap(), 0o644);
-    }
-
-    #[test]
-    fn sym_only_who_no_op_errors() {
-        let err = parse_symbolic(0o644, "u").unwrap_err();
-        assert!(err.contains("invalid mode"));
-    }
-
-    #[test]
-    fn sym_invalid_operator_errors() {
-        // "u@x" — '@' isn't a valid op.
-        let err = parse_symbolic(0o644, "u@x").unwrap_err();
-        assert!(err.contains("invalid operator"));
-    }
-
-    #[test]
-    fn sym_equals_clears_who_bits_then_sets() {
-        // u=r against 0o755: clear 0o700, set 0o400 → 0o455.
-        assert_eq!(parse_symbolic(0o755, "u=r").unwrap(), 0o455);
-    }
-
-    #[test]
-    fn sym_minus_does_nothing_if_bits_absent() {
-        assert_eq!(parse_symbolic(0o444, "u-x").unwrap(), 0o444);
+        for no in b"89Rcfvz" {
+            assert!(!is_mode_letter(*no), "{} should be an option", *no as char);
+        }
     }
 }

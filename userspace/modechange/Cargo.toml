@@ -1,0 +1,11 @@
+[package]
+name = "modechange"
+version = "0.1.0"
+edition = "2024"
+description = "Compiling a chmod-style mode string, applying it to a file's mode, and rendering the result, for the utilities and the shell that must agree on what `a+X` means."
+
+[lib]
+path = "src/lib.rs"
+
+[lints]
+workspace = true

@@ -53,7 +53,10 @@ use charwidth::char_width;
 use coreutils::getopt::{self, Opt, Program, Takes};
 use coreutils::human::{Opts, default_block_size};
 use coreutils::quote::{Mb, Style, next_mb, os_bytes, quote};
+use coreutils::vercmp::version;
 use coreutils::xnum::{self, Status, strtol_fatal};
+use modechange::{S_IFDIR, S_IFMT};
+use std::cmp::Ordering;
 use std::ffi::OsString;
 use std::io::Write;
 use std::process::ExitCode;
@@ -1458,6 +1461,235 @@ fn quote_name(
     }
 }
 
+// ------------------------------------------------------------ file records ---
+
+/// One timestamp, as `ls` holds and compares it.
+///
+/// Nanoseconds are carried rather than dropped because `-t` genuinely uses
+/// them: two files written in the same second by the same `cp` sort by the
+/// sub-second part, and a listing that ordered them by name instead would be
+/// wrong in the one case `-t` exists for.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default, Debug)]
+struct Ts {
+    sec: i64,
+    nsec: i64,
+}
+
+impl Ts {
+    /// The value GNU leaves in the birth-time field when the filesystem has no
+    /// birth time — not a real instant, and it is compared as one on purpose:
+    /// `-t --time=birth` on such a filesystem sorts every file equally and the
+    /// name tie-break decides, which is the ordering a user sees.
+    const UNKNOWN: Self = Self { sec: -1, nsec: -1 };
+
+    const fn is_known(self) -> bool {
+        !(self.sec == -1 && self.nsec == -1)
+    }
+}
+
+/// The parts of `struct stat` that `ls` reads.
+///
+/// It is a struct of our own rather than [`std::fs::Metadata`] because `ls`
+/// needs fields that `Metadata`'s portable surface does not expose (`rdev` for
+/// a device's major:minor, `blocks` for `-s`, the birth time for
+/// `--time=birth`), and because a *failed* stat still has to leave a record
+/// behind — `ls -l` prints a line for a dangling symlink, with `?` in every
+/// column that the failed stat would have filled.
+#[derive(Clone, Copy, Default, Debug)]
+struct Stat {
+    mode: u32,
+    nlink: u64,
+    uid: u32,
+    gid: u32,
+    size: i64,
+    blocks: u64,
+    rdev: u64,
+    ino: u64,
+    dev: u64,
+    atime: Ts,
+    mtime: Ts,
+    ctime: Ts,
+    btime: Ts,
+}
+
+/// GNU's `struct fileinfo`: one row of the listing.
+#[derive(Clone, Debug)]
+struct FileInfo {
+    /// The name as it will be printed — the bare entry name inside a
+    /// directory, but the whole operand for a file named on the command line,
+    /// which is why `ls /etc/passwd` prints the path and `ls /etc` does not.
+    name: Vec<u8>,
+    /// The path `stat` was given, kept because a recursive listing has to
+    /// reach an entry through its directory rather than through the name it
+    /// prints.
+    full_name: Vec<u8>,
+    /// Where a symlink points, read only when something will show it: `-l`, or
+    /// a classification that needs to know whether the target is a directory.
+    linkname: Option<Vec<u8>>,
+    /// Whether the `stat` succeeded. Every numeric field below is meaningless
+    /// when this is false, and `-l` prints `?` for each of them.
+    stat_ok: bool,
+    stat: Stat,
+    filetype: FileType,
+    /// The target's mode when the link was followed, `0` otherwise. It is
+    /// separate from `stat.mode` because a symlink to a directory must sort
+    /// with the directories under `--group-directories-first` while still
+    /// printing as a symlink.
+    link_mode: u32,
+    /// Whether a symlink's target could be reached. `-F` marks a dangling link
+    /// with `@` and a live one by what it points at, so the two cases differ
+    /// in the output and not only in an error.
+    link_ok: bool,
+    /// GNU's tri-state `f->quoted`: [`None`] is upstream's `-1`, "not
+    /// measured". See [`quote_name`].
+    quoted: Option<bool>,
+    /// The cached screen width, filled in before the sort when the layout or
+    /// `-U`-less width sorting will ask for it more than once.
+    width: Option<usize>,
+}
+
+impl Default for FileInfo {
+    fn default() -> Self {
+        Self {
+            name: Vec::new(),
+            full_name: Vec::new(),
+            linkname: None,
+            stat_ok: false,
+            stat: Stat {
+                btime: Ts::UNKNOWN,
+                ..Stat::default()
+            },
+            filetype: FileType::Unknown,
+            link_mode: 0,
+            link_ok: false,
+            quoted: None,
+            width: None,
+        }
+    }
+}
+
+// ------------------------------------------------------------------ sorting ---
+
+/// GNU's `is_linked_directory`: what `--group-directories-first` counts as a
+/// directory.
+///
+/// A symlink to a directory counts — but only once the link has been followed,
+/// which `ls` does for this purpose and not for the printed type. That is why
+/// the test reads [`FileInfo::link_mode`] as well as the file's own type.
+fn is_linked_directory(f: &FileInfo) -> bool {
+    matches!(f.filetype, FileType::Directory | FileType::ArgDirectory)
+        || f.link_mode & S_IFMT == S_IFDIR
+}
+
+/// The extension `-X` sorts on: the last `.` and everything after it.
+///
+/// A name with no dot sorts as the empty string and therefore first — and so
+/// does a *dot file*, because `strrchr` finds the leading dot and the
+/// extension of `.bashrc` is the whole name. That is upstream's behaviour, not
+/// an accident of this transcription: `ls -X` really does group `.bashrc` with
+/// the `.bashrc`-extensioned files rather than with the extensionless ones.
+fn extension(name: &[u8]) -> &[u8] {
+    match name.iter().rposition(|&b| b == b'.') {
+        Some(at) => name.get(at..).unwrap_or_default(),
+        None => b"",
+    }
+}
+
+/// The cached width, or the width computed now — GNU's `fileinfo_name_width`.
+fn name_width(cfg: &Config, cwd_some_quoted: bool, f: &FileInfo) -> usize {
+    if let Some(width) = f.width {
+        return width;
+    }
+    let out = quote_name(cfg, &cfg.filename_extra, cwd_some_quoted, &f.name, f.quoted);
+    out.width.saturating_add(usize::from(out.pad))
+}
+
+/// The comparison for one sort key, before `-r` and
+/// `--group-directories-first` are applied.
+///
+/// Two of the keys run *backwards* — `-S` puts the largest first and `-t` the
+/// newest — and that is a property of the key rather than of `-r`, which is
+/// why `ls -Sr` gives smallest-first and not something else. Every key falls
+/// back to the name, so the order is total and a listing does not depend on
+/// the order the directory happened to be read in.
+///
+/// `strcoll` is a byte comparison here. Under a locale whose collation is
+/// codepoint order — which `C.UTF-8` is, and SlateOS has no other — it is
+/// exactly `strcmp`, so GNU's whole `use_strcmp` fallback (it re-sorts with
+/// `strcmp` if `strcoll` sets `errno`) has nothing to fall back *from* and is
+/// not reproduced.
+fn key_cmp(cfg: &Config, cwd_some_quoted: bool, a: &FileInfo, b: &FileInfo) -> Ordering {
+    let by_name = || a.name.cmp(&b.name);
+    let time = |f: &FileInfo| match cfg.time_type {
+        TimeType::Mtime => f.stat.mtime,
+        TimeType::Ctime => f.stat.ctime,
+        TimeType::Atime => f.stat.atime,
+        TimeType::Btime => f.stat.btime,
+    };
+    match cfg.sort {
+        Sort::Name | Sort::None => by_name(),
+        Sort::Extension => extension(&a.name)
+            .cmp(extension(&b.name))
+            .then_with(by_name),
+        Sort::Width => name_width(cfg, cwd_some_quoted, a)
+            .cmp(&name_width(cfg, cwd_some_quoted, b))
+            .then_with(by_name),
+        // Largest first, newest first: the key is compared the other way
+        // round, not the pair.
+        Sort::Size => b.stat.size.cmp(&a.stat.size).then_with(by_name),
+        Sort::Time => time(b).cmp(&time(a)).then_with(by_name),
+        // `filevercmp` answers `Equal` for names that are the same version but
+        // not the same string — `f009` and `f9` — so the tie-break is not
+        // optional. It is `strcmp` and not `strcoll` because `filevercmp` is
+        // locale-independent and a locale-dependent secondary could disagree
+        // with it.
+        Sort::Version => version(&a.name, &b.name).then_with(by_name),
+    }
+}
+
+/// The full comparison: directories first, then the key, then `-r`.
+///
+/// The order of the three matters and is upstream's. `-r` reverses the *key*
+/// and not the directory grouping — `ls -r --group-directories-first` still
+/// lists directories first — because upstream applies `dirfirst_check` to the
+/// unswapped pair and hands it an already-reversed key comparator.
+fn file_cmp(cfg: &Config, cwd_some_quoted: bool, a: &FileInfo, b: &FileInfo) -> Ordering {
+    if cfg.directories_first {
+        let grouped = is_linked_directory(b).cmp(&is_linked_directory(a));
+        if grouped != Ordering::Equal {
+            return grouped;
+        }
+    }
+    let (x, y) = if cfg.sort_reverse { (b, a) } else { (a, b) };
+    key_cmp(cfg, cwd_some_quoted, x, y)
+}
+
+/// GNU's `sort_files`, including the `update_current_files_info` pass that
+/// caches every name's width first.
+///
+/// The cache is not only a saving: [`name_width`] is `O(n)` in the name and
+/// the comparator is called `O(n log n)` times, so measuring inside the
+/// comparator would make sorting a large directory quadratic in the *bytes*.
+/// GNU caches it under exactly the conditions that ask for it twice.
+fn sort_files(cfg: &Config, cwd_some_quoted: bool, files: &mut [FileInfo]) {
+    if cfg.sort == Sort::Width
+        || (cfg.line_length > 0
+            && matches!(cfg.format, Format::ManyPerLine | Format::Horizontal))
+    {
+        for f in files.iter_mut() {
+            let out = quote_name(cfg, &cfg.filename_extra, cwd_some_quoted, &f.name, f.quoted);
+            f.width = Some(out.width.saturating_add(usize::from(out.pad)));
+        }
+    }
+    if cfg.sort == Sort::None {
+        return;
+    }
+    // A stable sort, where GNU uses a merge sort for the same reason: the
+    // comparator is a total order only because every key falls back to the
+    // name, and an unstable sort would still be free to reorder genuine ties.
+    files.sort_by(|a, b| file_cmp(cfg, cwd_some_quoted, a, b));
+}
+
 fn main() -> ExitCode {
     ExitCode::SUCCESS
 }
@@ -1674,5 +1906,247 @@ mod tests {
         let out = quote_name(&raw, b"", false, b"n\xffame", None);
         assert_eq!(out.bytes, b"n\xffame");
         assert_eq!(out.width, 0);
+    }
+
+    // ------------------------------------------------------------ sorting ---
+
+    /// A plain file with the given name.
+    fn file(name: &str) -> FileInfo {
+        FileInfo {
+            name: name.as_bytes().to_vec(),
+            stat_ok: true,
+            filetype: FileType::Normal,
+            ..FileInfo::default()
+        }
+    }
+
+    fn dir(name: &str) -> FileInfo {
+        FileInfo {
+            filetype: FileType::Directory,
+            ..file(name)
+        }
+    }
+
+    /// A symlink whose target was followed and found to be a directory —
+    /// the case `--group-directories-first` groups by the *target*.
+    fn dirlink(name: &str) -> FileInfo {
+        FileInfo {
+            filetype: FileType::SymbolicLink,
+            link_mode: S_IFDIR | 0o755,
+            link_ok: true,
+            ..file(name)
+        }
+    }
+
+    fn order(cfg: &Config, mut files: Vec<FileInfo>) -> Vec<String> {
+        sort_files(cfg, false, &mut files);
+        files
+            .into_iter()
+            .map(|f| String::from_utf8(f.name).unwrap())
+            .collect()
+    }
+
+    /// The fixture every ordering below was measured on, GNU ls 9.4 under
+    /// `LC_ALL=C.UTF-8`, with `linkdir` a symlink to `dirA`.
+    fn fixture() -> Vec<FileInfo> {
+        vec![
+            dir("."),
+            dir(".."),
+            file(".hidden"),
+            file("a.txt"),
+            file("b.tar.gz"),
+            file("c"),
+            dir("dirA"),
+            dir("dirZ"),
+            file("f009"),
+            file("f10"),
+            file("f2"),
+            file("f9"),
+            dirlink("linkdir"),
+            file("zz"),
+        ]
+    }
+
+    /// ```text
+    /// $ ls -1 -a -X
+    /// c dirA dirZ f009 f10 f2 f9 linkdir zz    # no extension at all
+    /// . ..                                     # extension "."
+    /// b.tar.gz  .hidden  a.txt                 # ".gz" ".hidden" ".txt"
+    /// ```
+    ///
+    /// The two surprises are both `strrchr` doing exactly what it says: `..`
+    /// has the extension `.`, and a dot file's extension is its whole name —
+    /// so `-X` files `.hidden` under `h`, between `.gz` and `.txt`, and not
+    /// with the extensionless names.
+    #[test]
+    fn extension_order_is_the_last_dot_onwards_including_a_leading_one() {
+        let cfg = Config {
+            sort: Sort::Extension,
+            ..Config::default()
+        };
+        assert_eq!(
+            order(&cfg, fixture()),
+            [
+                "c", "dirA", "dirZ", "f009", "f10", "f2", "f9", "linkdir", "zz", ".", "..",
+                "b.tar.gz", ".hidden", "a.txt",
+            ]
+        );
+    }
+
+    /// ```text
+    /// $ ls -1 -a -v
+    /// . .. .hidden a.txt b.tar.gz c dirA dirZ f2 f009 f9 f10 linkdir zz
+    /// ```
+    ///
+    /// `f2 f009 f9 f10` is the whole point: `f9` and `f10` are in version
+    /// order rather than byte order, and `f009` sits before `f9` even though
+    /// `filevercmp` calls them equal — that is the `strcmp` tie-break, without
+    /// which the listing would depend on the order the directory was read in.
+    #[test]
+    fn version_order_falls_back_to_bytes_when_two_names_are_the_same_version() {
+        let cfg = Config {
+            sort: Sort::Version,
+            ..Config::default()
+        };
+        assert_eq!(
+            order(&cfg, fixture()),
+            [
+                ".", "..", ".hidden", "a.txt", "b.tar.gz", "c", "dirA", "dirZ", "f2", "f009", "f9",
+                "f10", "linkdir", "zz",
+            ]
+        );
+    }
+
+    /// ```text
+    /// $ ls -1 -a --group-directories-first
+    /// . .. dirA dirZ linkdir  .hidden a.txt b.tar.gz c f009 f10 f2 f9 zz
+    /// ```
+    ///
+    /// `linkdir` is a *symlink*, and it groups with the directories because
+    /// the group is decided by what the link points at. `.` and `..` are
+    /// directories too, which is why `-a --group-directories-first` does not
+    /// start with the dot files.
+    #[test]
+    fn a_symlink_to_a_directory_is_grouped_with_the_directories() {
+        let cfg = Config {
+            directories_first: true,
+            ..Config::default()
+        };
+        assert_eq!(
+            order(&cfg, fixture()),
+            [
+                ".", "..", "dirA", "dirZ", "linkdir", ".hidden", "a.txt", "b.tar.gz", "c", "f009",
+                "f10", "f2", "f9", "zz",
+            ]
+        );
+    }
+
+    /// ```text
+    /// $ ls -1 -a -r --group-directories-first
+    /// linkdir dirZ dirA .. .  zz f9 f2 f10 f009 c b.tar.gz a.txt .hidden
+    /// ```
+    ///
+    /// `-r` reverses the *key* and not the grouping: the directories are still
+    /// first, reversed among themselves. Upstream gets this by handing the
+    /// dirs-first wrapper an already-reversed comparator rather than reversing
+    /// the whole thing, and so does this.
+    #[test]
+    fn reversing_the_order_does_not_move_the_directories_to_the_bottom() {
+        let cfg = Config {
+            directories_first: true,
+            sort_reverse: true,
+            ..Config::default()
+        };
+        assert_eq!(
+            order(&cfg, fixture()),
+            [
+                "linkdir", "dirZ", "dirA", "..", ".", "zz", "f9", "f2", "f10", "f009", "c",
+                "b.tar.gz", "a.txt", ".hidden",
+            ]
+        );
+    }
+
+    /// `-S` and `-t` run backwards: largest and newest first. That is a
+    /// property of the key, so `-Sr` is smallest-first — and a tie in the key
+    /// still falls back to the name *forwards* under `-S` and *backwards*
+    /// under `-Sr`, because the pair is swapped before the key is asked.
+    #[test]
+    fn size_and_time_put_the_largest_and_newest_first() {
+        let sized = |name: &str, size: i64| FileInfo {
+            stat: Stat {
+                size,
+                ..Stat::default()
+            },
+            ..file(name)
+        };
+        let files = || vec![sized("a", 10), sized("b", 30), sized("c", 30), sized("d", 20)];
+        let cfg = Config {
+            sort: Sort::Size,
+            ..Config::default()
+        };
+        assert_eq!(order(&cfg, files()), ["b", "c", "d", "a"]);
+        let reversed = Config {
+            sort_reverse: true,
+            ..cfg
+        };
+        assert_eq!(order(&reversed, files()), ["a", "d", "c", "b"]);
+
+        let timed = |name: &str, sec: i64, nsec: i64| FileInfo {
+            stat: Stat {
+                mtime: Ts { sec, nsec },
+                ..Stat::default()
+            },
+            ..file(name)
+        };
+        // Same second, different nanoseconds — the case `-t` exists for, and
+        // the one a seconds-only timestamp would decide by name instead.
+        let cfg = Config {
+            sort: Sort::Time,
+            ..Config::default()
+        };
+        assert_eq!(
+            order(
+                &cfg,
+                vec![timed("a", 5, 100), timed("b", 5, 900), timed("c", 4, 999)]
+            ),
+            ["b", "a", "c"]
+        );
+    }
+
+    /// `-U` is not "some other order" — it is *no* sort at all, so the entries
+    /// stay in the order the directory handed them over.
+    #[test]
+    fn no_sort_leaves_the_directory_order_alone() {
+        let cfg = Config {
+            sort: Sort::None,
+            ..Config::default()
+        };
+        assert_eq!(order(&cfg, fixture()).first().unwrap(), ".");
+        assert_eq!(order(&cfg, fixture()).last().unwrap(), "zz");
+        assert_eq!(order(&cfg, vec![file("z"), file("a")]), ["z", "a"]);
+    }
+
+    /// `--sort=width` orders by the *screen* width of the rendered name, so a
+    /// name holding a two-column character is wider than its character count
+    /// and a name holding an unprintable byte has no width at all.
+    #[test]
+    fn width_order_measures_the_rendering_and_not_the_bytes() {
+        let cfg = Config {
+            sort: Sort::Width,
+            ..Config::default()
+        };
+        let files = vec![
+            file("abc"),
+            // Five characters, one of them DEL: `mbsnwidth` refuses the whole
+            // name and `ls` clamps that to zero, so it sorts as the narrowest
+            // thing here despite being the longest.
+            file("a\u{7f}bcd"),
+            file("\u{4e00}\u{4e00}"),
+            file("ab"),
+        ];
+        assert_eq!(
+            order(&cfg, files),
+            ["a\u{7f}bcd", "ab", "abc", "\u{4e00}\u{4e00}"]
+        );
     }
 }

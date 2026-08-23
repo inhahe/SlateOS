@@ -10360,6 +10360,7 @@ name = "sudo"
 version = "0.1.0"
 dependencies = [
  "authlib",
+ "scratchdir",
  "userdb",
 ]
 

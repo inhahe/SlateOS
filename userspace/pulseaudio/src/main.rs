@@ -4791,10 +4791,7 @@ mod tests {
 
     #[test]
     fn test_pasuspender_with_command() {
-        assert_eq!(
-            run_pasuspender(&["--".to_string(), "aplay".to_string()]),
-            0
-        );
+        assert_eq!(run_pasuspender(&["--".to_string(), "aplay".to_string()]), 0);
     }
 
     #[test]
@@ -4849,10 +4846,7 @@ mod tests {
 
     #[test]
     fn test_pulseaudio_dump_resample_methods() {
-        assert_eq!(
-            run_pulseaudio(&["--dump-resample-methods".to_string()]),
-            0
-        );
+        assert_eq!(run_pulseaudio(&["--dump-resample-methods".to_string()]), 0);
     }
 
     #[test]

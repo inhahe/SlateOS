@@ -32,6 +32,7 @@ use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::error::{KernelError, KernelResult};
+use crate::fs::path::{Path, PathBuf};
 
 // ---------------------------------------------------------------------------
 // Types
@@ -123,9 +124,13 @@ pub struct SyncAccount {
     /// Account name / email.
     pub account_name: String,
     /// Local sync folder path.
-    pub local_path: String,
+    pub local_path: PathBuf,
     /// Remote root path.
-    pub remote_path: String,
+    ///
+    /// Byte-typed like the local side (design-decisions.md §261): the remote
+    /// root mirrors a local subtree, so any name legal in the local filesystem
+    /// has to be expressible here or the mapping is not round-trippable.
+    pub remote_path: PathBuf,
     /// Whether sync is enabled.
     pub enabled: bool,
     /// Conflict resolution strategy.
@@ -148,7 +153,7 @@ pub struct SyncAccount {
 #[derive(Debug, Clone)]
 pub struct SyncConflict {
     pub account_id: u32,
-    pub path: String,
+    pub path: PathBuf,
     pub local_modified_ns: u64,
     pub remote_modified_ns: u64,
     pub local_size: u64,
@@ -166,7 +171,12 @@ const MAX_EXCLUDED: usize = 200;
 struct State {
     accounts: Vec<SyncAccount>,
     conflicts: Vec<SyncConflict>,
-    excluded_patterns: Vec<String>,
+    /// Exclude globs, held as raw bytes rather than `String`.
+    ///
+    /// A pattern names files, so it has to be able to spell anything a name
+    /// can spell -- `bu\xFFild/` is a legal directory and therefore a legal
+    /// thing to exclude (design-decisions.md §261).
+    excluded_patterns: Vec<Vec<u8>>,
     next_id: u32,
     total_syncs: u64,
     total_conflicts: u64,
@@ -198,12 +208,12 @@ pub fn init_defaults() {
     }
 
     let excluded = alloc::vec![
-        String::from("*.tmp"),
-        String::from("*.swp"),
-        String::from(".git/"),
-        String::from("node_modules/"),
-        String::from("*.o"),
-        String::from("thumbs.db"),
+        b"*.tmp".to_vec(),
+        b"*.swp".to_vec(),
+        b".git/".to_vec(),
+        b"node_modules/".to_vec(),
+        b"*.o".to_vec(),
+        b"thumbs.db".to_vec(),
     ];
 
     *guard = Some(State {
@@ -221,9 +231,10 @@ pub fn init_defaults() {
 pub fn add_account(
     provider: CloudProvider,
     account_name: &str,
-    local_path: &str,
-    remote_path: &str,
+    local_path: impl AsRef<Path>,
+    remote_path: impl AsRef<Path>,
 ) -> KernelResult<u32> {
+    let (local_path, remote_path) = (local_path.as_ref(), remote_path.as_ref());
     with_state(|state| {
         if state.accounts.len() >= MAX_ACCOUNTS {
             return Err(KernelError::ResourceExhausted);
@@ -241,8 +252,8 @@ pub fn add_account(
             id,
             provider,
             account_name: String::from(account_name),
-            local_path: String::from(local_path),
-            remote_path: String::from(remote_path),
+            local_path: local_path.to_path_buf(),
+            remote_path: remote_path.to_path_buf(),
             enabled: true,
             conflict_strategy: ConflictStrategy::KeepBoth,
             bandwidth_limit_kbps: 0,
@@ -329,10 +340,11 @@ pub fn record_sync(id: u32, uploaded: u64, downloaded: u64, files: u64) -> Kerne
 /// Report a sync conflict.
 pub fn report_conflict(
     account_id: u32,
-    path: &str,
+    path: impl AsRef<Path>,
     local_size: u64,
     remote_size: u64,
 ) -> KernelResult<()> {
+    let path = path.as_ref();
     with_state(|state| {
         if state.conflicts.len() >= MAX_CONFLICTS {
             state.conflicts.remove(0);
@@ -340,7 +352,7 @@ pub fn report_conflict(
         let now = crate::hpet::elapsed_ns();
         state.conflicts.push(SyncConflict {
             account_id,
-            path: String::from(path),
+            path: path.to_path_buf(),
             local_modified_ns: now,
             remote_modified_ns: now,
             local_size,
@@ -355,20 +367,22 @@ pub fn report_conflict(
 }
 
 /// Add an exclude pattern.
-pub fn add_exclude(pattern: &str) -> KernelResult<()> {
+pub fn add_exclude(pattern: impl AsRef<[u8]>) -> KernelResult<()> {
+    let pattern = pattern.as_ref();
     with_state(|state| {
         if state.excluded_patterns.len() >= MAX_EXCLUDED {
             return Err(KernelError::ResourceExhausted);
         }
         if !state.excluded_patterns.iter().any(|p| p == pattern) {
-            state.excluded_patterns.push(String::from(pattern));
+            state.excluded_patterns.push(pattern.to_vec());
         }
         Ok(())
     })
 }
 
 /// Remove an exclude pattern.
-pub fn remove_exclude(pattern: &str) -> KernelResult<()> {
+pub fn remove_exclude(pattern: impl AsRef<[u8]>) -> KernelResult<()> {
+    let pattern = pattern.as_ref();
     with_state(|state| {
         let pos = state
             .excluded_patterns
@@ -397,7 +411,7 @@ pub fn list_conflicts() -> Vec<SyncConflict> {
 }
 
 /// List exclude patterns.
-pub fn list_excludes() -> Vec<String> {
+pub fn list_excludes() -> Vec<Vec<u8>> {
     STATE
         .lock()
         .as_ref()
@@ -444,7 +458,7 @@ pub fn self_test() {
 
     // A pattern no user would plausibly have configured, so test 8 can add it
     // and take it away again without touching a real exclusion.
-    const TEST_EXCLUDE: &str = "*.cloudsync-selftest.bak";
+    const TEST_EXCLUDE: &[u8] = b"*.cloudsync-selftest.bak";
 
     // 1: Baseline.
     //
@@ -471,7 +485,7 @@ pub fn self_test() {
         return;
     }
     assert_eq!(list_accounts().len(), base_accts);
-    crate::serial_println!("  [1/11] baseline ({} accounts): OK", base_accts);
+    crate::serial_println!("  [1/12] baseline ({} accounts): OK", base_accts);
 
     // 2: Add account.
     //
@@ -487,7 +501,7 @@ pub fn self_test() {
     )
     .expect("add nc");
     assert!(id1 > 0);
-    crate::serial_println!("  [2/11] add account: OK");
+    crate::serial_println!("  [2/12] add account: OK");
 
     // 3: Add second account.
     let id2 = add_account(
@@ -498,7 +512,7 @@ pub fn self_test() {
     )
     .expect("add dbx");
     assert_eq!(list_accounts().len(), base_accts + 2);
-    crate::serial_println!("  [3/11] multiple accounts: OK");
+    crate::serial_println!("  [3/12] multiple accounts: OK");
 
     // 4: Duplicate rejected.
     let r = add_account(
@@ -508,25 +522,25 @@ pub fn self_test() {
         "/dup",
     );
     assert!(r.is_err());
-    crate::serial_println!("  [4/11] duplicate rejected: OK");
+    crate::serial_println!("  [4/12] duplicate rejected: OK");
 
     // 5: Record sync.
     record_sync(id1, 1024, 2048, 5).expect("record sync");
     let acct = get_account(id1).expect("get acct");
     assert_eq!(acct.bytes_uploaded, 1024);
     assert_eq!(acct.files_synced, 5);
-    crate::serial_println!("  [5/11] record sync: OK");
+    crate::serial_println!("  [5/12] record sync: OK");
 
     // 6: Report conflict.
     report_conflict(id1, "/docs/readme.txt", 100, 200).expect("conflict");
     assert_eq!(list_conflicts().len(), base_conflict_rows + 1);
-    crate::serial_println!("  [6/11] report conflict: OK");
+    crate::serial_println!("  [6/12] report conflict: OK");
 
     // 7: Set conflict strategy.
     set_conflict_strategy(id1, ConflictStrategy::LocalWins).expect("set strategy");
     let acct = get_account(id1).expect("get acct 2");
     assert_eq!(acct.conflict_strategy, ConflictStrategy::LocalWins);
-    crate::serial_println!("  [7/11] conflict strategy: OK");
+    crate::serial_println!("  [7/12] conflict strategy: OK");
 
     // 8: Exclude patterns.
     //
@@ -543,18 +557,18 @@ pub fn self_test() {
     add_exclude(TEST_EXCLUDE).expect("add exclude");
     assert_eq!(list_excludes().len(), base_excludes + 1);
     assert!(list_excludes().iter().any(|e| e == TEST_EXCLUDE));
-    crate::serial_println!("  [8/11] excludes: OK");
+    crate::serial_println!("  [8/12] excludes: OK");
 
     // 9: Disable account.
     set_account_enabled(id2, false).expect("disable");
     let acct = get_account(id2).expect("get acct 3");
     assert!(!acct.enabled);
-    crate::serial_println!("  [9/11] disable account: OK");
+    crate::serial_println!("  [9/12] disable account: OK");
 
     // 10: Remove account.
     remove_account(id2).expect("remove");
     assert_eq!(list_accounts().len(), base_accts + 1);
-    crate::serial_println!("  [10/11] remove account: OK");
+    crate::serial_println!("  [10/12] remove account: OK");
 
     // 11: Stats.
     //
@@ -567,7 +581,69 @@ pub fn self_test() {
     assert!(conflicts >= base_conflicts + 1);
     assert_eq!(active, base_active + 1);
     assert!(ops > 0);
-    crate::serial_println!("  [11/11] stats: OK");
+    crate::serial_println!("  [11/12] stats: OK");
+
+    // 12: Non-UTF-8 paths (design-decisions.md §261).
+    //
+    // `\xFF` and `\xFE` are both invalid as the first byte of a UTF-8 sequence,
+    // so under the old `String` typing both folded to U+FFFD and the two sync
+    // folders below became the same key.  That is not a cosmetic bug for this
+    // module: two accounts sharing one local path means the conflict rows of
+    // one are attributed to the other, and the exclude list would silently
+    // apply a pattern to a directory it was never written for.
+    let dir_a = Path::new(&b"/home/user/cs_\xFFsync"[..]);
+    let dir_b = Path::new(&b"/home/user/cs_\xFEsync"[..]);
+    let rem_a = Path::new(&b"/remote/cs_\xFFroot"[..]);
+    let id3 = add_account(
+        CloudProvider::S3Compatible,
+        "cloudsync-selftest-c@invalid",
+        dir_a,
+        rem_a,
+    )
+    .expect("add non-utf8 acct");
+    let a3 = get_account(id3).expect("get non-utf8 acct");
+    assert_eq!(a3.local_path.as_path(), dir_a);
+    assert_eq!(
+        a3.local_path.as_path().as_bytes(),
+        b"/home/user/cs_\xFFsync"
+    );
+    assert_eq!(a3.remote_path.as_path(), rem_a);
+    assert_ne!(
+        a3.local_path.as_path(),
+        dir_b,
+        "\\xFF must not fold to \\xFE"
+    );
+
+    // A conflict path is the thing the user is shown and asked to resolve, so
+    // it has to come back byte-for-byte or they act on the wrong file.
+    let conflict_path = Path::new(&b"/home/user/cs_\xFFsync/re\xFEport.txt"[..]);
+    report_conflict(id3, conflict_path, 11, 22).expect("non-utf8 conflict");
+    let c3 = list_conflicts();
+    let row = c3
+        .iter()
+        .find(|c| c.account_id == id3)
+        .expect("non-utf8 conflict row");
+    assert_eq!(row.path.as_path(), conflict_path);
+    assert_eq!(
+        row.path.as_path().as_bytes(),
+        b"/home/user/cs_\xFFsync/re\xFEport.txt"
+    );
+
+    // Exclude patterns name files, so they are byte-typed too.
+    let pat = &b"*.cloudsync-selftest-\xFF.bak"[..];
+    add_exclude(pat).expect("add non-utf8 exclude");
+    assert!(list_excludes().iter().any(|e| e == pat));
+    assert!(
+        !list_excludes()
+            .iter()
+            .any(|e| e == &b"*.cloudsync-selftest-\xFE.bak"[..]),
+        "a \\xFE pattern must not match the \\xFF one that was added"
+    );
+    remove_exclude(pat).expect("remove non-utf8 exclude");
+    assert!(!list_excludes().iter().any(|e| e == pat));
+
+    remove_account(id3).expect("cleanup: remove id3");
+    crate::serial_println!("  [12/12] non-UTF-8 sync paths: OK");
 
     // Cleanup: put the sync registry back exactly as it was found, so a second
     // `cloudsync test` sees the same baseline this one did.  `remove_account`
@@ -591,5 +667,5 @@ pub fn self_test() {
         "self_test must leave the exclude list as it found it"
     );
 
-    crate::serial_println!("cloudsync::self_test() — all 11 tests passed");
+    crate::serial_println!("cloudsync::self_test() — all 12 tests passed");
 }

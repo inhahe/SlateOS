@@ -5502,6 +5502,12 @@ extern "C" fn kernel_main() -> ! {
             if let Err(e) = fs::wallpaper::self_test() {
                 serial_println!("WARNING: wallpaper self-test failed: {:?}", e);
             }
+            // cloudsync was reachable only from a `kshell` subcommand, so its
+            // suite had never run in the boot test (TD-A-FS-SELFTESTS-NEVER-RUN).
+            // Safe here: it is baseline-relative and restores the account,
+            // conflict and exclude lists exactly, so it cannot disturb a user's
+            // cloud configuration -- and at boot there is none yet anyway.
+            fs::cloudsync::self_test();
             if let Err(e) = crate::sockact::self_test() {
                 serial_println!("WARNING: socket-activation self-test failed: {:?}", e);
             }

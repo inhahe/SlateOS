@@ -44470,7 +44470,7 @@ fn cmd_cloudsync(args: &str) {
                         a.id,
                         a.provider.label(),
                         a.account_name,
-                        a.local_path,
+                        a.local_path.display(),
                         if a.enabled { "yes" } else { "no" }
                     );
                 }
@@ -44525,7 +44525,7 @@ fn cmd_cloudsync(args: &str) {
                     shell_println!(
                         "  [acct #{}] {} (local: {} B, remote: {} B)",
                         c.account_id,
-                        c.path,
+                        c.path.display(),
                         c.local_size,
                         c.remote_size
                     );
@@ -44536,7 +44536,9 @@ fn cmd_cloudsync(args: &str) {
             let excludes = cloudsync::list_excludes();
             shell_println!("Excluded patterns ({}):", excludes.len());
             for p in &excludes {
-                shell_println!("  {}", p);
+                // Patterns are raw bytes under §261; borrow `Path`'s formatter,
+                // which escapes what has no UTF-8 spelling instead of dropping it.
+                shell_println!("  {}", crate::fs::path::Path::new(&p[..]).display());
             }
         }
         "stats" => {

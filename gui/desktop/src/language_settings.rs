@@ -2,27 +2,43 @@
 //!
 //! Configures system language, date/time formats, number formats,
 //! currency display, measurement units, and first day of week.
+//!
+//! # Colour
+//!
+//! Every colour comes from the [`Palette`] the caller resolved; this module
+//! names no value of its own. Five judgements decide which role each site
+//! takes, and each is pinned by a test because none of them is recoverable
+//! from the code alone.
+//!
+//! 1. **The accent marks position, and position only.** Three things here say
+//!    "this is the one in force" — the selected tab, the bar beside the
+//!    current language, and the current currency's row — so all three take
+//!    `p.accent`. Nothing else does. Note this module cannot borrow the
+//!    taskbar's "exactly one thing carries the accent" test: three accented
+//!    marks are legitimately on screen at once, on three different axes, so
+//!    the check has to be a per-site table plus a count.
+//! 2. **The "Partial" badge is a *property of the data*, not a position.** It
+//!    reports that a translation is incomplete, which is true regardless of
+//!    what the user has selected or what accent they chose, so it keeps
+//!    `p.yellow` and must never follow the accent.
+//! 3. **Ink on a colour this module filled is derived, never named.** The
+//!    active tab's label is `readable_on(p.accent)` and the badge's is
+//!    `readable_on(p.yellow)`. Both are provably derived rather than frozen,
+//!    because the two modes disagree about them.
+//! 4. **Headings are a two-rung hierarchy.** A section heading is
+//!    `p.lavender` at 15pt Bold — the convention already established by
+//!    `datetime_settings` and `notification_settings` — and a sub-heading
+//!    inside a section is `p.subtext1` at 13pt Bold. Lavender here is
+//!    structure, not decoration, and specifically is *not* the accent: a
+//!    heading does not move when the selection does.
+//! 5. **An absent value is dimmer than a present one.** The search box's
+//!    placeholder is `p.overlay0` and text the user actually typed is
+//!    `p.text`, so "Search languages…" cannot be mistaken for a query.
 
-use guitk::color::Color;
+use appearance::{Palette, readable_on};
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::text;
-
-// ============================================================================
-// Catppuccin Mocha palette
-// ============================================================================
-
-const BASE: Color = Color::from_hex(0x1E1E2E);
-const CRUST: Color = Color::from_hex(0x11111B);
-const SURFACE0: Color = Color::from_hex(0x313244);
-const SURFACE1: Color = Color::from_hex(0x45475A);
-const TEXT: Color = Color::from_hex(0xCDD6F4);
-const SUBTEXT0: Color = Color::from_hex(0xA6ADC8);
-const SUBTEXT1: Color = Color::from_hex(0xBAC2DE);
-const BLUE: Color = Color::from_hex(0x89B4FA);
-const YELLOW: Color = Color::from_hex(0xF9E2AF);
-const LAVENDER: Color = Color::from_hex(0xB4BEFE);
-const OVERLAY0: Color = Color::from_hex(0x6C7086);
 
 // ============================================================================
 // Language
@@ -499,7 +515,7 @@ impl LanguageSettingsUI {
     }
 
     /// Render the language settings panel.
-    pub fn render(&self, width: f32, height: f32) -> Vec<RenderCommand> {
+    pub fn render(&self, p: &Palette, width: f32, height: f32) -> Vec<RenderCommand> {
         let mut cmds = Vec::new();
 
         // Panel background
@@ -508,7 +524,7 @@ impl LanguageSettingsUI {
             y: 0.0,
             width,
             height,
-            color: BASE,
+            color: p.base,
             corner_radii: CornerRadii::all(8.0),
         });
 
@@ -518,7 +534,7 @@ impl LanguageSettingsUI {
             y: 24.0,
             text: "Language & Region".into(),
             font_size: 22.0,
-            color: TEXT,
+            color: p.text,
             font_weight: FontWeightHint::Bold,
             max_width: Some(width - 48.0),
             overflow: TextOverflow::Ellipsis,
@@ -540,7 +556,7 @@ impl LanguageSettingsUI {
                 y: tab_y,
                 width: tw,
                 height: 32.0,
-                color: if active { BLUE } else { SURFACE0 },
+                color: if active { p.accent } else { p.surface0 },
                 corner_radii: CornerRadii::all(6.0),
             });
             cmds.push(RenderCommand::Text {
@@ -548,7 +564,11 @@ impl LanguageSettingsUI {
                 y: tab_y + 8.0,
                 text: tab.label().into(),
                 font_size: 13.0,
-                color: if active { CRUST } else { SUBTEXT0 },
+                color: if active {
+                    readable_on(p.accent)
+                } else {
+                    p.subtext0
+                },
                 font_weight: if active {
                     FontWeightHint::Bold
                 } else {
@@ -564,15 +584,22 @@ impl LanguageSettingsUI {
         let cw = width - 48.0;
 
         match self.active_tab {
-            LanguageTab::Language => self.render_language_tab(&mut cmds, 24.0, cy, cw),
-            LanguageTab::Formats => self.render_formats_tab(&mut cmds, 24.0, cy, cw),
-            LanguageTab::Region => self.render_region_tab(&mut cmds, 24.0, cy, cw),
+            LanguageTab::Language => self.render_language_tab(&mut cmds, p, 24.0, cy, cw),
+            LanguageTab::Formats => self.render_formats_tab(&mut cmds, p, 24.0, cy, cw),
+            LanguageTab::Region => self.render_region_tab(&mut cmds, p, 24.0, cy, cw),
         }
 
         cmds
     }
 
-    fn render_language_tab(&self, cmds: &mut Vec<RenderCommand>, x: f32, y: f32, width: f32) {
+    fn render_language_tab(
+        &self,
+        cmds: &mut Vec<RenderCommand>,
+        p: &Palette,
+        x: f32,
+        y: f32,
+        width: f32,
+    ) {
         let mut cy = y;
 
         // Current language
@@ -582,7 +609,7 @@ impl LanguageSettingsUI {
                 y: cy,
                 width,
                 height: 50.0,
-                color: SURFACE1,
+                color: p.surface1,
                 corner_radii: CornerRadii::all(8.0),
             });
             cmds.push(RenderCommand::Text {
@@ -590,7 +617,7 @@ impl LanguageSettingsUI {
                 y: cy + 6.0,
                 text: format!("Current: {}", lang.display_name),
                 font_size: 14.0,
-                color: TEXT,
+                color: p.text,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(width - 24.0),
                 overflow: TextOverflow::Ellipsis,
@@ -600,7 +627,7 @@ impl LanguageSettingsUI {
                 y: cy + 28.0,
                 text: format!("{} ({})", lang.native_name, lang.tag),
                 font_size: 12.0,
-                color: SUBTEXT0,
+                color: p.subtext0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width - 24.0),
                 overflow: TextOverflow::Ellipsis,
@@ -614,7 +641,7 @@ impl LanguageSettingsUI {
             y: cy,
             width,
             height: 30.0,
-            color: SURFACE0,
+            color: p.surface0,
             corner_radii: CornerRadii::all(6.0),
         });
         let search_text = if self.language_search.is_empty() {
@@ -628,9 +655,9 @@ impl LanguageSettingsUI {
             text: search_text,
             font_size: 13.0,
             color: if self.language_search.is_empty() {
-                OVERLAY0
+                p.overlay0
             } else {
-                TEXT
+                p.text
             },
             font_weight: FontWeightHint::Regular,
             max_width: Some(width - 20.0),
@@ -649,7 +676,7 @@ impl LanguageSettingsUI {
                 y: cy,
                 width,
                 height: 40.0,
-                color: if is_selected { SURFACE1 } else { SURFACE0 },
+                color: if is_selected { p.surface1 } else { p.surface0 },
                 corner_radii: CornerRadii::all(4.0),
             });
 
@@ -659,7 +686,7 @@ impl LanguageSettingsUI {
                     y: cy + 4.0,
                     width: 4.0,
                     height: 32.0,
-                    color: BLUE,
+                    color: p.accent,
                     corner_radii: CornerRadii::all(2.0),
                 });
             }
@@ -669,7 +696,7 @@ impl LanguageSettingsUI {
                 y: cy + 4.0,
                 text: lang.display_name.clone(),
                 font_size: 13.0,
-                color: if is_current { BLUE } else { TEXT },
+                color: if is_current { p.accent } else { p.text },
                 font_weight: if is_current {
                     FontWeightHint::Bold
                 } else {
@@ -684,7 +711,7 @@ impl LanguageSettingsUI {
                 y: cy + 22.0,
                 text: lang.native_name.clone(),
                 font_size: 11.0,
-                color: SUBTEXT0,
+                color: p.subtext0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width * 0.4),
                 overflow: TextOverflow::Ellipsis,
@@ -697,7 +724,7 @@ impl LanguageSettingsUI {
                     y: cy + 12.0,
                     width: 56.0,
                     height: 18.0,
-                    color: YELLOW,
+                    color: p.yellow,
                     corner_radii: CornerRadii::all(9.0),
                 });
                 cmds.push(RenderCommand::Text {
@@ -705,7 +732,7 @@ impl LanguageSettingsUI {
                     y: cy + 14.0,
                     text: "Partial".into(),
                     font_size: 10.0,
-                    color: CRUST,
+                    color: readable_on(p.yellow),
                     font_weight: FontWeightHint::Bold,
                     max_width: Some(48.0),
                     overflow: TextOverflow::Ellipsis,
@@ -721,14 +748,21 @@ impl LanguageSettingsUI {
             y: cy + 4.0,
             text: format!("{} languages available", filtered.len()),
             font_size: 11.0,
-            color: OVERLAY0,
+            color: p.overlay0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(width),
             overflow: TextOverflow::Ellipsis,
         });
     }
 
-    fn render_formats_tab(&self, cmds: &mut Vec<RenderCommand>, x: f32, y: f32, width: f32) {
+    fn render_formats_tab(
+        &self,
+        cmds: &mut Vec<RenderCommand>,
+        p: &Palette,
+        x: f32,
+        y: f32,
+        width: f32,
+    ) {
         let mut cy = y;
 
         // Date format
@@ -737,7 +771,7 @@ impl LanguageSettingsUI {
             y: cy,
             text: "Date Format".into(),
             font_size: 15.0,
-            color: LAVENDER,
+            color: p.lavender,
             font_weight: FontWeightHint::Bold,
             max_width: Some(width),
             overflow: TextOverflow::Ellipsis,
@@ -746,6 +780,7 @@ impl LanguageSettingsUI {
 
         self.render_label_value(
             cmds,
+            p,
             x,
             cy,
             width,
@@ -753,7 +788,15 @@ impl LanguageSettingsUI {
             self.settings.date_format.label(),
         );
         cy += 24.0;
-        self.render_label_value(cmds, x, cy, width, "Example", self.settings.date_example());
+        self.render_label_value(
+            cmds,
+            p,
+            x,
+            cy,
+            width,
+            "Example",
+            self.settings.date_example(),
+        );
         cy += 36.0;
 
         // Time format
@@ -762,7 +805,7 @@ impl LanguageSettingsUI {
             y: cy,
             text: "Time Format".into(),
             font_size: 15.0,
-            color: LAVENDER,
+            color: p.lavender,
             font_weight: FontWeightHint::Bold,
             max_width: Some(width),
             overflow: TextOverflow::Ellipsis,
@@ -771,6 +814,7 @@ impl LanguageSettingsUI {
 
         self.render_label_value(
             cmds,
+            p,
             x,
             cy,
             width,
@@ -778,7 +822,15 @@ impl LanguageSettingsUI {
             self.settings.time_format.label(),
         );
         cy += 24.0;
-        self.render_label_value(cmds, x, cy, width, "Example", self.settings.time_example());
+        self.render_label_value(
+            cmds,
+            p,
+            x,
+            cy,
+            width,
+            "Example",
+            self.settings.time_example(),
+        );
         cy += 36.0;
 
         // First day of week
@@ -787,7 +839,7 @@ impl LanguageSettingsUI {
             y: cy,
             text: "Calendar".into(),
             font_size: 15.0,
-            color: LAVENDER,
+            color: p.lavender,
             font_weight: FontWeightHint::Bold,
             max_width: Some(width),
             overflow: TextOverflow::Ellipsis,
@@ -796,6 +848,7 @@ impl LanguageSettingsUI {
 
         self.render_label_value(
             cmds,
+            p,
             x,
             cy,
             width,
@@ -810,7 +863,7 @@ impl LanguageSettingsUI {
             y: cy,
             text: "Number Format".into(),
             font_size: 15.0,
-            color: LAVENDER,
+            color: p.lavender,
             font_weight: FontWeightHint::Bold,
             max_width: Some(width),
             overflow: TextOverflow::Ellipsis,
@@ -819,6 +872,7 @@ impl LanguageSettingsUI {
 
         self.render_label_value(
             cmds,
+            p,
             x,
             cy,
             width,
@@ -828,6 +882,7 @@ impl LanguageSettingsUI {
         cy += 24.0;
         self.render_label_value(
             cmds,
+            p,
             x,
             cy,
             width,
@@ -837,7 +892,14 @@ impl LanguageSettingsUI {
         let _ = cy;
     }
 
-    fn render_region_tab(&self, cmds: &mut Vec<RenderCommand>, x: f32, y: f32, width: f32) {
+    fn render_region_tab(
+        &self,
+        cmds: &mut Vec<RenderCommand>,
+        p: &Palette,
+        x: f32,
+        y: f32,
+        width: f32,
+    ) {
         let mut cy = y;
 
         // Measurement
@@ -846,7 +908,7 @@ impl LanguageSettingsUI {
             y: cy,
             text: "Measurement".into(),
             font_size: 15.0,
-            color: LAVENDER,
+            color: p.lavender,
             font_weight: FontWeightHint::Bold,
             max_width: Some(width),
             overflow: TextOverflow::Ellipsis,
@@ -855,6 +917,7 @@ impl LanguageSettingsUI {
 
         self.render_label_value(
             cmds,
+            p,
             x,
             cy,
             width,
@@ -869,7 +932,7 @@ impl LanguageSettingsUI {
             y: cy,
             text: "Temperature".into(),
             font_size: 15.0,
-            color: LAVENDER,
+            color: p.lavender,
             font_weight: FontWeightHint::Bold,
             max_width: Some(width),
             overflow: TextOverflow::Ellipsis,
@@ -878,6 +941,7 @@ impl LanguageSettingsUI {
 
         self.render_label_value(
             cmds,
+            p,
             x,
             cy,
             width,
@@ -892,18 +956,26 @@ impl LanguageSettingsUI {
             y: cy,
             text: "Currency".into(),
             font_size: 15.0,
-            color: LAVENDER,
+            color: p.lavender,
             font_weight: FontWeightHint::Bold,
             max_width: Some(width),
             overflow: TextOverflow::Ellipsis,
         });
         cy += 26.0;
 
-        self.render_label_value(cmds, x, cy, width, "Currency", &self.settings.currency_code);
+        self.render_label_value(
+            cmds,
+            p,
+            x,
+            cy,
+            width,
+            "Currency",
+            &self.settings.currency_code,
+        );
         cy += 24.0;
 
         let currency_example = self.settings.currency_example();
-        self.render_label_value(cmds, x, cy, width, "Example", &currency_example);
+        self.render_label_value(cmds, p, x, cy, width, "Example", &currency_example);
         cy += 36.0;
 
         // Available currencies list (first 6)
@@ -912,7 +984,7 @@ impl LanguageSettingsUI {
             y: cy,
             text: "Available Currencies".into(),
             font_size: 13.0,
-            color: SUBTEXT1,
+            color: p.subtext1,
             font_weight: FontWeightHint::Bold,
             max_width: Some(width),
             overflow: TextOverflow::Ellipsis,
@@ -926,7 +998,7 @@ impl LanguageSettingsUI {
                 y: cy,
                 width,
                 height: 28.0,
-                color: if is_current { SURFACE1 } else { SURFACE0 },
+                color: if is_current { p.surface1 } else { p.surface0 },
                 corner_radii: CornerRadii::all(4.0),
             });
             cmds.push(RenderCommand::Text {
@@ -939,7 +1011,7 @@ impl LanguageSettingsUI {
                     cur.format_value(1234.56)
                 ),
                 font_size: 12.0,
-                color: if is_current { BLUE } else { TEXT },
+                color: if is_current { p.accent } else { p.text },
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width - 20.0),
                 overflow: TextOverflow::Ellipsis,
@@ -951,6 +1023,7 @@ impl LanguageSettingsUI {
     fn render_label_value(
         &self,
         cmds: &mut Vec<RenderCommand>,
+        p: &Palette,
         x: f32,
         y: f32,
         width: f32,
@@ -962,7 +1035,7 @@ impl LanguageSettingsUI {
             y,
             text: label.into(),
             font_size: 13.0,
-            color: SUBTEXT0,
+            color: p.subtext0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(width * 0.4),
             overflow: TextOverflow::Ellipsis,
@@ -972,7 +1045,7 @@ impl LanguageSettingsUI {
             y,
             text: value.into(),
             font_size: 13.0,
-            color: TEXT,
+            color: p.text,
             font_weight: FontWeightHint::Regular,
             max_width: Some(width * 0.55),
             overflow: TextOverflow::Ellipsis,
@@ -1002,6 +1075,12 @@ mod tests {
         clippy::indexing_slicing,
         clippy::arithmetic_side_effects
     )]
+    // The colour tests locate a command by an exact size, y or font size — a
+    // literal the renderer writes and the test reads back with no arithmetic
+    // in between. Exact equality is the assertion meant; a tolerance would let
+    // a 15pt section heading pass as a 13pt sub-heading, which is precisely
+    // the distinction being pinned.
+    #![allow(clippy::float_cmp)]
 
     use super::*;
 
@@ -1228,7 +1307,7 @@ mod tests {
     #[test]
     fn test_ui_render_language_tab() {
         let ui = LanguageSettingsUI::new();
-        let cmds = ui.render(600.0, 800.0);
+        let cmds = ui.render(&accented(false), 600.0, 800.0);
         assert!(!cmds.is_empty());
     }
 
@@ -1236,7 +1315,7 @@ mod tests {
     fn test_ui_render_formats_tab() {
         let mut ui = LanguageSettingsUI::new();
         ui.set_tab(LanguageTab::Formats);
-        let cmds = ui.render(600.0, 800.0);
+        let cmds = ui.render(&accented(false), 600.0, 800.0);
         assert!(!cmds.is_empty());
     }
 
@@ -1244,8 +1323,434 @@ mod tests {
     fn test_ui_render_region_tab() {
         let mut ui = LanguageSettingsUI::new();
         ui.set_tab(LanguageTab::Region);
-        let cmds = ui.render(600.0, 800.0);
+        let cmds = ui.render(&accented(false), 600.0, 800.0);
         assert!(!cmds.is_empty());
+    }
+
+    // ---- Palette conversion ----
+    //
+    // See the module docs for the five judgements these pin.
+
+    use guitk::color::Color;
+
+    /// A palette whose accent is in no role, so "took the accent" and "took a
+    /// role that happens to be the accent" cannot be confused.
+    ///
+    /// The stock accent *is* `blue`, which makes every accent assertion in
+    /// this module pass against a site that named `p.blue` — the module-26
+    /// trap. Nothing here may use `Palette::for_mode` directly.
+    fn accented(light: bool) -> Palette {
+        let mut p = Palette::for_mode(light);
+        p.accent = Color::from_hex(0xFF00FF);
+        assert_eq!(
+            p.roles()
+                .iter()
+                .filter(|(name, c)| *name != "accent" && *c == p.accent)
+                .count(),
+            0,
+            "the probe accent collides with another role, so an assertion \
+             that a site is *not* the accent could pass for the wrong reason"
+        );
+        p
+    }
+
+    /// A language list built here rather than taken from `default_languages`.
+    ///
+    /// The defaults cannot reach the "Partial" badge at all: every incomplete
+    /// language sits at index 12 or beyond and the list renders `.take(12)`.
+    /// A fixture that used them would leave the badge — and therefore its
+    /// derived ink — untested while looking complete.
+    fn three_languages() -> Vec<Language> {
+        vec![
+            Language::new("en-US", "English (United States)", "English", true),
+            Language::new("pl-PL", "Polish (Poland)", "Polski", false),
+            Language::new("de-DE", "German (Germany)", "Deutsch", true),
+        ]
+    }
+
+    /// Every discriminator this module branches on, switched on at once.
+    ///
+    /// Current language is row 0, the *selected* row is row 2 (so "selected"
+    /// and "current" cannot be confused for one another), row 1 is incomplete
+    /// and so carries the badge, and the search box holds typed text rather
+    /// than its placeholder.
+    fn full_ui() -> LanguageSettingsUI {
+        let mut ui = LanguageSettingsUI::new();
+        ui.settings.available_languages = three_languages();
+        ui.settings.language = "en-US".to_string();
+        ui.selected_language_index = Some(2);
+        // A query matching all three, so the list keeps every row: "n" is in
+        // "English", "Poland" and "German". A query that filtered one out
+        // would silently drop whichever branch that row carried — which is
+        // how the first version of this fixture lost both the current-language
+        // marker and the third row at once.
+        ui.language_search = "n".to_string();
+        ui
+    }
+
+    /// Every colour `cmds` puts on the screen.
+    fn all_colors(cmds: &[RenderCommand]) -> Vec<Color> {
+        cmds.iter()
+            .filter_map(|c| match c {
+                RenderCommand::FillRect { color, .. }
+                | RenderCommand::Text { color, .. }
+                | RenderCommand::StrokeRect { color, .. }
+                | RenderCommand::Line { color, .. }
+                | RenderCommand::BoxShadow { color, .. } => Some(*color),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The colour of the `Text` command whose content is exactly `text`.
+    fn text_color(cmds: &[RenderCommand], want: &str) -> Color {
+        let hits: Vec<Color> = cmds
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, color, .. } if text == want => Some(*color),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            hits.len(),
+            1,
+            "expected exactly one command drawing {want:?}, found {}",
+            hits.len()
+        );
+        hits[0]
+    }
+
+    /// Every `FillRect` of exactly `w` x `h`, in draw order.
+    fn fills_sized(cmds: &[RenderCommand], w: f32, h: f32) -> Vec<Color> {
+        cmds.iter()
+            .filter_map(|c| match c {
+                RenderCommand::FillRect {
+                    width,
+                    height,
+                    color,
+                    ..
+                } if *width == w && *height == h => Some(*color),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The three tab-header fills, selected by the strip's y.
+    fn tab_strip(cmds: &[RenderCommand]) -> Vec<Color> {
+        cmds.iter()
+            .filter_map(|c| match c {
+                RenderCommand::FillRect { y, color, .. } if *y == 60.0 => Some(*color),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Render all three tabs, because one render only ever draws one of them.
+    fn every_tab(p: &Palette) -> Vec<(LanguageTab, Vec<RenderCommand>)> {
+        [
+            LanguageTab::Language,
+            LanguageTab::Formats,
+            LanguageTab::Region,
+        ]
+        .into_iter()
+        .map(|tab| {
+            let mut u = full_ui();
+            u.set_tab(tab);
+            (tab, u.render(p, 600.0, 800.0))
+        })
+        .collect()
+    }
+
+    /// The whole point: no site draws a colour the palette cannot account for.
+    ///
+    /// Run in both modes and over all three tabs — a leftover Mocha constant
+    /// is invisible in the dark render and names itself in the light one.
+    #[test]
+    fn every_colour_this_panel_draws_comes_from_its_palette() {
+        for light in [false, true] {
+            let p = accented(light);
+            for (tab, cmds) in every_tab(&p) {
+                crate::palette_check::assert_drawn_from(
+                    &p,
+                    &cmds,
+                    &[readable_on(p.accent), readable_on(p.yellow)],
+                    &format!("language_settings {tab:?}"),
+                );
+            }
+        }
+    }
+
+    /// A sweep is only as wide as the render it is handed.
+    ///
+    /// Each of these is a branch the fixture must keep reaching; if an edit
+    /// makes one unreachable, this fails loudly instead of the sweep quietly
+    /// checking less.
+    #[test]
+    fn the_fixture_reaches_every_branch_this_module_has() {
+        let p = accented(false);
+        let by_tab = every_tab(&p);
+        let lang = &by_tab[0].1;
+
+        // Both tab states: one active fill, two inactive.
+        // Tab widths are derived from their label text, so the strip is
+        // selected by its y. Not by height: the current-language marker bar
+        // is also 32 tall, and matching on that alone counted four "tabs".
+        let strip = tab_strip(lang);
+        assert_eq!(strip.len(), 3, "three tabs are drawn");
+        assert_eq!(
+            strip.iter().filter(|c| **c == p.accent).count(),
+            1,
+            "exactly one tab is active"
+        );
+
+        // The current-language card, the search box, three list rows.
+        assert_eq!(fills_sized(lang, 552.0, 50.0).len(), 1, "current card");
+        assert_eq!(fills_sized(lang, 552.0, 30.0).len(), 1, "search box");
+        assert_eq!(fills_sized(lang, 552.0, 40.0).len(), 3, "three list rows");
+        // The current-language marker bar and the incomplete badge.
+        assert_eq!(fills_sized(lang, 4.0, 32.0).len(), 1, "current marker");
+        assert_eq!(fills_sized(lang, 56.0, 18.0).len(), 1, "partial badge");
+        assert_eq!(text_color(lang, "Partial"), readable_on(p.yellow));
+        // Typed search text, not the placeholder.
+        assert!(
+            lang.iter().any(|c| matches!(
+                c,
+                RenderCommand::Text { text, .. } if text == "n"
+            )),
+            "the fixture's search box shows its placeholder, so the typed-text \
+             branch is never rendered"
+        );
+
+        // The other two tabs draw their headings and their label/value rows.
+        for (tab, cmds) in &by_tab[1..] {
+            assert!(
+                cmds.iter().any(|c| matches!(
+                    c,
+                    RenderCommand::Text { font_size, color, .. }
+                        if *font_size == 15.0 && *color == p.lavender
+                )),
+                "{tab:?} draws no section heading"
+            );
+        }
+        assert!(
+            by_tab[2]
+                .1
+                .iter()
+                .any(|c| matches!(c, RenderCommand::Text { font_size, color, .. }
+                    if *font_size == 13.0 && *color == p.subtext1)),
+            "the Region tab draws no sub-heading"
+        );
+    }
+
+    /// Judgement 1: three things mark position, and they are the only three.
+    ///
+    /// This module cannot use the taskbar's "exactly one thing carries the
+    /// accent" check — a selected tab, a current language and a current
+    /// currency are three different axes and are legitimately accented at the
+    /// same time. So the accent is counted per site instead.
+    #[test]
+    fn only_the_three_position_marks_carry_the_accent() {
+        for light in [false, true] {
+            let p = accented(light);
+            let by_tab = every_tab(&p);
+            let lang = &by_tab[0].1;
+
+            // The active tab's fill, the current row's marker bar, and the
+            // current row's label.
+            assert_eq!(fills_sized(lang, 4.0, 32.0), vec![p.accent], "marker bar");
+            assert_eq!(
+                text_color(lang, "English (United States)"),
+                p.accent,
+                "the current language's name marks which one is in force"
+            );
+            let accented_count = all_colors(lang).iter().filter(|c| **c == p.accent).count();
+            assert_eq!(
+                accented_count, 3,
+                "the Language tab should accent exactly the active tab, the \
+                 current row's marker and the current row's label — found \
+                 {accented_count}"
+            );
+
+            // The Formats tab has no position mark at all beyond its tab.
+            let formats = &by_tab[1].1;
+            assert_eq!(
+                all_colors(formats)
+                    .iter()
+                    .filter(|c| **c == p.accent)
+                    .count(),
+                1,
+                "nothing on the Formats tab is a selection"
+            );
+        }
+    }
+
+    /// Judgement 2: an incomplete translation is a fact about the data.
+    ///
+    /// It is true whatever the user has selected and whatever accent they
+    /// chose, so it must not move with either.
+    #[test]
+    fn the_partial_badge_is_a_property_of_the_language_not_a_selection() {
+        for light in [false, true] {
+            let p = accented(light);
+            let cmds = full_ui().render(&p, 600.0, 800.0);
+            let badge = fills_sized(&cmds, 56.0, 18.0);
+            assert_eq!(badge, vec![p.yellow]);
+            assert_ne!(
+                badge[0], p.accent,
+                "a translation's completeness would mean something different \
+                 on every machine if it followed the accent"
+            );
+        }
+    }
+
+    /// Judgement 3: ink on a fill this module chose is computed from it.
+    ///
+    /// Proved by the two modes disagreeing. Mocha yellow is pale and wants
+    /// near-black; Latte yellow is deep and wants near-white. A module that
+    /// froze the badge's ink to either endpoint fails one of the two.
+    #[test]
+    fn the_badge_ink_is_computed_from_the_badge_it_sits_on() {
+        let inks: Vec<Color> = [false, true]
+            .into_iter()
+            .map(|light| {
+                let p = accented(light);
+                let cmds = full_ui().render(&p, 600.0, 800.0);
+                let badge = fills_sized(&cmds, 56.0, 18.0)[0];
+                let ink = text_color(&cmds, "Partial");
+                assert_eq!(ink, readable_on(badge));
+                ink
+            })
+            .collect();
+        assert_ne!(
+            inks[0], inks[1],
+            "the two modes' yellows sit on opposite sides of the legibility \
+             threshold, so equal inks mean the value was frozen"
+        );
+    }
+
+    /// The active tab's label is derived from the accent, not named beside it.
+    ///
+    /// Swept across the accent's whole range rather than checked at one
+    /// value: `readable_on` has to answer *both* endpoints somewhere in that
+    /// sweep, which a frozen constant cannot do.
+    #[test]
+    fn the_active_tabs_label_is_computed_from_the_accent_under_it() {
+        let mut seen = std::collections::BTreeSet::new();
+        for v in (0..=0xF0).step_by(0x10) {
+            let mut p = Palette::for_mode(false);
+            p.accent = Color::rgba(v, v, v, 255);
+            let cmds = full_ui().render(&p, 600.0, 800.0);
+            let ink = text_color(&cmds, "Language");
+            assert_eq!(ink, readable_on(p.accent));
+            seen.insert((ink.r, ink.g, ink.b));
+        }
+        assert_eq!(
+            seen.len(),
+            2,
+            "sweeping the accent from black to near-white must drive the \
+             label through both readable_on endpoints; {} observed means it \
+             is frozen",
+            seen.len()
+        );
+    }
+
+    /// Judgement 4: headings are structure, so they do not move with selection.
+    #[test]
+    fn headings_keep_their_own_rung_under_every_accent() {
+        for light in [false, true] {
+            let p = accented(light);
+            let by_tab = every_tab(&p);
+            for (tab, cmds) in &by_tab[1..] {
+                let headings: Vec<Color> = cmds
+                    .iter()
+                    .filter_map(|c| match c {
+                        RenderCommand::Text {
+                            font_size, color, ..
+                        } if *font_size == 15.0 => Some(*color),
+                        _ => None,
+                    })
+                    .collect();
+                assert!(!headings.is_empty(), "{tab:?} has no headings");
+                for h in headings {
+                    assert_eq!(h, p.lavender, "{tab:?} heading left its rung");
+                    assert_ne!(h, p.accent, "a heading is not a selection");
+                }
+            }
+        }
+    }
+
+    /// Judgement 5: the placeholder is dimmer than a real query.
+    #[test]
+    fn an_empty_search_box_is_dimmer_than_one_with_a_query_in_it() {
+        let p = accented(false);
+        let mut ui = full_ui();
+        ui.language_search = String::new();
+        let empty = ui.render(&p, 600.0, 800.0);
+        assert_eq!(text_color(&empty, "Search languages..."), p.overlay0);
+
+        let typed = full_ui().render(&p, 600.0, 800.0);
+        assert_eq!(text_color(&typed, "n"), p.text);
+        assert_ne!(
+            p.overlay0, p.text,
+            "if these were equal a user could not tell a placeholder from a \
+             query they typed"
+        );
+    }
+
+    /// The panel is not the same picture in both modes.
+    ///
+    /// A module that ignored its palette entirely would still pass every
+    /// role table above, because those compare against whatever `p` says.
+    /// This is the check that the palette was read at all.
+    #[test]
+    fn the_render_is_not_the_same_in_both_modes() {
+        for tab in [
+            LanguageTab::Language,
+            LanguageTab::Formats,
+            LanguageTab::Region,
+        ] {
+            let mut ui = full_ui();
+            ui.set_tab(tab);
+            let dark = all_colors(&ui.render(&accented(false), 600.0, 800.0));
+            let light = all_colors(&ui.render(&accented(true), 600.0, 800.0));
+            assert_ne!(
+                dark, light,
+                "{tab:?} draws identically in both modes, so it is not \
+                 reading the palette it was handed"
+            );
+        }
+    }
+
+    /// None of the eleven deleted constants is still on screen.
+    ///
+    /// Named separately from the sweep because the sweep allows a Mocha value
+    /// in the *dark* render by construction; this asks the sharper question.
+    #[test]
+    fn none_of_the_eleven_deleted_constants_is_still_drawn() {
+        // The Mocha values this module used to hold, minus `crust`, which is
+        // also a `readable_on` endpoint and so is legitimately drawn.
+        const DELETED: [u32; 10] = [
+            0x001E_1E2E, // base
+            0x0031_3244, // surface0
+            0x0045_475A, // surface1
+            0x00CD_D6F4, // text
+            0x00A6_ADC8, // subtext0
+            0x00BA_C2DE, // subtext1
+            0x0089_B4FA, // blue
+            0x00F9_E2AF, // yellow
+            0x00B4_BEFE, // lavender
+            0x006C_7086, // overlay0
+        ];
+        let p = accented(true);
+        for (tab, cmds) in every_tab(&p) {
+            for c in all_colors(&cmds) {
+                let rgb = (u32::from(c.r) << 16) | (u32::from(c.g) << 8) | u32::from(c.b);
+                assert!(
+                    !DELETED.contains(&rgb),
+                    "{tab:?} still draws Mocha #{rgb:06X} in a light render"
+                );
+            }
+        }
     }
 
     // ---- Tab labels ----

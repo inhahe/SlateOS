@@ -30194,8 +30194,8 @@ fn cmd_certmgr(args: &str) {
                     );
                     shell_println!("Auto-renew:  {}", c.auto_renew);
                     shell_println!("Renewals:    {}", c.renewal_count);
-                    shell_println!("Cert path:   {}", c.cert_path);
-                    shell_println!("Key path:    {}", c.key_path);
+                    shell_println!("Cert path:   {}", c.cert_path.display());
+                    shell_println!("Key path:    {}", c.key_path.display());
                     shell_println!("Pinned:      {}", c.pinned);
                 }
                 Err(e) => shell_println!("Error: {:?}", e),

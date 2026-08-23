@@ -373,27 +373,6 @@ struct State {
 }
 
 impl State {
-    fn new() -> Self {
-        let mut features = Vec::new();
-        for &f in GuestFeature::ALL {
-            features.push(FeatureState::new(f));
-        }
-        Self {
-            initialized: false,
-            hypervisor: Hypervisor::None,
-            features,
-            balloon: BalloonState::new(),
-            heartbeat: HeartbeatState::new(),
-            clock: ClockState::new(),
-            guest_info: GuestInfoData::new(),
-            tick_count: 0,
-            display_width: 0,
-            display_height: 0,
-            shutdown_requested: false,
-            reboot_requested: false,
-        }
-    }
-
     /// Get a feature state by feature type.
     fn feature(&self, f: GuestFeature) -> Option<&FeatureState> {
         self.features.get(f as usize)
@@ -433,47 +412,70 @@ impl State {
     }
 }
 
-static STATE: Mutex<State> = Mutex::new(State {
-    initialized: false,
-    hypervisor: Hypervisor::None,
-    features: Vec::new(),
-    balloon: BalloonState {
-        inflated_pages: 0,
-        target_pages: 0,
-        total_inflated: 0,
-        total_deflated: 0,
-        max_pages: 0,
-        auto_enabled: true,
-    },
-    heartbeat: HeartbeatState {
-        interval_secs: 5,
-        sent_count: 0,
-        failed_count: 0,
-        last_sent_ns: 0,
-        host_ack: false,
-    },
-    clock: ClockState {
-        source: ClockSource::None,
-        reads: 0,
-        last_drift_ns: 0,
-        corrections: 0,
-        page_mapped: false,
-    },
-    guest_info: GuestInfoData {
-        os_name: String::new(),
-        os_version: String::new(),
-        kernel_version: String::new(),
-        cpu_count: 0,
-        total_memory: 0,
-        hostname: String::new(),
-        report_count: 0,
-    },
-    tick_count: 0,
-    display_width: 0,
-    display_height: 0,
-    shutdown_requested: false,
-    reboot_requested: false,
-});
+impl State {
+    /// What a fresh boot holds — nothing detected, nothing running.
+    ///
+    /// Named rather than left as the `static`'s literal because there is now
+    /// a second place that needs it: `self_test` installs a pristine `State`
+    /// for the duration of the suite. Two copies of a forty-line literal are
+    /// two things to keep in step, and nothing would catch them drifting.
+    ///
+    /// That is not hypothetical here. This replaces an earlier `State::new`
+    /// that nothing called and that had already drifted: it filled `features`
+    /// with a `FeatureState` per `GuestFeature`, where the static leaves the
+    /// vector empty. `init` is what fills it — see its "const initializer
+    /// uses empty Vec" rebuild — so the empty vector, not the filled one, is
+    /// what the machine actually boots with, and a suite handed the filled
+    /// one would have been testing a state no boot ever produces.
+    ///
+    /// `const` so the `static` itself can use it, which also rules out
+    /// reintroducing the drift: a populated `Vec` cannot be built here.
+    const fn new() -> Self {
+        Self {
+            initialized: false,
+            hypervisor: Hypervisor::None,
+            features: Vec::new(),
+            balloon: BalloonState {
+                inflated_pages: 0,
+                target_pages: 0,
+                total_inflated: 0,
+                total_deflated: 0,
+                max_pages: 0,
+                auto_enabled: true,
+            },
+            heartbeat: HeartbeatState {
+                interval_secs: 5,
+                sent_count: 0,
+                failed_count: 0,
+                last_sent_ns: 0,
+                host_ack: false,
+            },
+            clock: ClockState {
+                source: ClockSource::None,
+                reads: 0,
+                last_drift_ns: 0,
+                corrections: 0,
+                page_mapped: false,
+            },
+            guest_info: GuestInfoData {
+                os_name: String::new(),
+                os_version: String::new(),
+                kernel_version: String::new(),
+                cpu_count: 0,
+                total_memory: 0,
+                hostname: String::new(),
+                report_count: 0,
+            },
+            tick_count: 0,
+            display_width: 0,
+            display_height: 0,
+            shutdown_requested: false,
+            reboot_requested: false,
+        }
+    }
+}
+
+static STATE: Mutex<State> = Mutex::new(State::new());
 
 /// Whether init has completed (for fast checking).
 static INITIALIZED: AtomicBool = AtomicBool::new(false);
@@ -1307,8 +1309,25 @@ pub fn procfs_content() -> String {
 // Self-test
 // ---------------------------------------------------------------------------
 
-/// Self-test for VM guest integration.
+/// Run the module's self-test suite against state of its own.
+///
+/// The suite mutates module state and asserts exact contents, and it used to
+/// do that to the *live* state -- which, since it is also a kernel-shell
+/// subcommand, changed or destroyed whatever the user had here and then
+/// reported success.  It is moved aside for the duration and put back
+/// afterwards; `crate::fs::selftest` records why this shape rather than the
+/// alternatives.
+///
+/// Each pristine value is the `static`'s own initialiser, which is the one
+/// spelling of "what a fresh boot holds" that cannot drift away from it.
 pub fn self_test() {
+    let _pristine_initialized = crate::fs::selftest::pristine_atomic(&INITIALIZED, false);
+    let _pristine_tick_counter = crate::fs::selftest::pristine_atomic(&TICK_COUNTER, 0);
+    let _pristine_active_features = crate::fs::selftest::pristine_atomic(&ACTIVE_FEATURES, 0);
+    crate::fs::selftest::with_pristine(&STATE, State::new(), self_test_inner);
+}
+
+fn self_test_inner() {
     crate::serial_println!("[vmguest] Running self-test...");
 
     // Test 1: Feature enum labels are non-empty.

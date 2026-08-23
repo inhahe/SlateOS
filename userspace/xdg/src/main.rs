@@ -19,6 +19,7 @@
 //! system), then falling back to environment variables (`$BROWSER`,
 //! `$EDITOR`).
 
+use quoting::quoteaf_os;
 use std::collections::HashMap;
 use std::env;
 use std::fmt::Write as FmtWrite;
@@ -1088,7 +1089,7 @@ fn run_xdg_open(args: &[String]) -> i32 {
             }
             other => {
                 if other.starts_with('-') {
-                    eprintln!("xdg-open: unknown option '{}'", other);
+                    eprintln!("xdg-open: unknown option {}", quoteaf_os(other));
                     return 1;
                 }
                 target = Some(other);
@@ -1137,8 +1138,8 @@ fn launch_for_mime(mime: &str, target: &str, verbose: bool) -> i32 {
             return exec_command(&program, &args);
         }
         eprintln!(
-            "xdg-open: handler '{}' found but could not build command",
-            desktop_id
+            "xdg-open: handler {} found but could not build command",
+            quoteaf_os(&desktop_id)
         );
     }
 
@@ -1151,8 +1152,9 @@ fn launch_for_mime(mime: &str, target: &str, verbose: bool) -> i32 {
     }
 
     eprintln!(
-        "xdg-open: no handler found for '{}' (MIME: {})",
-        target, mime
+        "xdg-open: no handler found for {} (MIME: {})",
+        quoteaf_os(target),
+        quoteaf_os(mime)
     );
     4 // freedesktop exit code: no handler
 }
@@ -1162,7 +1164,7 @@ fn exec_command(program: &str, args: &[String]) -> i32 {
     match std::process::Command::new(program).args(args).status() {
         Ok(status) => status.code().unwrap_or(1),
         Err(e) => {
-            eprintln!("xdg-open: failed to execute '{}': {}", program, e);
+            eprintln!("xdg-open: failed to execute {}: {}", quoteaf_os(program), e);
             1
         }
     }
@@ -1207,7 +1209,7 @@ fn run_xdg_mime(args: &[String]) -> i32 {
             0
         }
         other => {
-            eprintln!("xdg-mime: unknown subcommand '{}'", other);
+            eprintln!("xdg-mime: unknown subcommand {}", quoteaf_os(other));
             print_xdg_mime_usage();
             1
         }
@@ -1246,7 +1248,7 @@ fn run_xdg_mime_query(args: &[String]) -> i32 {
             }
         }
         other => {
-            eprintln!("xdg-mime query: unknown query type '{}'", other);
+            eprintln!("xdg-mime query: unknown query type {}", quoteaf_os(other));
             1
         }
     }
@@ -1345,7 +1347,7 @@ fn run_mimeopen(args: &[String]) -> i32 {
             }
             other => {
                 if other.starts_with('-') {
-                    eprintln!("mimeopen: unknown option '{}'", other);
+                    eprintln!("mimeopen: unknown option {}", quoteaf_os(other));
                     return 1;
                 }
                 files.push(other.to_string());
@@ -1388,10 +1390,14 @@ fn interactive_open(file: &str, mime: &str, set_default: bool) -> i32 {
     let handlers = find_handlers_for_mime(mime);
 
     if handlers.is_empty() {
-        eprintln!("No handlers found for MIME type '{}'", mime);
+        eprintln!("No handlers found for MIME type {}", quoteaf_os(mime));
         eprintln!("Enter application command to use:");
     } else {
-        eprintln!("Choose an application to open '{}' ({}):", file, mime);
+        eprintln!(
+            "Choose an application to open {} ({}):",
+            quoteaf_os(file),
+            quoteaf_os(mime)
+        );
         for (i, (name, path)) in handlers.iter().enumerate() {
             let desktop_id = path
                 .file_name()
@@ -1433,7 +1439,10 @@ fn interactive_open(file: &str, mime: &str, set_default: bool) -> i32 {
             if let Some((program, args)) = build_command(desktop_id, file) {
                 return exec_command(&program, &args);
             }
-            eprintln!("mimeopen: could not build command for '{}'", desktop_id);
+            eprintln!(
+                "mimeopen: could not build command for {}",
+                quoteaf_os(desktop_id)
+            );
             return 1;
         }
     }

@@ -36,6 +36,7 @@
 //! - 1: files differ
 //! - 2: error occurred
 
+use quoting::{quoteaf_os, quotef_os};
 use std::env;
 use std::fs;
 use std::io::{self, Write};
@@ -175,7 +176,7 @@ fn parse_args(args: &[String]) -> ParseResult {
                 match n_str.parse::<usize>() {
                     Ok(n) => context_lines = Some(n),
                     Err(_) => {
-                        eprintln!("diff: invalid context length '{n_str}'");
+                        eprintln!("diff: invalid context length {}", quoteaf_os(n_str));
                         process::exit(2);
                     }
                 }
@@ -186,7 +187,7 @@ fn parse_args(args: &[String]) -> ParseResult {
                 match n_str.parse::<usize>() {
                     Ok(n) => context_lines = Some(n),
                     Err(_) => {
-                        eprintln!("diff: invalid context length '{n_str}'");
+                        eprintln!("diff: invalid context length {}", quoteaf_os(n_str));
                         process::exit(2);
                     }
                 }
@@ -201,7 +202,7 @@ fn parse_args(args: &[String]) -> ParseResult {
                 match args[i].parse::<usize>() {
                     Ok(w) => width = w,
                     Err(_) => {
-                        eprintln!("diff: invalid width '{}'", args[i]);
+                        eprintln!("diff: invalid width {}", quoteaf_os(&args[i]));
                         process::exit(2);
                     }
                 }
@@ -209,7 +210,7 @@ fn parse_args(args: &[String]) -> ParseResult {
                 match w_str.parse::<usize>() {
                     Ok(w) => width = w,
                     Err(_) => {
-                        eprintln!("diff: invalid width '{w_str}'");
+                        eprintln!("diff: invalid width {}", quoteaf_os(w_str));
                         process::exit(2);
                     }
                 }
@@ -240,7 +241,7 @@ fn parse_args(args: &[String]) -> ParseResult {
             } else if arg == "--version" {
                 return ParseResult::Version;
             } else {
-                eprintln!("diff: unrecognized option '{arg}'");
+                eprintln!("diff: unrecognized option {}", quoteaf_os(arg));
                 eprintln!("Try 'diff --help' for more information.");
                 process::exit(2);
             }
@@ -286,7 +287,7 @@ fn parse_args(args: &[String]) -> ParseResult {
                         match rest.parse::<usize>() {
                             Ok(w) => width = w,
                             Err(_) => {
-                                eprintln!("diff: invalid width '{rest}'");
+                                eprintln!("diff: invalid width {}", quoteaf_os(&rest));
                                 process::exit(2);
                             }
                         }
@@ -299,7 +300,7 @@ fn parse_args(args: &[String]) -> ParseResult {
                         match args[i].parse::<usize>() {
                             Ok(w) => width = w,
                             Err(_) => {
-                                eprintln!("diff: invalid width '{}'", args[i]);
+                                eprintln!("diff: invalid width {}", quoteaf_os(&args[i]));
                                 process::exit(2);
                             }
                         }
@@ -316,7 +317,7 @@ fn parse_args(args: &[String]) -> ParseResult {
                 'r' => recursive = true,
                 'N' => new_file = true,
                 other => {
-                    eprintln!("diff: invalid option -- '{other}'");
+                    eprintln!("diff: invalid option -- {}", quoteaf_os(other.to_string()));
                     eprintln!("Try 'diff --help' for more information.");
                     process::exit(2);
                 }
@@ -1327,11 +1328,11 @@ fn diff_files(path1_str: &str, path2_str: &str, config: &Config) -> i32 {
 
     // Handle absent files with --new-file.
     if !e1 && !config.new_file {
-        eprintln!("diff: {path1_str}: No such file or directory");
+        eprintln!("diff: {}: No such file or directory", quotef_os(path1_str));
         return 2;
     }
     if !e2 && !config.new_file {
-        eprintln!("diff: {path2_str}: No such file or directory");
+        eprintln!("diff: {}: No such file or directory", quotef_os(path2_str));
         return 2;
     }
 

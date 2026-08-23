@@ -1525,6 +1525,7 @@ name = "chown"
 version = "0.1.0"
 dependencies = [
  "modechange",
+ "quoting",
  "userdb",
 ]
 
@@ -2384,6 +2385,9 @@ version = "0.1.0"
 [[package]]
 name = "diff"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "diffcore"
@@ -2456,6 +2460,9 @@ version = "0.1.0"
 [[package]]
 name = "diskutil"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "displaycal-cli"
@@ -9196,6 +9203,9 @@ version = "0.1.0"
 [[package]]
 name = "rustup"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "rx-cli"
@@ -11272,6 +11282,9 @@ checksum = "e6e4313cd5fcd3dad5cafa179702e2b244f760991f45397d14d4ebf38247da75"
 [[package]]
 name = "uniq"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "unison-cli"
@@ -12159,6 +12172,9 @@ version = "0.1.0"
 [[package]]
 name = "xdg"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "xdg-dbus-proxy-cli"

@@ -4,3 +4,9 @@ version = "0.1.0"
 edition = "2024"
 description = "SlateOS unique line filter"
 [dependencies]
+# One rendering of untrusted text inside a diagnostic. The input and output
+# paths are argv words, and a path may hold any byte but `/` and NUL --
+# including a newline. A message that pastes one in raw lets whoever named
+# the file write extra lines of this program's stderr. See
+# `userspace/quoting`.
+quoting = { path = "../quoting" }

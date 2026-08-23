@@ -3,3 +3,8 @@ name = "rustup"
 version = "0.1.0"
 edition = "2024"
 [dependencies]
+# One rendering of untrusted text inside a diagnostic. Toolchain, target and
+# component names are argv words, and a command line may hold a newline --
+# so a message that pastes one in raw lets whoever wrote the argv write
+# extra lines of this program's output. See `userspace/quoting`.
+quoting = { path = "../quoting" }

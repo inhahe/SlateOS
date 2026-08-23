@@ -27,6 +27,7 @@
 //! diskutil partitions <device>     List partition table (MBR or GPT)
 //! ```
 
+use quoting::quoteaf_os;
 use std::collections::HashMap;
 use std::env;
 use std::fs;
@@ -776,7 +777,7 @@ fn cmd_info(device_name: &str) {
         return;
     }
 
-    eprintln!("error: device '{}' not found", device_name);
+    eprintln!("error: device {} not found", quoteaf_os(device_name));
     eprintln!("  Try 'diskutil list' to see available devices.");
     process::exit(1);
 }
@@ -887,7 +888,7 @@ fn cmd_format(device_name: &str, fstype: &str) {
     match fstype {
         "ext4" | "fat32" | "vfat" | "tmpfs" => {}
         other => {
-            eprintln!("error: unsupported filesystem type '{other}'");
+            eprintln!("error: unsupported filesystem type {}", quoteaf_os(other));
             eprintln!("  Supported types: ext4, fat32, tmpfs");
             process::exit(1);
         }
@@ -895,7 +896,7 @@ fn cmd_format(device_name: &str, fstype: &str) {
 
     // Verify the device exists.
     if find_device(dev_name).is_none() {
-        eprintln!("error: device '{}' not found", dev_name);
+        eprintln!("error: device {} not found", quoteaf_os(dev_name));
         process::exit(1);
     }
 
@@ -912,8 +913,8 @@ fn cmd_format(device_name: &str, fstype: &str) {
         "fat32" | "vfat" => "vfat",
         other => {
             eprintln!(
-                "error: the kernel cannot format '{other}' yet — only the FAT \
-                 family (fat32/vfat) has an in-kernel mkfs backend"
+                "error: the kernel cannot format {} yet — only the FAT family (fat32/vfat) has an in-kernel mkfs backend",
+                quoteaf_os(other)
             );
             process::exit(1);
         }
@@ -954,7 +955,7 @@ fn cmd_verify(device_name: &str) {
     let dev = match find_device(dev_name) {
         Some(d) => d,
         None => {
-            eprintln!("error: device '{}' not found", dev_name);
+            eprintln!("error: device {} not found", quoteaf_os(dev_name));
             process::exit(1);
         }
     };
@@ -1009,7 +1010,7 @@ fn cmd_repair(device_name: &str) {
     let dev_name = device_name.strip_prefix("/dev/").unwrap_or(device_name);
 
     if find_device(dev_name).is_none() {
-        eprintln!("error: device '{}' not found", dev_name);
+        eprintln!("error: device {} not found", quoteaf_os(dev_name));
         process::exit(1);
     }
 
@@ -1206,7 +1207,7 @@ fn show_usage_estimate(path: &str, dev_name: &str) {
         println!("  Total:         {}", format_size(dev.size_bytes()));
         println!("  (exact usage data not available without statfs)");
     } else {
-        println!("  Could not determine usage for '{}'", path);
+        println!("  Could not determine usage for {}", quoteaf_os(path));
     }
 }
 
@@ -1423,7 +1424,7 @@ fn cmd_smart(device_name: &str) {
         None => match find_device(dev_name) {
             Some(d) => d,
             None => {
-                eprintln!("error: device '{}' not found", dev_name);
+                eprintln!("error: device {} not found", quoteaf_os(dev_name));
                 process::exit(1);
             }
         },
@@ -1513,7 +1514,7 @@ fn cmd_trim(device_name: &str) {
     let dev = match find_device(dev_name) {
         Some(d) => d,
         None => {
-            eprintln!("error: device '{}' not found", dev_name);
+            eprintln!("error: device {} not found", quoteaf_os(dev_name));
             process::exit(1);
         }
     };
@@ -1581,8 +1582,8 @@ fn cmd_partitions(device_name: &str) {
         Some(d) => d,
         None => {
             eprintln!(
-                "error: device '{}' not found (or it is a partition, not a disk)",
-                dev_name
+                "error: device {} not found (or it is a partition, not a disk)",
+                quoteaf_os(dev_name)
             );
             eprintln!("  Provide a whole-disk device name (e.g. sda, nvme0n1).");
             process::exit(1);
@@ -1843,7 +1844,7 @@ fn main() {
         }
 
         unknown => {
-            eprintln!("error: unknown command '{unknown}'");
+            eprintln!("error: unknown command {}", quoteaf_os(unknown));
             eprintln!("  Run 'diskutil --help' for usage.");
             process::exit(1);
         }

@@ -7,6 +7,12 @@ description = "SlateOS file ownership and permission utility (chown/chmod)"
 # `userdb` for `/etc/users.yaml`. This crate carried the fourth hand-rolled
 # parser of that file. See `design-decisions.md` §330.
 [dependencies]
+# One rendering of untrusted text inside a diagnostic. chown/chgrp/chmod
+# name a path in every message they print, and a path may hold any byte but
+# `/` and NUL -- including a newline. So `chmod: cannot access {path}` lets
+# whoever *named* the file write extra lines of this program's stderr. See
+# `userspace/quoting`.
+quoting = { path = "../quoting" }
 userdb = { path = "../userdb" }
 
 # The one mode-string grammar. See design-decisions.md 364.

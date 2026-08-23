@@ -19,7 +19,7 @@
 # 71 real sites. If a number rises in a commit that also edits code, the
 # code is what raised it.
 #
-# 1527 sites across 768 files.
+# 1465 sites across 762 files.
 
 init/servicebus/src/main.rs:8
 userspace/abduco-cli/src/main.rs:5
@@ -123,7 +123,6 @@ userspace/chafa-cli/src/main.rs:1
 userspace/chargebee-cli/src/main.rs:1
 userspace/cheat-sh/src/main.rs:1
 userspace/checkout-cli/src/main.rs:1
-userspace/chown/src/main.rs:11
 userspace/chrony/src/main.rs:1
 userspace/chroot-cli/src/main.rs:4
 userspace/chroot/src/main.rs:5
@@ -185,13 +184,11 @@ userspace/deno/src/main.rs:1
 userspace/deta-cli/src/main.rs:3
 userspace/df/src/main.rs:4
 userspace/diesel-cli/src/main.rs:1
-userspace/diff/src/main.rs:10
 userspace/directus-cli/src/main.rs:1
 userspace/direnv-cli/src/main.rs:1
 userspace/dirvish-cli/src/main.rs:1
 userspace/discord-cli/src/main.rs:1
 userspace/diskonaut-cli/src/main.rs:1
-userspace/diskutil/src/main.rs:11
 userspace/django-cli/src/main.rs:4
 userspace/dnsimple-cli/src/main.rs:1
 userspace/dnsmadeeasy-cli/src/main.rs:1
@@ -591,7 +588,6 @@ userspace/rudder-cli/src/main.rs:1
 userspace/ruff-cli/src/main.rs:1
 userspace/runc-cli/src/main.rs:1
 userspace/rustdoc-cli/src/main.rs:1
-userspace/rustup/src/main.rs:10
 userspace/sage-cli/src/main.rs:1
 userspace/samtools-cli/src/main.rs:1
 userspace/sanity-cli/src/main.rs:1
@@ -714,7 +710,6 @@ userspace/udevd/src/main.rs:8
 userspace/udisks/src/main.rs:3
 userspace/uname/src/main.rs:3
 userspace/unbound/src/main.rs:1
-userspace/uniq/src/main.rs:10
 userspace/unison-cli/src/main.rs:1
 userspace/unity-cli/src/main.rs:3
 userspace/unreal-cli/src/main.rs:1
@@ -763,7 +758,6 @@ userspace/wrangler-cli/src/main.rs:2
 userspace/wso2-cli/src/main.rs:1
 userspace/x86-energy-perf-cli/src/main.rs:1
 userspace/xargs/src/main.rs:7
-userspace/xdg/src/main.rs:10
 userspace/xdotool-cli/src/main.rs:1
 userspace/xh/src/main.rs:1
 userspace/xkbcomp-cli/src/main.rs:1

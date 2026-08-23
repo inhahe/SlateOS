@@ -11,6 +11,7 @@
 //! - `clippy-driver` — Rust linter (proxy)
 //! - `rust-analyzer` — Rust language server (proxy)
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -64,7 +65,7 @@ fn run_rustup(args: Vec<String>) -> i32 {
             let toolchain = cmd_args.first().map(|s| s.as_str());
             match toolchain {
                 Some(tc) => {
-                    println!("info: syncing channel updates for '{}'", tc);
+                    println!("info: syncing channel updates for {}", quoteaf_os(tc));
                     println!("info: latest update on 2025-05-22");
                     println!("  {} updated - rustc 1.77.0", tc);
                 }
@@ -79,7 +80,7 @@ fn run_rustup(args: Vec<String>) -> i32 {
         }
         "default" => {
             if let Some(tc) = cmd_args.first() {
-                println!("info: default toolchain set to '{}'", tc);
+                println!("info: default toolchain set to {}", quoteaf_os(tc));
             } else {
                 println!("stable-x86_64-slateos (default)");
             }
@@ -94,12 +95,12 @@ fn run_rustup(args: Vec<String>) -> i32 {
                 }
                 "install" => {
                     let tc = cmd_args.get(1).map(|s| s.as_str()).unwrap_or("stable");
-                    println!("info: installing toolchain '{}'", tc);
-                    println!("info: toolchain '{}' installed", tc);
+                    println!("info: installing toolchain {}", quoteaf_os(tc));
+                    println!("info: toolchain {} installed", quoteaf_os(tc));
                 }
                 "uninstall" => {
                     let tc = cmd_args.get(1).map(|s| s.as_str()).unwrap_or("nightly");
-                    println!("info: uninstalling toolchain '{}'", tc);
+                    println!("info: uninstalling toolchain {}", quoteaf_os(tc));
                 }
                 _ => println!("toolchain {}: (simulated)", sub),
             }
@@ -117,8 +118,14 @@ fn run_rustup(args: Vec<String>) -> i32 {
                 }
                 "add" => {
                     let target = cmd_args.get(1).map(|s| s.as_str()).unwrap_or("target");
-                    println!("info: downloading component 'rust-std' for '{}'", target);
-                    println!("info: installing component 'rust-std' for '{}'", target);
+                    println!(
+                        "info: downloading component 'rust-std' for {}",
+                        quoteaf_os(target)
+                    );
+                    println!(
+                        "info: installing component 'rust-std' for {}",
+                        quoteaf_os(target)
+                    );
                 }
                 _ => println!("target {}: (simulated)", sub),
             }
@@ -140,8 +147,8 @@ fn run_rustup(args: Vec<String>) -> i32 {
                 }
                 "add" => {
                     let comp = cmd_args.get(1).map(|s| s.as_str()).unwrap_or("component");
-                    println!("info: downloading component '{}'", comp);
-                    println!("info: installing component '{}'", comp);
+                    println!("info: downloading component {}", quoteaf_os(comp));
+                    println!("info: installing component {}", quoteaf_os(comp));
                 }
                 _ => println!("component {}: (simulated)", sub),
             }
@@ -178,7 +185,7 @@ fn run_rustup(args: Vec<String>) -> i32 {
             0
         }
         other => {
-            eprintln!("rustup: unknown command '{}'", other);
+            eprintln!("rustup: unknown command {}", quoteaf_os(other));
             1
         }
     }

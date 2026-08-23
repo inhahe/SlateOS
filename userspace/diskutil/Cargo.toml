@@ -4,3 +4,9 @@ version = "0.1.0"
 edition = "2024"
 description = "SlateOS disk utility — format, info, check, benchmark"
 [dependencies]
+# One rendering of untrusted text inside a diagnostic. Device paths, volume
+# names and mount points are argv words or labels read off the disk itself,
+# and both may hold a newline -- so a message that pastes one in raw lets
+# whoever supplied it write extra lines of this program's output. See
+# `userspace/quoting`.
+quoting = { path = "../quoting" }

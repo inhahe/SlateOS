@@ -4,11 +4,16 @@
 //!
 //! Multi-personality: `rustdoc`, `cargo-doc`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_rustdoc(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
@@ -36,17 +41,20 @@ fn run_rustdoc(args: &[String]) -> i32 {
         println!("rustdoc 1.77.0 (Slate OS)");
         return 0;
     }
-    let crate_name = args.windows(2)
+    let crate_name = args
+        .windows(2)
         .find(|w| w[0] == "--crate-name")
         .map(|w| w[1].as_str())
         .unwrap_or("mycrate");
-    let outdir = args.windows(2)
+    let outdir = args
+        .windows(2)
         .find(|w| w[0] == "-o")
         .map(|w| w[1].as_str())
         .unwrap_or("doc");
     let test = args.iter().any(|a| a == "--test");
     if test {
-        let input = args.iter()
+        let input = args
+            .iter()
             .find(|a| a.ends_with(".rs"))
             .map(|s| s.as_str())
             .unwrap_or("src/lib.rs");
@@ -59,7 +67,10 @@ fn run_rustdoc(args: &[String]) -> i32 {
         println!();
         println!("test result: ok. 3 passed; 0 failed; 0 ignored");
     } else {
-        println!("rustdoc: generating documentation for '{}'", crate_name);
+        println!(
+            "rustdoc: generating documentation for {}",
+            quoteaf_os(crate_name)
+        );
         println!("  Documenting {} v0.1.0", crate_name);
         println!("  12 public items documented");
         println!("  Output: {}/{}/index.html", outdir, crate_name);
@@ -99,7 +110,10 @@ fn run_cargo_doc(args: &[String]) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "rustdoc".to_string());
+    let prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "rustdoc".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = match prog.as_str() {
         "cargo-doc" => run_cargo_doc(&rest),
@@ -110,7 +124,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_rustdoc};
+    use super::{basename, run_rustdoc, strip_ext};
 
     #[test]
     fn basename_strips_path() {

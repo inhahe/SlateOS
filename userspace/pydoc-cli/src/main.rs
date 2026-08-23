@@ -4,11 +4,16 @@
 //!
 //! Multi-personality: `pydoc`, `pydoc3`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_pydoc(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
@@ -33,7 +38,8 @@ fn run_pydoc(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-p") {
-        let port = args.windows(2)
+        let port = args
+            .windows(2)
             .find(|w| w[0] == "-p")
             .map(|w| w[1].as_str())
             .unwrap_or("8080");
@@ -46,25 +52,28 @@ fn run_pydoc(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-k") {
-        let keyword = args.windows(2)
+        let keyword = args
+            .windows(2)
             .find(|w| w[0] == "-k")
             .map(|w| w[1].as_str())
             .unwrap_or("print");
-        println!("Searching for '{}'...", keyword);
+        println!("Searching for {}...", quoteaf_os(keyword));
         println!("builtins - Built-in functions, exceptions, and other objects.");
         println!("sys - Access system-specific parameters and functions.");
         println!("os - OS routines for NT or Posix depending on what system we're on.");
         return 0;
     }
     if args.iter().any(|a| a == "-w") {
-        let module = args.windows(2)
+        let module = args
+            .windows(2)
             .find(|w| w[0] == "-w")
             .map(|w| w[1].as_str())
             .unwrap_or("os");
         println!("wrote {}.html", module);
         return 0;
     }
-    let name = args.iter()
+    let name = args
+        .iter()
         .find(|a| !a.starts_with('-'))
         .map(|s| s.as_str())
         .unwrap_or("os");
@@ -86,7 +95,10 @@ fn run_pydoc(args: &[String]) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "pydoc".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "pydoc".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_pydoc(&rest);
     process::exit(code);
@@ -94,7 +106,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_pydoc};
+    use super::{basename, run_pydoc, strip_ext};
 
     #[test]
     fn basename_strips_path() {

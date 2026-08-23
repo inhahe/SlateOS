@@ -1,6 +1,7 @@
 #![deny(clippy::all)]
 //! resend-cli — Slate OS Resend modern developer-first email API personality CLI.
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -252,21 +253,49 @@ fn print_critique() {
 }
 
 fn run_resend(args: &[String], prog: &str) -> i32 {
-    if args.is_empty() { print_help(prog); return 0; }
+    if args.is_empty() {
+        print_help(prog);
+        return 0;
+    }
     match args[0].as_str() {
-        "help" | "--help" | "-h" => { print_help(prog); 0 }
-        "version" | "--version" | "-V" => {
-            println!("{prog} 0.1.0 (Slate OS personality CLI)"); 0
+        "help" | "--help" | "-h" => {
+            print_help(prog);
+            0
         }
-        "about" => { print_about(); 0 }
-        "products" => { print_products(); 0 }
-        "reactemail" | "react" => { print_reactemail(); 0 }
-        "pricing" => { print_pricing(); 0 }
-        "customers" => { print_customers(); 0 }
-        "differentiator" | "diff" => { print_differentiator(); 0 }
-        "critique" => { print_critique(); 0 }
+        "version" | "--version" | "-V" => {
+            println!("{prog} 0.1.0 (Slate OS personality CLI)");
+            0
+        }
+        "about" => {
+            print_about();
+            0
+        }
+        "products" => {
+            print_products();
+            0
+        }
+        "reactemail" | "react" => {
+            print_reactemail();
+            0
+        }
+        "pricing" => {
+            print_pricing();
+            0
+        }
+        "customers" => {
+            print_customers();
+            0
+        }
+        "differentiator" | "diff" => {
+            print_differentiator();
+            0
+        }
+        "critique" => {
+            print_critique();
+            0
+        }
         other => {
-            eprintln!("{prog}: unknown subcommand '{other}'");
+            eprintln!("{prog}: unknown subcommand {}", quoteaf_os(other));
             eprintln!("Try '{prog} help' for usage.");
             2
         }
@@ -275,7 +304,8 @@ fn run_resend(args: &[String], prog: &str) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first()
+    let prog = args
+        .first()
         .map(|s| strip_ext(basename(s)).to_string())
         .unwrap_or_else(|| "resend".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
@@ -285,8 +315,20 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[test] fn t_basename() { assert_eq!(basename("/usr/bin/resend"), "resend"); }
-    #[test] fn t_strip() { assert_eq!(strip_ext("resend.exe"), "resend"); }
-    #[test] fn t_help() { assert_eq!(run_resend(&[], "resend"), 0); }
-    #[test] fn t_unknown() { assert_eq!(run_resend(&["xx".to_string()], "resend"), 2); }
+    #[test]
+    fn t_basename() {
+        assert_eq!(basename("/usr/bin/resend"), "resend");
+    }
+    #[test]
+    fn t_strip() {
+        assert_eq!(strip_ext("resend.exe"), "resend");
+    }
+    #[test]
+    fn t_help() {
+        assert_eq!(run_resend(&[], "resend"), 0);
+    }
+    #[test]
+    fn t_unknown() {
+        assert_eq!(run_resend(&["xx".to_string()], "resend"), 2);
+    }
 }

@@ -4,11 +4,16 @@
 //!
 //! Multi-personality: `rails`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_rails(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
@@ -42,8 +47,11 @@ fn run_rails(args: &[String]) -> i32 {
             println!("         run  bundle install");
         }
         "server" | "s" => {
-            let port = args.windows(2).find(|w| w[0] == "-p")
-                .map(|w| w[1].as_str()).unwrap_or("3000");
+            let port = args
+                .windows(2)
+                .find(|w| w[0] == "-p")
+                .map(|w| w[1].as_str())
+                .unwrap_or("3000");
             println!("=> Booting Puma");
             println!("=> Rails 7.1.3.4 application starting in development");
             println!("=> Run `bin/rails server --help` for more startup options");
@@ -59,22 +67,37 @@ fn run_rails(args: &[String]) -> i32 {
             match what {
                 "model" => {
                     println!("      invoke  active_record");
-                    println!("      create    db/migrate/20240615120000_create_{}.rb", name.to_lowercase());
+                    println!(
+                        "      create    db/migrate/20240615120000_create_{}.rb",
+                        name.to_lowercase()
+                    );
                     println!("      create    app/models/{}.rb", name.to_lowercase());
                     println!("      invoke    test_unit");
-                    println!("      create      test/models/{}_test.rb", name.to_lowercase());
+                    println!(
+                        "      create      test/models/{}_test.rb",
+                        name.to_lowercase()
+                    );
                 }
                 "controller" => {
-                    println!("      create  app/controllers/{}_controller.rb", name.to_lowercase());
+                    println!(
+                        "      create  app/controllers/{}_controller.rb",
+                        name.to_lowercase()
+                    );
                     println!("      invoke  erb");
                     println!("      create    app/views/{}/", name.to_lowercase());
                     println!("      invoke  test_unit");
                 }
                 "scaffold" => {
                     println!("      invoke  active_record");
-                    println!("      create    db/migrate/20240615120000_create_{}.rb", name.to_lowercase());
+                    println!(
+                        "      create    db/migrate/20240615120000_create_{}.rb",
+                        name.to_lowercase()
+                    );
                     println!("      create    app/models/{}.rb", name.to_lowercase());
-                    println!("      create    app/controllers/{}_controller.rb", name.to_lowercase());
+                    println!(
+                        "      create    app/controllers/{}_controller.rb",
+                        name.to_lowercase()
+                    );
                     println!("      create    app/views/{}/", name.to_lowercase());
                     println!("      invoke  resource_route");
                     println!("       route    resources :{}", name.to_lowercase());
@@ -104,14 +127,17 @@ fn run_rails(args: &[String]) -> i32 {
         }
         "db:create" => println!("Created database 'myapp_development'"),
         "db:seed" => println!("Seeded database."),
-        _ => println!("rails: '{}' completed", subcmd),
+        _ => println!("rails: {} completed", quoteaf_os(subcmd)),
     }
     0
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "rails".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "rails".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_rails(&rest);
     process::exit(code);
@@ -119,7 +145,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_rails};
+    use super::{basename, run_rails, strip_ext};
 
     #[test]
     fn basename_strips_path() {

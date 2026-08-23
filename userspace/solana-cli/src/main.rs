@@ -4,6 +4,7 @@
 //!
 //! Single personality: `solana`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -76,10 +77,15 @@ fn run_solana(args: Vec<String>) -> i32 {
                 }
                 "set" => {
                     let key = args.get(2).map(|s| s.as_str()).unwrap_or("--url");
-                    let val = args.get(3).map(|s| s.as_str()).unwrap_or("https://api.devnet.solana.com");
+                    let val = args
+                        .get(3)
+                        .map(|s| s.as_str())
+                        .unwrap_or("https://api.devnet.solana.com");
                     println!("Setting {} to {}", key, val);
                 }
-                _ => { println!("Config operation: {}", sub); }
+                _ => {
+                    println!("Config operation: {}", sub);
+                }
             }
             0
         }
@@ -100,10 +106,18 @@ fn run_solana(args: Vec<String>) -> i32 {
             0
         }
         "validators" => {
-            println!("  Identity                                     Vote Account                                 Commission  Last Vote  Root Slot  Credits  Version   Active Stake");
-            println!("  Val1abc...                                   Vote1abc...                                  5%          280000000  279999998  1234567  1.18.0    1,500,000 SOL");
-            println!("  Val2def...                                   Vote2def...                                  7%          280000000  279999997  1234500  1.18.0    800,000 SOL");
-            println!("  Val3ghi...                                   Vote3ghi...                                  10%         279999999  279999995  1234400  1.17.35   500,000 SOL");
+            println!(
+                "  Identity                                     Vote Account                                 Commission  Last Vote  Root Slot  Credits  Version   Active Stake"
+            );
+            println!(
+                "  Val1abc...                                   Vote1abc...                                  5%          280000000  279999998  1234567  1.18.0    1,500,000 SOL"
+            );
+            println!(
+                "  Val2def...                                   Vote2def...                                  7%          280000000  279999997  1234500  1.18.0    800,000 SOL"
+            );
+            println!(
+                "  Val3ghi...                                   Vote3ghi...                                  10%         279999999  279999995  1234400  1.17.35   500,000 SOL"
+            );
             0
         }
         "account" => {
@@ -131,7 +145,10 @@ fn run_solana(args: Vec<String>) -> i32 {
         "block" => {
             let slot = args.get(1).map(|s| s.as_str()).unwrap_or("280000000");
             println!("Slot: {}", slot);
-            println!("  Parent Slot:   {}", slot.parse::<u64>().unwrap_or(280000000) - 1);
+            println!(
+                "  Parent Slot:   {}",
+                slot.parse::<u64>().unwrap_or(280000000) - 1
+            );
             println!("  Block Time:    2024-01-15 14:00:00 UTC");
             println!("  Block Height:  250000000");
             println!("  Transactions:  2,500");
@@ -142,7 +159,7 @@ fn run_solana(args: Vec<String>) -> i32 {
             if cmd.is_empty() {
                 eprintln!("Usage: solana <command>. See --help.");
             } else {
-                eprintln!("Error: unknown command '{}'. See --help.", cmd);
+                eprintln!("Error: unknown command {}. See --help.", quoteaf_os(cmd));
             }
             1
         }
@@ -158,7 +175,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_solana};
+    use super::run_solana;
 
     #[test]
     fn help_exits_zero() {

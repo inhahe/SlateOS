@@ -29,6 +29,7 @@
 //! Ctrl+A ?     Show help
 //! ```
 
+use quoting::quoteaf_os;
 use std::env;
 use std::fs;
 use std::process;
@@ -1074,7 +1075,7 @@ fn main() {
             name.clone()
         };
 
-        println!("[reattaching to session '{}']", session_name);
+        println!("[reattaching to session {}]", quoteaf_os(&session_name));
         let mut session = Session::new(&session_name);
         run_session(&mut session);
         remove_session_info(&session_name);

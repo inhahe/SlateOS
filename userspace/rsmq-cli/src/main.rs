@@ -4,11 +4,16 @@
 //!
 //! Single personality: `rsmq`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_rsmq(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
@@ -42,7 +47,7 @@ fn run_rsmq(args: &[String], _prog: &str) -> i32 {
     match cmd {
         "create-queue" => {
             let name = args.get(1).map(|s| s.as_str()).unwrap_or("myqueue");
-            println!("Queue '{}' created.", name);
+            println!("Queue {} created.", quoteaf_os(name));
         }
         "delete-queue" => println!("Queue deleted."),
         "list-queues" => {
@@ -82,7 +87,10 @@ fn run_rsmq(args: &[String], _prog: &str) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "rsmq".to_string());
+    let prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "rsmq".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_rsmq(&rest, &prog);
     process::exit(code);
@@ -90,7 +98,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_rsmq};
+    use super::{basename, run_rsmq, strip_ext};
 
     #[test]
     fn basename_strips_path() {

@@ -4,6 +4,7 @@
 //!
 //! Multi-personality: `step`, `step-ca`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -49,9 +50,13 @@ fn run_step(args: Vec<String>) -> i32 {
                 }
                 "verify" => println!("Certificate is valid."),
                 "lint" => println!("Certificate linting: 0 errors, 0 warnings."),
-                "fingerprint" => println!("SHA256:abcdef1234567890abcdef1234567890abcdef1234567890"),
+                "fingerprint" => {
+                    println!("SHA256:abcdef1234567890abcdef1234567890abcdef1234567890")
+                }
                 _ => {
-                    println!("Subcommands: create, inspect, verify, lint, fingerprint, install, uninstall, format, key");
+                    println!(
+                        "Subcommands: create, inspect, verify, lint, fingerprint, install, uninstall, format, key"
+                    );
                 }
             }
         }
@@ -59,18 +64,24 @@ fn run_step(args: Vec<String>) -> i32 {
             let sub = args.get(1).map(|s| s.as_str()).unwrap_or("help");
             match sub {
                 "keypair" => println!("Key pair generated: pub.pem, priv.pem"),
-                "hash" => println!("SHA256: e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"),
+                "hash" => println!(
+                    "SHA256: e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+                ),
                 _ => println!("Subcommands: keypair, hash, nacl, jwt, jwe, jws, kdf, otp"),
             }
         }
         "ca" => {
             let sub = args.get(1).map(|s| s.as_str()).unwrap_or("help");
             match sub {
-                "bootstrap" => println!("The root certificate has been saved to ~/.step/certs/root_ca.crt."),
+                "bootstrap" => {
+                    println!("The root certificate has been saved to ~/.step/certs/root_ca.crt.")
+                }
                 "certificate" => println!("Certificate signed and saved."),
                 "token" => println!("eyJhbGciOiJFUzI1NiIsInR5cCI6IkpXVCJ9.simulated.token"),
                 "health" => println!("ok"),
-                _ => println!("Subcommands: bootstrap, certificate, token, revoke, renew, provisioner, health"),
+                _ => println!(
+                    "Subcommands: bootstrap, certificate, token, revoke, renew, provisioner, health"
+                ),
             }
         }
         "ssh" => {
@@ -83,7 +94,7 @@ fn run_step(args: Vec<String>) -> i32 {
             }
         }
         _ => {
-            eprintln!("Unknown command '{}'. Use --help.", cmd);
+            eprintln!("Unknown command {}. Use --help.", quoteaf_os(cmd));
             return 1;
         }
     }
@@ -107,7 +118,11 @@ fn run_step_ca(args: Vec<String>) -> i32 {
         return 0;
     }
 
-    let config = args.iter().find(|a| !a.starts_with('-')).map(|s| s.as_str()).unwrap_or("ca.json");
+    let config = args
+        .iter()
+        .find(|a| !a.starts_with('-'))
+        .map(|s| s.as_str())
+        .unwrap_or("ca.json");
     println!("Smallstep CA/0.26.1 (Slate OS)");
     println!("Loading configuration from {}", config);
     println!("Starting Certificate Authority...");
@@ -122,7 +137,9 @@ fn main() {
         let bytes = s.as_bytes();
         let mut last_sep = 0;
         for (i, &b) in bytes.iter().enumerate() {
-            if b == b'/' || b == b'\\' { last_sep = i + 1; }
+            if b == b'/' || b == b'\\' {
+                last_sep = i + 1;
+            }
         }
         let base = &s[last_sep..];
         base.strip_suffix(".exe").unwrap_or(base).to_string()
@@ -137,7 +154,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_step};
+    use super::run_step;
 
     #[test]
     fn help_exits_zero() {

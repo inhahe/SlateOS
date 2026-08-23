@@ -4,6 +4,7 @@
 //!
 //! Single personality: `skopeo`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -33,8 +34,14 @@ fn run_skopeo(args: Vec<String>) -> i32 {
     let cmd = args.first().map(|s| s.as_str()).unwrap_or("help");
     match cmd {
         "copy" => {
-            let src = args.get(1).map(|s| s.as_str()).unwrap_or("docker://source:tag");
-            let dst = args.get(2).map(|s| s.as_str()).unwrap_or("docker://dest:tag");
+            let src = args
+                .get(1)
+                .map(|s| s.as_str())
+                .unwrap_or("docker://source:tag");
+            let dst = args
+                .get(2)
+                .map(|s| s.as_str())
+                .unwrap_or("docker://dest:tag");
             println!("Getting image source signatures");
             println!("Copying blob sha256:abc123... done");
             println!("Copying blob sha256:def456... done");
@@ -44,7 +51,10 @@ fn run_skopeo(args: Vec<String>) -> i32 {
             let _ = (src, dst);
         }
         "inspect" => {
-            let target = args.get(1).map(|s| s.as_str()).unwrap_or("docker://alpine:latest");
+            let target = args
+                .get(1)
+                .map(|s| s.as_str())
+                .unwrap_or("docker://alpine:latest");
             println!("{{");
             println!("  \"Name\": \"{}\",", target);
             println!("  \"Tag\": \"latest\",");
@@ -58,7 +68,10 @@ fn run_skopeo(args: Vec<String>) -> i32 {
         }
         "list-tags" => {
             let repo = args.get(1).map(|s| s.as_str()).unwrap_or("docker://alpine");
-            println!("{{\"Repository\":\"{}\",\"Tags\":[\"latest\",\"3.19\",\"3.18\",\"3.17\",\"edge\"]}}", repo);
+            println!(
+                "{{\"Repository\":\"{}\",\"Tags\":[\"latest\",\"3.19\",\"3.18\",\"3.17\",\"edge\"]}}",
+                repo
+            );
         }
         "delete" => println!("(image deleted — simulated)"),
         "sync" => println!("(sync complete — simulated)"),
@@ -66,7 +79,7 @@ fn run_skopeo(args: Vec<String>) -> i32 {
         "logout" => println!("Removed login credentials."),
         "manifest-digest" => println!("sha256:abc123def456789..."),
         _ => {
-            eprintln!("Unknown command '{}'. Use --help.", cmd);
+            eprintln!("Unknown command {}. Use --help.", quoteaf_os(cmd));
             return 1;
         }
     }
@@ -82,7 +95,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_skopeo};
+    use super::run_skopeo;
 
     #[test]
     fn help_exits_zero() {

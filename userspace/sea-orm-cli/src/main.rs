@@ -4,6 +4,7 @@
 //!
 //! Single personality: `sea-orm-cli`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -38,7 +39,9 @@ fn run_sea_orm(args: Vec<String>) -> i32 {
                 println!("  -u, --database-url <URL>     Database URL");
                 println!("  -s, --database-schema <SCH>  Schema name");
                 println!("  -o, --output-dir <DIR>       Output directory (default: ./entity/src)");
-                println!("  --with-serde <MODE>          Serde derive (none/serialize/deserialize/both)");
+                println!(
+                    "  --with-serde <MODE>          Serde derive (none/serialize/deserialize/both)"
+                );
                 println!("  --with-copy-enums            Derive Copy for enums");
                 println!("  --date-time-crate <CRATE>    DateTime crate (chrono/time)");
                 println!("  --expanded-format            Expanded format");
@@ -49,7 +52,8 @@ fn run_sea_orm(args: Vec<String>) -> i32 {
                 return 0;
             }
 
-            let output = args.windows(2)
+            let output = args
+                .windows(2)
                 .find(|w| w[0] == "-o" || w[0] == "--output-dir")
                 .map(|w| w[1].as_str())
                 .unwrap_or("./entity/src");
@@ -97,7 +101,8 @@ fn run_sea_orm(args: Vec<String>) -> i32 {
             0
         }
         ("migrate", "down") => {
-            let n: u32 = args.windows(2)
+            let n: u32 = args
+                .windows(2)
                 .find(|w| w[0] == "-n")
                 .and_then(|w| w[1].parse().ok())
                 .unwrap_or(1);
@@ -134,7 +139,7 @@ fn run_sea_orm(args: Vec<String>) -> i32 {
             if cmd.is_empty() {
                 eprintln!("Error: command required. See --help.");
             } else {
-                eprintln!("Error: unknown command '{}'. See --help.", cmd);
+                eprintln!("Error: unknown command {}. See --help.", quoteaf_os(cmd));
             }
             1
         }
@@ -150,7 +155,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_sea_orm};
+    use super::run_sea_orm;
 
     #[test]
     fn help_exits_zero() {

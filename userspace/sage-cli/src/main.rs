@@ -4,11 +4,16 @@
 //!
 //! Multi-personality: `sage`, `sage-notebook`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_sage(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -41,7 +46,11 @@ fn run_sage(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-c") {
-        let code = args.windows(2).find(|w| w[0] == "-c").map(|w| w[1].as_str()).unwrap_or("print(factor(2024))");
+        let code = args
+            .windows(2)
+            .find(|w| w[0] == "-c")
+            .map(|w| w[1].as_str())
+            .unwrap_or("print(factor(2024))");
         println!("sage: {}", code);
         println!("[executed]");
         return 0;
@@ -51,9 +60,12 @@ fn run_sage(args: &[String]) -> i32 {
         println!("Notebook is running at: http://localhost:8888/");
         return 0;
     }
-    let file = args.iter().find(|a| a.ends_with(".sage") || a.ends_with(".py")).map(|s| s.as_str());
+    let file = args
+        .iter()
+        .find(|a| a.ends_with(".sage") || a.ends_with(".py"))
+        .map(|s| s.as_str());
     if let Some(f) = file {
-        println!("sage: loading '{}'", f);
+        println!("sage: loading {}", quoteaf_os(f));
         println!("[script completed]");
     } else {
         println!("┌──────────────────────────────────────────────────────────┐");
@@ -72,7 +84,11 @@ fn run_sage_notebook(args: &[String]) -> i32 {
         println!("  --no-browser   Don't open browser");
         return 0;
     }
-    let port = args.windows(2).find(|w| w[0] == "--port").map(|w| w[1].as_str()).unwrap_or("8888");
+    let port = args
+        .windows(2)
+        .find(|w| w[0] == "--port")
+        .map(|w| w[1].as_str())
+        .unwrap_or("8888");
     println!("Starting SageMath Jupyter notebook...");
     println!("Serving on http://localhost:{}/", port);
     println!("SageMath kernel available.");
@@ -81,7 +97,10 @@ fn run_sage_notebook(args: &[String]) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "sage".to_string());
+    let prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "sage".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = match prog.as_str() {
         "sage-notebook" => run_sage_notebook(&rest),
@@ -92,7 +111,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_sage};
+    use super::{basename, run_sage, strip_ext};
 
     #[test]
     fn basename_strips_path() {

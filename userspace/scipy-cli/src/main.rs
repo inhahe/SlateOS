@@ -4,6 +4,7 @@
 //!
 //! Multi-personality: `scipy`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -55,7 +56,7 @@ fn run_scipy(args: &[String]) -> i32 {
             println!("  Optimize minimize (Rosenbrock): 1.2 ms");
             println!("  Interpolate BSpline (10000 pts): 3.4 ms");
         }
-        _ => println!("scipy: command '{}' completed", subcmd),
+        _ => println!("scipy: command {} completed", quoteaf_os(subcmd)),
     }
     0
 }
@@ -69,7 +70,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_scipy};
+    use super::run_scipy;
 
     #[test]
     fn help_exits_zero() {

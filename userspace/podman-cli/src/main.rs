@@ -4,6 +4,7 @@
 //!
 //! Single personality: `podman`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -41,9 +42,15 @@ fn run_podman(args: Vec<String>) -> i32 {
             0
         }
         "ps" => {
-            println!("CONTAINER ID  IMAGE                 COMMAND     CREATED      STATUS       PORTS                  NAMES");
-            println!("abc123def4    docker.io/nginx:1.25  nginx -g…   2 hours ago  Up 2 hours   0.0.0.0:80->80/tcp     web");
-            println!("def456abc7    docker.io/redis:7.2   redis-s…    3 hours ago  Up 3 hours   6379/tcp               cache");
+            println!(
+                "CONTAINER ID  IMAGE                 COMMAND     CREATED      STATUS       PORTS                  NAMES"
+            );
+            println!(
+                "abc123def4    docker.io/nginx:1.25  nginx -g…   2 hours ago  Up 2 hours   0.0.0.0:80->80/tcp     web"
+            );
+            println!(
+                "def456abc7    docker.io/redis:7.2   redis-s…    3 hours ago  Up 3 hours   6379/tcp               cache"
+            );
             0
         }
         "images" => {
@@ -56,11 +63,14 @@ fn run_podman(args: Vec<String>) -> i32 {
             let sub = args.get(1).map(|s| s.as_str()).unwrap_or("ps");
             match sub {
                 "ps" => {
-                    println!("POD ID       NAME        STATUS   CREATED       INFRA ID     # OF CONTAINERS");
+                    println!(
+                        "POD ID       NAME        STATUS   CREATED       INFRA ID     # OF CONTAINERS"
+                    );
                     println!("abc123def4   web-pod     Running  2 hours ago   def456abc7   3");
                 }
                 "create" => {
-                    let name = args.windows(2)
+                    let name = args
+                        .windows(2)
                         .find(|w| w[0] == "--name")
                         .map(|w| w[1].as_str())
                         .unwrap_or("my-pod");
@@ -74,8 +84,12 @@ fn run_podman(args: Vec<String>) -> i32 {
             let sub = args.get(1).map(|s| s.as_str()).unwrap_or("ls");
             match sub {
                 "ls" | "list" => {
-                    println!("NAME                    VM TYPE   CREATED       LAST UP       CPUS  MEMORY   DISK SIZE");
-                    println!("podman-machine-default  qemu      1 week ago    2 hours ago   2     2.048GB  100GB");
+                    println!(
+                        "NAME                    VM TYPE   CREATED       LAST UP       CPUS  MEMORY   DISK SIZE"
+                    );
+                    println!(
+                        "podman-machine-default  qemu      1 week ago    2 hours ago   2     2.048GB  100GB"
+                    );
                 }
                 "init" => println!("Machine init complete"),
                 "start" => println!("Machine started successfully"),
@@ -106,7 +120,7 @@ fn run_podman(args: Vec<String>) -> i32 {
             if cmd.is_empty() {
                 eprintln!("Usage: podman <command>. See --help.");
             } else {
-                eprintln!("Error: unknown command '{}'. See --help.", cmd);
+                eprintln!("Error: unknown command {}. See --help.", quoteaf_os(cmd));
             }
             1
         }
@@ -122,7 +136,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_podman};
+    use super::run_podman;
 
     #[test]
     fn help_exits_zero() {

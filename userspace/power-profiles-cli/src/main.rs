@@ -4,11 +4,16 @@
 //!
 //! Multi-personality: `powerprofilesctl`, `power-profiles-daemon`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_powerprofilesctl(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -23,7 +28,10 @@ fn run_powerprofilesctl(args: &[String], _prog: &str) -> i32 {
         println!("  --version      Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("powerprofilesctl v0.20 (Slate OS)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("powerprofilesctl v0.20 (Slate OS)");
+        return 0;
+    }
     match args.first().map(|s| s.as_str()) {
         Some("list") => {
             println!("  power-saver:");
@@ -43,7 +51,7 @@ fn run_powerprofilesctl(args: &[String], _prog: &str) -> i32 {
         }
         Some("set") => {
             let profile = args.get(1).map(|s| s.as_str()).unwrap_or("balanced");
-            println!("powerprofilesctl: set profile to '{}'", profile);
+            println!("powerprofilesctl: set profile to {}", quoteaf_os(profile));
         }
         _ => {
             println!("powerprofilesctl: use --help for commands");
@@ -58,7 +66,10 @@ fn run_power_profiles_daemon(args: &[String], _prog: &str) -> i32 {
         println!("power-profiles-daemon v0.20 (Slate OS) — Power profile daemon");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("power-profiles-daemon v0.20 (Slate OS)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("power-profiles-daemon v0.20 (Slate OS)");
+        return 0;
+    }
     println!("power-profiles-daemon: started");
     println!("  Active profile: balanced");
     println!("  Drivers: intel_pstate, platform_profile");
@@ -67,7 +78,10 @@ fn run_power_profiles_daemon(args: &[String], _prog: &str) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "powerprofilesctl".to_string());
+    let prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "powerprofilesctl".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = match prog.as_str() {
         "power-profiles-daemon" => run_power_profiles_daemon(&rest, &prog),
@@ -78,7 +92,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_powerprofilesctl};
+    use super::{basename, run_powerprofilesctl, strip_ext};
 
     #[test]
     fn basename_strips_path() {
@@ -95,8 +109,14 @@ mod tests {
 
     #[test]
     fn help_exits_zero() {
-        assert_eq!(run_powerprofilesctl(&["--help".to_string()], "power-profiles"), 0);
-        assert_eq!(run_powerprofilesctl(&["-h".to_string()], "power-profiles"), 0);
+        assert_eq!(
+            run_powerprofilesctl(&["--help".to_string()], "power-profiles"),
+            0
+        );
+        assert_eq!(
+            run_powerprofilesctl(&["-h".to_string()], "power-profiles"),
+            0
+        );
         let _ = run_powerprofilesctl(&["--version".to_string()], "power-profiles");
     }
 

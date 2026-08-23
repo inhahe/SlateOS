@@ -4,3 +4,7 @@ version = "0.1.0"
 edition = "2024"
 description = "SlateOS terminal multiplexer"
 [dependencies]
+# It interpolates `session_name` into "[reattaching to session {}]". That
+# value is a path from the command line, and a path may hold any byte but
+# `/` and NUL -- a newline included.
+quoting = { path = "../quoting" }

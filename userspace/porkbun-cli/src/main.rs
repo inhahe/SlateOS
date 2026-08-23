@@ -1,6 +1,7 @@
 #![deny(clippy::all)]
 //! porkbun-cli — Slate OS personality CLI for Porkbun, the playful low-price registrar.
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -100,8 +101,7 @@ fn cmd_domains() {
     println!("  support for bulk transfers; just email support with a list");
     println!("  and they'll help walk through the EPP-code dance.");
     println!();
-    println!("DNS")
-    ;
+    println!("DNS");
     println!("  Anycast nameservers (porkbun's own DNS clusters), DNSSEC,");
     println!("  GLUE records, ALIAS-like apex-A behavior for popular hosts.");
     println!("  Full record-type support including SRV, CAA, HTTPS, TLSA.");
@@ -135,8 +135,7 @@ fn cmd_api() {
     println!("  /dns/delete/<domain>/<id>               delete a record");
     println!("  /ssl/retrieve/<domain>                  retrieve cert + key");
     println!();
-    println!("DYNAMIC DNS")
-    ;
+    println!("DYNAMIC DNS");
     println!("  Update an A/AAAA record from a script (cron + curl + your");
     println!("  current public IP). Many home-lab + self-hosted setups");
     println!("  use this to keep a porkbun-hosted hostname pointing at");
@@ -161,8 +160,7 @@ fn cmd_perks() {
     println!("  inbox. Catch-all and per-address rules supported. No daily");
     println!("  forward limit (well, within reasonable spam-prevention rates).");
     println!();
-    println!("FREE TRIVIAL HOSTING")
-    ;
+    println!("FREE TRIVIAL HOSTING");
     println!("  Porkbun hosts a one-page redirect or simple static landing");
     println!("  page on every domain at no extra cost. Useful for parking");
     println!("  domains before you build the real site.");
@@ -234,17 +232,47 @@ fn run_porkbun(args: &[String], prog: &str) -> i32 {
         return 0;
     };
     match sub.as_str() {
-        "help" | "-h" | "--help" => { print_help(prog); 0 }
-        "version" | "-V" | "--version" => { print_version(); 0 }
-        "about" => { cmd_about(); 0 }
-        "pricing" => { cmd_pricing(); 0 }
-        "domains" => { cmd_domains(); 0 }
-        "api" => { cmd_api(); 0 }
-        "perks" => { cmd_perks(); 0 }
-        "knife" => { cmd_knife(); 0 }
-        "weird" => { cmd_weird(); 0 }
+        "help" | "-h" | "--help" => {
+            print_help(prog);
+            0
+        }
+        "version" | "-V" | "--version" => {
+            print_version();
+            0
+        }
+        "about" => {
+            cmd_about();
+            0
+        }
+        "pricing" => {
+            cmd_pricing();
+            0
+        }
+        "domains" => {
+            cmd_domains();
+            0
+        }
+        "api" => {
+            cmd_api();
+            0
+        }
+        "perks" => {
+            cmd_perks();
+            0
+        }
+        "knife" => {
+            cmd_knife();
+            0
+        }
+        "weird" => {
+            cmd_weird();
+            0
+        }
         other => {
-            eprintln!("{prog}: unknown subcommand '{other}'. Try '{prog} help'.");
+            eprintln!(
+                "{prog}: unknown subcommand {}. Try '{prog} help'.",
+                quoteaf_os(other)
+            );
             2
         }
     }

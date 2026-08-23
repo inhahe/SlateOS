@@ -4,6 +4,7 @@
 //!
 //! Single personality: `sqlx`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -107,7 +108,7 @@ fn run_sqlx(args: Vec<String>) -> i32 {
             0
         }
         _ => {
-            eprintln!("Error: unknown command '{}'. See --help.", cmd);
+            eprintln!("Error: unknown command {}. See --help.", quoteaf_os(cmd));
             1
         }
     }
@@ -122,7 +123,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_sqlx};
+    use super::run_sqlx;
 
     #[test]
     fn help_exits_zero() {

@@ -18,6 +18,7 @@
 //! powerctl cancel                Cancel a scheduled operation
 //! ```
 
+use quoting::quoteaf_os;
 use std::env;
 use std::fs;
 use std::process;
@@ -561,7 +562,10 @@ fn cmd_schedule(args: &[String]) {
         "shutdown" | "halt" | "poweroff" => "shutdown",
         "reboot" | "restart" => "reboot",
         other => {
-            eprintln!("error: unknown action '{other}' (expected shutdown or reboot)");
+            eprintln!(
+                "error: unknown action {} (expected shutdown or reboot)",
+                quoteaf_os(other)
+            );
             process::exit(1);
         }
     };

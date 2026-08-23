@@ -4,6 +4,7 @@
 //!
 //! Single personality: `selenium`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -30,7 +31,11 @@ fn run_selenium(args: Vec<String>) -> i32 {
     let cmd = args.first().map(|s| s.as_str()).unwrap_or("");
     match cmd {
         "server" => {
-            let port = args.windows(2).find(|w| w[0] == "--port").map(|w| w[1].as_str()).unwrap_or("4444");
+            let port = args
+                .windows(2)
+                .find(|w| w[0] == "--port")
+                .map(|w| w[1].as_str())
+                .unwrap_or("4444");
             println!("Starting Selenium Server on port {}...", port);
             println!("  ✔ Server running at http://localhost:{}", port);
             println!("  ✔ Status: http://localhost:{}/wd/hub/status", port);
@@ -64,7 +69,9 @@ fn run_selenium(args: Vec<String>) -> i32 {
                     println!("Installing {}...", driver);
                     println!("  ✔ {} installed", driver);
                 }
-                _ => { println!("Driver operation: {}", sub); }
+                _ => {
+                    println!("Driver operation: {}", sub);
+                }
             }
             0
         }
@@ -86,7 +93,9 @@ fn run_selenium(args: Vec<String>) -> i32 {
                     println!("Starting Selenium Grid Node...");
                     println!("  ✔ Node registered with hub");
                 }
-                _ => { println!("Grid operation: {}", sub); }
+                _ => {
+                    println!("Grid operation: {}", sub);
+                }
             }
             0
         }
@@ -94,7 +103,7 @@ fn run_selenium(args: Vec<String>) -> i32 {
             if cmd.is_empty() {
                 eprintln!("Usage: selenium <command>. See --help.");
             } else {
-                eprintln!("Error: unknown command '{}'. See --help.", cmd);
+                eprintln!("Error: unknown command {}. See --help.", quoteaf_os(cmd));
             }
             1
         }
@@ -110,7 +119,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_selenium};
+    use super::run_selenium;
 
     #[test]
     fn help_exits_zero() {

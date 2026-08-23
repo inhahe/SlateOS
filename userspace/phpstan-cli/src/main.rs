@@ -4,11 +4,16 @@
 //!
 //! Multi-personality: `phpstan`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_phpstan(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
@@ -36,20 +41,28 @@ fn run_phpstan(args: &[String]) -> i32 {
     match subcmd {
         "--version" | "-V" => println!("PHPStan - PHP Static Analysis Tool 1.11.7"),
         "analyse" | "analyze" => {
-            let level = args.windows(2)
+            let level = args
+                .windows(2)
                 .find(|w| w[0] == "--level" || w[0] == "-l")
                 .map(|w| w[1].as_str())
                 .unwrap_or("0");
-            let paths: Vec<&str> = args.iter()
-                .filter(|a| !a.starts_with('-') && a.as_str() != "analyse" && a.as_str() != "analyze")
+            let paths: Vec<&str> = args
+                .iter()
+                .filter(|a| {
+                    !a.starts_with('-') && a.as_str() != "analyse" && a.as_str() != "analyze"
+                })
                 .filter(|a| {
                     let prev = args.iter().position(|x| x == *a);
                     if let Some(pos) = prev
                         && pos > 0
                     {
                         let p = args.get(pos - 1).map(|s| s.as_str()).unwrap_or("");
-                        return p != "--level" && p != "-l" && p != "--configuration" && p != "-c"
-                            && p != "--memory-limit" && p != "--error-format";
+                        return p != "--level"
+                            && p != "-l"
+                            && p != "--configuration"
+                            && p != "-c"
+                            && p != "--memory-limit"
+                            && p != "--error-format";
                     }
                     true
                 })
@@ -105,14 +118,17 @@ fn run_phpstan(args: &[String]) -> i32 {
             println!("Result cache: enabled");
             println!("Parallel processing: enabled (8 workers)");
         }
-        _ => println!("phpstan: '{}' completed", subcmd),
+        _ => println!("phpstan: {} completed", quoteaf_os(subcmd)),
     }
     0
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "phpstan".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "phpstan".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_phpstan(&rest);
     process::exit(code);
@@ -120,7 +136,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_phpstan};
+    use super::{basename, run_phpstan, strip_ext};
 
     #[test]
     fn basename_strips_path() {

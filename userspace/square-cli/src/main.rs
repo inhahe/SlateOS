@@ -4,6 +4,7 @@
 //!
 //! Single personality: `square`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -32,11 +33,19 @@ fn run_square(args: Vec<String>) -> i32 {
             match sub {
                 "list" => {
                     println!("ID                      Amount     Status       Source      Created");
-                    println!("pmt_abc123def456        $25.00     COMPLETED    CARD        2024-01-15 14:00");
-                    println!("pmt_ghi789jkl012        $42.50     COMPLETED    CARD        2024-01-15 13:30");
-                    println!("pmt_mno345pqr678        $15.00     COMPLETED    CASH        2024-01-15 12:00");
+                    println!(
+                        "pmt_abc123def456        $25.00     COMPLETED    CARD        2024-01-15 14:00"
+                    );
+                    println!(
+                        "pmt_ghi789jkl012        $42.50     COMPLETED    CARD        2024-01-15 13:30"
+                    );
+                    println!(
+                        "pmt_mno345pqr678        $15.00     COMPLETED    CASH        2024-01-15 12:00"
+                    );
                 }
-                _ => { println!("Payment operation: {}", sub); }
+                _ => {
+                    println!("Payment operation: {}", sub);
+                }
             }
             0
         }
@@ -48,7 +57,9 @@ fn run_square(args: Vec<String>) -> i32 {
                     println!("ord_abc123              $67.50     3      COMPLETED   2024-01-15");
                     println!("ord_def456              $25.00     1      OPEN        2024-01-15");
                 }
-                _ => { println!("Order operation: {}", sub); }
+                _ => {
+                    println!("Order operation: {}", sub);
+                }
             }
             0
         }
@@ -60,7 +71,9 @@ fn run_square(args: Vec<String>) -> i32 {
                     println!("cust_abc123        Alice Smith      alice@example.com        15");
                     println!("cust_def456        Bob Jones        bob@example.com          8");
                 }
-                _ => { println!("Customer operation: {}", sub); }
+                _ => {
+                    println!("Customer operation: {}", sub);
+                }
             }
             0
         }
@@ -73,7 +86,9 @@ fn run_square(args: Vec<String>) -> i32 {
                     println!("cat_def456        ITEM        Sandwich            $12.50");
                     println!("cat_ghi789        MODIFIER    Extra Shot          $1.50");
                 }
-                _ => { println!("Catalog operation: {}", sub); }
+                _ => {
+                    println!("Catalog operation: {}", sub);
+                }
             }
             0
         }
@@ -94,7 +109,7 @@ fn run_square(args: Vec<String>) -> i32 {
             if cmd.is_empty() {
                 eprintln!("Usage: square <command>. See --help.");
             } else {
-                eprintln!("Error: unknown command '{}'. See --help.", cmd);
+                eprintln!("Error: unknown command {}. See --help.", quoteaf_os(cmd));
             }
             1
         }
@@ -110,7 +125,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_square};
+    use super::run_square;
 
     #[test]
     fn help_exits_zero() {

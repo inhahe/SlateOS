@@ -72,6 +72,7 @@ OV = "gui/desktop/src/overview.rs"
 CTX = "gui/desktop/src/context_ext.rs"
 WID = "gui/desktop/src/widgets.rs"
 SND = "gui/desktop/src/sound_settings.rs"
+OSD = "gui/desktop/src/osd.rs"
 
 # (name, file, [(old, new), ...], [packages], [tests expected to fail])
 DEFECTS = [
@@ -5247,6 +5248,1256 @@ DEFECTS = [
             'every_rectangle_the_sound_panel_draws_is_in_the_role_it_claims',
             'the_three_accent_sites_follow_the_accent',
             'every_pair_this_panel_uses_to_tell_things_apart_stays_apart',
+        ],
+    ),
+    # ---- osd.rs (module 24 of 49) -------------------------------------------
+    (
+        "AAAAAAAAAAAAAAAAAAAAAA: the overlay's shadow becomes a role instead of an absence of light",
+        OSD,
+        [
+            ('color: Color::rgba(0, 0, 0, base_alpha / 2),',
+             'color: Color::rgba(p.crust.r, p.crust.g, p.crust.b, base_alpha / 2),'),
+        ],
+        ["desktop"],
+        [
+            'every_rectangle_the_osd_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        "BBBBBBBBBBBBBBBBBBBBBB: the overlay's shadow stops following the overlay's own fade",
+        OSD,
+        [
+            ('color: Color::rgba(0, 0, 0, base_alpha / 2),',
+             'color: Color::rgba(0, 0, 0, base_alpha),'),
+        ],
+        ["desktop"],
+        [
+            'every_rectangle_the_osd_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        "CCCCCCCCCCCCCCCCCCCCCC: the overlay's panel is frozen back to Mocha base",
+        OSD,
+        [
+            ('color: Color::rgba(p.base.r, p.base.g, p.base.b, base_alpha),',
+             'color: Color::rgba(0x1E, 0x1E, 0x2E, base_alpha),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_osd_draws_comes_from_its_palette',
+            'every_rectangle_the_osd_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        "DDDDDDDDDDDDDDDDDDDDDD: the overlay's panel becomes a sidebar's mantle",
+        OSD,
+        [
+            ('color: Color::rgba(p.base.r, p.base.g, p.base.b, base_alpha),',
+             'color: Color::rgba(p.mantle.r, p.mantle.g, p.mantle.b, base_alpha),'),
+        ],
+        ["desktop"],
+        [
+            'every_rectangle_the_osd_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        "EEEEEEEEEEEEEEEEEEEEEE: the overlay's panel follows the accent",
+        OSD,
+        [
+            ('color: Color::rgba(p.base.r, p.base.g, p.base.b, base_alpha),',
+             'color: Color::rgba(p.accent.r, p.accent.g, p.accent.b, base_alpha),'),
+        ],
+        ["desktop"],
+        [
+            'no_colour_the_overlay_draws_ever_follows_the_accent',
+            'every_rectangle_the_osd_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        "FFFFFFFFFFFFFFFFFFFFFF: the overlay's border is frozen back to Mocha surface1",
+        OSD,
+        [
+            ('color: Color::rgba(p.surface1.r, p.surface1.g, p.surface1.b, base_alpha),',
+             'color: Color::rgba(0x45, 0x47, 0x5A, base_alpha),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_osd_draws_comes_from_its_palette',
+            'every_rectangle_the_osd_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        "GGGGGGGGGGGGGGGGGGGGGG: the overlay's border sinks into its own fill",
+        OSD,
+        [
+            ('color: Color::rgba(p.surface1.r, p.surface1.g, p.surface1.b, base_alpha),',
+             'color: Color::rgba(p.surface0.r, p.surface0.g, p.surface0.b, base_alpha),'),
+        ],
+        ["desktop"],
+        [
+            'every_rectangle_the_osd_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        "HHHHHHHHHHHHHHHHHHHHHH: the slider's icon is frozen back to Mocha blue",
+        OSD,
+        [
+            ('font_size: icon_size,\n            color: Color::rgba(accent.r, accent.g, accent.b, text_alpha),',
+             'font_size: icon_size,\n            color: Color::rgba(0x89, 0xB4, 0xFA, text_alpha),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_osd_draws_comes_from_its_palette',
+            'every_text_the_osd_draws_is_in_the_role_it_claims',
+            'every_kind_draws_its_icon_in_the_colour_that_kind_claims',
+        ],
+    ),
+    (
+        "IIIIIIIIIIIIIIIIIIIIII: the slider's icon stops saying which kind of slider it is",
+        OSD,
+        [
+            ('font_size: icon_size,\n            color: Color::rgba(accent.r, accent.g, accent.b, text_alpha),',
+             'font_size: icon_size,\n            color: Color::rgba(p.text.r, p.text.g, p.text.b, text_alpha),'),
+        ],
+        ["desktop"],
+        [
+            'every_text_the_osd_draws_is_in_the_role_it_claims',
+            'every_kind_draws_its_icon_in_the_colour_that_kind_claims',
+        ],
+    ),
+    (
+        "JJJJJJJJJJJJJJJJJJJJJJ: the slider's label is frozen back to Mocha text",
+        OSD,
+        [
+            ('font_size: 14.0,\n            color: Color::rgba(p.text.r, p.text.g, p.text.b, text_alpha),\n            font_weight: FontWeightHint::Bold,\n            max_width: None,',
+             'font_size: 14.0,\n            color: Color::rgba(0xCD, 0xD6, 0xF4, text_alpha),\n            font_weight: FontWeightHint::Bold,\n            max_width: None,'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_osd_draws_comes_from_its_palette',
+            'every_text_the_osd_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        "KKKKKKKKKKKKKKKKKKKKKK: the slider's label drops to secondary text",
+        OSD,
+        [
+            ('font_size: 14.0,\n            color: Color::rgba(p.text.r, p.text.g, p.text.b, text_alpha),\n            font_weight: FontWeightHint::Bold,\n            max_width: None,',
+             'font_size: 14.0,\n            color: Color::rgba(p.subtext0.r, p.subtext0.g, p.subtext0.b, text_alpha),\n            font_weight: FontWeightHint::Bold,\n            max_width: None,'),
+        ],
+        ["desktop"],
+        [
+            'every_text_the_osd_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        "LLLLLLLLLLLLLLLLLLLLLL: the slider's track is frozen back to Mocha surface0",
+        OSD,
+        [
+            ('color: Color::rgba(p.surface0.r, p.surface0.g, p.surface0.b, text_alpha),',
+             'color: Color::rgba(0x31, 0x32, 0x44, text_alpha),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_osd_draws_comes_from_its_palette',
+            'every_rectangle_the_osd_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        "MMMMMMMMMMMMMMMMMMMMMM: the slider's track lightens one step",
+        OSD,
+        [
+            ('color: Color::rgba(p.surface0.r, p.surface0.g, p.surface0.b, text_alpha),',
+             'color: Color::rgba(p.surface1.r, p.surface1.g, p.surface1.b, text_alpha),'),
+        ],
+        ["desktop"],
+        [
+            'every_rectangle_the_osd_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        "NNNNNNNNNNNNNNNNNNNNNN: the slider's fill is frozen back to Mocha blue",
+        OSD,
+        [
+            ('width: fill_w,\n                height: track_h,\n                color: Color::rgba(accent.r, accent.g, accent.b, text_alpha),',
+             'width: fill_w,\n                height: track_h,\n                color: Color::rgba(0x89, 0xB4, 0xFA, text_alpha),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_osd_draws_comes_from_its_palette',
+            'every_rectangle_the_osd_draws_is_in_the_role_it_claims',
+            'volume_and_brightness_stay_a_pair_you_can_tell_apart',
+        ],
+    ),
+    (
+        "OOOOOOOOOOOOOOOOOOOOOO: the slider's fill follows the accent, as if you could drag an OSD",
+        OSD,
+        [
+            ('width: fill_w,\n                height: track_h,\n                color: Color::rgba(accent.r, accent.g, accent.b, text_alpha),',
+             'width: fill_w,\n                height: track_h,\n                color: Color::rgba(p.accent.r, p.accent.g, p.accent.b, text_alpha),'),
+        ],
+        ["desktop"],
+        [
+            'no_colour_the_overlay_draws_ever_follows_the_accent',
+            'every_rectangle_the_osd_draws_is_in_the_role_it_claims',
+            'volume_and_brightness_stay_a_pair_you_can_tell_apart',
+        ],
+    ),
+    (
+        "PPPPPPPPPPPPPPPPPPPPPP: the slider's knob is frozen back to Mocha text",
+        OSD,
+        [
+            ('height: 10.0,\n            color: Color::rgba(p.text.r, p.text.g, p.text.b, text_alpha),',
+             'height: 10.0,\n            color: Color::rgba(0xCD, 0xD6, 0xF4, text_alpha),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_osd_draws_comes_from_its_palette',
+            'every_rectangle_the_osd_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        "QQQQQQQQQQQQQQQQQQQQQQ: the slider's knob sinks into its own track",
+        OSD,
+        [
+            ('height: 10.0,\n            color: Color::rgba(p.text.r, p.text.g, p.text.b, text_alpha),',
+             'height: 10.0,\n            color: Color::rgba(p.surface0.r, p.surface0.g, p.surface0.b, text_alpha),'),
+        ],
+        ["desktop"],
+        [
+            'every_rectangle_the_osd_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        'RRRRRRRRRRRRRRRRRRRRRR: a slider at zero draws a fill anyway',
+        OSD,
+        [
+            ('if fill_w > 0.0 {',
+             'if fill_w >= 0.0 {'),
+        ],
+        ["desktop"],
+        [
+            'the_fixtures_take_every_branch_the_osd_has',
+        ],
+    ),
+    (
+        'SSSSSSSSSSSSSSSSSSSSSS: a slider never draws its fill at all',
+        OSD,
+        [
+            ('if fill_w > 0.0 {',
+             'if fill_w < 0.0 {'),
+        ],
+        ["desktop"],
+        [
+            'the_fixtures_take_every_branch_the_osd_has',
+            'every_rectangle_the_osd_draws_is_in_the_role_it_claims',
+            'volume_and_brightness_stay_a_pair_you_can_tell_apart',
+        ],
+    ),
+    (
+        'TTTTTTTTTTTTTTTTTTTTTT: the music note is frozen back to Mocha lavender',
+        OSD,
+        [
+            ('font_size: 28.0,\n            color: Color::rgba(p.lavender.r, p.lavender.g, p.lavender.b, text_alpha),',
+             'font_size: 28.0,\n            color: Color::rgba(0xB4, 0xBE, 0xFE, text_alpha),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_osd_draws_comes_from_its_palette',
+            'every_text_the_osd_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        'UUUUUUUUUUUUUUUUUUUUUU: the music note stops being a music note and becomes text',
+        OSD,
+        [
+            ('font_size: 28.0,\n            color: Color::rgba(p.lavender.r, p.lavender.g, p.lavender.b, text_alpha),',
+             'font_size: 28.0,\n            color: Color::rgba(p.text.r, p.text.g, p.text.b, text_alpha),'),
+        ],
+        ["desktop"],
+        [
+            'every_text_the_osd_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        'VVVVVVVVVVVVVVVVVVVVVV: the track title is frozen back to Mocha text',
+        OSD,
+        [
+            ('font_size: 14.0,\n            color: Color::rgba(p.text.r, p.text.g, p.text.b, text_alpha),\n            font_weight: FontWeightHint::Bold,\n            max_width: Some(max_text_w),',
+             'font_size: 14.0,\n            color: Color::rgba(0xCD, 0xD6, 0xF4, text_alpha),\n            font_weight: FontWeightHint::Bold,\n            max_width: Some(max_text_w),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_osd_draws_comes_from_its_palette',
+            'every_text_the_osd_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        "WWWWWWWWWWWWWWWWWWWWWW: the track title drops to the artist's secondary text",
+        OSD,
+        [
+            ('font_size: 14.0,\n            color: Color::rgba(p.text.r, p.text.g, p.text.b, text_alpha),\n            font_weight: FontWeightHint::Bold,\n            max_width: Some(max_text_w),',
+             'font_size: 14.0,\n            color: Color::rgba(p.subtext0.r, p.subtext0.g, p.subtext0.b, text_alpha),\n            font_weight: FontWeightHint::Bold,\n            max_width: Some(max_text_w),'),
+        ],
+        ["desktop"],
+        [
+            'every_text_the_osd_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        'XXXXXXXXXXXXXXXXXXXXXX: the track title follows the accent',
+        OSD,
+        [
+            ('font_size: 14.0,\n            color: Color::rgba(p.text.r, p.text.g, p.text.b, text_alpha),\n            font_weight: FontWeightHint::Bold,\n            max_width: Some(max_text_w),',
+             'font_size: 14.0,\n            color: Color::rgba(p.accent.r, p.accent.g, p.accent.b, text_alpha),\n            font_weight: FontWeightHint::Bold,\n            max_width: Some(max_text_w),'),
+        ],
+        ["desktop"],
+        [
+            'no_colour_the_overlay_draws_ever_follows_the_accent',
+            'every_text_the_osd_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        'YYYYYYYYYYYYYYYYYYYYYY: the artist line is frozen back to Mocha subtext0',
+        OSD,
+        [
+            ('font_size: 12.0,\n            color: Color::rgba(p.subtext0.r, p.subtext0.g, p.subtext0.b, text_alpha),',
+             'font_size: 12.0,\n            color: Color::rgba(0xA6, 0xAD, 0xC8, text_alpha),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_osd_draws_comes_from_its_palette',
+            'every_text_the_osd_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        "ZZZZZZZZZZZZZZZZZZZZZZ: the artist line is promoted to the title's own weight of text",
+        OSD,
+        [
+            ('font_size: 12.0,\n            color: Color::rgba(p.subtext0.r, p.subtext0.g, p.subtext0.b, text_alpha),',
+             'font_size: 12.0,\n            color: Color::rgba(p.text.r, p.text.g, p.text.b, text_alpha),'),
+        ],
+        ["desktop"],
+        [
+            'every_text_the_osd_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        'AAAAAAAAAAAAAAAAAAAAAAA: the album line is frozen back to Mocha subtext0',
+        OSD,
+        [
+            ('color: Color::rgba(p.subtext0.r, p.subtext0.g, p.subtext0.b, text_alpha / 2),',
+             'color: Color::rgba(0xA6, 0xAD, 0xC8, text_alpha / 2),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_osd_draws_comes_from_its_palette',
+            'every_text_the_osd_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        'BBBBBBBBBBBBBBBBBBBBBBB: the album line is promoted to primary text',
+        OSD,
+        [
+            ('color: Color::rgba(p.subtext0.r, p.subtext0.g, p.subtext0.b, text_alpha / 2),',
+             'color: Color::rgba(p.text.r, p.text.g, p.text.b, text_alpha / 2),'),
+        ],
+        ["desktop"],
+        [
+            'every_text_the_osd_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        'CCCCCCCCCCCCCCCCCCCCCCC: the media bar is frozen back to Mocha lavender',
+        OSD,
+        [
+            ('color: Color::rgba(p.lavender.r, p.lavender.g, p.lavender.b, text_alpha / 3),',
+             'color: Color::rgba(0xB4, 0xBE, 0xFE, text_alpha / 3),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_osd_draws_comes_from_its_palette',
+            'every_rectangle_the_osd_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        'DDDDDDDDDDDDDDDDDDDDDDD: the media bar follows the accent',
+        OSD,
+        [
+            ('color: Color::rgba(p.lavender.r, p.lavender.g, p.lavender.b, text_alpha / 3),',
+             'color: Color::rgba(p.accent.r, p.accent.g, p.accent.b, text_alpha / 3),'),
+        ],
+        ["desktop"],
+        [
+            'no_colour_the_overlay_draws_ever_follows_the_accent',
+            'every_rectangle_the_osd_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        'EEEEEEEEEEEEEEEEEEEEEEE: a track with no album draws an empty album line',
+        OSD,
+        [
+            ('if !album.is_empty() {',
+             'if true {'),
+        ],
+        ["desktop"],
+        [
+            'the_fixtures_take_every_branch_the_osd_has',
+        ],
+    ),
+    (
+        'FFFFFFFFFFFFFFFFFFFFFFF: a track with an album never draws it',
+        OSD,
+        [
+            ('if !album.is_empty() {',
+             'if false {'),
+        ],
+        ["desktop"],
+        [
+            'the_fixtures_take_every_branch_the_osd_has',
+            'every_text_the_osd_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        'GGGGGGGGGGGGGGGGGGGGGGG: the notice icon is frozen back to Mocha red',
+        OSD,
+        [
+            ('font_size: 20.0,\n            color: Color::rgba(accent.r, accent.g, accent.b, text_alpha),',
+             'font_size: 20.0,\n            color: Color::rgba(0xF3, 0x8B, 0xA8, text_alpha),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_osd_draws_comes_from_its_palette',
+            'every_text_the_osd_draws_is_in_the_role_it_claims',
+            'every_kind_draws_its_icon_in_the_colour_that_kind_claims',
+        ],
+    ),
+    (
+        'HHHHHHHHHHHHHHHHHHHHHHH: the notice icon stops saying what kind of notice it is',
+        OSD,
+        [
+            ('font_size: 20.0,\n            color: Color::rgba(accent.r, accent.g, accent.b, text_alpha),',
+             'font_size: 20.0,\n            color: Color::rgba(p.text.r, p.text.g, p.text.b, text_alpha),'),
+        ],
+        ["desktop"],
+        [
+            'every_text_the_osd_draws_is_in_the_role_it_claims',
+            'every_kind_draws_its_icon_in_the_colour_that_kind_claims',
+        ],
+    ),
+    (
+        'IIIIIIIIIIIIIIIIIIIIIII: the notice label is frozen back to Mocha text',
+        OSD,
+        [
+            ('font_size: OSD_LABEL_SIZE,\n            color: Color::rgba(p.text.r, p.text.g, p.text.b, text_alpha),',
+             'font_size: OSD_LABEL_SIZE,\n            color: Color::rgba(0xCD, 0xD6, 0xF4, text_alpha),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_osd_draws_comes_from_its_palette',
+            'every_text_the_osd_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        'JJJJJJJJJJJJJJJJJJJJJJJ: the notice label drops to secondary text',
+        OSD,
+        [
+            ('font_size: OSD_LABEL_SIZE,\n            color: Color::rgba(p.text.r, p.text.g, p.text.b, text_alpha),',
+             'font_size: OSD_LABEL_SIZE,\n            color: Color::rgba(p.subtext0.r, p.subtext0.g, p.subtext0.b, text_alpha),'),
+        ],
+        ["desktop"],
+        [
+            'every_text_the_osd_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        'KKKKKKKKKKKKKKKKKKKKKKK: an unmuted volume overlay reads as muted',
+        OSD,
+        [
+            ('if *muted { p.red } else { p.blue },',
+             'p.red,'),
+        ],
+        ["desktop"],
+        [
+            'every_text_the_osd_draws_is_in_the_role_it_claims',
+            'every_rectangle_the_osd_draws_is_in_the_role_it_claims',
+            'every_kind_draws_its_icon_in_the_colour_that_kind_claims',
+            'volume_and_brightness_stay_a_pair_you_can_tell_apart',
+        ],
+    ),
+    (
+        'LLLLLLLLLLLLLLLLLLLLLLL: a muted volume overlay reads as unmuted',
+        OSD,
+        [
+            ('if *muted { p.red } else { p.blue },',
+             'p.blue,'),
+        ],
+        ["desktop"],
+        [
+            'every_kind_draws_its_icon_in_the_colour_that_kind_claims',
+            'volume_and_brightness_stay_a_pair_you_can_tell_apart',
+        ],
+    ),
+    (
+        "MMMMMMMMMMMMMMMMMMMMMMM: brightness takes volume's blue, so the pair collapses",
+        OSD,
+        [
+            ('p.yellow,\n                    commands,',
+             'p.blue,\n                    commands,'),
+        ],
+        ["desktop"],
+        [
+            'every_kind_draws_its_icon_in_the_colour_that_kind_claims',
+            'volume_and_brightness_stay_a_pair_you_can_tell_apart',
+        ],
+    ),
+    (
+        'NNNNNNNNNNNNNNNNNNNNNNN: brightness follows the accent',
+        OSD,
+        [
+            ('p.yellow,\n                    commands,',
+             'p.accent,\n                    commands,'),
+        ],
+        ["desktop"],
+        [
+            'no_colour_the_overlay_draws_ever_follows_the_accent',
+            'every_kind_draws_its_icon_in_the_colour_that_kind_claims',
+            'volume_and_brightness_stay_a_pair_you_can_tell_apart',
+        ],
+    ),
+    (
+        'OOOOOOOOOOOOOOOOOOOOOOO: play/pause loses its own colour to plain text',
+        OSD,
+        [
+            ('p, ox, oy, osd_w, text_alpha, icon, label, p.lavender, commands,',
+             'p, ox, oy, osd_w, text_alpha, icon, label, p.text, commands,'),
+        ],
+        ["desktop"],
+        [
+            'every_kind_draws_its_icon_in_the_colour_that_kind_claims',
+        ],
+    ),
+    (
+        'PPPPPPPPPPPPPPPPPPPPPPP: a lock that is on reads as off',
+        OSD,
+        [
+            ('let color = if *active { p.green } else { p.subtext0 };',
+             'let color = p.subtext0;'),
+        ],
+        ["desktop"],
+        [
+            'every_kind_draws_its_icon_in_the_colour_that_kind_claims',
+        ],
+    ),
+    (
+        'QQQQQQQQQQQQQQQQQQQQQQQ: a lock that is off reads as on',
+        OSD,
+        [
+            ('let color = if *active { p.green } else { p.subtext0 };',
+             'let color = p.green;'),
+        ],
+        ["desktop"],
+        [
+            'every_kind_draws_its_icon_in_the_colour_that_kind_claims',
+        ],
+    ),
+    (
+        'RRRRRRRRRRRRRRRRRRRRRRR: an ejected device still reads as connected',
+        OSD,
+        [
+            ('let color = if *ejected { p.subtext0 } else { p.green };',
+             'let color = p.green;'),
+        ],
+        ["desktop"],
+        [
+            'every_kind_draws_its_icon_in_the_colour_that_kind_claims',
+        ],
+    ),
+    (
+        'SSSSSSSSSSSSSSSSSSSSSSS: a connected device reads as ejected',
+        OSD,
+        [
+            ('let color = if *ejected { p.subtext0 } else { p.green };',
+             'let color = p.subtext0;'),
+        ],
+        ["desktop"],
+        [
+            'every_kind_draws_its_icon_in_the_colour_that_kind_claims',
+        ],
+    ),
+    (
+        'TTTTTTTTTTTTTTTTTTTTTTT: the screenshot notice is frozen back to Mocha green',
+        OSD,
+        [
+            ('"\\u{1F4F7}",\n                    &label,\n                    p.green,',
+             '"\\u{1F4F7}",\n                    &label,\n                    Color::from_hex(0xA6E3A1),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_osd_draws_comes_from_its_palette',
+            'every_kind_draws_its_icon_in_the_colour_that_kind_claims',
+        ],
+    ),
+    (
+        'UUUUUUUUUUUUUUUUUUUUUUU: the screenshot notice follows the accent',
+        OSD,
+        [
+            ('"\\u{1F4F7}",\n                    &label,\n                    p.green,',
+             '"\\u{1F4F7}",\n                    &label,\n                    p.accent,'),
+        ],
+        ["desktop"],
+        [
+            'no_colour_the_overlay_draws_ever_follows_the_accent',
+            'every_kind_draws_its_icon_in_the_colour_that_kind_claims',
+        ],
+    ),
+    (
+        'VVVVVVVVVVVVVVVVVVVVVVV: a muted microphone still reads as live',
+        OSD,
+        [
+            ('let color = if *muted { p.red } else { p.green };',
+             'let color = p.green;'),
+        ],
+        ["desktop"],
+        [
+            'every_kind_draws_its_icon_in_the_colour_that_kind_claims',
+        ],
+    ),
+    (
+        'WWWWWWWWWWWWWWWWWWWWWWW: a live microphone reads as muted',
+        OSD,
+        [
+            ('let color = if *muted { p.red } else { p.green };',
+             'let color = p.red;'),
+        ],
+        ["desktop"],
+        [
+            'every_kind_draws_its_icon_in_the_colour_that_kind_claims',
+        ],
+    ),
+    (
+        'XXXXXXXXXXXXXXXXXXXXXXX: a dropped network connection still reads as connected',
+        OSD,
+        [
+            ('let color = if *connected { p.green } else { p.red };',
+             'let color = p.green;'),
+        ],
+        ["desktop"],
+        [
+            'every_kind_draws_its_icon_in_the_colour_that_kind_claims',
+        ],
+    ),
+    (
+        'YYYYYYYYYYYYYYYYYYYYYYY: a live network connection reads as dropped',
+        OSD,
+        [
+            ('let color = if *connected { p.green } else { p.red };',
+             'let color = p.red;'),
+        ],
+        ["desktop"],
+        [
+            'every_kind_draws_its_icon_in_the_colour_that_kind_claims',
+        ],
+    ),
+    (
+        'ZZZZZZZZZZZZZZZZZZZZZZZ: a low battery stops being a warning and becomes a caution',
+        OSD,
+        [
+            ('"\\u{1F50B}",\n                    &label,\n                    p.red,',
+             '"\\u{1F50B}",\n                    &label,\n                    p.peach,'),
+        ],
+        ["desktop"],
+        [
+            'every_kind_draws_its_icon_in_the_colour_that_kind_claims',
+        ],
+    ),
+    (
+        'AAAAAAAAAAAAAAAAAAAAAAAA: a low battery is frozen back to Mocha red',
+        OSD,
+        [
+            ('"\\u{1F50B}",\n                    &label,\n                    p.red,',
+             '"\\u{1F50B}",\n                    &label,\n                    Color::from_hex(0xF38BA8),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_osd_draws_comes_from_its_palette',
+            'every_kind_draws_its_icon_in_the_colour_that_kind_claims',
+        ],
+    ),
+    (
+        'BBBBBBBBBBBBBBBBBBBBBBBB: the Info icon stops being informational and turns into a success',
+        OSD,
+        [
+            ('OsdIcon::Info => ("\\u{2139}", p.blue),',
+             'OsdIcon::Info => ("\\u{2139}", p.green),'),
+        ],
+        ["desktop"],
+        [
+            'every_kind_draws_its_icon_in_the_colour_that_kind_claims',
+            'every_pair_this_module_uses_to_tell_things_apart_stays_apart',
+        ],
+    ),
+    (
+        'CCCCCCCCCCCCCCCCCCCCCCCC: the Success icon stops being green',
+        OSD,
+        [
+            ('OsdIcon::Success => ("\\u{2705}", p.green),',
+             'OsdIcon::Success => ("\\u{2705}", p.blue),'),
+        ],
+        ["desktop"],
+        [
+            'every_kind_draws_its_icon_in_the_colour_that_kind_claims',
+        ],
+    ),
+    (
+        'DDDDDDDDDDDDDDDDDDDDDDDD: the Warning icon is frozen back to Mocha yellow',
+        OSD,
+        [
+            ('OsdIcon::Warning => ("\\u{26A0}", p.yellow),',
+             'OsdIcon::Warning => ("\\u{26A0}", Color::from_hex(0xF9E2AF)),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_osd_draws_comes_from_its_palette',
+            'every_kind_draws_its_icon_in_the_colour_that_kind_claims',
+        ],
+    ),
+    (
+        'EEEEEEEEEEEEEEEEEEEEEEEE: the Error icon collides with the battery warning',
+        OSD,
+        [
+            ('OsdIcon::Error => ("\\u{274C}", p.red),',
+             'OsdIcon::Error => ("\\u{274C}", p.peach),'),
+        ],
+        ["desktop"],
+        [
+            'every_kind_draws_its_icon_in_the_colour_that_kind_claims',
+            'every_pair_this_module_uses_to_tell_things_apart_stays_apart',
+        ],
+    ),
+    (
+        "FFFFFFFFFFFFFFFFFFFFFFFF: the Speaker icon stops sharing the volume overlay's blue",
+        OSD,
+        [
+            ('OsdIcon::Speaker => ("\\u{1F50A}", p.blue),',
+             'OsdIcon::Speaker => ("\\u{1F50A}", p.text),'),
+        ],
+        ["desktop"],
+        [
+            'every_kind_draws_its_icon_in_the_colour_that_kind_claims',
+        ],
+    ),
+    (
+        "GGGGGGGGGGGGGGGGGGGGGGGG: the Brightness icon stops sharing the brightness overlay's yellow",
+        OSD,
+        [
+            ('OsdIcon::Brightness => ("\\u{2600}", p.yellow),',
+             'OsdIcon::Brightness => ("\\u{2600}", p.green),'),
+        ],
+        ["desktop"],
+        [
+            'every_kind_draws_its_icon_in_the_colour_that_kind_claims',
+        ],
+    ),
+    (
+        'HHHHHHHHHHHHHHHHHHHHHHHH: the Network icon turns into an error',
+        OSD,
+        [
+            ('OsdIcon::Network => ("\\u{1F310}", p.green),',
+             'OsdIcon::Network => ("\\u{1F310}", p.red),'),
+        ],
+        ["desktop"],
+        [
+            'every_kind_draws_its_icon_in_the_colour_that_kind_claims',
+        ],
+    ),
+    (
+        'IIIIIIIIIIIIIIIIIIIIIIII: the Battery icon loses its peach and collides with the error red',
+        OSD,
+        [
+            ('OsdIcon::Battery => ("\\u{1F50B}", p.peach),',
+             'OsdIcon::Battery => ("\\u{1F50B}", p.red),'),
+        ],
+        ["desktop"],
+        [
+            'every_kind_draws_its_icon_in_the_colour_that_kind_claims',
+            'every_pair_this_module_uses_to_tell_things_apart_stays_apart',
+        ],
+    ),
+    (
+        'JJJJJJJJJJJJJJJJJJJJJJJJ: the Lock icon loses its lavender and collides with the info blue',
+        OSD,
+        [
+            ('OsdIcon::Lock => ("\\u{1F512}", p.lavender),',
+             'OsdIcon::Lock => ("\\u{1F512}", p.blue),'),
+        ],
+        ["desktop"],
+        [
+            'every_kind_draws_its_icon_in_the_colour_that_kind_claims',
+            'every_pair_this_module_uses_to_tell_things_apart_stays_apart',
+        ],
+    ),
+    (
+        'KKKKKKKKKKKKKKKKKKKKKKKK: the Camera icon stops confirming anything',
+        OSD,
+        [
+            ('OsdIcon::Camera => ("\\u{1F4F7}", p.green),',
+             'OsdIcon::Camera => ("\\u{1F4F7}", p.subtext0),'),
+        ],
+        ["desktop"],
+        [
+            'every_kind_draws_its_icon_in_the_colour_that_kind_claims',
+        ],
+    ),
+    (
+        'LLLLLLLLLLLLLLLLLLLLLLLL: the medium volume icon collapses into the low one',
+        OSD,
+        [
+            ('} else if level < 66 {\n        "\\u{1F509}" // medium',
+             '} else if level < 66 {\n        "\\u{1F508}" // medium'),
+        ],
+        ["desktop"],
+        [
+            'the_fixtures_take_every_branch_the_osd_has',
+            'volume_icon_levels',
+        ],
+    ),
+    (
+        'MMMMMMMMMMMMMMMMMMMMMMMM: the settings title is frozen back to Mocha text',
+        OSD,
+        [
+            ('font_size: 18.0,\n            color: p.text,',
+             'font_size: 18.0,\n            color: Color::from_hex(0xCDD6F4),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_osd_draws_comes_from_its_palette',
+            'every_text_the_osd_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        "NNNNNNNNNNNNNNNNNNNNNNNN: the settings title drops to a heading's secondary text",
+        OSD,
+        [
+            ('font_size: 18.0,\n            color: p.text,',
+             'font_size: 18.0,\n            color: p.subtext0,'),
+        ],
+        ["desktop"],
+        [
+            'every_text_the_osd_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        'OOOOOOOOOOOOOOOOOOOOOOOO: the enable pill is frozen back to Mocha green',
+        OSD,
+        [
+            ('let enable_color = if self.config.enabled {\n            p.green\n        } else {\n            p.subtext0\n        };',
+             'let enable_color = if self.config.enabled {\n            Color::from_hex(0xA6E3A1)\n        } else {\n            p.subtext0\n        };'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_osd_draws_comes_from_its_palette',
+            'every_rectangle_the_osd_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        "PPPPPPPPPPPPPPPPPPPPPPPP: a disabled OSD's pill still reads as enabled",
+        OSD,
+        [
+            ('let enable_color = if self.config.enabled {\n            p.green\n        } else {\n            p.subtext0\n        };',
+             'let enable_color = p.green;'),
+        ],
+        ["desktop"],
+        [
+            'every_rectangle_the_osd_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        'QQQQQQQQQQQQQQQQQQQQQQQQ: the enable pill reports its state in the accent',
+        OSD,
+        [
+            ('let enable_color = if self.config.enabled {\n            p.green\n        } else {\n            p.subtext0\n        };',
+             'let enable_color = p.accent;'),
+        ],
+        ["desktop"],
+        [
+            'nothing_that_reports_a_state_follows_the_accent',
+            'the_settings_panel_has_exactly_three_accent_sites',
+            'every_rectangle_the_osd_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        "RRRRRRRRRRRRRRRRRRRRRRRR: the pill's knob is frozen back to Mocha text",
+        OSD,
+        [
+            ('height: 16.0,\n            color: p.text,',
+             'height: 16.0,\n            color: Color::from_hex(0xCDD6F4),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_osd_draws_comes_from_its_palette',
+            'every_rectangle_the_osd_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        "SSSSSSSSSSSSSSSSSSSSSSSS: the pill's knob sinks into an unselected grey",
+        OSD,
+        [
+            ('height: 16.0,\n            color: p.text,',
+             'height: 16.0,\n            color: p.surface1,'),
+        ],
+        ["desktop"],
+        [
+            'every_rectangle_the_osd_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        'TTTTTTTTTTTTTTTTTTTTTTTT: the enable label is frozen back to Mocha text',
+        OSD,
+        [
+            ('text: "Enable OSD overlays".to_string(),\n            font_size: 14.0,\n            color: p.text,',
+             'text: "Enable OSD overlays".to_string(),\n            font_size: 14.0,\n            color: Color::from_hex(0xCDD6F4),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_osd_draws_comes_from_its_palette',
+            'every_text_the_osd_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        'UUUUUUUUUUUUUUUUUUUUUUUU: the enable label drops to secondary text',
+        OSD,
+        [
+            ('text: "Enable OSD overlays".to_string(),\n            font_size: 14.0,\n            color: p.text,',
+             'text: "Enable OSD overlays".to_string(),\n            font_size: 14.0,\n            color: p.subtext0,'),
+        ],
+        ["desktop"],
+        [
+            'every_text_the_osd_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        'VVVVVVVVVVVVVVVVVVVVVVVV: the Position heading is frozen back to Mocha subtext0',
+        OSD,
+        [
+            ('text: "Position".to_string(),\n            font_size: 13.0,\n            color: p.subtext0,',
+             'text: "Position".to_string(),\n            font_size: 13.0,\n            color: Color::from_hex(0xA6ADC8),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_osd_draws_comes_from_its_palette',
+            'every_text_the_osd_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        'WWWWWWWWWWWWWWWWWWWWWWWW: the Position heading is promoted to primary text',
+        OSD,
+        [
+            ('text: "Position".to_string(),\n            font_size: 13.0,\n            color: p.subtext0,',
+             'text: "Position".to_string(),\n            font_size: 13.0,\n            color: p.text,'),
+        ],
+        ["desktop"],
+        [
+            'every_text_the_osd_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        'XXXXXXXXXXXXXXXXXXXXXXXX: the selected position dot stops following the accent',
+        OSD,
+        [
+            ('let dot_color = if selected { p.accent } else { p.surface1 };',
+             'let dot_color = if selected { p.blue } else { p.surface1 };'),
+        ],
+        ["desktop"],
+        [
+            'the_fixtures_take_every_branch_the_osd_has',
+            'the_settings_panel_has_exactly_three_accent_sites',
+            'every_rectangle_the_osd_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        'YYYYYYYYYYYYYYYYYYYYYYYY: every position dot reads as selected',
+        OSD,
+        [
+            ('let dot_color = if selected { p.accent } else { p.surface1 };',
+             'let dot_color = p.accent;'),
+        ],
+        ["desktop"],
+        [
+            'the_fixtures_take_every_branch_the_osd_has',
+            'the_settings_panel_has_exactly_three_accent_sites',
+            'every_rectangle_the_osd_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        "ZZZZZZZZZZZZZZZZZZZZZZZZ: an unselected position's label reads as selected",
+        OSD,
+        [
+            ('color: if selected { p.text } else { p.subtext0 },',
+             'color: p.text,'),
+        ],
+        ["desktop"],
+        [
+            'every_text_the_osd_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        "AAAAAAAAAAAAAAAAAAAAAAAAA: the selected position's label is frozen back to Mocha text",
+        OSD,
+        [
+            ('color: if selected { p.text } else { p.subtext0 },',
+             'color: if selected { Color::from_hex(0xCDD6F4) } else { p.subtext0 },'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_osd_draws_comes_from_its_palette',
+            'every_text_the_osd_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        'BBBBBBBBBBBBBBBBBBBBBBBBB: the Timeout heading is frozen back to Mocha subtext0',
+        OSD,
+        [
+            ('text: format!("Timeout: {}ms", self.config.timeout_ms),\n            font_size: 13.0,\n            color: p.subtext0,',
+             'text: format!("Timeout: {}ms", self.config.timeout_ms),\n            font_size: 13.0,\n            color: Color::from_hex(0xA6ADC8),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_osd_draws_comes_from_its_palette',
+            'every_text_the_osd_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        'CCCCCCCCCCCCCCCCCCCCCCCCC: the Timeout heading is promoted to primary text',
+        OSD,
+        [
+            ('text: format!("Timeout: {}ms", self.config.timeout_ms),\n            font_size: 13.0,\n            color: p.subtext0,',
+             'text: format!("Timeout: {}ms", self.config.timeout_ms),\n            font_size: 13.0,\n            color: p.text,'),
+        ],
+        ["desktop"],
+        [
+            'every_text_the_osd_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        "DDDDDDDDDDDDDDDDDDDDDDDDD: the timeout slider's track is frozen back to Mocha surface0",
+        OSD,
+        [
+            ('height: 4.0,\n            color: p.surface0,',
+             'height: 4.0,\n            color: Color::from_hex(0x313244),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_osd_draws_comes_from_its_palette',
+            'every_rectangle_the_osd_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        "EEEEEEEEEEEEEEEEEEEEEEEEE: the timeout slider's track takes the accent too, so the fill vanishes into it",
+        OSD,
+        [
+            ('height: 4.0,\n            color: p.surface0,',
+             'height: 4.0,\n            color: p.accent,'),
+        ],
+        ["desktop"],
+        [
+            'the_settings_panel_has_exactly_three_accent_sites',
+            'every_rectangle_the_osd_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        "FFFFFFFFFFFFFFFFFFFFFFFFF: the timeout slider's fill stops following the accent",
+        OSD,
+        [
+            ('height: 4.0,\n            color: p.accent,',
+             'height: 4.0,\n            color: p.blue,'),
+        ],
+        ["desktop"],
+        [
+            'the_settings_panel_has_exactly_three_accent_sites',
+            'every_rectangle_the_osd_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        'GGGGGGGGGGGGGGGGGGGGGGGGG: the Show-OSD-for heading is frozen back to Mocha subtext0',
+        OSD,
+        [
+            ('text: "Show OSD for:".to_string(),\n            font_size: 13.0,\n            color: p.subtext0,',
+             'text: "Show OSD for:".to_string(),\n            font_size: 13.0,\n            color: Color::from_hex(0xA6ADC8),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_osd_draws_comes_from_its_palette',
+            'every_text_the_osd_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        'HHHHHHHHHHHHHHHHHHHHHHHHH: the Show-OSD-for heading is promoted to primary text',
+        OSD,
+        [
+            ('text: "Show OSD for:".to_string(),\n            font_size: 13.0,\n            color: p.subtext0,',
+             'text: "Show OSD for:".to_string(),\n            font_size: 13.0,\n            color: p.text,'),
+        ],
+        ["desktop"],
+        [
+            'every_text_the_osd_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        'IIIIIIIIIIIIIIIIIIIIIIIII: the checkbox is frozen back to Mocha green',
+        OSD,
+        [
+            ('let check_color = if *enabled { p.green } else { p.surface1 };',
+             'let check_color = if *enabled { Color::from_hex(0xA6E3A1) } else { p.surface1 };'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_osd_draws_comes_from_its_palette',
+            'every_rectangle_the_osd_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        'JJJJJJJJJJJJJJJJJJJJJJJJJ: an unchecked box still reads as checked',
+        OSD,
+        [
+            ('let check_color = if *enabled { p.green } else { p.surface1 };',
+             'let check_color = p.green;'),
+        ],
+        ["desktop"],
+        [
+            'every_rectangle_the_osd_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        'KKKKKKKKKKKKKKKKKKKKKKKKK: the checkbox reports its state in the accent',
+        OSD,
+        [
+            ('let check_color = if *enabled { p.green } else { p.surface1 };',
+             'let check_color = p.accent;'),
+        ],
+        ["desktop"],
+        [
+            'nothing_that_reports_a_state_follows_the_accent',
+            'the_settings_panel_has_exactly_three_accent_sites',
+            'every_rectangle_the_osd_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        'LLLLLLLLLLLLLLLLLLLLLLLLL: the tick inside the box is frozen back to Mocha base',
+        OSD,
+        [
+            ('color: appearance::readable_on(p.green),',
+             'color: Color::from_hex(0x1E1E2E),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_osd_draws_comes_from_its_palette',
+            'every_text_the_osd_draws_is_in_the_role_it_claims',
+            'ink_drawn_on_a_coloured_fill_is_readable_in_both_modes',
+        ],
+    ),
+    (
+        'MMMMMMMMMMMMMMMMMMMMMMMMM: the tick is named instead of derived from the box it sits on',
+        OSD,
+        [
+            ('color: appearance::readable_on(p.green),',
+             'color: p.text,'),
+        ],
+        ["desktop"],
+        [
+            'every_text_the_osd_draws_is_in_the_role_it_claims',
+            'ink_drawn_on_a_coloured_fill_is_readable_in_both_modes',
+        ],
+    ),
+    (
+        'NNNNNNNNNNNNNNNNNNNNNNNNN: an unchecked box draws a tick anyway',
+        OSD,
+        [
+            ('if *enabled {\n                commands.push(RenderCommand::Text {',
+             'if true {\n                commands.push(RenderCommand::Text {'),
+        ],
+        ["desktop"],
+        [
+            'the_fixtures_take_every_branch_the_osd_has',
+        ],
+    ),
+    (
+        'OOOOOOOOOOOOOOOOOOOOOOOOO: a checked box never draws its tick',
+        OSD,
+        [
+            ('if *enabled {\n                commands.push(RenderCommand::Text {',
+             'if false {\n                commands.push(RenderCommand::Text {'),
+        ],
+        ["desktop"],
+        [
+            'the_fixtures_take_every_branch_the_osd_has',
+            'every_text_the_osd_draws_is_in_the_role_it_claims',
+            'ink_drawn_on_a_coloured_fill_is_readable_in_both_modes',
+        ],
+    ),
+    (
+        'PPPPPPPPPPPPPPPPPPPPPPPPP: the toggle labels are frozen back to Mocha text',
+        OSD,
+        [
+            ('font_size: 12.0,\n                color: p.text,',
+             'font_size: 12.0,\n                color: Color::from_hex(0xCDD6F4),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_osd_draws_comes_from_its_palette',
+            'every_text_the_osd_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        'QQQQQQQQQQQQQQQQQQQQQQQQQ: the toggle labels drop to secondary text',
+        OSD,
+        [
+            ('font_size: 12.0,\n                color: p.text,',
+             'font_size: 12.0,\n                color: p.subtext0,'),
+        ],
+        ["desktop"],
+        [
+            'every_text_the_osd_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        'RRRRRRRRRRRRRRRRRRRRRRRRR: the Preview button stops following the accent',
+        OSD,
+        [
+            ('height: 32.0,\n            color: p.accent,',
+             'height: 32.0,\n            color: p.blue,'),
+        ],
+        ["desktop"],
+        [
+            'the_settings_panel_has_exactly_three_accent_sites',
+            'every_rectangle_the_osd_draws_is_in_the_role_it_claims',
+        ],
+    ),
+    (
+        "SSSSSSSSSSSSSSSSSSSSSSSSS: the Preview button's label is frozen back to Mocha base",
+        OSD,
+        [
+            ('color: p.on_accent(),',
+             'color: Color::from_hex(0x1E1E2E),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_osd_draws_comes_from_its_palette',
+            'every_text_the_osd_draws_is_in_the_role_it_claims',
+            'ink_drawn_on_a_coloured_fill_is_readable_in_both_modes',
+        ],
+    ),
+    (
+        "TTTTTTTTTTTTTTTTTTTTTTTTT: the Preview button's label is named instead of derived from the accent",
+        OSD,
+        [
+            ('color: p.on_accent(),',
+             'color: p.text,'),
+        ],
+        ["desktop"],
+        [
+            'every_text_the_osd_draws_is_in_the_role_it_claims',
+            'ink_drawn_on_a_coloured_fill_is_readable_in_both_modes',
         ],
     ),
 ]

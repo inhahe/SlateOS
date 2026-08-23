@@ -51643,16 +51643,28 @@ thumbnail, or on any other content the palette does not own.
     three rows one colour. Generalised: **if the expected value is computed by
     the thing being tested, the assertion is checking that a function equals
     itself.**
-  - **Filtering before comparing throws away the evidence.** The accent test
-    first collected every colour equal to green, red or overlay0 and compared
-    *that list* across accents. The filter runs before the comparison, so a
-    site that stops drawing green and starts drawing the accent drops out of the
-    list — for every accent equally. The lists still matched. It was checking
-    that the sites which stayed put stayed put. The correct shape is the
-    inverse: render the same fixture under two out-of-palette accents A and B,
-    and require every command to draw the same colour in both **except** the
-    sites that draw A in the first and B in the second. That names the offending
-    command index instead of silently agreeing with itself.
+  - **An exemption defined by the property under test exempts the bug too —
+    the accent test had to be written three times.** *Attempt 1* collected
+    every colour equal to green, red or overlay0 and compared *that list*
+    across accents. The filter runs before the comparison, so a site that stops
+    drawing green and starts drawing the accent drops out of the list — for
+    every accent equally. The lists still matched; it was checking that the
+    sites which stayed put stayed put. *Attempt 2* fixed that by comparing every
+    command under two out-of-palette accents A and B, and skipping any site that
+    drew A in the first render and B in the second, "because that is a site
+    meant to follow the accent". Three defects walked through it — an enabled
+    resource, an allowed log entry and a switched-on toggle, all reporting state
+    in the accent — because **a site that wrongly follows the accent satisfies
+    the exemption exactly.** *Attempt 3* is the one that works: every command
+    must match under both accents, any command that moves must move exactly
+    A→B, and the number that move must equal a **declared per-state count**
+    (one for the tab strip's active label; two on the general tab, which adds
+    the selected telemetry level). Generalised: **you cannot recognise the
+    legitimate instances of a property by testing for that property — the bug
+    has it too. Count them instead**, so a new one fails rather than joining
+    the exemption. This is the same shape as module 24's "count, not list" rule
+    for accent sites, arrived at from the opposite direction, and it is now the
+    third time a *whitelist by description* has silently absorbed a defect.
   - **Four judgements, all recorded in the module's prose header.** (1) Two
     sites follow the accent, both meaning "you are here" — the active tab's
     label and the selected telemetry level's label; held by a test that

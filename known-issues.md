@@ -51785,6 +51785,26 @@ thumbnail, or on any other content the palette does not own.
     than a derivation proof; what it does catch is the failure that matters and
     the one the code actually had, a *named* role (`COL_BASE`, dark) on a plate
     whose lightness a later change could flip.
+  - **The membership sweep can never catch a site that reaches for the accent,
+    in any module.** `accent` is one of the palette's twenty-one roles, so a
+    command drawing it is accounted for by construction — in either mode, under
+    any accent value. Thirteen of this module's defects were declared against
+    the sweep on the assumption that an off-palette accent would make them
+    visible to it; it caught none of the thirteen, and the accent count and the
+    role tables caught all thirteen. This is not a gap to fix — the sweep asks
+    "is this a colour the palette can account for?", and the accent is one. It
+    is a fact about what the sweep is *for*: it finds a **leftover constant**,
+    and nothing else. For every site that must not follow the accent, the accent
+    count is not a supplement to the sweep; together with the per-site table it
+    is the whole check. Read with lesson 7 above, the sweep's reach is now
+    precise: it cannot see a wrong role, it cannot see the accent, and on a
+    mode-pinned surface it cannot see a leftover constant either.
+  - **`Palette::for_mode(true).base` is exactly the `readable_on` light
+    endpoint,** which the sweep allows everywhere on purpose, so "the screen
+    saver lights the display with Latte's background" is invisible to it. The
+    black-out test catches it, which is the test that owns that property.
+    Generally: the two endpoint values are sweep-transparent, so a defect that
+    happens to land on one is only ever caught by a property test.
 
 **Trigger:** this is not blocked on anything. It is sequenced after the shell
 event loop (`TD-C-THE-SHELL-CAN-DRAW-ITSELF-AND-NOBODY-CAN-ASK-IT-TO`) only

@@ -45900,22 +45900,41 @@ fn cmd_svcstart(args: &str) {
                 shell_println!("No crash records.");
             } else {
                 shell_println!(
-                    "{:16} {:>6} {:>8} {:>8} {:>8}",
+                    "{:16} {:>6} {:>8} {:>8} {:>10} {:>12}",
                     "Service",
                     "Consec",
                     "Total",
                     "Backoff",
-                    "Status"
+                    "Status",
+                    "Last crash"
                 );
-                for (name, consec, total, backoff_ms, perm) in &records {
-                    let status = if *perm { "FAILED" } else { "active" };
+                let now = crate::hpet::elapsed_ns();
+                for c in &records {
+                    // "restarting" means the backoff is running *now* — the
+                    // state an operator watching a flapping service most needs
+                    // to see, and one this display could not previously show
+                    // because there was no backoff period to be inside of.
+                    let status = if c.permanently_failed {
+                        "FAILED"
+                    } else if c.restart_pending {
+                        "restarting"
+                    } else {
+                        "active"
+                    };
+                    let last = match c.last_crash_ns {
+                        None => alloc::string::String::from("never"),
+                        Some(ns) => {
+                            alloc::format!("{}s ago", now.saturating_sub(ns) / 1_000_000_000)
+                        }
+                    };
                     shell_println!(
-                        "{:16} {:>6} {:>8} {:>5} ms {:>8}",
-                        name,
-                        consec,
-                        total,
-                        backoff_ms,
-                        status
+                        "{:16} {:>6} {:>8} {:>5} ms {:>10} {:>12}",
+                        c.name,
+                        c.consecutive_failures,
+                        c.total_crashes,
+                        c.backoff_ms,
+                        status,
+                        last
                     );
                 }
             }

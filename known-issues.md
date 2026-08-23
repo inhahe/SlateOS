@@ -63791,14 +63791,38 @@ the assertion panics — which in the kernel is not a red test, it is a dead
 machine. Each of these is reachable from a `kshell` subcommand, so this is
 a user-typeable kernel panic, not merely a testing inconvenience.
 
-**Found in three consecutive modules while converting them for §261** — it
-was not a coincidence in any of them, and all three are now fixed:
+**Found in four modules while converting them for §261** — it was not a
+coincidence in any of them, and all four are now fixed:
 
 | Module | Second-run failure | Fixed in |
 |---|---|---|
 | `fs::netshare` | test 1 `assert!(list_shares().is_empty())` — `id1` was never unmounted | `c5db19b8a` |
 | `fs::filevault` | test 1 `assert_eq!(list_vaults().len(), 0)` — the created vault was never deleted; test 8's exact counter assertions could not hold twice either | `c150f1b29` |
 | `fs::diskencrypt` | test 9 `start_encryption(1, …)` — run 1 leaves volume 1 `Unlocked`, and it only accepts `Unencrypted` | `59bd8befc` |
+| `fs::cloudsync` | test 3 `assert_eq!(list_accounts().len(), 2)` — run 1 leaves account `id1`, its conflict row and an extra `*.bak` exclude behind, so tests 3, 6, 8, 10 and 11 all fail on the second run | `2ebe9f40c` |
+
+`fs::cloudsync` also showed a fixture hazard worth naming separately,
+because it is not about leftovers at all and so survives any amount of
+cleanup: the suite's fixtures were **plausible values a user might really
+have**. It added the account `user@cloud.example` and the exclude pattern
+`*.bak`; `add_account` rejects a duplicate `(provider, account_name)`, so a
+user who genuinely syncs that NextCloud account would have had the suite
+fail on *its first* run, on a machine where it had never run before — no
+amount of cleanup discipline prevents that. The fix is to make fixtures
+unmistakably synthetic: the account names are now in the reserved
+`.invalid` TLD and carry a `selftest` marker, and the exclude pattern is
+`*.cloudsync-selftest.bak`. Check for this whenever a suite's fixture is a
+*name* rather than an index — an ID the module mints is safe, a string the
+user also chooses is not.
+
+Its test 8 was additionally asserting `list_excludes().len() >= 6` — the
+count of the defaults `init_defaults()` installs. That is not a property of
+the module: `remove_exclude` is public and has a shell command, so a user
+can take a default away and turn the assertion into a panic. It now asserts
+the round-trip (added pattern is visible, removed pattern is gone) instead.
+**Generalise:** an assertion about the *defaults* is only sound in a suite
+that resets to `None` first; a baseline-relative suite may assert only
+about what it itself changed.
 
 `fs::fileshare` was a near miss of a different flavour: it *does* reset at
 entry, so it survives a second run, but it left `sharing_enabled = true`

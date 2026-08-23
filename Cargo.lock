@@ -5641,6 +5641,13 @@ name = "localectl"
 version = "0.1.0"
 
 [[package]]
+name = "localtime"
+version = "0.1.0"
+dependencies = [
+ "tzrules",
+]
+
+[[package]]
 name = "lockscreen"
 version = "0.1.0"
 dependencies = [

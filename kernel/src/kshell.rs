@@ -52345,8 +52345,8 @@ fn cmd_netshare(args: &str) {
                         s.id,
                         s.protocol.label(),
                         s.host,
-                        s.remote_path,
-                        s.mount_point,
+                        s.remote_path.display(),
+                        s.mount_point.display(),
                         s.state.label()
                     );
                 }
@@ -52398,8 +52398,8 @@ fn cmd_netshare(args: &str) {
                             shell_println!("Share #{}", s.id);
                             shell_println!("  Protocol:  {}", s.protocol.label());
                             shell_println!("  Host:      {}", s.host);
-                            shell_println!("  Remote:    {}", s.remote_path);
-                            shell_println!("  Mount:     {}", s.mount_point);
+                            shell_println!("  Remote:    {}", s.remote_path.display());
+                            shell_println!("  Mount:     {}", s.mount_point.display());
                             shell_println!("  User:      {}", s.username);
                             shell_println!("  State:     {}", s.state.label());
                             shell_println!("  Auto-mount: {}", s.auto_mount);
@@ -52429,8 +52429,8 @@ fn cmd_netshare(args: &str) {
                         "  [{}] {}:{} → {}",
                         s.id,
                         s.host,
-                        s.remote_path,
-                        s.mount_point
+                        s.remote_path.display(),
+                        s.mount_point.display()
                     );
                 }
             }

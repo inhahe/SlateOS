@@ -54,7 +54,7 @@
 use coreutils::errmsg::strerror;
 use coreutils::fnmatch::{Flags, fnmatch};
 use coreutils::getopt::{self, Opt, Program, Takes};
-use coreutils::human::{Opts, human_readable};
+use coreutils::human::{Opts, default_block_size, human_readable};
 use coreutils::quote::{os_bytes, quote, quoteaf, quotef};
 // Only [`RealTree`] turns a byte path back into an `OsString`, and it is the
 // half of this file that the Windows development host does not compile — so
@@ -64,7 +64,7 @@ use coreutils::quote::{os_bytes, quote, quoteaf, quotef};
 // not have caught this.
 #[cfg(unix)]
 use coreutils::quote::os_from_bytes;
-use coreutils::xnum::{Status, strtol_fatal, xstrtoimax_base, xstrtoumax_base};
+use coreutils::xnum::{Status, strtol_fatal, xstrtoimax_base};
 use std::collections::HashSet;
 use std::ffi::OsString;
 use std::io::{self, Write};
@@ -110,17 +110,6 @@ const LONG_OPTIONS: &[(&str, Takes)] = &[
 
 // ------------------------------------------------------------ block sizes ---
 
-/// The two words `-B` accepts instead of a number, in `argmatch` order.
-const BLOCK_SIZE_WORDS: [&[u8]; 2] = [b"human-readable", b"si"];
-
-/// The suffix letters `humblock` hands to `xstrtoumax`.
-///
-/// Note what is *absent*: no `R`, no `Q`, and no `B`. `-B R` is therefore
-/// `invalid -B argument 'R'` rather than a ronnabyte, even though `du --help`
-/// advertises `R` in the SIZE paragraph — the paragraph describes `-t`'s list,
-/// which is a different one.
-const BLOCK_SIZE_SUFFIXES: &[u8] = b"eEgGkKmMpPtTyYzZ0";
-
 /// `-t`'s suffix list, which is *not* `-B`'s.
 ///
 /// Measured, GNU du 9.4: `-t 1m` and `-t 1k` are accepted but `-t 1g`, `-t 1t`,
@@ -141,115 +130,20 @@ impl Format {
     const fn plain(posixly_correct: bool) -> Self {
         Self {
             opts: Opts::NONE,
-            block_size: if posixly_correct { 512 } else { 1024 },
+            block_size: default_block_size(posixly_correct),
         }
     }
 }
 
-/// gnulib's `argmatch` against [`BLOCK_SIZE_WORDS`]: an unambiguous prefix, or
-/// nothing.
+/// gnulib's `human_options`, in `du`'s own vocabulary: [`Format`] rather than a
+/// loose pair.
 ///
-/// The empty string is a prefix of both, so it is *ambiguous* rather than a
-/// match — which is why `-B ''` falls through to the number parser and comes
-/// back as `invalid -B argument ''` rather than as `human-readable`.
-fn block_size_word(spec: &[u8]) -> Option<usize> {
-    let mut found = None;
-    for (index, word) in BLOCK_SIZE_WORDS.iter().enumerate() {
-        if !word.starts_with(spec) {
-            continue;
-        }
-        if spec == *word {
-            return Some(index);
-        }
-        if found.is_some() {
-            return None;
-        }
-        found = Some(index);
-    }
-    found
-}
-
-/// gnulib's `humblock`: read a block-size spec into a divisor and a set of
-/// [`Opts`].
-///
-/// The rule that surprises everyone is the last one. After the number is
-/// parsed, gnulib walks the spec looking for a digit; if it reaches the end
-/// without finding one, the spec was a bare unit like `K` or `KiB`, and the
-/// *suffix is switched on in the output* as well as applied as a divisor. That
-/// single `for` loop is the whole difference between these two, measured on a
-/// 3153920-byte tree:
-///
-/// ```text
-/// $ du -s -B 1K  t   ->  3080
-/// $ du -s -B K   t   ->  3080K
-/// $ du -s -B KB  t   ->  3154kB
-/// $ du -s -B KiB t   ->  3080KiB
-/// $ du -s -B G   t   ->  1G
-/// ```
-///
-/// A leading `'` is consumed and means "group the digits"; it is the reason
-/// `-B '1048576` is a valid spec and `-B 1'024` is not.
-fn humblock(spec: &[u8]) -> (u64, Opts, Status) {
-    let mut opts = Opts::NONE;
-    let rest = match spec.split_first() {
-        Some((b'\'', tail)) => {
-            opts = opts | Opts::GROUP_DIGITS;
-            tail
-        }
-        _ => spec,
-    };
-
-    match block_size_word(rest) {
-        Some(0) => (
-            1,
-            opts | Opts::AUTOSCALE | Opts::SI | Opts::BASE_1024,
-            Status::Ok,
-        ),
-        Some(1) => (1, opts | Opts::AUTOSCALE | Opts::SI, Status::Ok),
-        _ => {
-            let (value, status) = xstrtoumax_base(rest, 0, Some(BLOCK_SIZE_SUFFIXES));
-            if status != Status::Ok {
-                return (value, opts, status);
-            }
-            if !rest.iter().any(u8::is_ascii_digit) {
-                let last = rest.last().copied();
-                let before = rest
-                    .len()
-                    .checked_sub(2)
-                    .and_then(|index| rest.get(index))
-                    .copied();
-                opts = opts | Opts::SI;
-                if last == Some(b'B') {
-                    opts = opts | Opts::B;
-                }
-                if last != Some(b'B') || before == Some(b'i') {
-                    opts = opts | Opts::BASE_1024;
-                }
-            }
-            (value, opts, status)
-        }
-    }
-}
-
-/// gnulib's `human_options`: [`humblock`] plus the rule that a block size of
-/// zero is not a block size.
-///
-/// The zero rule is why `-B 0` says `invalid -B argument '0'` — the *number*
-/// parsed perfectly, so the diagnostic cannot have come from the number parser.
-/// It is also why `DU_BLOCK_SIZE=0` is silently the default rather than a
-/// division by zero: the environment caller discards the status this returns
-/// and keeps the repaired block size, and only the `-B` caller makes it fatal.
+/// The parsing itself is [`coreutils::human::human_options`] — `ls
+/// --block-size`, `df -B` and the `BLOCK_SIZE` environment variable all reach
+/// the same code, which they must, because `BLOCK_SIZE=K` in a profile has to
+/// mean the same thing to every utility that reads it.
 fn human_options(spec: &[u8], posixly_correct: bool) -> (Format, Status) {
-    let (block_size, opts, status) = humblock(spec);
-    if block_size == 0 {
-        return (
-            Format {
-                opts,
-                block_size: Format::plain(posixly_correct).block_size,
-            },
-            Status::Invalid,
-        );
-    }
+    let (block_size, opts, status) = coreutils::human::human_options(spec, posixly_correct);
     (Format { opts, block_size }, status)
 }
 

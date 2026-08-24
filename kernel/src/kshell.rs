@@ -8192,6 +8192,7 @@ fn cmd_kill(args: &str) {
     if args.is_empty() {
         shell_println!("Usage: kill <task_id>");
         shell_println!("Use 'ps' to see task IDs.");
+        set_exit(1);
         return;
     }
 
@@ -8226,6 +8227,7 @@ fn cmd_renice(args: &str) {
     if words.len() < 2 {
         shell_println!("Usage: renice <task_id> <priority>");
         shell_println!("  priority: 0 (highest) to 31 (lowest/idle)");
+        set_exit(1);
         return;
     }
 
@@ -8270,6 +8272,7 @@ fn cmd_throttle(args: &str) {
         shell_println!("Usage: throttle <task_id> [percent]");
         shell_println!("  percent: 1-100 (CPU%), 0=unlimited");
         shell_println!("  omit percent to query current quota");
+        set_exit(1);
         return;
     }
 
@@ -8317,6 +8320,7 @@ fn cmd_taskset(args: &str) {
         shell_println!("  mask: hex CPU affinity bitmask (e.g. 0x3 = CPUs 0,1)");
         shell_println!("  omit mask to query current affinity");
         shell_println!("  0xf = CPUs 0-3, 0xff = CPUs 0-7, etc.");
+        set_exit(1);
         return;
     }
 
@@ -8815,6 +8819,7 @@ fn cmd_history(args: &str) {
             let pattern = parts.get(1..).map(|p| p.join(" ")).unwrap_or_default();
             if pattern.is_empty() {
                 shell_println!("Usage: history search <pattern>");
+                set_exit(1);
                 return;
             }
             let shadow = SHELL_HISTORY.lock();
@@ -8873,6 +8878,7 @@ fn cmd_scrollback(args: &str) {
             let pattern = parts.get(1..).map(|p| p.join(" ")).unwrap_or_default();
             if pattern.is_empty() {
                 shell_println!("Usage: scrollback search <pattern>");
+                set_exit(1);
                 return;
             }
             let results = crate::console::scrollback_search(&pattern);
@@ -10300,6 +10306,48 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             TRAP_HANDLERS.lock().get("ERR").is_none(),
             "the self-test must not leave a trap armed behind it"
         );
+    }
+
+    serial_println!("  kshell::self_test 16: a usage error is an error");
+    // 710 command arms printed `Usage: ...` and returned without ever calling
+    // `set_exit(1)`, so a mistyped command reported success. That is the same
+    // silent-success class as the exit-status and capture bugs before it, and
+    // the damaging half is not the wrong number -- it is that `cmd || handler`
+    // never ran the handler, and `set -e` never stopped, for a command that
+    // did nothing at all.
+    {
+        // Output is captured only to keep the usage text out of the log; what
+        // is asserted is the status the line left behind.
+
+        // A top-level arity guard.
+        let _ = capture_command("kill");
+        assert_eq!(last_exit(), 1, "`kill` with no task id did not run");
+        let _ = capture_command("renice");
+        assert_eq!(last_exit(), 1, "`renice` with no arguments did not run");
+
+        // A subcommand arity guard, several match arms deep.
+        let _ = capture_command("fssnapshot info");
+        assert_eq!(last_exit(), 1, "`fssnapshot info` with no id did not run");
+
+        // A parse failure rather than an arity failure.
+        let _ = capture_command("ksyms zzz");
+        assert_eq!(last_exit(), 1, "`ksyms` with an unparseable address failed");
+
+        // The one deliberate exclusion: bare `ksyms` prints a symbol-count
+        // summary *and* a usage line, but it has done its job, so it
+        // succeeded. Asserted so the exclusion is a decision on the record
+        // rather than a site the sweep happened to miss.
+        let _ = capture_command("ksyms");
+        assert_eq!(
+            last_exit(),
+            0,
+            "bare `ksyms` reports its summary and succeeds"
+        );
+
+        // And a command that really worked still says so, so none of the
+        // above can be passing because everything now fails.
+        let _ = capture_command("echo ok");
+        assert_eq!(last_exit(), 0, "a command that worked still reports 0");
     }
 
     serial_println!("  kshell::self_test PASSED");
@@ -13226,6 +13274,7 @@ fn cmd_integrity(args: &str) {
         shell_println!("  stats           — Show baseline statistics");
         shell_println!("  clear           — Clear the baseline");
         shell_println!("  list [PREFIX]   — List baselined file paths");
+        set_exit(1);
         return;
     }
 
@@ -13499,6 +13548,7 @@ fn cmd_fhist(args: &str) {
                 Some(p) => resolve_path(p),
                 None => {
                     shell_println!("Usage: fhist show FILE");
+                    set_exit(1);
                     return;
                 }
             };
@@ -13532,6 +13582,7 @@ fn cmd_fhist(args: &str) {
                 Some(p) => resolve_path(p),
                 None => {
                     shell_println!("Usage: fhist restore FILE VERSION_NUMBER");
+                    set_exit(1);
                     return;
                 }
             };
@@ -13593,6 +13644,7 @@ fn cmd_fhist(args: &str) {
                 Some(p) => resolve_path(p),
                 None => {
                     shell_println!("Usage: fhist record FILE");
+                    set_exit(1);
                     return;
                 }
             };
@@ -13740,6 +13792,7 @@ fn cmd_assoc(args: &str) {
 
     if parts.is_empty() {
         shell_println!("Usage: assoc <list|show|add|remove|lookup|stats> [args...]");
+        set_exit(1);
         return;
     }
 
@@ -13763,6 +13816,7 @@ fn cmd_assoc(args: &str) {
                 Some(m) => *m,
                 None => {
                     shell_println!("Usage: assoc show <MIME_TYPE>");
+                    set_exit(1);
                     return;
                 }
             };
@@ -13790,6 +13844,7 @@ fn cmd_assoc(args: &str) {
         "add" => {
             if parts.len() < 4 {
                 shell_println!("Usage: assoc add <MIME> <APP_PATH> <APP_NAME> [PRIORITY]");
+                set_exit(1);
                 return;
             }
             let mime = parts[1];
@@ -13809,6 +13864,7 @@ fn cmd_assoc(args: &str) {
         "remove" | "rm" => {
             if parts.len() < 3 {
                 shell_println!("Usage: assoc remove <MIME> <APP_PATH>");
+                set_exit(1);
                 return;
             }
             let mime = parts[1];
@@ -13826,6 +13882,7 @@ fn cmd_assoc(args: &str) {
                 Some(p) => resolve_path(p),
                 None => {
                     shell_println!("Usage: assoc lookup <FILE>");
+                    set_exit(1);
                     return;
                 }
             };
@@ -13977,6 +14034,7 @@ fn cmd_quota(args: &str) {
             // quota setfiles user UID SOFT_INODES HARD_INODES
             if parts.len() < 5 {
                 shell_println!("Usage: quota setfiles <user|group> <ID> <soft_files> <hard_files>");
+                set_exit(1);
                 return;
             }
             let subject = match parts[1] {
@@ -14041,6 +14099,7 @@ fn cmd_quota(args: &str) {
         "show" => {
             if parts.len() < 3 {
                 shell_println!("Usage: quota show <user|group> <ID>");
+                set_exit(1);
                 return;
             }
             let subject = match parts[1] {
@@ -14139,6 +14198,7 @@ fn cmd_quota(args: &str) {
         "remove" | "rm" => {
             if parts.len() < 3 {
                 shell_println!("Usage: quota remove <user|group> <ID>");
+                set_exit(1);
                 return;
             }
             let subject = match parts[1] {
@@ -14309,6 +14369,7 @@ fn cmd_intercept(args: &str) {
                 Some(p) => resolve_path(p),
                 None => {
                     shell_println!("Usage: intercept add-ro <path_prefix>");
+                    set_exit(1);
                     return;
                 }
             };
@@ -14332,6 +14393,7 @@ fn cmd_intercept(args: &str) {
                 Some(p) => resolve_path(p),
                 None => {
                     shell_println!("Usage: intercept add-nodelete <path_prefix>");
+                    set_exit(1);
                     return;
                 }
             };
@@ -14376,6 +14438,7 @@ fn cmd_intercept(args: &str) {
                 Some(id) => id,
                 None => {
                     shell_println!("Usage: intercept enable <ID>");
+                    set_exit(1);
                     return;
                 }
             };
@@ -14390,6 +14453,7 @@ fn cmd_intercept(args: &str) {
                 Some(id) => id,
                 None => {
                     shell_println!("Usage: intercept disable <ID>");
+                    set_exit(1);
                     return;
                 }
             };
@@ -14404,6 +14468,7 @@ fn cmd_intercept(args: &str) {
                 Some(id) => id,
                 None => {
                     shell_println!("Usage: intercept remove <ID>");
+                    set_exit(1);
                     return;
                 }
             };
@@ -14641,6 +14706,7 @@ fn cmd_overlay(args: &str) {
         "create" => {
             if parts.len() < 4 {
                 shell_println!("Usage: overlay create NAME LOWER_PATH UPPER_PATH");
+                set_exit(1);
                 return;
             }
             let name = parts[1];
@@ -14655,6 +14721,7 @@ fn cmd_overlay(args: &str) {
         "destroy" => {
             if parts.len() < 2 {
                 shell_println!("Usage: overlay destroy NAME");
+                set_exit(1);
                 return;
             }
             if let Some(id) = overlay::find_by_name(parts[1]) {
@@ -14670,6 +14737,7 @@ fn cmd_overlay(args: &str) {
         "ls" => {
             if parts.len() < 2 {
                 shell_println!("Usage: overlay ls NAME [PATH]");
+                set_exit(1);
                 return;
             }
             if let Some(id) = overlay::find_by_name(parts[1]) {
@@ -14712,6 +14780,7 @@ fn cmd_overlay(args: &str) {
         "cat" => {
             if parts.len() < 3 {
                 shell_println!("Usage: overlay cat NAME PATH");
+                set_exit(1);
                 return;
             }
             if let Some(id) = overlay::find_by_name(parts[1]) {
@@ -14733,6 +14802,7 @@ fn cmd_overlay(args: &str) {
         "write" => {
             if parts.len() < 4 {
                 shell_println!("Usage: overlay write NAME PATH DATA...");
+                set_exit(1);
                 return;
             }
             if let Some(id) = overlay::find_by_name(parts[1]) {
@@ -14749,6 +14819,7 @@ fn cmd_overlay(args: &str) {
         "rm" => {
             if parts.len() < 3 {
                 shell_println!("Usage: overlay rm NAME PATH");
+                set_exit(1);
                 return;
             }
             if let Some(id) = overlay::find_by_name(parts[1]) {
@@ -14764,6 +14835,7 @@ fn cmd_overlay(args: &str) {
         "which" => {
             if parts.len() < 3 {
                 shell_println!("Usage: overlay which NAME PATH");
+                set_exit(1);
                 return;
             }
             if let Some(id) = overlay::find_by_name(parts[1]) {
@@ -14787,6 +14859,7 @@ fn cmd_overlay(args: &str) {
         "whiteouts" => {
             if parts.len() < 2 {
                 shell_println!("Usage: overlay whiteouts NAME");
+                set_exit(1);
                 return;
             }
             if let Some(id) = overlay::find_by_name(parts[1]) {
@@ -14811,6 +14884,7 @@ fn cmd_overlay(args: &str) {
         "stats" => {
             if parts.len() < 2 {
                 shell_println!("Usage: overlay stats NAME");
+                set_exit(1);
                 return;
             }
             if let Some(id) = overlay::find_by_name(parts[1]) {
@@ -14835,6 +14909,7 @@ fn cmd_overlay(args: &str) {
         "reset" => {
             if parts.len() < 2 {
                 shell_println!("Usage: overlay reset NAME");
+                set_exit(1);
                 return;
             }
             if let Some(id) = overlay::find_by_name(parts[1]) {
@@ -14854,6 +14929,7 @@ fn cmd_overlay(args: &str) {
         "commit" => {
             if parts.len() < 2 {
                 shell_println!("Usage: overlay commit NAME");
+                set_exit(1);
                 return;
             }
             if let Some(id) = overlay::find_by_name(parts[1]) {
@@ -14890,12 +14966,14 @@ fn cmd_mkfifo(args: &str) {
     let parts: Vec<&str> = args.split_whitespace().collect();
     if parts.is_empty() {
         shell_println!("Usage: mkfifo [-s SIZE] PATH");
+        set_exit(1);
         return;
     }
 
     let (capacity, path) = if parts[0] == "-s" {
         if parts.len() < 3 {
             shell_println!("Usage: mkfifo -s SIZE PATH");
+            set_exit(1);
             return;
         }
         if let Some(cap) = parse_size_suffix(parts[1]) {
@@ -15079,6 +15157,7 @@ fn cmd_tmpwatch(args: &str) {
         "--add" | "add" => {
             if parts.len() < 2 {
                 shell_println!("Usage: tmpwatch --add DIR");
+                set_exit(1);
                 return;
             }
             let dir = resolve_path(parts[1]);
@@ -15091,6 +15170,7 @@ fn cmd_tmpwatch(args: &str) {
         "--remove" | "remove" => {
             if parts.len() < 2 {
                 shell_println!("Usage: tmpwatch --remove DIR");
+                set_exit(1);
                 return;
             }
             if tmpwatch::remove_watch_dir(parts[1]) {
@@ -15103,6 +15183,7 @@ fn cmd_tmpwatch(args: &str) {
         "--exclude" | "exclude" => {
             if parts.len() < 2 {
                 shell_println!("Usage: tmpwatch --exclude PREFIX");
+                set_exit(1);
                 return;
             }
             tmpwatch::add_exclude(parts[1]);
@@ -15251,6 +15332,7 @@ fn cmd_audit(args: &str) {
         "rm-rule" => {
             if parts.len() < 2 {
                 shell_println!("Usage: audit rm-rule ID");
+                set_exit(1);
                 return;
             }
             if let Ok(id) = parts[1].parse::<u64>() {
@@ -15487,6 +15569,7 @@ fn cmd_namespace(args: &str) {
         "create" => {
             if parts.len() < 2 {
                 shell_println!("Usage: namespace create NAME [PARENT_ID]");
+                set_exit(1);
                 return;
             }
             let name = parts[1];
@@ -15504,6 +15587,7 @@ fn cmd_namespace(args: &str) {
         "destroy" => {
             if parts.len() < 2 {
                 shell_println!("Usage: namespace destroy ID");
+                set_exit(1);
                 return;
             }
             if let Ok(id) = parts[1].parse::<u64>() {
@@ -15519,6 +15603,7 @@ fn cmd_namespace(args: &str) {
         "mounts" => {
             if parts.len() < 2 {
                 shell_println!("Usage: namespace mounts ID");
+                set_exit(1);
                 return;
             }
             if let Ok(id) = parts[1].parse::<u64>() {
@@ -15547,6 +15632,7 @@ fn cmd_namespace(args: &str) {
         "mount" => {
             if parts.len() < 4 {
                 shell_println!("Usage: namespace mount ID PATH TYPE [ro]");
+                set_exit(1);
                 return;
             }
             if let Ok(id) = parts[1].parse::<u64>() {
@@ -15565,6 +15651,7 @@ fn cmd_namespace(args: &str) {
         "unmount" => {
             if parts.len() < 3 {
                 shell_println!("Usage: namespace unmount ID PATH");
+                set_exit(1);
                 return;
             }
             if let Ok(id) = parts[1].parse::<u64>() {
@@ -15580,6 +15667,7 @@ fn cmd_namespace(args: &str) {
         "info" => {
             if parts.len() < 2 {
                 shell_println!("Usage: namespace info ID");
+                set_exit(1);
                 return;
             }
             if let Ok(id) = parts[1].parse::<u64>() {
@@ -15629,6 +15717,7 @@ fn cmd_fssnapshot(args: &str) {
         shell_println!("  diff ID1 ID2                    — compare two snapshots");
         shell_println!("  delete ID                       — delete a snapshot");
         shell_println!("  entries ID                      — list entries in snapshot");
+        set_exit(1);
         return;
     }
 
@@ -15636,6 +15725,7 @@ fn cmd_fssnapshot(args: &str) {
         "create" => {
             if parts.len() < 3 {
                 shell_println!("Usage: fssnapshot create PATH NAME [--parent ID]");
+                set_exit(1);
                 return;
             }
             let path = parts[1];
@@ -15674,6 +15764,7 @@ fn cmd_fssnapshot(args: &str) {
         "restore" => {
             if parts.len() < 2 {
                 shell_println!("Usage: fssnapshot restore ID [TARGET]");
+                set_exit(1);
                 return;
             }
             let id = match parts[1].parse::<u64>() {
@@ -15754,6 +15845,7 @@ fn cmd_fssnapshot(args: &str) {
         "info" => {
             if parts.len() < 2 {
                 shell_println!("Usage: fssnapshot info ID");
+                set_exit(1);
                 return;
             }
             let id = match parts[1].parse::<u64>() {
@@ -15788,6 +15880,7 @@ fn cmd_fssnapshot(args: &str) {
         "diff" => {
             if parts.len() < 3 {
                 shell_println!("Usage: fssnapshot diff ID1 ID2");
+                set_exit(1);
                 return;
             }
             let id1 = match parts[1].parse::<u64>() {
@@ -15833,6 +15926,7 @@ fn cmd_fssnapshot(args: &str) {
         "delete" => {
             if parts.len() < 2 {
                 shell_println!("Usage: fssnapshot delete ID");
+                set_exit(1);
                 return;
             }
             let id = match parts[1].parse::<u64>() {
@@ -15850,6 +15944,7 @@ fn cmd_fssnapshot(args: &str) {
         "entries" => {
             if parts.len() < 2 {
                 shell_println!("Usage: fssnapshot entries ID");
+                set_exit(1);
                 return;
             }
             let id = match parts[1].parse::<u64>() {
@@ -15964,6 +16059,7 @@ fn cmd_reclaim(args: &str) {
         "watermark" => {
             if parts.len() < 3 {
                 shell_println!("Usage: reclaim watermark HIGH LOW  (e.g., 90 80)");
+                set_exit(1);
                 return;
             }
             let hi = parts[1].parse::<u64>().unwrap_or(90);
@@ -16015,6 +16111,7 @@ fn cmd_fstx(args: &str) {
         "write" => {
             if parts.len() < 4 {
                 shell_println!("Usage: fstx write TXID PATH DATA");
+                set_exit(1);
                 return;
             }
             let id = match parts[1].parse::<u64>() {
@@ -16034,6 +16131,7 @@ fn cmd_fstx(args: &str) {
         "remove" | "rm" => {
             if parts.len() < 3 {
                 shell_println!("Usage: fstx remove TXID PATH");
+                set_exit(1);
                 return;
             }
             let id = match parts[1].parse::<u64>() {
@@ -16052,6 +16150,7 @@ fn cmd_fstx(args: &str) {
         "mkdir" => {
             if parts.len() < 3 {
                 shell_println!("Usage: fstx mkdir TXID PATH");
+                set_exit(1);
                 return;
             }
             let id = match parts[1].parse::<u64>() {
@@ -16070,6 +16169,7 @@ fn cmd_fstx(args: &str) {
         "rename" | "mv" => {
             if parts.len() < 4 {
                 shell_println!("Usage: fstx rename TXID FROM TO");
+                set_exit(1);
                 return;
             }
             let id = match parts[1].parse::<u64>() {
@@ -16094,6 +16194,7 @@ fn cmd_fstx(args: &str) {
         "symlink" | "link" => {
             if parts.len() < 4 {
                 shell_println!("Usage: fstx symlink TXID PATH TARGET");
+                set_exit(1);
                 return;
             }
             let id = match parts[1].parse::<u64>() {
@@ -16118,6 +16219,7 @@ fn cmd_fstx(args: &str) {
         "commit" => {
             if parts.len() < 2 {
                 shell_println!("Usage: fstx commit TXID");
+                set_exit(1);
                 return;
             }
             let id = match parts[1].parse::<u64>() {
@@ -16135,6 +16237,7 @@ fn cmd_fstx(args: &str) {
         "rollback" | "abort" => {
             if parts.len() < 2 {
                 shell_println!("Usage: fstx rollback TXID");
+                set_exit(1);
                 return;
             }
             let id = match parts[1].parse::<u64>() {
@@ -16152,6 +16255,7 @@ fn cmd_fstx(args: &str) {
         "info" | "show" => {
             if parts.len() < 2 {
                 shell_println!("Usage: fstx info TXID");
+                set_exit(1);
                 return;
             }
             let id = match parts[1].parse::<u64>() {
@@ -16198,6 +16302,7 @@ fn cmd_fstx(args: &str) {
         "delete" | "del" | "clean" => {
             if parts.len() < 2 {
                 shell_println!("Usage: fstx delete TXID");
+                set_exit(1);
                 return;
             }
             let id = match parts[1].parse::<u64>() {
@@ -16239,6 +16344,7 @@ fn cmd_changetrack(args: &str) {
         "register" | "reg" | "add" => {
             if parts.len() < 2 {
                 shell_println!("Usage: ct register NAME");
+                set_exit(1);
                 return;
             }
             match changetrack::register(parts[1]) {
@@ -16249,6 +16355,7 @@ fn cmd_changetrack(args: &str) {
         "unregister" | "unreg" | "rm" | "remove" => {
             if parts.len() < 2 {
                 shell_println!("Usage: ct unregister NAME");
+                set_exit(1);
                 return;
             }
             match changetrack::unregister(parts[1]) {
@@ -16259,6 +16366,7 @@ fn cmd_changetrack(args: &str) {
         "changes" | "since" => {
             if parts.len() < 2 {
                 shell_println!("Usage: ct changes NAME [PATH_PREFIX]");
+                set_exit(1);
                 return;
             }
             let mut filter = changetrack::ChangeFilter::default();
@@ -16304,6 +16412,7 @@ fn cmd_changetrack(args: &str) {
         "peek" | "preview" => {
             if parts.len() < 2 {
                 shell_println!("Usage: ct peek NAME [PATH_PREFIX]");
+                set_exit(1);
                 return;
             }
             let mut filter = changetrack::ChangeFilter::default();
@@ -16346,6 +16455,7 @@ fn cmd_changetrack(args: &str) {
         "reset" | "skip" => {
             if parts.len() < 2 {
                 shell_println!("Usage: ct reset NAME");
+                set_exit(1);
                 return;
             }
             match changetrack::reset(parts[1]) {
@@ -16356,6 +16466,7 @@ fn cmd_changetrack(args: &str) {
         "info" | "show" => {
             if parts.len() < 2 {
                 shell_println!("Usage: ct info NAME");
+                set_exit(1);
                 return;
             }
             match changetrack::info(parts[1]) {
@@ -16463,6 +16574,7 @@ fn cmd_fcompress(args: &str) {
             if parts.len() < 2 {
                 shell_println!("Current: {}", fcompress::default_algorithm().name());
                 shell_println!("Usage: fc algo <lz4|gzip|zstd|bzip2|xz>");
+                set_exit(1);
                 return;
             }
             match fcompress::Algorithm::from_name(parts[1]) {
@@ -16490,6 +16602,7 @@ fn cmd_fcompress(args: &str) {
             "add" => {
                 if parts.len() < 3 {
                     shell_println!("Usage: fc rule add PREFIX [ALGO] [EXT1,EXT2,...]");
+                    set_exit(1);
                     return;
                 }
                 let prefix = alloc::string::String::from(parts[2]);
@@ -16520,6 +16633,7 @@ fn cmd_fcompress(args: &str) {
             "rm" | "remove" | "del" => {
                 if parts.len() < 3 {
                     shell_println!("Usage: fc rule rm PREFIX");
+                    set_exit(1);
                     return;
                 }
                 let n = fcompress::remove_rules(parts[2]);
@@ -16555,6 +16669,7 @@ fn cmd_fcompress(args: &str) {
         "info" => {
             if parts.len() < 2 {
                 shell_println!("Usage: fc info PATH");
+                set_exit(1);
                 return;
             }
             let path = resolve_path(parts[1]);
@@ -16578,6 +16693,7 @@ fn cmd_fcompress(args: &str) {
         "compress" => {
             if parts.len() < 2 {
                 shell_println!("Usage: fc compress PATH [ALGO]");
+                set_exit(1);
                 return;
             }
             let path = resolve_path(parts[1]);
@@ -16649,6 +16765,7 @@ fn cmd_fcompress(args: &str) {
         "decompress" | "expand" => {
             if parts.len() < 2 {
                 shell_println!("Usage: fc decompress PATH");
+                set_exit(1);
                 return;
             }
             let path = resolve_path(parts[1]);
@@ -16705,6 +16822,7 @@ fn cmd_encrypt(args: &str) {
             "add" | "create" => {
                 if parts.len() < 4 {
                     shell_println!("Usage: encrypt key add NAME PASSPHRASE");
+                    set_exit(1);
                     return;
                 }
                 let name = parts[2];
@@ -16717,6 +16835,7 @@ fn cmd_encrypt(args: &str) {
             "rm" | "remove" | "del" => {
                 if parts.len() < 3 {
                     shell_println!("Usage: encrypt key rm NAME");
+                    set_exit(1);
                     return;
                 }
                 match encrypt::remove_key(parts[2]) {
@@ -16740,6 +16859,7 @@ fn cmd_encrypt(args: &str) {
         "file" | "enc" => {
             if parts.len() < 3 {
                 shell_println!("Usage: encrypt file PATH KEY_NAME");
+                set_exit(1);
                 return;
             }
             let path = resolve_path(parts[1]);
@@ -16770,6 +16890,7 @@ fn cmd_encrypt(args: &str) {
         "decrypt" | "dec" => {
             if parts.len() < 3 {
                 shell_println!("Usage: encrypt decrypt PATH KEY_NAME");
+                set_exit(1);
                 return;
             }
             let path = resolve_path(parts[1]);
@@ -16803,6 +16924,7 @@ fn cmd_encrypt(args: &str) {
         "read" | "cat" => {
             if parts.len() < 3 {
                 shell_println!("Usage: encrypt read PATH KEY_NAME");
+                set_exit(1);
                 return;
             }
             let path = resolve_path(parts[1]);
@@ -16834,6 +16956,7 @@ fn cmd_encrypt(args: &str) {
         "info" => {
             if parts.len() < 2 {
                 shell_println!("Usage: encrypt info PATH");
+                set_exit(1);
                 return;
             }
             let path = resolve_path(parts[1]);
@@ -16893,6 +17016,7 @@ fn cmd_fsearch(args: &str) {
 
                 if pattern.is_empty() {
                     shell_println!("Usage: fsearch name <pattern> [path]");
+                    set_exit(1);
                     return;
                 }
 
@@ -16926,6 +17050,7 @@ fn cmd_fsearch(args: &str) {
 
                 if pattern.is_empty() {
                     shell_println!("Usage: fsearch glob <pattern> [path]");
+                    set_exit(1);
                     return;
                 }
 
@@ -16959,6 +17084,7 @@ fn cmd_fsearch(args: &str) {
 
                 if ext.is_empty() {
                     shell_println!("Usage: fsearch ext <extension> [path]");
+                    set_exit(1);
                     return;
                 }
 
@@ -16981,6 +17107,7 @@ fn cmd_fsearch(args: &str) {
                 let tok: Vec<&str> = rest.split_whitespace().collect();
                 if tok.is_empty() {
                     shell_println!("Usage: fsearch size <min> [max] [path]");
+                    set_exit(1);
                     return;
                 }
 
@@ -17035,6 +17162,7 @@ fn cmd_fsearch(args: &str) {
                     "dir" | "d" => search::Query::new().dirs_only().limit(50),
                     _ => {
                         shell_println!("Usage: fsearch type <file|dir> [path]");
+                        set_exit(1);
                         return;
                     }
                 };
@@ -17115,6 +17243,7 @@ fn cmd_tag(args: &str) {
 
             if path.is_empty() || tag.is_empty() {
                 shell_println!("Usage: tag add <path> <tag>");
+                set_exit(1);
                 return;
             }
 
@@ -17130,6 +17259,7 @@ fn cmd_tag(args: &str) {
 
             if path.is_empty() || tag.is_empty() {
                 shell_println!("Usage: tag rm <path> <tag>");
+                set_exit(1);
                 return;
             }
 
@@ -17141,6 +17271,7 @@ fn cmd_tag(args: &str) {
         "get" | "show" => {
             if rest.is_empty() {
                 shell_println!("Usage: tag get <path>");
+                set_exit(1);
                 return;
             }
 
@@ -17162,6 +17293,7 @@ fn cmd_tag(args: &str) {
 
             if path.is_empty() || tag_str.is_empty() {
                 shell_println!("Usage: tag set <path> <tag1,tag2,...>");
+                set_exit(1);
                 return;
             }
 
@@ -17174,6 +17306,7 @@ fn cmd_tag(args: &str) {
         "clear" => {
             if rest.is_empty() {
                 shell_println!("Usage: tag clear <path>");
+                set_exit(1);
                 return;
             }
 
@@ -17190,6 +17323,7 @@ fn cmd_tag(args: &str) {
             if tag_str.is_empty() {
                 shell_println!("Usage: tag search <tag> [path]");
                 shell_println!("       tag find <tag1,tag2,...> [path]");
+                set_exit(1);
                 return;
             }
 
@@ -17452,6 +17586,7 @@ fn cmd_fswatch(args: &str) {
             if path.is_empty() {
                 shell_println!("Usage: fswatch create <path> [mask]");
                 shell_println!("  Masks: create,delete,modify,rename,metadata,all (default: all)");
+                set_exit(1);
                 return;
             }
 
@@ -17471,6 +17606,7 @@ fn cmd_fswatch(args: &str) {
 
             if id_str.is_empty() {
                 shell_println!("Usage: fswatch read <id> [count]");
+                set_exit(1);
                 return;
             }
 
@@ -17522,6 +17658,7 @@ fn cmd_fswatch(args: &str) {
         "close" => {
             if rest.is_empty() {
                 shell_println!("Usage: fswatch close <id>");
+                set_exit(1);
                 return;
             }
             let id: u64 = match rest.parse() {
@@ -17539,6 +17676,7 @@ fn cmd_fswatch(args: &str) {
         "pending" => {
             if rest.is_empty() {
                 shell_println!("Usage: fswatch pending <id>");
+                set_exit(1);
                 return;
             }
             let id: u64 = match rest.parse() {
@@ -17596,6 +17734,7 @@ fn cmd_dirsync(args: &str) {
         "compare" | "cmp" | "diff" => {
             if parts.len() < 3 {
                 shell_println!("Usage: dirsync compare <src> <dst>");
+                set_exit(1);
                 return;
             }
             let src = parts[1];
@@ -17647,6 +17786,7 @@ fn cmd_dirsync(args: &str) {
         "sync" => {
             if parts.len() < 3 {
                 shell_println!("Usage: dirsync sync <src> <dst> [--delete] [--verify] [--dry-run]");
+                set_exit(1);
                 return;
             }
             let src = parts[1];
@@ -17764,6 +17904,7 @@ fn cmd_backup(args: &str) {
         "incr" | "incremental" => {
             if parts.len() < 3 {
                 shell_println!("Usage: backup incr <src> <dst> [--no-verify] [--dry-run]");
+                set_exit(1);
                 return;
             }
             let src = parts[1];
@@ -17835,6 +17976,7 @@ fn cmd_backup(args: &str) {
         "list" | "ls" => {
             if parts.len() < 2 {
                 shell_println!("Usage: backup list <backup_root>");
+                set_exit(1);
                 return;
             }
             match backup::list(parts[1]) {
@@ -17865,6 +18007,7 @@ fn cmd_backup(args: &str) {
         "verify" => {
             if parts.len() < 2 {
                 shell_println!("Usage: backup verify <backup_root> [manifest_id]");
+                set_exit(1);
                 return;
             }
             let manifest_id = parts.get(2).copied();
@@ -17972,6 +18115,7 @@ fn cmd_undelete(args: &str) {
         "recover" | "restore" => {
             if parts.len() < 2 {
                 shell_println!("Usage: undelete recover <path> [dest]");
+                set_exit(1);
                 return;
             }
             let path = parts[1];
@@ -18346,6 +18490,7 @@ fn cmd_batch(args: &str) {
         "rename" | "ren" => {
             if parts.len() < 4 {
                 shell_println!("Usage: batch rename <dir> <pattern> <replacement>");
+                set_exit(1);
                 return;
             }
             let dir = resolve_path(parts[1]);
@@ -18369,6 +18514,7 @@ fn cmd_batch(args: &str) {
         "copy" | "cp" => {
             if parts.len() < 3 {
                 shell_println!("Usage: batch copy <dest> <file1> [file2...]");
+                set_exit(1);
                 return;
             }
             let dest = resolve_path(parts[1]);
@@ -18393,6 +18539,7 @@ fn cmd_batch(args: &str) {
         "move" | "mv" => {
             if parts.len() < 3 {
                 shell_println!("Usage: batch move <dest> <file1> [file2...]");
+                set_exit(1);
                 return;
             }
             let dest = resolve_path(parts[1]);
@@ -18412,6 +18559,7 @@ fn cmd_batch(args: &str) {
         "delete" | "del" | "rm" => {
             if parts.len() < 2 {
                 shell_println!("Usage: batch delete <file1> [file2...]");
+                set_exit(1);
                 return;
             }
             let resolved: Vec<PathBuf> = parts[1..]
@@ -18430,6 +18578,7 @@ fn cmd_batch(args: &str) {
         "glob" => {
             if parts.len() < 3 {
                 shell_println!("Usage: batch glob <dir> <pattern>");
+                set_exit(1);
                 return;
             }
             let dir = resolve_path(parts[1]);
@@ -18716,6 +18865,7 @@ fn cmd_fspolicy(args: &str) {
                 parts[1]
             } else {
                 shell_println!("Usage: fspolicy apply <desktop|server|dev|gaming>");
+                set_exit(1);
                 return;
             };
             match policy::FsProfile::from_name(name) {
@@ -18752,6 +18902,7 @@ fn cmd_fspolicy(args: &str) {
                 parts[1]
             } else {
                 shell_println!("Usage: fspolicy get <key>");
+                set_exit(1);
                 return;
             };
             match policy::get_setting(key) {
@@ -18762,6 +18913,7 @@ fn cmd_fspolicy(args: &str) {
         "set" => {
             if parts.len() < 3 {
                 shell_println!("Usage: fspolicy set <key> <value>");
+                set_exit(1);
                 return;
             }
             let key = parts[1];
@@ -19028,6 +19180,7 @@ fn cmd_ionice(args: &str) {
                 shell_println!("Usage: ionice set <task_id> <class> [level]");
                 shell_println!("  Classes: realtime|rt, best-effort|be, idle|bg");
                 shell_println!("  Level: 0-7 (only for best-effort, default 4)");
+                set_exit(1);
                 return;
             }
             let task_id: u64 = match parts[1].parse() {
@@ -19054,6 +19207,7 @@ fn cmd_ionice(args: &str) {
         "clear" => {
             if parts.len() < 2 {
                 shell_println!("Usage: ionice clear <task_id>");
+                set_exit(1);
                 return;
             }
             let task_id: u64 = match parts[1].parse() {
@@ -19072,6 +19226,7 @@ fn cmd_ionice(args: &str) {
         "get" => {
             if parts.len() < 2 {
                 shell_println!("Usage: ionice get <task_id>");
+                set_exit(1);
                 return;
             }
             let task_id: u64 = match parts[1].parse() {
@@ -19144,6 +19299,7 @@ fn cmd_atime(args: &str) {
                 parts[1]
             } else {
                 shell_println!("Usage: atime set <always|relatime|noatime|lazyday>");
+                set_exit(1);
                 return;
             };
             match AtimePolicy::from_name(name) {
@@ -19160,6 +19316,7 @@ fn cmd_atime(args: &str) {
         "mount" => {
             if parts.len() < 3 {
                 shell_println!("Usage: atime mount <path> <policy>");
+                set_exit(1);
                 return;
             }
             let path = parts[1];
@@ -19174,6 +19331,7 @@ fn cmd_atime(args: &str) {
         "unmount" | "remove" => {
             if parts.len() < 2 {
                 shell_println!("Usage: atime remove <mount_path>");
+                set_exit(1);
                 return;
             }
             if atime::remove_override(parts[1]) {
@@ -19218,6 +19376,7 @@ fn cmd_prefetch(args: &str) {
         "advise" | "hint" => {
             if parts.len() < 3 {
                 shell_println!("Usage: prefetch advise <path> <normal|seq|rand|willneed|dontneed>");
+                set_exit(1);
                 return;
             }
             let path = resolve_path(parts[1]);
@@ -19235,6 +19394,7 @@ fn cmd_prefetch(args: &str) {
         "load" | "fetch" => {
             if parts.len() < 2 {
                 shell_println!("Usage: prefetch load <path> [offset] [length]");
+                set_exit(1);
                 return;
             }
             let path = resolve_path(parts[1]);
@@ -19316,6 +19476,7 @@ fn cmd_splice(args: &str) {
         "copy" | "cp" => {
             if parts.len() < 3 {
                 shell_println!("Usage: splice copy <src> <dst> [src_offset] [dst_offset] [len]");
+                set_exit(1);
                 return;
             }
             let src = resolve_path(parts[1]);
@@ -19340,6 +19501,7 @@ fn cmd_splice(args: &str) {
         "send" | "sendfile" => {
             if parts.len() < 3 {
                 shell_println!("Usage: splice send <src> <dst> [offset] [len]");
+                set_exit(1);
                 return;
             }
             let src = resolve_path(parts[1]);
@@ -19363,6 +19525,7 @@ fn cmd_splice(args: &str) {
         "pipe" | "splice" => {
             if parts.len() < 3 {
                 shell_println!("Usage: splice pipe <src> <dst> [src_offset] [len]");
+                set_exit(1);
                 return;
             }
             let src = resolve_path(parts[1]);
@@ -19386,6 +19549,7 @@ fn cmd_splice(args: &str) {
         "tee" => {
             if parts.len() < 3 {
                 shell_println!("Usage: splice tee <src> <dst> [offset] [len]");
+                set_exit(1);
                 return;
             }
             let src = resolve_path(parts[1]);
@@ -19432,6 +19596,7 @@ fn cmd_directio(args: &str) {
         "read" => {
             if parts.len() < 2 {
                 shell_println!("Usage: directio read <path> [offset] [len]");
+                set_exit(1);
                 return;
             }
             let path = resolve_path(parts[1]);
@@ -19461,6 +19626,7 @@ fn cmd_directio(args: &str) {
         "write" => {
             if parts.len() < 3 {
                 shell_println!("Usage: directio write <path> <data|hex:AABB..> [offset]");
+                set_exit(1);
                 return;
             }
             let path = resolve_path(parts[1]);
@@ -19494,6 +19660,7 @@ fn cmd_directio(args: &str) {
         "register" | "reg" => {
             if parts.len() < 2 {
                 shell_println!("Usage: directio register <path>");
+                set_exit(1);
                 return;
             }
             let path = resolve_path(parts[1]);
@@ -19506,6 +19673,7 @@ fn cmd_directio(args: &str) {
         "unregister" | "unreg" => {
             if parts.len() < 2 {
                 shell_println!("Usage: directio unregister <path>");
+                set_exit(1);
                 return;
             }
             let path = resolve_path(parts[1]);
@@ -19612,6 +19780,7 @@ fn cmd_fstrim(args: &str) {
         "notify" => {
             if parts.len() < 4 {
                 shell_println!("Usage: fstrim notify <device> <offset> <length>");
+                set_exit(1);
                 return;
             }
             let device = parts[1];
@@ -19674,6 +19843,7 @@ fn cmd_sparse(args: &str) {
         "punch" | "hole" => {
             if parts.len() < 4 {
                 shell_println!("Usage: sparse punch <path> <offset> <length>");
+                set_exit(1);
                 return;
             }
             let path = resolve_path(parts[1]);
@@ -19704,6 +19874,7 @@ fn cmd_sparse(args: &str) {
         "zero" => {
             if parts.len() < 4 {
                 shell_println!("Usage: sparse zero <path> <offset> <length>");
+                set_exit(1);
                 return;
             }
             let path = resolve_path(parts[1]);
@@ -19729,6 +19900,7 @@ fn cmd_sparse(args: &str) {
         "collapse" => {
             if parts.len() < 4 {
                 shell_println!("Usage: sparse collapse <path> <offset> <length>");
+                set_exit(1);
                 return;
             }
             let path = resolve_path(parts[1]);
@@ -19756,6 +19928,7 @@ fn cmd_sparse(args: &str) {
         "insert" => {
             if parts.len() < 4 {
                 shell_println!("Usage: sparse insert <path> <offset> <length>");
+                set_exit(1);
                 return;
             }
             let path = resolve_path(parts[1]);
@@ -19785,6 +19958,7 @@ fn cmd_sparse(args: &str) {
         "map" => {
             if parts.len() < 2 {
                 shell_println!("Usage: sparse map <path>");
+                set_exit(1);
                 return;
             }
             let path = resolve_path(parts[1]);
@@ -19970,6 +20144,7 @@ fn cmd_fsfreeze(args: &str) {
         "freeze" | "f" => {
             if parts.len() < 2 {
                 shell_println!("Usage: fsfreeze freeze <mountpoint> [reason]");
+                set_exit(1);
                 return;
             }
             let mp = resolve_path(parts[1]);
@@ -19996,6 +20171,7 @@ fn cmd_fsfreeze(args: &str) {
         "thaw" | "t" => {
             if parts.len() < 2 {
                 shell_println!("Usage: fsfreeze thaw <mountpoint>");
+                set_exit(1);
                 return;
             }
             let mp = resolve_path(parts[1]);
@@ -20021,6 +20197,7 @@ fn cmd_fsfreeze(args: &str) {
         "force" => {
             if parts.len() < 2 {
                 shell_println!("Usage: fsfreeze force <mountpoint>");
+                set_exit(1);
                 return;
             }
             let mp = resolve_path(parts[1]);
@@ -20100,6 +20277,7 @@ fn cmd_seal(args: &str) {
                 shell_println!("Usage: seal add <path> <seals>");
                 shell_println!("  Seals: shrink, grow, write, seal, exec, all");
                 shell_println!("  Combine with + or ,: shrink+grow+write");
+                set_exit(1);
                 return;
             }
             let path = resolve_path(parts[1]);
@@ -20116,6 +20294,7 @@ fn cmd_seal(args: &str) {
         "get" | "query" => {
             if parts.len() < 2 {
                 shell_println!("Usage: seal get <path>");
+                set_exit(1);
                 return;
             }
             let path = resolve_path(parts[1]);
@@ -20125,6 +20304,7 @@ fn cmd_seal(args: &str) {
         "check" => {
             if parts.len() < 3 {
                 shell_println!("Usage: seal check <path> <write|shrink|grow|addseal|exec>");
+                set_exit(1);
                 return;
             }
             let path = resolve_path(parts[1]);
@@ -20238,6 +20418,7 @@ fn cmd_recent(args: &str) {
             if parts.len() < 3 {
                 shell_println!("Usage: recent record <path> <type> [source]");
                 shell_println!("  Types: open, modify, create, exec");
+                set_exit(1);
                 return;
             }
             let path = resolve_path(parts[1]);
@@ -20262,6 +20443,7 @@ fn cmd_recent(args: &str) {
         "remove" | "rm" => {
             if parts.len() < 2 {
                 shell_println!("Usage: recent remove <path>");
+                set_exit(1);
                 return;
             }
             let path = resolve_path(parts[1]);
@@ -20277,6 +20459,7 @@ fn cmd_recent(args: &str) {
                 "add" => {
                     if parts.len() < 3 {
                         shell_println!("Usage: recent exclude add <prefix>");
+                        set_exit(1);
                         return;
                     }
                     recent::add_exclude(parts[2]);
@@ -20285,6 +20468,7 @@ fn cmd_recent(args: &str) {
                 "rm" | "remove" => {
                     if parts.len() < 3 {
                         shell_println!("Usage: recent exclude remove <prefix>");
+                        set_exit(1);
                         return;
                     }
                     if recent::remove_exclude(parts[2]) {
@@ -20376,6 +20560,7 @@ fn cmd_fileinfo(args: &str) {
             if parts.len() < 2 {
                 shell_println!("Usage: fileinfo fields <mime-type>");
                 shell_println!("  Example: fileinfo fields audio/mpeg");
+                set_exit(1);
                 return;
             }
             let fields = fileinfo::fields_for_mime(parts[1]);
@@ -20472,6 +20657,7 @@ fn cmd_fswalk(args: &str) {
         "find" => {
             if parts.len() < 2 {
                 shell_println!("Usage: fswalk find <pattern> [path] [max-depth]");
+                set_exit(1);
                 return;
             }
             let pattern = parts[1];
@@ -20656,6 +20842,7 @@ fn cmd_findex(args: &str) {
         "add" | "index" => {
             if parts.len() < 2 {
                 shell_println!("Usage: findex add <path>");
+                set_exit(1);
                 return;
             }
             let path = resolve_path(parts[1]);
@@ -20667,6 +20854,7 @@ fn cmd_findex(args: &str) {
         "remove" | "rm" => {
             if parts.len() < 2 {
                 shell_println!("Usage: findex remove <path>");
+                set_exit(1);
                 return;
             }
             let path = resolve_path(parts[1]);
@@ -20682,6 +20870,7 @@ fn cmd_findex(args: &str) {
                 shell_println!("  Ops: = != < > <= >= ~ (contains) ^ (starts) $ (ends)");
                 shell_println!("  Example: findex query audio.artist=Radiohead");
                 shell_println!("  Example: findex query image.width>=1920 AND image.height>=1080");
+                set_exit(1);
                 return;
             }
             let query_str = parts[1..].join(" ");
@@ -20703,6 +20892,7 @@ fn cmd_findex(args: &str) {
         "get" | "show" => {
             if parts.len() < 2 {
                 shell_println!("Usage: findex get <path>");
+                set_exit(1);
                 return;
             }
             let path = resolve_path(parts[1]);
@@ -20819,6 +21009,7 @@ fn cmd_thumbcache(args: &str) {
         "invalidate" | "inv" => {
             if parts.len() < 2 {
                 shell_println!("Usage: thumbcache invalidate <path>");
+                set_exit(1);
                 return;
             }
             let path = resolve_path(parts[1]);
@@ -20898,6 +21089,7 @@ fn cmd_bookmark(args: &str) {
             if parts.len() < 3 {
                 shell_println!("Usage: bookmark add <name> <path> [label] [category]");
                 shell_println!("  Categories: places, favorites (default), devices, network");
+                set_exit(1);
                 return;
             }
             let name = parts[1];
@@ -20915,6 +21107,7 @@ fn cmd_bookmark(args: &str) {
         "rm" | "remove" => {
             if parts.len() < 2 {
                 shell_println!("Usage: bookmark remove <name>");
+                set_exit(1);
                 return;
             }
             match bookmarks::remove(parts[1]) {
@@ -20925,6 +21118,7 @@ fn cmd_bookmark(args: &str) {
         "go" | "cd" => {
             if parts.len() < 2 {
                 shell_println!("Usage: bookmark go <name>");
+                set_exit(1);
                 return;
             }
             if let Some(path) = bookmarks::resolve(parts[1]) {
@@ -20951,6 +21145,7 @@ fn cmd_bookmark(args: &str) {
         "rename" => {
             if parts.len() < 3 {
                 shell_println!("Usage: bookmark rename <old-name> <new-name>");
+                set_exit(1);
                 return;
             }
             match bookmarks::rename(parts[1], parts[2]) {
@@ -21003,6 +21198,7 @@ fn cmd_clipboard(args: &str) {
                 .trim();
             if text.is_empty() {
                 shell_println!("Usage: clipboard copy <text>");
+                set_exit(1);
                 return;
             }
             match clipboard::set_text(text, "kshell") {
@@ -21356,6 +21552,7 @@ fn cmd_deskicons(args: &str) {
                 "free" => crate::fs::deskicons::LayoutMode::FreePlacement,
                 _ => {
                     shell_println!("Usage: deskicons mode <grid|free>");
+                    set_exit(1);
                     return;
                 }
             };
@@ -21657,6 +21854,7 @@ fn cmd_fileops(args: &str) {
         "delete" | "del" => {
             if parts.len() < 2 {
                 shell_println!("Usage: fileops delete <path...>");
+                set_exit(1);
                 return;
             }
             let mut sources = Vec::new();
@@ -22037,6 +22235,7 @@ fn cmd_filetype(args: &str) {
             // filetype register <mime> <description> <icon> [ext1 ext2...]
             if parts.len() < 4 {
                 shell_println!("Usage: filetype register <mime> <desc> <icon> [ext...]");
+                set_exit(1);
                 return;
             }
             let mime = parts[1];
@@ -22135,6 +22334,7 @@ fn cmd_openwith(args: &str) {
             // openw open <file> <app-path> [--default]
             if parts.len() < 3 {
                 shell_println!("Usage: openw open <file> <app-path> [--default]");
+                set_exit(1);
                 return;
             }
             let file = resolve_path(parts[1]);
@@ -22201,6 +22401,7 @@ fn cmd_openwith(args: &str) {
             // openw register <app-path> <app-name>
             if parts.len() < 3 {
                 shell_println!("Usage: openw register <app-path> <app-name>");
+                set_exit(1);
                 return;
             }
             let app_path = parts[1];
@@ -22541,6 +22742,7 @@ fn cmd_toolbar(args: &str) {
             let action = parts.get(1).copied().unwrap_or("");
             if action.is_empty() {
                 shell_println!("Usage: toolbar check <action>");
+                set_exit(1);
                 return;
             }
             let ctx = toolbar::ToolbarContext {
@@ -22623,6 +22825,7 @@ fn cmd_queryable(args: &str) {
             let val_str = parts.get(4).copied().unwrap_or("");
             if path_arg.is_empty() || attr_name.is_empty() || val_str.is_empty() {
                 shell_println!("Usage: qattr set <path> <name> <text|int|bool> <value>");
+                set_exit(1);
                 return;
             }
             let path = resolve_path(path_arg);
@@ -22654,6 +22857,7 @@ fn cmd_queryable(args: &str) {
             let attr_name = parts.get(2).copied().unwrap_or("");
             if path_arg.is_empty() || attr_name.is_empty() {
                 shell_println!("Usage: qattr get <path> <name>");
+                set_exit(1);
                 return;
             }
             let path = resolve_path(path_arg);
@@ -22675,6 +22879,7 @@ fn cmd_queryable(args: &str) {
             let attr_name = parts.get(2).copied().unwrap_or("");
             if path_arg.is_empty() || attr_name.is_empty() {
                 shell_println!("Usage: qattr rm <path> <name>");
+                set_exit(1);
                 return;
             }
             let path = resolve_path(path_arg);
@@ -22687,6 +22892,7 @@ fn cmd_queryable(args: &str) {
             let path_arg = parts.get(1).copied().unwrap_or("");
             if path_arg.is_empty() {
                 shell_println!("Usage: qattr list <path>");
+                set_exit(1);
                 return;
             }
             let path = resolve_path(path_arg);
@@ -22716,6 +22922,7 @@ fn cmd_queryable(args: &str) {
             let path_arg = parts.get(1).copied().unwrap_or("");
             if path_arg.is_empty() {
                 shell_println!("Usage: qattr clear <path>");
+                set_exit(1);
                 return;
             }
             let path = resolve_path(path_arg);
@@ -22733,6 +22940,7 @@ fn cmd_queryable(args: &str) {
             if attr_name.is_empty() || val_str.is_empty() {
                 shell_println!("Usage: qattr query <attr> <op> <value> [root]");
                 shell_println!("  ops: = != < <= > >= contains starts-with ends-with");
+                set_exit(1);
                 return;
             }
             let op = match op_str {
@@ -22800,6 +23008,7 @@ fn cmd_queryable(args: &str) {
                     let attr_name = parts.get(2).copied().unwrap_or("");
                     if attr_name.is_empty() {
                         shell_println!("Usage: qattr index create <attr_name>");
+                        set_exit(1);
                         return;
                     }
                     match queryable::create_index(attr_name) {
@@ -22811,6 +23020,7 @@ fn cmd_queryable(args: &str) {
                     let attr_name = parts.get(2).copied().unwrap_or("");
                     if attr_name.is_empty() {
                         shell_println!("Usage: qattr index drop <attr_name>");
+                        set_exit(1);
                         return;
                     }
                     match queryable::drop_index(attr_name) {
@@ -22915,6 +23125,7 @@ fn cmd_fcomment(args: &str) {
             let path_arg = parts.get(1).copied().unwrap_or("");
             if path_arg.is_empty() || parts.len() < 3 {
                 shell_println!("Usage: fcomment set <path> <comment text...>");
+                set_exit(1);
                 return;
             }
             let path = resolve_path(path_arg);
@@ -22943,6 +23154,7 @@ fn cmd_fcomment(args: &str) {
             let path_arg = parts.get(1).copied().unwrap_or("");
             if path_arg.is_empty() {
                 shell_println!("Usage: fcomment get <path>");
+                set_exit(1);
                 return;
             }
             let path = resolve_path(path_arg);
@@ -22955,6 +23167,7 @@ fn cmd_fcomment(args: &str) {
             let path_arg = parts.get(1).copied().unwrap_or("");
             if path_arg.is_empty() || parts.len() < 3 {
                 shell_println!("Usage: fcomment append <path> <text...>");
+                set_exit(1);
                 return;
             }
             let path = resolve_path(path_arg);
@@ -22978,6 +23191,7 @@ fn cmd_fcomment(args: &str) {
             let path_arg = parts.get(1).copied().unwrap_or("");
             if path_arg.is_empty() {
                 shell_println!("Usage: fcomment rm <path>");
+                set_exit(1);
                 return;
             }
             let path = resolve_path(path_arg);
@@ -22991,6 +23205,7 @@ fn cmd_fcomment(args: &str) {
             let root = parts.get(2).map(resolve_path);
             if needle.is_empty() {
                 shell_println!("Usage: fcomment search <text> [root]");
+                set_exit(1);
                 return;
             }
             let results = fcomment::search(needle, root.as_deref().map(Path::new));
@@ -23061,6 +23276,7 @@ fn cmd_rundialog(args: &str) {
                 parts[1..].join(" ")
             } else {
                 shell_println!("Usage: rundialog run <command>");
+                set_exit(1);
                 return;
             };
             match rundialog::resolve(&cmd_text) {
@@ -23135,6 +23351,7 @@ fn cmd_rundialog(args: &str) {
                     let path = parts.get(3).copied().unwrap_or("");
                     if name.is_empty() || path.is_empty() {
                         shell_println!("Usage: rundialog alias add <name> <path>");
+                        set_exit(1);
                         return;
                     }
                     match rundialog::register_alias(name, path) {
@@ -23146,6 +23363,7 @@ fn cmd_rundialog(args: &str) {
                     let name = parts.get(2).copied().unwrap_or("");
                     if name.is_empty() {
                         shell_println!("Usage: rundialog alias rm <name>");
+                        set_exit(1);
                         return;
                     }
                     match rundialog::remove_alias(name) {
@@ -23179,6 +23397,7 @@ fn cmd_rundialog(args: &str) {
                         parts[2..].join(" ")
                     } else {
                         shell_println!("Usage: rundialog bookmark add <command>");
+                        set_exit(1);
                         return;
                     };
                     match rundialog::add_bookmark(&cmd_text) {
@@ -23191,6 +23410,7 @@ fn cmd_rundialog(args: &str) {
                         parts[2..].join(" ")
                     } else {
                         shell_println!("Usage: rundialog bookmark rm <command>");
+                        set_exit(1);
                         return;
                     };
                     match rundialog::remove_bookmark(&cmd_text) {
@@ -23288,6 +23508,7 @@ fn cmd_notifcenter(args: &str) {
                 shell_println!("Usage: notif send <app> <title> [body] [category] [priority]");
                 shell_println!("  categories: info, warning, error, success, progress");
                 shell_println!("  priorities: low, normal, high, critical");
+                set_exit(1);
                 return;
             }
             let body = parts.get(3).copied().unwrap_or("");
@@ -23389,6 +23610,7 @@ fn cmd_notifcenter(args: &str) {
             let app = parts.get(1).copied().unwrap_or("");
             if app.is_empty() {
                 shell_println!("Usage: notif mute <app-name>");
+                set_exit(1);
                 return;
             }
             match notifcenter::mute_app(app) {
@@ -23400,6 +23622,7 @@ fn cmd_notifcenter(args: &str) {
             let app = parts.get(1).copied().unwrap_or("");
             if app.is_empty() {
                 shell_println!("Usage: notif unmute <app-name>");
+                set_exit(1);
                 return;
             }
             match notifcenter::unmute_app(app) {
@@ -23521,6 +23744,7 @@ fn cmd_appregistry(args: &str) {
             let id = parts.get(1).copied().unwrap_or("");
             if id.is_empty() {
                 shell_println!("Usage: appreg unregister <app-id>");
+                set_exit(1);
                 return;
             }
             match appregistry::unregister(id) {
@@ -23532,6 +23756,7 @@ fn cmd_appregistry(args: &str) {
             let id = parts.get(1).copied().unwrap_or("");
             if id.is_empty() {
                 shell_println!("Usage: appreg get <app-id>");
+                set_exit(1);
                 return;
             }
             match appregistry::get(id) {
@@ -23604,6 +23829,7 @@ fn cmd_appregistry(args: &str) {
             let mime = parts.get(1).copied().unwrap_or("");
             if mime.is_empty() {
                 shell_println!("Usage: appreg mime <mime-type>");
+                set_exit(1);
                 return;
             }
             let handlers = appregistry::handlers_for_mime(mime);
@@ -23633,6 +23859,7 @@ fn cmd_appregistry(args: &str) {
             let query = parts.get(1).copied().unwrap_or("");
             if query.is_empty() {
                 shell_println!("Usage: appreg search <query>");
+                set_exit(1);
                 return;
             }
             let results = appregistry::search(query);
@@ -23768,6 +23995,7 @@ fn cmd_theme(args: &str) {
             let hex = parts.get(2).copied().unwrap_or("");
             if role_str.is_empty() || hex.is_empty() {
                 shell_println!("Usage: theme set <role> <#hex>");
+                set_exit(1);
                 return;
             }
             let role = match theme::ColorRole::from_str(role_str) {
@@ -23817,6 +24045,7 @@ fn cmd_theme(args: &str) {
             let name = parts.get(1).copied().unwrap_or("");
             if name.is_empty() {
                 shell_println!("Usage: theme save <name>");
+                set_exit(1);
                 return;
             }
             // Save current overrides as a custom theme.
@@ -23835,6 +24064,7 @@ fn cmd_theme(args: &str) {
             let name = parts.get(1).copied().unwrap_or("");
             if name.is_empty() {
                 shell_println!("Usage: theme load <name>");
+                set_exit(1);
                 return;
             }
             match theme::apply_custom(name) {
@@ -23846,6 +24076,7 @@ fn cmd_theme(args: &str) {
             let name = parts.get(1).copied().unwrap_or("");
             if name.is_empty() {
                 shell_println!("Usage: theme delete <name>");
+                set_exit(1);
                 return;
             }
             match theme::delete_custom(name) {
@@ -23919,6 +24150,7 @@ fn cmd_hotkey(args: &str) {
                 shell_println!("  actions: close, switch, minimize-all, run, start,");
                 shell_println!("    screenshot, lock, logout, copy, cut, paste, undo,");
                 shell_println!("    redo, select-all, launch:<app>, cmd:<command>");
+                set_exit(1);
                 return;
             }
             let combo = match hotkeys::KeyCombo::parse(combo_str) {
@@ -23949,6 +24181,7 @@ fn cmd_hotkey(args: &str) {
             let combo_str = parts.get(1).copied().unwrap_or("");
             if combo_str.is_empty() {
                 shell_println!("Usage: hotkey unbind <combo>");
+                set_exit(1);
                 return;
             }
             let combo = match hotkeys::KeyCombo::parse(combo_str) {
@@ -23967,6 +24200,7 @@ fn cmd_hotkey(args: &str) {
             let combo_str = parts.get(1).copied().unwrap_or("");
             if combo_str.is_empty() {
                 shell_println!("Usage: hotkey {} <combo>", sub);
+                set_exit(1);
                 return;
             }
             let combo = match hotkeys::KeyCombo::parse(combo_str) {
@@ -23990,6 +24224,7 @@ fn cmd_hotkey(args: &str) {
             let combo_str = parts.get(1).copied().unwrap_or("");
             if combo_str.is_empty() {
                 shell_println!("Usage: hotkey dispatch <combo>");
+                set_exit(1);
                 return;
             }
             let combo = match hotkeys::KeyCombo::parse(combo_str) {
@@ -24012,6 +24247,7 @@ fn cmd_hotkey(args: &str) {
             let action_str = parts.get(1).copied().unwrap_or("");
             if action_str.is_empty() {
                 shell_println!("Usage: hotkey find <action>");
+                set_exit(1);
                 return;
             }
             match hotkeys::HotkeyAction::from_str(action_str) {
@@ -24026,6 +24262,7 @@ fn cmd_hotkey(args: &str) {
             let query = parts.get(1).copied().unwrap_or("");
             if query.is_empty() {
                 shell_println!("Usage: hotkey search <query>");
+                set_exit(1);
                 return;
             }
             let results = hotkeys::search(query);
@@ -29637,6 +29874,7 @@ fn cmd_useracct(args: &str) {
             fn case(sub: &str, parts: &[&str]) {
                 if parts.len() < 3 {
                     shell_println!("Usage: useracct {} <uid> <path>", sub);
+                    set_exit(1);
                     return;
                 }
                 let Ok(uid) = parts[1].parse::<u64>() else {
@@ -32807,6 +33045,7 @@ fn cmd_autostart(args: &str) {
                 Some(v) => v,
                 None => {
                     shell_println!("Usage: autostart user <uid>");
+                    set_exit(1);
                     return;
                 }
             };
@@ -32840,6 +33079,7 @@ fn cmd_autostart(args: &str) {
             if parts.len() < 4 {
                 shell_println!("Usage: autostart add <name> <command> <phase> [uid]");
                 shell_println!("Phases: system, desktop, login, deferred");
+                set_exit(1);
                 return;
             }
             let name = parts[1];
@@ -32868,6 +33108,7 @@ fn cmd_autostart(args: &str) {
                 Some(v) => v,
                 None => {
                     shell_println!("Usage: autostart remove <id>");
+                    set_exit(1);
                     return;
                 }
             };
@@ -32881,6 +33122,7 @@ fn cmd_autostart(args: &str) {
                 Some(v) => v,
                 None => {
                     shell_println!("Usage: autostart get <id>");
+                    set_exit(1);
                     return;
                 }
             };
@@ -32910,6 +33152,7 @@ fn cmd_autostart(args: &str) {
                 Some(v) => v,
                 None => {
                     shell_println!("Usage: autostart enable <id>");
+                    set_exit(1);
                     return;
                 }
             };
@@ -32923,6 +33166,7 @@ fn cmd_autostart(args: &str) {
                 Some(v) => v,
                 None => {
                     shell_println!("Usage: autostart disable <id>");
+                    set_exit(1);
                     return;
                 }
             };
@@ -32934,6 +33178,7 @@ fn cmd_autostart(args: &str) {
         "delay" => {
             if parts.len() < 3 {
                 shell_println!("Usage: autostart delay <id> <ms>");
+                set_exit(1);
                 return;
             }
             let id: u64 = match parts.get(1).and_then(|s| s.parse().ok()) {
@@ -32958,6 +33203,7 @@ fn cmd_autostart(args: &str) {
         "order" => {
             if parts.len() < 3 {
                 shell_println!("Usage: autostart order <id> <order>");
+                set_exit(1);
                 return;
             }
             let id: u64 = match parts.get(1).and_then(|s| s.parse().ok()) {
@@ -32982,6 +33228,7 @@ fn cmd_autostart(args: &str) {
         "phase" => {
             if parts.len() < 3 {
                 shell_println!("Usage: autostart phase <id> <system|desktop|login|deferred>");
+                set_exit(1);
                 return;
             }
             let id: u64 = match parts.get(1).and_then(|s| s.parse().ok()) {
@@ -33009,6 +33256,7 @@ fn cmd_autostart(args: &str) {
         "condition" | "cond" => {
             if parts.len() < 3 {
                 shell_println!("Usage: autostart condition <id> <always|ac|network|firstlogin>");
+                set_exit(1);
                 return;
             }
             let id: u64 = match parts.get(1).and_then(|s| s.parse().ok()) {
@@ -33036,6 +33284,7 @@ fn cmd_autostart(args: &str) {
         "args" => {
             if parts.len() < 3 {
                 shell_println!("Usage: autostart args <id> <arguments...>");
+                set_exit(1);
                 return;
             }
             let id: u64 = match parts.get(1).and_then(|s| s.parse().ok()) {
@@ -33054,6 +33303,7 @@ fn cmd_autostart(args: &str) {
         "desc" => {
             if parts.len() < 3 {
                 shell_println!("Usage: autostart desc <id> <description...>");
+                set_exit(1);
                 return;
             }
             let id: u64 = match parts.get(1).and_then(|s| s.parse().ok()) {
@@ -33072,6 +33322,7 @@ fn cmd_autostart(args: &str) {
         "impact" => {
             if parts.len() < 3 {
                 shell_println!("Usage: autostart impact <id> <low|medium|high|unknown>");
+                set_exit(1);
                 return;
             }
             let id: u64 = match parts.get(1).and_then(|s| s.parse().ok()) {
@@ -33099,6 +33350,7 @@ fn cmd_autostart(args: &str) {
         "launch" => {
             if parts.len() < 3 {
                 shell_println!("Usage: autostart launch <id> <duration_ms>");
+                set_exit(1);
                 return;
             }
             let id: u64 = match parts.get(1).and_then(|s| s.parse().ok()) {
@@ -33252,6 +33504,7 @@ fn cmd_schedtune(args: &str) {
                     Some(v) => v,
                     None => {
                         shell_println!("Usage: schedtune get <id>");
+                        set_exit(1);
                         return;
                     }
                 };
@@ -33295,6 +33548,7 @@ fn cmd_schedtune(args: &str) {
                     shell_println!("Usage: schedtune create <name> <workload> <model>");
                     shell_println!("Workloads: desktop, server, gaming, dev, realtime, lowpower");
                     shell_println!("Models: prr, cfs, eevdf, bfs, rtfifo");
+                    set_exit(1);
                     return;
                 }
                 let name = parts[1];
@@ -33335,6 +33589,7 @@ fn cmd_schedtune(args: &str) {
                     Some(v) => v,
                     None => {
                         shell_println!("Usage: schedtune remove <id>");
+                        set_exit(1);
                         return;
                     }
                 };
@@ -33352,6 +33607,7 @@ fn cmd_schedtune(args: &str) {
                     Some(v) => v,
                     None => {
                         shell_println!("Usage: schedtune apply <id>");
+                        set_exit(1);
                         return;
                     }
                 };
@@ -33367,6 +33623,7 @@ fn cmd_schedtune(args: &str) {
             fn case(parts: &[&str]) {
                 if parts.len() < 3 {
                     shell_println!("Usage: schedtune timeslice <id> <us>");
+                    set_exit(1);
                     return;
                 }
                 let id: u64 = match parts.get(1).and_then(|s| s.parse().ok()) {
@@ -33395,6 +33652,7 @@ fn cmd_schedtune(args: &str) {
             fn case(parts: &[&str]) {
                 if parts.len() < 3 {
                     shell_println!("Usage: schedtune preempt <id> <none|voluntary|full|realtime>");
+                    set_exit(1);
                     return;
                 }
                 let id: u64 = match parts.get(1).and_then(|s| s.parse().ok()) {
@@ -33426,6 +33684,7 @@ fn cmd_schedtune(args: &str) {
             fn case(parts: &[&str]) {
                 if parts.len() < 3 {
                     shell_println!("Usage: schedtune latency <id> <us>");
+                    set_exit(1);
                     return;
                 }
                 let id: u64 = match parts.get(1).and_then(|s| s.parse().ok()) {
@@ -33454,6 +33713,7 @@ fn cmd_schedtune(args: &str) {
             fn case(parts: &[&str]) {
                 if parts.len() < 3 {
                     shell_println!("Usage: schedtune interactive <id> <on|off>");
+                    set_exit(1);
                     return;
                 }
                 let id: u64 = match parts.get(1).and_then(|s| s.parse().ok()) {
@@ -33478,6 +33738,7 @@ fn cmd_schedtune(args: &str) {
             fn case(parts: &[&str]) {
                 if parts.len() < 3 {
                     shell_println!("Usage: schedtune affinity <id> <0-100>");
+                    set_exit(1);
                     return;
                 }
                 let id: u64 = match parts.get(1).and_then(|s| s.parse().ok()) {
@@ -33506,6 +33767,7 @@ fn cmd_schedtune(args: &str) {
             fn case(parts: &[&str]) {
                 if parts.len() < 3 {
                     shell_println!("Usage: schedtune balance <id> <steal|push|hybrid|pinned>");
+                    set_exit(1);
                     return;
                 }
                 let id: u64 = match parts.get(1).and_then(|s| s.parse().ok()) {
@@ -33537,6 +33799,7 @@ fn cmd_schedtune(args: &str) {
             fn case(parts: &[&str]) {
                 if parts.len() < 3 {
                     shell_println!("Usage: schedtune numa <id> <on|off>");
+                    set_exit(1);
                     return;
                 }
                 let id: u64 = match parts.get(1).and_then(|s| s.parse().ok()) {
@@ -33561,6 +33824,7 @@ fn cmd_schedtune(args: &str) {
                     Some(v) => v,
                     None => {
                         shell_println!("Usage: schedtune tradeoffs <id>");
+                        set_exit(1);
                         return;
                     }
                 };
@@ -33730,6 +33994,7 @@ fn cmd_mmtune(args: &str) {
                     Some(v) => v,
                     None => {
                         shell_println!("Usage: mmtune get <id>");
+                        set_exit(1);
                         return;
                     }
                 };
@@ -33771,6 +34036,7 @@ fn cmd_mmtune(args: &str) {
                     shell_println!("Usage: mmtune create <name> <workload> <allocator>");
                     shell_println!("Workloads: desktop, server, gaming, dev, lowmem, vmhost");
                     shell_println!("Allocators: buddy, slabbuddy, bitmap, zonebased");
+                    set_exit(1);
                     return;
                 }
                 let name = parts[1];
@@ -33810,6 +34076,7 @@ fn cmd_mmtune(args: &str) {
                     Some(v) => v,
                     None => {
                         shell_println!("Usage: mmtune remove <id>");
+                        set_exit(1);
                         return;
                     }
                 };
@@ -33827,6 +34094,7 @@ fn cmd_mmtune(args: &str) {
                     Some(v) => v,
                     None => {
                         shell_println!("Usage: mmtune apply <id>");
+                        set_exit(1);
                         return;
                     }
                 };
@@ -33842,6 +34110,7 @@ fn cmd_mmtune(args: &str) {
             fn case(parts: &[&str]) {
                 if parts.len() < 3 {
                     shell_println!("Usage: mmtune overcommit <id> <never|heuristic|always>");
+                    set_exit(1);
                     return;
                 }
                 let id: u64 = match parts.get(1).and_then(|s| s.parse().ok()) {
@@ -33872,6 +34141,7 @@ fn cmd_mmtune(args: &str) {
             fn case(parts: &[&str]) {
                 if parts.len() < 3 {
                     shell_println!("Usage: mmtune hugepages <id> <off|madvise|transparent|always>");
+                    set_exit(1);
                     return;
                 }
                 let id: u64 = match parts.get(1).and_then(|s| s.parse().ok()) {
@@ -33903,6 +34173,7 @@ fn cmd_mmtune(args: &str) {
             fn case(parts: &[&str]) {
                 if parts.len() < 3 {
                     shell_println!("Usage: mmtune compact <id> <off|light|background|aggressive>");
+                    set_exit(1);
                     return;
                 }
                 let id: u64 = match parts.get(1).and_then(|s| s.parse().ok()) {
@@ -33934,6 +34205,7 @@ fn cmd_mmtune(args: &str) {
             fn case(parts: &[&str]) {
                 if parts.len() < 3 {
                     shell_println!("Usage: mmtune swappiness <id> <0-200>");
+                    set_exit(1);
                     return;
                 }
                 let id: u64 = match parts.get(1).and_then(|s| s.parse().ok()) {
@@ -33962,6 +34234,7 @@ fn cmd_mmtune(args: &str) {
             fn case(parts: &[&str]) {
                 if parts.len() < 4 {
                     shell_println!("Usage: mmtune dirty <id> <ratio> <bg_ratio>");
+                    set_exit(1);
                     return;
                 }
                 let id: u64 = match parts.get(1).and_then(|s| s.parse().ok()) {
@@ -34001,6 +34274,7 @@ fn cmd_mmtune(args: &str) {
             fn case(parts: &[&str]) {
                 if parts.len() < 3 {
                     shell_println!("Usage: mmtune cache <id> <pressure 0-1000>");
+                    set_exit(1);
                     return;
                 }
                 let id: u64 = match parts.get(1).and_then(|s| s.parse().ok()) {
@@ -34029,6 +34303,7 @@ fn cmd_mmtune(args: &str) {
             fn case(parts: &[&str]) {
                 if parts.len() < 3 {
                     shell_println!("Usage: mmtune zram <id> <on|off>");
+                    set_exit(1);
                     return;
                 }
                 let id: u64 = match parts.get(1).and_then(|s| s.parse().ok()) {
@@ -34051,6 +34326,7 @@ fn cmd_mmtune(args: &str) {
             fn case(parts: &[&str]) {
                 if parts.len() < 3 {
                     shell_println!("Usage: mmtune zerofree <id> <on|off>");
+                    set_exit(1);
                     return;
                 }
                 let id: u64 = match parts.get(1).and_then(|s| s.parse().ok()) {
@@ -34073,6 +34349,7 @@ fn cmd_mmtune(args: &str) {
             fn case(parts: &[&str]) {
                 if parts.len() < 3 {
                     shell_println!("Usage: mmtune reclaim <id> <lru|clock|mglru|workingset>");
+                    set_exit(1);
                     return;
                 }
                 let id: u64 = match parts.get(1).and_then(|s| s.parse().ok()) {
@@ -34106,6 +34383,7 @@ fn cmd_mmtune(args: &str) {
                     Some(v) => v,
                     None => {
                         shell_println!("Usage: mmtune tradeoffs <id>");
+                        set_exit(1);
                         return;
                     }
                 };
@@ -34243,6 +34521,7 @@ fn cmd_capsettings(args: &str) {
                     Some(v) => v,
                     None => {
                         shell_println!("Usage: capsettings group <id>");
+                        set_exit(1);
                         return;
                     }
                 };
@@ -34267,6 +34546,7 @@ fn cmd_capsettings(args: &str) {
             fn case(parts: &[&str]) {
                 if parts.len() < 3 {
                     shell_println!("Usage: capsettings mkgroup <name> <desc>");
+                    set_exit(1);
                     return;
                 }
                 let name = parts[1];
@@ -34285,6 +34565,7 @@ fn cmd_capsettings(args: &str) {
                     Some(v) => v,
                     None => {
                         shell_println!("Usage: capsettings rmgroup <id>");
+                        set_exit(1);
                         return;
                     }
                 };
@@ -34300,6 +34581,7 @@ fn cmd_capsettings(args: &str) {
             fn case(parts: &[&str]) {
                 if parts.len() < 3 {
                     shell_println!("Usage: capsettings gadd <group_id> <capability>");
+                    set_exit(1);
                     return;
                 }
                 let gid: u64 = match parts.get(1).and_then(|s| s.parse().ok()) {
@@ -34328,6 +34610,7 @@ fn cmd_capsettings(args: &str) {
             fn case(parts: &[&str]) {
                 if parts.len() < 3 {
                     shell_println!("Usage: capsettings grm <group_id> <capability>");
+                    set_exit(1);
                     return;
                 }
                 let gid: u64 = match parts.get(1).and_then(|s| s.parse().ok()) {
@@ -34387,6 +34670,7 @@ fn cmd_capsettings(args: &str) {
                     Some(v) => v,
                     None => {
                         shell_println!("Usage: capsettings user <uid>");
+                        set_exit(1);
                         return;
                     }
                 };
@@ -34417,6 +34701,7 @@ fn cmd_capsettings(args: &str) {
             fn case(parts: &[&str]) {
                 if parts.len() < 3 {
                     shell_println!("Usage: capsettings adduser <uid> <username>");
+                    set_exit(1);
                     return;
                 }
                 let uid: u64 = match parts.get(1).and_then(|s| s.parse().ok()) {
@@ -34438,6 +34723,7 @@ fn cmd_capsettings(args: &str) {
             fn case(parts: &[&str]) {
                 if parts.len() < 3 {
                     shell_println!("Usage: capsettings ugroup <uid> <group_id>");
+                    set_exit(1);
                     return;
                 }
                 let uid: u64 = match parts.get(1).and_then(|s| s.parse().ok()) {
@@ -34466,6 +34752,7 @@ fn cmd_capsettings(args: &str) {
             fn case(parts: &[&str]) {
                 if parts.len() < 3 {
                     shell_println!("Usage: capsettings ucap <uid> <capability>");
+                    set_exit(1);
                     return;
                 }
                 let uid: u64 = match parts.get(1).and_then(|s| s.parse().ok()) {
@@ -34494,6 +34781,7 @@ fn cmd_capsettings(args: &str) {
             fn case(parts: &[&str]) {
                 if parts.len() < 3 {
                     shell_println!("Usage: capsettings udeny <uid> <capability>");
+                    set_exit(1);
                     return;
                 }
                 let uid: u64 = match parts.get(1).and_then(|s| s.parse().ok()) {
@@ -34522,6 +34810,7 @@ fn cmd_capsettings(args: &str) {
             fn case(parts: &[&str]) {
                 if parts.len() < 3 {
                     shell_println!("Usage: capsettings check <uid> <path>");
+                    set_exit(1);
                     return;
                 }
                 let uid: u64 = match parts.get(1).and_then(|s| s.parse().ok()) {
@@ -34586,6 +34875,7 @@ fn cmd_capsettings(args: &str) {
             fn case(parts: &[&str]) {
                 if parts.len() < 3 {
                     shell_println!("Usage: capsettings addpath <path> <capability> [recursive]");
+                    set_exit(1);
                     return;
                 }
                 let cap = match parse_capability(parts[2]) {
@@ -34611,6 +34901,7 @@ fn cmd_capsettings(args: &str) {
                     Some(v) => v,
                     None => {
                         shell_println!("Usage: capsettings rmpath <id>");
+                        set_exit(1);
                         return;
                     }
                 };
@@ -34811,6 +35102,7 @@ fn cmd_vpn(args: &str) {
                 Some(v) => v,
                 None => {
                     shell_println!("Usage: vpn get <id>");
+                    set_exit(1);
                     return;
                 }
             };
@@ -34839,6 +35131,7 @@ fn cmd_vpn(args: &str) {
             if parts.len() < 5 {
                 shell_println!("Usage: vpn create <name> <protocol> <server> <port>");
                 shell_println!("Protocols: openvpn, wireguard, ipsec, l2tp, pptp, ssh");
+                set_exit(1);
                 return;
             }
             let name = parts[1];
@@ -34871,6 +35164,7 @@ fn cmd_vpn(args: &str) {
                 Some(v) => v,
                 None => {
                     shell_println!("Usage: vpn remove <id>");
+                    set_exit(1);
                     return;
                 }
             };
@@ -34884,6 +35178,7 @@ fn cmd_vpn(args: &str) {
                 Some(v) => v,
                 None => {
                     shell_println!("Usage: vpn connect <id>");
+                    set_exit(1);
                     return;
                 }
             };
@@ -34899,6 +35194,7 @@ fn cmd_vpn(args: &str) {
         "auth" => {
             if parts.len() < 3 {
                 shell_println!("Usage: vpn auth <id> <userpass|cert|psk|token>");
+                set_exit(1);
                 return;
             }
             let id: u64 = match parts.get(1).and_then(|s| s.parse().ok()) {
@@ -34926,6 +35222,7 @@ fn cmd_vpn(args: &str) {
         "transport" => {
             if parts.len() < 3 {
                 shell_println!("Usage: vpn transport <id> <udp|tcp>");
+                set_exit(1);
                 return;
             }
             let id: u64 = match parts.get(1).and_then(|s| s.parse().ok()) {
@@ -34951,6 +35248,7 @@ fn cmd_vpn(args: &str) {
         "killswitch" | "ks" => {
             if parts.len() < 3 {
                 shell_println!("Usage: vpn killswitch <id> <on|off>");
+                set_exit(1);
                 return;
             }
             let id: u64 = match parts.get(1).and_then(|s| s.parse().ok()) {
@@ -34971,6 +35269,7 @@ fn cmd_vpn(args: &str) {
         "routeall" => {
             if parts.len() < 3 {
                 shell_println!("Usage: vpn routeall <id> <on|off>");
+                set_exit(1);
                 return;
             }
             let id: u64 = match parts.get(1).and_then(|s| s.parse().ok()) {
@@ -34992,6 +35291,7 @@ fn cmd_vpn(args: &str) {
         "autoconnect" | "ac" => {
             if parts.len() < 3 {
                 shell_println!("Usage: vpn autoconnect <id> <on|off>");
+                set_exit(1);
                 return;
             }
             let id: u64 = match parts.get(1).and_then(|s| s.parse().ok()) {
@@ -35012,6 +35312,7 @@ fn cmd_vpn(args: &str) {
         "dns" => {
             if parts.len() < 3 {
                 shell_println!("Usage: vpn dns <id> <server>");
+                set_exit(1);
                 return;
             }
             let id: u64 = match parts.get(1).and_then(|s| s.parse().ok()) {
@@ -35112,6 +35413,7 @@ fn cmd_dyndns(args: &str) {
                 Some(v) => v,
                 None => {
                     shell_println!("Usage: dyndns get <id>");
+                    set_exit(1);
                     return;
                 }
             };
@@ -35137,6 +35439,7 @@ fn cmd_dyndns(args: &str) {
             if parts.len() < 5 {
                 shell_println!("Usage: dyndns add <name> <provider> <hostname> <user>");
                 shell_println!("Providers: dynu, noip, duckdns, cloudflare, freedns, custom");
+                set_exit(1);
                 return;
             }
             let provider = match parts[2] {
@@ -35161,6 +35464,7 @@ fn cmd_dyndns(args: &str) {
                 Some(v) => v,
                 None => {
                     shell_println!("Usage: dyndns remove <id>");
+                    set_exit(1);
                     return;
                 }
             };
@@ -35174,6 +35478,7 @@ fn cmd_dyndns(args: &str) {
                 Some(v) => v,
                 None => {
                     shell_println!("Usage: dyndns enable <id>");
+                    set_exit(1);
                     return;
                 }
             };
@@ -35187,6 +35492,7 @@ fn cmd_dyndns(args: &str) {
                 Some(v) => v,
                 None => {
                     shell_println!("Usage: dyndns disable <id>");
+                    set_exit(1);
                     return;
                 }
             };
@@ -35198,6 +35504,7 @@ fn cmd_dyndns(args: &str) {
         "interval" => {
             if parts.len() < 3 {
                 shell_println!("Usage: dyndns interval <id> <seconds>");
+                set_exit(1);
                 return;
             }
             let id: u64 = match parts.get(1).and_then(|s| s.parse().ok()) {
@@ -35222,6 +35529,7 @@ fn cmd_dyndns(args: &str) {
         "update" => {
             if parts.len() < 3 {
                 shell_println!("Usage: dyndns update <id> <ip>");
+                set_exit(1);
                 return;
             }
             let id: u64 = match parts.get(1).and_then(|s| s.parse().ok()) {
@@ -35271,6 +35579,7 @@ fn cmd_dyndns(args: &str) {
             if parts.len() < 6 {
                 shell_println!("Usage: dyndns addfwd <desc> <ext_port> <int_port> <proto> <ip>");
                 shell_println!("Proto: tcp, udp, both");
+                set_exit(1);
                 return;
             }
             let ext: u16 = match parts.get(2).and_then(|s| s.parse().ok()) {
@@ -35307,6 +35616,7 @@ fn cmd_dyndns(args: &str) {
                 Some(v) => v,
                 None => {
                     shell_println!("Usage: dyndns rmfwd <id>");
+                    set_exit(1);
                     return;
                 }
             };
@@ -35430,6 +35740,7 @@ fn cmd_loginscreen(args: &str) {
                 Some("blur") => loginscreen::BackgroundMode::BlurDesktop,
                 _ => {
                     shell_println!("Usage: loginscreen bg <image|color|gradient|slideshow|blur>");
+                    set_exit(1);
                     return;
                 }
             };
@@ -35456,6 +35767,7 @@ fn cmd_loginscreen(args: &str) {
                 Some("tile") => loginscreen::FitMode::Tile,
                 _ => {
                     shell_println!("Usage: loginscreen fit <fill|fit|stretch|center|tile>");
+                    set_exit(1);
                     return;
                 }
             };
@@ -35467,6 +35779,7 @@ fn cmd_loginscreen(args: &str) {
                 Some(v) => v,
                 None => {
                     shell_println!("Usage: loginscreen blur <0-100>");
+                    set_exit(1);
                     return;
                 }
             };
@@ -35484,6 +35797,7 @@ fn cmd_loginscreen(args: &str) {
                 Some("hidden") | Some("off") => loginscreen::ClockPosition::Hidden,
                 _ => {
                     shell_println!("Usage: loginscreen clock <tl|tc|tr|bl|bc|br|hidden>");
+                    set_exit(1);
                     return;
                 }
             };
@@ -35498,6 +35812,7 @@ fn cmd_loginscreen(args: &str) {
                 Some("hidden") | Some("off") => loginscreen::UserListMode::Hidden,
                 _ => {
                     shell_println!("Usage: loginscreen userlist <all|recent|text|hidden>");
+                    set_exit(1);
                     return;
                 }
             };
@@ -35509,6 +35824,7 @@ fn cmd_loginscreen(args: &str) {
                 Some(v) => v,
                 None => {
                     shell_println!("Usage: loginscreen timeout <seconds>");
+                    set_exit(1);
                     return;
                 }
             };
@@ -35518,6 +35834,7 @@ fn cmd_loginscreen(args: &str) {
         "message" | "msg" => {
             if parts.len() < 2 {
                 shell_println!("Usage: loginscreen message <text...>");
+                set_exit(1);
                 return;
             }
             let msg = parts[1..].join(" ");
@@ -36288,6 +36605,7 @@ fn cmd_wakesensor(args: &str) {
                         "revoke" | "deny" | "no" => wakesensor::revoke_consent(sensor),
                         _ => {
                             shell_println!("Usage: grant or revoke");
+                            set_exit(1);
                             return;
                         }
                     };
@@ -37558,6 +37876,7 @@ fn cmd_focusassist(args: &str) {
             let mode_str = parts.get(2).copied().unwrap_or("priority");
             if name.is_empty() {
                 shell_println!("Usage: focusassist create <name> [priority|alarms|total]");
+                set_exit(1);
                 return;
             }
             let mode = match mode_str {
@@ -37581,6 +37900,7 @@ fn cmd_focusassist(args: &str) {
                 .unwrap_or(0);
             if id == 0 {
                 shell_println!("Usage: focusassist remove <profile_id>");
+                set_exit(1);
                 return;
             }
             match focusassist::remove_profile(id) {
@@ -37596,6 +37916,7 @@ fn cmd_focusassist(args: &str) {
             let mode_str = parts.get(2).copied().unwrap_or("");
             if id == 0 || mode_str.is_empty() {
                 shell_println!("Usage: focusassist mode <profile_id> <priority|alarms|total>");
+                set_exit(1);
                 return;
             }
             let mode = match mode_str {
@@ -37620,6 +37941,7 @@ fn cmd_focusassist(args: &str) {
             let app_id = parts.get(2).copied().unwrap_or("");
             if id == 0 || app_id.is_empty() {
                 shell_println!("Usage: focusassist addapp <profile_id> <app_id>");
+                set_exit(1);
                 return;
             }
             match focusassist::add_priority_app(id, app_id) {
@@ -37635,6 +37957,7 @@ fn cmd_focusassist(args: &str) {
             let app_id = parts.get(2).copied().unwrap_or("");
             if id == 0 || app_id.is_empty() {
                 shell_println!("Usage: focusassist rmapp <profile_id> <app_id>");
+                set_exit(1);
                 return;
             }
             match focusassist::remove_priority_app(id, app_id) {
@@ -37649,6 +37972,7 @@ fn cmd_focusassist(args: &str) {
                 .unwrap_or(0);
             if id == 0 {
                 shell_println!("Usage: focusassist apps <profile_id>");
+                set_exit(1);
                 return;
             }
             match focusassist::priority_apps(id) {
@@ -37672,6 +37996,7 @@ fn cmd_focusassist(args: &str) {
                 .unwrap_or(0);
             if id == 0 {
                 shell_println!("Usage: focusassist reply <profile_id> [message]");
+                set_exit(1);
                 return;
             }
             let msg = if parts.len() > 2 {
@@ -37801,6 +38126,7 @@ fn cmd_focusassist(args: &str) {
                 .unwrap_or(0);
             if id == 0 {
                 shell_println!("Usage: focusassist rmsched <schedule_id>");
+                set_exit(1);
                 return;
             }
             match focusassist::remove_schedule(id) {
@@ -37992,6 +38318,7 @@ fn cmd_storageclean(args: &str) {
                 shell_println!("Usage: sclean rm <path>...");
                 shell_println!("Deletes specific files from the last scan (the only way to");
                 shell_println!("reclaim space in an advisory category).");
+                set_exit(1);
                 return;
             }
             match storageclean::clean_paths(&paths) {
@@ -38592,6 +38919,7 @@ fn cmd_nightlight(args: &str) {
                     "off" | "false" | "no" | "keep" => false,
                     _ => {
                         shell_println!("Usage: nlight battery <on|off>");
+                        set_exit(1);
                         return;
                     }
                 };
@@ -42282,6 +42610,7 @@ fn cmd_parental(args: &str) {
         "create" => {
             if parts.len() < 3 {
                 shell_println!("Usage: parental create <uid> <name>");
+                set_exit(1);
                 return;
             }
             let uid: u32 = match parts[1].parse() {
@@ -42300,6 +42629,7 @@ fn cmd_parental(args: &str) {
         "remove" => {
             if parts.len() < 2 {
                 shell_println!("Usage: parental remove <uid>");
+                set_exit(1);
                 return;
             }
             let uid: u32 = match parts[1].parse() {
@@ -42317,6 +42647,7 @@ fn cmd_parental(args: &str) {
         "enable" | "disable" => {
             if parts.len() < 2 {
                 shell_println!("Usage: parental {} <uid>", sub);
+                set_exit(1);
                 return;
             }
             let uid: u32 = match parts[1].parse() {
@@ -42339,6 +42670,7 @@ fn cmd_parental(args: &str) {
         "filter" => {
             if parts.len() < 3 {
                 shell_println!("Usage: parental filter <uid> <none|light|moderate|strict>");
+                set_exit(1);
                 return;
             }
             let uid: u32 = match parts[1].parse() {
@@ -42366,6 +42698,7 @@ fn cmd_parental(args: &str) {
         "blocksite" => {
             if parts.len() < 3 {
                 shell_println!("Usage: parental blocksite <uid> <pattern>");
+                set_exit(1);
                 return;
             }
             let uid: u32 = match parts[1].parse() {
@@ -42384,6 +42717,7 @@ fn cmd_parental(args: &str) {
         "unblocksite" => {
             if parts.len() < 3 {
                 shell_println!("Usage: parental unblocksite <uid> <pattern>");
+                set_exit(1);
                 return;
             }
             let uid: u32 = match parts[1].parse() {
@@ -42401,6 +42735,7 @@ fn cmd_parental(args: &str) {
         "appmode" => {
             if parts.len() < 3 {
                 shell_println!("Usage: parental appmode <uid> <allowall|allowlist|blockall>");
+                set_exit(1);
                 return;
             }
             let uid: u32 = match parts[1].parse() {
@@ -42427,6 +42762,7 @@ fn cmd_parental(args: &str) {
         "blockapp" => {
             if parts.len() < 3 {
                 shell_println!("Usage: parental blockapp <uid> <app_id>");
+                set_exit(1);
                 return;
             }
             let uid: u32 = match parts[1].parse() {
@@ -42444,6 +42780,7 @@ fn cmd_parental(args: &str) {
         "allowapp" => {
             if parts.len() < 3 {
                 shell_println!("Usage: parental allowapp <uid> <app_id>");
+                set_exit(1);
                 return;
             }
             let uid: u32 = match parts[1].parse() {
@@ -42461,6 +42798,7 @@ fn cmd_parental(args: &str) {
         "limit" => {
             if parts.len() < 3 {
                 shell_println!("Usage: parental limit <uid> <minutes>");
+                set_exit(1);
                 return;
             }
             let uid: u32 = match parts[1].parse() {
@@ -42543,6 +42881,7 @@ fn cmd_parental(args: &str) {
         "check" => {
             if parts.len() < 3 {
                 shell_println!("Usage: parental check <app|web|time> <uid> <value>");
+                set_exit(1);
                 return;
             }
             let check_type = parts[1];
@@ -42557,6 +42896,7 @@ fn cmd_parental(args: &str) {
                 "app" => {
                     if parts.len() < 4 {
                         shell_println!("Usage: parental check app <uid> <app_id>");
+                        set_exit(1);
                         return;
                     }
                     let ok = parental::check_app_allowed(uid, parts[3]);
@@ -42570,6 +42910,7 @@ fn cmd_parental(args: &str) {
                 "web" => {
                     if parts.len() < 4 {
                         shell_println!("Usage: parental check web <uid> <url>");
+                        set_exit(1);
                         return;
                     }
                     let ok = parental::check_web_allowed(uid, parts[3]);
@@ -42583,6 +42924,7 @@ fn cmd_parental(args: &str) {
                 "time" => {
                     if parts.len() < 5 {
                         shell_println!("Usage: parental check time <uid> <hour> <day>");
+                        set_exit(1);
                         return;
                     }
                     let hour: u8 = match parts[3].parse() {
@@ -42614,6 +42956,7 @@ fn cmd_parental(args: &str) {
         "profile" => {
             if parts.len() < 2 {
                 shell_println!("Usage: parental profile <uid>");
+                set_exit(1);
                 return;
             }
             let uid: u32 = match parts[1].parse() {
@@ -42769,6 +43112,7 @@ fn cmd_audiodevice(args: &str) {
                 shell_println!("Usage: audiodevice add <name> <type> <dir> [driver]");
                 shell_println!("  types: speakers|mic|headphones|usb|bluetooth|hdmi|virtual|dac");
                 shell_println!("  dirs:  output|input|duplex");
+                set_exit(1);
                 return;
             }
             let name = parts[1];
@@ -42804,6 +43148,7 @@ fn cmd_audiodevice(args: &str) {
         "remove" => {
             if parts.len() < 2 {
                 shell_println!("Usage: audiodevice remove <id>");
+                set_exit(1);
                 return;
             }
             let id: u32 = match parts[1].parse() {
@@ -42821,6 +43166,7 @@ fn cmd_audiodevice(args: &str) {
         "default" => {
             if parts.len() < 3 {
                 shell_println!("Usage: audiodevice default <output|input> <id>");
+                set_exit(1);
                 return;
             }
             let id: u32 = match parts[2].parse() {
@@ -42845,6 +43191,7 @@ fn cmd_audiodevice(args: &str) {
         "volume" | "vol" => {
             if parts.len() < 3 {
                 shell_println!("Usage: audiodevice volume <id> <0-100>");
+                set_exit(1);
                 return;
             }
             let id: u32 = match parts[1].parse() {
@@ -42869,6 +43216,7 @@ fn cmd_audiodevice(args: &str) {
         "mute" | "unmute" => {
             if parts.len() < 2 {
                 shell_println!("Usage: audiodevice {} <id>", sub);
+                set_exit(1);
                 return;
             }
             let id: u32 = match parts[1].parse() {
@@ -42887,6 +43235,7 @@ fn cmd_audiodevice(args: &str) {
         "rate" => {
             if parts.len() < 3 {
                 shell_println!("Usage: audiodevice rate <id> <44100|48000|88200|96000|192000>");
+                set_exit(1);
                 return;
             }
             let id: u32 = match parts[1].parse() {
@@ -42918,6 +43267,7 @@ fn cmd_audiodevice(args: &str) {
         "autoswitch" => {
             if parts.len() < 2 {
                 shell_println!("Usage: audiodevice autoswitch <on|off>");
+                set_exit(1);
                 return;
             }
             let on = match parts[1] {
@@ -42939,6 +43289,7 @@ fn cmd_audiodevice(args: &str) {
         "info" => {
             if parts.len() < 2 {
                 shell_println!("Usage: audiodevice info <id>");
+                set_exit(1);
                 return;
             }
             let id: u32 = match parts[1].parse() {
@@ -43047,6 +43398,7 @@ fn cmd_sessionmgr(args: &str) {
         "login" => {
             if parts.len() < 3 {
                 shell_println!("Usage: session login <uid> <username> [type]");
+                set_exit(1);
                 return;
             }
             let uid: u32 = match parts[1].parse() {
@@ -43075,6 +43427,7 @@ fn cmd_sessionmgr(args: &str) {
         "logout" => {
             if parts.len() < 2 {
                 shell_println!("Usage: session logout <id>");
+                set_exit(1);
                 return;
             }
             let id: u32 = match parts[1].parse() {
@@ -43092,6 +43445,7 @@ fn cmd_sessionmgr(args: &str) {
         "switch" => {
             if parts.len() < 2 {
                 shell_println!("Usage: session switch <id>");
+                set_exit(1);
                 return;
             }
             let id: u32 = match parts[1].parse() {
@@ -43113,6 +43467,7 @@ fn cmd_sessionmgr(args: &str) {
         "unlock" => {
             if parts.len() < 2 {
                 shell_println!("Usage: session unlock <id>");
+                set_exit(1);
                 return;
             }
             let id: u32 = match parts[1].parse() {
@@ -43140,6 +43495,7 @@ fn cmd_sessionmgr(args: &str) {
         "timeout" => {
             if parts.len() < 2 {
                 shell_println!("Usage: session timeout <seconds>  (0 = disable)");
+                set_exit(1);
                 return;
             }
             let secs: u32 = match parts[1].parse() {
@@ -43157,6 +43513,7 @@ fn cmd_sessionmgr(args: &str) {
         "info" => {
             if parts.len() < 2 {
                 shell_println!("Usage: session info <id>");
+                set_exit(1);
                 return;
             }
             let id: u32 = match parts[1].parse() {
@@ -43255,6 +43612,7 @@ fn cmd_crashreport(args: &str) {
         "detail" => {
             if parts.len() < 2 {
                 shell_println!("Usage: crash detail <id>");
+                set_exit(1);
                 return;
             }
             let id: u32 = match parts[1].parse() {
@@ -43296,6 +43654,7 @@ fn cmd_crashreport(args: &str) {
         "delete" => {
             if parts.len() < 2 {
                 shell_println!("Usage: crash delete <id>");
+                set_exit(1);
                 return;
             }
             let id: u32 = match parts[1].parse() {
@@ -43317,6 +43676,7 @@ fn cmd_crashreport(args: &str) {
         "describe" => {
             if parts.len() < 3 {
                 shell_println!("Usage: crash describe <id> <text...>");
+                set_exit(1);
                 return;
             }
             let id: u32 = match parts[1].parse() {
@@ -43345,6 +43705,7 @@ fn cmd_crashreport(args: &str) {
         "autosubmit" => {
             if parts.len() < 2 {
                 shell_println!("Usage: crash autosubmit <on|off>");
+                set_exit(1);
                 return;
             }
             let on = matches!(parts[1], "on" | "true" | "yes" | "1");
@@ -43445,6 +43806,7 @@ fn cmd_netproxy(args: &str) {
         "mode" => {
             if parts.len() < 2 {
                 shell_println!("Usage: proxy mode <none|manual|auto|detect>");
+                set_exit(1);
                 return;
             }
             let mode = match parts[1] {
@@ -43465,6 +43827,7 @@ fn cmd_netproxy(args: &str) {
         "set" => {
             if parts.len() < 4 {
                 shell_println!("Usage: proxy set <http|https|socks4|socks5|ftp> <host> <port>");
+                set_exit(1);
                 return;
             }
             let proto = match parts[1] {
@@ -43494,6 +43857,7 @@ fn cmd_netproxy(args: &str) {
         "remove" => {
             if parts.len() < 2 {
                 shell_println!("Usage: proxy remove <http|https|socks4|socks5|ftp>");
+                set_exit(1);
                 return;
             }
             let proto = match parts[1] {
@@ -43555,6 +43919,7 @@ fn cmd_netproxy(args: &str) {
         "resolve" => {
             if parts.len() < 2 {
                 shell_println!("Usage: proxy resolve <host> [http|https]");
+                set_exit(1);
                 return;
             }
             let proto = if parts.len() > 2 {
@@ -43635,6 +44000,7 @@ fn cmd_fileversion(args: &str) {
         "list" => {
             if parts.len() < 2 {
                 shell_println!("Usage: fver list <path>");
+                set_exit(1);
                 return;
             }
             let versions = fileversion::list_versions(parts[1]);
@@ -43650,6 +44016,7 @@ fn cmd_fileversion(args: &str) {
         "detail" => {
             if parts.len() < 2 {
                 shell_println!("Usage: fver detail <version_id>");
+                set_exit(1);
                 return;
             }
             let id: u64 = match parts[1].parse() {
@@ -43676,6 +44043,7 @@ fn cmd_fileversion(args: &str) {
         "comment" => {
             if parts.len() < 3 {
                 shell_println!("Usage: fver comment <version_id> <text...>");
+                set_exit(1);
                 return;
             }
             let id: u64 = match parts[1].parse() {
@@ -43694,6 +44062,7 @@ fn cmd_fileversion(args: &str) {
         "restore" => {
             if parts.len() < 2 {
                 shell_println!("Usage: fver restore <version_id>");
+                set_exit(1);
                 return;
             }
             let id: u64 = match parts[1].parse() {
@@ -43716,6 +44085,7 @@ fn cmd_fileversion(args: &str) {
         "delete" => {
             if parts.len() < 2 {
                 shell_println!("Usage: fver delete <version_id>");
+                set_exit(1);
                 return;
             }
             let id: u64 = match parts[1].parse() {
@@ -43733,6 +44103,7 @@ fn cmd_fileversion(args: &str) {
         "purge" => {
             if parts.len() < 2 {
                 shell_println!("Usage: fver purge <path>");
+                set_exit(1);
                 return;
             }
             match fileversion::purge_file_versions(parts[1]) {
@@ -43864,6 +44235,7 @@ fn cmd_devicemgr(args: &str) {
         "info" => {
             if parts.len() < 2 {
                 shell_println!("Usage: devmgr info <id>");
+                set_exit(1);
                 return;
             }
             let id: u32 = match parts[1].parse() {
@@ -43900,6 +44272,7 @@ fn cmd_devicemgr(args: &str) {
                 shell_println!("Usage: devmgr add <name> <bus> <class> [vendor] [address]");
                 shell_println!("  bus:   pci|usb|acpi|platform|i2c|spi|bluetooth|virtual");
                 shell_println!("  class: display|audio|network|storage|input|usb|bt|other");
+                set_exit(1);
                 return;
             }
             let name = parts[1];
@@ -43938,6 +44311,7 @@ fn cmd_devicemgr(args: &str) {
         "remove" => {
             if parts.len() < 2 {
                 shell_println!("Usage: devmgr remove <id>");
+                set_exit(1);
                 return;
             }
             let id: u32 = match parts[1].parse() {
@@ -43955,6 +44329,7 @@ fn cmd_devicemgr(args: &str) {
         "bind" => {
             if parts.len() < 3 {
                 shell_println!("Usage: devmgr bind <id> <driver> [version]");
+                set_exit(1);
                 return;
             }
             let id: u32 = match parts[1].parse() {
@@ -43973,6 +44348,7 @@ fn cmd_devicemgr(args: &str) {
         "unbind" => {
             if parts.len() < 2 {
                 shell_println!("Usage: devmgr unbind <id>");
+                set_exit(1);
                 return;
             }
             let id: u32 = match parts[1].parse() {
@@ -43990,6 +44366,7 @@ fn cmd_devicemgr(args: &str) {
         "enable" | "disable" => {
             if parts.len() < 2 {
                 shell_println!("Usage: devmgr {} <id>", sub);
+                set_exit(1);
                 return;
             }
             let id: u32 = match parts[1].parse() {
@@ -44094,6 +44471,7 @@ fn cmd_location(args: &str) {
             if parts.len() < 4 {
                 shell_println!("Usage: loc update <lat_ud> <lon_ud> <accuracy_m> [source]");
                 shell_println!("  lat/lon in microdegrees (e.g., 47606209 for 47.606209°)");
+                set_exit(1);
                 return;
             }
             let lat: i64 = match parts[1].parse() {
@@ -44277,6 +44655,7 @@ fn cmd_diskencrypt(args: &str) {
         "info" => {
             if parts.len() < 2 {
                 shell_println!("Usage: dencrypt info <id>");
+                set_exit(1);
                 return;
             }
             let id: u32 = match parts[1].parse() {
@@ -44323,6 +44702,7 @@ fn cmd_diskencrypt(args: &str) {
         "unlock" => {
             if parts.len() < 3 {
                 shell_println!("Usage: dencrypt unlock <id> <passphrase>");
+                set_exit(1);
                 return;
             }
             let id: u32 = match parts[1].parse() {
@@ -44340,6 +44720,7 @@ fn cmd_diskencrypt(args: &str) {
         "lock" => {
             if parts.len() < 2 {
                 shell_println!("Usage: dencrypt lock <id>");
+                set_exit(1);
                 return;
             }
             let id: u32 = match parts[1].parse() {
@@ -44358,6 +44739,7 @@ fn cmd_diskencrypt(args: &str) {
             if parts.len() < 2 {
                 shell_println!("Usage: dencrypt encrypt <id> [algorithm]");
                 shell_println!("  algorithms: aes256|aes128|serpent|twofish|chacha20");
+                set_exit(1);
                 return;
             }
             let id: u32 = match parts[1].parse() {
@@ -44392,6 +44774,7 @@ fn cmd_diskencrypt(args: &str) {
         "recovery" => {
             if parts.len() < 2 {
                 shell_println!("Usage: dencrypt recovery <id>");
+                set_exit(1);
                 return;
             }
             let id: u32 = match parts[1].parse() {
@@ -44413,6 +44796,7 @@ fn cmd_diskencrypt(args: &str) {
         "addslot" => {
             if parts.len() < 3 {
                 shell_println!("Usage: dencrypt addslot <id> <label> [kdf]");
+                set_exit(1);
                 return;
             }
             let id: u32 = match parts[1].parse() {
@@ -44515,6 +44899,7 @@ fn cmd_pkgmgr(args: &str) {
         "install" => {
             if parts.len() < 2 {
                 shell_println!("Usage: pkg install <name> [version] [description]");
+                set_exit(1);
                 return;
             }
             let name = parts[1];
@@ -44532,6 +44917,7 @@ fn cmd_pkgmgr(args: &str) {
         "remove" => {
             if parts.len() < 2 {
                 shell_println!("Usage: pkg remove <name>");
+                set_exit(1);
                 return;
             }
             match pkgmgr::remove(parts[1]) {
@@ -44542,6 +44928,7 @@ fn cmd_pkgmgr(args: &str) {
         "info" => {
             if parts.len() < 2 {
                 shell_println!("Usage: pkg info <name>");
+                set_exit(1);
                 return;
             }
             match pkgmgr::get_package(parts[1]) {
@@ -44561,6 +44948,7 @@ fn cmd_pkgmgr(args: &str) {
         "search" => {
             if parts.len() < 2 {
                 shell_println!("Usage: pkg search <query>");
+                set_exit(1);
                 return;
             }
             let results = pkgmgr::search(parts[1]);
@@ -44615,6 +45003,7 @@ fn cmd_pkgmgr(args: &str) {
         "addrepo" => {
             if parts.len() < 3 {
                 shell_println!("Usage: pkg addrepo <name> <url>");
+                set_exit(1);
                 return;
             }
             match pkgmgr::add_repo(parts[1], parts[2]) {
@@ -44700,6 +45089,7 @@ fn cmd_remotedesktop(args: &str) {
         "port" => {
             if parts.len() < 2 {
                 shell_println!("Usage: rdp port <port>");
+                set_exit(1);
                 return;
             }
             let port: u16 = match parts[1].parse() {
@@ -44717,6 +45107,7 @@ fn cmd_remotedesktop(args: &str) {
         "connect" => {
             if parts.len() < 2 {
                 shell_println!("Usage: rdp connect <host> [port] [rdp|vnc]");
+                set_exit(1);
                 return;
             }
             let host = parts[1];
@@ -44741,6 +45132,7 @@ fn cmd_remotedesktop(args: &str) {
         "disconnect" => {
             if parts.len() < 2 {
                 shell_println!("Usage: rdp disconnect <id>");
+                set_exit(1);
                 return;
             }
             let id: u32 = match parts[1].parse() {
@@ -44758,6 +45150,7 @@ fn cmd_remotedesktop(args: &str) {
         "quality" => {
             if parts.len() < 2 {
                 shell_println!("Usage: rdp quality <low|medium|high|adaptive>");
+                set_exit(1);
                 return;
             }
             let q = match parts[1] {
@@ -44845,6 +45238,7 @@ fn cmd_restorepoint(args: &str) {
         "create" => {
             if parts.len() < 2 {
                 shell_println!("Usage: rpoint create <description> [type]");
+                set_exit(1);
                 return;
             }
             let desc = parts[1..].join(" ");
@@ -44857,6 +45251,7 @@ fn cmd_restorepoint(args: &str) {
         "delete" => {
             if parts.len() < 2 {
                 shell_println!("Usage: rpoint delete <id>");
+                set_exit(1);
                 return;
             }
             let id: u32 = match parts[1].parse() {
@@ -44874,6 +45269,7 @@ fn cmd_restorepoint(args: &str) {
         "restore" => {
             if parts.len() < 2 {
                 shell_println!("Usage: rpoint restore <id>");
+                set_exit(1);
                 return;
             }
             let id: u32 = match parts[1].parse() {
@@ -44891,6 +45287,7 @@ fn cmd_restorepoint(args: &str) {
         "info" => {
             if parts.len() < 2 {
                 shell_println!("Usage: rpoint info <id>");
+                set_exit(1);
                 return;
             }
             let id: u32 = match parts[1].parse() {
@@ -44917,6 +45314,7 @@ fn cmd_restorepoint(args: &str) {
         "auto" => {
             if parts.len() < 2 {
                 shell_println!("Usage: rpoint auto <on|off>");
+                set_exit(1);
                 return;
             }
             let on = matches!(parts[1], "on" | "true" | "yes");
@@ -45006,6 +45404,7 @@ fn cmd_battery(args: &str) {
         "info" => {
             if parts.len() < 2 {
                 shell_println!("Usage: batt info <id>");
+                set_exit(1);
                 return;
             }
             let id: u32 = match parts[1].parse() {
@@ -45037,6 +45436,7 @@ fn cmd_battery(args: &str) {
         "ac" => {
             if parts.len() < 2 {
                 shell_println!("Usage: batt ac <on|off>");
+                set_exit(1);
                 return;
             }
             let on = matches!(parts[1], "on" | "true" | "connected");
@@ -45102,6 +45502,7 @@ fn cmd_battery(args: &str) {
         "limit" => {
             if parts.len() < 2 {
                 shell_println!("Usage: batt limit <on|off> [pct]");
+                set_exit(1);
                 return;
             }
             let on = matches!(parts[1], "on" | "true" | "yes");
@@ -45201,6 +45602,7 @@ fn cmd_dictation(args: &str) {
         "lang" => {
             if parts.len() < 2 {
                 shell_println!("Usage: dict lang <en-us|en-gb|de|fr|es|ja|ko|zh|pt|it>");
+                set_exit(1);
                 return;
             }
             let lang = match parts[1] {
@@ -45351,6 +45753,7 @@ fn cmd_screenreader(args: &str) {
         "rate" => {
             if parts.len() < 2 {
                 shell_println!("Usage: sr rate <very-slow|slow|normal|fast|very-fast>");
+                set_exit(1);
                 return;
             }
             let rate = match parts[1] {
@@ -45393,6 +45796,7 @@ fn cmd_screenreader(args: &str) {
         "verbosity" | "verb" => {
             if parts.len() < 2 {
                 shell_println!("Usage: sr verbosity <low|medium|high>");
+                set_exit(1);
                 return;
             }
             let v = match parts[1] {
@@ -45412,6 +45816,7 @@ fn cmd_screenreader(args: &str) {
         "announce" => {
             if parts.len() < 2 {
                 shell_println!("Usage: sr announce <text>");
+                set_exit(1);
                 return;
             }
             let text = parts[1..].join(" ");
@@ -45559,6 +45964,7 @@ fn cmd_langpack(args: &str) {
         "remove" | "uninstall" => {
             if parts.len() < 2 {
                 shell_println!("Usage: lpack remove <code>");
+                set_exit(1);
                 return;
             }
             match langpack::uninstall(parts[1]) {
@@ -45569,6 +45975,7 @@ fn cmd_langpack(args: &str) {
         "set" | "use" => {
             if parts.len() < 2 {
                 shell_println!("Usage: lpack set <code>");
+                set_exit(1);
                 return;
             }
             match langpack::set_system_language(parts[1]) {
@@ -45579,6 +45986,7 @@ fn cmd_langpack(args: &str) {
         "translate" | "tr" => {
             if parts.len() < 2 {
                 shell_println!("Usage: lpack translate <key>");
+                set_exit(1);
                 return;
             }
             let result = langpack::translate(parts[1]);
@@ -45587,6 +45995,7 @@ fn cmd_langpack(args: &str) {
         "addstr" => {
             if parts.len() < 3 {
                 shell_println!("Usage: lpack addstr <key> <value...>");
+                set_exit(1);
                 return;
             }
             let value = parts[2..].join(" ");
@@ -45598,6 +46007,7 @@ fn cmd_langpack(args: &str) {
         "info" => {
             if parts.len() < 2 {
                 shell_println!("Usage: lpack info <code>");
+                set_exit(1);
                 return;
             }
             match langpack::get_pack(parts[1]) {
@@ -45678,6 +46088,7 @@ fn cmd_spellcheck(args: &str) {
         "check" => {
             if parts.len() < 2 {
                 shell_println!("Usage: spell check <word>");
+                set_exit(1);
                 return;
             }
             let result = spellcheck::check_word(parts[1]);
@@ -45692,6 +46103,7 @@ fn cmd_spellcheck(args: &str) {
         "add" => {
             if parts.len() < 2 {
                 shell_println!("Usage: spell add <word>");
+                set_exit(1);
                 return;
             }
             match spellcheck::add_personal(parts[1]) {
@@ -45702,6 +46114,7 @@ fn cmd_spellcheck(args: &str) {
         "remove" => {
             if parts.len() < 2 {
                 shell_println!("Usage: spell remove <word>");
+                set_exit(1);
                 return;
             }
             match spellcheck::remove_personal(parts[1]) {
@@ -45712,6 +46125,7 @@ fn cmd_spellcheck(args: &str) {
         "ignore" => {
             if parts.len() < 2 {
                 shell_println!("Usage: spell ignore <word>");
+                set_exit(1);
                 return;
             }
             match spellcheck::ignore_word(parts[1]) {
@@ -45960,6 +46374,7 @@ fn cmd_disksmart(args: &str) {
         "info" => {
             if parts.len() < 2 {
                 shell_println!("Usage: smart info <device>");
+                set_exit(1);
                 return;
             }
             match disksmart::get_drive(parts[1]) {
@@ -46107,6 +46522,7 @@ fn cmd_magnifier(args: &str) {
         "mode" => {
             if parts.len() < 2 {
                 shell_println!("Usage: mag mode <fullscreen|lens|docked>");
+                set_exit(1);
                 return;
             }
             let mode = match parts[1] {
@@ -46225,6 +46641,7 @@ fn cmd_cloudsync(args: &str) {
             if parts.len() < 5 {
                 shell_println!("Usage: csync add <provider> <account> <local-path> <remote-path>");
                 shell_println!("  Providers: webdav, nextcloud, dropbox, gdrive, onedrive, s3");
+                set_exit(1);
                 return;
             }
             let provider = match parts[1] {
@@ -46247,6 +46664,7 @@ fn cmd_cloudsync(args: &str) {
         "remove" => {
             if parts.len() < 2 {
                 shell_println!("Usage: csync remove <id>");
+                set_exit(1);
                 return;
             }
             let id: u32 = match parts[1].parse() {
@@ -46489,6 +46907,7 @@ fn cmd_soundevents(args: &str) {
         "volume" | "vol" => {
             if parts.len() < 2 {
                 shell_println!("Usage: sevents volume <0-100>");
+                set_exit(1);
                 return;
             }
             let vol: u32 = match parts[1].parse() {
@@ -46585,6 +47004,7 @@ fn cmd_usbmgr(args: &str) {
         "info" => {
             if parts.len() < 3 {
                 shell_println!("Usage: usb info <bus> <port>");
+                set_exit(1);
                 return;
             }
             let bus: u8 = match parts[1].parse() {
@@ -46623,6 +47043,7 @@ fn cmd_usbmgr(args: &str) {
         "eject" => {
             if parts.len() < 3 {
                 shell_println!("Usage: usb eject <bus> <port>");
+                set_exit(1);
                 return;
             }
             let bus: u8 = match parts[1].parse() {
@@ -46717,6 +47138,7 @@ fn cmd_cliphistory(args: &str) {
         "paste" => {
             if parts.len() < 2 {
                 shell_println!("Usage: cliphist paste <id>");
+                set_exit(1);
                 return;
             }
             let id: u64 = match parts[1].parse() {
@@ -46734,6 +47156,7 @@ fn cmd_cliphistory(args: &str) {
         "pin" => {
             if parts.len() < 2 {
                 shell_println!("Usage: cliphist pin <id>");
+                set_exit(1);
                 return;
             }
             let id: u64 = match parts[1].parse() {
@@ -46751,6 +47174,7 @@ fn cmd_cliphistory(args: &str) {
         "unpin" => {
             if parts.len() < 2 {
                 shell_println!("Usage: cliphist unpin <id>");
+                set_exit(1);
                 return;
             }
             let id: u64 = match parts[1].parse() {
@@ -46768,6 +47192,7 @@ fn cmd_cliphistory(args: &str) {
         "delete" => {
             if parts.len() < 2 {
                 shell_println!("Usage: cliphist delete <id>");
+                set_exit(1);
                 return;
             }
             let id: u64 = match parts[1].parse() {
@@ -46785,6 +47210,7 @@ fn cmd_cliphistory(args: &str) {
         "search" => {
             if parts.len() < 2 {
                 shell_println!("Usage: cliphist search <query>");
+                set_exit(1);
                 return;
             }
             let query = parts[1..].join(" ");
@@ -46897,6 +47323,7 @@ fn cmd_displaycolor(args: &str) {
         "assign" => {
             if parts.len() < 3 {
                 shell_println!("Usage: dcolor assign <display-id> <profile-id>");
+                set_exit(1);
                 return;
             }
             let did: u32 = match parts[1].parse() {
@@ -46921,6 +47348,7 @@ fn cmd_displaycolor(args: &str) {
         "calibrate" => {
             if parts.len() < 2 {
                 shell_println!("Usage: dcolor calibrate <display-id>");
+                set_exit(1);
                 return;
             }
             let did: u32 = match parts[1].parse() {
@@ -47028,6 +47456,7 @@ fn cmd_syslog(args: &str) {
         "grep" => {
             if parts.len() < 2 {
                 shell_println!("Usage: slog grep <text>");
+                set_exit(1);
                 return;
             }
             let query = parts[1..].join(" ");
@@ -47054,6 +47483,7 @@ fn cmd_syslog(args: &str) {
         "log" => {
             if parts.len() < 3 {
                 shell_println!("Usage: slog log <severity> <message...>");
+                set_exit(1);
                 return;
             }
             let sev = match syslog::Severity::from_str(parts[1]) {
@@ -47166,6 +47596,7 @@ fn cmd_elog(args: &str) {
                 shell_println!("Usage: elog ns <prefix> [count]");
                 shell_println!("  Filter events by namespace prefix.");
                 shell_println!("  Examples: elog ns security, elog ns system.boot 5");
+                set_exit(1);
                 return;
             }
             let prefix = parts[1];
@@ -47185,6 +47616,7 @@ fn cmd_elog(args: &str) {
                 shell_println!("Usage: elog sev <level> [count]");
                 shell_println!("  Show events at or above severity level.");
                 shell_println!("  Levels: debug, info, notice, warning, error, critical");
+                set_exit(1);
                 return;
             }
             let sev = match Severity::from_str_loose(parts[1]) {
@@ -47208,6 +47640,7 @@ fn cmd_elog(args: &str) {
         "pid" => {
             if parts.len() < 2 {
                 shell_println!("Usage: elog pid <pid> [count]");
+                set_exit(1);
                 return;
             }
             let pid: u32 = match parts[1].parse() {
@@ -47227,6 +47660,7 @@ fn cmd_elog(args: &str) {
         "service" | "svc" => {
             if parts.len() < 2 {
                 shell_println!("Usage: elog svc <name> [count]");
+                set_exit(1);
                 return;
             }
             let name = parts[1];
@@ -47241,6 +47675,7 @@ fn cmd_elog(args: &str) {
             if parts.len() < 2 {
                 shell_println!("Usage: elog grep <text> [count]");
                 shell_println!("  Case-insensitive search in event messages.");
+                set_exit(1);
                 return;
             }
             // Join all remaining words as search text (except optional last number).
@@ -47261,6 +47696,7 @@ fn cmd_elog(args: &str) {
             if parts.len() < 4 {
                 shell_println!("Usage: elog emit <namespace> <severity> <message...>");
                 shell_println!("  Example: elog emit system.test info \"Test event message\"");
+                set_exit(1);
                 return;
             }
             let ns = parts[1];
@@ -47287,6 +47723,7 @@ fn cmd_elog(args: &str) {
                 let level = eventlog::serial_echo_level();
                 shell_println!("Serial echo level: {} (and above)", level.as_str());
                 shell_println!("Usage: elog echo <level>  to change");
+                set_exit(1);
                 return;
             }
             match Severity::from_str_loose(parts[1]) {
@@ -49074,6 +49511,7 @@ fn cmd_pciids(args: &str) {
             // Look up a specific vendor:device or class:subclass.
             if parts.len() < 2 {
                 shell_println!("Usage: pciids lookup <vendor:device | class.subclass>");
+                set_exit(1);
                 return;
             }
             let arg = parts.get(1).copied().unwrap_or("");
@@ -49191,6 +49629,7 @@ fn cmd_upnp(args: &str) {
             // upnp add <tcp|udp> <internal_port> [external_port] [lifetime] [description]
             if parts.len() < 3 {
                 shell_println!("Usage: upnp add <tcp|udp> <port> [ext_port] [lifetime] [desc]");
+                set_exit(1);
                 return;
             }
             let proto = match parts.get(1).copied().unwrap_or("") {
@@ -49233,6 +49672,7 @@ fn cmd_upnp(args: &str) {
         "remove" | "rm" => {
             if parts.len() < 3 {
                 shell_println!("Usage: upnp remove <tcp|udp> <port>");
+                set_exit(1);
                 return;
             }
             let proto = match parts.get(1).copied().unwrap_or("") {
@@ -49292,6 +49732,7 @@ fn cmd_httpc(args: &str) {
             let url = parts.get(1).copied().unwrap_or("");
             if url.is_empty() {
                 shell_println!("Usage: httpc get <url>");
+                set_exit(1);
                 return;
             }
             shell_println!("GET {}...", url);
@@ -49326,6 +49767,7 @@ fn cmd_httpc(args: &str) {
             let url = parts.get(1).copied().unwrap_or("");
             if url.is_empty() {
                 shell_println!("Usage: httpc head <url>");
+                set_exit(1);
                 return;
             }
             shell_println!("HEAD {}...", url);
@@ -49346,6 +49788,7 @@ fn cmd_httpc(args: &str) {
             let body_str = parts.get(2..).map(|s| s.join(" ")).unwrap_or_default();
             if url.is_empty() {
                 shell_println!("Usage: httpc post <url> [body]");
+                set_exit(1);
                 return;
             }
             shell_println!("POST {} ({} bytes)...", url, body_str.len());
@@ -49602,6 +50045,7 @@ fn cmd_ws(args: &str) {
             let client_key = parts.get(1).copied().unwrap_or("");
             if client_key.is_empty() {
                 shell_println!("Usage: ws key <Sec-WebSocket-Key>");
+                set_exit(1);
                 return;
             }
             // Expose compute_accept_key for debugging.
@@ -49949,6 +50393,7 @@ fn cmd_ntp(args: &str) {
             let addr = parts.get(1).copied().unwrap_or("");
             if addr.is_empty() {
                 shell_println!("Usage: ntp add <server>");
+                set_exit(1);
                 return;
             }
             if ntp::add_server(addr) {
@@ -49961,6 +50406,7 @@ fn cmd_ntp(args: &str) {
             let addr = parts.get(1).copied().unwrap_or("");
             if addr.is_empty() {
                 shell_println!("Usage: ntp remove <server>");
+                set_exit(1);
                 return;
             }
             if ntp::remove_server(addr) {
@@ -50058,6 +50504,7 @@ fn cmd_mdns(args: &str) {
             let name = parts.get(1).copied().unwrap_or("");
             if name.is_empty() {
                 shell_println!("Usage: mdns resolve <name.local>");
+                set_exit(1);
                 return;
             }
             // Append .local if not present.
@@ -50076,6 +50523,7 @@ fn cmd_mdns(args: &str) {
             let name = parts.get(1).copied().unwrap_or("");
             if name.is_empty() {
                 shell_println!("Usage: mdns resolve6 <name.local>");
+                set_exit(1);
                 return;
             }
             // Append .local if not present.
@@ -50151,6 +50599,7 @@ fn cmd_mdns(args: &str) {
             let port_str = parts.get(3).copied().unwrap_or("0");
             if instance.is_empty() || stype.is_empty() {
                 shell_println!("Usage: mdns register <instance> <type> <port> [txt=val ...]");
+                set_exit(1);
                 return;
             }
             let port: u16 = port_str.parse().unwrap_or(0);
@@ -50170,6 +50619,7 @@ fn cmd_mdns(args: &str) {
             let idx_str = parts.get(1).copied().unwrap_or("");
             if idx_str.is_empty() {
                 shell_println!("Usage: mdns unregister <index>");
+                set_exit(1);
                 return;
             }
             let idx: usize = idx_str.parse().unwrap_or(usize::MAX);
@@ -50325,6 +50775,7 @@ fn cmd_telnetd(args: &str) {
             let idx_str = parts.get(1).copied().unwrap_or("");
             if idx_str.is_empty() {
                 shell_println!("Usage: telnetd kick <session#>");
+                set_exit(1);
                 return;
             }
             let idx: usize = idx_str.parse().unwrap_or(usize::MAX);
@@ -50463,6 +50914,7 @@ fn cmd_tftp(args: &str) {
             let filename = parts.get(2).copied().unwrap_or("");
             if ip_str.is_empty() || filename.is_empty() {
                 shell_println!("Usage: tftp get <server-ip> <filename>");
+                set_exit(1);
                 return;
             }
             let ip = match parse_ipv4(ip_str) {
@@ -50492,6 +50944,7 @@ fn cmd_tftp(args: &str) {
             let filename = parts.get(2).copied().unwrap_or("");
             if ip_str.is_empty() || filename.is_empty() {
                 shell_println!("Usage: tftp put <server-ip> <filename>");
+                set_exit(1);
                 return;
             }
             let ip = match parse_ipv4(ip_str) {
@@ -50526,6 +50979,7 @@ fn cmd_tftp(args: &str) {
             let filename = parts.get(2).copied().unwrap_or("");
             if ip_str.is_empty() || filename.is_empty() {
                 shell_println!("Usage: tftp get6 <server-ipv6> <filename>");
+                set_exit(1);
                 return;
             }
             let ip6 = match Ipv6Addr::parse(ip_str) {
@@ -50555,6 +51009,7 @@ fn cmd_tftp(args: &str) {
             let filename = parts.get(2).copied().unwrap_or("");
             if ip_str.is_empty() || filename.is_empty() {
                 shell_println!("Usage: tftp put6 <server-ipv6> <filename>");
+                set_exit(1);
                 return;
             }
             let ip6 = match Ipv6Addr::parse(ip_str) {
@@ -50667,6 +51122,7 @@ fn cmd_netsyslog(args: &str) {
             let ip_str = parts.get(1).copied().unwrap_or("");
             if ip_str.is_empty() {
                 shell_println!("Usage: syslog forward <ip> [port]");
+                set_exit(1);
                 return;
             }
             if ip_str == "off" || ip_str == "disable" {
@@ -50691,6 +51147,7 @@ fn cmd_netsyslog(args: &str) {
             let ip_str = parts.get(1).copied().unwrap_or("");
             if ip_str.is_empty() {
                 shell_println!("Usage: netsyslog forward6 <ipv6-addr> [port]");
+                set_exit(1);
                 return;
             }
             if ip_str == "off" || ip_str == "disable" {
@@ -50714,6 +51171,7 @@ fn cmd_netsyslog(args: &str) {
             let message = parts.get(1..).map(|p| p.join(" ")).unwrap_or_default();
             if message.is_empty() {
                 shell_println!("Usage: syslog send <message>");
+                set_exit(1);
                 return;
             }
             syslog::forward_kern(syslog::Severity::Info, &message);
@@ -50888,6 +51346,7 @@ fn cmd_pcap(args: &str) {
                         }
                         None => {
                             shell_println!("Usage: pcap start port <N>");
+                            set_exit(1);
                             return;
                         }
                     }
@@ -51745,6 +52204,7 @@ fn cmd_bridge(args: &str) {
         "addbr" | "create" => {
             if parts.len() < 2 {
                 shell_println!("Usage: brctl addbr <name>");
+                set_exit(1);
                 return;
             }
             match crate::net::bridge::create_bridge(parts[1]) {
@@ -51756,6 +52216,7 @@ fn cmd_bridge(args: &str) {
         "delbr" | "delete" => {
             if parts.len() < 2 {
                 shell_println!("Usage: brctl delbr <index>");
+                set_exit(1);
                 return;
             }
             let idx: usize = match parts[1].parse() {
@@ -51774,6 +52235,7 @@ fn cmd_bridge(args: &str) {
         "addif" => {
             if parts.len() < 3 {
                 shell_println!("Usage: brctl addif <bridge_idx> <port_id>");
+                set_exit(1);
                 return;
             }
             let br_idx: usize = match parts[1].parse() {
@@ -51799,6 +52261,7 @@ fn cmd_bridge(args: &str) {
         "delif" => {
             if parts.len() < 3 {
                 shell_println!("Usage: brctl delif <bridge_idx> <port_id>");
+                set_exit(1);
                 return;
             }
             let br_idx: usize = match parts[1].parse() {
@@ -51825,6 +52288,7 @@ fn cmd_bridge(args: &str) {
             if parts.len() < 3 {
                 shell_println!("Usage: brctl addbond <name> <mode>");
                 shell_println!("  Modes: active-backup, round-robin, xor-hash");
+                set_exit(1);
                 return;
             }
             let mode = match parts[2] {
@@ -51845,6 +52309,7 @@ fn cmd_bridge(args: &str) {
         "delbond" => {
             if parts.len() < 2 {
                 shell_println!("Usage: brctl delbond <index>");
+                set_exit(1);
                 return;
             }
             let idx: usize = match parts[1].parse() {
@@ -52040,6 +52505,7 @@ fn cmd_nat(args: &str) {
                 "del" | "rm" => {
                     if parts.len() < 4 {
                         shell_println!("Usage: nat forward del <tcp|udp> <host_port>");
+                        set_exit(1);
                         return;
                     }
                     let proto = match parts.get(2).copied().unwrap_or("tcp") {
@@ -52258,6 +52724,7 @@ fn cmd_qos(args: &str) {
             // qos rule dscp <dscp> <priority>
             if parts.len() < 4 {
                 shell_println!("Usage: qos rule <port|proto|dscp> <value> <priority>");
+                set_exit(1);
                 return;
             }
             let kind = parts[1];
@@ -52321,6 +52788,7 @@ fn cmd_qos(args: &str) {
             // qos limit <priority> <rate_bps> <burst_bytes>
             if parts.len() < 4 {
                 shell_println!("Usage: qos limit <priority> <rate_bps> <burst_bytes>");
+                set_exit(1);
                 return;
             }
             let prio: u8 = match parts[1].parse() {
@@ -52359,6 +52827,7 @@ fn cmd_qos(args: &str) {
         "unlimit" => {
             if parts.len() < 2 {
                 shell_println!("Usage: qos unlimit <priority>");
+                set_exit(1);
                 return;
             }
             let prio: u8 = match parts[1].parse() {
@@ -52477,6 +52946,7 @@ fn cmd_vlan(args: &str) {
             // vlan add <vid> [name]
             if parts.len() < 2 {
                 shell_println!("Usage: vlan add <vid> [name]");
+                set_exit(1);
                 return;
             }
             let vid: u16 = match parts[1].parse() {
@@ -52497,6 +52967,7 @@ fn cmd_vlan(args: &str) {
         "remove" | "del" | "delete" => {
             if parts.len() < 2 {
                 shell_println!("Usage: vlan remove <vid>");
+                set_exit(1);
                 return;
             }
             let vid: u16 = match parts[1].parse() {
@@ -52585,6 +53056,7 @@ fn cmd_smtp(args: &str) {
             // smtp send <server> <from> <to> <subject> [body...]
             if parts.len() < 5 {
                 shell_println!("Usage: smtp send <server> <from> <to> <subject> [body...]");
+                set_exit(1);
                 return;
             }
             let server_str = parts[1];
@@ -52673,6 +53145,7 @@ fn cmd_ftp(args: &str) {
             // ftp connect <host> [user] [pass]
             if parts.len() < 2 {
                 shell_println!("Usage: ftp connect <host> [user] [pass]");
+                set_exit(1);
                 return;
             }
             let host_str = parts[1];
@@ -52709,6 +53182,7 @@ fn cmd_ftp(args: &str) {
             // ftp ls <host> [path] [user] [pass]
             if parts.len() < 2 {
                 shell_println!("Usage: ftp ls <host> [path] [user] [pass]");
+                set_exit(1);
                 return;
             }
             let host_str = parts[1];
@@ -52747,6 +53221,7 @@ fn cmd_ftp(args: &str) {
             // ftp get <host> <file> [user] [pass]
             if parts.len() < 3 {
                 shell_println!("Usage: ftp get <host> <file> [user] [pass]");
+                set_exit(1);
                 return;
             }
             let host_str = parts[1];
@@ -52844,6 +53319,7 @@ fn cmd_snmp(args: &str) {
             // snmp get <host> <oid> [community]
             if parts.len() < 3 {
                 shell_println!("Usage: snmp get <host> <oid> [community]");
+                set_exit(1);
                 return;
             }
             let host_str = parts[1];
@@ -52889,6 +53365,7 @@ fn cmd_snmp(args: &str) {
             // snmp walk <host> <oid> [community]
             if parts.len() < 3 {
                 shell_println!("Usage: snmp walk <host> <oid> [community]");
+                set_exit(1);
                 return;
             }
             let host_str = parts[1];
@@ -52941,6 +53418,7 @@ fn cmd_snmp(args: &str) {
             // snmp sysinfo <host> [community]
             if parts.len() < 2 {
                 shell_println!("Usage: snmp sysinfo <host> [community]");
+                set_exit(1);
                 return;
             }
             let host_str = parts[1];
@@ -52975,6 +53453,7 @@ fn cmd_snmp(args: &str) {
             use crate::net::ipv6::Ipv6Addr;
             if parts.len() < 3 {
                 shell_println!("Usage: snmp get6 <ipv6-host> <oid> [community]");
+                set_exit(1);
                 return;
             }
             let host_str = parts[1];
@@ -53023,6 +53502,7 @@ fn cmd_snmp(args: &str) {
             use crate::net::ipv6::Ipv6Addr;
             if parts.len() < 3 {
                 shell_println!("Usage: snmp walk6 <ipv6-host> <oid> [community]");
+                set_exit(1);
                 return;
             }
             let host_str = parts[1];
@@ -53075,6 +53555,7 @@ fn cmd_snmp(args: &str) {
             use crate::net::ipv6::Ipv6Addr;
             if parts.len() < 2 {
                 shell_println!("Usage: snmp sysinfo6 <ipv6-host> [community]");
+                set_exit(1);
                 return;
             }
             let host_str = parts[1];
@@ -53166,6 +53647,7 @@ fn cmd_iperf(args: &str) {
             // iperf client <host> <port> [duration_polls]
             if parts.len() < 3 {
                 shell_println!("Usage: iperf client <host> <port> [duration]");
+                set_exit(1);
                 return;
             }
             let host_str = parts[1];
@@ -53218,6 +53700,7 @@ fn cmd_iperf(args: &str) {
             // iperf server <port> [max_polls]
             if parts.len() < 2 {
                 shell_println!("Usage: iperf server <port> [max_polls]");
+                set_exit(1);
                 return;
             }
             let port: u16 = match parts[1].parse() {
@@ -53254,6 +53737,7 @@ fn cmd_iperf(args: &str) {
             // iperf udp <host> <port> [count] [size]
             if parts.len() < 3 {
                 shell_println!("Usage: iperf udp <host> <port> [count] [size]");
+                set_exit(1);
                 return;
             }
             let host_str = parts[1];
@@ -53318,6 +53802,7 @@ fn cmd_iperf(args: &str) {
             use crate::net::ipv6::Ipv6Addr;
             if parts.len() < 3 {
                 shell_println!("Usage: iperf udp6 <ipv6-host> <port> [count] [size]");
+                set_exit(1);
                 return;
             }
             let host_str = parts[1];
@@ -53426,6 +53911,7 @@ fn cmd_nc(args: &str) {
             // nc connect <host> <port>
             if parts.len() < 3 {
                 shell_println!("Usage: nc connect <host> <port>");
+                set_exit(1);
                 return;
             }
             let host_str = parts[1];
@@ -53502,6 +53988,7 @@ fn cmd_nc(args: &str) {
             // nc listen <port>
             if parts.len() < 2 {
                 shell_println!("Usage: nc listen <port>");
+                set_exit(1);
                 return;
             }
             let port: u16 = match parts[1].parse() {
@@ -53543,6 +54030,7 @@ fn cmd_nc(args: &str) {
             // nc send <host> <port> <data...>
             if parts.len() < 4 {
                 shell_println!("Usage: nc send <host> <port> <data...>");
+                set_exit(1);
                 return;
             }
             let host_str = parts[1];
@@ -53599,6 +54087,7 @@ fn cmd_nc(args: &str) {
             // nc udp <host> <port> <data...>
             if parts.len() < 4 {
                 shell_println!("Usage: nc udp <host> <port> <data...>");
+                set_exit(1);
                 return;
             }
             let host_str = parts[1];
@@ -53636,6 +54125,7 @@ fn cmd_nc(args: &str) {
             use crate::net::ipv6::Ipv6Addr;
             if parts.len() < 4 {
                 shell_println!("Usage: nc udp6 <ipv6-host> <port> <data...>");
+                set_exit(1);
                 return;
             }
             let host_str = parts[1];
@@ -53673,6 +54163,7 @@ fn cmd_nc(args: &str) {
             // nc udplisten <port> [timeout]
             if parts.len() < 2 {
                 shell_println!("Usage: nc udplisten <port> [timeout]");
+                set_exit(1);
                 return;
             }
             let port: u16 = match parts[1].parse() {
@@ -53717,6 +54208,7 @@ fn cmd_nc(args: &str) {
             // nc scan <host> <start-port> [end-port]
             if parts.len() < 3 {
                 shell_println!("Usage: nc scan <host> <start-port> [end-port]");
+                set_exit(1);
                 return;
             }
             let host_str = parts[1];
@@ -53775,6 +54267,7 @@ fn cmd_nc(args: &str) {
             // nc service <port>
             if parts.len() < 2 {
                 shell_println!("Usage: nc service <port>");
+                set_exit(1);
                 return;
             }
             let port: u16 = match parts[1].parse() {
@@ -53856,6 +54349,7 @@ fn cmd_inputa11y(args: &str) {
         "sticky" => {
             if parts.len() < 2 {
                 shell_println!("Usage: ia11y sticky <on|off>");
+                set_exit(1);
                 return;
             }
             let on = parts[1] == "on" || parts[1] == "true";
@@ -53869,6 +54363,7 @@ fn cmd_inputa11y(args: &str) {
         "filter" => {
             if parts.len() < 2 {
                 shell_println!("Usage: ia11y filter <on|off>");
+                set_exit(1);
                 return;
             }
             let on = parts[1] == "on" || parts[1] == "true";
@@ -53882,6 +54377,7 @@ fn cmd_inputa11y(args: &str) {
         "toggle" => {
             if parts.len() < 2 {
                 shell_println!("Usage: ia11y toggle <on|off>");
+                set_exit(1);
                 return;
             }
             let on = parts[1] == "on" || parts[1] == "true";
@@ -53895,6 +54391,7 @@ fn cmd_inputa11y(args: &str) {
         "mouse" => {
             if parts.len() < 2 {
                 shell_println!("Usage: ia11y mouse <on|off> [speed]");
+                set_exit(1);
                 return;
             }
             let on = parts[1] == "on" || parts[1] == "true";
@@ -53914,6 +54411,7 @@ fn cmd_inputa11y(args: &str) {
         "bounce" => {
             if parts.len() < 2 {
                 shell_println!("Usage: ia11y bounce <on|off>");
+                set_exit(1);
                 return;
             }
             let on = parts[1] == "on" || parts[1] == "true";
@@ -57032,6 +57530,7 @@ fn cmd_speechio(args: &str) {
                 parts[1..].join(" ")
             } else {
                 shell_println!("Usage: speech speak <text>");
+                set_exit(1);
                 return;
             };
             match speechio::speak(&text, None, 100, 100, 80) {
@@ -57593,6 +58092,7 @@ fn cmd_appstore(args: &str) {
                 parts[1..].join(" ")
             } else {
                 shell_println!("Usage: store search <query>");
+                set_exit(1);
                 return;
             };
             let results = appstore::search(&query);
@@ -58818,6 +59318,7 @@ fn cmd_sharesheet(args: &str) {
         "share" => {
             if parts.len() < 3 {
                 shell_println!("Usage: sharesheet share <target_id> <data...>");
+                set_exit(1);
                 return;
             }
             let tid: u32 = match parts.get(1).unwrap_or(&"0").parse() {
@@ -60897,6 +61398,7 @@ fn cmd_mousegestures(args: &str) {
                 .collect();
             if dirs.is_empty() {
                 shell_println!("Usage: mousegestures recognize <dir> [dir...]");
+                set_exit(1);
                 return;
             }
             match mousegestures::recognize(&dirs) {
@@ -61018,6 +61520,7 @@ fn cmd_fontsettings(args: &str) {
                 "bgr" => fontsettings::Antialiasing::SubpixelBgr,
                 _ => {
                     shell_println!("Usage: fontsettings aa <none|grayscale|subpixel|bgr>");
+                    set_exit(1);
                     return;
                 }
             };
@@ -61035,6 +61538,7 @@ fn cmd_fontsettings(args: &str) {
                 "full" => fontsettings::Hinting::Full,
                 _ => {
                     shell_println!("Usage: fontsettings hinting <none|slight|medium|full>");
+                    set_exit(1);
                     return;
                 }
             };
@@ -61047,6 +61551,7 @@ fn cmd_fontsettings(args: &str) {
             let family = parts.get(1..).map(|s| s.join(" ")).unwrap_or_default();
             if family.is_empty() {
                 shell_println!("Usage: fontsettings font <family>");
+                set_exit(1);
                 return;
             }
             match fontsettings::set_default_font(&family) {
@@ -61058,6 +61563,7 @@ fn cmd_fontsettings(args: &str) {
             let family = parts.get(1..).map(|s| s.join(" ")).unwrap_or_default();
             if family.is_empty() {
                 shell_println!("Usage: fontsettings mono <family>");
+                set_exit(1);
                 return;
             }
             match fontsettings::set_monospace_font(&family) {
@@ -61161,6 +61667,7 @@ fn cmd_notifbadge(args: &str) {
             let count = parts.get(2).and_then(|s| s.parse::<u32>().ok());
             if app.is_empty() || count.is_none() {
                 shell_println!("Usage: notifbadge set <app> <count>");
+                set_exit(1);
                 return;
             }
             match notifbadge::set_count(app, count.unwrap_or(0)) {
@@ -61172,6 +61679,7 @@ fn cmd_notifbadge(args: &str) {
             let app = parts.get(1).copied().unwrap_or("");
             if app.is_empty() {
                 shell_println!("Usage: notifbadge inc <app>");
+                set_exit(1);
                 return;
             }
             match notifbadge::increment(app) {
@@ -61184,6 +61692,7 @@ fn cmd_notifbadge(args: &str) {
             let vis = parts.get(2).copied().unwrap_or("true");
             if app.is_empty() {
                 shell_println!("Usage: notifbadge dot <app> [true|false]");
+                set_exit(1);
                 return;
             }
             let v = vis != "false";
@@ -61197,6 +61706,7 @@ fn cmd_notifbadge(args: &str) {
             let pct = parts.get(2).and_then(|s| s.parse::<u32>().ok());
             if app.is_empty() || pct.is_none() {
                 shell_println!("Usage: notifbadge progress <app> <0-100>");
+                set_exit(1);
                 return;
             }
             match notifbadge::set_progress(app, pct.unwrap_or(0)) {
@@ -61224,6 +61734,7 @@ fn cmd_notifbadge(args: &str) {
             let app = parts.get(1).copied().unwrap_or("");
             if app.is_empty() {
                 shell_println!("Usage: notifbadge get <app>");
+                set_exit(1);
                 return;
             }
             match notifbadge::get_badge(app) {
@@ -61304,6 +61815,7 @@ fn cmd_lockwallpaper(args: &str) {
             let path = parts.get(1..).map(|s| s.join(" ")).unwrap_or_default();
             if path.is_empty() {
                 shell_println!("Usage: lockwallpaper image <path>");
+                set_exit(1);
                 return;
             }
             match lockwallpaper::set_image(&path) {
@@ -61339,6 +61851,7 @@ fn cmd_lockwallpaper(args: &str) {
                 .unwrap_or(60);
             if dir.is_empty() {
                 shell_println!("Usage: lockwallpaper slideshow <dir> [interval_secs]");
+                set_exit(1);
                 return;
             }
             match lockwallpaper::set_slideshow_dir(dir, interval) {
@@ -61350,6 +61863,7 @@ fn cmd_lockwallpaper(args: &str) {
             let path = parts.get(1..).map(|s| s.join(" ")).unwrap_or_default();
             if path.is_empty() {
                 shell_println!("Usage: lockwallpaper add <image_path>");
+                set_exit(1);
                 return;
             }
             match lockwallpaper::add_slideshow_image(&path) {
@@ -61372,6 +61886,7 @@ fn cmd_lockwallpaper(args: &str) {
                 "span" => lockwallpaper::FitMode::Span,
                 _ => {
                     shell_println!("Usage: lockwallpaper fit <fill|fit|stretch|tile|center|span>");
+                    set_exit(1);
                     return;
                 }
             };
@@ -61384,6 +61899,7 @@ fn cmd_lockwallpaper(args: &str) {
             let c = parts.get(1).copied().unwrap_or("");
             if c.is_empty() {
                 shell_println!("Usage: lockwallpaper color <#rrggbb>");
+                set_exit(1);
                 return;
             }
             match lockwallpaper::set_solid_color(c) {
@@ -61398,6 +61914,7 @@ fn cmd_lockwallpaper(args: &str) {
                 "off" => (false, false),
                 _ => {
                     shell_println!("Usage: lockwallpaper clock <on|off>");
+                    set_exit(1);
                     return;
                 }
             };
@@ -61510,6 +62027,7 @@ fn cmd_systemsounds(args: &str) {
             };
             if path.is_empty() {
                 shell_println!("Usage: systemsounds set <event> <path>");
+                set_exit(1);
                 return;
             }
             match systemsounds::set_sound(event, &path) {
@@ -61685,6 +62203,7 @@ fn cmd_hotcorners(args: &str) {
                 Some(c) => c,
                 None => {
                     shell_println!("Usage: hotcorners delay <tl|tr|bl|br> <ms>");
+                    set_exit(1);
                     return;
                 }
             };
@@ -61702,6 +62221,7 @@ fn cmd_hotcorners(args: &str) {
                 Some(c) => c,
                 None => {
                     shell_println!("Usage: hotcorners trigger <tl|tr|bl|br>");
+                    set_exit(1);
                     return;
                 }
             };
@@ -61808,6 +62328,7 @@ fn cmd_dynlock(args: &str) {
             let addr = parts.get(2).copied().unwrap_or("");
             if name.is_empty() || addr.is_empty() {
                 shell_println!("Usage: dynlock add <name> <bt_address>");
+                set_exit(1);
                 return;
             }
             match dynlock::add_device(name, addr) {
@@ -61819,6 +62340,7 @@ fn cmd_dynlock(args: &str) {
             let addr = parts.get(1).copied().unwrap_or("");
             if addr.is_empty() {
                 shell_println!("Usage: dynlock remove <bt_address>");
+                set_exit(1);
                 return;
             }
             match dynlock::remove_device(addr) {
@@ -62150,6 +62672,7 @@ fn cmd_haptfeedback(args: &str) {
                 Some(e) => e,
                 None => {
                     shell_println!("Usage: haptfeedback fire <event>");
+                    set_exit(1);
                     return;
                 }
             };
@@ -62423,6 +62946,7 @@ fn cmd_pinnedapps(args: &str) {
             };
             if app.is_empty() {
                 shell_println!("Usage: pinnedapps pin <location> <app> [display_name]");
+                set_exit(1);
                 return;
             }
             let dname = if display.is_empty() { app } else { &display };
@@ -62440,11 +62964,13 @@ fn cmd_pinnedapps(args: &str) {
                 "desktop" | "dt" => pinnedapps::PinLocation::Desktop,
                 _ => {
                     shell_println!("Usage: pinnedapps unpin <location> <app>");
+                    set_exit(1);
                     return;
                 }
             };
             if app.is_empty() {
                 shell_println!("Usage: pinnedapps unpin <location> <app>");
+                set_exit(1);
                 return;
             }
             match pinnedapps::unpin(loc, app) {
@@ -62462,6 +62988,7 @@ fn cmd_pinnedapps(args: &str) {
                 "desktop" | "dt" => pinnedapps::PinLocation::Desktop,
                 _ => {
                     shell_println!("Usage: pinnedapps move <location> <app> <position>");
+                    set_exit(1);
                     return;
                 }
             };
@@ -62493,6 +63020,7 @@ fn cmd_pinnedapps(args: &str) {
             };
             if app.is_empty() {
                 shell_println!("Usage: pinnedapps {} <location> <app> <path>", sub);
+                set_exit(1);
                 return;
             }
             let res = if sub == "icon" {
@@ -62509,6 +63037,7 @@ fn cmd_pinnedapps(args: &str) {
             let app = parts.get(1).copied().unwrap_or("");
             if app.is_empty() {
                 shell_println!("Usage: pinnedapps launch <app>");
+                set_exit(1);
                 return;
             }
             match pinnedapps::record_launch(app) {
@@ -62584,6 +63113,7 @@ fn cmd_inputmethod(args: &str) {
             let lang = parts.get(3).copied().unwrap_or("en");
             if name.is_empty() {
                 shell_println!("Usage: inputmethod add <name> [type] [lang]");
+                set_exit(1);
                 return;
             }
             let etype = match type_str {
@@ -62634,6 +63164,7 @@ fn cmd_inputmethod(args: &str) {
             let text = parts.get(1..).map(|s| s.join(" ")).unwrap_or_default();
             if text.is_empty() {
                 shell_println!("Usage: inputmethod compose <text>");
+                set_exit(1);
                 return;
             }
             match inputmethod::start_composition(&text) {
@@ -62815,6 +63346,7 @@ fn cmd_storagesense(args: &str) {
                 Some(c) => c,
                 None => {
                     shell_println!("Usage: storagesense enable <category>");
+                    set_exit(1);
                     return;
                 }
             };
@@ -62829,6 +63361,7 @@ fn cmd_storagesense(args: &str) {
                 Some(c) => c,
                 None => {
                     shell_println!("Usage: storagesense disable <category>");
+                    set_exit(1);
                     return;
                 }
             };
@@ -62844,6 +63377,7 @@ fn cmd_storagesense(args: &str) {
                 Some(c) => c,
                 None => {
                     shell_println!("Usage: storagesense age <category> <days>");
+                    set_exit(1);
                     return;
                 }
             };
@@ -63016,6 +63550,7 @@ fn cmd_recentsearch(args: &str) {
             let query = parts.get(2..).map(|s| s.join(" ")).unwrap_or_default();
             if query.is_empty() {
                 shell_println!("Usage: recentsearch record <source> <query>");
+                set_exit(1);
                 return;
             }
             let source = match source_str {
@@ -63039,6 +63574,7 @@ fn cmd_recentsearch(args: &str) {
             let prefix = parts.get(1..).map(|s| s.join(" ")).unwrap_or_default();
             if prefix.is_empty() {
                 shell_println!("Usage: recentsearch suggest <prefix>");
+                set_exit(1);
                 return;
             }
             let suggestions = recentsearch::suggest(&prefix, 10);
@@ -63055,6 +63591,7 @@ fn cmd_recentsearch(args: &str) {
             let query = parts.get(1..).map(|s| s.join(" ")).unwrap_or_default();
             if query.is_empty() {
                 shell_println!("Usage: recentsearch pin <query>");
+                set_exit(1);
                 return;
             }
             match recentsearch::pin(&query) {
@@ -63066,6 +63603,7 @@ fn cmd_recentsearch(args: &str) {
             let query = parts.get(1..).map(|s| s.join(" ")).unwrap_or_default();
             if query.is_empty() {
                 shell_println!("Usage: recentsearch unpin <query>");
+                set_exit(1);
                 return;
             }
             match recentsearch::unpin(&query) {
@@ -63283,6 +63821,7 @@ fn cmd_multiclip(args: &str) {
             let text = parts.get(1..).map(|s| s.join(" ")).unwrap_or_default();
             if text.is_empty() {
                 shell_println!("Usage: multiclip copy <text>");
+                set_exit(1);
                 return;
             }
             match multiclip::push(&text, multiclip::ContentType::PlainText) {
@@ -65999,6 +66538,7 @@ fn cmd_usbpolicy(args: &str) {
             // check <vid> <pid> <class> <name>
             if parts.len() < 5 {
                 shell_println!("Usage: usbpolicy check <vid_hex> <pid_hex> <class> <name>");
+                set_exit(1);
                 return;
             }
             let vid = u16::from_str_radix(parts[1].trim_start_matches("0x"), 16).unwrap_or(0);
@@ -66193,6 +66733,7 @@ fn cmd_applaunch(args: &str) {
         "search" | "find" => {
             if parts.len() < 2 {
                 shell_println!("Usage: applaunch search <query>");
+                set_exit(1);
                 return;
             }
             let query = parts[1..].join(" ");
@@ -66230,6 +66771,7 @@ fn cmd_applaunch(args: &str) {
         "register" | "add" => {
             if parts.len() < 3 {
                 shell_println!("Usage: applaunch register <name> <type> [action] [icon]");
+                set_exit(1);
                 return;
             }
             let name = parts[1];
@@ -66383,6 +66925,7 @@ fn cmd_sysprofiler(args: &str) {
             // set <section> <key> <value>
             if parts.len() < 4 {
                 shell_println!("Usage: sysprofiler set <section> <key> <value...>");
+                set_exit(1);
                 return;
             }
             let section = parse_profiler_section(parts[1]);
@@ -66475,6 +67018,7 @@ fn cmd_clipsync(args: &str) {
         "device" | "add" => {
             if parts.len() < 3 {
                 shell_println!("Usage: clipsync device <name> <send|receive|bidirectional>");
+                set_exit(1);
                 return;
             }
             let name = parts[1];
@@ -66502,6 +67046,7 @@ fn cmd_clipsync(args: &str) {
             // copy <type> <preview> <size>
             if parts.len() < 4 {
                 shell_println!("Usage: clipsync copy <type> <size> <preview...>");
+                set_exit(1);
                 return;
             }
             let ctype = parse_sync_content_type(parts[1]);
@@ -66668,6 +67213,7 @@ fn cmd_netusage(args: &str) {
             // record <app> <iface> <up|down> <bytes>
             if parts.len() < 5 {
                 shell_println!("Usage: netusage record <app> <iface> <up|down> <bytes>");
+                set_exit(1);
                 return;
             }
             let app = parts[1];
@@ -66696,6 +67242,7 @@ fn cmd_netusage(args: &str) {
         "cap" => {
             if parts.len() < 3 {
                 shell_println!("Usage: netusage cap <app> <bytes|none>");
+                set_exit(1);
                 return;
             }
             let app = parts[1];
@@ -66779,6 +67326,7 @@ fn cmd_netusage(args: &str) {
         "add" => {
             if parts.len() < 3 {
                 shell_println!("Usage: netusage add <name> <type>");
+                set_exit(1);
                 return;
             }
             let itype = parse_interface_type(parts[2]);
@@ -66846,6 +67394,7 @@ fn cmd_touchscreen(args: &str) {
         "add" => {
             if parts.len() < 3 {
                 shell_println!("Usage: touchscreen add <name> <max_touches>");
+                set_exit(1);
                 return;
             }
             let name = parts[1];
@@ -66935,6 +67484,7 @@ fn cmd_touchscreen(args: &str) {
         "gesture" => {
             if parts.len() < 3 {
                 shell_println!("Usage: touchscreen gesture <type> <action>");
+                set_exit(1);
                 return;
             }
             let gtype = parse_gesture_type(parts[1]);
@@ -67047,6 +67597,7 @@ fn cmd_diskquota(args: &str) {
             // set <name> <user|group> <soft_bytes> <hard_bytes>
             if parts.len() < 5 {
                 shell_println!("Usage: diskquota set <name> <user|group> <soft> <hard>");
+                set_exit(1);
                 return;
             }
             let name = parts[1];
@@ -67072,6 +67623,7 @@ fn cmd_diskquota(args: &str) {
         "files" => {
             if parts.len() < 5 {
                 shell_println!("Usage: diskquota files <name> <user|group> <soft> <hard>");
+                set_exit(1);
                 return;
             }
             let name = parts[1];
@@ -67096,6 +67648,7 @@ fn cmd_diskquota(args: &str) {
         "check" => {
             if parts.len() < 4 {
                 shell_println!("Usage: diskquota check <name> <user|group> <bytes>");
+                set_exit(1);
                 return;
             }
             let name = parts[1];
@@ -67147,6 +67700,7 @@ fn cmd_diskquota(args: &str) {
         "remove" => {
             if parts.len() < 3 {
                 shell_println!("Usage: diskquota remove <name> <user|group>");
+                set_exit(1);
                 return;
             }
             let name = parts[1];
@@ -67163,6 +67717,7 @@ fn cmd_diskquota(args: &str) {
         "get" => {
             if parts.len() < 3 {
                 shell_println!("Usage: diskquota get <name> <user|group>");
+                set_exit(1);
                 return;
             }
             let name = parts[1];
@@ -67264,6 +67819,7 @@ fn cmd_appdefaults(args: &str) {
         "get" => {
             if parts.len() < 3 {
                 shell_println!("Usage: appdefaults get <app> <key>");
+                set_exit(1);
                 return;
             }
             match appdefaults::get(parts[1], parts[2]) {
@@ -67281,6 +67837,7 @@ fn cmd_appdefaults(args: &str) {
         "set" => {
             if parts.len() < 4 {
                 shell_println!("Usage: appdefaults set <app> <key> <value> [type]");
+                set_exit(1);
                 return;
             }
             let app = parts[1];
@@ -67320,6 +67877,7 @@ fn cmd_appdefaults(args: &str) {
         "delete" | "del" => {
             if parts.len() < 3 {
                 shell_println!("Usage: appdefaults delete <app> <key>");
+                set_exit(1);
                 return;
             }
             match appdefaults::delete(parts[1], parts[2]) {
@@ -67442,6 +68000,7 @@ fn cmd_policyengine(args: &str) {
         "eval" | "evaluate" => {
             if parts.len() < 4 {
                 shell_println!("Usage: policyengine eval <subject> <action> <resource>");
+                set_exit(1);
                 return;
             }
             match policyengine::evaluate(parts[1], parts[2], parts[3]) {
@@ -67660,6 +68219,7 @@ fn cmd_fontpreview(args: &str) {
         "compare" => {
             if parts.len() < 2 {
                 shell_println!("Usage: fontpreview compare <id1,id2,...> [size]");
+                set_exit(1);
                 return;
             }
             let ids: Vec<u32> = parts[1]
@@ -67765,6 +68325,7 @@ fn cmd_fontpreview(args: &str) {
         "sample" => {
             if parts.len() < 2 {
                 shell_println!("Usage: fontpreview sample <text...>");
+                set_exit(1);
                 return;
             }
             let text = parts[1..].join(" ");
@@ -68030,6 +68591,7 @@ fn cmd_splitview(args: &str) {
         "add" => {
             if parts.len() < 2 {
                 shell_println!("Usage: splitview add <split_id> [window_id]");
+                set_exit(1);
                 return;
             }
             let split_id = parts[1].parse::<u32>().unwrap_or(0);
@@ -68042,6 +68604,7 @@ fn cmd_splitview(args: &str) {
         "rmpane" => {
             if parts.len() < 3 {
                 shell_println!("Usage: splitview rmpane <split_id> <pane_id>");
+                set_exit(1);
                 return;
             }
             let split_id = parts[1].parse::<u32>().unwrap_or(0);
@@ -68054,6 +68617,7 @@ fn cmd_splitview(args: &str) {
         "resize" => {
             if parts.len() < 4 {
                 shell_println!("Usage: splitview resize <split_id> <pane_id> <ratio>");
+                set_exit(1);
                 return;
             }
             let split_id = parts[1].parse::<u32>().unwrap_or(0);
@@ -68067,6 +68631,7 @@ fn cmd_splitview(args: &str) {
         "focus" => {
             if parts.len() < 3 {
                 shell_println!("Usage: splitview focus <split_id> <pane_id>");
+                set_exit(1);
                 return;
             }
             let split_id = parts[1].parse::<u32>().unwrap_or(0);
@@ -68079,6 +68644,7 @@ fn cmd_splitview(args: &str) {
         "orient" => {
             if parts.len() < 3 {
                 shell_println!("Usage: splitview orient <split_id> <h|v>");
+                set_exit(1);
                 return;
             }
             let split_id = parts[1].parse::<u32>().unwrap_or(0);
@@ -68159,6 +68725,7 @@ fn cmd_iotdevice(args: &str) {
         "discover" | "add" => {
             if parts.len() < 5 {
                 shell_println!("Usage: iotdevice discover <name> <type> <protocol> <room>");
+                set_exit(1);
                 return;
             }
             let dtype = parse_iot_device_type(parts[2]);
@@ -68193,6 +68760,7 @@ fn cmd_iotdevice(args: &str) {
         "set" => {
             if parts.len() < 3 {
                 shell_println!("Usage: iotdevice set <id> <state>");
+                set_exit(1);
                 return;
             }
             let id = parts[1].parse::<u32>().unwrap_or(0);
@@ -68224,6 +68792,7 @@ fn cmd_iotdevice(args: &str) {
         "group" => {
             if parts.len() < 3 {
                 shell_println!("Usage: iotdevice group <name> <id1,id2,...>");
+                set_exit(1);
                 return;
             }
             let ids: Vec<u32> = parts[2]
@@ -68238,6 +68807,7 @@ fn cmd_iotdevice(args: &str) {
         "gcmd" => {
             if parts.len() < 3 {
                 shell_println!("Usage: iotdevice gcmd <group_id> <state>");
+                set_exit(1);
                 return;
             }
             let gid = parts[1].parse::<u32>().unwrap_or(0);
@@ -68383,6 +68953,7 @@ fn cmd_prochistory(args: &str) {
         "start" => {
             if parts.len() < 3 {
                 shell_println!("Usage: prochistory start <name> <pid> [args]");
+                set_exit(1);
                 return;
             }
             let name = parts[1];
@@ -68400,6 +68971,7 @@ fn cmd_prochistory(args: &str) {
         "exit" => {
             if parts.len() < 3 {
                 shell_println!("Usage: prochistory exit <pid> <exit_code> [reason] [mem_kb]");
+                set_exit(1);
                 return;
             }
             let pid = parts[1].parse::<u32>().unwrap_or(0);
@@ -68546,6 +69118,7 @@ fn cmd_notiffilter(args: &str) {
         "add" => {
             if parts.len() < 4 {
                 shell_println!("Usage: notiffilter add <name> <field> <pattern> <action>");
+                set_exit(1);
                 return;
             }
             let field = parse_match_field(parts[2]);
@@ -68602,6 +69175,7 @@ fn cmd_notiffilter(args: &str) {
         "eval" | "test-eval" => {
             if parts.len() < 5 {
                 shell_println!("Usage: notiffilter eval <app> <category> <title> <body>");
+                set_exit(1);
                 return;
             }
             let notif = notiffilter::NotifData {
@@ -68846,6 +69420,7 @@ fn cmd_clipaction(args: &str) {
                 parts[1..].join(" ")
             } else {
                 shell_println!("Usage: clipaction detect <text>");
+                set_exit(1);
                 return;
             };
             let ct = clipaction::detect_type(&text);
@@ -68856,6 +69431,7 @@ fn cmd_clipaction(args: &str) {
                 parse_clip_content_type(t)
             } else {
                 shell_println!("Usage: clipaction actions <type>");
+                set_exit(1);
                 return;
             };
             let actions = clipaction::get_actions(ct);
@@ -68873,6 +69449,7 @@ fn cmd_clipaction(args: &str) {
                 Some(v) => v,
                 None => {
                     shell_println!("Usage: clipaction exec <id>");
+                    set_exit(1);
                     return;
                 }
             };
@@ -68884,6 +69461,7 @@ fn cmd_clipaction(args: &str) {
         "add" => {
             if parts.len() < 4 {
                 shell_println!("Usage: clipaction add <name> <type> <command>");
+                set_exit(1);
                 return;
             }
             let name = parts[1];
@@ -68899,6 +69477,7 @@ fn cmd_clipaction(args: &str) {
                 Some(v) => v,
                 None => {
                     shell_println!("Usage: clipaction remove <id>");
+                    set_exit(1);
                     return;
                 }
             };
@@ -69004,6 +69583,7 @@ fn cmd_energysaver(args: &str) {
                 Some(v) => v,
                 None => {
                     shell_println!("Usage: energysaver brightness <0-100>");
+                    set_exit(1);
                     return;
                 }
             };
@@ -69017,6 +69597,7 @@ fn cmd_energysaver(args: &str) {
                 Some(v) => v,
                 None => {
                     shell_println!("Usage: energysaver cpulimit <0-100>");
+                    set_exit(1);
                     return;
                 }
             };
@@ -69028,6 +69609,7 @@ fn cmd_energysaver(args: &str) {
         "throttle" => {
             if parts.len() < 3 {
                 shell_println!("Usage: energysaver throttle <app> <cpu_limit_pct>");
+                set_exit(1);
                 return;
             }
             let name = parts[1];
@@ -69048,6 +69630,7 @@ fn cmd_energysaver(args: &str) {
                 Some(n) => *n,
                 None => {
                     shell_println!("Usage: energysaver unthrottle <app>");
+                    set_exit(1);
                     return;
                 }
             };
@@ -69087,6 +69670,7 @@ fn cmd_energysaver(args: &str) {
         "autoswitch" => {
             if parts.len() < 3 {
                 shell_println!("Usage: energysaver autoswitch <on|off> <threshold_%>");
+                set_exit(1);
                 return;
             }
             let enabled = parts[1] == "on";
@@ -69191,6 +69775,7 @@ fn cmd_filerules(args: &str) {
                 Some(v) => v,
                 None => {
                     shell_println!("Usage: filerules remove <id>");
+                    set_exit(1);
                     return;
                 }
             };
@@ -69204,6 +69789,7 @@ fn cmd_filerules(args: &str) {
                 Some(v) => v,
                 None => {
                     shell_println!("Usage: filerules {} <id>", sub);
+                    set_exit(1);
                     return;
                 }
             };
@@ -69220,6 +69806,7 @@ fn cmd_filerules(args: &str) {
         "eval" => {
             if parts.len() < 5 {
                 shell_println!("Usage: filerules eval <filename> <ext> <size> <dir>");
+                set_exit(1);
                 return;
             }
             let filename = parts[1];
@@ -69324,6 +69911,7 @@ fn cmd_secureboot(args: &str) {
                 Some("strict") => BootState::EnforcingStrict,
                 _ => {
                     shell_println!("Usage: secureboot set <disabled|setup|enabled|strict>");
+                    set_exit(1);
                     return;
                 }
             };
@@ -69335,6 +69923,7 @@ fn cmd_secureboot(args: &str) {
         "enroll" => {
             if parts.len() < 4 {
                 shell_println!("Usage: secureboot enroll <type> <subject> <fingerprint>");
+                set_exit(1);
                 return;
             }
             let kt = parse_sboot_key_type(parts[1]);
@@ -69350,6 +69939,7 @@ fn cmd_secureboot(args: &str) {
                 Some(v) => v,
                 None => {
                     shell_println!("Usage: secureboot remove <id>");
+                    set_exit(1);
                     return;
                 }
             };
@@ -69361,6 +69951,7 @@ fn cmd_secureboot(args: &str) {
         "verify" => {
             if parts.len() < 3 {
                 shell_println!("Usage: secureboot verify <image_name> <hash>");
+                set_exit(1);
                 return;
             }
             let image = parts[1];
@@ -69453,6 +70044,7 @@ fn cmd_eventlog(args: &str) {
         "log" => {
             if parts.len() < 4 {
                 shell_println!("Usage: eventlog log <severity> <category> <source> [message...]");
+                set_exit(1);
                 return;
             }
             let sev = parse_event_severity(parts[1]);
@@ -69511,6 +70103,7 @@ fn cmd_eventlog(args: &str) {
                 Some(s) => *s,
                 None => {
                     shell_println!("Usage: eventlog source <name>");
+                    set_exit(1);
                     return;
                 }
             };
@@ -69535,6 +70128,7 @@ fn cmd_eventlog(args: &str) {
                 Some(c) => parse_event_category(c),
                 None => {
                     shell_println!("Usage: eventlog category <name>");
+                    set_exit(1);
                     return;
                 }
             };
@@ -69688,6 +70282,7 @@ fn cmd_systemimage(args: &str) {
                 Some(v) => v,
                 None => {
                     shell_println!("Usage: systemimage delete <id>");
+                    set_exit(1);
                     return;
                 }
             };
@@ -69701,6 +70296,7 @@ fn cmd_systemimage(args: &str) {
                 Some(v) => v,
                 None => {
                     shell_println!("Usage: systemimage restore <id>");
+                    set_exit(1);
                     return;
                 }
             };
@@ -69714,6 +70310,7 @@ fn cmd_systemimage(args: &str) {
                 Some(v) => v,
                 None => {
                     shell_println!("Usage: systemimage verify <id>");
+                    set_exit(1);
                     return;
                 }
             };
@@ -69728,6 +70325,7 @@ fn cmd_systemimage(args: &str) {
                 Some(v) => v,
                 None => {
                     shell_println!("Usage: systemimage info <id>");
+                    set_exit(1);
                     return;
                 }
             };
@@ -69835,6 +70433,7 @@ fn cmd_raidmgr(args: &str) {
                 Some(v) => v,
                 None => {
                     shell_println!("Usage: raidmgr delete <id>");
+                    set_exit(1);
                     return;
                 }
             };
@@ -69846,6 +70445,7 @@ fn cmd_raidmgr(args: &str) {
         "add" => {
             if parts.len() < 3 {
                 shell_println!("Usage: raidmgr add <array_id> <disk_id> [size] [spare]");
+                set_exit(1);
                 return;
             }
             let aid: u32 = match parts[1].parse() {
@@ -69874,6 +70474,7 @@ fn cmd_raidmgr(args: &str) {
         "remove" => {
             if parts.len() < 3 {
                 shell_println!("Usage: raidmgr remove <array_id> <disk_id>");
+                set_exit(1);
                 return;
             }
             let aid: u32 = match parts[1].parse() {
@@ -69891,6 +70492,7 @@ fn cmd_raidmgr(args: &str) {
         "fail" => {
             if parts.len() < 3 {
                 shell_println!("Usage: raidmgr fail <array_id> <disk_id>");
+                set_exit(1);
                 return;
             }
             let aid: u32 = match parts[1].parse() {
@@ -69910,6 +70512,7 @@ fn cmd_raidmgr(args: &str) {
                 Some(v) => v,
                 None => {
                     shell_println!("Usage: raidmgr rebuild <array_id>");
+                    set_exit(1);
                     return;
                 }
             };
@@ -69923,6 +70526,7 @@ fn cmd_raidmgr(args: &str) {
                 Some(v) => v,
                 None => {
                     shell_println!("Usage: raidmgr info <array_id>");
+                    set_exit(1);
                     return;
                 }
             };
@@ -70008,6 +70612,7 @@ fn cmd_networkbridge(args: &str) {
         "create" => {
             if parts.len() < 2 {
                 shell_println!("Usage: networkbridge create <name> [mode]");
+                set_exit(1);
                 return;
             }
             let name = parts[1];
@@ -70031,6 +70636,7 @@ fn cmd_networkbridge(args: &str) {
                 Some(v) => v,
                 None => {
                     shell_println!("Usage: networkbridge delete <id>");
+                    set_exit(1);
                     return;
                 }
             };
@@ -70042,6 +70648,7 @@ fn cmd_networkbridge(args: &str) {
         "add" => {
             if parts.len() < 4 {
                 shell_println!("Usage: networkbridge add <bridge_id> <iface> <type> [mac]");
+                set_exit(1);
                 return;
             }
             let bid: u32 = match parts[1].parse() {
@@ -70062,6 +70669,7 @@ fn cmd_networkbridge(args: &str) {
         "remove" => {
             if parts.len() < 3 {
                 shell_println!("Usage: networkbridge remove <bridge_id> <iface>");
+                set_exit(1);
                 return;
             }
             let bid: u32 = match parts[1].parse() {
@@ -70081,6 +70689,7 @@ fn cmd_networkbridge(args: &str) {
                 Some(v) => v,
                 None => {
                     shell_println!("Usage: networkbridge {} <bridge_id>", sub);
+                    set_exit(1);
                     return;
                 }
             };
@@ -70097,6 +70706,7 @@ fn cmd_networkbridge(args: &str) {
         "ip" => {
             if parts.len() < 4 {
                 shell_println!("Usage: networkbridge ip <bridge_id> <ip> <mask>");
+                set_exit(1);
                 return;
             }
             let bid: u32 = match parts[1].parse() {
@@ -70114,6 +70724,7 @@ fn cmd_networkbridge(args: &str) {
         "mtu" => {
             if parts.len() < 3 {
                 shell_println!("Usage: networkbridge mtu <bridge_id> <mtu>");
+                set_exit(1);
                 return;
             }
             let bid: u32 = match parts[1].parse() {
@@ -70140,6 +70751,7 @@ fn cmd_networkbridge(args: &str) {
                 Some(v) => v,
                 None => {
                     shell_println!("Usage: networkbridge info <bridge_id>");
+                    set_exit(1);
                     return;
                 }
             };
@@ -70221,6 +70833,7 @@ fn cmd_secureerase(args: &str) {
         "start" => {
             if parts.len() < 3 {
                 shell_println!("Usage: secureerase start <target> <method> [size] [passes]");
+                set_exit(1);
                 return;
             }
             let target = parts[1];
@@ -70245,6 +70858,7 @@ fn cmd_secureerase(args: &str) {
                 Some(v) => v,
                 None => {
                     shell_println!("Usage: secureerase complete <id>");
+                    set_exit(1);
                     return;
                 }
             };
@@ -70258,6 +70872,7 @@ fn cmd_secureerase(args: &str) {
                 Some(v) => v,
                 None => {
                     shell_println!("Usage: secureerase cancel <id>");
+                    set_exit(1);
                     return;
                 }
             };
@@ -70271,6 +70886,7 @@ fn cmd_secureerase(args: &str) {
                 Some(v) => v,
                 None => {
                     shell_println!("Usage: secureerase status <id>");
+                    set_exit(1);
                     return;
                 }
             };
@@ -70369,6 +70985,7 @@ fn cmd_dnssettings(args: &str) {
         "add" => {
             if parts.len() < 2 {
                 shell_println!("Usage: dnssettings add <address> [protocol] [priority]");
+                set_exit(1);
                 return;
             }
             let addr = parts[1];
@@ -70388,6 +71005,7 @@ fn cmd_dnssettings(args: &str) {
                 Some(a) => *a,
                 None => {
                     shell_println!("Usage: dnssettings remove <address>");
+                    set_exit(1);
                     return;
                 }
             };
@@ -70401,6 +71019,7 @@ fn cmd_dnssettings(args: &str) {
                 Some(n) => *n,
                 None => {
                     shell_println!("Usage: dnssettings resolve <hostname>");
+                    set_exit(1);
                     return;
                 }
             };
@@ -70541,6 +71160,7 @@ fn cmd_backupsched(args: &str) {
                 Some(v) => v,
                 None => {
                     shell_println!("Usage: backupsched delete <id>");
+                    set_exit(1);
                     return;
                 }
             };
@@ -70554,6 +71174,7 @@ fn cmd_backupsched(args: &str) {
                 Some(v) => v,
                 None => {
                     shell_println!("Usage: backupsched {} <id>", sub);
+                    set_exit(1);
                     return;
                 }
             };
@@ -70572,6 +71193,7 @@ fn cmd_backupsched(args: &str) {
                 Some(v) => v,
                 None => {
                     shell_println!("Usage: backupsched run <id>");
+                    set_exit(1);
                     return;
                 }
             };
@@ -70590,6 +71212,7 @@ fn cmd_backupsched(args: &str) {
                 Some(v) => v,
                 None => {
                     shell_println!("Usage: backupsched history <id>");
+                    set_exit(1);
                     return;
                 }
             };
@@ -70693,6 +71316,7 @@ fn cmd_displaycal(args: &str) {
                 Some(n) => *n,
                 None => {
                     shell_println!("Usage: displaycal add <name>");
+                    set_exit(1);
                     return;
                 }
             };
@@ -70706,6 +71330,7 @@ fn cmd_displaycal(args: &str) {
                 Some(v) => v,
                 None => {
                     shell_println!("Usage: displaycal remove <id>");
+                    set_exit(1);
                     return;
                 }
             };
@@ -70717,6 +71342,7 @@ fn cmd_displaycal(args: &str) {
         "profile" => {
             if parts.len() < 3 {
                 shell_println!("Usage: displaycal profile <id> <type>");
+                set_exit(1);
                 return;
             }
             let id: u32 = match parts[1].parse() {
@@ -70757,6 +71383,7 @@ fn cmd_displaycal(args: &str) {
         "whitepoint" | "wp" => {
             if parts.len() < 3 {
                 shell_println!("Usage: displaycal whitepoint <id> <kelvin>");
+                set_exit(1);
                 return;
             }
             let id: u32 = match parts[1].parse() {
@@ -70783,6 +71410,7 @@ fn cmd_displaycal(args: &str) {
                 Some(v) => v,
                 None => {
                     shell_println!("Usage: displaycal calibrate <id>");
+                    set_exit(1);
                     return;
                 }
             };
@@ -70796,6 +71424,7 @@ fn cmd_displaycal(args: &str) {
                 Some(v) => v,
                 None => {
                     shell_println!("Usage: displaycal info <id>");
+                    set_exit(1);
                     return;
                 }
             };
@@ -70881,6 +71510,7 @@ fn cmd_vpnprofile(args: &str) {
         "create" => {
             if parts.len() < 4 {
                 shell_println!("Usage: vpnprofile create <name> <protocol> <server> [port]");
+                set_exit(1);
                 return;
             }
             let name = parts[1];
@@ -70897,6 +71527,7 @@ fn cmd_vpnprofile(args: &str) {
                 Some(v) => v,
                 None => {
                     shell_println!("Usage: vpnprofile delete <id>");
+                    set_exit(1);
                     return;
                 }
             };
@@ -70910,6 +71541,7 @@ fn cmd_vpnprofile(args: &str) {
                 Some(v) => v,
                 None => {
                     shell_println!("Usage: vpnprofile connect <id>");
+                    set_exit(1);
                     return;
                 }
             };
@@ -70923,6 +71555,7 @@ fn cmd_vpnprofile(args: &str) {
                 Some(v) => v,
                 None => {
                     shell_println!("Usage: vpnprofile disconnect <id>");
+                    set_exit(1);
                     return;
                 }
             };
@@ -70934,6 +71567,7 @@ fn cmd_vpnprofile(args: &str) {
         "killswitch" => {
             if parts.len() < 3 {
                 shell_println!("Usage: vpnprofile killswitch <id> <on|off>");
+                set_exit(1);
                 return;
             }
             let id: u32 = match parts[1].parse() {
@@ -70958,6 +71592,7 @@ fn cmd_vpnprofile(args: &str) {
                 Some(v) => v,
                 None => {
                     shell_println!("Usage: vpnprofile info <id>");
+                    set_exit(1);
                     return;
                 }
             };
@@ -71051,6 +71686,7 @@ fn cmd_diskhealth(args: &str) {
                 Some(v) => v,
                 None => {
                     shell_println!("Usage: diskhealth check <id>");
+                    set_exit(1);
                     return;
                 }
             };
@@ -71062,6 +71698,7 @@ fn cmd_diskhealth(args: &str) {
         "add" => {
             if parts.len() < 4 {
                 shell_println!("Usage: diskhealth add <name> <model> <type> [serial] [capacity]");
+                set_exit(1);
                 return;
             }
             let name = parts[1];
@@ -71082,6 +71719,7 @@ fn cmd_diskhealth(args: &str) {
                 Some(v) => v,
                 None => {
                     shell_println!("Usage: diskhealth remove <id>");
+                    set_exit(1);
                     return;
                 }
             };
@@ -71095,6 +71733,7 @@ fn cmd_diskhealth(args: &str) {
                 Some(v) => v,
                 None => {
                     shell_println!("Usage: diskhealth info <id>");
+                    set_exit(1);
                     return;
                 }
             };
@@ -71179,6 +71818,7 @@ fn cmd_recoverypart(args: &str) {
         "add" => {
             if parts.len() < 3 {
                 shell_println!("Usage: recoverypart add <name> <type> [version] [size]");
+                set_exit(1);
                 return;
             }
             let name = parts[1];
@@ -71198,6 +71838,7 @@ fn cmd_recoverypart(args: &str) {
                 Some(v) => v,
                 None => {
                     shell_println!("Usage: recoverypart remove <id>");
+                    set_exit(1);
                     return;
                 }
             };
@@ -71216,6 +71857,7 @@ fn cmd_recoverypart(args: &str) {
                 Some(v) => v,
                 None => {
                     shell_println!("Usage: recoverypart repair <tool_id>");
+                    set_exit(1);
                     return;
                 }
             };
@@ -71299,6 +71941,7 @@ fn cmd_userprofile(args: &str) {
         "create" => {
             if parts.len() < 3 {
                 shell_println!("Usage: userprofile create <username> <display_name> [type]");
+                set_exit(1);
                 return;
             }
             let username = parts[1];
@@ -71318,6 +71961,7 @@ fn cmd_userprofile(args: &str) {
                 Some(v) => v,
                 None => {
                     shell_println!("Usage: userprofile delete <id>");
+                    set_exit(1);
                     return;
                 }
             };
@@ -71331,6 +71975,7 @@ fn cmd_userprofile(args: &str) {
                 Some(v) => v,
                 None => {
                     shell_println!("Usage: userprofile switch <id>");
+                    set_exit(1);
                     return;
                 }
             };
@@ -71344,6 +71989,7 @@ fn cmd_userprofile(args: &str) {
                 Some(v) => v,
                 None => {
                     shell_println!("Usage: userprofile {} <id>", sub);
+                    set_exit(1);
                     return;
                 }
             };
@@ -71360,6 +72006,7 @@ fn cmd_userprofile(args: &str) {
         "rename" => {
             if parts.len() < 3 {
                 shell_println!("Usage: userprofile rename <id> <new_display_name>");
+                set_exit(1);
                 return;
             }
             let id: u32 = match parts[1].parse() {
@@ -71389,6 +72036,7 @@ fn cmd_userprofile(args: &str) {
                 Some(v) => v,
                 None => {
                     shell_println!("Usage: userprofile info <id>");
+                    set_exit(1);
                     return;
                 }
             };
@@ -71413,6 +72061,7 @@ fn cmd_userprofile(args: &str) {
                 Some(v) => v,
                 None => {
                     shell_println!("Usage: userprofile {} <id> <path>", sub);
+                    set_exit(1);
                     return;
                 }
             };
@@ -71597,6 +72246,7 @@ fn cmd_cas(args: &str) {
             let data = parts.get(1..).map(|p| p.join(" ")).unwrap_or_default();
             if data.is_empty() {
                 shell_println!("Usage: cas put <data>");
+                set_exit(1);
                 return;
             }
             match cas::put(data.as_bytes()) {
@@ -71847,6 +72497,7 @@ fn cmd_powerwake(args: &str) {
             let reason = parts.get(1..).map(|p| p.join(" ")).unwrap_or_default();
             if reason.is_empty() {
                 shell_println!("Usage: powerwake schedule <reason>");
+                set_exit(1);
                 return;
             }
             powerwake::init_defaults();
@@ -74504,6 +75155,7 @@ fn cmd_cgroupfs(args: &str) {
             let path = parts.get(1).copied().unwrap_or("");
             if path.is_empty() {
                 shell_println!("Usage: cgroupfs create <path>");
+                set_exit(1);
                 return;
             }
             cgroupfs::init_defaults();
@@ -74516,6 +75168,7 @@ fn cmd_cgroupfs(args: &str) {
             let path = parts.get(1).copied().unwrap_or("");
             if path.is_empty() {
                 shell_println!("Usage: cgroupfs delete <path>");
+                set_exit(1);
                 return;
             }
             cgroupfs::init_defaults();
@@ -74530,6 +75183,7 @@ fn cmd_cgroupfs(args: &str) {
             let weight = weight_str.parse::<u32>().unwrap_or(0);
             if path.is_empty() || weight == 0 {
                 shell_println!("Usage: cgroupfs cpu <path> <weight 1-10000>");
+                set_exit(1);
                 return;
             }
             cgroupfs::init_defaults();
@@ -74544,6 +75198,7 @@ fn cmd_cgroupfs(args: &str) {
             let bytes = bytes_str.parse::<u64>().unwrap_or(0);
             if path.is_empty() {
                 shell_println!("Usage: cgroupfs mem <path> <bytes>");
+                set_exit(1);
                 return;
             }
             cgroupfs::init_defaults();
@@ -74558,6 +75213,7 @@ fn cmd_cgroupfs(args: &str) {
             let pid = pid_str.parse::<u32>().unwrap_or(0);
             if path.is_empty() || pid == 0 {
                 shell_println!("Usage: cgroupfs addpid <path> <pid>");
+                set_exit(1);
                 return;
             }
             cgroupfs::init_defaults();
@@ -74637,6 +75293,7 @@ fn cmd_secpolicy(args: &str) {
             if subj.is_empty() || obj.is_empty() || act_str.is_empty() {
                 shell_println!("Usage: secpolicy check <subject> <object> <action>");
                 shell_println!("  Actions: read|write|execute|create|delete|network");
+                set_exit(1);
                 return;
             }
             let action = match act_str {
@@ -74665,6 +75322,7 @@ fn cmd_secpolicy(args: &str) {
             let label = parts.get(3).copied().unwrap_or("");
             if etype.is_empty() {
                 shell_println!("Usage: secpolicy label <entity_id> <type> [label]");
+                set_exit(1);
                 return;
             }
             secpolicy::init_defaults();
@@ -74733,6 +75391,7 @@ fn cmd_procstat(args: &str) {
             let pid = pid_str.parse::<u32>().unwrap_or(0);
             if pid == 0 {
                 shell_println!("Usage: procstat get <pid>");
+                set_exit(1);
                 return;
             }
             procstat::init_defaults();
@@ -74784,6 +75443,7 @@ fn cmd_procstat(args: &str) {
             let pid = pid_str.parse::<u32>().unwrap_or(0);
             if pid == 0 {
                 shell_println!("Usage: procstat register <pid> <name>");
+                set_exit(1);
                 return;
             }
             procstat::init_defaults();
@@ -74838,6 +75498,7 @@ fn cmd_kernparam(args: &str) {
             let key = parts.get(1).copied().unwrap_or("");
             if key.is_empty() {
                 shell_println!("Usage: kernparam get <key>");
+                set_exit(1);
                 return;
             }
             kernparam::init_defaults();
@@ -74851,6 +75512,7 @@ fn cmd_kernparam(args: &str) {
             let val = parts.get(2).copied().unwrap_or("");
             if key.is_empty() {
                 shell_println!("Usage: kernparam set <key> <value>");
+                set_exit(1);
                 return;
             }
             kernparam::init_defaults();
@@ -74863,6 +75525,7 @@ fn cmd_kernparam(args: &str) {
             let key = parts.get(1).copied().unwrap_or("");
             if key.is_empty() {
                 shell_println!("Usage: kernparam remove <key>");
+                set_exit(1);
                 return;
             }
             kernparam::init_defaults();
@@ -74931,6 +75594,7 @@ fn cmd_tracemon(args: &str) {
             let name = parts.get(1).copied().unwrap_or("");
             if name.is_empty() {
                 shell_println!("Usage: tracemon enable <tracepoint>");
+                set_exit(1);
                 return;
             }
             tracemon::init_defaults();
@@ -74943,6 +75607,7 @@ fn cmd_tracemon(args: &str) {
             let name = parts.get(1).copied().unwrap_or("");
             if name.is_empty() {
                 shell_println!("Usage: tracemon disable <tracepoint>");
+                set_exit(1);
                 return;
             }
             tracemon::init_defaults();
@@ -75056,6 +75721,7 @@ fn cmd_authbroker(args: &str) {
             if principal.is_empty() {
                 shell_println!("Usage: authbroker auth <principal> [method]");
                 shell_println!("  Methods: password|token|certificate|biometric|kerberos|pubkey");
+                set_exit(1);
                 return;
             }
             let method = match method_str {
@@ -75080,6 +75746,7 @@ fn cmd_authbroker(args: &str) {
             let principal = parts.get(1).copied().unwrap_or("");
             if principal.is_empty() {
                 shell_println!("Usage: authbroker unlock <principal>");
+                set_exit(1);
                 return;
             }
             authbroker::init_defaults();
@@ -75093,6 +75760,7 @@ fn cmd_authbroker(args: &str) {
             let resource = parts.get(2).copied().unwrap_or("");
             if principal.is_empty() || resource.is_empty() {
                 shell_println!("Usage: authbroker grant <principal> <resource>");
+                set_exit(1);
                 return;
             }
             authbroker::init_defaults();
@@ -75115,6 +75783,7 @@ fn cmd_authbroker(args: &str) {
             let id = id_str.parse::<u32>().unwrap_or(0);
             if id == 0 {
                 shell_println!("Usage: authbroker revoke <grant_id>");
+                set_exit(1);
                 return;
             }
             authbroker::init_defaults();
@@ -75177,6 +75846,7 @@ fn cmd_prociso(args: &str) {
             if ns_type_str.is_empty() || name.is_empty() {
                 shell_println!("Usage: prociso create <type> <name>");
                 shell_println!("  Types: mnt|pid|net|user|ipc|uts|cgroup");
+                set_exit(1);
                 return;
             }
             let ns_type = match ns_type_str {
@@ -75203,6 +75873,7 @@ fn cmd_prociso(args: &str) {
             let id = id_str.parse::<u32>().unwrap_or(0);
             if id == 0 {
                 shell_println!("Usage: prociso delete <ns_id>");
+                set_exit(1);
                 return;
             }
             prociso::init_defaults();
@@ -75218,6 +75889,7 @@ fn cmd_prociso(args: &str) {
             let ns_id = ns_str.parse::<u32>().unwrap_or(0);
             if pid == 0 || ns_id == 0 {
                 shell_println!("Usage: prociso attach <pid> <ns_id>");
+                set_exit(1);
                 return;
             }
             prociso::init_defaults();
@@ -75233,6 +75905,7 @@ fn cmd_prociso(args: &str) {
             let ns_id = ns_str.parse::<u32>().unwrap_or(0);
             if pid == 0 || ns_id == 0 {
                 shell_println!("Usage: prociso detach <pid> <ns_id>");
+                set_exit(1);
                 return;
             }
             prociso::init_defaults();
@@ -75248,6 +75921,7 @@ fn cmd_prociso(args: &str) {
                     let name = parts.get(2).copied().unwrap_or("");
                     if name.is_empty() {
                         shell_println!("Usage: prociso container create <name>");
+                        set_exit(1);
                         return;
                     }
                     prociso::init_defaults();
@@ -75277,6 +75951,7 @@ fn cmd_prociso(args: &str) {
                     let id = id_str.parse::<u32>().unwrap_or(0);
                     if id == 0 {
                         shell_println!("Usage: prociso container delete <id>");
+                        set_exit(1);
                         return;
                     }
                     prociso::init_defaults();
@@ -75589,6 +76264,7 @@ fn cmd_ipclog(args: &str) {
             let pid = pid_str.parse::<u32>().unwrap_or(0);
             if pid == 0 {
                 shell_println!("Usage: ipclog pid <pid>");
+                set_exit(1);
                 return;
             }
             ipclog::init_defaults();
@@ -75611,6 +76287,7 @@ fn cmd_ipclog(args: &str) {
             let ch = ch_str.parse::<u32>().unwrap_or(0);
             if ch == 0 {
                 shell_println!("Usage: ipclog channel <channel_id>");
+                set_exit(1);
                 return;
             }
             ipclog::init_defaults();
@@ -75772,6 +76449,7 @@ fn cmd_shmem(args: &str) {
             let size = size_str.parse::<u64>().unwrap_or(0);
             if name.is_empty() || size == 0 {
                 shell_println!("Usage: shmem create <name> <size>");
+                set_exit(1);
                 return;
             }
             shmem::init_defaults();
@@ -75785,6 +76463,7 @@ fn cmd_shmem(args: &str) {
             let id = id_str.parse::<u32>().unwrap_or(0);
             if id == 0 {
                 shell_println!("Usage: shmem delete <id>");
+                set_exit(1);
                 return;
             }
             shmem::init_defaults();
@@ -75800,6 +76479,7 @@ fn cmd_shmem(args: &str) {
             let pid = pid_str.parse::<u32>().unwrap_or(0);
             if id == 0 || pid == 0 {
                 shell_println!("Usage: shmem attach <id> <pid>");
+                set_exit(1);
                 return;
             }
             shmem::init_defaults();
@@ -75815,6 +76495,7 @@ fn cmd_shmem(args: &str) {
             let pid = pid_str.parse::<u32>().unwrap_or(0);
             if id == 0 || pid == 0 {
                 shell_println!("Usage: shmem detach <id> <pid>");
+                set_exit(1);
                 return;
             }
             shmem::init_defaults();
@@ -75828,6 +76509,7 @@ fn cmd_shmem(args: &str) {
             let pid = pid_str.parse::<u32>().unwrap_or(0);
             if pid == 0 {
                 shell_println!("Usage: shmem pid <pid>");
+                set_exit(1);
                 return;
             }
             shmem::init_defaults();
@@ -75896,6 +76578,7 @@ fn cmd_wqstat(args: &str) {
             let name = parts.get(1).copied().unwrap_or("");
             if name.is_empty() {
                 shell_println!("Usage: wqstat get <name>");
+                set_exit(1);
                 return;
             }
             wqstat::init_defaults();
@@ -75978,6 +76661,7 @@ fn cmd_slabstat(args: &str) {
             let name = parts.get(1).copied().unwrap_or("");
             if name.is_empty() {
                 shell_println!("Usage: slabstat get <cache_name>");
+                set_exit(1);
                 return;
             }
             slabstat::init_defaults();
@@ -76111,6 +76795,7 @@ fn cmd_fdtable(args: &str) {
             let pid = pid_str.parse::<u32>().unwrap_or(0);
             if pid == 0 {
                 shell_println!("Usage: fdtable show <pid>");
+                set_exit(1);
                 return;
             }
             fdtable::init_defaults();
@@ -76134,6 +76819,7 @@ fn cmd_fdtable(args: &str) {
             let pid = pid_str.parse::<u32>().unwrap_or(0);
             if pid == 0 || path.is_empty() {
                 shell_println!("Usage: fdtable open <pid> <path>");
+                set_exit(1);
                 return;
             }
             fdtable::init_defaults();
@@ -76156,6 +76842,7 @@ fn cmd_fdtable(args: &str) {
             let fd = fd_str.parse::<u32>().unwrap_or(0);
             if pid == 0 {
                 shell_println!("Usage: fdtable close <pid> <fd>");
+                set_exit(1);
                 return;
             }
             fdtable::init_defaults();
@@ -76171,6 +76858,7 @@ fn cmd_fdtable(args: &str) {
             let fd = fd_str.parse::<u32>().unwrap_or(0);
             if pid == 0 {
                 shell_println!("Usage: fdtable dup <pid> <fd>");
+                set_exit(1);
                 return;
             }
             fdtable::init_defaults();
@@ -82811,6 +83499,7 @@ fn cmd_filepicker(args: &str) {
                 let path = parts.get(2).copied().unwrap_or("");
                 if id == 0 || path.is_empty() {
                     shell_println!("Usage: fpick nav <dialog-id> <path>");
+                    set_exit(1);
                     return;
                 }
                 match filepicker::navigate(id, path) {
@@ -82837,6 +83526,7 @@ fn cmd_filepicker(args: &str) {
                     .unwrap_or(0);
                 if id == 0 {
                     shell_println!("Usage: fpick up <dialog-id>");
+                    set_exit(1);
                     return;
                 }
                 match filepicker::go_up(id) {
@@ -82859,6 +83549,7 @@ fn cmd_filepicker(args: &str) {
                     .unwrap_or(0);
                 if id == 0 {
                     shell_println!("Usage: fpick back <dialog-id>");
+                    set_exit(1);
                     return;
                 }
                 match filepicker::go_back(id) {
@@ -82882,6 +83573,7 @@ fn cmd_filepicker(args: &str) {
                 let path = parts.get(2).copied().unwrap_or("");
                 if id == 0 || path.is_empty() {
                     shell_println!("Usage: fpick select <dialog-id> <path>");
+                    set_exit(1);
                     return;
                 }
                 match filepicker::select(id, path) {
@@ -82901,6 +83593,7 @@ fn cmd_filepicker(args: &str) {
                 let name = parts.get(2).copied().unwrap_or("");
                 if id == 0 || name.is_empty() {
                     shell_println!("Usage: fpick filename <dialog-id> <name>");
+                    set_exit(1);
                     return;
                 }
                 match filepicker::set_filename(id, name) {
@@ -82919,6 +83612,7 @@ fn cmd_filepicker(args: &str) {
                     .unwrap_or(0);
                 if id == 0 {
                     shell_println!("Usage: fpick confirm <dialog-id>");
+                    set_exit(1);
                     return;
                 }
                 match filepicker::confirm(id) {
@@ -82943,6 +83637,7 @@ fn cmd_filepicker(args: &str) {
                     .unwrap_or(0);
                 if id == 0 {
                     shell_println!("Usage: fpick cancel <dialog-id>");
+                    set_exit(1);
                     return;
                 }
                 match filepicker::cancel(id) {
@@ -82961,6 +83656,7 @@ fn cmd_filepicker(args: &str) {
                     .unwrap_or(0);
                 if id == 0 {
                     shell_println!("Usage: fpick close <dialog-id>");
+                    set_exit(1);
                     return;
                 }
                 match filepicker::close(id) {
@@ -82979,6 +83675,7 @@ fn cmd_filepicker(args: &str) {
                     .unwrap_or(0);
                 if id == 0 {
                     shell_println!("Usage: fpick info <dialog-id>");
+                    set_exit(1);
                     return;
                 }
                 match filepicker::get_dialog(id) {
@@ -83008,6 +83705,7 @@ fn cmd_filepicker(args: &str) {
                     .unwrap_or(0);
                 if id == 0 {
                     shell_println!("Usage: fpick ls <dialog-id>");
+                    set_exit(1);
                     return;
                 }
                 match filepicker::get_dialog(id) {
@@ -83055,6 +83753,7 @@ fn cmd_filepicker(args: &str) {
                         let path = parts.get(3).copied().unwrap_or("");
                         if label.is_empty() || path.is_empty() {
                             shell_println!("Usage: fpick bm add <label> <path> [icon]");
+                            set_exit(1);
                             return;
                         }
                         let icon = parts.get(4).copied().unwrap_or("icon-folder");
@@ -83067,6 +83766,7 @@ fn cmd_filepicker(args: &str) {
                         let path = parts.get(2).copied().unwrap_or("");
                         if path.is_empty() {
                             shell_println!("Usage: fpick bm rm <path>");
+                            set_exit(1);
                             return;
                         }
                         match filepicker::remove_bookmark(path) {
@@ -83163,6 +83863,7 @@ fn cmd_taskbar(args: &str) {
             let name = parts.get(2).copied().unwrap_or("");
             if app_id.is_empty() || name.is_empty() {
                 shell_println!("Usage: taskbar pin <app-id> <name> [icon]");
+                set_exit(1);
                 return;
             }
             let icon = parts.get(3).copied().unwrap_or("icon-default");
@@ -83175,6 +83876,7 @@ fn cmd_taskbar(args: &str) {
             let app_id = parts.get(1).copied().unwrap_or("");
             if app_id.is_empty() {
                 shell_println!("Usage: taskbar unpin <app-id>");
+                set_exit(1);
                 return;
             }
             match taskbar::unpin(app_id) {
@@ -83187,6 +83889,7 @@ fn cmd_taskbar(args: &str) {
             let pos = parts.get(2).and_then(|s| s.parse::<u32>().ok());
             if app_id.is_empty() || pos.is_none() {
                 shell_println!("Usage: taskbar reorder <app-id> <position>");
+                set_exit(1);
                 return;
             }
             match taskbar::reorder_pinned(app_id, pos.unwrap_or(0)) {
@@ -83211,6 +83914,7 @@ fn cmd_taskbar(args: &str) {
             let title = parts.get(3).copied().unwrap_or("Untitled");
             if app_id.is_empty() || win_id.is_none() {
                 shell_println!("Usage: taskbar addwin <app-id> <window-id> [title] [name] [icon]");
+                set_exit(1);
                 return;
             }
             let name = parts.get(4).copied().unwrap_or(app_id);
@@ -83225,6 +83929,7 @@ fn cmd_taskbar(args: &str) {
             let win_id = parts.get(2).and_then(|s| s.parse::<u64>().ok());
             if app_id.is_empty() || win_id.is_none() {
                 shell_println!("Usage: taskbar rmwin <app-id> <window-id>");
+                set_exit(1);
                 return;
             }
             match taskbar::remove_window(app_id, win_id.unwrap_or(0)) {
@@ -83307,6 +84012,7 @@ fn cmd_taskbar(args: &str) {
             let badge = parts.get(2).copied();
             if app_id.is_empty() {
                 shell_println!("Usage: taskbar badge <app-id> [text]  (omit to clear)");
+                set_exit(1);
                 return;
             }
             match taskbar::set_badge(app_id, badge) {
@@ -83318,6 +84024,7 @@ fn cmd_taskbar(args: &str) {
             let app_id = parts.get(1).copied().unwrap_or("");
             if app_id.is_empty() {
                 shell_println!("Usage: taskbar attention <app-id>");
+                set_exit(1);
                 return;
             }
             match taskbar::request_attention(app_id) {
@@ -83433,6 +84140,7 @@ fn cmd_startmenu(args: &str) {
                     let app_id = parts.get(2).copied().unwrap_or("");
                     if app_id.is_empty() {
                         shell_println!("Usage: smenu fav add <app-id>");
+                        set_exit(1);
                         return;
                     }
                     match startmenu::add_favorite(app_id) {
@@ -83444,6 +84152,7 @@ fn cmd_startmenu(args: &str) {
                     let app_id = parts.get(2).copied().unwrap_or("");
                     if app_id.is_empty() {
                         shell_println!("Usage: smenu fav rm <app-id>");
+                        set_exit(1);
                         return;
                     }
                     match startmenu::remove_favorite(app_id) {
@@ -83456,6 +84165,7 @@ fn cmd_startmenu(args: &str) {
                     let pos = parts.get(3).and_then(|s| s.parse::<usize>().ok());
                     if app_id.is_empty() || pos.is_none() {
                         shell_println!("Usage: smenu fav reorder <app-id> <position>");
+                        set_exit(1);
                         return;
                     }
                     match startmenu::reorder_favorite(app_id, pos.unwrap_or(0)) {
@@ -83484,6 +84194,7 @@ fn cmd_startmenu(args: &str) {
                     let label = parts.get(3).copied().unwrap_or("");
                     if app_id.is_empty() || label.is_empty() {
                         shell_println!("Usage: smenu link add <app-id> <label> [icon]");
+                        set_exit(1);
                         return;
                     }
                     let icon = parts.get(4).copied().unwrap_or("icon-default");
@@ -83496,6 +84207,7 @@ fn cmd_startmenu(args: &str) {
                     let app_id = parts.get(2).copied().unwrap_or("");
                     if app_id.is_empty() {
                         shell_println!("Usage: smenu link rm <app-id>");
+                        set_exit(1);
                         return;
                     }
                     match startmenu::remove_quick_link(app_id) {
@@ -83548,6 +84260,7 @@ fn cmd_startmenu(args: &str) {
             let app_id = parts.get(1).copied().unwrap_or("");
             if app_id.is_empty() {
                 shell_println!("Usage: smenu launch <app-id>");
+                set_exit(1);
                 return;
             }
             match startmenu::record_launch(app_id) {
@@ -83559,6 +84272,7 @@ fn cmd_startmenu(args: &str) {
             let query = parts.get(1).copied().unwrap_or("");
             if query.is_empty() {
                 shell_println!("Usage: smenu search <query>");
+                set_exit(1);
                 return;
             }
             let results = startmenu::search(query);
@@ -83679,6 +84393,7 @@ fn cmd_systray(args: &str) {
             let tooltip = parts.get(3).copied().unwrap_or("");
             if id.is_empty() || app_id.is_empty() {
                 shell_println!("Usage: tray add <icon-id> <app-id> [tooltip] [icon]");
+                set_exit(1);
                 return;
             }
             let icon_name = parts.get(4).copied().unwrap_or("icon-default");
@@ -83704,6 +84419,7 @@ fn cmd_systray(args: &str) {
             let id = parts.get(1).copied().unwrap_or("");
             if id.is_empty() {
                 shell_println!("Usage: tray remove <icon-id>");
+                set_exit(1);
                 return;
             }
             match systray::remove_icon(id) {
@@ -83715,6 +84431,7 @@ fn cmd_systray(args: &str) {
             let id = parts.get(1).copied().unwrap_or("");
             if id.is_empty() {
                 shell_println!("Usage: tray get <icon-id>");
+                set_exit(1);
                 return;
             }
             match systray::get_icon(id) {
@@ -83793,6 +84510,7 @@ fn cmd_systray(args: &str) {
             let badge = parts.get(2).copied();
             if id.is_empty() {
                 shell_println!("Usage: tray badge <icon-id> [text]  (omit text to clear)");
+                set_exit(1);
                 return;
             }
             match systray::set_badge(id, badge) {
@@ -83808,6 +84526,7 @@ fn cmd_systray(args: &str) {
             let text = parts.get(2).copied().unwrap_or("");
             if id.is_empty() || text.is_empty() {
                 shell_println!("Usage: tray tooltip <icon-id> <text>");
+                set_exit(1);
                 return;
             }
             match systray::set_tooltip(id, text) {
@@ -83820,6 +84539,7 @@ fn cmd_systray(args: &str) {
             let vis_str = parts.get(2).copied().unwrap_or("");
             if id.is_empty() || vis_str.is_empty() {
                 shell_println!("Usage: tray vis <icon-id> <visible|overflow|hidden>");
+                set_exit(1);
                 return;
             }
             let vis = match vis_str {
@@ -83893,6 +84613,7 @@ fn cmd_systray(args: &str) {
             let click_type = parts.get(2).copied().unwrap_or("primary");
             if id.is_empty() {
                 shell_println!("Usage: tray click <icon-id> [primary|secondary|double|middle]");
+                set_exit(1);
                 return;
             }
             let ct = match click_type {
@@ -83962,6 +84683,7 @@ fn cmd_fflags(args: &str) {
                 shell_println!("  Flags: immutable, append-only, no-delete, compressed,");
                 shell_println!("         no-backup, no-index, system, hidden");
                 shell_println!("  Short: i, a, d, c, b, n, s, h");
+                set_exit(1);
                 return;
             }
             let path = resolve_path(path_arg);
@@ -83988,6 +84710,7 @@ fn cmd_fflags(args: &str) {
             let path_arg = parts.get(1).copied().unwrap_or("");
             if path_arg.is_empty() || parts.len() < 3 {
                 shell_println!("Usage: fflags clear <path> <flag> [flag...]");
+                set_exit(1);
                 return;
             }
             let path = resolve_path(path_arg);
@@ -84010,6 +84733,7 @@ fn cmd_fflags(args: &str) {
             let path_arg = parts.get(1).copied().unwrap_or("");
             if path_arg.is_empty() {
                 shell_println!("Usage: fflags get <path>");
+                set_exit(1);
                 return;
             }
             let path = resolve_path(path_arg);
@@ -84024,6 +84748,7 @@ fn cmd_fflags(args: &str) {
             let path_arg = parts.get(1).copied().unwrap_or("");
             if path_arg.is_empty() {
                 shell_println!("Usage: fflags rm <path>");
+                set_exit(1);
                 return;
             }
             let path = resolve_path(path_arg);
@@ -84131,6 +84856,7 @@ fn cmd_preview(args: &str) {
             let path_arg = parts.get(1).copied().unwrap_or("");
             if path_arg.is_empty() {
                 shell_println!("Usage: preview generate <path> [small|medium|large]");
+                set_exit(1);
                 return;
             }
             let path = resolve_path(path_arg);
@@ -84166,6 +84892,7 @@ fn cmd_preview(args: &str) {
             let path_arg = parts.get(1).copied().unwrap_or("");
             if path_arg.is_empty() {
                 shell_println!("Usage: preview check <path>");
+                set_exit(1);
                 return;
             }
             let path = resolve_path(path_arg);
@@ -84264,6 +84991,7 @@ fn cmd_template(args: &str) {
             let name_or_id = parts.get(1).copied().unwrap_or("");
             if name_or_id.is_empty() {
                 shell_println!("Usage: template create <name_or_id> [directory]");
+                set_exit(1);
                 return;
             }
             let dir = parts.get(2).map(resolve_path).unwrap_or_else(get_cwd);
@@ -84291,6 +85019,7 @@ fn cmd_template(args: &str) {
             // template add <name> <ext> <default_name> [content]
             if parts.len() < 4 {
                 shell_println!("Usage: template add <name> <ext> <default_name> [content]");
+                set_exit(1);
                 return;
             }
             let name = parts.get(1).copied().unwrap_or("");
@@ -84335,6 +85064,7 @@ fn cmd_template(args: &str) {
             let name_or_id = parts.get(1).copied().unwrap_or("");
             if name_or_id.is_empty() {
                 shell_println!("Usage: template info <name_or_id>");
+                set_exit(1);
                 return;
             }
             let template = if let Ok(id) = name_or_id.parse::<u64>() {
@@ -84540,6 +85270,7 @@ fn cmd_pathbar(args: &str) {
             let partial = parts.get(1).copied().unwrap_or("");
             if partial.is_empty() {
                 shell_println!("Usage: pathbar complete <partial_path>");
+                set_exit(1);
                 return;
             }
             let cwd = get_cwd();
@@ -84557,6 +85288,7 @@ fn cmd_pathbar(args: &str) {
             let path_arg = parts.get(1).copied().unwrap_or("");
             if path_arg.is_empty() {
                 shell_println!("Usage: pathbar go <path>");
+                set_exit(1);
                 return;
             }
             let path = resolve_path(path_arg);
@@ -84601,6 +85333,7 @@ fn cmd_pathbar(args: &str) {
             let path_arg = parts.get(1).copied().unwrap_or("");
             if path_arg.is_empty() {
                 shell_println!("Usage: pathbar normalize <path>");
+                set_exit(1);
                 return;
             }
             shell_println!("{}", pathbar::normalize(path_arg).display());
@@ -84673,6 +85406,7 @@ fn cmd_viewstate(args: &str) {
             // viewstate set <path> <mode> [sort_col] [asc|desc]
             if parts.len() < 3 {
                 shell_println!("Usage: viewstate set <path> <mode> [sort_col] [asc|desc]");
+                set_exit(1);
                 return;
             }
             let path = resolve_path(parts.get(1).copied().unwrap_or(""));
@@ -84703,6 +85437,7 @@ fn cmd_viewstate(args: &str) {
             let path_arg = parts.get(1).copied().unwrap_or("");
             if path_arg.is_empty() {
                 shell_println!("Usage: viewstate remove <path>");
+                set_exit(1);
                 return;
             }
             let path = resolve_path(path_arg);
@@ -84908,6 +85643,7 @@ fn cmd_getfacl(args: &str) {
 
     if args.is_empty() {
         shell_println!("Usage: getfacl <path>");
+        set_exit(1);
         return;
     }
 
@@ -84943,6 +85679,7 @@ fn cmd_setfacl(args: &str) {
 
     if parts.len() < 2 {
         shell_println!("Usage: setfacl <-m spec|-x spec|-b|--from-mode MODE> <path>");
+        set_exit(1);
         return;
     }
 
@@ -84951,6 +85688,7 @@ fn cmd_setfacl(args: &str) {
             // setfacl -m u:UID:PERM PATH  or  setfacl -m g:GID:PERM PATH
             if parts.len() < 3 {
                 shell_println!("Usage: setfacl -m <u:UID:rwx|g:GID:rwx> <path>");
+                set_exit(1);
                 return;
             }
             let spec = parts[1];
@@ -85005,6 +85743,7 @@ fn cmd_setfacl(args: &str) {
             // setfacl -x u:UID PATH  or  setfacl -x g:GID PATH
             if parts.len() < 3 {
                 shell_println!("Usage: setfacl -x <u:UID|g:GID> <path>");
+                set_exit(1);
                 return;
             }
             let spec = parts[1];
@@ -85053,6 +85792,7 @@ fn cmd_setfacl(args: &str) {
             // setfacl --from-mode 755 PATH
             if parts.len() < 3 {
                 shell_println!("Usage: setfacl --from-mode <octal_mode> <path>");
+                set_exit(1);
                 return;
             }
             let mode = match u16::from_str_radix(parts[1], 8) {
@@ -99103,6 +99843,7 @@ fn cmd_memtest(args: &str) {
     let count: usize = args.trim().parse().unwrap_or(32);
     if count == 0 || count > 1024 {
         shell_println!("Usage: memtest [1..1024] (frame count, default 32)");
+        set_exit(1);
         return;
     }
 
@@ -101237,6 +101978,7 @@ fn cmd_hotplug(args: &str) {
         "offline" => {
             let Some(cpu_str) = parts.get(1) else {
                 shell_println!("Usage: hotplug offline <cpu>");
+                set_exit(1);
                 return;
             };
             let Ok(cpu) = cpu_str.parse::<usize>() else {
@@ -101253,6 +101995,7 @@ fn cmd_hotplug(args: &str) {
         "online" => {
             let Some(cpu_str) = parts.get(1) else {
                 shell_println!("Usage: hotplug online <cpu>");
+                set_exit(1);
                 return;
             };
             let Ok(cpu) = cpu_str.parse::<usize>() else {
@@ -101873,6 +102616,7 @@ fn cmd_checkpoint(args: &str) {
         "diff" => {
             if parts.len() < 3 {
                 shell_println!("Usage: checkpoint diff <A-D> <A-D>");
+                set_exit(1);
                 return;
             }
             let from = parts[1].as_bytes().first().copied().unwrap_or(b'A');
@@ -102291,6 +103035,7 @@ fn cmd_snapshot(args: &str) {
         "diff" => {
             if parts.len() < 3 {
                 shell_println!("Usage: snapshot diff A B");
+                set_exit(1);
                 return;
             }
             let from = parts[1].as_bytes().first().copied().unwrap_or(b'A');
@@ -103219,6 +103964,7 @@ fn cmd_ksyms(args: &str) {
     let Ok(addr) = u64::from_str_radix(addr_str, 16) else {
         shell_println!("Invalid address: {}", arg);
         shell_println!("Usage: ksyms <hex_address>");
+        set_exit(1);
         return;
     };
 
@@ -103358,6 +104104,7 @@ fn cmd_irqbalance(args: &str) {
         "pin" => {
             let (Some(irq_str), Some(cpu_str)) = (parts.get(1), parts.get(2)) else {
                 shell_println!("Usage: irqbalance pin <irq> <cpu>");
+                set_exit(1);
                 return;
             };
             let Ok(irq) = irq_str.parse::<u8>() else {
@@ -103374,6 +104121,7 @@ fn cmd_irqbalance(args: &str) {
         "unpin" => {
             let Some(irq_str) = parts.get(1) else {
                 shell_println!("Usage: irqbalance unpin <irq>");
+                set_exit(1);
                 return;
             };
             let Ok(irq) = irq_str.parse::<u8>() else {
@@ -110207,6 +110955,7 @@ fn cmd_tsession(args: &str) {
                 Some(s) => s,
                 None => {
                     shell_println!("Usage: tsession switch <id>");
+                    set_exit(1);
                     return;
                 }
             };
@@ -110224,6 +110973,7 @@ fn cmd_tsession(args: &str) {
                 Some(s) => s,
                 None => {
                     shell_println!("Usage: tsession kill <id>");
+                    set_exit(1);
                     return;
                 }
             };
@@ -110250,6 +111000,7 @@ fn cmd_tsession(args: &str) {
                 Some(s) => s,
                 None => {
                     shell_println!("Usage: tsession rename <id> <name>");
+                    set_exit(1);
                     return;
                 }
             };
@@ -110257,6 +111008,7 @@ fn cmd_tsession(args: &str) {
                 Some(s) => s,
                 None => {
                     shell_println!("Usage: tsession rename <id> <name>");
+                    set_exit(1);
                     return;
                 }
             };

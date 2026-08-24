@@ -575,7 +575,7 @@ fn is_array(name: &str) -> bool {
     ARRAY_VARS.lock().contains_key(name)
 }
 
-/// Expand `$VAR` and `${VAR}` references in a string.
+/// Expand `$VAR` and `${VAR}` references, accumulating into bytes.
 ///
 /// - `$NAME` expands the longest run of alphanumeric/underscore chars.
 /// - `${NAME}` expands the text between braces.
@@ -583,10 +583,21 @@ fn is_array(name: &str) -> bool {
 /// - `$?` expands to the last command's exit status (0=success, 1=failure).
 /// - Unknown variables expand to empty string.
 /// - Single-quoted strings (`'...'`) are not expanded.
-fn expand_vars(input: &str) -> String {
-    let bytes = input.as_bytes();
+///
+/// The accumulator is a `Vec<u8>` rather than a `String` because the parser
+/// has always been byte-indexed — it scans `bytes[i]` for `$`, `'`, `` ` ``
+/// and `~`, all ASCII — while the accumulator was a `String` that could only
+/// be fed `char`s. The two were bridged by `result.push(b as char)`, and that
+/// bridge was wrong: `b as char` maps a byte to the *Latin-1* code point of
+/// the same value, so every byte of a multi-byte UTF-8 sequence was re-encoded
+/// as its own two-byte character. `café` came out of the expander as `cafÃ©`.
+///
+/// Copying the byte verbatim is both the fix and the simpler operation: bytes
+/// this function does not interpret should pass through untouched, which is
+/// exactly what `Vec::push` does and exactly what `String::push` cannot.
+fn expand_vars_bytes(bytes: &[u8]) -> Vec<u8> {
     let len = bytes.len();
-    let mut result = String::with_capacity(len);
+    let mut result: Vec<u8> = Vec::with_capacity(len);
     let mut i = 0;
     let mut in_single_quote = false;
 
@@ -596,18 +607,18 @@ fn expand_vars(input: &str) -> String {
         if b == b'\'' && !in_single_quote {
             // Enter single-quoted section (no expansion).
             in_single_quote = true;
-            result.push('\'');
+            result.push(b'\'');
             i = i.saturating_add(1);
             continue;
         }
         if b == b'\'' && in_single_quote {
             in_single_quote = false;
-            result.push('\'');
+            result.push(b'\'');
             i = i.saturating_add(1);
             continue;
         }
         if in_single_quote {
-            result.push(b as char);
+            result.push(b);
             i = i.saturating_add(1);
             continue;
         }
@@ -616,19 +627,19 @@ fn expand_vars(input: &str) -> String {
             i = i.saturating_add(1);
             if i >= len {
                 // Trailing `$` — emit literally.
-                result.push('$');
+                result.push(b'$');
                 break;
             }
             let next = bytes[i];
 
             if next == b'$' {
                 // `$$` → literal `$`.
-                result.push('$');
+                result.push(b'$');
                 i = i.saturating_add(1);
             } else if next == b'?' {
                 // `$?` → last command's exit status.
                 let code = last_exit();
-                result.push_str(&alloc::format!("{}", code));
+                result.extend_from_slice(alloc::format!("{}", code).as_bytes());
                 i = i.saturating_add(1);
             } else if next == b'(' && bytes.get(i.saturating_add(1)) == Some(&b'(') {
                 // `$((...))` — arithmetic expansion.
@@ -655,7 +666,7 @@ fn expand_vars(input: &str) -> String {
                         // Expand variables within the expression first.
                         let expanded_expr = expand_vars(expr);
                         let val = eval_arithmetic(&expanded_expr);
-                        result.push_str(&alloc::format!("{}", val));
+                        result.extend_from_slice(alloc::format!("{}", val).as_bytes());
                     }
                 }
                 // Skip past `))`.
@@ -685,7 +696,7 @@ fn expand_vars(input: &str) -> String {
                         let output = capture_command(cmd);
                         // POSIX: strip trailing newlines from substitution.
                         if let Some(s) = shell_bytes_as_str(trim_trailing_newlines(&output), cmd) {
-                            result.push_str(s);
+                            result.extend_from_slice(s.as_bytes());
                         }
                     }
                 }
@@ -708,7 +719,12 @@ fn expand_vars(input: &str) -> String {
                 }
                 if let Some(inner_bytes) = bytes.get(start..i) {
                     if let Ok(inner) = core::str::from_utf8(inner_bytes) {
-                        expand_brace_expr(inner, &mut result);
+                        // `${...}` only ever produces text — a variable's
+                        // value, a length, a formatted number — so it keeps
+                        // its `String` accumulator and is spliced in here.
+                        let mut brace_out = String::new();
+                        expand_brace_expr(inner, &mut brace_out);
+                        result.extend_from_slice(brace_out.as_bytes());
                     }
                 }
                 if i < len && bytes[i] == b'}' {
@@ -717,15 +733,15 @@ fn expand_vars(input: &str) -> String {
             } else if next.is_ascii_digit() {
                 // `$0`..`$9` → positional parameter.
                 let n = (next - b'0') as usize;
-                result.push_str(&get_positional(n));
+                result.extend_from_slice(get_positional(n).as_bytes());
                 i = i.saturating_add(1);
             } else if next == b'#' {
                 // `$#` → number of positional parameters.
-                result.push_str(&alloc::format!("{}", positional_count()));
+                result.extend_from_slice(alloc::format!("{}", positional_count()).as_bytes());
                 i = i.saturating_add(1);
             } else if next == b'@' || next == b'*' {
                 // `$@` / `$*` → all positional parameters (space-separated).
-                result.push_str(&positional_all());
+                result.extend_from_slice(positional_all().as_bytes());
                 i = i.saturating_add(1);
             } else if next.is_ascii_alphabetic() || next == b'_' {
                 // `$NAME` form — longest alphanumeric/underscore run.
@@ -736,14 +752,14 @@ fn expand_vars(input: &str) -> String {
                 if let Some(name_bytes) = bytes.get(start..i) {
                     if let Ok(name) = core::str::from_utf8(name_bytes) {
                         if let Some(val) = env_get(name) {
-                            result.push_str(&val);
+                            result.extend_from_slice(val.as_bytes());
                         }
                     }
                 }
             } else {
                 // `$` followed by something else — emit literally.
-                result.push('$');
-                result.push(next as char);
+                result.push(b'$');
+                result.push(next);
                 i = i.saturating_add(1);
             }
         } else if b == b'`' {
@@ -759,7 +775,7 @@ fn expand_vars(input: &str) -> String {
                     let output = capture_command(cmd);
                     // POSIX: strip trailing newlines from substitution.
                     if let Some(s) = shell_bytes_as_str(trim_trailing_newlines(&output), cmd) {
-                        result.push_str(s);
+                        result.extend_from_slice(s.as_bytes());
                     }
                 }
             }
@@ -782,21 +798,49 @@ fn expand_vars(input: &str) -> String {
                 );
             if at_word_start && next_ok {
                 if let Some(home) = env_get("HOME") {
-                    result.push_str(&home);
+                    result.extend_from_slice(home.as_bytes());
                 } else {
-                    result.push('~');
+                    result.push(b'~');
                 }
             } else {
-                result.push('~');
+                result.push(b'~');
             }
             i = i.saturating_add(1);
         } else {
-            result.push(b as char);
+            result.push(b);
             i = i.saturating_add(1);
         }
     }
 
     result
+}
+
+/// Expand `$VAR` and `${VAR}` references in a string. See
+/// [`expand_vars_bytes`], of which this is the narrowing wrapper.
+///
+/// This is the seam where byte-clean expansion meets the nine callers that
+/// still deal in `&str`. Converting them is the remaining half of the
+/// byte-clean shell work (`TD-KSHELL-LINE-EDITOR-IS-UTF8`); until then the
+/// narrowing happens once, here, instead of nine times at the call sites.
+fn expand_vars(input: &str) -> String {
+    let expanded = expand_vars_bytes(input.as_bytes());
+    match String::from_utf8(expanded) {
+        Ok(s) => s,
+        Err(_) => {
+            // Unreachable as long as `input` is `&str`: every byte this
+            // function copies verbatim comes from `input`, and everything it
+            // *inserts* (variable values, positional parameters, formatted
+            // numbers, command output that already passed
+            // `shell_bytes_as_str`) is itself `&str`. Reported rather than
+            // silently substituted because reaching it means one of those
+            // sources stopped being UTF-8, which is a bug here and not bad
+            // input — and a `from_utf8_lossy` would hide exactly that.
+            crate::console_println!(
+                "kshell: internal error: variable expansion produced invalid UTF-8"
+            );
+            String::new()
+        }
+    }
 }
 
 /// Expand a `${...}` brace expression.
@@ -6194,6 +6238,37 @@ fn shell_bytes_as_str<'a>(bytes: &'a [u8], what: &str) -> Option<&'a str> {
     }
 }
 
+/// Finish a byte accumulator that was filled by an ASCII-delimited scanner.
+///
+/// Several small parsers here — `date +FORMAT`, awk's string literals and its
+/// print-argument splitter — walk a `&str` by byte index because every
+/// character they *interpret* is ASCII (`%`, `\`, `"`, `,`). Their accumulator
+/// used to be a `String`, which cannot be fed a byte, so each of them bridged
+/// the gap with `push(byte as char)` — and that maps a byte to the Latin-1
+/// code point of the same value, re-encoding every byte of a multi-byte
+/// character as its own two-byte sequence. `date +'%F café'` printed
+/// `2026-08-24 cafÃ©`.
+///
+/// Accumulating bytes and converting once, here, is lossless, and the reason
+/// is worth stating because it is what makes the whole pattern safe: a UTF-8
+/// continuation byte is always ≥ 0x80, so an ASCII delimiter can never occur
+/// *inside* a multi-byte sequence. A scanner that only ever branches on ASCII
+/// therefore only ever splits on character boundaries, and everything between
+/// its splits is copied through verbatim.
+///
+/// The `Err` arm is unreachable for a `&str` input by that argument; it is
+/// reported rather than lossily substituted so that a future caller which
+/// breaks the invariant is heard rather than silently corrected.
+fn finish_ascii_scan(out: Vec<u8>, what: &str) -> String {
+    match String::from_utf8(out) {
+        Ok(s) => s,
+        Err(_) => {
+            crate::console_println!("kshell: internal error: {what} produced invalid UTF-8");
+            String::new()
+        }
+    }
+}
+
 /// Strip trailing newlines, as POSIX requires of `$(…)` substitution.
 fn trim_trailing_newlines(bytes: &[u8]) -> &[u8] {
     let mut end = bytes.len();
@@ -9300,6 +9375,117 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         assert_eq!(piped("echo ok", b"\xff").as_slice(), &b"ok\n"[..]);
     }
 
+    serial_println!("  kshell::self_test 9: non-ASCII survives expansion (regression)");
+    // The same bug as section 3, in a far bigger place. `expand_vars` is on
+    // `execute`'s critical path — *every* command line goes through it — and
+    // its byte-indexed loop fed a `String` accumulator via
+    // `result.push(b as char)`. That maps a byte to the Latin-1 code point of
+    // the same value, so each byte of a multi-byte character was re-encoded as
+    // its own two-byte sequence: `echo café` really did run `echo cafÃ©`, and
+    // `mkdir Ünicode` really did create `Ãnicode`.
+    //
+    // Compare byte lengths explicitly, as section 3 does: a `String` that
+    // *looks* right in a debugger can still carry the doubled encoding.
+    assert_eq!(expand_vars("café"), "café");
+    assert_eq!(expand_vars("café").len(), "café".len());
+    assert_eq!(expand_vars("é").len(), 2);
+    assert_eq!(expand_vars("→").len(), 3);
+    assert_eq!(expand_vars("🦀").len(), 4);
+    // Single-quoted text takes a different branch (expansion suppressed) that
+    // had its own copy of the same `b as char`.
+    assert_eq!(expand_vars("'café'"), "'café'");
+    assert_eq!(expand_vars("'🦀'").len(), "'🦀'".len());
+    // `$` followed by a non-name byte is emitted literally — a third copy,
+    // reached when the byte after `$` is a UTF-8 lead byte.
+    assert_eq!(expand_vars("$é"), "$é");
+    // Tilde handling indexes around the character, so a multi-byte neighbour
+    // is where a byte-indexed lookahead would desynchronise.
+    assert_eq!(expand_vars("é~é"), "é~é");
+    {
+        // Expansion itself still works, and still works when the surrounding
+        // text is multi-byte — the fix must not have turned the expander into
+        // a pass-through.
+        let saved = env_get("KSHELL_SELFTEST_VAR");
+        assert!(env_set("KSHELL_SELFTEST_VAR", "→value"));
+        assert_eq!(expand_vars("é$KSHELL_SELFTEST_VARé"), "é→valueé");
+        assert_eq!(expand_vars("${KSHELL_SELFTEST_VAR}"), "→value");
+        // A non-ASCII *value* must not be doubled either; it is inserted
+        // wholesale rather than byte-by-byte, but assert it, since that is the
+        // property callers actually depend on.
+        assert_eq!(expand_vars("$KSHELL_SELFTEST_VAR").len(), "→value".len());
+        match saved {
+            Some(v) => {
+                assert!(env_set("KSHELL_SELFTEST_VAR", &v));
+            }
+            None => {
+                env_remove("KSHELL_SELFTEST_VAR");
+            }
+        }
+    }
+    // `$$` and `$?` are ASCII paths that must be unaffected by the change.
+    assert_eq!(expand_vars("$$"), "$");
+    assert_eq!(expand_vars("a$$b"), "a$b");
+
+    serial_println!("  kshell::self_test 10: the other byte-indexed scanners");
+    // Four more scanners had the same `push(byte as char)` bridge. They are
+    // grouped here because the bug is one bug; what differs is only how it
+    // surfaced.
+    {
+        // `date +FORMAT` — literal text in the format string was mojibake'd,
+        // so `date +'%F café'` printed `cafÃ©`. Driven through the real
+        // dispatch so the `+` parsing is covered too.
+        fn piped(cmd: &str, input: &[u8]) -> Vec<u8> {
+            let prev = SHELL_OUTPUT.lock().take();
+            capture_start();
+            dispatch_with_input(cmd, input);
+            let out = capture_stop();
+            *SHELL_OUTPUT.lock() = prev;
+            out
+        }
+        let out = piped("date +café", b"");
+        assert_eq!(
+            out.as_slice(),
+            "café\n".as_bytes(),
+            "date must copy literal format text through unchanged"
+        );
+        // A real conversion still works beside the literal text.
+        let out = piped("date +%Y-café", b"");
+        assert!(
+            out.ends_with("-café\n".as_bytes()) && out.len() == "2026-café\n".len(),
+            "date: expected a 4-digit year followed by the literal text"
+        );
+
+        // `tr` — this one did not merely corrupt, it produced a set that could
+        // never match, so the translation silently did nothing. `expand_tr_set`
+        // now scans characters.
+        assert_eq!(expand_tr_set("é"), alloc::vec!['é']);
+        assert_eq!(expand_tr_set("aéb"), alloc::vec!['a', 'é', 'b']);
+        assert_eq!(expand_tr_set("a-c"), alloc::vec!['a', 'b', 'c']);
+        // An escaped multi-byte character stands for itself.
+        assert_eq!(expand_tr_set("\\é"), alloc::vec!['é']);
+        // ASCII escapes and ranges are unchanged by the rewrite.
+        assert_eq!(expand_tr_set("\\n\\t"), alloc::vec!['\n', '\t']);
+        assert_eq!(expand_tr_set("0-9").len(), 10);
+        // A code-point range, which the byte version could not express at all
+        // (it would have walked from one character's bytes into another's).
+        assert_eq!(expand_tr_set("à-â"), alloc::vec!['à', 'á', 'â']);
+
+        // awk — a string literal and the comma splitter, both byte-indexed
+        // over ASCII delimiters.
+        assert_eq!(awk_eval_expr("\"café\"", "", &[], 1, 0), "café");
+        assert_eq!(awk_eval_expr("\"a\\tcafé\"", "", &[], 1, 0), "a\tcafé");
+        assert_eq!(
+            awk_split_print_args("\"café\",\"→\""),
+            alloc::vec![
+                alloc::string::String::from("\"café\""),
+                alloc::string::String::from("\"→\"")
+            ]
+        );
+        // A comma *inside* quotes is not a split point, and the multi-byte
+        // text around it must not desynchronise the quote tracking.
+        assert_eq!(awk_split_print_args("\"é,é\"").len(), 1);
+    }
+
     serial_println!("  kshell::self_test PASSED");
     Ok(())
 }
@@ -9559,28 +9745,30 @@ fn cmd_date(args: &str) {
         "December",
     ];
 
-    let mut out = alloc::string::String::with_capacity(fmt.len() + 32);
+    // Byte accumulator, not a `String`: see `finish_ascii_scan` for why, and
+    // for the invariant that makes the conversion at the end lossless.
+    let mut out: Vec<u8> = Vec::with_capacity(fmt.len() + 32);
     let bytes = fmt.as_bytes();
     let mut i = 0;
     while i < bytes.len() {
         if bytes[i] == b'%' && i + 1 < bytes.len() {
             i += 1;
             match bytes[i] {
-                b'Y' => out.push_str(&alloc::format!("{:04}", dt.year)),
-                b'm' => out.push_str(&alloc::format!("{:02}", dt.month)),
-                b'd' => out.push_str(&alloc::format!("{:02}", dt.day)),
-                b'H' => out.push_str(&alloc::format!("{:02}", dt.hour)),
-                b'M' => out.push_str(&alloc::format!("{:02}", dt.minute)),
-                b'S' => out.push_str(&alloc::format!("{:02}", dt.second)),
-                b'a' => out.push_str(DAY_ABBR[dow as usize % 7]),
-                b'A' => out.push_str(DAY_FULL[dow as usize % 7]),
+                b'Y' => out.extend_from_slice(alloc::format!("{:04}", dt.year).as_bytes()),
+                b'm' => out.extend_from_slice(alloc::format!("{:02}", dt.month).as_bytes()),
+                b'd' => out.extend_from_slice(alloc::format!("{:02}", dt.day).as_bytes()),
+                b'H' => out.extend_from_slice(alloc::format!("{:02}", dt.hour).as_bytes()),
+                b'M' => out.extend_from_slice(alloc::format!("{:02}", dt.minute).as_bytes()),
+                b'S' => out.extend_from_slice(alloc::format!("{:02}", dt.second).as_bytes()),
+                b'a' => out.extend_from_slice(DAY_ABBR[dow as usize % 7].as_bytes()),
+                b'A' => out.extend_from_slice(DAY_FULL[dow as usize % 7].as_bytes()),
                 b'b' | b'h' => {
                     let idx = if dt.month >= 1 && dt.month <= 12 {
                         (dt.month - 1) as usize
                     } else {
                         0
                     };
-                    out.push_str(MON_ABBR[idx]);
+                    out.extend_from_slice(MON_ABBR[idx].as_bytes());
                 }
                 b'B' => {
                     let idx = if dt.month >= 1 && dt.month <= 12 {
@@ -9588,48 +9776,39 @@ fn cmd_date(args: &str) {
                     } else {
                         0
                     };
-                    out.push_str(MON_FULL[idx]);
+                    out.extend_from_slice(MON_FULL[idx].as_bytes());
                 }
-                b'j' => out.push_str(&alloc::format!("{:03}", yday)),
+                b'j' => out.extend_from_slice(alloc::format!("{:03}", yday).as_bytes()),
                 b'u' => {
                     // ISO weekday: Mon=1..Sun=7.  dow 0=Sun → 7.
                     let iso = if dow == 0 { 7 } else { dow };
-                    out.push_str(&alloc::format!("{}", iso));
+                    out.extend_from_slice(alloc::format!("{}", iso).as_bytes());
                 }
-                b'Z' => out.push_str("UTC"),
-                b'n' => out.push('\n'),
-                b't' => out.push('\t'),
-                b'%' => out.push('%'),
-                b'F' => out.push_str(&alloc::format!(
-                    "{:04}-{:02}-{:02}",
-                    dt.year,
-                    dt.month,
-                    dt.day
-                )),
-                b'T' => out.push_str(&alloc::format!(
-                    "{:02}:{:02}:{:02}",
-                    dt.hour,
-                    dt.minute,
-                    dt.second
-                )),
-                b'D' => out.push_str(&alloc::format!(
-                    "{:02}/{:02}/{:04}",
-                    dt.month,
-                    dt.day,
-                    dt.year
-                )),
-                b's' => out.push_str(&alloc::format!("{}", epoch_secs)),
+                b'Z' => out.extend_from_slice(b"UTC"),
+                b'n' => out.push(b'\n'),
+                b't' => out.push(b'\t'),
+                b'%' => out.push(b'%'),
+                b'F' => out.extend_from_slice(
+                    alloc::format!("{:04}-{:02}-{:02}", dt.year, dt.month, dt.day).as_bytes(),
+                ),
+                b'T' => out.extend_from_slice(
+                    alloc::format!("{:02}:{:02}:{:02}", dt.hour, dt.minute, dt.second).as_bytes(),
+                ),
+                b'D' => out.extend_from_slice(
+                    alloc::format!("{:02}/{:02}/{:04}", dt.month, dt.day, dt.year).as_bytes(),
+                ),
+                b's' => out.extend_from_slice(alloc::format!("{}", epoch_secs).as_bytes()),
                 _ => {
-                    out.push('%');
-                    out.push(bytes[i] as char);
+                    out.push(b'%');
+                    out.push(bytes[i]);
                 }
             }
         } else {
-            out.push(bytes[i] as char);
+            out.push(bytes[i]);
         }
         i += 1;
     }
-    shell_println!("{}", out);
+    shell_println!("{}", finish_ascii_scan(out, "date +FORMAT"));
 }
 
 /// Time the execution of a shell command.
@@ -94895,36 +95074,50 @@ fn tr_delete(text: &str, set1: &str) {
 }
 
 /// Expand a tr character set.  Handles ranges like `a-z` and escapes like `\n`.
+///
+/// Scans **characters**, not bytes. `tr` is one of the few commands here that
+/// is genuinely `char`-oriented — it matches its input a character at a time
+/// against this set — so a byte-indexed scan was not merely lossy, it built a
+/// set that could never match. `tr é e` expanded `é` (0xC3 0xA9) into the two
+/// Latin-1 characters `Ã` and `©`, neither of which appears in decoded input,
+/// so the translation silently did nothing. Ranges were worse: `start..=end`
+/// over bytes could run from half of one character into half of another.
 fn expand_tr_set(set: &str) -> Vec<char> {
     let set = strip_quotes(set);
+    let src: Vec<char> = set.chars().collect();
+    let len = src.len();
     let mut chars = Vec::new();
-    let bytes = set.as_bytes();
-    let len = bytes.len();
     let mut i = 0;
 
     while i < len {
-        if bytes[i] == b'\\' && i.saturating_add(1) < len {
-            let next = bytes[i.saturating_add(1)];
+        let Some(cur) = src.get(i).copied() else {
+            break;
+        };
+        let next = src.get(i.saturating_add(1)).copied();
+        if cur == '\\' && next.is_some() {
             match next {
-                b'n' => chars.push('\n'),
-                b't' => chars.push('\t'),
-                b'r' => chars.push('\r'),
-                b'\\' => chars.push('\\'),
-                _ => chars.push(next as char),
+                Some('n') => chars.push('\n'),
+                Some('t') => chars.push('\t'),
+                Some('r') => chars.push('\r'),
+                // Any other escaped character stands for itself — including a
+                // multi-byte one, which is the case the byte scan mangled.
+                Some(c) => chars.push(c),
+                None => {}
             }
             i = i.saturating_add(2);
-        } else if i.saturating_add(2) < len && bytes[i.saturating_add(1)] == b'-' {
-            // Range: a-z
-            let start = bytes[i];
-            let end = bytes[i.saturating_add(2)];
-            if start <= end {
-                for c in start..=end {
-                    chars.push(c as char);
+        } else if next == Some('-') && i.saturating_add(2) < len {
+            // Range: `a-z`. Over `char`s this is a code-point range, which is
+            // what someone writing `à-ÿ` means and what the byte version could
+            // not express at all.
+            let end = src.get(i.saturating_add(2)).copied().unwrap_or(cur);
+            if cur <= end {
+                for c in cur..=end {
+                    chars.push(c);
                 }
             }
             i = i.saturating_add(3);
         } else {
-            chars.push(bytes[i] as char);
+            chars.push(cur);
             i = i.saturating_add(1);
         }
     }
@@ -108070,7 +108263,9 @@ fn awk_format_print(
 /// Split print arguments by commas (respecting quotes).
 fn awk_split_print_args(expr: &str) -> alloc::vec::Vec<alloc::string::String> {
     let mut parts = alloc::vec::Vec::new();
-    let mut current = alloc::string::String::new();
+    // Byte accumulator; see `finish_ascii_scan`. The delimiters here are `"`
+    // and `,`, both ASCII, so a split can never land inside a character.
+    let mut current: Vec<u8> = Vec::new();
     let mut in_quote = false;
     let bytes = expr.as_bytes();
     let mut i = 0;
@@ -108079,19 +108274,22 @@ fn awk_split_print_args(expr: &str) -> alloc::vec::Vec<alloc::string::String> {
         match bytes[i] {
             b'"' => {
                 in_quote = !in_quote;
-                current.push('"');
+                current.push(b'"');
             }
             b',' if !in_quote => {
-                parts.push(core::mem::take(&mut current));
+                parts.push(finish_ascii_scan(
+                    core::mem::take(&mut current),
+                    "awk print argument",
+                ));
             }
             _ => {
-                current.push(bytes[i] as char);
+                current.push(bytes[i]);
             }
         }
         i += 1;
     }
     if !current.is_empty() {
-        parts.push(current);
+        parts.push(finish_ascii_scan(current, "awk print argument"));
     }
     parts
 }
@@ -108110,29 +108308,35 @@ fn awk_eval_expr(
     // String literal: "..."
     if expr.starts_with('"') && expr.ends_with('"') && expr.len() >= 2 {
         let inner = &expr[1..expr.len() - 1];
-        // Handle common escape sequences.
-        let mut result = alloc::string::String::new();
+        // Handle common escape sequences. Byte accumulator; see
+        // `finish_ascii_scan`. Only `\` is interpreted here, so an
+        // `awk '{print "café"}'` literal now reaches the output intact.
+        let mut result: Vec<u8> = Vec::new();
         let bytes = inner.as_bytes();
         let mut i = 0;
         while i < bytes.len() {
             if bytes[i] == b'\\' && i + 1 < bytes.len() {
                 match bytes[i + 1] {
-                    b'n' => result.push('\n'),
-                    b't' => result.push('\t'),
-                    b'\\' => result.push('\\'),
-                    b'"' => result.push('"'),
+                    b'n' => result.push(b'\n'),
+                    b't' => result.push(b'\t'),
+                    b'\\' => result.push(b'\\'),
+                    b'"' => result.push(b'"'),
                     _ => {
-                        result.push('\\');
-                        result.push(bytes[i + 1] as char);
+                        // An unrecognised escape keeps its backslash. Only the
+                        // *lead* byte is emitted here; any continuation bytes
+                        // fall through the branch below on the next passes,
+                        // which is why the sequence survives.
+                        result.push(b'\\');
+                        result.push(bytes[i + 1]);
                     }
                 }
                 i += 2;
             } else {
-                result.push(bytes[i] as char);
+                result.push(bytes[i]);
                 i += 1;
             }
         }
-        return result;
+        return finish_ascii_scan(result, "awk string literal");
     }
 
     // Built-in variables.

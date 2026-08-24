@@ -67826,7 +67826,7 @@ VFS call under a given guard. `net/tftp.rs` was named once and had three.
 
 ## TD-A-ASSERTIONS-THAT-A-CONSTANT-WOULD-PASS — the weak-proxy sweep (lane A, 2026-08-23)
 
-**Status:** two instances FIXED; the class is not closed.
+**Status:** three instances FIXED; the class is not closed.
 
 A self-test assertion is only worth its line if there is a plausible way for
 the code under test to be wrong and still fail it. Three shapes recur here
@@ -67851,13 +67851,36 @@ and none of them clear that bar:
    can notice when it stops being written. Fixed in `d4dff8c2a` by carrying
    it on `CrashInfo`, rendering it, and asserting it in self-tests 4 and 5.
 
-3. **A test that skips itself and reports success.** Still open:
-   `kernel/src/fs/index.rs:1020` prints
-   `"[index]   (skipped VFS tests: /tmp not mounted)"` and returns Ok. It is
+3. **A test that skips itself and reports success.** `kernel/src/fs/index.rs`
+   printed `"[index]   (skipped VFS tests: /tmp not mounted)"` mid-run and
+   then `"[index] Self-test passed"` at the end. The last line is the one a
+   reader believes, so the suite went green having tested nothing. It was
    dormant rather than harmless — `/tmp` *is* mounted today (see
-   `build/serial-batch32.txt` line 2190, `/tmp -> memfs`), so the branch is
-   not taken; but if it ever were, the suite would go green having tested
-   nothing. A skip must be reported as a skip, not as a pass.
+   `build/serial-batch32.txt` line 2190, `/tmp -> memfs`), so the branch was
+   not taken.
+
+   Fixed 2026-08-23. Two changes, and the second is the larger one:
+
+   - **The skip is now carried to the summary.** `self_test` collects the
+     names of sections it could not run and, if that list is non-empty,
+     prints `"Self-test passed with N section(s) SKIPPED"` followed by one
+     `SKIP:` line each — the shape `report_pathz_skips` in
+     `scripts/boot-test.sh` already uses. Test 5's zero-entry rebuild joined
+     the list for the same reason: its bookkeeping assertions ran, but the
+     thing the test is *for* — that a walk finds files and files them — did
+     not happen, and "rebuild OK (0 entries)" read as a pass.
+   - **The precondition is now asked, not inferred.** The gate was
+     `if Vfs::write_file(..).is_ok()`, which classifies *every* failure as
+     "/tmp is not mounted": a permission gate wrongly denying the write, a
+     full filesystem, a memfs bug. It would have skipped the very test that
+     caught them. It now consults the mount table — a fact — and once /tmp is
+     known mounted, a failing write is a reported failure with the error in
+     it, not a skip.
+
+   The general lesson for this class: a self-skipping test has *two* defects,
+   and fixing only the reporting leaves the worse one. The condition that
+   decides to skip must be a statement about the environment, never a
+   swallowed error from the code under test.
 
 **Also still open, same class:** `svcstart`'s `boot_start_ns`/`boot_end_ns`
 are only ever compared behind `if st.boot_end_ns > st.boot_start_ns`

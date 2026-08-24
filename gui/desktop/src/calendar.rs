@@ -4546,4 +4546,493 @@ description: Just a test";
         let events = store.events_for_range(range_start, range_end);
         assert!(events.is_empty());
     }
+
+    // ========================================================================
+    // Colour
+    //
+    // Module 43 of part 2 of
+    // TD-C-FORTY-NINE-SHELL-MODULES-CARRY-THEIR-OWN-COPY-OF-THE-PALETTE. The
+    // eight `Color` constants that used to live in this file's `mod theme` are
+    // gone, and the tests below are the only thing that says so: a constant
+    // the conversion missed still compiles and still draws the colour it
+    // always drew, so it is invisible to the eye and to every other test here.
+    // ========================================================================
+
+    /// A palette whose accent is a member of no role.
+    ///
+    /// The stock accent *is* `blue`, and this module has three sites that mean
+    /// "today" — the day disc, the mini-month label, the "Today" button —
+    /// which must be tellable apart from any role that happens to share the
+    /// accent's value. The assertion lives in the fixture rather than in one
+    /// test of its own so that it fires in every test that renders.
+    fn accented(light: bool) -> Palette {
+        let mut p = Palette::for_mode(light);
+        p.accent = Color::from_hex(0x00FF_00FF);
+        assert!(
+            !p.roles()
+                .iter()
+                .any(|(n, r)| *n != "accent" && *r == p.accent),
+            "the fixture accent collides with a role, so no test using it can \
+             tell an accented site from that role"
+        );
+        p
+    }
+
+    /// The colour a user gave one of their own events.
+    ///
+    /// Deliberately in neither palette. `CalendarEvent::color` is the one
+    /// value this module draws that is not the shell's to theme, so a fixture
+    /// that used a role could not tell "the user's colour was honoured" from
+    /// "the default was drawn" — and telling those apart is the whole point,
+    /// since the month-grid dot ignored the field entirely until module 43.
+    const USER_ORANGE: Color = Color::from_hex(0xFF7F00);
+
+    /// Every colour a command carries, alpha discarded.
+    ///
+    /// The drop shadow is included rather than filtered out. It is black at
+    /// every alpha in both modes on purpose (§525 decision 3), which makes it
+    /// the one entry in the ordered pin below that must *not* move with the
+    /// mode — and a site excluded from the pin is a site the pin cannot check.
+    fn colors(cmds: &[RenderCommand]) -> Vec<Color> {
+        cmds.iter()
+            .filter_map(|c| match c {
+                RenderCommand::FillRect { color, .. }
+                | RenderCommand::StrokeRect { color, .. }
+                | RenderCommand::Text { color, .. }
+                | RenderCommand::BoxShadow { color, .. } => {
+                    Some(Color::rgba(color.r, color.g, color.b, 255))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Opaque black, as [`colors`] reports the drop shadow.
+    const SHADOW: Color = Color::rgba(0, 0, 0, 255);
+
+    /// The month view the ordered pin below is a claim about.
+    ///
+    /// May 2026, open on today (the 18th), the 7th selected, week numbers on,
+    /// a clock band carrying one extra zone, and events on three days: one
+    /// uncoloured on a plain day, seven on the selected day of which the
+    /// earliest carries [`USER_ORANGE`], and one uncoloured on today. Between
+    /// them they reach every colour site the month view has except the "Today"
+    /// button, which by construction cannot coexist with a visible today cell.
+    ///
+    /// The grid's shape is a fact about the calendar rather than about this
+    /// code: 1 May 2026 is a Friday and weeks start on Sunday, so cell 0 is
+    /// 26 April, cell 5 is 1 May, cell 35 is 31 May, and cells 36..=41 are
+    /// 1..=6 June. Today is therefore cell 22 and the selection cell 11. Those
+    /// are asserted here so that the literal indices the pin uses are anchored
+    /// to the dates they claim to be, and cannot quietly come to mean other
+    /// cells if the grid's origin ever moves.
+    fn scene() -> (CalendarView, EventStore) {
+        let config = CalendarConfig {
+            show_week_numbers: true,
+            ..Default::default()
+        };
+        let mut cal = CalendarView::new(config);
+        cal.set_today(2026, 5, 18);
+        cal.set_visible(true);
+        cal.selected_date = Some((2026, 5, 7));
+
+        let mut clock = ClockDisplay::new();
+        assert!(clock.add_timezone("Tokyo", "JST-9"));
+        cal.header = Some(ClockHeader {
+            clock,
+            zone: Tz::UTC,
+        });
+
+        let grid = cal.generate_grid();
+        assert_eq!(grid.len(), 42);
+        assert_eq!((grid[0].month, grid[0].day), (4, 26));
+        assert_eq!((grid[5].month, grid[5].day), (5, 1));
+        assert_eq!((grid[11].month, grid[11].day), (5, 7));
+        assert_eq!((grid[22].month, grid[22].day), (5, 18));
+        assert_eq!((grid[35].month, grid[35].day), (5, 31));
+        assert_eq!((grid[41].month, grid[41].day), (6, 6));
+
+        let mut store = EventStore::new();
+        let at = |d: u32, h: u32| date_to_timestamp(2026, 5, d, h, 0, 0).expect("valid");
+        // A plain current-month day with one uncoloured event: the default dot.
+        add(&mut store, make_event("Dentist", at(3, 9), at(3, 10)));
+        // Seven on the selected day, so the detail card fills to its six-row
+        // maximum and draws the overflow line. `events_for_date` sorts by
+        // start time, so the 08:00 one is the `first()` the dot reads — and it
+        // is the only one carrying a colour.
+        let mut coloured = make_event("Launch", at(7, 8), at(7, 9));
+        coloured.color = Some(USER_ORANGE);
+        add(&mut store, coloured);
+        for i in 1..7u32 {
+            add(&mut store, make_event("Slot", at(7, 9 + i), at(7, 10 + i)));
+        }
+        // One on today, uncoloured, so the dot's on-the-disc rule is drawn.
+        add(&mut store, make_event("Standup", at(18, 9), at(18, 10)));
+        (cal, store)
+    }
+
+    /// Every colour the month view draws, in draw order, written out by hand.
+    ///
+    /// Written out rather than derived: an expectation built by walking the
+    /// same grid the renderer walks is an echo, not a claim, and cannot see
+    /// that grid permuted. "Today is cell 22" is something this test asserts.
+    #[test]
+    fn every_month_view_site_draws_the_role_it_claims() {
+        for light in [false, true] {
+            let p = accented(light);
+            let (cal, store) = scene();
+
+            let mut want = vec![
+                SHADOW,     // the popup's drop shadow
+                p.base,     // the popup itself
+                p.surface1, // its one-pixel border
+                p.text,     // the clock band's time
+                p.subtext0, // its date
+                p.subtext0, // its one extra zone
+                p.subtext0, // the "<" arrow
+                p.subtext0, // the ">" arrow
+                p.text,     // "May 2026"
+            ];
+            // No "Today" button: the view is already on today's month. It has
+            // a test of its own below, because it cannot appear here.
+            want.extend([p.subtext0; 7]); // day-of-week headers
+            want.extend([p.subtext0; 6]); // the week-number gutter, one per row
+
+            for i in 0..42usize {
+                match i {
+                    // Today: the accent disc, then ink derived from it.
+                    22 => want.extend([p.accent, readable_on(p.accent)]),
+                    // The selection: a surface disc, and ordinary day ink.
+                    11 => want.extend([p.surface0, p.text]),
+                    // Lead-in from April and spill-over into June.
+                    0..=4 | 36..=41 => want.push(p.subtext0),
+                    _ => want.push(p.text),
+                }
+                match i {
+                    7 => want.push(p.lavender),              // 3 May, uncoloured
+                    11 => want.push(USER_ORANGE),            // 7 May, the user's
+                    22 => want.push(readable_on(p.accent)),  // 18 May, on the disc
+                    _ => {}
+                }
+            }
+
+            // The detail card for the 7th: its fill, its "May 7" header, then
+            // six of the day's seven events as bar/time/title, then the line
+            // that says one was left out.
+            want.extend([p.mantle, p.text]);
+            want.extend([USER_ORANGE, p.subtext1, p.text]);
+            for _ in 0..5 {
+                want.extend([p.lavender, p.subtext1, p.text]);
+            }
+            want.push(p.subtext1);
+
+            assert_eq!(
+                colors(&cal.render(&p, 0.0, 0.0, 1.0, NOW, &store)),
+                want,
+                "month view, light = {light}"
+            );
+        }
+    }
+
+    /// The "Today" button wears the accent, and only appears off today's month.
+    ///
+    /// It is a control the user can act on, so it follows the accent rather
+    /// than a fixed blue — the other half of design-decisions §527, where the
+    /// About dialog's *logo* deliberately does not.
+    #[test]
+    fn the_today_button_wears_the_accent() {
+        for light in [false, true] {
+            let p = accented(light);
+            let (mut cal, store) = scene();
+            let on_today = colors(&cal.render(&p, 0.0, 0.0, 1.0, NOW, &store));
+            cal.next_month();
+            let off_month = colors(&cal.render(&p, 0.0, 0.0, 1.0, NOW, &store));
+
+            // The button is the tenth colour, straight after the month title,
+            // and exists only in the second render.
+            assert_eq!(on_today[8], p.text, "the month title");
+            assert_eq!(off_month[8], p.text, "the month title");
+            assert_eq!(off_month[9], p.accent, "the Today button");
+            assert_ne!(on_today[9], p.accent, "no Today button on today's month");
+        }
+    }
+
+    /// The year view's chrome in order, and its one accented cell in 365.
+    ///
+    /// The twelve mini months are counted rather than pinned in order: 378
+    /// literal entries would state nothing the month view's pin does not
+    /// already state about which role means what, whereas the counts state the
+    /// thing that is actually specific to this view — that exactly one day of
+    /// the year is today and exactly one month label is the current one.
+    #[test]
+    fn every_year_view_site_draws_the_role_it_claims() {
+        for light in [false, true] {
+            let p = accented(light);
+            let (mut cal, store) = scene();
+            cal.mode = CalendarViewMode::Year;
+            let got = colors(&cal.render(&p, 0.0, 0.0, 1.0, NOW, &store));
+
+            assert_eq!(
+                &got[..5],
+                &[SHADOW, p.base, p.subtext0, p.subtext0, p.text],
+                "year-view shadow, card, two arrows and title, light = {light}"
+            );
+
+            // Twelve month labels, 365 day numbers (2026 is not a leap year),
+            // and one disc under today.
+            let rest = &got[5..];
+            assert_eq!(rest.len(), 12 + 365 + 1, "light = {light}");
+            let n = |want: Color| rest.iter().filter(|c| **c == want).count();
+            assert_eq!(n(p.accent), 2, "May's label and today's disc");
+            assert_eq!(n(readable_on(p.accent)), 1, "the digit on today's disc");
+            assert_eq!(n(p.text), 11, "the other eleven month labels");
+            assert_eq!(n(p.subtext0), 364, "every day of 2026 except today");
+        }
+    }
+
+    /// Every colour either view draws is one its palette can account for.
+    ///
+    /// The light render is the one that matters: every constant deleted from
+    /// this module was a Catppuccin Mocha value, so a missed substitution is a
+    /// colour the light palette does not contain, and it names itself.
+    #[test]
+    fn every_colour_the_calendar_draws_comes_from_its_palette() {
+        for light in [false, true] {
+            let p = accented(light);
+            let derived = [p.accent, USER_ORANGE];
+            for off_month in [false, true] {
+                for mode in [CalendarViewMode::Month, CalendarViewMode::Year] {
+                    let (mut cal, store) = scene();
+                    cal.mode = mode;
+                    if off_month {
+                        // Reaches the "Today" button, which the scene's own
+                        // month cannot draw. A site nothing renders is a site
+                        // nothing checks.
+                        cal.next_month();
+                    }
+                    crate::palette_check::assert_drawn_from(
+                        &p,
+                        &cal.render(&p, 0.0, 0.0, 1.0, NOW, &store),
+                        &derived,
+                        "calendar",
+                    );
+                }
+            }
+        }
+    }
+
+    /// Every colour that is a role moves when the mode does.
+    ///
+    /// This is what the membership sweep cannot see. `assert_drawn_from` runs
+    /// against the light palette and is obliged to accept `#EFF1F5` — it is
+    /// both Latte `base` and a `readable_on` endpoint — so a leftover constant
+    /// that happened to hold a Latte value would pass it. It cannot pass this:
+    /// a constant does not move.
+    #[test]
+    fn every_role_the_calendar_draws_moves_with_the_mode() {
+        let dark = accented(false);
+        let pale = accented(true);
+        for mode in [CalendarViewMode::Month, CalendarViewMode::Year] {
+            let (mut cal, store) = scene();
+            cal.mode = mode;
+            let a = colors(&cal.render(&dark, 0.0, 0.0, 1.0, NOW, &store));
+            let b = colors(&cal.render(&pale, 0.0, 0.0, 1.0, NOW, &store));
+            assert_eq!(a.len(), b.len());
+            for (i, (x, y)) in a.iter().zip(b.iter()).enumerate() {
+                // Three values are the same in both modes on purpose: the drop
+                // shadow is an absence of light rather than a colour, the
+                // accent is the user's (and this fixture sets one accent for
+                // both modes), and so is the event colour. Everything else is
+                // a role, and a role that did not move is a constant.
+                let fixed = *x == SHADOW
+                    || *x == dark.accent
+                    || *x == readable_on(dark.accent)
+                    || *x == USER_ORANGE;
+                if fixed {
+                    assert_eq!(x, y, "colour {i} should not have moved");
+                } else {
+                    assert_ne!(
+                        x, y,
+                        "colour {i} is #{:02X}{:02X}{:02X} in both modes",
+                        x.r, x.g, x.b
+                    );
+                }
+            }
+        }
+    }
+
+    /// WCAG contrast ratio between two opaque colours.
+    fn contrast(a: Color, b: Color) -> f64 {
+        fn lum(c: Color) -> f64 {
+            fn ch(v: u8) -> f64 {
+                let v = f64::from(v) / 255.0;
+                if v <= 0.040_45 {
+                    v / 12.92
+                } else {
+                    ((v + 0.055) / 1.055).powf(2.4)
+                }
+            }
+            0.2126 * ch(c.r) + 0.7152 * ch(c.g) + 0.0722 * ch(c.b)
+        }
+        let (x, y) = (lum(a), lum(b));
+        let (hi, lo) = if x > y { (x, y) } else { (y, x) };
+        (hi + 0.05) / (lo + 0.05)
+    }
+
+    /// Every ink this module puts on a fill clears the 4.5:1 floor.
+    ///
+    /// Contrast is not a membership property: both halves of an unreadable
+    /// pairing can be perfectly good palette members, so the sweep above is
+    /// blind to this and always will be. Three of these pairings were below
+    /// the floor before the conversion — the adjacent-month days at 1.91:1 in
+    /// Latte, the detail card's time at 3.40:1, the week-number gutter — all
+    /// because a `surface*` role was being read as an ink, which is
+    /// unreadable by construction: surfaces sit near the background, which is
+    /// what they are for.
+    ///
+    /// Run against the *stock* palette, not [`accented`]: an arbitrary accent
+    /// has arbitrary contrast, and what to do about that is a design question
+    /// logged as
+    /// `TD-C-A-USER-CHOSEN-EVENT-COLOUR-CAN-VANISH-INTO-THE-TODAY-DISC`
+    /// rather than something this test gets to decide. The pairings are
+    /// written out by hand because a pairing is a fact about which fill an ink
+    /// lands on, and the command list does not record that.
+    #[test]
+    fn every_pairing_the_calendar_draws_clears_the_contrast_floor() {
+        for light in [false, true] {
+            let p = Palette::for_mode(light);
+            let pairings = [
+                ("the clock's time", p.base, p.text),
+                ("the clock's date and zone rows", p.base, p.subtext0),
+                ("the navigation arrows", p.base, p.subtext0),
+                ("the month and year title", p.base, p.text),
+                ("the day-of-week headers", p.base, p.subtext0),
+                ("the week-number gutter", p.base, p.subtext0),
+                ("this month's day numbers", p.base, p.text),
+                ("the adjacent months' day numbers", p.base, p.subtext0),
+                ("a selected day's number", p.surface0, p.text),
+                ("today's number", p.accent, readable_on(p.accent)),
+                ("the detail card's header", p.mantle, p.text),
+                ("an event's time", p.mantle, p.subtext1),
+                ("an event's title", p.mantle, p.text),
+                ("the overflow line", p.mantle, p.subtext1),
+                ("a mini month's day numbers", p.base, p.subtext0),
+                ("the current mini month's label", p.base, p.accent),
+                ("another mini month's label", p.base, p.text),
+                ("the \"Today\" button", p.base, p.accent),
+            ];
+            for (what, bg, ink) in pairings {
+                let ratio = contrast(bg, ink);
+                assert!(
+                    ratio >= 4.5,
+                    "{what} reads at {ratio:.2}:1 in {} mode",
+                    if light { "light" } else { "dark" }
+                );
+            }
+        }
+    }
+
+    /// The tray-clock delegate hands on the palette it was given.
+    ///
+    /// `render_tray_clock` is a one-line delegate to `ClockDisplay::render`
+    /// and, before this test, was called from nowhere in the tree — every
+    /// other test in this module called the inner function directly. A
+    /// delegate is a site: it could have dropped the palette, transposed x and
+    /// y, or handed the clock a palette of its own, and nothing would have
+    /// failed. Same shape as the `window_peek` manager delegate found in
+    /// module 41.
+    #[test]
+    fn the_tray_clock_delegate_draws_the_palette_it_is_handed() {
+        for light in [false, true] {
+            let p = accented(light);
+            let (cal, _) = scene();
+            let mut clock = ClockDisplay::new();
+            assert!(clock.add_timezone("Tokyo", "JST-9"));
+            let via = cal.render_tray_clock(&p, &clock, 12.0, 34.0, 1.0, NOW, &Tz::UTC);
+            let direct = clock.render(&p, 12.0, 34.0, 1.0, NOW, &Tz::UTC);
+            assert_eq!(
+                format!("{via:?}"),
+                format!("{direct:?}"),
+                "the delegate changed something, light = {light}"
+            );
+            assert_eq!(colors(&via), vec![p.text, p.subtext0, p.subtext0]);
+        }
+    }
+
+    /// An event the user never coloured does not gain a colour by being saved.
+    ///
+    /// `color` was a plain `Color` whose parser default was a hardcoded Mocha
+    /// blue, which the serializer then wrote back out — so merely opening the
+    /// calendar edited the user's file. `None` is not a colour and must not be
+    /// spelled as one; see design-decisions §528.
+    #[test]
+    fn an_uncoloured_event_round_trips_without_gaining_a_colour() {
+        let mut store = EventStore::new();
+        add(&mut store, make_event("Plain", 5_000, 6_000));
+        let text = store.export_text();
+        assert!(
+            !text.contains("color:"),
+            "an uncoloured event was written out with a colour: {text}"
+        );
+
+        let mut back = EventStore::new();
+        assert_eq!(back.import_text(&text), 1);
+        assert_eq!(back.get_event(1).expect("event 1").color, None);
+    }
+
+    /// A colour the user *did* choose is drawn in the month grid.
+    ///
+    /// The dot used to be a fixed lavender that never looked at the event, so
+    /// the field was parsed, stored and written back faithfully while changing
+    /// nothing visible outside the detail card. A value that round-trips and a
+    /// value that is used are unrelated properties.
+    #[test]
+    fn a_coloured_event_shows_the_users_colour_in_the_month_grid() {
+        for light in [false, true] {
+            let p = accented(light);
+            let (cal, store) = scene();
+            let dots: Vec<Color> = cal
+                .render(&p, 0.0, 0.0, 1.0, NOW, &store)
+                .iter()
+                .filter_map(|c| match c {
+                    RenderCommand::FillRect {
+                        width,
+                        height,
+                        color,
+                        ..
+                    } if (*width - DOT_RADIUS * 2.0).abs() < 0.01
+                        && (*height - DOT_RADIUS * 2.0).abs() < 0.01 =>
+                    {
+                        Some(*color)
+                    }
+                    _ => None,
+                })
+                .collect();
+            // 3 May's default, 7 May's chosen colour, 18 May's on-disc ink.
+            assert_eq!(
+                dots,
+                vec![p.lavender, USER_ORANGE, readable_on(p.accent)],
+                "light = {light}"
+            );
+        }
+    }
+
+    /// The dot and the detail card's bar cannot disagree about one event.
+    ///
+    /// Both go through `CalendarEvent::dot_color`, which is the point of it
+    /// existing: two sites resolving `None` independently is two answers to
+    /// the same question, and they drift.
+    #[test]
+    fn the_dot_and_the_detail_bar_resolve_a_colour_the_same_way() {
+        for light in [false, true] {
+            let p = accented(light);
+            let coloured = {
+                let mut e = make_event("x", 0, 1);
+                e.color = Some(USER_ORANGE);
+                e
+            };
+            assert_eq!(coloured.dot_color(&p), USER_ORANGE);
+            assert_eq!(make_event("y", 0, 1).dot_color(&p), p.lavender);
+        }
+    }
 }

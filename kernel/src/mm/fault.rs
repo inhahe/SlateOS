@@ -332,57 +332,110 @@ pub fn remove_kernel_vma(start: u64) -> Option<Vma> {
 }
 
 // ---------------------------------------------------------------------------
-// Self-test
+// Active probe / self-test
 // ---------------------------------------------------------------------------
 
-/// Run a boot-time self-test of the demand paging subsystem.
+/// Where an active demand-paging probe went wrong.
 ///
-/// Tests:
-/// 1. Add a demand-paged VMA to the kernel address space.
-/// 2. Touch the memory (triggers a page fault).
-/// 3. Verify the fault handler allocated a frame and mapped it.
-/// 4. Write data and read it back.
-/// 5. Clean up: unmap the frame, free it, remove the VMA.
-pub fn self_test() -> KernelResult<()> {
-    serial_println!("[fault] Running demand paging self-test...");
-
-    // -- Test 1: Register a demand-paged VMA ------------------------------------
-    test_demand_page()?;
-
-    serial_println!("[fault] Demand paging self-test PASSED");
-    Ok(())
+/// Each variant names the *stage* that failed, so a caller which cannot print
+/// a running commentary — `syshealth`, which has one line per check — can
+/// still say something more useful than "failed".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DemandPageFailure {
+    /// The probe address was already mapped, so the probe could not run.
+    ///
+    /// Not a skip: nothing else may use this address, so it being mapped means
+    /// either a previous probe leaked its frame or something is squatting on a
+    /// reserved kernel address.  Both are bugs, and reporting "pass" for a test
+    /// that never ran would hide them.
+    AddressBusy,
+    /// The kernel address space refused the probe VMA.
+    VmaRejected,
+    /// The fault handler returned but left the address unmapped.
+    NotMapped,
+    /// The byte written through the fault did not read back.
+    ReadbackMismatch,
+    /// One of the four 4 KiB hardware pages of the 16 KiB frame misbehaved.
+    PageUnreadable,
+    /// The probe worked but could not undo itself, so it leaked.
+    CleanupFailed,
 }
 
-/// Test demand paging: register VMA, fault into it, verify, clean up.
+impl DemandPageFailure {
+    /// A short human-readable description of the failed stage.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::AddressBusy => "probe address already mapped (leaked frame?)",
+            Self::VmaRejected => "kernel address space refused the probe VMA",
+            Self::NotMapped => "fault returned but left the address unmapped",
+            Self::ReadbackMismatch => "wrote a byte through the fault, read back garbage",
+            Self::PageUnreadable => "a 4 KiB page of the 16 KiB frame is unreadable",
+            Self::CleanupFailed => "probe leaked — unmap/free/remove failed",
+        }
+    }
+}
+
+/// Actively exercise demand paging end to end, and clean up after itself.
+///
+/// Registers an anonymous VMA at a reserved kernel address that nothing else
+/// uses, writes to it — which *must* take a page fault, because no frame is
+/// mapped yet — then verifies the handler allocated, zeroed and mapped a full
+/// 16 KiB frame, and finally unmaps and frees it again.
+///
+/// Unlike reading `fault_stats()`, this proves the resolver works *now*.  It is
+/// deliberately silent and repeatable so that `syshealth` can run it on demand
+/// as often as the operator likes; [`self_test`] wraps it with boot logging.
+///
+/// # Errors
+///
+/// Returns the stage that failed.  Every path that returns an error also
+/// releases whatever the probe had acquired by that point, so a failure does
+/// not poison the next run.
 #[allow(clippy::arithmetic_side_effects)]
-fn test_demand_page() -> KernelResult<()> {
+pub fn probe_demand_page() -> Result<(), DemandPageFailure> {
     let test_virt = VirtAddr::new(DEMAND_PAGE_TEST_BASE);
     let pml4 = page_table::cr3_to_pml4(page_table::read_cr3());
 
-    // Verify the test address is not already mapped.
     if page_table::translate(pml4, test_virt).is_some() {
-        serial_println!(
-            "[fault]   SKIP: test address {:#x} already mapped",
-            DEMAND_PAGE_TEST_BASE
-        );
-        return Ok(());
+        return Err(DemandPageFailure::AddressBusy);
     }
 
-    // Add a demand-paged VMA for the test region.
+    // Add a demand-paged VMA for the probe region.
     let vma = Vma {
         start: DEMAND_PAGE_TEST_BASE,
         end: DEMAND_PAGE_TEST_BASE + DEMAND_PAGE_TEST_SIZE,
         kind: VmaKind::Anonymous,
         flags: PageFlags::PRESENT | PageFlags::WRITABLE | PageFlags::GLOBAL | PageFlags::NO_EXECUTE,
     };
-    add_kernel_vma(vma)?;
-    serial_println!(
-        "[fault]   Registered demand-page VMA at {:#x}",
-        DEMAND_PAGE_TEST_BASE
-    );
+    add_kernel_vma(vma).map_err(|_| DemandPageFailure::VmaRejected)?;
 
-    // Touch the memory.  This will trigger a page fault because no
-    // physical frame is mapped yet.  The fault handler will:
+    let outcome = run_probe_body(pml4, test_virt);
+
+    // Undo the probe on every path.  The VMA always goes; the frame only
+    // exists if the fault actually mapped one, which `unmap_probe_frame`
+    // establishes by translating first.
+    //
+    // The old boot-only version removed the VMA but *not* the frame on its
+    // failure paths.  That was invisible while this ran once per boot; the
+    // moment `syshealth` could run it repeatedly, one failure would have
+    // leaked a frame and made every later run fail with `AddressBusy` —
+    // a real bug reported as a different, fictitious one.
+    let cleanup = unmap_probe_frame(pml4, test_virt);
+    remove_kernel_vma(DEMAND_PAGE_TEST_BASE);
+
+    outcome?;
+    cleanup
+}
+
+/// The probe's actual assertions, run with the VMA registered.
+///
+/// Split out so the caller can clean up on every exit path without a
+/// `goto`-shaped tangle of repeated teardown before each `return`.
+#[allow(clippy::arithmetic_side_effects)]
+fn run_probe_body(pml4: u64, test_virt: VirtAddr) -> Result<(), DemandPageFailure> {
+    // Touch the memory.  This must trigger a page fault, because no physical
+    // frame is mapped yet.  The fault handler will:
     //   1. Find our VMA
     //   2. Allocate a frame
     //   3. Zero it
@@ -390,40 +443,32 @@ fn test_demand_page() -> KernelResult<()> {
     //   5. Flush the TLB
     //   6. Return Ok — the CPU retries the write instruction
     //
-    // SAFETY: The address is in kernel space, within our VMA, and
-    // the page fault handler will map it before the write completes.
-    // We must use volatile to prevent the compiler from eliding
-    // the write (it writes to an address with no prior mapping).
+    // SAFETY: The address is in kernel space, within our VMA, and the page
+    // fault handler will map it before the write completes.  Volatile so the
+    // compiler cannot elide a write to an address with no prior mapping.
     unsafe {
         let ptr = DEMAND_PAGE_TEST_BASE as *mut u8;
         ptr.write_volatile(0xDD);
     }
 
-    // If we get here, the page fault was resolved successfully.
-    // Verify the mapping exists.
-    let phys = page_table::translate(pml4, test_virt);
-    if phys.is_none() {
-        serial_println!("[fault]   FAIL: address not mapped after demand fault");
-        remove_kernel_vma(DEMAND_PAGE_TEST_BASE);
-        return Err(KernelError::InternalError);
+    // Reaching here means the fault was resolved.  Verify the mapping exists.
+    if page_table::translate(pml4, test_virt).is_none() {
+        return Err(DemandPageFailure::NotMapped);
     }
-    serial_println!("[fault]   Demand page fault resolved: OK");
 
-    // Read back the value we wrote.
+    // Read back the value written through the fault.
     // SAFETY: DEMAND_PAGE_TEST_BASE was just demand-faulted and is mapped.
     let readback = unsafe {
         let ptr = DEMAND_PAGE_TEST_BASE as *const u8;
         ptr.read_volatile()
     };
     if readback != 0xDD {
-        serial_println!("[fault]   FAIL: read back {:#x}, expected 0xDD", readback);
-        remove_kernel_vma(DEMAND_PAGE_TEST_BASE);
-        return Err(KernelError::InternalError);
+        return Err(DemandPageFailure::ReadbackMismatch);
     }
-    serial_println!("[fault]   Write/read through demand-paged memory: OK");
 
-    // Write across the full 16 KiB frame to verify all 4 hardware
-    // pages are accessible.
+    // Write across the full 16 KiB frame to verify all 4 hardware pages are
+    // accessible — our page size is 16 KiB, so a resolver that mapped only the
+    // first 4 KiB would pass every check above.
     // SAFETY: DEMAND_PAGE_TEST_BASE is mapped to a full 16 KiB frame.
     unsafe {
         let ptr = DEMAND_PAGE_TEST_BASE as *mut u8;
@@ -431,34 +476,56 @@ fn test_demand_page() -> KernelResult<()> {
             ptr.add(offset).write_volatile(0xEE);
         }
         for offset in (0..FRAME_SIZE).step_by(4096) {
-            let val = ptr.add(offset).read_volatile();
-            if val != 0xEE {
-                serial_println!(
-                    "[fault]   FAIL: page at offset {} reads {:#x}, expected 0xEE",
-                    offset,
-                    val
-                );
-                remove_kernel_vma(DEMAND_PAGE_TEST_BASE);
-                return Err(KernelError::InternalError);
+            if ptr.add(offset).read_volatile() != 0xEE {
+                return Err(DemandPageFailure::PageUnreadable);
             }
         }
     }
-    serial_println!("[fault]   All 4 hardware pages accessible: OK");
 
-    // -- Cleanup: unmap, free frame, remove VMA ---------------------------------
-    //
-    // SAFETY: We mapped this frame during the fault; we're the only
-    // user.  After unmap + TLB flush, no references remain.
+    Ok(())
+}
+
+/// Unmap and free the probe frame, if the fault got as far as mapping one.
+fn unmap_probe_frame(pml4: u64, test_virt: VirtAddr) -> Result<(), DemandPageFailure> {
+    if page_table::translate(pml4, test_virt).is_none() {
+        // Never mapped — nothing to release, and that is not a cleanup failure.
+        return Ok(());
+    }
+
+    // SAFETY: the fault handler mapped this frame for us and we are its only
+    // user.  After unmap + TLB flush no references to it remain.
     let frame = unsafe {
-        let f = page_table::unmap_frame(pml4, test_virt)?;
+        let f = page_table::unmap_frame(pml4, test_virt)
+            .map_err(|_| DemandPageFailure::CleanupFailed)?;
         page_table::flush_frame(test_virt);
         f
     };
-    unsafe {
-        frame::free_frame(frame)?;
-    }
-    remove_kernel_vma(DEMAND_PAGE_TEST_BASE);
-    serial_println!("[fault]   Cleanup (unmap + free + remove VMA): OK");
+    // SAFETY: `frame` was just unmapped and flushed; nothing can reach it.
+    unsafe { frame::free_frame(frame) }.map_err(|_| DemandPageFailure::CleanupFailed)
+}
 
+/// Run a boot-time self-test of the demand paging subsystem.
+///
+/// A thin logging wrapper over [`probe_demand_page`].
+///
+/// # Errors
+///
+/// Returns [`KernelError::InternalError`] if the probe failed at any stage.
+pub fn self_test() -> KernelResult<()> {
+    serial_println!("[fault] Running demand paging self-test...");
+
+    match probe_demand_page() {
+        Ok(()) => {
+            serial_println!(
+                "[fault]   Demand page probe (VMA -> fault -> 16 KiB R/W -> cleanup): OK"
+            );
+        }
+        Err(e) => {
+            serial_println!("[fault]   FAIL: {}", e.as_str());
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    serial_println!("[fault] Demand paging self-test PASSED");
     Ok(())
 }

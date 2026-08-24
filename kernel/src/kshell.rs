@@ -108624,14 +108624,21 @@ fn cmd_diag() {
     );
 
     // --- Page faults ---
+    //
+    // `fatal` counts *user* processes killed for an unhandled fault: the
+    // kernel-fatal path halts the machine, so a running shell can never see
+    // one. Killing a process that faulted with no handler is the kernel doing
+    // its job, so this row reports the number without calling it a problem —
+    // "FATAL FAULTS" read as a kernel malfunction and was never that. A
+    // program that *did* handle its fault is counted in `handled`, which
+    // separates a working fault handler from a crash.
     let pf = crate::mm::fault::fault_stats();
-    let status_pf = if pf.fatal > 0 { "FATAL FAULTS" } else { "OK" };
     shell_println!(
-        "  PgFaults:  resolved={}, cow={}, fatal={}  [{}]",
+        "  PgFaults:  resolved={}, cow={}, handled={}, killed-task={}  [OK]",
         pf.kernel_resolved.saturating_add(pf.user_resolved),
         pf.cow,
-        pf.fatal,
-        status_pf
+        pf.delivered,
+        pf.fatal
     );
 
     // --- TLB ---
@@ -108759,7 +108766,10 @@ fn cmd_diag() {
         + (heap.poison_violations > 0) as u8
         + (heap.double_free_violations > 0) as u8
         + (heap.redzone_violations > 0) as u8
-        + (pf.fatal > 0) as u8
+        // Deliberately not `pf.fatal`: see the PgFaults row above. A user
+        // process killed for an unhandled fault is correct kernel behaviour,
+        // and counting it as an issue made `diag` report a permanent problem
+        // that no operator could ever act on.
         + (violations > 0) as u8
         + (jitter_status == "HIGH") as u8
         + (lat_status == "HIGH") as u8
@@ -109294,15 +109304,40 @@ fn cmd_syshealth() {
         }
     }
 
-    // Test 7: No fatal page faults.
+    // Test 7: Demand paging still resolves faults.
+    //
+    // This check used to read `fault_stats().fatal` and fail if any fatal
+    // fault had ever happened. That was the wrong question twice over.
+    //
+    // First, it is a *passive counter*, and this command's own doc comment
+    // draws the line: "Unlike `diag` (which reads passive counters), this
+    // command actively tests kernel subsystem integrity." Reading a counter
+    // here duplicated the `diag` row that already reports it.
+    //
+    // Second, and worse, the thing it counted is not a kernel health problem.
+    // A fatal user page fault means a program dereferenced something bad and
+    // had no handler, so the kernel killed it — that is the kernel working
+    // correctly, and no other OS calls itself unhealthy because a process
+    // segfaulted. A fatal *kernel* fault would be a real verdict, but that
+    // path ends in `halt_loop()`, so no shell ever runs to report it. The
+    // check could therefore only ever fail for the one reason that did not
+    // matter, and it did: it read `[FAIL] Page faults: 5 fatal fault(s)` on
+    // every boot, all five raised by boot self-tests deliberately provoking
+    // faults to prove fault handling works.
+    //
+    // What is worth asserting is that the resolver works *now* — so provoke a
+    // real fault and require it to be resolved, the way tests 1, 2 and 6
+    // actively exercise the allocators rather than reading their counters.
     {
-        let pf = crate::mm::fault::fault_stats();
-        if pf.fatal == 0 {
-            shell_println!("  [PASS] Page faults: no fatal faults since boot");
-            passed += 1;
-        } else {
-            shell_println!("  [FAIL] Page faults: {} fatal fault(s)", pf.fatal);
-            failed += 1;
+        match crate::mm::fault::probe_demand_page() {
+            Ok(()) => {
+                shell_println!("  [PASS] Demand paging: fault resolved, 16 KiB R/W OK");
+                passed += 1;
+            }
+            Err(e) => {
+                shell_println!("  [FAIL] Demand paging: {}", e.as_str());
+                failed += 1;
+            }
         }
     }
 

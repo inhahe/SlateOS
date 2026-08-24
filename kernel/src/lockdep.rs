@@ -542,6 +542,18 @@ pub fn set_enabled(enabled: bool) {
     ENABLED.store(enabled, Ordering::Release);
 }
 
+/// How a lock was taken — the distinction that decides whether this
+/// acquisition can be one half of a deadlock.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Acquire {
+    /// `lock()` — the caller spins until it gets the lock, so it can be the
+    /// side of a cycle that never makes progress.
+    Blocking,
+    /// `try_lock()` that *succeeded* — the caller would have walked away had
+    /// the lock been taken, so it can never be the blocking side of a cycle.
+    Try,
+}
+
 /// Notify lockdep that a lock is being acquired.
 ///
 /// Call this BEFORE the actual lock acquisition (while we still know
@@ -550,8 +562,9 @@ pub fn set_enabled(enabled: bool) {
 ///
 /// `lock_addr`: address of the lock (e.g., `&spinlock as *const _ as usize`).
 /// `name`: short human-readable name for diagnostics.
+/// `how`: see [`Acquire`] — a `Try` records no *incoming* dependency edges.
 #[inline]
-pub fn lock_acquire(lock_addr: usize, name: &[u8]) {
+pub fn lock_acquire(lock_addr: usize, name: &[u8], how: Acquire) {
     if !ENABLED.load(Ordering::Relaxed) {
         return;
     }
@@ -601,7 +614,32 @@ pub fn lock_acquire(lock_addr: usize, name: &[u8]) {
     let held = unsafe { &mut HELD[cpu] };
 
     // Check all currently-held locks for ordering violations.
-    for i in 0..held.depth as usize {
+    //
+    // Only for a *blocking* acquire. A deadlock needs both sides to be stuck,
+    // and a `try_lock` is never stuck: if the lock is taken it returns `None`
+    // and the caller unwinds, which breaks the cycle rather than closing it.
+    // So an edge held → this, recorded because we happened to be holding
+    // something when a `try_lock` succeeded, describes an inversion that cannot
+    // actually deadlock — and reporting it is worse than not checking, because
+    // a validator that cries wolf gets switched off. This is why Linux's
+    // lockdep skips the whole dependency-add and deadlock-check block for a
+    // trylock (`validate_chain()`: `if (!hlock->trylock && hlock->check && …)`)
+    // while still pushing the lock onto the held stack.
+    //
+    // Found by `syshealth`, which fails its "no lockdep violations" check on
+    // every boot because `sysctl::get` holds `sysctl-reg` across
+    // `fs::cache::try_flush_expired`'s `try_lock` of `CACHE`. That is a
+    // non-bug, and it was invisible for as long as `syshealth` exited 0
+    // whatever it found.
+    //
+    // The *outgoing* direction stays: a `try_lock` that succeeded is genuinely
+    // held, so a blocking acquire nested inside it can deadlock normally, and
+    // the push below is what lets that be caught.
+    let to_check = match how {
+        Acquire::Blocking => held.depth as usize,
+        Acquire::Try => 0,
+    };
+    for i in 0..to_check {
         let held_class = held.stack[i];
         if held_class == class_idx {
             // Re-entrant acquisition of the SAME lock instance on the same
@@ -1328,8 +1366,8 @@ pub fn self_test() {
     let lock_c: usize = 0xDEAD_0003;
 
     // Test 1: Acquire A then B (establishes A→B ordering).
-    lock_acquire(lock_a, b"test-A");
-    lock_acquire(lock_b, b"test-B");
+    lock_acquire(lock_a, b"test-A", Acquire::Blocking);
+    lock_acquire(lock_b, b"test-B", Acquire::Blocking);
     lock_release(lock_b);
     lock_release(lock_a);
 
@@ -1338,8 +1376,8 @@ pub fn self_test() {
     serial_println!("[lockdep]   Consistent order (A→B): OK");
 
     // Test 2: Acquire B then A (should detect AB/BA inversion).
-    lock_acquire(lock_b, b"test-B");
-    lock_acquire(lock_a, b"test-A");
+    lock_acquire(lock_b, b"test-B", Acquire::Blocking);
+    lock_acquire(lock_a, b"test-A", Acquire::Blocking);
     lock_release(lock_a);
     lock_release(lock_b);
 
@@ -1352,9 +1390,9 @@ pub fn self_test() {
     serial_println!("[lockdep]   AB/BA inversion detected: OK");
 
     // Test 3: Non-cyclic chain (A→B→C is fine, no cycle).
-    lock_acquire(lock_a, b"test-A");
-    lock_acquire(lock_b, b"test-B");
-    lock_acquire(lock_c, b"test-C");
+    lock_acquire(lock_a, b"test-A", Acquire::Blocking);
+    lock_acquire(lock_b, b"test-B", Acquire::Blocking);
+    lock_acquire(lock_c, b"test-C", Acquire::Blocking);
     lock_release(lock_c);
     lock_release(lock_b);
     lock_release(lock_a);
@@ -1366,8 +1404,8 @@ pub fn self_test() {
     serial_println!("[lockdep]   Non-cyclic chain (A→B→C): OK");
 
     // Test 4: Transitive cycle (C→A when A→B→C exists).
-    lock_acquire(lock_c, b"test-C");
-    lock_acquire(lock_a, b"test-A");
+    lock_acquire(lock_c, b"test-C", Acquire::Blocking);
+    lock_acquire(lock_a, b"test-A", Acquire::Blocking);
     lock_release(lock_a);
     lock_release(lock_c);
 
@@ -1391,8 +1429,8 @@ pub fn self_test() {
     // helper (used by the spinlock stall detector) walks the held stack and
     // resolves class names without panicking. We only assert the depth is
     // observed correctly; the printed names are for human inspection.
-    lock_acquire(lock_a, b"stall-A");
-    lock_acquire(lock_b, b"stall-B");
+    lock_acquire(lock_a, b"stall-A", Acquire::Blocking);
+    lock_acquire(lock_b, b"stall-B", Acquire::Blocking);
     // SAFETY: cpu is the current CPU index (< MAX_CPUS).
     let held = unsafe { HELD[cpu].depth };
     assert_eq!(held, 2, "two locks held before dump");
@@ -1414,8 +1452,8 @@ pub fn self_test() {
         "[lockdep]   (self-test) intentionally re-acquiring a held lock; the \
          'SELF-DEADLOCK' line below is expected and not a real event:"
     );
-    lock_acquire(lock_a, b"test-A");
-    lock_acquire(lock_a, b"test-A"); // recursive → should report + count.
+    lock_acquire(lock_a, b"test-A", Acquire::Blocking);
+    lock_acquire(lock_a, b"test-A", Acquire::Blocking); // recursive → should report + count.
     let v7 = VIOLATIONS.load(Ordering::Relaxed);
     assert_eq!(
         v7,
@@ -1432,6 +1470,73 @@ pub fn self_test() {
         "held stack empty after recursive-test releases"
     );
     serial_println!("[lockdep]   Recursive self-deadlock detection: OK");
+
+    // Test 7b: a successful `try_lock` takes no incoming dependency edges.
+    //
+    // A deadlock needs both sides stuck. A `try_lock` is never stuck — it
+    // returns `None` and the caller unwinds — so an inversion whose second half
+    // is a `try_lock` cannot close a cycle, and reporting it is a false alarm.
+    // Real instance, and the reason this test exists: `sysctl::get` holds
+    // `sysctl-reg` across `fs::cache::try_flush_expired`'s `try_lock` of
+    // `CACHE`, which fired on every boot and made `syshealth` report a
+    // permanently unhealthy kernel.
+    //
+    // Both halves are asserted, because suppressing too much would be the
+    // easier mistake and a silent one: a `try_lock` that *succeeded* is
+    // genuinely held, so a blocking acquire nested inside it must still record
+    // its edge and still be checked.
+    let lock_d: usize = 0xDEAD_0004;
+    let lock_e: usize = 0xDEAD_0005;
+
+    // Establish D→E the ordinary way.
+    lock_acquire(lock_d, b"test-D", Acquire::Blocking);
+    lock_acquire(lock_e, b"test-E", Acquire::Blocking);
+    lock_release(lock_e);
+    lock_release(lock_d);
+
+    // Now invert it, with the second half a `try_lock`. Under the old code this
+    // recorded E→D, found the cycle and printed a deadlock warning.
+    let v_try = VIOLATIONS.load(Ordering::Relaxed);
+    let e_try = EDGE_COUNT.load(Ordering::Relaxed);
+    lock_acquire(lock_e, b"test-E", Acquire::Blocking);
+    lock_acquire(lock_d, b"test-D", Acquire::Try);
+    assert_eq!(
+        VIOLATIONS.load(Ordering::Relaxed),
+        v_try,
+        "a try_lock cannot be the blocking side of a cycle, so it is not a violation"
+    );
+    assert_eq!(
+        EDGE_COUNT.load(Ordering::Relaxed),
+        e_try,
+        "and it records no incoming edge either, or the reverse would fire later"
+    );
+
+    // The try-acquired lock is still held: depth grew by both acquires.
+    // SAFETY: same CPU, holding only this test's fake locks.
+    let held_try = unsafe { HELD[cpu].depth };
+    assert_eq!(held_try, 2, "a successful try_lock is still a held lock");
+
+    // And a blocking acquire nested inside it is checked normally: D is held,
+    // so taking E blocking would invert the D→E just established... except E is
+    // already held here, so use a fresh class and assert the edge appears.
+    let lock_f: usize = 0xDEAD_0006;
+    let e_nested = EDGE_COUNT.load(Ordering::Relaxed);
+    lock_acquire(lock_f, b"test-F", Acquire::Blocking);
+    assert!(
+        EDGE_COUNT.load(Ordering::Relaxed) > e_nested,
+        "a blocking acquire nested inside a try_lock still records its edges"
+    );
+
+    lock_release(lock_f);
+    lock_release(lock_d);
+    lock_release(lock_e);
+    // SAFETY: same CPU, after releases.
+    assert_eq!(
+        unsafe { HELD[cpu].depth },
+        0,
+        "held stack empty after try_lock-test releases"
+    );
+    serial_println!("[lockdep]   try_lock takes no incoming edge: OK");
 
     // Test 8: the class hash index agrees with an exhaustive scan. Run a second
     // time late in boot from `main`, when the table is actually populated —
@@ -1482,7 +1587,7 @@ pub fn self_test() {
     // whatever an off-by-one frame walk would produce.
     {
         const SITE_PROBE: usize = 0xdead_5117;
-        lock_acquire(SITE_PROBE, b"site-probe");
+        lock_acquire(SITE_PROBE, b"site-probe", Acquire::Blocking);
         let idx = find_or_register_class(SITE_PROBE, b"site-probe")
             .expect("site probe class must be registered");
         let site = class_site(idx).expect("acquiring a lock must record where from");

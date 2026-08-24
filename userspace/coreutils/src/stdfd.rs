@@ -81,6 +81,35 @@
 //! utility's output with its diagnostics matches what the same program does
 //! under glibc.
 //!
+//! ## The same question about descriptor 2: [`diag!`] and [`close_stderr`]
+//!
+//! `eprintln!` has a third failure of its own, and it is louder than either of
+//! the above: it *panics* when the write fails. The panic handler then tries to
+//! print the panic message — to the same descriptor 2 — which fails for the
+//! same reason, and the runtime aborts. `id --nope 2>/dev/full` was status 134,
+//! `Aborted (core dumped)`, where GNU exits 1.
+//!
+//! GNU's rule comes out of gnulib's `close_stdout`, which closes *stderr* as
+//! well as stdout and `_exit (exit_failure)` if that fails. `close_stream` then
+//! forgives a close that fails with `EBADF` when nothing was pending, so what
+//! actually decides the status is whether a diagnostic was *attempted*:
+//!
+//! | | GNU |
+//! |---|---|
+//! | nothing written to stderr | the status the run earned — `id --help` 0, `uname` 0 |
+//! | a diagnostic attempted and lost | `exit_failure`, silently — `id --nope` 1, `tty x` **3** |
+//!
+//! and the second overrides the first in both directions: `pwd x 2>/dev/full`
+//! is 1 where the same command with a working stderr is 0, and `tty x` is 3
+//! where it is otherwise 2. Measured, for a closed descriptor and a full one
+//! alike.
+//!
+//! So [`diag!`] replaces `eprintln!` — same shape, raw `write(2)`, no panic —
+//! and records a lost diagnostic in one process-global flag, which is exactly
+//! what `ferror (stderr)` is. [`close_stdout`] consults it, and
+//! [`close_stderr`] is it alone, for the utilities that spell their own tail
+//! out.
+//!
 //! ## What this module deliberately does not do
 //!
 //! It does not restore `SIGPIPE`. Rust masks it, so `yes | head -1` yields
@@ -107,6 +136,7 @@
 
 use std::io::{self, Write};
 use std::process::ExitCode;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::errmsg::strerror;
 
@@ -346,6 +376,78 @@ pub fn write_all(fd: i32, bytes: &[u8]) -> io::Result<()> {
     imp::write_all(fd, bytes)
 }
 
+/// Whether a diagnostic failed to reach descriptor 2 — `ferror (stderr)`,
+/// which is process-global in stdio for the same reason it is here.
+///
+/// Sticky, and never cleared: the bytes lost to the first failure are still
+/// lost, and there is no `clearerr` in any caller's control flow.
+static DIAGNOSTIC_LOST: AtomicBool = AtomicBool::new(false);
+
+/// Write one diagnostic to descriptor 2, remembering it if it does not arrive.
+///
+/// The whole of what [`diag!`] does; call it directly only where the message is
+/// already a `String`. Nothing is added but the trailing newline — the program
+/// name and its colon belong to the caller, as they do in `error(3)`.
+///
+/// Unlike `eprintln!` this cannot fail *or* panic. A failure is recorded in
+/// the flag [`close_stderr`] reads, which is the only place GNU acts on it
+/// either: `error()` does not check its own write, and it is the `fclose` in
+/// gnulib's `close_stdout` that turns the lost diagnostic into a status.
+pub fn diag_line(line: &str) {
+    let mut bytes = Vec::with_capacity(line.len().saturating_add(1));
+    bytes.extend_from_slice(line.as_bytes());
+    bytes.push(b'\n');
+    diag_bytes(&bytes);
+}
+
+/// [`diag_line`] without the newline, for a diagnostic assembled in pieces or
+/// one that is not text — a file name from `argv` need not be UTF-8, and must
+/// reach the terminal as the bytes it was given.
+pub fn diag_bytes(bytes: &[u8]) {
+    diag_to(2, bytes);
+}
+
+/// [`diag_bytes`] with the descriptor spelled out, so that the failure path can
+/// be exercised on a descriptor that is not the test runner's own stderr.
+fn diag_to(fd: i32, bytes: &[u8]) {
+    if write_all(fd, bytes).is_err() {
+        DIAGNOSTIC_LOST.store(true, Ordering::Relaxed);
+    }
+}
+
+/// Whether any diagnostic has failed to reach descriptor 2 so far.
+///
+/// [`close_stderr`] is the usual way to act on this. It is public for the
+/// utility that must know mid-run — none does yet — and for the tests.
+#[must_use]
+pub fn diagnostic_lost() -> bool {
+    DIAGNOSTIC_LOST.load(Ordering::Relaxed)
+}
+
+/// `eprintln!` that reports a lost diagnostic instead of aborting the process.
+///
+/// Same shape as `eprintln!`, same arguments, one behavioural difference: a
+/// write that fails is *recorded* rather than panicked on. `eprintln!` panics,
+/// the panic message fails to print for the same reason, and the process dies
+/// of `SIGABRT` — status 134 where GNU exits with its own failure status. See
+/// the module docs.
+///
+/// ```ignore
+/// use coreutils::diag;
+///
+/// diag!("tty: {e}");
+/// ```
+///
+/// The flag it sets is read by [`close_stdout`] and [`close_stderr`], so a
+/// utility that swaps `eprintln!` for this and already ends in one of those two
+/// is correct with no further change.
+#[macro_export]
+macro_rules! diag {
+    ($($arg:tt)*) => {
+        $crate::stdfd::diag_line(&::std::format!($($arg)*))
+    };
+}
+
 /// Report a failed write the way GNU does, on descriptor 2.
 ///
 /// `error (0, errno, "%s", _("write error"))` from gnulib's `closeout.c`:
@@ -357,10 +459,11 @@ pub fn write_all(fd: i32, bytes: &[u8]) -> io::Result<()> {
 /// The report's own delivery is not checked, because there is nowhere left to
 /// say so.
 pub fn write_error(program: &str, err: &io::Error) {
-    let line = format!("{program}: write error: {}\n", strerror(err));
-    // The diagnostic about a failed write has no better recourse than the
-    // failed write did; a caller has already decided the exit status.
-    let _ = write_all(2, line.as_bytes());
+    // Through `diag_bytes`, so that this failing counts as a lost diagnostic
+    // like any other. It makes no difference to the status when stdout is what
+    // failed — the caller is already returning a failure — but it does when
+    // some other stream is, and it costs nothing to be consistent.
+    diag_bytes(format!("{program}: write error: {}\n", strerror(err)).as_bytes());
 }
 
 /// Whether a failed write failed because the reader went away.
@@ -420,15 +523,55 @@ pub fn reader_gone(err: &io::Error) -> bool {
 /// and `sort` (2), `tty` (3) — and those that must know the flush's verdict
 /// *before* they finish deciding what to print, such as `comm` and `join`,
 /// which report a disordered input only if the output survived. Both spell the
-/// tail out with [`reader_gone`] and [`write_error`] instead.
+/// tail out with [`reader_gone`] and [`write_error`] instead — and both must
+/// still finish with [`close_stderr`], which this does for them.
 pub fn close_stdout(program: &str, out: Stream, earned: ExitCode) -> ExitCode {
-    match out.finish() {
+    close_stdout_with(program, out, earned, 1)
+}
+
+/// [`close_stdout`] for a utility whose failure status is not 1.
+///
+/// `failure` is upstream's `exit_failure`, the value it passes to gnulib's
+/// `initialize_exit_failure`: 125 for `env`, 2 for `ls` and `sort`, 3 for
+/// `tty`. It is what a lost diagnostic or an undelivered output exits with,
+/// and it overrides `earned` in both directions — measured, `tty x` is 2 with
+/// a working stderr and 3 without one.
+pub fn close_stdout_with(program: &str, out: Stream, earned: ExitCode, failure: u8) -> ExitCode {
+    let after_stdout = match out.finish() {
         Ok(()) => earned,
         Err(e) if reader_gone(&e) => earned,
         Err(e) => {
             write_error(program, &e);
-            ExitCode::FAILURE
+            ExitCode::from(failure)
         }
+    };
+    close_stderr(after_stdout, failure)
+}
+
+/// The last word on the exit status: gnulib's `close_stream (stderr)`.
+///
+/// Returns `failure` if any diagnostic was lost — see [`diag!`] — and `earned`
+/// otherwise. `failure` is upstream's `exit_failure`; 1 for most of the family.
+///
+/// Every utility owes this call, including the ones whose stdout tail is
+/// hand-written, because a diagnostic that never arrived is a failure the
+/// caller has no other way of hearing about. [`close_stdout`] and
+/// [`close_stdout_with`] make it for you; a utility that finishes its own
+/// [`Stream`] must make it itself, as the last thing it does:
+///
+/// ```ignore
+/// let code = match out.finish() { … };
+/// stdfd::close_stderr(code, 1)
+/// ```
+///
+/// It is deliberately *silent*. There is nowhere left to complain to, which is
+/// exactly why the status has to carry the news.
+#[must_use]
+pub fn close_stderr(earned: ExitCode, failure: u8) -> ExitCode {
+    if diagnostic_lost() {
+        ExitCode::from(failure)
+    } else {
+        earned
     }
 }
 
@@ -534,6 +677,22 @@ impl Stream {
         self.error.as_ref()
     }
 
+    /// Keep the first failure, and tell the process about it if it was a
+    /// diagnostic.
+    ///
+    /// A `Stream` on descriptor 2 is another way of writing one — `nohup` and
+    /// `env` build their messages that way — so a failure here has to reach the
+    /// same flag [`diag!`] sets, or the status would depend on which of the two
+    /// spellings the utility happened to use.
+    fn record(&mut self, e: io::Error) {
+        if self.fd == 2 {
+            DIAGNOSTIC_LOST.store(true, Ordering::Relaxed);
+        }
+        if self.error.is_none() {
+            self.error = Some(e);
+        }
+    }
+
     /// Push whatever is buffered at the descriptor, recording a failure.
     fn drain(&mut self) {
         if self.buf.is_empty() {
@@ -541,10 +700,8 @@ impl Stream {
         }
         let result = imp::write_all(self.fd, &self.buf);
         self.buf.clear();
-        if let Err(e) = result
-            && self.error.is_none()
-        {
-            self.error = Some(e);
+        if let Err(e) = result {
+            self.record(e);
         }
     }
 
@@ -571,11 +728,8 @@ impl Write for Stream {
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
         match self.mode {
             Buffering::None => {
-                let result = imp::write_all(self.fd, bytes);
-                if let Err(e) = result
-                    && self.error.is_none()
-                {
-                    self.error = Some(e);
+                if let Err(e) = imp::write_all(self.fd, bytes) {
+                    self.record(e);
                 }
             }
             Buffering::Line => {
@@ -674,6 +828,30 @@ mod tests {
             s.error.as_ref().map(std::io::Error::kind),
             first,
             "a later failure does not displace the first"
+        );
+    }
+
+    /// The one test that touches the process-global flag, and it is one test
+    /// on purpose: the flag is deliberately sticky and has no `clearerr`, so
+    /// two tests asserting on it would depend on which ran first. Nothing else
+    /// in this suite reads it, which is what makes setting it here safe.
+    ///
+    /// Descriptor -1 rather than 2, so that a diagnostic the test *wants* to
+    /// fail does not have to be printed at the runner to fail.
+    #[test]
+    fn a_lost_diagnostic_is_remembered_and_a_delivered_one_is_not() {
+        assert!(!super::diagnostic_lost(), "nothing has failed to write yet");
+        super::diag_to(2, b"");
+        assert!(
+            !super::diagnostic_lost(),
+            "a write that arrived is not a loss"
+        );
+        super::diag_to(-1, b"a diagnostic with nowhere to go\n");
+        assert!(super::diagnostic_lost(), "one that did not arrive is");
+        super::diag_to(2, b"");
+        assert!(
+            super::diagnostic_lost(),
+            "and it stays lost -- a later success does not bring the bytes back"
         );
     }
 

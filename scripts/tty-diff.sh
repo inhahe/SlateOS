@@ -62,9 +62,11 @@ pass=0; fail=0; xfail=0; xpass=0
 # `TO_FULL` and `CLOSED` are the two ways to reach a write error: /dev/full
 # fails every write, whereas a closed descriptor only fails one that was
 # actually attempted.
-STDIN_FROM=; STDIN_CLOSED=; TO_FULL=; CLOSED=
+STDIN_FROM=; STDIN_CLOSED=; TO_FULL=; CLOSED=; ERR_FULL=; ERR_CLOSED=
 
-reset_knobs() { STDIN_FROM=; STDIN_CLOSED=; TO_FULL=; CLOSED=; }
+reset_knobs() {
+  STDIN_FROM=; STDIN_CLOSED=; TO_FULL=; CLOSED=; ERR_FULL=; ERR_CLOSED=
+}
 
 # Bytes, not text: a terminal's name is a path, and a path is bytes.
 render() {
@@ -113,7 +115,11 @@ compare() {
     # Four spellings rather than a variable holding a redirection: the shell
     # expands redirections before it expands variables, so `$REDIR` would be an
     # argument and not a redirection.
-    if [ -n "$STDIN_CLOSED" ]; then
+    if [ -n "$ERR_CLOSED" ]; then
+      ( timeout -k 2 60 env PATH="$bindir/$side" tty "$@" ) >"$out" 2>&- <"$sin"
+    elif [ -n "$ERR_FULL" ]; then
+      ( timeout -k 2 60 env PATH="$bindir/$side" tty "$@" ) >"$out" 2>/dev/full <"$sin"
+    elif [ -n "$STDIN_CLOSED" ]; then
       ( timeout -k 2 60 env PATH="$bindir/$side" tty "$@" ) >"$out" 2>"$err" <&-
     elif [ -n "$CLOSED" ]; then
       ( timeout -k 2 60 env PATH="$bindir/$side" tty "$@" ) >&- 2>"$err" <"$sin"
@@ -149,13 +155,20 @@ pty_compare() {
   elif [ -n "$TO_FULL" ]; then redir='>/dev/full'
   else redir=; fi
 
+  # Unlike stdout's, the stderr redirection is built for both sides at once,
+  # because the two sides' files differ only in name and the shape does not.
+  local e_ours e_gnu
+  if [ -n "$ERR_CLOSED" ]; then e_ours='2>&-'; e_gnu='2>&-'
+  elif [ -n "$ERR_FULL" ]; then e_ours='2>/dev/full'; e_gnu='2>/dev/full'
+  else e_ours="2>'$o_err'"; e_gnu="2>'$g_err'"; fi
+
   # `script -q -e -c CMD /dev/null`: -q suppresses its banner, -e makes its own
   # status the child's, -c gives the command, and /dev/null discards the
   # typescript. Its stdout is redirected too, or the pty's echo would land in
   # the harness's output.
   script -qec "\
-env PATH='$bindir/ours' tty$qa ${redir:->'$o_bin'} 2>'$o_err'; echo \$? >'$o_rcf'; \
-env PATH='$bindir/gnu'  tty$qa ${redir:->'$g_bin'} 2>'$g_err'; echo \$? >'$g_rcf'" \
+env PATH='$bindir/ours' tty$qa ${redir:->'$o_bin'} $e_ours; echo \$? >'$o_rcf'; \
+env PATH='$bindir/gnu'  tty$qa ${redir:->'$g_bin'} $e_gnu; echo \$? >'$g_rcf'" \
     /dev/null >/dev/null 2>&1
 
   o_rc=$(cat "$o_rcf"); g_rc=$(cat "$g_rcf")
@@ -179,9 +192,10 @@ report() {
 # The label is built before the runner runs, because the runner resets the
 # knobs.
 label_of() {
-  printf 'tty %s%s%s%s%s' "$*" \
+  printf 'tty %s%s%s%s%s%s%s' "$*" \
     "${STDIN_FROM:+  [<$STDIN_FROM]}" "${STDIN_CLOSED:+  [<&-]}" \
-    "${TO_FULL:+  [>/dev/full]}" "${CLOSED:+  [>&-]}"
+    "${TO_FULL:+  [>/dev/full]}" "${CLOSED:+  [>&-]}" \
+    "${ERR_FULL:+  [2>/dev/full]}" "${ERR_CLOSED:+  [2>&-]}"
 }
 run_case() { local label; label=$(label_of "$@"); compare "$@"; report "$label"; }
 pty_case() { local label; label="[pty] $(label_of "$@")"; pty_compare "$@"; report "$label"; }
@@ -299,6 +313,37 @@ CLOSED=1; run_case -x
 CLOSED=1; pty_case
 TO_FULL=1; pty_case
 CLOSED=1; pty_case -s
+
+# --- standard error closed, and full -----------------------------------------
+# gnulib's `close_stdout` closes *stderr* too, and exits `exit_failure` if that
+# fails -- so a diagnostic that could not be delivered is itself a failure, and
+# says so in the status because there is nowhere left to say it in words.
+#
+# The two halves of the rule are both here. A run that writes no diagnostic
+# cannot lose one, so its status is untouched; a run that writes one and loses
+# it exits 3, overriding whatever it had earned -- including the 2 of a usage
+# error, which is the only case in this file where the status *rises*.
+#
+# Before `stdfd::diag!` this whole group was status 134: `eprintln!` panics on a
+# failed write, the panic message fails the same way, and the process aborts.
+ERR_FULL=1;   run_case
+ERR_CLOSED=1; run_case
+ERR_FULL=1;   run_case -s
+ERR_CLOSED=1; run_case -s
+ERR_FULL=1;   run_case --quiet
+# Not `--help` or `--version` here: their *output* differs from GNU's on
+# purpose, so they can only be `xfail_case`s, and an xfail records nothing
+# about the status -- which is the only thing this group is asking about.
+# A diagnostic attempted: 2 becomes 3.
+ERR_FULL=1;   run_case x
+ERR_CLOSED=1; run_case x
+ERR_FULL=1;   run_case -x
+ERR_CLOSED=1; run_case --nope
+ERR_FULL=1;   run_case --help=1
+ERR_CLOSED=1; run_case --=x
+# And on a terminal, where the run earns 0 and the lost diagnostic still wins.
+ERR_FULL=1;   pty_case
+ERR_FULL=1;   pty_case x
 
 printf '\n%d passed, %d differed, %d differ on purpose' "$pass" "$fail" "$xfail"
 if [ "$xpass" -gt 0 ]; then

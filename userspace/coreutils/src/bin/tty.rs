@@ -191,6 +191,7 @@ fn parse_args(args: &[OsString]) -> Result<Request, getopt::Error> {
 #[cfg(unix)]
 mod imp {
     use super::{Request, WRITE_ERROR, help_text, parse_args};
+    use coreutils::diag;
     use coreutils::stdfd::{self, Stream};
     use std::ffi::{CStr, OsString};
     use std::io::Write;
@@ -236,8 +237,13 @@ mod imp {
         let request = match parse_args(&args) {
             Ok(request) => request,
             Err(e) => {
-                eprintln!("tty: {e}");
-                return ExitCode::from(u8::try_from(e.status).unwrap_or(2));
+                diag!("tty: {e}");
+                // Through `close_stderr` even here: upstream's `usage` calls
+                // `exit`, which runs the `atexit` handler, which closes stderr
+                // -- so a complaint that could not be delivered turns the 2
+                // into a 3. Measured: `tty x 2>/dev/full` is 3, `tty x` is 2.
+                let status = ExitCode::from(u8::try_from(e.status).unwrap_or(2));
+                return stdfd::close_stderr(status, WRITE_ERROR);
             }
         };
 
@@ -275,20 +281,12 @@ mod imp {
             }
         };
 
-        // Not `stdfd::close_stdout`, which would report status 1: `tty`'s write
-        // error is 3, and 1 is already the answer *no terminal*. Otherwise the
-        // shape is the same, and it is reached even when the answer was `not a
-        // tty` -- upstream's `atexit` handler runs on every exit path, and its
-        // status overrides the one the run had earned.
-        match out.finish() {
-            Ok(()) => earned,
-            // Nothing downstream is listening, so there is nobody to tell.
-            Err(e) if stdfd::reader_gone(&e) => earned,
-            Err(e) => {
-                stdfd::write_error("tty", &e);
-                ExitCode::from(WRITE_ERROR)
-            }
-        }
+        // Not `stdfd::close_stdout`, which would report status 1: `tty`'s
+        // failure status is 3, and 1 is already the answer *no terminal*. It is
+        // reached even when the answer was `not a tty` -- upstream's `atexit`
+        // handler runs on every exit path, and its status overrides the one the
+        // run had earned.
+        stdfd::close_stdout_with("tty", out, earned, WRITE_ERROR)
     }
 }
 

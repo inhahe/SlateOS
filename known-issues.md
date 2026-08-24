@@ -68915,6 +68915,27 @@ through the failure filter; then reverted.
 **Still not gated:** the `bench/**` crates, also lane A's. Same one-line
 addition if they turn out to be clippy-clean; unmeasured as of this writing.
 
+**Correction, 2026-08-24 — there are no `bench/**` crates, so the gate is
+already complete for lane A's scope.** Checked before extending it: `bench/`
+holds three data files (`baselines.toml`, `boot-history.jsonl`,
+`history.jsonl`) and no `Cargo.toml`, and the workspace `members` list has no
+`bench/*` glob. Benchmarking here is the boot test's own `--bench` mode over
+in-kernel code, which `-p kernel` already covers.
+
+The paragraph above was written from `CLAUDE.md`'s instruction to *put*
+benchmarks in `bench/<subsystem>/` — a statement about where they should go,
+read as one about where they are. Worth noting as a pattern, because it is the
+second time in two days that an entry in this file recorded an unverified
+premise as fact (the first being the fingerprint claim corrected above). Both
+were about a minute's work to check; neither was checked before being written
+down, and both were written *confidently enough to act on* — the fingerprint
+one deferred this gate by a day, and this one would have sent the next reader
+looking for crates that do not exist.
+
+Nothing further to gate. `-p kernel` is the whole of lane A's lintable tree;
+the other lanes' crates are theirs to gate, and a workspace-wide run is not
+lane A's to impose on them.
+
 ---
 
 

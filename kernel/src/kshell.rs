@@ -11205,6 +11205,72 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         assert_eq!(last_exit(), 0, "ls: a complete listing is success");
     }
 
+    serial_println!("  kshell::self_test 29: a diagnostic followed by a bare return still owes 1");
+    // A sample of the 111 sites swept mechanically: a command printed
+    // `progname: something went wrong` and then `return;`, leaving the 0 that
+    // `dispatch` sets before every command. So `unzip missing.zip && rm -rf src`
+    // ran the `rm`.
+    //
+    // The sweep was gated on the Unix convention that a message prefixed with
+    // the command's own name is a diagnostic -- `cp`, `grep` and `ld` prefix
+    // their name to errors and never to results -- because the vocabulary gates
+    // do not work here: three of `zip`'s four early exits contain no form of the
+    // words "error", "failed" or "cannot", and an argument-count gate cannot
+    // separate a usage error from `alias`, `declare` and `trap`, all of which
+    // use "no arguments" to mean *show me the current value*.
+    //
+    // A gate is not a proof, so this rung spot-checks the three shapes the sweep
+    // covers, one command from each family, rather than trusting the convention
+    // on its own.
+    {
+        // A missing required argument.
+        let out = capture_command("unzip -d");
+        assert_output_starts_with("unzip explains the missing directory", &out, b"unzip: ");
+        assert_eq!(last_exit(), 1, "a usage error is a failed command");
+
+        // A file that cannot be read at all.
+        let out = capture_command("tar -tf /zzz_no_such_dir/zzz.tar");
+        assert_output_starts_with("tar names the archive it could not read", &out, b"tar: ");
+        assert_eq!(last_exit(), 1, "an unreadable archive is a failed command");
+
+        // A file that reads fine and is not what it claims to be -- the shape
+        // most likely to be mistaken for a result, since nothing failed at the
+        // I/O layer and the command has something true to say.
+        //
+        // `-t` is load-bearing, and not for the reason it looks like. Plain
+        // `gunzip <not-gzip>` does not reach this diagnostic at all: `cmd_gunzip`
+        // serves both `gzip` and `gunzip`, `dispatch` discards which name was
+        // typed, so the function guesses from the file's magic bytes and a file
+        // that is *not* gzip is taken as a request to compress it. `-t` is one of
+        // the two flags that suppress that guess. See known-issues -- the guess
+        // is a bug in its own right, and this rung would have asserted around it.
+        crate::fs::vfs::Vfs::write_file(
+            Path::new("/tmp/kshell_sweep_selftest.gz"),
+            b"this is not gzip",
+        )?;
+        let out = capture_command("gunzip -t /tmp/kshell_sweep_selftest.gz");
+        assert_output_starts_with("gunzip rejects the magic", &out, b"gunzip: ");
+        assert_eq!(last_exit(), 1, "a malformed archive is a failed command");
+
+        // The five `-t` successes the sweep deliberately left alone are *not*
+        // asserted here, and the omission is deliberate. `gunzip -t good.gz`
+        // prints `gunzip: '<file>': OK (...)` on success, because real `gzip -t`
+        // does -- so the convention the sweep runs on is not "the prefix means
+        // an error", it is "the prefix means the command is speaking about
+        // itself". Guarding that needs a *valid* archive, and this shell has no
+        // compressor to make one with: `gzip` and `gunzip` both dispatch to
+        // `cmd_gunzip`. Hand-assembling gzip bytes to test something the sweep
+        // did not change would be a boot cycle wagered on my memory of a
+        // container format.
+        //
+        // The exclusion is guarded better elsewhere anyway: the sweep script
+        // keys its exemptions on the message text and aborts if any of them
+        // stops matching a site, so the check fires when someone re-runs the
+        // sweep -- which is the moment the mistake would actually be made.
+
+        let _ = crate::fs::vfs::Vfs::remove(Path::new("/tmp/kshell_sweep_selftest.gz"));
+    }
+
     serial_println!("  kshell::self_test PASSED");
     Ok(())
 }
@@ -95035,6 +95101,7 @@ fn cmd_wc(args: &str) {
         Ok(d) => d,
         Err(e) => {
             shell_println!("wc: {}: {:?}", path.display(), e);
+            set_exit(1);
             return;
         }
     };
@@ -95086,6 +95153,7 @@ fn cmd_head(args: &str) {
         Ok(d) => d,
         Err(e) => {
             shell_println!("head: {}: {:?}", path.display(), e);
+            set_exit(1);
             return;
         }
     };
@@ -95121,6 +95189,7 @@ fn cmd_tail(args: &str) {
         Ok(d) => d,
         Err(e) => {
             shell_println!("tail: {}: {:?}", path.display(), e);
+            set_exit(1);
             return;
         }
     };
@@ -95182,6 +95251,7 @@ fn cmd_hexdump(args: &str) {
         Ok(d) => d,
         Err(e) => {
             shell_println!("hexdump: {}: {:?}", path.display(), e);
+            set_exit(1);
             return;
         }
     };
@@ -96408,6 +96478,7 @@ fn cmd_run(args: &str) {
         Ok(data) => data,
         Err(e) => {
             shell_println!("run: {}: {:?}", path.display(), e);
+            set_exit(1);
             return;
         }
     };
@@ -101697,6 +101768,7 @@ fn cmd_container(args: &str) {
                             },
                             None => {
                                 shell_println!("container logs: --tail needs a value");
+                                set_exit(1);
                                 return;
                             }
                         },
@@ -101790,6 +101862,7 @@ fn cmd_container(args: &str) {
                                 }
                                 None => {
                                     shell_println!("container events: -n needs a numeric value");
+                                    set_exit(1);
                                     return;
                                 }
                             }
@@ -101805,6 +101878,7 @@ fn cmd_container(args: &str) {
                                 }
                                 None => {
                                     shell_println!("container events: --id needs a container ID");
+                                    set_exit(1);
                                     return;
                                 }
                             }
@@ -105596,6 +105670,7 @@ fn cmd_source(args: &str) {
         Ok(d) => d,
         Err(e) => {
             shell_println!("source: {}: {:?}", path.display(), e);
+            set_exit(1);
             return;
         }
     };
@@ -105604,6 +105679,7 @@ fn cmd_source(args: &str) {
         Ok(s) => s,
         Err(_) => {
             shell_println!("source: {}: not a text file", path.display());
+            set_exit(1);
             return;
         }
     };
@@ -105613,6 +105689,7 @@ fn cmd_source(args: &str) {
         let mut depth = SOURCE_DEPTH.lock();
         if *depth >= MAX_DEPTH {
             shell_println!("source: maximum nesting depth ({}) exceeded", MAX_DEPTH);
+            set_exit(1);
             return;
         }
         *depth = depth.saturating_add(1);
@@ -105713,6 +105790,7 @@ fn cmd_nl(args: &str) {
         Ok(d) => d,
         Err(e) => {
             shell_println!("nl: {}: {:?}", path.display(), e);
+            set_exit(1);
             return;
         }
     };
@@ -105756,6 +105834,7 @@ fn cmd_rev(args: &str) {
         Ok(d) => d,
         Err(e) => {
             shell_println!("rev: {}: {:?}", path.display(), e);
+            set_exit(1);
             return;
         }
     };
@@ -108113,6 +108192,7 @@ fn cmd_journal(args: &str) {
                     i = i.wrapping_add(1);
                 } else {
                     shell_println!("journal: -n requires a number");
+                    set_exit(1);
                     return;
                 }
             }
@@ -108131,6 +108211,7 @@ fn cmd_journal(args: &str) {
                     i = i.wrapping_add(1);
                 } else {
                     shell_println!("journal: --since requires a number");
+                    set_exit(1);
                     return;
                 }
             }
@@ -114888,11 +114969,13 @@ fn cmd_tar(args: &str) {
     let mode_count = u8::from(create) + u8::from(extract) + u8::from(list);
     if mode_count != 1 {
         shell_println!("tar: specify exactly one of -c, -x, -t");
+        set_exit(1);
         return;
     }
 
     if !flags.contains('f') {
         shell_println!("tar: -f flag required (no stdin/stdout tar)");
+        set_exit(1);
         return;
     }
 
@@ -114908,6 +114991,7 @@ fn cmd_tar(args: &str) {
         // tar -cf archive.tar file1 dir1 ...
         if parts.len() < 3 {
             shell_println!("tar: no files specified for archiving");
+            set_exit(1);
             return;
         }
 
@@ -114929,6 +115013,7 @@ fn cmd_tar(args: &str) {
                 verbose,
             ) {
                 shell_println!("tar: {}: {:?}", source, e);
+                set_exit(1);
                 return;
             }
         }
@@ -114981,6 +115066,7 @@ fn cmd_tar(args: &str) {
                 }
                 Err(e) => {
                     shell_println!("tar: xz compression failed: {:?}", e);
+                    set_exit(1);
                     return;
                 }
             }
@@ -115029,6 +115115,7 @@ fn cmd_tar(args: &str) {
             Ok(d) => d,
             Err(e) => {
                 shell_println!("tar: read '{}': {:?}", archive_path.display(), e);
+                set_exit(1);
                 return;
             }
         };
@@ -115051,6 +115138,7 @@ fn cmd_tar(args: &str) {
                 }
                 Err(e) => {
                     shell_println!("tar: gzip decompress failed: {:?}", e);
+                    set_exit(1);
                     return;
                 }
             }
@@ -115072,6 +115160,7 @@ fn cmd_tar(args: &str) {
                 }
                 Err(e) => {
                     shell_println!("tar: bzip2 decompress failed: {:?}", e);
+                    set_exit(1);
                     return;
                 }
             }
@@ -115091,6 +115180,7 @@ fn cmd_tar(args: &str) {
                 }
                 Err(e) => {
                     shell_println!("tar: xz decompress failed: {:?}", e);
+                    set_exit(1);
                     return;
                 }
             }
@@ -115114,6 +115204,7 @@ fn cmd_tar(args: &str) {
                     }
                     Err(e) => {
                         shell_println!("tar: zstd decompress failed: {:?}", e);
+                        set_exit(1);
                         return;
                     }
                 }
@@ -115132,6 +115223,7 @@ fn cmd_tar(args: &str) {
                     }
                     Err(e) => {
                         shell_println!("tar: lz4 decompress failed: {:?}", e);
+                        set_exit(1);
                         return;
                     }
                 }
@@ -115147,6 +115239,7 @@ fn cmd_tar(args: &str) {
             Ok(e) => e,
             Err(e) => {
                 shell_println!("tar: parse '{}': {:?}", archive_path.display(), e);
+                set_exit(1);
                 return;
             }
         };
@@ -115434,6 +115527,7 @@ fn cmd_unzip(args: &str) {
                     skip_next = true;
                 } else {
                     shell_println!("unzip: -d requires a directory argument");
+                    set_exit(1);
                     return;
                 }
             }
@@ -115449,6 +115543,7 @@ fn cmd_unzip(args: &str) {
         Some(p) => resolve_path(p),
         None => {
             shell_println!("unzip: no archive file specified");
+            set_exit(1);
             return;
         }
     };
@@ -115457,6 +115552,7 @@ fn cmd_unzip(args: &str) {
         Ok(d) => d,
         Err(e) => {
             shell_println!("unzip: '{}': {:?}", archive_path.display(), e);
+            set_exit(1);
             return;
         }
     };
@@ -115653,6 +115749,7 @@ fn cmd_cpio_list(args: &[&str]) {
         Some(&p) => resolve_path(p),
         None => {
             shell_println!("cpio -t: no archive file specified");
+            set_exit(1);
             return;
         }
     };
@@ -115661,6 +115758,7 @@ fn cmd_cpio_list(args: &[&str]) {
         Ok(d) => d,
         Err(e) => {
             shell_println!("cpio: '{}': {:?}", archive_path.display(), e);
+            set_exit(1);
             return;
         }
     };
@@ -115669,6 +115767,7 @@ fn cmd_cpio_list(args: &[&str]) {
         Ok(e) => e,
         Err(e) => {
             shell_println!("cpio: '{}': parse failed: {:?}", archive_path.display(), e);
+            set_exit(1);
             return;
         }
     };
@@ -115765,6 +115864,7 @@ fn cmd_cpio_extract(args: &[&str]) {
                     skip_next = true;
                 } else {
                     shell_println!("cpio -i: -d requires a directory argument");
+                    set_exit(1);
                     return;
                 }
             }
@@ -115780,6 +115880,7 @@ fn cmd_cpio_extract(args: &[&str]) {
         Some(p) => resolve_path(p),
         None => {
             shell_println!("cpio -i: no archive file specified");
+            set_exit(1);
             return;
         }
     };
@@ -115788,6 +115889,7 @@ fn cmd_cpio_extract(args: &[&str]) {
         Ok(d) => d,
         Err(e) => {
             shell_println!("cpio: '{}': {:?}", archive_path.display(), e);
+            set_exit(1);
             return;
         }
     };
@@ -115800,6 +115902,7 @@ fn cmd_cpio_extract(args: &[&str]) {
                 archive_path.display(),
                 e
             );
+            set_exit(1);
             return;
         }
     };
@@ -115881,6 +115984,7 @@ fn cmd_cpio_create(args: &[&str]) {
 
     if args.len() < 2 {
         shell_println!("cpio -o: need archive name and at least one file");
+        set_exit(1);
         return;
     }
 
@@ -115944,6 +116048,7 @@ fn cmd_cpio_create(args: &[&str]) {
 
     if entries.is_empty() {
         shell_println!("cpio -o: no valid files to archive");
+        set_exit(1);
         return;
     }
 
@@ -115951,6 +116056,7 @@ fn cmd_cpio_create(args: &[&str]) {
         Ok(a) => a,
         Err(e) => {
             shell_println!("cpio: create failed: {:?}", e);
+            set_exit(1);
             return;
         }
     };
@@ -116014,6 +116120,7 @@ fn cmd_ar_list(args: &[&str]) {
         Some(&p) => resolve_path(p),
         None => {
             shell_println!("ar t: no archive file specified");
+            set_exit(1);
             return;
         }
     };
@@ -116022,6 +116129,7 @@ fn cmd_ar_list(args: &[&str]) {
         Ok(d) => d,
         Err(e) => {
             shell_println!("ar: '{}': {:?}", archive_path.display(), e);
+            set_exit(1);
             return;
         }
     };
@@ -116030,6 +116138,7 @@ fn cmd_ar_list(args: &[&str]) {
         Ok(e) => e,
         Err(e) => {
             shell_println!("ar: '{}': parse failed: {:?}", archive_path.display(), e);
+            set_exit(1);
             return;
         }
     };
@@ -116085,6 +116194,7 @@ fn cmd_ar_extract(args: &[&str]) {
                     skip_next = true;
                 } else {
                     shell_println!("ar x: -d requires a directory argument");
+                    set_exit(1);
                     return;
                 }
             }
@@ -116100,6 +116210,7 @@ fn cmd_ar_extract(args: &[&str]) {
         Some(p) => resolve_path(p),
         None => {
             shell_println!("ar x: no archive file specified");
+            set_exit(1);
             return;
         }
     };
@@ -116108,6 +116219,7 @@ fn cmd_ar_extract(args: &[&str]) {
         Ok(d) => d,
         Err(e) => {
             shell_println!("ar: '{}': {:?}", archive_path.display(), e);
+            set_exit(1);
             return;
         }
     };
@@ -116120,6 +116232,7 @@ fn cmd_ar_extract(args: &[&str]) {
                 archive_path.display(),
                 e
             );
+            set_exit(1);
             return;
         }
     };
@@ -116166,6 +116279,7 @@ fn cmd_ar_create(args: &[&str]) {
 
     if args.len() < 2 {
         shell_println!("ar r: need archive name and at least one file");
+        set_exit(1);
         return;
     }
 
@@ -116196,6 +116310,7 @@ fn cmd_ar_create(args: &[&str]) {
 
     if entries.is_empty() {
         shell_println!("ar r: no valid files to archive");
+        set_exit(1);
         return;
     }
 
@@ -116203,6 +116318,7 @@ fn cmd_ar_create(args: &[&str]) {
         Ok(a) => a,
         Err(e) => {
             shell_println!("ar: create failed: {:?}", e);
+            set_exit(1);
             return;
         }
     };
@@ -116468,6 +116584,7 @@ fn cmd_dpkg_contents(args: &[&str]) {
         Some(&p) => resolve_path(p),
         None => {
             shell_println!("dpkg -c: no .deb file specified");
+            set_exit(1);
             return;
         }
     };
@@ -116529,6 +116646,7 @@ fn cmd_dpkg_extract(args: &[&str]) {
                     skip_next = true;
                 } else {
                     shell_println!("dpkg -x: -d requires a directory argument");
+                    set_exit(1);
                     return;
                 }
             }
@@ -116544,6 +116662,7 @@ fn cmd_dpkg_extract(args: &[&str]) {
         Some(p) => resolve_path(p),
         None => {
             shell_println!("dpkg -x: no .deb file specified");
+            set_exit(1);
             return;
         }
     };
@@ -116557,6 +116676,7 @@ fn cmd_dpkg_extract(args: &[&str]) {
         Some(m) => m,
         None => {
             shell_println!("dpkg: no data.tar found in '{}'", deb_path.display());
+            set_exit(1);
             return;
         }
     };
@@ -116680,6 +116800,7 @@ fn cmd_un7z(args: &str) {
                     skip_next = true;
                 } else {
                     shell_println!("un7z: -d requires a directory argument");
+                    set_exit(1);
                     return;
                 }
             }
@@ -116695,6 +116816,7 @@ fn cmd_un7z(args: &str) {
         Some(p) => resolve_path(p),
         None => {
             shell_println!("un7z: no archive file specified");
+            set_exit(1);
             return;
         }
     };
@@ -116703,6 +116825,7 @@ fn cmd_un7z(args: &str) {
         Ok(d) => d,
         Err(e) => {
             shell_println!("un7z: '{}': {:?}", archive_path.display(), e);
+            set_exit(1);
             return;
         }
     };
@@ -116715,6 +116838,7 @@ fn cmd_un7z(args: &str) {
                 archive_path.display(),
                 e
             );
+            set_exit(1);
             return;
         }
     };
@@ -116848,6 +116972,7 @@ fn cmd_unrar(args: &str) {
                     skip_next = true;
                 } else {
                     shell_println!("unrar: -d requires a directory argument");
+                    set_exit(1);
                     return;
                 }
             }
@@ -116863,6 +116988,7 @@ fn cmd_unrar(args: &str) {
         Some(p) => resolve_path(p),
         None => {
             shell_println!("unrar: no archive file specified");
+            set_exit(1);
             return;
         }
     };
@@ -116871,6 +116997,7 @@ fn cmd_unrar(args: &str) {
         Ok(d) => d,
         Err(e) => {
             shell_println!("unrar: '{}': {:?}", archive_path.display(), e);
+            set_exit(1);
             return;
         }
     };
@@ -116882,10 +117009,12 @@ fn cmd_unrar(args: &str) {
                 "unrar: '{}': RAR4 format not supported (only RAR5)",
                 archive_path.display()
             );
+            set_exit(1);
             return;
         }
         Err(e) => {
             shell_println!("unrar: '{}': parse failed: {:?}", archive_path.display(), e);
+            set_exit(1);
             return;
         }
     };
@@ -117115,6 +117244,7 @@ fn cmd_zip(args: &str) {
 
     if positional.len() < 2 {
         shell_println!("zip: need at least an archive name and one file");
+        set_exit(1);
         return;
     }
 
@@ -117157,6 +117287,7 @@ fn cmd_zip(args: &str) {
 
     if input_files.is_empty() {
         shell_println!("zip: no input files");
+        set_exit(1);
         return;
     }
 
@@ -117199,6 +117330,7 @@ fn cmd_zip(args: &str) {
 
     if entries.is_empty() {
         shell_println!("zip: nothing to add");
+        set_exit(1);
         return;
     }
 
@@ -117381,6 +117513,7 @@ fn cmd_base64(args: &str) {
         Ok(d) => d,
         Err(e) => {
             shell_println!("base64: '{}': {:?}", path.display(), e);
+            set_exit(1);
             return;
         }
     };
@@ -117577,6 +117710,7 @@ fn cmd_gunzip(args: &str) {
                     skip_next = true;
                 } else {
                     shell_println!("gunzip: -o requires an argument");
+                    set_exit(1);
                     return;
                 }
             }
@@ -117592,6 +117726,7 @@ fn cmd_gunzip(args: &str) {
         Some(p) => resolve_path(p),
         None => {
             shell_println!("gunzip: no input file specified");
+            set_exit(1);
             return;
         }
     };
@@ -117601,6 +117736,7 @@ fn cmd_gunzip(args: &str) {
         Ok(d) => d,
         Err(e) => {
             shell_println!("gzip: '{}': {:?}", input.display(), e);
+            set_exit(1);
             return;
         }
     };
@@ -117648,6 +117784,7 @@ fn cmd_gunzip(args: &str) {
     let compressed = file_data;
     if !is_gzip {
         shell_println!("gunzip: '{}': not in gzip format", input.display());
+        set_exit(1);
         return;
     }
 
@@ -117688,6 +117825,7 @@ fn cmd_gunzip(args: &str) {
                 input.display(),
                 e
             );
+            set_exit(1);
             return;
         }
     };
@@ -117761,6 +117899,7 @@ fn cmd_bunzip2(args: &str) {
                     skip_next = true;
                 } else {
                     shell_println!("bunzip2: -o requires an argument");
+                    set_exit(1);
                     return;
                 }
             }
@@ -117776,6 +117915,7 @@ fn cmd_bunzip2(args: &str) {
         Some(p) => resolve_path(p),
         None => {
             shell_println!("bunzip2: no input file specified");
+            set_exit(1);
             return;
         }
     };
@@ -117785,6 +117925,7 @@ fn cmd_bunzip2(args: &str) {
         Ok(d) => d,
         Err(e) => {
             shell_println!("bunzip2: '{}': {:?}", input.display(), e);
+            set_exit(1);
             return;
         }
     };
@@ -117796,6 +117937,7 @@ fn cmd_bunzip2(args: &str) {
         || file_data.get(2) != Some(&b'h')
     {
         shell_println!("bunzip2: '{}': not a bzip2 file", input.display());
+        set_exit(1);
         return;
     }
 
@@ -117808,6 +117950,7 @@ fn cmd_bunzip2(args: &str) {
                 input.display(),
                 e
             );
+            set_exit(1);
             return;
         }
     };
@@ -117891,6 +118034,7 @@ fn cmd_bzip2(args: &str) {
                     skip_next = true;
                 } else {
                     shell_println!("bzip2: -o requires an argument");
+                    set_exit(1);
                     return;
                 }
             }
@@ -117906,6 +118050,7 @@ fn cmd_bzip2(args: &str) {
         Some(p) => resolve_path(p),
         None => {
             shell_println!("bzip2: no input file specified");
+            set_exit(1);
             return;
         }
     };
@@ -117915,6 +118060,7 @@ fn cmd_bzip2(args: &str) {
         Ok(d) => d,
         Err(e) => {
             shell_println!("bzip2: '{}': {:?}", input.display(), e);
+            set_exit(1);
             return;
         }
     };
@@ -117983,6 +118129,7 @@ fn cmd_xz(args: &str) {
                     skip_next = true;
                 } else {
                     shell_println!("xz: -o requires an argument");
+                    set_exit(1);
                     return;
                 }
             }
@@ -117998,6 +118145,7 @@ fn cmd_xz(args: &str) {
         Some(p) => resolve_path(p),
         None => {
             shell_println!("xz: no input file specified");
+            set_exit(1);
             return;
         }
     };
@@ -118006,6 +118154,7 @@ fn cmd_xz(args: &str) {
         Ok(d) => d,
         Err(e) => {
             shell_println!("xz: '{}': {:?}", input.display(), e);
+            set_exit(1);
             return;
         }
     };
@@ -118014,6 +118163,7 @@ fn cmd_xz(args: &str) {
         Ok(c) => c,
         Err(e) => {
             shell_println!("xz: compression failed: {:?}", e);
+            set_exit(1);
             return;
         }
     };
@@ -118082,6 +118232,7 @@ fn cmd_unxz(args: &str) {
                     skip_next = true;
                 } else {
                     shell_println!("unxz: -o requires an argument");
+                    set_exit(1);
                     return;
                 }
             }
@@ -118097,6 +118248,7 @@ fn cmd_unxz(args: &str) {
         Some(p) => resolve_path(p),
         None => {
             shell_println!("unxz: no input file specified");
+            set_exit(1);
             return;
         }
     };
@@ -118106,6 +118258,7 @@ fn cmd_unxz(args: &str) {
         Ok(d) => d,
         Err(e) => {
             shell_println!("unxz: '{}': {:?}", input.display(), e);
+            set_exit(1);
             return;
         }
     };
@@ -118113,6 +118266,7 @@ fn cmd_unxz(args: &str) {
     // Verify XZ magic (FD 37 7A 58 5A 00).
     if file_data.len() < 12 || file_data.get(..6) != Some(&[0xFD, 0x37, 0x7A, 0x58, 0x5A, 0x00]) {
         shell_println!("unxz: '{}': not an XZ file", input.display());
+        set_exit(1);
         return;
     }
 
@@ -118121,6 +118275,7 @@ fn cmd_unxz(args: &str) {
         Ok(d) => d,
         Err(e) => {
             shell_println!("unxz: '{}': decompression failed: {:?}", input.display(), e);
+            set_exit(1);
             return;
         }
     };
@@ -118198,6 +118353,7 @@ fn cmd_unzstd(args: &str) {
                     skip_next = true;
                 } else {
                     shell_println!("unzstd: -o requires an argument");
+                    set_exit(1);
                     return;
                 }
             }
@@ -118213,6 +118369,7 @@ fn cmd_unzstd(args: &str) {
         Some(p) => resolve_path(p),
         None => {
             shell_println!("unzstd: no input file specified");
+            set_exit(1);
             return;
         }
     };
@@ -118222,6 +118379,7 @@ fn cmd_unzstd(args: &str) {
         Ok(d) => d,
         Err(e) => {
             shell_println!("unzstd: '{}': {:?}", input.display(), e);
+            set_exit(1);
             return;
         }
     };
@@ -118229,6 +118387,7 @@ fn cmd_unzstd(args: &str) {
     // Verify Zstandard magic (FD 2F B5 28).
     if file_data.len() < 8 {
         shell_println!("unzstd: '{}': file too small", input.display());
+        set_exit(1);
         return;
     }
     let magic = u32::from(file_data[0])
@@ -118237,6 +118396,7 @@ fn cmd_unzstd(args: &str) {
         | (u32::from(file_data[3]) << 24);
     if magic != 0xFD2F_B528 {
         shell_println!("unzstd: '{}': not a Zstandard file", input.display());
+        set_exit(1);
         return;
     }
 
@@ -118249,6 +118409,7 @@ fn cmd_unzstd(args: &str) {
                 input.display(),
                 e
             );
+            set_exit(1);
             return;
         }
     };
@@ -118329,6 +118490,7 @@ fn cmd_zstd(args: &str) {
                     skip_next = true;
                 } else {
                     shell_println!("zstd: -o requires an argument");
+                    set_exit(1);
                     return;
                 }
             }
@@ -118344,6 +118506,7 @@ fn cmd_zstd(args: &str) {
         Some(p) => resolve_path(p),
         None => {
             shell_println!("zstd: no input file specified");
+            set_exit(1);
             return;
         }
     };
@@ -118353,6 +118516,7 @@ fn cmd_zstd(args: &str) {
         Ok(d) => d,
         Err(e) => {
             shell_println!("zstd: '{}': {:?}", input.display(), e);
+            set_exit(1);
             return;
         }
     };
@@ -118434,6 +118598,7 @@ fn cmd_unlz4(args: &str) {
                     skip_next = true;
                 } else {
                     shell_println!("unlz4: -o requires an argument");
+                    set_exit(1);
                     return;
                 }
             }
@@ -118449,6 +118614,7 @@ fn cmd_unlz4(args: &str) {
         Some(p) => resolve_path(p),
         None => {
             shell_println!("unlz4: no input file specified");
+            set_exit(1);
             return;
         }
     };
@@ -118458,6 +118624,7 @@ fn cmd_unlz4(args: &str) {
         Ok(d) => d,
         Err(e) => {
             shell_println!("unlz4: '{}': {:?}", input.display(), e);
+            set_exit(1);
             return;
         }
     };
@@ -118465,6 +118632,7 @@ fn cmd_unlz4(args: &str) {
     // Verify LZ4 frame magic (04 22 4D 18).
     if file_data.len() < 7 {
         shell_println!("unlz4: '{}': file too small", input.display());
+        set_exit(1);
         return;
     }
     let magic = u32::from(file_data[0])
@@ -118477,6 +118645,7 @@ fn cmd_unlz4(args: &str) {
             input.display(),
             magic
         );
+        set_exit(1);
         return;
     }
 
@@ -118489,6 +118658,7 @@ fn cmd_unlz4(args: &str) {
                 input.display(),
                 e
             );
+            set_exit(1);
             return;
         }
     };
@@ -118562,6 +118732,7 @@ fn cmd_lz4(args: &str) {
                     skip_next = true;
                 } else {
                     shell_println!("lz4: -o requires an argument");
+                    set_exit(1);
                     return;
                 }
             }
@@ -118577,6 +118748,7 @@ fn cmd_lz4(args: &str) {
         Some(p) => resolve_path(p),
         None => {
             shell_println!("lz4: no input file specified");
+            set_exit(1);
             return;
         }
     };
@@ -118586,6 +118758,7 @@ fn cmd_lz4(args: &str) {
         Ok(d) => d,
         Err(e) => {
             shell_println!("lz4: '{}': {:?}", input.display(), e);
+            set_exit(1);
             return;
         }
     };
@@ -118687,6 +118860,7 @@ fn cmd_sed(args: &str) {
 
     if commands.is_empty() {
         shell_println!("sed: no command specified");
+        set_exit(1);
         return;
     }
 
@@ -118705,6 +118879,7 @@ fn cmd_sed(args: &str) {
     // Process each file (or use empty content if no file given).
     if file_args.is_empty() {
         shell_println!("sed: no input file specified");
+        set_exit(1);
         return;
     }
 
@@ -119052,6 +119227,7 @@ fn cmd_awk(args: &str) {
 
     if program.is_empty() {
         shell_println!("awk: no program specified");
+        set_exit(1);
         return;
     }
 
@@ -119060,6 +119236,7 @@ fn cmd_awk(args: &str) {
     // Process files.
     if files.is_empty() {
         shell_println!("awk: no input file specified");
+        set_exit(1);
         return;
     }
 

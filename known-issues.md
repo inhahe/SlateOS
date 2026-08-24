@@ -72723,3 +72723,55 @@ and *enumerating every distinct message it matched* — not from reading the
 rule and judging it plausible. Two of the three false positives were single
 sites out of thousands, and both would have turned a working command into a
 failing one.
+
+### 2026-08-24 — the payoff: giving `syshealth` a status uncovered two real kernel bugs
+
+Fixed in `429a81bc3` and `e5c2d77df`. Recorded here because the *way* they
+surfaced is the argument for the whole sweep.
+
+Rung 21 (added with the checker fix in `89354fcb8`) asserts the uncontroversial
+half of the rule: a checker that **passes** must still report 0, or a blanket
+`set_exit(1)` would "fix" the bug by breaking every caller. It panicked on the
+first boot that ran it. `syshealth` was reporting **`ISSUES DETECTED` on a
+healthy kernel**, and had been since the lock validator landed — its check 5,
+"no lockdep violations", failed on every boot. Nobody had ever seen it, because
+the command exited 0 whatever it printed.
+
+Two independent causes, both genuine:
+
+1. **lockdep counted a `try_lock` as a possible deadlock.** A deadlock needs
+   both sides stuck; a `try_lock` returns `None` and unwinds, which breaks a
+   cycle rather than closing it. `sysctl::get` holds `sysctl-reg` across
+   `fs::cache::try_flush_expired`'s `try_lock` of `CACHE`, and that fired on
+   every boot. Linux's lockdep skips dependency-add for a trylock for exactly
+   this reason. Ours now takes a `lockdep::Acquire::{Blocking, Try}` argument.
+   The *outgoing* direction stays — a try-acquired lock is genuinely held, so a
+   blocking acquire nested inside it deadlocks normally — and the new rung
+   asserts that half too, because over-suppressing would be the silent mistake.
+2. **lockdep's own self-test polluted the counter it publishes.** `self_test`
+   plants three violations on purpose to prove the detector fires, and they
+   landed in the same tally as real ones, so `violation_count()` was
+   permanently ≥ 3. Now tallied separately (`SELF_TEST_VIOLATIONS` +
+   `IN_SELF_TEST`) rather than reset afterwards — a reset would erase a genuine
+   violation landing in the same window, and would leave the self-test's own
+   assertions with nothing to check.
+
+See `design-decisions.md` §273 for the alternatives weighed on both.
+
+**Two lessons, and the second is the general one.**
+
+*A checker whose verdict is not in its status is a checker nobody reads.* This
+is stronger than the claim the sweep started from. The original argument was
+that a missing status misleads *downstream control flow* — `||`, `&&`, `set -e`.
+Here there was no downstream: a human ran `syshealth`, and the `[FAIL]` row was
+right there on screen, and it still went unnoticed for the validator's entire
+lifetime. Seven rows of which six say `[PASS]` are read as "fine". The status
+is not merely the machine-readable channel; it is the *only* part of the output
+that is read every time.
+
+*Assert the passing side of a checker, not just the failing side.* Rung 21
+could only exercise `syshealth`'s success path — a corrupt heap cannot be
+staged from a healthy kernel — and it looked like the weak half of the test at
+the time it was written. It is the half that found both bugs. A test that
+pins "healthy means 0" fails loudly the moment anything makes healthy stop
+meaning 0, which is precisely the regression a status-carrying checker invites.

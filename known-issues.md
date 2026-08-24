@@ -50401,7 +50401,7 @@ guarantee, and on Windows the failure mode would be a sharing violation in
 whichever of the two processes lost the race. Wait for `[run-timeout] child
 exited` before running any cargo command against the same target directory.
 
-**Part 2 progress. 42 of 49 modules converted.**
+**Part 2 progress. 43 of 49 modules converted.**
 
 - [x] `security_dialog.rs` — 29 constants, done 2026-08-22. The method above
   survived contact: the sweep lives in `gui/desktop/src/palette_check.rs` as
@@ -53193,6 +53193,142 @@ exited` before running any cargo command against the same target directory.
       lands at 3.14:1 on magenta. It shares those catches with the pin only
       because the pin happens to be watching the same two indices. Change the
       fixture and the pin stops seeing them; the ratio does not care.
+- [x] `calendar.rs` — 8 constants over 35 colour sites, done 2026-08-23. 113
+  tests in the module (ten new), harness defects Ax68–Xx69 (fifty).
+  - **The largest finding is not a colour at all: a field that round-tripped
+    perfectly and was never drawn.** `CalendarEvent::color` was parsed by
+    `import_text`, stored, and written back by `export_text` faithfully — and
+    the month grid's event dot drew a fixed `LAVENDER` that never looked at the
+    field. The only site that read it was the detail card, which appears only
+    for a day the user has *selected*. So a colour set in the calendar file
+    survived every save/load cycle intact while changing nothing the user could
+    see until they clicked the day. **A value that round-trips correctly and a
+    value that is used are unrelated properties**, and a round-trip test — which
+    this module had — asserts only the first. This is the generalisation of
+    module 41's delegate finding: there the unexercised thing was a function,
+    here it is a *read*.
+  - **It was nearly missed by the search that found everything else.** The sweep
+    for surviving colour work was `grep '\.color' | grep -v 'color:'` — strip
+    the struct-literal noise, keep the reads. But `color: event.dot_color(p)` is
+    a read *spelled* as a write, and the filter removed the one production line
+    that mattered along with the forty that did not. **A filter that removes the
+    noise can remove the signal with it** whenever the signal and the noise
+    share a shape. The read was found by reading the renderer instead.
+  - **`Option<Color>`, not a sentinel — design-decisions.md §528.** The tempting
+    non-decision is `.unwrap_or(p.blue)` inside `import_text`. That makes the
+    *parser* consult the palette, so the same file parses to different data
+    depending on which theme is active, and `export_text` then writes that
+    theme-dependent value back: merely opening the calendar in light mode would
+    rewrite every event the user never coloured. A display setting must not be
+    able to edit user data. `None` is resolved once, at draw time, by
+    `CalendarEvent::dot_color`.
+  - **Three contrast failures, all one shape: a fill role read as an ink.** The
+    adjacent months' day numbers were `SURFACE2` on `BASE` — 2.46:1 in Mocha and
+    **1.91:1** in Latte; the week-number gutter was the same; and the detail
+    card was `SURFACE0` with `SUBTEXT` on it, **3.40:1** in Latte. Surfaces sit
+    near the background — that is what they are for — so any `surface*` used as
+    ink is unreadable by construction, and the dark-mode-only review that
+    preceded these conversions could not see it because Mocha's surfaces are
+    further from its base than Latte's are from its.
+  - **The detail card is the one case where the *fill* had to move rather than
+    the ink.** No quiet role clears 4.5:1 against Latte `surface0`: `subtext1`,
+    the next rung up from the offending `subtext0`, still only reaches 4.05. So
+    the card became `mantle` — one step *away* from `base` in both modes, a
+    shallow well rather than a raised panel — which buys two readable ink tiers
+    at once (5.14 for the event time, 6.57 for its title in Latte). Worth
+    recording because the reflex in the previous forty-two modules was always to
+    move the ink; here that reflex has no solution.
+  - **Lesson 24 held again: a delegate is a site.** `render_tray_clock` is a
+    one-line forward to `ClockDisplay::render` and was called from nowhere in
+    the tree — every existing test called the inner function directly. It could
+    have dropped the palette, transposed x and y, or handed the clock a palette
+    of its own, and nothing would have failed. Two harness defects do exactly
+    that, and one test is the sole catcher of both.
+  - **The contrast test cannot catch a single defect in this module, and that is
+    correct.** `every_pairing_the_calendar_draws_clears_the_contrast_floor`
+    reads palette values and a hand-written table of which ink lands on which
+    fill; it never calls the renderer. So no defect in `calendar.rs` is declared
+    against it — the catchers would all be MISSING. It is not dead weight: it is
+    the only thing standing between the module and a repeat of the three bugs
+    above, and it would fail loudly if `appearance` moved a role. But it is a
+    claim about the *palette*, not about this file, and declaring it as a
+    catcher for a rendering defect would have been a declaration error in five
+    consecutive modules' worth of tradition. **A test can be correct, valuable,
+    and structurally incapable of catching any defect in the file it lives in.**
+  - **My hand-computed contrast figure was wrong, and only running it found
+    that.** I predicted Latte `accent` (which stock is `blue`, `#1D62EC`) on
+    Latte `base` at 4.415:1 and expected the new contrast test to fail on the
+    "Today" button. It passed; the measured value is **4.63:1**. The pairing is
+    genuinely thin but it clears the floor, and no code change was warranted.
+    The lesson is narrow and worth keeping: WCAG luminance is a gamma-corrected
+    weighted sum, estimating it by eye is estimating an exponential, and a
+    prediction that would have driven a code change has to be *computed*.
+  - **Sweep: 50 caught, 0 escaped, 0 never asked, 0 under-caught, 2
+    under-declared.** The preflight was `50 build, 0 do not, 0 not applied`, and
+    both runs ended `restored: all files match their recorded SHA-256`. No
+    declaration errors were found by reading this time — the first module in six
+    where the pre-run check against the test source turned up nothing, which is
+    what the previous five modules' errors were teaching.
+  - Catcher census (50 defects):
+
+    | Test | Caught | Sole catcher |
+    |---|---|---|
+    | `every_month_view_site_draws_the_role_it_claims` | 33 | 12 |
+    | `every_role_the_calendar_draws_moves_with_the_mode` | 13 | 0 |
+    | `every_colour_the_calendar_draws_comes_from_its_palette` | 12 | 0 |
+    | `every_year_view_site_draws_the_role_it_claims` | 11 | 9 |
+    | `the_tray_clock_delegate_draws_the_palette_it_is_handed` | 6 | 2 |
+    | `a_coloured_event_shows_the_users_colour_in_the_month_grid` | 6 | 0 |
+    | `the_today_button_wears_the_accent` | 3 | 2 |
+    | `an_uncoloured_event_round_trips_without_gaining_a_colour` | 2 | 2 |
+    | `the_dot_and_the_detail_bar_resolve_a_colour_the_same_way` | 2 | 0 |
+    | `the_selection_disc_is_drawn_on_the_cell_that_is_clicked` | 2 | 0 |
+    | `every_pairing_the_calendar_draws_clears_the_contrast_floor` | 0 | 0 |
+
+    - **Twenty-seven of the fifty are caught by exactly one test, and the
+      fifteen sole catches that lie outside the month-view pin are all sites a
+      general-purpose check cannot reach.** Nine are in the year view, which the
+      month-view pin never renders; two are behind the tray-clock delegate,
+      which nothing else in the tree calls; two are the "Today" button, which by
+      construction cannot coexist with a visible today cell and so is invisible
+      to the scene the pin uses; two are the file format, which no renderer test
+      touches at all. The other twelve sole catches belong to the pin, and are
+      the role swaps and fill-role-as-ink defects that are perfectly good
+      palette members drawn in the wrong place. Not one of the twenty-seven
+      would have been found by widening an existing test — each needed a fixture
+      that reaches the site.
+    - **The contrast test caught nothing, and could not have.** It is the first
+      test in this series with a zero, and the zero is structural rather than a
+      gap: it reads palette values and a hand-written table of which ink lands
+      on which fill, and never calls the renderer. Its job is to fail if
+      `appearance` moves a role, not if `calendar` misuses one. Recorded because
+      a zero row in this table has meant "the test is weak" in every previous
+      module, and here it means something else entirely.
+    - **Both under-declarations were the same accidental locator**, and it is a
+      shape worth naming.
+      `the_selection_disc_is_drawn_on_the_cell_that_is_clicked` is a *layout*
+      test: it finds the selection disc, takes its centre, and asserts the hit
+      test agrees. It finds it by matching `dark().surface0` — so its locator is
+      a role assertion it never meant to make, and changing the disc's role
+      makes `find_map` return nothing and the `.expect` fire before the geometry
+      it exists to check is reached. A real catch, but a fragile one: it
+      protects the role only for as long as nobody widens the locator, and it
+      reports the failure in the vocabulary of layout.
+    - **One of the two was also caught by a value collision in the mode test's
+      skip clause**, which is worth writing down because the same clause appears
+      in every module from 39 on. The clause exempts colours that are
+      legitimately identical in both modes by comparing *values*: `SHADOW`, the
+      accent, `readable_on(accent)`, and the user's event colour. For this
+      fixture's magenta accent, `readable_on` answers `#EFF1F5` — and Mocha
+      `surface0`'s `readable_on` is also `#EFF1F5`. So when the two discs are
+      swapped, today's ink is misfiled as "legitimately fixed", asserted equal
+      across modes, and fails because it is not. The collision only ever makes
+      the test *stricter* — a site wrongly classed as fixed is asserted equal,
+      never skipped — so it cannot hide a defect; it can only produce a failure
+      whose message points at the wrong reason. That is why it is documented
+      here and in the harness rather than tightened: keying the clause on sites
+      instead of values would mean deriving the site list from the renderer, and
+      lesson 22 says an expectation derived from the code under test is an echo.
 
 **Trigger:** this is not blocked on anything. It is sequenced after the shell
 event loop (`TD-C-THE-SHELL-CAN-DRAW-ITSELF-AND-NOBODY-CAN-ASK-IT-TO`) only
@@ -65409,68 +65545,79 @@ copied from this table into an assertion.
 
 ---
 
-## TD-C-THE-CALENDAR-ACCEPTS-A-COLOUR-FOR-EVERY-EVENT-AND-THEN-DISCARDS-IT (lane C, 2026-08-23)
+## TD-C-THE-CALENDARS-EVENT-COLOUR-ONLY-SHOWED-WHEN-A-DAY-WAS-SELECTED (lane C, 2026-08-23)
 
-**In short:** The calendar lets you give each event its own colour. You can
-write `color: #FF0000` next to an event in the calendar file, and the calendar
-will read it, keep it, and write it back out again unchanged when it saves. What
-it will never do is *show* it. Every event in the month grid is marked with the
-same lavender dot regardless. The colour you chose is stored faithfully and has
-no effect on anything you can see.
+**Status:** FIXED 2026-08-23, commit `c36aeb469`, as part of the module-43
+palette conversion.
 
-**Where:** `gui/desktop/src/calendar.rs`. `CalendarEvent::color` is declared at
-line 382 and is read in exactly one place in the whole tree — line 540, the
-serializer, which writes it back out as hex. The parser assigns it at lines 561,
-590 and 617 (`parse_hex_color(val).unwrap_or(theme::BLUE)`). The one place a
-per-event mark is actually drawn, `render_day_cell` at line ~2252, hard-codes
-the dot to `theme::LAVENDER` (or `theme::BASE` on today's blue disc) and never
-looks at the event at all — it only asks `events_for_date(...).is_empty()`.
+**In short:** The calendar lets you give each event its own colour. You could
+write `color: FF0000` next to an event in the calendar file, and the calendar
+would read it, store it, and write it back unchanged. But the only place it ever
+*drew* that colour was the little bar on the detail card — the panel that opens
+when you click a specific day. The month grid's per-day dot, which is the mark
+you actually look at when scanning the month, was a fixed lavender for every
+event regardless. So a colour you set was invisible unless you first clicked the
+day it was on, which is the one moment you no longer need a colour to tell
+events apart.
 
-**How it survived:** the field is written and read by the same round-trip test
-(`assert_eq!(e.color, Color::from_hex(0x89B4FA))` at line 3715), which pins the
-*default* and proves the value survives a save/load cycle. That test passes and
-will keep passing forever, because a value that round-trips correctly and a
-value that is used are unrelated properties. This is the sharpest instance yet
-of the standing lesson that **a site nothing renders is a site nothing checks** —
-here the site does not merely go unchecked, it does not exist, and the field's
-test coverage actively disguises that.
+A second, quieter half: an event with no `color:` line in the file was given a
+hardcoded Mocha blue by the parser, and the serializer then wrote that invented
+blue back out. Opening the calendar was enough to edit the user's file.
 
-**The proper fix, in two parts, and why it is not "point the default at
-`p.blue`".** The tempting move during the palette conversion is to swap
-`theme::BLUE` for `p.blue` and move on. That would be wrong on its own terms,
-because the assignment is in a **parser**, and a parser that consults the
-palette makes the same file parse to different data depending on which theme is
-active — then the serializer writes the theme-dependent value back, so merely
-opening the calendar in light mode silently rewrites every event the user never
-specified a colour for. A display setting must not be able to edit user data.
+**Correction to the first version of this entry.** It was originally filed as
+"the colour is read only by the serializer and never rendered at all". That was
+wrong, and wrong for an instructive reason: it was derived from
+`grep '\.color' | grep -v 'color:'`, and the one production read —
+`color: event.color,` in `render_event_detail`'s colour bar — was excluded by
+the second filter, which was there to drop struct-literal *writes*. A filter
+that removes the noise can remove the signal with it; the shape of a read and
+the shape of a write were the same shape.
 
-So:
+**Where it was:** `gui/desktop/src/calendar.rs`. `CalendarEvent::color` was a
+plain `Color`; the parser assigned `parse_hex_color(val).unwrap_or(theme::BLUE)`
+at three sites; `render_day_cell` hard-coded the dot to `theme::LAVENDER` (or
+`theme::BASE` on today's disc) and only ever asked
+`events_for_date(...).is_empty()`, never looking at the event it found.
 
-1. **`color` becomes `Option<Color>`.** `None` means "the user did not choose
+**How the dot half survived:** the field was covered by a round-trip test
+(`assert_eq!(e.color, Color::from_hex(0x89B4FA))`), which pinned the *default*
+and proved the value survived a save/load cycle. That test passed and would have
+passed forever, because **a value that round-trips correctly and a value that is
+used are unrelated properties**. The colour bar's existence is what made this a
+half-bug rather than a whole one, and it is also what made the field look
+covered: something drew it, so nothing asked what else should have.
+
+**The fix, in two parts, and why part 1 is not "point the default at `p.blue`".**
+The tempting move during the conversion was to swap `theme::BLUE` for `p.blue`.
+That is wrong on its own terms, because the assignment is in a **parser**, and a
+parser that consults the palette makes the same file parse to different data
+depending on which theme is active — after which the serializer writes the
+theme-dependent value back, so merely opening the calendar in light mode
+rewrites every event the user never gave a colour. A display setting must not be
+able to edit user data. So:
+
+1. **`color` is now `Option<Color>`.** `None` means "the user did not choose
    one", which is not the same as any colour and must not be spelled as one —
    the identical reasoning as design-decisions.md §526 for the peek popup's
-   sampled colour. The serializer emits the `color:` line only when it is
-   `Some`, so a file without the key round-trips to a file without the key
-   instead of gaining a colour the user never asked for.
-2. **`render_day_cell` actually uses it**, resolving `None` to a palette role
-   (`lavender` today) and `Some(c)` to the user's colour. Note that this makes
-   the dot the one place in the shell drawing a colour that is deliberately
-   *not* from the palette, so `palette_check::assert_drawn_from` must be handed
-   it via `derived` — and the fixture must therefore use an off-palette event
-   colour, or the test cannot tell the two paths apart.
+   sampled colour. `export_text` emits the `color:` line only for `Some`, so a
+   file without the key round-trips to a file without the key.
+2. **`render_day_cell` uses it**, via the new
+   `CalendarEvent::dot_color(&self, p: &Palette)`, which resolves `None` to
+   `p.lavender` and `Some(c)` to the user's colour. The detail card's bar goes
+   through the same method, so the two marks for one event cannot disagree.
+   This makes the dot the one place in the module drawing a colour deliberately
+   *not* from the palette, so `palette_check::assert_drawn_from` is handed it via
+   `derived` — and the fixture uses an off-palette event colour, or the test
+   could not tell the two paths apart.
 
-The contrast question rides along: an arbitrary user colour can land on the
-today-disc's blue, so the dot needs the `readable_on`-style treatment or a
-contrasting ring. That is a real design choice and is deferred to the fix, not
-guessed at here.
-
-**Trigger:** do this as part of the `calendar.rs` palette conversion (module 43
-of part 2 of `TD-C-FORTY-NINE-SHELL-MODULES-CARRY-THEIR-OWN-COPY-OF-THE-PALETTE`),
-which is where the three `theme::BLUE` parser assignments have to be dealt with
-one way or the other. Deciding to leave them as a fixed constant is also a
-legitimate outcome, but it must be a decision rather than an oversight, and it
-must come with the dot being wired up — a stored-and-ignored field is not
-acceptable in either case.
+**Still open, deliberately: the dot on today's disc.** An arbitrary user colour
+can land on the accent-coloured today disc at any contrast, including none. The
+`None` path handles it (`readable_on(today_disc)`), but a `Some(c)` that happens
+to equal the accent draws an invisible dot. Fixing that properly needs a design
+answer — a contrasting ring, a brightness-nudged variant, or a rule that the
+user's colour is simply honoured and the collision is theirs — and it is logged
+separately rather than guessed at here. See
+`TD-C-A-USER-CHOSEN-EVENT-COLOUR-CAN-VANISH-INTO-THE-TODAY-DISC` below.
 
 **While you are in there — a second, unrelated hole in the same module.**
 `CalendarPopup::render_tray_clock` (line ~2531) is a one-line delegate to
@@ -65483,6 +65630,51 @@ manager delegate found during module 41: *a test that calls the inner function
 cannot see a defect in the outer delegate — a delegate is a site.* The
 conversion needs at least one test that goes through `render_tray_clock`
 itself, or the sweep will report a defect there as escaped and be right to.
+
+## TD-C-A-USER-CHOSEN-EVENT-COLOUR-CAN-VANISH-INTO-THE-TODAY-DISC (lane C, 2026-08-23)
+
+**In short:** Each calendar event can carry a colour you picked, and the month
+grid draws a small dot in that colour on the event's day. Today's date is drawn
+as a filled disc in your accent colour. If you give an event a colour close to
+your accent — or exactly it — the dot lands on the disc and disappears. The
+event is still there; the mark saying so is not visible.
+
+**Where:** `gui/desktop/src/calendar.rs`, `render_day_cell`. The dot's colour is
+
+```rust
+let dot_color = match (first.color, is_today) {
+    (Some(chosen), _) => chosen,          // <-- no contrast check
+    (None, true) => readable_on(today_disc),
+    (None, false) => p.lavender,
+};
+```
+
+The `None` branches are safe by construction: `readable_on` derives the ink from
+the disc's own brightness, and `p.lavender` is only ever drawn on the card. The
+`Some` branch honours the user's colour unconditionally, which is the correct
+*default* instinct and the wrong *only* rule.
+
+**Why it is filed rather than fixed:** the three available answers are each
+defensible and each visible to the user, so this is a design choice, not an
+oversight to patch.
+
+| Option | *What changes:* |
+|---|---|
+| Honour it always (today) | Nothing. A colour matching the accent is invisible on today's cell, and the user arguably asked for that. |
+| Draw a ring around the dot | Every coloured dot gains a thin outline in the cell's own background colour, on every day, not just today. |
+| Nudge the dot's brightness when contrast is below a floor | A dot on today's disc is drawn slightly lighter or darker than the colour the user set — so the file and the screen disagree. |
+
+**If it is never answered:** nothing gets worse. It affects one cell out of
+forty-two, only when a colour was explicitly chosen, and only when that colour
+is near the accent. The event remains in the detail card, whose colour bar sits
+on `mantle` and is unaffected.
+
+**Note the shape of it:** this is a *contrast* defect, and contrast is not a
+membership property — the user's colour is not a palette member at all, so
+`palette_check::assert_drawn_from` is told to accept it via `derived` and can
+never see this. A membership test cannot check a value it was told to accept.
+Only a test that computes a ratio can, and it would need a policy to compare
+against, which is exactly what is missing.
 
 ---
 

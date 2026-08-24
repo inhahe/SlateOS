@@ -112,6 +112,9 @@ A11Y = "gui/desktop/src/accessibility_settings.rs"
 FOCUS = "gui/desktop/src/focus_assist.rs"
 PEEK = "gui/desktop/src/window_peek.rs"
 ABOUT = "gui/desktop/src/about.rs"
+CAL = "gui/desktop/src/calendar.rs"
+SESS = "gui/desktop/src/session_mgr.rs"
+FD = "gui/desktop/src/file_drop.rs"
 
 # (name, file, [(old, new), ...], [packages], [tests expected to fail])
 DEFECTS = [
@@ -19128,6 +19131,1674 @@ DEFECTS = [
         ["desktop"],
         [
             'every_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA: the clock band's time is still Mocha TEXT",
+        CAL,
+        [
+            ('        let time_ink = p.text;',
+             '        let time_ink = Color::from_hex(0xCDD6F4);'),
+        ],
+        ["desktop"],
+        [
+            'every_month_view_site_draws_the_role_it_claims',
+            'every_colour_the_calendar_draws_comes_from_its_palette',
+            'every_role_the_calendar_draws_moves_with_the_mode',
+            'the_tray_clock_delegate_draws_the_palette_it_is_handed',
+        ],
+    ),
+    (
+        "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB: the clock band draws its time and its date in each other's roles",
+        CAL,
+        [
+            ('        let time_ink = p.text;\n        let date_ink = p.subtext0;',
+             '        let time_ink = p.subtext0;\n        let date_ink = p.text;'),
+        ],
+        ["desktop"],
+        [
+            'every_month_view_site_draws_the_role_it_claims',
+            'the_tray_clock_delegate_draws_the_palette_it_is_handed',
+        ],
+    ),
+    (
+        "CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC: the clock band's extra-zone rows read a fill role as ink",
+        CAL,
+        [
+            ('        let zone_ink = p.subtext0;',
+             '        let zone_ink = p.surface2;'),
+        ],
+        ["desktop"],
+        [
+            'every_month_view_site_draws_the_role_it_claims',
+            'the_tray_clock_delegate_draws_the_palette_it_is_handed',
+        ],
+    ),
+    (
+        'DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD: the clock band builds a palette of its own, so the clock alone ignores the mode',
+        CAL,
+        [
+            ('        let time_ink = p.text;\n        let date_ink = p.subtext0;\n        let zone_ink = p.subtext0;',
+             '        let p = &Palette::for_mode(false);\n        let time_ink = p.text;\n        let date_ink = p.subtext0;\n        let zone_ink = p.subtext0;'),
+        ],
+        ["desktop"],
+        [
+            'every_month_view_site_draws_the_role_it_claims',
+            'every_colour_the_calendar_draws_comes_from_its_palette',
+            'every_role_the_calendar_draws_moves_with_the_mode',
+            'the_tray_clock_delegate_draws_the_palette_it_is_handed',
+        ],
+    ),
+    (
+        'EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE: the popup background is still Mocha BASE',
+        CAL,
+        [
+            ('        let popup_bg = p.base;',
+             '        let popup_bg = Color::from_hex(0x1E1E2E);'),
+        ],
+        ["desktop"],
+        [
+            'every_month_view_site_draws_the_role_it_claims',
+            'every_colour_the_calendar_draws_comes_from_its_palette',
+            'every_role_the_calendar_draws_moves_with_the_mode',
+        ],
+    ),
+    (
+        'FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF: the popup border is still Mocha SURFACE1',
+        CAL,
+        [
+            ('        let popup_border = p.surface1;',
+             '        let popup_border = Color::from_hex(0x45475A);'),
+        ],
+        ["desktop"],
+        [
+            'every_month_view_site_draws_the_role_it_claims',
+            'every_colour_the_calendar_draws_comes_from_its_palette',
+            'every_role_the_calendar_draws_moves_with_the_mode',
+        ],
+    ),
+    (
+        "GGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGG: the popup fill and its border are drawn in each other's roles",
+        CAL,
+        [
+            ('        let popup_bg = p.base;\n        let popup_border = p.surface1;',
+             '        let popup_bg = p.surface1;\n        let popup_border = p.base;'),
+        ],
+        ["desktop"],
+        [
+            'every_month_view_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        'HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH: the week-number gutter goes back to surface2, the 1.9:1 fill-role-as-ink',
+        CAL,
+        [
+            ('                    color: p.subtext0,\n                    font_size: layout.px(WEEK_NUM_FONT),',
+             '                    color: p.surface2,\n                    font_size: layout.px(WEEK_NUM_FONT),'),
+        ],
+        ["desktop"],
+        [
+            'every_month_view_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "IIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIII: the month popup's drop shadow is drawn as a palette role instead of black",
+        CAL,
+        [
+            ('            color: Color::rgba(0, 0, 0, 100),\n            corner_radii: radii,',
+             '            color: p.crust,\n            corner_radii: radii,'),
+        ],
+        ["desktop"],
+        [
+            'every_month_view_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "JJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJ: the clock band is handed a palette of its own rather than the popup's",
+        CAL,
+        [
+            ('.render(p, band.x',
+             '.render(&Palette::for_mode(false), band.x'),
+        ],
+        ["desktop"],
+        [
+            'every_month_view_site_draws_the_role_it_claims',
+            'every_colour_the_calendar_draws_comes_from_its_palette',
+            'every_role_the_calendar_draws_moves_with_the_mode',
+        ],
+    ),
+    (
+        'KKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKK: the day cells are handed a palette of their own, so only the grid ignores the mode',
+        CAL,
+        [
+            ('            self.render_day_cell(p, &mut cmds, &layout, index, cell, store);',
+             '            self.render_day_cell(&Palette::for_mode(false), &mut cmds, &layout, index, cell, store);'),
+        ],
+        ["desktop"],
+        [
+            'every_month_view_site_draws_the_role_it_claims',
+            'every_colour_the_calendar_draws_comes_from_its_palette',
+            'every_role_the_calendar_draws_moves_with_the_mode',
+            'a_coloured_event_shows_the_users_colour_in_the_month_grid',
+        ],
+    ),
+    (
+        "LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLL: the month view's navigation arrows are still Mocha SUBTEXT",
+        CAL,
+        [
+            ('        let arrow_ink = p.subtext0;\n        let month_ink = p.text;',
+             '        let arrow_ink = Color::from_hex(0xA6ADC8);\n        let month_ink = p.text;'),
+        ],
+        ["desktop"],
+        [
+            'every_month_view_site_draws_the_role_it_claims',
+            'every_colour_the_calendar_draws_comes_from_its_palette',
+            'every_role_the_calendar_draws_moves_with_the_mode',
+        ],
+    ),
+    (
+        "MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM: the navigation arrows and the month title are drawn in each other's roles",
+        CAL,
+        [
+            ('        let arrow_ink = p.subtext0;\n        let month_ink = p.text;',
+             '        let arrow_ink = p.text;\n        let month_ink = p.subtext0;'),
+        ],
+        ["desktop"],
+        [
+            'every_month_view_site_draws_the_role_it_claims',
+            'the_today_button_wears_the_accent',
+        ],
+    ),
+    (
+        "NNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNN: the Today button wears a fixed blue, so it stops agreeing with today's disc",
+        CAL,
+        [
+            ('        let today_ink = p.accent;',
+             '        let today_ink = p.blue;'),
+        ],
+        ["desktop"],
+        [
+            'the_today_button_wears_the_accent',
+        ],
+    ),
+    (
+        'OOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOO: the Today button is drawn as ordinary text, so nothing marks it as a control',
+        CAL,
+        [
+            ('        let today_ink = p.accent;',
+             '        let today_ink = p.text;'),
+        ],
+        ["desktop"],
+        [
+            'the_today_button_wears_the_accent',
+        ],
+    ),
+    (
+        'PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPP: the day-of-week headers are still Mocha SUBTEXT',
+        CAL,
+        [
+            ('        let dow_ink = p.subtext0;',
+             '        let dow_ink = Color::from_hex(0xA6ADC8);'),
+        ],
+        ["desktop"],
+        [
+            'every_month_view_site_draws_the_role_it_claims',
+            'every_colour_the_calendar_draws_comes_from_its_palette',
+            'every_role_the_calendar_draws_moves_with_the_mode',
+        ],
+    ),
+    (
+        'QQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQ: the day-of-week headers read a fill role as ink',
+        CAL,
+        [
+            ('        let dow_ink = p.subtext0;',
+             '        let dow_ink = p.surface2;'),
+        ],
+        ["desktop"],
+        [
+            'every_month_view_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "RRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRR: today's disc is a fixed blue, so it stops following the accent the user chose",
+        CAL,
+        [
+            ('        let today_disc = p.accent;\n        let selected_disc = p.surface0;',
+             '        let today_disc = p.blue;\n        let selected_disc = p.surface0;'),
+        ],
+        ["desktop"],
+        [
+            'every_month_view_site_draws_the_role_it_claims',
+            'a_coloured_event_shows_the_users_colour_in_the_month_grid',
+        ],
+    ),
+    (
+        'SSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSS: the selection disc goes back to surface1, one rung too bright to sit under text',
+        CAL,
+        [
+            ('        let today_disc = p.accent;\n        let selected_disc = p.surface0;',
+             '        let today_disc = p.accent;\n        let selected_disc = p.surface1;'),
+        ],
+        ["desktop"],
+        [
+            'every_month_view_site_draws_the_role_it_claims',
+            # Reconciled after the sweep. This layout test finds the disc by
+            # matching `dark().surface0`, so its *locator* is a role assertion
+            # it never meant to make: change the role and `find_map` returns
+            # nothing, and the `.expect` fires before the geometry it exists to
+            # check is ever reached.
+            'the_selection_disc_is_drawn_on_the_cell_that_is_clicked',
+        ],
+    ),
+    (
+        "TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT: today's disc and the selection's are drawn in each other's roles",
+        CAL,
+        [
+            ('        let today_disc = p.accent;\n        let selected_disc = p.surface0;',
+             '        let today_disc = p.surface0;\n        let selected_disc = p.accent;'),
+        ],
+        ["desktop"],
+        [
+            'every_month_view_site_draws_the_role_it_claims',
+            'a_coloured_event_shows_the_users_colour_in_the_month_grid',
+            # Same accidental locator as the defect above.
+            'the_selection_disc_is_drawn_on_the_cell_that_is_clicked',
+            # Reconciled after the sweep, and caught by coincidence rather than
+            # by design. The mode test's skip clause is keyed on *values*, not
+            # on sites: it treats a colour as legitimately fixed when it equals
+            # `readable_on(dark.accent)`, which for this fixture's magenta is
+            # `#EFF1F5`. With the discs swapped, today's ink becomes
+            # `readable_on(surface0)` — also `#EFF1F5` in Mocha — so the clause
+            # misfiles a site that does move, demands it not move, and fails.
+            # The collision only ever makes the test stricter (a site wrongly
+            # classed as fixed is asserted equal, never skipped), so it cannot
+            # hide a defect; it can only produce a failure that needs reading.
+            'every_role_the_calendar_draws_moves_with_the_mode',
+        ],
+    ),
+    (
+        "UUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUU: the adjacent months' day numbers go back to surface2, 1.91:1 in Latte",
+        CAL,
+        [
+            ('        } else if cell.current_month {\n            p.text\n        } else {\n            p.subtext0\n        };',
+             '        } else if cell.current_month {\n            p.text\n        } else {\n            p.surface2\n        };'),
+        ],
+        ["desktop"],
+        [
+            'every_month_view_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "VVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVV: this month's day numbers are drawn as quietly as the neighbouring months'",
+        CAL,
+        [
+            ('        } else if cell.current_month {\n            p.text\n        } else {\n            p.subtext0\n        };',
+             '        } else if cell.current_month {\n            p.subtext0\n        } else {\n            p.subtext0\n        };'),
+        ],
+        ["desktop"],
+        [
+            'every_month_view_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "WWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWW: today's number is a role rather than ink derived from whatever disc it sits on",
+        CAL,
+        [
+            ('        let text_color = if is_today {\n            readable_on(today_disc)\n        } else if cell.current_month {',
+             '        let text_color = if is_today {\n            p.text\n        } else if cell.current_month {'),
+        ],
+        ["desktop"],
+        [
+            'every_month_view_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        'XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX: the month-grid dot discards the colour the user gave the event',
+        CAL,
+        [
+            ('            let dot_color = match (first.color, is_today) {\n                (Some(chosen), _) => chosen,',
+             '            let dot_color = match (first.color, is_today) {\n                (Some(_), _) => p.lavender,'),
+        ],
+        ["desktop"],
+        [
+            'every_month_view_site_draws_the_role_it_claims',
+            'a_coloured_event_shows_the_users_colour_in_the_month_grid',
+        ],
+    ),
+    (
+        "YYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYY: an uncoloured dot on today's disc ignores the disc and may vanish into it",
+        CAL,
+        [
+            ('                (None, true) => readable_on(today_disc),',
+             '                (None, true) => p.lavender,'),
+        ],
+        ["desktop"],
+        [
+            'every_month_view_site_draws_the_role_it_claims',
+            'a_coloured_event_shows_the_users_colour_in_the_month_grid',
+        ],
+    ),
+    (
+        'ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ: the uncoloured event dot reads a fill role as a mark on the base',
+        CAL,
+        [
+            ('                (None, false) => p.lavender,',
+             '                (None, false) => p.surface2,'),
+        ],
+        ["desktop"],
+        [
+            'every_month_view_site_draws_the_role_it_claims',
+            'a_coloured_event_shows_the_users_colour_in_the_month_grid',
+        ],
+    ),
+    (
+        'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA: an uncoloured event resolves to blue, which is also the stock accent',
+        CAL,
+        [
+            ('        self.color.unwrap_or(p.lavender)',
+             '        self.color.unwrap_or(p.blue)'),
+        ],
+        ["desktop"],
+        [
+            'every_month_view_site_draws_the_role_it_claims',
+            'the_dot_and_the_detail_bar_resolve_a_colour_the_same_way',
+        ],
+    ),
+    (
+        'BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB: dot_color ignores the colour the user chose and always answers the default',
+        CAL,
+        [
+            ('        self.color.unwrap_or(p.lavender)',
+             '        p.lavender'),
+        ],
+        ["desktop"],
+        [
+            'every_month_view_site_draws_the_role_it_claims',
+            'the_dot_and_the_detail_bar_resolve_a_colour_the_same_way',
+        ],
+    ),
+    (
+        'CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC: the detail card goes back to surface0, where its time reads at 3.40:1 in Latte',
+        CAL,
+        [
+            ('        let card_bg = p.mantle;',
+             '        let card_bg = p.surface0;'),
+        ],
+        ["desktop"],
+        [
+            'every_month_view_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        'DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD: the detail card is still Mocha MANTLE',
+        CAL,
+        [
+            ('        let card_bg = p.mantle;',
+             '        let card_bg = Color::from_hex(0x181825);'),
+        ],
+        ["desktop"],
+        [
+            'every_month_view_site_draws_the_role_it_claims',
+            'every_colour_the_calendar_draws_comes_from_its_palette',
+            'every_role_the_calendar_draws_moves_with_the_mode',
+        ],
+    ),
+    (
+        "EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE: an event's time drops a rung to subtext0, the tier the card had to move to escape",
+        CAL,
+        [
+            ('        let time_ink = p.subtext1;',
+             '        let time_ink = p.subtext0;'),
+        ],
+        ["desktop"],
+        [
+            'every_month_view_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF: the detail card's header and its event times are drawn in each other's roles",
+        CAL,
+        [
+            ('        let header_ink = p.text;\n        let time_ink = p.subtext1;',
+             '        let header_ink = p.subtext1;\n        let time_ink = p.text;'),
+        ],
+        ["desktop"],
+        [
+            'every_month_view_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        'GGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGG: the N-more overflow line reads a fill role as ink',
+        CAL,
+        [
+            ('        let more_ink = p.subtext1;',
+             '        let more_ink = p.surface1;'),
+        ],
+        ["desktop"],
+        [
+            'every_month_view_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH: the detail card's colour bar ignores the event and draws a fixed role",
+        CAL,
+        [
+            ('                color: event.dot_color(p),',
+             '                color: p.lavender,'),
+        ],
+        ["desktop"],
+        [
+            'every_month_view_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        'IIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIII: the detail card builds a palette of its own, so only the card ignores the mode',
+        CAL,
+        [
+            ('        let card_bg = p.mantle;\n        let header_ink = p.text;',
+             '        let p = &Palette::for_mode(false);\n        let card_bg = p.mantle;\n        let header_ink = p.text;'),
+        ],
+        ["desktop"],
+        [
+            'every_month_view_site_draws_the_role_it_claims',
+            'every_colour_the_calendar_draws_comes_from_its_palette',
+            'every_role_the_calendar_draws_moves_with_the_mode',
+        ],
+    ),
+    (
+        "JJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJ: the year view's card is still Mocha BASE",
+        CAL,
+        [
+            ('        let card_bg = p.base;\n        let arrow_ink = p.subtext0;\n        let title_ink = p.text;',
+             '        let card_bg = Color::from_hex(0x1E1E2E);\n        let arrow_ink = p.subtext0;\n        let title_ink = p.text;'),
+        ],
+        ["desktop"],
+        [
+            'every_year_view_site_draws_the_role_it_claims',
+            'every_colour_the_calendar_draws_comes_from_its_palette',
+            'every_role_the_calendar_draws_moves_with_the_mode',
+        ],
+    ),
+    (
+        "KKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKK: the year view's arrows read a fill role as ink",
+        CAL,
+        [
+            ('        let arrow_ink = p.subtext0;\n        let title_ink = p.text;',
+             '        let arrow_ink = p.surface2;\n        let title_ink = p.text;'),
+        ],
+        ["desktop"],
+        [
+            'every_year_view_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLL: the year view's arrows and its year label are drawn in each other's roles",
+        CAL,
+        [
+            ('        let arrow_ink = p.subtext0;\n        let title_ink = p.text;',
+             '        let arrow_ink = p.text;\n        let title_ink = p.subtext0;'),
+        ],
+        ["desktop"],
+        [
+            'every_year_view_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM: the year view's drop shadow is drawn as a palette role instead of black",
+        CAL,
+        [
+            ('            color: Color::rgba(0, 0, 0, 100),\n            corner_radii: CornerRadii::all(layout.px(CARD_RADIUS)),',
+             '            color: p.crust,\n            corner_radii: CornerRadii::all(layout.px(CARD_RADIUS)),'),
+        ],
+        ["desktop"],
+        [
+            'every_year_view_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        'NNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNN: the year view builds a palette of its own, so one of the two views ignores the mode',
+        CAL,
+        [
+            ('        let card_bg = p.base;\n        let arrow_ink = p.subtext0;\n        let title_ink = p.text;',
+             '        let p = &Palette::for_mode(false);\n        let card_bg = p.base;\n        let arrow_ink = p.subtext0;\n        let title_ink = p.text;'),
+        ],
+        ["desktop"],
+        [
+            'every_year_view_site_draws_the_role_it_claims',
+            'every_colour_the_calendar_draws_comes_from_its_palette',
+            'every_role_the_calendar_draws_moves_with_the_mode',
+        ],
+    ),
+    (
+        "OOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOO: the mini months' today disc is a fixed blue, disagreeing with the day grid's",
+        CAL,
+        [
+            ('        let today_disc = p.accent;\n        let label_color = if is_current { today_disc } else { p.text };',
+             '        let today_disc = p.blue;\n        let label_color = if is_current { today_disc } else { p.text };'),
+        ],
+        ["desktop"],
+        [
+            'every_year_view_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPP: a mini month's label is drawn as quietly as the day numbers inside it",
+        CAL,
+        [
+            ('        let today_disc = p.accent;\n        let label_color = if is_current { today_disc } else { p.text };',
+             '        let today_disc = p.accent;\n        let label_color = if is_current { today_disc } else { p.subtext0 };'),
+        ],
+        ["desktop"],
+        [
+            'every_year_view_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "QQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQ: the current mini month's label stops following the disc drawn beneath it",
+        CAL,
+        [
+            ('        let today_disc = p.accent;\n        let label_color = if is_current { today_disc } else { p.text };',
+             '        let today_disc = p.accent;\n        let label_color = if is_current { p.blue } else { p.text };'),
+        ],
+        ["desktop"],
+        [
+            'every_year_view_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "RRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRR: a mini month's day numbers read a fill role as ink",
+        CAL,
+        [
+            ('            let text_color = if is_today {\n                readable_on(today_disc)\n            } else {\n                p.subtext0\n            };',
+             '            let text_color = if is_today {\n                readable_on(today_disc)\n            } else {\n                p.surface2\n            };'),
+        ],
+        ["desktop"],
+        [
+            'every_year_view_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "SSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSS: a mini month's today digit is a role rather than ink derived from its disc",
+        CAL,
+        [
+            ('            let text_color = if is_today {\n                readable_on(today_disc)\n            } else {\n                p.subtext0\n            };',
+             '            let text_color = if is_today {\n                p.text\n            } else {\n                p.subtext0\n            };'),
+        ],
+        ["desktop"],
+        [
+            'every_year_view_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        'TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT: the tray-clock delegate builds a palette of its own and drops the one it was handed',
+        CAL,
+        [
+            ('        clock.render(p, x, y, scale, utc_now, local)',
+             '        clock.render(&Palette::for_mode(false), x, y, scale, utc_now, local)'),
+        ],
+        ["desktop"],
+        [
+            'the_tray_clock_delegate_draws_the_palette_it_is_handed',
+        ],
+    ),
+    (
+        'UUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUU: the tray-clock delegate transposes x and y on its way through',
+        CAL,
+        [
+            ('        clock.render(p, x, y, scale, utc_now, local)',
+             '        clock.render(p, y, x, scale, utc_now, local)'),
+        ],
+        ["desktop"],
+        [
+            'the_tray_clock_delegate_draws_the_palette_it_is_handed',
+        ],
+    ),
+    (
+        'VVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVV: the year mode dispatches to the month view, so the year view is never drawn',
+        CAL,
+        [
+            ('            CalendarViewMode::Year => self.render_year_view(p, x, y, scale),',
+             '            CalendarViewMode::Year => self.render_month_view(p, x, y, scale, utc_now, store),'),
+        ],
+        ["desktop"],
+        [
+            'every_year_view_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        'WWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWW: saving writes a colour line for every event, so an uncoloured one gains one',
+        CAL,
+        [
+            ('            if let Some(c) = event.color {',
+             '            {\n                let c = event.color.unwrap_or(Color::from_hex(0x89B4FA));'),
+        ],
+        ["desktop"],
+        [
+            'an_uncoloured_event_round_trips_without_gaining_a_colour',
+        ],
+    ),
+    (
+        'XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX: loading gives an event with no colour line a default, which saving then writes back',
+        CAL,
+        [
+            ('        let mut color: Option<Color> = None;',
+             '        let mut color: Option<Color> = Some(Color::from_hex(0x89B4FA));'),
+            ('                color = None;',
+             '                color = Some(Color::from_hex(0x89B4FA));'),
+        ],
+        ["desktop"],
+        [
+            'an_uncoloured_event_round_trips_without_gaining_a_colour',
+        ],
+    ),
+    (
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA: the picker's background is mantle again, which is also the selected row's fill",
+        SESS,
+        [
+            ('        let picker_bg = p.base;',
+             '        let picker_bg = p.mantle;'),
+        ],
+        ["desktop"],
+        [
+            'every_picker_site_draws_the_role_it_claims',
+            'only_the_selected_row_is_filled',
+        ],
+    ),
+    (
+        "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB: the picker's background is still the Mocha MANTLE constant",
+        SESS,
+        [
+            ('        let picker_bg = p.base;',
+             '        let picker_bg = Color::from_hex(0x181825);'),
+        ],
+        ["desktop"],
+        [
+            'every_picker_site_draws_the_role_it_claims',
+            'every_colour_the_picker_draws_comes_from_its_palette',
+            'every_themed_site_the_picker_draws_moves_with_the_mode',
+        ],
+    ),
+    (
+        "CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC: the picker's border reads surface0 instead of surface1",
+        SESS,
+        [
+            ('        let picker_border = p.surface1;',
+             '        let picker_border = p.surface0;'),
+        ],
+        ["desktop"],
+        [
+            'every_picker_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD: the picker's border is still the Mocha SURFACE1 constant",
+        SESS,
+        [
+            ('        let picker_border = p.surface1;',
+             '        let picker_border = Color::from_hex(0x45475A);'),
+        ],
+        ["desktop"],
+        [
+            'every_picker_site_draws_the_role_it_claims',
+            'every_colour_the_picker_draws_comes_from_its_palette',
+            'every_themed_site_the_picker_draws_moves_with_the_mode',
+        ],
+    ),
+    (
+        'EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE: the idle title drops to subtext0',
+        SESS,
+        [
+            ('        let title_ink = p.text;',
+             '        let title_ink = p.subtext0;'),
+        ],
+        ["desktop"],
+        [
+            'every_picker_site_draws_the_role_it_claims',
+            'the_title_wears_the_accent_only_while_searching',
+        ],
+    ),
+    (
+        'FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF: the idle title is still the Mocha TEXT constant',
+        SESS,
+        [
+            ('        let title_ink = p.text;',
+             '        let title_ink = Color::from_hex(0xCDD6F4);'),
+        ],
+        ["desktop"],
+        [
+        # The accent test only renders the dark palette, where this literal *is*
+        # `p.text`, so it cannot see this one. Only the light render can.
+            'every_picker_site_draws_the_role_it_claims',
+            'every_colour_the_picker_draws_comes_from_its_palette',
+            'every_themed_site_the_picker_draws_moves_with_the_mode',
+        ],
+    ),
+    (
+        'GGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGG: the search state goes back to the named blue instead of the accent',
+        SESS,
+        [
+            ('        let searching_ink = p.accent;',
+             '        let searching_ink = p.blue;'),
+        ],
+        ["desktop"],
+        [
+        # The pin test's fixture has an empty search box, so this site is not
+        # drawn there at all. A site nothing renders is a site nothing checks.
+            'the_title_wears_the_accent_only_while_searching',
+        ],
+    ),
+    (
+        'HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH: the title never changes colour, so nothing marks the search as live',
+        SESS,
+        [
+            ('        let searching_ink = p.accent;',
+             '        let searching_ink = p.text;'),
+        ],
+        ["desktop"],
+        [
+            'the_title_wears_the_accent_only_while_searching',
+        ],
+    ),
+    (
+        'IIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIII: the selected row goes back to surface0, which no quiet ink survives in Latte',
+        SESS,
+        [
+            ('        let selected_row = p.mantle;',
+             '        let selected_row = p.surface0;'),
+        ],
+        ["desktop"],
+        [
+            'every_picker_site_draws_the_role_it_claims',
+            'only_the_selected_row_is_filled',
+        ],
+    ),
+    (
+        'JJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJ: the selected row is still the Mocha SURFACE0 constant',
+        SESS,
+        [
+            ('        let selected_row = p.mantle;',
+             '        let selected_row = Color::from_hex(0x313244);'),
+        ],
+        ["desktop"],
+        [
+            'every_picker_site_draws_the_role_it_claims',
+            'every_colour_the_picker_draws_comes_from_its_palette',
+            'every_themed_site_the_picker_draws_moves_with_the_mode',
+            'only_the_selected_row_is_filled',
+        ],
+    ),
+    (
+        "KKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKK: the selected row's icon is not lifted out of the quiet tier",
+        SESS,
+        [
+            ('        let selected_icon_ink = p.text;',
+             '        let selected_icon_ink = p.subtext0;'),
+        ],
+        ["desktop"],
+        [
+            'every_picker_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLL: an unselected row's icon drops to overlay0",
+        SESS,
+        [
+            ('        let icon_ink = p.subtext0;',
+             '        let icon_ink = p.overlay0;'),
+        ],
+        ["desktop"],
+        [
+            'every_picker_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM: an unselected row's icon is still the Mocha SUBTEXT0 constant",
+        SESS,
+        [
+            ('        let icon_ink = p.subtext0;',
+             '        let icon_ink = Color::from_hex(0xA6ADC8);'),
+        ],
+        ["desktop"],
+        [
+            'every_picker_site_draws_the_role_it_claims',
+            'every_colour_the_picker_draws_comes_from_its_palette',
+            'every_themed_site_the_picker_draws_moves_with_the_mode',
+        ],
+    ),
+    (
+        "NNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNN: a workspace's name drops a tier to subtext1",
+        SESS,
+        [
+            ('        let name_ink = p.text;',
+             '        let name_ink = p.subtext1;'),
+        ],
+        ["desktop"],
+        [
+            'every_picker_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "OOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOO: a workspace's name is still the Mocha TEXT constant",
+        SESS,
+        [
+            ('        let name_ink = p.text;',
+             '        let name_ink = Color::from_hex(0xCDD6F4);'),
+        ],
+        ["desktop"],
+        [
+            'every_picker_site_draws_the_role_it_claims',
+            'every_colour_the_picker_draws_comes_from_its_palette',
+            'every_themed_site_the_picker_draws_moves_with_the_mode',
+        ],
+    ),
+    (
+        'PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPP: the row captions go back to overlay0, the rung below anything readable',
+        SESS,
+        [
+            ('        let caption_ink = p.subtext1;',
+             '        let caption_ink = p.overlay0;'),
+        ],
+        ["desktop"],
+        [
+        # Not the contrast test: it reads palette values and a hand-written
+        # pairing table and never calls the renderer, so it is structurally
+        # incapable of failing for anything in this file. That is a property of
+        # the test, not a weakness -- contrast is not a membership property and
+        # the sweep cannot see it either.
+            'every_picker_site_draws_the_role_it_claims',
+            'the_empty_state_draws_the_caption_ink',
+        ],
+    ),
+    (
+        'QQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQ: the row captions are still the Mocha OVERLAY0 constant',
+        SESS,
+        [
+            ('        let caption_ink = p.subtext1;',
+             '        let caption_ink = Color::from_hex(0x6C7086);'),
+        ],
+        ["desktop"],
+        [
+            'every_picker_site_draws_the_role_it_claims',
+            'every_colour_the_picker_draws_comes_from_its_palette',
+            'every_themed_site_the_picker_draws_moves_with_the_mode',
+            'the_empty_state_draws_the_caption_ink',
+        ],
+    ),
+    (
+        'RRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRR: the selected and unselected icon inks are transposed',
+        SESS,
+        [
+            ('                color: if selected {\n                    selected_icon_ink\n                } else {\n                    icon_ink\n                },',
+             '                color: if selected {\n                    icon_ink\n                } else {\n                    selected_icon_ink\n                },'),
+        ],
+        ["desktop"],
+        [
+            'every_picker_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "SSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSS: the picker's background and its border are drawn in each other's colours",
+        SESS,
+        [
+            ('            color: picker_bg,\n            corner_radii: CornerRadii::all(12.0),\n        });\n\n        // Border.\n        commands.push(RenderCommand::StrokeRect {\n            x: px,\n            y: py,\n            width: picker_w,\n            height: picker_h,\n            color: picker_border,',
+             '            color: picker_border,\n            corner_radii: CornerRadii::all(12.0),\n        });\n\n        // Border.\n        commands.push(RenderCommand::StrokeRect {\n            x: px,\n            y: py,\n            width: picker_w,\n            height: picker_h,\n            color: picker_bg,'),
+        ],
+        ["desktop"],
+        [
+        # One edit spanning both sites, not two edits. Two would undo each
+        # other: the harness replaces the first match, so the second edit would
+        # find the line the first one had just rewritten. See lesson 18.
+            'every_picker_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        'TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT: the drop shadow is tinted, so it is a colour rather than an absence of light',
+        SESS,
+        [
+            ('            color: Color::rgba(0, 0, 0, 120),',
+             '            color: Color::rgba(0, 0, 40, 120),'),
+        ],
+        ["desktop"],
+        [
+            'every_picker_site_draws_the_role_it_claims',
+            'every_colour_the_picker_draws_comes_from_its_palette',
+        ],
+    ),
+    (
+        "UUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUU: the colour tag ignores the user's choice and always draws the theme's blue",
+        SESS,
+        [
+            ('                color: ws.tag_color(p),',
+             '                color: p.blue,'),
+        ],
+        ["desktop"],
+        [
+            'every_picker_site_draws_the_role_it_claims',
+            'the_tag_the_picker_draws_is_the_one_the_resolver_gives',
+        ],
+    ),
+    (
+        'VVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVV: the colour tag follows the accent, so every workspace wears the same tag',
+        SESS,
+        [
+            ('                color: ws.tag_color(p),',
+             '                color: p.accent,'),
+        ],
+        ["desktop"],
+        [
+            'every_picker_site_draws_the_role_it_claims',
+            'the_tag_the_picker_draws_is_the_one_the_resolver_gives',
+        ],
+    ),
+    (
+        "WWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWW: an untagged workspace's default tag follows the accent instead of blue",
+        SESS,
+        [
+            ('        self.color.unwrap_or(p.blue)',
+             '        self.color.unwrap_or(p.accent)'),
+        ],
+        ["desktop"],
+        [
+        # Not the resolver test: it compares what the renderer drew against what
+        # `tag_color` answers, and both move together here. An expectation taken
+        # from the code under test is an echo -- lesson 22. The pin test holds
+        # because it names `p.blue` itself.
+            'every_picker_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX: an untagged workspace's default tag is still the Mocha BLUE constant",
+        SESS,
+        [
+            ('        self.color.unwrap_or(p.blue)',
+             '        self.color.unwrap_or(Color::from_hex(0x89B4FA))'),
+        ],
+        ["desktop"],
+        [
+            'every_picker_site_draws_the_role_it_claims',
+            'every_colour_the_picker_draws_comes_from_its_palette',
+            'every_themed_site_the_picker_draws_moves_with_the_mode',
+        ],
+    ),
+    (
+        "YYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYY: the resolver drops the user's choice on the floor",
+        SESS,
+        [
+            ('        self.color.unwrap_or(p.blue)',
+             '        {\n            let _ = self.color;\n            p.blue\n        }'),
+        ],
+        ["desktop"],
+        [
+            'every_picker_site_draws_the_role_it_claims',
+            'a_tagged_workspace_keeps_the_users_colour',
+        ],
+    ),
+    (
+        'ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ: a new workspace is born carrying a resolved dark-mode blue',
+        SESS,
+        [
+            ('            pinned_desktop: None,\n            color: None,',
+             '            pinned_desktop: None,\n            color: Some(Color::from_hex(0x89B4FA)),'),
+        ],
+        ["desktop"],
+        [
+            'every_picker_site_draws_the_role_it_claims',
+            'every_colour_the_picker_draws_comes_from_its_palette',
+            'every_themed_site_the_picker_draws_moves_with_the_mode',
+            'a_new_workspace_is_born_untagged',
+        ],
+    ),
+    (
+        'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA: duplicating a workspace throws its colour tag away',
+        SESS,
+        [
+            ('            new_ws.color = source.color;',
+             '            new_ws.color = None;'),
+        ],
+        ["desktop"],
+        [
+            'a_tagged_workspace_keeps_the_users_colour',
+        ],
+    ),
+    (
+        "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB: the window count is drawn in the icon's ink",
+        SESS,
+        [
+            ('                font_size: 11.0,\n                color: caption_ink,',
+             '                font_size: 11.0,\n                color: icon_ink,'),
+        ],
+        ["desktop"],
+        [
+            'every_picker_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        'CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC: the shortcut hint alone goes back to overlay0',
+        SESS,
+        [
+            ('                    font_size: 10.0,\n                    color: caption_ink,',
+             '                    font_size: 10.0,\n                    color: p.overlay0,'),
+        ],
+        ["desktop"],
+        [
+            'every_picker_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        'DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD: the empty-state line alone goes back to overlay0',
+        SESS,
+        [
+            ('                font_size: 13.0,\n                color: caption_ink,',
+             '                font_size: 13.0,\n                color: p.overlay0,'),
+        ],
+        ["desktop"],
+        [
+        # The pin test's fixture always matches at least one workspace, so the
+        # empty branch never runs there. This is the whole reason the empty state
+        # got a fixture of its own.
+            'the_empty_state_draws_the_caption_ink',
+        ],
+    ),
+    (
+        "EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE: a workspace's name is drawn in the caption ink at its site",
+        SESS,
+        [
+            ('                font_size: 14.0,\n                color: name_ink,',
+             '                font_size: 14.0,\n                color: caption_ink,'),
+        ],
+        ["desktop"],
+        [
+            'every_picker_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF: the selection is filled in the picker's own background, so it is invisible",
+        SESS,
+        [
+            ('                    color: selected_row,\n                    corner_radii: CornerRadii::all(8.0),',
+             '                    color: picker_bg,\n                    corner_radii: CornerRadii::all(8.0),'),
+        ],
+        ["desktop"],
+        [
+            'every_picker_site_draws_the_role_it_claims',
+            'only_the_selected_row_is_filled',
+        ],
+    ),
+    (
+        'GGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGG: every row is filled, not just the selected one',
+        SESS,
+        [
+            ('            if selected {\n                commands.push(RenderCommand::FillRect {',
+             '            if true {\n                commands.push(RenderCommand::FillRect {'),
+        ],
+        ["desktop"],
+        [
+            'every_picker_site_draws_the_role_it_claims',
+            'only_the_selected_row_is_filled',
+        ],
+    ),
+    (
+        'HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH: no row is ever filled, so the selection is not shown at all',
+        SESS,
+        [
+            ('            if selected {\n                commands.push(RenderCommand::FillRect {',
+             '            if false {\n                commands.push(RenderCommand::FillRect {'),
+        ],
+        ["desktop"],
+        [
+            'every_picker_site_draws_the_role_it_claims',
+            'only_the_selected_row_is_filled',
+        ],
+    ),
+    (
+        "IIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIII: the picker's background and the selected row's fill are transposed",
+        SESS,
+        [
+            ('        let picker_bg = p.base;',
+             '        let picker_bg = p.mantle;'),
+            ('        let selected_row = p.mantle;',
+             '        let selected_row = p.base;'),
+        ],
+        ["desktop"],
+        [
+        # Two edits are safe here where they were not for the background/border
+        # transposition above: the second anchor still reads `p.mantle` on the
+        # *binding* line, which the first edit did not create a duplicate of.
+            'every_picker_site_draws_the_role_it_claims',
+            'only_the_selected_row_is_filled',
+        ],
+    ),
+    (
+        'JJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJ: the title always draws the search ink, so the idle state looks live',
+        SESS,
+        [
+            ('            color: if self.search_text.is_empty() {\n                title_ink\n            } else {\n                searching_ink\n            },',
+             '            color: searching_ink,'),
+        ],
+        ["desktop"],
+        [
+            'every_picker_site_draws_the_role_it_claims',
+            'the_title_wears_the_accent_only_while_searching',
+        ],
+    ),
+    (
+        "KKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKK: the title's two states are transposed",
+        SESS,
+        [
+            ('            color: if self.search_text.is_empty() {\n                title_ink\n            } else {\n                searching_ink\n            },',
+             '            color: if self.search_text.is_empty() {\n                searching_ink\n            } else {\n                title_ink\n            },'),
+        ],
+        ["desktop"],
+        [
+            'every_picker_site_draws_the_role_it_claims',
+            'the_title_wears_the_accent_only_while_searching',
+        ],
+    ),
+    (
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA: the drag card's fill is mantle, not base",
+        FD,
+        [
+            ('    let card_fill = p.base;',
+             '    let card_fill = p.mantle;'),
+        ],
+        ["desktop"],
+        [
+        # mantle is a role, moves with the mode, and `text` on it reads 12.14/6.57 -
+        # so membership, the mode test and the contrast walk all pass. Only the
+        # ordered pin knows which role belongs here.
+            'every_drag_overlay_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB: the drag card's fill is still the Mocha BASE constant",
+        FD,
+        [
+            ('    let card_fill = p.base;',
+             '    let card_fill = Color::from_hex(0x1E1E2E);'),
+        ],
+        ["desktop"],
+        [
+        # the contrast walk catches this one too: Latte `text` on Mocha `base` is
+        # 2.05, because the card stops following the mode but its ink does not.
+            'every_drag_overlay_site_draws_the_role_it_claims',
+            'every_colour_the_drag_overlay_draws_comes_from_its_palette',
+            'every_site_the_drag_overlay_draws_moves_with_the_mode',
+            'every_ink_the_drag_card_draws_is_readable_on_what_it_sits_on',
+        ],
+    ),
+    (
+        "CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC: the dragged item's description drops a tier to subtext0",
+        FD,
+        [
+            ('    let desc_ink = p.text;',
+             '    let desc_ink = p.subtext0;'),
+        ],
+        ["desktop"],
+        [
+        # 7.37/4.64 on base, so it clears the floor - a readable defect is still a
+        # defect, and only the pin can see it.
+            'every_drag_overlay_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD: the dragged item's description is still the Mocha TEXT constant",
+        FD,
+        [
+            ('    let desc_ink = p.text;',
+             '    let desc_ink = Color::from_hex(0xCDD6F4);'),
+        ],
+        ["desktop"],
+        [
+            'every_drag_overlay_site_draws_the_role_it_claims',
+            'every_colour_the_drag_overlay_draws_comes_from_its_palette',
+            'every_site_the_drag_overlay_draws_moves_with_the_mode',
+            'every_ink_the_drag_card_draws_is_readable_on_what_it_sits_on',
+        ],
+    ),
+    (
+        'EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE: the badge ink is crust, the reflexive darkest role',
+        FD,
+        [
+            ('    let badge_ink = p.base;',
+             '    let badge_ink = p.crust;'),
+        ],
+        ["desktop"],
+        [
+        # the headline defect this module exists to catch: 12.61/10.59 in Mocha but
+        # 3.98/3.95 in Latte. Membership and the mode test both pass - crust is a
+        # perfectly good role that moves with the theme. Only a contrast check that
+        # reads the real ink/fill pairing out of the rendered commands sees it.
+            'every_drag_overlay_site_draws_the_role_it_claims',
+            'every_ink_the_drag_card_draws_is_readable_on_what_it_sits_on',
+        ],
+    ),
+    (
+        'FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF: the badge ink is still the Mocha BASE constant',
+        FD,
+        [
+            ('    let badge_ink = p.base;',
+             '    let badge_ink = Color::from_hex(0x1E1E2E);'),
+        ],
+        ["desktop"],
+        [
+            'every_drag_overlay_site_draws_the_role_it_claims',
+            'every_colour_the_drag_overlay_draws_comes_from_its_palette',
+            'every_site_the_drag_overlay_draws_moves_with_the_mode',
+            'every_ink_the_drag_card_draws_is_readable_on_what_it_sits_on',
+        ],
+    ),
+    (
+        'GGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGG: the item-count chip goes back to peach, colliding with Link',
+        FD,
+        [
+            ('    let count_chip = p.text;',
+             '    let count_chip = p.peach;'),
+        ],
+        ["desktop"],
+        [
+        # base ink on peach is 9.27/4.62, so the contrast walk passes: this is a
+        # meaning collision, not a legibility one, and it needs its own test.
+            'every_drag_overlay_site_draws_the_role_it_claims',
+            'the_item_count_chip_is_never_an_effect_colour',
+        ],
+    ),
+    (
+        'HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH: the item-count chip is still the Mocha PEACH constant',
+        FD,
+        [
+            ('    let count_chip = p.text;',
+             '    let count_chip = Color::from_hex(0xFAB387);'),
+        ],
+        ["desktop"],
+        [
+            'every_drag_overlay_site_draws_the_role_it_claims',
+            'every_colour_the_drag_overlay_draws_comes_from_its_palette',
+            'every_site_the_drag_overlay_draws_moves_with_the_mode',
+            'the_item_count_chip_is_never_an_effect_colour',
+            'every_ink_the_drag_card_draws_is_readable_on_what_it_sits_on',
+        ],
+    ),
+    (
+        'IIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIII: the item-count chip is surface2, the obvious-looking chip that cannot work',
+        FD,
+        [
+            ('    let count_chip = p.text;',
+             '    let count_chip = p.surface2;'),
+        ],
+        ["desktop"],
+        [
+        # 2.46 Mocha / 1.91 Latte - a surface role is defined as being near the
+        # background, so it fails as a badge fill in *both* modes.
+            'every_drag_overlay_site_draws_the_role_it_claims',
+            'every_ink_the_drag_card_draws_is_readable_on_what_it_sits_on',
+        ],
+    ),
+    (
+        "JJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJ: the description's ink and the badge's ink are transposed",
+        FD,
+        [
+            ('    let desc_ink = p.text;',
+             '    let desc_ink = p.base;'),
+            ('    let badge_ink = p.base;',
+             '    let badge_ink = p.text;'),
+        ],
+        ["desktop"],
+        [
+        # two edits are safe: each anchor carries its own binding name, so the first
+        # edit cannot create a duplicate of the second's anchor (lesson 18).
+            'every_drag_overlay_site_draws_the_role_it_claims',
+            'every_ink_the_drag_card_draws_is_readable_on_what_it_sits_on',
+        ],
+    ),
+    (
+        "KKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKK: the card's fill and the count chip are transposed",
+        FD,
+        [
+            ('    let card_fill = p.base;',
+             '    let card_fill = p.text;'),
+            ('    let count_chip = p.text;',
+             '    let count_chip = p.base;'),
+        ],
+        ["desktop"],
+        [
+            'every_drag_overlay_site_draws_the_role_it_claims',
+            'every_ink_the_drag_card_draws_is_readable_on_what_it_sits_on',
+        ],
+    ),
+    (
+        "LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLL: copy and move wear each other's colours, so green now means move",
+        FD,
+        [
+            ('            Self::Copy => p.green,\n            Self::Move => p.blue,',
+             '            Self::Copy => p.blue,\n            Self::Move => p.green,'),
+        ],
+        ["desktop"],
+        [
+        # the site pin cannot catch this and must not be declared: its expectation
+        # calls `effect.color(p)`, so it is an echo of the code under test (lesson
+        # 22). Both colours are palette roles that move with the mode, so
+        # membership and the mode test pass, and base ink clears 4.5 on both, so
+        # the contrast walk passes. Only the hand-pinned role vector sees it.
+            'each_drop_effect_wears_its_own_role',
+        ],
+    ),
+    (
+        'MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM: a forbidden drop wears the link colour',
+        FD,
+        [
+            ('            Self::None => p.red,',
+             '            Self::None => p.peach,'),
+        ],
+        ["desktop"],
+        [
+            'each_drop_effect_wears_its_own_role',
+        ],
+    ),
+    (
+        'NNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNN: every effect wears the same blue, so the badge says nothing',
+        FD,
+        [
+            ('            Self::None => p.red,\n            Self::Copy => p.green,\n            Self::Move => p.blue,\n            Self::Link => p.peach,',
+             '            Self::None => p.blue,\n            Self::Copy => p.blue,\n            Self::Move => p.blue,\n            Self::Link => p.blue,'),
+        ],
+        ["desktop"],
+        [
+            'each_drop_effect_wears_its_own_role',
+        ],
+    ),
+    (
+        'OOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOO: every effect wears the accent, so the badge tracks the theme not the verb',
+        FD,
+        [
+            ('            Self::None => p.red,\n            Self::Copy => p.green,\n            Self::Move => p.blue,\n            Self::Link => p.peach,',
+             '            Self::None => p.accent,\n            Self::Copy => p.accent,\n            Self::Move => p.accent,\n            Self::Link => p.accent,'),
+        ],
+        ["desktop"],
+        [
+        # the accent is one of the 21 roles, so membership passes, and it moves with
+        # the mode, so the mode test passes.
+            'each_drop_effect_wears_its_own_role',
+        ],
+    ),
+    (
+        'PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPP: the link effect is still the Mocha PEACH constant',
+        FD,
+        [
+            ('            Self::Link => p.peach,',
+             '            Self::Link => Color::from_hex(0xFAB387),'),
+        ],
+        ["desktop"],
+        [
+            'each_drop_effect_wears_its_own_role',
+            'every_colour_the_drag_overlay_draws_comes_from_its_palette',
+            'every_colour_the_drop_highlight_draws_comes_from_its_palette',
+            'every_site_the_drag_overlay_draws_moves_with_the_mode',
+            'every_ink_the_drag_card_draws_is_readable_on_what_it_sits_on',
+        ],
+    ),
+    (
+        "QQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQ: the effect badge's label is drawn in the description's ink",
+        FD,
+        [
+            ('        font_size: 9.0,\n        color: badge_ink,',
+             '        font_size: 9.0,\n        color: desc_ink,'),
+        ],
+        ["desktop"],
+        [
+        # `color: badge_ink,` appears at two sites, so the anchor has to span the
+        # font size above it to be unique.
+            'every_drag_overlay_site_draws_the_role_it_claims',
+            'every_ink_the_drag_card_draws_is_readable_on_what_it_sits_on',
+        ],
+    ),
+    (
+        "RRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRR: the item count is drawn in the chip's own colour, so it is invisible",
+        FD,
+        [
+            ('            font_size: 10.0,\n            color: badge_ink,',
+             '            font_size: 10.0,\n            color: count_chip,'),
+        ],
+        ["desktop"],
+        [
+            'every_drag_overlay_site_draws_the_role_it_claims',
+            'every_ink_the_drag_card_draws_is_readable_on_what_it_sits_on',
+        ],
+    ),
+    (
+        "SSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSS: the item-count chip is filled with the card's own colour",
+        FD,
+        [
+            ('            height: 16.0,\n            color: count_chip,',
+             '            height: 16.0,\n            color: card_fill,'),
+        ],
+        ["desktop"],
+        [
+            'every_drag_overlay_site_draws_the_role_it_claims',
+            'every_ink_the_drag_card_draws_is_readable_on_what_it_sits_on',
+        ],
+    ),
+    (
+        "TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT: the effect badge is filled with the count chip's colour",
+        FD,
+        [
+            ('        height: 12.0,\n        color: badge_color,',
+             '        height: 12.0,\n        color: count_chip,'),
+        ],
+        ["desktop"],
+        [
+        # base ink on a `text` chip is 11.34/7.06, so this is perfectly legible and
+        # perfectly wrong - the badge stops saying what will happen. Contrast
+        # cannot see it; only the pin can.
+            'every_drag_overlay_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "UUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUU: the target tooltip's label drops to overlay0",
+        FD,
+        [
+            ('    let tooltip_ink = p.text;',
+             '    let tooltip_ink = p.overlay0;'),
+        ],
+        ["desktop"],
+        [
+        # 3.36 Mocha / 2.30 Latte - the same overlay-as-ink shape module 44 found.
+            'every_drop_highlight_site_draws_the_role_it_claims',
+            'the_drop_tooltips_label_is_readable_on_its_fill',
+        ],
+    ),
+    (
+        "VVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVV: the target tooltip's label is still the Mocha TEXT constant",
+        FD,
+        [
+            ('    let tooltip_ink = p.text;',
+             '    let tooltip_ink = Color::from_hex(0xCDD6F4);'),
+        ],
+        ["desktop"],
+        [
+            'every_drop_highlight_site_draws_the_role_it_claims',
+            'every_colour_the_drop_highlight_draws_comes_from_its_palette',
+            'every_site_the_drop_highlight_draws_moves_with_the_mode',
+            'the_drop_tooltips_label_is_readable_on_its_fill',
+        ],
+    ),
+    (
+        'WWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWW: the target tooltip is filled with surface1',
+        FD,
+        [
+            ('    let tooltip_fill = p.base;',
+             '    let tooltip_fill = p.surface1;'),
+        ],
+        ["desktop"],
+        [
+        # 6.31 in Mocha and 4.39 in Latte - under the floor by a tenth, and
+        # invisible to any check that only looks at dark mode.
+            'every_drop_highlight_site_draws_the_role_it_claims',
+            'the_drop_tooltips_label_is_readable_on_its_fill',
+        ],
+    ),
+    (
+        "XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX: the target tooltip's fill and label are transposed",
+        FD,
+        [
+            ('    let tooltip_fill = p.base;',
+             '    let tooltip_fill = p.text;'),
+            ('    let tooltip_ink = p.text;',
+             '    let tooltip_ink = p.base;'),
+        ],
+        ["desktop"],
+        [
+        # NOT the contrast test, though it walks exactly this pair: the contrast
+        # ratio is symmetric in its two arguments, so a transposition of the
+        # fill and the ink reproduces the ratio exactly. Only the ordered site
+        # table can see this one.
+            'every_drop_highlight_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "YYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYY: the target's glowing border is drawn in the tooltip's ink",
+        FD,
+        [
+            ('        color,\n        line_width: 2.0,',
+             '        color: tooltip_ink,\n        line_width: 2.0,'),
+        ],
+        ["desktop"],
+        [
+        # the border carries no text, so no contrast pair changes; `text` is a role
+        # that moves with the mode, so membership and the mode test pass. The
+        # border stops meaning anything and only the pin notices.
+            'every_drop_highlight_site_draws_the_role_it_claims',
+        ],
+    ),
+    (
+        "ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ: the target's border and its tooltip fill are transposed",
+        FD,
+        [
+            ('        color,\n        line_width: 2.0,',
+             '        color: tooltip_fill,\n        line_width: 2.0,'),
+            ('            color: Color::rgba(tooltip_fill.r, tooltip_fill.g, tooltip_fill.b, 200),',
+             '            color: Color::rgba(color.r, color.g, color.b, 200),'),
+        ],
+        ["desktop"],
+        [
+        # safe as two edits: the first writes `color: tooltip_fill,` which does not
+        # match the second anchor's `Color::rgba(` shape.
+            'every_drop_highlight_site_draws_the_role_it_claims',
+            'the_drop_tooltips_label_is_readable_on_its_fill',
+        ],
+    ),
+    (
+        'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA: the drop highlight resolves its effect colour from a hardcoded dark palette',
+        FD,
+        [
+            ('    let color = effect.color(p);',
+             '    let color = effect.color(&Palette::for_mode(false));'),
+        ],
+        ["desktop"],
+        [
+            'every_drop_highlight_site_draws_the_role_it_claims',
+            'every_colour_the_drop_highlight_draws_comes_from_its_palette',
+            'every_site_the_drop_highlight_draws_moves_with_the_mode',
+        ],
+    ),
+    (
+        'BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB: the drag badge resolves its effect colour from a hardcoded dark palette',
+        FD,
+        [
+            ('    let badge_color = session.current_effect.color(p);',
+             '    let badge_color = session.current_effect.color(&Palette::for_mode(false));'),
+        ],
+        ["desktop"],
+        [
+            'every_drag_overlay_site_draws_the_role_it_claims',
+            'every_colour_the_drag_overlay_draws_comes_from_its_palette',
+            'every_site_the_drag_overlay_draws_moves_with_the_mode',
+            'every_ink_the_drag_card_draws_is_readable_on_what_it_sits_on',
+        ],
+    ),
+    (
+        'CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC: a single-item drag draws a count badge reading 1',
+        FD,
+        [
+            ('    // Item count badge (if multiple).\n    if count > 1 {',
+             '    // Item count badge (if multiple).\n    if true {'),
+        ],
+        ["desktop"],
+        [
+        # `if count > 1` appears twice - the other governs the description's room -
+        # so the anchor spans the comment above it.
+            'a_single_item_drag_draws_no_count_chip',
+        ],
+    ),
+    (
+        'DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD: the count badge is never drawn, so a twelve-file drag looks like one file',
+        FD,
+        [
+            ('    // Item count badge (if multiple).\n    if count > 1 {',
+             '    // Item count badge (if multiple).\n    if false {'),
+        ],
+        ["desktop"],
+        [
+            'every_drag_overlay_site_draws_the_role_it_claims',
+            'every_site_the_drag_overlay_draws_moves_with_the_mode',
+            'every_ink_the_drag_card_draws_is_readable_on_what_it_sits_on',
+            'the_item_count_chip_is_never_an_effect_colour',
+            'a_multi_item_description_stops_before_the_count_badge',
+            'only_the_card_and_the_tooltip_are_translucent',
+        ],
+    ),
+    (
+        'EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE: an unlabelled target draws an empty tooltip',
+        FD,
+        [
+            ('    if !target.label.is_empty() {',
+             '    if true {'),
+        ],
+        ["desktop"],
+        [
+            'an_unlabelled_target_draws_no_tooltip',
+        ],
+    ),
+    (
+        'FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF: the target tooltip is never drawn, so the target never says what it is',
+        FD,
+        [
+            ('    if !target.label.is_empty() {',
+             '    if false {'),
+        ],
+        ["desktop"],
+        [
+        # not declared against the highlight membership test: drawing *fewer*
+        # colours leaves every colour still drawn a legal member.
+            'every_drop_highlight_site_draws_the_role_it_claims',
+            'every_site_the_drop_highlight_draws_moves_with_the_mode',
+            'the_drop_tooltips_label_is_readable_on_its_fill',
+            'only_the_card_and_the_tooltip_are_translucent',
+        ],
+    ),
+    (
+        'GGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGG: the drag card is fully opaque and hides what is being dragged onto',
+        FD,
+        [
+            ('        color: Color::rgba(card_fill.r, card_fill.g, card_fill.b, 220),',
+             '        color: Color::rgba(card_fill.r, card_fill.g, card_fill.b, 255),'),
+        ],
+        ["desktop"],
+        [
+        # every other test in the module flattens alpha so one list can be compared
+        # against palette roles, which makes all of them blind to this.
+            'only_the_card_and_the_tooltip_are_translucent',
+        ],
+    ),
+    (
+        'HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH: the target tooltip is fully opaque',
+        FD,
+        [
+            ('            color: Color::rgba(tooltip_fill.r, tooltip_fill.g, tooltip_fill.b, 200),',
+             '            color: Color::rgba(tooltip_fill.r, tooltip_fill.g, tooltip_fill.b, 255),'),
+        ],
+        ["desktop"],
+        [
+            'only_the_card_and_the_tooltip_are_translucent',
         ],
     ),
 ]

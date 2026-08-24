@@ -23,7 +23,6 @@ userspace/coreutils/src/bin/fetch.rs:argv-as-string
 userspace/coreutils/src/bin/free.rs:argv-as-string
 userspace/coreutils/src/bin/grep.rs:argv-as-string
 userspace/coreutils/src/bin/logger.rs:argv-as-string
-userspace/coreutils/src/bin/md5sum.rs:argv-as-string
 userspace/coreutils/src/bin/more.rs:argv-as-string
 userspace/coreutils/src/bin/nice.rs:argv-as-string
 userspace/coreutils/src/bin/nohup.rs:argv-as-string
@@ -33,7 +32,6 @@ userspace/coreutils/src/bin/renice.rs:argv-as-string
 userspace/coreutils/src/bin/sed.rs:argv-as-string
 userspace/coreutils/src/bin/sh.rs:argv-as-string
 userspace/coreutils/src/bin/sh.rs:env-as-string
-userspace/coreutils/src/bin/sha256sum.rs:argv-as-string
 userspace/coreutils/src/bin/sleep.rs:argv-as-string
 userspace/coreutils/src/bin/strings.rs:argv-as-string
 userspace/coreutils/src/bin/tar.rs:argv-as-string

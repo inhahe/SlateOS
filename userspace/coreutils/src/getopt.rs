@@ -274,6 +274,25 @@ impl Program {
         Program { name, usage_status }
     }
 
+    /// Print `name: <error>` to stderr — the whole of what a utility that stops
+    /// at the first command-line error does with one.
+    ///
+    /// Every bin here spells that out as `eprintln!("tee: {e}")`, which is fine
+    /// when the name is a literal. It stops being fine in a module shared by
+    /// several programs, where the name is data: the literal becomes
+    /// `"{}: {e}"`, and `scripts/host-errmsg.py` — which exempts the shape
+    /// `<name>: {e}` precisely because it is always a [`Error`] and never an
+    /// `io::Error` — cannot tell that from a real site printing the host's
+    /// error text with one word of context. Naming the operation removes the
+    /// literal instead of widening the gate to admit a shape it cannot check.
+    ///
+    /// The status is deliberately not returned. It is [`Error::status`], the
+    /// caller is what exits, and a function that both printed and produced an
+    /// exit code would be used by callers that only wanted one of the two.
+    pub fn report(self, e: &Error) {
+        eprintln!("{}: {}", self.name, e.message());
+    }
+
     /// The utility's *own* usage errors — `invalid field specification '0'`,
     /// `invalid --parallel argument 'x'` — rather than getopt's.
     ///

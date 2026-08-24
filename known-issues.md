@@ -50604,7 +50604,7 @@ guarantee, and on Windows the failure mode would be a sharing violation in
 whichever of the two processes lost the race. Wait for `[run-timeout] child
 exited` before running any cargo command against the same target directory.
 
-**Part 2 progress. 42 of 49 modules converted.**
+**Part 2 progress. 45 of 49 modules converted.**
 
 - [x] `security_dialog.rs` — 29 constants, done 2026-08-22. The method above
   survived contact: the sweep lives in `gui/desktop/src/palette_check.rs` as
@@ -53396,6 +53396,417 @@ exited` before running any cargo command against the same target directory.
       lands at 3.14:1 on magenta. It shares those catches with the pin only
       because the pin happens to be watching the same two indices. Change the
       fixture and the pin stops seeing them; the ratio does not care.
+- [x] `calendar.rs` — 8 constants over 35 colour sites, done 2026-08-23. 113
+  tests in the module (ten new), harness defects Ax68–Xx69 (fifty).
+  - **The largest finding is not a colour at all: a field that round-tripped
+    perfectly and was never drawn.** `CalendarEvent::color` was parsed by
+    `import_text`, stored, and written back by `export_text` faithfully — and
+    the month grid's event dot drew a fixed `LAVENDER` that never looked at the
+    field. The only site that read it was the detail card, which appears only
+    for a day the user has *selected*. So a colour set in the calendar file
+    survived every save/load cycle intact while changing nothing the user could
+    see until they clicked the day. **A value that round-trips correctly and a
+    value that is used are unrelated properties**, and a round-trip test — which
+    this module had — asserts only the first. This is the generalisation of
+    module 41's delegate finding: there the unexercised thing was a function,
+    here it is a *read*.
+  - **It was nearly missed by the search that found everything else.** The sweep
+    for surviving colour work was `grep '\.color' | grep -v 'color:'` — strip
+    the struct-literal noise, keep the reads. But `color: event.dot_color(p)` is
+    a read *spelled* as a write, and the filter removed the one production line
+    that mattered along with the forty that did not. **A filter that removes the
+    noise can remove the signal with it** whenever the signal and the noise
+    share a shape. The read was found by reading the renderer instead.
+  - **`Option<Color>`, not a sentinel — design-decisions.md §528.** The tempting
+    non-decision is `.unwrap_or(p.blue)` inside `import_text`. That makes the
+    *parser* consult the palette, so the same file parses to different data
+    depending on which theme is active, and `export_text` then writes that
+    theme-dependent value back: merely opening the calendar in light mode would
+    rewrite every event the user never coloured. A display setting must not be
+    able to edit user data. `None` is resolved once, at draw time, by
+    `CalendarEvent::dot_color`.
+  - **Three contrast failures, all one shape: a fill role read as an ink.** The
+    adjacent months' day numbers were `SURFACE2` on `BASE` — 2.46:1 in Mocha and
+    **1.91:1** in Latte; the week-number gutter was the same; and the detail
+    card was `SURFACE0` with `SUBTEXT` on it, **3.40:1** in Latte. Surfaces sit
+    near the background — that is what they are for — so any `surface*` used as
+    ink is unreadable by construction, and the dark-mode-only review that
+    preceded these conversions could not see it because Mocha's surfaces are
+    further from its base than Latte's are from its.
+  - **The detail card is the one case where the *fill* had to move rather than
+    the ink.** No quiet role clears 4.5:1 against Latte `surface0`: `subtext1`,
+    the next rung up from the offending `subtext0`, still only reaches 4.05. So
+    the card became `mantle` — one step *away* from `base` in both modes, a
+    shallow well rather than a raised panel — which buys two readable ink tiers
+    at once (5.14 for the event time, 6.57 for its title in Latte). Worth
+    recording because the reflex in the previous forty-two modules was always to
+    move the ink; here that reflex has no solution.
+  - **Lesson 24 held again: a delegate is a site.** `render_tray_clock` is a
+    one-line forward to `ClockDisplay::render` and was called from nowhere in
+    the tree — every existing test called the inner function directly. It could
+    have dropped the palette, transposed x and y, or handed the clock a palette
+    of its own, and nothing would have failed. Two harness defects do exactly
+    that, and one test is the sole catcher of both.
+  - **The contrast test cannot catch a single defect in this module, and that is
+    correct.** `every_pairing_the_calendar_draws_clears_the_contrast_floor`
+    reads palette values and a hand-written table of which ink lands on which
+    fill; it never calls the renderer. So no defect in `calendar.rs` is declared
+    against it — the catchers would all be MISSING. It is not dead weight: it is
+    the only thing standing between the module and a repeat of the three bugs
+    above, and it would fail loudly if `appearance` moved a role. But it is a
+    claim about the *palette*, not about this file, and declaring it as a
+    catcher for a rendering defect would have been a declaration error in five
+    consecutive modules' worth of tradition. **A test can be correct, valuable,
+    and structurally incapable of catching any defect in the file it lives in.**
+  - **My hand-computed contrast figure was wrong, and only running it found
+    that.** I predicted Latte `accent` (which stock is `blue`, `#1D62EC`) on
+    Latte `base` at 4.415:1 and expected the new contrast test to fail on the
+    "Today" button. It passed; the measured value is **4.63:1**. The pairing is
+    genuinely thin but it clears the floor, and no code change was warranted.
+    The lesson is narrow and worth keeping: WCAG luminance is a gamma-corrected
+    weighted sum, estimating it by eye is estimating an exponential, and a
+    prediction that would have driven a code change has to be *computed*.
+  - **Sweep: 50 caught, 0 escaped, 0 never asked, 0 under-caught, 2
+    under-declared.** The preflight was `50 build, 0 do not, 0 not applied`, and
+    both runs ended `restored: all files match their recorded SHA-256`. No
+    declaration errors were found by reading this time — the first module in six
+    where the pre-run check against the test source turned up nothing, which is
+    what the previous five modules' errors were teaching.
+  - Catcher census (50 defects):
+
+    | Test | Caught | Sole catcher |
+    |---|---|---|
+    | `every_month_view_site_draws_the_role_it_claims` | 33 | 12 |
+    | `every_role_the_calendar_draws_moves_with_the_mode` | 13 | 0 |
+    | `every_colour_the_calendar_draws_comes_from_its_palette` | 12 | 0 |
+    | `every_year_view_site_draws_the_role_it_claims` | 11 | 9 |
+    | `the_tray_clock_delegate_draws_the_palette_it_is_handed` | 6 | 2 |
+    | `a_coloured_event_shows_the_users_colour_in_the_month_grid` | 6 | 0 |
+    | `the_today_button_wears_the_accent` | 3 | 2 |
+    | `an_uncoloured_event_round_trips_without_gaining_a_colour` | 2 | 2 |
+    | `the_dot_and_the_detail_bar_resolve_a_colour_the_same_way` | 2 | 0 |
+    | `the_selection_disc_is_drawn_on_the_cell_that_is_clicked` | 2 | 0 |
+    | `every_pairing_the_calendar_draws_clears_the_contrast_floor` | 0 | 0 |
+
+    - **Twenty-seven of the fifty are caught by exactly one test, and the
+      fifteen sole catches that lie outside the month-view pin are all sites a
+      general-purpose check cannot reach.** Nine are in the year view, which the
+      month-view pin never renders; two are behind the tray-clock delegate,
+      which nothing else in the tree calls; two are the "Today" button, which by
+      construction cannot coexist with a visible today cell and so is invisible
+      to the scene the pin uses; two are the file format, which no renderer test
+      touches at all. The other twelve sole catches belong to the pin, and are
+      the role swaps and fill-role-as-ink defects that are perfectly good
+      palette members drawn in the wrong place. Not one of the twenty-seven
+      would have been found by widening an existing test — each needed a fixture
+      that reaches the site.
+    - **The contrast test caught nothing, and could not have.** It is the first
+      test in this series with a zero, and the zero is structural rather than a
+      gap: it reads palette values and a hand-written table of which ink lands
+      on which fill, and never calls the renderer. Its job is to fail if
+      `appearance` moves a role, not if `calendar` misuses one. Recorded because
+      a zero row in this table has meant "the test is weak" in every previous
+      module, and here it means something else entirely.
+    - **Both under-declarations were the same accidental locator**, and it is a
+      shape worth naming.
+      `the_selection_disc_is_drawn_on_the_cell_that_is_clicked` is a *layout*
+      test: it finds the selection disc, takes its centre, and asserts the hit
+      test agrees. It finds it by matching `dark().surface0` — so its locator is
+      a role assertion it never meant to make, and changing the disc's role
+      makes `find_map` return nothing and the `.expect` fire before the geometry
+      it exists to check is reached. A real catch, but a fragile one: it
+      protects the role only for as long as nobody widens the locator, and it
+      reports the failure in the vocabulary of layout.
+    - **One of the two was also caught by a value collision in the mode test's
+      skip clause**, which is worth writing down because the same clause appears
+      in every module from 39 on. The clause exempts colours that are
+      legitimately identical in both modes by comparing *values*: `SHADOW`, the
+      accent, `readable_on(accent)`, and the user's event colour. For this
+      fixture's magenta accent, `readable_on` answers `#EFF1F5` — and Mocha
+      `surface0`'s `readable_on` is also `#EFF1F5`. So when the two discs are
+      swapped, today's ink is misfiled as "legitimately fixed", asserted equal
+      across modes, and fails because it is not. The collision only ever makes
+      the test *stricter* — a site wrongly classed as fixed is asserted equal,
+      never skipped — so it cannot hide a defect; it can only produce a failure
+      whose message points at the wrong reason. That is why it is documented
+      here and in the harness rather than tightened: keying the clause on sites
+      instead of values would mean deriving the site list from the renderer, and
+      lesson 22 says an expectation derived from the code under test is an echo.
+
+- [x] `session_mgr.rs` — 7 constants over 13 colour sites, done 2026-08-24. 43
+  tests in the module (ten new), harness defects Ax70–Kx71 (thirty-seven).
+  - **Three of the thirteen sites were unreadable in *both* modes, not just in
+    Latte.** The window count, the shortcut hint and the empty-state line were
+    all `OVERLAY0` — an overlay role used as an ink, which measures **3.59:1**
+    on Mocha `mantle` and **2.14:1** on Latte. Every previous module's contrast
+    findings were Latte-only, because Mocha's roles are further apart than
+    Latte's and a dark-mode-only review can miss a light-mode failure but not a
+    both-modes one. This module is the exception: the review that preceded
+    these conversions looked at Mocha and still passed three sites that fail in
+    Mocha. The reason is that `overlay0` *reads* like an ink name — it is the
+    only quiet-sounding role that is not in the `subtext*` family — so it was
+    picked by name rather than by measurement. All three moved to `subtext1`
+    (9.91 / 5.14 on mantle).
+  - **The selected row moved its *fill*, and this is now a rule rather than a
+    one-off.** The conventional highlight is `surface0`, but the row carries a
+    caption: on Latte `surface0` the caption's natural ink `subtext0` reads
+    **3.40** and even `subtext1` only reaches **4.05**, so no quiet tier
+    survives there. Rather than shout the caption, the fill recedes to `mantle`
+    and the picker's own background moves `mantle` → `base` to keep the two
+    distinguishable. This is the second module to hit the identical wall — the
+    calendar's detail card was the first — so it was written up as a
+    cross-module rule in `design-decisions.md` §529 instead of a third
+    per-module note: *a selection highlight may be a raised `surface0` only if
+    everything drawn on it is full-strength `text`; otherwise it recedes to
+    `mantle`.* The remaining five modules and the ~2,258-constant app
+    conversion now have the answer without re-deriving it.
+  - **§528's parser rule applied to a *constructor*.** `Workspace::new` set
+    `color: BLUE`, baking one mode's blue into a saved workspace at the moment
+    it was created — a value that would then outlive every theme change, so a
+    workspace made in dark mode would keep wearing a pastel blue in light mode
+    forever. §528 was written about a *parser* consulting the palette; the same
+    hazard is present anywhere user data is *created* without a palette in
+    hand, which a constructor is by definition. The field became
+    `Option<Color>` and resolves at draw time via `Workspace::tag_color`. The
+    default is deliberately `p.blue` and not `p.accent`: a tag whose default
+    followed the accent would make every *untagged* workspace look like the
+    themed one, which is the opposite of what a tag is for.
+  - **One site keeps `subtext0`, and it needed a test to say *why*.** The
+    unselected row's icon is the module's only surviving `subtext0`, which is
+    legal on `base` (7.37 / 4.64) and illegal on the selected row's `mantle` in
+    Latte (4.31). It is safe purely by construction — the ink is chosen by the
+    same `if selected` that chooses the fill, so `subtext0` is only ever drawn
+    where `base` is. A premise like that is invisible to every test in the
+    suite: a membership test accepts the colour, a role pin accepts it, and a
+    contrast test that reads a hand-written pairing table would simply have the
+    correct pairing written into it. `only_the_selected_row_is_filled` pins the
+    premise directly — exactly one `mantle` fill exists in the scene, and its
+    `y` steps by a constant as the selection moves — so widening the fill to a
+    second row breaks it. **A by-construction safety argument needs a test that
+    asserts the construction, not the consequence.**
+  - **Lesson 18 was avoided by prediction rather than discovered by failure.**
+    The background/border transposition, written as two harness edits, is a
+    silent no-op: edit 1 rewrites `color: picker_bg,` to `color:
+    picker_border,`, and edit 2's first match is then that same freshly-written
+    line, so the patch undoes itself and the "defect" compiles to the original
+    program. It was written instead as one anchor spanning both `color:` lines
+    with the intervening `// Border.` block. Second module running where the
+    pre-run walk of every prediction against the test source found the trap
+    before the machine did.
+  - **Sweep: 37 caught, 0 escaped, 0 never asked, 0 under-caught, 3
+    under-declared.** The preflight was `37 build, 0 do not, 0 not applied`,
+    and both runs ended `restored: all files match their recorded SHA-256`. No
+    declaration errors were found by reading — the second module in a row.
+  - Catcher census (37 defects):
+
+    | Test | Caught | Sole catcher |
+    |---|---|---|
+    | `every_picker_site_draws_the_role_it_claims` | 33 | 10 |
+    | `every_colour_the_picker_draws_comes_from_its_palette` | 10 | 0 |
+    | `every_themed_site_the_picker_draws_moves_with_the_mode` | 10 | 0 |
+    | `only_the_selected_row_is_filled` | 8 | 0 |
+    | `the_title_wears_the_accent_only_while_searching` | 5 | 2 |
+    | `the_tag_the_picker_draws_is_the_one_the_resolver_gives` | 4 | 0 |
+    | `the_empty_state_draws_the_caption_ink` | 3 | 1 |
+    | `a_tagged_workspace_keeps_the_users_colour` | 2 | 1 |
+    | `a_new_workspace_is_born_untagged` | 1 | 0 |
+    | `every_pairing_the_picker_draws_clears_the_contrast_floor` | 0 | 0 |
+
+    - **The ordered pin catches 33 of 37 and is the sole catcher of 10**, which
+      is the highest share any single test has had in this series. That is a
+      property of the module rather than of the test: the picker is one
+      renderer with one scene, so unlike the calendar — month view, year view,
+      tray delegate, file format — there is no second surface for a general
+      check to miss. The four defects it does *not* catch are exactly the four
+      that are not in the drawn output at all: three in the resolver and the
+      constructor, one in the empty-state branch, which the populated scene
+      never renders.
+    - **The contrast test caught nothing, and again could not have.** Second
+      module in a row with a structural zero, for the same reason as the
+      calendar: it reads palette values against a hand-written pairing table
+      and never calls the renderer. Recorded so the zero is not read as a gap.
+      It is worth noting what this *does* mean, though: the three `overlay0`
+      failures this module fixed were failures of that table's *contents*, not
+      of the test — nobody had written the pairing down. A test that checks a
+      hand-written table catches a role moving underneath it; it cannot catch a
+      pairing nobody thought to list.
+    - **`the_empty_state_draws_the_caption_ink` is the sole catcher of the
+      empty-state ink, and this is the lesson-24 shape in a branch rather than
+      a function.** The populated scene never reaches the `workspaces.is_empty()`
+      arm, so every other test in the module — the ordered pin included — is
+      blind to it. **A site nothing renders is a site nothing checks**, and a
+      conditional arm is as much a separate site as a separate function is.
+    - **Two of the three under-declarations are one accidental locator, and it
+      is a new variety: positional, not value-keyed.**
+      `the_tag_the_picker_draws_is_the_one_the_resolver_gives` finds the three
+      colour tags at hard-coded indices 4, 10 and 14 of the drawn list. Any
+      defect that changes the *number* of `FillRect`s shifts every index after
+      it, so "every row is filled" and "no row is ever filled" both make the
+      test read a neighbouring site and fail — in the vocabulary of tag
+      resolution, about a defect in selection painting. The calendar's
+      accidental locator keyed on a colour value; this one keys on list
+      position. Both are real catches and both are fragile in the same way:
+      they protect a property they never meant to assert, and the protection
+      evaporates the moment someone adjusts the fixture. Left as-is for the
+      same reason as the calendar's — deriving the indices from the renderer
+      would make the expectation an echo (lesson 22).
+    - **The third under-declaration is positional too, one layer up.**
+      `every_themed_site_the_picker_draws_moves_with_the_mode` zips the 19-entry
+      label list against the drawn list, so "every row is filled" inserts two
+      commands and slides the labels out of register. The skip clause then
+      exempts the wrong site, and `USER_PINK` — legitimately identical in both
+      modes — is asserted to differ and does not. Same class as the calendar's
+      value-collision under-declaration and same direction of error: the
+      misalignment can only make the test fail where it should not have been
+      asked, never pass where it should have failed, so it cannot hide a
+      defect. **Every under-declaration these four modules have produced has
+      been an alignment or collision artefact of a test locating its site
+      indirectly** — which is the price of not deriving locators from the code
+      under test, and a price worth paying.
+    - **`B×70` is the one under-declaration I predicted and then failed to
+      carry.** The picker's background left as the literal `0x181825` is caught
+      by `only_the_selected_row_is_filled`, because in that test's dark fixture
+      the literal *is* `p.mantle`, so the background `FillRect` matches the
+      mantle locator and the test counts two filled rows. I had predicted
+      exactly this for the role-swap variant (`A×70`, background → `p.mantle`)
+      and did not carry the reasoning across to the Mocha-literal variant of
+      the same site. **A literal and the role it equals in one mode are the
+      same defect to any test that runs in that mode**; declarations for the
+      two variants of a site should be written as a pair, not independently.
+- [x] `file_drop.rs` — 6 constants over 13 colour sites, done 2026-08-24. 41
+  tests in the module (eleven new), harness defects Ax72–Hx73 (thirty-four).
+  - **The badge ink has to be `base`; `crust`, the reflexive choice, fails all
+    four effect colours in Latte and passes all four in Mocha.** The effect
+    badge is a filled chip whose fill is one of four saturated hues — red
+    forbids, green copies, blue moves, peach links — with a label drawn on top,
+    so the ink is being asked to read on four different backgrounds at once.
+    `crust` measures 8.10 / 12.61 / 8.91 / 10.59 on those four in Mocha and
+    **4.10 / 3.98 / 3.96 / 3.95** in Latte — four failures, none of them
+    visible to a dark-mode review. `base` measures 7.08 / 11.03 / 7.79 / 9.27
+    and **4.80 / 4.66 / 4.63 / 4.62**, clearing the floor on all eight. The
+    margin is thin enough on the Latte side (4.62 against 4.5) that the
+    reasoning is now written into the module header rather than left to be
+    re-derived: the darkest role is not automatically the most readable ink,
+    because Latte's `crust` is a *light* colour and the effect hues are
+    mid-tone.
+  - **No `surface*` or `overlay0` role can be a badge fill in either mode.**
+    The obvious-looking "quiet chip" for the item count is `surface2` with
+    `text` on it, which is **4.62 in Mocha and 3.69 in Latte**; `surface1` is
+    6.31 / **4.39**; `overlay0` fails with every ink there is. Only four
+    pairings in the whole palette work for a chip on the card: `peach`+`base`,
+    `subtext1`+`base`, `text`+`base` and `text`+`crust`. The count chip took
+    `text`+`base` — an inverted chip — which is the only one of the four that
+    is not also an effect colour.
+  - **The item-count chip was `peach`, and so is `DropEffect::Link`.** Both
+    were the same hardcoded `MOCHA_PEACH`, so a twelve-file *copy* drag drew a
+    green badge next to a peach chip that means "link" everywhere else in the
+    same overlay. This is a meaning collision rather than a contrast failure,
+    and no contrast or membership test can see it: peach is a legal member and
+    reads fine on the card. `the_item_count_chip_is_never_an_effect_colour`
+    asserts the disjointness directly, against all four effects in both modes.
+  - **The contrast test changed shape — it now reads the pairing out of the
+    rendered commands — and stopped being a structural zero.** The previous
+    four modules each had a contrast test that compared palette values against
+    a *hand-written* pairing table and never called the renderer; each caught
+    exactly nothing in its own file, because a table of pairings is a claim
+    about the palette, and no defect in the module under test can falsify it.
+    Here the walk takes `cmds.windows(2)`, pairs every `FillRect` with the
+    `Text` that follows it, and asserts 4.5:1 on whatever it finds. It caught
+    **14 of 34**, second only to the ordered site table. It is not an echo
+    (lesson 22) because nothing it asserts comes from the code under test: the
+    4.5:1 floor comes from WCAG, and the required pair count (24 on the card,
+    8 on the tooltip) is written out by hand, so a site that stops being drawn
+    fails the count rather than silently passing an empty walk. **A contrast
+    test should read its pairings from the rendered output; a hand-written
+    pairing table can only catch a role moving underneath it.**
+  - **…and it is still blind to a *transposition*, because contrast is
+    symmetric.** `X×72` swaps the tooltip's fill and its ink, and the walk
+    computes `contrast(fill, ink)` — a symmetric function — so it returns
+    exactly the ratio it returned before. The declaration was wrong, not the
+    test: legibility genuinely survives a transposition and the design
+    genuinely does not, which is the ordered site table's job. Fixed by
+    dropping the declaration and writing the reason into the test's doc
+    comment. **Lesson: a contrast check cannot see its two operands exchanged.**
+  - **A `zip` between an expectation table and a drawn list truncates, and that
+    was a real hole in two tests, not a bad declaration.** `F×73` stops drawing
+    the tooltip entirely. Both
+    `every_site_the_drop_highlight_draws_moves_with_the_mode` and its drag-card
+    twin asserted only that the two modes drew *the same number* of colours —
+    which a vanished site satisfies, since it vanishes from both — and then
+    zipped the three-entry site table onto a one-entry drawn list, so the two
+    missing sites fell off the end of the zip and were never asked whether they
+    move. The role tests already pinned their length against the table; the
+    mode tests now do too. This is lesson 24's shape once more (*a site nothing
+    renders is a site nothing checks*) arriving through a new door: not a
+    branch nobody exercised, but a `zip` quietly shortening the question.
+  - **The colour extractor flattens alpha, so every colour test in the module
+    was blind to the deliberate translucency.** `colors()` forces alpha to 255
+    so that a role comparison is not defeated by a card drawn at 220. That is
+    right for the role tests and wrong as a total picture: the drag card is
+    220/255 and the drop tooltip 200/255 on purpose — a drag decoration must
+    not hide what is being dragged *onto* — and nothing asserted it.
+    `only_the_card_and_the_tooltip_are_translucent` pins both alpha vectors
+    exactly, and is the sole catcher of the two defects that make them opaque.
+    The alphas are also deliberately *not* `p.panel_alpha`: a drag decoration
+    is not a panel, and tying it to the panel setting would let a user who
+    likes opaque panels lose the drag preview.
+  - **A geometry test must locate by geometry.**
+    `a_multi_item_description_stops_before_the_count_badge` is a *layout* test,
+    and it found the count badge as "the only peach fill on the card". That
+    made it silently assert the badge's colour as well, and it would have
+    stopped working the instant the role changed — reporting a colour defect in
+    the vocabulary of overlap. It now locates the badge by the only thing that
+    is actually about geometry: `width == COUNT_BADGE_W`, a named constant
+    introduced for the purpose.
+  - **Sweep: 34 caught, 0 escaped, 0 never asked, 2 under-caught, 5
+    under-declared**, on a preflight of `34 build, 0 do not, 0 not applied`.
+    Both under-catches were genuine findings rather than noise — one a wrong
+    declaration (the symmetric contrast test), one a real hole in two tests
+    (the truncating zip) — and both were re-run to green after the fix. Every
+    run ended `restored: all files match their recorded SHA-256`.
+  - Catcher census (34 defects):
+
+    | Test | Caught | Sole catcher |
+    |---|---|---|
+    | `every_drag_overlay_site_draws_the_role_it_claims` | 17 | 3 |
+    | `every_ink_the_drag_card_draws_is_readable_on_what_it_sits_on` | 14 | 0 |
+    | `every_drop_highlight_site_draws_the_role_it_claims` | 8 | 1 |
+    | `every_site_the_drag_overlay_draws_moves_with_the_mode` | 7 | 0 |
+    | `every_colour_the_drag_overlay_draws_comes_from_its_palette` | 6 | 0 |
+    | `an_unlabelled_target_draws_no_tooltip` | 6 | 1 |
+    | `each_drop_effect_wears_its_own_role` | 5 | 1 |
+    | `the_drop_tooltips_label_is_readable_on_its_fill` | 5 | 0 |
+    | `only_the_card_and_the_tooltip_are_translucent` | 4 | 2 |
+    | `the_item_count_chip_is_never_an_effect_colour` | 3 | 0 |
+    | `every_colour_the_drop_highlight_draws_comes_from_its_palette` | 3 | 0 |
+    | `every_site_the_drop_highlight_draws_moves_with_the_mode` | 3 | 0 |
+    | `a_single_item_drag_draws_no_count_chip` | 1 | 1 |
+    | `a_multi_item_description_stops_before_the_count_badge` | 1 | 0 |
+
+    Counts are after the two fixes below; the two `moves_with_the_mode` rows
+    each gained one catch when the truncating `zip` was closed.
+
+    - **The ordered pin's share fell to 17 of 34 — the lowest in the series —
+      and that is the point.** Its share was 33/37 in `session_mgr` because
+      that module is one renderer with one scene. `file_drop` has two
+      renderers, a four-way semantic mapping, two conditional branches and two
+      deliberate alpha values, and the census shows each of those needing its
+      own test: the mapping is caught only by the pinned effect vector, the
+      branches only by the two absence tests, the alphas only by the
+      translucency test. A falling sole-catcher count on a rising defect count
+      is what a well-decomposed suite looks like.
+    - **All five under-declarations are one test: `an_unlabelled_target_draws_no_tooltip`.**
+      It asserts that an empty label draws exactly one command, and then — to
+      confirm the survivor is the border rather than a stray fill — that its
+      colour is `p.green`. That second clause is an accidental value-keyed
+      locator: every defect that changes what `DropEffect::Copy` resolves to
+      (copy/move transposed, all-blue, all-accent) or that draws the border in
+      some other role trips it, in the vocabulary of tooltip suppression. It is
+      the calendar's variety of accidental locator, and errs only in the
+      stricter direction: it can fail where it was not asked, never pass where
+      it should have failed. **Five modules in, every under-declaration this
+      harness has produced has been an alignment or collision artefact of a
+      test locating its site indirectly.**
 
 **Trigger:** this is not blocked on anything. It is sequenced after the shell
 event loop (`TD-C-THE-SHELL-CAN-DRAW-ITSELF-AND-NOBODY-CAN-ASK-IT-TO`) only
@@ -53706,6 +54117,75 @@ Nothing else blocks it.
 window edge. Every application stays dark on a light desktop, which reads as
 each application being broken rather than the theme being unimplemented — the
 same misdiagnosis the shell entry describes, multiplied by ninety.
+---
+
+### TD-C-WORKSPACES-CANNOT-SURVIVE-A-LOGOUT-AND-THE-MODULE-SAYS-THEY-CAN — 2026-08-24 — OPEN
+
+**In short.** A *workspace* here is a saved window layout — "Development" with
+an editor, a terminal and a browser at particular positions — that the user
+names once and can then restore with one keystroke. The module that implements
+them opens by promising "session persistence across logouts/reboots". It does
+not do that. Nothing in the module ever reads or writes a file, so every
+workspace the user creates exists only in the running shell's memory and is
+gone the moment the shell exits. There *is* an `export_workspaces()` that turns
+the list into a string, but nobody calls it, nothing can read the string back,
+and the string leaves out most of what a workspace is.
+
+**Where:** `gui/desktop/src/session_mgr.rs`.
+
+- The module doc (lines 1–8) claims persistence across logouts/reboots.
+- `SessionManager::export_workspaces` (line 418) is the only serialiser. It is
+  called from exactly one place — its own unit test, `export_workspaces` at
+  line 1081. `grep -rn 'session_mgr\|SessionManager\|WorkspacePicker' gui apps`
+  finds a single hit outside the file itself: `pub mod session_mgr;` in
+  `gui/desktop/src/lib.rs:131`. The type is declared and never constructed by
+  the shell.
+- There is no counterpart reader. No `import`, no `parse`, no `load`, no
+  `from_str`, no `serde` derive anywhere in the module.
+
+**What the format drops.** `Workspace` has eleven fields. The exported line
+`workspace:{id}:{name}:{icon}:{auto_launch}` carries four of them. Missing:
+`description`, `created_at`, `last_used` (which is what `sort_by_recent`
+orders on), `shortcut` (the "Super+1" the picker draws), `pinned_desktop`, and
+`color` (the user's colour tag). The whole `SessionState` — the live snapshot
+`save_session`/`restore_session` operate on — is not exported at all. So even
+if a reader were written against this format, restoring would silently discard
+the user's shortcut and colour tag and reset every workspace's recency, which
+would reorder the picker on every reboot.
+
+**The format is also ambiguous, which is why the reader cannot simply be
+written.** Fields are joined with `:` and no field is escaped or quoted, but
+`name`, `icon`, `app_id` and `title_hint` are all free-form user strings. A
+workspace named `Build: nightly` produces a line with six colon-separated
+fields where the parser expects four, and a window whose title hint contains a
+colon does the same. `state` is written with `{:?}`, i.e. the Rust `Debug`
+spelling of the enum, which is a debugging aid rather than a format — renaming
+a variant would silently change the file format. Writing a reader against this
+format would be writing a parser for a format that cannot round-trip its own
+inputs.
+
+**What the proper fix looks like.** Not "add an importer". The format has to be
+replaced first, and by the project's own configuration rule that means YAML
+(`design.txt`: YAML for configuration, with a library that preserves comments
+and formatting), covering all eleven `Workspace` fields plus `SessionState`,
+with the enum spelled explicitly rather than via `Debug`. Then a reader, then
+the shell actually calling both at the right moments — which needs the shell
+event loop, since something has to notice "the user is logging out" and "the
+shell just started". Until the shell can be driven
+(`TD-C-THE-SHELL-CAN-DRAW-ITSELF-AND-NOBODY-CAN-ASK-IT-TO`), there is no moment
+to hang the save and load calls on. The honest interim step, which costs
+nothing and is not deferred, is the doc comment: it should say what the module
+does today rather than what it is intended to do.
+
+**Trigger:** the format and the reader can be done at any time; the save/load
+calls are sequenced after the shell event loop.
+
+**If never fixed:** the feature is a demo. A user who spends ten minutes
+arranging and naming three workspaces loses all three at logout, with no
+warning that they were never saved — which is worse than the feature being
+absent, because the naming UI implies durability. The module doc actively
+misleads the next person to read it into thinking the persistence exists and
+merely needs wiring.
 ---
 
 ### B-THE-NATIVE-LIBC-AND-THE-LINUX-ABI-DISAGREE-ABOUT-WHAT-EXISTS, AND LIBC'S DOC COMMENTS EXPLAIN IT WITH A REASON THAT STOPPED BEING TRUE — 2026-08-21 — OPEN
@@ -65612,68 +66092,79 @@ copied from this table into an assertion.
 
 ---
 
-## TD-C-THE-CALENDAR-ACCEPTS-A-COLOUR-FOR-EVERY-EVENT-AND-THEN-DISCARDS-IT (lane C, 2026-08-23)
+## TD-C-THE-CALENDARS-EVENT-COLOUR-ONLY-SHOWED-WHEN-A-DAY-WAS-SELECTED (lane C, 2026-08-23)
 
-**In short:** The calendar lets you give each event its own colour. You can
-write `color: #FF0000` next to an event in the calendar file, and the calendar
-will read it, keep it, and write it back out again unchanged when it saves. What
-it will never do is *show* it. Every event in the month grid is marked with the
-same lavender dot regardless. The colour you chose is stored faithfully and has
-no effect on anything you can see.
+**Status:** FIXED 2026-08-23, commit `c36aeb469`, as part of the module-43
+palette conversion.
 
-**Where:** `gui/desktop/src/calendar.rs`. `CalendarEvent::color` is declared at
-line 382 and is read in exactly one place in the whole tree — line 540, the
-serializer, which writes it back out as hex. The parser assigns it at lines 561,
-590 and 617 (`parse_hex_color(val).unwrap_or(theme::BLUE)`). The one place a
-per-event mark is actually drawn, `render_day_cell` at line ~2252, hard-codes
-the dot to `theme::LAVENDER` (or `theme::BASE` on today's blue disc) and never
-looks at the event at all — it only asks `events_for_date(...).is_empty()`.
+**In short:** The calendar lets you give each event its own colour. You could
+write `color: FF0000` next to an event in the calendar file, and the calendar
+would read it, store it, and write it back unchanged. But the only place it ever
+*drew* that colour was the little bar on the detail card — the panel that opens
+when you click a specific day. The month grid's per-day dot, which is the mark
+you actually look at when scanning the month, was a fixed lavender for every
+event regardless. So a colour you set was invisible unless you first clicked the
+day it was on, which is the one moment you no longer need a colour to tell
+events apart.
 
-**How it survived:** the field is written and read by the same round-trip test
-(`assert_eq!(e.color, Color::from_hex(0x89B4FA))` at line 3715), which pins the
-*default* and proves the value survives a save/load cycle. That test passes and
-will keep passing forever, because a value that round-trips correctly and a
-value that is used are unrelated properties. This is the sharpest instance yet
-of the standing lesson that **a site nothing renders is a site nothing checks** —
-here the site does not merely go unchecked, it does not exist, and the field's
-test coverage actively disguises that.
+A second, quieter half: an event with no `color:` line in the file was given a
+hardcoded Mocha blue by the parser, and the serializer then wrote that invented
+blue back out. Opening the calendar was enough to edit the user's file.
 
-**The proper fix, in two parts, and why it is not "point the default at
-`p.blue`".** The tempting move during the palette conversion is to swap
-`theme::BLUE` for `p.blue` and move on. That would be wrong on its own terms,
-because the assignment is in a **parser**, and a parser that consults the
-palette makes the same file parse to different data depending on which theme is
-active — then the serializer writes the theme-dependent value back, so merely
-opening the calendar in light mode silently rewrites every event the user never
-specified a colour for. A display setting must not be able to edit user data.
+**Correction to the first version of this entry.** It was originally filed as
+"the colour is read only by the serializer and never rendered at all". That was
+wrong, and wrong for an instructive reason: it was derived from
+`grep '\.color' | grep -v 'color:'`, and the one production read —
+`color: event.color,` in `render_event_detail`'s colour bar — was excluded by
+the second filter, which was there to drop struct-literal *writes*. A filter
+that removes the noise can remove the signal with it; the shape of a read and
+the shape of a write were the same shape.
 
-So:
+**Where it was:** `gui/desktop/src/calendar.rs`. `CalendarEvent::color` was a
+plain `Color`; the parser assigned `parse_hex_color(val).unwrap_or(theme::BLUE)`
+at three sites; `render_day_cell` hard-coded the dot to `theme::LAVENDER` (or
+`theme::BASE` on today's disc) and only ever asked
+`events_for_date(...).is_empty()`, never looking at the event it found.
 
-1. **`color` becomes `Option<Color>`.** `None` means "the user did not choose
+**How the dot half survived:** the field was covered by a round-trip test
+(`assert_eq!(e.color, Color::from_hex(0x89B4FA))`), which pinned the *default*
+and proved the value survived a save/load cycle. That test passed and would have
+passed forever, because **a value that round-trips correctly and a value that is
+used are unrelated properties**. The colour bar's existence is what made this a
+half-bug rather than a whole one, and it is also what made the field look
+covered: something drew it, so nothing asked what else should have.
+
+**The fix, in two parts, and why part 1 is not "point the default at `p.blue`".**
+The tempting move during the conversion was to swap `theme::BLUE` for `p.blue`.
+That is wrong on its own terms, because the assignment is in a **parser**, and a
+parser that consults the palette makes the same file parse to different data
+depending on which theme is active — after which the serializer writes the
+theme-dependent value back, so merely opening the calendar in light mode
+rewrites every event the user never gave a colour. A display setting must not be
+able to edit user data. So:
+
+1. **`color` is now `Option<Color>`.** `None` means "the user did not choose
    one", which is not the same as any colour and must not be spelled as one —
    the identical reasoning as design-decisions.md §526 for the peek popup's
-   sampled colour. The serializer emits the `color:` line only when it is
-   `Some`, so a file without the key round-trips to a file without the key
-   instead of gaining a colour the user never asked for.
-2. **`render_day_cell` actually uses it**, resolving `None` to a palette role
-   (`lavender` today) and `Some(c)` to the user's colour. Note that this makes
-   the dot the one place in the shell drawing a colour that is deliberately
-   *not* from the palette, so `palette_check::assert_drawn_from` must be handed
-   it via `derived` — and the fixture must therefore use an off-palette event
-   colour, or the test cannot tell the two paths apart.
+   sampled colour. `export_text` emits the `color:` line only for `Some`, so a
+   file without the key round-trips to a file without the key.
+2. **`render_day_cell` uses it**, via the new
+   `CalendarEvent::dot_color(&self, p: &Palette)`, which resolves `None` to
+   `p.lavender` and `Some(c)` to the user's colour. The detail card's bar goes
+   through the same method, so the two marks for one event cannot disagree.
+   This makes the dot the one place in the module drawing a colour deliberately
+   *not* from the palette, so `palette_check::assert_drawn_from` is handed it via
+   `derived` — and the fixture uses an off-palette event colour, or the test
+   could not tell the two paths apart.
 
-The contrast question rides along: an arbitrary user colour can land on the
-today-disc's blue, so the dot needs the `readable_on`-style treatment or a
-contrasting ring. That is a real design choice and is deferred to the fix, not
-guessed at here.
-
-**Trigger:** do this as part of the `calendar.rs` palette conversion (module 43
-of part 2 of `TD-C-FORTY-NINE-SHELL-MODULES-CARRY-THEIR-OWN-COPY-OF-THE-PALETTE`),
-which is where the three `theme::BLUE` parser assignments have to be dealt with
-one way or the other. Deciding to leave them as a fixed constant is also a
-legitimate outcome, but it must be a decision rather than an oversight, and it
-must come with the dot being wired up — a stored-and-ignored field is not
-acceptable in either case.
+**Still open, deliberately: the dot on today's disc.** An arbitrary user colour
+can land on the accent-coloured today disc at any contrast, including none. The
+`None` path handles it (`readable_on(today_disc)`), but a `Some(c)` that happens
+to equal the accent draws an invisible dot. Fixing that properly needs a design
+answer — a contrasting ring, a brightness-nudged variant, or a rule that the
+user's colour is simply honoured and the collision is theirs — and it is logged
+separately rather than guessed at here. See
+`TD-C-A-USER-CHOSEN-EVENT-COLOUR-CAN-VANISH-INTO-THE-TODAY-DISC` below.
 
 **While you are in there — a second, unrelated hole in the same module.**
 `CalendarPopup::render_tray_clock` (line ~2531) is a one-line delegate to
@@ -65686,6 +66177,51 @@ manager delegate found during module 41: *a test that calls the inner function
 cannot see a defect in the outer delegate — a delegate is a site.* The
 conversion needs at least one test that goes through `render_tray_clock`
 itself, or the sweep will report a defect there as escaped and be right to.
+
+## TD-C-A-USER-CHOSEN-EVENT-COLOUR-CAN-VANISH-INTO-THE-TODAY-DISC (lane C, 2026-08-23)
+
+**In short:** Each calendar event can carry a colour you picked, and the month
+grid draws a small dot in that colour on the event's day. Today's date is drawn
+as a filled disc in your accent colour. If you give an event a colour close to
+your accent — or exactly it — the dot lands on the disc and disappears. The
+event is still there; the mark saying so is not visible.
+
+**Where:** `gui/desktop/src/calendar.rs`, `render_day_cell`. The dot's colour is
+
+```rust
+let dot_color = match (first.color, is_today) {
+    (Some(chosen), _) => chosen,          // <-- no contrast check
+    (None, true) => readable_on(today_disc),
+    (None, false) => p.lavender,
+};
+```
+
+The `None` branches are safe by construction: `readable_on` derives the ink from
+the disc's own brightness, and `p.lavender` is only ever drawn on the card. The
+`Some` branch honours the user's colour unconditionally, which is the correct
+*default* instinct and the wrong *only* rule.
+
+**Why it is filed rather than fixed:** the three available answers are each
+defensible and each visible to the user, so this is a design choice, not an
+oversight to patch.
+
+| Option | *What changes:* |
+|---|---|
+| Honour it always (today) | Nothing. A colour matching the accent is invisible on today's cell, and the user arguably asked for that. |
+| Draw a ring around the dot | Every coloured dot gains a thin outline in the cell's own background colour, on every day, not just today. |
+| Nudge the dot's brightness when contrast is below a floor | A dot on today's disc is drawn slightly lighter or darker than the colour the user set — so the file and the screen disagree. |
+
+**If it is never answered:** nothing gets worse. It affects one cell out of
+forty-two, only when a colour was explicitly chosen, and only when that colour
+is near the accent. The event remains in the detail card, whose colour bar sits
+on `mantle` and is unaffected.
+
+**Note the shape of it:** this is a *contrast* defect, and contrast is not a
+membership property — the user's colour is not a palette member at all, so
+`palette_check::assert_drawn_from` is told to accept it via `derived` and can
+never see this. A membership test cannot check a value it was told to accept.
+Only a test that computes a ratio can, and it would need a policy to compare
+against, which is exactly what is missing.
 
 ---
 
@@ -69731,3 +70267,191 @@ expectations.
 
 Nothing else. In particular the closed-descriptor divergence that `tee` has does
 not arise for `echo`, which never reads.
+
+## `md5sum` and `sha256sum` accepted no options at all — including `-c`, which is why anyone runs them (lane B, 2026-08-24)
+
+**In short:** both programs took a list of file names and printed a hash for
+each, and that was the whole of it. There was no `--check`, so neither could
+*verify* a checksum file — which is the reason a person types `md5sum` in the
+first place; the printing half is only useful because the checking half exists.
+There was no `--tag`, `-z`, `--status`, `--quiet`, `--strict`,
+`--ignore-missing`, `-w`, `--help` or `--version` either: every one of those
+was treated as a file name, so `md5sum --check SUMS` did not check anything —
+it reported `md5sum: '--check': No such file or directory` and then hashed
+`SUMS` itself, printing a line that looks plausible and answers a different
+question. Both also read each file entirely into memory before hashing it, and
+both panicked outright on a file name holding a byte that is not valid UTF-8.
+Rewritten from GNU coreutils 9.4's `src/digest.c` and checked against the real
+GNU binaries, 113 cases each.
+
+### Why this one is worse than the size of the diff suggests
+
+The other conversions in this section (`cmp`, `tee`, `echo`) were programs that
+did their job and were missing options around the edges. These two were missing
+*the* option. A checksum utility that can only print is a checksum utility with
+no consumer: the output exists to be fed back in later, on another machine, by
+`-c`. Without it the only way to verify anything was to re-run the program and
+compare the two outputs by eye — which is not a workflow anybody has, and is
+why nothing in the tree called these binaries at all.
+
+The specific failure mode is worth stating because it is silent. `md5sum -c
+SUMS` in the old version does not fail. `-c` is not an option it knows, so `-c`
+becomes an operand, and an operand that does not exist is a diagnostic on
+stderr — one line, easily lost in a script — after which `SUMS` is hashed as
+data and a normal-looking checksum line goes to stdout. Exit status 1, from the
+missing `-c` file rather than from any verification. A script that tested only
+for output would conclude the check ran.
+
+### What was missing
+
+1. **`-c`/`--check` — the entire verifying half of the program.** With it, the
+   five options that only make sense alongside it: `--ignore-missing`,
+   `--quiet`, `--status`, `--strict` and `-w`/`--warn`. Upstream refuses each
+   of those *without* `-c`, in a fixed order, and the order is observable when
+   two are wrong at once.
+2. **`--tag`** — BSD-style `MD5 (name) = <hex>` output, and the corresponding
+   ability to read those lines back.
+3. **`-z`/`--zero`** — NUL-terminated records, which is what makes the output
+   safe to pipe into anything when a file name may contain a newline.
+4. **`-b`/`--binary` and `-t`/`--text`.** Genuine no-ops for the byte content
+   on a POSIX system — gnulib's `O_BINARY` is `0` — but they still choose the
+   `*`/` ` indicator byte in the output, and `--tag` implies `-b`, so
+   `--tag --text` is an error while `--text --tag` is fine.
+5. **`--help` and `--version`** — neither existed.
+6. **Name escaping.** A file called `we<newline>ird` was printed raw, producing
+   two lines that no reader can put back together and that `-c` would then
+   parse as two separate records. Upstream escapes `\n`, `\r` and `\` and
+   marks the record with a single leading backslash; `-z` disables escaping
+   because a NUL-terminated record cannot be confused by a newline anyway.
+7. **argv was `Vec<String>`.** `env::args()` panics on the first byte that is
+   not valid UTF-8, so `md5sum $'\xff'` aborted before printing anything —
+   in a program whose entire input is file names. Both removed from
+   `scripts/argv-utf8-baseline.txt`; 27 findings remain.
+8. **The whole file was read into memory.** `read_to_end` then hash. `md5sum`
+   on a disk image is an ordinary thing to do and that shape answers it with
+   an allocation the size of the input, which past a certain size is not a slow
+   answer but no answer. Both hashes are now incremental, fed in 64 KiB reads.
+
+### The three rules that would not have survived being guessed
+
+Each of these was measured against the GNU binary before it was written, not
+recalled:
+
+* **A checksum file may use `<hex>  NAME` or BSD-reversed `<hex> NAME`, but not
+  both in one file.** This reads as tidiness and is a security rule. In the
+  reversed layout the name begins immediately after one space; so a reversed
+  line naming a file whose name starts with a space or `*` is also a
+  well-formed *standard* line, naming a different file. Upstream latches the
+  layout on the first line that settles it and rejects the other kind
+  thereafter. A parser that simply tried both would verify the wrong file and
+  report `OK`.
+* **The escaping is announced by a leading backslash on the record, not
+  detected.** `filename_unescape` refuses a trailing lone backslash, a `\`
+  before anything but `n`, `r` or `\`, and an embedded NUL — so a name that
+  merely *contains* a backslash round-trips as `\\` and a name that was never
+  escaped keeps its backslashes literally. Getting this backwards turns every
+  Windows-style path in a checksum file into a different name.
+* **Four failure kinds have four different exit rules.** Mismatched, missing,
+  unreadable and improperly-formatted are counted separately; `--strict`
+  promotes only the last of them to a non-zero exit, `--ignore-missing`
+  demotes only the second, and `--ignore-missing` with *nothing* verified is
+  its own diagnostic (`no file was verified`) rather than a silent success.
+
+### What the differential harness found
+
+`scripts/digest-diff.sh` is one harness that runs its whole case list once per
+program, because upstream is one file compiled eight times and ours is one
+module parameterised by an `Algorithm` constant. Nothing in it hard-codes a
+digest width; the two cases that would have (a deliberately wrong checksum, and
+a digest one hex digit short) derive theirs from the reference binary's own
+output at startup, so a future `sha1sum` is one word in `PROGS` away.
+
+It covers *both* programs by default rather than needing `PROG=` to reach the
+second, which is not a convenience: `scripts/all-diff.sh` finds harnesses
+through a glob and cannot pass one an argument, so a harness that named two
+programs and silently examined one would have reported green for a binary it
+never ran. It also reads only `tail -1` and calls a harness green by matching
+`" 0 differed"`, so the per-program lines are indented and the totals are
+printed once at the end — leaving the last program's own line as the tail would
+have hidden a difference found in the first.
+
+**113 passed, 0 differed, 2 differ on purpose** for each of `md5sum` and
+`sha256sum`; `226 passed, 0 differed, 4 differ on purpose` in total. The two
+are `--help`, which omits the GNU project's ancillary block (bug-report
+address, home page, `info` reference) — the preceding 28 lines are
+byte-identical — and `--version`, which names SlateOS. Everything else agrees:
+all three output formats, the escaping, every option error and prefix
+ambiguity, and the whole of `--check` including the layout latch, the
+`WARNING:` lines with their singular/plural forms, and the exit statuses.
+
+Run `PROG=md5sum OURS=/usr/bin/md5sum ./scripts/digest-diff.sh` to confirm the
+harness still discriminates; it reports the two xfails as XPASS and nothing
+else, which is what says the remaining 113 are comparisons and not
+coincidences. (`OURS` replaces a single binary, so the harness refuses it
+without a `PROG` saying which — rather than applying it to whichever program
+happened to run first.)
+
+### What our own tests caught that the harness could not have
+
+The streaming rewrite introduced a bug the differential harness would have hung
+on rather than reported: `Md5::absorb` assigned `used` from the tail remainder
+unconditionally, so topping up a partial block *without filling it* threw the
+partial block away and left `used` at 0. `squeeze` pads with "one zero byte at
+a time until `used == 56`", which under that bug never advances — an infinite
+loop reachable from `md5sum` with no arguments. It was caught by
+`byte_at_a_time_agrees_with_one_shot` and by
+`every_split_of_a_multi_block_message_agrees`, which hash one message at all
+201 possible two-way splits; the padding path is now commented with why the
+early return is correctness and not an optimisation.
+
+That is the argument for those tests existing at all. A one-shot hash cannot
+get chunk-boundary handling wrong, so converting to a streaming one adds a
+whole failure class that the RFC 1321 vectors — every one of which is a single
+`update` — cannot see.
+
+### The two gates that stopped seeing these programs when the code moved
+
+Both were caught by the pre-push hook on the first attempt to push this, and
+both are the same shape: a check that reads *bins* went blind the moment the
+thing it reads moved into a module two bins share. Neither was a false alarm to
+be silenced.
+
+`scripts/getopt-ambiguity-check.py` scanned `src/bin/**.rs` for a
+`LONG_OPTIONS` table and, finding none in either bin, printed `md5sum has no
+LONG_OPTIONS table … (not yet converted to coreutils::getopt?)` and reported
+`0 table(s) checked`. That note is *reassuring* and was wrong: the table exists,
+it had simply moved to `src/digest.rs`. The fix follows the delegation — a bin
+whose `main` is `coreutils::<module>::main(…)` is read from `src/<module>.rs`
+instead — and keeps the finding named for the **bin**, so the shared table is
+compared against `md5sum`'s GNU binary *and* `sha256sum`'s. That is not
+redundant: it is the only thing that would catch a table right for one
+algorithm and wrong for the other. Both now check clean against real GNU:
+`2 table(s) checked; 0 disagreement(s)`.
+
+`scripts/host-errmsg.py` flagged `eprintln!("{}: {e}", algo.program)`. Its
+exempt shape is a literal that is exactly `<name>: {e}` — the "the error is the
+whole message" print, which in every bin carries a `getopt::Error` and never an
+`io::Error`. Ours is semantically that, but with the name as *data*, so the
+literal is `"{}: {e}"` and the gate cannot tell it from a real site printing
+the host's error text with one word of context. Widening the exemption to
+`{something}: {e}` would have admitted exactly the sites the gate exists to
+find, so the literal was removed instead: `getopt::Program::report(&e)` prints
+`name: <message>`, which is byte-identical and is now the one named place for
+that operation. Adding a line to the baseline or to `IGNORE` would have been
+the cheaper answer and the wrong one — the gate's complaint was about a shape
+it genuinely cannot check, not about this file.
+
+### Where it lives
+
+`userspace/coreutils/src/digest.rs` is the sixteenth shared module, and it is
+the strongest form of that crate's argument: the two sides that must agree are
+not two utilities but one utility and itself. `--check` parses output this same
+program wrote, so a checksum file is a format with two independent
+implementations inside one binary, and any drift between them shows up as a
+file that verifies as `FAILED` on the machine that produced it.
+
+The bins keep only their hash. `sha256sum` delegates to `userspace/sha2`, now
+through the incremental `Sha256` rather than the one-shot `sha256`, and its
+FIPS vectors were repointed at the path the program actually takes. `md5sum`
+keeps MD5 locally because it has exactly one consumer; it moves out when it has
+two, for the same reason SHA-256 already did.

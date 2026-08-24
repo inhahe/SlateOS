@@ -15104,6 +15104,60 @@ landmine this entry already documents at `kshell.rs:3583` for the input
 guard — the entry flagged the one on the *input* path and missed the
 identical one on the *output* path, which was already live.
 
+**[A] 2026-08-24 — stage (b), the path pipeline, has LANDED (`961a160a3`).**
+
+`resolve_path` is now `fn resolve_path<P: AsRef<Path>>(P) -> PathBuf`, `CWD`
+is a `Mutex<PathBuf>`, and `TermSession.cwd` is a `PathBuf` — so a 0xFF byte
+survives `cd`, resolution and session switch intact. `fs::bench` (7
+signatures) and the five filesystem `mount` pass-throughs went with it.
+
+*The ~270-call-site figure this entry has quoted since 2026-08-13 never had
+to be paid.* `fs/path.rs` already implements `AsRef<Path>` for `str`,
+`String`, `[u8]`, `Vec<u8>` and `PathBuf`, so making `resolve_path` generic
+left every forwarding caller compiling untouched. The compiler enumerated the
+real cost: **387 errors**, of which **289 (75%)** were the single mechanical
+`PathBuf: !Display` case and only ~98 carried judgment. Driving the edits
+from rustc's own JSON byte spans (rather than a regex) put each one exactly
+on the expression rustc objected to.
+
+**The finding worth carrying forward, because it is a silent-corruption class
+the type system does not catch:** `format!("{}.gz", input.display())`
+type-checks *as a path*, because `String: AsRef<Path>`. It also writes a
+U+FFFD-mangled filename to disk. My own mechanical `.display()` pass
+introduced ten of these (five compressors, five decompressor `.out`
+fallbacks); the compiler caught them only incidentally, because the sibling
+`if` branch happened to be a `PathBuf`. Had both branches been `String`, they
+would have compiled clean and corrupted filenames silently. They are now
+`path_with_suffix`/`decompressed_output_path`, appending via `extend_bytes` —
+not `push`, which inserts a separator. **Anyone extending this conversion
+should grep for `display()` inside path construction, not trust the types.**
+
+Also fixed in passing: `extension_hint` used `rsplit_once('.')`, which
+searches the whole path, so `archive.tar/notes` reported extension
+`tar/notes`. Now `Path::extension`, which stops at the last component.
+
+*Verification:* `self_test` sections 4 and 5 assert 20 normalisation cases
+(`.`, `..`, root escape, repeated/trailing separators, cwd-relative) and 3
+that drive 0xFF through `resolve_path` — the case a `String` return type
+could not represent at all.
+
+**Still open, and deliberately not narrowed:** `fs::pipe` and `fs::templates`
+store paths as `String` internally, and the environment is a `String` map.
+Rather than paper over these with `display()` — which would hand the callee a
+*different path than the user typed* — `path_arg_as_str` refuses loudly at
+`mkfifo` and `template`, and is grep-able as the marker for that follow-up.
+`$PWD` stays lossy on purpose and says so in-code: resolution goes through
+`CWD`, never `$PWD`, so a U+FFFD there cannot redirect a file operation.
+
+**Remaining for (b)/(c):** word expansion → `Vec<u8>`; completion → `PathBuf`
+candidates; the `\xNN` escape (still must be *built* — Correction 2 above is
+the right one); and the output sink (`shell_write` takes `&str`,
+`SHELL_OUTPUT` is a `String`, `capture_command` returns `String`), which per
+the paragraph above must land *with* (b), not after. The editor buffer
+(`line_buf`, `History.entries`) and the 3580 input guard are unchanged — and
+the 3583 `ch as char` landmine is still live, so that guard must not be
+widened before the buffer type changes.
+
 ### D-NETSTACK-RX-DEMUX. The netstack daemon had no shared RX demux — concurrent connections couldn't safely receive at once — FIXED 2026-07-14
 
 **Where:** `services/netstack/src/main.rs`.

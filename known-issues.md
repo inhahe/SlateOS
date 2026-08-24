@@ -68957,7 +68957,7 @@ approximation is in every utility here that consults `hard_locale`.
 
 ---
 
-### TD-A-BOOT-TEST-IS-NOT-ISOLATED-FROM-HOST-LOAD — a concurrent `cargo` run can fail an otherwise-clean boot — OPEN 2026-08-24 (lane A)
+### TD-A-BOOT-TEST-IS-NOT-ISOLATED-FROM-HOST-LOAD — a concurrent `cargo` run can fail an otherwise-clean boot — PARTLY FIXED 2026-08-24 (lane A, `026d61d9a`) — see the correction at the end of this entry
 
 **In short:** the boot test runs the kernel inside QEMU, which is a program on
 this machine competing for the same CPUs as everything else. If you start a
@@ -69016,6 +69016,66 @@ building* instead.
    for the hang modes that *do* keep completing self-tests.
 3. **Let the harness pass a slack multiplier** when it knows the host is
    loaded. Requires the harness to know, which it does not.
+
+---
+
+### Correction, 2026-08-24 — the diagnosis above is wrong, and one real bug under it is now fixed (`026d61d9a`)
+
+**In short:** I filed this as "the machine got slower and the watchdog cannot
+tell that apart from a hang." That is not what happened. The harness was
+measuring time with a broken ruler, and the kernel with a good one, and the two
+were being compared as though they were the same ruler.
+
+**The bug.** The QEMU wait loop in `scripts/boot-test.sh` counted its own
+iterations — `sleep 1`, then `ELAPSED=$((ELAPSED + 1))`. An iteration is not a
+second: it is the sleep *plus* a `grep -q` over a serial log that reaches
+2.7 MB, plus the stall-tracking `stat`. Measured against the same script's
+epoch stamps:
+
+| Boot | host | `ELAPSED` at BOOT_OK | guest armed + arm | real QEMU wall | undercount |
+|---|---|---|---|---|---|
+| batch40 | loaded | 665 s | ~890 s | 903 s | 26% |
+| batch41 | idle | 349 s | ~472 s | 465 s | 25% |
+| batch42 | idle | 439 s | 549 s | 563 s | 22% |
+
+**The guest's clock is accurate** — within ~2.5% of real time on every run. The
+drift was entirely in the harness, and it is present on an *idle* host, so it
+was never really about contention at all. Host load only widened a gap that was
+always there.
+
+**Why that produced a false FAIL.** The harness passes `$TIMEOUT` to the guest
+as `sched.boot_deadline_ms`, and `liveness_arm` derives
+`deadline = timeout − 45 s − now_at_arm` in *real* monotonic nanoseconds. With
+`$TIMEOUT` denominated in slow iterations, the guest's deadline landed hundreds
+of seconds before the harness's kill rather than the 45 s the design intends.
+So on batch40 the watchdog fired at ~860 s real while the harness still
+believed it had a quarter of its budget left. The watchdog was not confused by
+contention; it was correctly applying a deadline that had been handed to it in
+the wrong units.
+
+Two further consequences, both live until this fix: **`$TIMEOUT` did not bound
+wall time** (batch40's "900 s timeout" permitted 903 s and would have permitted
+~1200 s — the kill under-fires exactly when a run most needs it), and
+**`"BOOT_OK detected after Ns"` was systematically low**, which matters because
+that is the figure a reader quotes when comparing two boots.
+
+**What the fix does and does not buy.** `ELAPSED` is now computed from an epoch
+stamp, so both sides measure the same thing. It does **not** make a loaded
+host's boot pass: batch40 genuinely needed 903 s of an 855 s allowance, and no
+clock change invents time. What it buys is a truthful verdict — "this boot
+exceeded its wall-clock budget", which points at the budget — instead of a
+watchdog report that reads as a hang and sends the next reader into
+`sched/mod.rs`.
+
+**The three candidate fixes above are therefore mostly answered.** (2) is moot:
+the watchdog's time base was never the problem. (3) is moot: the slack it would
+have added was an attempt to compensate for the drift now removed. (1) remains
+genuinely open, and is now the *only* open part — a `cargo` run beside QEMU
+still steals CPU from a TCG emulator that is CPU-bound and single-threaded, and
+that still shows up as a longer boot. It just no longer shows up as a *lie*.
+
+**The interim rule still stands** and is still the cheap answer: do not run
+`cargo` while a boot test is running.
 
 Candidate 2 is the most principled and the least compatible with the
 watchdog's stated purpose ("catches *any* hang mode"). Recorded rather than

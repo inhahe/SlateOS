@@ -334,6 +334,78 @@ pub const SYS_PTY_GET_TERMIOS: u64 = 555;
 /// [`SYS_PTY_GET_TERMIOS`].
 pub const SYS_PTY_SET_TERMIOS: u64 = 556;
 
+// The three later additions (869–871) are numbered apart from the 544–556 block
+// because they were added after it closed, not because they differ in kind.
+
+/// Count the bytes readable on a pty end, for `ioctl(fd, FIONREAD)`.  `arg0` =
+/// either end's handle; returns the count.
+///
+/// **How exact the answer is depends on the end and the discipline**, and a
+/// caller that cares must be told rather than left to assume:
+///
+/// | End | Mode | Answer |
+/// |---|---|---|
+/// | master | — | exact |
+/// | slave | raw | exact |
+/// | slave | canonical | **upper bound** |
+/// | either | anything | **zero is exact** |
+///
+/// The master's count is of *post*-discipline bytes, i.e. after `ONLCR` has
+/// expanded newlines, so a four-byte slave write containing one newline reports
+/// 5 — which is the number a reader must size by to avoid stranding the `\r`.
+/// The canonical slave's is of *pre*-discipline bytes: the line editor has not
+/// run, so an erase will consume a byte rather than deliver one, and an
+/// unterminated line delivers nothing at all until its newline arrives.
+///
+/// Only the upper bound is ever wrong, and it is harmless: `read()` returns what
+/// is actually there regardless of what this said.  **Zero is exact everywhere**,
+/// which is the property that makes this usable for the common caller — a
+/// polling loop testing emptiness.
+///
+/// **A hung-up end with an empty buffer answers 0, not an error**, and
+/// deliberately differs from [`SYS_PTY_POLL`], where hangup sets the readable
+/// bit.  "Would a read return immediately" is yes at hangup; "how many bytes are
+/// there" is none, and this call's caller believes the number.
+pub const SYS_PTY_READABLE_BYTES: u64 = 869;
+/// Read a terminal's foreground process group by handle, for `TIOCGPGRP` on a
+/// master.  `arg0` = the terminal; returns the pgid.
+///
+/// **This is not a widened [`SYS_TTY_GET_PGRP`] (537), and could not have
+/// been.** libc invokes 537 as `syscall0`, which never writes `rdi`, so giving
+/// `arg0` a meaning would read whatever the caller happened to leave in that
+/// register — sometimes 0, sometimes a live handle naming an unrelated
+/// terminal.  A compatibility break that fails nondeterministically with the
+/// caller's register allocation is one nobody would ever have diagnosed.  537
+/// and 538 are unchanged and remain correct for the slave.
+///
+/// **`arg0 == 0` is `ENOTTY`, not the console.**  Unlike 553–556, "my terminal"
+/// is not a useful reading here: a daemon has no foreground process group, and
+/// answering with the console's would report a group it has no relationship to
+/// as its own.
+///
+/// **A terminal nobody has claimed is also `ENOTTY`** — a pty whose slave has
+/// not yet run `TIOCSCTTY` genuinely has no foreground group, and a caller must
+/// read that as "nothing is running in there yet" rather than receive a `0` it
+/// might try to signal.
+pub const SYS_PTY_GET_PGRP: u64 = 870;
+/// Set a terminal's foreground process group by handle, for `TIOCSPGRP` on a
+/// master.  `arg0` = the terminal, **`arg1` = the pgid** — note the shift from
+/// [`SYS_TTY_SET_PGRP`] (538), where the pgid is `arg0`.
+///
+/// **The group is validated against the terminal's session, not the caller's.**
+/// For a master those are different sessions by construction, so validating
+/// against the caller would be simultaneously too strict and too lax: it would
+/// reject every group actually running on the pty, and accept groups from the
+/// emulator's own unrelated session — the terminal-theft case the POSIX rule
+/// exists to prevent, merely pointed the other way.
+///
+/// **`SIGTTOU` follows the terminal, not the caller.**  An emulator holding a
+/// master is neither foreground nor background in that terminal's session, and
+/// stopping it for being a background job on some *other* terminal would
+/// deadlock — the emulator is often exactly the process that would have to be
+/// resumed to make itself foreground.
+pub const SYS_PTY_SET_PGRP: u64 = 871;
+
 // POSIX signal shim (522–526)
 pub const SYS_SIGNAL_REGISTER: u64 = 522;
 pub const SYS_SIGNAL_SEND: u64 = 523;

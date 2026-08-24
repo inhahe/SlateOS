@@ -662,8 +662,8 @@ pub extern "C" fn ioctl(fd: i32, request: u64, arg: *mut u8) -> i32 {
         FIONREAD => handle_fionread(entry.kind, entry.handle, arg),
         TCGETS => handle_tcgets(entry.kind, entry.handle, arg),
         TCSETS | TCSETSW | TCSETSF => handle_tcsets(entry.kind, entry.handle, arg),
-        TIOCGPGRP => handle_tiocgpgrp(fd, entry.kind, arg),
-        TIOCSPGRP => handle_tiocspgrp(fd, entry.kind, arg),
+        TIOCGPGRP => handle_tiocgpgrp(fd, entry.kind, entry.handle, arg),
+        TIOCSPGRP => handle_tiocspgrp(fd, entry.kind, entry.handle, arg),
         TIOCSCTTY => handle_tiocsctty(entry.kind, entry.handle),
         TIOCNOTTY => handle_tiocnotty(entry.kind, entry.handle),
         _ => {
@@ -900,26 +900,31 @@ fn handle_fionread(kind: HandleKind, handle: u64, arg: *mut u8) -> i32 {
             0
         }
         HandleKind::PtyMaster | HandleKind::PtySlave => {
-            // The kernel has no `SYS_PTY_READABLE_BYTES` counterpart to
-            // `SYS_PIPE_READABLE_BYTES`, so the honest answer available here
-            // is the readable *bit* from `SYS_PTY_POLL`, widened to 0 or 1.
+            // A real count, from the kernel's ring, since `SYS_PTY_READABLE_BYTES`
+            // landed.  This used to be the readable *bit* of `SYS_PTY_POLL`
+            // widened to 0 or 1, because no counter existed; the ring turned out
+            // to maintain `len` on every write and read anyway, so the count is
+            // O(1) and was free to expose.
             //
-            // Answering `ENOTTY` instead was considered and rejected: a pty
-            // does support FIONREAD on Linux, and the programs that ask are
-            // terminal emulators, whose fallback for "this is not a
-            // terminal" is far more wrong than a low count.  A low count
-            // degrades a caller that sizes a read by it into reading a byte
-            // at a time — slow, but every byte still arrives, because
-            // `read()` returns what is actually there regardless of what
-            // this said.  Critically, the 0 case is *exact*: a caller that
-            // uses FIONREAD only to test emptiness (the common case, and
-            // what `select`-less polling loops do) gets the right answer.
+            // Exact on a master and on a raw slave.  On a *canonical* slave it is
+            // an upper bound: the count is of pre-discipline bytes, so an erase
+            // will consume one rather than deliver it, and an unterminated line
+            // delivers nothing until its newline arrives.  Counting exactly would
+            // mean running the line editor twice, and the second run would see
+            // different input.  The overcount is harmless — `read()` returns what
+            // is actually there regardless of what this said — and **zero remains
+            // exact everywhere**, which is what the common caller, a polling loop
+            // testing emptiness, actually depends on.
             //
-            // The real fix is a kernel counter; until it exists this must
-            // never silently grow a plausible-looking estimate, since a
-            // wrong non-zero count is worse than an admittedly coarse one.
-            let status = crate::syscall::syscall1(crate::syscall::SYS_PTY_POLL, handle);
-            let available = i32::from(status >= 0 && (status as u64) & 0x1 != 0);
+            // A hung-up end with an empty buffer answers 0 rather than failing,
+            // which deliberately differs from `SYS_PTY_POLL`'s treatment of
+            // hangup as readable.  See `SYS_PTY_READABLE_BYTES`.
+            let bytes = crate::syscall::syscall1(crate::syscall::SYS_PTY_READABLE_BYTES, handle);
+            // A negative return is an errno, not a count. FIONREAD has no way to
+            // say "unknown", and reporting a negative as a count would be read as
+            // an enormous positive by a caller that stores it unsigned — so fall
+            // back to the exact-and-safe answer rather than propagating garbage.
+            let available = i32::try_from(bytes).unwrap_or(0).max(0);
             // SAFETY: arg must be at least sizeof(i32).
             unsafe {
                 core::ptr::write_unaligned(arg.cast::<i32>(), available);
@@ -998,39 +1003,52 @@ fn handle_tcsets(kind: HandleKind, handle: u64, arg: *mut u8) -> i32 {
     }
 }
 
-/// Whether the *process-group* ioctls may act on this kind of descriptor.
+/// Whether the process-group ioctls may reach this kind of descriptor **via
+/// syscalls 537/538**, which answer only for the caller's own controlling
+/// terminal.
 ///
-/// Narrower than [`terminal_arg`] on purpose, and the exclusion is
-/// `PtyMaster`.  Syscalls 537/538 (`SYS_TTY_GET_PGRP`/`SYS_TTY_SET_PGRP`)
-/// were deliberately *not* widened to the terminal-naming convention, so
-/// they answer only for the caller's own controlling terminal.  A pty slave
-/// usually *is* that -- after `login_tty` it is exactly that -- so
-/// delegating works and, when it does not, the kernel's `ENOTTY` is the
-/// truthful answer.  A master never is: it belongs to the emulator, whose
-/// controlling terminal is something else entirely, so delegating on a
-/// master would report the *emulator's* foreground group as if it were the
-/// pty's -- a wrong number, which is worse than a refusal.
+/// This is not "may the ioctl act on it" — a `PtyMaster` may, and does, but by a
+/// different route.  537/538 were deliberately *not* widened to the
+/// terminal-naming convention 553-556 use, because libc invokes them as
+/// `syscall0`/`syscall1` and so has no register to widen into.  A pty slave
+/// usually *is* the caller's controlling terminal — after `login_tty` it is
+/// exactly that — so delegating works, and when it does not the kernel's
+/// `ENOTTY` is the truthful answer.  A master never is: it belongs to the
+/// emulator, whose controlling terminal is something else entirely, so
+/// delegating on a master would report the *emulator's* foreground group as if
+/// it were the pty's — a wrong number, which is worse than a refusal.
 ///
-/// Linux can answer for a master because master and slave share one `struct
-/// tty`.  We cannot until 537/538 take a terminal; requested of lane A in
-/// `requests/b-a-pty-gaps-master-inheritance-and-readable-bytes.md` and
-/// tracked as `TD-B-PTY-MASTER-HAS-NO-FOREGROUND-GROUP`.
+/// A master therefore goes to `SYS_PTY_GET_PGRP`/`SYS_PTY_SET_PGRP` (870/871),
+/// which name the terminal explicitly.  Until those existed the master case had
+/// no answer at all and returned `ENOTTY`; that was
+/// `TD-B-PTY-MASTER-HAS-NO-FOREGROUND-GROUP`, now fixed.
 fn is_pgrp_terminal(kind: HandleKind) -> bool {
     matches!(kind, HandleKind::Console | HandleKind::PtySlave)
 }
 
 /// TIOCGPGRP — get the foreground process group of a terminal.
 ///
-/// Returns the PGID via the integer pointer `arg`.  Delegates to
-/// `tcgetpgrp()`, which reads the value from the kernel, keyed by our
-/// session — so this reports the same foreground group every other member
-/// of the session sees.
+/// Returns the PGID via the integer pointer `arg`.
 ///
-/// `tcgetpgrp` can genuinely fail (`ENOTTY` when the session has no
-/// controlling terminal), so its -1 is propagated rather than written into
-/// the caller's buffer as if it were a process group.
-fn handle_tiocgpgrp(fd: i32, kind: HandleKind, arg: *mut u8) -> i32 {
-    if !is_pgrp_terminal(kind) {
+/// **Two different syscalls, chosen by which end is held.**  For the console
+/// and a pty *slave* this delegates to `tcgetpgrp()`, which asks syscall 537
+/// keyed by our own session — so it reports the same foreground group every
+/// other member of the session sees.  A pty *master* is not in that session by
+/// construction: the emulator holding it is in its own, and 537 would answer
+/// about the emulator's terminal rather than the one it is asking about.  So a
+/// master goes to `SYS_PTY_GET_PGRP`, which names the terminal explicitly.
+///
+/// This used to return `ENOTTY` for a master unconditionally
+/// (`TD-B-PTY-MASTER-HAS-NO-FOREGROUND-GROUP`), which is why a terminal
+/// emulator could not tell which job was in the foreground of the pty it owned
+/// — the thing a title bar exists to display.
+///
+/// Either call can genuinely fail (`ENOTTY` when the session has no
+/// controlling terminal, or when nothing has claimed the named pty yet), so a
+/// -1 is propagated rather than written into the caller's buffer as if it were
+/// a process group.
+fn handle_tiocgpgrp(fd: i32, kind: HandleKind, handle: u64, arg: *mut u8) -> i32 {
+    if !is_pgrp_terminal(kind) && kind != HandleKind::PtyMaster {
         errno::set_errno(errno::ENOTTY);
         return -1;
     }
@@ -1038,11 +1056,22 @@ fn handle_tiocgpgrp(fd: i32, kind: HandleKind, arg: *mut u8) -> i32 {
         errno::set_errno(errno::EFAULT);
         return -1;
     }
-    let pgrp = crate::process::tcgetpgrp(fd);
-    if pgrp < 0 {
-        // errno is already set by tcgetpgrp.
-        return -1;
-    }
+    let pgrp = if kind == HandleKind::PtyMaster {
+        match pty_master_get_pgrp(handle) {
+            Ok(v) => v,
+            Err(e) => {
+                errno::set_errno(e);
+                return -1;
+            }
+        }
+    } else {
+        let v = crate::process::tcgetpgrp(fd);
+        if v < 0 {
+            // errno is already set by tcgetpgrp.
+            return -1;
+        }
+        v
+    };
     // SAFETY: arg must be at least sizeof(i32) per ioctl contract.
     unsafe {
         core::ptr::write_unaligned(arg.cast::<i32>(), pgrp);
@@ -1052,10 +1081,17 @@ fn handle_tiocgpgrp(fd: i32, kind: HandleKind, arg: *mut u8) -> i32 {
 
 /// TIOCSPGRP — set the foreground process group of a terminal.
 ///
-/// Reads the PGID from the integer pointer `arg` and delegates to
-/// `tcsetpgrp()`.
-fn handle_tiocspgrp(fd: i32, kind: HandleKind, arg: *mut u8) -> i32 {
-    if !is_pgrp_terminal(kind) {
+/// Reads the PGID from the integer pointer `arg`.  Splits by end for the same
+/// reason [`handle_tiocgpgrp`] does: the console and a slave go to
+/// `tcsetpgrp()` (syscall 538, keyed by our session), a master to
+/// `SYS_PTY_SET_PGRP`, which names the terminal.
+///
+/// Note the argument order differs between the two kernel calls — 538 takes the
+/// pgid as `arg0`, while 871 takes the terminal as `arg0` and the pgid as
+/// `arg1`.  That is not gratuitous: 537/538 are invoked as `syscall0`/`syscall1`
+/// and so have no free register to widen into.
+fn handle_tiocspgrp(fd: i32, kind: HandleKind, handle: u64, arg: *mut u8) -> i32 {
+    if !is_pgrp_terminal(kind) && kind != HandleKind::PtyMaster {
         errno::set_errno(errno::ENOTTY);
         return -1;
     }
@@ -1065,7 +1101,66 @@ fn handle_tiocspgrp(fd: i32, kind: HandleKind, arg: *mut u8) -> i32 {
     }
     // SAFETY: arg must be at least sizeof(i32) per ioctl contract.
     let pgrp = unsafe { core::ptr::read_unaligned(arg.cast::<i32>()) };
+    if kind == HandleKind::PtyMaster {
+        return match pty_master_set_pgrp(handle, pgrp) {
+            Ok(()) => 0,
+            Err(e) => {
+                errno::set_errno(e);
+                -1
+            }
+        };
+    }
     crate::process::tcsetpgrp(fd, pgrp)
+}
+
+/// `SYS_PTY_GET_PGRP` behind an `errno`-shaped result.
+///
+/// On a host build there is no kernel to ask and the process-group double
+/// models exactly one session, which a master is by definition not a member of.
+/// `ENOTTY` is the honest answer there and is also the real one for an
+/// unclaimed terminal, so the host and target agree on the case that matters.
+fn pty_master_get_pgrp(handle: u64) -> Result<i32, i32> {
+    #[cfg(target_os = "none")]
+    {
+        let ret = crate::syscall::syscall1(crate::syscall::SYS_PTY_GET_PGRP, handle);
+        if ret < 0 {
+            return Err(crate::process::ctty_errno(ret));
+        }
+        i32::try_from(ret).map_err(|_| errno::ENOTTY)
+    }
+    #[cfg(not(target_os = "none"))]
+    {
+        let _ = handle;
+        Err(errno::ENOTTY)
+    }
+}
+
+/// `SYS_PTY_SET_PGRP` behind an `errno`-shaped result.  See
+/// [`pty_master_get_pgrp`] for why the host build refuses.
+fn pty_master_set_pgrp(handle: u64, pgrp: i32) -> Result<(), i32> {
+    if pgrp <= 0 {
+        // A process group id is positive; 0 and negatives are `tcsetpgrp`'s
+        // documented `EINVAL`, and letting one through would sign-extend into a
+        // `u64` argument as an enormous group id.
+        return Err(errno::EINVAL);
+    }
+    #[cfg(target_os = "none")]
+    {
+        let ret = crate::syscall::syscall2(
+            crate::syscall::SYS_PTY_SET_PGRP,
+            handle,
+            u64::from(pgrp.unsigned_abs()),
+        );
+        if ret < 0 {
+            return Err(crate::process::ctty_errno(ret));
+        }
+        Ok(())
+    }
+    #[cfg(not(target_os = "none"))]
+    {
+        let _ = handle;
+        Err(errno::ENOTTY)
+    }
 }
 
 /// TIOCSCTTY — claim this terminal as our session's controlling terminal.
@@ -2720,6 +2815,66 @@ mod tests {
         assert_eq!(ret, -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::ENOTTY);
         let _ = fdtable::close_fd(fd);
+    }
+
+    /// A master is no longer refused by the kind gate.
+    ///
+    /// The gate used to reject `PtyMaster` before anything else, so *every*
+    /// TIOCGPGRP on a master was `ENOTTY` regardless of the arguments. Reaching
+    /// the null-pointer check — and therefore `EFAULT` — is the observable
+    /// proof that the master arm is now entered at all, and it is checkable on
+    /// a host build, where there is no kernel behind 870 to ask.
+    #[test]
+    fn tiocgpgrp_on_a_master_gets_past_the_kind_gate() {
+        let fd = fdtable::alloc_fd(HandleKind::PtyMaster, 9 << 1).unwrap();
+        let ret = ioctl(fd, TIOCGPGRP, core::ptr::null_mut());
+        assert_eq!(ret, -1);
+        assert_eq!(
+            crate::errno::get_errno(),
+            crate::errno::EFAULT,
+            "a master must reach the argument check, not be refused as not-a-terminal"
+        );
+        let _ = fdtable::close_fd(fd);
+    }
+
+    /// Same for the setter, and additionally the one rule the master path
+    /// enforces before it reaches the kernel: a process group id is positive.
+    ///
+    /// 0 and negatives matter more here than on the slave path because the
+    /// value is widened into a `u64` syscall argument — a negative would
+    /// sign-extend into an enormous group id rather than being rejected.
+    #[test]
+    fn tiocspgrp_on_a_master_rejects_a_non_positive_group() {
+        let fd = fdtable::alloc_fd(HandleKind::PtyMaster, 9 << 1).unwrap();
+        for bad in [0_i32, -1, i32::MIN] {
+            let ret = ioctl(fd, TIOCSPGRP, (&raw const bad).cast::<u8>().cast_mut());
+            assert_eq!(ret, -1, "pgid {bad} was accepted");
+            assert_eq!(
+                crate::errno::get_errno(),
+                crate::errno::EINVAL,
+                "pgid {bad} must be EINVAL, not passed to the kernel"
+            );
+        }
+        let _ = fdtable::close_fd(fd);
+    }
+
+    /// FIONREAD on a pty must still answer 0 rather than fail, and must never
+    /// write a negative count.
+    ///
+    /// On a host build there is no kernel counter, so 0 is all this can check —
+    /// but 0 is precisely the value the exactness contract guarantees, and a
+    /// caller sizing a read by a negative-turned-huge number is the failure
+    /// this pins against.
+    #[test]
+    fn fionread_on_a_pty_never_reports_a_negative_count() {
+        for kind in [HandleKind::PtyMaster, HandleKind::PtySlave] {
+            let fd = fdtable::alloc_fd(kind, 9 << 1).unwrap();
+            let mut n: i32 = -12345;
+            let ret = ioctl(fd, FIONREAD, (&raw mut n).cast::<u8>());
+            assert_eq!(ret, 0, "FIONREAD on {kind:?} must succeed");
+            assert!(n >= 0, "FIONREAD on {kind:?} reported {n}");
+            let _ = fdtable::close_fd(fd);
+        }
     }
 
     #[test]

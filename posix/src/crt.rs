@@ -375,7 +375,7 @@ static mut INIT_FDS_BUF: [crate::spawn::FdMapEntry; MAX_INIT_FDS] = [crate::spaw
 /// called from single-threaded context.
 unsafe fn retrieve_initial_fds() {
     use crate::fdtable;
-    use crate::spawn::handle_type_to_kind;
+    use crate::spawn::handle_type_to_kind_for;
     use crate::syscall::{SYS_PROCESS_GET_INITIAL_FDS, syscall2};
 
     let buf_ptr = addr_of_mut!(INIT_FDS_BUF);
@@ -412,7 +412,10 @@ unsafe fn retrieve_initial_fds() {
         // drift apart (see BUG-CRT0-STREAM-SOCKET-UNMAPPED, where this
         // side lacked a STREAM_SOCKET arm and silently rebuilt every
         // inherited AF_UNIX endpoint as a plain `File`).
-        let kind = handle_type_to_kind(entry.handle_type);
+        //
+        // The handle goes in as well as the type because one wire type,
+        // `PTY`, names either end — the end lives in the handle's low bit.
+        let kind = handle_type_to_kind_for(entry.handle_type, entry.handle);
 
         // Install this fd at the specified number.
         fdtable::set_fd(entry.fd, kind, entry.handle);

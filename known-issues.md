@@ -66270,7 +66270,7 @@ level. Noted rather than changed, so a future reader who spots it knows it was
 seen and judged, not missed.
 
 
-## Four limitations left behind by wiring libc's pty family to syscalls 544-556 (lane B, 2026-08-23)
+## Four limitations left behind by wiring libc's pty family to syscalls 544-556 (lane B, 2026-08-23) -- three FIXED 2026-08-24
 
 All four were found while landing
 `requests/a-b-pty-the-tty-layer-is-now-n-devices-and-a-pty-object-exists.md`
@@ -66280,7 +66280,14 @@ libc had to pick the least-wrong answer. Three are filed to lane A as
 `requests/b-a-pty-gaps-master-inheritance-and-readable-bytes.md`; the
 fourth is ours and is a non-issue by design.
 
-### TD-B-PTY-MASTER-CANNOT-BE-INHERITED-ACROSS-SPAWN -- OPEN, blocking for one shape of program
+**All three filed gaps were closed by lane A on 2026-08-24**
+(`requests/a-b-all-three-pty-gaps-closed.md`) and wired up in libc the same
+day. The entries below are kept in full rather than deleted: each one records
+*why* the least-wrong answer was chosen, and the fix notes appended to them
+record why the obvious fix was in two of the three cases not the one that
+landed. The fourth entry remains open and is expected to stay that way.
+
+### TD-B-PTY-MASTER-CANNOT-BE-INHERITED-ACROSS-SPAWN -- FIXED 2026-08-24
 
 **Where:** `posix/src/spawn.rs`, `build_fd_map`.
 
@@ -66309,7 +66316,32 @@ refcount bump in `SYS_PROCESS_SPAWN`. Note for whoever implements it that
 this must *not* be spelled as a blind `SYS_PTY_DUP` -- see the next entry
 but one for why libc's own `dup` does not call it either.
 
-### TD-B-PTY-FIONREAD-IS-A-BOOLEAN -- OPEN, degrades but does not break
+**Fixed 2026-08-24**, exactly as described. Lane A added
+`fd_handle_type::PTY = 7` -- one constant for both ends, because `PtyHandle`
+is `(tty_id << 1) | end` and a second constant would only create a place for
+the two encodings to disagree -- and spawn dups through `pty::dup()`, which
+refcounts the end. libc's side: the filter in `build_fd_map` is gone,
+`kind_to_handle_type` maps `PtyMaster` to `PTY`, and the reverse direction
+grew `handle_type_to_kind_for(handle_type, handle)`.
+
+**The reverse direction was the part that could have been got wrong.** One
+wire type names either end, so `handle_type_to_kind` -- which sees only the
+type byte -- cannot decode it. Left as it was, a child would have rebuilt an
+inherited master as a `File` and the file layer would have misread the handle
+number, which is the precise hazard this entry warned about, merely relocated
+from the parent to the child. It now reads the handle's low bit. Rebuilding a
+master as a *slave* would have been worse still: the emulator's own keystrokes
+would come back to it.
+
+Three things did not change and are pinned by tests so they do not look like
+oversights: `PtySlave` still travels as `CONSOLE` (exact, not approximate --
+`login_tty` has already made it the child's controlling terminal); nothing on
+this path calls `SYS_PTY_DUP`, and `dup` must keep not calling it, because
+spawn takes one reference per `fd_map` entry; and the entry is ownership-gated
+kernel-side, so a hand-built `fd_map` naming a master the caller does not hold
+fails the whole spawn rather than being silently dropped.
+
+### TD-B-PTY-FIONREAD-IS-A-BOOLEAN -- FIXED 2026-08-24
 
 **Where:** `posix/src/ioctl.rs`, `handle_fionread`, the
 `PtyMaster | PtySlave` arm.
@@ -66334,7 +66366,53 @@ using `FIONREAD` only to test emptiness -- the common case, and what
 count. If it does not, this entry should be closed "won't fix" rather than
 left open forever; that is stated in the request to lane A.
 
-### TD-B-PTY-MASTER-HAS-NO-FOREGROUND-GROUP -- OPEN, narrow
+**Fixed 2026-08-24 -- and not as the "won't fix" that was offered.** The ring
+keeps `len` as a field, maintained by every write and read regardless, so the
+count is O(1) and was free to expose. `SYS_PTY_READABLE_BYTES` = 869.
+
+How exact the answer is depends on the end, and libc states it rather than
+leaving callers to assume:
+
+| End | Mode | Answer |
+|---|---|---|
+| master | -- | exact |
+| slave | raw | exact |
+| slave | canonical | upper bound |
+| either | anything | **zero is exact** |
+
+The master's count is of *post*-discipline bytes, i.e. after `ONLCR`, so a
+four-byte slave write containing one newline reports 5 -- which is the number a
+reader must size by to avoid stranding the `\r` to be misread as the start of
+the next line. The canonical slave's is of *pre*-discipline bytes: the line
+editor has not run, so an erase will consume a byte rather than deliver one,
+and an unterminated line delivers nothing until its newline arrives. Counting
+exactly would mean running the editor twice, and the second run would see
+different input.
+
+Only the upper bound is ever wrong and it is harmless, for the same reason the
+old boolean was: `read()` returns what is actually there regardless. The
+property that made the boolean merely degraded rather than broken -- **zero is
+exact** -- survives intact.
+
+A hung-up end with an empty buffer answers 0 rather than failing, which
+deliberately differs from `SYS_PTY_POLL`, where hangup sets the readable bit:
+"would a read return immediately" is yes there, but "how many bytes are there"
+is none, and `FIONREAD`'s caller believes the number.
+
+libc clamps a negative return to 0 rather than propagating it. `FIONREAD` has
+no way to say "unknown", and a negative stored into a caller's unsigned length
+is an enormous positive -- the one way this call could do real damage.
+
+**Lane A also found and fixed a live hang while implementing it**, which is
+worth knowing because it explains a class of symptom: a canonical line is
+delivered as a unit, so a reader whose buffer is smaller than the line leaves
+the remainder in the *device's* pending buffer rather than any ring, and
+`pty::readable()` consulted only the ring. A slave holding four undelivered
+bytes of `"hello\n"` reported not readable, and went on doing so forever if
+the master sent nothing further. Any libc test that did a short `read` on a
+slave and then polled was racing this. Nothing in libc needed to change.
+
+### TD-B-PTY-MASTER-HAS-NO-FOREGROUND-GROUP -- FIXED 2026-08-24
 
 **Where:** `posix/src/ioctl.rs`, `is_pgrp_terminal`.
 
@@ -66354,6 +66432,54 @@ of an omission someone later "fixes".
 
 **Proper fix:** 537/538 take a terminal under the same convention as
 539/553-556.
+
+**Fixed 2026-08-24 -- but not by that fix, which turns out to be
+unimplementable.** New numbers instead: `SYS_PTY_GET_PGRP` = 870,
+`SYS_PTY_SET_PGRP` = 871.
+
+The reason the requested shape could not work is worth recording, because it is
+not a reason either lane guessed and it generalises to every other syscall
+somebody proposes widening:
+
+> **libc invokes 537 as `syscall0`, which never writes `rdi`.**
+
+Giving `arg0` a meaning would therefore not read a zero. It would read whatever
+the caller happened to leave in `rdi` -- under the naming convention that is
+`0` ("my terminal") sometimes, `1` (reserved, refused) sometimes, and a live
+pty handle naming an unrelated terminal the rest of the time. A compatibility
+break that fails *nondeterministically*, varying with the caller's register
+allocation, is one nobody would ever have diagnosed. 538 has the same problem
+one argument along: its `arg0` is the pgid, so the terminal would have to move
+to `arg1`, which `syscall1` likewise never writes.
+
+So 537/538 are unchanged and remain correct for the console and the slave, and
+`is_pgrp_terminal` still names exactly those two -- its meaning narrowed from
+"may the process-group ioctls act on this" to "may they reach it *via
+537/538*". A master now takes the other route.
+
+Three properties of the new pair that libc depends on and states at the
+constants:
+
+* **`arg0 == 0` is `ENOTTY`, not the console.** Unlike 553-556, "my terminal"
+  is not a useful reading: a daemon has no foreground process group, and
+  answering with the console's would report a group it has no relationship to
+  as its own.
+* **A named terminal nobody has claimed is also `ENOTTY`.** A pty whose slave
+  has not yet run `TIOCSCTTY` genuinely has no foreground group, and a title-bar
+  caller must read that as "nothing is running in there yet" rather than
+  receive a `0` it might try to signal.
+* **The group is validated against the terminal's session, not the caller's**,
+  and `SIGTTOU` follows the terminal rather than the caller. For a master those
+  sessions differ by construction, so validating against the caller would be
+  simultaneously too strict and too lax -- rejecting every group actually
+  running on the pty, and accepting groups from the emulator's own unrelated
+  session, which is the terminal-theft case the POSIX rule exists to prevent,
+  merely pointed the other way.
+
+Note the argument order differs between the two pairs: 538 takes the pgid as
+`arg0`, while 871 takes the terminal as `arg0` and the pgid as `arg1`. libc
+rejects a non-positive pgid before the call, since the value is widened into a
+`u64` and a negative would sign-extend into an enormous group id.
 
 ### The slave cannot be reopened by name after its first claim -- WORKS AS DESIGNED, recorded so it is not mistaken for a bug
 

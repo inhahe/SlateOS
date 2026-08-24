@@ -295,6 +295,13 @@ pub fn pristine_atomic<A: AtomicScalar>(cell: &A, pristine: A::Value) -> Restore
 // Skips
 // ---------------------------------------------------------------------------
 
+/// How many skipped sections one suite can name individually.
+///
+/// The largest suite in the tree records six; sixteen leaves room without
+/// making the type big enough to matter on a stack (16 × 16 B = 256 B).
+/// Passing it is not silently lossy — see [`Skips::record`].
+const MAX_SKIPS: usize = 16;
+
 /// The sections of a self-test that could not run, carried to the line that
 /// announces the result.
 ///
@@ -336,14 +343,44 @@ pub fn pristine_atomic<A: AtomicScalar>(cell: &A, pristine: A::Value) -> Restore
 /// skips.report("[index]");
 /// serial_println!("[index] Self-test passed{}", skips.suffix());
 /// ```
-#[derive(Debug, Default)]
+///
+/// ## Why it is fixed-capacity and allocation-free
+///
+/// This type must not touch the heap, and the reason is not tidiness — it is a
+/// boot-killing bug it caused on 2026-08-23.  Two of its users run where a
+/// heap allocation is either impossible or self-defeating:
+///
+/// * **Before the heap exists.**  `mm::frame::self_test()` runs between
+///   "physical frame allocator initialized" and "kernel heap allocator
+///   initialized".  When the ledger held a `Vec`, its first `record()` was the
+///   first `Vec::push` of the boot, and the kernel died with `memory
+///   allocation of 128 bytes failed` — from the suite that exists to prove the
+///   memory subsystem works.
+/// * **While diagnosing the allocator.**  A suite hunting a heap bug must not
+///   report its findings through the heap: the reporting path would fail
+///   exactly when there is something to report.
+///
+/// So the entries are `(&'static str, &'static str)` in an inline array of
+/// [`MAX_SKIPS`], and [`suffix`](Skips::suffix) returns a `Display` adaptor
+/// rather than a `String`.  A skip reason is a property of the *code*, not of
+/// the run, so there is never anything to format and never an allocation to
+/// fail.  [`self_test`] asserts this against the allocator's own counters.
+#[derive(Debug)]
 pub struct Skips {
     /// `(section, why)` pairs, in the order the sections were reached.
-    ///
-    /// `&'static str` rather than `String` on purpose: a skip reason is a
-    /// property of the code, not of the run, so there is nothing to format and
-    /// no allocation to fail in a suite that may be diagnosing the allocator.
-    entries: alloc::vec::Vec<(&'static str, &'static str)>,
+    entries: [(&'static str, &'static str); MAX_SKIPS],
+    /// How many of `entries` are live.
+    len: usize,
+    /// Sections that skipped after `entries` filled.  Counted rather than
+    /// dropped: losing a skip is the exact failure this whole module exists to
+    /// prevent, so overflow degrades to "N more, unnamed" and never to silence.
+    overflow: usize,
+}
+
+impl Default for Skips {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Skips {
@@ -351,7 +388,9 @@ impl Skips {
     #[must_use]
     pub const fn new() -> Self {
         Self {
-            entries: alloc::vec::Vec::new(),
+            entries: [("", ""); MAX_SKIPS],
+            len: 0,
+            overflow: 0,
         }
     }
 
@@ -360,8 +399,29 @@ impl Skips {
     /// `why` should name the missing *precondition* ("no AC97 device",
     /// "/tmp not mounted"), not the failing call — the reader's next question
     /// is always whether the absence is expected on this machine.
+    ///
+    /// Beyond [`MAX_SKIPS`] the section is counted but not named; the count
+    /// still reaches both [`report`](Self::report) and
+    /// [`suffix`](Self::suffix), so the closing line stays honest.
     pub fn record(&mut self, section: &'static str, why: &'static str) {
-        self.entries.push((section, why));
+        if let Some(slot) = self.entries.get_mut(self.len) {
+            *slot = (section, why);
+            self.len = self.len.saturating_add(1);
+        } else {
+            self.overflow = self.overflow.saturating_add(1);
+        }
+    }
+
+    /// How many sections were skipped, named and unnamed.
+    #[must_use]
+    pub const fn count(&self) -> usize {
+        self.len.saturating_add(self.overflow)
+    }
+
+    /// Whether every section ran.
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        self.count() == 0
     }
 
     /// Print one `SKIP:` line per skipped section, prefixed with `tag`.
@@ -371,8 +431,19 @@ impl Skips {
     /// to the bottom from missing it.  Prints nothing when nothing was
     /// skipped.
     pub fn report(&self, tag: &str) {
-        for (section, why) in &self.entries {
+        // `get(..len)` rather than indexing: `indexing_slicing` is denied, and
+        // an out-of-range `len` would be a bug in this type, not a reason to
+        // panic a self-test.
+        for (section, why) in self.entries.get(..self.len).unwrap_or(&[]) {
             crate::serial_println!("{}   SKIP: {} ({})", tag, section, why);
+        }
+        if self.overflow > 0 {
+            crate::serial_println!(
+                "{}   SKIP: {} further section(s) (ledger holds {})",
+                tag,
+                self.overflow,
+                MAX_SKIPS
+            );
         }
     }
 
@@ -383,12 +454,29 @@ impl Skips {
     /// suite's own wording — `Self-test PASSED`, `All 11 self-tests passed.`,
     /// `Self-test passed (148 entries, 1 rebuilds)` — which is what makes this
     /// a one-line change at ~25 call sites rather than a rewrite of each.
+    ///
+    /// The returned value formats in place with `{}`, so it allocates nothing;
+    /// see the type-level note on why that matters.
     #[must_use]
-    pub fn suffix(&self) -> alloc::string::String {
-        if self.entries.is_empty() {
-            alloc::string::String::new()
+    pub const fn suffix(&self) -> SkipSuffix {
+        SkipSuffix(self.count())
+    }
+}
+
+/// The `{}`-formattable tail of a self-test's closing line.
+///
+/// Exists so [`Skips::suffix`] can be used exactly like the `String` it
+/// replaced — `serial_println!("… PASSED{}", skips.suffix())` — without an
+/// allocation on a path that may have no working allocator.
+#[derive(Debug, Clone, Copy)]
+pub struct SkipSuffix(usize);
+
+impl core::fmt::Display for SkipSuffix {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        if self.0 == 0 {
+            Ok(())
         } else {
-            alloc::format!(" — {} section(s) SKIPPED", self.entries.len())
+            write!(f, " — {} section(s) SKIPPED", self.0)
         }
     }
 }
@@ -519,4 +607,166 @@ macro_rules! selftest_setup {
         )+
         ready
     }};
+}
+
+/// A `core::fmt::Write` sink over a fixed stack buffer.
+///
+/// Used by the self-test below to render a [`SkipSuffix`] and inspect the
+/// bytes.  It exists because the obvious alternative — `alloc::format!` —
+/// would allocate, and the whole point of the assertion is that nothing on
+/// this path does.
+struct FixedBuf {
+    bytes: [u8; 64],
+    len: usize,
+}
+
+impl FixedBuf {
+    const fn new() -> Self {
+        Self {
+            bytes: [0; 64],
+            len: 0,
+        }
+    }
+
+    fn as_str(&self) -> &str {
+        core::str::from_utf8(self.bytes.get(..self.len).unwrap_or(&[])).unwrap_or("<not utf-8>")
+    }
+}
+
+impl core::fmt::Write for FixedBuf {
+    fn write_str(&mut self, s: &str) -> core::fmt::Result {
+        for &b in s.as_bytes() {
+            let Some(slot) = self.bytes.get_mut(self.len) else {
+                return Err(core::fmt::Error);
+            };
+            *slot = b;
+            self.len = self.len.saturating_add(1);
+        }
+        Ok(())
+    }
+}
+
+/// Prove that the skip ledger itself never touches the heap.
+///
+/// This is a regression test for a boot-killing bug, not a formality.  On
+/// 2026-08-23 [`Skips`] held an `alloc::vec::Vec` and [`Skips::suffix`]
+/// returned an `alloc::string::String`.  `mm::frame::self_test()` runs
+/// *between* "physical frame allocator initialized" and "kernel heap allocator
+/// initialized", so its first `skips.record(…)` was the first heap allocation
+/// of the boot and the kernel died with `memory allocation of 128 bytes
+/// failed` — killed by the bookkeeping of the suite that exists to prove the
+/// memory subsystem works.
+///
+/// The invariant is structural (an inline array plus a `Display` adaptor), but
+/// structure is easy to regress by adding one convenient field, and the
+/// failure mode is a panic 120 lines into the boot with no mention of this
+/// module in it.  So it is asserted against the allocator's own counters.
+///
+/// Interrupts are masked across the measurement because [`crate::mm::heap::stats`]
+/// aggregates per-CPU counters: an interrupt handler that allocated inside the
+/// window would be attributed to this code and fail the test spuriously.
+///
+/// # Errors
+/// Returns [`KernelError::InternalError`](crate::error::KernelError::InternalError)
+/// if the ledger allocated, dropped a skip, or rendered the wrong suffix.
+pub fn self_test() -> crate::error::KernelResult<()> {
+    use core::fmt::Write as _;
+
+    crate::serial_println!("[selftest] Running skip-ledger self-test...");
+
+    let mut rendered = FixedBuf::new();
+    let mut overflowed = FixedBuf::new();
+    let mut empty = FixedBuf::new();
+
+    // The whole exercise runs inside the masked window, so the counters
+    // bracket exactly the work under test and nothing else.
+    let (before, after, over_count, named, emptiness) = crate::cpu::without_interrupts(|| {
+        let b = crate::mm::heap::stats();
+
+        let fresh = Skips::new();
+        let _ = write!(empty, "{}", fresh.suffix());
+        let fresh_is_empty = fresh.is_empty();
+
+        let mut skips = Skips::new();
+        // One past capacity, so the overflow arm is exercised too.  Every
+        // string here is `'static`, which is what makes recording free.
+        for _ in 0..MAX_SKIPS {
+            skips.record("ledger capacity", "exercising the named path");
+        }
+        skips.record("ledger overflow", "exercising the counted path");
+        let n = skips.count();
+        let named = skips.entries.get(..skips.len).unwrap_or(&[]).len();
+        let _ = write!(overflowed, "{}", skips.suffix());
+
+        let mut one = Skips::new();
+        one.record("suffix rendering", "exercising the singular path");
+        let _ = write!(rendered, "{}", one.suffix());
+        // `report` writes to the serial port; include it, because a
+        // reporting path that allocates fails exactly when there is
+        // something to report.
+        one.report("[selftest]");
+
+        let a = crate::mm::heap::stats();
+        (b, a, n, named, (fresh_is_empty, skips.is_empty()))
+    });
+
+    let allocs = after
+        .slab_allocs
+        .saturating_sub(before.slab_allocs)
+        .saturating_add(after.large_allocs.saturating_sub(before.large_allocs));
+    if allocs != 0 {
+        crate::serial_println!(
+            "[selftest]   FAIL: the skip ledger performed {allocs} heap allocation(s); it runs \
+             before the heap exists (mm::frame::self_test) and must not"
+        );
+        return Err(crate::error::KernelError::InternalError);
+    }
+
+    if !empty.as_str().is_empty() {
+        crate::serial_println!(
+            "[selftest]   FAIL: an empty ledger rendered {:?}, want \"\"",
+            empty.as_str()
+        );
+        return Err(crate::error::KernelError::InternalError);
+    }
+    // `is_empty` is what a suite branches on to decide whether to print a
+    // qualified closing line, so a ledger that under-reports emptiness would
+    // reinstate the unqualified "PASSED" this module exists to prevent.
+    if emptiness != (true, false) {
+        crate::serial_println!(
+            "[selftest]   FAIL: is_empty() reported {:?} for (fresh, overflowed), want (true, false)",
+            emptiness
+        );
+        return Err(crate::error::KernelError::InternalError);
+    }
+    if rendered.as_str() != " — 1 section(s) SKIPPED" {
+        crate::serial_println!(
+            "[selftest]   FAIL: one skip rendered {:?}",
+            rendered.as_str()
+        );
+        return Err(crate::error::KernelError::InternalError);
+    }
+    // The overflowed skip must still be *counted*: dropping it would restore
+    // exactly the silence this module exists to prevent.
+    if over_count != MAX_SKIPS.saturating_add(1) || named != MAX_SKIPS {
+        crate::serial_println!(
+            "[selftest]   FAIL: {} recorded past capacity {MAX_SKIPS} counted {over_count} \
+             ({named} named)",
+            MAX_SKIPS.saturating_add(1)
+        );
+        return Err(crate::error::KernelError::InternalError);
+    }
+    if overflowed.as_str() != " — 17 section(s) SKIPPED" {
+        crate::serial_println!(
+            "[selftest]   FAIL: an overflowed ledger rendered {:?}",
+            overflowed.as_str()
+        );
+        return Err(crate::error::KernelError::InternalError);
+    }
+
+    crate::serial_println!("[selftest]   Ledger allocates nothing: OK");
+    crate::serial_println!("[selftest]   Suffix rendering (0/1/overflow): OK");
+    crate::serial_println!("[selftest]   Overflow is counted, not dropped: OK");
+    crate::serial_println!("[selftest] Skip-ledger self-test PASSED");
+    Ok(())
 }

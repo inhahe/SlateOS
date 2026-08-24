@@ -5751,8 +5751,10 @@ fn execute_single(line: &str) {
 
     // Check for output redirection (> file, >> file).
     if let Some(redir) = parse_redirect(line) {
+        // `execute_redirect` leaves the status of the command it ran (or 1 if
+        // the write failed). Stamping 0 over it here made `grep pat f > out ||
+        // echo "no match"` unreachable and `$?` a constant.
         execute_redirect(redir.command, redir.path, redir.append);
-        set_exit(0);
         return;
     }
 
@@ -6012,7 +6014,10 @@ fn execute_input_redirect(command: &str, path: &str) {
     } else {
         dispatch_with_input(command, &data);
     }
-    set_exit(0);
+    // No `set_exit(0)` here. `dispatch` stamps 0 on entry and the command
+    // raises it on failure, so on arrival here the status is already the
+    // command's own; stamping success again would discard it and make every
+    // `cmd < file` succeed regardless of what `cmd` did.
 }
 
 /// Find the position of the first un-quoted `|` character.
@@ -6076,8 +6081,12 @@ fn execute_redirect(command: &str, path: &str, append: bool) {
         return;
     }
 
+    // A failed write outranks whatever the command reported: the command's
+    // output did not reach the file the user named, so the line as a whole
+    // did not do what it said.
     if let Err(e) = redirect_write(path, &output, append) {
-        crate::console_println!("Redirect error: {:?}", e);
+        crate::console_println!("{}: cannot write: {:?}", path, e);
+        set_exit(1);
     }
 }
 
@@ -6120,7 +6129,8 @@ fn execute_heredoc(command: &str, suffix: &str, body: &str) {
         // Suffix is a bare redirect (e.g., "> /tmp/out" or ">> /tmp/out").
         if !output.is_empty() {
             if let Err(e) = redirect_write(path, &output, append) {
-                crate::console_println!("Redirect error: {:?}", e);
+                crate::console_println!("{}: cannot write: {:?}", path, e);
+                set_exit(1);
             }
         }
     } else {
@@ -6198,13 +6208,18 @@ fn execute_pipe_chain(segments: &[&str]) {
         let output = capture_stop();
         if !output.is_empty() {
             if let Err(e) = redirect_write(redir.path, &output, redir.append) {
-                crate::console_println!("Redirect error: {:?}", e);
+                crate::console_println!("{}: cannot write: {:?}", redir.path, e);
+                set_exit(1);
             }
         }
     } else {
         dispatch_with_input(last, &piped_data);
     }
-    set_exit(0);
+    // The pipeline's status is the last stage's, as in POSIX: each stage's
+    // `dispatch` stamps 0 on entry and the stage raises it, so the value left
+    // here is already correct. The `set_exit(0)` that used to close this
+    // function overwrote it, which meant no pipeline could ever fail --
+    // `cmd | grep pat && ...` ran the right-hand side even with no match.
 }
 
 /// Narrow captured shell output to `&str` for a stage that still requires it.
@@ -6294,6 +6309,13 @@ fn dispatch_with_input(line: &str, input: &[u8]) {
     let mut parts = line.splitn(2, ' ');
     let cmd = parts.next().unwrap_or("");
     let args = parts.next().unwrap_or("").trim();
+
+    // Establish the same baseline `dispatch` does. Only the fallback arm below
+    // reaches `dispatch`, so without this the `*_input` variants inherited
+    // whatever the *previous* pipeline stage happened to leave behind: `cat f |
+    // head 5` reported failure whenever `cat` had failed, and a successful
+    // stage after a failed one masked it. Commands raise it themselves.
+    set_exit(0);
 
     // Commands that support reading from piped input.
     match cmd {
@@ -9595,6 +9617,114 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         run("archive stats");
         assert_eq!(last_exit(), 0);
 
+        let _ = Vfs::remove(src);
+        let _ = Vfs::remove(out);
+    }
+
+    serial_println!("  kshell::self_test 12: a failure survives a redirect or a pipe");
+    // `execute_redirect`, `execute_input_redirect` and `execute_pipe_chain`
+    // each ended with an unconditional `set_exit(0)`, stamped *after* the
+    // command had already reported its own status. So `cmd > f`, `cmd < f` and
+    // every pipeline exited 0 no matter what happened inside them, which made
+    // `&&`, `||`, `$?`, `if`, `while` and `set -e` blind to any failure that
+    // was not a bare unredirected command.
+    //
+    // Driven through `execute`, not `dispatch`: the discarding happened in the
+    // line-level plumbing that only `execute` reaches.
+    {
+        use crate::fs::vfs::Vfs;
+        fn run(cmd: &str) {
+            // The redirect and pipe paths run their own capture without saving
+            // this one, so nothing may be asserted about the bytes here; the
+            // capture is only to keep the commands' output off the serial log.
+            let prev = SHELL_OUTPUT.lock().take();
+            capture_start();
+            execute(cmd);
+            let _ = capture_stop();
+            *SHELL_OUTPUT.lock() = prev;
+        }
+        let src = "/tmp/kshell_status_selftest.txt";
+        let out = "/tmp/kshell_status_selftest.out";
+        Vfs::write_file(src, b"alpha\nbeta\n")?;
+        let _ = Vfs::remove(out);
+
+        // Baseline: the contract being propagated. `grep` reports "found
+        // nothing" as exit 1, which is the status the rest of the shell is
+        // most often asked about.
+        run("grep alpha /tmp/kshell_status_selftest.txt");
+        assert_eq!(last_exit(), 0, "a match is success");
+        run("grep zeta /tmp/kshell_status_selftest.txt");
+        assert_eq!(last_exit(), 1, "no match is failure");
+
+        // Through a pipeline: the status is the last stage's, as in POSIX.
+        run("cat /tmp/kshell_status_selftest.txt | grep alpha");
+        assert_eq!(last_exit(), 0, "a pipeline that ended well succeeded");
+        run("cat /tmp/kshell_status_selftest.txt | grep zeta");
+        assert_eq!(last_exit(), 1, "a pipeline reports its last stage");
+
+        // The other half of "last stage": an *earlier* stage's failure must not
+        // leak into the result. Only the `*_input` command variants take this
+        // path, and none of them stamped a baseline, so the status was whatever
+        // the previous stage had left in the global.
+        run("grep zeta /tmp/kshell_status_selftest.txt | head 5");
+        assert_eq!(
+            last_exit(),
+            0,
+            "the last stage succeeded, whatever an earlier one did"
+        );
+
+        // Through an output redirect.
+        run("grep alpha /tmp/kshell_status_selftest.txt > /tmp/kshell_status_selftest.out");
+        assert_eq!(last_exit(), 0);
+        assert_eq!(
+            Vfs::read_file(out)?.as_slice(),
+            &b"alpha\n"[..],
+            "the redirect must still have written the output"
+        );
+        run("grep zeta /tmp/kshell_status_selftest.txt > /tmp/kshell_status_selftest.out");
+        assert_eq!(
+            last_exit(),
+            1,
+            "a redirected command still reports its own status"
+        );
+
+        // Through an input redirect.
+        run("grep alpha < /tmp/kshell_status_selftest.txt");
+        assert_eq!(last_exit(), 0);
+        run("grep zeta < /tmp/kshell_status_selftest.txt");
+        assert_eq!(last_exit(), 1, "`cmd < file` still reports cmd's status");
+
+        // And the reason any of it matters: the chain operators read this
+        // value. A bare assignment is used as the probe because it is a
+        // complete command that leaves an observable trace without printing.
+        env_remove("KSHELL_STATUS_PROBE");
+        run(
+            "grep zeta /tmp/kshell_status_selftest.txt > /tmp/kshell_status_selftest.out \
+             || KSHELL_STATUS_PROBE=ran",
+        );
+        assert_eq!(
+            env_get("KSHELL_STATUS_PROBE").as_deref(),
+            Some("ran"),
+            "`||` must see a redirected command's failure"
+        );
+
+        env_remove("KSHELL_STATUS_PROBE");
+        run("cat /tmp/kshell_status_selftest.txt | grep alpha && KSHELL_STATUS_PROBE=ran");
+        assert_eq!(
+            env_get("KSHELL_STATUS_PROBE").as_deref(),
+            Some("ran"),
+            "`&&` must see a pipeline's success"
+        );
+
+        env_remove("KSHELL_STATUS_PROBE");
+        run("cat /tmp/kshell_status_selftest.txt | grep zeta && KSHELL_STATUS_PROBE=ran");
+        assert_eq!(
+            env_get("KSHELL_STATUS_PROBE"),
+            None,
+            "`&&` must not run after a failed pipeline"
+        );
+
+        env_remove("KSHELL_STATUS_PROBE");
         let _ = Vfs::remove(src);
         let _ = Vfs::remove(out);
     }
@@ -85342,6 +85472,12 @@ fn cmd_grep(args: &str) {
     } else if total_matches == 0 && !flags.count_only && !flags.files_only {
         crate::console_println!("grep: no matches for '{}'", pattern);
     }
+    // Same contract as the piped form above: no match is exit 1, whatever the
+    // output flags. The two halves must agree, or `grep pat f` and
+    // `cat f | grep pat` would answer `&&` differently.
+    if total_matches == 0 {
+        set_exit(1);
+    }
 }
 
 /// Search a single file for grep matches.
@@ -94822,6 +94958,13 @@ fn cmd_grep_input(args: &str, input: &str) {
         shell_println!("{}", match_count);
     } else if match_count == 0 {
         crate::console_println!("grep: no matches for '{}'", pattern);
+    }
+    // "Found nothing" is grep's documented exit 1, and it is the status the
+    // rest of the shell is most often asked about: `cmd | grep pat && ...`
+    // depends on it. `-c` counts rather than filters, but zero is still no
+    // match, so it reports the same way.
+    if match_count == 0 {
+        set_exit(1);
     }
 }
 

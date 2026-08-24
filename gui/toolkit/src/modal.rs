@@ -1356,7 +1356,15 @@ impl InputDialog {
         let display_text = if self.input_text.is_empty() {
             self.placeholder.clone()
         } else if self.password_mode {
-            "*".repeat(self.input_text.len())
+            // One mark per *caret stop*, not per byte. `len()` is the UTF-8
+            // byte count, so a password with any non-ASCII character in it drew
+            // more asterisks than it has characters — two for an accented
+            // letter, four for an emoji. That is wrong twice over: the row of
+            // marks no longer lines up with the positions the caret can occupy
+            // (`caret_offsets` walks characters), and the width of the row
+            // leaks how many bytes the secret encodes to, which for a password
+            // typed in a non-Latin script is most of what an observer wants.
+            "*".repeat(self.input_text.chars().count())
         } else {
             self.input_text.clone()
         };
@@ -3201,6 +3209,55 @@ mod tests {
 
         dialog.handle_event(&tab);
         assert_eq!(dialog.focused_element, InputFocus::TextField);
+    }
+
+    /// The mask has one asterisk per caret stop, whatever the secret encodes to.
+    ///
+    /// It used to be `"*".repeat(text.len())` — the UTF-8 *byte* count. An
+    /// accented letter therefore drew two marks, an emoji four, and a password
+    /// typed in Greek or Hebrew or Japanese drew a row two or three times its
+    /// own length. Two things break at once:
+    ///
+    /// - the marks stop lining up with the places the caret can be. The caret
+    ///   steps by character (`caret_offsets` walks `char_indices`), so in an
+    ///   eight-character password of eleven bytes the caret has nine stops
+    ///   spread across twelve asterisks and points between the wrong ones.
+    /// - the width of the row leaks the secret's *encoded* length rather than
+    ///   its typed length, which for a non-Latin password narrows it far more
+    ///   than a character count does. Masking exists to stop exactly that.
+    ///
+    /// **A failure here counting more marks than characters is that bug back.**
+    #[test]
+    fn the_mask_has_one_mark_per_character_not_per_byte() {
+        // 8 characters; 16 bytes — the old code drew exactly twice as many
+        // marks as the user typed. ASCII, Latin-1, Greek, Hebrew, CJK, emoji:
+        // one, two, two, two, three and four bytes respectively.
+        let secret = "ab\u{00E9}\u{03B1}\u{05D0}\u{4E2D}\u{1F600}c";
+        assert_eq!(secret.chars().count(), 8);
+        assert_eq!(secret.len(), 16);
+
+        let mut dialog = InputDialog::prompt("Test", "Password:", "")
+            .with_password_mode(true)
+            .with_initial_text(secret);
+        dialog.show();
+        dialog.overlay.opacity = 1.0;
+
+        let mut tree = RenderTree::new();
+        dialog.render(800.0, 600.0, &mut tree);
+        let masks: Vec<&String> = tree
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } if text.starts_with('*') => Some(text),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(masks.len(), 1, "the field is drawn once");
+        assert_eq!(masks[0].len(), 8, "one mark per character, not per byte");
+        assert!(
+            !masks[0].contains(|c| c != '*'),
+            "nothing of the secret itself is drawn"
+        );
     }
 
     #[test]

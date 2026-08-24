@@ -75,7 +75,8 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
-BIN_DIR = Path(__file__).resolve().parent.parent / "userspace" / "coreutils" / "src" / "bin"
+SRC_DIR = Path(__file__).resolve().parent.parent / "userspace" / "coreutils" / "src"
+BIN_DIR = SRC_DIR / "bin"
 
 # Bins whose name is ours rather than GNU's, or which GNU has no equivalent of.
 # Comparing these against whatever the host happens to have under that name
@@ -98,6 +99,15 @@ ALIAS_RE = re.compile(
 )
 ENTRY_RE = re.compile(r'\(\s*"([^"]*)"\s*,')
 PAIR_RE = re.compile(r'\(\s*"([^"]*)"\s*,\s*"([^"]*)"\s*\)')
+
+# A bin whose whole `main` is `coreutils::digest::main(&MD5)` keeps its option
+# table in that module, not in itself. Upstream has the same arrangement —
+# `src/digest.c` is one file compiled eight times — and it is the reason this
+# has to be followed rather than skipped: without it, `md5sum` and `sha256sum`
+# were both reported as "no LONG_OPTIONS table … not yet converted?", which is
+# a note the reader is trained to ignore, and the sweep silently checked
+# nothing for two shipped programs that do have one.
+DELEGATE_RE = re.compile(r"coreutils::([a-z_][a-z0-9_]*)::main\s*\(")
 
 
 @dataclass
@@ -132,6 +142,18 @@ def parse_table(path: Path) -> Table | None:
     text = path.read_text(encoding="utf-8", errors="replace")
     m = TABLE_RE.search(text)
     if not m:
+        d = DELEGATE_RE.search(text)
+        if d and path.is_relative_to(BIN_DIR):
+            shared = SRC_DIR / f"{d.group(1)}.rs"
+            if shared.is_file():
+                # Named for the *bin*, not the module: two programs share this
+                # table, and each is compared against its own GNU binary. That
+                # is not redundant — it is the only thing that would catch a
+                # table right for one algorithm and wrong for the other.
+                t = parse_table(shared)
+                if t:
+                    t.util = path.stem
+                return t
         return None
     body = m.group(1)
     # Strip line comments so a name quoted inside prose is not read as an entry.

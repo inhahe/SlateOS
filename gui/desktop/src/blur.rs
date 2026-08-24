@@ -17,28 +17,106 @@
 //! # Usage
 //!
 //! ```ignore
+//! let p = Palette::from_settings(&settings);
 //! let mut mgr = BlurManager::new();
-//! mgr.register(0, BlurRegion::new(0.0, 920.0, 1920.0, 48.0, BlurEffect::taskbar()));
-//! mgr.register(1, BlurRegion::new(100.0, 100.0, 800.0, 30.0, BlurEffect::title_bar()));
+//! mgr.register(0, BlurRegion::new(0.0, 920.0, 1920.0, 48.0, BlurEffect::taskbar(&p)));
+//! mgr.register(1, BlurRegion::new(100.0, 100.0, 800.0, 30.0, BlurEffect::title_bar(&p)));
 //!
 //! // each frame:
 //! mgr.update_all(&mut framebuffer, 1920, 1080);
 //! ```
 
+use appearance::Palette;
 use guitk::color::Color;
 
 use std::collections::HashMap;
 
 // ============================================================================
-// Catppuccin Mocha palette (blur-specific tints)
+// Tint weights — how much palette colour each preset lays over the blur
 // ============================================================================
 
-/// Catppuccin Mocha: base (used as heavy tint base for taskbar)
-const MOCHA_BASE: Color = Color::from_hex(0x1E1E2E);
-/// Catppuccin Mocha: mantle (darker tint for title bars)
-const MOCHA_MANTLE: Color = Color::from_hex(0x181825);
-/// Catppuccin Mocha: surface0 (mid-tone for menus)
-const MOCHA_SURFACE0: Color = Color::from_hex(0x313244);
+// The three colours these presets used to hold — Mocha `base`, `mantle` and
+// `surface0` — are now read from the palette the caller passes in. The roles
+// carry over unchanged, and their *relationships* are what the presets are
+// actually made of rather than the particular hex values: the taskbar is the
+// window's backdrop (`base`), a title bar sits behind its window and so is one
+// step deeper (`mantle`), and a menu floats above everything and so is one step
+// raised (`surface0`). Those three relationships hold in Latte as well, where
+// `surface0` is *darker* than `base` rather than lighter — which is the reason
+// to name roles rather than lightnesses.
+//
+// The alphas below are the second half of a preset and are deliberately not one
+// value: a taskbar is permanent chrome and can afford a heavy tint, a menu is
+// transient and wants to show more of what it covers. They are written for
+// `TransparencyLevel::Full`, the most see-through setting the shell offers, and
+// [`scaled_tint`] moves them toward opaque as the user asks for less
+// transparency. Before that scaling existed these were absolute, which meant
+// setting transparency to *Off* left the taskbar 37% see-through — the setting
+// was simply not consulted by the one subsystem whose entire job is
+// transparency.
+
+/// Permanent chrome, and the heaviest tint: the taskbar is always present, so
+/// the desktop behind it should read as texture rather than as content.
+const TINT_TASKBAR: u8 = 160;
+/// A title bar is chrome too, but it sits against its own window rather than
+/// against the wallpaper, so it needs less help separating from what it covers.
+const TINT_TITLE_BAR: u8 = 120;
+/// The lightest tint. A menu is transient and covers content the user was just
+/// looking at; hiding that content is what a menu is trying to avoid.
+const TINT_MENU: u8 = 100;
+/// A notification is transient like a menu but arrives unrequested, so it leans
+/// toward legibility rather than toward showing what it covers.
+const TINT_NOTIFICATION: u8 = 140;
+/// The general-purpose weight, for a surface with no preset of its own.
+const TINT_STANDARD: u8 = 140;
+
+/// The `panel_alpha` of `TransparencyLevel::Full`, the setting the tint weights
+/// above are written for.
+///
+/// Not read from [`appearance::TransparencyLevel`] at runtime because the
+/// weights are a *design* keyed to that anchor: if the enum's value moved, the
+/// right response is to re-choose the weights, not to have them silently
+/// re-scale. The test `the_tint_weights_are_written_for_the_full_setting` pins
+/// the two together so the divergence is a failure rather than a drift.
+const TINT_ANCHOR: u16 = 160;
+
+/// Move a preset's tint weight toward opaque as the user asks for less
+/// transparency.
+///
+/// `panel_alpha` runs from 160 (`Full`) to 255 (`Off`). The weights above are
+/// written at the `Full` end, and the `Off` end is not a matter of taste: a
+/// user who switches transparency off and can still see their wallpaper through
+/// the taskbar has been overruled by the shell. So the two ends are fixed —
+/// preset weight at `Full`, fully opaque at `Off` — and the settings between
+/// them interpolate linearly.
+///
+/// The preset hierarchy survives the scaling at every setting except `Off`,
+/// where by definition it collapses: opaque is opaque, and a "lighter tint"
+/// that still showed through would mean the setting had not been honoured.
+fn scaled_tint(preset: u8, panel_alpha: u8) -> u8 {
+    // A `Palette`'s `panel_alpha` is a public field, so a caller can put a
+    // value below the anchor there — more transparency than the shell's own
+    // most-transparent setting offers. The clamp says what that means: the
+    // weights are already written at maximum transparency, so there is nothing
+    // below the anchor to interpolate toward. (The `saturating_sub` below would
+    // also stop it underflowing, but that is a coincidence of the arithmetic
+    // rather than the intent, and a reader should not have to derive the intent
+    // from an overflow rule.)
+    let pa = u16::from(panel_alpha).max(TINT_ANCHOR);
+    let span = 255_u16.saturating_sub(TINT_ANCHOR);
+    let headroom = 255_u16.saturating_sub(u16::from(preset));
+    let travelled = pa.saturating_sub(TINT_ANCHOR);
+    let lifted = headroom
+        .saturating_mul(travelled)
+        .checked_div(span)
+        .unwrap_or(0);
+    u8::try_from(u16::from(preset).saturating_add(lifted).min(255)).unwrap_or(255)
+}
+
+/// A palette role at a preset's tint weight, scaled by the user's setting.
+fn tint(role: Color, preset: u8, p: &Palette) -> Color {
+    Color::rgba(role.r, role.g, role.b, scaled_tint(preset, p.panel_alpha))
+}
 
 // ============================================================================
 // BlurEffect — configurable visual parameters
@@ -74,70 +152,57 @@ impl BlurEffect {
         }
     }
 
-    /// Heavy blur with dark tint — Windows 11 taskbar style.
-    pub fn taskbar() -> Self {
-        Self::new(
-            24.0,
-            0.65,
-            Color::rgba(MOCHA_BASE.r, MOCHA_BASE.g, MOCHA_BASE.b, 160),
-            1.3,
-            0.03,
-        )
+    /// Heavy blur with a `base` tint — Windows 11 taskbar style.
+    pub fn taskbar(p: &Palette) -> Self {
+        Self::new(24.0, 0.65, tint(p.base, TINT_TASKBAR, p), 1.3, 0.03)
     }
 
-    /// Medium blur with lighter tint — window title bars.
-    pub fn title_bar() -> Self {
-        Self::new(
-            16.0,
-            0.75,
-            Color::rgba(MOCHA_MANTLE.r, MOCHA_MANTLE.g, MOCHA_MANTLE.b, 120),
-            1.1,
-            0.02,
-        )
+    /// Medium blur with a `mantle` tint — window title bars.
+    pub fn title_bar(p: &Palette) -> Self {
+        Self::new(16.0, 0.75, tint(p.mantle, TINT_TITLE_BAR, p), 1.1, 0.02)
     }
 
-    /// Light blur for dropdown/context menus.
-    pub fn menu() -> Self {
-        Self::new(
-            12.0,
-            0.80,
-            Color::rgba(MOCHA_SURFACE0.r, MOCHA_SURFACE0.g, MOCHA_SURFACE0.b, 100),
-            1.0,
-            0.01,
-        )
+    /// Light blur with a `surface0` tint — dropdown and context menus.
+    pub fn menu(p: &Palette) -> Self {
+        Self::new(12.0, 0.80, tint(p.surface0, TINT_MENU, p), 1.0, 0.01)
     }
 
-    /// Medium blur for notification panels.
-    pub fn notification() -> Self {
-        Self::new(
-            18.0,
-            0.70,
-            Color::rgba(MOCHA_BASE.r, MOCHA_BASE.g, MOCHA_BASE.b, 140),
-            1.2,
-            0.02,
-        )
+    /// Medium blur with a `base` tint — notification panels.
+    pub fn notification(p: &Palette) -> Self {
+        Self::new(18.0, 0.70, tint(p.base, TINT_NOTIFICATION, p), 1.2, 0.02)
     }
 
-    /// Fully opaque, no blur (accessibility/performance fallback).
-    pub fn none() -> Self {
+    /// The general-purpose effect, for a surface with no preset of its own.
+    ///
+    /// This replaces what used to be `Default::default()`. `Default` takes no
+    /// arguments, so it structurally *cannot* see a palette, and the only thing
+    /// it could return was a hardcoded Catppuccin Mocha tint — which is the
+    /// entire defect this conversion exists to remove, in the one place where
+    /// the type system guaranteed it could never be fixed in situ. Removing the
+    /// impl turns a silent wrong colour into a compile error at every call
+    /// site, which is the only way a trait with no room for a parameter can be
+    /// made safe.
+    pub fn standard(p: &Palette) -> Self {
+        Self::new(20.0, 0.70, tint(p.base, TINT_STANDARD, p), 1.2, 0.02)
+    }
+
+    /// Fully opaque, no blur — the accessibility and performance fallback.
+    ///
+    /// The tint is opaque `base` at every transparency setting, and deliberately
+    /// does not go through [`scaled_tint`]: this preset means "draw no blur at
+    /// all", so a user who reached for it because motion or translucency is a
+    /// problem for them must not have translucency handed back by the
+    /// transparency slider. It is the one preset whose alpha is a fact rather
+    /// than a preference — and the one where a stale Mocha value would have
+    /// been most visible, since an opaque wrong-mode tint is a solid dark slab
+    /// over a light desktop rather than a subtle mis-tinting.
+    pub fn none(p: &Palette) -> Self {
         Self::new(
             0.0,
             1.0,
-            Color::rgba(MOCHA_BASE.r, MOCHA_BASE.g, MOCHA_BASE.b, 255),
+            Color::rgba(p.base.r, p.base.g, p.base.b, 255),
             1.0,
             0.0,
-        )
-    }
-}
-
-impl Default for BlurEffect {
-    fn default() -> Self {
-        Self::new(
-            20.0,
-            0.70,
-            Color::rgba(MOCHA_BASE.r, MOCHA_BASE.g, MOCHA_BASE.b, 140),
-            1.2,
-            0.02,
         )
     }
 }
@@ -1004,6 +1069,64 @@ mod tests {
     #![allow(clippy::float_cmp)]
 
     use super::*;
+    use crate::palette_check::assert_colours_from;
+
+    // ======================================================================
+    // Helper: palettes
+    // ======================================================================
+
+    /// The dark palette, at the transparency the tint weights are written for.
+    ///
+    /// `Palette::for_mode` is opaque (`panel_alpha == 255`), which is the *Off*
+    /// end of the scale — so a fixture built from it alone would test every
+    /// preset at the one setting where they all collapse to opaque and the
+    /// hierarchy between them is gone. Every test that cares about a tint's
+    /// value therefore uses this fixture, which pins the setting the weights
+    /// were chosen at.
+    fn dark() -> Palette {
+        let mut p = Palette::for_mode(false);
+        p.panel_alpha = appearance::TransparencyLevel::Full.panel_alpha();
+        p
+    }
+
+    /// The light palette at the same transparency setting.
+    fn light() -> Palette {
+        let mut p = Palette::for_mode(true);
+        p.panel_alpha = appearance::TransparencyLevel::Full.panel_alpha();
+        p
+    }
+
+    /// Every tint this module can produce, in a fixed order, each named.
+    ///
+    /// Ordered rather than a set: a set cannot see two presets exchanged, and
+    /// a taskbar wearing the menu's tint is a real defect that leaves every
+    /// value in the table still present.
+    fn tints_of(p: &Palette) -> Vec<(&'static str, Color)> {
+        vec![
+            ("the taskbar's tint", BlurEffect::taskbar(p).tint),
+            ("a title bar's tint", BlurEffect::title_bar(p).tint),
+            ("a menu's tint", BlurEffect::menu(p).tint),
+            ("a notification's tint", BlurEffect::notification(p).tint),
+            ("the standard tint", BlurEffect::standard(p).tint),
+            ("the no-blur fallback's tint", BlurEffect::none(p).tint),
+        ]
+    }
+
+    /// The role each preset above claims, in the same order.
+    ///
+    /// Written out separately from `tints_of` on purpose: a table derived from
+    /// the code under test is an echo of it, and would agree with any value the
+    /// constructors happened to produce.
+    fn claimed_roles(p: &Palette) -> Vec<(&'static str, Color)> {
+        vec![
+            ("the taskbar's tint", p.base),
+            ("a title bar's tint", p.mantle),
+            ("a menu's tint", p.surface0),
+            ("a notification's tint", p.base),
+            ("the standard tint", p.base),
+            ("the no-blur fallback's tint", p.base),
+        ]
+    }
 
     // ======================================================================
     // Helper: create a solid-colour framebuffer
@@ -1068,7 +1191,7 @@ mod tests {
 
     #[test]
     fn test_preset_taskbar() {
-        let e = BlurEffect::taskbar();
+        let e = BlurEffect::taskbar(&dark());
         assert!(e.radius > 20.0);
         assert!(e.opacity < 1.0);
         assert!(e.saturation > 1.0);
@@ -1077,28 +1200,28 @@ mod tests {
 
     #[test]
     fn test_preset_title_bar() {
-        let e = BlurEffect::title_bar();
+        let e = BlurEffect::title_bar(&dark());
         assert!(e.radius > 10.0 && e.radius < 30.0);
         assert!(e.opacity > 0.5 && e.opacity < 1.0);
     }
 
     #[test]
     fn test_preset_menu() {
-        let e = BlurEffect::menu();
+        let e = BlurEffect::menu(&dark());
         assert!(e.radius > 5.0 && e.radius < 20.0);
         assert!(e.opacity >= 0.7);
     }
 
     #[test]
     fn test_preset_notification() {
-        let e = BlurEffect::notification();
+        let e = BlurEffect::notification(&dark());
         assert!(e.radius >= 15.0);
         assert!(e.noise_amount > 0.0);
     }
 
     #[test]
     fn test_preset_none() {
-        let e = BlurEffect::none();
+        let e = BlurEffect::none(&dark());
         assert_eq!(e.radius, 0.0);
         assert_eq!(e.opacity, 1.0);
         assert_eq!(e.noise_amount, 0.0);
@@ -1106,11 +1229,235 @@ mod tests {
 
     #[test]
     fn test_default_effect() {
-        let e = BlurEffect::default();
+        let e = BlurEffect::standard(&dark());
         assert_eq!(e.radius, 20.0);
         assert_eq!(e.opacity, 0.70);
         assert_eq!(e.saturation, 1.2);
         assert_eq!(e.noise_amount, 0.02);
+    }
+
+    // ======================================================================
+    // Preset tints — the field the six tests above never look at
+    // ======================================================================
+
+    /// Every preset draws the role it claims.
+    ///
+    /// The six tests above assert radius, opacity, saturation and noise, and
+    /// between them do not read `tint` once — which is how three Catppuccin
+    /// Mocha constants survived in a module with full test coverage of every
+    /// other field of the same struct. Colour is compared on RGB only: the
+    /// alpha is the tint *weight*, which the scaling test below owns.
+    #[test]
+    fn every_preset_tints_with_the_role_it_claims() {
+        for p in [dark(), light()] {
+            let drawn = tints_of(&p);
+            let claimed = claimed_roles(&p);
+            assert_eq!(
+                drawn.len(),
+                claimed.len(),
+                "the preset list and the role list have drifted apart"
+            );
+            for ((name, got), (_, want)) in drawn.iter().zip(claimed.iter()) {
+                assert_eq!(
+                    (got.r, got.g, got.b),
+                    (want.r, want.g, want.b),
+                    "{name} is #{:02X}{:02X}{:02X} in {} mode, not the role it claims",
+                    got.r,
+                    got.g,
+                    got.b,
+                    if p.light { "light" } else { "dark" }
+                );
+            }
+        }
+    }
+
+    /// Every tint comes from the palette it was handed.
+    ///
+    /// The light half is the one that matters: a Mocha constant left behind by
+    /// the conversion is a dark value, and the light palette does not contain
+    /// it. Nothing here is derived, so `derived` is empty — a blur tint is a
+    /// role at an alpha and never a computed colour.
+    #[test]
+    fn every_tint_comes_from_its_palette() {
+        for p in [dark(), light()] {
+            assert_colours_from(&p, &tints_of(&p), &[], "blur presets");
+        }
+    }
+
+    /// Every tint moves when the mode does.
+    ///
+    /// Pinned against the *table's* length as well as against the other mode:
+    /// the zip below stops at the shorter side, so a preset that stopped
+    /// existing would shrink both lists equally and fall off the end without
+    /// ever being asked whether it moves.
+    #[test]
+    fn every_tint_moves_with_the_mode() {
+        let in_dark = tints_of(&dark());
+        let in_light = tints_of(&light());
+        assert_eq!(in_dark.len(), in_light.len());
+        assert_eq!(
+            in_dark.len(),
+            claimed_roles(&dark()).len(),
+            "a preset stopped being listed"
+        );
+        for ((name, d), (_, l)) in in_dark.iter().zip(in_light.iter()) {
+            assert_ne!(
+                (d.r, d.g, d.b),
+                (l.r, l.g, l.b),
+                "{name} is the same colour in both modes, so it is not themed"
+            );
+        }
+    }
+
+    /// No blur tint is the accent.
+    ///
+    /// A blur tint is the colour of a *surface*, and the accent means "you
+    /// chose this" — a taskbar is not a choice. This is worth asserting rather
+    /// than assuming because the stock accent is `blue`, so an accent-tinted
+    /// taskbar would look merely blue-ish on a default install and would only
+    /// reveal itself on a machine whose owner had picked a different accent.
+    #[test]
+    fn no_blur_tint_wears_the_accent() {
+        for is_light in [false, true] {
+            let mut p = if is_light { light() } else { dark() };
+            p.accent = Color::from_hex(0xFF00FF);
+            for (name, c) in tints_of(&p) {
+                assert_ne!(
+                    (c.r, c.g, c.b),
+                    (p.accent.r, p.accent.g, p.accent.b),
+                    "{name} is the accent"
+                );
+            }
+        }
+    }
+
+    /// The tint weights are written for `TransparencyLevel::Full`.
+    ///
+    /// [`TINT_ANCHOR`] is a copy of that level's `panel_alpha`, held separately
+    /// so the weights do not silently re-scale if the level's value moves. A
+    /// copy that nothing compares is a copy that drifts, so this is the
+    /// comparison.
+    #[test]
+    fn the_tint_weights_are_written_for_the_full_setting() {
+        assert_eq!(
+            TINT_ANCHOR,
+            u16::from(appearance::TransparencyLevel::Full.panel_alpha()),
+            "the anchor the tint weights were chosen at no longer matches the \
+             Full transparency level — re-choose the weights rather than \
+             letting them re-scale"
+        );
+    }
+
+    /// Turning transparency off makes every blurred surface opaque.
+    ///
+    /// This is the bug the scaling exists to fix: the weights used to be
+    /// absolute, so a user who set transparency to *Off* still had a taskbar
+    /// they could see the wallpaper through. `Off` is the one end of the scale
+    /// that is not a matter of taste — the setting's own name is the
+    /// specification.
+    #[test]
+    fn transparency_off_leaves_no_blurred_surface_see_through() {
+        for is_light in [false, true] {
+            let mut p = Palette::for_mode(is_light);
+            p.panel_alpha = appearance::TransparencyLevel::Off.panel_alpha();
+            for (name, c) in tints_of(&p) {
+                assert_eq!(
+                    c.a, 255,
+                    "{name} is still {} of 255 opaque with transparency off",
+                    c.a
+                );
+            }
+        }
+    }
+
+    /// At full transparency the presets keep the hierarchy they were designed
+    /// with: menu lighter than title bar, lighter than notification, lighter
+    /// than taskbar, and the no-blur fallback opaque.
+    ///
+    /// A step function collapses distinctions (lesson 23), and a scaling that
+    /// rounded four weights onto the same value would still satisfy the two
+    /// end-point tests above while quietly making every surface identical.
+    ///
+    /// The expected weights are written out here rather than read from the
+    /// `TINT_*` constants. A table copied out of the code under test agrees
+    /// with whatever that code does, which is the one thing a test must not do
+    /// — and the exact table catches what a pure ordering assertion cannot:
+    /// `standard`'s weight appears in no inequality, because it sits between no
+    /// two others, so an ordering check would let it take any value at all.
+    #[test]
+    fn the_tint_weights_at_full_transparency_are_the_ones_they_were_designed_as() {
+        let p = dark();
+        let want: [(&str, u8); 6] = [
+            ("a menu", 100),
+            ("a title bar", 120),
+            ("a notification", 140),
+            ("the standard surface", 140),
+            ("the taskbar", 160),
+            ("the no-blur fallback", 255),
+        ];
+        let got = [
+            ("a menu", BlurEffect::menu(&p).tint.a),
+            ("a title bar", BlurEffect::title_bar(&p).tint.a),
+            ("a notification", BlurEffect::notification(&p).tint.a),
+            ("the standard surface", BlurEffect::standard(&p).tint.a),
+            ("the taskbar", BlurEffect::taskbar(&p).tint.a),
+            ("the no-blur fallback", BlurEffect::none(&p).tint.a),
+        ];
+        for ((name, w), (_, g)) in want.iter().zip(got.iter()) {
+            assert_eq!(
+                g, w,
+                "{name} tints at {g} of 255 at full transparency, not the {w} \
+                 it was designed as"
+            );
+        }
+
+        // Redundant with the table above, and kept for the same reason the
+        // accent test is kept: it states the *rule* the numbers exist to
+        // satisfy, so a future edit that changes all six numbers together
+        // still has to keep chrome heavier than transient surfaces.
+        let (menu, title) = (got[0].1, got[1].1);
+        let (note, bar) = (got[2].1, got[4].1);
+        assert!(
+            menu < title && title < note && note < bar,
+            "the tint hierarchy collapsed: menu {menu}, title {title}, \
+             notification {note}, taskbar {bar}"
+        );
+    }
+
+    /// The scaling is monotone: asking for less transparency never yields a
+    /// more see-through surface.
+    ///
+    /// Checked across the whole `u8` range rather than at the four enum values,
+    /// because `panel_alpha` is a public field and an intermediate value is
+    /// exactly where an off-by-one in the interpolation would hide.
+    #[test]
+    fn less_transparency_is_never_more_see_through() {
+        for preset in [TINT_MENU, TINT_TITLE_BAR, TINT_NOTIFICATION, TINT_TASKBAR] {
+            let mut prev = 0_u8;
+            for pa in 0_u16..=255 {
+                let a = scaled_tint(preset, u8::try_from(pa).unwrap_or(255));
+                assert!(
+                    a >= prev,
+                    "tint {preset} went from {prev} to {a} as panel_alpha \
+                     reached {pa}, which is backwards"
+                );
+                prev = a;
+            }
+            assert_eq!(scaled_tint(preset, 255), 255);
+        }
+    }
+
+    /// A palette whose `panel_alpha` is below the anchor is clamped, not
+    /// wrapped.
+    ///
+    /// `panel_alpha` is a public field, so nothing stops a caller writing a
+    /// value the enum never produces. The interpolation subtracts the anchor
+    /// from it, and an unclamped subtraction there would underflow.
+    #[test]
+    fn a_panel_alpha_below_the_anchor_is_clamped() {
+        for pa in [0_u8, 1, 159] {
+            assert_eq!(scaled_tint(TINT_TASKBAR, pa), TINT_TASKBAR);
+        }
     }
 
     // ======================================================================
@@ -1211,7 +1558,8 @@ mod tests {
         let original = gradient_buffer(w, h);
         let mut buf = original.clone();
 
-        let mut region = BlurRegion::new(0.0, 0.0, w as f32, h as f32, BlurEffect::default());
+        let mut region =
+            BlurRegion::new(0.0, 0.0, w as f32, h as f32, BlurEffect::standard(&dark()));
         region.set_enabled(false);
         BlurRenderer::blur_region(&mut buf, w, h, &region);
 
@@ -1254,7 +1602,7 @@ mod tests {
         // Put a different color as the "original" that we expect corners to keep.
         // We fill the buffer with red, then blur a region that has rounded
         // corners. The corner pixels should remain red (unblurred).
-        let region = BlurRegion::new(0.0, 0.0, w as f32, h as f32, BlurEffect::default())
+        let region = BlurRegion::new(0.0, 0.0, w as f32, h as f32, BlurEffect::standard(&dark()))
             .with_corner_radius(10.0);
         BlurRenderer::blur_region(&mut buf, w, h, &region);
 
@@ -1313,7 +1661,7 @@ mod tests {
 
     #[test]
     fn test_region_pixel_bounds_clamp() {
-        let region = BlurRegion::new(-10.0, -10.0, 100.0, 100.0, BlurEffect::default());
+        let region = BlurRegion::new(-10.0, -10.0, 100.0, 100.0, BlurEffect::standard(&dark()));
         let (x, y, w, h) = region.pixel_bounds(64, 64);
         assert_eq!(x, 0);
         assert_eq!(y, 0);
@@ -1323,7 +1671,7 @@ mod tests {
 
     #[test]
     fn test_region_pixel_bounds_fully_outside() {
-        let region = BlurRegion::new(200.0, 200.0, 50.0, 50.0, BlurEffect::default());
+        let region = BlurRegion::new(200.0, 200.0, 50.0, 50.0, BlurEffect::standard(&dark()));
         let (_, _, w, h) = region.pixel_bounds(100, 100);
         assert_eq!(w, 0);
         assert_eq!(h, 0);
@@ -1341,14 +1689,14 @@ mod tests {
 
         mgr.register(
             1,
-            BlurRegion::new(0.0, 0.0, 100.0, 48.0, BlurEffect::taskbar()),
+            BlurRegion::new(0.0, 0.0, 100.0, 48.0, BlurEffect::taskbar(&dark())),
         );
         assert_eq!(mgr.region_count(), 1);
         assert!(!mgr.is_empty());
 
         mgr.register(
             2,
-            BlurRegion::new(0.0, 0.0, 800.0, 30.0, BlurEffect::title_bar()),
+            BlurRegion::new(0.0, 0.0, 800.0, 30.0, BlurEffect::title_bar(&dark())),
         );
         assert_eq!(mgr.region_count(), 2);
 
@@ -1363,11 +1711,11 @@ mod tests {
         let mut mgr = BlurManager::new();
         mgr.register(
             1,
-            BlurRegion::new(0.0, 0.0, 100.0, 48.0, BlurEffect::taskbar()),
+            BlurRegion::new(0.0, 0.0, 100.0, 48.0, BlurEffect::taskbar(&dark())),
         );
         mgr.register(
             1,
-            BlurRegion::new(10.0, 10.0, 200.0, 60.0, BlurEffect::menu()),
+            BlurRegion::new(10.0, 10.0, 200.0, 60.0, BlurEffect::menu(&dark())),
         );
 
         assert_eq!(mgr.region_count(), 1);
@@ -1381,7 +1729,7 @@ mod tests {
         let mut mgr = BlurManager::new();
         mgr.register(
             1,
-            BlurRegion::new(0.0, 0.0, 100.0, 48.0, BlurEffect::taskbar()),
+            BlurRegion::new(0.0, 0.0, 100.0, 48.0, BlurEffect::taskbar(&dark())),
         );
         // Clear dirty flag manually.
         mgr.dirty.insert(1, false);
@@ -1400,7 +1748,10 @@ mod tests {
     #[test]
     fn test_manager_invalidate_single() {
         let mut mgr = BlurManager::new();
-        mgr.register(1, BlurRegion::new(0.0, 0.0, 10.0, 10.0, BlurEffect::none()));
+        mgr.register(
+            1,
+            BlurRegion::new(0.0, 0.0, 10.0, 10.0, BlurEffect::none(&dark())),
+        );
         // Simulate cached state.
         mgr.dirty.insert(1, false);
         mgr.cache.insert(1, PixelRect::new(10, 10));
@@ -1412,8 +1763,14 @@ mod tests {
     #[test]
     fn test_manager_invalidate_all() {
         let mut mgr = BlurManager::new();
-        mgr.register(1, BlurRegion::new(0.0, 0.0, 10.0, 10.0, BlurEffect::none()));
-        mgr.register(2, BlurRegion::new(0.0, 0.0, 10.0, 10.0, BlurEffect::none()));
+        mgr.register(
+            1,
+            BlurRegion::new(0.0, 0.0, 10.0, 10.0, BlurEffect::none(&dark())),
+        );
+        mgr.register(
+            2,
+            BlurRegion::new(0.0, 0.0, 10.0, 10.0, BlurEffect::none(&dark())),
+        );
         mgr.dirty.insert(1, false);
         mgr.dirty.insert(2, false);
 
@@ -1434,7 +1791,7 @@ mod tests {
         let mut buf = original.clone();
         mgr.register(
             1,
-            BlurRegion::new(0.0, 0.0, w as f32, h as f32, BlurEffect::taskbar()),
+            BlurRegion::new(0.0, 0.0, w as f32, h as f32, BlurEffect::taskbar(&dark())),
         );
         mgr.update_all(&mut buf, w, h);
         assert_eq!(buf, original);
@@ -1449,7 +1806,7 @@ mod tests {
         let mut mgr = BlurManager::new();
         mgr.register(
             0,
-            BlurRegion::new(0.0, 0.0, w as f32, h as f32, BlurEffect::taskbar()),
+            BlurRegion::new(0.0, 0.0, w as f32, h as f32, BlurEffect::taskbar(&dark())),
         );
         mgr.update_all(&mut buf, w, h);
 
@@ -1465,7 +1822,7 @@ mod tests {
         let mut mgr = BlurManager::new();
         mgr.register(
             1,
-            BlurRegion::new(0.0, 0.0, w as f32, h as f32, BlurEffect::taskbar()),
+            BlurRegion::new(0.0, 0.0, w as f32, h as f32, BlurEffect::taskbar(&dark())),
         );
 
         // First update computes blur.
@@ -1492,7 +1849,7 @@ mod tests {
         let mut buf = solid_buffer(w, h, 0xFF_AA_BB_CC);
         let original = buf.clone();
 
-        let region = BlurRegion::new(5.0, 5.0, 0.0, 0.0, BlurEffect::default());
+        let region = BlurRegion::new(5.0, 5.0, 0.0, 0.0, BlurEffect::standard(&dark()));
         BlurRenderer::blur_region(&mut buf, w, h, &region);
 
         assert_eq!(buf, original, "Zero-size region should be no-op");
@@ -1501,7 +1858,7 @@ mod tests {
     #[test]
     fn test_blur_region_negative_dimensions_clamped() {
         // Negative width/height should be clamped to zero in constructor.
-        let region = BlurRegion::new(0.0, 0.0, -10.0, -5.0, BlurEffect::default());
+        let region = BlurRegion::new(0.0, 0.0, -10.0, -5.0, BlurEffect::standard(&dark()));
         assert_eq!(region.width, 0.0);
         assert_eq!(region.height, 0.0);
     }

@@ -69841,6 +69841,38 @@ get chunk-boundary handling wrong, so converting to a streaming one adds a
 whole failure class that the RFC 1321 vectors — every one of which is a single
 `update` — cannot see.
 
+### The two gates that stopped seeing these programs when the code moved
+
+Both were caught by the pre-push hook on the first attempt to push this, and
+both are the same shape: a check that reads *bins* went blind the moment the
+thing it reads moved into a module two bins share. Neither was a false alarm to
+be silenced.
+
+`scripts/getopt-ambiguity-check.py` scanned `src/bin/**.rs` for a
+`LONG_OPTIONS` table and, finding none in either bin, printed `md5sum has no
+LONG_OPTIONS table … (not yet converted to coreutils::getopt?)` and reported
+`0 table(s) checked`. That note is *reassuring* and was wrong: the table exists,
+it had simply moved to `src/digest.rs`. The fix follows the delegation — a bin
+whose `main` is `coreutils::<module>::main(…)` is read from `src/<module>.rs`
+instead — and keeps the finding named for the **bin**, so the shared table is
+compared against `md5sum`'s GNU binary *and* `sha256sum`'s. That is not
+redundant: it is the only thing that would catch a table right for one
+algorithm and wrong for the other. Both now check clean against real GNU:
+`2 table(s) checked; 0 disagreement(s)`.
+
+`scripts/host-errmsg.py` flagged `eprintln!("{}: {e}", algo.program)`. Its
+exempt shape is a literal that is exactly `<name>: {e}` — the "the error is the
+whole message" print, which in every bin carries a `getopt::Error` and never an
+`io::Error`. Ours is semantically that, but with the name as *data*, so the
+literal is `"{}: {e}"` and the gate cannot tell it from a real site printing
+the host's error text with one word of context. Widening the exemption to
+`{something}: {e}` would have admitted exactly the sites the gate exists to
+find, so the literal was removed instead: `getopt::Program::report(&e)` prints
+`name: <message>`, which is byte-identical and is now the one named place for
+that operation. Adding a line to the baseline or to `IGNORE` would have been
+the cheaper answer and the wrong one — the gate's complaint was about a shape
+it genuinely cannot check, not about this file.
+
 ### Where it lives
 
 `userspace/coreutils/src/digest.rs` is the sixteenth shared module, and it is

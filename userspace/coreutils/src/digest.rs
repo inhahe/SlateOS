@@ -686,7 +686,7 @@ pub fn main(algo: &Algorithm) -> ExitCode {
     let request = match parse_args(program, &args) {
         Ok(r) => r,
         Err(e) => {
-            eprintln!("{}: {e}", algo.program);
+            program.report(&e);
             return ExitCode::from(u8::try_from(e.status).unwrap_or(1));
         }
     };
@@ -703,7 +703,7 @@ pub fn main(algo: &Algorithm) -> ExitCode {
     };
 
     if let Err(e) = validate(program, &set) {
-        eprintln!("{}: {e}", algo.program);
+        program.report(&e);
         return ExitCode::from(u8::try_from(e.status).unwrap_or(1));
     }
 

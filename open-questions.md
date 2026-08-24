@@ -1363,6 +1363,108 @@ is one more that option B or C would change.
 display code in the same tree. A is the defensible status quo. C is the honest
 one and I would not argue against it.
 
+## C-Q7 — [C] In the "green on black" high-contrast scheme, the highlight colour is three times dimmer than in the other three. Change it? — Status: OPEN
+
+**In short:** SlateOS has a "high contrast" setting for people who cannot read
+the normal theme. It offers four fixed colour schemes. In three of them the
+highlight colour — the one used to show which thing is selected — is bright and
+jumps off the background. In the fourth, "green on black", the highlight is
+magenta, which is much darker than the others: about a third as visible. So the
+one scheme aimed at the most strain-sensitive users is the one where "this is
+selected" is hardest to see. The question is whether to change that colour, and
+if so to what — because the current choice is dim *on purpose*, for a reason
+that is also good.
+
+Glossary, once:
+
+- **Contrast ratio** — a single number for "how different in brightness are
+  these two colours", from 1:1 (identical, invisible) to 21:1 (black on white).
+  The web accessibility standard (**WCAG**) asks for at least 4.5:1 for normal
+  text and 7:1 for its strictest level.
+- **Highlight / accent colour** — the colour used for the selected item, the
+  focus ring, the progress bar: not the words themselves, but the marker
+  showing where you are.
+- **Hue** — which colour it is (red, green, blue), as opposed to how bright it
+  is. Two colours can be equally bright and still easy to tell apart by hue —
+  unless the viewer is red-green colour blind, in which case they may not be.
+
+### What is actually there
+
+The four schemes, measured against their own background:
+
+| Scheme | Background | Text | Text contrast | Highlight | Highlight contrast |
+|---|---|---|---|---|---|
+| Black background | black | white | 21.00:1 | yellow `#FFFF00` | **19.56:1** |
+| White background | white | black | 21.00:1 | blue `#0000FF` | **8.59:1** |
+| Yellow on black | black | yellow | 19.56:1 | cyan `#00FFFF` | **16.75:1** |
+| Green on black | black | green | 15.30:1 | magenta `#FF00FF` | **6.70:1** |
+
+Magenta is the outlier, and it cannot simply be "turned up": `#FF00FF` is
+already the brightest magenta that exists. 6.70:1 clears the ordinary WCAG bar
+(4.5:1) and misses the strict one (7:1) — in the mode whose entire purpose is
+to be easier to see than the default.
+
+### Why the dim colour is not obviously wrong
+
+Magenta is the *opposite* of green. That makes it the one highlight in the list
+that stays distinguishable from this scheme's green text under red-green colour
+blindness, and it is the most different in hue from the text of any candidate.
+The brighter alternatives are brighter precisely because they are closer to
+green:
+
+| Candidate highlight | Contrast vs black | Contrast vs the green text |
+|---|---|---|
+| magenta `#FF00FF` (today) | 6.70:1 | 2.29:1 |
+| pale magenta `#FF80FF` | 9.78:1 | 1.56:1 |
+| cyan `#00FFFF` | 16.75:1 | 1.09:1 |
+| white `#FFFFFF` | 21.00:1 | 1.37:1 |
+
+So the trade is real: *visible against the background* and *distinguishable
+from the text* pull in opposite directions here, and today's colour is at one
+end of it.
+
+### Options
+
+**A — Leave it at magenta `#FF00FF`.**
+*What changes:* nothing; the selection marker in "green on black" stays about a
+third as bright as in the other three schemes, and is documented as deliberate.
+
+**B — Pale magenta `#FF80FF`.**
+*What changes:* the selection marker in "green on black" becomes noticeably
+brighter (6.70:1 → 9.78:1, clearing the strict 7:1 bar) while staying pink /
+magenta, so it remains the colour furthest from green.
+
+**C — Cyan `#00FFFF`.**
+*What changes:* the selection marker becomes as bright as in the other schemes
+(16.75:1), but it is now nearly the same brightness as the green text (1.09:1),
+so text and highlight are told apart *only* by hue — which is exactly what a
+red-green colour blind user cannot do. It would also make two of the four
+schemes use the same highlight colour.
+
+**D — White `#FFFFFF`.**
+*What changes:* the selection marker becomes the brightest thing on screen
+(21.00:1) and the scheme becomes two-colour-plus-white. Simple and maximally
+visible; loses the idea that the highlight is a *colour* at all.
+
+### My recommendation
+
+**B.** It is the only option that fixes the thing being complained about
+without giving up the reason the current colour was chosen: it stays a magenta,
+so it stays the hue furthest from the text, and it stops being the dim one. C
+and D are brighter still, but each pays for it — C by collapsing under the
+colour blindness this mode exists to accommodate, D by dropping the colour.
+
+### If this is never answered
+
+Safe, and it does not get worse with time. The current colour is usable and
+above the ordinary accessibility bar; nothing is blocked on this. The one live
+consequence is that the regression test which pins these twelve colours
+(`every_high_contrast_scheme_is_legible_with_itself` in
+`gui/desktop/src/a11y.rs`) has its highlight floor set to **4.5:1** rather than
+7:1, specifically so this scheme passes — so the floor is currently set by the
+outlier rather than by the standard. Answering B, C or D would let that floor
+rise to 7:1 and hold every future scheme to it.
+
 ## Resolved — lane A
 
 - Q45 Convert the whole shell to bytes, or only the expanded word? — resolved

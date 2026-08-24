@@ -1631,9 +1631,11 @@ mod tests {
     /// The broad sweep: no command carries a colour the palette cannot
     /// account for, on any tab, in either mode.
     ///
-    /// `derived` is empty because this module computes nothing — every
-    /// colour it draws is a role or [`Palette::on_accent`], and `on_accent`
-    /// answers a `readable_on` endpoint, which the sweep already allows.
+    /// The one thing this module computes rather than reads is
+    /// [`Palette::on_accent`], the lettering on the selected tab, so that is
+    /// what `derived` declares. It is declared rather than exempt because
+    /// `on_accent`'s two answers are themselves roles of the opposite mode —
+    /// see `palette_check`'s module docs.
     #[test]
     fn every_colour_the_panel_draws_comes_from_its_palette() {
         for light in [false, true] {
@@ -1642,7 +1644,7 @@ mod tests {
                 for mut ui in [AccessibilitySettingsUI::new(), busy()] {
                     ui.set_tab(tab);
                     let cmds = ui.render(&p, 600.0, 800.0);
-                    assert_drawn_from(&p, &cmds, &[], "accessibility_settings");
+                    assert_drawn_from(&p, &cmds, &[p.on_accent()], "accessibility_settings");
                 }
             }
         }
@@ -1650,13 +1652,15 @@ mod tests {
 
     /// The narrow sweep the broad one cannot do: `CRUST`.
     ///
-    /// `assert_drawn_from` has to allow `#11111B` — it is one of the two
-    /// answers `readable_on` gives, so a light-mode button with a pale fill
-    /// legitimately draws it. That makes the membership sweep structurally
-    /// blind to a leftover literal `CRUST`, which is exactly the constant
-    /// this module used for its selected-tab lettering. Naming the nine
-    /// values explicitly closes the hole, and the fixture's accent is dark
-    /// (see [`accented`]) so near-black is never the right answer here.
+    /// The broad sweep declares [`Palette::on_accent`] as derived, and in a
+    /// light render that answer *is* `#11111B` — so a leftover literal
+    /// `CRUST`, which is exactly the constant this module used for its
+    /// selected-tab lettering, would be covered by the declaration and pass.
+    /// A declaration is a claim about one value, not about where it may
+    /// appear, so it cannot tell the ink apart from a stray copy of it.
+    /// Naming the nine deleted values explicitly closes that, and the
+    /// fixture's accent is dark (see [`accented`]) so near-black is never the
+    /// right answer anywhere else here.
     #[test]
     fn none_of_the_nine_deleted_constants_is_still_drawn() {
         let p = accented(true);

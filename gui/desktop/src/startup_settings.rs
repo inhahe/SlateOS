@@ -1560,8 +1560,25 @@ mod tests {
     fn every_colour_the_panel_draws_comes_from_its_palette() {
         for light in [false, true] {
             let p = Palette::for_mode(light);
+            // The three computed inks named in the module header: the active
+            // tab's label, the impact badge's label on each of its four
+            // categorical fills, and the failure badge's on red. Written out
+            // rather than read back from `StartupImpact::color`, so this is a
+            // claim about the design and not an echo of the code under test.
+            let ink = [
+                p.on_accent(),
+                readable_on(p.green),
+                readable_on(p.yellow),
+                readable_on(p.red),
+                readable_on(p.overlay0),
+            ];
             for (ui, what) in every_state() {
-                assert_drawn_from(&p, &render(&ui, &p), &[], &format!("{what}, light={light}"));
+                assert_drawn_from(
+                    &p,
+                    &render(&ui, &p),
+                    &ink,
+                    &format!("{what}, light={light}"),
+                );
             }
         }
     }
@@ -1793,12 +1810,12 @@ mod tests {
 
     /// The panel's own surfaces are the palette's, in both modes.
     ///
-    /// This is what the membership sweep structurally cannot check.
-    /// `assert_drawn_from` allows `0x11111B` and `0xEFF1F5` at any alpha,
-    /// because those are the two answers [`appearance::readable_on`] can give
-    /// and a legitimately-converted foreground will be one of them — but
-    /// `0x11111B` is *also* Mocha's `crust`, so a literal put back where a
-    /// role belongs can produce a render the sweep is obliged to accept.
+    /// This is what the membership sweep structurally cannot check. The sweep
+    /// declares this module's `readable_on` inks as derived, and a declaration
+    /// is a claim about a *value* rather than about where that value may
+    /// appear — so `0x11111B`, which is both one of those inks and Mocha's
+    /// `crust`, would pass the sweep wherever it turned up, including in the
+    /// place a role belongs.
     ///
     /// Membership is the wrong question for a surface anyway. These are not
     /// "some palette colour", they are one specific role each, so the test

@@ -50434,7 +50434,7 @@ the feature is not near enough to specify an interface against.
 program the user runs, silently and continuously. The desktop works; the
 privacy property a user would assume it has is simply absent.
 
-## TD-C-FORTY-NINE-SHELL-MODULES-CARRY-THEIR-OWN-COPY-OF-THE-PALETTE — PART 1 DONE 2026-08-22, PART 2 OPEN
+## TD-C-FORTY-NINE-SHELL-MODULES-CARRY-THEIR-OWN-COPY-OF-THE-PALETTE — PART 1 DONE 2026-08-22, PART 2 DONE 2026-08-24
 
 **Status, 2026-08-22.** Part 1 below is **done**: `appearance::Palette` exists,
 carries the light ladder as well as the dark one, and `DecorationColors` and
@@ -50604,7 +50604,7 @@ guarantee, and on Windows the failure mode would be a sharing violation in
 whichever of the two processes lost the race. Wait for `[run-timeout] child
 exited` before running any cargo command against the same target directory.
 
-**Part 2 progress. 47 of 49 modules converted.**
+**Part 2 progress. 49 of 49 modules converted — Part 2 is complete.**
 
 - [x] `security_dialog.rs` — 29 constants, done 2026-08-22. The method above
   survived contact: the sweep lives in `gui/desktop/src/palette_check.rs` as
@@ -54073,6 +54073,253 @@ exited` before running any cargo command against the same target directory.
       which is a fact about the palette. This one asserts an *identity* —
       "the taskbar's tint is `base`" — which is a fact about the module, and a
       fact about the module is the only kind a test of the module can falsify.
+- [x] `wallpaper.rs` — 1 constant over 2 sites, done 2026-08-24. 92 tests in
+  the module (fifteen new), harness defects Ax78–Wx78 (twenty-three).
+  - **A one-constant module turned out to be a live instance of §528: the
+    substituted default was being laundered into the user's file as a
+    choice.** `WallpaperConfig::color` was a plain `Color` defaulting to
+    `palette::BASE`, and `save_config` writes `color=` unconditionally — so the
+    first save after startup wrote the shell's *guess* into the user's config
+    as though the user had picked it. Converting the constant to `p.base`
+    would have made the guess mode-dependent and left the laundering intact: a
+    desktop that started in dark mode and was then saved would be pinned to
+    Mocha's `base` forever, in light mode too, with nothing anywhere recording
+    that it had ever been a default. **A default that a save turns into a
+    choice is a one-way door**, and the door was already there before this task
+    touched it.
+  - **The fix is `Option<Color>`, not a better default.** `color: None` means
+    "follow the theme", and `background(&self, p)` resolves it as
+    `self.config.color.unwrap_or(p.base)` at paint time, so an unset background
+    is a *role read on every frame* rather than a value captured once.
+    `save_config` writes no `color=` key at all when it is `None`, `from_yaml`
+    loads a file without that key as `None`, and `follow_desktop_base()` makes
+    the unset state reachable again after a choice — which matters, because
+    without it the door is still one-way, just harder to notice. Four tests pin
+    the round trip end to end, and
+    `choosing_the_base_and_following_it_are_different_states` states the point:
+    picking the colour that happens to equal today's `base` and following
+    `base` are different things, and must stay different when the mode changes.
+  - **`DynamicTheme`'s five phase colours are exempt, and the exemption is
+    written down rather than assumed.** They are a picture of the sky at five
+    times of day — dawn purple through midnight near-black — not roles, and
+    theming them would mean a "dynamic" wallpaper that stops being a sky. The
+    module header now says so, and `every_mode()` renders the dynamic mode by
+    setting `config.mode` directly, so the sweep sees the module's own phase
+    table rather than a copy handed in by the test.
+  - **The exemption's first draft was an echo, and would have widened the sweep
+    to admit the very defect it was written to allow past.** `sky_tones()`
+    originally read the five phases out of `DynamicTheme::default()` — the code
+    the exemption excuses — so a phase changed to Mocha's `base` would have
+    been declared derived *by the test itself* and passed. Lesson 22 again, in
+    the one place where being wrong is invisible: an expectation derived from
+    the code under test cannot fail. Replaced with a hand-written `const SKY`
+    plus `the_five_sky_tones_are_the_ones_the_module_was_written_with`,
+    committed separately so the fix is legible as a fix.
+  - **Predicting each defect's catcher before the run found a test that could
+    not fail.** `render_slideshow_without_images_still_renders` passes whether
+    or not a *populated* slideshow draws anything, because an empty slideshow
+    is the only case it constructs — so nothing in the module asserted that a
+    slideshow with pictures in it shows one. `a_slideshow_with_images_draws_one`
+    was added before the sweep, and `Vx78` fired against it.
+  - **First sweep: 23 caught, 0 escaped, 0 never asked, but 3 under-caught and
+    2 under-declared.** All three under-catches turned out to be real defects
+    in the *instruments* rather than noise, and they are the most valuable
+    thing this module produced.
+  - **Under-catches 1 and 2 (`Bx78`, `Kx78`) exposed a hole spanning every
+    module swept to date, and are why `design-decisions.md` §532 exists.**
+    `Ax78` reintroduced the desktop background as a Mocha `base` literal and
+    was caught; `Bx78` reintroduced the identical site as a *Latte* `base`
+    literal and was not. Two defects differing only in which mode's leftover
+    they represent had been getting different answers — because `palette_check`
+    unconditionally allowed the two values `readable_on` can return, and
+    `0xEFF1F5` **is** Latte `base` while `0x11111B` **is** Mocha `crust`. The
+    sweep had been told to wave past precisely the two most likely leftovers in
+    the shell, in all forty-eight modules converted so far. The exemption is now
+    a per-module declaration (thirteen modules, one line each — *measured*,
+    against the old comment's estimate of "most of them"), and
+    `a_readable_on_endpoint_is_not_exempt_in_the_mode_that_lacks_it` pins it.
+    **A membership exemption for a value that is also a role silently
+    un-checks that role everywhere; an exemption must be declared by the module
+    that needs it.**
+  - **The refactor immediately paid out on already-swept modules.** Re-running
+    five older defects that reintroduce one of the two endpoints found no
+    regression (5 of 5 still caught) and *two new catches*: `Ex43`
+    (`default_apps`, the current chip's ink frozen to `CRUST`) and `Px60`
+    (`accessibility_settings`, the chosen tab's lettering frozen to Mocha
+    `crust`) are now caught by their modules' membership sweeps, which
+    previously could not see them at all. Both declarations were updated in the
+    harness. That is two defects which, had they been introduced by a real edit
+    rather than by the harness, would have relied entirely on a single per-site
+    table to catch them.
+  - **Under-catch 3 (`Fx78`) was a hole in a pre-existing test, and a new
+    lesson.** `render_solid_produces_one_fill` set the user's chosen colour to
+    `Color::from_hex(0x1E1E2E)` and rendered with the dark palette — whose
+    `base` **is** `#1E1E2E`. The test therefore could not distinguish "draws
+    the colour the user chose" from "ignores the user and draws the theme", and
+    `Fx78`, which does exactly the latter, passed it. **A fixture value that
+    equals a role cannot distinguish the choice from the role** — the fixture
+    has to be off the palette for the same reason lesson 21 says it has to be
+    off the instruments. Fixed with an off-palette constant *plus an assertion
+    that it is off-palette*, so the property cannot rot silently the next time
+    a role changes.
+  - **Both under-declarations were catches, not misses,** and both were folded
+    back into the harness: `Ex78` (the background falls back to the accent) is
+    also caught by `an_unset_background_moves_with_the_mode`, because the
+    fixtures set one accent for both modes so an accent-backed desktop stops
+    moving; `Ox78` (choosing a colour records no choice) is also caught by
+    `config_save_load_roundtrip_solid`, because a choice never recorded cannot
+    survive a round trip — and, after the `Fx78` fix, by
+    `render_solid_produces_one_fill` as well.
+  - **Re-sweep after the three fixes: 23 caught, 0 escaped, 0 never asked, 0
+    under-caught, 0 under-declared** — 72 catcher-slots over 17 distinct tests,
+    median 3 catchers per defect (min 1, max 6). Every touched file restored to
+    its recorded SHA-256.
+  - **The five single-catcher defects name five *different* tests, and that is
+    the useful shape.** `Hx78` (an image's letterbox underlay stops going
+    through the resolver) rests only on `an_images_underlay_follows_the_theme_too`;
+    `Nx78` (the saver drops a colour key that was chosen) only on
+    `config_save_load_roundtrip_solid`; `Rx78` (the dynamic gradient darkens by
+    twice as much) only on `every_colour_this_module_draws_comes_from_its_palette`;
+    `Ux78` (dawn and evening transposed) only on
+    `the_five_sky_tones_are_the_ones_the_module_was_written_with`; `Vx78` only
+    on the test written for it. No test is the sole guard of more than one
+    defect, so no single deletion opens more than one hole — unlike module 47,
+    where one table was the sole catcher nine times.
+  - **`Ux78` is lesson 9 demonstrated rather than argued.** Transposing dawn
+    and evening changes no *value* the module draws, only which hour draws it,
+    so the membership sweep — which caught nine other defects here, including
+    `Rx78` alone — is structurally blind to it. The ordered hand-written `SKY`
+    table is the only instrument in the module that can see a permutation, and
+    it is exactly the table whose first draft was an echo. Had that draft
+    shipped, `Ux78` would have escaped outright: the echo would have agreed
+    with the transposition.
+
+- [x] `a11y.rs` — 1 constant over 4 sites, plus two translucent Mocha-`base`
+  fills and a pair of white crosshairs, done 2026-08-24. **The last of the
+  49.** 63 tests in the module (twelve new), harness defects Ax79–Yx79
+  (twenty-five).
+  - **The dangerous defect in this module was not the leftover constant. It
+    was the ink the leftover constant was holding in place.** The magnifier
+    lens was `Color::rgba(30, 30, 46, 200)` — Mocha `base` at partial alpha —
+    and its crosshairs were white at half alpha. Converting only the fill to
+    `p.base` would have been a clean-looking diff that produced a **1.06:1**
+    hairline in light mode: measured, half-alpha white over Latte `base` is
+    very nearly invisible, and it would have been invisible *in a screen
+    magnifier*, over the enlarged copy of the thing the user cannot otherwise
+    read. The crosshairs are now `readable_on(p.base)` at full alpha —
+    **14.50:1 dark, 16.58:1 light**. The lesson generalises past this module:
+    **a fill converted to a role drags its ink with it. An ink left as a
+    literal beside a fill that moved is a light-mode bug waiting for the fill
+    to move.** Defect `Ex79` (choose the crosshair ink for the rim rather than
+    for the fill it sits on) exists to keep that pairing pinned.
+  - **The lens is opaque now, and deliberately does not read the transparency
+    setting** — `design-decisions.md` §533. The two alphas it used to carry
+    (200 for the circular lens, 220 for the docked strip) had no comment and
+    no test between them; nothing had chosen them. Behind this overlay is not
+    other content, it is *a second rendering of the very thing being read*, so
+    any alpha at all is a double image at the point of regard. `Kx79` and
+    `Lx79` reintroduce each alpha; both are caught only by
+    `the_lens_is_opaque_in_both_modes`.
+  - **A second bug fell out of the same read: the docked strip assumed the
+    screen was 1920 wide.** The literal was there with a comment promising it
+    would one day be the real width. `render_overlay` now takes `screen_w`.
+    `the_docked_strip_spans_the_screen_it_was_given` checks 1280 *and* 3840,
+    because a single width cannot tell "uses the argument" from "returns a
+    constant that happens to match the fixture."
+  - **Two kinds of exception, and only one of them needs an exemption.**
+    `HighContrastTheme`'s four schemes exist precisely to *replace* the theme
+    for someone who cannot read it, so routing them through the palette would
+    delete the feature — but module 48 established that an exemption with
+    nothing behind it is an unchecked region, so they are pinned by an exact
+    hand-written twelve-colour table, by
+    `no_high_contrast_colour_is_a_palette_role`, and by a self-legibility
+    floor. `ColorFilter` needs no exemption at all: it is a function of the
+    colour it is handed and holds none of its own — and that claim is *checked*
+    (`a_colour_filter_introduces_no_colour_of_its_own`: every filter fixes
+    black and white, `None` is the identity, alpha is untouched) rather than
+    asserted in a comment.
+  - **Predicting each defect's catcher before running the sweep found two
+    holes that would otherwise have escaped.** `Cx79` (the lens falls back to
+    `mantle` instead of `base`) and `Hx79` (the docked strip's underline falls
+    back to `blue` instead of the accent) are both role-for-role swaps, which
+    the membership sweep is structurally blind to, and the rim test as first
+    written only inspected the circular lens's `StrokeRect`. Both were closed
+    before the run — `the_lens_is_the_desktops_base_in_both_shapes_and_both_modes`
+    is a new test written for the first, and the rim test was extended to the
+    docked `Line` for the second. This is the third module in which the
+    prediction step, not the sweep, was what found the hole.
+  - **Sweep: 25 caught, 0 escaped, 0 never asked** — 42 catcher-slots over 16
+    distinct tests, median **1** catcher per defect (min 1, max 5). Every
+    touched file restored to its recorded SHA-256.
+  - **This is the module where the shared instrument helped least, and the
+    reason is worth keeping.** The membership sweep caught 5 of 25 defects
+    here (20%), against 9 of 23 in module 48 (39%), and the median catcher
+    count fell from 3 to 1. Not because the module is worse tested — nothing
+    escaped — but because most of its defects are not *"a wrong colour was
+    drawn"*; they are *"the right colour was drawn, from the wrong place"*: a
+    fallback that stops following the accent, a chosen colour that is ignored,
+    a `follow_*` method that silently does nothing, an alpha that comes back.
+    A set-membership instrument cannot see any of those. **The sweep is a
+    floor, not a ceiling; every site whose provenance matters needs a
+    site-shaped test**, and in this module fifteen of the twenty-five defects
+    rest on exactly one.
+  - **`Bx79` is a new and sharp instance of that blindness, and it is worth
+    stating in general terms because it applies to thirteen modules.** The
+    defect replaces the lens fill with the *Latte* `base` literal `0xEFF1F5`.
+    The membership sweep cannot reject it in **either** mode: in light mode
+    `0xEFF1F5` is `base`, an actual role; in dark mode it is
+    `readable_on(Mocha base)`, which this module legitimately declares in
+    `derived`. The same is true of its counterpart `0x11111B`, which is Mocha
+    `crust` in dark mode and the light-mode ink. So **both `readable_on`
+    endpoints sit permanently inside the allowed set, in both modes, for every
+    one of the 13 modules that derive them** (§532). Contrast `Ax79`, the
+    *Mocha* base literal `0x1E1E2E`, which the sweep does catch — because it
+    is a role in one mode only. The declaration was corrected to name the two
+    site-shaped tests that actually catch it, with the reasoning recorded at
+    the harness entry rather than left as a silent omission.
+  - **Two under-declarations folded back.** `Nx79` also breaks
+    `following_the_accent_is_reachable_again_after_choosing` (it reads the
+    resolved colour too), and `Yx79` also breaks the four older inverter tests
+    — the inverter being the most-tested filter in the module. The new filter
+    test is still the only instrument that would catch the same stray constant
+    appearing in any *other* filter, which is why it was written.
+  - **One finding was left for the operator rather than fixed silently.**
+    `every_high_contrast_scheme_is_legible_with_itself` measures the four
+    highlight colours at 19.56 / 8.59 / 16.75 / **6.70**:1 against their own
+    backgrounds. The outlier is "green on black", whose magenta highlight is
+    the dimmest colour in the set — and it is dim *for a reason*, being the
+    only candidate that stays distinguishable from green under red-green
+    colour blindness. Changing it is a user-visible appearance policy, so the
+    test's highlight floor was set to 4.5:1 with the outlier named at the site
+    and the question queued as `open-questions.md` **C-Q7** (recommendation:
+    pale magenta `#FF80FF`, 9.78:1, which keeps the hue and clears the strict
+    bar). Answering it would let that floor rise to 7:1 and hold every future
+    scheme to it.
+
+**Part 2 is closed.** Measured at the end rather than asserted: `gui/desktop/src`
+now contains **zero** `const <NAME>: Color` in production code. The 22 that a
+grep still finds are all inside `#[cfg(test)]` modules and all of them exist to
+be *off*-palette — `OFF_PALETTE`, `CHOSEN`, `USER_PINK`, `SAMPLED`, `A`/`B` —
+which is the opposite defect and the thing that makes the tests able to fail.
+The shell draws its colour from one place.
+
+**What the 49 modules taught, condensed.** The single most valuable habit was
+not the sweep; it was **predicting each defect's catcher before running the
+harness**. That step, not the run, is what repeatedly found tests that could
+not fail — an expectation echoing the table it checked (module 47), a fixture
+value that equalled the role it was meant to distinguish from (48), a
+role-for-role swap no membership test can see (47, 48, 49), a rim assertion
+that never reached the second shape (49). The sweep then *confirms* a
+prediction rather than discovering the hole, and a `[MISSING:]` becomes
+information — it means the prediction was wrong, and finding out which half was
+wrong is where the remaining bugs were.
+
+The second habit worth keeping is treating an **exemption as a debt**. Every
+"this one legitimately isn't a role" — the dynamic sky, the high-contrast
+schemes, the readable-on extremes — is an unchecked region until something
+pins it, and twice the exemption itself turned out to be the bug (§532, and
+`Bx78`/`Kx78` before it). An exemption now ships with an instrument: an exact
+table, a role-collision proof, or a claim about *provenance* rather than value.
 
 **Trigger:** this is not blocked on anything. It is sequenced after the shell
 event loop (`TD-C-THE-SHELL-CAN-DRAW-ITSELF-AND-NOBODY-CAN-ASK-IT-TO`) only

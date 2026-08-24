@@ -1980,7 +1980,12 @@ mod tests {
                     mgr.active_test_pattern = pattern.copied();
                     let cmds = mgr.render(&p, 0.0, 0.0, 600.0, 400.0);
                     drawn += cmds.len();
-                    assert_drawn_from(&p, &cmds, &instrument_colors(&mgr), "display_settings");
+                    // The instruments (test patterns, night-light swatch) plus
+                    // the one colour the panel *computes*: the lettering on
+                    // its accent-filled button.
+                    let mut derived = instrument_colors(&mgr);
+                    derived.push(p.on_accent());
+                    assert_drawn_from(&p, &cmds, &derived, "display_settings");
                 }
             }
         }

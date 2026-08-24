@@ -117,6 +117,8 @@ SESS = "gui/desktop/src/session_mgr.rs"
 FD = "gui/desktop/src/file_drop.rs"
 IM = "gui/desktop/src/input_method.rs"
 BL = "gui/desktop/src/blur.rs"
+WP = "gui/desktop/src/wallpaper.rs"
+AX = "gui/desktop/src/a11y.rs"
 
 # (name, file, [(old, new), ...], [packages], [tests expected to fail])
 DEFECTS = [
@@ -11391,6 +11393,11 @@ DEFECTS = [
         [
             'none_of_the_eleven_deleted_constants_is_still_drawn',
             'the_current_chips_ink_is_computed_from_the_accent_under_it',
+            # Only since design-decisions.md 532: the membership sweep used to
+            # allow 0x11111B unconditionally, so it could not see this. It now
+            # declares readable_on(p.accent), and the fixture accent's ink is
+            # the *pale* endpoint, leaving the near-black one unaccounted for.
+            'every_colour_this_panel_draws_comes_from_its_palette',
         ],
     ),
     (
@@ -16441,6 +16448,10 @@ DEFECTS = [
             'every_site_draws_the_role_it_claims',
             'the_selected_tab_is_lettered_for_its_own_fill',
             'every_site_changes_when_the_mode_does',
+            # Only since design-decisions.md 532: 0x11111B used to be waved
+            # past unconditionally. The sweep now declares only p.on_accent(),
+            # which for this fixture's dark accent is the pale endpoint.
+            'every_colour_the_panel_draws_comes_from_its_palette',
         ],
     ),
     (
@@ -21766,6 +21777,670 @@ DEFECTS = [
         ["desktop"],
         [
             'test_default_effect',
+        ],
+    ),
+    (
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA: the desktop's background is the Mocha base literal again",
+        WP,
+        [
+            ('        self.config.color.unwrap_or(p.base)\n',
+             '        self.config.color.unwrap_or(Color::from_hex(0x1E1E2E))\n'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_module_draws_comes_from_its_palette',
+            'an_unset_background_is_the_desktops_base_in_each_mode',
+            'an_unset_background_moves_with_the_mode',
+            'an_images_underlay_follows_the_theme_too',
+            'choosing_the_base_and_following_it_are_different_states',
+        ],
+    ),
+    (
+        "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB: the desktop's background is the Latte base literal",
+        WP,
+        [
+            ('        self.config.color.unwrap_or(p.base)\n',
+             '        self.config.color.unwrap_or(Color::from_hex(0xEFF1F5))\n'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_module_draws_comes_from_its_palette',
+            'an_unset_background_is_the_desktops_base_in_each_mode',
+            'an_unset_background_moves_with_the_mode',
+            'an_images_underlay_follows_the_theme_too',
+            'choosing_the_base_and_following_it_are_different_states',
+        ],
+    ),
+    (
+        "CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC: the desktop's background falls back to mantle rather than base",
+        WP,
+        [
+            ('        self.config.color.unwrap_or(p.base)\n',
+             '        self.config.color.unwrap_or(p.mantle)\n'),
+        ],
+        ["desktop"],
+        [
+            'an_unset_background_is_the_desktops_base_in_each_mode',
+            'an_images_underlay_follows_the_theme_too',
+            'choosing_the_base_and_following_it_are_different_states',
+        ],
+    ),
+    (
+        "DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD: the desktop's background falls back to crust rather than base",
+        WP,
+        [
+            ('        self.config.color.unwrap_or(p.base)\n',
+             '        self.config.color.unwrap_or(p.crust)\n'),
+        ],
+        ["desktop"],
+        [
+            'an_unset_background_is_the_desktops_base_in_each_mode',
+            'an_images_underlay_follows_the_theme_too',
+            'choosing_the_base_and_following_it_are_different_states',
+        ],
+    ),
+    (
+        "EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE: the desktop's background falls back to the accent",
+        WP,
+        [
+            ('        self.config.color.unwrap_or(p.base)\n',
+             '        self.config.color.unwrap_or(p.accent)\n'),
+        ],
+        ["desktop"],
+        [
+            'an_unset_background_is_the_desktops_base_in_each_mode',
+            'an_images_underlay_follows_the_theme_too',
+            'no_wallpaper_site_wears_the_accent',
+            'choosing_the_base_and_following_it_are_different_states',
+            # The fixtures set one accent for both modes, so a background that
+            # fell back to it would stop moving with the theme.
+            'an_unset_background_moves_with_the_mode',
+        ],
+    ),
+    (
+        'FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF: the colour the user chose is ignored and the theme wins',
+        WP,
+        [
+            ('        self.config.color.unwrap_or(p.base)\n',
+             '        p.base\n'),
+        ],
+        ["desktop"],
+        [
+            'a_chosen_background_overrides_the_theme_and_does_not_move',
+            'choosing_the_base_and_following_it_are_different_states',
+            'render_solid_produces_one_fill',
+        ],
+    ),
+    (
+        'GGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGG: the solid background stops going through the resolver',
+        WP,
+        [
+            ('            color: self.background(p),\n            corner_radii: CornerRadii::ZERO,\n        }]',
+             '            color: p.surface0,\n            corner_radii: CornerRadii::ZERO,\n        }]'),
+        ],
+        ["desktop"],
+        [
+            'an_unset_background_is_the_desktops_base_in_each_mode',
+            'a_chosen_background_overrides_the_theme_and_does_not_move',
+            'choosing_the_base_and_following_it_are_different_states',
+            'render_solid_produces_one_fill',
+        ],
+    ),
+    (
+        "HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH: an image's letterbox underlay stops going through the resolver",
+        WP,
+        [
+            ('            color: self.background(p),\n            corner_radii: CornerRadii::ZERO,\n        });',
+             '            color: p.mantle,\n            corner_radii: CornerRadii::ZERO,\n        });'),
+        ],
+        ["desktop"],
+        [
+            'an_images_underlay_follows_the_theme_too',
+        ],
+    ),
+    (
+        "IIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIII: an image's letterbox underlay is the Mocha base literal",
+        WP,
+        [
+            ('            color: self.background(p),\n            corner_radii: CornerRadii::ZERO,\n        });',
+             '            color: Color::from_hex(0x1E1E2E),\n            corner_radii: CornerRadii::ZERO,\n        });'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_module_draws_comes_from_its_palette',
+            'an_images_underlay_follows_the_theme_too',
+        ],
+    ),
+    (
+        "JJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJ: a fresh configuration names the Mocha base as the user's choice",
+        WP,
+        [
+            ('            color: None,\n            slideshow_dir: String::new(),',
+             '            color: Some(Color::from_hex(0x1E1E2E)),\n            slideshow_dir: String::new(),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_module_draws_comes_from_its_palette',
+            'an_images_underlay_follows_the_theme_too',
+            'a_fresh_config_has_chosen_no_colour',
+            'saving_an_unchosen_colour_writes_no_colour_key',
+            'an_unchosen_colour_survives_a_save_and_load',
+        ],
+    ),
+    (
+        "KKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKK: a fresh configuration names the Latte base as the user's choice",
+        WP,
+        [
+            ('            color: None,\n            slideshow_dir: String::new(),',
+             '            color: Some(Color::from_hex(0xEFF1F5)),\n            slideshow_dir: String::new(),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_module_draws_comes_from_its_palette',
+            'an_images_underlay_follows_the_theme_too',
+            'a_fresh_config_has_chosen_no_colour',
+            'saving_an_unchosen_colour_writes_no_colour_key',
+            'an_unchosen_colour_survives_a_save_and_load',
+        ],
+    ),
+    (
+        'LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLL: the parser substitutes the Mocha base for an absent colour key',
+        WP,
+        [
+            ('            color,\n            slideshow_dir,',
+             '            color: color.or(Some(Color::from_hex(0x1E1E2E))),\n            slideshow_dir,'),
+        ],
+        ["desktop"],
+        [
+            'an_unchosen_colour_survives_a_save_and_load',
+            'a_config_file_with_no_colour_key_loads_as_unchosen',
+        ],
+    ),
+    (
+        'MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM: the saver writes a colour key whether or not one was chosen',
+        WP,
+        [
+            ('        if let Some(c) = self.config.color {\n            out.push_str(&format!("color={:02X}{:02X}{:02X}\\n", c.r, c.g, c.b));\n        }',
+             '        let c = self.config.color.unwrap_or(Color::from_hex(0x1E1E2E));\n        out.push_str(&format!("color={:02X}{:02X}{:02X}\\n", c.r, c.g, c.b));'),
+        ],
+        ["desktop"],
+        [
+            'saving_an_unchosen_colour_writes_no_colour_key',
+            'an_unchosen_colour_survives_a_save_and_load',
+        ],
+    ),
+    (
+        'NNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNN: the saver drops the colour key even when one was chosen',
+        WP,
+        [
+            ('        if let Some(c) = self.config.color {\n            out.push_str(&format!("color={:02X}{:02X}{:02X}\\n", c.r, c.g, c.b));\n        }',
+             '        if false {\n            let c = self.config.color.unwrap_or(Color::BLACK);\n            out.push_str(&format!("color={:02X}{:02X}{:02X}\\n", c.r, c.g, c.b));\n        }'),
+        ],
+        ["desktop"],
+        [
+            'config_save_load_roundtrip_solid',
+        ],
+    ),
+    (
+        'OOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOO: choosing a colour records no choice at all',
+        WP,
+        [
+            ('        self.config.color = Some(color);\n',
+             '        self.config.color = None;\n'),
+        ],
+        ["desktop"],
+        [
+            'manager_set_solid_color',
+            'a_chosen_background_overrides_the_theme_and_does_not_move',
+            'choosing_the_base_and_following_it_are_different_states',
+            'following_the_theme_is_reachable_again_after_choosing',
+            # A choice that was never recorded cannot survive the round trip.
+            'config_save_load_roundtrip_solid',
+            # Only since its fixture stopped being the dark palette's own
+            # `base`: with an off-palette choice, a discarded choice shows up
+            # as the theme's colour on the screen.
+            'render_solid_produces_one_fill',
+        ],
+    ),
+    (
+        'PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPP: following the theme records the Mocha base as a choice instead',
+        WP,
+        [
+            ('        self.config.color = None;\n        self.slideshow = None;',
+             '        self.config.color = Some(Color::from_hex(0x1E1E2E));\n        self.slideshow = None;'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_module_draws_comes_from_its_palette',
+            'an_unset_background_is_the_desktops_base_in_each_mode',
+            'an_unset_background_moves_with_the_mode',
+            'choosing_the_base_and_following_it_are_different_states',
+            'following_the_theme_is_reachable_again_after_choosing',
+        ],
+    ),
+    (
+        'QQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQ: following the theme leaves the mode on the dynamic gradient',
+        WP,
+        [
+            ('        self.config.mode = WallpaperMode::SolidColor;\n        self.config.color = None;',
+             '        self.config.mode = WallpaperMode::Dynamic;\n        self.config.color = None;'),
+        ],
+        ["desktop"],
+        [
+            'an_unset_background_is_the_desktops_base_in_each_mode',
+            'an_unset_background_moves_with_the_mode',
+            'choosing_the_base_and_following_it_are_different_states',
+            'following_the_theme_is_reachable_again_after_choosing',
+        ],
+    ),
+    (
+        'RRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRR: the dynamic gradient darkens by twice as much',
+        WP,
+        [
+            ('            base_color.r.saturating_sub(20),\n            base_color.g.saturating_sub(20),\n            base_color.b.saturating_sub(20),',
+             '            base_color.r.saturating_sub(40),\n            base_color.g.saturating_sub(40),\n            base_color.b.saturating_sub(40),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_module_draws_comes_from_its_palette',
+        ],
+    ),
+    (
+        'SSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSS: the dynamic gradient paints the accent instead of the sky',
+        WP,
+        [
+            ('        let base_color = self.config.dynamic_theme.color_at(time_secs);\n',
+             '        let base_color = self.config.dynamic_theme.color_at(time_secs);\n        let base_color = Color::rgba(255, 0, 255, base_color.a);\n'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_module_draws_comes_from_its_palette',
+            'no_wallpaper_site_wears_the_accent',
+        ],
+    ),
+    (
+        'TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT: the night sky becomes the Mocha base',
+        WP,
+        [
+            ('            night: Color::from_hex(0x0D0D1A),',
+             '            night: Color::from_hex(0x1E1E2E),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_this_module_draws_comes_from_its_palette',
+            'the_five_sky_tones_are_the_ones_the_module_was_written_with',
+        ],
+    ),
+    (
+        'UUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUU: dawn and evening are transposed',
+        WP,
+        [
+            ('            dawn: Color::from_hex(0x2E1A47),      // deep purple-blue\n            morning: Color::from_hex(0x1A3A5C),   // cool blue\n            afternoon: Color::from_hex(0x1E4D6E), // warm teal-blue\n            evening: Color::from_hex(0x4A2040),   // warm purple-red',
+             '            dawn: Color::from_hex(0x4A2040),      // deep purple-blue\n            morning: Color::from_hex(0x1A3A5C),   // cool blue\n            afternoon: Color::from_hex(0x1E4D6E), // warm teal-blue\n            evening: Color::from_hex(0x2E1A47),   // warm purple-red'),
+        ],
+        ["desktop"],
+        [
+            'the_five_sky_tones_are_the_ones_the_module_was_written_with',
+        ],
+    ),
+    (
+        'VVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVV: the slideshow draws a bare fill instead of an image over its underlay',
+        WP,
+        [
+            ('        self.render_image(p, width, height)\n',
+             '        self.render_solid(p, width, height)\n'),
+        ],
+        ["desktop"],
+        [
+            'a_slideshow_with_images_draws_one',
+        ],
+    ),
+    (
+        "WWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWW: the wallpaper's own alpha is discarded when the theme supplies the colour",
+        WP,
+        [
+            ('        self.config.color.unwrap_or(p.base)\n',
+             '        Color::rgba(\n            self.config.color.unwrap_or(p.base).r,\n            self.config.color.unwrap_or(p.base).g,\n            self.config.color.unwrap_or(p.base).b,\n            128,\n        )\n'),
+        ],
+        ["desktop"],
+        [
+            'an_unset_background_is_the_desktops_base_in_each_mode',
+            'an_images_underlay_follows_the_theme_too',
+            'a_chosen_background_overrides_the_theme_and_does_not_move',
+            'render_solid_produces_one_fill',
+        ],
+    ),
+    (
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA: the magnifier lens is the Mocha base literal again",
+        AX,
+        [
+            ('                    color: p.base,\n                    corner_radii: radii,\n',
+             '                    color: Color::from_hex(0x1E1E2E),\n                    corner_radii: radii,\n'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_overlay_draws_comes_from_its_palette',
+            'the_lens_is_the_desktops_base_in_both_shapes_and_both_modes',
+            'the_crosshairs_are_legible_on_the_lens_in_both_modes',
+        ],
+    ),
+    (
+        "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB: the magnifier lens is the Latte base literal",
+        AX,
+        [
+            ('                    color: p.base,\n                    corner_radii: radii,\n',
+             '                    color: Color::from_hex(0xEFF1F5),\n                    corner_radii: radii,\n'),
+        ],
+        ["desktop"],
+        # Deliberately NOT the membership sweep, which is structurally unable to
+        # see this one. 0xEFF1F5 is Latte `base` -- a role, so allowed outright in
+        # light mode -- and it is also readable_on(Mocha base), which this module
+        # declares in `derived`, so it is allowed in dark mode too. Both
+        # readable_on endpoints are permanently inside the allowed set of any
+        # module that derives them: 0xEFF1F5 is a Latte role and the dark-mode
+        # ink; 0x11111B is a Mocha role and the light-mode ink. The site-shaped
+        # tests are what catch it. (Contrast defect A, the Mocha base literal,
+        # which the sweep does catch -- 0x1E1E2E is a role in one mode only.)
+        [
+            'the_lens_is_the_desktops_base_in_both_shapes_and_both_modes',
+            'the_crosshairs_are_legible_on_the_lens_in_both_modes',
+        ],
+    ),
+    (
+        "CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC: the magnifier lens falls back to mantle rather than base",
+        AX,
+        [
+            ('                    color: p.base,\n                    corner_radii: radii,\n',
+             '                    color: p.mantle,\n                    corner_radii: radii,\n'),
+        ],
+        ["desktop"],
+        [
+            'the_lens_is_the_desktops_base_in_both_shapes_and_both_modes',
+        ],
+    ),
+    (
+        "DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD: the lens crosshairs go back to white at half alpha",
+        AX,
+        [
+            ('                    let ink = readable_on(p.base);\n',
+             '                    let ink = Color::rgba(255, 255, 255, 128);\n'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_overlay_draws_comes_from_its_palette',
+            'the_crosshairs_are_legible_on_the_lens_in_both_modes',
+        ],
+    ),
+    (
+        "EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE: the crosshair ink is chosen for the rim rather than the fill it sits on",
+        AX,
+        [
+            ('                    let ink = readable_on(p.base);\n',
+             '                    let ink = readable_on(p.accent);\n'),
+        ],
+        ["desktop"],
+        [
+            'the_crosshairs_are_legible_on_the_lens_in_both_modes',
+        ],
+    ),
+    (
+        "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF: the lens rim is the Mocha blue it used to name",
+        AX,
+        [
+            ('                    color: p.accent,\n                    line_width: bw,\n',
+             '                    color: Color::from_hex(0x89B4FA),\n                    line_width: bw,\n'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_overlay_draws_comes_from_its_palette',
+            'the_lens_rim_and_the_focus_ring_are_the_accent',
+        ],
+    ),
+    (
+        "GGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGG: the lens rim falls back to blue rather than the accent",
+        AX,
+        [
+            ('                    color: p.accent,\n                    line_width: bw,\n',
+             '                    color: p.blue,\n                    line_width: bw,\n'),
+        ],
+        ["desktop"],
+        [
+            'the_lens_rim_and_the_focus_ring_are_the_accent',
+        ],
+    ),
+    (
+        "HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH: the docked strip's underline falls back to blue rather than the accent",
+        AX,
+        [
+            ('                    color: p.accent,\n                    width: bw,\n',
+             '                    color: p.blue,\n                    width: bw,\n'),
+        ],
+        ["desktop"],
+        [
+            'the_lens_rim_and_the_focus_ring_are_the_accent',
+        ],
+    ),
+    (
+        "IIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIII: the docked strip goes back to assuming the screen is 1920 wide",
+        AX,
+        [
+            ('                    width: screen_w,\n                    height: strip_h,\n',
+             '                    width: 1920.0,\n                    height: strip_h,\n'),
+        ],
+        ["desktop"],
+        [
+            'the_docked_strip_spans_the_screen_it_was_given',
+        ],
+    ),
+    (
+        "JJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJ: the docked strip's underline goes back to ending at 1920",
+        AX,
+        [
+            ('                    x2: screen_w,\n',
+             '                    x2: 1920.0,\n'),
+        ],
+        ["desktop"],
+        [
+            'the_docked_strip_spans_the_screen_it_was_given',
+        ],
+    ),
+    (
+        "KKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKK: the magnifier lens becomes translucent again",
+        AX,
+        [
+            ('                    color: p.base,\n                    corner_radii: radii,\n',
+             '                    color: Color::rgba(p.base.r, p.base.g, p.base.b, 200),\n                    corner_radii: radii,\n'),
+        ],
+        ["desktop"],
+        [
+            'the_lens_is_opaque_in_both_modes',
+        ],
+    ),
+    (
+        "LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLL: the docked strip becomes translucent again",
+        AX,
+        [
+            ('                    color: p.base,\n                    corner_radii: CornerRadii::ZERO,\n',
+             '                    color: Color::rgba(p.base.r, p.base.g, p.base.b, 220),\n                    corner_radii: CornerRadii::ZERO,\n'),
+        ],
+        ["desktop"],
+        [
+            'the_lens_is_opaque_in_both_modes',
+        ],
+    ),
+    (
+        "MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM: the focus ring is pre-filled with Mocha blue instead of left unset",
+        AX,
+        [
+            ('            color: None,\n            width: 2.0,\n',
+             '            color: Some(Color::from_hex(0x89B4FA)),\n            width: 2.0,\n'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_overlay_draws_comes_from_its_palette',
+            'the_lens_rim_and_the_focus_ring_are_the_accent',
+            'an_unset_ring_follows_the_accent_and_a_chosen_one_does_not',
+        ],
+    ),
+    (
+        "NNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNN: an unset focus ring resolves to blue rather than the accent",
+        AX,
+        [
+            ('        self.color.unwrap_or(p.accent)\n',
+             '        self.color.unwrap_or(p.blue)\n'),
+        ],
+        ["desktop"],
+        [
+            'the_lens_rim_and_the_focus_ring_are_the_accent',
+            'an_unset_ring_follows_the_accent_and_a_chosen_one_does_not',
+            # Folded back after the first sweep reported it undeclared: the
+            # "give it back to the theme" test also reads the resolved colour,
+            # so breaking the fallback breaks it too.
+            'following_the_accent_is_reachable_again_after_choosing',
+        ],
+    ),
+    (
+        "OOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOO: a chosen focus-ring colour is ignored and the accent drawn instead",
+        AX,
+        [
+            ('        self.color.unwrap_or(p.accent)\n',
+             '        p.accent\n'),
+        ],
+        ["desktop"],
+        [
+            'an_unset_ring_follows_the_accent_and_a_chosen_one_does_not',
+        ],
+    ),
+    (
+        "PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPP: the locator ring is pre-filled with Mocha blue instead of left unset",
+        AX,
+        [
+            ('            locator_color: None,\n',
+             '            locator_color: Some(Color::from_hex(0x89B4FA)),\n'),
+        ],
+        ["desktop"],
+        [
+            'an_unset_ring_follows_the_accent_and_a_chosen_one_does_not',
+        ],
+    ),
+    (
+        "QQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQ: a chosen locator colour is ignored and the accent drawn instead",
+        AX,
+        [
+            ('        self.locator_color.unwrap_or(p.accent)\n',
+             '        p.accent\n'),
+        ],
+        ["desktop"],
+        [
+            'an_unset_ring_follows_the_accent_and_a_chosen_one_does_not',
+        ],
+    ),
+    (
+        "RRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRR: giving the focus ring back to the theme silently does nothing",
+        AX,
+        [
+            ('    pub fn follow_accent(&mut self) {\n        self.color = None;\n    }\n',
+             '    pub fn follow_accent(&mut self) {\n        self.color = self.color.or(None);\n    }\n'),
+        ],
+        ["desktop"],
+        [
+            'following_the_accent_is_reachable_again_after_choosing',
+        ],
+    ),
+    (
+        "SSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSS: giving the locator ring back to the theme silently does nothing",
+        AX,
+        [
+            ('    pub fn follow_accent_locator(&mut self) {\n        self.locator_color = None;\n    }\n',
+             '    pub fn follow_accent_locator(&mut self) {\n        self.locator_color = self.locator_color.or(None);\n    }\n'),
+        ],
+        ["desktop"],
+        [
+            'following_the_accent_is_reachable_again_after_choosing',
+        ],
+    ),
+    (
+        "TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT: a high-contrast text colour drifts toward the theme's own green",
+        AX,
+        [
+            ('            Self::YellowOnBlack => Color::from_hex(0xFFFF00),\n            Self::GreenOnBlack => Color::from_hex(0x00FF00),\n',
+             '            Self::YellowOnBlack => Color::from_hex(0xFFFF00),\n            Self::GreenOnBlack => Color::from_hex(0xA6E3A1),\n'),
+        ],
+        ["desktop"],
+        [
+            'the_four_high_contrast_schemes_are_the_ones_the_module_was_written_with',
+            'no_high_contrast_colour_is_a_palette_role',
+            'every_high_contrast_scheme_is_legible_with_itself',
+        ],
+    ),
+    (
+        "UUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUU: two high-contrast accents are transposed between their schemes",
+        AX,
+        [
+            ('            Self::YellowOnBlack => Color::from_hex(0x00FFFF),\n            Self::GreenOnBlack => Color::from_hex(0xFF00FF),\n',
+             '            Self::YellowOnBlack => Color::from_hex(0xFF00FF),\n            Self::GreenOnBlack => Color::from_hex(0x00FFFF),\n'),
+        ],
+        ["desktop"],
+        [
+            'the_four_high_contrast_schemes_are_the_ones_the_module_was_written_with',
+        ],
+    ),
+    (
+        "VVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVV: a high-contrast background stops being an extreme and becomes a role",
+        AX,
+        [
+            ('            Self::YellowOnBlack => Color::from_hex(0x000000),\n            Self::GreenOnBlack => Color::from_hex(0x000000),\n',
+             '            Self::YellowOnBlack => Color::from_hex(0x1E1E2E),\n            Self::GreenOnBlack => Color::from_hex(0x000000),\n'),
+        ],
+        ["desktop"],
+        [
+            'the_four_high_contrast_schemes_are_the_ones_the_module_was_written_with',
+            'no_high_contrast_colour_is_a_palette_role',
+        ],
+    ),
+    (
+        "WWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWW: the high-contrast border stops following the text it outlines",
+        AX,
+        [
+            ('    pub fn border(&self) -> Color {\n        self.text()\n    }\n',
+             '    pub fn border(&self) -> Color {\n        self.accent()\n    }\n'),
+        ],
+        ["desktop"],
+        [
+            'the_four_high_contrast_schemes_are_the_ones_the_module_was_written_with',
+        ],
+    ),
+    (
+        "XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX: the animated focus ring keeps the alpha and drops the role",
+        AX,
+        [
+            ('        let ring_color = Color::rgba(base.r, base.g, base.b, alpha);\n',
+             '        let ring_color = Color::rgba(255, 255, 255, base.a.min(alpha));\n'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_overlay_draws_comes_from_its_palette',
+            'the_lens_rim_and_the_focus_ring_are_the_accent',
+        ],
+    ),
+    (
+        "YYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYY: a colour filter acquires a constant of its own",
+        AX,
+        [
+            ('                invert_channel(color.b),\n',
+             '                0x1B,\n'),
+        ],
+        ["desktop"],
+        [
+            'a_colour_filter_introduces_no_colour_of_its_own',
+            # Folded back after the first sweep reported them undeclared. The
+            # inverter is the most-tested filter in the module and four older
+            # tests already pin it; the new test is the only one that would
+            # also catch the same constant appearing in any *other* filter.
+            'black_and_white_survive_every_filter',
+            'inverting_twice_returns_the_original_color',
+            'test_color_filter_inverted',
+            'the_filters_still_produce_the_weights_they_were_written_with',
         ],
     ),
 ]

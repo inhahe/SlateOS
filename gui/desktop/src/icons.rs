@@ -1894,9 +1894,11 @@ mod tests {
     /// desktop would cover nine of the sixteen deleted constants and quietly
     /// certify the other seven.
     ///
-    /// `derived` is empty. `on_wallpaper_dim` is the accent-free pale extreme
-    /// at alpha 200, and the sweep compares roles on RGB only, so it lands on
-    /// the `readable_on` endpoint it is built from.
+    /// `derived` names the wallpaper inks. They are the pale extreme in *both*
+    /// modes on purpose — the wallpaper is not a surface the shell knows the
+    /// colour of, so the label does not flip with the theme — which means in a
+    /// dark render they are the one thing here that is not a role of the
+    /// palette in play, and therefore the one thing that must be declared.
     #[test]
     fn every_colour_the_icon_layer_draws_comes_from_its_palette() {
         // One of each icon type, so all nine categorical hues are emitted.
@@ -1960,7 +1962,12 @@ mod tests {
                 }
                 let cmds = layer.render(&p);
                 assert!(!cmds.is_empty());
-                palette_check::assert_drawn_from(&p, &cmds, &[], "icons");
+                palette_check::assert_drawn_from(
+                    &p,
+                    &cmds,
+                    &[p.on_wallpaper(), p.on_wallpaper_dim()],
+                    "icons",
+                );
             }
         }
     }

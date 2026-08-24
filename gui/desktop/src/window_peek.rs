@@ -1798,18 +1798,21 @@ mod tests {
     ///
     /// Rendered in *both* modes, because a leftover Mocha constant is a legal
     /// colour in the dark render and only names itself in the light one. The
-    /// window's own sampled colour is declared `derived`: it is the one value
-    /// here that is deliberately not a role, and naming it at the call site is
-    /// how the sweep records that somebody claimed it.
+    /// Two things are declared `derived`: the window's own sampled colour,
+    /// which is deliberately not a role at all, and the X on the close button,
+    /// which is `readable_on` ink for the two fills that button can take.
+    /// Naming them at the call site is how the sweep records that somebody
+    /// claimed them.
     #[test]
     fn every_colour_the_module_draws_comes_from_its_palette() {
         for light in [false, true] {
             let p = accented(light);
+            let derived = [SAMPLED, readable_on(p.red), readable_on(p.surface2)];
             for hover in [false, true] {
                 for close in [false, true] {
                     let mut popup = peek_over(four_states(), hover);
                     popup.close_hovered = close;
-                    assert_drawn_from(&p, &popup.render(&p), &[SAMPLED], "window peek");
+                    assert_drawn_from(&p, &popup.render(&p), &derived, "window peek");
                 }
             }
         }
@@ -2029,7 +2032,12 @@ mod tests {
         mgr.popup.tick(1200);
         mgr.popup.hovered_slot = Some(0);
         let light = accented(true);
-        assert_drawn_from(&light, &mgr.render(&light), &[SAMPLED], "peek manager");
+        assert_drawn_from(
+            &light,
+            &mgr.render(&light),
+            &[SAMPLED, readable_on(light.red), readable_on(light.surface2)],
+            "peek manager",
+        );
         assert_ne!(
             colors(&mgr.render(&accented(false))),
             colors(&mgr.render(&light)),

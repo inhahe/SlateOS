@@ -27,20 +27,44 @@
 //! - **black at any alpha** — a scrim and a drop shadow are an absence of
 //!   light rather than a colour (§525 decision 3), which is why they do not
 //!   flip with the mode;
-//! - the two [`readable_on`] endpoints, `0x11111B` and `0xEFF1F5` — text
-//!   chosen for a coloured fill, which is a function of that fill's brightness
-//!   and not a role;
 //! - whatever the caller declares in `derived`.
 //!
-//! # The known hole, stated rather than discovered later
+//! # `readable_on` ink is declared, not exempt
 //!
-//! `readable_on` answers `0x11111B`, and `0x11111B` *is* Mocha `crust`. It has
-//! to be allowed in a light render, because a light-mode Allow button is pale
-//! green and wants near-black text on it. The consequence is that this sweep
-//! cannot catch a stray literal `CRUST` left behind in a converted module.
-//! Every other role it catches. That hole is worth naming here because the
-//! alternative — dropping the endpoint from the allowed set — would fail every
-//! module that draws a coloured button, which is most of them.
+//! Text chosen for a coloured fill is a function of that fill's brightness
+//! rather than a role, so it is not a palette member and has to be allowed
+//! somehow. This module used to allow it *unconditionally*: the two values
+//! [`readable_on`](appearance::readable_on) can return, `0x11111B` and
+//! `0xEFF1F5`, passed the sweep in any module and in either mode.
+//!
+//! That was a hole big enough to drive the whole conversion through, because
+//! **those two values are also palette roles.** `0xEFF1F5` is Latte `base` and
+//! `0x11111B` is Mocha `crust` — which is to say, the single most likely
+//! cross-mode literal to be left behind in each direction was the one thing
+//! the sweep was told to wave past. It was found by the reintroduction
+//! harness in module 48: `A×78` (a stray Mocha-base literal) was caught, and
+//! `B×78` — the identical defect with Latte's base — was not. Two defects that
+//! differ only in which mode's leftover they represent must not get different
+//! answers.
+//!
+//! So the exemption is gone, and a module that draws readable ink declares
+//! what it draws it on:
+//!
+//! ```ignore
+//! assert_drawn_from(&p, &cmds, &[readable_on(p.accent)], "the panel");
+//! ```
+//!
+//! That is a stronger statement than the blanket allowance in three ways: it
+//! names the fill the ink belongs to, so a reader can check the claim; it is
+//! confined to the module that makes it, so the other thirty-six get the
+//! endpoints checked as ordinary roles; and it goes stale loudly — draw the
+//! ink on something else and the declaration no longer covers it.
+//!
+//! The cost is real and worth stating: thirteen of the forty-nine shell
+//! modules draw such ink and each now carries a declaration. The old comment
+//! here estimated that cost as "every module that draws a coloured button,
+//! which is most of them" and used it to justify keeping the hole. Measured,
+//! it is 27% of them and one line each.
 //!
 //! # Why `derived` is a parameter and not a blanket allowance
 //!
@@ -54,12 +78,6 @@
 use appearance::Palette;
 use guitk::color::Color;
 use guitk::render::RenderCommand;
-
-/// The two values [`appearance::readable_on`] can return.
-///
-/// Not read from that function because the point of the sweep is to compare
-/// against something the code under test did not produce.
-const READABLE_ON_ENDPOINTS: [u32; 2] = [0x0011_111B, 0x00EF_F1F5];
 
 /// Every colour `cmd` will put on the screen.
 ///
@@ -97,10 +115,6 @@ fn is_accounted_for(p: &Palette, c: Color, derived: &[Color]) -> bool {
     if c.r == 0 && c.g == 0 && c.b == 0 {
         return true;
     }
-    let rgb = (u32::from(c.r) << 16) | (u32::from(c.g) << 8) | u32::from(c.b);
-    if READABLE_ON_ENDPOINTS.contains(&rgb) {
-        return true;
-    }
     // RGB only: alpha is how a role becomes a panel, a wash or a hover.
     if p.roles()
         .iter()
@@ -122,10 +136,9 @@ fn is_accounted_for(p: &Palette, c: Color, derived: &[Color]) -> bool {
 /// # Panics
 ///
 /// When a command carries a colour that is neither a role of `p`, nor black,
-/// nor a [`readable_on`](appearance::readable_on) endpoint, nor listed in
-/// `derived`. The message gives the offending value, the command index and the
-/// mode, because "some colour is wrong somewhere in 300 commands" is not an
-/// actionable failure.
+/// nor listed in `derived`. The message gives the offending value, the command
+/// index and the mode, because "some colour is wrong somewhere in 300 commands"
+/// is not an actionable failure.
 pub fn assert_drawn_from(p: &Palette, cmds: &[RenderCommand], derived: &[Color], what: &str) {
     for (i, cmd) in cmds.iter().enumerate() {
         for c in colors_of(cmd) {
@@ -153,8 +166,7 @@ pub fn assert_drawn_from(p: &Palette, cmds: &[RenderCommand], derived: &[Color],
 /// # Panics
 ///
 /// On the same condition as [`assert_drawn_from`]: a colour that is neither a
-/// role of `p`, nor black, nor a [`readable_on`](appearance::readable_on)
-/// endpoint, nor listed in `derived`.
+/// role of `p`, nor black, nor listed in `derived`.
 pub fn assert_colours_from(p: &Palette, named: &[(&str, Color)], derived: &[Color], what: &str) {
     for (label, c) in named {
         assert_one(p, label, *c, derived, what);
@@ -168,8 +180,10 @@ fn assert_one(p: &Palette, label: &str, c: Color, derived: &[Color], what: &str)
         is_accounted_for(p, c, derived),
         "{what}: {label} in {mode} mode draws \
          #{:02X}{:02X}{:02X} (alpha {}), which is not a role of the \
-         {mode} palette, not black, not a readable_on endpoint, and \
-         not declared as derived. A colour constant was probably left \
+         {mode} palette, not black, and not declared as derived. \
+         (Ink from readable_on is declared, not exempt — if this is \
+         such a colour, name the fill it sits on in `derived`.) \
+         A colour constant was probably left \
          behind by the conversion — see known-issues.md \
          TD-C-FORTY-NINE-SHELL-MODULES-CARRY-THEIR-OWN-COPY-OF-THE-PALETTE.",
         c.r,
@@ -307,6 +321,37 @@ mod tests {
             msg.contains("the taskbar's tint"),
             "the failure did not name the offending site: {msg}"
         );
+    }
+
+    /// Neither `readable_on` endpoint is waved past any more.
+    ///
+    /// This is the hole module 48 found: both endpoints are also roles —
+    /// `0xEFF1F5` is Latte `base`, `0x11111B` is Mocha `crust` — so exempting
+    /// them globally un-checked the likeliest cross-mode leftover in each
+    /// direction. The asymmetry that exposed it is reproduced literally here:
+    /// each endpoint is offered to the palette of the *other* mode, where it is
+    /// not a role, and must be rejected exactly as any other foreign literal
+    /// would be.
+    #[test]
+    fn a_readable_on_endpoint_is_not_exempt_in_the_mode_that_lacks_it() {
+        // (the endpoint, the mode whose palette does not contain it)
+        for (hex, light) in [(0x00EF_F1F5_u32, false), (0x0011_111B, true)] {
+            let p = Palette::for_mode(light);
+            let c = Color::from_hex(hex);
+            assert!(
+                !is_accounted_for(&p, c, &[]),
+                "#{hex:06X} was accepted undeclared by the {} palette; the \
+                 blanket readable_on exemption is back, and with it the \
+                 cross-mode leftover it hid",
+                if light { "light" } else { "dark" }
+            );
+            // …and declaring it is how a module that really does draw that ink
+            // gets to keep drawing it.
+            assert!(
+                is_accounted_for(&p, c, &[c]),
+                "#{hex:06X} was rejected even though the caller declared it"
+            );
+        }
     }
 
     /// And it must accept the palette it was given, at every alpha, or the

@@ -61,6 +61,7 @@
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use appearance::Palette;
 use guitk::event::{Event, MouseEvent};
 use guitk::render::RenderTree;
 use oswindow::{ConnectionError, ConnectionTransport as Transport, Error, EventLoop, Layer, Spec};
@@ -338,9 +339,14 @@ impl<T: Transport> ShellSession<T> {
         // `DesktopShell::seconds_since_local_midnight` for why this is asked of
         // the shell rather than computed here.
         let day = self.shell.seconds_since_local_midnight(unix_now());
+        // Built here rather than held, for the same reason the chrome builds
+        // one per paint: the shell's `appearance` is the single source of
+        // truth, and a cached palette is a second one that goes stale the
+        // moment the user switches mode.
+        let p = Palette::from_settings(&self.shell.appearance);
         let mut tree = RenderTree::new();
         tree.commands
-            .extend(self.wallpaper.get_render_commands(width, height, day));
+            .extend(self.wallpaper.get_render_commands(&p, width, height, day));
         self.events
             .submit(self.background.window, &self.background.localize(&tree))
     }

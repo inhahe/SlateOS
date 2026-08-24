@@ -2496,19 +2496,23 @@ mod tests {
     /// The sweep: in the *light* palette a surviving Mocha constant is a dark
     /// value Latte does not contain, so it names itself.
     ///
-    /// `derived` is empty because the only two colours this module computes —
-    /// `readable_on(p.green)` and `p.on_accent()` — are `readable_on`
-    /// endpoints, which the sweep already allows.
+    /// `derived` names the only two colours this module computes: the ink on
+    /// the lit lock-key pill, and the lettering on an accent-filled control.
+    /// Both are `readable_on` answers, and a `readable_on` answer is declared
+    /// rather than exempt — each of the two values that function can return is
+    /// also a role of one of the two palettes, so a blanket allowance would
+    /// un-check Latte `base` and Mocha `crust` everywhere.
     #[test]
     fn every_colour_the_osd_draws_comes_from_its_palette() {
         for light in [false, true] {
             for accent in SAFE_ACCENTS {
                 let mut p = Palette::for_mode(light);
                 p.accent = accent;
+                let ink = [appearance::readable_on(p.green), p.on_accent()];
                 for (what, kind) in every_kind() {
-                    assert_drawn_from(&p, &overlay(kind, &p), &[], &format!("osd ({what})"));
+                    assert_drawn_from(&p, &overlay(kind, &p), &ink, &format!("osd ({what})"));
                 }
-                assert_drawn_from(&p, &settings(&p), &[], "osd settings");
+                assert_drawn_from(&p, &settings(&p), &ink, "osd settings");
                 assert_drawn_from(
                     &p,
                     &settings_with(&p, |c| {
@@ -2519,7 +2523,7 @@ mod tests {
                         c.show_lock_keys = false;
                         c.position = OsdPosition::Center;
                     }),
-                    &[],
+                    &ink,
                     "osd settings (all off)",
                 );
             }

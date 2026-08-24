@@ -542,28 +542,39 @@ pub fn resolve(command: impl AsRef<[u8]>) -> KernelResult<ResolveResult> {
         });
     }
 
-    let state = STATE.lock();
+    // Steps 2 and 3 are pure table lookups and answer under the lock. Step 4
+    // stats the filesystem, which may not happen with `STATE` held: the VFS
+    // takes the filesystem's lock and holds it across content generation,
+    // which for procfs reaches back into arbitrary module-global state, so
+    // `STATE -> filesystem lock` inverts the live order and deadlocks. The
+    // candidate directories therefore leave the critical section as a plain
+    // list. `scripts/check-vfs-under-lock.py` enforces this.
+    let path_dirs = {
+        let state = STATE.lock();
 
-    // 2. Alias.
-    if let Some(alias_path) = state.aliases.get(cmd.as_bytes()) {
-        return Ok(ResolveResult {
-            path: alias_path.clone(),
-            args,
-            source: CompletionSource::Alias,
-        });
-    }
+        // 2. Alias.
+        if let Some(alias_path) = state.aliases.get(cmd.as_bytes()) {
+            return Ok(ResolveResult {
+                path: alias_path.clone(),
+                args,
+                source: CompletionSource::Alias,
+            });
+        }
 
-    // 3. PATH cache.
-    if let Some(cached_path) = state.path_cache.get(cmd) {
-        return Ok(ResolveResult {
-            path: cached_path.clone(),
-            args,
-            source: CompletionSource::Path,
-        });
-    }
+        // 3. PATH cache.
+        if let Some(cached_path) = state.path_cache.get(cmd) {
+            return Ok(ResolveResult {
+                path: cached_path.clone(),
+                args,
+                source: CompletionSource::Path,
+            });
+        }
+
+        state.path_dirs.clone()
+    };
 
     // 4. Search PATH directories.
-    for dir in &state.path_dirs {
+    for dir in &path_dirs {
         let full = dir.join(cmd);
         // Check if file exists via VFS.
         if crate::fs::Vfs::metadata(&full).is_ok() {

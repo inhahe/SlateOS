@@ -438,343 +438,6 @@ build directory, or keep three and keep pruning.** C stays either way, and D is
 orthogonal too — it asks *where* the output lives, not *how many copies* there
 are, so it composes with A and B just as C does.
 
-## C-Q2 — [C] When the text on a line runs both ways, should the Right arrow key move the caret one character *later in the sentence*, or one step *to the right on the screen*? — Status: **ANSWERED 2026-08-21 by the operator — b (visual)**
-
-> **ANSWERED 2026-08-21 (relayed by lane A).** The operator answered **b** —
-> the visual convention, matching the recommendation below.
->
-> **Note on how this answer arrived, because it was briefly misfiled.** It came
-> in as the bare words *"b, i guess"* inside a large multi-lane answer batch, and
-> lane A first read it as an answer to **Q49** (modern AMD graphics), which the
-> same message also answered at length. The operator corrected this the same
-> day: *"the 'q49: b, i guess' was meant to be for c-q2"*. Q49 is unaffected —
-> `design-decisions.md` §262 was written from the operator's detailed Q49
-> answer and never cited the stray "b", so no record needs revising; only this
-> question gained an answer it had been missing.
->
-> Lane A is relaying rather than acting — **the write-up is lane C's.** Move this
-> into your own `design-decisions.md` number range with `**Decided by:**
-> Operator (Claude recommended this option)`, add the `**In short:**` opener,
-> then delete this question and index it under "Resolved".
->
-> Per the entry below, switching this on is one line in each of three text
-> widgets — `caret_left`/`caret_right` are already written and tested. Mind the
-> measured caveat: a widget that does not also remember which side of a
-> direction boundary the caret is on will **skip an entire right-to-left word**
-> in one press, which is worse than today.
-
-**In short:** Hebrew and Arabic are written right to left, and a line can mix
-them with English — "I said שלום to him". On such a line the order the
-characters are *stored and read* is not the order they are *drawn*, so the Right
-arrow key has two different meanings and they disagree. Today it means "the next
-character in reading order", which makes the blinking caret sometimes jump
-sideways across a word instead of stepping. The alternative is "one step to the
-right on screen", which always steps, but means the caret sometimes moves
-*backwards* through the sentence. Every operating system picks one; they do not
-all pick the same one, and neither answer is wrong.
-
-**A worked example.** The line is `I said <SHALOM> to him`, where `<SHALOM>` is
-one Hebrew word of five letters. Drawn, the Hebrew word's letters run right to
-left inside it, while the sentence around them runs left to right. Put the caret
-just before the Hebrew word and press Right five times:
-
-| | What the caret does | Where it ends up |
-|---|---|---|
-| **Logical** (today) | Steps through the Hebrew letters in the order they are read, so it jumps from the word's right-hand end leftwards, then jumps back | after the last Hebrew letter, at the word's **left** edge |
-| **Visual** | Moves right one letter-width each press, never jumping | at the word's **right** edge, having passed through the whole word |
-
-Both end "after the whole word" in some sense; they just disagree about which
-end of the word that is, and about what happens in between.
-
-**The options.**
-
-| | *What changes:* |
-|---|---|
-| **A. Keep logical** (macOS, GTK, Qt, most of Linux) | Nothing changes. On a mixed line the caret sometimes jumps a word's width sideways between two presses of the same key. |
-| **B. Switch to visual** (Windows edit controls, and what ICU's `ubidi` API is built to support) | The caret always moves one step in the direction of the arrow, and never jumps. Holding Right walks the caret smoothly across the line, but the *text position* it is at can go backwards, so typing after several presses inserts earlier in the sentence than the previous press did. |
-| **C. Both, on a setting** | A preference the user sets, defaulting to one of the above. Costs a setting nobody knows how to answer, and doubles the number of behaviours every future text widget has to be correct in. |
-
-**What is already built either way — updated 2026-08-17: option B is now written
-and tested, and is one line per widget away from being switched on.** The
-shaping engine knows where every character is drawn and which way it runs; on
-top of that there are now `caret_left`/`caret_right` functions that take a caret
-and hand back the next caret position *to the left or right on the screen*, with
-tests covering a mixed-direction line, an Arabic ligature crossed as one unit,
-and the pixel round-trip. Nothing calls them. Answering "B" is a one-line change
-in each of three text widgets; answering "A" deletes nothing, because those
-functions are also what mouse selection and any future screen-order feature
-want. **So this question is now purely about which behaviour is right.**
-
-**One thing measured while building it, which strengthens the case that this had
-to be asked rather than guessed.** The extra bit the caret carries ("which side
-of a direction boundary am I on") turned out not to be a nicety. A text box that
-remembers only the caret's *position in the string* between keypresses, and
-works the rest out fresh each time, does not merely land on the wrong side of a
-boundary — it **skips the entire right-to-left word in a single press**. So a
-half-hearted "B" — switching the arrow keys without also making the widgets
-remember that bit — would be *worse* than today's behaviour, not better. That
-groundwork has been done now regardless of the answer, so the choice is no
-longer between "A" and "a risky B".
-
-**My recommendation: B, visual.** The reason is what the key is called. Users
-press "right arrow" while looking at the screen, and an arrow key that sometimes
-moves the caret left is surprising in a way that no amount of correctness
-argument fixes. The logical convention's advantage — that the caret's text
-position advances monotonically — is invisible; the visual convention's
-advantage is the thing the user is looking at. Home/End and word-motion would
-stay logical under either answer, since those name positions in the sentence
-rather than directions on the screen.
-
-**If this is never answered:** nothing breaks and nothing gets worse. Option A
-is the current behaviour and it is self-consistent; the cost is a small,
-permanent oddity on mixed-direction lines, which is rare in English text and
-constant in Hebrew or Arabic text. It gets harder to change later only in the
-sense that more text widgets will have been written against whichever answer is
-in force.
-
-**Where it bites:** `gui/font/src/shape.rs` (`ShapedRun::caret_left` /
-`caret_right`, built 2026-08-17), `gui/toolkit/src/text.rs` (`TextCursor` and
-its `caret_left`/`caret_right` wrappers), and the arrow-key handling in
-`guitk::widget::TextInput` and `guitk::modal::InputDialog` — each of which
-carries a comment marked `C-Q2` naming the exact line to change. `apps/editor`
-is **not** covered by either answer: it draws its caret and scrolls sideways in
-a way that assumes screen order equals reading order, so it needs its own,
-larger fix first (`known-issues.md` → `TD-EDITOR-IS-NOT-BIDIRECTIONAL`).
-Tracked in `known-issues.md` → `TD-GUI-ARROW-KEYS-MOVE-IN-LOGICAL-ORDER`.
-
-## C-Q3 — [C] `CLAUDE.md` tells all three lanes to publish finished work through one shared folder, and two of them collided in it today. Change the instruction? — Status: **ANSWERED 2026-08-21 by the operator — b**
-
-> **ANSWERED 2026-08-21 (relayed by lane A).** On 2026-08-21 the
-> operator answered `c-q3: b`.
-> The answer arrived in a batch covering several lanes' questions at once, so
-> lane A is relaying it here rather than acting on it — **the write-up is
-> still the owning lane's to do.** Owning lane: move this entry into your own
-> `design-decisions.md` number range with `**Decided by:** Operator`, add the
-> `**In short:**` opener, then delete this question and index it under
-> "Resolved".
-
-**In short:** Each of the three agents works in its own private copy of the
-source tree, which is what stops them overwriting each other. But the last step
-of every finished task sends all three back into **one shared copy** — the
-`os` folder — to publish the work. Today two agents were in there at the same
-moment and their publish steps tangled; git printed a "a git process may have
-crashed in this repository earlier" error and one agent's step ended up
-discarded. Nothing was lost this time, because a discarded publish can simply
-be re-run. There is a way to publish that never touches the shared folder at
-all, and the question is whether to make that the instruction.
-
-**Why the shared folder is there.** Publishing means combining your work with
-whatever the other two have published since you started. Combining normally
-needs a folder to do it in — somewhere the files from both sides can sit while
-differences are reconciled. `CLAUDE.md` nominates `os` as that folder. The
-catch is that a folder can only be in one state at a time, so two agents
-reconciling in it simultaneously are editing the same thing, which is precisely
-the failure the private copies were created to prevent.
-
-**Why it can be avoided.** The rules *already* require each agent to pull in
-everyone else's published work and re-run the tests **before** publishing —
-in its own private copy. Once that is done, publishing has nothing left to
-reconcile: the shared side has no changes the agent's copy lacks. Git can then
-publish with a single server-side command that needs no folder at all
-(`git push origin lane-c:main`, a "fast-forward"). If another agent published
-in the meantime the command is simply **refused**; you pull their work in,
-re-test, and try again. It cannot half-succeed and it cannot interleave with
-anyone else's.
-
-**The options.**
-
-| | *What changes:* |
-|---|---|
-| **A. Leave `CLAUDE.md` as it is** | Nothing changes. Agents keep meeting in `os`; collisions stay rare but keep happening, and each one costs a re-run and looks alarming in the transcript. |
-| **B. Change step 11 to the folderless publish** | Agents stop entering `os` to publish. `os` becomes a read-only window onto the combined result. Collisions become impossible rather than rare; a clash surfaces as a clean "refused, try again" instead of a tangle. |
-| **C. Add a lock around `os`** | Agents still meet in `os` but queue for it, the way they already queue for the emulator. Collisions become impossible too, but an agent can now be made to *wait*, and a lock left behind by a crashed agent blocks the others until someone clears it. |
-
-**My recommendation: B.** It removes the shared resource instead of scheduling
-access to it, needs no new machinery, and is what I did today after the
-collision — it worked, and `main` still only ever advanced to a commit whose
-tests had been run. C solves the same problem by adding a lock that can itself
-get stuck. The one thing B gives up is the ability to resolve a genuine
-conflict *during* publication, but that was never wanted here: the rules
-already say resolve-then-test-then-publish, and B just makes that order
-mandatory instead of conventional.
-
-**Why this is a question and not a change I made:** `CLAUDE.md` is yours. Its
-own text says not to edit it except on an explicit instruction, so this is
-written up rather than acted on.
-
-**If this is never answered:** nothing breaks. I will keep publishing the safe
-way regardless — the instruction permits it, it just does not prescribe it —
-so the exposure is limited to the other two lanes continuing to follow the
-letter of step 11. The cost is an occasional tangled publish that has to be
-re-run, and it neither grows nor worsens with time. Full detail in
-`known-issues.md` → "Two lanes merging up at once race in the shared `os`
-worktree".
-
-## C-Q5 — [C] This OS writes all of its own cryptography by hand. Keep doing that, or port implementations other people have already broken and fixed? — Status: **ANSWERED 2026-08-21 by the operator — c**
-
-> **ANSWERED 2026-08-21 (relayed by lane A).** On 2026-08-21 the
-> operator answered `c-q5: c`.
-> The answer arrived in a batch covering several lanes' questions at once, so
-> lane A is relaying it here rather than acting on it — **the write-up is
-> still the owning lane's to do.** Owning lane: move this entry into your own
-> `design-decisions.md` number range with `**Decided by:** Operator`, add the
-> `**In short:**` opener, then delete this question and index it under
-> "Resolved".
-
-**In short:** the code that protects saved passwords, login and the lock
-screen is cryptography we wrote ourselves — including eleven separate
-hand-written copies of the same hash function. Writing your own cryptography
-is the one thing security practitioners are close to unanimous about not
-doing, and not because the algorithms are secret: they are public, and ours
-compute the right answers. The problem is that the *bugs* are silent. Code
-that produces correct output can still leak the secret through how long it
-takes to run, and no test will ever notice. The question is whether to keep
-writing these and fix them in place, or to bring in implementations that
-already survived twenty years of people attacking them.
-
-**How we got here.** Nothing was ever decided. The OS has no third-party
-crypto dependency, so each feature that needed a hash wrote one. It worked, so
-it kept happening.
-
-**What is actually wrong right now** (all four logged in `known-issues.md`,
-found while turning the workspace lints on for `gui/credentials`):
-
-| Problem | What it means |
-|---|---|
-| The password vault scrambles every secret with an identical repeating pattern | two saved passwords cancel each other out; the vault can be read without the master password |
-| The master password is hashed once, with an extra ingredient that is the same on every SlateOS machine | guessable at billions of tries per second, and one precomputed table cracks every user everywhere |
-| Nothing in userspace can obtain an unpredictable number | the built-in password *generator* produces guessable passwords |
-| Eleven hand-written copies of SHA-256 | eleven chances for one of them to be wrong, forever |
-
-The first three can be brought up to "defensible" using only what is already
-in the tree, and I am doing that regardless of the answer here. What the
-answer decides is the *end state* — specifically two things I would rather not
-write myself:
-
-- **authenticated encryption** (so an attacker who cannot read the vault also
-  cannot silently alter what is in it), and
-- **a deliberately-slow password hash** (so guessing costs an attacker real
-  money — Argon2id or scrypt).
-
-**The options.**
-
-- **A — Keep writing our own, carefully.**
-  *What changes:* I implement AES-GCM and Argon2id in-tree with the official
-  test vectors, and the eleven hash copies collapse into one shared crate.
-  *For:* no outside code in the trust base; works in the kernel's no-allocator
-  environment by construction; consistent with how the rest of the OS is
-  built.
-  *Against:* this is the one area where "passes its tests" and "is secure" are
-  different sentences. The classic break is a comparison that returns a
-  fraction sooner when the first byte is wrong — an attacker measures the
-  timing and recovers the secret one byte at a time, against code that is
-  perfectly correct. I cannot test my way to confidence here the way I can
-  everywhere else in this project, and that is the honest reason I am asking.
-- **B — Port a vetted implementation for everything.**
-  *What changes:* the tree gains a vendored copy of an established Rust crypto
-  implementation (RustCrypto's, or BearSSL in C), used everywhere; the
-  hand-written copies are deleted.
-  *For:* written to be constant-time on purpose, by people who do only this;
-  and it is what this project's own spec already says to do elsewhere —
-  `design.txt` requires porting battle-tested code for the filesystem rather
-  than writing our own.
-  *Against:* a real dependency to vendor and keep current; more moving parts
-  in the build.
-- **C — Port the primitives, keep our own glue.**
-  *What changes:* the hash, the cipher and the password hash are vendored; the
-  vault file format and the service plumbing on top stay ours.
-  *For:* this is what actual operating systems do, and it puts the borrowed
-  code exactly where writing your own hurts most.
-  *Against:* same dependency cost as B, on a smaller surface.
-
-**Recommendation: C.** The spec's own "port battle-tested code" rule was
-written for the filesystem and applies with more force here, where a bug does
-not crash — it just quietly stops protecting anything.
-
-**If this is never answered:** nothing breaks and nothing is blocked — I will
-still fix the four defects above as far as hand-written primitives allow. But
-the vault stays unauthenticated (an attacker who cannot read it can still
-alter it undetectably), password hashing stays cheap to attack, and every
-further piece of crypto written meanwhile is more work to throw away if the
-answer is later B or C.
-
-## C-Q4 — [C] Nothing in the system can print. Two half-built printing features exist and neither is connected. Which one should applications talk to? — Status: **ANSWERED 2026-08-21 by the operator — c**
-
-> **ANSWERED 2026-08-21 (relayed by lane A).** On 2026-08-21 the
-> operator answered "let's do c since we should do it eventually anyway, no point putting it off with a stop-gap solution in its place".
-> The answer arrived in a batch covering several lanes' questions at once, so
-> lane A is relaying it here rather than acting on it — **the write-up is
-> still the owning lane's to do.** Owning lane: move this entry into your own
-> `design-decisions.md` number range with `**Decided by:** Operator`, add the
-> `**In short:**` opener, then delete this question and index it under
-> "Resolved".
-
-**In short:** There is no way to print anything from this OS today. Two
-separate pieces of printing code were written at different times and neither
-was ever hooked up to anything a user can click. One of them lives in the PDF
-viewer and knows how to work out *which pages* to print; the other lives in the
-desktop and knows about *printers* — which ones exist, paper sizes, how many
-copies, and a queue of pending jobs. Neither knows the other exists. The
-question is how an application should reach a printer: through the desktop's
-existing machinery, or through something new built for the purpose.
-
-**What is actually there.** Both pieces are real code with tests, not
-placeholders:
-
-| | In the PDF viewer | In the desktop |
-|---|---|---|
-| Works out which pages to print | yes — including "1-3, 5, 7-9" | only a single "from page X to page Y" |
-| Knows what printers exist | no | yes |
-| Copies, paper size, double-sided, quality | no | yes |
-| Queue of pending jobs, cancel, pause | no | yes |
-| Reachable by any application | **no** | **no** |
-
-Each is better than the other at a different half of the job, which is not a
-mistake — the page range is something only the document knows (it is the only
-thing that knows how long it is), and the printer list is something only the
-system knows. The gap is the connection between them.
-
-**Why this needs deciding rather than just doing.** Applications live in
-`apps/`, the desktop is the program that draws the screen. Making the PDF
-viewer call directly into the desktop's code would work in about an hour, and
-would mean every application that ever wants to print has to be built together
-with the desktop — so a change to the taskbar could stop the PDF viewer from
-compiling. That is the kind of tangle that is cheap to create and expensive to
-undo later, which is why it is worth a decision now rather than after four more
-applications have copied it.
-
-**The options.**
-
-- **A — Applications call the desktop's printing code directly.**
-  *What changes:* printing works in the PDF viewer today. Every application
-  that prints is from then on built together with the whole desktop, and
-  printing only works while the desktop is running.
-- **B — Move the printer-handling code into a small shared library that both
-  the desktop and applications use.**
-  *What changes:* nothing visible differs from A for a user; the code moves
-  house first, so applications depend on a printing library rather than on the
-  desktop. Roughly half a day more work than A, and it is the last time the
-  move is cheap.
-- **C — Printing becomes a background service that applications send jobs to,
-  like every other OS.**
-  *What changes:* a print job survives the application closing, and can be
-  cancelled from anywhere. Several days of work, and it needs the message
-  plumbing between programs that other parts of the system already use.
-- **D — Leave it. Delete neither piece, connect neither.**
-  *What changes:* nothing. Printing stays impossible, and the two models drift
-  further apart as each is edited for its own reasons.
-
-**Recommendation: B**, then C later if printing ever needs to outlive the
-application that started it. B costs little more than A and does not create the
-dependency that A does; C is the right long-run shape but is a real project and
-nothing is currently blocked on it.
-
-**If this is never answered:** nothing breaks and nothing worsens quickly, but
-printing stays impossible from every application, and the drift is real — the
-two models already disagree about what a page range is, and each additional
-edit to either makes the eventual merge harder. Detail in `known-issues.md` →
-"`apps/pdfviewer` can print nothing at all — the whole model is unwired".
-
 ## Q56 — [A] A program compiled for Linux is exempt from the file-permission checks our own programs must pass. Close the gap, or write it down as the price of running Linux software? — Status: OPEN
 
 **In short:** When a program asks this system a question about a file — "how big
@@ -1297,72 +960,6 @@ The index is split by lane so three lanes adding a line at once land at three
 different offsets and the merge is automatic. Newest first within each lane.
 `(§n)` cites `design-decisions.md`.
 
-## Q55 — [C] The installer reads `size = "100 GB"` in a partition table as 107 GB. Should a decimal spelling mean a decimal number? — Status: **ANSWERED 2026-08-21 by the operator — c**
-
-> **ANSWERED 2026-08-21 (relayed by lane A).** On 2026-08-21 the
-> operator answered `q55: c`.
-> The answer arrived in a batch covering several lanes' questions at once, so
-> lane A is relaying it here rather than acting on it — **the write-up is
-> still the owning lane's to do.** Owning lane: move this entry into your own
-> `design-decisions.md` number range with `**Decided by:** Operator`, add the
-> `**In short:**` opener, then delete this question and index it under
-> "Resolved".
-
-**In short:** An unattended-install config file describes each disk partition
-with a size like `"100 GB"` or `"32 GiB"`. The installer currently treats those
-two spellings as *the same number* — both mean 2^30 bytes, the binary one. So a
-config asking for `500 GB` on a 500 GB drive asks for 537 GB of space and the
-install fails to fit. The question is whether to make the decimal spelling mean
-the decimal number, at the cost of changing what existing config files do.
-
-**Glossary:** `GB` (gigabyte) is decimal — exactly 1 000 000 000 bytes, and it
-is what a disk's box says. `GiB` (gibibyte) is binary — 1 073 741 824 bytes,
-about 7% more. They diverge further at `TB`/`TiB` (10%).
-
-Where it lives: `apps/installer/src/lib.rs:1211`, the `multiplier` match in the
-partition-size parser. `"K"|"KB"|"KIB"` all map to 1024, and so on up to `TB`.
-
-This is the mirror image of the display-side defect fixed in
-design-decisions.md §489 — there, code divided by 1024 and *printed* `GB`; here
-it *reads* `GB` and multiplies by 1024. The display side was unambiguous
-(printing a number under a label that means something else is simply false), so
-it was fixed without asking. This side is not, because the suffix in a config
-file is an input convention, and the surrounding ecosystem is genuinely split.
-
-### The options
-
-**A. Leave it. Every suffix is binary.**
-*What changes:* nothing.
-This is what `fdisk`, `parted` and most partitioning tools do, and what anyone
-who has typed `+512M` at a disk prompt expects. It is also self-consistent: a
-config author who writes `100 GB` gets the same partition every time.
-
-**B. Honour the spelling: `GB` = 10⁹, `GiB` = 2³⁰, bare `G` = 2³⁰.**
-*What changes:* a config that says `100 GB` yields a partition 7% smaller than
-it does today; `100 GiB` and `100 G` are unaffected.
-Matches what the display side now does, and matches the drive's label — which
-is the number a user copies when they write "the 500 GB disk".
-
-**C. Reject the ambiguous spellings: accept only `GiB` and bare `G`, and error
-on `GB` with a message naming both.**
-*What changes:* configs using `GB` stop installing until edited; nothing is
-silently resized.
-The only option that cannot quietly give someone the wrong disk layout, at the
-cost of breaking existing files loudly rather than leaving them wrong quietly.
-
-### If this is never answered
-
-Current behaviour is safe in the sense that it is deterministic and has been
-the behaviour all along; no data is at risk. The concrete cost is that a
-partition table written from a drive's advertised capacity will not fit on that
-drive, and the error will point at the partition table rather than at the units.
-It does not get worse with time, but every config file written in the meantime
-is one more that option B or C would change.
-
-**Recommendation:** B, but weakly, and only because it now disagrees with the
-display code in the same tree. A is the defensible status quo. C is the honest
-one and I would not argue against it.
-
 ## C-Q7 — [C] In the "green on black" high-contrast scheme, the highlight colour is three times dimmer than in the other three. Change it? — Status: OPEN
 
 **In short:** SlateOS has a "high contrast" setting for people who cannot read
@@ -1541,11 +1138,55 @@ rise to 7:1 and hold every future scheme to it.
   decomposes what the face cannot draw. This was the last 339 sweep
   disagreements, all one question.
 
+- C-Q3 Should all three lanes keep publishing finished work through the one
+  shared `os` worktree, after two collided in it? — answered 2026-08-21 by the
+  operator, **b**; written up 2026-08-24 (§538): no. A lane publishes with
+  `git push origin lane-<x>:main`, a fast-forward that needs no working
+  directory and is *refused* rather than tangled if another lane got there
+  first. `os` becomes a read-only window on the result.
+
+- C-Q5 Should this OS keep writing its own cryptography by hand? — answered
+  2026-08-21 by the operator, **c**; written up 2026-08-24 (§539): the
+  primitives (hash, cipher, password hash) are ported from vetted
+  implementations; the vault format and the service plumbing on top stay ours.
+  The line falls where testing stops reaching — a cipher can compute the right
+  answer and still leak the secret through its timing, and no test we write
+  sees that, whereas a file format that loses a record is an ordinary bug. The
+  eleven hand-written SHA-256 copies collapse to one ported one.
+
+- C-Q4 Nothing can print, and two disconnected halves of a printing system
+  exist — which should applications talk to? — answered 2026-08-21 by the
+  operator, **c**; written up 2026-08-24 (§540): neither. Printing becomes a
+  background service applications submit jobs to, so a job outlives the
+  application that started it. Lane C had recommended the cheaper shared
+  library (b); the operator overruled it as a stop-gap that would only be
+  rewritten, since a library and a service differ in *who owns the job*, and
+  every caller written against the library is a caller to migrate.
+
+- C-Q2 On a line mixing Hebrew or Arabic with English, should the Right arrow
+  key move the caret one character later in the sentence, or one step right on
+  the screen? — answered 2026-08-21 by the operator, **b (visual)**; written up
+  2026-08-24 (§541): the screen. A key named for a screen direction follows the
+  screen; Home/End and word-motion stay logical, because those name positions
+  in the sentence. Caveat carried into the implementation: a widget that does
+  not also remember which side of a direction boundary the caret is on will
+  **skip a whole right-to-left word** in one press — worse than the old
+  behaviour, so a half-switched widget is a regression, not a partial win.
+
 ## Resolved — pre-split (unprefixed `Q<n>`, single-agent era)
 
 These numbers are not to be extended; new questions use `A-Q<n>` / `B-Q<n>` /
 `C-Q<n>`.
 
+- Q55 [C] The installer read `size = "100 GB"` as 107 GB — should a decimal
+  spelling mean a decimal number? — answered 2026-08-21 by the operator, **c**;
+  written up 2026-08-24 (§542): neither spelling is guessed at. `GB` is
+  **refused**, with an error naming both alternatives; only `GiB` and bare `G`
+  are accepted. Lane C had weakly recommended honouring the spelling (b) while
+  naming c the honest option. The deciding point: both "pick one" answers leave
+  some existing config file meaning something its author did not intend, with
+  nothing announcing it — and a partition table is not a place to be helpful
+  about a guess.
 - Q45 Should `RenderCommand::Text` carry an overflow policy, rather than text
   being cut mid-glyph with no ellipsis? — resolved 2026-08-15 (§427): **yes** —
   the draw command carries the policy and the compositor draws the ellipsis.

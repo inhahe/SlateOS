@@ -41161,3 +41161,281 @@ In all three the repair was the same shape, and it is the rule this decision lea
 ### Left standing, deliberately
 
 `guitk::theme::contrast_text` has the *same* defect in a worse form: it picks pure black or white by `luminance(c) < 0.5`, where `luminance` uses a `powf(2.2)` approximation and the true crossover for black-vs-white is 0.179. Colours between those two figures get white when black is far better — around 2.3:1 at the midpoint. It is a separate crate with its own callers and its own test surface, it is not what the palette uses, and folding it into this change would have made a two-crate diff untestable as one thing. Logged in `known-issues.md` as its own item.
+
+## 537. The contrast arithmetic moves down into the toolkit, so the crate every widget depends on holds the only copy
+
+**Date:** 2026-08-24
+**Decided by:** Claude (autonomous)
+
+**In short:** Two different parts of the desktop were each working out, on their own, whether to write on a coloured button in dark ink or light ink. The appearance settings had a correct method as of §536; the widget toolkit had its own, and the toolkit's was wrong for nearly half of all colours — on a plain red button it chose white lettering when black is noticeably easier to read. The toolkit could not simply call the good one, because the good one lived in a crate that sits *above* it. So the good one moved down into the toolkit, and the appearance crate now points at it instead of keeping a copy. There is one implementation in the tree again.
+
+### The defect
+
+`guitk::theme::contrast_text` chose between pure black and pure white by thresholding relative luminance at **0.5**:
+
+```rust
+fn luminance(c: Color) -> f32 {
+    let r = (c.r as f32 / 255.0).powf(2.2);  // and g, b
+    0.2126 * r + 0.7152 * g + 0.0722 * b
+}
+pub fn is_dark(color: Color) -> bool { luminance(color) < 0.5 }
+pub fn contrast_text(bg: Color) -> Color {
+    if is_dark(bg) { Color::WHITE } else { Color::BLACK }
+}
+```
+
+Black and white are equally legible not at luminance 0.5 but at `sqrt(0.0525) - 0.05` ≈ **0.179**. The `+0.05` term in the WCAG ratio is a fixed allowance for ambient flare; it is a large fraction of a dark colour's luminance and a negligible fraction of a light one's, so it pushes the balance point down to roughly a sixth of the range. Everything between 0.179 and 0.5 therefore got the worse ink.
+
+Measured over all 16 777 216 colours:
+
+| | Old rule | New rule |
+|---|---|---|
+| Worst ink returned | **1.92:1**, at `#21D828` (black was available at 10.92:1) | **4.58:1** |
+| Colours given the worse ink | **41.78 %** | 0 |
+| Guarantee it can state | none — depends on which colours were nearby when 0.5 was picked | 4.58:1 for *any* colour, from the crossover |
+
+`#FF0000` and `#808080` are both in the wrong band: red was inked white at 4.00:1 with black available at 5.25:1, grey white at 3.95:1 with black at 5.32:1. These are not exotic colours.
+
+A second, independent error compounded it: `luminance` used `powf(2.2)` where sRGB is a linear segment below 0.03928 and `((v+0.055)/1.055)^2.4` above. On its own that flips only 0.56 % of the cube — small, but it is four lines to do exactly and there was no reason to approximate.
+
+### The decision, and why it is a move rather than a fix
+
+The obvious repair is to write the ratio comparison into `guitk` as well. That fixes the behaviour and leaves the actual problem in place: two crates, two implementations of relative luminance, correct today and free to drift tomorrow. This is the §534 shape — *the tree holds one correct answer that callers cannot reach, so it grows wrong copies* — and repairing the copy without removing it is treating the symptom.
+
+`guitk` cannot call `appearance`; the dependency runs `appearance → guitk`. So the single copy has to live in `guitk`, and it does now:
+
+- `guitk::theme::relative_luminance` and `guitk::theme::contrast_ratio` are public, and use the real piecewise sRGB curve.
+- `contrast_text` compares the two candidate inks by ratio, exactly as `readable_on` does one crate up.
+- `appearance` **re-exports** them — `pub use guitk::theme::{contrast_ratio, relative_luminance};` — rather than wrapping them. A wrapper is a place where two things can come apart; a re-export is not.
+
+`appearance`'s own Cargo.toml already made this argument, about `Color`, before the contrast helpers existed: the toolkit is *"the one crate whose job is to stop there being two definitions of anything."* The helpers were put in `appearance` in §536 only because that is where the bug being fixed was, which is a reason about the diff, not about where the code belongs.
+
+`readable_on` stays in `appearance` and stays separate. It answers the same question with the *palette's* near-black and near-white instead of pure black and white, because §532 requires that ink on an accented surface belong to the palette. Now that the two share their arithmetic, the only thing that differs between them is which pair of inks they choose from — which is the real distinction, and is now the only one.
+
+### `is_dark`
+
+Redefined as `contrast_text(color) == Color::WHITE` rather than given a corrected threshold of its own. Two functions with two thresholds can disagree about a colour; one defined in terms of the other cannot. The name still reads as a question about brightness and the definition is now a question about legibility, which is a mismatch — but legibility is the only question it has ever been asked, and a precise answer under an imprecise name beats the reverse. The doc comment states the crossover explicitly so the next reader does not have to rediscover that it is not 0.5.
+
+Deleting it was the alternative. It has no callers, so nothing would break. Keeping it costs two lines and gives the "someone re-adds a threshold" failure a place to be caught, which `is_dark_and_contrast_text_cannot_disagree` now does.
+
+### Cost paid
+
+**None in behaviour, and that is itself the finding.** `contrast_text` and `is_dark` had no production callers — only six tests of their own, between them checking `#14141E`, `#F0F0F0`, pure black, pure white, and the two Catppuccin backgrounds. All six are nowhere near the 0.179 crossover, so all six passed before this change and pass after it, unchanged. They were tests that could not fail for the reason they were named — which is why the defect survived in a file that looked well tested.
+
+The `known-issues.md` entry filed the day before had predicted "a run of pinned-colour test failures" from "a crate with many widget callers", and deferred the work partly on that basis. Nobody had grepped for a caller. The entry is kept, marked FIXED, with the wrong prediction left visible and labelled: **a blast radius that was estimated rather than measured has to say which it is**, or a later reader treats a guess as a finding and prices the work off it.
+
+### Rejected
+
+- **Fix `contrast_text` in place, leave `appearance`'s copy alone.** Cheaper diff, and leaves the tree with two implementations of the WCAG curve — the exact condition that produced this bug. The whole point of §534 is that the second copy is the defect, not its symptom.
+- **Move the helpers to `guitk::color` instead of `guitk::theme`.** Defensible — a colour metric is arguably a property of the colour type. But `contrast_text` and `is_dark` are in `theme`, `color.rs` is currently pure data and conversion, and splitting the metric from its only two consumers buys nothing. If `color.rs` ever grows other metrics, move all of them together.
+- **Have `appearance` keep thin wrappers with its own doc comments.** The docs read better attached to the crate a shell author is already in. But a wrapper is an editable body, and an editable body is where a divergence starts; the re-export makes divergence a compile-time impossibility. `readable_on`'s doc carries the shell-facing explanation instead.
+- **Widen `contrast_text` to return the palette extremes.** That is `readable_on`, and it is already written. The toolkit has no palette and must not acquire one.
+
+## 538. Lanes publish to `main` with a fast-forward push from their own worktree, not by merging inside the shared `os` checkout
+
+**Date:** 2026-08-21 (answered), written up 2026-08-24
+**Decided by:** Operator (Claude recommended this option) — `open-questions.md` → C-Q3, answered `b`
+
+**In short:** The three agents each work in their own private copy of the source tree, which is what stops them overwriting one another. But the last step of every finished task used to send all three into **one shared copy** — the `os` folder — to publish. Two agents were in there at the same moment on 2026-08-21 and their publish steps tangled. From now on nobody enters that folder to publish: each lane publishes with a single server-side command that needs no folder at all, and if another lane got there first the command is simply refused, so you pull their work in, re-test, and try again.
+
+### The problem
+
+`roadmap.md` step 11 said: merge your lane branch into `main` from the `os` integration worktree, then push `main`. A worktree can only be in one state at a time, so two lanes merging in it simultaneously are editing the same thing — precisely the failure the per-lane worktrees exist to prevent. On 2026-08-21 that happened: git reported *"a git process may have crashed in this repository earlier"* and one lane's merge was discarded. Nothing was lost, because a discarded publish can be re-run, but the failure is silent enough to be worth removing rather than tolerating.
+
+### The decision
+
+**Option B: publish with `git push origin lane-c:main`.**
+
+This works because the rules *already* require each lane to `git fetch origin && git merge origin/main` and re-run the tests **in its own worktree** before publishing. Once that is done there is nothing left to reconcile — the lane branch already contains everything `main` has — so the push is a fast-forward, which the server performs atomically with no working directory involved.
+
+The safety property is the important part: a fast-forward push **cannot half-succeed and cannot interleave**. If another lane published in the meantime, `main` is no longer an ancestor of the lane branch and git *refuses* the push outright. The recovery is the same work the lane was already required to do: fetch, merge, re-test, push again. A refusal is a clean, loud, recoverable state, whereas a tangled merge in a shared checkout is a quiet one.
+
+Note this is not a force-push and must never become one. `--force` here would discard another lane's published work, which is exactly the outcome the whole arrangement is built to prevent. The refusal *is* the feature.
+
+### What it gives up
+
+The ability to resolve a genuine merge conflict *during* publication. That was never wanted: the rules already say resolve-then-test-then-publish, and B makes that ordering mandatory rather than conventional. A conflict now has to be resolved in the lane's own worktree, where the tests that prove the resolution can actually be run — which is where it should have been resolved anyway. Resolving a conflict in `os` and pushing produces a `main` commit whose exact tree no lane ever tested.
+
+`os` becomes a read-only window onto the combined result rather than a place work is done.
+
+### Rejected
+
+- **A — leave `roadmap.md` step 11 as it is.** Collisions stay rare but keep happening; each costs a re-run and looks alarming in the transcript. Rare-but-silent is the worst combination for a failure mode nobody is watching for.
+- **C — add a lock around the `os` worktree,** the way QEMU runs are already serialised. Solves the same problem, but by *scheduling* access to a shared resource rather than removing the need for it. It can make an agent wait, and a lock left behind by a crashed agent blocks the other two until someone clears it — a new failure mode traded for the old one. Removing the shared resource strictly dominates queueing for it.
+- **D — do nothing and document the race.** Considered implicitly and not offered: a documented race that costs a re-run every time it fires is not a resolution.
+
+### Why this was a question rather than a change
+
+`CLAUDE.md` and `roadmap.md` step 11 are the operator's, and `CLAUDE.md`'s own text forbids editing it except on an explicit instruction. The safe publish was already *permitted* by the existing wording — it just was not *prescribed* — so lane C had been publishing this way since the collision regardless. What needed the operator was making it the rule for all three lanes.
+
+## 539. Cryptographic primitives are ported from vetted implementations; the format and plumbing around them stay ours
+
+**Date:** 2026-08-24
+**Decided by:** Operator (Claude recommended this option) — `open-questions.md` → C-Q5, answered `c`
+
+**In short:** the code that protects saved passwords, login and the lock screen is cryptography this project wrote itself — including eleven separate hand-written copies of the same hash function. From now on, the *primitives* (the hash, the cipher, the password hash) are ported from implementations that other people have already spent twenty years attacking and repairing. Everything built on top of them — the vault file format, the credential service, the login flow — stays ours. The reason for the split is that hand-written crypto fails in a way this project's usual defence does not catch: the code computes the right answer and still leaks the secret, through how long it took to compute it. No test we can write notices that.
+
+### The problem this answers
+
+Nothing was ever decided about crypto. The OS has no third-party crypto dependency, so each feature that needed a hash wrote one, it worked, and it kept happening. Turning the workspace lints on for `gui/credentials` surfaced four defects, all logged in `known-issues.md`:
+
+| Problem | What it means |
+|---|---|
+| The password vault scrambles every secret with an identical repeating pattern | two saved passwords cancel each other out; the vault can be read without the master password |
+| The master password is hashed once, with an extra ingredient identical on every SlateOS machine | guessable at billions of tries per second, and one precomputed table cracks every user everywhere |
+| Nothing in userspace can obtain an unpredictable number | the built-in password *generator* produces guessable passwords |
+| Eleven hand-written copies of SHA-256 | eleven chances for one of them to be wrong, forever |
+
+Those four are being fixed regardless of this decision, as far as hand-written primitives allow. What the decision settles is the **end state** — specifically the two things that were not going to be written by hand: **authenticated encryption**, so an attacker who cannot read the vault also cannot silently alter it, and **a deliberately-slow password hash** (Argon2id or scrypt), so guessing costs an attacker real money.
+
+### Why the line falls between primitive and glue
+
+The argument for borrowing is strongest exactly where the failure is invisible. A cipher or a password hash has one property that cannot be established by checking its output: that it takes the same amount of time no matter what the secret is. The classic break is a comparison that returns a fraction sooner when the first byte is wrong; an attacker measures the timing and recovers the secret one byte at a time, against code that is perfectly correct by every test. This project's entire quality model is "if you did not test it, it is untested" — and here that model does not reach.
+
+The argument for *not* borrowing is strongest where the failure is visible. A vault file format that loses a record, a service that hands a credential to the wrong caller, a login flow that accepts an empty password — these are ordinary bugs, catchable by ordinary tests, and they are also the parts that have to fit this OS's capability model, its IPC, and its no-allocator constraints. Vendoring someone else's opinion about those would import a design, not a proof.
+
+So: borrow where testing cannot reach, write where it can. That is also what production operating systems do, and it is the same rule `design.txt` already states for the filesystem — port battle-tested code rather than writing a new one. That rule was written about ext4 and applies here with more force, because an ext4 bug crashes and a crypto bug just quietly stops protecting anything.
+
+### Rejected
+
+- **A — keep writing our own, carefully.** Implement AES-GCM and Argon2id in-tree against the official test vectors and collapse the eleven hash copies into one shared crate. For: no outside code in the trust base, works in the kernel's no-allocator environment by construction, consistent with how the rest of the OS is built. Against: "passes its tests" and "is secure" are different sentences here, and only here. This was the honest reason the question was asked at all rather than decided in-lane.
+- **B — port a vetted implementation for everything,** primitives and protocol both. For: the borrowed code is written to be constant-time on purpose by people who do only this. Against: it imports a whole design where only the arithmetic was wanted, and the surrounding layers are precisely the ones that must fit this OS's capability model rather than a general-purpose one. C gets the same protection over a smaller vendored surface.
+
+### What this obliges
+
+- The eleven SHA-256 copies collapse to one, and that one is ported rather than written.
+- New crypto written before the port lands is written knowing it is temporary; prefer deferring a crypto feature over adding a twelfth copy of something.
+- The vendored code is vendored, not depended on over the network, and carries a note recording which upstream revision it came from — otherwise "keep it current" has nothing to compare against.
+
+## 540. Printing is a background service applications submit jobs to, not a library they link
+
+**Date:** 2026-08-24
+**Decided by:** Operator (Claude recommended B, the shared library; operator chose C) — `open-questions.md` → C-Q4, answered `c`: *"let's do c since we should do it eventually anyway, no point putting it off with a stop-gap solution in its place"*
+
+**In short:** nothing in this OS can print. Two halves of a printing system exist and have never been introduced to each other — the PDF viewer knows how to work out *which pages* to print, and the desktop knows about *printers*, paper sizes, copies and a job queue. The connection between them will be a **background service**: an application hands a print job to a running system service and is then done with it. The job survives the application closing, and it can be cancelled from anywhere. This is more work than either shorter path, and it was chosen on the grounds that it is where printing has to end up anyway, so a stop-gap would be built only to be thrown away.
+
+### What already exists
+
+Both halves are real code with tests, not placeholders. Neither is reachable by any application.
+
+| | In the PDF viewer | In the desktop |
+|---|---|---|
+| Works out which pages to print | yes — including `1-3, 5, 7-9` | only a single "from page X to page Y" |
+| Knows what printers exist | no | yes |
+| Copies, paper size, double-sided, quality | no | yes |
+| Queue of pending jobs, cancel, pause | no | yes |
+| Reachable by any application | **no** | **no** |
+
+The split itself is not the mistake. A page range is something only the document can know, because it is the only thing that knows how long it is; the printer list is something only the system can know. What is missing is the join.
+
+### Why a service rather than a library
+
+The three live options were really one question asked three ways: *what does an application depend on in order to print?*
+
+- Depending on **the desktop** (option A) means every application that prints is built together with the program that draws the screen — a taskbar change could stop the PDF viewer compiling — and printing only works while the desktop is running.
+- Depending on **a library** (option B) removes the build tangle but keeps the job inside the application's own process. Close the application and the job goes with it.
+- Depending on **a service** (option C) means the application depends on a message format, not on code. The job outlives the sender by construction, because it was never the sender's to begin with.
+
+The third is what every other operating system converged on, and the reason is the property the first two cannot have at any price: **a print job is not part of the application's lifetime.** A user who prints a forty-page document and closes the viewer expects the pages to keep coming. B can be extended to A's capability, but it cannot be extended to that without becoming C.
+
+### The operator's reasoning, and why it overrode the recommendation
+
+The recommendation was B — cheaper, and the last moment at which moving the code was cheap. The operator's answer rejected the framing rather than the estimate: *"we should do it eventually anyway, no point putting it off with a stop-gap solution in its place."*
+
+That is consistent with this project's standing rule that effort is not a cost to be minimised and that a convenient intermediate is never temporary. B's real defect is not that it is worse than C — it is that it is a *way station* on the road to C, and way stations accumulate callers. Four applications written against a printing library are four applications to rewrite when the service arrives. The recommendation had priced the work and not the rewrite.
+
+Recorded because the estimate was not wrong and the conclusion still was: **"cheap now and compatible with the right answer later" is not the same as "on the way to the right answer later."** A library and a service differ in who owns the job, which is exactly the thing callers build assumptions around.
+
+### Rejected
+
+- **A — applications call the desktop's printing code directly.** Printing would work in the PDF viewer within the hour, at the price of coupling every printing application to the whole desktop. Cheap to create, expensive to undo, and the tangle grows with each new caller.
+- **B — move printer handling into a shared library.** The recommended option. No build tangle, nothing visible different from A for a user, and roughly half a day's work. Rejected as a way station: it settles the dependency question the wrong way (the job lives in the application's process) and every caller written against it is a caller to migrate.
+- **D — leave both halves unwired.** Printing stays impossible and the two models drift further apart, since each is edited for its own reasons. The two already disagree about what a page range is.
+
+### What this obliges
+
+- Printing is not unblocked by a quick change; it is a real piece of work with a message format, a service, and a queue that outlives its clients. Nothing else is currently blocked on it.
+- The PDF viewer's page-range parser is the good half and should be lifted into the job format, not reimplemented — it already handles `1-3, 5, 7-9`, which the desktop's from/to pair cannot express.
+- Until the service exists, neither half gains new callers. Wiring one application directly is exactly the stop-gap this decision refused.
+
+## 541. Arrow keys move the caret by what is on the screen, not by position in the sentence
+
+**Date:** 2026-08-24
+**Decided by:** Operator (Claude recommended this option) — `open-questions.md` → C-Q2, answered `b` (visual)
+
+**In short:** Hebrew and Arabic are written right to left, and one line can mix them with English — *"I said שלום to him"*. On such a line the order the characters are stored in is not the order they are drawn in, so the Right arrow key has two possible meanings that disagree. It now means **one step to the right on the screen**. Previously it meant "the next character in reading order", which made the caret occasionally jump a whole word sideways between two presses of the same key. The cost of the new rule is that the caret's *position in the sentence* can move backwards while it moves rightwards on screen.
+
+### The worked example
+
+The line is `I said <SHALOM> to him`, where `<SHALOM>` is one Hebrew word of five letters, drawn right-to-left inside a sentence drawn left-to-right. Put the caret just before the Hebrew word and press Right five times:
+
+| | What the caret does | Where it ends up |
+|---|---|---|
+| **Logical** (the old rule) | Steps through the letters in reading order, so it jumps to the word's right-hand end, walks leftwards, then jumps back | after the last Hebrew letter, at the word's **left** edge |
+| **Visual** (the new rule) | Moves right by one letter each press, never jumping | at the word's **right** edge, having passed through the whole word |
+
+Both arrive "after the whole word" in some sense. They disagree about which end of the word that is, and about everything in between.
+
+### Why visual
+
+Neither convention is wrong, and the major systems are split — macOS, GTK and Qt are logical; Windows edit controls are visual, and ICU's `ubidi` API is built to support the visual walk.
+
+The argument that decided it is what the key is *called*. A user presses "right arrow" while looking at the screen. A right arrow that sometimes moves the caret leftwards is surprising in a way no correctness argument repairs. The logical convention's advantage — that the caret's text offset advances monotonically — is real but **invisible**; the visual convention's advantage is the thing the user is actually looking at.
+
+Home/End and word-motion stay logical under this decision, and that is not an inconsistency: those name *positions in the sentence* ("start of line", "next word"), not *directions on the screen*. Only the two keys that name a screen direction follow the screen.
+
+### The measured caveat, which is the reason this was asked rather than guessed
+
+The caret has to carry one extra bit alongside its offset: **which side of a direction boundary it is on.** That turned out not to be a nicety. A text box that stores only the caret's position in the string between keypresses, and recomputes the rest each time, does not merely land on the wrong side of a boundary — it **skips the entire right-to-left word in a single press**, which is worse than the behaviour being replaced.
+
+So a half-implemented "visual" — switching the arrow keys without also making each widget remember that bit — is a regression, not a partial improvement. This is the specific thing to check when wiring each widget, and it is why "one line per widget" is true only because the groundwork was already built.
+
+### What was already built
+
+`caret_left` / `caret_right` were written and tested on 2026-08-17, before the answer arrived, covering a mixed-direction line, an Arabic ligature crossed as a single unit, and the pixel round-trip. They were written with nothing calling them precisely because the answer was outstanding — and they are not wasted under either answer, since mouse selection and any future screen-order feature need the same primitive. That is why the question could be left open at no cost.
+
+### Rejected
+
+- **A — keep logical.** The status quo, self-consistent, and what most of Linux does. Rejected because its one advantage is not observable by the person pressing the key, while its cost — a caret that jumps a word's width sideways between two presses of the same key — is.
+- **C — a user setting, defaulting to one of the two.** Rejected on two grounds: it asks the user a question they have no basis to answer, and it doubles the number of behaviours every future text widget must be correct in — for a rule that is subtle enough that the *single* correct behaviour already has a documented way to get it wrong.
+
+### Where this lands
+
+- `gui/font/src/shape.rs` — `ShapedRun::caret_left` / `caret_right`, the primitive; already correct.
+- `gui/toolkit/src/text.rs` — `TextCursor` and its wrappers.
+- `guitk::widget::TextInput` and `guitk::modal::InputDialog` — the arrow-key handling; each carries a comment marked `C-Q2` naming the exact line.
+- `apps/editor` is **not** covered by this decision either way. It draws its caret and scrolls horizontally on the assumption that screen order equals reading order, so it needs its own larger fix first (`known-issues.md` → `TD-EDITOR-IS-NOT-BIDIRECTIONAL`).
+
+## 542. The installer refuses an ambiguous size suffix rather than guessing which one the author meant
+
+**Date:** 2026-08-24
+**Decided by:** Operator (Claude recommended B weakly, and named C the honest option; operator chose C) — `open-questions.md` → Q55, answered `c`
+
+**In short:** an unattended-install config file describes each disk partition with a size like `"100 GB"` or `"32 GiB"`. The installer treated both spellings as the same number — the binary one — so a config asking for `500 GB` on a 500 GB drive actually asked for 537 GB and the install failed to fit. It now **refuses `GB` outright**, with an error naming both alternatives, and accepts only the unambiguous `GiB` and bare `G`. A config using `GB` stops installing until someone edits it. Nothing is ever silently resized.
+
+**Glossary:** `GB` (gigabyte) is decimal — exactly 1 000 000 000 bytes, and what a disk's box says. `GiB` (gibibyte) is binary — 1 073 741 824 bytes, about 7 % more. They diverge further at `TB`/`TiB` (10 %).
+
+### Why this one was asked when its mirror image was not
+
+§489 fixed the display side of the same confusion: code that divided by 1024 and *printed* `GB`. That was fixed without asking anyone, because printing a number under a label that means something else is simply false — there is no convention under which it is right.
+
+The input side is not like that. A suffix in a config file is an **input convention**, and the surrounding ecosystem is genuinely split: `fdisk` and `parted` treat everything as binary, and anyone who has typed `+512M` at a disk prompt expects exactly that. So the tree held two defensible conventions and had silently picked one, which is the shape of question that goes to the operator rather than getting resolved in-lane.
+
+### Why refusing beats picking
+
+The two "pick one" answers share a defect that only became visible once they were written down next to each other: **whichever is chosen, some existing config file means something different than its author intended, and nothing announces it.** Under A the author who wrote `100 GB` from the drive's label quietly gets 7 % more than they asked for. Under B that same author quietly gets 7 % less than they got yesterday. Both failures are silent, and both produce a disk layout nobody chose.
+
+C is the only option where the ambiguity is surfaced to the one party who can actually resolve it — the person who wrote the file and knows which number they meant. The cost is real and was accepted knowingly: **existing config files break loudly instead of being left wrong quietly.** For a tool that partitions disks, that trade is not close. A partition table is not a place to be helpful about a guess.
+
+This generalises past the installer: when an input has two established meanings and the tree cannot tell which was intended, refusing is a better default than defaulting. A rejection costs an edit; a wrong guess costs a disk layout, and gives no sign it happened.
+
+### Rejected
+
+- **A — leave it, every suffix is binary.** The status quo, self-consistent, and what most partitioning tools do. Rejected because self-consistency is not the property at issue: the author who copied "500 GB" off the drive's label still gets a partition that does not fit, and the error points at the partition table rather than at the units.
+- **B — honour the spelling: `GB` = 10⁹, `GiB` = 2³⁰, bare `G` = 2³⁰.** The (weak) recommendation, on the sole ground that it would agree with what §489 made the display side do. Rejected because it silently changes what every existing config file does — the same silent-wrong-layout failure as A, merely in the other direction, and newly introduced rather than long-standing.
+
+### What this obliges
+
+- `apps/installer/src/lib.rs` — the `multiplier` match in the partition-size parser, where `"K"|"KB"|"KIB"` all currently map to 1024, up through `TB`.
+- The error message must name **both** replacements (`GiB` for what you have now, `GB` was never honoured as decimal), because an author who is refused needs to know which one preserves their existing layout. An error that only says "ambiguous" makes the reader guess again, one level up.
+- Documentation and any sample config in the tree must stop using `GB`, or the installer will reject its own examples.

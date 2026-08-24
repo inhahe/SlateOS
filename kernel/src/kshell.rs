@@ -322,6 +322,46 @@ fn assert_output_starts_with(what: &str, out: &[u8], expected: &[u8]) {
     panic!("`{}` output did not start with the expected prefix", what);
 }
 
+/// Whether `out` contains `needle` anywhere.
+///
+/// Shared by [`assert_output_contains`] and [`assert_output_lacks`] so the two
+/// can never disagree about what "contains" means — a positive and a negative
+/// assertion that answer the same question differently would let a single
+/// output satisfy both.
+fn output_contains(out: &[u8], needle: &[u8]) -> bool {
+    needle.len() <= out.len() && out.windows(needle.len()).any(|w| w == needle)
+}
+
+/// Assert a captured command's output contains `expected` somewhere.
+///
+/// [`assert_output_starts_with`] cannot express this, and the gap is not
+/// cosmetic: a diagnostic about *part* of a walk — `find` reporting the one
+/// subtree it could not descend into — is emitted in the middle of the matches
+/// it did find, so it is never at the start and the prefix form would have to be
+/// weakened to `find: ` and thereby stop distinguishing the message at all.
+///
+/// Panics on a miss, after printing both sides, so the failing boot carries its
+/// own explanation.
+fn assert_output_contains(what: &str, out: &[u8], expected: &[u8]) {
+    use crate::serial_println;
+
+    assert!(
+        !expected.is_empty(),
+        "`{}`: assert_output_contains needs a non-empty needle",
+        what
+    );
+
+    if output_contains(out, expected) {
+        return;
+    }
+    serial_println!("  !! `{}`: output lacked text it must contain", what);
+    serial_println!("     expected somewhere in the output:");
+    dump_lines(expected);
+    serial_println!("     actual output ({} bytes):", out.len());
+    dump_lines(out);
+    panic!("`{}` output lacked text it must contain", what);
+}
+
 /// Assert a captured command's output does **not** contain `forbidden`.
 ///
 /// The negative counterpart to [`assert_output_starts_with`], and it exists for
@@ -346,9 +386,7 @@ fn assert_output_lacks(what: &str, out: &[u8], forbidden: &[u8]) {
         what
     );
 
-    let present =
-        forbidden.len() <= out.len() && out.windows(forbidden.len()).any(|w| w == forbidden);
-    if !present {
+    if !output_contains(out, forbidden) {
         return;
     }
     serial_println!("  !! `{}`: output contained text it must not", what);
@@ -11014,6 +11052,120 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         let _ = Vfs::remove(same);
     }
 
+    serial_println!(
+        "  kshell::self_test 27: a subtree not walked is not a subtree without matches"
+    );
+    // `find` set no exit status on any path at all, so every one of its failures
+    // arrived as success -- and it has the worst possible trailer for that,
+    // because it signs off with "N matches found" whatever happened. A search
+    // that could not open its root printed `0 matches found` and exited 0: the
+    // exact output, and the exact status, of a search that read the directory
+    // and found it held nothing.
+    //
+    // This rung also pins the distinction the fix turns on, which no output can
+    // show: the built-in depth cap and the user's `-maxdepth` are the same
+    // number in the same field and opposite in meaning, so one must report and
+    // the other must stay silent.
+    {
+        use crate::fs::vfs::Vfs;
+
+        // Two trees, because a predicate filters the *output* and not the walk:
+        // `-name needle.txt` still descends every directory it is given, so a
+        // deep tree would trip the depth cap during the plain match tests and
+        // they would be asserting the cap rather than the match.
+        let shallow = Path::new("/tmp/kshell_find_shallow");
+        Vfs::mkdir_all(shallow)?;
+        Vfs::write_file(Path::new("/tmp/kshell_find_shallow/needle.txt"), b"x")?;
+
+        // 18 levels: two past FIND_DEPTH_CAP, so the walk is certain to hit the
+        // cap rather than merely reach it.
+        Vfs::mkdir_all(Path::new(
+            "/tmp/kshell_find_deep/d1/d2/d3/d4/d5/d6/d7/d8/d9/d10/d11/d12/d13/d14/d15/d16/d17/d18",
+        ))?;
+
+        // 0: matched. The ordinary path, asserted so the rungs below cannot pass
+        // by breaking the search itself.
+        let out = capture_command("find /tmp/kshell_find_shallow -name needle.txt");
+        assert_output_contains("the match is printed", &out, b"needle.txt");
+        assert_eq!(last_exit(), 0, "find: a match is success");
+
+        // 0 as well: *finding nothing is a complete answer*, and this is the one
+        // place `find` differs from `grep`. `grep`'s empty result is ambiguous
+        // ("absent" or "unreadable?"), so it earns a third status; `find`'s is
+        // not, so a nonzero status here would invent a failure GNU `find` does
+        // not report either.
+        let out = capture_command("find /tmp/kshell_find_shallow -name zzz_no_such_name");
+        assert_output_contains("the empty result is stated", &out, b"0 matches found");
+        assert_eq!(last_exit(), 0, "find: finding nothing is not an error");
+
+        // 1: could not walk. Byte-for-byte the same trailer as the line above --
+        // `0 matches found` -- which is precisely why the status has to carry
+        // the difference.
+        let out = capture_command("find /zzz_no_such_dir -name anything");
+        assert_output_starts_with(
+            "find names the directory it could not read",
+            &out,
+            b"find: ",
+        );
+        assert_eq!(
+            last_exit(),
+            1,
+            "find: an unreadable root is not an empty one"
+        );
+
+        // A depth that is not a number used to become a silent `-maxdepth 16`,
+        // so a typo returned a truncated search wearing the look of a whole one.
+        let out = capture_command("find /tmp/kshell_find_shallow -maxdepth abc");
+        assert_output_starts_with("find rejects a non-numeric depth", &out, b"find: -maxdepth");
+        assert_eq!(last_exit(), 1, "find: a bad depth is a usage error");
+
+        // The built-in cap: nobody asked for it, the directories below it exist,
+        // and stopping there without a word is `find` reporting that they do not.
+        let out = capture_command("find /tmp/kshell_find_deep -type d");
+        assert_output_contains("the cap is named when it bites", &out, b"recursion limit");
+        assert_eq!(last_exit(), 1, "find: a truncated walk is incomplete");
+
+        // The user's own limit, on the same tree, cutting off far more of it --
+        // and silent, because this is the command doing what it was told. The
+        // pair is the whole point: identical mechanism, opposite meaning.
+        let out = capture_command("find /tmp/kshell_find_deep -maxdepth 2 -type d");
+        assert_output_lacks(
+            "a requested limit is not a complaint",
+            &out,
+            b"recursion limit",
+        );
+        assert_eq!(last_exit(), 0, "find: -maxdepth is not a failure");
+
+        // A depth past the cap is clamped and said out loud -- but the clamp is
+        // only a *warning*, and the status turns on whether the answer came back
+        // whole, not on whether the request was honoured verbatim. Here the cap
+        // goes on to bite this deep tree, so 1; asked of the shallow tree below,
+        // the same clamp costs nothing and the status stays 0.
+        let out = capture_command("find /tmp/kshell_find_deep -maxdepth 99 -type d");
+        assert_output_contains(
+            "the clamp is announced",
+            &out,
+            b"exceeds the built-in limit",
+        );
+        assert_eq!(last_exit(), 1, "find: the clamp truncated this walk");
+
+        let out = capture_command("find /tmp/kshell_find_shallow -maxdepth 99 -name needle.txt");
+        assert_output_contains(
+            "the clamp is still announced",
+            &out,
+            b"exceeds the built-in limit",
+        );
+        assert_eq!(
+            last_exit(),
+            0,
+            "find: a clamp that changed nothing is not a failure"
+        );
+
+        // The trees are left in place: removing an 18-deep one needs a recursive
+        // delete the VFS does not offer, and /tmp does not survive the boot. The
+        // names are unique enough that no other rung can trip over them.
+    }
+
     serial_println!("  kshell::self_test PASSED");
     Ok(())
 }
@@ -13330,6 +13482,13 @@ fn du_recurse(path: &Path, depth: usize, max_depth: usize, summary_only: bool) -
 ///   `find / -type d -name src`
 ///   `find . -size +1M`
 ///   `find /tmp -empty`
+///
+/// Exits **0** when the walk completed — *including* when it matched nothing,
+/// which is a complete answer and not an error — and **1** when it could not
+/// walk something: an unreadable directory, a subtree cut off by
+/// [`FIND_DEPTH_CAP`], or a usage error. Two values, not the three
+/// `grep`/`cmp`/`diff` use; see [`FindTally`] for why the third would be
+/// meaningless here.
 #[allow(clippy::arithmetic_side_effects)]
 fn cmd_find(args: &str) {
     if args.is_empty() {
@@ -13350,7 +13509,9 @@ fn cmd_find(args: &str) {
     let mut name_pattern: Option<&str> = None;
     let mut type_filter: Option<char> = None; // 'f', 'd', or 'l'
     let mut size_filter: Option<(i64, char)> = None; // (threshold, '+'/'-'/'=')
-    let mut max_depth: u32 = 16;
+    // `None` until the user asks: the default is not a request, and only a
+    // request may cut the walk off silently.
+    let mut user_max_depth: Option<u32> = None;
     let mut empty_filter = false;
 
     let mut words = args.split_whitespace().peekable();
@@ -13366,8 +13527,23 @@ fn cmd_find(args: &str) {
                 size_filter = Some(parse_size_predicate(s));
             }
         } else if w == "-maxdepth" {
-            if let Some(d) = words.next() {
-                max_depth = d.parse::<u32>().unwrap_or(16);
+            // `.unwrap_or(16)` used to turn `-maxdepth abc` into a silent
+            // `-maxdepth 16`, so a typo produced a *truncated* search wearing
+            // the appearance of a complete one. A depth argument that is not a
+            // number is a mistake, and the only safe answer to a mistake in a
+            // search's bounds is to refuse rather than to guess at them.
+            let Some(d) = words.next() else {
+                shell_println!("find: -maxdepth: expected a number");
+                set_exit(1);
+                return;
+            };
+            match d.parse::<u32>() {
+                Ok(n) => user_max_depth = Some(n),
+                Err(_) => {
+                    shell_println!("find: -maxdepth: '{}' is not a number", d);
+                    set_exit(1);
+                    return;
+                }
             }
         } else if w == "-empty" {
             empty_filter = true;
@@ -13385,6 +13561,25 @@ fn cmd_find(args: &str) {
 
     let root = resolve_path(search_path);
 
+    // A `-maxdepth` deeper than the cap cannot be honoured, and pretending
+    // otherwise is the same silence in a different place: the old code let the
+    // user's number straight through, so `-maxdepth 200` would have recursed 200
+    // levels into the shell's 64 KiB stack if a tree that deep existed. Clamp,
+    // and say so once here rather than once per subtree below.
+    let (max_depth, depth_limit_is_builtin) = match user_max_depth {
+        Some(n) if n <= FIND_DEPTH_CAP => (n, false),
+        Some(n) => {
+            shell_println!(
+                "find: -maxdepth {}: exceeds the built-in limit of {}, using {}",
+                n,
+                FIND_DEPTH_CAP,
+                FIND_DEPTH_CAP
+            );
+            (FIND_DEPTH_CAP, true)
+        }
+        None => (FIND_DEPTH_CAP, true),
+    };
+
     let filter = FindFilter {
         name_pattern,
         is_glob: name_pattern
@@ -13393,12 +13588,33 @@ fn cmd_find(args: &str) {
         size_filter,
         empty_filter,
         max_depth,
+        depth_limit_is_builtin,
     };
 
-    let mut count: u64 = 0;
-    find_recurse_filtered(Path::new(&root), &filter, &mut count, 0);
-    shell_println!("\n{} matches found", count);
+    let mut tally = FindTally::default();
+    find_recurse_filtered(Path::new(&root), &filter, &mut tally, 0);
+    shell_println!("\n{} matches found", tally.matches);
+
+    // Two values, not three (see `FindTally`): finding nothing is a complete
+    // answer and stays 0, exactly as GNU `find` does. What must not stay 0 is a
+    // walk that could not read something -- the count printed above is then a
+    // floor rather than a total, and the caller has no other way to learn that.
+    if tally.unreadable > 0 {
+        set_exit(1);
+    }
 }
+
+/// How deep `find` will descend before giving up on a subtree.
+///
+/// This is a stack-safety limit, not a feature: `find_recurse_filtered` recurses
+/// once per directory level, and the shell's task stack is 64 KiB
+/// ([`crate::sched::task::TASK_STACK_SIZE`]). It is emphatically *not* the same
+/// thing as the user's `-maxdepth`, even though one field used to carry both --
+/// see [`FindFilter::depth_limit_is_builtin`].
+///
+/// Named rather than inlined because the limit is now *reported* when it bites,
+/// and the diagnostic and the check must not be able to drift apart.
+const FIND_DEPTH_CAP: u32 = 16;
 
 /// Parsed find predicates.
 struct FindFilter<'a> {
@@ -13407,7 +13623,42 @@ struct FindFilter<'a> {
     type_filter: Option<char>,
     size_filter: Option<(i64, char)>,
     empty_filter: bool,
+    /// The depth actually enforced: the user's `-maxdepth` if they gave one and
+    /// it fits, otherwise [`FIND_DEPTH_CAP`].
     max_depth: u32,
+    /// Whether `max_depth` is ours or theirs.
+    ///
+    /// The two are indistinguishable as numbers and opposite in meaning. A user
+    /// who writes `-maxdepth 2` *asked* not to see anything deeper, so cutting
+    /// the walk off there is the command working, and saying so would be noise
+    /// on every run. Our own cap is the reverse: nobody asked for it, the files
+    /// below it exist, and stopping silently is `find` reporting that they do
+    /// not. Only the second gets a diagnostic.
+    depth_limit_is_builtin: bool,
+}
+
+/// What a `find` run produced: what it matched, and what it could not walk.
+///
+/// Unlike `grep`, `find` needs only **two** exit statuses, not three. The test
+/// is whether the command's "no" is ambiguous: `grep`'s empty result might mean
+/// *I searched and the text is absent* or *I could not read the file*, so it
+/// needs a third value to keep those apart. `find`'s empty result carries no
+/// such ambiguity -- "no path matched" is a perfectly good, complete answer, and
+/// GNU `find` accordingly exits 0 for it and reserves 1 for errors. Inventing a
+/// 2 here would be manufacturing a distinction the command does not have.
+///
+/// What `find` *did* lack was any status at all: `cmd_find` set none on any
+/// path, so `find /no/such/dir -name x` printed `0 matches found` and exited 0 --
+/// a directory that could not be opened reported as a directory containing
+/// nothing.
+#[derive(Default)]
+struct FindTally {
+    /// Paths that satisfied every predicate.
+    matches: u64,
+    /// Directories the walk could not read, or subtrees it was cut off from by
+    /// [`FIND_DEPTH_CAP`]. Any of these means the search was incomplete, so the
+    /// zero-match answer is not an answer.
+    unreadable: usize,
 }
 
 /// Parse a `-size` argument like `+1M`, `-512k`, `100c`.
@@ -94570,21 +94821,44 @@ fn extension_hint(path: &Path) -> &'static str {
     }
 }
 
-/// Recursive helper for find — search directory tree for name matches.
+/// Recursive helper for `find` — walk a directory tree applying the predicates.
 ///
-/// Uses glob matching if the pattern contains metacharacters (`*`, `?`,
-/// `[`), otherwise falls back to case-insensitive substring matching.
-/// Limits depth to 16.
-/// Recursive find with predicate filtering.
+/// Uses glob matching if the pattern contains metacharacters (`*`, `?`, `[`),
+/// otherwise falls back to case-insensitive substring matching. Depth is bounded
+/// by [`FindFilter::max_depth`].
+///
+/// Records anything it could not look at in `tally.unreadable` rather than
+/// returning quietly, because a walk that skipped a subtree has not established
+/// that the subtree holds no match — and printing `0 matches found` afterwards
+/// asserts exactly that. See [`FindTally`].
 #[allow(clippy::arithmetic_side_effects)]
-fn find_recurse_filtered(path: &Path, filter: &FindFilter<'_>, count: &mut u64, depth: u32) {
+fn find_recurse_filtered(path: &Path, filter: &FindFilter<'_>, tally: &mut FindTally, depth: u32) {
     if depth > filter.max_depth {
+        // Only our own cap is a refusal. The user's `-maxdepth` is the command
+        // doing what it was told, and announcing it would fire on every level of
+        // every bounded search.
+        if filter.depth_limit_is_builtin {
+            shell_println!(
+                "find: {}: recursion limit ({}) reached, not searched",
+                path.display(),
+                FIND_DEPTH_CAP
+            );
+            tally.unreadable = tally.unreadable.saturating_add(1);
+        }
         return;
     }
 
     let entries = match crate::fs::Vfs::readdir(path) {
         Ok(e) => e,
-        Err(_) => return,
+        Err(e) => {
+            // This fires for the root as well as for subdirectories, which is
+            // the case that mattered most: `find /no/such/dir -name x` used to
+            // fail to open its one and only directory and then report the
+            // result as `0 matches found`, exit 0.
+            shell_println!("find: {}: {:?}", path.display(), e);
+            tally.unreadable = tally.unreadable.saturating_add(1);
+            return;
+        }
     };
 
     for entry in &entries {
@@ -94643,9 +94917,19 @@ fn find_recurse_filtered(path: &Path, filter: &FindFilter<'_>, count: &mut u64, 
                 crate::fs::EntryType::File => entry.size == 0,
                 crate::fs::EntryType::Directory => {
                     // Check if directory is empty (no entries besides . and ..).
-                    crate::fs::Vfs::readdir(&child_path)
-                        .map(|e| e.is_empty())
-                        .unwrap_or(false)
+                    match crate::fs::Vfs::readdir(&child_path) {
+                        Ok(e) => e.is_empty(),
+                        Err(e) => {
+                            // `.unwrap_or(false)` here answered "not empty" for
+                            // a directory nobody managed to open -- a claim
+                            // about its contents, made without reading them, and
+                            // indistinguishable in the output from a directory
+                            // genuinely holding files.
+                            shell_println!("find: {}: {:?}", child_path.display(), e);
+                            tally.unreadable = tally.unreadable.saturating_add(1);
+                            false
+                        }
+                    }
                 }
                 _ => false,
             };
@@ -94663,11 +94947,11 @@ fn find_recurse_filtered(path: &Path, filter: &FindFilter<'_>, count: &mut u64, 
                 crate::fs::EntryType::CharDevice => "",
             };
             shell_println!("{}{}", child_path.display(), type_str);
-            *count = count.saturating_add(1);
+            tally.matches = tally.matches.saturating_add(1);
         }
 
         if entry.entry_type == crate::fs::EntryType::Directory {
-            find_recurse_filtered(&child_path, filter, count, depth + 1);
+            find_recurse_filtered(&child_path, filter, tally, depth + 1);
         }
     }
 }

@@ -269,7 +269,12 @@ struct ScoredEntry {
 /// Main launcher dialog state. Embed this in your desktop shell state.
 pub struct LauncherState {
     query: String,
-    cursor: usize,
+    /// The caret: a byte offset *and* which side of a direction boundary it is
+    /// on. The second half is not decoration — where a left-to-right and a
+    /// right-to-left run meet, one byte offset names two places on screen, and
+    /// a caret rebuilt from the offset alone steps over the whole
+    /// right-to-left word in a single press. See `design-decisions.md` §541.
+    cursor: TextCursor,
     results: Vec<ScoredEntry>,
     selected_index: usize,
     /// Whether the launcher dialog is visible.
@@ -287,7 +292,7 @@ impl LauncherState {
         let apps = builtin_app_database();
         let mut state = Self {
             query: String::new(),
-            cursor: 0,
+            cursor: TextCursor::default(),
             results: Vec::new(),
             selected_index: 0,
             visible: false,
@@ -304,7 +309,7 @@ impl LauncherState {
     /// Show the launcher (resets search state).
     pub fn show(&mut self) {
         self.query.clear();
-        self.cursor = 0;
+        self.cursor = TextCursor::default();
         self.selected_index = 0;
         self.visible = true;
         self.update_results();
@@ -366,7 +371,7 @@ impl LauncherState {
                     && let Some(entry) = self.apps.get(scored.db_index)
                 {
                     self.query = entry.name.clone();
-                    self.cursor = self.query.len();
+                    self.cursor = TextCursor::from(self.query.len());
                     self.update_results();
                 }
                 return LauncherAction::None;
@@ -377,12 +382,19 @@ impl LauncherState {
             // the query and stepping `char_indices`, a slice that panics on an
             // offset which has drifted off a character boundary. `TextCursor`
             // answers it once, for every field in the toolkit.
+            //
+            // Note the split: the two *edits* below move logically and the two
+            // *arrows* move visually. That is not an inconsistency. Backspace
+            // deletes the character before this one in the string, which is
+            // what a reader of that script means wherever it happens to be
+            // drawn; an arrow key is a request to move one place on the screen.
+            // `design-decisions.md` §541.
             Key::Backspace => {
-                let at = TextCursor::from(self.cursor);
+                let at = self.cursor;
                 if let Some(prev) = at.prev_in(&self.query) {
                     self.query
                         .replace_range(prev.byte()..at.snapped_in(&self.query).byte(), "");
-                    self.cursor = prev.byte();
+                    self.cursor = prev;
                     self.selected_index = 0;
                     self.update_results();
                 }
@@ -393,37 +405,51 @@ impl LauncherState {
                 // Delete removes the character the caret sits *on*: the span
                 // from this caret stop to the next one. `String::remove` took
                 // a byte offset and a character's worth of faith.
-                let at = TextCursor::from(self.cursor).snapped_in(&self.query);
+                let at = self.cursor.snapped_in(&self.query);
                 if let Some(next) = at.next_in(&self.query) {
                     self.query.replace_range(at.byte()..next.byte(), "");
-                    self.cursor = at.byte();
+                    self.cursor = at;
                     self.selected_index = 0;
                     self.update_results();
                 }
                 return LauncherAction::None;
             }
 
+            // Measured at the size and weight the query is drawn at, because
+            // the gaps between glyphs belong to the shaped run — and assigned
+            // whole rather than by byte, because the affinity is what stops a
+            // right-to-left word being skipped in one press.
             Key::Left => {
-                if let Some(prev) = TextCursor::from(self.cursor).prev_in(&self.query) {
-                    self.cursor = prev.byte();
+                if let Some(prev) = text::caret_left(
+                    &self.query,
+                    self.cursor,
+                    INPUT_FONT_SIZE,
+                    FontWeightHint::Regular,
+                ) {
+                    self.cursor = prev;
                 }
                 return LauncherAction::None;
             }
 
             Key::Right => {
-                if let Some(next) = TextCursor::from(self.cursor).next_in(&self.query) {
-                    self.cursor = next.byte();
+                if let Some(next) = text::caret_right(
+                    &self.query,
+                    self.cursor,
+                    INPUT_FONT_SIZE,
+                    FontWeightHint::Regular,
+                ) {
+                    self.cursor = next;
                 }
                 return LauncherAction::None;
             }
 
             Key::Home => {
-                self.cursor = 0;
+                self.cursor = TextCursor::default();
                 return LauncherAction::None;
             }
 
             Key::End => {
-                self.cursor = self.query.len();
+                self.cursor = TextCursor::from(self.query.len());
                 return LauncherAction::None;
             }
 
@@ -461,8 +487,15 @@ impl LauncherState {
         if let Some(ch) = event.text
             && !ch.is_control()
         {
-            self.query.insert(self.cursor, ch);
-            self.cursor = self.cursor.saturating_add(ch.len_utf8());
+            self.query.insert(self.cursor.byte(), ch);
+            // Typing lands the caret after what was typed, which is the
+            // downstream side of the new boundary whichever way the surrounding
+            // text runs — and, now that the query contains the character, the
+            // next boundary the query itself names.
+            self.cursor = self
+                .cursor
+                .next_in(&self.query)
+                .unwrap_or_else(|| TextCursor::from(self.query.len()));
             self.selected_index = 0;
             self.update_results();
         }
@@ -651,12 +684,24 @@ impl LauncherState {
         // `0.55` is not a fixable constant, because no single number is right
         // for a face whose whole purpose is that its characters differ.
         //
-        // `get` rather than `[..cursor]`: the caret is a byte offset, and
-        // slicing a `str` off a character boundary aborts the process. A caret
-        // that is momentarily inconsistent should draw at the left edge, not
-        // take the desktop's launcher down.
-        let before = self.query.get(..self.cursor).unwrap_or("");
-        let cursor_x = 12.0 + text::measure(before, INPUT_FONT_SIZE, FontWeightHint::Regular);
+        // Placed by the shaper rather than by measuring the text before the
+        // caret. Measuring the prefix assumes the caret sits at its width,
+        // which is only true while the line runs in one direction: where a
+        // right-to-left run meets a left-to-right one, the prefix's width is
+        // not where the caret belongs, and *which* of the two candidate
+        // positions is right depends on the affinity the cursor carries. This
+        // is also what makes the visual arrows above draw where they move.
+        //
+        // It also removes the slicing question entirely — `caret_x` is handed
+        // the cursor, not a `&str` that a drifted offset could split inside a
+        // character and abort the desktop's launcher on.
+        let cursor_x = 12.0
+            + text::caret_x(
+                &self.query,
+                self.cursor,
+                INPUT_FONT_SIZE,
+                FontWeightHint::Regular,
+            );
         cmds.push(RenderCommand::Line {
             x1: cursor_x,
             y1: text_y,
@@ -1145,7 +1190,7 @@ mod tests {
             let mut state = LauncherState::new(1280.0, 800.0);
             state.visible = true;
             state.query = query.to_owned();
-            state.cursor = query.len();
+            state.cursor = TextCursor::from(query.len());
             state
                 .render(&accented(false))
                 .into_iter()
@@ -1189,7 +1234,7 @@ mod tests {
         let mut state = LauncherState::new(1280.0, 800.0);
         state.visible = true;
         state.query = "é".to_owned();
-        state.cursor = 1;
+        state.cursor = TextCursor::from(1);
         assert!(!state.render(&accented(false)).is_empty());
     }
 
@@ -1204,17 +1249,17 @@ mod tests {
             state.handle_key(&type_char(ch));
         }
         assert_eq!(state.query, "aé€🔒");
-        assert_eq!(state.cursor, 10);
+        assert_eq!(state.cursor.byte(), 10);
 
         // Four Lefts reach the start — one per keystroke typed, not one per
         // byte, of which there are ten.
         for _ in 0..4 {
             state.handle_key(&press(Key::Left));
         }
-        assert_eq!(state.cursor, 0);
+        assert_eq!(state.cursor.byte(), 0);
         // And Left at the start stays put rather than underflowing.
         state.handle_key(&press(Key::Left));
-        assert_eq!(state.cursor, 0);
+        assert_eq!(state.cursor.byte(), 0);
 
         // Delete removes whole characters from the front.
         state.handle_key(&press(Key::Delete));
@@ -1226,7 +1271,7 @@ mod tests {
         for _ in 0..5 {
             state.handle_key(&press(Key::Right));
         }
-        assert_eq!(state.cursor, state.query.len());
+        assert_eq!(state.cursor.byte(), state.query.len());
 
         // Backspace erases one keystroke's worth each time, not one byte.
         state.handle_key(&press(Key::Backspace));
@@ -1235,7 +1280,88 @@ mod tests {
         assert_eq!(state.query, "");
         state.handle_key(&press(Key::Backspace));
         assert_eq!(state.query, "");
-        assert_eq!(state.cursor, 0);
+        assert_eq!(state.cursor.byte(), 0);
+    }
+
+    /// The arrows move by the **screen**, so the launcher agrees with every
+    /// other text field in the system (`design-decisions.md` §541) rather than
+    /// being the one place where they still step through the string.
+    ///
+    /// On `ab` + two Hebrew letters + `cd`, drawn `a b <bet> <aleph> c d`, the
+    /// two gaps where the directions meet each answer to *both* of the byte
+    /// offsets 2 and 6. Walking left reports 6 at both of them and walking
+    /// right reports 2 at both, and only the affinity inside `TextCursor` says
+    /// which is which — the reason this field stores a `TextCursor` and not a
+    /// `usize`. Had it kept the byte and rebuilt the rest each press, it would
+    /// read the second 6 as the first and skip the whole Hebrew word in one
+    /// keystroke, which §541 records as worse than the motion it replaced.
+    #[test]
+    fn the_arrows_walk_the_query_by_the_screen_not_by_the_string() {
+        let text = "ab\u{05D0}\u{05D1}cd";
+        let mut state = LauncherState::new(1280.0, 800.0);
+        state.visible = true;
+        state.query = text.to_owned();
+        state.cursor = TextCursor::from(text.len());
+
+        let mut seen = vec![];
+        for _ in 0..6 {
+            state.handle_key(&press(Key::Left));
+            seen.push(state.cursor.byte());
+        }
+        assert_eq!(seen, vec![7, 6, 4, 6, 1, 0], "leftward walk");
+
+        let mut seen = vec![];
+        for _ in 0..6 {
+            state.handle_key(&press(Key::Right));
+            seen.push(state.cursor.byte());
+        }
+        assert_eq!(seen, vec![1, 2, 4, 2, 7, 8], "rightward walk");
+    }
+
+    /// Moving and drawing must agree: a caret that steps one place right on the
+    /// screen has to be *drawn* one place right, which it is not if the caret's
+    /// x is the width of the text before it. On a line that mixes directions
+    /// the prefix width and the caret position are simply different numbers —
+    /// so this walks the query and checks the drawn x rises every press.
+    ///
+    /// This is the half of §541 that no cursor-only test can see: the byte
+    /// sequence above would be equally satisfied by a field that moved
+    /// correctly and drew the caret somewhere else entirely.
+    #[test]
+    fn the_drawn_caret_moves_rightwards_every_time_the_right_arrow_does() {
+        let text = "ab\u{05D0}\u{05D1}cd";
+        let mut state = LauncherState::new(1280.0, 800.0);
+        state.visible = true;
+        state.query = text.to_owned();
+        state.cursor = TextCursor::default();
+
+        let drawn = |state: &LauncherState| {
+            state
+                .render(&accented(false))
+                .into_iter()
+                .find_map(|cmd| match cmd {
+                    RenderCommand::Line { x1, x2, color, .. }
+                        if (x1 - x2).abs() < f32::EPSILON && color == accented(false).accent =>
+                    {
+                        Some(x1)
+                    }
+                    _ => None,
+                })
+                .expect("the launcher draws a caret")
+        };
+
+        let mut previous = drawn(&state);
+        for step in 0..6 {
+            state.handle_key(&press(Key::Right));
+            let now = drawn(&state);
+            assert!(
+                now > previous,
+                "press {step} moved the caret to byte {} but drew it at {now}, \
+                 which is not right of {previous}",
+                state.cursor.byte(),
+            );
+            previous = now;
+        }
     }
 
     /// The companion to the render test above: a caret that has drifted inside
@@ -1247,12 +1373,12 @@ mod tests {
             let mut state = LauncherState::new(1280.0, 800.0);
             state.visible = true;
             state.query = "né".to_owned();
-            state.cursor = 2; // inside the two-byte 'é'
+            state.cursor = TextCursor::from(2); // inside the two-byte 'é'
             state.handle_key(&press(key));
             assert!(
-                state.query.is_char_boundary(state.cursor),
+                state.query.is_char_boundary(state.cursor.byte()),
                 "{key:?} left the caret at byte {} of {:?}",
-                state.cursor,
+                state.cursor.byte(),
                 state.query,
             );
         }

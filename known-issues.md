@@ -72883,7 +72883,7 @@ computed and the default was reported as if it were one." A default of
 success is a claim, and every early `return` past it is an unexamined
 assertion that the claim still holds.
 
-## TD-B-BC-QUIT-FIRES-AT-THE-WRONG-TIME-AND-HALT-DOES-NOT-EXIST (lane B, 2026-08-24) — **open**
+## TD-B-BC-QUIT-FIRES-AT-THE-WRONG-TIME-AND-HALT-DOES-NOT-EXIST (lane B, 2026-08-24) — ✅ **FIXED 2026-08-24**
 
 **In short:** `bc` is a calculator, and it has two ways to stop: `quit` and
 `halt`. Ours implements one of them, and implements it at the wrong moment.
@@ -72941,6 +72941,63 @@ wrong is only *how much runs first*, and `halt` being missing.
 **Needs** a `bc-diff.sh` differential harness against GNU `bc` under WSL, like
 the ones for `cmp`/`tee`/`echo`/`tty`; there is none yet, which is why this
 went unnoticed.
+
+### How it was fixed
+
+`scripts/bc-diff.sh` was written first, and every row in the table above is now
+one of its cases. All 24 quit/halt comparisons agree with GNU.
+
+`halt` went in as planned: `Token::Halt`, `Stmt::Halt`, and the four existing
+`…::Quit` variants renamed to `…::Halt`, since that machinery was always
+`halt`'s and never `quit`'s.
+
+**`quit` did not go in as planned, and the plan's step 2 was wrong.** It said
+to *truncate* the statement list at the `quit`. Measurement says the whole unit
+is discarded — `print "A"; quit` prints nothing, not `A`. The model that fits
+is GNU's scanner: it calls `exit(0)` the instant it *scans* the token, and the
+statements the parser has compiled but not yet executed die unexecuted with it.
+So `Parser::saw_quit` asks the token stream, before a single statement is built,
+and a unit containing one is thrown away entire. The confirming case is
+`if (1)\nquit\n2`, which GNU answers with nothing: the `if` had a body, would
+have run, and did not, because the `quit` on line 2 is inside the same unit.
+
+### The part that was not in the plan at all: what a "unit" is
+
+Step 3 said to give `eval_input` "the same line-at-a-time chunking `eval_stdin`
+already has". Doing exactly that would have been a regression, because the
+chunking `eval_stdin` had was itself wrong. It split on brace depth, so
+`if (0)` on one line and its body on the next were two units and **the body ran
+unconditionally**. Measured: `printf 'if (0)\nprint "x"\n' | bc -q` prints
+nothing on GNU.
+
+Both routes now share one `Chunker`, whose test for "is there more of this to
+come?" is `Parser::truncated` — set when a parse hits `Eof` where a token was
+*required*. Three things were measured to draw its boundary, and only the first
+was guessable:
+
+| Input | GNU | Therefore |
+|---|---|---|
+| `if (0)` / `print "x"` | prints nothing | a missing **body** waits for the next line |
+| `x = 1 +` / `2` / `x` | `syntax error`, `2`, `0` | a missing **operand** does **not** — the newline ends the statement |
+| `/* one` / `two */ 2+2` | `4` | an unclosed **comment** waits |
+| `1 + \` / `2` | `3` | a trailing **continuation** waits |
+
+The last two are invisible to the parser: `/* one` yields no tokens and reads
+exactly like a blank line, and `1 + \` yields `1` and `+` and reads exactly
+like the missing-operand case the parser is right *not* to wait for. Only the
+scanner can tell them apart, so `Lexer::unfinished` reports them and
+`Parser::new` folds it into `truncated`.
+
+### Cost
+
+`open_brace_depth` is gone, and with it the last of the brace counting. Each
+line is re-lexed together with everything pending rather than on its own, which
+is required for correctness (a line that begins inside a comment means something
+else entirely) and costs a re-scan of at most a few lines.
+
+Commits: `4256da9b6` (host build), and the bc change below. Harness result went
+from 50 differences on its first run to 23, none of them quit/halt; the
+remainder are the separate entries filed immediately after this one.
 
 ---
 
@@ -73405,3 +73462,240 @@ their arrows were equally invisible before the switch. Bundling a
 caret/selection/scrolling implementation into the change that moved five
 fields' arrows would have made a reviewable diff unreviewable. Nothing depends
 on it: `pathbar` is the toolkit field the shell actually uses for typing.
+
+---
+
+## TD-B-BC-SYNTAX-ERRORS-ARE-NEVER-REPORTED (lane B, 2026-08-24) — **open**
+
+**In short:** feed our `bc` a program with a mistake in it — a stray `)`, a
+character that is not part of the language, a quote that is never closed — and
+it says nothing at all, computes something, and exits 0. GNU `bc` names the
+file and the line and says `syntax error`. So a script with a typo in it
+silently produces a *wrong answer* on ours, and a shell pipeline that checks
+`bc`'s exit status is told everything went fine. This is the most damaging of
+the differences the new differential harness found, because every other one is
+a wrong *message* where this one is a wrong *number* with no message.
+
+**Where:** `userspace/coreutils/src/bin/bc.rs`. Four places conspire, and all
+four are the same decision — *recover silently and keep going* — taken without
+anywhere to record that recovery happened:
+
+| Site | What it does now |
+|---|---|
+| `Parser::parse_primary`, the `_` arm | returns `Expr::Number("0")` for any token that cannot start an expression, without advancing |
+| `Parser::parse_stmt`, the `_` arm | advances past an unexpected token and returns `None` |
+| `Parser::expect` | returns `false` and carries on when the required token is absent |
+| `Lexer::next_token` | has no "illegal character" token; unknown bytes are skipped |
+
+**Measured**, GNU `bc` 1.07.1 under WSL, every case both as a file operand and
+on standard input (`scripts/bc-diff.sh`, marked `known_bug` with this key):
+
+| Input | GNU stderr | GNU stdout | Ours |
+|---|---|---|---|
+| `print )` | `prog.bc 1: syntax error` | *(none)* | *(nothing at all, exit 0)* |
+| `1 $ 2` | `illegal character: $` then `syntax error` | *(none)* | `1` and `2`, exit 0 |
+| `print "abc` *(unterminated)* | `illegal character: "` | *(none)* | `abc`, exit 0 |
+| `if (1) {` / `print "A"` *(unclosed)* | `syntax error` | *(none)* | `A`, exit 0 |
+| `print )` then `print "after\n"` | `syntax error` | `after` | `after`, no diagnostic |
+| `print "A"` with **no trailing newline** | `syntax error` | *(none)* | `A`, exit 0 |
+
+Note the last row: GNU requires the final newline and treats its absence as a
+syntax error, which is worth knowing before "fixing" it in the obvious
+direction.
+
+Note also that GNU **keeps going** after an error — row 5 still prints `after`
+— so this is not "stop at the first problem"; it is "say so, then continue".
+
+**The proper fix.** The parser needs an error channel, which it has never had.
+Concretely:
+
+1. `Lexer` gains a `Token::Illegal(u8)` for a byte that starts no token, and
+   reports an unterminated string the same way rather than running to end of
+   input. GNU's wording is `illegal character: X`.
+2. `Parser` accumulates a `Vec<SyntaxError>` carrying a line number, rather
+   than silently recovering. `parse_primary`'s zero, `parse_stmt`'s skip and
+   `expect`'s `false` each record one first.
+3. The chunk runner writes them, prefixed as GNU prefixes them — the **file
+   name** for a file operand (`prog.bc 1: syntax error`) and the literal
+   `(standard_in)` for the session on stdin — and then runs the chunk anyway,
+   because that is what GNU does.
+4. The line number counts within the *whole input*, not within the chunk, so
+   `Chunker` has to carry a running line count.
+
+The exit status stays 0: GNU exits 0 after a syntax error, which was measured
+and is the one part of the current behaviour that is already right.
+
+**Blast radius:** the six harness rows above, plus every `parse_primary`
+fallback taken in a program that is actually valid — of which there should be
+none. So an implementation that is too eager shows up immediately as some
+other, currently-green harness row turning red.
+
+---
+
+## TD-B-BC-RUNTIME-ERROR-WORDING-DIFFERS-FROM-GNU (lane B, 2026-08-24) — **open**
+
+**In short:** when a calculation goes wrong — dividing by zero, taking the
+square root of a negative number, calling a function that was never defined —
+both `bc`s complain and both keep going. They word it differently, and ours
+leaves out the two facts GNU includes: *which function* the fault was in, and
+*where inside it*. A script that greps `bc`'s stderr, or a user diffing against
+a reference output, sees a difference.
+
+**Where:** `userspace/coreutils/src/bin/bc.rs`, `impl Display for RuntimeError`
+and the `Runtime error: ` prefix at its call site.
+
+**Measured**, GNU `bc` 1.07.1:
+
+| Input | GNU | Ours |
+|---|---|---|
+| `1/0` | `Runtime error (func=(main), adr=3): Divide by zero` | `Runtime error: divide by zero` |
+| `sqrt(-1)` | `Runtime error (func=(main), adr=4): Square root of a negative number` | `Runtime error: square root of a negative number` |
+| `f(1)`, `f` undefined | `Runtime error (func=(main), adr=3): Function f not defined.` | `Runtime error: undefined function f` |
+
+Three separate differences: the missing `(func=…, adr=…)` parenthesis, the
+sentence case (GNU capitalises the first word), and the phrasing of the
+undefined-function case, which in GNU is a sentence ending in a full stop.
+
+**The proper fix**, and the reason it is not a one-liner: `adr=` is the *byte
+offset into GNU's compiled dc program*, and we do not compile to dc — we walk a
+tree. There is no honest value to put there. Two ways out:
+
+* **(a) Emit the prefix with a counter of our own** — statements executed within
+  the current function, say.
+  *What changes:* the shape matches GNU and the number does not; it would be a
+  number that looks meaningful and is not.
+* **(b) Emit `func=` and drop `adr=`.**
+  *What changes:* `Runtime error (func=(main)): Divide by zero` — honest, still
+  a divergence, and the divergence is one field rather than a fake value.
+
+Recommendation: **(b)**, plus fixing the capitalisation and the
+undefined-function sentence, which are unambiguous. `func=` we can produce
+truthfully — the interpreter always knows which function body it is in, or
+`(main)`. Then record the missing `adr=` as a deliberate divergence and move
+these three harness rows from `known_bug` to `xfail` with that reason.
+
+Do this **after** `TD-B-BC-SYNTAX-ERRORS-ARE-NEVER-REPORTED`, which builds the
+diagnostic plumbing (file name vs `(standard_in)`, line numbers) that this
+should reuse rather than duplicate.
+
+---
+
+## TD-B-BC-MATHLIB-ARCTANGENT-IS-INACCURATE (lane B, 2026-08-24) — **open**
+
+**In short:** `bc -l` provides a small library of maths functions. Ours gets
+the arctangent wrong — not by a rounding error in the last digit, but in the
+**third** one. `a(1)` is π/4, a number every reference agrees on; GNU prints
+`.7853981633` and we print `.7828982258`. Anything computing an angle with our
+`bc` gets an answer wrong by about 0.03%.
+
+**Where:** `userspace/coreutils/src/bin/bc.rs`, the `a(x)` builtin.
+
+**Measured**, `scale=10`, `bc -l`:
+
+| Call | GNU | Ours | True value |
+|---|---|---|---|
+| `a(1)` | `.7853981633` | `.7828982258` | 0.78539816339… |
+| `j(0,1)` | `.7651976865` | `.7651976865` | agrees |
+| `s(0)`, `c(0)`, `e(1)`, `l(1)` | — | — | all agree |
+
+So it is `a` alone; the Bessel function beside it in the same harness row is
+correct, as are sine, cosine, exp and log.
+
+**Diagnosis, not yet confirmed against the code:** the error is far too large
+for accumulated rounding and far too small for a wrong formula, which is the
+signature of a **truncated series**. The Maclaurin series for arctangent
+converges famously slowly at `x = 1` — it is the alternating harmonic series
+there — so an implementation that sums a fixed number of terms rather than
+iterating until the term falls below the current `scale` lands close to the
+answer and stops. `.7828982258` being *below* the true value is consistent with
+stopping just after a negative term.
+
+**The proper fix:** the standard one, which is also GNU's. Range-reduce with
+`atan(x) = 2·atan(x / (1 + sqrt(1 + x²)))` until `|x|` is small enough that the
+series converges quickly, then sum **until the term is smaller than the working
+precision**, with the working scale set a few digits above the requested
+`scale` so the last requested digit is not itself the rounding error. Then
+extend the harness row to `a(0)`, `a(0.5)`, `a(1)`, `a(2)`, `a(-1)` and a large
+`scale` — a fixed-term series can be right at one argument and wrong at the
+next, which is exactly why one call was enough to miss this.
+
+---
+
+## TD-B-BC-MATHLIB-LOG-ERRORS-WHERE-GNU-SATURATES (lane B, 2026-08-24) — **open**
+
+**In short:** `l(0)` — the natural logarithm of zero — has no answer as a real
+number. GNU `bc` returns a very large negative number rather than complaining;
+ours prints `Runtime error: log of non-positive number` and computes nothing.
+A script that takes the log of a value which happens to be zero gets a number
+from GNU and a diagnostic from us.
+
+**Where:** `userspace/coreutils/src/bin/bc.rs`, `RuntimeError::LogOfNonPositive`
+and the `l(x)` builtin that raises it.
+
+**Measured**, `scale=10`, `bc -l`:
+
+| Call | GNU stdout | GNU stderr | Ours |
+|---|---|---|---|
+| `l(0)` | `-9999999999.0000000000` | *(none)* | *(none)*, plus `Runtime error: log of non-positive number` |
+
+`-9999999999` is ten nines — one per digit of `scale`, which is 10 here. That
+is probably not a coincidence, and it is the thing to check before implementing:
+GNU's `l` looks like it saturates at a magnitude tied to the current scale
+rather than returning a fixed constant. **Measure `l(0)` at `scale=5`,
+`scale=20` and `scale=50` before writing the fix.** A hard-coded
+`-9999999999` that happens to match at `scale=10` would be a new bug wearing
+the old one's clothes.
+
+**Not yet measured, and needed:** `l(-1)`. Negative arguments may or may not
+saturate the same way; the row above establishes only zero.
+
+**The proper fix:** whatever the scale sweep shows, applied in `l(x)`'s
+zero/negative path in place of the `RuntimeError::LogOfNonPositive` return. If
+it turns out GNU does error for negatives and only saturates at zero, then
+`LogOfNonPositive` stays and only its zero case changes — in which case its
+wording also falls under `TD-B-BC-RUNTIME-ERROR-WORDING-DIFFERS-FROM-GNU`.
+
+---
+
+## TD-B-BC-UNAVAILABLE-FILE-NAME-IS-QUOTED-GNU-LEAVES-IT-BARE (lane B, 2026-08-24) — **open; a decision more than a bug**
+
+**In short:** ask `bc` to run a file that does not exist and both programs
+complain and exit 1. GNU writes `File nosuch.bc is unavailable.`; we write
+`File 'nosuch.bc' is unavailable.` — the same sentence with the name in quotes.
+The quotes are there on purpose, and the question is whether that purpose
+outranks matching GNU exactly.
+
+**Where:** `userspace/coreutils/src/bin/bc.rs`, `Trouble::report`, the
+`Self::Unavailable` arm, which calls `quoteaf_os` (the always-quote form).
+
+**The case for the quotes** is the one the whole tree already accepts for every
+coreutils diagnostic: a file name may contain spaces, newlines or control
+characters, and an unquoted one in the middle of a sentence is then unreadable
+or actively misleading. `quoteaf_os` was chosen here specifically because the
+name sits mid-sentence, where an elided quote would blur into the words either
+side of it.
+
+**The case against** is that `bc` is not coreutils. It is a different upstream
+with a different convention, and this tree's diagnostic policy was adopted to
+match *GNU coreutils*, not to be applied to every program regardless of which
+program it is imitating. Matching GNU `bc` is the stated goal of
+`scripts/bc-diff.sh`.
+
+**Options:**
+
+* **(a) Match GNU bc: print the name bare.**
+  *What changes:* the message reads `File nosuch.bc is unavailable.`, and a
+  name containing a space or a newline goes into the sentence as-is.
+* **(b) Keep the quotes.**
+  *What changes:* nothing; the harness row becomes a permanent divergence and
+  should move from `known_bug` to `xfail` with this reason attached.
+* **(c) Quote only when the name needs it** (`quotef_os`, the eliding form).
+  *What changes:* a clean name prints bare and matches GNU byte-for-byte; a
+  name with a space or a control character is quoted and does not. GNU
+  coreutils' own `quotearg` behaves this way.
+
+**If it is never decided:** nothing gets worse and nothing is blocked; one
+harness row stays yellow. Recommendation: **(c)** — it makes the common case
+match GNU exactly and keeps the protection for the case that motivated the
+policy. It is a user-visible message, so it is written down here rather than
+quietly changed.

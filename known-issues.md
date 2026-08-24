@@ -50401,7 +50401,7 @@ guarantee, and on Windows the failure mode would be a sharing violation in
 whichever of the two processes lost the race. Wait for `[run-timeout] child
 exited` before running any cargo command against the same target directory.
 
-**Part 2 progress. 41 of 49 modules converted.**
+**Part 2 progress. 42 of 49 modules converted.**
 
 - [x] `security_dialog.rs` — 29 constants, done 2026-08-22. The method above
   survived contact: the sweep lives in `gui/desktop/src/palette_check.rs` as
@@ -53094,6 +53094,105 @@ exited` before running any cargo command against the same target directory.
       sites it does not reach — which is why widening the fixture (looping the
       close button) raised its score, and why the manager delegate, which no
       fixture of `PeekPopup` can reach at all, stayed invisible to it.
+- [x] `about.rs` — 9 constants over 19 colour sites, done 2026-08-23.
+  Fifty-six tests in the module (seven new), harness defects Ax66–Zx67
+  (fifty-two).
+  - **The wordmark was unreadable in light mode, and the reason is worth
+    stating precisely: Latte's blue is *dark*.** The product name was drawn as
+    a hard-coded `MANTLE` (`#181825`) on a hard-coded `BLUE` (`#89B4FA`) logo
+    tile — 8.71:1 in Mocha, which is why forty-one modules' worth of dark-mode
+    review never flagged it. But the light palette's `blue` is `#1E66D5`, a
+    *darker* colour than the dark palette's, because a light theme needs its
+    accents to hold contrast against white rather than against near-black. Ink
+    chosen to be dark enough for a pale-blue tile is therefore nearly the same
+    brightness as a mid-blue one: `#181825` on `#1E66D5` measures **3.25:1**,
+    below the 4.5:1 body-text floor. The fix is `readable_on(logo)`, which
+    answers `#EFF1F5` there for **4.72:1**, and still answers near-black in
+    Mocha. This is the same shape as the previous modules' near-black-on-accent
+    bugs, but arrived at from the opposite direction — not "the ink stayed dark
+    when the fill went pale" but "the fill went *dark* while the ink stayed
+    dark with it."
+  - **The branding-vs-accent split**, recorded as design-decisions.md §527. Two
+    sites drew the same `BLUE` constant: the logo tile and the selected tab's
+    label. Pointing both at `p.accent` would have given a user who picks pink a
+    pink SlateOS logo, so the logo keeps `p.blue` and only the tab strip follows
+    the accent. The testing consequence is the part that belongs here: because
+    the two sites used to hold the same value, one `blue` assertion covered
+    both, and any test left at that level would keep passing if they were
+    re-merged in *either* direction. So they are pinned separately and by
+    position — the logo at its own index against `p.blue`, the tab at the active
+    tab's index against `p.accent`, with the accent's occurrence count asserted
+    to be exactly one. None of that is expressible in a fixture that leaves the
+    accent at its stock value, because the stock accent *is* `blue`.
+  - **Lesson 22 applied a second time, and it cost two test failures to
+    learn.** The ordered pin needs a locator saying which colour appears where
+    in the tab strip. The convenient way to write it is to walk `AboutTab::ALL`
+    and compare each entry to the active tab — and that is an echo, not an
+    expectation: a locator derived from the list under test permutes when the
+    list does, so it cannot see the list permuted. The strip is instead written
+    out by hand per tab in `chrome(p, tab)`, alongside `accent_index(tab)`. The
+    hand-written form is also what exposed my own error: I had assumed the
+    active tab's fill is always the strip's first entry. It is not — the fill
+    sits at the active tab's *index*, so Hardware renders
+    `[quiet, fill, hot, quiet, quiet]`. A derived locator would have quietly
+    agreed with the renderer and told me nothing.
+  - **Five declaration errors caught by reading, before the sweep — the fifth
+    consecutive module in which reading beat running.** One of them is lesson
+    23 in a new dress and is the reason this bullet exists. The defect *"the
+    logo tile is still Mocha `BLUE`"* was declared to be caught by the
+    legibility test. It is not, and cannot be: the wordmark is
+    `readable_on` of *that same value*, so reverting the tile to a constant
+    reverts the ink with it and the pair stays perfectly legible in both modes.
+    A step function's output cannot see its input change. The catcher is the
+    accent test, via its light-mode `p.blue` assertion — a *membership* claim,
+    not a contrast one. The other four: two accent-derived-ink defects that
+    only the mode-change test sees (its skip clause skips the accent itself,
+    not ink derived from it), and two "builds a palette of its own" defects
+    that collapse every accented site to the stock accent and so are caught by
+    the accent count dropping to zero.
+  - **Sweep: 52 caught, 0 escaped, 0 never asked, 0 under-caught, 3
+    under-declared.** The preflight was `52 build, 0 do not, 0 not applied`, and
+    both runs ended `restored: all files match their recorded SHA-256`. The
+    three under-declarations were reconciled in `scripts/reintro-palette.py`
+    with the reasoning attached; each is a case of a test being *wider* than I
+    credited it, which is the harmless direction.
+  - Catcher census (52 defects):
+
+    | Test | Caught | Sole catcher |
+    |---|---|---|
+    | `every_site_draws_the_role_it_claims` | 50 | 18 |
+    | `every_site_changes_when_the_mode_does` | 24 | 0 |
+    | `every_colour_the_dialog_draws_comes_from_its_palette` | 23 | 0 |
+    | `none_of_the_nine_deleted_constants_is_still_drawn` | 23 | 0 |
+    | `the_chosen_tab_wears_the_accent_and_the_logo_never_does` | 10 | 0 |
+    | `the_wordmark_is_legible_on_the_logo_tile` | 9 | 0 |
+    | `the_empty_licence_list_is_drawn_from_the_palette` | 3 | 1 |
+
+    - **The two defects the ordered pin cannot see are both in the empty
+      licence list** — a site its fixture, which has two licences, never
+      renders. Not a weakness in the pin: a pin is an assertion about one
+      render, and it sees every site that render contains and nothing about the
+      sites it does not reach. It is the reason the empty fixture exists at all,
+      and it is the same finding as module 41's, arrived at from a different
+      direction — there the unreachable site was behind a delegate, here it is
+      behind a data shape.
+    - **The one defect only the empty-list test catches is the interesting
+      one:** *"an empty licence list is reported in `RED`, as though having no
+      licences were an error."* `red` is a perfectly good palette member, so the
+      membership sweep is blind to it by construction; it flips correctly
+      between modes, so the mode test is blind to it; and the pin's fixture
+      never renders the line. Three general-purpose tests, all structurally
+      unable to see a defect that is purely a question of *meaning* — whether
+      "you have no licences" is a fact or a fault. That is the boundary of what
+      mechanical checking reaches, and the only thing on the far side of it is a
+      test written by someone who decided what the site is supposed to say.
+    - The legibility test's 9-of-52 with 0 sole catches understates it. Two of
+      those nine are defects the membership sweep is *obliged* to accept — the
+      `CRUST` wordmark, because `0x11111B` is a `readable_on` endpoint the sweep
+      was told to allow, and the accent-coloured logo, whose derived white ink
+      lands at 3.14:1 on magenta. It shares those catches with the pin only
+      because the pin happens to be watching the same two indices. Change the
+      fixture and the pin stops seeing them; the ratio does not care.
 
 **Trigger:** this is not blocked on anything. It is sequenced after the shell
 event loop (`TD-C-THE-SHELL-CAN-DRAW-ITSELF-AND-NOBODY-CAN-ASK-IT-TO`) only
@@ -65250,6 +65349,140 @@ writes the poison, in the addendum to
 `ScratchDir` prevents both halves: it never reuses a name and never opens by
 deleting. Workaround until then: delete `%TEMP%/slateos-screenshot-litter` — it
 is a file, so `rmdir` will not remove it.
+
+---
+
+## TD-C-THREE-OF-THE-CALENDARS-COLOUR-PAIRINGS-ARE-BELOW-THE-CONTRAST-FLOOR (lane C, 2026-08-23)
+
+**In short:** Three places in the calendar draw text too close in brightness to
+what is behind it to be comfortably readable. The worst is the greyed-out day
+numbers from the previous and next month that fill the corners of a month grid:
+they measure **2.46:1** against the popup background, where the accepted floor
+for readable text is 4.5:1. That one is broken **in the dark theme the shell
+actually starts in**, not merely in light mode — it is on screen right now.
+
+**The measurements.** Contrast ratio (WCAG relative luminance), computed for the
+pairings as they will read once each side is a palette role. The Mocha column is
+what ships today, since the module is currently hard-coded to Mocha:
+
+| Site | Ink / behind | Mocha | Latte |
+|---|---|---|---|
+| adjacent-month day number | `surface2` on `base` | **2.46** | **1.91** |
+| selected day's number | `text` on `surface1` | 6.31 | **4.39** |
+| event-detail body text | `subtext0` on `surface0` | 5.65 | **3.40** |
+| today's number | `base` on `blue` | 7.79 | 4.63 |
+| ordinary day number | `text` on `base` | 11.34 | 7.06 |
+| day-of-week header | `subtext0` on `base` | 7.37 | 4.64 |
+
+**Where:** `gui/desktop/src/calendar.rs`. The adjacent-month ink is the `else`
+arm of the `text_color` choice in `render_day_cell` (~line 2220); the selected
+day is `text` drawn over the `SURFACE1` disc chosen at ~line 2196; the detail
+body is ~line 2318/2345 over the `SURFACE0` panel at ~line 2279.
+
+**The root cause of the worst one is a role-category error, not a bad shade.**
+`surface2` is a *fill* role — the colour of a raised panel — and it is being
+used as an *ink*. Surfaces sit near the background by construction, so a surface
+used as text is guaranteed to be low-contrast in whichever mode you look at; the
+2.46 and the 1.91 are not unlucky values, they are what the role is for. The
+de-emphasised-text roles are `overlay0` and `subtext0`. Note that `overlay0`
+does not rescue it either (3.19 Mocha / 2.09 Latte) — it is also below floor —
+so the fix has to be `subtext0` (7.37 / 4.64) plus, if the adjacent-month days
+must still look recessed, recessing them by something other than contrast:
+lighter weight, or simply omitting them.
+
+**The other two are ordinary near-misses** and want a role step: the selected
+day's disc moving `surface1` → `surface0` (which darkens the gap in Latte), and
+the detail body moving `subtext0` → `text` on its panel.
+
+**How it went unnoticed:** the module has no contrast test of any kind, and
+membership sweeps cannot find this class at all — *contrast is not a membership
+property*, so both colours in an unreadable pair can be perfectly good palette
+members and every sweep will pass. Only a test that computes the ratio finds it.
+Module 41 (`window_peek`) is the precedent: its 1.60:1 close-button X had been
+shipping since the module was written.
+
+**Trigger:** fix during the `calendar.rs` palette conversion (module 43 of part
+2 of `TD-C-FORTY-NINE-SHELL-MODULES-CARRY-THEIR-OWN-COPY-OF-THE-PALETTE`), and
+add the contrast test in the same change — the numbers above are predictions
+from the role table and must be re-derived by a test that reads the palette, not
+copied from this table into an assertion.
+
+---
+
+## TD-C-THE-CALENDAR-ACCEPTS-A-COLOUR-FOR-EVERY-EVENT-AND-THEN-DISCARDS-IT (lane C, 2026-08-23)
+
+**In short:** The calendar lets you give each event its own colour. You can
+write `color: #FF0000` next to an event in the calendar file, and the calendar
+will read it, keep it, and write it back out again unchanged when it saves. What
+it will never do is *show* it. Every event in the month grid is marked with the
+same lavender dot regardless. The colour you chose is stored faithfully and has
+no effect on anything you can see.
+
+**Where:** `gui/desktop/src/calendar.rs`. `CalendarEvent::color` is declared at
+line 382 and is read in exactly one place in the whole tree — line 540, the
+serializer, which writes it back out as hex. The parser assigns it at lines 561,
+590 and 617 (`parse_hex_color(val).unwrap_or(theme::BLUE)`). The one place a
+per-event mark is actually drawn, `render_day_cell` at line ~2252, hard-codes
+the dot to `theme::LAVENDER` (or `theme::BASE` on today's blue disc) and never
+looks at the event at all — it only asks `events_for_date(...).is_empty()`.
+
+**How it survived:** the field is written and read by the same round-trip test
+(`assert_eq!(e.color, Color::from_hex(0x89B4FA))` at line 3715), which pins the
+*default* and proves the value survives a save/load cycle. That test passes and
+will keep passing forever, because a value that round-trips correctly and a
+value that is used are unrelated properties. This is the sharpest instance yet
+of the standing lesson that **a site nothing renders is a site nothing checks** —
+here the site does not merely go unchecked, it does not exist, and the field's
+test coverage actively disguises that.
+
+**The proper fix, in two parts, and why it is not "point the default at
+`p.blue`".** The tempting move during the palette conversion is to swap
+`theme::BLUE` for `p.blue` and move on. That would be wrong on its own terms,
+because the assignment is in a **parser**, and a parser that consults the
+palette makes the same file parse to different data depending on which theme is
+active — then the serializer writes the theme-dependent value back, so merely
+opening the calendar in light mode silently rewrites every event the user never
+specified a colour for. A display setting must not be able to edit user data.
+
+So:
+
+1. **`color` becomes `Option<Color>`.** `None` means "the user did not choose
+   one", which is not the same as any colour and must not be spelled as one —
+   the identical reasoning as design-decisions.md §526 for the peek popup's
+   sampled colour. The serializer emits the `color:` line only when it is
+   `Some`, so a file without the key round-trips to a file without the key
+   instead of gaining a colour the user never asked for.
+2. **`render_day_cell` actually uses it**, resolving `None` to a palette role
+   (`lavender` today) and `Some(c)` to the user's colour. Note that this makes
+   the dot the one place in the shell drawing a colour that is deliberately
+   *not* from the palette, so `palette_check::assert_drawn_from` must be handed
+   it via `derived` — and the fixture must therefore use an off-palette event
+   colour, or the test cannot tell the two paths apart.
+
+The contrast question rides along: an arbitrary user colour can land on the
+today-disc's blue, so the dot needs the `readable_on`-style treatment or a
+contrasting ring. That is a real design choice and is deferred to the fix, not
+guessed at here.
+
+**Trigger:** do this as part of the `calendar.rs` palette conversion (module 43
+of part 2 of `TD-C-FORTY-NINE-SHELL-MODULES-CARRY-THEIR-OWN-COPY-OF-THE-PALETTE`),
+which is where the three `theme::BLUE` parser assignments have to be dealt with
+one way or the other. Deciding to leave them as a fixed constant is also a
+legitimate outcome, but it must be a decision rather than an oversight, and it
+must come with the dot being wired up — a stored-and-ignored field is not
+acceptable in either case.
+
+**While you are in there — a second, unrelated hole in the same module.**
+`CalendarPopup::render_tray_clock` (line ~2531) is a one-line delegate to
+`clock.render(...)`, and it is called from **nowhere in the tree** — not by
+production code, not by any of the module's hundred-odd tests, every one of
+which calls `clock.render` directly. So the delegate could drop an argument,
+transpose `x` and `y`, or (after the conversion) hand the clock the wrong
+palette, and nothing would fail. This is the same shape as the `window_peek`
+manager delegate found during module 41: *a test that calls the inner function
+cannot see a defect in the outer delegate — a delegate is a site.* The
+conversion needs at least one test that goes through `render_tray_clock`
+itself, or the sweep will report a defect there as escaped and be right to.
 
 ---
 

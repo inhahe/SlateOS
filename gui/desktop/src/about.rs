@@ -9,25 +9,55 @@
 //! Uses a tabbed layout with four tabs: Overview, Hardware, Software, Licenses.
 //! System information is gathered into a `SystemInfo` struct and can be
 //! serialized/deserialized in a simple key=value text format for persistence.
+//!
+//! # Colour
+//!
+//! Every colour on this page is read from the [`Palette`] handed to
+//! [`AboutDialog::render`]; the module holds no constants of its own. Three of
+//! the choices that produced were judgements rather than substitutions, and are
+//! recorded here because the next person to look at a blue rectangle in an
+//! About box will otherwise assume it is decoration.
+//!
+//! ## The wordmark was unreadable in light mode
+//!
+//! The logo tile was a hard-coded Mocha `BLUE` (`#89B4FA`) lettered in a
+//! hard-coded `MANTLE` (`#181825`). Mocha's blue is a *pale* blue, so near-black
+//! on it reads at 8.7:1 and nobody noticed anything wrong. Latte's blue is
+//! `#1E66D5` — a saturated, genuinely dark blue — and the same near-black ink on
+//! it measures **3.25:1**, under the 4.5:1 floor for body text and far under it
+//! for a 32-pixel wordmark that is the first thing on the page.
+//!
+//! This is the same shape of defect as the previous forty-one modules and for
+//! the same reason: `MANTLE` is a name for `#181825`, not a name for "the ink
+//! that can be read on this tile", so the site could not express what it needed.
+//! The ink is now [`readable_on`]`(p.blue)`, which keeps the near-black in Mocha
+//! and flips to near-white in Latte, taking the ratio to 4.72:1.
+//!
+//! ## The logo is the product's colour; the tab strip is the user's
+//!
+//! Two sites drew Mocha `BLUE` and they do not mean the same thing. The tab
+//! strip's active tab is a **selection** — the user's answer to "which tab" —
+//! and selections in this shell wear [`Palette::accent`], so a user who sets a
+//! green accent gets a green tab. The logo tile is the **product's own mark**,
+//! and it stays `p.blue`: it still moves between Mocha and Latte, because the
+//! page around it does, but it does not become whatever colour the user last
+//! chose. An About box whose branding changes with a preference is not branding.
+//!
+//! The consequence for testing is that the two sites must be pinned separately.
+//! A single "blue is used here" assertion cannot tell a logo that started
+//! following the accent from a tab strip that stopped.
+//!
+//! ## Licence names are `lavender`, not the accent
+//!
+//! The licence list heads each entry with its name in `lavender` — a second
+//! quiet hue used to separate a name from the body text under it. It is a
+//! typographic distinction rather than a selection, so it does not follow the
+//! accent either; the list has no selected item.
 
-use guitk::color::Color;
+use appearance::{Palette, readable_on};
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::text;
-
-// ============================================================================
-// Catppuccin Mocha theme constants
-// ============================================================================
-
-const COL_BASE: Color = Color::from_hex(0x1E1E2E);
-const COL_SURFACE0: Color = Color::from_hex(0x313244);
-const COL_SURFACE1: Color = Color::from_hex(0x45475A);
-const COL_TEXT: Color = Color::from_hex(0xCDD6F4);
-const COL_SUBTEXT0: Color = Color::from_hex(0xA6ADC8);
-const COL_BLUE: Color = Color::from_hex(0x89B4FA);
-const COL_LAVENDER: Color = Color::from_hex(0xB4BEFE);
-const COL_OVERLAY0: Color = Color::from_hex(0x6C7086);
-const COL_MANTLE: Color = Color::from_hex(0x181825);
 
 // ============================================================================
 // License list metrics
@@ -297,12 +327,27 @@ impl AboutDialog {
     /// Render the dialog, producing a list of render commands.
     /// The dialog is positioned at (`x`, `y`) with the given `width`/`height`.
     /// Returns an empty Vec if the dialog is not visible.
-    pub fn render(&self, x: f32, y: f32, width: f32, height: f32) -> Vec<RenderCommand> {
+    ///
+    /// `p` supplies every colour drawn; see the module docs for the three sites
+    /// where the mapping from old constant to role was a judgement.
+    pub fn render(
+        &self,
+        p: &Palette,
+        x: f32,
+        y: f32,
+        width: f32,
+        height: f32,
+    ) -> Vec<RenderCommand> {
         if !self.visible {
             return Vec::new();
         }
 
         let mut cmds = Vec::with_capacity(64);
+
+        let bg = p.base;
+        let border = p.surface1;
+        let title_ink = p.text;
+        let tab_fill = p.surface1;
 
         // Dialog background with rounded corners.
         cmds.push(RenderCommand::FillRect {
@@ -310,7 +355,7 @@ impl AboutDialog {
             y,
             width,
             height,
-            color: COL_BASE,
+            color: bg,
             corner_radii: CornerRadii::all(12.0),
         });
 
@@ -320,7 +365,7 @@ impl AboutDialog {
             y,
             width,
             height,
-            color: COL_SURFACE1,
+            color: border,
             line_width: 1.0,
             corner_radii: CornerRadii::all(12.0),
         });
@@ -331,7 +376,7 @@ impl AboutDialog {
             y: y + 16.0,
             text: "About This Computer".to_string(),
             font_size: 18.0,
-            color: COL_TEXT,
+            color: title_ink,
             font_weight: FontWeightHint::Bold,
             max_width: Some(width - 40.0),
             overflow: TextOverflow::Ellipsis,
@@ -349,17 +394,21 @@ impl AboutDialog {
                     y: tab_y,
                     width: 100.0,
                     height: 28.0,
-                    color: COL_SURFACE1,
+                    color: tab_fill,
                     corner_radii: CornerRadii::all(4.0),
                 });
             }
+
+            // The chosen tab is a selection, so it wears the accent; the logo
+            // below is the product's mark and does not. See the module docs.
+            let label = if is_active { p.accent } else { p.subtext0 };
 
             cmds.push(RenderCommand::Text {
                 x: tab_x + 8.0,
                 y: tab_y + 6.0,
                 text: tab.display_name().to_string(),
                 font_size: 12.0,
-                color: if is_active { COL_BLUE } else { COL_SUBTEXT0 },
+                color: label,
                 font_weight: if is_active {
                     FontWeightHint::Bold
                 } else {
@@ -377,16 +426,16 @@ impl AboutDialog {
 
         match self.active_tab {
             AboutTab::Overview => {
-                self.render_overview(&mut cmds, x + 20.0, content_y, content_w, content_h);
+                self.render_overview(p, &mut cmds, x + 20.0, content_y, content_w, content_h);
             }
             AboutTab::Hardware => {
-                self.render_hardware(&mut cmds, x + 20.0, content_y, content_w, content_h);
+                self.render_hardware(p, &mut cmds, x + 20.0, content_y, content_w, content_h);
             }
             AboutTab::Software => {
-                self.render_software(&mut cmds, x + 20.0, content_y, content_w, content_h);
+                self.render_software(p, &mut cmds, x + 20.0, content_y, content_w, content_h);
             }
             AboutTab::Licenses => {
-                self.render_licenses(&mut cmds, x + 20.0, content_y, content_w, content_h);
+                self.render_licenses(p, &mut cmds, x + 20.0, content_y, content_w, content_h);
             }
         }
 
@@ -399,6 +448,7 @@ impl AboutDialog {
 
     fn render_overview(
         &self,
+        p: &Palette,
         cmds: &mut Vec<RenderCommand>,
         x: f32,
         y: f32,
@@ -412,12 +462,19 @@ impl AboutDialog {
         let logo_h: f32 = 100.0;
         let logo_x = x + (width - logo_w) / 2.0;
 
+        // The product's own mark: themed, but never the user's accent.
+        let logo = p.blue;
+        let wordmark = readable_on(logo);
+        let version_ink = p.text;
+        let built_ink = p.subtext0;
+        let tagline_ink = p.overlay0;
+
         cmds.push(RenderCommand::FillRect {
             x: logo_x,
             y,
             width: logo_w,
             height: logo_h,
-            color: COL_BLUE,
+            color: logo,
             corner_radii: CornerRadii::all(12.0),
         });
 
@@ -426,7 +483,7 @@ impl AboutDialog {
             y: y + logo_h / 2.0 - 16.0,
             text: info.os_name.clone(),
             font_size: 32.0,
-            color: COL_MANTLE,
+            color: wordmark,
             font_weight: FontWeightHint::Bold,
             max_width: Some(logo_w - 20.0),
             overflow: TextOverflow::Ellipsis,
@@ -440,7 +497,7 @@ impl AboutDialog {
             y: row_y,
             text: format!("Version {}", info.os_version),
             font_size: 14.0,
-            color: COL_TEXT,
+            color: version_ink,
             font_weight: FontWeightHint::Regular,
             max_width: Some(logo_w),
             overflow: TextOverflow::Ellipsis,
@@ -452,7 +509,7 @@ impl AboutDialog {
             y: row_y,
             text: format!("Built on {}", info.build_date),
             font_size: 12.0,
-            color: COL_SUBTEXT0,
+            color: built_ink,
             font_weight: FontWeightHint::Regular,
             max_width: Some(logo_w),
             overflow: TextOverflow::Ellipsis,
@@ -465,7 +522,7 @@ impl AboutDialog {
             y: row_y,
             text: "A modern, capability-based microkernel operating system.".to_string(),
             font_size: 12.0,
-            color: COL_OVERLAY0,
+            color: tagline_ink,
             font_weight: FontWeightHint::Regular,
             max_width: Some(logo_w),
             overflow: TextOverflow::Ellipsis,
@@ -474,6 +531,7 @@ impl AboutDialog {
 
     fn render_hardware(
         &self,
+        p: &Palette,
         cmds: &mut Vec<RenderCommand>,
         x: f32,
         y: f32,
@@ -481,13 +539,14 @@ impl AboutDialog {
         _height: f32,
     ) {
         let info = &self.system_info;
+        let hardware_heading = p.text;
 
         cmds.push(RenderCommand::Text {
             x,
             y,
             text: "Hardware".to_string(),
             font_size: 14.0,
-            color: COL_TEXT,
+            color: hardware_heading,
             font_weight: FontWeightHint::Bold,
             max_width: Some(width),
             overflow: TextOverflow::Ellipsis,
@@ -495,10 +554,11 @@ impl AboutDialog {
 
         let mut row_y = y + 30.0;
 
-        render_property_row(cmds, x, row_y, width, "CPU", &info.cpu_model);
+        render_property_row(p, cmds, x, row_y, width, "CPU", &info.cpu_model);
         row_y += 28.0;
 
         render_property_row(
+            p,
             cmds,
             x,
             row_y,
@@ -509,6 +569,7 @@ impl AboutDialog {
         row_y += 28.0;
 
         render_property_row(
+            p,
             cmds,
             x,
             row_y,
@@ -518,14 +579,23 @@ impl AboutDialog {
         );
         row_y += 28.0;
 
-        render_property_row(cmds, x, row_y, width, "GPU", &info.gpu_model);
+        render_property_row(p, cmds, x, row_y, width, "GPU", &info.gpu_model);
         row_y += 28.0;
 
-        render_property_row(cmds, x, row_y, width, "Display", &info.display_resolution);
+        render_property_row(
+            p,
+            cmds,
+            x,
+            row_y,
+            width,
+            "Display",
+            &info.display_resolution,
+        );
     }
 
     fn render_software(
         &self,
+        p: &Palette,
         cmds: &mut Vec<RenderCommand>,
         x: f32,
         y: f32,
@@ -533,13 +603,14 @@ impl AboutDialog {
         _height: f32,
     ) {
         let info = &self.system_info;
+        let software_heading = p.text;
 
         cmds.push(RenderCommand::Text {
             x,
             y,
             text: "Software".to_string(),
             font_size: 14.0,
-            color: COL_TEXT,
+            color: software_heading,
             font_weight: FontWeightHint::Bold,
             max_width: Some(width),
             overflow: TextOverflow::Ellipsis,
@@ -547,16 +618,17 @@ impl AboutDialog {
 
         let mut row_y = y + 30.0;
 
-        render_property_row(cmds, x, row_y, width, "Kernel", &info.kernel_version);
+        render_property_row(p, cmds, x, row_y, width, "Kernel", &info.kernel_version);
         row_y += 28.0;
 
-        render_property_row(cmds, x, row_y, width, "Architecture", &info.architecture);
+        render_property_row(p, cmds, x, row_y, width, "Architecture", &info.architecture);
         row_y += 28.0;
 
-        render_property_row(cmds, x, row_y, width, "Hostname", &info.hostname);
+        render_property_row(p, cmds, x, row_y, width, "Hostname", &info.hostname);
         row_y += 28.0;
 
         render_property_row(
+            p,
             cmds,
             x,
             row_y,
@@ -568,18 +640,25 @@ impl AboutDialog {
 
     fn render_licenses(
         &self,
+        p: &Palette,
         cmds: &mut Vec<RenderCommand>,
         x: f32,
         y: f32,
         width: f32,
         height: f32,
     ) {
+        let licenses_heading = p.text;
+        let empty_ink = p.subtext0;
+        let name_bg = p.surface0;
+        let name_ink = p.lavender;
+        let body_ink = p.subtext0;
+
         cmds.push(RenderCommand::Text {
             x,
             y,
             text: "Open Source Licenses".to_string(),
             font_size: 14.0,
-            color: COL_TEXT,
+            color: licenses_heading,
             font_weight: FontWeightHint::Bold,
             max_width: Some(width),
             overflow: TextOverflow::Ellipsis,
@@ -591,7 +670,7 @@ impl AboutDialog {
                 y: y + 30.0,
                 text: "No licenses to display.".to_string(),
                 font_size: 12.0,
-                color: COL_SUBTEXT0,
+                color: empty_ink,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width),
                 overflow: TextOverflow::Ellipsis,
@@ -641,7 +720,7 @@ impl AboutDialog {
                     y: item_y,
                     width,
                     height: 24.0,
-                    color: COL_SURFACE0,
+                    color: name_bg,
                     corner_radii: CornerRadii::all(4.0),
                 });
 
@@ -650,7 +729,7 @@ impl AboutDialog {
                     y: item_y + 4.0,
                     text: license.name.clone(),
                     font_size: 12.0,
-                    color: COL_LAVENDER,
+                    color: name_ink,
                     font_weight: FontWeightHint::Bold,
                     max_width: Some(width - 16.0),
                     overflow: TextOverflow::Ellipsis,
@@ -663,7 +742,7 @@ impl AboutDialog {
                         y: item_y + 28.0 + n as f32 * LICENSE_LINE_HEIGHT,
                         text: line.clone(),
                         font_size: LICENSE_FONT_SIZE,
-                        color: COL_SUBTEXT0,
+                        color: body_ink,
                         font_weight: FontWeightHint::Regular,
                         max_width: Some(width - 16.0),
                         overflow: TextOverflow::Ellipsis,
@@ -716,7 +795,12 @@ pub fn format_memory(mb: u64) -> String {
 }
 
 /// Render a labeled property row (label on the left, value on the right).
+///
+/// The label is quieter than the value on purpose: on the Hardware and Software
+/// tabs the labels are the same eight words every time and the values are the
+/// only thing anyone came to read.
 fn render_property_row(
+    p: &Palette,
     cmds: &mut Vec<RenderCommand>,
     x: f32,
     y: f32,
@@ -724,12 +808,15 @@ fn render_property_row(
     label: &str,
     value: &str,
 ) {
+    let label_ink = p.subtext0;
+    let value_ink = p.text;
+
     cmds.push(RenderCommand::Text {
         x,
         y,
         text: label.to_string(),
         font_size: 12.0,
-        color: COL_SUBTEXT0,
+        color: label_ink,
         font_weight: FontWeightHint::Regular,
         max_width: Some(width * 0.4),
         overflow: TextOverflow::Ellipsis,
@@ -739,7 +826,7 @@ fn render_property_row(
         y,
         text: value.to_string(),
         font_size: 12.0,
-        color: COL_TEXT,
+        color: value_ink,
         font_weight: FontWeightHint::Regular,
         max_width: Some(width * 0.55),
         overflow: TextOverflow::Ellipsis,
@@ -768,6 +855,9 @@ mod tests {
     #![allow(clippy::float_cmp)]
 
     use super::*;
+    // Only the tests name colours directly now; the renderer takes them from
+    // the palette it is handed.
+    use guitk::color::Color;
 
     // ---- format_uptime tests ----
 
@@ -971,7 +1061,7 @@ mod tests {
 
     #[test]
     fn test_about_tab_all_names_nonempty() {
-        for tab in AboutTab::ALL {
+        for &tab in AboutTab::ALL {
             assert!(!tab.display_name().is_empty());
         }
     }
@@ -1059,7 +1149,7 @@ mod tests {
     #[test]
     fn test_render_hidden_returns_empty() {
         let dlg = AboutDialog::default();
-        let cmds = dlg.render(0.0, 0.0, 500.0, 400.0);
+        let cmds = dlg.render(&accented(false), 0.0, 0.0, 500.0, 400.0);
         assert!(cmds.is_empty());
     }
 
@@ -1068,7 +1158,7 @@ mod tests {
         let mut dlg = AboutDialog::default();
         dlg.show();
         dlg.set_tab(AboutTab::Overview);
-        let cmds = dlg.render(0.0, 0.0, 500.0, 400.0);
+        let cmds = dlg.render(&accented(false), 0.0, 0.0, 500.0, 400.0);
         assert!(!cmds.is_empty());
         // Should have background, border, title, tabs, and overview content.
         assert!(cmds.len() >= 10);
@@ -1086,7 +1176,7 @@ mod tests {
         };
         dlg.show();
         dlg.set_tab(AboutTab::Hardware);
-        let cmds = dlg.render(0.0, 0.0, 500.0, 400.0);
+        let cmds = dlg.render(&accented(false), 0.0, 0.0, 500.0, 400.0);
         assert!(!cmds.is_empty());
     }
 
@@ -1102,7 +1192,7 @@ mod tests {
         };
         dlg.show();
         dlg.set_tab(AboutTab::Software);
-        let cmds = dlg.render(0.0, 0.0, 500.0, 400.0);
+        let cmds = dlg.render(&accented(false), 0.0, 0.0, 500.0, 400.0);
         assert!(!cmds.is_empty());
     }
 
@@ -1111,7 +1201,7 @@ mod tests {
         let mut dlg = AboutDialog::default();
         dlg.show();
         dlg.set_tab(AboutTab::Licenses);
-        let cmds = dlg.render(0.0, 0.0, 500.0, 400.0);
+        let cmds = dlg.render(&accented(false), 0.0, 0.0, 500.0, 400.0);
         assert!(!cmds.is_empty());
     }
 
@@ -1126,7 +1216,7 @@ mod tests {
         };
         dlg.show();
         dlg.set_tab(AboutTab::Licenses);
-        let cmds = dlg.render(0.0, 0.0, 500.0, 400.0);
+        let cmds = dlg.render(&accented(false), 0.0, 0.0, 500.0, 400.0);
         assert!(!cmds.is_empty());
         // Should include clip, license headers, license text, and pop clip.
         assert!(cmds.len() >= 12);
@@ -1169,7 +1259,7 @@ mod tests {
         };
         dlg.show();
         dlg.set_tab(AboutTab::Licenses);
-        let lines = body_lines(&dlg.render(0.0, 0.0, 500.0, 400.0));
+        let lines = body_lines(&dlg.render(&accented(false), 0.0, 0.0, 500.0, 400.0));
 
         assert!(
             lines.len() > 1,
@@ -1204,7 +1294,7 @@ mod tests {
         };
         dlg.show();
         dlg.set_tab(AboutTab::Licenses);
-        let cmds = dlg.render(0.0, 0.0, 500.0, 400.0);
+        let cmds = dlg.render(&accented(false), 0.0, 0.0, 500.0, 400.0);
 
         let headers = header_ys(&cmds);
         assert_eq!(headers.len(), 2, "both licences should be on screen");
@@ -1233,7 +1323,7 @@ mod tests {
             };
             dlg.show();
             dlg.set_tab(AboutTab::Licenses);
-            header_ys(&dlg.render(0.0, 0.0, 500.0, 400.0))
+            header_ys(&dlg.render(&accented(false), 0.0, 0.0, 500.0, 400.0))
         };
         let ascii = layout("aaaa aaaa aaaa aaaa aaaa aaaa aaaa aaaa");
         let accented = layout("éééé éééé éééé éééé éééé éééé éééé éééé");
@@ -1248,7 +1338,7 @@ mod tests {
     fn test_render_at_offset_position() {
         let mut dlg = AboutDialog::default();
         dlg.show();
-        let cmds = dlg.render(100.0, 200.0, 500.0, 400.0);
+        let cmds = dlg.render(&accented(false), 100.0, 200.0, 500.0, 400.0);
         // First command should be the background FillRect at (100, 200).
         if let Some(RenderCommand::FillRect { x, y, .. }) = cmds.first() {
             assert!((*x - 100.0).abs() < 0.01);
@@ -1271,7 +1361,7 @@ mod tests {
         dlg.show();
         dlg.set_tab(AboutTab::Licenses);
         dlg.scroll(50.0);
-        let cmds = dlg.render(0.0, 0.0, 500.0, 400.0);
+        let cmds = dlg.render(&accented(false), 0.0, 0.0, 500.0, 400.0);
         assert!(!cmds.is_empty());
     }
 
@@ -1280,14 +1370,30 @@ mod tests {
     #[test]
     fn test_render_property_row_produces_two_texts() {
         let mut cmds = Vec::new();
-        render_property_row(&mut cmds, 0.0, 0.0, 400.0, "Label", "Value");
+        render_property_row(
+            &accented(false),
+            &mut cmds,
+            0.0,
+            0.0,
+            400.0,
+            "Label",
+            "Value",
+        );
         assert_eq!(cmds.len(), 2);
     }
 
     #[test]
     fn test_render_property_row_label_content() {
         let mut cmds = Vec::new();
-        render_property_row(&mut cmds, 10.0, 20.0, 400.0, "CPU", "i9-13900K");
+        render_property_row(
+            &accented(false),
+            &mut cmds,
+            10.0,
+            20.0,
+            400.0,
+            "CPU",
+            "i9-13900K",
+        );
         if let RenderCommand::Text { text, .. } = &cmds[0] {
             assert_eq!(text, "CPU");
         } else {
@@ -1300,38 +1406,341 @@ mod tests {
         }
     }
 
-    // ---- Themed color constant tests ----
+    // ---- Colour ----
+    //
+    // The three tests that used to live here asserted that `COL_BASE` was
+    // `#1E1E2E`, that `COL_BLUE` was `#89B4FA`, and that all nine constants
+    // were opaque. They passed for as long as the constants existed and proved
+    // nothing about what the dialog drew — a module that read every colour from
+    // a palette and one that read none would both have satisfied them. They are
+    // replaced by tests that assert against the *render*.
 
+    /// A palette whose accent is in no role, so "this site follows the accent"
+    /// and "this site is `blue`" cannot be confused.
+    ///
+    /// The stock accent *is* `blue`, which is exactly the collision this
+    /// module's two blue sites must be kept apart across — see the module docs.
+    /// The assertions are inside the fixture rather than in one test so they
+    /// fire in every test that renders.
+    fn accented(light: bool) -> Palette {
+        let mut p = Palette::for_mode(light);
+        p.accent = Color::from_hex(0x00FF_00FF);
+        assert!(
+            !p.roles()
+                .iter()
+                .any(|(n, r)| *n != "accent" && *r == p.accent),
+            "the fixture accent collides with a role, so no test using it can \
+             tell an accented site from that role"
+        );
+        p
+    }
+
+    /// A dialog with licences, so the licence list's three colour sites exist.
+    ///
+    /// Both licence bodies are short enough to wrap to exactly one line at the
+    /// 500-pixel width every test here uses, which is what makes the ordered
+    /// pin's expectation for the Licenses tab a fixed length.
+    fn dialog_with_licenses(tab: AboutTab) -> AboutDialog {
+        let mut dlg = AboutDialog::new(
+            SystemInfo::default(),
+            vec![
+                LicenseInfo::new("MIT", "Granted free of charge."),
+                LicenseInfo::new("Apache-2.0", "Under the Apache License."),
+            ],
+        );
+        dlg.show();
+        dlg.active_tab = tab;
+        dlg
+    }
+
+    /// The same dialog with no licences at all, for the empty-list line.
+    fn empty_dialog(tab: AboutTab) -> AboutDialog {
+        let mut dlg = AboutDialog::new(SystemInfo::default(), Vec::new());
+        dlg.show();
+        dlg.active_tab = tab;
+        dlg
+    }
+
+    /// Every colour a command carries, alpha discarded.
+    fn colors(cmds: &[RenderCommand]) -> Vec<Color> {
+        cmds.iter()
+            .filter_map(|c| match c {
+                RenderCommand::FillRect { color, .. }
+                | RenderCommand::StrokeRect { color, .. }
+                | RenderCommand::Text { color, .. } => {
+                    Some(Color::rgba(color.r, color.g, color.b, 255))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Every render of every tab, in both modes, draws only palette colours.
+    ///
+    /// The light render is the one that matters: every constant deleted from
+    /// this module was a Mocha value, so a missed substitution is a colour the
+    /// light palette does not contain and names itself.
     #[test]
-    fn test_theme_colors_opaque() {
-        // All theme constants should be fully opaque.
-        let colors = [
-            COL_BASE,
-            COL_SURFACE0,
-            COL_SURFACE1,
-            COL_TEXT,
-            COL_SUBTEXT0,
-            COL_BLUE,
-            COL_LAVENDER,
-            COL_OVERLAY0,
-            COL_MANTLE,
-        ];
-        for c in &colors {
-            assert_eq!(c.a, 255, "Theme color should be opaque: {:?}", c);
+    fn every_colour_the_dialog_draws_comes_from_its_palette() {
+        for light in [false, true] {
+            let p = accented(light);
+            for &tab in AboutTab::ALL {
+                for dlg in [dialog_with_licenses(tab), empty_dialog(tab)] {
+                    crate::palette_check::assert_drawn_from(
+                        &p,
+                        &dlg.render(&p, 0.0, 0.0, 500.0, 400.0),
+                        &[p.accent],
+                        "about dialog",
+                    );
+                }
+            }
         }
     }
 
+    /// None of the nine deleted constants is still drawn.
+    ///
+    /// [`every_colour_the_dialog_draws_comes_from_its_palette`] catches these
+    /// as a class, but only in the light render and only because Mocha values
+    /// happen not to be Latte values. This names them, so a failure says
+    /// *which* constant survived rather than "some colour is not a role".
     #[test]
-    fn test_mocha_base_rgb() {
-        assert_eq!(COL_BASE.r, 0x1E);
-        assert_eq!(COL_BASE.g, 0x1E);
-        assert_eq!(COL_BASE.b, 0x2E);
+    fn none_of_the_nine_deleted_constants_is_still_drawn() {
+        const DELETED: [(&str, u32); 9] = [
+            ("COL_BASE", 0x001E_1E2E),
+            ("COL_SURFACE0", 0x0031_3244),
+            ("COL_SURFACE1", 0x0045_475A),
+            ("COL_TEXT", 0x00CD_D6F4),
+            ("COL_SUBTEXT0", 0x00A6_ADC8),
+            ("COL_BLUE", 0x0089_B4FA),
+            ("COL_LAVENDER", 0x00B4_BEFE),
+            ("COL_OVERLAY0", 0x006C_7086),
+            ("COL_MANTLE", 0x0018_1825),
+        ];
+        let p = accented(true);
+        for &tab in AboutTab::ALL {
+            // Both dialogs: the empty-licence line is a site no populated
+            // fixture reaches, and a constant left behind there would be
+            // invisible to a loop that only rendered the busy one.
+            for dlg in [dialog_with_licenses(tab), empty_dialog(tab)] {
+                let drawn = colors(&dlg.render(&p, 0.0, 0.0, 500.0, 400.0));
+                for (name, hex) in DELETED {
+                    let c = Color::from_hex(hex);
+                    assert!(
+                        !drawn.contains(&Color::rgba(c.r, c.g, c.b, 255)),
+                        "{name} is still drawn on the {tab:?} tab in light mode"
+                    );
+                }
+            }
+        }
     }
 
+    /// Every site draws the role it claims, in order, on every tab.
+    ///
+    /// A set-membership check cannot see two sites swapped; this can. The
+    /// expectation is written out by hand rather than derived from the
+    /// renderer, which is the only way it can disagree with the renderer.
     #[test]
-    fn test_mocha_blue_rgb() {
-        assert_eq!(COL_BLUE.r, 0x89);
-        assert_eq!(COL_BLUE.g, 0xB4);
-        assert_eq!(COL_BLUE.b, 0xFA);
+    fn every_site_draws_the_role_it_claims() {
+        for light in [false, true] {
+            let p = accented(light);
+
+            let mut want = chrome(&p, AboutTab::Overview);
+            want.extend([p.blue, readable_on(p.blue), p.text, p.subtext0, p.overlay0]);
+            assert_eq!(
+                colors(
+                    &dialog_with_licenses(AboutTab::Overview).render(&p, 0.0, 0.0, 500.0, 400.0)
+                ),
+                want,
+                "Overview, light = {light}"
+            );
+
+            // Five property rows, each a quiet label and a loud value.
+            let mut want = chrome(&p, AboutTab::Hardware);
+            want.push(p.text);
+            for _ in 0..5 {
+                want.extend([p.subtext0, p.text]);
+            }
+            assert_eq!(
+                colors(
+                    &dialog_with_licenses(AboutTab::Hardware).render(&p, 0.0, 0.0, 500.0, 400.0)
+                ),
+                want,
+                "Hardware, light = {light}"
+            );
+
+            // Four rows on Software.
+            let mut want = chrome(&p, AboutTab::Software);
+            want.push(p.text);
+            for _ in 0..4 {
+                want.extend([p.subtext0, p.text]);
+            }
+            assert_eq!(
+                colors(
+                    &dialog_with_licenses(AboutTab::Software).render(&p, 0.0, 0.0, 500.0, 400.0)
+                ),
+                want,
+                "Software, light = {light}"
+            );
+
+            // Two licences: heading, then per licence a header fill, a name and
+            // one body line each.
+            let mut want = chrome(&p, AboutTab::Licenses);
+            want.push(p.text);
+            for _ in 0..2 {
+                want.extend([p.surface0, p.lavender, p.subtext0]);
+            }
+            assert_eq!(
+                colors(
+                    &dialog_with_licenses(AboutTab::Licenses).render(&p, 0.0, 0.0, 500.0, 400.0)
+                ),
+                want,
+                "Licenses, light = {light}"
+            );
+        }
+    }
+
+    /// The dialog's background, border, title and tab strip, in draw order.
+    ///
+    /// The strip is written out **by hand for each tab** rather than derived by
+    /// walking `AboutTab::ALL` and comparing to the active one. That is the
+    /// difference between an expectation and an echo: a locator read from the
+    /// list under test permutes when the list does, and so cannot see the list
+    /// permuted. Written out, "Software is third" is a claim this test makes.
+    fn chrome(p: &Palette, tab: AboutTab) -> Vec<Color> {
+        let (fill, hot, quiet) = (p.surface1, p.accent, p.subtext0);
+        let strip = match tab {
+            AboutTab::Overview => [fill, hot, quiet, quiet, quiet],
+            AboutTab::Hardware => [quiet, fill, hot, quiet, quiet],
+            AboutTab::Software => [quiet, quiet, fill, hot, quiet],
+            AboutTab::Licenses => [quiet, quiet, quiet, fill, hot],
+        };
+        let mut v = vec![p.base, p.surface1, p.text];
+        v.extend(strip);
+        v
+    }
+
+    /// Where in the render the accented label falls, for each tab.
+    ///
+    /// Also written out by hand, and for the same reason as [`chrome`].
+    fn accent_index(tab: AboutTab) -> usize {
+        match tab {
+            AboutTab::Overview => 4,
+            AboutTab::Hardware => 5,
+            AboutTab::Software => 6,
+            AboutTab::Licenses => 7,
+        }
+    }
+
+    /// The wordmark is legible on the tile it sits on, in both modes.
+    ///
+    /// This is the bug the conversion found: near-black on Latte's `#1E66D5`
+    /// measures 3.25:1. A membership sweep cannot see it, because both colours
+    /// are perfectly good palette members and it is their *pairing* that is
+    /// unreadable — contrast is not a membership property.
+    #[test]
+    fn the_wordmark_is_legible_on_the_logo_tile() {
+        for light in [false, true] {
+            let p = accented(light);
+            let cmds = dialog_with_licenses(AboutTab::Overview).render(&p, 0.0, 0.0, 500.0, 400.0);
+            let tile = colors(&cmds)[8];
+            let ink = colors(&cmds)[9];
+            let ratio = contrast(tile, ink);
+            assert!(
+                ratio >= 4.5,
+                "the wordmark reads at {ratio:.2}:1 on its tile in {} mode",
+                if light { "light" } else { "dark" }
+            );
+        }
+    }
+
+    /// WCAG contrast ratio between two opaque colours.
+    fn contrast(a: Color, b: Color) -> f64 {
+        fn lum(c: Color) -> f64 {
+            fn ch(v: u8) -> f64 {
+                let v = f64::from(v) / 255.0;
+                if v <= 0.040_45 {
+                    v / 12.92
+                } else {
+                    ((v + 0.055) / 1.055).powf(2.4)
+                }
+            }
+            0.2126 * ch(c.r) + 0.7152 * ch(c.g) + 0.0722 * ch(c.b)
+        }
+        let (x, y) = (lum(a), lum(b));
+        let (hi, lo) = if x > y { (x, y) } else { (y, x) };
+        (hi + 0.05) / (lo + 0.05)
+    }
+
+    /// Only the chosen tab wears the accent — and the logo never does.
+    ///
+    /// Two sites drew the same constant and mean different things: one is the
+    /// user's selection, one is the product's mark. A test that only checked
+    /// "the accent appears somewhere" would pass with them swapped.
+    #[test]
+    fn the_chosen_tab_wears_the_accent_and_the_logo_never_does() {
+        for light in [false, true] {
+            let p = accented(light);
+            for &tab in AboutTab::ALL {
+                let cmds = dialog_with_licenses(tab).render(&p, 0.0, 0.0, 500.0, 400.0);
+                let drawn = colors(&cmds);
+                assert_eq!(
+                    drawn.iter().filter(|c| **c == p.accent).count(),
+                    1,
+                    "exactly one site — the chosen tab's label — is accented \
+                     on {tab:?}, light = {light}"
+                );
+                assert_eq!(
+                    drawn[accent_index(tab)],
+                    p.accent,
+                    "the chosen tab's label, {tab:?}"
+                );
+            }
+            // And on the tab that draws it, the logo is `blue` regardless.
+            let cmds = dialog_with_licenses(AboutTab::Overview).render(&p, 0.0, 0.0, 500.0, 400.0);
+            assert_eq!(colors(&cmds)[8], p.blue, "the logo tile, light = {light}");
+        }
+    }
+
+    /// The dialog's own chrome changes when the mode does — at every site.
+    ///
+    /// Excluded by name: nothing. Every colour this dialog draws is a role or
+    /// derived from one, and every Mocha role differs from its Latte
+    /// counterpart, so a site frozen to a constant shows up as an equality.
+    #[test]
+    fn every_site_changes_when_the_mode_does() {
+        for &tab in AboutTab::ALL {
+            let dlg = dialog_with_licenses(tab);
+            let dark = colors(&dlg.render(&accented(false), 0.0, 0.0, 500.0, 400.0));
+            let light = colors(&dlg.render(&accented(true), 0.0, 0.0, 500.0, 400.0));
+            assert_eq!(dark.len(), light.len(), "{tab:?} drew a different shape");
+            for (i, (a, b)) in dark.iter().zip(light.iter()).enumerate() {
+                // The accent is pinned to one magenta in both modes by the
+                // fixture, on purpose — it is the instrument, not a site.
+                if *a == accented(false).accent {
+                    continue;
+                }
+                assert_ne!(a, b, "colour {i} on {tab:?} is the same in both modes");
+            }
+        }
+    }
+
+    /// An empty licence list still draws, and still draws from the palette.
+    ///
+    /// A site nothing renders is a site nothing checks: "No licenses to
+    /// display." is drawn only by a dialog with no licences, and every other
+    /// fixture on this page has two.
+    #[test]
+    fn the_empty_licence_list_is_drawn_from_the_palette() {
+        for light in [false, true] {
+            let p = accented(light);
+            let drawn =
+                colors(&empty_dialog(AboutTab::Licenses).render(&p, 0.0, 0.0, 500.0, 400.0));
+            assert_eq!(
+                drawn.len(),
+                10,
+                "the empty list draws chrome, a heading and one line"
+            );
+            assert_eq!(drawn[9], p.subtext0, "the empty-list line, light = {light}");
+        }
     }
 }

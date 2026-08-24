@@ -51,10 +51,11 @@ use alloc::boxed::Box;
 ///
 /// Returns an error if the device doesn't contain a valid ext4 filesystem
 /// or if the mount point is already in use.
-pub fn mount(device: &str, mount_path: &str) -> KernelResult<()> {
+pub fn mount(device: &str, mount_path: impl AsRef<crate::fs::path::Path>) -> KernelResult<()> {
+    let mount_path = mount_path.as_ref();
     let fs = vfs_impl::Ext4Fs::open(device)?;
     crate::fs::Vfs::mount(mount_path, Box::new(fs))?;
-    serial_println!("[ext4] Mounted {} at {}", device, mount_path);
+    serial_println!("[ext4] Mounted {} at {}", device, mount_path.display());
     Ok(())
 }
 

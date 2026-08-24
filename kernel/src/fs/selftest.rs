@@ -393,6 +393,37 @@ impl Skips {
     }
 }
 
+/// Whether `path` is a mount point in the live mount table.
+///
+/// This is the shape a filesystem precondition should take: a fact looked up,
+/// with exactly one meaning.  The alternatives a suite reaches for instead —
+/// `Vfs::stat(path).is_ok()`, or a probe write whose `Result` is discarded —
+/// read as "is it mounted" but mean "did that call fail for *any* reason",
+/// which includes a permission gate wrongly refusing the path and the bug the
+/// section exists to catch.
+///
+/// It answers only the question it names.  A mount can be present and still
+/// refuse a write (read-only, quota, a file tag), so a section that needs to
+/// *write* should use this to decide whether to run and then classify the
+/// staging error with [`classify`] — see `fs::trash::self_test`.
+#[must_use]
+pub fn is_mounted(path: &str) -> bool {
+    crate::fs::Vfs::mounts()
+        .iter()
+        .any(|(p, _)| p.as_path() == crate::fs::path::Path::new(path))
+}
+
+/// Whether `path` is a mount point *and* is not mounted read-only.
+///
+/// The read-only flag is the one write-blocking condition the mount table can
+/// answer on its own; the rest (quotas, tags, ACLs) still need [`classify`].
+#[must_use]
+pub fn is_mounted_rw(path: &str) -> bool {
+    crate::fs::Vfs::mounts_full()
+        .iter()
+        .any(|(p, _, opts)| p.as_path() == crate::fs::path::Path::new(path) && !opts.read_only)
+}
+
 /// The outcome of a self-test's setup step, split into the two things that
 /// `.is_ok()` collapses into one.
 ///

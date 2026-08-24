@@ -4,6 +4,7 @@
 //!
 //! Single personality: `caddy`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -48,20 +49,37 @@ fn run_caddy(args: Vec<String>) -> i32 {
         }
         "run" | "start" => {
             let is_bg = cmd.as_str() == "start";
-            let config = cmd_args.iter().position(|a| a == "--config")
+            let config = cmd_args
+                .iter()
+                .position(|a| a == "--config")
                 .and_then(|i| cmd_args.get(i + 1))
                 .map(|s| s.as_str())
                 .unwrap_or("/etc/caddy/Caddyfile");
-            println!("{{\"level\":\"info\",\"ts\":1716368400.000,\"msg\":\"using provided configuration\",\"config_file\":\"{}\"}}", config);
+            println!(
+                "{{\"level\":\"info\",\"ts\":1716368400.000,\"msg\":\"using provided configuration\",\"config_file\":\"{}\"}}",
+                config
+            );
             println!("{{\"level\":\"info\",\"ts\":1716368400.100,\"msg\":\"adapted config\"}}");
-            println!("{{\"level\":\"info\",\"ts\":1716368400.200,\"logger\":\"tls.obtain\",\"msg\":\"acquiring lock\"}}");
-            println!("{{\"level\":\"info\",\"ts\":1716368400.300,\"logger\":\"tls\",\"msg\":\"automatic HTTPS is fully managed\"}}");
+            println!(
+                "{{\"level\":\"info\",\"ts\":1716368400.200,\"logger\":\"tls.obtain\",\"msg\":\"acquiring lock\"}}"
+            );
+            println!(
+                "{{\"level\":\"info\",\"ts\":1716368400.300,\"logger\":\"tls\",\"msg\":\"automatic HTTPS is fully managed\"}}"
+            );
             println!("{{\"level\":\"info\",\"ts\":1716368400.400,\"msg\":\"autosaved config\"}}");
-            println!("{{\"level\":\"info\",\"ts\":1716368400.500,\"msg\":\"serving initial configuration\"}}");
-            println!("{{\"level\":\"info\",\"ts\":1716368400.501,\"logger\":\"http\",\"msg\":\"server listening\",\"address\":\":443\"}}");
-            println!("{{\"level\":\"info\",\"ts\":1716368400.502,\"logger\":\"http\",\"msg\":\"server listening\",\"address\":\":80\"}}");
+            println!(
+                "{{\"level\":\"info\",\"ts\":1716368400.500,\"msg\":\"serving initial configuration\"}}"
+            );
+            println!(
+                "{{\"level\":\"info\",\"ts\":1716368400.501,\"logger\":\"http\",\"msg\":\"server listening\",\"address\":\":443\"}}"
+            );
+            println!(
+                "{{\"level\":\"info\",\"ts\":1716368400.502,\"logger\":\"http\",\"msg\":\"server listening\",\"address\":\":80\"}}"
+            );
             if is_bg {
-                println!("{{\"level\":\"info\",\"ts\":1716368400.600,\"msg\":\"Caddy started in background\"}}");
+                println!(
+                    "{{\"level\":\"info\",\"ts\":1716368400.600,\"msg\":\"Caddy started in background\"}}"
+                );
             }
             0
         }
@@ -70,15 +88,22 @@ fn run_caddy(args: Vec<String>) -> i32 {
             0
         }
         "reload" => {
-            let config = cmd_args.iter().position(|a| a == "--config")
+            let config = cmd_args
+                .iter()
+                .position(|a| a == "--config")
                 .and_then(|i| cmd_args.get(i + 1))
                 .map(|s| s.as_str())
                 .unwrap_or("/etc/caddy/Caddyfile");
-            println!("{{\"level\":\"info\",\"msg\":\"reloading config from {}\"}}", config);
+            println!(
+                "{{\"level\":\"info\",\"msg\":\"reloading config from {}\"}}",
+                config
+            );
             0
         }
         "validate" => {
-            let config = cmd_args.iter().position(|a| a == "--config")
+            let config = cmd_args
+                .iter()
+                .position(|a| a == "--config")
                 .and_then(|i| cmd_args.get(i + 1))
                 .map(|s| s.as_str())
                 .unwrap_or("/etc/caddy/Caddyfile");
@@ -86,7 +111,9 @@ fn run_caddy(args: Vec<String>) -> i32 {
             0
         }
         "adapt" => {
-            let config = cmd_args.iter().position(|a| a == "--config")
+            let config = cmd_args
+                .iter()
+                .position(|a| a == "--config")
                 .and_then(|i| cmd_args.get(i + 1))
                 .map(|s| s.as_str())
                 .unwrap_or("/etc/caddy/Caddyfile");
@@ -111,11 +138,15 @@ fn run_caddy(args: Vec<String>) -> i32 {
             0
         }
         "file-server" => {
-            let listen = cmd_args.iter().position(|a| a == "--listen")
+            let listen = cmd_args
+                .iter()
+                .position(|a| a == "--listen")
                 .and_then(|i| cmd_args.get(i + 1))
                 .map(|s| s.as_str())
                 .unwrap_or(":2015");
-            let root = cmd_args.iter().position(|a| a == "--root")
+            let root = cmd_args
+                .iter()
+                .position(|a| a == "--root")
                 .and_then(|i| cmd_args.get(i + 1))
                 .map(|s| s.as_str())
                 .unwrap_or(".");
@@ -124,11 +155,15 @@ fn run_caddy(args: Vec<String>) -> i32 {
             0
         }
         "reverse-proxy" => {
-            let from = cmd_args.iter().position(|a| a == "--from")
+            let from = cmd_args
+                .iter()
+                .position(|a| a == "--from")
                 .and_then(|i| cmd_args.get(i + 1))
                 .map(|s| s.as_str())
                 .unwrap_or(":80");
-            let to = cmd_args.iter().position(|a| a == "--to")
+            let to = cmd_args
+                .iter()
+                .position(|a| a == "--to")
                 .and_then(|i| cmd_args.get(i + 1))
                 .map(|s| s.as_str())
                 .unwrap_or("localhost:8080");
@@ -160,8 +195,14 @@ fn run_caddy(args: Vec<String>) -> i32 {
             println!("$2a$14$abc123def456ghi789jklmnopqrstuvwxyz012345");
             0
         }
-        "trust" => { println!("Certificate installed into local trust store"); 0 }
-        "untrust" => { println!("Certificate removed from local trust store"); 0 }
+        "trust" => {
+            println!("Certificate installed into local trust store");
+            0
+        }
+        "untrust" => {
+            println!("Certificate removed from local trust store");
+            0
+        }
         "environ" => {
             println!("HOME=/root");
             println!("PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin");
@@ -169,7 +210,10 @@ fn run_caddy(args: Vec<String>) -> i32 {
             println!("XDG_CONFIG_HOME=/root/.config");
             0
         }
-        other => { eprintln!("caddy: unknown command '{}'", other); 1 }
+        other => {
+            eprintln!("caddy: unknown command {}", quoteaf_os(other));
+            1
+        }
     }
 }
 
@@ -182,7 +226,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_caddy};
+    use super::run_caddy;
 
     #[test]
     fn help_exits_zero() {

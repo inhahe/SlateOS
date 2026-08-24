@@ -2,3 +2,8 @@
 name = "terragrunt-cli"
 version = "0.1.0"
 edition = "2024"
+
+[dependencies]
+# The command run across every subdirectory and the terragrunt subcommand
+# are argv words.
+quoting = { path = "../quoting" }

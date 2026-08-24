@@ -4,6 +4,7 @@
 //!
 //! Single personality: `jupyter`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -31,17 +32,32 @@ fn run_jupyter(args: Vec<String>) -> i32 {
     let cmd = args.first().map(|s| s.as_str()).unwrap_or("");
     match cmd {
         "notebook" | "lab" => {
-            let port = args.windows(2).find(|w| w[0] == "--port").map(|w| w[1].as_str()).unwrap_or("8888");
-            let kind = if cmd == "lab" { "JupyterLab" } else { "Jupyter Notebook" };
+            let port = args
+                .windows(2)
+                .find(|w| w[0] == "--port")
+                .map(|w| w[1].as_str())
+                .unwrap_or("8888");
+            let kind = if cmd == "lab" {
+                "JupyterLab"
+            } else {
+                "Jupyter Notebook"
+            };
             println!("[I] {} is running at:", kind);
             println!("    http://localhost:{}/?token=abc123def456ghi789", port);
-            println!("     or http://127.0.0.1:{}/?token=abc123def456ghi789", port);
+            println!(
+                "     or http://127.0.0.1:{}/?token=abc123def456ghi789",
+                port
+            );
             println!("[I] Use Control-C to stop this server.");
             0
         }
         "nbconvert" => {
             let notebook = args.get(1).map(|s| s.as_str()).unwrap_or("notebook.ipynb");
-            let to = args.windows(2).find(|w| w[0] == "--to").map(|w| w[1].as_str()).unwrap_or("html");
+            let to = args
+                .windows(2)
+                .find(|w| w[0] == "--to")
+                .map(|w| w[1].as_str())
+                .unwrap_or("html");
             println!("[NbConvertApp] Converting {} to {}...", notebook, to);
             let output = notebook.strip_suffix(".ipynb").unwrap_or("notebook");
             println!("[NbConvertApp] Writing {} to {}.{}", to, output, to);
@@ -58,9 +74,14 @@ fn run_jupyter(args: Vec<String>) -> i32 {
                 }
                 "install" => {
                     let name = args.get(2).map(|s| s.as_str()).unwrap_or("mykernel");
-                    println!("[InstallKernelSpec] Installed kernelspec {} in /usr/share/jupyter/kernels/{}", name, name);
+                    println!(
+                        "[InstallKernelSpec] Installed kernelspec {} in /usr/share/jupyter/kernels/{}",
+                        name, name
+                    );
                 }
-                _ => { println!("Kernelspec operation: {}", sub); }
+                _ => {
+                    println!("Kernelspec operation: {}", sub);
+                }
             }
             0
         }
@@ -88,7 +109,9 @@ fn run_jupyter(args: Vec<String>) -> i32 {
                     println!("Shutting down server on port {}...", port);
                     println!("  ✔ Server stopped.");
                 }
-                _ => { println!("Server operation: {}", sub); }
+                _ => {
+                    println!("Server operation: {}", sub);
+                }
             }
             0
         }
@@ -96,7 +119,7 @@ fn run_jupyter(args: Vec<String>) -> i32 {
             if cmd.is_empty() {
                 eprintln!("Usage: jupyter <command>. See --help.");
             } else {
-                eprintln!("Error: unknown command '{}'. See --help.", cmd);
+                eprintln!("Error: unknown command {}. See --help.", quoteaf_os(cmd));
             }
             1
         }
@@ -112,7 +135,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_jupyter};
+    use super::run_jupyter;
 
     #[test]
     fn help_exits_zero() {

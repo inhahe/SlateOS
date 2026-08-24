@@ -4,6 +4,7 @@
 //!
 //! Single personality: `stripe`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -45,7 +46,11 @@ fn run_stripe(args: Vec<String>) -> i32 {
             0
         }
         "listen" => {
-            let forward = args.windows(2).find(|w| w[0] == "--forward-to").map(|w| w[1].as_str()).unwrap_or("http://localhost:3000/webhooks");
+            let forward = args
+                .windows(2)
+                .find(|w| w[0] == "--forward-to")
+                .map(|w| w[1].as_str())
+                .unwrap_or("http://localhost:3000/webhooks");
             println!("Ready! Webhook signing secret: whsec_test_abc123...");
             println!("Forwarding to {}", forward);
             println!();
@@ -56,7 +61,10 @@ fn run_stripe(args: Vec<String>) -> i32 {
             0
         }
         "trigger" => {
-            let event = args.get(1).map(|s| s.as_str()).unwrap_or("payment_intent.succeeded");
+            let event = args
+                .get(1)
+                .map(|s| s.as_str())
+                .unwrap_or("payment_intent.succeeded");
             println!("Setting up fixture for: {}", event);
             println!("Trigger succeeded! Check dashboard for event details.");
             0
@@ -73,7 +81,9 @@ fn run_stripe(args: Vec<String>) -> i32 {
                 "create" => {
                     println!("✔ Created customer cus_new123");
                 }
-                _ => { println!("Customer operation: {}", sub); }
+                _ => {
+                    println!("Customer operation: {}", sub);
+                }
             }
             0
         }
@@ -89,7 +99,9 @@ fn run_stripe(args: Vec<String>) -> i32 {
                 "create" => {
                     println!("✔ Created payment intent pi_new123 ($99.00)");
                 }
-                _ => { println!("Payment operation: {}", sub); }
+                _ => {
+                    println!("Payment operation: {}", sub);
+                }
             }
             0
         }
@@ -102,7 +114,9 @@ fn run_stripe(args: Vec<String>) -> i32 {
                     println!("prod_def456         Enterprise Plan   true      2024-01-01");
                     println!("prod_ghi789         Starter Plan      true      2024-01-01");
                 }
-                _ => { println!("Product operation: {}", sub); }
+                _ => {
+                    println!("Product operation: {}", sub);
+                }
             }
             0
         }
@@ -111,10 +125,16 @@ fn run_stripe(args: Vec<String>) -> i32 {
             match sub {
                 "list" => {
                     println!("ID                  Customer       Status     Plan            Price");
-                    println!("sub_abc123          cus_abc123     active     Pro Plan        $99/mo");
-                    println!("sub_def456          cus_def456     active     Starter Plan    $29/mo");
+                    println!(
+                        "sub_abc123          cus_abc123     active     Pro Plan        $99/mo"
+                    );
+                    println!(
+                        "sub_def456          cus_def456     active     Starter Plan    $29/mo"
+                    );
                 }
-                _ => { println!("Subscription operation: {}", sub); }
+                _ => {
+                    println!("Subscription operation: {}", sub);
+                }
             }
             0
         }
@@ -136,7 +156,9 @@ fn run_stripe(args: Vec<String>) -> i32 {
                     println!("evt_ghi789      customer.created             2024-01-15 13:55:00");
                     println!("evt_jkl012      invoice.paid                 2024-01-15 13:50:00");
                 }
-                _ => { println!("Event operation: {}", sub); }
+                _ => {
+                    println!("Event operation: {}", sub);
+                }
             }
             0
         }
@@ -152,7 +174,7 @@ fn run_stripe(args: Vec<String>) -> i32 {
             if cmd.is_empty() {
                 eprintln!("Usage: stripe <command>. See --help.");
             } else {
-                eprintln!("Error: unknown command '{}'. See --help.", cmd);
+                eprintln!("Error: unknown command {}. See --help.", quoteaf_os(cmd));
             }
             1
         }
@@ -168,7 +190,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_stripe};
+    use super::run_stripe;
 
     #[test]
     fn help_exits_zero() {

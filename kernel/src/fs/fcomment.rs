@@ -253,7 +253,9 @@ pub fn count() -> usize {
 pub fn rename_path(old_path: impl AsRef<Path>, new_path: impl AsRef<Path>) -> KernelResult<()> {
     let mut store = STORE.lock();
     if let Some(comment) = store.comments.remove(old_path.as_ref()) {
-        store.comments.insert(new_path.as_ref().to_path_buf(), comment);
+        store
+            .comments
+            .insert(new_path.as_ref().to_path_buf(), comment);
         Ok(())
     } else {
         Ok(()) // No comment to move — that's fine.

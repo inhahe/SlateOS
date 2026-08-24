@@ -10,6 +10,7 @@
 
 #![deny(clippy::all)]
 
+use quoting::quoteaf_os;
 use std::collections::BTreeSet;
 use std::env;
 use std::fs;
@@ -684,7 +685,7 @@ fn lsinitramfs_main(args: &[String]) -> i32 {
                 }
             }
             Err(e) => {
-                eprintln!("lsinitramfs: cannot read '{file}': {e}");
+                eprintln!("lsinitramfs: cannot read {}: {e}", quoteaf_os(file));
                 return 1;
             }
         }
@@ -727,7 +728,7 @@ fn mkinitramfs_main(args: &[String]) -> i32 {
                     if let Some(c) = Compression::from_str(&args[i]) {
                         config.compression = c;
                     } else {
-                        eprintln!("mkinitramfs: unknown compression '{}'", args[i]);
+                        eprintln!("mkinitramfs: unknown compression {}", quoteaf_os(&args[i]));
                         return 1;
                     }
                 }
@@ -763,7 +764,7 @@ fn mkinitramfs_main(args: &[String]) -> i32 {
                 config.kernel_version = s.to_string();
             }
             other => {
-                eprintln!("mkinitramfs: unknown option '{other}'");
+                eprintln!("mkinitramfs: unknown option {}", quoteaf_os(other));
                 return 1;
             }
         }
@@ -812,8 +813,8 @@ fn mkinitramfs_main(args: &[String]) -> i32 {
         }
         Err(e) => {
             eprintln!(
-                "mkinitramfs: failed to write '{}': {e}",
-                config.output.display()
+                "mkinitramfs: failed to write {}: {e}",
+                quoteaf_os(&config.output)
             );
             1
         }
@@ -876,7 +877,7 @@ fn update_initramfs_main(args: &[String]) -> i32 {
                 return 0;
             }
             other => {
-                eprintln!("update-initramfs: unknown option '{other}'");
+                eprintln!("update-initramfs: unknown option {}", quoteaf_os(other));
                 return 1;
             }
         }

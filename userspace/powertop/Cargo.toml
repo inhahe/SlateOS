@@ -3,3 +3,9 @@ name = "powertop"
 version = "0.1.0"
 edition = "2024"
 [dependencies]
+# It interpolates `t.description` into " Setting {}: {} → {}". That value
+# comes from this program's own simulated tunable table, so the quoting is
+# presentation rather than defence -- but the line names a device path, and
+# the shape of a partly-quoted three-value message is exactly what gets
+# copied to a place where the value is not this program's.
+quoting = { path = "../quoting" }

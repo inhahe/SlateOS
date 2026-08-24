@@ -2,3 +2,7 @@
 name = "plaid-cli"
 version = "0.1.0"
 edition = "2024"
+
+[dependencies]
+# The institution search query and the rejected command name are argv words.
+quoting = { path = "../quoting" }

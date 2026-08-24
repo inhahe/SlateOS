@@ -4,6 +4,7 @@
 //!
 //! Single personality: `inkscape`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -42,26 +43,33 @@ fn run_inkscape(args: Vec<String>) -> i32 {
         return 0;
     }
 
-    let export_type = args.windows(2)
+    let export_type = args
+        .windows(2)
         .find(|w| w[0] == "--export-type")
         .map(|w| w[1].as_str());
 
-    let output = args.windows(2)
+    let output = args
+        .windows(2)
         .find(|w| w[0] == "-o" || w[0] == "--export-filename")
         .map(|w| w[1].as_str());
 
-    let dpi = args.windows(2)
+    let dpi = args
+        .windows(2)
         .find(|w| w[0] == "-d" || w[0] == "--export-dpi")
         .map(|w| w[1].as_str())
         .unwrap_or("96");
 
-    let files: Vec<&str> = args.iter()
+    let files: Vec<&str> = args
+        .iter()
         .filter(|a| !a.starts_with('-'))
         .map(|s| s.as_str())
         .collect();
 
     // Query mode
-    if args.iter().any(|a| a == "--query-width" || a == "--query-height") {
+    if args
+        .iter()
+        .any(|a| a == "--query-width" || a == "--query-height")
+    {
         println!("1024");
         return 0;
     }
@@ -72,7 +80,7 @@ fn run_inkscape(args: Vec<String>) -> i32 {
 
     if args.iter().any(|a| a == "--vacuum-defs") {
         for f in &files {
-            println!("Vacuuming defs in '{}'...", f);
+            println!("Vacuuming defs in {}...", quoteaf_os(f));
         }
         println!("Done.");
         return 0;
@@ -81,18 +89,27 @@ fn run_inkscape(args: Vec<String>) -> i32 {
     if let Some(etype) = export_type {
         for f in &files {
             let out = output.unwrap_or("output");
-            println!("Exporting '{}' → '{}' as {} at {} DPI", f, out, etype.to_uppercase(), dpi);
+            println!(
+                "Exporting {} → {} as {} at {dpi} DPI",
+                quoteaf_os(f),
+                quoteaf_os(out),
+                etype.to_uppercase()
+            );
         }
     } else if output.is_some() {
         for f in &files {
-            println!("Exporting '{}' → '{}'", f, output.unwrap_or("output"));
+            println!(
+                "Exporting {} → {}",
+                quoteaf_os(f),
+                quoteaf_os(output.unwrap_or("output"))
+            );
         }
     } else if files.is_empty() {
         println!("Inkscape 1.3.2 (Slate OS)");
         println!("Starting Inkscape GUI...");
     } else {
         for f in &files {
-            println!("Opening '{}' in Inkscape...", f);
+            println!("Opening {} in Inkscape...", quoteaf_os(f));
         }
     }
     0
@@ -107,7 +124,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_inkscape};
+    use super::run_inkscape;
 
     #[test]
     fn help_exits_zero() {

@@ -4,11 +4,16 @@
 //!
 //! Multi-personality: `ha`, `hass-cli`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_ha(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
@@ -84,7 +89,7 @@ fn run_ha(args: &[String]) -> i32 {
             println!("  OS: Slate OS");
             println!("  Kernel: 6.6.0-slateos");
         }
-        _ => println!("ha: '{}' completed", subcmd),
+        _ => println!("ha: {} completed", quoteaf_os(subcmd)),
     }
     0
 }
@@ -115,7 +120,10 @@ fn run_hass_cli(args: &[String]) -> i32 {
                     println!("binary_sensor.motion       off");
                 }
                 "get" => {
-                    let entity = args.get(2).map(|s| s.as_str()).unwrap_or("light.living_room");
+                    let entity = args
+                        .get(2)
+                        .map(|s| s.as_str())
+                        .unwrap_or("light.living_room");
                     println!("{}: on", entity);
                     println!("  brightness: 200");
                     println!("  color_temp: 350");
@@ -131,14 +139,17 @@ fn run_hass_cli(args: &[String]) -> i32 {
                 println!("  Service called successfully.");
             }
         }
-        _ => println!("hass-cli: '{}' completed", subcmd),
+        _ => println!("hass-cli: {} completed", quoteaf_os(subcmd)),
     }
     0
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "ha".to_string());
+    let prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "ha".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = match prog.as_str() {
         "hass-cli" => run_hass_cli(&rest),
@@ -149,7 +160,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_ha};
+    use super::{basename, run_ha, strip_ext};
 
     #[test]
     fn basename_strips_path() {

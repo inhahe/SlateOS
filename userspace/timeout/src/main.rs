@@ -7,6 +7,7 @@
 //! - `nice`: run a command with modified scheduling priority
 //! - `renice`: alter priority of running processes
 
+use quoting::quoteaf_os;
 use std::env;
 use std::fs::{self, OpenOptions};
 use std::io;
@@ -221,7 +222,7 @@ fn run_timeout(args: &[String]) -> i32 {
                     match parse_signal(&args[i]) {
                         Some(s) => signal = s,
                         None => {
-                            eprintln!("timeout: invalid signal '{}'", args[i]);
+                            eprintln!("timeout: invalid signal {}", quoteaf_os(&args[i]));
                             return 125;
                         }
                     }
@@ -233,7 +234,7 @@ fn run_timeout(args: &[String]) -> i32 {
                     match parse_duration(&args[i]) {
                         Some(d) => kill_after = Some(d),
                         None => {
-                            eprintln!("timeout: invalid duration '{}'", args[i]);
+                            eprintln!("timeout: invalid duration {}", quoteaf_os(&args[i]));
                             return 125;
                         }
                     }
@@ -250,7 +251,7 @@ fn run_timeout(args: &[String]) -> i32 {
                 match parse_signal(val) {
                     Some(s) => signal = s,
                     None => {
-                        eprintln!("timeout: invalid signal '{}'", val);
+                        eprintln!("timeout: invalid signal {}", quoteaf_os(val));
                         return 125;
                     }
                 }
@@ -260,7 +261,7 @@ fn run_timeout(args: &[String]) -> i32 {
                 match parse_duration(val) {
                     Some(d) => kill_after = Some(d),
                     None => {
-                        eprintln!("timeout: invalid duration '{}'", val);
+                        eprintln!("timeout: invalid duration {}", quoteaf_os(val));
                         return 125;
                     }
                 }
@@ -272,7 +273,7 @@ fn run_timeout(args: &[String]) -> i32 {
                         signal = n;
                     }
                 } else {
-                    eprintln!("timeout: unknown option '{}'", arg);
+                    eprintln!("timeout: unknown option {}", quoteaf_os(arg));
                     return 125;
                 }
             }
@@ -292,7 +293,7 @@ fn run_timeout(args: &[String]) -> i32 {
         Some(ref ds) => match parse_duration(ds) {
             Some(d) => d,
             None => {
-                eprintln!("timeout: invalid duration '{}'", ds);
+                eprintln!("timeout: invalid duration {}", quoteaf_os(ds));
                 return 125;
             }
         },
@@ -322,7 +323,7 @@ fn run_timeout(args: &[String]) -> i32 {
     {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("timeout: failed to execute '{}': {}", program, e);
+            eprintln!("timeout: failed to execute {}: {}", quoteaf_os(program), e);
             // 126 = command found but not executable, 127 = not found
             return if e.kind() == io::ErrorKind::NotFound {
                 127
@@ -349,7 +350,11 @@ fn run_timeout(args: &[String]) -> i32 {
                 if start.elapsed() >= duration {
                     // Timeout expired — send signal
                     if verbose {
-                        eprintln!("timeout: sending signal {} to command '{}'", signal, program);
+                        eprintln!(
+                            "timeout: sending signal {} to command {}",
+                            signal,
+                            quoteaf_os(program)
+                        );
                     }
 
                     // Use our syscall to send signal
@@ -380,8 +385,8 @@ fn run_timeout(args: &[String]) -> i32 {
                                     if kill_start.elapsed() >= ka {
                                         if verbose {
                                             eprintln!(
-                                                "timeout: sending KILL to command '{}'",
-                                                program
+                                                "timeout: sending KILL to command {}",
+                                                quoteaf_os(program)
                                             );
                                         }
                                         #[cfg(target_os = "slateos")]
@@ -405,7 +410,11 @@ fn run_timeout(args: &[String]) -> i32 {
 
                     // Wait for child to die
                     let _ = child.wait();
-                    return if preserve_status { 128 + signal as i32 } else { 124 };
+                    return if preserve_status {
+                        128 + signal as i32
+                    } else {
+                        124
+                    };
                 }
 
                 // Sleep briefly before polling again
@@ -454,7 +463,7 @@ fn run_nohup(args: &[String]) -> i32 {
                 let path = format!("{}/nohup.out", home);
                 match OpenOptions::new().create(true).append(true).open(&path) {
                     Ok(f) => {
-                        eprintln!("nohup: appending output to '{}'", path);
+                        eprintln!("nohup: appending output to {}", quoteaf_os(&path));
                         Some(f)
                     }
                     Err(_) => {
@@ -485,7 +494,7 @@ fn run_nohup(args: &[String]) -> i32 {
     {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("nohup: failed to execute '{}': {}", program, e);
+            eprintln!("nohup: failed to execute {}: {}", quoteaf_os(program), e);
             return if e.kind() == io::ErrorKind::NotFound {
                 127
             } else {
@@ -537,7 +546,7 @@ fn run_nice(args: &[String]) -> i32 {
                     match args[i].parse::<i32>() {
                         Ok(n) => adjustment = n,
                         Err(_) => {
-                            eprintln!("nice: invalid adjustment '{}'", args[i]);
+                            eprintln!("nice: invalid adjustment {}", quoteaf_os(&args[i]));
                             return 125;
                         }
                     }
@@ -548,7 +557,7 @@ fn run_nice(args: &[String]) -> i32 {
                 match val.parse::<i32>() {
                     Ok(n) => adjustment = n,
                     Err(_) => {
-                        eprintln!("nice: invalid adjustment '{}'", val);
+                        eprintln!("nice: invalid adjustment {}", quoteaf_os(val));
                         return 125;
                     }
                 }
@@ -602,7 +611,7 @@ fn run_nice(args: &[String]) -> i32 {
     {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("nice: '{}': {}", program, e);
+            eprintln!("nice: {}: {}", quoteaf_os(program), e);
             return if e.kind() == io::ErrorKind::NotFound {
                 127
             } else {
@@ -664,7 +673,7 @@ fn run_renice(args: &[String]) -> i32 {
                     match args[i].parse::<i32>() {
                         Ok(n) => priority = Some(n.clamp(-20, 19)),
                         Err(_) => {
-                            eprintln!("renice: invalid priority '{}'", args[i]);
+                            eprintln!("renice: invalid priority {}", quoteaf_os(&args[i]));
                             return 1;
                         }
                     }
@@ -677,7 +686,7 @@ fn run_renice(args: &[String]) -> i32 {
                     match args[i].parse::<u32>() {
                         Ok(pid) => targets.push((PRIO_PROCESS, pid)),
                         Err(_) => {
-                            eprintln!("renice: invalid PID '{}'", args[i]);
+                            eprintln!("renice: invalid PID {}", quoteaf_os(&args[i]));
                             return 1;
                         }
                     }
@@ -690,7 +699,7 @@ fn run_renice(args: &[String]) -> i32 {
                     match args[i].parse::<u32>() {
                         Ok(pgrp) => targets.push((PRIO_PGRP, pgrp)),
                         Err(_) => {
-                            eprintln!("renice: invalid PGRP '{}'", args[i]);
+                            eprintln!("renice: invalid PGRP {}", quoteaf_os(&args[i]));
                             return 1;
                         }
                     }
@@ -708,7 +717,7 @@ fn run_renice(args: &[String]) -> i32 {
                         match lookup_uid(&args[i]) {
                             Some(uid) => uid,
                             None => {
-                                eprintln!("renice: unknown user '{}'", args[i]);
+                                eprintln!("renice: unknown user {}", quoteaf_os(&args[i]));
                                 return 1;
                             }
                         }
@@ -722,13 +731,13 @@ fn run_renice(args: &[String]) -> i32 {
                     if let Ok(n) = arg.parse::<i32>() {
                         priority = Some(n.clamp(-20, 19));
                     } else {
-                        eprintln!("renice: invalid priority '{}'", arg);
+                        eprintln!("renice: invalid priority {}", quoteaf_os(arg));
                         return 1;
                     }
                 } else if let Ok(n) = arg.parse::<u32>() {
                     targets.push((current_which, n));
                 } else {
-                    eprintln!("renice: invalid argument '{}'", arg);
+                    eprintln!("renice: invalid argument {}", quoteaf_os(arg));
                     return 1;
                 }
             }

@@ -4,6 +4,7 @@
 //!
 //! Single personality: `sops`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -48,8 +49,13 @@ fn run_sops(args: Vec<String>) -> i32 {
             0
         }
         "decrypt" => {
-            let file = args.get(1).map(|s| s.as_str()).unwrap_or("secrets.enc.yaml");
-            let extract = args.windows(2).find(|w| w[0] == "--extract")
+            let file = args
+                .get(1)
+                .map(|s| s.as_str())
+                .unwrap_or("secrets.enc.yaml");
+            let extract = args
+                .windows(2)
+                .find(|w| w[0] == "--extract")
                 .map(|w| w[1].as_str());
             println!("Decrypting {}...", file);
             if let Some(path) = extract {
@@ -62,21 +68,30 @@ fn run_sops(args: Vec<String>) -> i32 {
             0
         }
         "edit" => {
-            let file = args.get(1).map(|s| s.as_str()).unwrap_or("secrets.enc.yaml");
+            let file = args
+                .get(1)
+                .map(|s| s.as_str())
+                .unwrap_or("secrets.enc.yaml");
             println!("Decrypting {} for editing...", file);
             println!("  Opening in $EDITOR...");
             println!("  File saved and re-encrypted.");
             0
         }
         "rotate" => {
-            let file = args.get(1).map(|s| s.as_str()).unwrap_or("secrets.enc.yaml");
+            let file = args
+                .get(1)
+                .map(|s| s.as_str())
+                .unwrap_or("secrets.enc.yaml");
             println!("Rotating data key for {}...", file);
             println!("  Data key rotated successfully");
             println!("  All values re-encrypted with new data key");
             0
         }
         "updatekeys" => {
-            let file = args.get(1).map(|s| s.as_str()).unwrap_or("secrets.enc.yaml");
+            let file = args
+                .get(1)
+                .map(|s| s.as_str())
+                .unwrap_or("secrets.enc.yaml");
             println!("Updating keys for {}...", file);
             println!("  Added key: age1newkey...");
             println!("  Removed key: age1oldkey...");
@@ -84,7 +99,10 @@ fn run_sops(args: Vec<String>) -> i32 {
             0
         }
         "filestatus" => {
-            let file = args.get(1).map(|s| s.as_str()).unwrap_or("secrets.enc.yaml");
+            let file = args
+                .get(1)
+                .map(|s| s.as_str())
+                .unwrap_or("secrets.enc.yaml");
             println!("File: {}", file);
             println!("  Encrypted: true");
             println!("  Last modified: 2024-01-15T14:00:00Z");
@@ -98,7 +116,7 @@ fn run_sops(args: Vec<String>) -> i32 {
             if cmd.is_empty() {
                 eprintln!("Usage: sops <command>. See --help.");
             } else {
-                eprintln!("Error: unknown command '{}'. See --help.", cmd);
+                eprintln!("Error: unknown command {}. See --help.", quoteaf_os(cmd));
             }
             1
         }
@@ -114,7 +132,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_sops};
+    use super::run_sops;
 
     #[test]
     fn help_exits_zero() {

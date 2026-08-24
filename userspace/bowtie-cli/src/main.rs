@@ -4,11 +4,16 @@
 //!
 //! Multi-personality: `bowtie2`, `bowtie2-build`, `bowtie2-inspect`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_bowtie2(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
@@ -31,8 +36,12 @@ fn run_bowtie2(args: &[String]) -> i32 {
         println!("64-bit, Built with Rust for Slate OS");
         return 0;
     }
-    let idx = args.windows(2).find(|w| w[0] == "-x").map(|w| w[1].as_str()).unwrap_or("genome");
-    println!("bowtie2: aligning reads against index '{}'", idx);
+    let idx = args
+        .windows(2)
+        .find(|w| w[0] == "-x")
+        .map(|w| w[1].as_str())
+        .unwrap_or("genome");
+    println!("bowtie2: aligning reads against index {}", quoteaf_os(idx));
     println!("1234567 reads; of these:");
     println!("  1234567 (100.00%) were unpaired; of these:");
     println!("    12345 (1.00%) aligned 0 times");
@@ -78,7 +87,11 @@ fn run_bowtie2_inspect(args: &[String]) -> i32 {
         return 0;
     }
     let summary = args.iter().any(|a| a == "-s" || a == "--summary");
-    let base = args.iter().find(|a| !a.starts_with('-')).map(|s| s.as_str()).unwrap_or("genome");
+    let base = args
+        .iter()
+        .find(|a| !a.starts_with('-'))
+        .map(|s| s.as_str())
+        .unwrap_or("genome");
     if summary {
         println!("Index: {}", base);
         println!("  Sequences: 24");
@@ -95,7 +108,10 @@ fn run_bowtie2_inspect(args: &[String]) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "bowtie2".to_string());
+    let prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "bowtie2".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = match prog.as_str() {
         "bowtie2-build" => run_bowtie2_build(&rest),
@@ -107,7 +123,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_bowtie2};
+    use super::{basename, run_bowtie2, strip_ext};
 
     #[test]
     fn basename_strips_path() {

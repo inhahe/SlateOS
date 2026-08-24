@@ -3,3 +3,7 @@ name = "fwupd"
 version = "0.1.0"
 edition = "2024"
 [dependencies]
+# fwupd names devices and firmware release identifiers, strings that come
+# from the device's own descriptors and from downloaded metadata -- neither
+# of them ours.
+quoting = { path = "../quoting" }

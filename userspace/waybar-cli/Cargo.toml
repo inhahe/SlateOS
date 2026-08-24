@@ -2,3 +2,8 @@
 name = "waybar-cli"
 version = "0.1.0"
 edition = "2024"
+
+[dependencies]
+# The config and style paths it reports loading both come from the command
+# line.
+quoting = { path = "../quoting" }

@@ -4,6 +4,7 @@
 //!
 //! Single personality: `scribus`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -50,17 +51,19 @@ fn run_scribus(args: Vec<String>) -> i32 {
     }
 
     let batch = args.iter().any(|a| a == "-g" || a == "--no-gui");
-    let script = args.windows(2)
+    let script = args
+        .windows(2)
         .find(|w| w[0] == "-py" || w[0] == "--python-script")
         .map(|w| w[1].as_str());
 
-    let file = args.iter()
+    let file = args
+        .iter()
         .rfind(|a| !a.starts_with('-'))
         .map(|s| s.as_str());
 
     if batch {
         if let Some(s) = script {
-            println!("Scribus batch mode: running script '{}'...", s);
+            println!("Scribus batch mode: running script {}...", quoteaf_os(s));
             if let Some(f) = file {
                 println!("  Document: {}", f);
             }
@@ -69,7 +72,7 @@ fn run_scribus(args: Vec<String>) -> i32 {
             println!("Scribus batch mode: no script specified.");
         }
     } else if let Some(f) = file {
-        println!("Scribus: opening '{}'...", f);
+        println!("Scribus: opening {}...", quoteaf_os(f));
         println!("  Document loaded: 4 pages, A4, CMYK");
     } else {
         println!("Scribus 1.6.1 (Slate OS)");
@@ -87,7 +90,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_scribus};
+    use super::run_scribus;
 
     #[test]
     fn help_exits_zero() {

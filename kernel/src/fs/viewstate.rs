@@ -263,9 +263,12 @@ static SET_COUNT: AtomicU64 = AtomicU64::new(0);
 /// directories whose names differ only in a byte with no UTF-8 spelling
 /// would otherwise share one entry, and the user would find that setting
 /// a view mode on one folder silently changed a different folder's.
-static STATES: PreemptSpinMutex<Vec<(PathBuf, ViewSettings)>> = PreemptSpinMutex::named(Vec::new(), b"STATES");
-static TEMPLATES: PreemptSpinMutex<Vec<ViewTemplate>> = PreemptSpinMutex::named(Vec::new(), b"TEMPLATES");
-static GLOBAL_DEFAULTS: PreemptSpinMutex<Option<ViewSettings>> = PreemptSpinMutex::named(None, b"GLOBAL_DEFAULTS");
+static STATES: PreemptSpinMutex<Vec<(PathBuf, ViewSettings)>> =
+    PreemptSpinMutex::named(Vec::new(), b"STATES");
+static TEMPLATES: PreemptSpinMutex<Vec<ViewTemplate>> =
+    PreemptSpinMutex::named(Vec::new(), b"TEMPLATES");
+static GLOBAL_DEFAULTS: PreemptSpinMutex<Option<ViewSettings>> =
+    PreemptSpinMutex::named(None, b"GLOBAL_DEFAULTS");
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -553,10 +556,7 @@ pub fn self_test() -> KernelResult<()> {
             Path::new(&b"/home/\xFFu/Pictures"[..]),
             "**/Pictures"
         ));
-        assert!(path_matches_pattern(
-            Path::new(&b"/home/\xFFu"[..]),
-            "*"
-        ));
+        assert!(path_matches_pattern(Path::new(&b"/home/\xFFu"[..]), "*"));
         serial_println!("[viewstate] test 4 passed: pattern matching");
     }
 

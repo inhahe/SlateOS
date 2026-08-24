@@ -2,3 +2,8 @@
 name = "thanos-cli"
 version = "0.1.0"
 edition = "2024"
+
+[dependencies]
+# thanos-cli names blocks, buckets and tenants, identifiers written into
+# object storage by another component.
+quoting = { path = "../quoting" }

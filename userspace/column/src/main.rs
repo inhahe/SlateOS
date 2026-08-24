@@ -30,6 +30,7 @@
 //!       --version               Output version information and exit
 //! ```
 
+use quoting::{quoteaf_os, quotef_os};
 use std::env;
 use std::fs::File;
 use std::io::{self, BufRead, BufReader, Write};
@@ -70,7 +71,8 @@ fn char_display_width(ch: char) -> usize {
         || (0x1DC0..=0x1DFF).contains(&cp) // Combining Diacritical Marks Supplement
         || (0x20D0..=0x20FF).contains(&cp) // Combining Diacritical Marks for Symbols
         || (0xFE00..=0xFE0F).contains(&cp) // Variation Selectors
-        || (0xFE20..=0xFE2F).contains(&cp) // Combining Half Marks
+        || (0xFE20..=0xFE2F).contains(&cp)
+    // Combining Half Marks
     {
         return 0;
     }
@@ -259,15 +261,13 @@ fn parse_args(args: &[String]) -> ParseResult {
                 "--json" => json = true,
                 "--help" => return ParseResult::Help,
                 "--version" => return ParseResult::Version,
-                "--separator" => {
-                    match consume_option_value(args, &mut i, eq_val, "--separator") {
-                        Ok(val) => separator = Some(val.to_string()),
-                        Err(msg) => {
-                            eprintln!("{msg}");
-                            process::exit(1);
-                        }
+                "--separator" => match consume_option_value(args, &mut i, eq_val, "--separator") {
+                    Ok(val) => separator = Some(val.to_string()),
+                    Err(msg) => {
+                        eprintln!("{msg}");
+                        process::exit(1);
                     }
-                }
+                },
                 "--output-separator" => {
                     match consume_option_value(args, &mut i, eq_val, "--output-separator") {
                         Ok(val) => output_separator = Some(val.to_string()),
@@ -277,21 +277,19 @@ fn parse_args(args: &[String]) -> ParseResult {
                         }
                     }
                 }
-                "--columns" => {
-                    match consume_option_value(args, &mut i, eq_val, "--columns") {
-                        Ok(val) => match val.parse::<usize>() {
-                            Ok(n) if n > 0 => term_width = n,
-                            _ => {
-                                eprintln!("column: invalid column count: '{val}'");
-                                process::exit(1);
-                            }
-                        },
-                        Err(msg) => {
-                            eprintln!("{msg}");
+                "--columns" => match consume_option_value(args, &mut i, eq_val, "--columns") {
+                    Ok(val) => match val.parse::<usize>() {
+                        Ok(n) if n > 0 => term_width = n,
+                        _ => {
+                            eprintln!("column: invalid column count: {}", quoteaf_os(val));
                             process::exit(1);
                         }
+                    },
+                    Err(msg) => {
+                        eprintln!("{msg}");
+                        process::exit(1);
                     }
-                }
+                },
                 "--table-columns" => {
                     match consume_option_value(args, &mut i, eq_val, "--table-columns") {
                         Ok(val) => {
@@ -335,7 +333,7 @@ fn parse_args(args: &[String]) -> ParseResult {
                     }
                 }
                 _ => {
-                    eprintln!("column: unrecognized option '{arg}'");
+                    eprintln!("column: unrecognized option {}", quoteaf_os(arg));
                     eprintln!("Try 'column --help' for more information.");
                     process::exit(1);
                 }
@@ -401,7 +399,7 @@ fn parse_args(args: &[String]) -> ParseResult {
                     match val_str.parse::<usize>() {
                         Ok(n) if n > 0 => term_width = n,
                         _ => {
-                            eprintln!("column: invalid column count: '{val_str}'");
+                            eprintln!("column: invalid column count: {}", quoteaf_os(&val_str));
                             process::exit(1);
                         }
                     }
@@ -465,7 +463,7 @@ fn parse_args(args: &[String]) -> ParseResult {
                     break;
                 }
                 _ => {
-                    eprintln!("column: invalid option -- '{ch}'");
+                    eprintln!("column: invalid option -- {}", quoteaf_os(ch.to_string()));
                     eprintln!("Try 'column --help' for more information.");
                     process::exit(1);
                 }
@@ -511,7 +509,7 @@ fn read_all_lines(file_paths: &[String], keep_empty: bool) -> io::Result<Vec<Str
             match File::open(path) {
                 Ok(f) => Box::new(BufReader::new(f)),
                 Err(e) => {
-                    eprintln!("column: {path}: {e}");
+                    eprintln!("column: {}: {e}", quotef_os(path));
                     continue;
                 }
             }
@@ -578,7 +576,11 @@ fn fill_columns(words: &[String], term_width: usize, output_sep: &str) -> Vec<St
 
         // Total width: sum of column widths + separators between them.
         let total: usize = col_widths.iter().sum::<usize>()
-            + if ncols > 1 { sep_width * (ncols - 1) } else { 0 };
+            + if ncols > 1 {
+                sep_width * (ncols - 1)
+            } else {
+                0
+            };
 
         if total <= term_width {
             best_ncols = ncols;
@@ -661,7 +663,11 @@ fn fill_rows(words: &[String], term_width: usize, output_sep: &str) -> Vec<Strin
         }
 
         let total: usize = col_widths.iter().sum::<usize>()
-            + if ncols > 1 { sep_width * (ncols - 1) } else { 0 };
+            + if ncols > 1 {
+                sep_width * (ncols - 1)
+            } else {
+                0
+            };
 
         if total <= term_width {
             best_ncols = ncols;
@@ -1055,7 +1061,9 @@ fn print_help() {
     println!("  -t, --table                 Create a table from delimited input");
     println!("  -s, --separator=CHARS       Input delimiter character(s) (default: whitespace)");
     println!("  -o, --output-separator=STR  Output column separator (default: 2 spaces)");
-    println!("  -c, --columns=N             Terminal width override (default: {DEFAULT_TERM_WIDTH})");
+    println!(
+        "  -c, --columns=N             Terminal width override (default: {DEFAULT_TERM_WIDTH})"
+    );
     println!("  -x, --fillrows              Fill rows before columns (default: columns first)");
     println!("  -n, --no-merge              Don't merge multiple adjacent delimiters");
     println!("  -e, --empty                 Don't ignore empty lines");
@@ -1421,8 +1429,7 @@ mod tests {
 
     #[test]
     fn test_parse_args_output_separator_long() {
-        let args: Vec<String> =
-            vec!["column".into(), "--output-separator= | ".into()];
+        let args: Vec<String> = vec!["column".into(), "--output-separator= | ".into()];
         match parse_args(&args) {
             ParseResult::Run(config) => {
                 assert_eq!(config.output_separator, " | ");
@@ -1451,8 +1458,7 @@ mod tests {
 
     #[test]
     fn test_parse_args_file_paths() {
-        let args: Vec<String> =
-            vec!["column".into(), "-t".into(), "file1".into(), "file2".into()];
+        let args: Vec<String> = vec!["column".into(), "-t".into(), "file1".into(), "file2".into()];
         match parse_args(&args) {
             ParseResult::Run(config) => {
                 assert_eq!(config.file_paths, vec!["file1", "file2"]);
@@ -1552,8 +1558,8 @@ mod tests {
     fn test_fill_columns_with_cjk() {
         let words: Vec<String> = vec![
             "\u{4e16}\u{754c}".to_string(), // width 4
-            "ab".to_string(),                // width 2
-            "\u{4e16}".to_string(),          // width 2
+            "ab".to_string(),               // width 2
+            "\u{4e16}".to_string(),         // width 2
         ];
         // Width 12: col widths [4, 2, 2] + 2 seps * 2 = 12. Fits in 3 cols.
         let result = fill_columns(&words, 12, "  ");

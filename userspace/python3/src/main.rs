@@ -10,6 +10,7 @@
 //! - `pip` — Python package installer
 //! - `pip3` — alias for pip
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -125,7 +126,9 @@ fn run_pydoc(args: Vec<String>) -> i32 {
     }
 
     if args.iter().any(|a| a == "-p") {
-        let port = args.iter().position(|a| a == "-p")
+        let port = args
+            .iter()
+            .position(|a| a == "-p")
             .and_then(|i| args.get(i + 1))
             .and_then(|s| s.parse::<u16>().ok())
             .unwrap_or(8080);
@@ -136,7 +139,7 @@ fn run_pydoc(args: Vec<String>) -> i32 {
 
     if let Some(pos) = args.iter().position(|a| a == "-k") {
         let keyword = args.get(pos + 1).map(|s| s.as_str()).unwrap_or("help");
-        println!("Searching for '{}':", keyword);
+        println!("Searching for {}:", quoteaf_os(keyword));
         println!("os - OS routines for NT or Posix");
         println!("sys - System-specific parameters and functions");
         return 0;
@@ -166,7 +169,7 @@ fn run_pydoc(args: Vec<String>) -> i32 {
             println!("    platform = 'slateos'");
             println!("    version = '3.13.0 (Slate OS)'");
         }
-        _ => println!("Help on '{}': (simulated)", topic),
+        _ => println!("Help on {}: (simulated)", quoteaf_os(topic)),
     }
     0
 }
@@ -200,7 +203,9 @@ fn run_pip(args: Vec<String>) -> i32 {
         }
         "install" => {
             for pkg in &cmd_args {
-                if pkg.starts_with('-') { continue; }
+                if pkg.starts_with('-') {
+                    continue;
+                }
                 println!("Collecting {}", pkg);
                 println!("  Downloading {}-1.0.0-py3-none-any.whl (simulated)", pkg);
                 println!("Installing collected packages: {}", pkg);
@@ -210,7 +215,9 @@ fn run_pip(args: Vec<String>) -> i32 {
         }
         "uninstall" => {
             for pkg in &cmd_args {
-                if pkg.starts_with('-') { continue; }
+                if pkg.starts_with('-') {
+                    continue;
+                }
                 println!("Found existing installation: {} 1.0.0", pkg);
                 println!("Uninstalling {}-1.0.0:", pkg);
                 println!("  Successfully uninstalled {}-1.0.0", pkg);
@@ -256,8 +263,14 @@ fn run_pip(args: Vec<String>) -> i32 {
             }
             0
         }
-        "check" => { println!("No broken requirements found."); 0 }
-        other => { eprintln!("pip: unknown command '{}'", other); 1 }
+        "check" => {
+            println!("No broken requirements found.");
+            0
+        }
+        other => {
+            eprintln!("pip: unknown command {}", quoteaf_os(other));
+            1
+        }
     }
 }
 
@@ -271,7 +284,9 @@ fn main() {
         let bytes = s.as_bytes();
         let mut last_sep = 0;
         for (i, &b) in bytes.iter().enumerate() {
-            if b == b'/' || b == b'\\' { last_sep = i + 1; }
+            if b == b'/' || b == b'\\' {
+                last_sep = i + 1;
+            }
         }
         let base = &s[last_sep..];
         let base = base.strip_suffix(".exe").unwrap_or(base);
@@ -293,7 +308,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_python};
+    use super::run_python;
 
     #[test]
     fn help_exits_zero() {

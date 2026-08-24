@@ -4,6 +4,7 @@
 //!
 //! Single personality: `atuin`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -49,7 +50,8 @@ fn run_atuin(args: Vec<String>) -> i32 {
         }
         "search" => {
             let interactive = args.iter().any(|a| a == "-i" || a == "--interactive");
-            let query: Vec<&str> = args.iter()
+            let query: Vec<&str> = args
+                .iter()
                 .skip(1)
                 .filter(|a| !a.starts_with('-'))
                 .map(|s| s.as_str())
@@ -64,7 +66,7 @@ fn run_atuin(args: Vec<String>) -> i32 {
                 println!("  [2025-05-22 09:45]  vim src/main.rs");
                 println!("  [2025-05-22 09:30]  git commit -m \"update\"");
             } else {
-                println!("Search results for '{}':", query.join(" "));
+                println!("Search results for {}:", quoteaf_os(query.join(" ")));
                 println!("  [2025-05-22 10:00]  {} --release", query[0]);
                 println!("  [2025-05-21 15:30]  {} --verbose", query[0]);
             }
@@ -128,7 +130,7 @@ fn run_atuin(args: Vec<String>) -> i32 {
             0
         }
         _ => {
-            eprintln!("Error: unknown command '{}'. See --help.", cmd);
+            eprintln!("Error: unknown command {}. See --help.", quoteaf_os(cmd));
             1
         }
     }
@@ -143,7 +145,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_atuin};
+    use super::run_atuin;
 
     #[test]
     fn help_exits_zero() {

@@ -4,11 +4,16 @@
 //!
 //! Multi-personality: `sv`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_sv(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
@@ -27,7 +32,7 @@ fn run_sv(args: &[String]) -> i32 {
         "--version" => println!("sv 2.0.0"),
         "create" => {
             let name = args.get(1).map(|s| s.as_str()).unwrap_or("my-app");
-            println!("Creating SvelteKit project '{}'...", name);
+            println!("Creating SvelteKit project {}...", quoteaf_os(name));
             println!("  Template: skeleton");
             println!("  Type checking: TypeScript");
             println!("  ESLint: yes");
@@ -56,14 +61,17 @@ fn run_sv(args: &[String]) -> i32 {
             println!("Migrating from {}...", from);
             println!("Migration complete. Review changes.");
         }
-        _ => println!("sv: '{}' completed", subcmd),
+        _ => println!("sv: {} completed", quoteaf_os(subcmd)),
     }
     0
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "sv".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "sv".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_sv(&rest);
     process::exit(code);
@@ -71,7 +79,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_sv};
+    use super::{basename, run_sv, strip_ext};
 
     #[test]
     fn basename_strips_path() {

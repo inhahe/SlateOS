@@ -4,11 +4,16 @@
 //!
 //! Multi-personality: `tor`, `torify`, `torsocks`, `tor-resolve`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_tor(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -51,17 +56,31 @@ fn run_tor(args: &[String]) -> i32 {
     println!("May 22 12:00:00.000 [notice] Tor 0.4.8.10 running on SlateOS.");
     println!("May 22 12:00:00.001 [notice] Read configuration file \"/etc/tor/torrc\".");
     println!("May 22 12:00:00.010 [notice] Opening Socks listener on 127.0.0.1:9050");
-    println!("May 22 12:00:00.011 [notice] Opened Socks listener connection (ready) on 127.0.0.1:9050");
+    println!(
+        "May 22 12:00:00.011 [notice] Opened Socks listener connection (ready) on 127.0.0.1:9050"
+    );
     println!("May 22 12:00:01.500 [notice] Bootstrapped 0% (starting): Starting");
     println!("May 22 12:00:02.100 [notice] Bootstrapped 5% (conn): Connecting to a relay");
     println!("May 22 12:00:02.500 [notice] Bootstrapped 10% (conn_done): Connected to a relay");
     println!("May 22 12:00:03.200 [notice] Bootstrapped 14% (handshake): Handshaking with a relay");
-    println!("May 22 12:00:03.800 [notice] Bootstrapped 25% (onehop_create): Establishing a one-hop circuit");
-    println!("May 22 12:00:04.500 [notice] Bootstrapped 40% (requesting_status): Asking for networkstatus consensus");
-    println!("May 22 12:00:05.200 [notice] Bootstrapped 45% (loading_status): Loading networkstatus consensus");
-    println!("May 22 12:00:06.000 [notice] Bootstrapped 80% (conn_or): Connecting to the Tor network");
-    println!("May 22 12:00:07.500 [notice] Bootstrapped 85% (conn_done_or): Connected to the Tor network");
-    println!("May 22 12:00:08.000 [notice] Bootstrapped 89% (circuit_create): Establishing a Tor circuit");
+    println!(
+        "May 22 12:00:03.800 [notice] Bootstrapped 25% (onehop_create): Establishing a one-hop circuit"
+    );
+    println!(
+        "May 22 12:00:04.500 [notice] Bootstrapped 40% (requesting_status): Asking for networkstatus consensus"
+    );
+    println!(
+        "May 22 12:00:05.200 [notice] Bootstrapped 45% (loading_status): Loading networkstatus consensus"
+    );
+    println!(
+        "May 22 12:00:06.000 [notice] Bootstrapped 80% (conn_or): Connecting to the Tor network"
+    );
+    println!(
+        "May 22 12:00:07.500 [notice] Bootstrapped 85% (conn_done_or): Connected to the Tor network"
+    );
+    println!(
+        "May 22 12:00:08.000 [notice] Bootstrapped 89% (circuit_create): Establishing a Tor circuit"
+    );
     println!("May 22 12:00:09.200 [notice] Bootstrapped 100% (done): Done");
     0
 }
@@ -80,8 +99,15 @@ fn run_torsocks(args: &[String]) -> i32 {
         return 0;
     }
 
-    let prog = args.iter().find(|a| !a.starts_with('-')).map(|s| s.as_str()).unwrap_or("curl");
-    println!("torsocks: routing '{}' through Tor SOCKS5 127.0.0.1:9050", prog);
+    let prog = args
+        .iter()
+        .find(|a| !a.starts_with('-'))
+        .map(|s| s.as_str())
+        .unwrap_or("curl");
+    println!(
+        "torsocks: routing {} through Tor SOCKS5 127.0.0.1:9050",
+        quoteaf_os(prog)
+    );
     0
 }
 
@@ -93,7 +119,11 @@ fn run_tor_resolve(args: &[String]) -> i32 {
         return 0;
     }
 
-    let host = args.iter().find(|a| !a.starts_with('-')).map(|s| s.as_str()).unwrap_or("example.com");
+    let host = args
+        .iter()
+        .find(|a| !a.starts_with('-'))
+        .map(|s| s.as_str())
+        .unwrap_or("example.com");
     println!("{}", host);
     println!("93.184.216.34");
     0
@@ -101,7 +131,10 @@ fn run_tor_resolve(args: &[String]) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "tor".to_string());
+    let prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "tor".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = match prog.as_str() {
         "torify" | "torsocks" => run_torsocks(&rest),
@@ -113,7 +146,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_tor};
+    use super::{basename, run_tor, strip_ext};
 
     #[test]
     fn basename_strips_path() {

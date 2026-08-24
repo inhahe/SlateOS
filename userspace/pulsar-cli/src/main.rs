@@ -4,6 +4,7 @@
 //!
 //! Single personality: `pulsar-admin`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -41,7 +42,10 @@ fn run_pulsar_admin(args: Vec<String>) -> i32 {
                     println!("  persistent://public/default/notifications");
                 }
                 "stats" => {
-                    let topic = args.get(2).map(|s| s.as_str()).unwrap_or("persistent://public/default/orders");
+                    let topic = args
+                        .get(2)
+                        .map(|s| s.as_str())
+                        .unwrap_or("persistent://public/default/orders");
                     println!("Topic: {}", topic);
                     println!("  Messages In:     12,345/s");
                     println!("  Messages Out:    12,340/s");
@@ -52,10 +56,15 @@ fn run_pulsar_admin(args: Vec<String>) -> i32 {
                     println!("  Backlog:         5 messages");
                 }
                 "create" => {
-                    let topic = args.get(2).map(|s| s.as_str()).unwrap_or("persistent://public/default/new-topic");
+                    let topic = args
+                        .get(2)
+                        .map(|s| s.as_str())
+                        .unwrap_or("persistent://public/default/new-topic");
                     println!("Topic {} created", topic);
                 }
-                _ => { println!("Topic operation: {}", sub); }
+                _ => {
+                    println!("Topic operation: {}", sub);
+                }
             }
             0
         }
@@ -68,7 +77,9 @@ fn run_pulsar_admin(args: Vec<String>) -> i32 {
                     println!("  myorg");
                     println!("  analytics");
                 }
-                _ => { println!("Tenant operation: {}", sub); }
+                _ => {
+                    println!("Tenant operation: {}", sub);
+                }
             }
             0
         }
@@ -82,7 +93,9 @@ fn run_pulsar_admin(args: Vec<String>) -> i32 {
                     println!("  {}/production", tenant);
                     println!("  {}/staging", tenant);
                 }
-                _ => { println!("Namespace operation: {}", sub); }
+                _ => {
+                    println!("Namespace operation: {}", sub);
+                }
             }
             0
         }
@@ -99,7 +112,9 @@ fn run_pulsar_admin(args: Vec<String>) -> i32 {
                     println!("  Broker URL:    pulsar://localhost:6650");
                     println!("  Brokers:       3");
                 }
-                _ => { println!("Cluster operation: {}", sub); }
+                _ => {
+                    println!("Cluster operation: {}", sub);
+                }
             }
             0
         }
@@ -114,7 +129,7 @@ fn run_pulsar_admin(args: Vec<String>) -> i32 {
             if cmd.is_empty() {
                 eprintln!("Usage: pulsar-admin <command>. See --help.");
             } else {
-                eprintln!("Error: unknown command '{}'. See --help.", cmd);
+                eprintln!("Error: unknown command {}. See --help.", quoteaf_os(cmd));
             }
             1
         }
@@ -130,7 +145,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_pulsar_admin};
+    use super::run_pulsar_admin;
 
     #[test]
     fn help_exits_zero() {

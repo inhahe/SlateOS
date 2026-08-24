@@ -4,6 +4,7 @@
 //!
 //! Single personality: `dbt`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -37,7 +38,7 @@ fn run_dbt(args: Vec<String>) -> i32 {
     match cmd {
         "init" => {
             let name = args.get(1).map(|s| s.as_str()).unwrap_or("my_project");
-            println!("Creating dbt project '{}'...", name);
+            println!("Creating dbt project {}...", quoteaf_os(name));
             println!("  Created {}/dbt_project.yml", name);
             println!("  Created {}/models/", name);
             println!("  Created {}/seeds/", name);
@@ -48,23 +49,45 @@ fn run_dbt(args: Vec<String>) -> i32 {
             0
         }
         "run" => {
-            let select = args.windows(2).find(|w| w[0] == "--select" || w[0] == "-s").map(|w| w[1].as_str());
+            let select = args
+                .windows(2)
+                .find(|w| w[0] == "--select" || w[0] == "-s")
+                .map(|w| w[1].as_str());
             println!("Running with dbt=1.7.0");
             println!("Found 8 models, 3 tests, 2 seeds, 1 snapshot");
             println!();
             if let Some(s) = select {
                 println!("  Concurrency: 4 threads");
-                println!("  1 of 1 OK  created model analytics.{} ............... [SELECT in 0.45s]", s);
+                println!(
+                    "  1 of 1 OK  created model analytics.{} ............... [SELECT in 0.45s]",
+                    s
+                );
             } else {
                 println!("  Concurrency: 4 threads");
-                println!("  1 of 8 OK  created model staging.stg_customers ...... [SELECT in 0.32s]");
-                println!("  2 of 8 OK  created model staging.stg_orders ......... [SELECT in 0.28s]");
-                println!("  3 of 8 OK  created model staging.stg_payments ....... [SELECT in 0.31s]");
-                println!("  4 of 8 OK  created model marts.dim_customers ........ [SELECT in 0.45s]");
-                println!("  5 of 8 OK  created model marts.fct_orders ........... [SELECT in 0.52s]");
-                println!("  6 of 8 OK  created model marts.fct_payments ......... [SELECT in 0.38s]");
-                println!("  7 of 8 OK  created model analytics.revenue .......... [SELECT in 0.41s]");
-                println!("  8 of 8 OK  created model analytics.customers_kpis ... [SELECT in 0.55s]");
+                println!(
+                    "  1 of 8 OK  created model staging.stg_customers ...... [SELECT in 0.32s]"
+                );
+                println!(
+                    "  2 of 8 OK  created model staging.stg_orders ......... [SELECT in 0.28s]"
+                );
+                println!(
+                    "  3 of 8 OK  created model staging.stg_payments ....... [SELECT in 0.31s]"
+                );
+                println!(
+                    "  4 of 8 OK  created model marts.dim_customers ........ [SELECT in 0.45s]"
+                );
+                println!(
+                    "  5 of 8 OK  created model marts.fct_orders ........... [SELECT in 0.52s]"
+                );
+                println!(
+                    "  6 of 8 OK  created model marts.fct_payments ......... [SELECT in 0.38s]"
+                );
+                println!(
+                    "  7 of 8 OK  created model analytics.revenue .......... [SELECT in 0.41s]"
+                );
+                println!(
+                    "  8 of 8 OK  created model analytics.customers_kpis ... [SELECT in 0.55s]"
+                );
             }
             println!();
             println!("Finished running 8 models in 0 hours 0 minutes and 3.22 seconds (3.22s).");
@@ -90,8 +113,12 @@ fn run_dbt(args: Vec<String>) -> i32 {
             println!();
             println!("  Concurrency: 4 threads");
             println!("  Running seeds...");
-            println!("  1 of 2 OK  seed file seeds.raw_customers .............. [INSERT 100 in 0.18s]");
-            println!("  2 of 2 OK  seed file seeds.raw_orders ................. [INSERT 250 in 0.22s]");
+            println!(
+                "  1 of 2 OK  seed file seeds.raw_customers .............. [INSERT 100 in 0.18s]"
+            );
+            println!(
+                "  2 of 2 OK  seed file seeds.raw_orders ................. [INSERT 250 in 0.22s]"
+            );
             println!("  Running models...");
             println!("  1 of 8 OK  created model staging.stg_customers ........ [SELECT in 0.32s]");
             println!("  ...");
@@ -99,7 +126,9 @@ fn run_dbt(args: Vec<String>) -> i32 {
             println!("  Running tests...");
             println!("  3 of 3 PASS ......................................... [PASS in 0.36s]");
             println!("  Running snapshots...");
-            println!("  1 of 1 OK  snapshotted scd_customers .................. [INSERT 0 in 0.28s]");
+            println!(
+                "  1 of 1 OK  snapshotted scd_customers .................. [INSERT 0 in 0.28s]"
+            );
             println!();
             println!("Finished running 2 seeds, 8 models, 3 tests, 1 snapshot in 4.91s.");
             println!("Completed successfully.");
@@ -134,11 +163,17 @@ fn run_dbt(args: Vec<String>) -> i32 {
                     println!("  Docs written to target/");
                 }
                 "serve" => {
-                    let port = args.windows(2).find(|w| w[0] == "--port").map(|w| w[1].as_str()).unwrap_or("8080");
+                    let port = args
+                        .windows(2)
+                        .find(|w| w[0] == "--port")
+                        .map(|w| w[1].as_str())
+                        .unwrap_or("8080");
                     println!("Serving docs at http://localhost:{}", port);
                     println!("Press Ctrl+C to exit.");
                 }
-                _ => { println!("Docs operation: {}", sub); }
+                _ => {
+                    println!("Docs operation: {}", sub);
+                }
             }
             0
         }
@@ -148,12 +183,22 @@ fn run_dbt(args: Vec<String>) -> i32 {
                 "freshness" => {
                     println!("Running with dbt=1.7.0");
                     println!();
-                    println!("  Source            Table           Status   Max Loaded At         Criteria");
-                    println!("  raw.customers     customers       PASS     2024-01-15 13:00:00   < 24 hours");
-                    println!("  raw.orders        orders          PASS     2024-01-15 14:00:00   < 12 hours");
-                    println!("  raw.payments      payments        WARN     2024-01-14 08:00:00   < 24 hours");
+                    println!(
+                        "  Source            Table           Status   Max Loaded At         Criteria"
+                    );
+                    println!(
+                        "  raw.customers     customers       PASS     2024-01-15 13:00:00   < 24 hours"
+                    );
+                    println!(
+                        "  raw.orders        orders          PASS     2024-01-15 14:00:00   < 12 hours"
+                    );
+                    println!(
+                        "  raw.payments      payments        WARN     2024-01-14 08:00:00   < 24 hours"
+                    );
                 }
-                _ => { println!("Source operation: {}", sub); }
+                _ => {
+                    println!("Source operation: {}", sub);
+                }
             }
             0
         }
@@ -200,7 +245,7 @@ fn run_dbt(args: Vec<String>) -> i32 {
             if cmd.is_empty() {
                 eprintln!("Usage: dbt <command>. See --help.");
             } else {
-                eprintln!("Error: unknown command '{}'. See --help.", cmd);
+                eprintln!("Error: unknown command {}. See --help.", quoteaf_os(cmd));
             }
             1
         }
@@ -216,7 +261,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_dbt};
+    use super::run_dbt;
 
     #[test]
     fn help_exits_zero() {

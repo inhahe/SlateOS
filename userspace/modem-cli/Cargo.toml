@@ -2,3 +2,9 @@
 name = "modem-cli"
 version = "0.1.0"
 edition = "2024"
+
+[dependencies]
+# modem-cli names modems, SIMs and the operator strings the network reports;
+# an operator name arrives over the air, so it is the least trustworthy kind
+# of word there is.
+quoting = { path = "../quoting" }

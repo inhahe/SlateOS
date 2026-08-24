@@ -10,5 +10,11 @@ description = "SlateOS package manager — content-addressed store with atomic g
 # carried its own transcription with no known-answer test — the same shape as
 # the `/etc/shadow` bug in `design-decisions.md` §329.
 [dependencies]
+# One rendering of untrusted text inside a diagnostic. Package names, store
+# paths and generation labels come off the command line or out of a manifest,
+# and both may hold a newline -- so a message that pastes one in raw lets
+# whoever supplied it write extra lines of this program's output. See
+# `userspace/quoting`.
+quoting = { path = "../quoting" }
 httpclient = { path = "../../net/httpclient" }
 sha2 = { path = "../../sha2" }

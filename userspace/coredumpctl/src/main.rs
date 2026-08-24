@@ -8,6 +8,7 @@
 //! - `coredumpctl` (default) — core dump list/info/dump/debug
 //! - `coredump-extract` — extract core dump to file
 
+use quoting::quoteaf_os;
 use std::collections::BTreeMap;
 use std::env;
 use std::process;
@@ -55,7 +56,7 @@ impl Default for CoreDumpConfig {
             process_size_max: 2 * 1024 * 1024 * 1024, // 2 GiB
             external_size_max: 2 * 1024 * 1024 * 1024,
             journal_size_max: 767 * 1024 * 1024, // 767 MiB
-            max_use: 0, // unlimited
+            max_use: 0,                          // unlimited
             keep_free: 0,
         }
     }
@@ -82,7 +83,11 @@ fn read_coredumps() -> Vec<CoreDump> {
             if let Some(dump) = parse_coredump_info(&path) {
                 dumps.push(dump);
             }
-        } else if path.extension().map(|e| e == "core" || e == "lz4" || e == "zst" || e == "xz").unwrap_or(false) {
+        } else if path
+            .extension()
+            .map(|e| e == "core" || e == "lz4" || e == "zst" || e == "xz")
+            .unwrap_or(false)
+        {
             // Try to infer info from filename
             if let Some(dump) = parse_coredump_from_filename(&path) {
                 dumps.push(dump);
@@ -115,7 +120,9 @@ fn parse_coredump_info(path: &std::path::Path) -> Option<CoreDump> {
         p.to_string_lossy().to_string()
     };
 
-    let size = std::fs::metadata(&coredump_path).map(|m| m.len()).unwrap_or(0);
+    let size = std::fs::metadata(&coredump_path)
+        .map(|m| m.len())
+        .unwrap_or(0);
 
     Some(CoreDump {
         timestamp: map.get("TIMESTAMP").cloned().unwrap_or_default(),
@@ -269,7 +276,11 @@ fn parse_size_value(s: &str) -> u64 {
         (s, 1u64)
     };
 
-    num_str.trim().parse::<u64>().unwrap_or(0).saturating_mul(multiplier)
+    num_str
+        .trim()
+        .parse::<u64>()
+        .unwrap_or(0)
+        .saturating_mul(multiplier)
 }
 
 // ── Commands ───────────────────────────────────────────────────────────
@@ -337,8 +348,10 @@ fn cmd_list(args: &[String]) {
     }
 
     if !no_legend {
-        println!("{:<20} {:>6} {:>6} {:>6} {:<10} {:<8} EXE",
-            "TIME", "PID", "UID", "GID", "SIG", "COREFILE");
+        println!(
+            "{:<20} {:>6} {:>6} {:>6} {:<10} {:<8} EXE",
+            "TIME", "PID", "UID", "GID", "SIG", "COREFILE"
+        );
     }
 
     for d in &dumps {
@@ -349,8 +362,10 @@ fn cmd_list(args: &[String]) {
         };
         let present = if d.size > 0 { "present" } else { "missing" };
         let exe = if d.exe.is_empty() { &d.comm } else { &d.exe };
-        println!("{:<20} {:>6} {:>6} {:>6} {:<10} {:<8} {}",
-            d.timestamp, d.pid, d.uid, d.gid, sig, present, exe);
+        println!(
+            "{:<20} {:>6} {:>6} {:>6} {:<10} {:<8} {}",
+            d.timestamp, d.pid, d.uid, d.gid, sig, present, exe
+        );
     }
 
     if !no_legend {
@@ -365,7 +380,10 @@ fn cmd_info(args: &[String]) {
         if let Ok(pid) = arg.parse::<u32>() {
             dumps.iter().rev().find(|d| d.pid == pid)
         } else {
-            dumps.iter().rev().find(|d| d.exe.contains(arg.as_str()) || d.comm.contains(arg.as_str()))
+            dumps
+                .iter()
+                .rev()
+                .find(|d| d.exe.contains(arg.as_str()) || d.comm.contains(arg.as_str()))
         }
     } else {
         dumps.last()
@@ -388,7 +406,14 @@ fn cmd_info(args: &[String]) {
         println!("  \"uid\": {},", dump.uid);
         println!("  \"gid\": {},", dump.gid);
         println!("  \"signal\": {},", dump.signal);
-        println!("  \"signalName\": \"{}\",", if dump.signal_name.is_empty() { signal_name(dump.signal) } else { &dump.signal_name });
+        println!(
+            "  \"signalName\": \"{}\",",
+            if dump.signal_name.is_empty() {
+                signal_name(dump.signal)
+            } else {
+                &dump.signal_name
+            }
+        );
         println!("  \"exe\": \"{}\",", dump.exe);
         println!("  \"comm\": \"{}\",", dump.comm);
         println!("  \"hostname\": \"{}\",", dump.hostname);
@@ -412,9 +437,11 @@ fn cmd_info(args: &[String]) {
         if !dump.hostname.is_empty() {
             println!("      Hostname: {}", dump.hostname);
         }
-        println!("      Corefile: {} ({})",
+        println!(
+            "      Corefile: {} ({})",
             if dump.size > 0 { "present" } else { "missing" },
-            format_size(dump.size));
+            format_size(dump.size)
+        );
         if !dump.boot_id.is_empty() {
             println!("       Boot ID: {}", dump.boot_id);
         }
@@ -435,10 +462,9 @@ fn cmd_dump(args: &[String]) {
                     output_path = args[i].clone();
                 }
             }
-            _ if !args[i].starts_with('-')
-                && match_arg.is_empty() => {
-                    match_arg = args[i].clone();
-                }
+            _ if !args[i].starts_with('-') && match_arg.is_empty() => {
+                match_arg = args[i].clone();
+            }
             _ => {}
         }
         i += 1;
@@ -449,7 +475,10 @@ fn cmd_dump(args: &[String]) {
     } else if let Ok(pid) = match_arg.parse::<u32>() {
         dumps.iter().rev().find(|d| d.pid == pid)
     } else {
-        dumps.iter().rev().find(|d| d.exe.contains(match_arg.as_str()) || d.comm.contains(match_arg.as_str()))
+        dumps
+            .iter()
+            .rev()
+            .find(|d| d.exe.contains(match_arg.as_str()) || d.comm.contains(match_arg.as_str()))
     };
 
     let dump = match dump {
@@ -472,7 +501,11 @@ fn cmd_dump(args: &[String]) {
     // Copy core dump to output
     match std::fs::copy(&dump._coredump_path, &output_path) {
         Ok(bytes) => {
-            println!("Core dump written to '{}' ({}).", output_path, format_size(bytes));
+            println!(
+                "Core dump written to {} ({}).",
+                quoteaf_os(&output_path),
+                format_size(bytes)
+            );
         }
         Err(e) => {
             eprintln!("Failed to write core dump: {}", e);
@@ -496,10 +529,9 @@ fn cmd_debug(args: &[String]) {
                     debugger = args[i].clone();
                 }
             }
-            _ if !args[i].starts_with('-')
-                && match_arg.is_empty() => {
-                    match_arg = args[i].clone();
-                }
+            _ if !args[i].starts_with('-') && match_arg.is_empty() => {
+                match_arg = args[i].clone();
+            }
             _ => {}
         }
         i += 1;
@@ -510,7 +542,10 @@ fn cmd_debug(args: &[String]) {
     } else if let Ok(pid) = match_arg.parse::<u32>() {
         dumps.iter().rev().find(|d| d.pid == pid)
     } else {
-        dumps.iter().rev().find(|d| d.exe.contains(match_arg.as_str()) || d.comm.contains(match_arg.as_str()))
+        dumps
+            .iter()
+            .rev()
+            .find(|d| d.exe.contains(match_arg.as_str()) || d.comm.contains(match_arg.as_str()))
     };
 
     let dump = match dump {
@@ -526,7 +561,11 @@ fn cmd_debug(args: &[String]) {
         process::exit(1);
     }
 
-    let exe = if dump.exe.is_empty() { &dump.comm } else { &dump.exe };
+    let exe = if dump.exe.is_empty() {
+        &dump.comm
+    } else {
+        &dump.exe
+    };
     println!("Launching {} for {} (PID {})...", debugger, exe, dump.pid);
     println!("{} {} {}", debugger, exe, dump._coredump_path);
 }
@@ -537,10 +576,27 @@ fn cmd_config() {
     println!("  Storage: {}", config.storage);
     println!("  Compress: {}", if config.compress { "yes" } else { "no" });
     println!("  ProcessSizeMax: {}", format_size(config.process_size_max));
-    println!("  ExternalSizeMax: {}", format_size(config.external_size_max));
+    println!(
+        "  ExternalSizeMax: {}",
+        format_size(config.external_size_max)
+    );
     println!("  JournalSizeMax: {}", format_size(config.journal_size_max));
-    println!("  MaxUse: {}", if config.max_use == 0 { "unlimited".to_string() } else { format_size(config.max_use) });
-    println!("  KeepFree: {}", if config.keep_free == 0 { "unlimited".to_string() } else { format_size(config.keep_free) });
+    println!(
+        "  MaxUse: {}",
+        if config.max_use == 0 {
+            "unlimited".to_string()
+        } else {
+            format_size(config.max_use)
+        }
+    );
+    println!(
+        "  KeepFree: {}",
+        if config.keep_free == 0 {
+            "unlimited".to_string()
+        } else {
+            format_size(config.keep_free)
+        }
+    );
 }
 
 // ── coredump-extract personality ───────────────────────────────────────
@@ -690,7 +746,9 @@ mod tests {
     #[test]
     fn test_parse_coredump_from_filename() {
         // core.<comm>.<uid>.<boot_id>.<pid>.<timestamp>
-        let path = std::path::Path::new("/var/lib/systemd/coredump/core.myapp.1000.abc123.42.1234567890.core");
+        let path = std::path::Path::new(
+            "/var/lib/systemd/coredump/core.myapp.1000.abc123.42.1234567890.core",
+        );
         // Won't find the actual file but tests parsing logic
         let result = parse_coredump_from_filename(path);
         // File doesn't exist so it may return None or a dump with size 0

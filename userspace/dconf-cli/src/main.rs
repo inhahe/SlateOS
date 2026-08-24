@@ -4,6 +4,7 @@
 //!
 //! Single personality: `dconf`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -68,11 +69,11 @@ fn run_dconf(args: Vec<String>) -> i32 {
         "compile" => println!("dconf: database compiled"),
         "watch" => {
             let path = args.get(1).map(|s| s.as_str()).unwrap_or("/");
-            println!("Watching '{}' for changes...", path);
+            println!("Watching {} for changes...", quoteaf_os(path));
         }
         "load" => println!("dconf: loaded from stdin"),
         _ => {
-            eprintln!("dconf: unknown command '{}'. See --help.", cmd);
+            eprintln!("dconf: unknown command {}. See --help.", quoteaf_os(cmd));
             return 1;
         }
     }
@@ -88,7 +89,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_dconf};
+    use super::run_dconf;
 
     #[test]
     fn help_exits_zero() {

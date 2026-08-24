@@ -1318,16 +1318,12 @@ pub fn procfs_content() -> String {
 }
 
 /// Format a byte count as human-readable.
+///
+/// Delegates to [`crate::bytesize::iec`]. A resource limit is a `u64` and is
+/// routinely set near `UNLIMITED`, which the private copy this replaced would
+/// have reported as a sixteen-billion-GiB number.
 fn format_bytes(bytes: u64) -> String {
-    if bytes >= 1_073_741_824 {
-        format!("{:.1} GiB", bytes as f64 / 1_073_741_824.0)
-    } else if bytes >= 1_048_576 {
-        format!("{:.1} MiB", bytes as f64 / 1_048_576.0)
-    } else if bytes >= 1024 {
-        format!("{:.1} KiB", bytes as f64 / 1024.0)
-    } else {
-        format!("{} B", bytes)
-    }
+    crate::bytesize::iec(bytes)
 }
 
 /// Format a limit value (UNLIMITED → "∞").
@@ -1343,8 +1339,22 @@ fn fmt_limit(val: u64) -> String {
 // Self-Tests
 // ---------------------------------------------------------------------------
 
-/// Run self-tests for the resource limits subsystem.
+/// Run the module's self-test suite against state of its own.
+///
+/// The suite mutates module state and asserts exact contents, and it used to
+/// do that to the *live* state -- which, since it is also a kernel-shell
+/// subcommand, changed or destroyed whatever the user had here and then
+/// reported success.  It is moved aside for the duration and put back
+/// afterwards; `crate::fs::selftest` records why this shape rather than the
+/// alternatives.
+///
+/// Each pristine value is the `static`'s own initialiser, which is the one
+/// spelling of "what a fresh boot holds" that cannot drift away from it.
 pub fn self_test() -> bool {
+    crate::fs::selftest::with_pristine(&STATE, State::new(), self_test_inner)
+}
+
+fn self_test_inner() -> bool {
     crate::serial_println!("[reslimit] Running self-tests...");
     let mut passed = 0u32;
     let mut failed = 0u32;

@@ -4,11 +4,16 @@
 //!
 //! Multi-personality: `cnitool`, `flannel`, `calico`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_cnitool(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
@@ -50,7 +55,7 @@ fn run_cnitool(args: &[String]) -> i32 {
         }
         "del" => println!("Network removed successfully."),
         "check" => println!("Network check passed."),
-        _ => println!("cnitool: unknown command '{}'", subcmd),
+        _ => println!("cnitool: unknown command {}", quoteaf_os(subcmd)),
     }
     0
 }
@@ -116,14 +121,17 @@ fn run_calico(args: &[String]) -> i32 {
             println!("slateos-node-1      (64512)   192.168.1.100 up");
             println!("slateos-node-2      (64512)   192.168.1.101 up");
         }
-        _ => println!("calico: command '{}' completed", subcmd),
+        _ => println!("calico: command {} completed", quoteaf_os(subcmd)),
     }
     0
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "cnitool".to_string());
+    let prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "cnitool".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = match prog.as_str() {
         "flannel" | "flanneld" => run_flannel(&rest),
@@ -135,7 +143,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_cnitool};
+    use super::{basename, run_cnitool, strip_ext};
 
     #[test]
     fn basename_strips_path() {

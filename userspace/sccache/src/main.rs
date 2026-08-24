@@ -4,6 +4,7 @@
 //!
 //! Multi-personality: `sccache`, `sccache-dist`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -110,7 +111,7 @@ fn run_sccache_dist(args: Vec<String>) -> i32 {
             println!("sccache-dist: generated auth token: <simulated-token>");
         }
         _ => {
-            eprintln!("Unknown command '{}'. Use --help.", cmd);
+            eprintln!("Unknown command {}. Use --help.", quoteaf_os(cmd));
             return 1;
         }
     }
@@ -124,7 +125,9 @@ fn main() {
         let bytes = s.as_bytes();
         let mut last_sep = 0;
         for (i, &b) in bytes.iter().enumerate() {
-            if b == b'/' || b == b'\\' { last_sep = i + 1; }
+            if b == b'/' || b == b'\\' {
+                last_sep = i + 1;
+            }
         }
         let base = &s[last_sep..];
         base.strip_suffix(".exe").unwrap_or(base).to_string()
@@ -139,7 +142,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_sccache};
+    use super::run_sccache;
 
     #[test]
     fn help_exits_zero() {

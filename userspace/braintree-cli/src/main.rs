@@ -4,6 +4,7 @@
 //!
 //! Single personality: `braintree`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -37,7 +38,11 @@ fn run_braintree(args: Vec<String>) -> i32 {
                     println!("txn_ghi789    $25.00      refund  settled         2024-01-14");
                 }
                 "sale" => {
-                    let amount = args.windows(2).find(|w| w[0] == "--amount").map(|w| w[1].as_str()).unwrap_or("99.00");
+                    let amount = args
+                        .windows(2)
+                        .find(|w| w[0] == "--amount")
+                        .map(|w| w[1].as_str())
+                        .unwrap_or("99.00");
                     println!("✔ Transaction created");
                     println!("  ID:     txn_new123");
                     println!("  Amount: ${}", amount);
@@ -57,7 +62,9 @@ fn run_braintree(args: Vec<String>) -> i32 {
                     println!("✔ Refund created for {}", id);
                     println!("  Refund ID: txn_ref123");
                 }
-                _ => { println!("Transaction operation: {}", sub); }
+                _ => {
+                    println!("Transaction operation: {}", sub);
+                }
             }
             0
         }
@@ -69,7 +76,9 @@ fn run_braintree(args: Vec<String>) -> i32 {
                     println!("cus_abc123      Alice Smith      alice@example.com      2");
                     println!("cus_def456      Bob Jones        bob@example.com        1");
                 }
-                _ => { println!("Customer operation: {}", sub); }
+                _ => {
+                    println!("Customer operation: {}", sub);
+                }
             }
             0
         }
@@ -111,7 +120,7 @@ fn run_braintree(args: Vec<String>) -> i32 {
             if cmd.is_empty() {
                 eprintln!("Usage: braintree <command>. See --help.");
             } else {
-                eprintln!("Error: unknown command '{}'. See --help.", cmd);
+                eprintln!("Error: unknown command {}. See --help.", quoteaf_os(cmd));
             }
             1
         }
@@ -127,7 +136,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_braintree};
+    use super::run_braintree;
 
     #[test]
     fn help_exits_zero() {

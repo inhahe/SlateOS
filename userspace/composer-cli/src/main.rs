@@ -4,11 +4,16 @@
 //!
 //! Multi-personality: `composer`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_composer(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
@@ -56,7 +61,10 @@ fn run_composer(args: &[String]) -> i32 {
                 println!("  - Installing phpunit/phpunit (11.2.0): Extracting archive");
             }
             println!("Generating autoload files");
-            println!("3 packages installed{}.", if dev { " (+1 dev)" } else { "" });
+            println!(
+                "3 packages installed{}.",
+                if dev { " (+1 dev)" } else { "" }
+            );
         }
         "update" => {
             let pkg = args.get(1).map(|s| s.as_str());
@@ -101,7 +109,7 @@ fn run_composer(args: &[String]) -> i32 {
         }
         "search" => {
             let term = args.get(1).map(|s| s.as_str()).unwrap_or("http");
-            println!("Searching for '{}'...", term);
+            println!("Searching for {}...", quoteaf_os(term));
             println!("guzzlehttp/guzzle         PHP HTTP client");
             println!("symfony/http-foundation   HTTP Foundation component");
             println!("nyholm/psr7               PSR-7 implementation");
@@ -126,14 +134,17 @@ fn run_composer(args: &[String]) -> i32 {
         "audit" => {
             println!("Found 0 security vulnerability advisories affecting 0 packages.");
         }
-        _ => println!("composer: '{}' completed", subcmd),
+        _ => println!("composer: {} completed", quoteaf_os(subcmd)),
     }
     0
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "composer".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "composer".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_composer(&rest);
     process::exit(code);
@@ -141,7 +152,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_composer};
+    use super::{basename, run_composer, strip_ext};
 
     #[test]
     fn basename_strips_path() {

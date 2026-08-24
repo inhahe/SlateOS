@@ -2,3 +2,9 @@
 name = "syncthing-cli"
 version = "0.1.0"
 edition = "2024"
+
+[dependencies]
+# syncthing-cli names folders, devices and files; a device name and a synced
+# file name both come from a remote peer, which is as untrusted as a word
+# gets.
+quoting = { path = "../quoting" }

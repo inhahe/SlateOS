@@ -4,11 +4,16 @@
 //!
 //! Multi-personality: `bwa`, `bwa-mem2`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_bwa(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
@@ -51,7 +56,7 @@ fn run_bwa(args: &[String]) -> i32 {
             println!("[bwa_aln] Processing reads...");
             println!("[bwa_aln] 1234567 reads processed.");
         }
-        _ => println!("bwa: '{}' completed", subcmd),
+        _ => println!("bwa: {} completed", quoteaf_os(subcmd)),
     }
     0
 }
@@ -85,14 +90,17 @@ fn run_bwa_mem2(args: &[String]) -> i32 {
             println!("[bwa-mem2] 1234567 reads aligned");
             println!("[bwa-mem2] Real time: 123.45 sec (2x faster than bwa)");
         }
-        _ => println!("bwa-mem2: '{}' completed", subcmd),
+        _ => println!("bwa-mem2: {} completed", quoteaf_os(subcmd)),
     }
     0
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "bwa".to_string());
+    let prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "bwa".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = match prog.as_str() {
         "bwa-mem2" => run_bwa_mem2(&rest),
@@ -103,7 +111,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_bwa};
+    use super::{basename, run_bwa, strip_ext};
 
     #[test]
     fn basename_strips_path() {

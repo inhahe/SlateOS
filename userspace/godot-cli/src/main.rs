@@ -4,11 +4,16 @@
 //!
 //! Multi-personality: `godot`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_godot(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -35,17 +40,23 @@ fn run_godot(args: &[String]) -> i32 {
     }
     let headless = args.iter().any(|a| a == "--headless");
     let editor = args.iter().any(|a| a == "--editor" || a == "-e");
-    let export = args.windows(2).find(|w| w[0] == "--export-release")
+    let export = args
+        .windows(2)
+        .find(|w| w[0] == "--export-release")
         .map(|w| w[1].as_str());
 
     if let Some(preset) = export {
-        println!("Exporting project with preset '{}'...", preset);
+        println!("Exporting project with preset {}...", quoteaf_os(preset));
         println!("  Building...");
         println!("  Packing resources...");
         println!("  Export complete.");
     } else if headless {
         println!("Godot Engine v4.3.stable.official - Running headless");
-        if let Some(script) = args.windows(2).find(|w| w[0] == "--script").map(|w| w[1].as_str()) {
+        if let Some(script) = args
+            .windows(2)
+            .find(|w| w[0] == "--script")
+            .map(|w| w[1].as_str())
+        {
             println!("  Running script: {}", script);
             println!("  Script completed.");
         }
@@ -54,8 +65,11 @@ fn run_godot(args: &[String]) -> i32 {
         println!("  Loading project...");
         println!("  Editor ready.");
     } else {
-        let scene = args.iter().rfind(|a| !a.starts_with('-'))
-            .map(|s| s.as_str()).unwrap_or("main.tscn");
+        let scene = args
+            .iter()
+            .rfind(|a| !a.starts_with('-'))
+            .map(|s| s.as_str())
+            .unwrap_or("main.tscn");
         println!("Godot Engine v4.3.stable.official");
         println!("  Loading scene: {}", scene);
         println!("  Running...");
@@ -65,7 +79,10 @@ fn run_godot(args: &[String]) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "godot".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "godot".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_godot(&rest);
     process::exit(code);
@@ -73,7 +90,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_godot};
+    use super::{basename, run_godot, strip_ext};
 
     #[test]
     fn basename_strips_path() {

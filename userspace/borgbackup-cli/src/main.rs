@@ -4,6 +4,7 @@
 //!
 //! Single personality: `borg`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -35,22 +36,34 @@ fn run_borg(args: Vec<String>) -> i32 {
     let cmd = args.first().map(|s| s.as_str()).unwrap_or("");
     match cmd {
         "init" => {
-            let repo = args.get(1).map(|s| s.as_str()).unwrap_or("/backup/borg-repo");
-            let encryption = args.windows(2).find(|w| w[0] == "-e" || w[0] == "--encryption")
-                .map(|w| w[1].as_str()).unwrap_or("repokey");
+            let repo = args
+                .get(1)
+                .map(|s| s.as_str())
+                .unwrap_or("/backup/borg-repo");
+            let encryption = args
+                .windows(2)
+                .find(|w| w[0] == "-e" || w[0] == "--encryption")
+                .map(|w| w[1].as_str())
+                .unwrap_or("repokey");
             println!("Initializing repository at {}", repo);
             println!("  Encryption: {}", encryption);
             println!("  Repository initialized successfully.");
             0
         }
         "create" => {
-            let archive = args.get(1).map(|s| s.as_str()).unwrap_or("repo::archive-2024-01-15");
+            let archive = args
+                .get(1)
+                .map(|s| s.as_str())
+                .unwrap_or("repo::archive-2024-01-15");
             let path = args.get(2).map(|s| s.as_str()).unwrap_or("/home/user");
             println!("Creating archive: {}", archive);
             println!("  Source: {}", path);
             println!();
             println!("──────────────────────────────────────────────");
-            println!("Archive name: {}", archive.split("::").last().unwrap_or(archive));
+            println!(
+                "Archive name: {}",
+                archive.split("::").last().unwrap_or(archive)
+            );
             println!("Archive fingerprint: abc123def456ghi789jkl012mno345pq");
             println!("Time (start): Mon, 2024-01-15 14:00:00");
             println!("Time (end):   Mon, 2024-01-15 14:02:30");
@@ -66,7 +79,10 @@ fn run_borg(args: Vec<String>) -> i32 {
             0
         }
         "extract" => {
-            let archive = args.get(1).map(|s| s.as_str()).unwrap_or("repo::archive-2024-01-15");
+            let archive = args
+                .get(1)
+                .map(|s| s.as_str())
+                .unwrap_or("repo::archive-2024-01-15");
             println!("Extracting archive {}...", archive);
             println!("  10,234 files extracted");
             println!("  Total size: 2.35 GB");
@@ -76,9 +92,15 @@ fn run_borg(args: Vec<String>) -> i32 {
             let target = args.get(1).map(|s| s.as_str()).unwrap_or("repo");
             if target.contains("::") {
                 println!("drwxr-xr-x user  user        0 Mon, 2024-01-15 14:00:00 home/user/");
-                println!("-rw-r--r-- user  user     1234 Mon, 2024-01-15 13:00:00 home/user/.bashrc");
-                println!("-rw-r--r-- user  user  5242880 Mon, 2024-01-15 12:00:00 home/user/data.csv");
-                println!("drwxr-xr-x user  user        0 Mon, 2024-01-15 11:00:00 home/user/projects/");
+                println!(
+                    "-rw-r--r-- user  user     1234 Mon, 2024-01-15 13:00:00 home/user/.bashrc"
+                );
+                println!(
+                    "-rw-r--r-- user  user  5242880 Mon, 2024-01-15 12:00:00 home/user/data.csv"
+                );
+                println!(
+                    "drwxr-xr-x user  user        0 Mon, 2024-01-15 11:00:00 home/user/projects/"
+                );
             } else {
                 println!("archive-2024-01-15        Mon, 2024-01-15 14:00:00 [abc123de]");
                 println!("archive-2024-01-14        Sun, 2024-01-14 14:00:00 [def456gh]");
@@ -87,8 +109,14 @@ fn run_borg(args: Vec<String>) -> i32 {
             0
         }
         "info" => {
-            let archive = args.get(1).map(|s| s.as_str()).unwrap_or("repo::archive-2024-01-15");
-            println!("Archive name: {}", archive.split("::").last().unwrap_or(archive));
+            let archive = args
+                .get(1)
+                .map(|s| s.as_str())
+                .unwrap_or("repo::archive-2024-01-15");
+            println!(
+                "Archive name: {}",
+                archive.split("::").last().unwrap_or(archive)
+            );
             println!("Archive fingerprint: abc123def456ghi789jkl012mno345pq");
             println!("Comment: ");
             println!("Hostname: myhost");
@@ -103,15 +131,21 @@ fn run_borg(args: Vec<String>) -> i32 {
             0
         }
         "delete" => {
-            let archive = args.get(1).map(|s| s.as_str()).unwrap_or("repo::archive-2024-01-13");
+            let archive = args
+                .get(1)
+                .map(|s| s.as_str())
+                .unwrap_or("repo::archive-2024-01-13");
             println!("Deleting archive {}...", archive);
             println!("  Archive deleted.");
             0
         }
         "prune" => {
             let repo = args.get(1).map(|s| s.as_str()).unwrap_or("repo");
-            let keep_daily = args.windows(2).find(|w| w[0] == "--keep-daily")
-                .map(|w| w[1].as_str()).unwrap_or("7");
+            let keep_daily = args
+                .windows(2)
+                .find(|w| w[0] == "--keep-daily")
+                .map(|w| w[1].as_str())
+                .unwrap_or("7");
             println!("Pruning repository {}...", repo);
             println!("  Keeping {} daily archives", keep_daily);
             println!("  Pruning archive: archive-2024-01-08  (daily rule)");
@@ -137,8 +171,14 @@ fn run_borg(args: Vec<String>) -> i32 {
             0
         }
         "diff" => {
-            let archive1 = args.get(1).map(|s| s.as_str()).unwrap_or("repo::archive-2024-01-14");
-            let archive2 = args.get(2).map(|s| s.as_str()).unwrap_or("repo::archive-2024-01-15");
+            let archive1 = args
+                .get(1)
+                .map(|s| s.as_str())
+                .unwrap_or("repo::archive-2024-01-14");
+            let archive2 = args
+                .get(2)
+                .map(|s| s.as_str())
+                .unwrap_or("repo::archive-2024-01-15");
             println!("Comparing {} to {}:", archive1, archive2);
             println!("  added       2.1 MB home/user/documents/new-file.pdf");
             println!("  changed    45.6 kB home/user/.config/app/settings.json");
@@ -149,7 +189,7 @@ fn run_borg(args: Vec<String>) -> i32 {
             if cmd.is_empty() {
                 eprintln!("Usage: borg <command>. See --help.");
             } else {
-                eprintln!("Error: unknown command '{}'. See --help.", cmd);
+                eprintln!("Error: unknown command {}. See --help.", quoteaf_os(cmd));
             }
             1
         }
@@ -165,7 +205,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_borg};
+    use super::run_borg;
 
     #[test]
     fn help_exits_zero() {

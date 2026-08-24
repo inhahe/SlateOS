@@ -373,24 +373,62 @@ pub fn self_test() {
     // comparison passes everything — it would certify the very layouts it was
     // written to reject, silently and forever. So test the predicate against
     // cases with known answers, including both boundaries.
-    const A: Region = Region { name: "a", start: 0x1000, size: 0x1000 };
-    let case = |start: u64, size: u64| overlaps(&A, &Region { name: "x", start, size });
-    assert!(!case(0x2000, 0x1000), "regions that merely abut must not overlap");
-    assert!(!case(0x0000, 0x1000), "regions that merely abut from below must not overlap");
-    assert!(case(0x1FFF, 0x1000), "a one-byte overlap at the top must be detected");
-    assert!(case(0x0001, 0x1000), "a one-byte overlap at the bottom must be detected");
+    const A: Region = Region {
+        name: "a",
+        start: 0x1000,
+        size: 0x1000,
+    };
+    let case = |start: u64, size: u64| {
+        overlaps(
+            &A,
+            &Region {
+                name: "x",
+                start,
+                size,
+            },
+        )
+    };
+    assert!(
+        !case(0x2000, 0x1000),
+        "regions that merely abut must not overlap"
+    );
+    assert!(
+        !case(0x0000, 0x1000),
+        "regions that merely abut from below must not overlap"
+    );
+    assert!(
+        case(0x1FFF, 0x1000),
+        "a one-byte overlap at the top must be detected"
+    );
+    assert!(
+        case(0x0001, 0x1000),
+        "a one-byte overlap at the bottom must be detected"
+    );
     assert!(case(0x1000, 0x1000), "an identical region must overlap");
-    assert!(case(0x1400, 0x0100), "a fully contained region must overlap");
+    assert!(
+        case(0x1400, 0x0100),
+        "a fully contained region must overlap"
+    );
     // The degenerate case, which is here because it failed. `overlaps` was
     // originally the textbook two-comparison form, and that form calls an
     // empty region an overlap of whatever contains it — `start < end` is false
     // in both directions, so both comparisons pass. The first boot after this
     // assertion was written panicked on it.
     assert!(!case(0x1400, 0x0000), "an empty region overlaps nothing");
-    assert!(!case(0x1000, 0x0000), "an empty region at a shared start overlaps nothing");
+    assert!(
+        !case(0x1000, 0x0000),
+        "an empty region at a shared start overlaps nothing"
+    );
     {
-        const EMPTY: Region = Region { name: "e", start: 0x1400, size: 0 };
-        assert!(!overlaps(&EMPTY, &A), "emptiness must be checked on both sides");
+        const EMPTY: Region = Region {
+            name: "e",
+            start: 0x1400,
+            size: 0,
+        };
+        assert!(
+            !overlaps(&EMPTY, &A),
+            "emptiness must be checked on both sides"
+        );
     }
     // Zero-size regions are caught by their own build assertion, since the
     // line above means the overlap gate will never see them.

@@ -4,3 +4,7 @@ version = "0.1.0"
 edition = "2024"
 description = "SlateOS build and execute command lines from stdin"
 [dependencies]
+# xargs names the command it was asked to run and the arguments it read from
+# its input, and that input is by design a stream produced by another
+# program -- find, most often, walking a directory of unknown names.
+quoting = { path = "../quoting" }

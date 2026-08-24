@@ -4,6 +4,7 @@
 //!
 //! Single personality: `postman` (also `newman`)
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -32,7 +33,10 @@ fn run_postman(args: Vec<String>) -> i32 {
         }
         "run" => {
             let collection = args.get(1).map(|s| s.as_str()).unwrap_or("collection.json");
-            let env_file = args.windows(2).find(|w| w[0] == "-e" || w[0] == "--environment").map(|w| w[1].as_str());
+            let env_file = args
+                .windows(2)
+                .find(|w| w[0] == "-e" || w[0] == "--environment")
+                .map(|w| w[1].as_str());
 
             println!("postman");
             println!();
@@ -102,7 +106,9 @@ fn run_postman(args: Vec<String>) -> i32 {
                     println!();
                     println!("  0 errors, 2 warnings");
                 }
-                _ => { println!("API operation: {}", sub); }
+                _ => {
+                    println!("API operation: {}", sub);
+                }
             }
             0
         }
@@ -110,7 +116,7 @@ fn run_postman(args: Vec<String>) -> i32 {
             if cmd.is_empty() {
                 eprintln!("Usage: postman <command>. See --help.");
             } else {
-                eprintln!("Error: unknown command '{}'. See --help.", cmd);
+                eprintln!("Error: unknown command {}. See --help.", quoteaf_os(cmd));
             }
             1
         }
@@ -126,7 +132,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_postman};
+    use super::run_postman;
 
     #[test]
     fn help_exits_zero() {

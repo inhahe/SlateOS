@@ -2,3 +2,7 @@
 name = "swupd-cli"
 version = "0.1.0"
 edition = "2024"
+
+[dependencies]
+# The file searched for and the swupd subcommand are argv words.
+quoting = { path = "../quoting" }

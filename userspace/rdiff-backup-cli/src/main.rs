@@ -4,6 +4,7 @@
 //!
 //! Single personality: `rdiff-backup`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -74,7 +75,10 @@ fn run_rdiff_backup(args: Vec<String>) -> i32 {
                     println!("home/user/documents/report.txt");
                     println!("home/user/photos/vacation.jpg");
                 }
-                _ => println!("rdiff-backup list: unknown subcommand '{}'", subcmd),
+                _ => println!(
+                    "rdiff-backup list: unknown subcommand {}",
+                    quoteaf_os(subcmd)
+                ),
             }
         }
         "verify" => {
@@ -94,7 +98,10 @@ fn run_rdiff_backup(args: Vec<String>) -> i32 {
             println!("  Newest: Mon Jan 15 10:30:00 2024");
         }
         _ => {
-            eprintln!("rdiff-backup: unknown command '{}'. See --help.", cmd);
+            eprintln!(
+                "rdiff-backup: unknown command {}. See --help.",
+                quoteaf_os(cmd)
+            );
             return 1;
         }
     }
@@ -110,7 +117,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_rdiff_backup};
+    use super::run_rdiff_backup;
 
     #[test]
     fn help_exits_zero() {

@@ -9,6 +9,7 @@
 //! - `tlp-stat` — show power management status
 //! - `tlp-rdw` — radio device wizard (enable/disable WiFi/BT on dock/undock)
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -114,17 +115,38 @@ fn run_tlp(args: Vec<String>) -> i32 {
             println!("  --version     Show version");
             0
         }
-        "--version" | "-V" => { println!("tlp 0.1.0 (Slate OS)"); 0 }
+        "--version" | "-V" => {
+            println!("tlp 0.1.0 (Slate OS)");
+            0
+        }
         "start" => tlp_start(),
         "ac" => tlp_apply(PowerMode::AC),
         "bat" => tlp_apply(PowerMode::Battery),
-        "usb" => { println!("tlp: USB autosuspend applied"); 0 }
-        "bayoff" => { println!("tlp: optical drive bay power off (simulated)"); 0 }
+        "usb" => {
+            println!("tlp: USB autosuspend applied");
+            0
+        }
+        "bayoff" => {
+            println!("tlp: optical drive bay power off (simulated)");
+            0
+        }
         "setcharge" => tlp_setcharge(&args),
-        "fullcharge" => { println!("tlp: charge thresholds removed, charging to 100%"); 0 }
-        "discharge" => { println!("tlp: force discharge started (simulated)"); 0 }
-        "recalibrate" => { println!("tlp: battery recalibration started (simulated)"); 0 }
-        other => { eprintln!("tlp: unknown command '{}'", other); 1 }
+        "fullcharge" => {
+            println!("tlp: charge thresholds removed, charging to 100%");
+            0
+        }
+        "discharge" => {
+            println!("tlp: force discharge started (simulated)");
+            0
+        }
+        "recalibrate" => {
+            println!("tlp: battery recalibration started (simulated)");
+            0
+        }
+        other => {
+            eprintln!("tlp: unknown command {}", quoteaf_os(other));
+            1
+        }
     }
 }
 
@@ -133,9 +155,30 @@ fn tlp_start() -> i32 {
     // Detect power source
     let mode = PowerMode::AC; // simulated
     println!("tlp: starting, mode = {}", mode);
-    println!("  CPU governor: {}", if mode == PowerMode::AC { &config.cpu_scaling_governor_on_ac } else { &config.cpu_scaling_governor_on_bat });
-    println!("  CPU boost: {}", if mode == PowerMode::AC { config.cpu_boost_on_ac } else { config.cpu_boost_on_bat });
-    println!("  WiFi power save: {}", if mode == PowerMode::AC { config.wifi_pwr_on_ac } else { config.wifi_pwr_on_bat });
+    println!(
+        "  CPU governor: {}",
+        if mode == PowerMode::AC {
+            &config.cpu_scaling_governor_on_ac
+        } else {
+            &config.cpu_scaling_governor_on_bat
+        }
+    );
+    println!(
+        "  CPU boost: {}",
+        if mode == PowerMode::AC {
+            config.cpu_boost_on_ac
+        } else {
+            config.cpu_boost_on_bat
+        }
+    );
+    println!(
+        "  WiFi power save: {}",
+        if mode == PowerMode::AC {
+            config.wifi_pwr_on_ac
+        } else {
+            config.wifi_pwr_on_bat
+        }
+    );
     println!("tlp: settings applied");
     0
 }
@@ -143,20 +186,51 @@ fn tlp_start() -> i32 {
 fn tlp_apply(mode: PowerMode) -> i32 {
     let config = TlpConfig::default();
     println!("tlp: applying {} settings", mode);
-    let gov = if mode == PowerMode::AC { &config.cpu_scaling_governor_on_ac } else { &config.cpu_scaling_governor_on_bat };
-    let epb = if mode == PowerMode::AC { &config.cpu_energy_perf_policy_on_ac } else { &config.cpu_energy_perf_policy_on_bat };
+    let gov = if mode == PowerMode::AC {
+        &config.cpu_scaling_governor_on_ac
+    } else {
+        &config.cpu_scaling_governor_on_bat
+    };
+    let epb = if mode == PowerMode::AC {
+        &config.cpu_energy_perf_policy_on_ac
+    } else {
+        &config.cpu_energy_perf_policy_on_bat
+    };
     println!("  CPU governor → {}", gov);
     println!("  Energy perf policy → {}", epb);
-    println!("  CPU boost → {}", if mode == PowerMode::AC { config.cpu_boost_on_ac } else { config.cpu_boost_on_bat });
-    println!("  WiFi power save → {}", if mode == PowerMode::AC { config.wifi_pwr_on_ac } else { config.wifi_pwr_on_bat });
+    println!(
+        "  CPU boost → {}",
+        if mode == PowerMode::AC {
+            config.cpu_boost_on_ac
+        } else {
+            config.cpu_boost_on_bat
+        }
+    );
+    println!(
+        "  WiFi power save → {}",
+        if mode == PowerMode::AC {
+            config.wifi_pwr_on_ac
+        } else {
+            config.wifi_pwr_on_bat
+        }
+    );
     println!("tlp: {} settings applied", mode);
     0
 }
 
 fn tlp_setcharge(args: &[String]) -> i32 {
-    let start = args.get(1).and_then(|s| s.parse::<u32>().ok()).unwrap_or(75);
-    let stop = args.get(2).and_then(|s| s.parse::<u32>().ok()).unwrap_or(80);
-    println!("tlp: setting charge thresholds BAT0: start={} stop={}", start, stop);
+    let start = args
+        .get(1)
+        .and_then(|s| s.parse::<u32>().ok())
+        .unwrap_or(75);
+    let stop = args
+        .get(2)
+        .and_then(|s| s.parse::<u32>().ok())
+        .unwrap_or(80);
+    println!(
+        "tlp: setting charge thresholds BAT0: start={} stop={}",
+        start, stop
+    );
     0
 }
 
@@ -181,14 +255,24 @@ fn run_tlp_stat(args: Vec<String>) -> i32 {
             println!("  -w, --wifi      WiFi");
             0
         }
-        "--version" | "-V" => { println!("tlp-stat 0.1.0 (Slate OS)"); 0 }
+        "--version" | "-V" => {
+            println!("tlp-stat 0.1.0 (Slate OS)");
+            0
+        }
         "-b" | "--battery" => stat_battery(),
         "-c" | "--config" => stat_config(),
         "-p" | "--processor" => stat_processor(),
         "-s" | "--system" => stat_system(),
         "-t" | "--temp" => stat_temp(),
         "-w" | "--wifi" => stat_wifi(),
-        _ => { stat_system(); println!(); stat_processor(); println!(); stat_battery(); 0 }
+        _ => {
+            stat_system();
+            println!();
+            stat_processor();
+            println!();
+            stat_battery();
+            0
+        }
     }
 }
 
@@ -210,14 +294,38 @@ fn stat_battery() -> i32 {
 fn stat_config() -> i32 {
     let config = TlpConfig::default();
     println!("--- TLP Configuration");
-    println!("  CPU_SCALING_GOVERNOR_ON_AC = {}", config.cpu_scaling_governor_on_ac);
-    println!("  CPU_SCALING_GOVERNOR_ON_BAT = {}", config.cpu_scaling_governor_on_bat);
-    println!("  CPU_ENERGY_PERF_POLICY_ON_AC = {}", config.cpu_energy_perf_policy_on_ac);
-    println!("  CPU_ENERGY_PERF_POLICY_ON_BAT = {}", config.cpu_energy_perf_policy_on_bat);
-    println!("  CPU_BOOST_ON_AC = {}", if config.cpu_boost_on_ac { 1 } else { 0 });
-    println!("  CPU_BOOST_ON_BAT = {}", if config.cpu_boost_on_bat { 1 } else { 0 });
-    println!("  WIFI_PWR_ON_AC = {}", if config.wifi_pwr_on_ac { "on" } else { "off" });
-    println!("  WIFI_PWR_ON_BAT = {}", if config.wifi_pwr_on_bat { "on" } else { "off" });
+    println!(
+        "  CPU_SCALING_GOVERNOR_ON_AC = {}",
+        config.cpu_scaling_governor_on_ac
+    );
+    println!(
+        "  CPU_SCALING_GOVERNOR_ON_BAT = {}",
+        config.cpu_scaling_governor_on_bat
+    );
+    println!(
+        "  CPU_ENERGY_PERF_POLICY_ON_AC = {}",
+        config.cpu_energy_perf_policy_on_ac
+    );
+    println!(
+        "  CPU_ENERGY_PERF_POLICY_ON_BAT = {}",
+        config.cpu_energy_perf_policy_on_bat
+    );
+    println!(
+        "  CPU_BOOST_ON_AC = {}",
+        if config.cpu_boost_on_ac { 1 } else { 0 }
+    );
+    println!(
+        "  CPU_BOOST_ON_BAT = {}",
+        if config.cpu_boost_on_bat { 1 } else { 0 }
+    );
+    println!(
+        "  WIFI_PWR_ON_AC = {}",
+        if config.wifi_pwr_on_ac { "on" } else { "off" }
+    );
+    println!(
+        "  WIFI_PWR_ON_BAT = {}",
+        if config.wifi_pwr_on_bat { "on" } else { "off" }
+    );
     0
 }
 
@@ -261,7 +369,10 @@ fn stat_wifi() -> i32 {
 // ── tlp-rdw personality ───────────────────────────────────────────────
 
 fn run_tlp_rdw(args: Vec<String>) -> i32 {
-    let cmd = args.first().cloned().unwrap_or_else(|| "status".to_string());
+    let cmd = args
+        .first()
+        .cloned()
+        .unwrap_or_else(|| "status".to_string());
 
     match cmd.as_str() {
         "--help" | "-h" => {
@@ -283,9 +394,18 @@ fn run_tlp_rdw(args: Vec<String>) -> i32 {
             println!("  BT on undock:   disable");
             0
         }
-        "enable" => { println!("tlp-rdw: radio device management enabled"); 0 }
-        "disable" => { println!("tlp-rdw: radio device management disabled"); 0 }
-        other => { eprintln!("tlp-rdw: unknown command '{}'", other); 1 }
+        "enable" => {
+            println!("tlp-rdw: radio device management enabled");
+            0
+        }
+        "disable" => {
+            println!("tlp-rdw: radio device management disabled");
+            0
+        }
+        other => {
+            eprintln!("tlp-rdw: unknown command {}", quoteaf_os(other));
+            1
+        }
     }
 }
 
@@ -299,7 +419,9 @@ fn main() {
         let bytes = s.as_bytes();
         let mut last_sep = 0;
         for (i, &b) in bytes.iter().enumerate() {
-            if b == b'/' || b == b'\\' { last_sep = i + 1; }
+            if b == b'/' || b == b'\\' {
+                last_sep = i + 1;
+            }
         }
         let base = &s[last_sep..];
         let base = base.strip_suffix(".exe").unwrap_or(base);

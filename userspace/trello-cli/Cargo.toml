@@ -2,3 +2,8 @@
 name = "trello-cli"
 version = "0.1.0"
 edition = "2024"
+
+[dependencies]
+# trello-cli names boards, lists and cards, every one of them titled by
+# whoever created it on the service.
+quoting = { path = "../quoting" }

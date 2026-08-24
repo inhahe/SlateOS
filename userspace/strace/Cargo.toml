@@ -4,6 +4,9 @@ version = "0.1.0"
 edition = "2024"
 description = "SlateOS strace - system call tracing (strace/ltrace)"
 [dependencies]
+# The output file it could not open and the syscall filter that matched
+# nothing are both argv words.
+quoting = { path = "../quoting" }
 
 # Inherit the workspace lint configuration. This crate had none at all: it was
 # not in the `[lints] workspace = true` set and set no `#![deny]`/`#![warn]` of

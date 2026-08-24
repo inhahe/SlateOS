@@ -9,6 +9,7 @@
 //! - `tuned-adm` — tuning profile administration CLI
 //! - `tuned-gui` — placeholder for GUI configuration
 
+use quoting::quoteaf_os;
 use std::collections::BTreeMap;
 use std::env;
 use std::process;
@@ -246,14 +247,15 @@ fn load_profiles() -> Vec<Profile> {
             if path.is_dir() {
                 let conf = path.join("tuned.conf");
                 if conf.is_file()
-                    && let Some(p) = parse_profile_file(&conf, &entry.file_name().to_string_lossy()) {
-                        // Override builtin if same name
-                        if let Some(idx) = profiles.iter().position(|x| x.name == p.name) {
-                            profiles[idx] = p;
-                        } else {
-                            profiles.push(p);
-                        }
+                    && let Some(p) = parse_profile_file(&conf, &entry.file_name().to_string_lossy())
+                {
+                    // Override builtin if same name
+                    if let Some(idx) = profiles.iter().position(|x| x.name == p.name) {
+                        profiles[idx] = p;
+                    } else {
+                        profiles.push(p);
                     }
+                }
             }
         }
     }
@@ -275,7 +277,7 @@ fn parse_profile_file(path: &std::path::Path, name: &str) -> Option<Profile> {
             continue;
         }
         if line.starts_with('[') && line.ends_with(']') {
-            current_section = line[1..line.len()-1].to_string();
+            current_section = line[1..line.len() - 1].to_string();
             continue;
         }
         if let Some((key, value)) = line.split_once('=') {
@@ -288,7 +290,8 @@ fn parse_profile_file(path: &std::path::Path, name: &str) -> Option<Profile> {
                     _ => {}
                 }
             } else if !current_section.is_empty() {
-                sections.entry(current_section.clone())
+                sections
+                    .entry(current_section.clone())
                     .or_default()
                     .insert(key.to_string(), value.to_string());
             }
@@ -381,7 +384,7 @@ fn cmd_profile(args: &[String]) {
     let name = &args[0];
     let profiles = load_profiles();
     if !profiles.iter().any(|p| p.name == *name) {
-        eprintln!("Error: profile '{}' not found.", name);
+        eprintln!("Error: profile {} not found.", quoteaf_os(name));
         eprintln!("Use 'tuned-adm list' to see available profiles.");
         process::exit(1);
     }
@@ -412,7 +415,7 @@ fn cmd_profile_info(args: &[String]) {
     let profile = match profiles.iter().find(|p| p.name == target) {
         Some(p) => p,
         None => {
-            eprintln!("Profile '{}' not found.", target);
+            eprintln!("Profile {} not found.", quoteaf_os(&target));
             process::exit(1);
         }
     };
@@ -477,7 +480,9 @@ fn cmd_auto_profile() {
             }
             Err(_) => Vec::new(),
         };
-        recs.into_iter().next().unwrap_or_else(|| "balanced".to_string())
+        recs.into_iter()
+            .next()
+            .unwrap_or_else(|| "balanced".to_string())
     };
 
     let _ = std::fs::create_dir_all(PROFILES_DIR);
@@ -503,12 +508,12 @@ fn cmd_verify() {
     let profile = match profiles.iter().find(|p| p.name == active) {
         Some(p) => p,
         None => {
-            println!("FAIL: Active profile '{}' not found.", active);
+            println!("FAIL: Active profile {} not found.", quoteaf_os(&active));
             process::exit(1);
         }
     };
 
-    println!("Verification for profile '{}':", profile.name);
+    println!("Verification for profile {}:", quoteaf_os(&profile.name));
     let all_ok = true;
 
     for (section, params) in &profile.sections {
@@ -526,7 +531,9 @@ fn cmd_verify() {
 // ── tuned daemon ───────────────────────────────────────────────────────
 
 fn run_daemon(args: &[String]) {
-    let foreground = args.iter().any(|a| a == "-d" || a == "--daemon" || a == "-n" || a == "--no-daemon");
+    let foreground = args
+        .iter()
+        .any(|a| a == "-d" || a == "--daemon" || a == "-n" || a == "--no-daemon");
     let debug = args.iter().any(|a| a == "-D" || a == "--debug");
 
     if debug {
@@ -537,7 +544,7 @@ fn run_daemon(args: &[String]) {
     if active.is_empty() {
         println!("tuned: no active profile, using 'balanced'");
     } else {
-        println!("tuned: applying profile '{}'", active);
+        println!("tuned: applying profile {}", quoteaf_os(&active));
     }
 
     if foreground {
@@ -589,7 +596,10 @@ fn print_tuned_help() {
 
 fn run_tuned_adm(args: Vec<String>) -> i32 {
     let rest: Vec<String> = args.into_iter().skip(1).collect();
-    let cmd = rest.first().cloned().unwrap_or_else(|| "active".to_string());
+    let cmd = rest
+        .first()
+        .cloned()
+        .unwrap_or_else(|| "active".to_string());
     let cmd_args: Vec<String> = rest.into_iter().skip(1).collect();
 
     if cmd == "-h" || cmd == "--help" {
@@ -689,7 +699,10 @@ mod tests {
     #[test]
     fn test_throughput_performance_profile() {
         let profiles = builtin_profiles();
-        let tp = profiles.iter().find(|p| p.name == "throughput-performance").unwrap();
+        let tp = profiles
+            .iter()
+            .find(|p| p.name == "throughput-performance")
+            .unwrap();
         let cpu = &tp.sections["cpu"];
         assert_eq!(cpu.get("governor").map(|s| s.as_str()), Some("performance"));
     }
@@ -727,9 +740,15 @@ mod tests {
     #[test]
     fn test_network_profiles_inherit() {
         let profiles = builtin_profiles();
-        let nt = profiles.iter().find(|p| p.name == "network-throughput").unwrap();
+        let nt = profiles
+            .iter()
+            .find(|p| p.name == "network-throughput")
+            .unwrap();
         assert_eq!(nt.include.as_deref(), Some("throughput-performance"));
-        let nl = profiles.iter().find(|p| p.name == "network-latency").unwrap();
+        let nl = profiles
+            .iter()
+            .find(|p| p.name == "network-latency")
+            .unwrap();
         assert_eq!(nl.include.as_deref(), Some("latency-performance"));
     }
 
@@ -781,8 +800,12 @@ mod tests {
     fn test_profiles_sorted_after_load() {
         let profiles = load_profiles();
         for i in 1..profiles.len() {
-            assert!(profiles[i-1].name <= profiles[i].name,
-                "Profiles not sorted: {} > {}", profiles[i-1].name, profiles[i].name);
+            assert!(
+                profiles[i - 1].name <= profiles[i].name,
+                "Profiles not sorted: {} > {}",
+                profiles[i - 1].name,
+                profiles[i].name
+            );
         }
     }
 
@@ -798,8 +821,7 @@ mod tests {
     #[test]
     fn test_profile_sections_nonempty() {
         for p in builtin_profiles() {
-            assert!(!p.sections.is_empty(),
-                "Profile {} has no sections", p.name);
+            assert!(!p.sections.is_empty(), "Profile {} has no sections", p.name);
         }
     }
 }

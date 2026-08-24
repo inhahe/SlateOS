@@ -4,6 +4,7 @@
 //!
 //! Single personality: `linear`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -42,7 +43,11 @@ fn run_linear(args: Vec<String>) -> i32 {
                     println!("ENG-45      Done          Low       Clean up logs");
                 }
                 "create" => {
-                    let title = args.windows(2).find(|w| w[0] == "-t" || w[0] == "--title").map(|w| w[1].as_str()).unwrap_or("New issue");
+                    let title = args
+                        .windows(2)
+                        .find(|w| w[0] == "-t" || w[0] == "--title")
+                        .map(|w| w[1].as_str())
+                        .unwrap_or("New issue");
                     println!("✔ Created ENG-46: {}", title);
                 }
                 "view" => {
@@ -56,7 +61,9 @@ fn run_linear(args: Vec<String>) -> i32 {
                     println!("  Labels:    bug, backend");
                     println!("  Estimate:  3 points");
                 }
-                _ => { println!("Issue operation: {}", sub); }
+                _ => {
+                    println!("Issue operation: {}", sub);
+                }
             }
             0
         }
@@ -69,7 +76,9 @@ fn run_linear(args: Vec<String>) -> i32 {
                     println!("11      Cycle 11    completed 100%        Dec 25 - Jan 7");
                     println!("13      Cycle 13    upcoming  0%          Jan 22 - Feb 5");
                 }
-                _ => { println!("Cycle operation: {}", sub); }
+                _ => {
+                    println!("Cycle operation: {}", sub);
+                }
             }
             0
         }
@@ -91,7 +100,7 @@ fn run_linear(args: Vec<String>) -> i32 {
         }
         "search" => {
             let query = args.get(1).map(|s| s.as_str()).unwrap_or("auth");
-            println!("Results for '{}':", query);
+            println!("Results for {}:", quoteaf_os(query));
             println!("  ENG-42  In Progress  Fix auth flow");
             println!("  ENG-38  Done         Auth token refresh");
             println!("  ENG-30  Done         OAuth2 integration");
@@ -101,7 +110,7 @@ fn run_linear(args: Vec<String>) -> i32 {
             if cmd.is_empty() {
                 eprintln!("Usage: linear <command>. See --help.");
             } else {
-                eprintln!("Error: unknown command '{}'. See --help.", cmd);
+                eprintln!("Error: unknown command {}. See --help.", quoteaf_os(cmd));
             }
             1
         }
@@ -117,7 +126,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_linear};
+    use super::run_linear;
 
     #[test]
     fn help_exits_zero() {

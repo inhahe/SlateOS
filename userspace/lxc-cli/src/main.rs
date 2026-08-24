@@ -4,6 +4,7 @@
 //!
 //! Multi-personality: `lxc`, `lxc-create`, `lxc-start`, `lxc-stop`, `lxc-ls`, `lxc-info`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -44,7 +45,12 @@ fn run_lxc(args: &[String]) -> i32 {
     }
 
     let cmd = args.first().map(|s| s.as_str()).unwrap_or("");
-    let rest: Vec<&str> = args.iter().skip(1).filter(|a| !a.starts_with('-')).map(|s| s.as_str()).collect();
+    let rest: Vec<&str> = args
+        .iter()
+        .skip(1)
+        .filter(|a| !a.starts_with('-'))
+        .map(|s| s.as_str())
+        .collect();
 
     match cmd {
         "launch" => {
@@ -118,7 +124,7 @@ fn run_lxc(args: &[String]) -> i32 {
             }
         }
         _ => {
-            eprintln!("lxc: unknown command '{}'. See --help.", cmd);
+            eprintln!("lxc: unknown command {}. See --help.", quoteaf_os(cmd));
             return 1;
         }
     }
@@ -142,7 +148,11 @@ fn run_lxc_legacy(args: &[String], cmd_name: &str) -> i32 {
             println!("test-env");
         }
         "lxc-info" => {
-            let name = args.iter().find(|a| !a.starts_with('-')).map(|s| s.as_str()).unwrap_or("container1");
+            let name = args
+                .iter()
+                .find(|a| !a.starts_with('-'))
+                .map(|s| s.as_str())
+                .unwrap_or("container1");
             println!("Name:           {}", name);
             println!("State:          RUNNING");
             println!("PID:            12345");
@@ -156,13 +166,16 @@ fn run_lxc_legacy(args: &[String], cmd_name: &str) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first()
+    let prog = args
+        .first()
         .map(|s| strip_ext(basename(s)).to_string())
         .unwrap_or_else(|| "lxc".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
 
     let code = match prog.as_str() {
-        "lxc-create" | "lxc-start" | "lxc-stop" | "lxc-ls" | "lxc-info" => run_lxc_legacy(&rest, &prog),
+        "lxc-create" | "lxc-start" | "lxc-stop" | "lxc-ls" | "lxc-info" => {
+            run_lxc_legacy(&rest, &prog)
+        }
         _ => run_lxc(&rest),
     };
     process::exit(code);
@@ -170,7 +183,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_lxc};
+    use super::{basename, run_lxc, strip_ext};
 
     #[test]
     fn basename_strips_path() {

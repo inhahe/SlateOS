@@ -8,6 +8,7 @@
 //! - `rasdaemon` (default) — RAS daemon collecting hardware error events
 //! - `ras-mc-ctl` — RAS memory controller status/configuration tool
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -146,55 +147,49 @@ fn read_memory_errors() -> Vec<MemoryError> {
 }
 
 fn read_pcie_errors() -> Vec<PcieAerEvent> {
-    vec![
-        PcieAerEvent {
-            timestamp: 1716002000,
-            dev_name: "0000:03:00.0 (NVMe SSD)".to_string(),
-            _severity: AerSeverity::_Corrected,
-            error_type: "Receiver Error".to_string(),
-            tlp_header: "00000000 00000000 00000000 00000000".to_string(),
-        },
-    ]
+    vec![PcieAerEvent {
+        timestamp: 1716002000,
+        dev_name: "0000:03:00.0 (NVMe SSD)".to_string(),
+        _severity: AerSeverity::_Corrected,
+        error_type: "Receiver Error".to_string(),
+        tlp_header: "00000000 00000000 00000000 00000000".to_string(),
+    }]
 }
 
 fn read_disk_errors() -> Vec<DiskError> {
-    vec![
-        DiskError {
-            timestamp: 1716001000,
-            dev: "sda".to_string(),
-            sector: 123456789,
-            nr_sectors: 8,
-            error: "medium error".to_string(),
-            _rwbs: "R".to_string(),
-        },
-    ]
+    vec![DiskError {
+        timestamp: 1716001000,
+        dev: "sda".to_string(),
+        sector: 123456789,
+        nr_sectors: 8,
+        error: "medium error".to_string(),
+        _rwbs: "R".to_string(),
+    }]
 }
 
 fn read_mc_controllers() -> Vec<McController> {
-    vec![
-        McController {
-            id: 0,
-            name: "Skylake IMC".to_string(),
-            _size_mb: 32768,
-            status: "active".to_string(),
-            channels: vec![
-                McChannel {
-                    _id: 0,
-                    dimm_label: "DIMM_A1 (16GB DDR4 3200)".to_string(),
-                    _size_mb: 16384,
-                    ce_count: 2,
-                    ue_count: 0,
-                },
-                McChannel {
-                    _id: 1,
-                    dimm_label: "DIMM_B1 (16GB DDR4 3200)".to_string(),
-                    _size_mb: 16384,
-                    ce_count: 0,
-                    ue_count: 0,
-                },
-            ],
-        },
-    ]
+    vec![McController {
+        id: 0,
+        name: "Skylake IMC".to_string(),
+        _size_mb: 32768,
+        status: "active".to_string(),
+        channels: vec![
+            McChannel {
+                _id: 0,
+                dimm_label: "DIMM_A1 (16GB DDR4 3200)".to_string(),
+                _size_mb: 16384,
+                ce_count: 2,
+                ue_count: 0,
+            },
+            McChannel {
+                _id: 1,
+                dimm_label: "DIMM_B1 (16GB DDR4 3200)".to_string(),
+                _size_mb: 16384,
+                ce_count: 0,
+                ue_count: 0,
+            },
+        ],
+    }]
 }
 
 fn format_event_time(ts: u64) -> String {
@@ -210,7 +205,10 @@ fn format_event_time(ts: u64) -> String {
 // ── rasdaemon personality ─────────────────────────────────────────────
 
 fn run_rasdaemon(args: Vec<String>) -> i32 {
-    let cmd = args.first().cloned().unwrap_or_else(|| "--summary".to_string());
+    let cmd = args
+        .first()
+        .cloned()
+        .unwrap_or_else(|| "--summary".to_string());
     let cmd_args: Vec<String> = args.into_iter().skip(1).collect();
 
     match cmd.as_str() {
@@ -245,7 +243,7 @@ fn run_rasdaemon(args: Vec<String>) -> i32 {
         "--show-disk" => cmd_show_disk(),
         "--status" | "status" => cmd_status(),
         other => {
-            eprintln!("rasdaemon: unknown option '{}'", other);
+            eprintln!("rasdaemon: unknown option {}", quoteaf_os(other));
             eprintln!("Try 'rasdaemon --help' for more information.");
             1
         }
@@ -261,8 +259,14 @@ fn cmd_summary() -> i32 {
     println!("=================");
     println!();
 
-    let ce_count = mem_errors.iter().filter(|e| e.error_type == MemErrorType::Corrected).count();
-    let ue_count = mem_errors.iter().filter(|e| e.error_type == MemErrorType::Uncorrected).count();
+    let ce_count = mem_errors
+        .iter()
+        .filter(|e| e.error_type == MemErrorType::Corrected)
+        .count();
+    let ue_count = mem_errors
+        .iter()
+        .filter(|e| e.error_type == MemErrorType::Uncorrected)
+        .count();
     println!("Memory errors:");
     println!("  Corrected (CE):   {}", ce_count);
     println!("  Uncorrected (UE): {}", ue_count);
@@ -307,7 +311,10 @@ fn cmd_record(args: &[String]) -> i32 {
     let foreground = args.iter().any(|a| a == "--foreground" || a == "-f");
     println!("rasdaemon: starting RAS event recording");
     println!("  Database: {}", _RAS_DB_PATH);
-    println!("  Mode: {}", if foreground { "foreground" } else { "daemon" });
+    println!(
+        "  Mode: {}",
+        if foreground { "foreground" } else { "daemon" }
+    );
     println!();
     println!("Monitoring tracepoints:");
     println!("  ras:mc_event (memory errors)");
@@ -321,31 +328,39 @@ fn cmd_record(args: &[String]) -> i32 {
 
 fn cmd_show_ce() -> i32 {
     let errors = read_memory_errors();
-    let ces: Vec<_> = errors.iter()
+    let ces: Vec<_> = errors
+        .iter()
         .filter(|e| e.error_type == MemErrorType::Corrected)
         .collect();
 
     println!("Corrected Memory Errors ({} total):", ces.len());
-    println!("{:<12} {:<8} {:<10} {:<18} {:<8} {:>10}",
-        "Time", "Count", "Label", "Address", "Grain", "Syndrome");
+    println!(
+        "{:<12} {:<8} {:<10} {:<18} {:<8} {:>10}",
+        "Time", "Count", "Label", "Address", "Grain", "Syndrome"
+    );
     println!("{}", "-".repeat(70));
 
     for e in &ces {
-        println!("{:<12} {:<8} {:<10} {:#018x} {:<8} {:#010x}",
+        println!(
+            "{:<12} {:<8} {:<10} {:#018x} {:<8} {:#010x}",
             format_event_time(e.timestamp),
             e.error_count,
             e.label,
             e.address,
             e.grain,
-            e.syndrome);
+            e.syndrome
+        );
     }
     0
 }
 
 fn cmd_show_ue() -> i32 {
     let errors = read_memory_errors();
-    let ues: Vec<_> = errors.iter()
-        .filter(|e| e.error_type == MemErrorType::Uncorrected || e.error_type == MemErrorType::Fatal)
+    let ues: Vec<_> = errors
+        .iter()
+        .filter(|e| {
+            e.error_type == MemErrorType::Uncorrected || e.error_type == MemErrorType::Fatal
+        })
         .collect();
 
     if ues.is_empty() {
@@ -353,9 +368,14 @@ fn cmd_show_ue() -> i32 {
     } else {
         println!("Uncorrected Memory Errors ({} total):", ues.len());
         for e in &ues {
-            println!("[{}] MC{} {}: {} @ {:#018x}",
+            println!(
+                "[{}] MC{} {}: {} @ {:#018x}",
                 format_event_time(e.timestamp),
-                e.mc, e.error_type, e.message, e.address);
+                e.mc,
+                e.error_type,
+                e.message,
+                e.address
+            );
         }
     }
     0
@@ -364,15 +384,16 @@ fn cmd_show_ue() -> i32 {
 fn cmd_show_aer() -> i32 {
     let errors = read_pcie_errors();
     println!("PCIe AER Events ({} total):", errors.len());
-    println!("{:<12} {:<30} {:<20}",
-        "Time", "Device", "Error");
+    println!("{:<12} {:<30} {:<20}", "Time", "Device", "Error");
     println!("{}", "-".repeat(65));
 
     for e in &errors {
-        println!("{:<12} {:<30} {:<20}",
+        println!(
+            "{:<12} {:<30} {:<20}",
             format_event_time(e.timestamp),
             e.dev_name,
-            e.error_type);
+            e.error_type
+        );
         println!("  TLP Header: {}", e.tlp_header);
     }
     0
@@ -381,17 +402,21 @@ fn cmd_show_aer() -> i32 {
 fn cmd_show_disk() -> i32 {
     let errors = read_disk_errors();
     println!("Disk Error Events ({} total):", errors.len());
-    println!("{:<12} {:<8} {:>12} {:>8} {:<20}",
-        "Time", "Device", "Sector", "Count", "Error");
+    println!(
+        "{:<12} {:<8} {:>12} {:>8} {:<20}",
+        "Time", "Device", "Sector", "Count", "Error"
+    );
     println!("{}", "-".repeat(65));
 
     for e in &errors {
-        println!("{:<12} {:<8} {:>12} {:>8} {:<20}",
+        println!(
+            "{:<12} {:<8} {:>12} {:>8} {:<20}",
             format_event_time(e.timestamp),
             e.dev,
             e.sector,
             e.nr_sectors,
-            e.error);
+            e.error
+        );
     }
     0
 }
@@ -412,7 +437,10 @@ fn cmd_status() -> i32 {
 // ── ras-mc-ctl personality ────────────────────────────────────────────
 
 fn run_mc_ctl(args: Vec<String>) -> i32 {
-    let cmd = args.first().cloned().unwrap_or_else(|| "--status".to_string());
+    let cmd = args
+        .first()
+        .cloned()
+        .unwrap_or_else(|| "--status".to_string());
 
     match cmd.as_str() {
         "--help" | "help" | "-h" => {
@@ -447,7 +475,7 @@ fn run_mc_ctl(args: Vec<String>) -> i32 {
             0
         }
         other => {
-            eprintln!("ras-mc-ctl: unknown option '{}'", other);
+            eprintln!("ras-mc-ctl: unknown option {}", quoteaf_os(other));
             1
         }
     }
@@ -470,8 +498,10 @@ fn mc_status() -> i32 {
             } else {
                 "OK"
             };
-            println!("  {}: CE={} UE={} [{}]",
-                ch.dimm_label, ch.ce_count, ch.ue_count, status);
+            println!(
+                "  {}: CE={} UE={} [{}]",
+                ch.dimm_label, ch.ce_count, ch.ue_count, status
+            );
         }
         println!();
     }
@@ -522,14 +552,15 @@ fn mc_errors() -> i32 {
     println!("EDAC Error Counts by DIMM");
     println!("=========================");
     println!();
-    println!("{:<8} {:<30} {:>8} {:>8}",
-        "MC", "DIMM", "CE", "UE");
+    println!("{:<8} {:<30} {:>8} {:>8}", "MC", "DIMM", "CE", "UE");
     println!("{}", "-".repeat(58));
 
     for mc in &controllers {
         for ch in &mc.channels {
-            println!("mc{:<5} {:<30} {:>8} {:>8}",
-                mc.id, ch.dimm_label, ch.ce_count, ch.ue_count);
+            println!(
+                "mc{:<5} {:<30} {:>8} {:>8}",
+                mc.id, ch.dimm_label, ch.ce_count, ch.ue_count
+            );
         }
     }
     0
@@ -646,9 +677,13 @@ mod tests {
             ce_count: 5,
             ue_count: 0,
         };
-        let status = if ch.ue_count > 0 { "FAIL" }
-            else if ch.ce_count > 0 { "DEGRADED" }
-            else { "OK" };
+        let status = if ch.ue_count > 0 {
+            "FAIL"
+        } else if ch.ce_count > 0 {
+            "DEGRADED"
+        } else {
+            "OK"
+        };
         assert_eq!(status, "DEGRADED");
     }
 }

@@ -48,6 +48,7 @@
 
 #![deny(clippy::all)]
 
+use quoting::quoteaf_os;
 use std::collections::HashMap;
 use std::env;
 use std::io::{self, Write};
@@ -326,9 +327,7 @@ impl Snapshot {
                 match key {
                     "number" => number = val.parse().ok(),
                     "date" => date = val.parse().unwrap_or(0),
-                    "type" => {
-                        snap_type = SnapType::from_str(val).unwrap_or(SnapType::Single)
-                    }
+                    "type" => snap_type = SnapType::from_str(val).unwrap_or(SnapType::Single),
                     "pre_number" => pre_number = val.parse().ok(),
                     "description" => description = val.to_string(),
                     "cleanup" => cleanup = CleanupAlgo::from_str(val),
@@ -471,23 +470,14 @@ impl SnapperConfig {
             "TIMELINE_CLEANUP={}\n",
             if self.timeline_cleanup { "yes" } else { "no" }
         ));
-        out.push_str(&format!(
-            "TIMELINE_LIMIT_HOURLY={}\n",
-            self.timeline_hourly
-        ));
+        out.push_str(&format!("TIMELINE_LIMIT_HOURLY={}\n", self.timeline_hourly));
         out.push_str(&format!("TIMELINE_LIMIT_DAILY={}\n", self.timeline_daily));
-        out.push_str(&format!(
-            "TIMELINE_LIMIT_WEEKLY={}\n",
-            self.timeline_weekly
-        ));
+        out.push_str(&format!("TIMELINE_LIMIT_WEEKLY={}\n", self.timeline_weekly));
         out.push_str(&format!(
             "TIMELINE_LIMIT_MONTHLY={}\n",
             self.timeline_monthly
         ));
-        out.push_str(&format!(
-            "TIMELINE_LIMIT_YEARLY={}\n",
-            self.timeline_yearly
-        ));
+        out.push_str(&format!("TIMELINE_LIMIT_YEARLY={}\n", self.timeline_yearly));
         out.push_str(&format!(
             "NUMBER_CLEANUP={}\n",
             if self.number_cleanup { "yes" } else { "no" }
@@ -540,9 +530,7 @@ impl SnapperConfig {
                     "NUMBER_LIMIT" => {
                         cfg.number_limit = val.parse().unwrap_or(DEFAULT_NUMBER_LIMIT)
                     }
-                    "EMPTY_PRE_POST_CLEANUP" => {
-                        cfg.empty_pre_post_cleanup = val == "yes"
-                    }
+                    "EMPTY_PRE_POST_CLEANUP" => cfg.empty_pre_post_cleanup = val == "yes",
                     _ => {}
                 }
             }
@@ -617,11 +605,7 @@ impl SnapperConfig {
 }
 
 fn bool_to_yesno(b: bool) -> &'static str {
-    if b {
-        "yes"
-    } else {
-        "no"
-    }
+    if b { "yes" } else { "no" }
 }
 
 // ============================================================================
@@ -782,34 +766,44 @@ impl SnapshotStore {
         let mut to_keep: Vec<u64> = Vec::new();
 
         // Group by (year, month, day, hour) for hourly
-        to_keep.extend(self.keep_by_bucket(&timeline_snaps, self.config.timeline_hourly, |ts| {
-            let bt = secs_to_broken(ts);
-            (bt.year, bt.month as i64, bt.day as i64, bt.hour as i64)
-        }));
+        to_keep.extend(
+            self.keep_by_bucket(&timeline_snaps, self.config.timeline_hourly, |ts| {
+                let bt = secs_to_broken(ts);
+                (bt.year, bt.month as i64, bt.day as i64, bt.hour as i64)
+            }),
+        );
 
         // Group by (year, month, day) for daily
-        to_keep.extend(self.keep_by_bucket(&timeline_snaps, self.config.timeline_daily, |ts| {
-            let bt = secs_to_broken(ts);
-            (bt.year, bt.month as i64, bt.day as i64, 0)
-        }));
+        to_keep.extend(
+            self.keep_by_bucket(&timeline_snaps, self.config.timeline_daily, |ts| {
+                let bt = secs_to_broken(ts);
+                (bt.year, bt.month as i64, bt.day as i64, 0)
+            }),
+        );
 
         // Group by (year, week) for weekly
-        to_keep.extend(self.keep_by_bucket(&timeline_snaps, self.config.timeline_weekly, |ts| {
-            let bt = secs_to_broken(ts);
-            (bt.year, week_of_year(&bt) as i64, 0, 0)
-        }));
+        to_keep.extend(
+            self.keep_by_bucket(&timeline_snaps, self.config.timeline_weekly, |ts| {
+                let bt = secs_to_broken(ts);
+                (bt.year, week_of_year(&bt) as i64, 0, 0)
+            }),
+        );
 
         // Group by (year, month) for monthly
-        to_keep.extend(self.keep_by_bucket(&timeline_snaps, self.config.timeline_monthly, |ts| {
-            let bt = secs_to_broken(ts);
-            (bt.year, bt.month as i64, 0, 0)
-        }));
+        to_keep.extend(
+            self.keep_by_bucket(&timeline_snaps, self.config.timeline_monthly, |ts| {
+                let bt = secs_to_broken(ts);
+                (bt.year, bt.month as i64, 0, 0)
+            }),
+        );
 
         // Group by year for yearly
-        to_keep.extend(self.keep_by_bucket(&timeline_snaps, self.config.timeline_yearly, |ts| {
-            let bt = secs_to_broken(ts);
-            (bt.year, 0, 0, 0)
-        }));
+        to_keep.extend(
+            self.keep_by_bucket(&timeline_snaps, self.config.timeline_yearly, |ts| {
+                let bt = secs_to_broken(ts);
+                (bt.year, 0, 0, 0)
+            }),
+        );
 
         to_keep.sort();
         to_keep.dedup();
@@ -826,12 +820,7 @@ impl SnapshotStore {
 
     /// Helper: group snapshots by a bucket key, keep the most recent `limit`
     /// unique buckets, returning the snapshot numbers to keep.
-    fn keep_by_bucket<F>(
-        &self,
-        snaps: &[(u64, u64)],
-        limit: u32,
-        bucket_fn: F,
-    ) -> Vec<u64>
+    fn keep_by_bucket<F>(&self, snaps: &[(u64, u64)], limit: u32, bucket_fn: F) -> Vec<u64>
     where
         F: Fn(u64) -> BucketKey,
     {
@@ -851,8 +840,7 @@ impl SnapshotStore {
         }
 
         // Sort buckets by key (most recent first) and keep `limit` of them.
-        let mut bucket_list: Vec<(BucketKey, BucketVal)> =
-            buckets.into_iter().collect();
+        let mut bucket_list: Vec<(BucketKey, BucketVal)> = buckets.into_iter().collect();
         bucket_list.sort_by_key(|b| std::cmp::Reverse(b.0));
 
         let keep_count = (limit as usize).min(bucket_list.len());
@@ -864,7 +852,10 @@ impl SnapshotStore {
 
     /// Run the empty-pre-post cleanup: delete pre/post pairs where no files
     /// changed between them (i.e., the pair is empty).
-    fn cleanup_empty_pre_post(&mut self, changes_fn: &dyn Fn(u64, u64) -> Vec<FileChange>) -> Vec<u64> {
+    fn cleanup_empty_pre_post(
+        &mut self,
+        changes_fn: &dyn Fn(u64, u64) -> Vec<FileChange>,
+    ) -> Vec<u64> {
         if !self.config.empty_pre_post_cleanup {
             return Vec::new();
         }
@@ -921,11 +912,7 @@ fn compute_status(
 fn format_status_table(changes: &[FileChange]) -> String {
     let mut out = String::new();
     for ch in changes {
-        out.push_str(&format!(
-            "{} {}\n",
-            ch.change_type.short(),
-            ch.path
-        ));
+        out.push_str(&format!("{} {}\n", ch.change_type.short(), ch.path));
     }
     if changes.is_empty() {
         out.push_str("No changes.\n");
@@ -937,11 +924,7 @@ fn format_status_table(changes: &[FileChange]) -> String {
 fn format_status_csv(changes: &[FileChange]) -> String {
     let mut out = String::from("change,path\n");
     for ch in changes {
-        out.push_str(&format!(
-            "{},{}\n",
-            ch.change_type.as_str(),
-            ch.path
-        ));
+        out.push_str(&format!("{},{}\n", ch.change_type.as_str(), ch.path));
     }
     out
 }
@@ -1008,10 +991,7 @@ fn format_snapshot_csv(snapshots: &[&Snapshot]) -> String {
 /// Format config list as a table.
 fn format_config_table(configs: &[&SnapperConfig]) -> String {
     let mut out = String::new();
-    out.push_str(&format!(
-        "{:<20} | {}\n",
-        "Config", "Subvolume"
-    ));
+    out.push_str(&format!("{:<20} | {}\n", "Config", "Subvolume"));
     out.push_str(&format!("{}\n", "-".repeat(50)));
     for cfg in configs {
         out.push_str(&format!("{:<20} | {}\n", cfg.name, cfg.subvolume));
@@ -1097,9 +1077,10 @@ fn collect_flag_values<'a>(args: &'a [String], flag: &str) -> Vec<&'a str> {
     let mut iter = args.iter();
     while let Some(arg) = iter.next() {
         if arg == flag
-            && let Some(val) = iter.next() {
-                values.push(val.as_str());
-            }
+            && let Some(val) = iter.next()
+        {
+            values.push(val.as_str());
+        }
     }
     values
 }
@@ -1166,7 +1147,7 @@ fn run_snapper(args: &[String]) -> i32 {
         "rollback" => cmd_rollback(config_name, subcmd_args),
         "cleanup" => cmd_cleanup(config_name, subcmd_args),
         _ => {
-            eprintln!("snapper: unknown subcommand '{}'", subcmd);
+            eprintln!("snapper: unknown subcommand {}", quoteaf_os(subcmd));
             eprintln!("Try 'snapper --help' for more information.");
             1
         }
@@ -1178,30 +1159,57 @@ fn print_snapper_usage() {
     let mut out = stdout.lock();
     let _ = writeln!(out, "snapper {} - Filesystem snapshot manager", VERSION);
     let _ = writeln!(out);
-    let _ = writeln!(out, "Usage: snapper [--config <name>] [--csvout] <subcommand> [args...]");
+    let _ = writeln!(
+        out,
+        "Usage: snapper [--config <name>] [--csvout] <subcommand> [args...]"
+    );
     let _ = writeln!(out);
     let _ = writeln!(out, "Global options:");
-    let _ = writeln!(out, "  --config <name>, -c <name>  Use config (default: root)");
-    let _ = writeln!(out, "  --csvout                    Machine-readable CSV output");
+    let _ = writeln!(
+        out,
+        "  --config <name>, -c <name>  Use config (default: root)"
+    );
+    let _ = writeln!(
+        out,
+        "  --csvout                    Machine-readable CSV output"
+    );
     let _ = writeln!(out);
     let _ = writeln!(out, "Config management:");
-    let _ = writeln!(out, "  list-configs                          List configured subvolumes");
-    let _ = writeln!(out, "  create-config -n <name> -s <subvolume> Create a new config");
-    let _ = writeln!(out, "  delete-config -n <name>               Delete a config");
-    let _ = writeln!(out, "  get-config -n <name>                  Show config values");
-    let _ = writeln!(out, "  set-config -n <name> KEY=VALUE...     Set config values");
+    let _ = writeln!(
+        out,
+        "  list-configs                          List configured subvolumes"
+    );
+    let _ = writeln!(
+        out,
+        "  create-config -n <name> -s <subvolume> Create a new config"
+    );
+    let _ = writeln!(
+        out,
+        "  delete-config -n <name>               Delete a config"
+    );
+    let _ = writeln!(
+        out,
+        "  get-config -n <name>                  Show config values"
+    );
+    let _ = writeln!(
+        out,
+        "  set-config -n <name> KEY=VALUE...     Set config values"
+    );
     let _ = writeln!(out);
     let _ = writeln!(out, "Snapshot management:");
-    let _ = writeln!(out, "  list                                  List snapshots");
+    let _ = writeln!(
+        out,
+        "  list                                  List snapshots"
+    );
     let _ = writeln!(
         out,
         "  create [-t type] [-d desc] [-c algo] [-u key=val]..."
     );
+    let _ = writeln!(out, "  modify <num> [-d desc] [-c algo] [-u key=val]...");
     let _ = writeln!(
         out,
-        "  modify <num> [-d desc] [-c algo] [-u key=val]..."
+        "  delete <num>...                       Delete snapshots"
     );
-    let _ = writeln!(out, "  delete <num>...                       Delete snapshots");
     let _ = writeln!(
         out,
         "  status <num1>..<num2>                 Show changes between snapshots"
@@ -1214,8 +1222,14 @@ fn print_snapper_usage() {
         out,
         "  undochange <num1>..<num2>             Undo changes between snapshots"
     );
-    let _ = writeln!(out, "  rollback [<num>]                      Rollback to snapshot");
-    let _ = writeln!(out, "  cleanup <algorithm>                   Run cleanup algorithm");
+    let _ = writeln!(
+        out,
+        "  rollback [<num>]                      Rollback to snapshot"
+    );
+    let _ = writeln!(
+        out,
+        "  cleanup <algorithm>                   Run cleanup algorithm"
+    );
 }
 
 /// Stub: load all configs from CONFIG_DIR.
@@ -1289,7 +1303,7 @@ fn cmd_create_config(args: &[String]) -> i32 {
     let cfg = SnapperConfig::new(name, subvolume);
     match save_config(&cfg) {
         Ok(()) => {
-            println!("Config '{}' created.", name);
+            println!("Config {} created.", quoteaf_os(name));
             0
         }
         Err(e) => {
@@ -1309,7 +1323,7 @@ fn cmd_delete_config(args: &[String]) -> i32 {
     };
     match delete_config_file(name) {
         Ok(()) => {
-            println!("Config '{}' deleted.", name);
+            println!("Config {} deleted.", quoteaf_os(name));
             0
         }
         Err(e) => {
@@ -1333,7 +1347,7 @@ fn cmd_get_config(args: &[String]) -> i32 {
             0
         }
         None => {
-            eprintln!("Error: config '{}' not found", name);
+            eprintln!("Error: config {} not found", quoteaf_os(name));
             1
         }
     }
@@ -1350,7 +1364,7 @@ fn cmd_set_config(args: &[String]) -> i32 {
     let mut cfg = match load_config(name) {
         Some(c) => c,
         None => {
-            eprintln!("Error: config '{}' not found", name);
+            eprintln!("Error: config {} not found", quoteaf_os(name));
             return 1;
         }
     };
@@ -1361,7 +1375,7 @@ fn cmd_set_config(args: &[String]) -> i32 {
             if cfg.set_value(&k, &v) {
                 found_kv = true;
             } else {
-                eprintln!("Warning: unknown key '{}'", k);
+                eprintln!("Warning: unknown key {}", quoteaf_os(&k));
             }
         }
     }
@@ -1373,7 +1387,7 @@ fn cmd_set_config(args: &[String]) -> i32 {
 
     match save_config(&cfg) {
         Ok(()) => {
-            println!("Config '{}' updated.", name);
+            println!("Config {} updated.", quoteaf_os(name));
             0
         }
         Err(e) => {
@@ -1411,7 +1425,7 @@ fn cmd_create(config_name: &str, args: &[String]) -> i32 {
     let snap_type = match SnapType::from_str(snap_type_str) {
         Some(t) => t,
         None => {
-            eprintln!("Error: unknown snapshot type '{}'", snap_type_str);
+            eprintln!("Error: unknown snapshot type {}", quoteaf_os(snap_type_str));
             return 1;
         }
     };
@@ -1428,8 +1442,7 @@ fn cmd_create(config_name: &str, args: &[String]) -> i32 {
     }
 
     let pre_number = if snap_type == SnapType::Post {
-        extract_flag(args, "--pre-number")
-            .and_then(|s| s.parse().ok())
+        extract_flag(args, "--pre-number").and_then(|s| s.parse().ok())
     } else {
         None
     };
@@ -1453,7 +1466,7 @@ fn cmd_modify(config_name: &str, args: &[String]) -> i32 {
     let num: u64 = match args[0].parse() {
         Ok(n) => n,
         Err(_) => {
-            eprintln!("Error: invalid snapshot number '{}'", args[0]);
+            eprintln!("Error: invalid snapshot number {}", quoteaf_os(&args[0]));
             return 1;
         }
     };
@@ -1513,7 +1526,7 @@ fn cmd_delete(config_name: &str, args: &[String]) -> i32 {
                 }
             }
             Err(_) => {
-                eprintln!("Error: invalid snapshot number '{}'", arg);
+                eprintln!("Error: invalid snapshot number {}", quoteaf_os(arg));
                 errors += 1;
             }
         }
@@ -1531,7 +1544,10 @@ fn cmd_status(config_name: &str, args: &[String], csvout: bool) -> i32 {
     let (from, to) = match parse_range(&args[0]) {
         Some(r) => r,
         None => {
-            eprintln!("Error: invalid range '{}', expected format: N..M", args[0]);
+            eprintln!(
+                "Error: invalid range {}, expected format: N..M",
+                quoteaf_os(&args[0])
+            );
             return 1;
         }
     };
@@ -1581,7 +1597,10 @@ fn cmd_undochange(config_name: &str, args: &[String]) -> i32 {
     let (from, to) = match parse_range(&args[0]) {
         Some(r) => r,
         None => {
-            eprintln!("Error: invalid range '{}', expected format: N..M", args[0]);
+            eprintln!(
+                "Error: invalid range {}, expected format: N..M",
+                quoteaf_os(&args[0])
+            );
             return 1;
         }
     };
@@ -1626,7 +1645,7 @@ fn cmd_rollback(config_name: &str, args: &[String]) -> i32 {
         match args[0].parse::<u64>() {
             Ok(n) => n,
             Err(_) => {
-                eprintln!("Error: invalid snapshot number '{}'", args[0]);
+                eprintln!("Error: invalid snapshot number {}", quoteaf_os(&args[0]));
                 return 1;
             }
         }
@@ -1659,11 +1678,15 @@ fn cmd_cleanup(config_name: &str, args: &[String]) -> i32 {
     let deleted = match algo.as_str() {
         "timeline" => store.cleanup_timeline(),
         "number" => store.cleanup_number(),
-        "empty-pre-post" => {
-            store.cleanup_empty_pre_post(&|a, b| compute_status(&cfg, &Snapshot::new(a, SnapType::Single), &Snapshot::new(b, SnapType::Single)))
-        }
+        "empty-pre-post" => store.cleanup_empty_pre_post(&|a, b| {
+            compute_status(
+                &cfg,
+                &Snapshot::new(a, SnapType::Single),
+                &Snapshot::new(b, SnapType::Single),
+            )
+        }),
         _ => {
-            eprintln!("Error: unknown cleanup algorithm '{}'", algo);
+            eprintln!("Error: unknown cleanup algorithm {}", quoteaf_os(algo));
             return 1;
         }
     };
@@ -1696,7 +1719,10 @@ fn run_timeline(args: &[String]) -> i32 {
 
     let once = has_flag(args, "--once");
 
-    println!("snapper-timeline: starting for config '{}'", config_name);
+    println!(
+        "snapper-timeline: starting for config {}",
+        quoteaf_os(config_name)
+    );
 
     let cfg = match load_config(config_name) {
         Some(c) => c,
@@ -1704,7 +1730,10 @@ fn run_timeline(args: &[String]) -> i32 {
     };
 
     if !cfg.timeline_create {
-        println!("Timeline creation is disabled for config '{}'.", config_name);
+        println!(
+            "Timeline creation is disabled for config {}.",
+            quoteaf_os(config_name)
+        );
         return 0;
     }
 
@@ -1749,8 +1778,14 @@ fn print_timeline_usage() {
     let _ = writeln!(out, "Usage: snapper-timeline [OPTIONS]");
     let _ = writeln!(out);
     let _ = writeln!(out, "Options:");
-    let _ = writeln!(out, "  --config <name>, -c <name>  Config to use (default: root)");
-    let _ = writeln!(out, "  --once                      Create one snapshot and exit");
+    let _ = writeln!(
+        out,
+        "  --config <name>, -c <name>  Config to use (default: root)"
+    );
+    let _ = writeln!(
+        out,
+        "  --once                      Create one snapshot and exit"
+    );
     let _ = writeln!(out, "  --help, -h                  Show this help");
     let _ = writeln!(out, "  --version, -V               Show version");
 }
@@ -1773,10 +1808,12 @@ fn run_cleanup(args: &[String]) -> i32 {
         .or_else(|| extract_flag(args, "-c"))
         .unwrap_or("root");
 
-    let algo = extract_flag(args, "--algorithm")
-        .or_else(|| extract_flag(args, "-a"));
+    let algo = extract_flag(args, "--algorithm").or_else(|| extract_flag(args, "-a"));
 
-    println!("snapper-cleanup: running for config '{}'", config_name);
+    println!(
+        "snapper-cleanup: running for config {}",
+        quoteaf_os(config_name)
+    );
 
     let cfg = match load_config(config_name) {
         Some(c) => c,
@@ -1806,7 +1843,7 @@ fn run_cleanup(args: &[String]) -> i32 {
             total_deleted += deleted.len();
         }
         Some(a) => {
-            eprintln!("Error: unknown algorithm '{}'", a);
+            eprintln!("Error: unknown algorithm {}", quoteaf_os(a));
             return 1;
         }
         None => {
@@ -1848,7 +1885,10 @@ fn print_cleanup_usage() {
     let _ = writeln!(out, "Usage: snapper-cleanup [OPTIONS]");
     let _ = writeln!(out);
     let _ = writeln!(out, "Options:");
-    let _ = writeln!(out, "  --config <name>, -c <name>          Config (default: root)");
+    let _ = writeln!(
+        out,
+        "  --config <name>, -c <name>          Config (default: root)"
+    );
     let _ = writeln!(
         out,
         "  --algorithm <algo>, -a <algo>       Run specific algorithm"
@@ -2331,10 +2371,7 @@ mod tests {
     #[test]
     fn test_config_get_value_number() {
         let cfg = SnapperConfig::new("root", "/");
-        assert_eq!(
-            cfg.get_value("NUMBER_LIMIT"),
-            Some("50".to_string())
-        );
+        assert_eq!(cfg.get_value("NUMBER_LIMIT"), Some("50".to_string()));
     }
 
     #[test]
@@ -2513,12 +2550,7 @@ mod tests {
     #[test]
     fn test_store_create_with_date() {
         let mut store = SnapshotStore::new(SnapperConfig::new("root", "/"));
-        let num = store.create_with_date(
-            SnapType::Single,
-            12345,
-            "timed",
-            CleanupAlgo::Timeline,
-        );
+        let num = store.create_with_date(SnapType::Single, 12345, "timed", CleanupAlgo::Timeline);
         let snap = store.get(num).unwrap();
         assert_eq!(snap.date, 12345);
         assert_eq!(snap.description, "timed");
@@ -2925,9 +2957,12 @@ mod tests {
     #[test]
     fn test_collect_flag_values_multiple() {
         let args: Vec<String> = vec![
-            "-u".into(), "a=1".into(),
-            "-u".into(), "b=2".into(),
-            "-d".into(), "desc".into(),
+            "-u".into(),
+            "a=1".into(),
+            "-u".into(),
+            "b=2".into(),
+            "-d".into(),
+            "desc".into(),
         ];
         let vals = collect_flag_values(&args, "-u");
         assert_eq!(vals, vec!["a=1", "b=2"]);
@@ -3084,7 +3119,8 @@ mod tests {
     #[test]
     fn test_format_snapshot_csv_with_userdata() {
         let mut snap = Snapshot::new_with_date(1, SnapType::Single, 0);
-        snap.userdata.insert("important".to_string(), "yes".to_string());
+        snap.userdata
+            .insert("important".to_string(), "yes".to_string());
         let csv = format_snapshot_csv(&[&snap]);
         assert!(csv.contains("important=yes"));
     }
@@ -3101,10 +3137,18 @@ mod tests {
     fn test_config_get_all_known_keys() {
         let cfg = SnapperConfig::new("root", "/");
         let keys = [
-            "SUBVOLUME", "SNAPSHOT_DIR", "TIMELINE_CREATE", "TIMELINE_CLEANUP",
-            "TIMELINE_LIMIT_HOURLY", "TIMELINE_LIMIT_DAILY", "TIMELINE_LIMIT_WEEKLY",
-            "TIMELINE_LIMIT_MONTHLY", "TIMELINE_LIMIT_YEARLY", "NUMBER_CLEANUP",
-            "NUMBER_LIMIT", "EMPTY_PRE_POST_CLEANUP",
+            "SUBVOLUME",
+            "SNAPSHOT_DIR",
+            "TIMELINE_CREATE",
+            "TIMELINE_CLEANUP",
+            "TIMELINE_LIMIT_HOURLY",
+            "TIMELINE_LIMIT_DAILY",
+            "TIMELINE_LIMIT_WEEKLY",
+            "TIMELINE_LIMIT_MONTHLY",
+            "TIMELINE_LIMIT_YEARLY",
+            "NUMBER_CLEANUP",
+            "NUMBER_LIMIT",
+            "EMPTY_PRE_POST_CLEANUP",
         ];
         for key in &keys {
             assert!(cfg.get_value(key).is_some(), "key {} should exist", key);

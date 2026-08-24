@@ -46,8 +46,8 @@
 
 #![allow(dead_code)] // Many entry points will be wired up incrementally.
 
-use alloc::boxed::Box;
 use crate::error::{KernelError, KernelResult};
+use alloc::boxed::Box;
 
 // ---------------------------------------------------------------------------
 // Constants

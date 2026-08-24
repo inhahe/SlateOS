@@ -2,3 +2,8 @@
 name = "seldon-cli"
 version = "0.1.0"
 edition = "2024"
+
+[dependencies]
+# seldon-cli names deployments, models and namespaces, identifiers created
+# on the cluster rather than by this tool.
+quoting = { path = "../quoting" }

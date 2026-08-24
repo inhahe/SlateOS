@@ -266,8 +266,10 @@ static DROP_COUNT: AtomicU64 = AtomicU64::new(0);
 static CANCEL_COUNT: AtomicU64 = AtomicU64::new(0);
 static TOTAL_BYTES: AtomicU64 = AtomicU64::new(0);
 
-static ACTIVE_SESSION: PreemptSpinMutex<Option<DragSession>> = PreemptSpinMutex::named(None, b"ACTIVE_SESSION");
-static DROP_ZONES: PreemptSpinMutex<Vec<DropZone>> = PreemptSpinMutex::named(Vec::new(), b"DROP_ZONES");
+static ACTIVE_SESSION: PreemptSpinMutex<Option<DragSession>> =
+    PreemptSpinMutex::named(None, b"ACTIVE_SESSION");
+static DROP_ZONES: PreemptSpinMutex<Vec<DropZone>> =
+    PreemptSpinMutex::named(Vec::new(), b"DROP_ZONES");
 
 // ---------------------------------------------------------------------------
 // Session management

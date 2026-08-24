@@ -16,6 +16,7 @@
 //! After changing the root, the working directory is changed to `/`
 //! unless `--skip-chdir` is specified.
 
+use quoting::quoteaf_os;
 use std::env;
 use std::fs;
 use std::io;
@@ -459,7 +460,10 @@ fn print_help() {
     println!();
     println!("DESCRIPTION:");
     println!("  Change the root directory to NEWROOT and execute COMMAND.");
-    println!("  If no COMMAND is given, run '{DEFAULT_SHELL}'.");
+    println!(
+        "  If no COMMAND is given, run {}.",
+        quoteaf_os(DEFAULT_SHELL)
+    );
     println!();
     println!("OPTIONS:");
     println!("  --userspec=USER:GROUP   Run command as USER with primary group GROUP");
@@ -530,7 +534,10 @@ fn main() {
 
     // Step 1: Change the root directory.
     if let Err(e) = do_chroot(&opts.newroot) {
-        eprintln!("chroot: cannot chroot to '{}': {e}", opts.newroot);
+        eprintln!(
+            "chroot: cannot chroot to {}: {e}",
+            quoteaf_os(&opts.newroot)
+        );
         process::exit(125);
     }
 
@@ -584,22 +591,23 @@ fn main() {
             match kind {
                 std::io::ErrorKind::NotFound => {
                     eprintln!(
-                        "chroot: failed to run command '{}': \
-                         no such file or directory",
-                        opts.command
+                        "chroot: failed to run command {}: no such file or directory",
+                        quoteaf_os(&opts.command)
                     );
                     process::exit(127);
                 }
                 std::io::ErrorKind::PermissionDenied => {
                     eprintln!(
-                        "chroot: failed to run command '{}': \
-                         permission denied",
-                        opts.command
+                        "chroot: failed to run command {}: permission denied",
+                        quoteaf_os(&opts.command)
                     );
                     process::exit(126);
                 }
                 _ => {
-                    eprintln!("chroot: failed to run command '{}': {e}", opts.command);
+                    eprintln!(
+                        "chroot: failed to run command {}: {e}",
+                        quoteaf_os(&opts.command)
+                    );
                     process::exit(126);
                 }
             }

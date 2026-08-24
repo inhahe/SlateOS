@@ -25,6 +25,7 @@
 
 #![deny(clippy::all)]
 
+use quoting::quoteaf_os;
 use std::env;
 use std::fs;
 use std::process;
@@ -209,7 +210,11 @@ fn compute_broadcast(ip: [u8; 4], mask: [u8; 4]) -> [u8; 4] {
 /// counters at zero rather than fabricating traffic statistics.
 fn interface_from_net_if_info(info: &NetIfInfo) -> InterfaceInfo {
     let has_ip = !is_zero4(info.ip);
-    let ip_addr = if has_ip { fmt_ipv4(info.ip) } else { String::new() };
+    let ip_addr = if has_ip {
+        fmt_ipv4(info.ip)
+    } else {
+        String::new()
+    };
     let netmask = if has_ip {
         fmt_ipv4(info.mask)
     } else {
@@ -383,9 +388,7 @@ fn read_sysfs_u32(path: &str, default: u32) -> u32 {
 
 /// Parse a sysfs u64 counter.
 fn read_sysfs_u64(path: &str) -> u64 {
-    read_file(path)
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(0)
+    read_file(path).and_then(|s| s.parse().ok()).unwrap_or(0)
 }
 
 /// Parse a hex flags value from sysfs (e.g. "0x1003" -> 0x1003).
@@ -485,47 +488,52 @@ fn read_interfaces() -> Vec<InterfaceInfo> {
 
     // Fallback: parse /proc/net/dev.
     if interfaces.is_empty()
-        && let Some(content) = read_file("/proc/net/dev") {
-            for line in content.lines().skip(2) {
-                let line = line.trim();
-                if let Some((name, stats)) = line.split_once(':') {
-                    let name = name.trim();
-                    let nums: Vec<u64> = stats
-                        .split_whitespace()
-                        .filter_map(|s| s.parse().ok())
-                        .collect();
+        && let Some(content) = read_file("/proc/net/dev")
+    {
+        for line in content.lines().skip(2) {
+            let line = line.trim();
+            if let Some((name, stats)) = line.split_once(':') {
+                let name = name.trim();
+                let nums: Vec<u64> = stats
+                    .split_whitespace()
+                    .filter_map(|s| s.parse().ok())
+                    .collect();
 
-                    let (ip_addr, netmask, broadcast) = get_iface_ip(name);
+                let (ip_addr, netmask, broadcast) = get_iface_ip(name);
 
-                    // /proc/net/dev columns:
-                    // RX: bytes packets errs drop fifo frame compressed multicast
-                    // TX: bytes packets errs drop fifo colls carrier compressed
-                    interfaces.push(InterfaceInfo {
-                        name: name.to_string(),
-                        flags: if ip_addr.is_empty() { 0 } else { iff::UP | iff::RUNNING },
-                        mtu: 1500,
-                        mac: String::new(),
-                        ip_addr,
-                        netmask,
-                        broadcast,
-                        tx_queuelen: 0,
-                        rx_bytes: nums.first().copied().unwrap_or(0),
-                        rx_packets: nums.get(1).copied().unwrap_or(0),
-                        rx_errors: nums.get(2).copied().unwrap_or(0),
-                        rx_dropped: nums.get(3).copied().unwrap_or(0),
-                        rx_overruns: nums.get(4).copied().unwrap_or(0),
-                        rx_frame: nums.get(5).copied().unwrap_or(0),
-                        tx_bytes: nums.get(8).copied().unwrap_or(0),
-                        tx_packets: nums.get(9).copied().unwrap_or(0),
-                        tx_errors: nums.get(10).copied().unwrap_or(0),
-                        tx_dropped: nums.get(11).copied().unwrap_or(0),
-                        tx_overruns: nums.get(12).copied().unwrap_or(0),
-                        tx_carrier: nums.get(14).copied().unwrap_or(0),
-                        tx_collisions: nums.get(13).copied().unwrap_or(0),
-                    });
-                }
+                // /proc/net/dev columns:
+                // RX: bytes packets errs drop fifo frame compressed multicast
+                // TX: bytes packets errs drop fifo colls carrier compressed
+                interfaces.push(InterfaceInfo {
+                    name: name.to_string(),
+                    flags: if ip_addr.is_empty() {
+                        0
+                    } else {
+                        iff::UP | iff::RUNNING
+                    },
+                    mtu: 1500,
+                    mac: String::new(),
+                    ip_addr,
+                    netmask,
+                    broadcast,
+                    tx_queuelen: 0,
+                    rx_bytes: nums.first().copied().unwrap_or(0),
+                    rx_packets: nums.get(1).copied().unwrap_or(0),
+                    rx_errors: nums.get(2).copied().unwrap_or(0),
+                    rx_dropped: nums.get(3).copied().unwrap_or(0),
+                    rx_overruns: nums.get(4).copied().unwrap_or(0),
+                    rx_frame: nums.get(5).copied().unwrap_or(0),
+                    tx_bytes: nums.get(8).copied().unwrap_or(0),
+                    tx_packets: nums.get(9).copied().unwrap_or(0),
+                    tx_errors: nums.get(10).copied().unwrap_or(0),
+                    tx_dropped: nums.get(11).copied().unwrap_or(0),
+                    tx_overruns: nums.get(12).copied().unwrap_or(0),
+                    tx_carrier: nums.get(14).copied().unwrap_or(0),
+                    tx_collisions: nums.get(13).copied().unwrap_or(0),
+                });
             }
         }
+    }
 
     // Last resort: query the kernel directly. The kernel does not yet populate
     // /sys/class/net/ or /proc/net/dev, so without this the tool would report
@@ -663,11 +671,7 @@ fn print_interface(iface: &InterfaceInfo) {
     );
     println!(
         "        TX errors {}  dropped {}  overruns {}  carrier {}  collisions {}",
-        iface.tx_errors,
-        iface.tx_dropped,
-        iface.tx_overruns,
-        iface.tx_carrier,
-        iface.tx_collisions
+        iface.tx_errors, iface.tx_dropped, iface.tx_overruns, iface.tx_carrier, iface.tx_collisions
     );
 
     // Blank line between interfaces.
@@ -678,8 +682,16 @@ fn print_interface(iface: &InterfaceInfo) {
 fn print_short_table(interfaces: &[&InterfaceInfo]) {
     println!(
         "{:<10} {:<6} {:<12} {:<12} {:<10} {:<10} {:<12} {:<12} {:<10} {:<10}",
-        "Iface", "MTU", "RX-OK", "RX-ERR", "RX-DRP", "RX-OVR",
-        "TX-OK", "TX-ERR", "TX-DRP", "TX-OVR"
+        "Iface",
+        "MTU",
+        "RX-OK",
+        "RX-ERR",
+        "RX-DRP",
+        "RX-OVR",
+        "TX-OK",
+        "TX-ERR",
+        "TX-DRP",
+        "TX-OVR"
     );
 
     for iface in interfaces {
@@ -997,7 +1009,7 @@ fn main() {
         match interfaces.iter().find(|i| i.name == *name) {
             Some(info) => print_interface(info),
             None => {
-                eprintln!("ifconfig: interface '{name}' not found");
+                eprintln!("ifconfig: interface {} not found", quoteaf_os(name));
                 process::exit(1);
             }
         }
@@ -1431,7 +1443,10 @@ mod tests {
             "52:54:00:12:34:56"
         );
         assert_eq!(fmt_mac([0, 0, 0, 0, 0, 0]), "00:00:00:00:00:00");
-        assert_eq!(fmt_mac([0xff, 0xab, 0x0c, 0xde, 0x01, 0x9f]), "ff:ab:0c:de:01:9f");
+        assert_eq!(
+            fmt_mac([0xff, 0xab, 0x0c, 0xde, 0x01, 0x9f]),
+            "ff:ab:0c:de:01:9f"
+        );
     }
 
     // --- SYS_NET_IF_CONFIG record building ---

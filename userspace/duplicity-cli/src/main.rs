@@ -4,6 +4,7 @@
 //!
 //! Single personality: `duplicity`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -33,7 +34,10 @@ fn run_duplicity(args: Vec<String>) -> i32 {
     match cmd {
         "full" => {
             let src = args.get(1).map(|s| s.as_str()).unwrap_or("/home/user");
-            let dst = args.get(2).map(|s| s.as_str()).unwrap_or("file:///backup/duplicity");
+            let dst = args
+                .get(2)
+                .map(|s| s.as_str())
+                .unwrap_or("file:///backup/duplicity");
             println!("Local and Remote metadata are synchronized, no sync needed.");
             println!("Last full backup date: none");
             println!("Starting full backup of {} to {}", src, dst);
@@ -55,7 +59,10 @@ fn run_duplicity(args: Vec<String>) -> i32 {
         }
         "incremental" => {
             let src = args.get(1).map(|s| s.as_str()).unwrap_or("/home/user");
-            let dst = args.get(2).map(|s| s.as_str()).unwrap_or("file:///backup/duplicity");
+            let dst = args
+                .get(2)
+                .map(|s| s.as_str())
+                .unwrap_or("file:///backup/duplicity");
             println!("Last full backup date: Mon Jan 15 14:00:00 2024");
             println!("Starting incremental backup of {} to {}", src, dst);
             println!();
@@ -73,7 +80,10 @@ fn run_duplicity(args: Vec<String>) -> i32 {
             0
         }
         "restore" => {
-            let src = args.get(1).map(|s| s.as_str()).unwrap_or("file:///backup/duplicity");
+            let src = args
+                .get(1)
+                .map(|s| s.as_str())
+                .unwrap_or("file:///backup/duplicity");
             let dst = args.get(2).map(|s| s.as_str()).unwrap_or("/tmp/restore");
             println!("Restoring from {} to {}", src, dst);
             println!("  10,234 files restored");
@@ -81,14 +91,20 @@ fn run_duplicity(args: Vec<String>) -> i32 {
             0
         }
         "verify" => {
-            let target = args.get(1).map(|s| s.as_str()).unwrap_or("file:///backup/duplicity");
+            let target = args
+                .get(1)
+                .map(|s| s.as_str())
+                .unwrap_or("file:///backup/duplicity");
             let src = args.get(2).map(|s| s.as_str()).unwrap_or("/home/user");
             println!("Verifying {} against {}", target, src);
             println!("  Verify complete. No differences found.");
             0
         }
         "list-current" => {
-            let target = args.get(1).map(|s| s.as_str()).unwrap_or("file:///backup/duplicity");
+            let target = args
+                .get(1)
+                .map(|s| s.as_str())
+                .unwrap_or("file:///backup/duplicity");
             println!("Listing current files in {}:", target);
             println!("Mon Jan 15 14:00:00 2024 .");
             println!("Mon Jan 15 13:00:00 2024 .bashrc");
@@ -98,7 +114,10 @@ fn run_duplicity(args: Vec<String>) -> i32 {
             0
         }
         "collection-status" => {
-            let target = args.get(1).map(|s| s.as_str()).unwrap_or("file:///backup/duplicity");
+            let target = args
+                .get(1)
+                .map(|s| s.as_str())
+                .unwrap_or("file:///backup/duplicity");
             println!("Collection status for {}:", target);
             println!();
             println!("Chain 1:");
@@ -111,14 +130,20 @@ fn run_duplicity(args: Vec<String>) -> i32 {
             0
         }
         "remove-older" => {
-            let time = args.windows(2).find(|w| w[0] == "--older-than")
-                .map(|w| w[1].as_str()).unwrap_or("30D");
+            let time = args
+                .windows(2)
+                .find(|w| w[0] == "--older-than")
+                .map(|w| w[1].as_str())
+                .unwrap_or("30D");
             println!("Removing backup sets older than {}", time);
             println!("  No old backup sets found. Nothing to delete.");
             0
         }
         "cleanup" => {
-            let target = args.get(1).map(|s| s.as_str()).unwrap_or("file:///backup/duplicity");
+            let target = args
+                .get(1)
+                .map(|s| s.as_str())
+                .unwrap_or("file:///backup/duplicity");
             println!("Cleaning up incomplete sets in {}...", target);
             println!("  Found 0 incomplete backup sets.");
             println!("  Cleanup complete.");
@@ -128,7 +153,7 @@ fn run_duplicity(args: Vec<String>) -> i32 {
             if cmd.is_empty() {
                 eprintln!("Usage: duplicity <command>. See --help.");
             } else {
-                eprintln!("Error: unknown command '{}'. See --help.", cmd);
+                eprintln!("Error: unknown command {}. See --help.", quoteaf_os(cmd));
             }
             1
         }
@@ -144,7 +169,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_duplicity};
+    use super::run_duplicity;
 
     #[test]
     fn help_exits_zero() {

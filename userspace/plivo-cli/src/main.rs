@@ -1,6 +1,7 @@
 #![deny(clippy::all)]
 //! plivo-cli — Slate OS personality CLI for Plivo, the value-CPaaS challenger.
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -236,17 +237,47 @@ fn run_plivo(args: &[String], prog: &str) -> i32 {
         return 0;
     };
     match sub.as_str() {
-        "help" | "-h" | "--help" => { print_help(prog); 0 }
-        "version" | "-V" | "--version" => { print_version(); 0 }
-        "about" => { cmd_about(); 0 }
-        "apis" => { cmd_apis(); 0 }
-        "contaque" => { cmd_contaque(); 0 }
-        "sip" => { cmd_sip(); 0 }
-        "pricing" => { cmd_pricing(); 0 }
-        "networks" => { cmd_networks(); 0 }
-        "customers" => { cmd_customers(); 0 }
+        "help" | "-h" | "--help" => {
+            print_help(prog);
+            0
+        }
+        "version" | "-V" | "--version" => {
+            print_version();
+            0
+        }
+        "about" => {
+            cmd_about();
+            0
+        }
+        "apis" => {
+            cmd_apis();
+            0
+        }
+        "contaque" => {
+            cmd_contaque();
+            0
+        }
+        "sip" => {
+            cmd_sip();
+            0
+        }
+        "pricing" => {
+            cmd_pricing();
+            0
+        }
+        "networks" => {
+            cmd_networks();
+            0
+        }
+        "customers" => {
+            cmd_customers();
+            0
+        }
         other => {
-            eprintln!("{prog}: unknown subcommand '{other}'. Try '{prog} help'.");
+            eprintln!(
+                "{prog}: unknown subcommand {}. Try '{prog} help'.",
+                quoteaf_os(other)
+            );
             2
         }
     }

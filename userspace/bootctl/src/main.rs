@@ -8,6 +8,7 @@
 
 #![deny(clippy::all)]
 
+use quoting::quoteaf_os;
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -114,7 +115,10 @@ fn save_loader_config(esp: &Path, config: &LoaderConfig) -> Result<(), String> {
         content.push_str(&format!("timeout  {timeout}\n"));
     }
     content.push_str(&format!("console-mode  {}\n", config.console_mode));
-    content.push_str(&format!("editor  {}\n", if config.editor { "yes" } else { "no" }));
+    content.push_str(&format!(
+        "editor  {}\n",
+        if config.editor { "yes" } else { "no" }
+    ));
 
     fs::write(conf_dir.join("loader.conf"), content)
         .map_err(|e| format!("Cannot write loader.conf: {e}"))
@@ -132,9 +136,10 @@ fn discover_entries(esp: &Path) -> Vec<BootEntry> {
         for entry in dir_entries.flatten() {
             let path = entry.path();
             if path.extension().and_then(|e| e.to_str()) == Some("conf")
-                && let Some(boot_entry) = parse_boot_entry(&path) {
-                    entries.push(boot_entry);
-                }
+                && let Some(boot_entry) = parse_boot_entry(&path)
+            {
+                entries.push(boot_entry);
+            }
         }
     }
 
@@ -231,9 +236,11 @@ fn get_firmware_info() -> (String, bool) {
 fn get_secure_boot_status() -> &'static str {
     let sb_path = "/sys/firmware/efi/efivars/SecureBoot-8be4df61-93ca-11d2-aa0d-00e098032b8c";
     if let Ok(data) = fs::read(sb_path)
-        && data.len() >= 5 && data[4] == 1 {
-            return "enabled";
-        }
+        && data.len() >= 5
+        && data[4] == 1
+    {
+        return "enabled";
+    }
     "disabled"
 }
 
@@ -262,7 +269,10 @@ fn cmd_status(esp: &Path) -> i32 {
         println!("      timeout: {t}s");
     }
     println!(" console-mode: {}", config.console_mode);
-    println!("       editor: {}", if config.editor { "yes" } else { "no" });
+    println!(
+        "       editor: {}",
+        if config.editor { "yes" } else { "no" }
+    );
     println!();
     println!("Boot Entries ({}):", entries.len());
     for (i, entry) in entries.iter().enumerate() {
@@ -287,8 +297,8 @@ fn cmd_list(esp: &Path) -> i32 {
     let config = load_loader_config(esp);
 
     for entry in &entries {
-        let is_default = entry.id.contains(&config.default_entry)
-            || config.default_entry == "@saved";
+        let is_default =
+            entry.id.contains(&config.default_entry) || config.default_entry == "@saved";
         let marker = if is_default { " (default)" } else { "" };
         println!("{}{marker}", entry.title);
         println!("  id: {}", entry.id);
@@ -306,7 +316,7 @@ fn cmd_set_default(esp: &Path, entry_id: &str) -> i32 {
 
     match save_loader_config(esp, &config) {
         Ok(()) => {
-            println!("bootctl: default set to '{entry_id}'");
+            println!("bootctl: default set to {}", quoteaf_os(entry_id));
             0
         }
         Err(e) => {
@@ -322,7 +332,7 @@ fn cmd_set_oneshot(esp: &Path, entry_id: &str) -> i32 {
     let _ = fs::create_dir_all(&loader_dir);
     match fs::write(loader_dir.join("oneshot"), entry_id) {
         Ok(()) => {
-            println!("bootctl: oneshot set to '{entry_id}'");
+            println!("bootctl: oneshot set to {}", quoteaf_os(entry_id));
             0
         }
         Err(e) => {
@@ -339,7 +349,7 @@ fn cmd_set_timeout(esp: &Path, timeout: &str) -> i32 {
     } else if let Ok(t) = timeout.parse::<u32>() {
         config.timeout = Some(t);
     } else {
-        eprintln!("bootctl: invalid timeout '{timeout}'");
+        eprintln!("bootctl: invalid timeout {}", quoteaf_os(timeout));
         return 1;
     }
 
@@ -360,7 +370,10 @@ fn cmd_install(esp: &Path) -> i32 {
     let _ = fs::create_dir_all(&target);
     let _ = fs::create_dir_all(esp.join("loader/entries"));
 
-    eprintln!("bootctl: would copy systemd-bootx64.efi to {}", target.display());
+    eprintln!(
+        "bootctl: would copy systemd-bootx64.efi to {}",
+        target.display()
+    );
     eprintln!("bootctl: would set EFI boot variable");
     println!("bootctl: installed to {}", esp.display());
     0
@@ -480,9 +493,7 @@ fn main() {
         i += 1;
     }
 
-    let esp = esp_path
-        .map(PathBuf::from)
-        .unwrap_or_else(find_esp);
+    let esp = esp_path.map(PathBuf::from).unwrap_or_else(find_esp);
 
     let exit_code = match command.as_deref() {
         Some("status") | None => cmd_status(&esp),
@@ -514,7 +525,7 @@ fn main() {
         Some("is-installed") => cmd_is_installed(&esp),
         Some("reboot-to-firmware") => cmd_reboot_to_firmware(),
         Some(other) => {
-            eprintln!("bootctl: unknown command '{other}'");
+            eprintln!("bootctl: unknown command {}", quoteaf_os(other));
             1
         }
     };

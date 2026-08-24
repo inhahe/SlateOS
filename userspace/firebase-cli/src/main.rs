@@ -4,11 +4,16 @@
 //!
 //! Multi-personality: `firebase`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_firebase(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
@@ -47,7 +52,9 @@ fn run_firebase(args: &[String]) -> i32 {
             println!("Firebase initialization complete!");
         }
         "deploy" => {
-            let only = args.windows(2).find(|w| w[0] == "--only")
+            let only = args
+                .windows(2)
+                .find(|w| w[0] == "--only")
                 .map(|w| w[1].as_str());
             if let Some(o) = only {
                 println!("Deploying {} only...", o);
@@ -79,7 +86,7 @@ fn run_firebase(args: &[String]) -> i32 {
                     println!("  UI:        http://localhost:4000");
                 }
                 "exec" => println!("firebase emulators: exec completed"),
-                _ => println!("firebase emulators: '{}' completed", sub),
+                _ => println!("firebase emulators: {} completed", quoteaf_os(sub)),
             }
         }
         "projects" => {
@@ -95,14 +102,17 @@ fn run_firebase(args: &[String]) -> i32 {
         }
         "login" => println!("Already logged in as user@example.com"),
         "logout" => println!("Logged out."),
-        _ => println!("firebase: '{}' completed", subcmd),
+        _ => println!("firebase: {} completed", quoteaf_os(subcmd)),
     }
     0
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "firebase".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "firebase".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_firebase(&rest);
     process::exit(code);
@@ -110,7 +120,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_firebase};
+    use super::{basename, run_firebase, strip_ext};
 
     #[test]
     fn basename_strips_path() {

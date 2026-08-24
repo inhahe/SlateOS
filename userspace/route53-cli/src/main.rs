@@ -1,6 +1,7 @@
 #![deny(clippy::all)]
 //! route53-cli — Slate OS personality CLI for Amazon Route 53, AWS's managed DNS.
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -232,17 +233,47 @@ fn run_route53(args: &[String], prog: &str) -> i32 {
         return 0;
     };
     match sub.as_str() {
-        "help" | "-h" | "--help" => { print_help(prog); 0 }
-        "version" | "-V" | "--version" => { print_version(); 0 }
-        "about" => { cmd_about(); 0 }
-        "records" => { cmd_records(); 0 }
-        "routing" => { cmd_routing(); 0 }
-        "health" => { cmd_health(); 0 }
-        "private" => { cmd_private(); 0 }
-        "pricing" => { cmd_pricing(); 0 }
-        "resolver" => { cmd_resolver(); 0 }
+        "help" | "-h" | "--help" => {
+            print_help(prog);
+            0
+        }
+        "version" | "-V" | "--version" => {
+            print_version();
+            0
+        }
+        "about" => {
+            cmd_about();
+            0
+        }
+        "records" => {
+            cmd_records();
+            0
+        }
+        "routing" => {
+            cmd_routing();
+            0
+        }
+        "health" => {
+            cmd_health();
+            0
+        }
+        "private" => {
+            cmd_private();
+            0
+        }
+        "pricing" => {
+            cmd_pricing();
+            0
+        }
+        "resolver" => {
+            cmd_resolver();
+            0
+        }
         other => {
-            eprintln!("{prog}: unknown subcommand '{other}'. Try '{prog} help'.");
+            eprintln!(
+                "{prog}: unknown subcommand {}. Try '{prog} help'.",
+                quoteaf_os(other)
+            );
             2
         }
     }

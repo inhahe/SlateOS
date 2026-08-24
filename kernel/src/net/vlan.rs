@@ -452,9 +452,36 @@ pub fn procfs_content() -> String {
 // Self-tests
 // ---------------------------------------------------------------------------
 
-/// Run VLAN self-tests.
+/// Run the module's self-test suite against state of its own.
+///
+/// The suite mutates module state and asserts exact contents, and it used to
+/// do that to the *live* state -- which, since it is also a kernel-shell
+/// subcommand, changed or destroyed whatever the user had here and then
+/// reported success.  It is moved aside for the duration and put back
+/// afterwards; `crate::fs::selftest` records why this shape rather than the
+/// alternatives.
+///
+/// Each pristine value is the `static`'s own initialiser, which is the one
+/// spelling of "what a fresh boot holds" that cannot drift away from it.
 #[allow(dead_code)] // Public API.
 pub fn self_test() -> KernelResult<()> {
+    let _pristine_tagged_rx = crate::fs::selftest::pristine_atomic(&TAGGED_RX, 0);
+    let _pristine_tagged_tx = crate::fs::selftest::pristine_atomic(&TAGGED_TX, 0);
+    let _pristine_untagged_rx = crate::fs::selftest::pristine_atomic(&UNTAGGED_RX, 0);
+    let _pristine_unknown_vlan_drops = crate::fs::selftest::pristine_atomic(&UNKNOWN_VLAN_DROPS, 0);
+    crate::fs::selftest::with_pristine(
+        &VLANS,
+        [const { VlanInterface::empty() }; MAX_VLANS],
+        self_test_inner,
+    )
+}
+
+// `KernelResult` is `self_test`'s signature, which the shell's dispatch table
+// fixes; this body has no failing path of its own and never had one. The lint
+// fires only because the split moved that body into a *private* function, and
+// private is the visibility it inspects -- the code itself is unchanged.
+#[allow(clippy::unnecessary_wraps)]
+fn self_test_inner() -> KernelResult<()> {
     crate::serial_println!("[vlan] Running VLAN self-tests...");
     let mut passed = 0u32;
 

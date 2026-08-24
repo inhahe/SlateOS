@@ -27,11 +27,9 @@
 // CRC accumulators is bounded by container header limits and
 // length checks immediately preceding any slice/index. Decompression
 // errors surface as Err rather than panic.
-#![allow(
-    clippy::arithmetic_side_effects,
-    clippy::indexing_slicing,
-)]
+#![allow(clippy::arithmetic_side_effects, clippy::indexing_slicing)]
 
+use quoting::{quoteaf_os, quotef_os};
 use std::env;
 use std::fs::{self, File};
 use std::io::{self, Read, Write};
@@ -334,7 +332,11 @@ struct BitWriter<W: Write> {
 
 impl<W: Write> BitWriter<W> {
     fn new(inner: W) -> Self {
-        Self { inner, buf: 0, bits: 0 }
+        Self {
+            inner,
+            buf: 0,
+            bits: 0,
+        }
     }
 
     fn write_bits(&mut self, val: u32, n: u32) -> io::Result<()> {
@@ -369,7 +371,12 @@ struct BitReader<'a> {
 
 impl<'a> BitReader<'a> {
     fn new(data: &'a [u8]) -> Self {
-        Self { data, pos: 0, buf: 0, bits: 0 }
+        Self {
+            data,
+            pos: 0,
+            buf: 0,
+            bits: 0,
+        }
     }
 
     fn refill(&mut self) -> Result<(), String> {
@@ -458,7 +465,13 @@ impl HuffmanTable {
 
         let max_len = lengths.iter().copied().fold(0u8, u8::max) as u32;
 
-        Ok(HuffmanTable { counts, symbols, first_code, first_sym, max_len })
+        Ok(HuffmanTable {
+            counts,
+            symbols,
+            first_code,
+            first_sym,
+            max_len,
+        })
     }
 
     fn decode(&self, reader: &mut BitReader<'_>) -> Result<u16, String> {
@@ -470,9 +483,11 @@ impl HuffmanTable {
             let f = self.first_code[bits as usize];
             if count > 0 && code >= f && code < f + count {
                 let idx = (self.first_sym[bits as usize] + (code - f)) as usize;
-                return self.symbols.get(idx).copied().ok_or_else(|| {
-                    "huffman: symbol index out of range".to_string()
-                });
+                return self
+                    .symbols
+                    .get(idx)
+                    .copied()
+                    .ok_or_else(|| "huffman: symbol index out of range".to_string());
             }
         }
         Err("huffman: no symbol found".to_string())
@@ -481,10 +496,18 @@ impl HuffmanTable {
 
 fn fixed_litlen_table() -> Result<HuffmanTable, String> {
     let mut lengths = [0u8; 288];
-    for item in &mut lengths[0..=143] { *item = 8; }
-    for item in &mut lengths[144..=255] { *item = 9; }
-    for item in &mut lengths[256..=279] { *item = 7; }
-    for item in &mut lengths[280..=287] { *item = 8; }
+    for item in &mut lengths[0..=143] {
+        *item = 8;
+    }
+    for item in &mut lengths[144..=255] {
+        *item = 9;
+    }
+    for item in &mut lengths[256..=279] {
+        *item = 7;
+    }
+    for item in &mut lengths[280..=287] {
+        *item = 8;
+    }
     HuffmanTable::from_lengths(&lengths)
 }
 
@@ -498,16 +521,24 @@ fn fixed_dist_table() -> Result<HuffmanTable, String> {
 
 fn deflate_decompress(reader: &mut BitReader<'_>, output: &mut Vec<u8>) -> Result<(), String> {
     loop {
-        let bfinal = reader.read_bits(1).map_err(|e| format!("deflate: BFINAL: {e}"))?;
-        let btype = reader.read_bits(2).map_err(|e| format!("deflate: BTYPE: {e}"))?;
+        let bfinal = reader
+            .read_bits(1)
+            .map_err(|e| format!("deflate: BFINAL: {e}"))?;
+        let btype = reader
+            .read_bits(2)
+            .map_err(|e| format!("deflate: BTYPE: {e}"))?;
 
         match btype {
             0 => {
                 // Stored block.
-                let len = reader.read_u16_le_aligned()
-                    .map_err(|e| format!("deflate: stored LEN: {e}"))? as usize;
-                let nlen = reader.read_u16_le_aligned()
-                    .map_err(|e| format!("deflate: stored NLEN: {e}"))? as usize;
+                let len = reader
+                    .read_u16_le_aligned()
+                    .map_err(|e| format!("deflate: stored LEN: {e}"))?
+                    as usize;
+                let nlen = reader
+                    .read_u16_le_aligned()
+                    .map_err(|e| format!("deflate: stored NLEN: {e}"))?
+                    as usize;
                 if (len ^ nlen) != 0xFFFF {
                     return Err(format!(
                         "deflate: stored block LEN/NLEN mismatch ({len:#x} ^ {nlen:#x})"
@@ -536,8 +567,8 @@ fn deflate_decompress(reader: &mut BitReader<'_>, output: &mut Vec<u8>) -> Resul
             1 => {
                 let litlen = fixed_litlen_table()
                     .map_err(|e| format!("deflate: fixed litlen table: {e}"))?;
-                let dist = fixed_dist_table()
-                    .map_err(|e| format!("deflate: fixed dist table: {e}"))?;
+                let dist =
+                    fixed_dist_table().map_err(|e| format!("deflate: fixed dist table: {e}"))?;
                 decode_huffman_block(reader, output, &litlen, &dist)
                     .map_err(|e| format!("deflate: fixed block: {e}"))?;
             }
@@ -614,8 +645,9 @@ fn decode_huffman_block(
 fn decode_dynamic_headers(
     reader: &mut BitReader<'_>,
 ) -> Result<(HuffmanTable, HuffmanTable), String> {
-    const CLEN_ORDER: [usize; 19] =
-        [16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15];
+    const CLEN_ORDER: [usize; 19] = [
+        16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15,
+    ];
 
     let hlit = reader.read_bits(5)? as usize + 257;
     let hdist = reader.read_bits(5)? as usize + 1;
@@ -644,7 +676,9 @@ fn decode_dynamic_headers(
                 let prev = lengths[i - 1];
                 let repeat = reader.read_bits(2)? as usize + 3;
                 for _ in 0..repeat {
-                    if i >= total { break; }
+                    if i >= total {
+                        break;
+                    }
                     lengths[i] = prev;
                     i += 1;
                 }
@@ -652,7 +686,9 @@ fn decode_dynamic_headers(
             17 => {
                 let repeat = reader.read_bits(3)? as usize + 3;
                 for _ in 0..repeat {
-                    if i >= total { break; }
+                    if i >= total {
+                        break;
+                    }
                     lengths[i] = 0;
                     i += 1;
                 }
@@ -660,7 +696,9 @@ fn decode_dynamic_headers(
             18 => {
                 let repeat = reader.read_bits(7)? as usize + 11;
                 for _ in 0..repeat {
-                    if i >= total { break; }
+                    if i >= total {
+                        break;
+                    }
                     lengths[i] = 0;
                     i += 1;
                 }
@@ -689,8 +727,7 @@ fn hash3(data: &[u8], pos: usize) -> usize {
     if pos + 2 >= data.len() {
         return 0;
     }
-    let h = u32::from(data[pos])
-        .wrapping_mul(2_654_435_761)
+    let h = u32::from(data[pos]).wrapping_mul(2_654_435_761)
         ^ u32::from(data[pos + 1]).wrapping_mul(1_234_567)
         ^ u32::from(data[pos + 2]);
     (h as usize) & (HASH_SIZE - 1)
@@ -734,7 +771,9 @@ fn lz77_compress(input: &[u8], level: u8) -> Vec<Token> {
 
         while cur != usize::MAX && chain_len < max_chain {
             let dist = pos.wrapping_sub(cur);
-            if dist == 0 || dist > MAX_DIST { break; }
+            if dist == 0 || dist > MAX_DIST {
+                break;
+            }
             let max_cmp = (n - pos).min(MAX_MATCH);
             let mut mlen = 0;
             while mlen < max_cmp && input[pos + mlen] == input[cur + mlen] {
@@ -743,7 +782,9 @@ fn lz77_compress(input: &[u8], level: u8) -> Vec<Token> {
             if mlen > best_len {
                 best_len = mlen;
                 best_dist = dist;
-                if best_len >= MAX_MATCH { break; }
+                if best_len >= MAX_MATCH {
+                    break;
+                }
             }
             cur = prev[cur % MAX_DIST];
             chain_len += 1;
@@ -753,7 +794,10 @@ fn lz77_compress(input: &[u8], level: u8) -> Vec<Token> {
         head[h] = pos;
 
         if best_len >= MIN_MATCH {
-            tokens.push(Token::Match { dist: best_dist as u16, len: best_len as u16 });
+            tokens.push(Token::Match {
+                dist: best_dist as u16,
+                len: best_len as u16,
+            });
             for k in 1..best_len {
                 if pos + k + MIN_MATCH <= n {
                     let hk = hash3(input, pos + k);
@@ -781,8 +825,10 @@ fn deflate_compress(input: &[u8], level: u8) -> Result<Vec<u8>, String> {
     let mut output = Vec::new();
     let mut bw = BitWriter::new(&mut output);
 
-    bw.write_bits(1, 1).map_err(|e| format!("deflate: BFINAL: {e}"))?;
-    bw.write_bits(1, 2).map_err(|e| format!("deflate: BTYPE: {e}"))?;
+    bw.write_bits(1, 1)
+        .map_err(|e| format!("deflate: BFINAL: {e}"))?;
+    bw.write_bits(1, 2)
+        .map_err(|e| format!("deflate: BTYPE: {e}"))?;
 
     for token in &tokens {
         match *token {
@@ -847,7 +893,9 @@ fn deflate_compress_stored(input: &[u8]) -> Vec<u8> {
         output.push((nlen >> 8) as u8);
         output.extend_from_slice(chunk);
         pos = chunk_end;
-        if is_final { break; }
+        if is_final {
+            break;
+        }
     }
     output
 }
@@ -916,25 +964,50 @@ fn zip_read_central_directory(data: &[u8]) -> Result<Vec<ZipEntry>, String> {
                 "zip: central directory entry {entry_idx} truncated"
             ));
         }
-        let sig = u32::from_le_bytes([data[pos], data[pos+1], data[pos+2], data[pos+3]]);
+        let sig = u32::from_le_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]);
         if sig != SIG_CENTRAL {
             return Err(format!(
                 "zip: expected central dir signature at {pos:#x}, got {sig:#010x}"
             ));
         }
 
-        let method = u16::from_le_bytes([data[pos+10], data[pos+11]]);
-        let mod_time = u16::from_le_bytes([data[pos+12], data[pos+13]]);
-        let mod_date = u16::from_le_bytes([data[pos+14], data[pos+15]]);
-        let entry_crc = u32::from_le_bytes([data[pos+16], data[pos+17], data[pos+18], data[pos+19]]);
-        let comp_size = u32::from_le_bytes([data[pos+20], data[pos+21], data[pos+22], data[pos+23]]);
-        let uncomp_size = u32::from_le_bytes([data[pos+24], data[pos+25], data[pos+26], data[pos+27]]);
-        let fname_len = u16::from_le_bytes([data[pos+28], data[pos+29]]) as usize;
-        let extra_len = u16::from_le_bytes([data[pos+30], data[pos+31]]) as usize;
-        let comment_len = u16::from_le_bytes([data[pos+32], data[pos+33]]) as usize;
-        let internal_attrs = u16::from_le_bytes([data[pos+36], data[pos+37]]);
-        let external_attrs = u32::from_le_bytes([data[pos+38], data[pos+39], data[pos+40], data[pos+41]]);
-        let lhdr_offset = u32::from_le_bytes([data[pos+42], data[pos+43], data[pos+44], data[pos+45]]);
+        let method = u16::from_le_bytes([data[pos + 10], data[pos + 11]]);
+        let mod_time = u16::from_le_bytes([data[pos + 12], data[pos + 13]]);
+        let mod_date = u16::from_le_bytes([data[pos + 14], data[pos + 15]]);
+        let entry_crc = u32::from_le_bytes([
+            data[pos + 16],
+            data[pos + 17],
+            data[pos + 18],
+            data[pos + 19],
+        ]);
+        let comp_size = u32::from_le_bytes([
+            data[pos + 20],
+            data[pos + 21],
+            data[pos + 22],
+            data[pos + 23],
+        ]);
+        let uncomp_size = u32::from_le_bytes([
+            data[pos + 24],
+            data[pos + 25],
+            data[pos + 26],
+            data[pos + 27],
+        ]);
+        let fname_len = u16::from_le_bytes([data[pos + 28], data[pos + 29]]) as usize;
+        let extra_len = u16::from_le_bytes([data[pos + 30], data[pos + 31]]) as usize;
+        let comment_len = u16::from_le_bytes([data[pos + 32], data[pos + 33]]) as usize;
+        let internal_attrs = u16::from_le_bytes([data[pos + 36], data[pos + 37]]);
+        let external_attrs = u32::from_le_bytes([
+            data[pos + 38],
+            data[pos + 39],
+            data[pos + 40],
+            data[pos + 41],
+        ]);
+        let lhdr_offset = u32::from_le_bytes([
+            data[pos + 42],
+            data[pos + 43],
+            data[pos + 44],
+            data[pos + 45],
+        ]);
 
         let name_start = pos + 46;
         let name_end = name_start + fname_len;
@@ -942,7 +1015,9 @@ fn zip_read_central_directory(data: &[u8]) -> Result<Vec<ZipEntry>, String> {
         let comment_end = comment_start + comment_len;
 
         if comment_end > data.len() {
-            return Err(format!("zip: entry {entry_idx} name/comment extends beyond data"));
+            return Err(format!(
+                "zip: entry {entry_idx} name/comment extends beyond data"
+            ));
         }
 
         let name = String::from_utf8_lossy(&data[name_start..name_end]).into_owned();
@@ -980,18 +1055,16 @@ fn find_eocd(data: &[u8]) -> Result<usize, String> {
     // Scan backwards (EOCD is usually near the end).
     let mut i = search_end;
     loop {
-        if data[i] == 0x50
-            && data[i + 1] == 0x4B
-            && data[i + 2] == 0x05
-            && data[i + 3] == 0x06
-        {
+        if data[i] == 0x50 && data[i + 1] == 0x4B && data[i + 2] == 0x05 && data[i + 3] == 0x06 {
             // Verify the comment length matches.
             let comment_len = u16::from_le_bytes([data[i + 20], data[i + 21]]) as usize;
             if i + 22 + comment_len == data.len() {
                 return Ok(i);
             }
         }
-        if i == search_start { break; }
+        if i == search_start {
+            break;
+        }
         i -= 1;
     }
     Err("zip: EOCD record not found".to_string())
@@ -1011,7 +1084,12 @@ fn zip_read_local_data<'a>(data: &'a [u8], entry: &ZipEntry) -> Result<&'a [u8],
         ));
     }
 
-    let sig = u32::from_le_bytes([data[offset], data[offset+1], data[offset+2], data[offset+3]]);
+    let sig = u32::from_le_bytes([
+        data[offset],
+        data[offset + 1],
+        data[offset + 2],
+        data[offset + 3],
+    ]);
     if sig != SIG_LOCAL {
         return Err(format!(
             "zip: expected local file header for '{}' at {offset:#x}, got {sig:#010x}",
@@ -1019,8 +1097,8 @@ fn zip_read_local_data<'a>(data: &'a [u8], entry: &ZipEntry) -> Result<&'a [u8],
         ));
     }
 
-    let fname_len = u16::from_le_bytes([data[offset+26], data[offset+27]]) as usize;
-    let extra_len = u16::from_le_bytes([data[offset+28], data[offset+29]]) as usize;
+    let fname_len = u16::from_le_bytes([data[offset + 26], data[offset + 27]]) as usize;
+    let extra_len = u16::from_le_bytes([data[offset + 28], data[offset + 29]]) as usize;
     let data_start = offset + 30 + fname_len + extra_len;
     let comp_size = entry.compressed_size as usize;
 
@@ -1051,7 +1129,7 @@ fn zip_extract_entry(data: &[u8], entry: &ZipEntry) -> Result<Vec<u8>, String> {
             return Err(format!(
                 "zip: '{}': unsupported compression method {other}",
                 entry.name
-            ))
+            ));
         }
     };
 
@@ -1059,7 +1137,9 @@ fn zip_extract_entry(data: &[u8], entry: &ZipEntry) -> Result<Vec<u8>, String> {
     if output.len() != entry.uncompressed_size as usize {
         return Err(format!(
             "zip: '{}': size mismatch: expected {}, got {}",
-            entry.name, entry.uncompressed_size, output.len()
+            entry.name,
+            entry.uncompressed_size,
+            output.len()
         ));
     }
 
@@ -1087,7 +1167,10 @@ struct ZipWriter {
 
 impl ZipWriter {
     fn new() -> Self {
-        Self { buf: Vec::new(), entries: Vec::new() }
+        Self {
+            buf: Vec::new(),
+            entries: Vec::new(),
+        }
     }
 
     /// Add a file to the archive.
@@ -1160,12 +1243,7 @@ impl ZipWriter {
     }
 
     /// Add a directory entry (stored, no data).
-    fn add_directory(
-        &mut self,
-        name: &str,
-        mod_date: u16,
-        mod_time: u16,
-    ) {
+    fn add_directory(&mut self, name: &str, mod_date: u16, mod_time: u16) {
         // Directory names must end with '/'.
         let dir_name = if name.ends_with('/') {
             name.to_string()
@@ -1395,13 +1473,11 @@ fn collect_files(
     };
 
     let mut children: Vec<PathBuf> = entries
-        .filter_map(|e| {
-            match e {
-                Ok(de) => Some(de.path()),
-                Err(err) => {
-                    errors.push(format!("{}: {err}", dir.display()));
-                    None
-                }
+        .filter_map(|e| match e {
+            Ok(de) => Some(de.path()),
+            Err(err) => {
+                errors.push(format!("{}: {err}", dir.display()));
+                None
             }
         })
         .collect();
@@ -1500,7 +1576,11 @@ fn detect_mode(argv0: &str) -> ToolMode {
         .file_stem()
         .and_then(|s| s.to_str())
         .unwrap_or(argv0);
-    if base == "unzip" { ToolMode::Unzip } else { ToolMode::Zip }
+    if base == "unzip" {
+        ToolMode::Unzip
+    } else {
+        ToolMode::Zip
+    }
 }
 
 fn parse_zip_args(args: &[String]) -> Result<ZipOptions, String> {
@@ -1702,7 +1782,8 @@ fn run_zip(opts: &ZipOptions) -> Result<(), String> {
                     &mut errors,
                 );
                 // Also add the directory entry itself.
-                let dir_arc_name = archive_name(path, path.parent().unwrap_or(path), opts.junk_paths);
+                let dir_arc_name =
+                    archive_name(path, path.parent().unwrap_or(path), opts.junk_paths);
                 if !dir_arc_name.is_empty() {
                     let (dd, dt) = encode_dos_datetime(file_mtime(path));
                     writer.add_directory(&dir_arc_name, dd, dt);
@@ -1725,7 +1806,10 @@ fn run_zip(opts: &ZipOptions) -> Result<(), String> {
                     }
                 }
             } else if !opts.quiet {
-                eprintln!("zip: {source}: is a directory -- ignored (use -r for recursive)");
+                eprintln!(
+                    "zip: {}: is a directory -- ignored (use -r for recursive)",
+                    quotef_os(source)
+                );
             }
             continue;
         }
@@ -1796,9 +1880,7 @@ fn add_one_file(
     total_bytes: &mut u64,
 ) -> Result<(), String> {
     // In update mode, check if a newer version already exists in the archive.
-    if update
-        && let Some(existing_entry) = existing.iter().find(|e| e.name == arc_name)
-    {
+    if update && let Some(existing_entry) = existing.iter().find(|e| e.name == arc_name) {
         let file_mtime = encode_dos_datetime(file_mtime(path));
         let entry_mtime = (existing_entry.mod_date, existing_entry.mod_time);
         if entry_mtime >= file_mtime {
@@ -1838,8 +1920,8 @@ fn add_one_file(
 
 fn run_unzip(opts: &UnzipOptions) -> Result<(), String> {
     let archive_path = Path::new(&opts.archive);
-    let archive_data = read_file(archive_path)
-        .map_err(|e| format!("unzip: cannot open {}: {e}", opts.archive))?;
+    let archive_data =
+        read_file(archive_path).map_err(|e| format!("unzip: cannot open {}: {e}", opts.archive))?;
 
     let entries = zip_read_central_directory(&archive_data)
         .map_err(|e| format!("unzip: {}: {e}", opts.archive))?;
@@ -1881,9 +1963,7 @@ fn list_archive(entries: &[ZipEntry], opts: &UnzipOptions) {
     let mut count = 0usize;
 
     for entry in entries {
-        if !opts.files.is_empty()
-            && !opts.files.iter().any(|f| glob_matches(f, &entry.name))
-        {
+        if !opts.files.is_empty() && !opts.files.iter().any(|f| glob_matches(f, &entry.name)) {
             continue;
         }
         let dt = dos_datetime_str(entry.mod_date, entry.mod_time);
@@ -1900,12 +1980,7 @@ fn list_archive(entries: &[ZipEntry], opts: &UnzipOptions) {
             };
             println!(
                 "{:>10} {:>6} {:>10} {:>9.0}%  {}  {}",
-                entry.uncompressed_size,
-                method_str,
-                entry.compressed_size,
-                ratio,
-                dt,
-                entry.name
+                entry.uncompressed_size, method_str, entry.compressed_size, ratio, dt, entry.name
             );
         } else {
             println!("{:>10}  {}  {}", entry.uncompressed_size, dt, entry.name);
@@ -1941,9 +2016,7 @@ fn test_archive(
     let mut errors = 0usize;
 
     for entry in entries {
-        if !opts.files.is_empty()
-            && !opts.files.iter().any(|f| glob_matches(f, &entry.name))
-        {
+        if !opts.files.is_empty() && !opts.files.iter().any(|f| glob_matches(f, &entry.name)) {
             continue;
         }
         if entry.name.ends_with('/') {
@@ -1982,9 +2055,7 @@ fn extract_archive(
     let mut extracted = 0usize;
 
     for entry in entries {
-        if !opts.files.is_empty()
-            && !opts.files.iter().any(|f| glob_matches(f, &entry.name))
-        {
+        if !opts.files.is_empty() && !opts.files.iter().any(|f| glob_matches(f, &entry.name)) {
             continue;
         }
 
@@ -2041,7 +2112,10 @@ fn extract_archive(
     }
 
     if !opts.quiet {
-        println!("unzip: extracted {extracted} file(s) to '{}'", dest.display());
+        println!(
+            "unzip: extracted {extracted} file(s) to {}",
+            quoteaf_os(dest)
+        );
     }
 
     if errors.is_empty() {
@@ -2105,21 +2179,21 @@ fn main() {
     let argv0 = args.first().map_or("zip", String::as_str);
     let mode = detect_mode(argv0);
 
-    let cli_args = if args.len() > 1 { &args[1..] } else { &[] as &[String] };
+    let cli_args = if args.len() > 1 {
+        &args[1..]
+    } else {
+        &[] as &[String]
+    };
 
     let result = match mode {
-        ToolMode::Zip => {
-            match parse_zip_args(cli_args) {
-                Ok(opts) => run_zip(&opts),
-                Err(e) => Err(e),
-            }
-        }
-        ToolMode::Unzip => {
-            match parse_unzip_args(cli_args) {
-                Ok(opts) => run_unzip(&opts),
-                Err(e) => Err(e),
-            }
-        }
+        ToolMode::Zip => match parse_zip_args(cli_args) {
+            Ok(opts) => run_zip(&opts),
+            Err(e) => Err(e),
+        },
+        ToolMode::Unzip => match parse_unzip_args(cli_args) {
+            Ok(opts) => run_unzip(&opts),
+            Err(e) => Err(e),
+        },
     };
 
     if let Err(e) = result {
@@ -2296,7 +2370,8 @@ mod tests {
             assert!(
                 comp.len() < input.len(),
                 "level={level}: compressed ({}) should be < input ({})",
-                comp.len(), input.len()
+                comp.len(),
+                input.len()
             );
             let mut out = Vec::new();
             let mut reader = BitReader::new(&comp);
@@ -2340,7 +2415,9 @@ mod tests {
     #[test]
     fn test_zip_single_file_stored() {
         let mut writer = ZipWriter::new();
-        writer.add_file("hello.txt", b"Hello, ZIP!", 0, 0, 0).unwrap();
+        writer
+            .add_file("hello.txt", b"Hello, ZIP!", 0, 0, 0)
+            .unwrap();
         let archive = writer.finish();
 
         let entries = zip_read_central_directory(&archive).unwrap();
@@ -2371,7 +2448,9 @@ mod tests {
     fn test_zip_multiple_files() {
         let mut writer = ZipWriter::new();
         writer.add_file("a.txt", b"file A", 6, 0, 0).unwrap();
-        writer.add_file("b.txt", b"file B contents here", 6, 0, 0).unwrap();
+        writer
+            .add_file("b.txt", b"file B contents here", 6, 0, 0)
+            .unwrap();
         writer.add_file("c.txt", b"", 0, 0, 0).unwrap();
         let archive = writer.finish();
 
@@ -2391,7 +2470,9 @@ mod tests {
     fn test_zip_directory_entry() {
         let mut writer = ZipWriter::new();
         writer.add_directory("subdir", 0, 0);
-        writer.add_file("subdir/file.txt", b"inside dir", 0, 0, 0).unwrap();
+        writer
+            .add_file("subdir/file.txt", b"inside dir", 0, 0, 0)
+            .unwrap();
         let archive = writer.finish();
 
         let entries = zip_read_central_directory(&archive).unwrap();
@@ -2434,7 +2515,10 @@ mod tests {
         let archive = writer.finish();
         let offset = find_eocd(&archive).unwrap();
         let sig = u32::from_le_bytes([
-            archive[offset], archive[offset+1], archive[offset+2], archive[offset+3],
+            archive[offset],
+            archive[offset + 1],
+            archive[offset + 2],
+            archive[offset + 3],
         ]);
         assert_eq!(sig, SIG_EOCD);
     }
@@ -2554,8 +2638,12 @@ mod tests {
     #[test]
     fn test_parse_zip_args_flags() {
         let args: Vec<String> = vec![
-            "-r".into(), "-j".into(), "-9".into(), "-v".into(),
-            "out.zip".into(), "dir/".into(),
+            "-r".into(),
+            "-j".into(),
+            "-9".into(),
+            "-v".into(),
+            "out.zip".into(),
+            "dir/".into(),
         ];
         let opts = parse_zip_args(&args).unwrap();
         assert!(opts.recursive);
@@ -2566,10 +2654,7 @@ mod tests {
 
     #[test]
     fn test_parse_zip_args_exclude() {
-        let args: Vec<String> = vec![
-            "-x".into(), "*.log".into(),
-            "out.zip".into(), "src/".into(),
-        ];
+        let args: Vec<String> = vec!["-x".into(), "*.log".into(), "out.zip".into(), "src/".into()];
         let opts = parse_zip_args(&args).unwrap();
         assert_eq!(opts.excludes, vec!["*.log".to_string()]);
     }
@@ -2588,7 +2673,10 @@ mod tests {
     #[test]
     fn test_parse_unzip_args_flags() {
         let args: Vec<String> = vec![
-            "-l".into(), "-d".into(), "/tmp/out".into(), "archive.zip".into(),
+            "-l".into(),
+            "-d".into(),
+            "/tmp/out".into(),
+            "archive.zip".into(),
         ];
         let opts = parse_unzip_args(&args).unwrap();
         assert!(opts.list);
@@ -2597,9 +2685,7 @@ mod tests {
 
     #[test]
     fn test_parse_unzip_args_specific_files() {
-        let args: Vec<String> = vec![
-            "archive.zip".into(), "a.txt".into(), "b.txt".into(),
-        ];
+        let args: Vec<String> = vec!["archive.zip".into(), "a.txt".into(), "b.txt".into()];
         let opts = parse_unzip_args(&args).unwrap();
         assert_eq!(opts.files, vec!["a.txt".to_string(), "b.txt".to_string()]);
     }

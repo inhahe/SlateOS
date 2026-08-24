@@ -4,6 +4,7 @@
 //!
 //! Single personality: `redis-cli`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -88,7 +89,8 @@ fn run_redis_cli(args: Vec<String>) -> i32 {
     }
 
     // Inline command execution
-    let cmds: Vec<&str> = args.iter()
+    let cmds: Vec<&str> = args
+        .iter()
         .filter(|a| !a.starts_with('-'))
         .map(|s| s.as_str())
         .collect();
@@ -122,7 +124,7 @@ fn run_redis_cli(args: Vec<String>) -> i32 {
                 println!("used_memory_peak_human:11.77M");
             }
             "DBSIZE" => println!("(integer) 1234"),
-            _ => println!("(error) ERR unknown command '{}'", cmds[0]),
+            _ => println!("(error) ERR unknown command {}", quoteaf_os(cmds[0])),
         }
         return 0;
     }
@@ -141,7 +143,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_redis_cli};
+    use super::run_redis_cli;
 
     #[test]
     fn help_exits_zero() {

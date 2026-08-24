@@ -4,6 +4,7 @@
 //!
 //! Single personality: `discord`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -42,7 +43,10 @@ fn run_discord(args: Vec<String>) -> i32 {
                     println!("3456789012345678    Gaming Hub        800      false");
                 }
                 "info" => {
-                    let id = args.get(2).map(|s| s.as_str()).unwrap_or("1234567890123456");
+                    let id = args
+                        .get(2)
+                        .map(|s| s.as_str())
+                        .unwrap_or("1234567890123456");
                     println!("Guild: {}", id);
                     println!("  Name:        My Server");
                     println!("  Members:     150");
@@ -52,7 +56,9 @@ fn run_discord(args: Vec<String>) -> i32 {
                     println!("  Region:      us-east");
                     println!("  Boost Level: 2 (7 boosts)");
                 }
-                _ => { println!("Guild operation: {}", sub); }
+                _ => {
+                    println!("Guild operation: {}", sub);
+                }
             }
             0
         }
@@ -72,7 +78,9 @@ fn run_discord(args: Vec<String>) -> i32 {
                     println!("✔ Created channel #{}", name);
                     println!("  ID: 6666666666666666");
                 }
-                _ => { println!("Channel operation: {}", sub); }
+                _ => {
+                    println!("Channel operation: {}", sub);
+                }
             }
             0
         }
@@ -80,8 +88,16 @@ fn run_discord(args: Vec<String>) -> i32 {
             let sub = args.get(1).map(|s| s.as_str()).unwrap_or("send");
             match sub {
                 "send" => {
-                    let ch = args.windows(2).find(|w| w[0] == "-c" || w[0] == "--channel").map(|w| w[1].as_str()).unwrap_or("1111111111111111");
-                    let msg = args.windows(2).find(|w| w[0] == "-m" || w[0] == "--message").map(|w| w[1].as_str()).unwrap_or("Hello!");
+                    let ch = args
+                        .windows(2)
+                        .find(|w| w[0] == "-c" || w[0] == "--channel")
+                        .map(|w| w[1].as_str())
+                        .unwrap_or("1111111111111111");
+                    let msg = args
+                        .windows(2)
+                        .find(|w| w[0] == "-m" || w[0] == "--message")
+                        .map(|w| w[1].as_str())
+                        .unwrap_or("Hello!");
                     println!("✔ Sent to channel {}", ch);
                     println!("  Content: {}", msg);
                     println!("  Message ID: 7777777777777777");
@@ -92,7 +108,9 @@ fn run_discord(args: Vec<String>) -> i32 {
                     println!("  [14:01] Bob: Working on the deploy");
                     println!("  [14:05] Bot: Build #123 passed ✓");
                 }
-                _ => { println!("Message operation: {}", sub); }
+                _ => {
+                    println!("Message operation: {}", sub);
+                }
             }
             0
         }
@@ -101,11 +119,19 @@ fn run_discord(args: Vec<String>) -> i32 {
             match sub {
                 "list" => {
                     println!("ID                  Username          Nickname     Status   Joined");
-                    println!("1000000000000001    alice#1234        Alice        online   2024-01-01");
-                    println!("1000000000000002    bob#5678          Bob          idle     2024-01-05");
-                    println!("1000000000000003    charlie#9012      Charlie      dnd      2024-01-10");
+                    println!(
+                        "1000000000000001    alice#1234        Alice        online   2024-01-01"
+                    );
+                    println!(
+                        "1000000000000002    bob#5678          Bob          idle     2024-01-05"
+                    );
+                    println!(
+                        "1000000000000003    charlie#9012      Charlie      dnd      2024-01-10"
+                    );
                 }
-                _ => { println!("Member operation: {}", sub); }
+                _ => {
+                    println!("Member operation: {}", sub);
+                }
             }
             0
         }
@@ -119,7 +145,9 @@ fn run_discord(args: Vec<String>) -> i32 {
                     println!("8888888888888890    Developer     #0000FF   12       3");
                     println!("8888888888888891    Member        #808080   130      1");
                 }
-                _ => { println!("Role operation: {}", sub); }
+                _ => {
+                    println!("Role operation: {}", sub);
+                }
             }
             0
         }
@@ -132,10 +160,15 @@ fn run_discord(args: Vec<String>) -> i32 {
                     println!("9999999999999998    GitHub         #dev-chat");
                 }
                 "send" => {
-                    let url = args.get(2).map(|s| s.as_str()).unwrap_or("https://discord.com/api/webhooks/...");
+                    let url = args
+                        .get(2)
+                        .map(|s| s.as_str())
+                        .unwrap_or("https://discord.com/api/webhooks/...");
                     println!("✔ Webhook message sent to {}", url);
                 }
-                _ => { println!("Webhook operation: {}", sub); }
+                _ => {
+                    println!("Webhook operation: {}", sub);
+                }
             }
             0
         }
@@ -151,9 +184,13 @@ fn run_discord(args: Vec<String>) -> i32 {
                     println!("  Public:   false");
                 }
                 "invite" => {
-                    println!("Invite URL: https://discord.com/oauth2/authorize?client_id=1000000000000000&scope=bot&permissions=8");
+                    println!(
+                        "Invite URL: https://discord.com/oauth2/authorize?client_id=1000000000000000&scope=bot&permissions=8"
+                    );
                 }
-                _ => { println!("Bot operation: {}", sub); }
+                _ => {
+                    println!("Bot operation: {}", sub);
+                }
             }
             0
         }
@@ -169,7 +206,7 @@ fn run_discord(args: Vec<String>) -> i32 {
             if cmd.is_empty() {
                 eprintln!("Usage: discord <command>. See --help.");
             } else {
-                eprintln!("Error: unknown command '{}'. See --help.", cmd);
+                eprintln!("Error: unknown command {}. See --help.", quoteaf_os(cmd));
             }
             1
         }
@@ -185,7 +222,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_discord};
+    use super::run_discord;
 
     #[test]
     fn help_exits_zero() {

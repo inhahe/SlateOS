@@ -4,6 +4,7 @@
 //!
 //! Single personality: `cypress`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -30,8 +31,15 @@ fn run_cypress(args: Vec<String>) -> i32 {
     let cmd = args.first().map(|s| s.as_str()).unwrap_or("");
     match cmd {
         "run" => {
-            let spec = args.windows(2).find(|w| w[0] == "--spec").map(|w| w[1].as_str());
-            let browser = args.windows(2).find(|w| w[0] == "--browser").map(|w| w[1].as_str()).unwrap_or("electron");
+            let spec = args
+                .windows(2)
+                .find(|w| w[0] == "--spec")
+                .map(|w| w[1].as_str());
+            let browser = args
+                .windows(2)
+                .find(|w| w[0] == "--browser")
+                .map(|w| w[1].as_str())
+                .unwrap_or("electron");
             println!("═══════════════════════════════════════");
             println!("  (Run Starting)");
             println!("  ┌────────────────────────────────────┐");
@@ -92,7 +100,9 @@ fn run_cypress(args: Vec<String>) -> i32 {
                 "clear" => {
                     println!("✔ Cleared Cypress cache.");
                 }
-                _ => { println!("Cache operation: {}", sub); }
+                _ => {
+                    println!("Cache operation: {}", sub);
+                }
             }
             0
         }
@@ -100,7 +110,7 @@ fn run_cypress(args: Vec<String>) -> i32 {
             if cmd.is_empty() {
                 eprintln!("Usage: cypress <command>. See --help.");
             } else {
-                eprintln!("Error: unknown command '{}'. See --help.", cmd);
+                eprintln!("Error: unknown command {}. See --help.", quoteaf_os(cmd));
             }
             1
         }
@@ -116,7 +126,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_cypress};
+    use super::run_cypress;
 
     #[test]
     fn help_exits_zero() {

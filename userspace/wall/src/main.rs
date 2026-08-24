@@ -5,6 +5,7 @@
 //! - `write`: send message to specific user's terminal
 //! - `mesg`: control terminal message permission
 
+use quoting::quoteaf_os;
 use std::env;
 use std::fs::{self, OpenOptions};
 use std::io::{self, BufRead, Read, Write};
@@ -42,9 +43,10 @@ fn get_tty() -> String {
     // Read from /proc/self/fd/0 symlink or /dev/tty
     if let Ok(link) = fs::read_link("/proc/self/fd/0")
         && let Some(path) = link.to_str()
-            && path.starts_with("/dev/") {
-                return path[5..].to_string();
-            }
+        && path.starts_with("/dev/")
+    {
+        return path[5..].to_string();
+    }
     "console".to_string()
 }
 
@@ -63,9 +65,18 @@ fn format_timestamp() -> String {
     let (year, month, day) = days_to_date(days);
 
     let month_name = match month {
-        1 => "Jan", 2 => "Feb", 3 => "Mar", 4 => "Apr",
-        5 => "May", 6 => "Jun", 7 => "Jul", 8 => "Aug",
-        9 => "Sep", 10 => "Oct", 11 => "Nov", 12 => "Dec",
+        1 => "Jan",
+        2 => "Feb",
+        3 => "Mar",
+        4 => "Apr",
+        5 => "May",
+        6 => "Jun",
+        7 => "Jul",
+        8 => "Aug",
+        9 => "Sep",
+        10 => "Oct",
+        11 => "Nov",
+        12 => "Dec",
         _ => "???",
     };
 
@@ -108,11 +119,12 @@ fn get_logged_in_terminals() -> Vec<(String, String)> {
     if let Ok(entries) = fs::read_dir("/dev/pts") {
         for entry in entries.flatten() {
             if let Some(name) = entry.file_name().to_str()
-                && name.chars().all(|c| c.is_ascii_digit()) {
-                    let tty = format!("pts/{}", name);
-                    // Check if someone is using this terminal
-                    terminals.push(("unknown".to_string(), tty));
-                }
+                && name.chars().all(|c| c.is_ascii_digit())
+            {
+                let tty = format!("pts/{}", name);
+                // Check if someone is using this terminal
+                terminals.push(("unknown".to_string(), tty));
+            }
         }
     }
 
@@ -252,9 +264,10 @@ fn run_wall(args: &[String]) -> i32 {
         }
 
         if let Ok(mut f) = OpenOptions::new().write(true).open(&dev_path)
-            && f.write_all(full_message.as_bytes()).is_ok() {
-                sent += 1;
-            }
+            && f.write_all(full_message.as_bytes()).is_ok()
+        {
+            sent += 1;
+        }
     }
 
     let _ = sent;
@@ -319,7 +332,9 @@ fn run_write(args: &[String]) -> i32 {
     // Send header
     let header = format!(
         "\r\nMessage from {} ({}) [{:?}]...\r\n",
-        username, tty, format_timestamp()
+        username,
+        tty,
+        format_timestamp()
     );
     let _ = target.write_all(header.as_bytes());
 
@@ -413,7 +428,10 @@ fn run_mesg(args: &[String]) -> i32 {
             0
         }
         other => {
-            eprintln!("mesg: invalid argument '{}' (use 'y' or 'n')", other);
+            eprintln!(
+                "mesg: invalid argument {} (use 'y' or 'n')",
+                quoteaf_os(other)
+            );
             1
         }
     }

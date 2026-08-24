@@ -4,6 +4,7 @@
 //!
 //! Single personality: `logcli`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -43,11 +44,19 @@ fn run_logcli(args: Vec<String>) -> i32 {
     match cmd {
         "query" => {
             let query = args.get(1).map(|s| s.as_str()).unwrap_or("{job=\"nginx\"}");
-            println!("2024-01-15T14:30:00Z {{job=\"nginx\", instance=\"web-1\"}} GET /api/health 200 1ms");
+            println!(
+                "2024-01-15T14:30:00Z {{job=\"nginx\", instance=\"web-1\"}} GET /api/health 200 1ms"
+            );
             println!("2024-01-15T14:30:01Z {{job=\"nginx\", instance=\"web-2\"}} GET / 200 3ms");
-            println!("2024-01-15T14:30:02Z {{job=\"nginx\", instance=\"web-1\"}} POST /api/data 201 15ms");
-            println!("2024-01-15T14:30:03Z {{job=\"nginx\", instance=\"web-2\"}} GET /static/app.js 200 0ms");
-            println!("2024-01-15T14:30:05Z {{job=\"nginx\", instance=\"web-1\"}} GET /api/users 200 8ms");
+            println!(
+                "2024-01-15T14:30:02Z {{job=\"nginx\", instance=\"web-1\"}} POST /api/data 201 15ms"
+            );
+            println!(
+                "2024-01-15T14:30:03Z {{job=\"nginx\", instance=\"web-2\"}} GET /static/app.js 200 0ms"
+            );
+            println!(
+                "2024-01-15T14:30:05Z {{job=\"nginx\", instance=\"web-1\"}} GET /api/users 200 8ms"
+            );
             println!("  (query: {})", query);
             0
         }
@@ -95,7 +104,7 @@ fn run_logcli(args: Vec<String>) -> i32 {
             if cmd.is_empty() {
                 eprintln!("Usage: logcli <command>. See --help.");
             } else {
-                eprintln!("Error: unknown command '{}'. See --help.", cmd);
+                eprintln!("Error: unknown command {}. See --help.", quoteaf_os(cmd));
             }
             1
         }
@@ -111,7 +120,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_logcli};
+    use super::run_logcli;
 
     #[test]
     fn help_exits_zero() {

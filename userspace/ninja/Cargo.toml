@@ -3,3 +3,6 @@ name = "ninja"
 version = "0.1.0"
 edition = "2024"
 [dependencies]
+# The directory it reports entering is an argv word, and the unknown-tool
+# message echoes the offending one.
+quoting = { path = "../quoting" }

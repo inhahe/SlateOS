@@ -4,6 +4,7 @@
 //!
 //! Multi-personality: `bedtools`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -76,7 +77,7 @@ fn run_bedtools(args: &[String]) -> i32 {
             println!("chr1\t100\t250\tread1\t42\t+");
             println!("chr1\t500\t650\tread2\t38\t-");
         }
-        _ => println!("bedtools: '{}' completed", subcmd),
+        _ => println!("bedtools: {} completed", quoteaf_os(subcmd)),
     }
     0
 }
@@ -90,7 +91,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_bedtools};
+    use super::run_bedtools;
 
     #[test]
     fn help_exits_zero() {

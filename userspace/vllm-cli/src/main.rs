@@ -4,11 +4,16 @@
 //!
 //! Multi-personality: `vllm`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_vllm(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
@@ -36,10 +41,16 @@ fn run_vllm(args: &[String]) -> i32 {
     match subcmd {
         "--version" => println!("vllm 0.5.0"),
         "serve" => {
-            let model = args.get(1).map(|s| s.as_str()).unwrap_or("meta-llama/Llama-3-8B");
-            let port = args.windows(2).find(|w| w[0] == "--port")
-                .map(|w| w[1].as_str()).unwrap_or("8000");
-            println!("INFO:     Loading model '{}'...", model);
+            let model = args
+                .get(1)
+                .map(|s| s.as_str())
+                .unwrap_or("meta-llama/Llama-3-8B");
+            let port = args
+                .windows(2)
+                .find(|w| w[0] == "--port")
+                .map(|w| w[1].as_str())
+                .unwrap_or("8000");
+            println!("INFO:     Loading model {}...", quoteaf_os(model));
             println!("INFO:     Model loaded in 12.3s");
             println!("INFO:     GPU memory usage: 14.2 GB / 24.0 GB");
             println!("INFO:     Starting OpenAI-compatible API server");
@@ -47,8 +58,11 @@ fn run_vllm(args: &[String]) -> i32 {
             println!("INFO:     API docs: http://0.0.0.0:{}/docs", port);
         }
         "chat" => {
-            let model = args.get(1).map(|s| s.as_str()).unwrap_or("meta-llama/Llama-3-8B");
-            println!("Loading model '{}'...", model);
+            let model = args
+                .get(1)
+                .map(|s| s.as_str())
+                .unwrap_or("meta-llama/Llama-3-8B");
+            println!("Loading model {}...", quoteaf_os(model));
             println!("Model loaded. Type 'quit' to exit.");
             println!();
             println!("> Hello!");
@@ -61,8 +75,11 @@ fn run_vllm(args: &[String]) -> i32 {
             println!("  Total time: 5.6s");
         }
         "benchmark" => {
-            let model = args.get(1).map(|s| s.as_str()).unwrap_or("meta-llama/Llama-3-8B");
-            println!("Benchmarking '{}'...", model);
+            let model = args
+                .get(1)
+                .map(|s| s.as_str())
+                .unwrap_or("meta-llama/Llama-3-8B");
+            println!("Benchmarking {}...", quoteaf_os(model));
             println!();
             println!("  Throughput: 1234.5 tokens/s");
             println!("  Latency (median): 23.4ms");
@@ -70,14 +87,17 @@ fn run_vllm(args: &[String]) -> i32 {
             println!("  Time to first token: 12.3ms");
             println!("  Batch size: 32");
         }
-        _ => println!("vllm: '{}' completed", subcmd),
+        _ => println!("vllm: {} completed", quoteaf_os(subcmd)),
     }
     0
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "vllm".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "vllm".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_vllm(&rest);
     process::exit(code);
@@ -85,7 +105,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_vllm};
+    use super::{basename, run_vllm, strip_ext};
 
     #[test]
     fn basename_strips_path() {

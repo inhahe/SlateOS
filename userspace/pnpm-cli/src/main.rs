@@ -4,11 +4,16 @@
 //!
 //! Multi-personality: `pnpm`, `pnpx`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_pnpm(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
@@ -113,13 +118,13 @@ fn run_pnpm(args: &[String]) -> i32 {
                 "status" => println!("Content-addressable store: 4.2 GB, 12,345 packages"),
                 "prune" => println!("Removed 234 unreferenced packages. Freed 120 MB."),
                 "path" => println!("/home/user/.local/share/pnpm/store/v3"),
-                _ => println!("pnpm store: '{}' completed", sub),
+                _ => println!("pnpm store: {} completed", quoteaf_os(sub)),
             }
         }
         "audit" => {
             println!("0 vulnerabilities found");
         }
-        _ => println!("pnpm: '{}' completed", subcmd),
+        _ => println!("pnpm: {} completed", quoteaf_os(subcmd)),
     }
     0
 }
@@ -130,7 +135,10 @@ fn run_pnpx(args: &[String]) -> i32 {
         println!("Execute a package without installing (pnpm dlx)");
         return 0;
     }
-    let cmd = args.first().map(|s| s.as_str()).unwrap_or("create-react-app");
+    let cmd = args
+        .first()
+        .map(|s| s.as_str())
+        .unwrap_or("create-react-app");
     println!("pnpx: running {}...", cmd);
     println!("{}: executed.", cmd);
     0
@@ -138,7 +146,10 @@ fn run_pnpx(args: &[String]) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "pnpm".to_string());
+    let prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "pnpm".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = match prog.as_str() {
         "pnpx" => run_pnpx(&rest),
@@ -149,7 +160,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_pnpm};
+    use super::{basename, run_pnpm, strip_ext};
 
     #[test]
     fn basename_strips_path() {

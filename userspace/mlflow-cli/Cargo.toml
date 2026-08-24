@@ -2,3 +2,8 @@
 name = "mlflow-cli"
 version = "0.1.0"
 edition = "2024"
+
+[dependencies]
+# mlflow-cli names experiments, runs and models, identifiers created on the
+# tracking server rather than by this tool.
+quoting = { path = "../quoting" }

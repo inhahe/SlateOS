@@ -11134,7 +11134,9 @@ fn drm_read_u32_array(user_ptr: u64, count: u32, max: u32) -> Result<alloc::vec:
         return Err(errno::EINVAL);
     }
     let n = usize::try_from(count).map_err(|_| errno::EINVAL)?;
-    let bytes = n.checked_mul(core::mem::size_of::<u32>()).ok_or(errno::EINVAL)?;
+    let bytes = n
+        .checked_mul(core::mem::size_of::<u32>())
+        .ok_or(errno::EINVAL)?;
     let mut out = alloc::vec![0u32; n];
     // SAFETY: `out` is `n` contiguous `u32` = `bytes` bytes of valid, writable
     // kernel memory; `copy_from_user` validates the user source range and
@@ -57694,7 +57696,10 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                 }
                 // Lower both -> Ok.
                 pcb::set_rlimit(test_pid, pcb::RLIMIT_NOFILE, 32, 64).expect("lower rlimit");
-                assert_eq!(pcb::get_rlimit(test_pid, pcb::RLIMIT_NOFILE), Some((32, 64)));
+                assert_eq!(
+                    pcb::get_rlimit(test_pid, pcb::RLIMIT_NOFILE),
+                    Some((32, 64))
+                );
                 // resource out of range -> InvalidArgument.
                 match pcb::set_rlimit(test_pid, pcb::NUM_RLIMITS, 0, 0) {
                     Err(KernelError::InvalidArgument) => {}

@@ -1326,11 +1326,40 @@ pub fn procfs_content() -> String {
 // Self-tests
 // ---------------------------------------------------------------------------
 
-/// Run TFTP self-tests.
-// Self-tests deliberately runtime-assert TFTP opcodes and error
-// codes as living documentation.
-#[allow(clippy::assertions_on_constants)]
+/// Run the module's self-test suite against state of its own.
+///
+/// The suite mutates module state and asserts exact contents, and it used to
+/// do that to the *live* state -- which, since it is also a kernel-shell
+/// subcommand, changed or destroyed whatever the user had here and then
+/// reported success.  It is moved aside for the duration and put back
+/// afterwards; `crate::fs::selftest` records why this shape rather than the
+/// alternatives.
+///
+/// Each pristine value is the `static`'s own initialiser, which is the one
+/// spelling of "what a fresh boot holds" that cannot drift away from it.
 pub fn self_test() -> KernelResult<()> {
+    let _pristine_server_enabled = crate::fs::selftest::pristine_atomic(&SERVER_ENABLED, false);
+    let _pristine_last_server_tick = crate::fs::selftest::pristine_atomic(&LAST_SERVER_TICK, 0);
+    let _pristine_client_gets = crate::fs::selftest::pristine_atomic(&CLIENT_GETS, 0);
+    let _pristine_client_puts = crate::fs::selftest::pristine_atomic(&CLIENT_PUTS, 0);
+    let _pristine_client_bytes_rx = crate::fs::selftest::pristine_atomic(&CLIENT_BYTES_RX, 0);
+    let _pristine_client_bytes_tx = crate::fs::selftest::pristine_atomic(&CLIENT_BYTES_TX, 0);
+    let _pristine_client_errors = crate::fs::selftest::pristine_atomic(&CLIENT_ERRORS, 0);
+    let _pristine_client_timeouts = crate::fs::selftest::pristine_atomic(&CLIENT_TIMEOUTS, 0);
+    let _pristine_server_requests = crate::fs::selftest::pristine_atomic(&SERVER_REQUESTS, 0);
+    let _pristine_server_completed = crate::fs::selftest::pristine_atomic(&SERVER_COMPLETED, 0);
+    let _pristine_server_errors = crate::fs::selftest::pristine_atomic(&SERVER_ERRORS, 0);
+    let _pristine_server_bytes_tx = crate::fs::selftest::pristine_atomic(&SERVER_BYTES_TX, 0);
+    crate::fs::selftest::with_pristine(&SERVER_STATE, TftpServerState::new(), self_test_inner)
+}
+
+#[allow(clippy::assertions_on_constants)]
+// `KernelResult` is `self_test`'s signature, which the shell's dispatch table
+// fixes; this body has no failing path of its own and never had one. The lint
+// fires only because the split moved that body into a *private* function, and
+// private is the visibility it inspects -- the code itself is unchanged.
+#[allow(clippy::unnecessary_wraps)]
+fn self_test_inner() -> KernelResult<()> {
     crate::serial_println!("[tftp] Running TFTP self-tests...");
     let mut passed = 0u32;
 

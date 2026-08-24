@@ -4,11 +4,16 @@
 //!
 //! Multi-personality: `calibre`, `calibredb`, `ebook-convert`, `ebook-meta`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_calibredb(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
@@ -37,7 +42,7 @@ fn run_calibredb(args: &[String]) -> i32 {
             println!("Search: {}", query);
             println!("  1, 2 (2 results)");
         }
-        _ => println!("calibredb: '{}' completed", subcmd),
+        _ => println!("calibredb: {} completed", quoteaf_os(subcmd)),
     }
     0
 }
@@ -77,7 +82,11 @@ fn run_ebook_meta(args: &[String]) -> i32 {
         println!("ebook-meta (calibre 7.4.0, Slate OS)");
         return 0;
     }
-    let file = args.iter().find(|a| !a.starts_with('-')).map(|s| s.as_str()).unwrap_or("book.epub");
+    let file = args
+        .iter()
+        .find(|a| !a.starts_with('-'))
+        .map(|s| s.as_str())
+        .unwrap_or("book.epub");
     println!("Title     : The Art of Programming");
     println!("Author(s) : John Doe");
     println!("Publisher  : Tech Books");
@@ -105,7 +114,10 @@ fn run_calibre(args: &[String]) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "calibredb".to_string());
+    let prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "calibredb".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = match prog.as_str() {
         "ebook-convert" => run_ebook_convert(&rest),
@@ -118,7 +130,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_calibredb};
+    use super::{basename, run_calibredb, strip_ext};
 
     #[test]
     fn basename_strips_path() {

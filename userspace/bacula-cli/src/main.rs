@@ -4,6 +4,7 @@
 //!
 //! Multi-personality: `bconsole`, `bscan`, `bls`, `bextract`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -53,8 +54,12 @@ fn run_bscan(args: &[String]) -> i32 {
         println!("  -V VOLUME  Volume name");
         return 0;
     }
-    let device = args.iter().find(|a| !a.starts_with('-')).map(|s| s.as_str()).unwrap_or("/dev/st0");
-    println!("bscan: scanning device '{}'", device);
+    let device = args
+        .iter()
+        .find(|a| !a.starts_with('-'))
+        .map(|s| s.as_str())
+        .unwrap_or("/dev/st0");
+    println!("bscan: scanning device {}", quoteaf_os(device));
     println!("  Records: 4523");
     println!("  Jobs: 12");
     println!("  Volumes: 1");
@@ -100,7 +105,8 @@ fn run_bextract(args: &[String]) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first()
+    let prog = args
+        .first()
         .map(|s| strip_ext(basename(s)).to_string())
         .unwrap_or_else(|| "bconsole".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
@@ -116,7 +122,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_bconsole};
+    use super::{basename, run_bconsole, strip_ext};
 
     #[test]
     fn basename_strips_path() {

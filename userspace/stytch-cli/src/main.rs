@@ -1,6 +1,7 @@
 #![deny(clippy::all)]
 //! stytch-cli — Slate OS Stytch developer-first auth platform personality CLI.
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -356,23 +357,56 @@ fn run_stytch(args: &[String], prog: &str) -> i32 {
         return 0;
     }
     match args[0].as_str() {
-        "help" | "--help" | "-h" => { print_help(prog); 0 }
+        "help" | "--help" | "-h" => {
+            print_help(prog);
+            0
+        }
         "version" | "--version" | "-V" => {
             println!("{prog} 0.1.0 (Slate OS personality CLI)");
             0
         }
-        "about" => { print_about(); 0 }
-        "products" => { print_products(); 0 }
-        "primitives" => { print_primitives(); 0 }
-        "methods" => { print_methods(); 0 }
-        "sdks" => { print_sdks(); 0 }
-        "b2b" => { print_b2b(); 0 }
-        "pricing" => { print_pricing(); 0 }
-        "customers" => { print_customers(); 0 }
-        "differentiator" | "diff" => { print_differentiator(); 0 }
-        "critique" => { print_critique(); 0 }
+        "about" => {
+            print_about();
+            0
+        }
+        "products" => {
+            print_products();
+            0
+        }
+        "primitives" => {
+            print_primitives();
+            0
+        }
+        "methods" => {
+            print_methods();
+            0
+        }
+        "sdks" => {
+            print_sdks();
+            0
+        }
+        "b2b" => {
+            print_b2b();
+            0
+        }
+        "pricing" => {
+            print_pricing();
+            0
+        }
+        "customers" => {
+            print_customers();
+            0
+        }
+        "differentiator" | "diff" => {
+            print_differentiator();
+            0
+        }
+        "critique" => {
+            print_critique();
+            0
+        }
         other => {
-            eprintln!("{prog}: unknown subcommand '{other}'");
+            eprintln!("{prog}: unknown subcommand {}", quoteaf_os(other));
             eprintln!("Try '{prog} help' for usage.");
             2
         }
@@ -381,7 +415,8 @@ fn run_stytch(args: &[String], prog: &str) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first()
+    let prog = args
+        .first()
         .map(|s| strip_ext(basename(s)).to_string())
         .unwrap_or_else(|| "stytch".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();

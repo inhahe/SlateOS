@@ -4,3 +4,7 @@ version = "0.1.0"
 edition = "2024"
 description = "SlateOS pv/truncate/shred/fuser - pipe/file management tools"
 [dependencies]
+# The shred personality names the file it is overwriting, once per pass and
+# once when it is gone -- the messages that tell a user their data is being
+# destroyed.
+quoting = { path = "../quoting" }

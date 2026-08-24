@@ -4,6 +4,7 @@
 //!
 //! Single personality: `notation`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -51,7 +52,9 @@ fn run_notation(args: Vec<String>) -> i32 {
             match sub {
                 "list" | "ls" => {
                     println!("NAME       KEY PATH                     CERTIFICATE PATH");
-                    println!("default    /home/user/.config/notation/  /home/user/.config/notation/cert.pem");
+                    println!(
+                        "default    /home/user/.config/notation/  /home/user/.config/notation/cert.pem"
+                    );
                 }
                 "add" => println!("Certificate added successfully."),
                 "delete" | "remove" => println!("Certificate removed."),
@@ -92,7 +95,7 @@ fn run_notation(args: Vec<String>) -> i32 {
         "login" => println!("Login succeeded."),
         "logout" => println!("Logout succeeded."),
         _ => {
-            eprintln!("Unknown command '{}'. Use --help.", cmd);
+            eprintln!("Unknown command {}. Use --help.", quoteaf_os(cmd));
             return 1;
         }
     }
@@ -108,7 +111,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_notation};
+    use super::run_notation;
 
     #[test]
     fn help_exits_zero() {

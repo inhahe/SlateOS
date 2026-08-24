@@ -2,3 +2,7 @@
 name = "upcloud-cli"
 version = "0.1.0"
 edition = "2024"
+
+[dependencies]
+# The `upctl server` subcommand and the top-level one are argv words.
+quoting = { path = "../quoting" }

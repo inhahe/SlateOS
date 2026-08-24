@@ -3,3 +3,6 @@ name = "tuned"
 version = "0.1.0"
 edition = "2024"
 [dependencies]
+# tuned names performance profiles, which are read out of the profiles
+# directory on disk rather than chosen by this tool.
+quoting = { path = "../quoting" }

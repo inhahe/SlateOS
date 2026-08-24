@@ -32,6 +32,7 @@
 #![allow(clippy::needless_pass_by_value)]
 #![allow(clippy::unnecessary_wraps)]
 
+use quoting::quoteaf_os;
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::fmt;
 use std::time::{Duration, Instant};
@@ -960,7 +961,13 @@ pub struct PolicyRule {
 
 impl PolicyRule {
     /// Checks if this rule matches the given message context.
-    fn matches_message(&self, sender: &str, dest: &str, iface: Option<&str>, member: Option<&str>) -> bool {
+    fn matches_message(
+        &self,
+        sender: &str,
+        dest: &str,
+        iface: Option<&str>,
+        member: Option<&str>,
+    ) -> bool {
         if let Some(ref rule_sender) = self.sender {
             if rule_sender != sender {
                 return false;
@@ -1225,9 +1232,7 @@ impl ServiceBus {
 
         for segment in &segments {
             if segment.is_empty() {
-                return Err(BusError::InvalidName(
-                    "empty segment in name".to_owned(),
-                ));
+                return Err(BusError::InvalidName("empty segment in name".to_owned()));
             }
             let first = segment.as_bytes().first().copied();
             match first {
@@ -1299,7 +1304,8 @@ impl ServiceBus {
 
             if self.debug_mode {
                 eprintln!(
-                    "[servicebus] {owner_unique_name} queued for name '{name}' (pos={})",
+                    "[servicebus] {owner_unique_name} queued for name {} (pos={})",
+                    quoteaf_os(name),
                     ownership.queue.len()
                 );
             }
@@ -1339,7 +1345,10 @@ impl ServiceBus {
         self.complete_activation(name);
 
         if self.debug_mode {
-            eprintln!("[servicebus] registered: '{name}' owned by {owner_unique_name} (pid={pid})");
+            eprintln!(
+                "[servicebus] registered: {} owned by {owner_unique_name} (pid={pid})",
+                quoteaf_os(name)
+            );
         }
 
         Ok(())
@@ -1366,7 +1375,10 @@ impl ServiceBus {
         self.release_name_internal(name, owner_unique_name);
 
         if self.debug_mode {
-            eprintln!("[servicebus] unregistered: '{name}' by {owner_unique_name}");
+            eprintln!(
+                "[servicebus] unregistered: {} by {owner_unique_name}",
+                quoteaf_os(name)
+            );
         }
 
         Ok(())
@@ -1401,7 +1413,8 @@ impl ServiceBus {
 
                     if self.debug_mode {
                         eprintln!(
-                            "[servicebus] name '{name}' transferred to {conn_name} (pid={next_pid})"
+                            "[servicebus] name {} transferred to {conn_name} (pid={next_pid})",
+                            quoteaf_os(name)
                         );
                     }
                 }
@@ -1411,7 +1424,10 @@ impl ServiceBus {
                 self.services.remove(name);
 
                 if self.debug_mode {
-                    eprintln!("[servicebus] name '{name}' released (no waiters)");
+                    eprintln!(
+                        "[servicebus] name {} released (no waiters)",
+                        quoteaf_os(name)
+                    );
                 }
             }
         }
@@ -1564,11 +1580,7 @@ impl ServiceBus {
     /// Adds a signal subscription with a match rule.
     ///
     /// Signals matching the rule will be delivered to the subscribing connection.
-    pub fn add_match_rule(
-        &mut self,
-        subscriber: &str,
-        rule: MatchRule,
-    ) -> Result<(), BusError> {
+    pub fn add_match_rule(&mut self, subscriber: &str, rule: MatchRule) -> Result<(), BusError> {
         if !self.connections.contains_key(subscriber) {
             return Err(BusError::ConnectionNotFound(subscriber.to_owned()));
         }
@@ -1812,8 +1824,9 @@ impl ServiceBus {
 
         if self.debug_mode {
             eprintln!(
-                "[servicebus] activating '{name}' via '{}'",
-                entry.exec_path
+                "[servicebus] activating {} via {}",
+                quoteaf_os(name),
+                quoteaf_os(&entry.exec_path)
             );
         }
 
@@ -1840,8 +1853,8 @@ impl ServiceBus {
 
             if self.debug_mode {
                 eprintln!(
-                    "[servicebus] activation complete for '{}', delivering {} queued messages",
-                    name,
+                    "[servicebus] activation complete for {}, delivering {} queued messages",
+                    quoteaf_os(name),
                     pending.queued_messages.len()
                 );
             }
@@ -1874,7 +1887,7 @@ impl ServiceBus {
         for name in &timed_out {
             self.stats.activations_timed_out = self.stats.activations_timed_out.saturating_add(1);
             if self.debug_mode {
-                eprintln!("[servicebus] activation timed out for '{name}'");
+                eprintln!("[servicebus] activation timed out for {}", quoteaf_os(name));
             }
         }
 
@@ -1899,16 +1912,23 @@ impl ServiceBus {
         let mut offset = 4;
 
         // Serialize header fields
-        offset = serialize_value(&mut buf, offset, &Value::String(msg.header.sender.clone()), 0)?;
-        offset =
-            serialize_value(&mut buf, offset, &Value::String(msg.header.destination.clone()), 0)?;
+        offset = serialize_value(
+            &mut buf,
+            offset,
+            &Value::String(msg.header.sender.clone()),
+            0,
+        )?;
+        offset = serialize_value(
+            &mut buf,
+            offset,
+            &Value::String(msg.header.destination.clone()),
+            0,
+        )?;
         offset = serialize_value(&mut buf, offset, &Value::U64(msg.header.serial), 0)?;
         offset = serialize_value(
             &mut buf,
             offset,
-            &Value::Optional(
-                msg.header.reply_serial.map(|s| Box::new(Value::U64(s))),
-            ),
+            &Value::Optional(msg.header.reply_serial.map(|s| Box::new(Value::U64(s)))),
             0,
         )?;
         offset = serialize_value(
@@ -1926,7 +1946,10 @@ impl ServiceBus {
             &mut buf,
             offset,
             &Value::Optional(
-                msg.header.interface.as_ref().map(|s| Box::new(Value::String(s.clone()))),
+                msg.header
+                    .interface
+                    .as_ref()
+                    .map(|s| Box::new(Value::String(s.clone()))),
             ),
             0,
         )?;
@@ -1934,7 +1957,10 @@ impl ServiceBus {
             &mut buf,
             offset,
             &Value::Optional(
-                msg.header.member.as_ref().map(|s| Box::new(Value::String(s.clone()))),
+                msg.header
+                    .member
+                    .as_ref()
+                    .map(|s| Box::new(Value::String(s.clone()))),
             ),
             0,
         )?;
@@ -2640,13 +2666,11 @@ mod tests {
 
         let msgs = bus.drain_outbox(&watcher);
         assert_eq!(msgs.len(), 1);
-        assert_eq!(
-            msgs[0].header.member,
-            Some("NameAcquired".to_owned())
-        );
+        assert_eq!(msgs[0].header.member, Some("NameAcquired".to_owned()));
 
         // Unregister triggers NameLost
-        bus.unregister_service(&owner, "org.slateos.watched").unwrap();
+        bus.unregister_service(&owner, "org.slateos.watched")
+            .unwrap();
 
         let msgs = bus.drain_outbox(&watcher);
         assert_eq!(msgs.len(), 1);
@@ -2746,7 +2770,8 @@ mod tests {
 
         bus.register_service(&c1, "org.slateos.alpha", vec![])
             .unwrap();
-        bus.register_service(&c2, "org.slateos.beta", vec![]).unwrap();
+        bus.register_service(&c2, "org.slateos.beta", vec![])
+            .unwrap();
 
         let names = bus.list_names();
         assert_eq!(names.len(), 2);

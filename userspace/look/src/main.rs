@@ -3,6 +3,7 @@
 //! Searches for lines in a sorted file that begin with the given
 //! prefix string. Uses binary search for efficiency.
 
+use quoting::quoteaf_os;
 use std::env;
 use std::fs;
 use std::process;
@@ -116,7 +117,7 @@ fn parse_args(args: &[String]) -> Options {
             opts.file = positional[1].clone();
         }
         _ => {
-            eprintln!("look: extra operand '{}'", positional[2]);
+            eprintln!("look: extra operand {}", quoteaf_os(&positional[2]));
             process::exit(1);
         }
     }
@@ -143,7 +144,12 @@ fn normalize(s: &str, alpha_only: bool, case_insensitive: bool) -> String {
 }
 
 /// Extract the comparison key from a string, applying termination char
-fn extract_key(s: &str, terminate: Option<char>, alpha_only: bool, case_insensitive: bool) -> String {
+fn extract_key(
+    s: &str,
+    terminate: Option<char>,
+    alpha_only: bool,
+    case_insensitive: bool,
+) -> String {
     let base = if let Some(term) = terminate {
         if let Some(pos) = s.find(term) {
             &s[..pos]
@@ -182,7 +188,12 @@ fn main() {
 
     while lo < hi {
         let mid = lo + (hi - lo) / 2;
-        let line_key = extract_key(lines[mid], opts.terminate, opts.alpha_only, opts.case_insensitive);
+        let line_key = extract_key(
+            lines[mid],
+            opts.terminate,
+            opts.alpha_only,
+            opts.case_insensitive,
+        );
         if line_key < search_key {
             lo = mid + 1;
         } else {
@@ -197,9 +208,7 @@ fn main() {
         if line_key.starts_with(&search_key) {
             println!("{}", line);
             found = true;
-        } else if line_key > search_key
-            && !line_key.starts_with(&search_key)
-        {
+        } else if line_key > search_key && !line_key.starts_with(&search_key) {
             break;
         }
     }
@@ -254,7 +263,10 @@ mod tests {
 
     #[test]
     fn test_extract_key_no_terminate() {
-        assert_eq!(extract_key("hello world", None, false, false), "hello world");
+        assert_eq!(
+            extract_key("hello world", None, false, false),
+            "hello world"
+        );
     }
 
     #[test]
@@ -274,10 +286,7 @@ mod tests {
 
     #[test]
     fn test_extract_key_with_options() {
-        assert_eq!(
-            extract_key("He-llo:world", Some(':'), true, true),
-            "hello"
-        );
+        assert_eq!(extract_key("He-llo:world", Some(':'), true, true), "hello");
     }
 
     // Argument parsing

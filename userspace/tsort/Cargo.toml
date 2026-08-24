@@ -4,3 +4,6 @@ version = "0.1.0"
 edition = "2024"
 description = "SlateOS topological sort"
 [dependencies]
+# Both messages echo an argv word this program rejected -- an unknown option
+# and an extra operand.
+quoting = { path = "../quoting" }

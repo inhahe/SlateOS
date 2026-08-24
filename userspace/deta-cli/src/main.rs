@@ -4,11 +4,16 @@
 //!
 //! Multi-personality: `space`, `deta`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_space(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
@@ -32,10 +37,10 @@ fn run_space(args: &[String]) -> i32 {
         "version" | "--version" => println!("space v0.5.1"),
         "new" => {
             let name = args.get(1).map(|s| s.as_str()).unwrap_or("my-app");
-            println!("Creating project '{}'...", name);
+            println!("Creating project {}...", quoteaf_os(name));
             println!("  Created Spacefile");
             println!("  Created Discovery.md");
-            println!("Project '{}' created.", name);
+            println!("Project {} created.", quoteaf_os(name));
         }
         "push" => {
             println!("Pushing to Deta Space...");
@@ -64,14 +69,17 @@ fn run_space(args: &[String]) -> i32 {
         "login" => {
             println!("Logged in as user@example.com");
         }
-        _ => println!("space: '{}' completed", subcmd),
+        _ => println!("space: {} completed", quoteaf_os(subcmd)),
     }
     0
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "space".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "space".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_space(&rest);
     process::exit(code);
@@ -79,7 +87,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_space};
+    use super::{basename, run_space, strip_ext};
 
     #[test]
     fn basename_strips_path() {

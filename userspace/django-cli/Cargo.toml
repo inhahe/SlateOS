@@ -2,3 +2,8 @@
 name = "django-cli"
 version = "0.1.0"
 edition = "2024"
+
+[dependencies]
+# django-cli names apps, models and migration files that come from the
+# command line and from the project tree on disk.
+quoting = { path = "../quoting" }

@@ -4,6 +4,7 @@
 //!
 //! Single personality: `buildah`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -48,7 +49,9 @@ fn run_buildah(args: Vec<String>) -> i32 {
             println!("OS/Arch:         slateos/amd64");
         }
         "bud" | "build" => {
-            let tag = args.iter().position(|a| a == "-t" || a == "--tag")
+            let tag = args
+                .iter()
+                .position(|a| a == "-t" || a == "--tag")
                 .and_then(|i| args.get(i + 1))
                 .map(|s| s.as_str())
                 .unwrap_or("localhost/image:latest");
@@ -60,7 +63,10 @@ fn run_buildah(args: Vec<String>) -> i32 {
         }
         "from" => {
             let base = args.get(1).map(|s| s.as_str()).unwrap_or("alpine:latest");
-            println!("{}-working-container", base.split(':').next().unwrap_or("alpine"));
+            println!(
+                "{}-working-container",
+                base.split(':').next().unwrap_or("alpine")
+            );
         }
         "images" => {
             println!("REPOSITORY          TAG      IMAGE ID       CREATED        SIZE");
@@ -68,18 +74,26 @@ fn run_buildah(args: Vec<String>) -> i32 {
             println!("docker.io/alpine    3.19     fed789abc012   3 days ago     7.4 MB");
         }
         "containers" => {
-            println!("CONTAINER ID   BUILDER   IMAGE ID        IMAGE NAME                CONTAINER NAME");
-            println!("abc123def456   *         fed789abc012    docker.io/alpine:3.19     alpine-working-container");
+            println!(
+                "CONTAINER ID   BUILDER   IMAGE ID        IMAGE NAME                CONTAINER NAME"
+            );
+            println!(
+                "abc123def456   *         fed789abc012    docker.io/alpine:3.19     alpine-working-container"
+            );
         }
         "inspect" => {
             let target = args.get(1).map(|s| s.as_str()).unwrap_or("container");
-            println!("{{\"Type\":\"\",\"FromImage\":\"\",\"Container\":\"{}\"}}", target);
+            println!(
+                "{{\"Type\":\"\",\"FromImage\":\"\",\"Container\":\"{}\"}}",
+                target
+            );
         }
-        "push" | "pull" | "commit" | "tag" | "rm" | "rmi" | "run" | "copy" | "add" | "config" | "mount" | "umount" => {
+        "push" | "pull" | "commit" | "tag" | "rm" | "rmi" | "run" | "copy" | "add" | "config"
+        | "mount" | "umount" => {
             println!("({} — simulated)", cmd);
         }
         _ => {
-            eprintln!("Unknown command '{}'. Use --help.", cmd);
+            eprintln!("Unknown command {}. Use --help.", quoteaf_os(cmd));
             return 1;
         }
     }
@@ -95,7 +109,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_buildah};
+    use super::run_buildah;
 
     #[test]
     fn help_exits_zero() {

@@ -4,11 +4,16 @@
 //!
 //! Multi-personality: `yarn`, `yarnpkg`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_yarn(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -49,7 +54,9 @@ fn run_yarn(args: &[String]) -> i32 {
     match subcmd {
         "--version" | "-v" => println!("4.3.1"),
         "install" | "i" => {
-            let immutable = args.iter().any(|a| a == "--immutable" || a == "--frozen-lockfile");
+            let immutable = args
+                .iter()
+                .any(|a| a == "--immutable" || a == "--frozen-lockfile");
             if immutable {
                 println!("yarn install v4.3.1 (immutable)");
             } else {
@@ -91,7 +98,10 @@ fn run_yarn(args: &[String]) -> i32 {
             println!("$ {}", script);
         }
         "dlx" => {
-            let pkg = args.get(1).map(|s| s.as_str()).unwrap_or("create-react-app");
+            let pkg = args
+                .get(1)
+                .map(|s| s.as_str())
+                .unwrap_or("create-react-app");
             println!("yarn dlx: running {}...", pkg);
             println!("Done.");
         }
@@ -126,7 +136,7 @@ fn run_yarn(args: &[String]) -> i32 {
                     println!("  packages/utils");
                     println!("  apps/web");
                 }
-                _ => println!("yarn workspace: '{}' completed", sub),
+                _ => println!("yarn workspace: {} completed", quoteaf_os(sub)),
             }
         }
         "cache" => {
@@ -134,7 +144,7 @@ fn run_yarn(args: &[String]) -> i32 {
             match sub {
                 "list" => println!("Cache entries: 234 (456 MB)"),
                 "clean" => println!("Cache cleared."),
-                _ => println!("yarn cache: '{}' completed", sub),
+                _ => println!("yarn cache: {} completed", quoteaf_os(sub)),
             }
         }
         "config" => {
@@ -159,7 +169,10 @@ fn run_yarn(args: &[String]) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "yarn".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "yarn".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_yarn(&rest);
     process::exit(code);
@@ -167,7 +180,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_yarn};
+    use super::{basename, run_yarn, strip_ext};
 
     #[test]
     fn basename_strips_path() {

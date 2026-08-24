@@ -2,3 +2,8 @@
 name = "dovecot-cli"
 version = "0.1.0"
 edition = "2024"
+
+[dependencies]
+# The mailbox subcommand and the rejected command name are argv words -- and
+# a mailbox name in particular is user-created text.
+quoting = { path = "../quoting" }

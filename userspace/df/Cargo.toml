@@ -4,3 +4,6 @@ version = "0.1.0"
 edition = "2024"
 description = "SlateOS disk free space utility"
 [dependencies]
+# df names filesystems and mount points read out of the mount table, so the
+# words come from the kernel and from whoever mounted them.
+quoting = { path = "../quoting" }

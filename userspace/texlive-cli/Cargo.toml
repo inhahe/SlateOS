@@ -2,3 +2,7 @@
 name = "texlive-cli"
 version = "0.1.0"
 edition = "2024"
+
+[dependencies]
+# The package search term and the tlmgr action are argv words.
+quoting = { path = "../quoting" }

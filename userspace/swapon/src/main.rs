@@ -14,6 +14,7 @@
 // consume. Dead-code lint cannot see across that future boundary.
 #![allow(dead_code)]
 
+use quoting::quotef_os;
 use std::collections::HashMap;
 use std::env;
 use std::fs;
@@ -101,9 +102,15 @@ fn parse_meminfo() -> MemInfo {
         Some(c) => c,
         None => {
             return MemInfo {
-                mem_total: 0, mem_free: 0, mem_available: 0,
-                buffers: 0, cached: 0, swap_total: 0, swap_free: 0,
-                shmem: 0, sreclaimable: 0,
+                mem_total: 0,
+                mem_free: 0,
+                mem_available: 0,
+                buffers: 0,
+                cached: 0,
+                swap_total: 0,
+                swap_free: 0,
+                shmem: 0,
+                sreclaimable: 0,
             };
         }
     };
@@ -300,7 +307,7 @@ fn cmd_swapon(args: &[String]) {
     } else {
         for device in &devices {
             if is_swap_active(device) {
-                eprintln!("swapon: {device}: already active");
+                eprintln!("swapon: {}: already active", quotef_os(device));
                 continue;
             }
             activate_swap(device, priority, discard, verbose);
@@ -313,12 +320,18 @@ fn show_swap_summary() {
     let stdout = io::stdout();
     let mut out = stdout.lock();
 
-    let _ = writeln!(out, "{:<40} {:>6} {:>10} {:>10} {:>5}",
-        "Filename", "Type", "Size", "Used", "Priority");
+    let _ = writeln!(
+        out,
+        "{:<40} {:>6} {:>10} {:>10} {:>5}",
+        "Filename", "Type", "Size", "Used", "Priority"
+    );
 
     for e in &entries {
-        let _ = writeln!(out, "{:<40} {:>6} {:>10} {:>10} {:>5}",
-            e.filename, e.swap_type, e.size_kb, e.used_kb, e.priority);
+        let _ = writeln!(
+            out,
+            "{:<40} {:>6} {:>10} {:>10} {:>5}",
+            e.filename, e.swap_type, e.size_kb, e.used_kb, e.priority
+        );
     }
 }
 
@@ -336,12 +349,16 @@ fn activate_swap(device: &str, priority: Option<i32>, discard: bool, verbose: bo
     match fs::write("/proc/sys/swap/activate", &cmd) {
         Ok(()) => {
             if verbose {
-                println!("swapon: {device}: activated{}",
-                    priority.map(|p| format!(" (priority {p})")).unwrap_or_default());
+                println!(
+                    "swapon: {device}: activated{}",
+                    priority
+                        .map(|p| format!(" (priority {p})"))
+                        .unwrap_or_default()
+                );
             }
         }
         Err(e) => {
-            eprintln!("swapon: {device}: failed to activate: {e}");
+            eprintln!("swapon: {}: failed to activate: {e}", quotef_os(device));
         }
     }
 }
@@ -405,7 +422,7 @@ fn cmd_swapoff(args: &[String]) {
     } else {
         for device in &devices {
             if !is_swap_active(device) {
-                eprintln!("swapoff: {device}: not currently active");
+                eprintln!("swapoff: {}: not currently active", quotef_os(device));
                 continue;
             }
             deactivate_swap(device, verbose);
@@ -422,7 +439,7 @@ fn deactivate_swap(device: &str, verbose: bool) {
             }
         }
         Err(e) => {
-            eprintln!("swapoff: {device}: failed to deactivate: {e}");
+            eprintln!("swapoff: {}: failed to deactivate: {e}", quotef_os(device));
         }
     }
 }
@@ -524,7 +541,9 @@ fn display_free(unit: &str, wide: bool, total_line: bool, lohi: bool) {
     let stdout = io::stdout();
     let mut out = stdout.lock();
 
-    let used = info.mem_total.saturating_sub(info.mem_free)
+    let used = info
+        .mem_total
+        .saturating_sub(info.mem_free)
         .saturating_sub(info.buffers)
         .saturating_sub(info.cached);
     let buff_cache = info.buffers + info.cached;
@@ -533,38 +552,82 @@ fn display_free(unit: &str, wide: bool, total_line: bool, lohi: bool) {
     let fmt = |v: u64| format_size_unit(v, unit);
 
     if wide {
-        let _ = writeln!(out, "{:>16} {:>12} {:>12} {:>12} {:>12} {:>12} {:>12}",
-            "", "total", "used", "free", "shared", "buffers", "cache");
-        let _ = writeln!(out, "{:<16} {:>12} {:>12} {:>12} {:>12} {:>12} {:>12}",
-            "Mem:", fmt(info.mem_total), fmt(used),
-            fmt(info.mem_free), fmt(info.shmem),
-            fmt(info.buffers), fmt(info.cached));
+        let _ = writeln!(
+            out,
+            "{:>16} {:>12} {:>12} {:>12} {:>12} {:>12} {:>12}",
+            "", "total", "used", "free", "shared", "buffers", "cache"
+        );
+        let _ = writeln!(
+            out,
+            "{:<16} {:>12} {:>12} {:>12} {:>12} {:>12} {:>12}",
+            "Mem:",
+            fmt(info.mem_total),
+            fmt(used),
+            fmt(info.mem_free),
+            fmt(info.shmem),
+            fmt(info.buffers),
+            fmt(info.cached)
+        );
     } else {
-        let _ = writeln!(out, "{:>16} {:>12} {:>12} {:>12} {:>12} {:>12} {:>12}",
-            "", "total", "used", "free", "shared", "buff/cache", "available");
-        let _ = writeln!(out, "{:<16} {:>12} {:>12} {:>12} {:>12} {:>12} {:>12}",
-            "Mem:", fmt(info.mem_total), fmt(used),
-            fmt(info.mem_free), fmt(info.shmem),
-            fmt(buff_cache), fmt(info.mem_available));
+        let _ = writeln!(
+            out,
+            "{:>16} {:>12} {:>12} {:>12} {:>12} {:>12} {:>12}",
+            "", "total", "used", "free", "shared", "buff/cache", "available"
+        );
+        let _ = writeln!(
+            out,
+            "{:<16} {:>12} {:>12} {:>12} {:>12} {:>12} {:>12}",
+            "Mem:",
+            fmt(info.mem_total),
+            fmt(used),
+            fmt(info.mem_free),
+            fmt(info.shmem),
+            fmt(buff_cache),
+            fmt(info.mem_available)
+        );
     }
 
     if lohi {
         // Low memory = total, High memory = 0 for flat memory model.
-        let _ = writeln!(out, "{:<16} {:>12} {:>12} {:>12}",
-            "Low:", fmt(info.mem_total), fmt(used), fmt(info.mem_free));
-        let _ = writeln!(out, "{:<16} {:>12} {:>12} {:>12}",
-            "High:", fmt(0), fmt(0), fmt(0));
+        let _ = writeln!(
+            out,
+            "{:<16} {:>12} {:>12} {:>12}",
+            "Low:",
+            fmt(info.mem_total),
+            fmt(used),
+            fmt(info.mem_free)
+        );
+        let _ = writeln!(
+            out,
+            "{:<16} {:>12} {:>12} {:>12}",
+            "High:",
+            fmt(0),
+            fmt(0),
+            fmt(0)
+        );
     }
 
-    let _ = writeln!(out, "{:<16} {:>12} {:>12} {:>12}",
-        "Swap:", fmt(info.swap_total), fmt(swap_used), fmt(info.swap_free));
+    let _ = writeln!(
+        out,
+        "{:<16} {:>12} {:>12} {:>12}",
+        "Swap:",
+        fmt(info.swap_total),
+        fmt(swap_used),
+        fmt(info.swap_free)
+    );
 
     if total_line {
         let total_total = info.mem_total + info.swap_total;
         let total_used = used + swap_used;
         let total_free = info.mem_free + info.swap_free;
-        let _ = writeln!(out, "{:<16} {:>12} {:>12} {:>12}",
-            "Total:", fmt(total_total), fmt(total_used), fmt(total_free));
+        let _ = writeln!(
+            out,
+            "{:<16} {:>12} {:>12} {:>12}",
+            "Total:",
+            fmt(total_total),
+            fmt(total_used),
+            fmt(total_free)
+        );
     }
 }
 

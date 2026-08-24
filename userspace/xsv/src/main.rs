@@ -4,6 +4,7 @@
 //!
 //! Single personality: `xsv`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -66,7 +67,8 @@ fn run_xsv(args: Vec<String>) -> i32 {
             0
         }
         "frequency" => {
-            let col = args.iter()
+            let col = args
+                .iter()
                 .position(|a| a == "-s" || a == "--select")
                 .and_then(|i| args.get(i + 1))
                 .map(|s| s.as_str())
@@ -90,7 +92,8 @@ fn run_xsv(args: Vec<String>) -> i32 {
             0
         }
         "search" => {
-            let pattern = args.get(1)
+            let pattern = args
+                .get(1)
                 .filter(|a| !a.starts_with('-'))
                 .map(|s| s.as_str())
                 .unwrap_or("Engineer");
@@ -99,7 +102,7 @@ fn run_xsv(args: Vec<String>) -> i32 {
             println!("Alice,30,Engineering,alice@example.com,95000");
             println!("Carol,35,Engineering,carol@example.com,105000");
             println!("Eve,28,Engineering,eve@example.com,88000");
-            println!("(matched '{}' — 120 records)", pattern);
+            println!("(matched {} — 120 records)", quoteaf_os(pattern));
             0
         }
         "sort" => {
@@ -146,7 +149,7 @@ fn run_xsv(args: Vec<String>) -> i32 {
             0
         }
         _ => {
-            eprintln!("Error: unknown command '{}'. See --help.", cmd);
+            eprintln!("Error: unknown command {}. See --help.", quoteaf_os(cmd));
             1
         }
     }
@@ -161,7 +164,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_xsv};
+    use super::run_xsv;
 
     #[test]
     fn help_exits_zero() {

@@ -4,11 +4,16 @@
 //!
 //! Multi-personality: `jackd`, `jack_connect`, `jack_disconnect`, `jack_lsp`, `jack_control`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_jackd(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -26,14 +31,29 @@ fn run_jackd(args: &[String]) -> i32 {
         println!("jackd version 1.9.22 (Slate OS)");
         return 0;
     }
-    let driver = args.windows(2).find(|w| w[0] == "-d").map(|w| w[1].as_str()).unwrap_or("alsa");
-    let rate = args.windows(2).find(|w| w[0] == "-r").map(|w| w[1].as_str()).unwrap_or("48000");
-    let period = args.windows(2).find(|w| w[0] == "-p").map(|w| w[1].as_str()).unwrap_or("1024");
+    let driver = args
+        .windows(2)
+        .find(|w| w[0] == "-d")
+        .map(|w| w[1].as_str())
+        .unwrap_or("alsa");
+    let rate = args
+        .windows(2)
+        .find(|w| w[0] == "-r")
+        .map(|w| w[1].as_str())
+        .unwrap_or("48000");
+    let period = args
+        .windows(2)
+        .find(|w| w[0] == "-p")
+        .map(|w| w[1].as_str())
+        .unwrap_or("1024");
     println!("jackd 1.9.22");
     println!("  Driver: {}", driver);
     println!("  Sample rate: {} Hz", rate);
     println!("  Period: {} frames", period);
-    println!("  Latency: {:.1} ms", period.parse::<f64>().unwrap_or(1024.0) / rate.parse::<f64>().unwrap_or(48000.0) * 1000.0);
+    println!(
+        "  Latency: {:.1} ms",
+        period.parse::<f64>().unwrap_or(1024.0) / rate.parse::<f64>().unwrap_or(48000.0) * 1000.0
+    );
     println!("  Server started.");
     0
 }
@@ -68,8 +88,14 @@ fn run_jack_connect(args: &[String]) -> i32 {
         println!("Usage: jack_connect SOURCE_PORT DEST_PORT");
         return 0;
     }
-    let src = args.first().map(|s| s.as_str()).unwrap_or("system:capture_1");
-    let dst = args.get(1).map(|s| s.as_str()).unwrap_or("ardour:Audio 1/audio_in 1");
+    let src = args
+        .first()
+        .map(|s| s.as_str())
+        .unwrap_or("system:capture_1");
+    let dst = args
+        .get(1)
+        .map(|s| s.as_str())
+        .unwrap_or("ardour:Audio 1/audio_in 1");
     println!("Connected: {} -> {}", src, dst);
     0
 }
@@ -79,8 +105,14 @@ fn run_jack_disconnect(args: &[String]) -> i32 {
         println!("Usage: jack_disconnect SOURCE_PORT DEST_PORT");
         return 0;
     }
-    let src = args.first().map(|s| s.as_str()).unwrap_or("system:capture_1");
-    let dst = args.get(1).map(|s| s.as_str()).unwrap_or("ardour:Audio 1/audio_in 1");
+    let src = args
+        .first()
+        .map(|s| s.as_str())
+        .unwrap_or("system:capture_1");
+    let dst = args
+        .get(1)
+        .map(|s| s.as_str())
+        .unwrap_or("ardour:Audio 1/audio_in 1");
     println!("Disconnected: {} -> {}", src, dst);
     0
 }
@@ -104,14 +136,17 @@ fn run_jack_control(args: &[String]) -> i32 {
             let driver = args.get(1).map(|s| s.as_str()).unwrap_or("alsa");
             println!("Driver set to: {}", driver);
         }
-        _ => println!("jack_control: '{}' completed", subcmd),
+        _ => println!("jack_control: {} completed", quoteaf_os(subcmd)),
     }
     0
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "jackd".to_string());
+    let prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "jackd".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = match prog.as_str() {
         "jack_lsp" => run_jack_lsp(&rest),
@@ -125,7 +160,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_jackd};
+    use super::{basename, run_jackd, strip_ext};
 
     #[test]
     fn basename_strips_path() {

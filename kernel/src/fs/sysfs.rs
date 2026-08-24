@@ -1668,6 +1668,42 @@ pub fn self_test() -> KernelResult<()> {
         }
     }
 
+    // Through the mount, not through a detached instance.
+    //
+    // Everything above drives a bare `SysFs::new()`, so the VFS never holds
+    // this filesystem's per-mount lock while a generator runs. That is exactly
+    // how the procfs self-deadlock hid for as long as it did (known-issues.md
+    // -> FIXED-A-PROCFS-SELF-DEADLOCKED-ENUMERATING-ITS-OWN-MOUNT-TABLE): a
+    // direct call tests the *generator*, not the filesystem.
+    //
+    // `/sys/fs/mount_count` is the node that matters. It calls `Vfs::mounts()`,
+    // which used to walk the mount table locking every filesystem in it --
+    // including this one, already locked by the VFS on our behalf. It is safe
+    // only because the mount table now caches `fs_type` and locks nothing to
+    // read it. This block is what notices if that regresses.
+    if crate::fs::Vfs::stat("/sys").is_ok() {
+        let entries = crate::fs::Vfs::readdir("/sys/fs")?;
+        let mount_count = crate::fs::Vfs::read_file("/sys/fs/mount_count")?;
+        let osrelease = crate::fs::Vfs::read_file("/sys/kernel/osrelease")?;
+        // The count must parse and be at least 1: this very read went through a
+        // mount, so there is provably one. Zero would mean the generator
+        // returned an empty table rather than the live one.
+        let text = core::str::from_utf8(&mount_count).unwrap_or("");
+        let n: usize = text.trim().parse().unwrap_or(0);
+        if n == 0 {
+            serial_println!("[sysfs]   FAIL: mount_count = {:?}, want >= 1", text);
+            return Err(KernelError::InternalError);
+        }
+        serial_println!(
+            "[sysfs]   through-the-mount: fs/ {} entries, mount_count {}, osrelease {}B, no self-deadlock OK",
+            entries.len(),
+            n,
+            osrelease.len()
+        );
+    } else {
+        serial_println!("[sysfs]   through-the-mount: /sys not mounted, skipped");
+    }
+
     serial_println!("[sysfs] Self-test passed.");
     Ok(())
 }

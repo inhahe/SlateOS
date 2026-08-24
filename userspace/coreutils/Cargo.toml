@@ -11,6 +11,13 @@ description = "Coreutils for SlateOS (86 binaries)"
 # `[[ $f =~ ^a ]]` in osh and `grep '^a'` gave different answers about one file.
 # See design-decisions.md §322.
 ere = { path = "../ere" }
+# One rendering of a file name inside a diagnostic. This was `src/quote.rs`
+# until 2026-08-23 and is re-exported as `coreutils::quote`, so no bin changed.
+# It moved out because a path may contain a newline — a utility that prints one
+# raw lets whoever chose the name forge lines of its own error stream — and the
+# 777 utility crates that do not depend on this bundle had 1798 diagnostics
+# doing exactly that, with no way to call the fix. See design-decisions.md §370.
+quoting = { path = "../quoting" }
 # One definition of an exact integer, shared with `bc`, `dc` and `genius-cli`.
 # GNU `expr` is arbitrary-precision — `expr 9223372036854775807 + 1` answers
 # 9223372036854775808 — and a shell script reaches those sizes by accident.

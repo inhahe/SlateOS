@@ -4,11 +4,16 @@
 //!
 //! Multi-personality: `rpk`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_rpk(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
@@ -50,15 +55,15 @@ fn run_rpk(args: &[String]) -> i32 {
                 }
                 "produce" => {
                     let topic = args.get(2).map(|s| s.as_str()).unwrap_or("events");
-                    println!("Producing to topic '{}'...", topic);
+                    println!("Producing to topic {}...", quoteaf_os(topic));
                     println!("Produced offset 42 to partition 0");
                 }
                 "consume" => {
                     let topic = args.get(2).map(|s| s.as_str()).unwrap_or("events");
-                    println!("Consuming from '{}':", topic);
+                    println!("Consuming from {}:", quoteaf_os(topic));
                     println!("  partition: 0, offset: 42, value: hello");
                 }
-                _ => println!("rpk topic: '{}' completed", sub),
+                _ => println!("rpk topic: {} completed", quoteaf_os(sub)),
             }
         }
         "group" => {
@@ -83,14 +88,17 @@ fn run_rpk(args: &[String]) -> i32 {
                 println!("  2     192.168.1.3   9092   rack2");
             }
         }
-        _ => println!("rpk: '{}' completed", subcmd),
+        _ => println!("rpk: {} completed", quoteaf_os(subcmd)),
     }
     0
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "rpk".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "rpk".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_rpk(&rest);
     process::exit(code);
@@ -98,7 +106,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_rpk};
+    use super::{basename, run_rpk, strip_ext};
 
     #[test]
     fn basename_strips_path() {

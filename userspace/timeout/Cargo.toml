@@ -4,3 +4,10 @@ version = "0.1.0"
 edition = "2024"
 description = "SlateOS timeout/nohup/nice/renice process control"
 [dependencies]
+# One rendering of untrusted text inside a diagnostic. Every word these four
+# personalities name back at you -- the command `timeout`/`nohup`/`nice` was
+# asked to run, the duration and signal strings it rejected -- came off the
+# command line, and a command line may hold a newline. A message that pastes
+# one in raw lets whoever wrote the argv write extra lines of this program's
+# output. See `userspace/quoting`.
+quoting = { path = "../quoting" }

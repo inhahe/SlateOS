@@ -2,3 +2,8 @@
 name = "otel-cli"
 version = "0.1.0"
 edition = "2024"
+
+[dependencies]
+# The span name and the service name are both argv words, echoed together in
+# one line.
+quoting = { path = "../quoting" }

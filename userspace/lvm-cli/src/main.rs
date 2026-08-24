@@ -4,6 +4,7 @@
 //!
 //! Multi-personality: `pvcreate`, `vgcreate`, `lvcreate`, `pvs`, `vgs`, `lvs`, `pvdisplay`, `vgdisplay`, `lvdisplay`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -23,20 +24,28 @@ fn run_lvm(prog: &str, args: &[String]) -> i32 {
 
     match prog {
         "pvcreate" => {
-            let dev = args.iter().find(|a| !a.starts_with('-'))
-                .map(|s| s.as_str()).unwrap_or("/dev/sdb");
+            let dev = args
+                .iter()
+                .find(|a| !a.starts_with('-'))
+                .map(|s| s.as_str())
+                .unwrap_or("/dev/sdb");
             println!("  Physical volume \"{}\" successfully created.", dev);
         }
         "vgcreate" => {
-            let positional: Vec<&str> = args.iter()
+            let positional: Vec<&str> = args
+                .iter()
                 .filter(|a| !a.starts_with('-'))
-                .map(|s| s.as_str()).collect();
+                .map(|s| s.as_str())
+                .collect();
             let vg = positional.first().copied().unwrap_or("vg0");
             println!("  Volume group \"{}\" successfully created", vg);
         }
         "lvcreate" => {
-            let name = args.windows(2).find(|w| w[0] == "-n" || w[0] == "--name")
-                .map(|w| w[1].as_str()).unwrap_or("lv0");
+            let name = args
+                .windows(2)
+                .find(|w| w[0] == "-n" || w[0] == "--name")
+                .map(|w| w[1].as_str())
+                .unwrap_or("lv0");
             println!("  Logical volume \"{}\" created.", name);
         }
         "pvs" => {
@@ -89,7 +98,10 @@ fn run_lvm(prog: &str, args: &[String]) -> i32 {
             println!("  Block device           254:0");
         }
         _ => {
-            println!("lvm: unknown command '{}'. Try pvs, vgs, lvs, pvcreate, vgcreate, lvcreate.", prog);
+            println!(
+                "lvm: unknown command {}. Try pvs, vgs, lvs, pvcreate, vgcreate, lvcreate.",
+                quoteaf_os(prog)
+            );
             return 1;
         }
     }
@@ -98,7 +110,8 @@ fn run_lvm(prog: &str, args: &[String]) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first()
+    let prog = args
+        .first()
         .map(|s| strip_ext(basename(s)).to_string())
         .unwrap_or_else(|| "lvs".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
@@ -108,7 +121,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_lvm};
+    use super::{basename, run_lvm, strip_ext};
 
     #[test]
     fn basename_strips_path() {

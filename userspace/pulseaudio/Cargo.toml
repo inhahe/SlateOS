@@ -3,4 +3,10 @@ name = "pulseaudio"
 version = "0.1.0"
 edition = "2024"
 description = "SlateOS PulseAudio sound system utilities"
+
 [dependencies]
+# One rendering of untrusted text inside a diagnostic. A file name handed to
+# `paplay`, and every argv word these six personalities echo back, may hold a
+# newline -- so a message that pastes one in raw lets whoever typed it write
+# extra lines of this program's output. See `userspace/quoting`.
+quoting = { path = "../quoting" }

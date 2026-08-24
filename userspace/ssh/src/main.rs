@@ -68,6 +68,7 @@
 #![allow(clippy::manual_range_contains)]
 #![allow(clippy::module_name_repetitions)]
 
+use quoting::quoteaf_os;
 use std::env;
 use std::fmt;
 use std::io::{self, Read, Write};
@@ -2419,8 +2420,8 @@ impl SshSession {
                 ))),
                 StrictHostKey::No => {
                     eprintln!(
-                        "Warning: Permanently added '{}' ({key_type}) to the list of known hosts.",
-                        self.config.hostname
+                        "Warning: Permanently added {} ({key_type}) to the list of known hosts.",
+                        quoteaf_os(&self.config.hostname)
                     );
                     add_known_host(&self.config.hostname, self.config.port, key_type, key_blob);
                     Ok(())
@@ -2442,8 +2443,8 @@ impl SshSession {
 
                     if answer == "yes" {
                         eprintln!(
-                            "Warning: Permanently added '{}' ({key_type}) to the list of known hosts.",
-                            self.config.hostname
+                            "Warning: Permanently added {} ({key_type}) to the list of known hosts.",
+                            quoteaf_os(&self.config.hostname)
                         );
                         add_known_host(&self.config.hostname, self.config.port, key_type, key_blob);
                         Ok(())

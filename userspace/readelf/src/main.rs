@@ -27,11 +27,9 @@
 // symbols, relocations, and notes. Arithmetic is on offsets bounded by
 // ELF header limits, and slice/index operations are gated by length
 // checks against the file buffer. Errors return Err, never panic.
-#![allow(
-    clippy::arithmetic_side_effects,
-    clippy::indexing_slicing,
-)]
+#![allow(clippy::arithmetic_side_effects, clippy::indexing_slicing)]
 
+use quoting::quotef_os;
 use std::env;
 use std::fs::File;
 use std::io::{self, BufWriter, Read, Write};
@@ -199,11 +197,21 @@ enum Error {
     Io(io::Error),
     NotElf,
     TruncatedHeader,
-    TruncatedData { what: &'static str, offset: usize, needed: usize, available: usize },
+    TruncatedData {
+        what: &'static str,
+        offset: usize,
+        needed: usize,
+        available: usize,
+    },
     InvalidClass(u8),
     InvalidEncoding(u8),
-    InvalidIndex { what: &'static str, idx: usize },
-    BadUtf8 { what: &'static str },
+    InvalidIndex {
+        what: &'static str,
+        idx: usize,
+    },
+    BadUtf8 {
+        what: &'static str,
+    },
     SectionNotFound(String),
     InvalidHexDumpTarget(String),
 }
@@ -214,7 +222,12 @@ impl std::fmt::Display for Error {
             Self::Io(e) => write!(f, "I/O error: {e}"),
             Self::NotElf => write!(f, "not an ELF file (bad magic)"),
             Self::TruncatedHeader => write!(f, "file too small to contain ELF header"),
-            Self::TruncatedData { what, offset, needed, available } => write!(
+            Self::TruncatedData {
+                what,
+                offset,
+                needed,
+                available,
+            } => write!(
                 f,
                 "{what}: truncated data at offset {offset:#x}: need {needed}, have {available}"
             ),
@@ -476,7 +489,12 @@ fn read_u32(data: &[u8], offset: usize, little_endian: bool) -> Result<u32> {
             available: data.len(),
         });
     }
-    let bytes = [data[offset], data[offset + 1], data[offset + 2], data[offset + 3]];
+    let bytes = [
+        data[offset],
+        data[offset + 1],
+        data[offset + 2],
+        data[offset + 3],
+    ];
     Ok(if little_endian {
         u32::from_le_bytes(bytes)
     } else {
@@ -501,8 +519,14 @@ fn read_u64(data: &[u8], offset: usize, little_endian: bool) -> Result<u64> {
         });
     }
     let bytes = [
-        data[offset], data[offset + 1], data[offset + 2], data[offset + 3],
-        data[offset + 4], data[offset + 5], data[offset + 6], data[offset + 7],
+        data[offset],
+        data[offset + 1],
+        data[offset + 2],
+        data[offset + 3],
+        data[offset + 4],
+        data[offset + 5],
+        data[offset + 6],
+        data[offset + 7],
     ];
     Ok(if little_endian {
         u64::from_le_bytes(bytes)
@@ -727,7 +751,12 @@ impl<'a> Elf<'a> {
         let phdrs = parse_program_headers(data, &header)?;
         let shdrs = parse_section_headers(data, &header)?;
 
-        Ok(Self { data, header, phdrs, shdrs })
+        Ok(Self {
+            data,
+            header,
+            phdrs,
+            shdrs,
+        })
     }
 
     fn le(&self) -> bool {
@@ -1035,21 +1064,14 @@ fn parse_section_headers(data: &[u8], hdr: &ElfHeader) -> Result<Vec<SectionHead
         };
         for sh in &mut shdrs {
             let name_off = sh.sh_name as usize;
-            sh.name = read_cstr(shstrtab, name_off)
-                .unwrap_or("")
-                .to_string();
+            sh.name = read_cstr(shstrtab, name_off).unwrap_or("").to_string();
         }
     }
 
     Ok(shdrs)
 }
 
-fn parse_symbol_table(
-    sec_data: &[u8],
-    strtab: &[u8],
-    class: u8,
-    le: bool,
-) -> Result<Vec<Symbol>> {
+fn parse_symbol_table(sec_data: &[u8], strtab: &[u8], class: u8, le: bool) -> Result<Vec<Symbol>> {
     let entsz: usize = if class == ELFCLASS64 { 24 } else { 16 };
     if sec_data.is_empty() {
         return Ok(Vec::new());
@@ -1165,7 +1187,10 @@ fn parse_dynamic_entries(sec_data: &[u8], class: u8, le: bool) -> Result<Vec<Dyn
                 read_u32(sec_data, base + 4, le)? as u64,
             )
         };
-        entries.push(DynEntry { d_tag: tag, d_val: val });
+        entries.push(DynEntry {
+            d_tag: tag,
+            d_val: val,
+        });
         if tag == DT_NULL {
             break;
         }
@@ -1212,7 +1237,11 @@ fn parse_note_entries(data: &[u8], le: bool) -> Vec<Note> {
         let desc = data[pos..desc_end].to_vec();
         pos = (pos + descsz + 3) & !3; // align to 4
 
-        notes.push(Note { name, note_type, desc });
+        notes.push(Note {
+            name,
+            note_type,
+            desc,
+        });
     }
     notes
 }
@@ -1329,14 +1358,30 @@ fn shdr_type_name(t: u32) -> &'static str {
 
 fn shdr_flags_str(flags: u64) -> String {
     let mut s = String::with_capacity(8);
-    if flags & SHF_WRITE != 0 { s.push('W'); }
-    if flags & SHF_ALLOC != 0 { s.push('A'); }
-    if flags & SHF_EXECINSTR != 0 { s.push('X'); }
-    if flags & SHF_MERGE != 0 { s.push('M'); }
-    if flags & SHF_STRINGS != 0 { s.push('S'); }
-    if flags & SHF_INFO_LINK != 0 { s.push('I'); }
-    if flags & SHF_LINK_ORDER != 0 { s.push('L'); }
-    if flags & SHF_TLS != 0 { s.push('T'); }
+    if flags & SHF_WRITE != 0 {
+        s.push('W');
+    }
+    if flags & SHF_ALLOC != 0 {
+        s.push('A');
+    }
+    if flags & SHF_EXECINSTR != 0 {
+        s.push('X');
+    }
+    if flags & SHF_MERGE != 0 {
+        s.push('M');
+    }
+    if flags & SHF_STRINGS != 0 {
+        s.push('S');
+    }
+    if flags & SHF_INFO_LINK != 0 {
+        s.push('I');
+    }
+    if flags & SHF_LINK_ORDER != 0 {
+        s.push('L');
+    }
+    if flags & SHF_TLS != 0 {
+        s.push('T');
+    }
     s
 }
 
@@ -1454,22 +1499,74 @@ fn display_file_header(out: &mut impl Write, elf: &Elf<'_>) -> Result<()> {
         write!(out, " {b:02x}")?;
     }
     writeln!(out)?;
-    writeln!(out, "  Class:                             {}", class_name(h.class))?;
-    writeln!(out, "  Data:                              {}", data_name(h.data))?;
-    writeln!(out, "  Version:                           {} (current)", h.version)?;
-    writeln!(out, "  OS/ABI:                            {}", osabi_name(h.osabi))?;
-    writeln!(out, "  ABI Version:                       {}", h.abi_version)?;
-    writeln!(out, "  Type:                              {}", elf_type_name(h.e_type))?;
-    writeln!(out, "  Machine:                           {}", machine_name(h.e_machine))?;
-    writeln!(out, "  Version:                           {:#x}", h.e_version)?;
+    writeln!(
+        out,
+        "  Class:                             {}",
+        class_name(h.class)
+    )?;
+    writeln!(
+        out,
+        "  Data:                              {}",
+        data_name(h.data)
+    )?;
+    writeln!(
+        out,
+        "  Version:                           {} (current)",
+        h.version
+    )?;
+    writeln!(
+        out,
+        "  OS/ABI:                            {}",
+        osabi_name(h.osabi)
+    )?;
+    writeln!(
+        out,
+        "  ABI Version:                       {}",
+        h.abi_version
+    )?;
+    writeln!(
+        out,
+        "  Type:                              {}",
+        elf_type_name(h.e_type)
+    )?;
+    writeln!(
+        out,
+        "  Machine:                           {}",
+        machine_name(h.e_machine)
+    )?;
+    writeln!(
+        out,
+        "  Version:                           {:#x}",
+        h.e_version
+    )?;
     writeln!(out, "  Entry point address:               {:#x}", h.e_entry)?;
-    writeln!(out, "  Start of program headers:          {} (bytes into file)", h.e_phoff)?;
-    writeln!(out, "  Start of section headers:          {} (bytes into file)", h.e_shoff)?;
+    writeln!(
+        out,
+        "  Start of program headers:          {} (bytes into file)",
+        h.e_phoff
+    )?;
+    writeln!(
+        out,
+        "  Start of section headers:          {} (bytes into file)",
+        h.e_shoff
+    )?;
     writeln!(out, "  Flags:                             {:#x}", h.e_flags)?;
-    writeln!(out, "  Size of this header:               {} (bytes)", h.e_ehsize)?;
-    writeln!(out, "  Size of program headers:           {} (bytes)", h.e_phentsize)?;
+    writeln!(
+        out,
+        "  Size of this header:               {} (bytes)",
+        h.e_ehsize
+    )?;
+    writeln!(
+        out,
+        "  Size of program headers:           {} (bytes)",
+        h.e_phentsize
+    )?;
     writeln!(out, "  Number of program headers:         {}", h.e_phnum)?;
-    writeln!(out, "  Size of section headers:           {} (bytes)", h.e_shentsize)?;
+    writeln!(
+        out,
+        "  Size of section headers:           {} (bytes)",
+        h.e_shentsize
+    )?;
     writeln!(out, "  Number of section headers:         {}", h.e_shnum)?;
     writeln!(out, "  Section header string table index: {}", h.e_shstrndx)?;
     Ok(())
@@ -1574,8 +1671,11 @@ fn display_section_headers(out: &mut impl Write, elf: &Elf<'_>, wide: bool) -> R
         writeln!(out, "\nThere are no sections in this file.")?;
         return Ok(());
     }
-    writeln!(out, "\nThere are {} section headers, starting at offset {:#x}:",
-        elf.header.e_shnum, elf.header.e_shoff)?;
+    writeln!(
+        out,
+        "\nThere are {} section headers, starting at offset {:#x}:",
+        elf.header.e_shnum, elf.header.e_shoff
+    )?;
     writeln!(out)?;
     writeln!(out, "Section Headers:")?;
 
@@ -1623,7 +1723,10 @@ fn display_section_headers(out: &mut impl Write, elf: &Elf<'_>, wide: bool) -> R
     }
 
     writeln!(out, "Key to Flags:")?;
-    writeln!(out, "  W (write), A (alloc), X (execute), M (merge), S (strings), I (info),")?;
+    writeln!(
+        out,
+        "  W (write), A (alloc), X (execute), M (merge), S (strings), I (info),"
+    )?;
     writeln!(out, "  L (link order), T (TLS)")?;
     Ok(())
 }
@@ -1636,11 +1739,22 @@ fn display_symbols(out: &mut impl Write, elf: &Elf<'_>, wide: bool) -> Result<()
         }
         found_any = true;
         let syms = elf.parse_symbols(idx)?;
-        writeln!(out, "\nSymbol table '{}' contains {} entries:", sh.name, syms.len())?;
+        writeln!(
+            out,
+            "\nSymbol table '{}' contains {} entries:",
+            sh.name,
+            syms.len()
+        )?;
         if elf.header.class == ELFCLASS64 {
-            writeln!(out, "   Num:    Value          Size Type    Bind   Vis      Ndx Name")?;
+            writeln!(
+                out,
+                "   Num:    Value          Size Type    Bind   Vis      Ndx Name"
+            )?;
         } else {
-            writeln!(out, "   Num:    Value Size Type    Bind   Vis      Ndx Name")?;
+            writeln!(
+                out,
+                "   Num:    Value Size Type    Bind   Vis      Ndx Name"
+            )?;
         }
         for (i, sym) in syms.iter().enumerate() {
             let name = maybe_truncate(&sym.name, 25, wide);
@@ -1693,18 +1807,33 @@ fn display_relocs(out: &mut impl Write, elf: &Elf<'_>) -> Result<()> {
         let (rels, relas, name) = elf.parse_reloc_section(idx)?;
         let is_rela = sh.sh_type == SHT_RELA;
         let count = if is_rela { relas.len() } else { rels.len() };
-        writeln!(out, "\nRelocation section '{name}' at offset {:#x} contains {count} entries:",
-            sh.sh_offset)?;
+        writeln!(
+            out,
+            "\nRelocation section '{name}' at offset {:#x} contains {count} entries:",
+            sh.sh_offset
+        )?;
         if elf.header.class == ELFCLASS64 {
             if is_rela {
-                writeln!(out, "  Offset          Info           Type           Sym. Value    Sym. Name + Addend")?;
+                writeln!(
+                    out,
+                    "  Offset          Info           Type           Sym. Value    Sym. Name + Addend"
+                )?;
             } else {
-                writeln!(out, "  Offset          Info           Type           Sym. Value    Sym. Name")?;
+                writeln!(
+                    out,
+                    "  Offset          Info           Type           Sym. Value    Sym. Name"
+                )?;
             }
         } else if is_rela {
-            writeln!(out, " Offset     Info    Type            Sym.Value  Sym. Name + Addend")?;
+            writeln!(
+                out,
+                " Offset     Info    Type            Sym.Value  Sym. Name + Addend"
+            )?;
         } else {
-            writeln!(out, " Offset     Info    Type            Sym.Value  Sym. Name")?;
+            writeln!(
+                out,
+                " Offset     Info    Type            Sym.Value  Sym. Name"
+            )?;
         }
 
         if is_rela {
@@ -1770,11 +1899,15 @@ fn display_dynamic(out: &mut impl Write, elf: &Elf<'_>) -> Result<()> {
 
     let dynstr = elf.dynstr();
 
-    writeln!(out, "\nDynamic section at offset {:#x} contains {} entries:",
-        elf.shdrs.iter()
+    writeln!(
+        out,
+        "\nDynamic section at offset {:#x} contains {} entries:",
+        elf.shdrs
+            .iter()
             .find(|s| s.sh_type == SHT_DYNAMIC)
             .map_or(0, |s| s.sh_offset),
-        entries.len())?;
+        entries.len()
+    )?;
     writeln!(out, "  Tag        Type                         Name/Value")?;
 
     for entry in &entries {
@@ -1829,7 +1962,10 @@ fn display_notes(out: &mut impl Write, elf: &Elf<'_>) -> Result<()> {
                     write!(out, "{b:02x}")?;
                 }
                 writeln!(out)?;
-            } else if note.name == "GNU" && note.note_type == NT_GNU_ABI_TAG && note.desc.len() >= 16 {
+            } else if note.name == "GNU"
+                && note.note_type == NT_GNU_ABI_TAG
+                && note.desc.len() >= 16
+            {
                 let os = read_u32(&note.desc, 0, elf.le()).unwrap_or(0);
                 let major = read_u32(&note.desc, 4, elf.le()).unwrap_or(0);
                 let minor = read_u32(&note.desc, 8, elf.le()).unwrap_or(0);
@@ -1915,7 +2051,11 @@ fn hex_dump_section(
         write!(out, "  ")?;
         // ASCII column
         for &b in chunk {
-            let c = if b >= 0x20 && b < 0x7f { b as char } else { '.' };
+            let c = if b >= 0x20 && b < 0x7f {
+                b as char
+            } else {
+                '.'
+            };
             write!(out, "{c}")?;
         }
         writeln!(out)?;
@@ -1928,7 +2068,10 @@ fn hex_dump_section(
 
 /// Clean entry point for hex dump: resolves section and delegates.
 fn do_hex_dump(out: &mut impl Write, elf: &Elf<'_>, target: &str) -> Result<()> {
-    let sec_idx = if let Some(hex) = target.strip_prefix("0x").or_else(|| target.strip_prefix("0X")) {
+    let sec_idx = if let Some(hex) = target
+        .strip_prefix("0x")
+        .or_else(|| target.strip_prefix("0X"))
+    {
         usize::from_str_radix(hex, 16)
             .map_err(|_| Error::InvalidHexDumpTarget(target.to_string()))?
     } else if target.chars().all(|c| c.is_ascii_digit()) {
@@ -1941,11 +2084,18 @@ fn do_hex_dump(out: &mut impl Write, elf: &Elf<'_>, target: &str) -> Result<()> 
     };
 
     if sec_idx >= elf.shdrs.len() {
-        return Err(Error::InvalidIndex { what: "section", idx: sec_idx });
+        return Err(Error::InvalidIndex {
+            what: "section",
+            idx: sec_idx,
+        });
     }
     let sh = &elf.shdrs[sec_idx];
     let data = elf.section_data(sec_idx)?;
-    writeln!(out, "\nHex dump of section '{}' (index {sec_idx}):", sh.name)?;
+    writeln!(
+        out,
+        "\nHex dump of section '{}' (index {sec_idx}):",
+        sh.name
+    )?;
     hex_dump_section(out, sh, data, sh.sh_addr)
 }
 
@@ -2003,7 +2153,7 @@ fn run() -> Result<()> {
     let mut had_error = false;
     for path in &opts.files {
         if let Err(e) = process_file(&mut out, path, &opts) {
-            eprintln!("readelf: {path}: {e}");
+            eprintln!("readelf: {}: {e}", quotef_os(path));
             had_error = true;
         }
     }
@@ -2532,7 +2682,10 @@ mod tests {
 
     #[test]
     fn test_rel_info_extraction_64() {
-        let r = Rel { r_offset: 0, r_info: 0x0000_0002_0000_0001 };
+        let r = Rel {
+            r_offset: 0,
+            r_info: 0x0000_0002_0000_0001,
+        };
         assert_eq!(r.sym_index(ELFCLASS64), 2);
         assert_eq!(r.rel_type(ELFCLASS64), 1);
     }
@@ -2540,7 +2693,10 @@ mod tests {
     #[test]
     fn test_rel_info_extraction_32() {
         // For ELF32: sym = r_info >> 8, type = r_info & 0xff
-        let r = Rel { r_offset: 0, r_info: (5u64 << 8) | 7 };
+        let r = Rel {
+            r_offset: 0,
+            r_info: (5u64 << 8) | 7,
+        };
         assert_eq!(r.sym_index(ELFCLASS32), 5);
         assert_eq!(r.rel_type(ELFCLASS32), 7);
     }

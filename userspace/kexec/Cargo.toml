@@ -3,3 +3,6 @@ name = "kexec"
 version = "0.1.0"
 edition = "2024"
 [dependencies]
+# The unknown-option and unknown-command messages echo the offending argv
+# word itself.
+quoting = { path = "../quoting" }

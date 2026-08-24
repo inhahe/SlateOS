@@ -4,3 +4,6 @@ version = "0.1.0"
 edition = "2024"
 description = "SlateOS audit utility"
 [dependencies]
+# autrace names the program it is about to trace, twice; that is a path from
+# argv and may hold any byte but `/`.
+quoting = { path = "../quoting" }

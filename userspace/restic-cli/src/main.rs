@@ -4,6 +4,7 @@
 //!
 //! Single personality: `restic`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -33,8 +34,11 @@ fn run_restic(args: Vec<String>) -> i32 {
         return 0;
     }
 
-    let repo = args.windows(2).find(|w| w[0] == "-r" || w[0] == "--repo")
-        .map(|w| w[1].as_str()).unwrap_or("/backup/repo");
+    let repo = args
+        .windows(2)
+        .find(|w| w[0] == "-r" || w[0] == "--repo")
+        .map(|w| w[1].as_str())
+        .unwrap_or("/backup/repo");
 
     let cmd = args.first().map(|s| s.as_str()).unwrap_or("");
     match cmd {
@@ -47,10 +51,12 @@ fn run_restic(args: Vec<String>) -> i32 {
             0
         }
         "backup" => {
-            let path = args.iter()
+            let path = args
+                .iter()
                 .skip(1)
                 .find(|a| !a.starts_with('-') && !a.starts_with("--"))
-                .map(|s| s.as_str()).unwrap_or("/home/user");
+                .map(|s| s.as_str())
+                .unwrap_or("/home/user");
             println!("repository {} opened", repo);
             println!();
             println!("Files:         1,234 new,    56 changed,  8,901 unmodified");
@@ -66,31 +72,52 @@ fn run_restic(args: Vec<String>) -> i32 {
         }
         "restore" => {
             let snapshot = args.get(1).map(|s| s.as_str()).unwrap_or("latest");
-            let target = args.windows(2).find(|w| w[0] == "--target" || w[0] == "-t")
-                .map(|w| w[1].as_str()).unwrap_or("/tmp/restore");
+            let target = args
+                .windows(2)
+                .find(|w| w[0] == "--target" || w[0] == "-t")
+                .map(|w| w[1].as_str())
+                .unwrap_or("/tmp/restore");
             println!("repository {} opened", repo);
             println!("restoring snapshot {} to {}", snapshot, target);
             println!();
             println!("  [0:15] 100.00%  10191 files, 2.345 GiB");
-            println!("restoring <Snapshot abc123de of [/home/user] at 2024-01-15 14:00:00> to {}", target);
+            println!(
+                "restoring <Snapshot abc123de of [/home/user] at 2024-01-15 14:00:00> to {}",
+                target
+            );
             0
         }
         "snapshots" => {
             println!("repository {} opened", repo);
             println!();
             println!("ID        Time                 Host        Tags    Paths              Size");
-            println!("──────────────────────────────────────────────────────────────────────────────");
-            println!("abc123de  2024-01-15 14:00:00  myhost              /home/user         2.3 GiB");
-            println!("def456gh  2024-01-14 14:00:00  myhost              /home/user         2.1 GiB");
-            println!("ghi789ij  2024-01-13 14:00:00  myhost              /home/user         2.0 GiB");
-            println!("jkl012mn  2024-01-15 10:00:00  myhost      db      /var/lib/postgres   890 MiB");
-            println!("──────────────────────────────────────────────────────────────────────────────");
+            println!(
+                "──────────────────────────────────────────────────────────────────────────────"
+            );
+            println!(
+                "abc123de  2024-01-15 14:00:00  myhost              /home/user         2.3 GiB"
+            );
+            println!(
+                "def456gh  2024-01-14 14:00:00  myhost              /home/user         2.1 GiB"
+            );
+            println!(
+                "ghi789ij  2024-01-13 14:00:00  myhost              /home/user         2.0 GiB"
+            );
+            println!(
+                "jkl012mn  2024-01-15 10:00:00  myhost      db      /var/lib/postgres   890 MiB"
+            );
+            println!(
+                "──────────────────────────────────────────────────────────────────────────────"
+            );
             println!("4 snapshots");
             0
         }
         "forget" => {
-            let keep_last = args.windows(2).find(|w| w[0] == "--keep-last")
-                .map(|w| w[1].as_str()).unwrap_or("7");
+            let keep_last = args
+                .windows(2)
+                .find(|w| w[0] == "--keep-last")
+                .map(|w| w[1].as_str())
+                .unwrap_or("7");
             println!("repository {} opened", repo);
             println!("Applying Policy: keep {} latest snapshots", keep_last);
             println!();
@@ -158,7 +185,7 @@ fn run_restic(args: Vec<String>) -> i32 {
             if cmd.is_empty() {
                 eprintln!("Usage: restic <command>. See --help.");
             } else {
-                eprintln!("Error: unknown command '{}'. See --help.", cmd);
+                eprintln!("Error: unknown command {}. See --help.", quoteaf_os(cmd));
             }
             1
         }
@@ -174,7 +201,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_restic};
+    use super::run_restic;
 
     #[test]
     fn help_exits_zero() {

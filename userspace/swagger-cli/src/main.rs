@@ -4,6 +4,7 @@
 //!
 //! Single personality: `swagger`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -40,7 +41,11 @@ fn run_swagger(args: Vec<String>) -> i32 {
         }
         "bundle" => {
             let input = args.get(1).map(|s| s.as_str()).unwrap_or("openapi.yaml");
-            let output = args.windows(2).find(|w| w[0] == "-o" || w[0] == "--output").map(|w| w[1].as_str()).unwrap_or("bundled.yaml");
+            let output = args
+                .windows(2)
+                .find(|w| w[0] == "-o" || w[0] == "--output")
+                .map(|w| w[1].as_str())
+                .unwrap_or("bundled.yaml");
             println!("Bundling {} → {}", input, output);
             println!("  Resolved 5 external references");
             println!("  ✔ Bundle complete");
@@ -48,15 +53,27 @@ fn run_swagger(args: Vec<String>) -> i32 {
         }
         "convert" => {
             let input = args.get(1).map(|s| s.as_str()).unwrap_or("openapi.yaml");
-            let format = args.windows(2).find(|w| w[0] == "--format").map(|w| w[1].as_str()).unwrap_or("json");
+            let format = args
+                .windows(2)
+                .find(|w| w[0] == "--format")
+                .map(|w| w[1].as_str())
+                .unwrap_or("json");
             println!("Converting {} to {}", input, format);
             println!("  ✔ Saved to openapi.{}", format);
             0
         }
         "generate" => {
             let spec = args.get(1).map(|s| s.as_str()).unwrap_or("openapi.yaml");
-            let lang = args.windows(2).find(|w| w[0] == "-l" || w[0] == "--language").map(|w| w[1].as_str()).unwrap_or("typescript");
-            let output = args.windows(2).find(|w| w[0] == "-o" || w[0] == "--output").map(|w| w[1].as_str()).unwrap_or("./generated");
+            let lang = args
+                .windows(2)
+                .find(|w| w[0] == "-l" || w[0] == "--language")
+                .map(|w| w[1].as_str())
+                .unwrap_or("typescript");
+            let output = args
+                .windows(2)
+                .find(|w| w[0] == "-o" || w[0] == "--output")
+                .map(|w| w[1].as_str())
+                .unwrap_or("./generated");
             println!("Generating {} client from {}", lang, spec);
             println!("  Output: {}/", output);
             println!("  Files generated: 12");
@@ -65,8 +82,15 @@ fn run_swagger(args: Vec<String>) -> i32 {
         }
         "serve" => {
             let file = args.get(1).map(|s| s.as_str()).unwrap_or("openapi.yaml");
-            let port = args.windows(2).find(|w| w[0] == "-p" || w[0] == "--port").map(|w| w[1].as_str()).unwrap_or("8080");
-            println!("Serving Swagger UI for {} at http://localhost:{}", file, port);
+            let port = args
+                .windows(2)
+                .find(|w| w[0] == "-p" || w[0] == "--port")
+                .map(|w| w[1].as_str())
+                .unwrap_or("8080");
+            println!(
+                "Serving Swagger UI for {} at http://localhost:{}",
+                file, port
+            );
             0
         }
         "diff" => {
@@ -102,7 +126,7 @@ fn run_swagger(args: Vec<String>) -> i32 {
             if cmd.is_empty() {
                 eprintln!("Usage: swagger <command>. See --help.");
             } else {
-                eprintln!("Error: unknown command '{}'. See --help.", cmd);
+                eprintln!("Error: unknown command {}. See --help.", quoteaf_os(cmd));
             }
             1
         }
@@ -118,7 +142,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_swagger};
+    use super::run_swagger;
 
     #[test]
     fn help_exits_zero() {

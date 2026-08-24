@@ -4,6 +4,7 @@
 //!
 //! Multi-personality: `gatk`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -38,8 +39,16 @@ fn run_gatk(args: &[String]) -> i32 {
     match subcmd {
         "--version" => println!("GATK 4.5.0.0 (Slate OS)"),
         "HaplotypeCaller" => {
-            let input = args.windows(2).find(|w| w[0] == "-I").map(|w| w[1].as_str()).unwrap_or("input.bam");
-            let reference = args.windows(2).find(|w| w[0] == "-R").map(|w| w[1].as_str()).unwrap_or("reference.fa");
+            let input = args
+                .windows(2)
+                .find(|w| w[0] == "-I")
+                .map(|w| w[1].as_str())
+                .unwrap_or("input.bam");
+            let reference = args
+                .windows(2)
+                .find(|w| w[0] == "-R")
+                .map(|w| w[1].as_str())
+                .unwrap_or("reference.fa");
             println!("HaplotypeCaller  (GATK 4.5.0.0)");
             println!("  Input: {}", input);
             println!("  Reference: {}", reference);
@@ -90,7 +99,7 @@ fn run_gatk(args: &[String]) -> i32 {
             println!("CountVariants  (GATK 4.5.0.0)");
             println!("  Tool returned: 5678");
         }
-        _ => println!("gatk: '{}' completed", subcmd),
+        _ => println!("gatk: {} completed", quoteaf_os(subcmd)),
     }
     0
 }
@@ -104,7 +113,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_gatk};
+    use super::run_gatk;
 
     #[test]
     fn help_exits_zero() {

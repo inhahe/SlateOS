@@ -4,11 +4,16 @@
 //!
 //! Multi-personality: `vuepress`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_vuepress(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
@@ -46,14 +51,17 @@ fn run_vuepress(args: &[String]) -> i32 {
             println!("  VuePress: 2.0.0-rc.14");
             println!("  Vue: 3.4.21");
         }
-        _ => println!("vuepress: '{}' completed", subcmd),
+        _ => println!("vuepress: {} completed", quoteaf_os(subcmd)),
     }
     0
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "vuepress".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "vuepress".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_vuepress(&rest);
     process::exit(code);
@@ -61,7 +69,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_vuepress};
+    use super::{basename, run_vuepress, strip_ext};
 
     #[test]
     fn basename_strips_path() {

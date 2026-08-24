@@ -4,11 +4,16 @@
 //!
 //! Multi-personality: `uvt-simplestreams-libvirt`, `uvt-kvm`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_uvt_simplestreams(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -22,7 +27,10 @@ fn run_uvt_simplestreams(args: &[String], _prog: &str) -> i32 {
         println!("  --version        Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("uvt-simplestreams-libvirt v0.1 (Slate OS)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("uvt-simplestreams-libvirt v0.1 (Slate OS)");
+        return 0;
+    }
     match args.first().map(|s| s.as_str()) {
         Some("sync") => {
             println!("uvt-simplestreams-libvirt: syncing cloud images...");
@@ -55,7 +63,10 @@ fn run_uvt_kvm(args: &[String], _prog: &str) -> i32 {
         println!("  ip NAME         Show VM IP address");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("uvt-kvm v0.1 (Slate OS)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("uvt-kvm v0.1 (Slate OS)");
+        return 0;
+    }
     match args.first().map(|s| s.as_str()) {
         Some("list") => {
             println!("test-vm1    running    192.168.122.10");
@@ -63,7 +74,7 @@ fn run_uvt_kvm(args: &[String], _prog: &str) -> i32 {
         }
         Some("create") => {
             let name = args.get(1).map(|s| s.as_str()).unwrap_or("vm1");
-            println!("uvt-kvm: creating VM '{}'", name);
+            println!("uvt-kvm: creating VM {}", quoteaf_os(name));
             println!("  Image: slateos-24.04 amd64");
             println!("  Memory: 512 MiB");
         }
@@ -76,7 +87,10 @@ fn run_uvt_kvm(args: &[String], _prog: &str) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "uvt-simplestreams-libvirt".to_string());
+    let prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "uvt-simplestreams-libvirt".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = match prog.as_str() {
         "uvt-kvm" => run_uvt_kvm(&rest, &prog),
@@ -87,7 +101,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_uvt_simplestreams};
+    use super::{basename, run_uvt_simplestreams, strip_ext};
 
     #[test]
     fn basename_strips_path() {

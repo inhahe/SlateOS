@@ -121,7 +121,8 @@ pub struct FreezeStatus {
 // ---------------------------------------------------------------------------
 
 /// Frozen filesystem table.
-static FROZEN_TABLE: PreemptSpinMutex<Vec<FrozenEntry>> = PreemptSpinMutex::named(Vec::new(), b"FROZEN_TABLE");
+static FROZEN_TABLE: PreemptSpinMutex<Vec<FrozenEntry>> =
+    PreemptSpinMutex::named(Vec::new(), b"FROZEN_TABLE");
 
 /// Statistics.
 static FREEZE_COUNT: AtomicU64 = AtomicU64::new(0);
@@ -152,7 +153,10 @@ pub fn freeze(mountpoint: impl AsRef<Path>, reason: &str) -> KernelResult<Freeze
     let mut table = FROZEN_TABLE.lock();
 
     // Find existing or create new.
-    if let Some(entry) = table.iter_mut().find(|e| e.mountpoint.as_path() == mountpoint) {
+    if let Some(entry) = table
+        .iter_mut()
+        .find(|e| e.mountpoint.as_path() == mountpoint)
+    {
         entry.freeze_level += 1;
         entry.deadline_ns = now + AUTO_THAW_NS;
         if !reason.is_empty() {
@@ -531,7 +535,10 @@ fn test_auto_thaw_tracking() {
     freeze(mp, "").unwrap();
 
     let list = list_frozen();
-    let entry = list.iter().find(|e| e.mountpoint.as_path() == Path::new(mp)).unwrap();
+    let entry = list
+        .iter()
+        .find(|e| e.mountpoint.as_path() == Path::new(mp))
+        .unwrap();
 
     // Should have time remaining (close to 5 minutes).
     assert!(entry.time_until_thaw_ns > 0);

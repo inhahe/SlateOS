@@ -4,6 +4,10 @@ version = "0.1.0"
 edition = "2024"
 description = "SlateOS ELF binary inspector"
 [dependencies]
+# It interpolates `path` into "readelf: {}: {e}". That value is one of
+# `opts.files`, the positional operands `parse_args` collected from argv, so
+# it is whatever the user typed and not text this program chose.
+quoting = { path = "../quoting" }
 
 [lints]
 workspace = true

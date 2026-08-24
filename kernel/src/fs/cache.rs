@@ -1114,7 +1114,10 @@ fn self_test_on(device: &str) -> KernelResult<()> {
         crate::serial_println!("[bcache]   FAIL: read count not incremented");
         return Err(KernelError::InternalError);
     }
-    crate::serial_println!("[bcache]   Read sector 0: {} bytes, pattern OK", SECTOR_SIZE);
+    crate::serial_println!(
+        "[bcache]   Read sector 0: {} bytes, pattern OK",
+        SECTOR_SIZE
+    );
 
     // Read the same sector again — it must be served from the cache.  Asserting
     // that `hits` rose is more robust than asserting that `misses` did not: a

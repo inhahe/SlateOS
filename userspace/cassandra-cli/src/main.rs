@@ -4,6 +4,7 @@
 //!
 //! Multi-personality: `cqlsh` and `nodetool`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -36,9 +37,14 @@ fn run_cqlsh(args: Vec<String>) -> i32 {
         return 0;
     }
 
-    let host = args.first().filter(|a| !a.starts_with('-'))
-        .map(|s| s.as_str()).unwrap_or("localhost");
-    let execute = args.windows(2).find(|w| w[0] == "-e")
+    let host = args
+        .first()
+        .filter(|a| !a.starts_with('-'))
+        .map(|s| s.as_str())
+        .unwrap_or("localhost");
+    let execute = args
+        .windows(2)
+        .find(|w| w[0] == "-e")
         .map(|w| w[1].as_str());
 
     if let Some(cmd) = execute {
@@ -89,10 +95,18 @@ fn run_nodetool(args: Vec<String>) -> i32 {
             println!("Datacenter: dc1");
             println!("===============");
             println!("Status=Up/Down  State=Normal/Leaving/Joining/Moving");
-            println!("--  Address        Load       Tokens  Owns    Host ID                              Rack");
-            println!("UN  192.168.1.10   256.5 GiB  256     33.3%   abc12345-def6-7890-abcd-ef1234567890 rack1");
-            println!("UN  192.168.1.11   248.2 GiB  256     33.4%   def67890-abc1-2345-defg-hi6789012345 rack1");
-            println!("UN  192.168.1.12   261.8 GiB  256     33.3%   ghi12345-jkl6-7890-mnop-qr1234567890 rack2");
+            println!(
+                "--  Address        Load       Tokens  Owns    Host ID                              Rack"
+            );
+            println!(
+                "UN  192.168.1.10   256.5 GiB  256     33.3%   abc12345-def6-7890-abcd-ef1234567890 rack1"
+            );
+            println!(
+                "UN  192.168.1.11   248.2 GiB  256     33.4%   def67890-abc1-2345-defg-hi6789012345 rack1"
+            );
+            println!(
+                "UN  192.168.1.12   261.8 GiB  256     33.3%   ghi12345-jkl6-7890-mnop-qr1234567890 rack2"
+            );
             0
         }
         "info" => {
@@ -110,15 +124,24 @@ fn run_nodetool(args: Vec<String>) -> i32 {
         }
         "compactionstats" => {
             println!("pending tasks: 2");
-            println!("            compaction type    keyspace   table      completed    total       unit");
-            println!("  Compaction                   myks       users      128 MB       256 MB      bytes");
-            println!("  Compaction                   myks       orders     64 MB        128 MB      bytes");
+            println!(
+                "            compaction type    keyspace   table      completed    total       unit"
+            );
+            println!(
+                "  Compaction                   myks       users      128 MB       256 MB      bytes"
+            );
+            println!(
+                "  Compaction                   myks       orders     64 MB        128 MB      bytes"
+            );
             println!("Active compaction remaining time:  0h12m30s");
             0
         }
         "repair" => {
             let keyspace = args.get(1).map(|s| s.as_str()).unwrap_or("myks");
-            println!("[2024-01-15 14:00:00] Starting repair for keyspace '{}'...", keyspace);
+            println!(
+                "[2024-01-15 14:00:00] Starting repair for keyspace {}...",
+                quoteaf_os(keyspace)
+            );
             println!("[2024-01-15 14:00:05] Repair session 1 of 3 completed");
             println!("[2024-01-15 14:00:10] Repair session 2 of 3 completed");
             println!("[2024-01-15 14:00:15] Repair session 3 of 3 completed");
@@ -127,7 +150,7 @@ fn run_nodetool(args: Vec<String>) -> i32 {
         }
         "flush" => {
             let keyspace = args.get(1).map(|s| s.as_str()).unwrap_or("myks");
-            println!("Flushing keyspace '{}'...", keyspace);
+            println!("Flushing keyspace {}...", quoteaf_os(keyspace));
             println!("  Flushed memtables for 5 tables");
             0
         }
@@ -135,7 +158,7 @@ fn run_nodetool(args: Vec<String>) -> i32 {
             if cmd.is_empty() {
                 eprintln!("Usage: nodetool <command>. See --help.");
             } else {
-                eprintln!("Error: unknown command '{}'. See --help.", cmd);
+                eprintln!("Error: unknown command {}. See --help.", quoteaf_os(cmd));
             }
             1
         }
@@ -144,7 +167,9 @@ fn run_nodetool(args: Vec<String>) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first().map(|s| strip_ext(basename(s)).to_string())
+    let prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
         .unwrap_or_else(|| "cqlsh".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = match prog.as_str() {
@@ -156,7 +181,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_cqlsh};
+    use super::{basename, run_cqlsh, strip_ext};
 
     #[test]
     fn basename_strips_path() {

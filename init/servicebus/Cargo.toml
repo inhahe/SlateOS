@@ -3,3 +3,9 @@ name = "servicebus"
 version = "0.1.0"
 edition = "2024"
 description = "SlateOS Service Bus — named service registry with typed RPC"
+
+[dependencies]
+# servicebus names the services that register with it, and a service picks
+# its own name when it connects. That makes every name in the bus's log a
+# word chosen by a peer process rather than by the bus.
+quoting = { path = "../../userspace/quoting" }

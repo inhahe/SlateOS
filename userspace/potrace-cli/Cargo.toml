@@ -2,3 +2,8 @@
 name = "potrace-cli"
 version = "0.1.0"
 edition = "2024"
+
+[dependencies]
+# The input file is an argv word and the output name is derived from it, so
+# a crafted input name reaches the message twice.
+quoting = { path = "../quoting" }

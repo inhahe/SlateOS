@@ -4,6 +4,7 @@
 //!
 //! Multi-personality: `wine`, `wine64`, `wineserver`, `wineboot`, `winecfg`, `winepath`, `regedit`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -31,7 +32,7 @@ fn run_wine(args: &[String]) -> i32 {
         println!("Usage: wine PROGRAM [ARGUMENTS]");
         return 1;
     }
-    println!("wine: starting '{}'", program);
+    println!("wine: starting {}", quoteaf_os(program));
     0
 }
 
@@ -92,7 +93,11 @@ fn run_winepath(args: &[String]) -> i32 {
         println!("  -0    Null-separated output");
         return 0;
     }
-    let path = args.iter().find(|a| !a.starts_with('-')).map(|s| s.as_str()).unwrap_or(".");
+    let path = args
+        .iter()
+        .find(|a| !a.starts_with('-'))
+        .map(|s| s.as_str())
+        .unwrap_or(".");
     let unix_mode = args.iter().any(|a| a == "-u");
     if unix_mode {
         println!("/home/user/.wine/drive_c/{}", path.replace('\\', "/"));
@@ -110,7 +115,7 @@ fn run_regedit(args: &[String]) -> i32 {
         return 0;
     }
     if let Some(file) = args.iter().find(|a| !a.starts_with('-')) {
-        println!("regedit: importing '{}'", file);
+        println!("regedit: importing {}", quoteaf_os(file));
     } else {
         println!("regedit: opening registry editor");
     }
@@ -119,7 +124,8 @@ fn run_regedit(args: &[String]) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first()
+    let prog = args
+        .first()
         .map(|s| strip_ext(basename(s)).to_string())
         .unwrap_or_else(|| "wine".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
@@ -127,7 +133,10 @@ fn main() {
     let code = match prog.as_str() {
         "wineserver" => run_wineserver(&rest),
         "wineboot" => run_wineboot(&rest),
-        "winecfg" => { println!("Opening Wine configuration..."); 0 }
+        "winecfg" => {
+            println!("Opening Wine configuration...");
+            0
+        }
         "winepath" => run_winepath(&rest),
         "regedit" => run_regedit(&rest),
         "wine64" => run_wine(&rest),
@@ -138,7 +147,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_wine};
+    use super::{basename, run_wine, strip_ext};
 
     #[test]
     fn basename_strips_path() {

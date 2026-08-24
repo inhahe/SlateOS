@@ -2,3 +2,8 @@
 name = "circleci-cli"
 version = "0.1.0"
 edition = "2024"
+
+[dependencies]
+# circleci-cli names projects, jobs and workflows, identifiers defined in a
+# config file and on the service side.
+quoting = { path = "../quoting" }

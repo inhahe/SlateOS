@@ -4,11 +4,16 @@
 //!
 //! Multi-personality: `yard`, `yardoc`, `yri`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_yard(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
@@ -30,11 +35,13 @@ fn run_yard(args: &[String]) -> i32 {
     match subcmd {
         "--version" => println!("yard 0.9.36 (Slate OS)"),
         "doc" => {
-            let files: Vec<&str> = args.iter()
+            let files: Vec<&str> = args
+                .iter()
                 .filter(|a| a.ends_with(".rb"))
                 .map(|s| s.as_str())
                 .collect();
-            let outdir = args.windows(2)
+            let outdir = args
+                .windows(2)
                 .find(|w| w[0] == "-o")
                 .map(|w| w[1].as_str())
                 .unwrap_or("doc");
@@ -51,7 +58,8 @@ fn run_yard(args: &[String]) -> i32 {
             println!("  Output: {}/index.html", outdir);
         }
         "server" => {
-            let port = args.windows(2)
+            let port = args
+                .windows(2)
                 .find(|w| w[0] == "-p")
                 .map(|w| w[1].as_str())
                 .unwrap_or("8808");
@@ -83,7 +91,7 @@ fn run_yard(args: &[String]) -> i32 {
             println!("  MyApp::Config");
             println!("  MyApp::Utils");
         }
-        _ => println!("yard: '{}' completed", subcmd),
+        _ => println!("yard: {} completed", quoteaf_os(subcmd)),
     }
     0
 }
@@ -103,7 +111,8 @@ fn run_yri(args: &[String]) -> i32 {
         println!("  --no-cache  Skip cache");
         return 0;
     }
-    let name = args.iter()
+    let name = args
+        .iter()
         .find(|a| !a.starts_with('-'))
         .map(|s| s.as_str())
         .unwrap_or("String#length");
@@ -118,7 +127,10 @@ fn run_yri(args: &[String]) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "yard".to_string());
+    let prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "yard".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = match prog.as_str() {
         "yardoc" => run_yardoc(&rest),
@@ -130,7 +142,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_yard};
+    use super::{basename, run_yard, strip_ext};
 
     #[test]
     fn basename_strips_path() {

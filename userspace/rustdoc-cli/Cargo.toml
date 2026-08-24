@@ -2,3 +2,9 @@
 name = "rustdoc-cli"
 version = "0.1.0"
 edition = "2024"
+
+[dependencies]
+# It interpolates `crate_name` into "rustdoc: generating documentation for
+# {}". That value is an argv word, so it is whatever the user typed and not
+# text this program chose.
+quoting = { path = "../quoting" }

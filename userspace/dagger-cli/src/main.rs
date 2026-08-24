@@ -4,11 +4,16 @@
 //!
 //! Multi-personality: `dagger`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_dagger(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
@@ -31,11 +36,17 @@ fn run_dagger(args: &[String]) -> i32 {
     match subcmd {
         "version" | "--version" => println!("dagger 0.12.0"),
         "init" => {
-            let name = args.windows(2).find(|w| w[0] == "--name")
-                .map(|w| w[1].as_str()).unwrap_or("my-module");
-            let sdk = args.windows(2).find(|w| w[0] == "--sdk")
-                .map(|w| w[1].as_str()).unwrap_or("go");
-            println!("Initializing module '{}'...", name);
+            let name = args
+                .windows(2)
+                .find(|w| w[0] == "--name")
+                .map(|w| w[1].as_str())
+                .unwrap_or("my-module");
+            let sdk = args
+                .windows(2)
+                .find(|w| w[0] == "--sdk")
+                .map(|w| w[1].as_str())
+                .unwrap_or("go");
+            println!("Initializing module {}...", quoteaf_os(name));
             println!("  SDK: {}", sdk);
             println!("  Created: dagger.json");
             println!("  Created: main.go");
@@ -43,7 +54,7 @@ fn run_dagger(args: &[String]) -> i32 {
         }
         "call" => {
             let func = args.get(1).map(|s| s.as_str()).unwrap_or("build");
-            println!("Calling function '{}'...", func);
+            println!("Calling function {}...", quoteaf_os(func));
             println!("  ✔ Container initialized");
             println!("  ✔ Source mounted");
             println!("  ✔ Dependencies installed");
@@ -64,21 +75,27 @@ fn run_dagger(args: &[String]) -> i32 {
             println!("publish       Publish container image");
         }
         "install" => {
-            let module = args.get(1).map(|s| s.as_str()).unwrap_or("github.com/dagger/dagger");
+            let module = args
+                .get(1)
+                .map(|s| s.as_str())
+                .unwrap_or("github.com/dagger/dagger");
             println!("Installing {}...", module);
             println!("Module installed successfully.");
         }
         "login" => {
             println!("Logged in to Dagger Cloud.");
         }
-        _ => println!("dagger: '{}' completed", subcmd),
+        _ => println!("dagger: {} completed", quoteaf_os(subcmd)),
     }
     0
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "dagger".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "dagger".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_dagger(&rest);
     process::exit(code);
@@ -86,7 +103,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_dagger};
+    use super::{basename, run_dagger, strip_ext};
 
     #[test]
     fn basename_strips_path() {

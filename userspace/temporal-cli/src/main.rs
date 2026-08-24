@@ -4,6 +4,7 @@
 //!
 //! Single personality: `temporal`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -35,16 +36,24 @@ fn run_temporal(args: Vec<String>) -> i32 {
             let sub = args.get(1).map(|s| s.as_str()).unwrap_or("start-dev");
             match sub {
                 "start-dev" => {
-                    let port = args.windows(2).find(|w| w[0] == "--port")
-                        .map(|w| w[1].as_str()).unwrap_or("7233");
-                    let ui_port = args.windows(2).find(|w| w[0] == "--ui-port")
-                        .map(|w| w[1].as_str()).unwrap_or("8233");
+                    let port = args
+                        .windows(2)
+                        .find(|w| w[0] == "--port")
+                        .map(|w| w[1].as_str())
+                        .unwrap_or("7233");
+                    let ui_port = args
+                        .windows(2)
+                        .find(|w| w[0] == "--ui-port")
+                        .map(|w| w[1].as_str())
+                        .unwrap_or("8233");
                     println!("Temporal development server starting...");
                     println!("  gRPC: localhost:{}", port);
                     println!("  UI:   http://localhost:{}", ui_port);
                     println!("  Namespace: default");
                 }
-                _ => { println!("Server operation: {}", sub); }
+                _ => {
+                    println!("Server operation: {}", sub);
+                }
             }
             0
         }
@@ -52,24 +61,43 @@ fn run_temporal(args: Vec<String>) -> i32 {
             let sub = args.get(1).map(|s| s.as_str()).unwrap_or("list");
             match sub {
                 "list" => {
-                    println!("  Status     Workflow ID                Type               Start Time");
-                    println!("  Running    order-process-abc123       OrderWorkflow      2024-01-15 14:00:00");
-                    println!("  Completed  user-signup-def456         SignupWorkflow      2024-01-15 13:30:00");
-                    println!("  Failed     report-gen-ghi789          ReportWorkflow      2024-01-15 12:00:00");
-                    println!("  Running    data-pipeline-jkl012       PipelineWorkflow    2024-01-15 10:00:00");
+                    println!(
+                        "  Status     Workflow ID                Type               Start Time"
+                    );
+                    println!(
+                        "  Running    order-process-abc123       OrderWorkflow      2024-01-15 14:00:00"
+                    );
+                    println!(
+                        "  Completed  user-signup-def456         SignupWorkflow      2024-01-15 13:30:00"
+                    );
+                    println!(
+                        "  Failed     report-gen-ghi789          ReportWorkflow      2024-01-15 12:00:00"
+                    );
+                    println!(
+                        "  Running    data-pipeline-jkl012       PipelineWorkflow    2024-01-15 10:00:00"
+                    );
                 }
                 "start" => {
-                    let wf_type = args.windows(2).find(|w| w[0] == "--type")
-                        .map(|w| w[1].as_str()).unwrap_or("MyWorkflow");
-                    let wf_id = args.windows(2).find(|w| w[0] == "--workflow-id")
-                        .map(|w| w[1].as_str()).unwrap_or("wf-new-001");
+                    let wf_type = args
+                        .windows(2)
+                        .find(|w| w[0] == "--type")
+                        .map(|w| w[1].as_str())
+                        .unwrap_or("MyWorkflow");
+                    let wf_id = args
+                        .windows(2)
+                        .find(|w| w[0] == "--workflow-id")
+                        .map(|w| w[1].as_str())
+                        .unwrap_or("wf-new-001");
                     println!("Started workflow:");
                     println!("  Workflow ID: {}", wf_id);
                     println!("  Run ID:      run-abc123def456");
                     println!("  Type:        {}", wf_type);
                 }
                 "describe" => {
-                    let wf_id = args.get(2).map(|s| s.as_str()).unwrap_or("order-process-abc123");
+                    let wf_id = args
+                        .get(2)
+                        .map(|s| s.as_str())
+                        .unwrap_or("order-process-abc123");
                     println!("Workflow ID:   {}", wf_id);
                     println!("Run ID:        run-abc123def456");
                     println!("Type:          OrderWorkflow");
@@ -80,14 +108,22 @@ fn run_temporal(args: Vec<String>) -> i32 {
                     println!("Pending Activities: 1");
                 }
                 "signal" => {
-                    let wf_id = args.get(2).map(|s| s.as_str()).unwrap_or("order-process-abc123");
+                    let wf_id = args
+                        .get(2)
+                        .map(|s| s.as_str())
+                        .unwrap_or("order-process-abc123");
                     println!("Signal sent to workflow {}", wf_id);
                 }
                 "cancel" => {
-                    let wf_id = args.get(2).map(|s| s.as_str()).unwrap_or("order-process-abc123");
+                    let wf_id = args
+                        .get(2)
+                        .map(|s| s.as_str())
+                        .unwrap_or("order-process-abc123");
                     println!("Cancelled workflow {}", wf_id);
                 }
-                _ => { println!("Workflow operation: {}", sub); }
+                _ => {
+                    println!("Workflow operation: {}", sub);
+                }
             }
             0
         }
@@ -102,7 +138,9 @@ fn run_temporal(args: Vec<String>) -> i32 {
                     println!("    worker-2@host2 (last seen: 1s ago)");
                     println!("  Backlog: 5 workflow tasks, 2 activity tasks");
                 }
-                _ => { println!("Task queue operation: {}", sub); }
+                _ => {
+                    println!("Task queue operation: {}", sub);
+                }
             }
             0
         }
@@ -115,7 +153,9 @@ fn run_temporal(args: Vec<String>) -> i32 {
                     println!("  hourly-sync       SyncWorkflow     every hour        Running");
                     println!("  weekly-cleanup    CleanupWorkflow  Sun 2am           Paused");
                 }
-                _ => { println!("Schedule operation: {}", sub); }
+                _ => {
+                    println!("Schedule operation: {}", sub);
+                }
             }
             0
         }
@@ -123,7 +163,7 @@ fn run_temporal(args: Vec<String>) -> i32 {
             if cmd.is_empty() {
                 eprintln!("Usage: temporal <command>. See --help.");
             } else {
-                eprintln!("Error: unknown command '{}'. See --help.", cmd);
+                eprintln!("Error: unknown command {}. See --help.", quoteaf_os(cmd));
             }
             1
         }
@@ -139,7 +179,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_temporal};
+    use super::run_temporal;
 
     #[test]
     fn help_exits_zero() {

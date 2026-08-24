@@ -1,6 +1,7 @@
 #![deny(clippy::all)]
 //! paddle-cli — Slate OS Paddle Merchant-of-Record SaaS billing personality CLI.
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -270,7 +271,7 @@ fn run_paddle(args: &[String], prog: &str) -> i32 {
         "help" | "--help" | "-h" => print_help(prog),
         "version" | "--version" | "-V" => print_version(),
         other => {
-            eprintln!("{prog}: unknown subcommand '{other}'");
+            eprintln!("{prog}: unknown subcommand {}", quoteaf_os(other));
             eprintln!("Try '{prog} help' for the list of subcommands.");
             return 2;
         }

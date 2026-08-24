@@ -26,6 +26,7 @@
 //! du --inodes                     Count inodes instead of bytes
 //! ```
 
+use quoting::quoteaf_os;
 use std::collections::HashSet;
 use std::env;
 use std::fs;
@@ -221,12 +222,12 @@ fn parse_args() -> Config {
                     match args[i].parse::<usize>() {
                         Ok(n) => cfg.max_depth = Some(n),
                         Err(_) => {
-                            eprintln!("du: invalid maximum depth '{}'", args[i]);
+                            eprintln!("du: invalid maximum depth {}", quoteaf_os(&args[i]));
                             process::exit(1);
                         }
                     }
                 } else {
-                    eprintln!("du: option '{arg}' requires an argument");
+                    eprintln!("du: option {} requires an argument", quoteaf_os(arg));
                     process::exit(1);
                 }
             }
@@ -247,7 +248,7 @@ fn parse_args() -> Config {
                     match parse_size(&args[i]) {
                         Some(sz) => cfg.threshold = Some(sz),
                         None => {
-                            eprintln!("du: invalid threshold '{}'", args[i]);
+                            eprintln!("du: invalid threshold {}", quoteaf_os(&args[i]));
                             process::exit(1);
                         }
                     }
@@ -264,7 +265,10 @@ fn parse_args() -> Config {
                         "size" => cfg.sort_by = Some(SortField::Size),
                         "name" => cfg.sort_by = Some(SortField::Name),
                         other => {
-                            eprintln!("du: invalid sort field '{other}' (use 'size' or 'name')");
+                            eprintln!(
+                                "du: invalid sort field {} (use 'size' or 'name')",
+                                quoteaf_os(other)
+                            );
                             process::exit(1);
                         }
                     }
@@ -312,7 +316,10 @@ fn parse_args() -> Config {
                                 match rest.parse::<usize>() {
                                     Ok(n) => cfg.max_depth = Some(n),
                                     Err(_) => {
-                                        eprintln!("du: invalid maximum depth '{rest}'");
+                                        eprintln!(
+                                            "du: invalid maximum depth {}",
+                                            quoteaf_os(&rest)
+                                        );
                                         process::exit(1);
                                     }
                                 }
@@ -325,7 +332,10 @@ fn parse_args() -> Config {
                                 match args[i].parse::<usize>() {
                                     Ok(n) => cfg.max_depth = Some(n),
                                     Err(_) => {
-                                        eprintln!("du: invalid maximum depth '{}'", args[i]);
+                                        eprintln!(
+                                            "du: invalid maximum depth {}",
+                                            quoteaf_os(&args[i])
+                                        );
                                         process::exit(1);
                                     }
                                 }
@@ -741,7 +751,7 @@ fn walk(
     let meta = match get_metadata(root, cfg.dereference) {
         Ok(m) => m,
         Err(e) => {
-            eprintln!("du: cannot access '{}': {e}", root.display());
+            eprintln!("du: cannot access {}: {e}", quoteaf_os(root));
             *exit_code = 1;
             return (0, 0);
         }
@@ -789,7 +799,7 @@ fn walk(
     let entries = match fs::read_dir(root) {
         Ok(rd) => rd,
         Err(e) => {
-            eprintln!("du: cannot read directory '{}': {e}", root.display());
+            eprintln!("du: cannot read directory {}: {e}", quoteaf_os(root));
             *exit_code = 1;
             return (0, 1);
         }
@@ -803,7 +813,7 @@ fn walk(
         let entry = match entry_result {
             Ok(e) => e,
             Err(e) => {
-                eprintln!("du: error reading entry in '{}': {e}", root.display());
+                eprintln!("du: error reading entry in {}: {e}", quoteaf_os(root));
                 *exit_code = 1;
                 continue;
             }

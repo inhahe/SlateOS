@@ -9,6 +9,7 @@
 //!   lists archive).
 //! - **getconf**: print system configuration variable values.
 
+use quoting::quoteaf_os;
 use std::env;
 use std::io::{self, Write};
 use std::path::Path;
@@ -91,24 +92,29 @@ const LC_CATEGORIES: &[&str] = &[
 /// then `LANG`, then the built-in default `"POSIX"`.
 fn resolve_category(category: &str) -> String {
     // LC_ALL overrides all individual categories.
-    if category != "LC_ALL" && category != "LANG"
+    if category != "LC_ALL"
+        && category != "LANG"
         && let Ok(val) = env::var("LC_ALL")
-            && !val.is_empty() {
-                return val;
-            }
+        && !val.is_empty()
+    {
+        return val;
+    }
 
     // The specific variable itself.
     if let Ok(val) = env::var(category)
-        && !val.is_empty() {
-            return val;
-        }
+        && !val.is_empty()
+    {
+        return val;
+    }
 
     // Fall back to LANG (except when querying LANG or LC_ALL themselves).
-    if category != "LANG" && category != "LC_ALL"
+    if category != "LANG"
+        && category != "LC_ALL"
         && let Ok(val) = env::var("LANG")
-            && !val.is_empty() {
-                return val;
-            }
+        && !val.is_empty()
+    {
+        return val;
+    }
 
     String::from("POSIX")
 }
@@ -172,16 +178,31 @@ struct LocaleData {
 // ===========================================================================
 
 static EN_US_DAY_NAMES: [&str; 7] = [
-    "Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday",
+    "Sunday",
+    "Monday",
+    "Tuesday",
+    "Wednesday",
+    "Thursday",
+    "Friday",
+    "Saturday",
 ];
 static EN_US_ABBREV_DAYS: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 static EN_US_MONTH_NAMES: [&str; 12] = [
-    "January", "February", "March", "April", "May", "June",
-    "July", "August", "September", "October", "November", "December",
+    "January",
+    "February",
+    "March",
+    "April",
+    "May",
+    "June",
+    "July",
+    "August",
+    "September",
+    "October",
+    "November",
+    "December",
 ];
 static EN_US_ABBREV_MONTHS: [&str; 12] = [
-    "Jan", "Feb", "Mar", "Apr", "May", "Jun",
-    "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
 ];
 static EN_US_AM_PM: [&str; 2] = ["AM", "PM"];
 
@@ -268,16 +289,42 @@ static EN_GB_DATA: LocaleData = LocaleData {
 // ===========================================================================
 
 static DE_DAY_NAMES: [&str; 7] = [
-    "Sonntag", "Montag", "Dienstag", "Mittwoch", "Donnerstag", "Freitag", "Samstag",
+    "Sonntag",
+    "Montag",
+    "Dienstag",
+    "Mittwoch",
+    "Donnerstag",
+    "Freitag",
+    "Samstag",
 ];
 static DE_ABBREV_DAYS: [&str; 7] = ["So", "Mo", "Di", "Mi", "Do", "Fr", "Sa"];
 static DE_MONTH_NAMES: [&str; 12] = [
-    "Januar", "Februar", "M\u{00E4}rz", "April", "Mai", "Juni",
-    "Juli", "August", "September", "Oktober", "November", "Dezember",
+    "Januar",
+    "Februar",
+    "M\u{00E4}rz",
+    "April",
+    "Mai",
+    "Juni",
+    "Juli",
+    "August",
+    "September",
+    "Oktober",
+    "November",
+    "Dezember",
 ];
 static DE_ABBREV_MONTHS: [&str; 12] = [
-    "Jan", "Feb", "M\u{00E4}r", "Apr", "Mai", "Jun",
-    "Jul", "Aug", "Sep", "Okt", "Nov", "Dez",
+    "Jan",
+    "Feb",
+    "M\u{00E4}r",
+    "Apr",
+    "Mai",
+    "Jun",
+    "Jul",
+    "Aug",
+    "Sep",
+    "Okt",
+    "Nov",
+    "Dez",
 ];
 static DE_AM_PM: [&str; 2] = ["", ""];
 
@@ -327,12 +374,32 @@ static FR_DAY_NAMES: [&str; 7] = [
 ];
 static FR_ABBREV_DAYS: [&str; 7] = ["dim.", "lun.", "mar.", "mer.", "jeu.", "ven.", "sam."];
 static FR_MONTH_NAMES: [&str; 12] = [
-    "janvier", "f\u{00E9}vrier", "mars", "avril", "mai", "juin",
-    "juillet", "ao\u{00FB}t", "septembre", "octobre", "novembre", "d\u{00E9}cembre",
+    "janvier",
+    "f\u{00E9}vrier",
+    "mars",
+    "avril",
+    "mai",
+    "juin",
+    "juillet",
+    "ao\u{00FB}t",
+    "septembre",
+    "octobre",
+    "novembre",
+    "d\u{00E9}cembre",
 ];
 static FR_ABBREV_MONTHS: [&str; 12] = [
-    "janv.", "f\u{00E9}vr.", "mars", "avr.", "mai", "juin",
-    "juil.", "ao\u{00FB}t", "sept.", "oct.", "nov.", "d\u{00E9}c.",
+    "janv.",
+    "f\u{00E9}vr.",
+    "mars",
+    "avr.",
+    "mai",
+    "juin",
+    "juil.",
+    "ao\u{00FB}t",
+    "sept.",
+    "oct.",
+    "nov.",
+    "d\u{00E9}c.",
 ];
 static FR_AM_PM: [&str; 2] = ["", ""];
 
@@ -390,12 +457,32 @@ static JA_ABBREV_DAYS: [&str; 7] = [
     "\u{65E5}", "\u{6708}", "\u{706B}", "\u{6C34}", "\u{6728}", "\u{91D1}", "\u{571F}",
 ];
 static JA_MONTH_NAMES: [&str; 12] = [
-    "1\u{6708}", "2\u{6708}", "3\u{6708}", "4\u{6708}", "5\u{6708}", "6\u{6708}",
-    "7\u{6708}", "8\u{6708}", "9\u{6708}", "10\u{6708}", "11\u{6708}", "12\u{6708}",
+    "1\u{6708}",
+    "2\u{6708}",
+    "3\u{6708}",
+    "4\u{6708}",
+    "5\u{6708}",
+    "6\u{6708}",
+    "7\u{6708}",
+    "8\u{6708}",
+    "9\u{6708}",
+    "10\u{6708}",
+    "11\u{6708}",
+    "12\u{6708}",
 ];
 static JA_ABBREV_MONTHS: [&str; 12] = [
-    "1\u{6708}", "2\u{6708}", "3\u{6708}", "4\u{6708}", "5\u{6708}", "6\u{6708}",
-    "7\u{6708}", "8\u{6708}", "9\u{6708}", "10\u{6708}", "11\u{6708}", "12\u{6708}",
+    "1\u{6708}",
+    "2\u{6708}",
+    "3\u{6708}",
+    "4\u{6708}",
+    "5\u{6708}",
+    "6\u{6708}",
+    "7\u{6708}",
+    "8\u{6708}",
+    "9\u{6708}",
+    "10\u{6708}",
+    "11\u{6708}",
+    "12\u{6708}",
 ];
 static JA_AM_PM: [&str; 2] = ["\u{5348}\u{524D}", "\u{5348}\u{5F8C}"];
 
@@ -453,14 +540,32 @@ static ZH_ABBREV_DAYS: [&str; 7] = [
     "\u{65E5}", "\u{4E00}", "\u{4E8C}", "\u{4E09}", "\u{56DB}", "\u{4E94}", "\u{516D}",
 ];
 static ZH_MONTH_NAMES: [&str; 12] = [
-    "\u{4E00}\u{6708}", "\u{4E8C}\u{6708}", "\u{4E09}\u{6708}",
-    "\u{56DB}\u{6708}", "\u{4E94}\u{6708}", "\u{516D}\u{6708}",
-    "\u{4E03}\u{6708}", "\u{516B}\u{6708}", "\u{4E5D}\u{6708}",
-    "\u{5341}\u{6708}", "\u{5341}\u{4E00}\u{6708}", "\u{5341}\u{4E8C}\u{6708}",
+    "\u{4E00}\u{6708}",
+    "\u{4E8C}\u{6708}",
+    "\u{4E09}\u{6708}",
+    "\u{56DB}\u{6708}",
+    "\u{4E94}\u{6708}",
+    "\u{516D}\u{6708}",
+    "\u{4E03}\u{6708}",
+    "\u{516B}\u{6708}",
+    "\u{4E5D}\u{6708}",
+    "\u{5341}\u{6708}",
+    "\u{5341}\u{4E00}\u{6708}",
+    "\u{5341}\u{4E8C}\u{6708}",
 ];
 static ZH_ABBREV_MONTHS: [&str; 12] = [
-    "1\u{6708}", "2\u{6708}", "3\u{6708}", "4\u{6708}", "5\u{6708}", "6\u{6708}",
-    "7\u{6708}", "8\u{6708}", "9\u{6708}", "10\u{6708}", "11\u{6708}", "12\u{6708}",
+    "1\u{6708}",
+    "2\u{6708}",
+    "3\u{6708}",
+    "4\u{6708}",
+    "5\u{6708}",
+    "6\u{6708}",
+    "7\u{6708}",
+    "8\u{6708}",
+    "9\u{6708}",
+    "10\u{6708}",
+    "11\u{6708}",
+    "12\u{6708}",
 ];
 static ZH_AM_PM: [&str; 2] = ["\u{4E0A}\u{5348}", "\u{4E0B}\u{5348}"];
 
@@ -518,12 +623,32 @@ static KO_ABBREV_DAYS: [&str; 7] = [
     "\u{C77C}", "\u{C6D4}", "\u{D654}", "\u{C218}", "\u{BAA9}", "\u{AE08}", "\u{D1A0}",
 ];
 static KO_MONTH_NAMES: [&str; 12] = [
-    "1\u{C6D4}", "2\u{C6D4}", "3\u{C6D4}", "4\u{C6D4}", "5\u{C6D4}", "6\u{C6D4}",
-    "7\u{C6D4}", "8\u{C6D4}", "9\u{C6D4}", "10\u{C6D4}", "11\u{C6D4}", "12\u{C6D4}",
+    "1\u{C6D4}",
+    "2\u{C6D4}",
+    "3\u{C6D4}",
+    "4\u{C6D4}",
+    "5\u{C6D4}",
+    "6\u{C6D4}",
+    "7\u{C6D4}",
+    "8\u{C6D4}",
+    "9\u{C6D4}",
+    "10\u{C6D4}",
+    "11\u{C6D4}",
+    "12\u{C6D4}",
 ];
 static KO_ABBREV_MONTHS: [&str; 12] = [
-    "1\u{C6D4}", "2\u{C6D4}", "3\u{C6D4}", "4\u{C6D4}", "5\u{C6D4}", "6\u{C6D4}",
-    "7\u{C6D4}", "8\u{C6D4}", "9\u{C6D4}", "10\u{C6D4}", "11\u{C6D4}", "12\u{C6D4}",
+    "1\u{C6D4}",
+    "2\u{C6D4}",
+    "3\u{C6D4}",
+    "4\u{C6D4}",
+    "5\u{C6D4}",
+    "6\u{C6D4}",
+    "7\u{C6D4}",
+    "8\u{C6D4}",
+    "9\u{C6D4}",
+    "10\u{C6D4}",
+    "11\u{C6D4}",
+    "12\u{C6D4}",
 ];
 static KO_AM_PM: [&str; 2] = ["\u{C624}\u{C804}", "\u{C624}\u{D6C4}"];
 
@@ -569,16 +694,39 @@ static KO_KR_DATA: LocaleData = LocaleData {
 // ===========================================================================
 
 static ES_DAY_NAMES: [&str; 7] = [
-    "domingo", "lunes", "martes", "mi\u{00E9}rcoles", "jueves", "viernes", "s\u{00E1}bado",
+    "domingo",
+    "lunes",
+    "martes",
+    "mi\u{00E9}rcoles",
+    "jueves",
+    "viernes",
+    "s\u{00E1}bado",
 ];
-static ES_ABBREV_DAYS: [&str; 7] = ["dom", "lun", "mar", "mi\u{00E9}", "jue", "vie", "s\u{00E1}b"];
+static ES_ABBREV_DAYS: [&str; 7] = [
+    "dom",
+    "lun",
+    "mar",
+    "mi\u{00E9}",
+    "jue",
+    "vie",
+    "s\u{00E1}b",
+];
 static ES_MONTH_NAMES: [&str; 12] = [
-    "enero", "febrero", "marzo", "abril", "mayo", "junio",
-    "julio", "agosto", "septiembre", "octubre", "noviembre", "diciembre",
+    "enero",
+    "febrero",
+    "marzo",
+    "abril",
+    "mayo",
+    "junio",
+    "julio",
+    "agosto",
+    "septiembre",
+    "octubre",
+    "noviembre",
+    "diciembre",
 ];
 static ES_ABBREV_MONTHS: [&str; 12] = [
-    "ene", "feb", "mar", "abr", "may", "jun",
-    "jul", "ago", "sep", "oct", "nov", "dic",
+    "ene", "feb", "mar", "abr", "may", "jun", "jul", "ago", "sep", "oct", "nov", "dic",
 ];
 static ES_AM_PM: [&str; 2] = ["", ""];
 
@@ -624,17 +772,31 @@ static ES_ES_DATA: LocaleData = LocaleData {
 // ===========================================================================
 
 static PT_DAY_NAMES: [&str; 7] = [
-    "domingo", "segunda-feira", "ter\u{00E7}a-feira", "quarta-feira",
-    "quinta-feira", "sexta-feira", "s\u{00E1}bado",
+    "domingo",
+    "segunda-feira",
+    "ter\u{00E7}a-feira",
+    "quarta-feira",
+    "quinta-feira",
+    "sexta-feira",
+    "s\u{00E1}bado",
 ];
 static PT_ABBREV_DAYS: [&str; 7] = ["dom", "seg", "ter", "qua", "qui", "sex", "s\u{00E1}b"];
 static PT_MONTH_NAMES: [&str; 12] = [
-    "janeiro", "fevereiro", "mar\u{00E7}o", "abril", "maio", "junho",
-    "julho", "agosto", "setembro", "outubro", "novembro", "dezembro",
+    "janeiro",
+    "fevereiro",
+    "mar\u{00E7}o",
+    "abril",
+    "maio",
+    "junho",
+    "julho",
+    "agosto",
+    "setembro",
+    "outubro",
+    "novembro",
+    "dezembro",
 ];
 static PT_ABBREV_MONTHS: [&str; 12] = [
-    "jan", "fev", "mar", "abr", "mai", "jun",
-    "jul", "ago", "set", "out", "nov", "dez",
+    "jan", "fev", "mar", "abr", "mai", "jun", "jul", "ago", "set", "out", "nov", "dez",
 ];
 static PT_AM_PM: [&str; 2] = ["", ""];
 
@@ -689,9 +851,12 @@ static RU_DAY_NAMES: [&str; 7] = [
     "\u{0421}\u{0443}\u{0431}\u{0431}\u{043E}\u{0442}\u{0430}",
 ];
 static RU_ABBREV_DAYS: [&str; 7] = [
-    "\u{0412}\u{0441}", "\u{041F}\u{043D}",
-    "\u{0412}\u{0442}", "\u{0421}\u{0440}",
-    "\u{0427}\u{0442}", "\u{041F}\u{0442}",
+    "\u{0412}\u{0441}",
+    "\u{041F}\u{043D}",
+    "\u{0412}\u{0442}",
+    "\u{0421}\u{0440}",
+    "\u{0427}\u{0442}",
+    "\u{041F}\u{0442}",
     "\u{0421}\u{0431}",
 ];
 static RU_MONTH_NAMES: [&str; 12] = [
@@ -709,12 +874,18 @@ static RU_MONTH_NAMES: [&str; 12] = [
     "\u{0414}\u{0435}\u{043A}\u{0430}\u{0431}\u{0440}\u{044C}",
 ];
 static RU_ABBREV_MONTHS: [&str; 12] = [
-    "\u{044F}\u{043D}\u{0432}", "\u{0444}\u{0435}\u{0432}",
-    "\u{043C}\u{0430}\u{0440}", "\u{0430}\u{043F}\u{0440}",
-    "\u{043C}\u{0430}\u{0439}", "\u{0438}\u{044E}\u{043D}",
-    "\u{0438}\u{044E}\u{043B}", "\u{0430}\u{0432}\u{0433}",
-    "\u{0441}\u{0435}\u{043D}", "\u{043E}\u{043A}\u{0442}",
-    "\u{043D}\u{043E}\u{044F}", "\u{0434}\u{0435}\u{043A}",
+    "\u{044F}\u{043D}\u{0432}",
+    "\u{0444}\u{0435}\u{0432}",
+    "\u{043C}\u{0430}\u{0440}",
+    "\u{0430}\u{043F}\u{0440}",
+    "\u{043C}\u{0430}\u{0439}",
+    "\u{0438}\u{044E}\u{043D}",
+    "\u{0438}\u{044E}\u{043B}",
+    "\u{0430}\u{0432}\u{0433}",
+    "\u{0441}\u{0435}\u{043D}",
+    "\u{043E}\u{043A}\u{0442}",
+    "\u{043D}\u{043E}\u{044F}",
+    "\u{0434}\u{0435}\u{043A}",
 ];
 static RU_AM_PM: [&str; 2] = ["", ""];
 
@@ -760,16 +931,31 @@ static RU_RU_DATA: LocaleData = LocaleData {
 // ===========================================================================
 
 static C_DAY_NAMES: [&str; 7] = [
-    "Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday",
+    "Sunday",
+    "Monday",
+    "Tuesday",
+    "Wednesday",
+    "Thursday",
+    "Friday",
+    "Saturday",
 ];
 static C_ABBREV_DAYS: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 static C_MONTH_NAMES: [&str; 12] = [
-    "January", "February", "March", "April", "May", "June",
-    "July", "August", "September", "October", "November", "December",
+    "January",
+    "February",
+    "March",
+    "April",
+    "May",
+    "June",
+    "July",
+    "August",
+    "September",
+    "October",
+    "November",
+    "December",
 ];
 static C_ABBREV_MONTHS: [&str; 12] = [
-    "Jan", "Feb", "Mar", "Apr", "May", "Jun",
-    "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
 ];
 static C_AM_PM: [&str; 2] = ["AM", "PM"];
 
@@ -1141,15 +1327,12 @@ fn run_localedef(args: &[String]) {
     let charmap_name = charmap.unwrap_or_else(|| String::from("UTF-8"));
 
     // Check if the charmap is known.
-    let charmap_valid = AVAILABLE_CHARMAPS.iter().any(|&cm| {
-        cm.eq_ignore_ascii_case(&charmap_name)
-    });
+    let charmap_valid = AVAILABLE_CHARMAPS
+        .iter()
+        .any(|&cm| cm.eq_ignore_ascii_case(&charmap_name));
 
     if !charmap_valid && !force_create {
-        let _ = writeln!(
-            io::stderr(),
-            "localedef: unknown charmap '{charmap_name}'"
-        );
+        let _ = writeln!(io::stderr(), "localedef: unknown charmap '{charmap_name}'");
         process::exit(1);
     }
 
@@ -1157,7 +1340,10 @@ fn run_localedef(args: &[String]) {
     // the charmap file, then generate a compiled locale.  For now we
     // validate the arguments and report success.
     println!(
-        "localedef: locale '{name}' created from input '{input_file}' with charmap '{charmap_name}'"
+        "localedef: locale {} created from input {} with charmap {}",
+        quoteaf_os(&name),
+        quoteaf_os(&input_file),
+        quoteaf_os(&charmap_name)
     );
 }
 
@@ -1205,36 +1391,111 @@ fn build_conf_table() -> Vec<ConfVar> {
     let ncpus = count_cpus();
     vec![
         // POSIX
-        ConfVar { name: "ARG_MAX", value: ConfValue::Int(2_097_152) },
-        ConfVar { name: "CHILD_MAX", value: ConfValue::Int(32_768) },
-        ConfVar { name: "CLK_TCK", value: ConfValue::Int(100) },
-        ConfVar { name: "HOST_NAME_MAX", value: ConfValue::Int(255) },
-        ConfVar { name: "LOGIN_NAME_MAX", value: ConfValue::Int(256) },
-        ConfVar { name: "OPEN_MAX", value: ConfValue::Int(1_024) },
-        ConfVar { name: "PAGE_SIZE", value: ConfValue::Int(16_384) },
-        ConfVar { name: "PAGESIZE", value: ConfValue::Int(16_384) },
-        ConfVar { name: "_POSIX_VERSION", value: ConfValue::Int(200_809) },
+        ConfVar {
+            name: "ARG_MAX",
+            value: ConfValue::Int(2_097_152),
+        },
+        ConfVar {
+            name: "CHILD_MAX",
+            value: ConfValue::Int(32_768),
+        },
+        ConfVar {
+            name: "CLK_TCK",
+            value: ConfValue::Int(100),
+        },
+        ConfVar {
+            name: "HOST_NAME_MAX",
+            value: ConfValue::Int(255),
+        },
+        ConfVar {
+            name: "LOGIN_NAME_MAX",
+            value: ConfValue::Int(256),
+        },
+        ConfVar {
+            name: "OPEN_MAX",
+            value: ConfValue::Int(1_024),
+        },
+        ConfVar {
+            name: "PAGE_SIZE",
+            value: ConfValue::Int(16_384),
+        },
+        ConfVar {
+            name: "PAGESIZE",
+            value: ConfValue::Int(16_384),
+        },
+        ConfVar {
+            name: "_POSIX_VERSION",
+            value: ConfValue::Int(200_809),
+        },
         // Path
-        ConfVar { name: "PATH_MAX", value: ConfValue::Int(4_096) },
-        ConfVar { name: "NAME_MAX", value: ConfValue::Int(255) },
-        ConfVar { name: "PIPE_BUF", value: ConfValue::Int(4_096) },
-        ConfVar { name: "SYMLINK_MAX", value: ConfValue::Int(255) },
+        ConfVar {
+            name: "PATH_MAX",
+            value: ConfValue::Int(4_096),
+        },
+        ConfVar {
+            name: "NAME_MAX",
+            value: ConfValue::Int(255),
+        },
+        ConfVar {
+            name: "PIPE_BUF",
+            value: ConfValue::Int(4_096),
+        },
+        ConfVar {
+            name: "SYMLINK_MAX",
+            value: ConfValue::Int(255),
+        },
         // System
-        ConfVar { name: "NPROCESSORS_CONF", value: ConfValue::Int(ncpus) },
-        ConfVar { name: "NPROCESSORS_ONLN", value: ConfValue::Int(ncpus) },
+        ConfVar {
+            name: "NPROCESSORS_CONF",
+            value: ConfValue::Int(ncpus),
+        },
+        ConfVar {
+            name: "NPROCESSORS_ONLN",
+            value: ConfValue::Int(ncpus),
+        },
         // GNU
-        ConfVar { name: "GNU_LIBC_VERSION", value: ConfValue::Str("slateos-libc 0.1") },
-        ConfVar { name: "GNU_LIBPTHREAD_VERSION", value: ConfValue::Str("slateos-pthread 0.1") },
+        ConfVar {
+            name: "GNU_LIBC_VERSION",
+            value: ConfValue::Str("slateos-libc 0.1"),
+        },
+        ConfVar {
+            name: "GNU_LIBPTHREAD_VERSION",
+            value: ConfValue::Str("slateos-pthread 0.1"),
+        },
         // Limits
-        ConfVar { name: "LONG_BIT", value: ConfValue::Int(64) },
-        ConfVar { name: "WORD_BIT", value: ConfValue::Int(32) },
-        ConfVar { name: "INT_MAX", value: ConfValue::Int(2_147_483_647) },
-        ConfVar { name: "INT_MIN", value: ConfValue::Int(-2_147_483_648) },
-        ConfVar { name: "UINT_MAX", value: ConfValue::Int(4_294_967_295) },
-        ConfVar { name: "SSIZE_MAX", value: ConfValue::Int(9_223_372_036_854_775_807) },
+        ConfVar {
+            name: "LONG_BIT",
+            value: ConfValue::Int(64),
+        },
+        ConfVar {
+            name: "WORD_BIT",
+            value: ConfValue::Int(32),
+        },
+        ConfVar {
+            name: "INT_MAX",
+            value: ConfValue::Int(2_147_483_647),
+        },
+        ConfVar {
+            name: "INT_MIN",
+            value: ConfValue::Int(-2_147_483_648),
+        },
+        ConfVar {
+            name: "UINT_MAX",
+            value: ConfValue::Int(4_294_967_295),
+        },
+        ConfVar {
+            name: "SSIZE_MAX",
+            value: ConfValue::Int(9_223_372_036_854_775_807),
+        },
         // File
-        ConfVar { name: "FILESIZEBITS", value: ConfValue::Int(64) },
-        ConfVar { name: "LINK_MAX", value: ConfValue::Int(65_000) },
+        ConfVar {
+            name: "FILESIZEBITS",
+            value: ConfValue::Int(64),
+        },
+        ConfVar {
+            name: "LINK_MAX",
+            value: ConfValue::Int(65_000),
+        },
     ]
 }
 
@@ -1325,7 +1586,10 @@ mod tests {
 
     #[test]
     fn test_personality_localedef_path() {
-        assert_eq!(detect_personality("/usr/bin/localedef"), Personality::Localedef);
+        assert_eq!(
+            detect_personality("/usr/bin/localedef"),
+            Personality::Localedef
+        );
     }
 
     #[test]
@@ -1835,7 +2099,10 @@ mod tests {
     #[test]
     fn test_getconf_gnu_libpthread_version() {
         let table = build_conf_table();
-        let entry = table.iter().find(|v| v.name == "GNU_LIBPTHREAD_VERSION").unwrap();
+        let entry = table
+            .iter()
+            .find(|v| v.name == "GNU_LIBPTHREAD_VERSION")
+            .unwrap();
         assert_eq!(entry.value.display(), "slateos-pthread 0.1");
     }
 

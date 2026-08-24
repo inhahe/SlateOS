@@ -2,3 +2,9 @@
 name = "redis-cli-tool"
 version = "0.1.0"
 edition = "2024"
+
+[dependencies]
+# It interpolates `pattern` into "Scanning for keys matching {}...". That
+# value is an argv word, so it is whatever the user typed and not text this
+# program chose.
+quoting = { path = "../quoting" }

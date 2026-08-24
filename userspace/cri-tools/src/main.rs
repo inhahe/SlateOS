@@ -4,6 +4,7 @@
 //!
 //! Multi-personality: `crictl`, `critest`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -42,9 +43,15 @@ fn run_crictl(args: Vec<String>) -> i32 {
             println!("RuntimeApiVersion:  v1");
         }
         "ps" => {
-            println!("CONTAINER      IMAGE                   CREATED        STATE     NAME          POD ID");
-            println!("abc123def456   docker.io/nginx:1.25    2 hours ago    Running   nginx         pod-abc123");
-            println!("def456abc789   docker.io/redis:7       5 hours ago    Running   redis-cache   pod-def456");
+            println!(
+                "CONTAINER      IMAGE                   CREATED        STATE     NAME          POD ID"
+            );
+            println!(
+                "abc123def456   docker.io/nginx:1.25    2 hours ago    Running   nginx         pod-abc123"
+            );
+            println!(
+                "def456abc789   docker.io/redis:7       5 hours ago    Running   redis-cache   pod-def456"
+            );
         }
         "pods" => {
             println!("POD ID         CREATED        STATE    NAME            NAMESPACE");
@@ -70,11 +77,12 @@ fn run_crictl(args: Vec<String>) -> i32 {
             println!("  ]}}");
             println!("}}");
         }
-        "inspect" | "inspecti" | "inspectp" | "logs" | "exec" | "create" | "start" | "stop" | "rm" | "pull" | "rmi" | "attach" => {
+        "inspect" | "inspecti" | "inspectp" | "logs" | "exec" | "create" | "start" | "stop"
+        | "rm" | "pull" | "rmi" | "attach" => {
             println!("({} — simulated)", cmd);
         }
         _ => {
-            eprintln!("Unknown command '{}'. Use --help.", cmd);
+            eprintln!("Unknown command {}. Use --help.", quoteaf_os(cmd));
             return 1;
         }
     }
@@ -106,7 +114,9 @@ fn main() {
         let bytes = s.as_bytes();
         let mut last_sep = 0;
         for (i, &b) in bytes.iter().enumerate() {
-            if b == b'/' || b == b'\\' { last_sep = i + 1; }
+            if b == b'/' || b == b'\\' {
+                last_sep = i + 1;
+            }
         }
         let base = &s[last_sep..];
         base.strip_suffix(".exe").unwrap_or(base).to_string()
@@ -121,7 +131,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_crictl};
+    use super::run_crictl;
 
     #[test]
     fn help_exits_zero() {

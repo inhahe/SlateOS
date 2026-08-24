@@ -5,6 +5,7 @@
 
 #![allow(unexpected_cfgs)]
 
+use quoting::quoteaf_os;
 use std::env;
 use std::fs;
 use std::io::{self, Read, Write};
@@ -325,7 +326,10 @@ fn parse_args() -> Args {
     let needs_two = !(args.directory_mode || args.target_directory.is_some());
     if positionals.len() <= usize::from(needs_two) {
         if let Some(first) = positionals.first() {
-            eprintln!("install: missing destination file operand after '{first}'");
+            eprintln!(
+                "install: missing destination file operand after {}",
+                quoteaf_os(first)
+            );
         } else {
             eprintln!("install: missing file operand");
         }
@@ -341,7 +345,7 @@ fn parse_args() -> Args {
     } else if args.no_target_directory {
         // -T: exactly src dest
         if let Some(extra) = positionals.get(2) {
-            eprintln!("install: extra operand '{extra}'");
+            eprintln!("install: extra operand {}", quoteaf_os(extra));
             usage_error();
         }
         let mut it = positionals.into_iter();
@@ -596,7 +600,7 @@ fn create_dir_at(path: &Path, mode: u32, verbose: bool) -> Result<(), String> {
         .map_err(|e| format!("cannot create directory '{}': {e}", path.display()))?;
 
     if verbose {
-        println!("install: creating directory '{}'", path.display());
+        println!("install: creating directory {}", quoteaf_os(path));
     }
 
     set_mode(path, mode)
@@ -717,22 +721,22 @@ fn install_file(src: &Path, dst: &Path, args: &Args) -> Result<(), String> {
             Ok(s) if s.success() => {}
             Ok(s) => {
                 eprintln!(
-                    "install: strip program '{}' failed with exit code {}",
-                    args.strip_program,
+                    "install: strip program {} failed with exit code {}",
+                    quoteaf_os(&args.strip_program),
                     s.code().unwrap_or(-1)
                 );
             }
             Err(e) => {
                 eprintln!(
-                    "install: cannot run strip program '{}': {e}",
-                    args.strip_program
+                    "install: cannot run strip program {}: {e}",
+                    quoteaf_os(&args.strip_program)
                 );
             }
         }
     }
 
     if args.verbose {
-        println!("'{}' -> '{}'", src.display(), dst.display());
+        println!("{} -> {}", quoteaf_os(src), quoteaf_os(dst));
     }
 
     Ok(())

@@ -4,6 +4,7 @@
 //!
 //! Multi-personality: `gettext`, `xgettext`, `msgfmt`, `msginit`, `msgmerge`, `msgcat`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -28,7 +29,11 @@ fn run_gettext(args: &[String]) -> i32 {
         println!("  -E           (ignored for compatibility)");
         return 0;
     }
-    let text: Vec<&str> = args.iter().filter(|a| !a.starts_with('-')).map(|s| s.as_str()).collect();
+    let text: Vec<&str> = args
+        .iter()
+        .filter(|a| !a.starts_with('-'))
+        .map(|s| s.as_str())
+        .collect();
     if let Some(msg) = text.last() {
         println!("{}", msg);
     }
@@ -56,9 +61,21 @@ fn run_xgettext(args: &[String]) -> i32 {
         println!("xgettext (GNU gettext-tools) 0.22.4 (Slate OS)");
         return 0;
     }
-    let output = args.windows(2).find(|w| w[0] == "-o" || w[0] == "--output").map(|w| w[1].as_str()).unwrap_or("messages.po");
-    let files: Vec<&str> = args.iter().filter(|a| !a.starts_with('-')).map(|s| s.as_str()).collect();
-    println!("Extracting from {} file(s) → '{}'", files.len(), output);
+    let output = args
+        .windows(2)
+        .find(|w| w[0] == "-o" || w[0] == "--output")
+        .map(|w| w[1].as_str())
+        .unwrap_or("messages.po");
+    let files: Vec<&str> = args
+        .iter()
+        .filter(|a| !a.starts_with('-'))
+        .map(|s| s.as_str())
+        .collect();
+    println!(
+        "Extracting from {} file(s) → {}",
+        files.len(),
+        quoteaf_os(output)
+    );
     0
 }
 
@@ -80,9 +97,13 @@ fn run_msgfmt(args: &[String]) -> i32 {
         return 0;
     }
     let stats = args.iter().any(|a| a == "--statistics");
-    let files: Vec<&str> = args.iter().filter(|a| !a.starts_with('-')).map(|s| s.as_str()).collect();
+    let files: Vec<&str> = args
+        .iter()
+        .filter(|a| !a.starts_with('-'))
+        .map(|s| s.as_str())
+        .collect();
     for f in &files {
-        println!("Compiling '{}'...", f);
+        println!("Compiling {}...", quoteaf_os(f));
         if stats {
             println!("  42 translated messages, 3 fuzzy, 1 untranslated.");
         }
@@ -102,9 +123,21 @@ fn run_msginit(args: &[String]) -> i32 {
         println!("  -l, --locale LOC    Target locale");
         return 0;
     }
-    let locale = args.windows(2).find(|w| w[0] == "-l" || w[0] == "--locale").map(|w| w[1].as_str()).unwrap_or("en_US");
-    let output = args.windows(2).find(|w| w[0] == "-o" || w[0] == "--output").map(|w| w[1].as_str()).unwrap_or("messages.po");
-    println!("Creating '{}' for locale '{}'...", output, locale);
+    let locale = args
+        .windows(2)
+        .find(|w| w[0] == "-l" || w[0] == "--locale")
+        .map(|w| w[1].as_str())
+        .unwrap_or("en_US");
+    let output = args
+        .windows(2)
+        .find(|w| w[0] == "-o" || w[0] == "--output")
+        .map(|w| w[1].as_str())
+        .unwrap_or("messages.po");
+    println!(
+        "Creating {} for locale {}...",
+        quoteaf_os(output),
+        quoteaf_os(locale)
+    );
     println!("Done.");
     0
 }
@@ -139,7 +172,11 @@ fn run_msgcat(args: &[String]) -> i32 {
         println!("  -t, --to-code ENC   Output encoding");
         return 0;
     }
-    let files: Vec<&str> = args.iter().filter(|a| !a.starts_with('-')).map(|s| s.as_str()).collect();
+    let files: Vec<&str> = args
+        .iter()
+        .filter(|a| !a.starts_with('-'))
+        .map(|s| s.as_str())
+        .collect();
     println!("Concatenating {} catalog(s)...", files.len());
     println!("Done.");
     0
@@ -147,7 +184,8 @@ fn run_msgcat(args: &[String]) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first()
+    let prog = args
+        .first()
         .map(|s| strip_ext(basename(s)).to_string())
         .unwrap_or_else(|| "gettext".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
@@ -165,7 +203,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_gettext};
+    use super::{basename, run_gettext, strip_ext};
 
     #[test]
     fn basename_strips_path() {

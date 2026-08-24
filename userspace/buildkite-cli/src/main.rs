@@ -4,11 +4,16 @@
 //!
 //! Multi-personality: `bk`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_bk(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
@@ -45,7 +50,7 @@ fn run_bk(args: &[String]) -> i32 {
                     println!("  Duration: 3m 12s");
                     println!("  URL:      https://buildkite.com/my-org/my-pipeline/builds/42");
                 }
-                _ => println!("bk build: '{}' completed", sub),
+                _ => println!("bk build: {} completed", quoteaf_os(sub)),
             }
         }
         "pipeline" => {
@@ -56,7 +61,7 @@ fn run_bk(args: &[String]) -> i32 {
                 println!("backend          156      #156 (passed)");
                 println!("frontend         89       #89 (running)");
             } else {
-                println!("bk pipeline: '{}' completed", sub);
+                println!("bk pipeline: {} completed", quoteaf_os(sub));
             }
         }
         "local" => {
@@ -74,17 +79,20 @@ fn run_bk(args: &[String]) -> i32 {
                 println!("agent-001       build-1         idle");
                 println!("agent-002       build-2         busy");
             } else {
-                println!("bk agent: '{}' completed", sub);
+                println!("bk agent: {} completed", quoteaf_os(sub));
             }
         }
-        _ => println!("bk: '{}' completed", subcmd),
+        _ => println!("bk: {} completed", quoteaf_os(subcmd)),
     }
     0
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "bk".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "bk".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_bk(&rest);
     process::exit(code);
@@ -92,7 +100,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_bk};
+    use super::{basename, run_bk, strip_ext};
 
     #[test]
     fn basename_strips_path() {

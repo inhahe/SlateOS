@@ -30,6 +30,7 @@
 //! - 1: files differ
 //! - 2: error occurred
 
+use quoting::quoteaf_os;
 use std::env;
 use std::fs::File;
 use std::io::{self, Read, Write};
@@ -77,7 +78,7 @@ fn parse_byte_count(s: &str, opt_name: &str) -> u64 {
     match s.parse::<u64>() {
         Ok(n) => n,
         Err(_) => {
-            eprintln!("cmp: invalid {opt_name} value '{s}'");
+            eprintln!("cmp: invalid {opt_name} value {}", quoteaf_os(s));
             process::exit(2);
         }
     }
@@ -160,7 +161,7 @@ fn parse_args(args: &[String]) -> ParseResult {
             } else if arg == "--version" {
                 return ParseResult::Version;
             } else {
-                eprintln!("cmp: unrecognized option '{arg}'");
+                eprintln!("cmp: unrecognized option {}", quoteaf_os(arg));
                 eprintln!("Try 'cmp --help' for more information.");
                 process::exit(2);
             }
@@ -213,7 +214,7 @@ fn parse_args(args: &[String]) -> ParseResult {
                     continue;
                 }
                 other => {
-                    eprintln!("cmp: invalid option -- '{other}'");
+                    eprintln!("cmp: invalid option -- {}", quoteaf_os(other.to_string()));
                     eprintln!("Try 'cmp --help' for more information.");
                     process::exit(2);
                 }
@@ -357,10 +358,8 @@ fn compare(
             None => CHUNK_SIZE,
         };
 
-        let n1 = read_full(r1, &mut buf1[..want])
-            .map_err(|e| format!("read error: {e}"))?;
-        let n2 = read_full(r2, &mut buf2[..want])
-            .map_err(|e| format!("read error: {e}"))?;
+        let n1 = read_full(r1, &mut buf1[..want]).map_err(|e| format!("read error: {e}"))?;
+        let n2 = read_full(r2, &mut buf2[..want]).map_err(|e| format!("read error: {e}"))?;
 
         let common = n1.min(n2);
 
@@ -489,22 +488,13 @@ fn print_verbose(diffs: &[Difference], print_bytes_flag: bool) {
                 byte_display(d.val2),
             );
         } else {
-            let _ = writeln!(
-                w,
-                "{:>5} {:>3o} {:>3o}",
-                d.byte_number, d.val1, d.val2,
-            );
+            let _ = writeln!(w, "{:>5} {:>3o} {:>3o}", d.byte_number, d.val1, d.val2,);
         }
     }
 }
 
 /// Print JSON output for the comparison result.
-fn print_json_output(
-    result: &CmpResult,
-    path1: &str,
-    path2: &str,
-    shorter_name: Option<&str>,
-) {
+fn print_json_output(result: &CmpResult, path1: &str, path2: &str, shorter_name: Option<&str>) {
     let out = io::stdout();
     let mut w = out.lock();
 
@@ -530,7 +520,11 @@ fn print_json_output(
             }
             let _ = write!(w, "]");
         }
-        CmpResult::Eof { byte_number, line_number, diffs } => {
+        CmpResult::Eof {
+            byte_number,
+            line_number,
+            diffs,
+        } => {
             let _ = write!(w, "\"identical\":false,");
             let _ = write!(w, "\"differences\":[");
             for (idx, d) in diffs.iter().enumerate() {
@@ -637,19 +631,21 @@ fn run_cmp(config: &Config) -> i32 {
 
     // Skip initial bytes if requested.
     if config.skip1 > 0
-        && let Err(msg) = skip_bytes(r1.as_mut(), config.skip1) {
-            if !config.silent {
-                eprintln!("cmp: {}: {msg}", config.path1);
-            }
-            return 2;
+        && let Err(msg) = skip_bytes(r1.as_mut(), config.skip1)
+    {
+        if !config.silent {
+            eprintln!("cmp: {}: {msg}", config.path1);
         }
+        return 2;
+    }
     if config.skip2 > 0
-        && let Err(msg) = skip_bytes(r2.as_mut(), config.skip2) {
-            if !config.silent {
-                eprintln!("cmp: {}: {msg}", config.path2);
-            }
-            return 2;
+        && let Err(msg) = skip_bytes(r2.as_mut(), config.skip2)
+    {
+        if !config.silent {
+            eprintln!("cmp: {}: {msg}", config.path2);
         }
+        return 2;
+    }
 
     // Run the comparison.
     let result = match compare(r1.as_mut(), r2.as_mut(), config.verbose, config.max_bytes) {
@@ -746,26 +742,27 @@ fn run_cmp(config: &Config) -> i32 {
                 if config.verbose && !diffs.is_empty() {
                     print_verbose(diffs, config.print_bytes);
                 } else if !config.verbose
-                    && let Some(first) = diffs.first() {
-                        if config.print_bytes {
-                            let out = io::stdout();
-                            let mut w = out.lock();
-                            let _ = writeln!(
-                                w,
-                                "{} {} differ: byte {}, line {} is {:>3o} {} {:>3o} {}",
-                                config.path1,
-                                config.path2,
-                                first.byte_number,
-                                first.line_number,
-                                first.val1,
-                                byte_display(first.val1),
-                                first.val2,
-                                byte_display(first.val2),
-                            );
-                        } else {
-                            print_default(first, &config.path1, &config.path2);
-                        }
+                    && let Some(first) = diffs.first()
+                {
+                    if config.print_bytes {
+                        let out = io::stdout();
+                        let mut w = out.lock();
+                        let _ = writeln!(
+                            w,
+                            "{} {} differ: byte {}, line {} is {:>3o} {} {:>3o} {}",
+                            config.path1,
+                            config.path2,
+                            first.byte_number,
+                            first.line_number,
+                            first.val1,
+                            byte_display(first.val1),
+                            first.val2,
+                            byte_display(first.val2),
+                        );
+                    } else {
+                        print_default(first, &config.path1, &config.path2);
                     }
+                }
                 eprintln!(
                     "cmp: EOF on {shorter_name} after byte {}, in line {}",
                     byte_number.saturating_sub(1),

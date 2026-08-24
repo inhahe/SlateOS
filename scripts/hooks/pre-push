@@ -740,4 +740,99 @@ EOF
     exit 1
 fi
 
+# ---------------------------------------------------------------------------
+# Gate 8: refuse to publish a diagnostic that names a file without quoting it.
+#
+# `userspace/coreutils/tests/diagnostics_quote_names.rs` already forbids this,
+# over exactly one directory: `coreutils/src/bin`. Everything else in the tree
+# is outside it — including all 41 crates that duplicate a coreutils name, so
+# `coreutils/src/bin/du.rs` is checked and `userspace/du/src/main.rs` is not,
+# and those are the same program.
+#
+# What is being prevented is a name that forges a line of its own diagnostic:
+#
+#     $ touch $'x\ncut: /etc/shadow: Permission denied'
+#     $ cut -c1 x*
+#     cut: x: Is a directory
+#     cut: /etc/shadow: Permission denied      <- cut never wrote this
+#
+# The second line is indistinguishable from a real one, which is the whole
+# problem: whatever reads that stream — a script, a test, a person — believes
+# it. `quotef_os` renders the name so it cannot contain a newline.
+#
+# Same shape as gates 2-4 and 6: the backlog lives in
+# scripts/quote-names-baseline.txt (777 files, 1798 sites when this landed),
+# and this fails only on a *new* one. Keyed on file + count rather than on the
+# line number, because a line number churns on any edit above it and a gate
+# that cries wolf gets bypassed; see the script's docstring for the three keys
+# that were considered.
+#
+# See known-issues.md -> TD-B-THE-QUOTE-NAMES-TEST-READS-ONE-DIRECTORY-OF-EIGHTY.
+#
+# Bypass: ALLOW_UNQUOTED_NAMES=1 git push origin <branch>
+# ---------------------------------------------------------------------------
+
+if [ "${ALLOW_UNQUOTED_NAMES:-0}" = "1" ]; then
+    echo "pre-push: ALLOW_UNQUOTED_NAMES=1 set — name-quoting check skipped." >&2
+    skip_quote=1
+else
+    skip_quote=$skip
+fi
+
+quote="${repo_root:-.}/scripts/quote-names.py"
+[ -f "$quote" ] || skip_quote=1
+# The scanned trees, plus the checker and its baseline: a push that edits the
+# baseline by hand -- the one way to defeat this gate without the bypass -- must
+# be the push that re-verifies it, or lowering a number is unattended.
+touches userspace/ services/ init/ posix/ \
+        scripts/quote-names.py scripts/quote-names-baseline.txt || skip_quote=1
+
+quote_failed=0
+if [ "$skip_quote" != "1" ]; then
+    # As with gate 6, check the checker first: this detector's signal is also
+    # inside a string literal, so a rewrite that reached for a Rust lexer would
+    # blank out the very text it searches and report a clean tree.
+    if ! "$py" "$quote" --selftest; then
+        echo "pre-push: quote-names.py FAILED ITS OWN SELF-TEST — its --check result is not trustworthy." >&2
+        quote_failed=1
+    elif ! "$py" "$quote" --check; then
+        quote_failed=1
+    fi
+fi
+
+if [ "$quote_failed" = "1" ]; then
+    cat >&2 <<EOF
+
+pre-push: REFUSING to push — a diagnostic above puts a file name straight into
+its message.
+
+    eprintln!("cut: {path}: {e}");
+
+compiles, reads correctly, and hands the name control of stderr. A file called
+\`x\` followed by a newline and \`cut: /etc/shadow: Permission denied\` makes
+\`cut\` appear to have written a line it never wrote, and nothing downstream
+can tell the difference.
+
+The fix, one call per site:
+
+    eprintln!("cut: {}: {e}", quotef_os(path));
+
+\`quotef_os\` quotes only when the name needs it; \`quoteaf_os\` always does.
+Both live in the \`quoting\` module of the crate. Hand-written quotes —
+\`'{path}'\` — are flagged too and are worse than none: they look fixed, so
+they survive review, while a name containing a \`'\` still breaks out.
+
+Do NOT raise a number in scripts/quote-names-baseline.txt to turn this green.
+That file is the existing backlog and only ever shrinks; raising an entry
+records the defect instead of repairing it. A genuine false positive belongs in
+the IGNORE table in scripts/quote-names.py, which records *why* rather than
+merely *that*.
+
+To push anyway:
+    ALLOW_UNQUOTED_NAMES=1 git push $remote_name ...
+
+EOF
+    exit 1
+fi
+
 exit 0

@@ -18,6 +18,7 @@
 //! service tree                   Show service dependency tree
 //! ```
 
+use quoting::quoteaf_os;
 use std::env;
 use std::fs;
 use std::process;
@@ -383,7 +384,7 @@ fn cmd_status(name: &str) {
     let info = match read_service_status(name) {
         Some(i) => i,
         None => {
-            eprintln!("Service '{}' not found", name);
+            eprintln!("Service {} not found", quoteaf_os(name));
             process::exit(1);
         }
     };
@@ -426,7 +427,7 @@ fn cmd_start(name: &str) {
             let def_path = format!("/etc/service.d/{name}.service");
             let (_, _, exec_path, _) = read_service_def(&def_path);
             if exec_path.is_empty() {
-                eprintln!("No exec path found for service '{name}'");
+                eprintln!("No exec path found for service {}", quoteaf_os(name));
                 process::exit(1);
             }
             // The actual process spawn would use SYS_SPAWN here.
@@ -515,7 +516,7 @@ fn cmd_logs(name: &str) {
     }
 
     if !found {
-        println!("No log entries found for service '{name}'");
+        println!("No log entries found for service {}", quoteaf_os(name));
     }
 }
 

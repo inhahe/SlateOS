@@ -4,6 +4,7 @@
 //!
 //! Multi-personality: `zoxide` (manager), `z` (jump), `zi` (interactive)
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -72,7 +73,8 @@ fn run_zoxide(args: Vec<String>) -> i32 {
                 println!("(interactive selection — simulated)");
                 println!("/home/user/projects/myapp");
             } else {
-                let keyword: Vec<&str> = args.iter()
+                let keyword: Vec<&str> = args
+                    .iter()
                     .skip(1)
                     .filter(|a| !a.starts_with('-'))
                     .map(|s| s.as_str())
@@ -136,7 +138,7 @@ fn run_zoxide(args: Vec<String>) -> i32 {
             0
         }
         _ => {
-            eprintln!("Error: unknown command '{}'. See --help.", cmd);
+            eprintln!("Error: unknown command {}. See --help.", quoteaf_os(cmd));
             1
         }
     }
@@ -144,7 +146,10 @@ fn run_zoxide(args: Vec<String>) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let argv0 = args.first().cloned().unwrap_or_else(|| String::from("zoxide"));
+    let argv0 = args
+        .first()
+        .cloned()
+        .unwrap_or_else(|| String::from("zoxide"));
     let p = personality(&argv0);
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = match p {
@@ -157,7 +162,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_z};
+    use super::run_z;
 
     #[test]
     fn help_exits_zero() {

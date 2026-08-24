@@ -2,3 +2,7 @@
 name = "remix-cli"
 version = "0.1.0"
 edition = "2024"
+
+[dependencies]
+# The new project's name and the remix subcommand are argv words.
+quoting = { path = "../quoting" }

@@ -4,6 +4,7 @@
 //!
 //! Single personality: `fonttools`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -37,7 +38,8 @@ fn run_fonttools(args: Vec<String>) -> i32 {
     let cmd = args.first().map(|s| s.as_str()).unwrap_or("");
     match cmd {
         "info" => {
-            let file = args.iter()
+            let file = args
+                .iter()
                 .filter(|a| !a.starts_with('-'))
                 .nth(1)
                 .map(|s| s.as_str())
@@ -74,7 +76,8 @@ fn run_fonttools(args: Vec<String>) -> i32 {
                 println!("  -o, --output <FILE>       Output file");
                 return 0;
             }
-            let file = args.iter()
+            let file = args
+                .iter()
                 .filter(|a| !a.starts_with('-'))
                 .nth(1)
                 .map(|s| s.as_str())
@@ -87,7 +90,8 @@ fn run_fonttools(args: Vec<String>) -> i32 {
             0
         }
         "merge" => {
-            let files: Vec<&str> = args.iter()
+            let files: Vec<&str> = args
+                .iter()
                 .filter(|a| !a.starts_with('-'))
                 .skip(1)
                 .map(|s| s.as_str())
@@ -101,12 +105,14 @@ fn run_fonttools(args: Vec<String>) -> i32 {
             0
         }
         "convert" => {
-            let file = args.iter()
+            let file = args
+                .iter()
                 .filter(|a| !a.starts_with('-'))
                 .nth(1)
                 .map(|s| s.as_str())
                 .unwrap_or("font.ttf");
-            let format = args.windows(2)
+            let format = args
+                .windows(2)
                 .find(|w| w[0] == "--format" || w[0] == "-f")
                 .map(|w| w[1].as_str())
                 .unwrap_or("woff2");
@@ -116,7 +122,8 @@ fn run_fonttools(args: Vec<String>) -> i32 {
             0
         }
         "inspect" => {
-            let file = args.iter()
+            let file = args
+                .iter()
                 .filter(|a| !a.starts_with('-'))
                 .nth(1)
                 .map(|s| s.as_str())
@@ -138,7 +145,8 @@ fn run_fonttools(args: Vec<String>) -> i32 {
             0
         }
         "validate" => {
-            let file = args.iter()
+            let file = args
+                .iter()
                 .filter(|a| !a.starts_with('-'))
                 .nth(1)
                 .map(|s| s.as_str())
@@ -154,7 +162,8 @@ fn run_fonttools(args: Vec<String>) -> i32 {
             0
         }
         "metrics" => {
-            let file = args.iter()
+            let file = args
+                .iter()
                 .filter(|a| !a.starts_with('-'))
                 .nth(1)
                 .map(|s| s.as_str())
@@ -219,7 +228,7 @@ fn run_fonttools(args: Vec<String>) -> i32 {
             0
         }
         _ => {
-            eprintln!("Error: unknown command '{}'. See --help.", cmd);
+            eprintln!("Error: unknown command {}. See --help.", quoteaf_os(cmd));
             1
         }
     }
@@ -234,7 +243,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_fonttools};
+    use super::run_fonttools;
 
     #[test]
     fn help_exits_zero() {

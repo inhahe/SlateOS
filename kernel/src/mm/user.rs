@@ -1507,7 +1507,10 @@ fn cross_as_tests(target: crate::proc::pcb::ProcessId) -> KernelResult<()> {
         KernelError::InternalError
     })?;
     if got != [0u8; 8] {
-        crate::serial_println!("[user]   FAIL: demand-paged read gave {:x?}, want zeros", got);
+        crate::serial_println!(
+            "[user]   FAIL: demand-paged read gave {:x?}, want zeros",
+            got
+        );
         return Err(KernelError::InternalError);
     }
 

@@ -4,11 +4,16 @@
 //!
 //! Multi-personality: `snyk`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_snyk(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
@@ -35,8 +40,11 @@ fn run_snyk(args: &[String]) -> i32 {
         }
         "test" => {
             let path = args.get(1).map(|s| s.as_str()).unwrap_or(".");
-            let severity = args.windows(2).find(|w| w[0] == "--severity-threshold")
-                .map(|w| w[1].as_str()).unwrap_or("low");
+            let severity = args
+                .windows(2)
+                .find(|w| w[0] == "--severity-threshold")
+                .map(|w| w[1].as_str())
+                .unwrap_or("low");
             println!("Testing {}...", path);
             println!();
             println!("Tested 156 dependencies for known issues.");
@@ -82,7 +90,7 @@ fn run_snyk(args: &[String]) -> i32 {
                     println!("Monitoring {}...", image);
                     println!("Snapshot created for container image.");
                 }
-                _ => println!("snyk container: '{}' completed", sub),
+                _ => println!("snyk container: {} completed", quoteaf_os(sub)),
             }
         }
         "iac" => {
@@ -103,7 +111,7 @@ fn run_snyk(args: &[String]) -> i32 {
                 println!();
                 println!("Tested 3 files, found 2 issues.");
             } else {
-                println!("snyk iac: '{}' completed", sub);
+                println!("snyk iac: {} completed", quoteaf_os(sub));
             }
         }
         "code" => {
@@ -121,17 +129,20 @@ fn run_snyk(args: &[String]) -> i32 {
                 println!();
                 println!("Tested 45 files, found 2 issues.");
             } else {
-                println!("snyk code: '{}' completed", sub);
+                println!("snyk code: {} completed", quoteaf_os(sub));
             }
         }
-        _ => println!("snyk: '{}' completed", subcmd),
+        _ => println!("snyk: {} completed", quoteaf_os(subcmd)),
     }
     0
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "snyk".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "snyk".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_snyk(&rest);
     process::exit(code);
@@ -139,7 +150,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_snyk};
+    use super::{basename, run_snyk, strip_ext};
 
     #[test]
     fn basename_strips_path() {

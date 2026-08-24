@@ -4,3 +4,6 @@ version = "0.1.0"
 edition = "2024"
 description = "SlateOS kernel module management tools"
 [dependencies]
+# lsmod names loaded kernel modules, strings that come out of the kernel's
+# module list rather than from this tool.
+quoting = { path = "../quoting" }

@@ -4,6 +4,7 @@
 //!
 //! Single personality: `az`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -65,16 +66,22 @@ fn run_az(args: Vec<String>) -> i32 {
             match command {
                 "list" => {
                     println!("[");
-                    println!("  {{\"name\": \"My Subscription\", \"id\": \"12345678-abcd-efgh-ijkl-123456789012\", \"isDefault\": true}},");
-                    println!("  {{\"name\": \"Dev Subscription\", \"id\": \"87654321-dcba-hgfe-lkji-210987654321\", \"isDefault\": false}}");
+                    println!(
+                        "  {{\"name\": \"My Subscription\", \"id\": \"12345678-abcd-efgh-ijkl-123456789012\", \"isDefault\": true}},"
+                    );
+                    println!(
+                        "  {{\"name\": \"Dev Subscription\", \"id\": \"87654321-dcba-hgfe-lkji-210987654321\", \"isDefault\": false}}"
+                    );
                     println!("]");
                 }
                 "show" => {
-                    println!("{{\"id\": \"12345678-abcd-efgh-ijkl-123456789012\", \"name\": \"My Subscription\", \"state\": \"Enabled\"}}");
+                    println!(
+                        "{{\"id\": \"12345678-abcd-efgh-ijkl-123456789012\", \"name\": \"My Subscription\", \"state\": \"Enabled\"}}"
+                    );
                 }
                 "set" => {
                     let sub = args.get(2).map(|s| s.as_str()).unwrap_or("My Subscription");
-                    println!("Subscription set to '{}'.", sub);
+                    println!("Subscription set to {}.", quoteaf_os(sub));
                 }
                 _ => {
                     eprintln!("Usage: az account <list|show|set>. See --help.");
@@ -87,14 +94,29 @@ fn run_az(args: Vec<String>) -> i32 {
             match command {
                 "list" => {
                     println!("[");
-                    println!("  {{\"name\": \"my-rg\", \"location\": \"eastus\", \"provisioningState\": \"Succeeded\"}},");
-                    println!("  {{\"name\": \"staging-rg\", \"location\": \"westus2\", \"provisioningState\": \"Succeeded\"}}");
+                    println!(
+                        "  {{\"name\": \"my-rg\", \"location\": \"eastus\", \"provisioningState\": \"Succeeded\"}},"
+                    );
+                    println!(
+                        "  {{\"name\": \"staging-rg\", \"location\": \"westus2\", \"provisioningState\": \"Succeeded\"}}"
+                    );
                     println!("]");
                 }
                 "create" => {
-                    let name = args.windows(2).find(|w| w[0] == "-n" || w[0] == "--name").map(|w| w[1].as_str()).unwrap_or("new-rg");
-                    let loc = args.windows(2).find(|w| w[0] == "-l" || w[0] == "--location").map(|w| w[1].as_str()).unwrap_or("eastus");
-                    println!("{{\"id\": \"/subscriptions/.../resourceGroups/{}\", \"location\": \"{}\", \"name\": \"{}\", \"provisioningState\": \"Succeeded\"}}", name, loc, name);
+                    let name = args
+                        .windows(2)
+                        .find(|w| w[0] == "-n" || w[0] == "--name")
+                        .map(|w| w[1].as_str())
+                        .unwrap_or("new-rg");
+                    let loc = args
+                        .windows(2)
+                        .find(|w| w[0] == "-l" || w[0] == "--location")
+                        .map(|w| w[1].as_str())
+                        .unwrap_or("eastus");
+                    println!(
+                        "{{\"id\": \"/subscriptions/.../resourceGroups/{}\", \"location\": \"{}\", \"name\": \"{}\", \"provisioningState\": \"Succeeded\"}}",
+                        name, loc, name
+                    );
                 }
                 _ => {
                     eprintln!("Usage: az group <list|create|delete|show>. See --help.");
@@ -107,17 +129,36 @@ fn run_az(args: Vec<String>) -> i32 {
             match command {
                 "list" => {
                     println!("[");
-                    println!("  {{\"name\": \"web-vm-1\", \"resourceGroup\": \"my-rg\", \"location\": \"eastus\", \"powerState\": \"VM running\", \"vmSize\": \"Standard_B2s\"}},");
-                    println!("  {{\"name\": \"db-vm\", \"resourceGroup\": \"my-rg\", \"location\": \"eastus\", \"powerState\": \"VM running\", \"vmSize\": \"Standard_D4s_v3\"}}");
+                    println!(
+                        "  {{\"name\": \"web-vm-1\", \"resourceGroup\": \"my-rg\", \"location\": \"eastus\", \"powerState\": \"VM running\", \"vmSize\": \"Standard_B2s\"}},"
+                    );
+                    println!(
+                        "  {{\"name\": \"db-vm\", \"resourceGroup\": \"my-rg\", \"location\": \"eastus\", \"powerState\": \"VM running\", \"vmSize\": \"Standard_D4s_v3\"}}"
+                    );
                     println!("]");
                 }
                 "create" => {
-                    let name = args.windows(2).find(|w| w[0] == "-n" || w[0] == "--name").map(|w| w[1].as_str()).unwrap_or("new-vm");
-                    println!("{{\"id\": \"/subscriptions/.../virtualMachines/{}\", \"name\": \"{}\", \"powerState\": \"VM running\"}}", name, name);
+                    let name = args
+                        .windows(2)
+                        .find(|w| w[0] == "-n" || w[0] == "--name")
+                        .map(|w| w[1].as_str())
+                        .unwrap_or("new-vm");
+                    println!(
+                        "{{\"id\": \"/subscriptions/.../virtualMachines/{}\", \"name\": \"{}\", \"powerState\": \"VM running\"}}",
+                        name, name
+                    );
                 }
                 "start" | "stop" | "deallocate" | "restart" => {
-                    let name = args.windows(2).find(|w| w[0] == "-n" || w[0] == "--name").map(|w| w[1].as_str()).unwrap_or("web-vm-1");
-                    println!("VM '{}' operation '{}' completed.", name, command);
+                    let name = args
+                        .windows(2)
+                        .find(|w| w[0] == "-n" || w[0] == "--name")
+                        .map(|w| w[1].as_str())
+                        .unwrap_or("web-vm-1");
+                    println!(
+                        "VM {} operation {} completed.",
+                        quoteaf_os(name),
+                        quoteaf_os(command)
+                    );
                 }
                 _ => {
                     eprintln!("Usage: az vm <list|create|start|stop|delete|...>. See --help.");
@@ -130,15 +171,23 @@ fn run_az(args: Vec<String>) -> i32 {
             match command {
                 "list" => {
                     println!("[");
-                    println!("  {{\"name\": \"prod-aks\", \"resourceGroup\": \"my-rg\", \"location\": \"eastus\", \"kubernetesVersion\": \"1.28.3\", \"agentPoolProfiles\": [{{\"count\": 3}}]}}");
+                    println!(
+                        "  {{\"name\": \"prod-aks\", \"resourceGroup\": \"my-rg\", \"location\": \"eastus\", \"kubernetesVersion\": \"1.28.3\", \"agentPoolProfiles\": [{{\"count\": 3}}]}}"
+                    );
                     println!("]");
                 }
                 "get-credentials" => {
-                    let name = args.windows(2).find(|w| w[0] == "-n" || w[0] == "--name").map(|w| w[1].as_str()).unwrap_or("prod-aks");
+                    let name = args
+                        .windows(2)
+                        .find(|w| w[0] == "-n" || w[0] == "--name")
+                        .map(|w| w[1].as_str())
+                        .unwrap_or("prod-aks");
                     println!("Merged \"{}\" as current context in ~/.kube/config", name);
                 }
                 _ => {
-                    eprintln!("Usage: az aks <list|create|get-credentials|scale|upgrade>. See --help.");
+                    eprintln!(
+                        "Usage: az aks <list|create|get-credentials|scale|upgrade>. See --help."
+                    );
                     return 1;
                 }
             }
@@ -150,9 +199,13 @@ fn run_az(args: Vec<String>) -> i32 {
                     let sub = args.get(2).map(|s| s.as_str()).unwrap_or("list");
                     match sub {
                         "list" => {
-                            println!("[{{\"name\": \"mystorageaccount\", \"location\": \"eastus\", \"kind\": \"StorageV2\", \"sku\": {{\"name\": \"Standard_LRS\"}}}}]");
+                            println!(
+                                "[{{\"name\": \"mystorageaccount\", \"location\": \"eastus\", \"kind\": \"StorageV2\", \"sku\": {{\"name\": \"Standard_LRS\"}}}}]"
+                            );
                         }
-                        _ => { println!("Storage account operation: {}", sub); }
+                        _ => {
+                            println!("Storage account operation: {}", sub);
+                        }
                     }
                 }
                 "blob" => {
@@ -160,12 +213,20 @@ fn run_az(args: Vec<String>) -> i32 {
                     match sub {
                         "list" => {
                             println!("[");
-                            println!("  {{\"name\": \"file1.txt\", \"contentLength\": 1024, \"lastModified\": \"2024-01-15T10:00:00Z\"}},");
-                            println!("  {{\"name\": \"archive.tar.gz\", \"contentLength\": 51200, \"lastModified\": \"2024-01-14T09:00:00Z\"}}");
+                            println!(
+                                "  {{\"name\": \"file1.txt\", \"contentLength\": 1024, \"lastModified\": \"2024-01-15T10:00:00Z\"}},"
+                            );
+                            println!(
+                                "  {{\"name\": \"archive.tar.gz\", \"contentLength\": 51200, \"lastModified\": \"2024-01-14T09:00:00Z\"}}"
+                            );
                             println!("]");
                         }
-                        "upload" => { println!("Finished upload."); }
-                        _ => { println!("Blob operation: {}", sub); }
+                        "upload" => {
+                            println!("Finished upload.");
+                        }
+                        _ => {
+                            println!("Blob operation: {}", sub);
+                        }
                     }
                 }
                 _ => {
@@ -178,18 +239,26 @@ fn run_az(args: Vec<String>) -> i32 {
         "keyvault" => {
             match command {
                 "list" => {
-                    println!("[{{\"name\": \"my-vault\", \"location\": \"eastus\", \"resourceGroup\": \"my-rg\"}}]");
+                    println!(
+                        "[{{\"name\": \"my-vault\", \"location\": \"eastus\", \"resourceGroup\": \"my-rg\"}}]"
+                    );
                 }
                 "secret" => {
                     let sub = args.get(2).map(|s| s.as_str()).unwrap_or("list");
                     match sub {
                         "list" => {
-                            println!("[{{\"id\": \"https://my-vault.vault.azure.net/secrets/db-password\", \"attributes\": {{\"enabled\": true}}}}]");
+                            println!(
+                                "[{{\"id\": \"https://my-vault.vault.azure.net/secrets/db-password\", \"attributes\": {{\"enabled\": true}}}}]"
+                            );
                         }
                         "show" => {
-                            println!("{{\"value\": \"s3cr3t-v4lu3\", \"id\": \"https://my-vault.vault.azure.net/secrets/db-password\"}}");
+                            println!(
+                                "{{\"value\": \"s3cr3t-v4lu3\", \"id\": \"https://my-vault.vault.azure.net/secrets/db-password\"}}"
+                            );
                         }
-                        _ => { println!("Secret operation: {}", sub); }
+                        _ => {
+                            println!("Secret operation: {}", sub);
+                        }
                     }
                 }
                 _ => {
@@ -203,7 +272,7 @@ fn run_az(args: Vec<String>) -> i32 {
             if group.is_empty() {
                 eprintln!("Usage: az <group> <command>. See --help.");
             } else {
-                eprintln!("Error: unknown group '{}'. See --help.", group);
+                eprintln!("Error: unknown group {}. See --help.", quoteaf_os(group));
             }
             1
         }
@@ -219,7 +288,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_az};
+    use super::run_az;
 
     #[test]
     fn help_exits_zero() {

@@ -3,3 +3,8 @@ name = "helm"
 version = "0.1.0"
 edition = "2024"
 [dependencies]
+# It interpolates `sub` into "({} search for {})". That value is an argv
+# word, so it is whatever the user typed and not text this program chose. It
+# interpolates `query` into "({} search for {})". That value is an argv
+# word, so it is whatever the user typed and not text this program chose.
+quoting = { path = "../quoting" }

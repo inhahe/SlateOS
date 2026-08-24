@@ -2,3 +2,8 @@
 name = "prefect-cli"
 version = "0.1.0"
 edition = "2024"
+
+[dependencies]
+# prefect-cli echoes the subcommand and the flow, deployment and work-pool
+# names it was handed on the command line.
+quoting = { path = "../quoting" }

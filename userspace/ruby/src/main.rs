@@ -13,6 +13,7 @@
 //! - `rdoc` — Ruby documentation generator
 //! - `ri` — Ruby interactive reference
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -105,7 +106,10 @@ fn run_gem(args: Vec<String>) -> i32 {
             println!("  --version     Show version");
             0
         }
-        "--version" | "-v" => { println!("3.5.0"); 0 }
+        "--version" | "-v" => {
+            println!("3.5.0");
+            0
+        }
         "install" => {
             for pkg in &cmd_args {
                 if !pkg.starts_with('-') {
@@ -141,9 +145,18 @@ fn run_gem(args: Vec<String>) -> i32 {
             println!("{} (results simulated)", query);
             0
         }
-        "uninstall" => { println!("Successfully uninstalled (simulated)"); 0 }
-        "update" => { println!("Updating installed gems (simulated)"); 0 }
-        other => { eprintln!("gem: unknown command '{}'", other); 1 }
+        "uninstall" => {
+            println!("Successfully uninstalled (simulated)");
+            0
+        }
+        "update" => {
+            println!("Updating installed gems (simulated)");
+            0
+        }
+        other => {
+            eprintln!("gem: unknown command {}", quoteaf_os(other));
+            1
+        }
     }
 }
 
@@ -161,7 +174,8 @@ fn run_rake(args: Vec<String>) -> i32 {
     }
 
     if args.iter().any(|a| a == "--version") {
-        println!("rake, version 13.1.0"); return 0;
+        println!("rake, version 13.1.0");
+        return 0;
     }
 
     if args.iter().any(|a| a == "-T" || a == "--tasks") {
@@ -172,7 +186,11 @@ fn run_rake(args: Vec<String>) -> i32 {
         return 0;
     }
 
-    let target = args.first().filter(|a| !a.starts_with('-')).map(|s| s.as_str()).unwrap_or("default");
+    let target = args
+        .first()
+        .filter(|a| !a.starts_with('-'))
+        .map(|s| s.as_str())
+        .unwrap_or("default");
     println!("** Invoke {} (first_time)", target);
     println!("** Execute {} (simulated)", target);
     0
@@ -197,7 +215,10 @@ fn run_bundle(args: Vec<String>) -> i32 {
             println!("  --version  Show version");
             0
         }
-        "--version" | "-v" => { println!("Bundler version 2.5.0"); 0 }
+        "--version" | "-v" => {
+            println!("Bundler version 2.5.0");
+            0
+        }
         "install" => {
             println!("Fetching gem metadata from https://rubygems.org/...");
             println!("Resolving dependencies...");
@@ -212,9 +233,18 @@ fn run_bundle(args: Vec<String>) -> i32 {
             println!("  * minitest (5.21.0)");
             0
         }
-        "exec" => { println!("(bundle exec — simulated)"); 0 }
-        "init" => { println!("Writing new Gemfile (simulated)"); 0 }
-        other => { eprintln!("bundle: unknown command '{}'", other); 1 }
+        "exec" => {
+            println!("(bundle exec — simulated)");
+            0
+        }
+        "init" => {
+            println!("Writing new Gemfile (simulated)");
+            0
+        }
+        other => {
+            eprintln!("bundle: unknown command {}", quoteaf_os(other));
+            1
+        }
     }
 }
 
@@ -228,7 +258,9 @@ fn main() {
         let bytes = s.as_bytes();
         let mut last_sep = 0;
         for (i, &b) in bytes.iter().enumerate() {
-            if b == b'/' || b == b'\\' { last_sep = i + 1; }
+            if b == b'/' || b == b'\\' {
+                last_sep = i + 1;
+            }
         }
         let base = &s[last_sep..];
         let base = base.strip_suffix(".exe").unwrap_or(base);
@@ -242,9 +274,18 @@ fn main() {
         "gem" => run_gem(rest),
         "rake" => run_rake(rest),
         "bundler" | "bundle" => run_bundle(rest),
-        "erb" => { println!("(ERB template processing — simulated)"); 0 }
-        "rdoc" => { println!("Generating documentation... done (simulated)"); 0 }
-        "ri" => { println!("(ri: Ruby interactive reference — simulated)"); 0 }
+        "erb" => {
+            println!("(ERB template processing — simulated)");
+            0
+        }
+        "rdoc" => {
+            println!("Generating documentation... done (simulated)");
+            0
+        }
+        "ri" => {
+            println!("(ri: Ruby interactive reference — simulated)");
+            0
+        }
         _ => run_ruby(rest),
     };
 
@@ -255,7 +296,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_ruby};
+    use super::run_ruby;
 
     #[test]
     fn help_exits_zero() {

@@ -4,6 +4,7 @@
 //!
 //! Single personality: `statsd`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -30,8 +31,16 @@ fn run_statsd(args: Vec<String>) -> i32 {
     let cmd = args.first().map(|s| s.as_str()).unwrap_or("");
     match cmd {
         "server" => {
-            let port = args.windows(2).find(|w| w[0] == "--port").map(|w| w[1].as_str()).unwrap_or("8125");
-            let flush = args.windows(2).find(|w| w[0] == "--flush-interval").map(|w| w[1].as_str()).unwrap_or("10");
+            let port = args
+                .windows(2)
+                .find(|w| w[0] == "--port")
+                .map(|w| w[1].as_str())
+                .unwrap_or("8125");
+            let flush = args
+                .windows(2)
+                .find(|w| w[0] == "--flush-interval")
+                .map(|w| w[1].as_str())
+                .unwrap_or("10");
             println!("[StatsD] Starting server on UDP port {}", port);
             println!("[StatsD] Flush interval: {}s", flush);
             println!("[StatsD] Backends: graphite, console");
@@ -39,11 +48,22 @@ fn run_statsd(args: Vec<String>) -> i32 {
             0
         }
         "send" => {
-            let metric = args.get(1).map(|s| s.as_str()).unwrap_or("app.request.count");
+            let metric = args
+                .get(1)
+                .map(|s| s.as_str())
+                .unwrap_or("app.request.count");
             let value = args.get(2).map(|s| s.as_str()).unwrap_or("1");
             let mtype = args.get(3).map(|s| s.as_str()).unwrap_or("c");
-            let host = args.windows(2).find(|w| w[0] == "--host").map(|w| w[1].as_str()).unwrap_or("localhost");
-            let port = args.windows(2).find(|w| w[0] == "--port").map(|w| w[1].as_str()).unwrap_or("8125");
+            let host = args
+                .windows(2)
+                .find(|w| w[0] == "--host")
+                .map(|w| w[1].as_str())
+                .unwrap_or("localhost");
+            let port = args
+                .windows(2)
+                .find(|w| w[0] == "--port")
+                .map(|w| w[1].as_str())
+                .unwrap_or("8125");
             let type_name = match mtype {
                 "c" => "counter",
                 "g" => "gauge",
@@ -52,12 +72,23 @@ fn run_statsd(args: Vec<String>) -> i32 {
                 "h" => "histogram",
                 _ => mtype,
             };
-            println!("Sent {}:{}|{} ({}) to {}:{}", metric, value, mtype, type_name, host, port);
+            println!(
+                "Sent {}:{}|{} ({}) to {}:{}",
+                metric, value, mtype, type_name, host, port
+            );
             0
         }
         "health" => {
-            let host = args.windows(2).find(|w| w[0] == "--host").map(|w| w[1].as_str()).unwrap_or("localhost");
-            let port = args.windows(2).find(|w| w[0] == "--port").map(|w| w[1].as_str()).unwrap_or("8126");
+            let host = args
+                .windows(2)
+                .find(|w| w[0] == "--host")
+                .map(|w| w[1].as_str())
+                .unwrap_or("localhost");
+            let port = args
+                .windows(2)
+                .find(|w| w[0] == "--port")
+                .map(|w| w[1].as_str())
+                .unwrap_or("8126");
             println!("StatsD health check ({}:{}):", host, port);
             println!("  Status:    healthy");
             println!("  Uptime:    3d 14h 22m");
@@ -95,7 +126,7 @@ fn run_statsd(args: Vec<String>) -> i32 {
             if cmd.is_empty() {
                 eprintln!("Usage: statsd <command>. See --help.");
             } else {
-                eprintln!("Error: unknown command '{}'. See --help.", cmd);
+                eprintln!("Error: unknown command {}. See --help.", quoteaf_os(cmd));
             }
             1
         }
@@ -111,7 +142,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_statsd};
+    use super::run_statsd;
 
     #[test]
     fn help_exits_zero() {

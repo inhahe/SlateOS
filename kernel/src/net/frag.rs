@@ -1313,7 +1313,14 @@ fn test_table_reassembly_orders() -> crate::error::KernelResult<()> {
         crate::serial_println!("[frag]   FAIL: table: hole-filling fragment did not complete");
         return Err(crate::error::KernelError::InternalError);
     };
-    if pkt.payload != [[1u8; 8].as_slice(), [2u8; 8].as_slice(), [3u8; 8].as_slice()].concat() {
+    if pkt.payload
+        != [
+            [1u8; 8].as_slice(),
+            [2u8; 8].as_slice(),
+            [3u8; 8].as_slice(),
+        ]
+        .concat()
+    {
         crate::serial_println!("[frag]   FAIL: table: three-fragment payload mismatch");
         return Err(crate::error::KernelError::InternalError);
     }
@@ -1401,7 +1408,10 @@ fn test_table_rejected_fragments_free_their_slot() -> crate::error::KernelResult
         return Err(crate::error::KernelError::InternalError);
     };
     if pkt.payload.len() != 32 {
-        crate::serial_println!("[frag]   FAIL: post-junk datagram len {}", pkt.payload.len());
+        crate::serial_println!(
+            "[frag]   FAIL: post-junk datagram len {}",
+            pkt.payload.len()
+        );
         return Err(crate::error::KernelError::InternalError);
     }
 

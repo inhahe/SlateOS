@@ -2,3 +2,8 @@
 name = "fivetran-cli"
 version = "0.1.0"
 edition = "2024"
+
+[dependencies]
+# fivetran-cli names connectors, destinations and schemas, identifiers
+# created on the service side.
+quoting = { path = "../quoting" }

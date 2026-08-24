@@ -4,3 +4,6 @@ version = "0.1.0"
 edition = "2024"
 description = "SlateOS manual page viewer"
 [dependencies]
+# man names manual pages and the section and path it searched, drawn from
+# the command line and from the man tree on disk.
+quoting = { path = "../quoting" }

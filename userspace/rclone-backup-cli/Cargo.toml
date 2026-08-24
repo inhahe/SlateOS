@@ -2,3 +2,8 @@
 name = "rclone-backup-cli"
 version = "0.1.0"
 edition = "2024"
+
+[dependencies]
+# The backup profile name is an argv word, echoed by both the sync and the
+# check path.
+quoting = { path = "../quoting" }

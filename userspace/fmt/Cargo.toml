@@ -4,3 +4,5 @@ version = "0.1.0"
 edition = "2024"
 description = "SlateOS simple text formatter"
 [dependencies]
+# fmt names the files it reflows, taken straight from the command line.
+quoting = { path = "../quoting" }

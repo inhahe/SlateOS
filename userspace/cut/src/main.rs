@@ -29,6 +29,7 @@
 //!   -M     From first to M'th (inclusive) byte, character, or field
 //! ```
 
+use quoting::{quoteaf_os, quotef_os};
 use std::env;
 use std::fs::File;
 use std::io::{self, BufRead, BufReader, Write};
@@ -81,7 +82,9 @@ fn parse_ranges(list: &str) -> Result<Vec<Range>, String> {
                 .parse()
                 .map_err(|_| format!("invalid range: '{token}'"))?;
             if m == 0 {
-                return Err(format!("fields and positions are numbered from 1: '{token}'"));
+                return Err(format!(
+                    "fields and positions are numbered from 1: '{token}'"
+                ));
             }
             Range { start: 1, end: m }
         } else if let Some(rest) = token.strip_suffix('-') {
@@ -90,7 +93,9 @@ fn parse_ranges(list: &str) -> Result<Vec<Range>, String> {
                 .parse()
                 .map_err(|_| format!("invalid range: '{token}'"))?;
             if n == 0 {
-                return Err(format!("fields and positions are numbered from 1: '{token}'"));
+                return Err(format!(
+                    "fields and positions are numbered from 1: '{token}'"
+                ));
             }
             Range {
                 start: n,
@@ -105,12 +110,12 @@ fn parse_ranges(list: &str) -> Result<Vec<Range>, String> {
                 .parse()
                 .map_err(|_| format!("invalid range: '{token}'"))?;
             if n == 0 || m == 0 {
-                return Err(format!("fields and positions are numbered from 1: '{token}'"));
+                return Err(format!(
+                    "fields and positions are numbered from 1: '{token}'"
+                ));
             }
             if n > m {
-                return Err(format!(
-                    "invalid decreasing range: '{token}'"
-                ));
+                return Err(format!("invalid decreasing range: '{token}'"));
             }
             Range { start: n, end: m }
         } else {
@@ -119,7 +124,9 @@ fn parse_ranges(list: &str) -> Result<Vec<Range>, String> {
                 .parse()
                 .map_err(|_| format!("invalid range: '{token}'"))?;
             if n == 0 {
-                return Err(format!("fields and positions are numbered from 1: '{token}'"));
+                return Err(format!(
+                    "fields and positions are numbered from 1: '{token}'"
+                ));
             }
             Range { start: n, end: n }
         };
@@ -153,7 +160,6 @@ fn parse_ranges(list: &str) -> Result<Vec<Range>, String> {
 
     Ok(merged)
 }
-
 
 /// Build the complement of a set of ranges, for positions 1..=count.
 /// If `count` is `None`, the complement extends to `usize::MAX`.
@@ -235,10 +241,11 @@ fn parse_args(args: &[String]) -> ParseResult {
         list_val: &str,
     ) {
         if let Some(prev) = *current
-            && prev != new {
-                eprintln!("cut: only one type of list may be specified");
-                process::exit(1);
-            }
+            && prev != new
+        {
+            eprintln!("cut: only one type of list may be specified");
+            process::exit(1);
+        }
         *current = Some(new);
         *range_list = Some(list_val.to_string());
     }
@@ -283,13 +290,11 @@ fn parse_args(args: &[String]) -> ParseResult {
             } else if arg == "--delimiter" || arg.starts_with("--delimiter=") {
                 let val = long_opt_value(arg, "--delimiter", args, &mut i);
                 delimiter = Some(parse_delimiter(&val));
-            } else if arg == "--output-delimiter"
-                || arg.starts_with("--output-delimiter=")
-            {
+            } else if arg == "--output-delimiter" || arg.starts_with("--output-delimiter=") {
                 let val = long_opt_value(arg, "--output-delimiter", args, &mut i);
                 output_delimiter = Some(val);
             } else {
-                eprintln!("cut: unrecognized option '{arg}'");
+                eprintln!("cut: unrecognized option {}", quoteaf_os(arg));
                 eprintln!("Try 'cut --help' for more information.");
                 process::exit(1);
             }
@@ -333,7 +338,10 @@ fn parse_args(args: &[String]) -> ParseResult {
                     only_delimited = true;
                 }
                 _ => {
-                    eprintln!("cut: invalid option -- '{}'", chars[j]);
+                    eprintln!(
+                        "cut: invalid option -- {}",
+                        quoteaf_os(chars[j].to_string())
+                    );
                     eprintln!("Try 'cut --help' for more information.");
                     process::exit(1);
                 }
@@ -405,7 +413,7 @@ fn long_opt_value(arg: &str, name: &str, args: &[String], i: &mut usize) -> Stri
     // Value is the next argument.
     *i += 1;
     if *i >= args.len() {
-        eprintln!("cut: option '{name}' requires an argument");
+        eprintln!("cut: option {} requires an argument", quoteaf_os(name));
         process::exit(1);
     }
     args[*i].clone()
@@ -640,10 +648,7 @@ fn process_input(
     json_rows: &mut Option<&mut Vec<String>>,
 ) -> io::Result<()> {
     let default_delim = config.delimiter.to_string();
-    let output_delim = config
-        .output_delimiter
-        .as_deref()
-        .unwrap_or(&default_delim);
+    let output_delim = config.output_delimiter.as_deref().unwrap_or(&default_delim);
 
     let mut line_buf = String::new();
     let mut out_buf: Vec<u8> = Vec::with_capacity(256);
@@ -775,7 +780,7 @@ fn run(config: &Config) -> i32 {
         let mut input = match open_input(path) {
             Ok(inp) => inp,
             Err(e) => {
-                eprintln!("cut: {path}: {e}");
+                eprintln!("cut: {}: {e}", quotef_os(path));
                 exit_code = 1;
                 continue;
             }
@@ -792,7 +797,7 @@ fn run(config: &Config) -> i32 {
             if e.kind() == io::ErrorKind::BrokenPipe {
                 process::exit(0);
             }
-            eprintln!("cut: {path}: {e}");
+            eprintln!("cut: {}: {e}", quotef_os(path));
             exit_code = 1;
         }
     }
@@ -819,18 +824,20 @@ fn run(config: &Config) -> i32 {
             exit_code = 1;
         }
         if let Err(e) = stdout_lock.write_all(b"\n")
-            && e.kind() != io::ErrorKind::BrokenPipe {
-                eprintln!("cut: write error: {e}");
-                exit_code = 1;
-            }
+            && e.kind() != io::ErrorKind::BrokenPipe
+        {
+            eprintln!("cut: write error: {e}");
+            exit_code = 1;
+        }
     }
 
     // Flush stdout.
     if let Err(e) = stdout_lock.flush()
-        && e.kind() != io::ErrorKind::BrokenPipe {
-            eprintln!("cut: write error: {e}");
-            exit_code = 1;
-        }
+        && e.kind() != io::ErrorKind::BrokenPipe
+    {
+        eprintln!("cut: write error: {e}");
+        exit_code = 1;
+    }
 
     exit_code
 }

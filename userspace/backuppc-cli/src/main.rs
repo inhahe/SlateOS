@@ -4,11 +4,16 @@
 //!
 //! Multi-personality: `backuppc`, `backuppc-nightly`, `backuppc-servermesg`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_backuppc(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -23,7 +28,10 @@ fn run_backuppc(args: &[String], _prog: &str) -> i32 {
         println!("Features: pooling, dedup, compression, rsync/tar/smb transport");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("backuppc v4.4 (Slate OS)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("backuppc v4.4 (Slate OS)");
+        return 0;
+    }
     if args.iter().any(|a| a == "--status") {
         println!("BackupPC Status:");
         println!("  Hosts configured: 8");
@@ -59,7 +67,7 @@ fn run_backuppc_servermesg(args: &[String], _prog: &str) -> i32 {
         return 0;
     }
     if let Some(cmd) = args.first() {
-        println!("backuppc-servermesg: sent '{}'", cmd);
+        println!("backuppc-servermesg: sent {}", quoteaf_os(cmd));
     } else {
         println!("backuppc-servermesg: no command specified");
     }
@@ -68,7 +76,10 @@ fn run_backuppc_servermesg(args: &[String], _prog: &str) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "backuppc".to_string());
+    let prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "backuppc".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = match prog.as_str() {
         "backuppc-nightly" => run_backuppc_nightly(&rest, &prog),
@@ -80,7 +91,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_backuppc};
+    use super::{basename, run_backuppc, strip_ext};
 
     #[test]
     fn basename_strips_path() {

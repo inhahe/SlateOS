@@ -9639,17 +9639,14 @@ fn format_perms(perms: u16) -> [u8; 9] {
     out
 }
 
-/// Format a byte count as a human-readable string (K/M/G).
+/// `ls -h`'s size column: `512`, `1.5K`, `2.0G`.
+///
+/// Delegates to [`crate::bytesize::compact`] — the fixed-width column form,
+/// not the prose form — so that `ls -h`, `df -h` and `du -h` finally print the
+/// same size the same way. They did not: `du` truncated to whole units, so a
+/// file `ls -h` showed as `1.9M` appeared as `1M` under `du`.
 fn format_size_human(size: u64) -> String {
-    if size >= 1_073_741_824 {
-        alloc::format!("{:.1}G", size as f64 / 1_073_741_824.0)
-    } else if size >= 1_048_576 {
-        alloc::format!("{:.1}M", size as f64 / 1_048_576.0)
-    } else if size >= 1024 {
-        alloc::format!("{:.1}K", size as f64 / 1024.0)
-    } else {
-        alloc::format!("{}", size)
-    }
+    crate::bytesize::compact(size)
 }
 
 fn cmd_ls(args: &str) {
@@ -10307,16 +10304,13 @@ fn cmd_df(args: &str) {
 
 /// Format a byte count as human-readable (K/M/G).
 #[allow(clippy::arithmetic_side_effects)]
+/// `df` and `du`'s size column: `512`, `1.5K`, `2.0G`.
+///
+/// Delegates to [`crate::bytesize::compact`], the same function `ls -h` uses.
+/// The private copy this replaced truncated to whole units, so `du` reported a
+/// 1.9 MiB directory as `1M` while `ls -h` called the file inside it `1.9M`.
 fn format_bytes(bytes: u64) -> alloc::string::String {
-    if bytes < 1024 {
-        alloc::format!("{}B", bytes)
-    } else if bytes < 1024 * 1024 {
-        alloc::format!("{}K", bytes / 1024)
-    } else if bytes < 1024 * 1024 * 1024 {
-        alloc::format!("{}M", bytes / (1024 * 1024))
-    } else {
-        alloc::format!("{}G", bytes / (1024 * 1024 * 1024))
-    }
+    crate::bytesize::compact(bytes)
 }
 
 /// Format a Unix epoch timestamp (nanoseconds) as YYYY-MM-DD HH:MM:SS.
@@ -11215,6 +11209,16 @@ fn cmd_locate(args: &str) {
         crate::console_println!("  Total size:  {} bytes", st.total_size);
         crate::console_println!("  Extensions:  {}", st.extension_count);
         crate::console_println!("  Rebuilds:    {}", st.rebuild_count);
+        // How old the snapshot is decides whether a `locate` hit can be
+        // trusted. The index recorded this from the start but nothing ever
+        // showed it, so the one question a user of a cached index actually has
+        // was the one the stats screen could not answer.
+        match index::age_of_last_rebuild_ns() {
+            None => crate::console_println!("  Last build:  never"),
+            Some(age_ns) => {
+                crate::console_println!("  Last build:  {}s ago", age_ns / 1_000_000_000)
+            }
+        }
         crate::console_println!("  Truncated:   {}", st.truncated);
         crate::console_println!("  Initialized: {}", st.initialized);
         return;
@@ -11543,7 +11547,13 @@ fn cmd_dedup(args: &str) {
     shell_println!("=== Duplicate Report ===");
     shell_println!("  Duplicate groups:   {}", total_dup_groups);
     shell_println!("  Duplicate files:    {} (extra copies)", total_dup_files);
-    shell_println!("  Wasted space:       {}", format_size_human(total_wasted));
+    // Prose, not a column, so the spelled-out IEC form rather than `ls -h`'s
+    // one-letter one. This line reused the `ls` column formatter only because
+    // it was the byte formatter that happened to be in scope.
+    shell_println!(
+        "  Wasted space:       {}",
+        crate::bytesize::iec(total_wasted)
+    );
     shell_println!("  Files scanned:      {}", total_scanned);
     shell_println!("  Files hashed:       {}", files_hashed);
     if hash_errors > 0 {
@@ -11572,8 +11582,8 @@ fn cmd_dedup(args: &str) {
                 "[{}...] {} x {} (wasted: {})",
                 short_hash,
                 paths.len(),
-                format_size_human(*size),
-                format_size_human(size.saturating_mul((paths.len() as u64).saturating_sub(1)))
+                crate::bytesize::iec(*size),
+                crate::bytesize::iec(size.saturating_mul((paths.len() as u64).saturating_sub(1)))
             );
             for (pi, path) in paths.iter().enumerate() {
                 if pi == 0 {
@@ -11611,7 +11621,7 @@ fn cmd_dedup(args: &str) {
         shell_println!(
             "Deleted {} duplicate files, reclaimed {}.",
             deleted_count,
-            format_size_human(deleted_bytes)
+            crate::bytesize::iec(deleted_bytes)
         );
         if delete_errors > 0 {
             shell_println!("  {} files could not be deleted.", delete_errors);
@@ -12252,11 +12262,7 @@ fn cmd_assoc(args: &str) {
 
             match associations::default_app_for_file(&path) {
                 Some(app) => {
-                    shell_println!(
-                        "Open with: {} ({})",
-                        app.app_name,
-                        app.app_path.display()
-                    );
+                    shell_println!("Open with: {} ({})", app.app_name, app.app_path.display());
                 }
                 None => {
                     shell_println!("Open with: (no application registered)");
@@ -38430,21 +38436,9 @@ fn cmd_screenrec(args: &str) {
     }
 }
 
+/// See [`crate::bytesize`] for why this is no longer written out here.
 fn format_size_helper(bytes: u64) -> alloc::string::String {
-    use alloc::format;
-    if bytes >= 1_073_741_824 {
-        format!(
-            "{}.{} GB",
-            bytes / 1_073_741_824,
-            (bytes % 1_073_741_824) / 107_374_182
-        )
-    } else if bytes >= 1_048_576 {
-        format!("{}.{} MB", bytes / 1_048_576, (bytes % 1_048_576) / 104_857)
-    } else if bytes >= 1024 {
-        format!("{}.{} KB", bytes / 1024, (bytes % 1024) / 102)
-    } else {
-        format!("{} B", bytes)
-    }
+    crate::bytesize::iec(bytes)
 }
 
 /// `datausage` / `dusage` — network data usage monitoring.
@@ -44733,7 +44727,7 @@ fn cmd_soundevents(args: &str) {
                         } else {
                             String::from("off")
                         },
-                        m.sound_path
+                        m.sound_path.display()
                     );
                 }
             }
@@ -45690,7 +45684,12 @@ fn cmd_logpersist(args: &str) {
             shell_println!("  Files compressed: {}", st.files_compressed);
             shell_println!("  Bytes saved:    {} bytes", st.bytes_saved_by_compression);
             shell_println!("  Total pruned:   {} files", st.total_pruned);
-            shell_println!("  Last seq:       {}", st.global_last_flushed_seq);
+            // Sequence 0 is a real event, so "nothing flushed yet" must not
+            // print as 0 — that would claim a flush that never happened.
+            match st.global_last_flushed_seq {
+                None => shell_println!("  Last seq:       none (nothing flushed yet)"),
+                Some(seq) => shell_println!("  Last seq:       {}", seq),
+            }
             if !st.cursors.is_empty() {
                 shell_println!();
                 shell_println!(
@@ -45901,22 +45900,41 @@ fn cmd_svcstart(args: &str) {
                 shell_println!("No crash records.");
             } else {
                 shell_println!(
-                    "{:16} {:>6} {:>8} {:>8} {:>8}",
+                    "{:16} {:>6} {:>8} {:>8} {:>10} {:>12}",
                     "Service",
                     "Consec",
                     "Total",
                     "Backoff",
-                    "Status"
+                    "Status",
+                    "Last crash"
                 );
-                for (name, consec, total, backoff_ms, perm) in &records {
-                    let status = if *perm { "FAILED" } else { "active" };
+                let now = crate::hpet::elapsed_ns();
+                for c in &records {
+                    // "restarting" means the backoff is running *now* — the
+                    // state an operator watching a flapping service most needs
+                    // to see, and one this display could not previously show
+                    // because there was no backoff period to be inside of.
+                    let status = if c.permanently_failed {
+                        "FAILED"
+                    } else if c.restart_pending {
+                        "restarting"
+                    } else {
+                        "active"
+                    };
+                    let last = match c.last_crash_ns {
+                        None => alloc::string::String::from("never"),
+                        Some(ns) => {
+                            alloc::format!("{}s ago", now.saturating_sub(ns) / 1_000_000_000)
+                        }
+                    };
                     shell_println!(
-                        "{:16} {:>6} {:>8} {:>5} ms {:>8}",
-                        name,
-                        consec,
-                        total,
-                        backoff_ms,
-                        status
+                        "{:16} {:>6} {:>8} {:>5} ms {:>10} {:>12}",
+                        c.name,
+                        c.consecutive_failures,
+                        c.total_crashes,
+                        c.backoff_ms,
+                        status,
+                        last
                     );
                 }
             }
@@ -59703,7 +59721,7 @@ fn cmd_systemsounds(args: &str) {
                     shell_println!(
                         "  {:20} {} [{}] (plays: {})",
                         a.event.label(),
-                        a.sound_path,
+                        a.sound_path.display(),
                         status,
                         a.play_count
                     );
@@ -59723,7 +59741,7 @@ fn cmd_systemsounds(args: &str) {
                 }
             };
             match systemsounds::play(event) {
-                Ok(Some(path)) => shell_println!("Playing: {}", path),
+                Ok(Some(path)) => shell_println!("Playing: {}", path.display()),
                 Ok(None) => shell_println!("Sound disabled or not assigned."),
                 Err(e) => shell_println!("Error: {:?}", e),
             }
@@ -60935,10 +60953,46 @@ fn cmd_storagesense(args: &str) {
         }
         "show" | "" => {
             storagesense::init_defaults();
-            shell_println!(
-                "Storage Sense — Schedule: {}",
-                storagesense::get_schedule().label()
-            );
+            let schedule = storagesense::get_schedule();
+            shell_println!("Storage Sense — Schedule: {}", schedule.label());
+            if schedule == storagesense::Schedule::OnLowSpace {
+                shell_println!(
+                    "  Low-space threshold: {} MiB",
+                    storagesense::low_space_threshold_mb()
+                );
+            }
+            match storagesense::last_run_ns() {
+                None => shell_println!("  Last run: never"),
+                Some(ns) => shell_println!(
+                    "  Last run: {}s ago",
+                    crate::hpet::elapsed_ns().saturating_sub(ns) / 1_000_000_000
+                ),
+            }
+            // The schedule used to be echoed back and nothing more. Saying
+            // whether it has actually come due is the difference between
+            // reporting a setting and reporting a state.
+            match storagesense::due_reason() {
+                None => shell_println!("  Due now: no"),
+                Some(storagesense::DueReason::NeverRun) => {
+                    shell_println!("  Due now: YES (scheduled, never run)");
+                }
+                Some(storagesense::DueReason::IntervalElapsed {
+                    since_last_ns,
+                    interval_ns,
+                }) => shell_println!(
+                    "  Due now: YES ({}s since last run, interval {}s)",
+                    since_last_ns / 1_000_000_000,
+                    interval_ns / 1_000_000_000
+                ),
+                Some(storagesense::DueReason::LowSpace {
+                    free_mb,
+                    threshold_mb,
+                }) => shell_println!(
+                    "  Due now: YES ({} MiB free, below {} MiB threshold)",
+                    free_mb,
+                    threshold_mb
+                ),
+            }
             let policies = storagesense::list_policies();
             for p in &policies {
                 let status = if p.enabled { "on" } else { "off" };
@@ -68675,11 +68729,23 @@ fn cmd_backupsched(args: &str) {
             if scheds.is_empty() {
                 shell_println!("No backup schedules");
             } else {
+                let due = backupsched::due_schedules();
                 shell_println!("{} schedule(s):", scheds.len());
                 for s in &scheds {
                     let status = if s.enabled { "on" } else { "off" };
+                    // "never" is printed as such rather than as an elapsed
+                    // time, because a schedule that has not run is not the
+                    // same as one that ran at uptime zero.
+                    let last = match s.last_run_ns {
+                        None => alloc::string::String::from("never"),
+                        Some(ns) => alloc::format!(
+                            "{}s ago",
+                            crate::hpet::elapsed_ns().saturating_sub(ns) / 1_000_000_000
+                        ),
+                    };
+                    let due_mark = if due.contains(&s.id) { " DUE" } else { "" };
                     shell_println!(
-                        "  [{}] {} ({} {}) {} → {} [{}] runs={}",
+                        "  [{}] {} ({} {}) {} → {} [{}] runs={} last={}{}",
                         s.id,
                         s.name,
                         s.backup_type.label(),
@@ -68687,7 +68753,9 @@ fn cmd_backupsched(args: &str) {
                         s.source_path,
                         s.destination,
                         status,
-                        s.run_count
+                        s.run_count,
+                        last,
+                        due_mark
                     );
                 }
             }

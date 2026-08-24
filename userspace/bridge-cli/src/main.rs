@@ -4,11 +4,16 @@
 //!
 //! Multi-personality: `bridge`, `brctl`, `bondctl`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_bridge(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
@@ -30,11 +35,15 @@ fn run_bridge(args: &[String]) -> i32 {
             let cmd = args.get(1).map(|s| s.as_str()).unwrap_or("show");
             match cmd {
                 "show" => {
-                    println!("2: eth0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 master br0 state forwarding priority 32 cost 4");
-                    println!("3: eth1: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 master br0 state forwarding priority 32 cost 4");
+                    println!(
+                        "2: eth0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 master br0 state forwarding priority 32 cost 4"
+                    );
+                    println!(
+                        "3: eth1: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 master br0 state forwarding priority 32 cost 4"
+                    );
                 }
                 "set" => println!("bridge: link set completed"),
-                _ => println!("bridge: link command '{}' completed", cmd),
+                _ => println!("bridge: link command {} completed", quoteaf_os(cmd)),
             }
         }
         "fdb" => {
@@ -48,10 +57,13 @@ fn run_bridge(args: &[String]) -> i32 {
                     println!("ff:ff:ff:ff:ff:ff dev eth0 master br0 permanent");
                 }
                 "add" | "del" => {
-                    let addr = args.get(2).map(|s| s.as_str()).unwrap_or("00:00:00:00:00:00");
+                    let addr = args
+                        .get(2)
+                        .map(|s| s.as_str())
+                        .unwrap_or("00:00:00:00:00:00");
                     println!("bridge: fdb {} {} completed", cmd, addr);
                 }
-                _ => println!("bridge: fdb command '{}' completed", cmd),
+                _ => println!("bridge: fdb command {} completed", quoteaf_os(cmd)),
             }
         }
         "mdb" => {
@@ -71,11 +83,11 @@ fn run_bridge(args: &[String]) -> i32 {
                     println!("br0\t 1 PVID Egress Untagged");
                 }
                 "add" | "del" => println!("bridge: vlan {} completed", cmd),
-                _ => println!("bridge: vlan command '{}' completed", cmd),
+                _ => println!("bridge: vlan command {} completed", quoteaf_os(cmd)),
             }
         }
         "monitor" => println!("Listening for bridge events..."),
-        _ => println!("bridge: unknown object '{}'", obj),
+        _ => println!("bridge: unknown object {}", quoteaf_os(obj)),
     }
     0
 }
@@ -125,7 +137,7 @@ fn run_brctl(args: &[String]) -> i32 {
             println!("brctl: STP for {} set to {}", br, state);
         }
         _ => {
-            eprintln!("brctl: unknown command '{}'", subcmd);
+            eprintln!("brctl: unknown command {}", quoteaf_os(subcmd));
             return 1;
         }
     }
@@ -194,7 +206,7 @@ fn run_bondctl(args: &[String]) -> i32 {
             println!("bondctl: set mode for {} to {}", bond, mode);
         }
         _ => {
-            eprintln!("bondctl: unknown command '{}'", subcmd);
+            eprintln!("bondctl: unknown command {}", quoteaf_os(subcmd));
             return 1;
         }
     }
@@ -203,7 +215,10 @@ fn run_bondctl(args: &[String]) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "bridge".to_string());
+    let prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "bridge".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = match prog.as_str() {
         "brctl" => run_brctl(&rest),
@@ -215,7 +230,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_bridge};
+    use super::{basename, run_bridge, strip_ext};
 
     #[test]
     fn basename_strips_path() {

@@ -4,11 +4,16 @@
 //!
 //! Multi-personality: `cadabra2`, `cadabra2-cli`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_cadabra(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -25,12 +30,19 @@ fn run_cadabra(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--server") {
-        let port = args.windows(2).find(|w| w[0] == "--port").map(|w| w[1].as_str()).unwrap_or("18121");
+        let port = args
+            .windows(2)
+            .find(|w| w[0] == "--port")
+            .map(|w| w[1].as_str())
+            .unwrap_or("18121");
         println!("Cadabra kernel server starting on port {}", port);
         println!("Ready for connections.");
         return 0;
     }
-    let notebook = args.iter().find(|a| a.ends_with(".cnb")).map(|s| s.as_str());
+    let notebook = args
+        .iter()
+        .find(|a| a.ends_with(".cnb"))
+        .map(|s| s.as_str());
     if let Some(nb) = notebook {
         println!("Cadabra 2.4.4 — opening notebook: {}", nb);
     } else {
@@ -52,9 +64,12 @@ fn run_cadabra_cli(args: &[String]) -> i32 {
         println!("cadabra2-cli 2.4.4 (Slate OS)");
         return 0;
     }
-    let script = args.iter().find(|a| a.ends_with(".cdb")).map(|s| s.as_str());
+    let script = args
+        .iter()
+        .find(|a| a.ends_with(".cdb"))
+        .map(|s| s.as_str());
     if let Some(s) = script {
-        println!("cadabra2-cli: executing '{}'", s);
+        println!("cadabra2-cli: executing {}", quoteaf_os(s));
         println!("[script completed]");
     } else {
         println!("Cadabra 2.4.4 (CLI mode)");
@@ -65,7 +80,10 @@ fn run_cadabra_cli(args: &[String]) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "cadabra2".to_string());
+    let prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "cadabra2".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = match prog.as_str() {
         "cadabra2-cli" => run_cadabra_cli(&rest),
@@ -76,7 +94,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_cadabra};
+    use super::{basename, run_cadabra, strip_ext};
 
     #[test]
     fn basename_strips_path() {

@@ -4,6 +4,7 @@
 //!
 //! Multi-personality: `wg` (WireGuard tool), `wg-quick` (quick setup)
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -16,7 +17,9 @@ fn run_wg(args: Vec<String>) -> i32 {
             println!("Usage: wg <cmd> [<args>]");
             println!();
             println!("Available subcommands:");
-            println!("  show [<interface> [<field>]]   Shows current configuration and device info");
+            println!(
+                "  show [<interface> [<field>]]   Shows current configuration and device info"
+            );
             println!("  showconf <interface>           Shows the current configuration");
             println!("  set <interface> [<args>]       Change current configuration");
             println!("  setconf <interface> <file>     Applies a configuration file");
@@ -24,7 +27,9 @@ fn run_wg(args: Vec<String>) -> i32 {
             println!("  syncconf <interface> <file>    Synchronize a configuration file");
             println!("  genkey                         Generates a new private key");
             println!("  genpsk                         Generates a new preshared key");
-            println!("  pubkey                         Calculates the public key from a private key");
+            println!(
+                "  pubkey                         Calculates the public key from a private key"
+            );
             println!("  --version                      Show version");
             0
         }
@@ -62,16 +67,26 @@ fn run_wg(args: Vec<String>) -> i32 {
                         println!("TrMvSoP4jYQlY6RIzBgbssQqY3vxI2piVFBs2ZPkENk=");
                     }
                     Some("endpoints") => {
-                        println!("xTIBA5rboUvnH4htodjb6e697QjLERt1NAB4mZqp8Dg=\t198.51.100.1:51820");
+                        println!(
+                            "xTIBA5rboUvnH4htodjb6e697QjLERt1NAB4mZqp8Dg=\t198.51.100.1:51820"
+                        );
                         println!("TrMvSoP4jYQlY6RIzBgbssQqY3vxI2piVFBs2ZPkENk=\t203.0.113.5:51820");
                     }
                     Some("transfer") => {
-                        println!("xTIBA5rboUvnH4htodjb6e697QjLERt1NAB4mZqp8Dg=\t1525612544\t933421056");
-                        println!("TrMvSoP4jYQlY6RIzBgbssQqY3vxI2piVFBs2ZPkENk=\t478956544\t245923840");
+                        println!(
+                            "xTIBA5rboUvnH4htodjb6e697QjLERt1NAB4mZqp8Dg=\t1525612544\t933421056"
+                        );
+                        println!(
+                            "TrMvSoP4jYQlY6RIzBgbssQqY3vxI2piVFBs2ZPkENk=\t478956544\t245923840"
+                        );
                     }
                     Some("dump") => {
-                        println!("gN65BkIKy1eCE9pP1wdc8ROUgxU3sGR2SAhXkG2BFVM=\t(none)\t51820\toff");
-                        println!("xTIBA5rboUvnH4htodjb6e697QjLERt1NAB4mZqp8Dg=\t(none)\t198.51.100.1:51820\t10.0.0.2/32,fd00::2/128\t42\t1525612544\t933421056\t25");
+                        println!(
+                            "gN65BkIKy1eCE9pP1wdc8ROUgxU3sGR2SAhXkG2BFVM=\t(none)\t51820\toff"
+                        );
+                        println!(
+                            "xTIBA5rboUvnH4htodjb6e697QjLERt1NAB4mZqp8Dg=\t(none)\t198.51.100.1:51820\t10.0.0.2/32,fd00::2/128\t42\t1525612544\t933421056\t25"
+                        );
                     }
                     _ => {
                         println!("interface: wg0");
@@ -117,7 +132,10 @@ fn run_wg(args: Vec<String>) -> i32 {
             println!("({} applied — simulated)", cmd);
             0
         }
-        other => { eprintln!("wg: unknown command '{}'", other); 1 }
+        other => {
+            eprintln!("wg: unknown command {}", quoteaf_os(other));
+            1
+        }
     }
 }
 
@@ -155,7 +173,10 @@ fn run_wg_quick(args: Vec<String>) -> i32 {
             println!("PrivateKey = yAnz5TF+lXXJte14tji3zlMNq+hd2rYUIgJBgB3fBmk=");
             0
         }
-        other => { eprintln!("wg-quick: unknown command '{}'", other); 1 }
+        other => {
+            eprintln!("wg-quick: unknown command {}", quoteaf_os(other));
+            1
+        }
     }
 }
 
@@ -166,7 +187,9 @@ fn main() {
         let bytes = s.as_bytes();
         let mut last_sep = 0;
         for (i, &b) in bytes.iter().enumerate() {
-            if b == b'/' || b == b'\\' { last_sep = i + 1; }
+            if b == b'/' || b == b'\\' {
+                last_sep = i + 1;
+            }
         }
         let base = &s[last_sep..];
         base.strip_suffix(".exe").unwrap_or(base).to_string()
@@ -181,7 +204,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_wg};
+    use super::run_wg;
 
     #[test]
     fn help_exits_zero() {

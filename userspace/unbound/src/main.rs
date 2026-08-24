@@ -5,6 +5,7 @@
 //! Multi-personality: `unbound` (daemon), `unbound-control` (remote control),
 //!   `unbound-checkconf` (config check), `unbound-host` (DNS lookup)
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -23,12 +24,17 @@ fn run_unbound(args: Vec<String>) -> i32 {
         println!("linked modules: dns64 respip validator iterator");
         return 0;
     }
-    let config = args.iter().position(|a| a == "-c")
+    let config = args
+        .iter()
+        .position(|a| a == "-c")
         .and_then(|i| args.get(i + 1))
         .map(|s| s.as_str())
         .unwrap_or("/etc/unbound/unbound.conf");
     println!("[2025-05-22 10:00:00] unbound[12345:0] info: start of service (unbound 1.20.0).");
-    println!("[2025-05-22 10:00:00] unbound[12345:0] info: read {}", config);
+    println!(
+        "[2025-05-22 10:00:00] unbound[12345:0] info: read {}",
+        config
+    );
     println!("[2025-05-22 10:00:00] unbound[12345:0] info: service became available.");
     println!("[2025-05-22 10:00:00] unbound[12345:0] info: listening on 0.0.0.0 port 53");
     println!("[2025-05-22 10:00:00] unbound[12345:0] info: listening on :: port 53");
@@ -82,8 +88,14 @@ fn run_control(args: Vec<String>) -> i32 {
             println!("total.tcpusage=3");
             0
         }
-        "reload" => { println!("ok"); 0 }
-        "stop" => { println!("ok"); 0 }
+        "reload" => {
+            println!("ok");
+            0
+        }
+        "stop" => {
+            println!("ok");
+            0
+        }
         "flush" => {
             let name = args.get(1).map(|s| s.as_str()).unwrap_or("example.com");
             println!("ok removed {}", name);
@@ -102,7 +114,10 @@ fn run_control(args: Vec<String>) -> i32 {
             println!("END_RRSET_CACHE");
             0
         }
-        other => { eprintln!("unbound-control: unknown command '{}'", other); 1 }
+        other => {
+            eprintln!("unbound-control: unknown command {}", quoteaf_os(other));
+            1
+        }
     }
 }
 
@@ -111,7 +126,11 @@ fn run_checkconf(args: Vec<String>) -> i32 {
         println!("Usage: unbound-checkconf [config_file]");
         return 0;
     }
-    let config = args.iter().find(|a| !a.starts_with('-')).map(|s| s.as_str()).unwrap_or("/etc/unbound/unbound.conf");
+    let config = args
+        .iter()
+        .find(|a| !a.starts_with('-'))
+        .map(|s| s.as_str())
+        .unwrap_or("/etc/unbound/unbound.conf");
     println!("unbound-checkconf: no errors in {}", config);
     0
 }
@@ -121,10 +140,17 @@ fn run_host(args: Vec<String>) -> i32 {
         println!("Usage: unbound-host [-vdhr46] [-c class] [-t type] name");
         return 0;
     }
-    let name = args.iter().find(|a| !a.starts_with('-')).map(|s| s.as_str()).unwrap_or("example.com");
+    let name = args
+        .iter()
+        .find(|a| !a.starts_with('-'))
+        .map(|s| s.as_str())
+        .unwrap_or("example.com");
     let verbose = args.iter().any(|a| a == "-v");
     println!("{} has address 93.184.216.34", name);
-    println!("{} has IPv6 address 2606:2800:220:1:248:1893:25c8:1946", name);
+    println!(
+        "{} has IPv6 address 2606:2800:220:1:248:1893:25c8:1946",
+        name
+    );
     println!("{} mail is handled by 10 mail.{}", name, name);
     if verbose {
         println!("{} has DNSSEC validation: secure", name);
@@ -139,7 +165,9 @@ fn main() {
         let bytes = s.as_bytes();
         let mut last_sep = 0;
         for (i, &b) in bytes.iter().enumerate() {
-            if b == b'/' || b == b'\\' { last_sep = i + 1; }
+            if b == b'/' || b == b'\\' {
+                last_sep = i + 1;
+            }
         }
         let base = &s[last_sep..];
         base.strip_suffix(".exe").unwrap_or(base).to_string()
@@ -156,7 +184,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_unbound};
+    use super::run_unbound;
 
     #[test]
     fn help_exits_zero() {

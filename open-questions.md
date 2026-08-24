@@ -998,6 +998,16 @@ The reasoning, so you can overrule it in one line if you disagree:
   cheap fix I could bundle into the move: measured 2026-08-22 with
   `scripts/quote-names-scope.py`, a tree-wide version would flag **1796 call
   sites across 777 crates**.
+
+  *Update 2026-08-23 — this argument is now weaker, and you should discount it
+  accordingly.* `scripts/quote-names.py` runs the same two detectors over the
+  whole of lane B's tree from pre-push gate 8, against a baseline of the 1798
+  sites that exist today; it fails only on a **new** one. So a standalone crate
+  is no longer unchecked — it is held at "no worse than today" rather than at
+  "zero", which is the only remaining difference. The 1798 are still unrepaired,
+  so a `bc` moved out of `coreutils/src/bin` would go from *must be clean* to
+  *must not get dirtier*. That is a smaller loss than this bullet described when
+  it was written, and it shrinks further with every crate the burn-down clears.
 - **It would create a dependency shape that exists nowhere in the tree yet.**
   `bc` now uses `coreutils`'s `getopt`, `quote` and `errmsg`. A standalone
   `userspace/bc` would have to depend on the `coreutils` *library* — a per-tool
@@ -1021,7 +1031,7 @@ lost either way; that part of yesterday's promise still holds.
 worth correcting whichever way this goes); `userspace/coreutils/` (86 bins,
 `src/lib.rs`); the 41 duplicate crates under `userspace/`;
 `known-issues.md` → `B-FORTY-TWO-BINARY-NAMES-ARE-BUILT-BY-TWO-PACKAGES`;
-`scripts/dup-bins-survey.py` (the triage); `scripts/quote-names-scope.py` and
+`scripts/dup-bins-survey.py` (the triage); `scripts/quote-names.py` and
 `known-issues.md` → `TD-B-THE-QUOTE-NAMES-TEST-READS-ONE-DIRECTORY-OF-EIGHTY`
 (the lint-coverage half of the cost).
 

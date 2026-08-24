@@ -4,6 +4,7 @@
 //!
 //! Single personality: `redis-cli`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -31,10 +32,16 @@ fn run_redis_cli(args: Vec<String>) -> i32 {
         return 0;
     }
 
-    let host = args.windows(2).find(|w| w[0] == "-h")
-        .map(|w| w[1].as_str()).unwrap_or("127.0.0.1");
-    let port = args.windows(2).find(|w| w[0] == "-p")
-        .map(|w| w[1].as_str()).unwrap_or("6379");
+    let host = args
+        .windows(2)
+        .find(|w| w[0] == "-h")
+        .map(|w| w[1].as_str())
+        .unwrap_or("127.0.0.1");
+    let port = args
+        .windows(2)
+        .find(|w| w[0] == "-p")
+        .map(|w| w[1].as_str())
+        .unwrap_or("6379");
 
     if args.iter().any(|a| a == "--stat") {
         println!("------- data ------ ----- load ---- - conn - --- cache --- ----- cmd -----");
@@ -62,9 +69,12 @@ fn run_redis_cli(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--scan") {
-        let pattern = args.windows(2).find(|w| w[0] == "--pattern")
-            .map(|w| w[1].as_str()).unwrap_or("*");
-        println!("Scanning for keys matching '{}'...", pattern);
+        let pattern = args
+            .windows(2)
+            .find(|w| w[0] == "--pattern")
+            .map(|w| w[1].as_str())
+            .unwrap_or("*");
+        println!("Scanning for keys matching {}...", quoteaf_os(pattern));
         println!("session:abc123");
         println!("session:def456");
         println!("user:1");
@@ -142,7 +152,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_redis_cli};
+    use super::run_redis_cli;
 
     #[test]
     fn help_exits_zero() {

@@ -2555,8 +2555,8 @@ unsafe fn free_order_inner(frame: PhysFrame, order: usize) -> KernelResult<()> {
     // Short-circuited when neither consumer is on, so a production build with
     // zero-on-free off does not pay a volatile refcount read on every free for
     // an answer nobody reads.
-    let sole_owned = (is_zero_on_free() || super::kasan::is_enabled())
-        && block_is_sole_owned(frame, order);
+    let sole_owned =
+        (is_zero_on_free() || super::kasan::is_enabled()) && block_is_sole_owned(frame, order);
 
     // Zero-on-free: zero the block BEFORE taking the global lock to
     // avoid holding the lock during the expensive zeroing operation.

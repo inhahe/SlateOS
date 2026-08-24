@@ -36,6 +36,7 @@
 
 #![cfg_attr(not(test), no_main)]
 
+use quoting::quoteaf_os;
 use std::collections::BTreeSet;
 #[cfg(not(test))]
 use std::env;
@@ -251,7 +252,7 @@ fn parse_args(args: &[String]) -> ParseResult {
                 if i < args.len() {
                     config.output_file = Some(args[i].clone());
                 } else {
-                    eprintln!("ctags: option '{arg}' requires an argument");
+                    eprintln!("ctags: option {} requires an argument", quoteaf_os(arg));
                     std::process::exit(1);
                 }
             }
@@ -263,7 +264,7 @@ fn parse_args(args: &[String]) -> ParseResult {
                     "no" | "0" => SortMode::No,
                     "foldcase" => SortMode::Foldcase,
                     _ => {
-                        eprintln!("ctags: unknown sort mode '{val}'");
+                        eprintln!("ctags: unknown sort mode {}", quoteaf_os(val));
                         std::process::exit(1);
                     }
                 };
@@ -379,12 +380,14 @@ fn collect_files(config: &Config) -> Vec<String> {
         if p.is_dir() && config.recurse {
             collect_dir(p, &config.exclude_patterns, &mut result);
         } else if p.is_file() {
-            if !is_excluded(f, &config.exclude_patterns)
-                && detect_language(f).is_some() {
-                    result.push(f.clone());
-                }
+            if !is_excluded(f, &config.exclude_patterns) && detect_language(f).is_some() {
+                result.push(f.clone());
+            }
         } else if !p.exists() {
-            eprintln!("ctags: cannot open '{}': No such file or directory", f);
+            eprintln!(
+                "ctags: cannot open {}: No such file or directory",
+                quoteaf_os(f)
+            );
         }
     }
 
@@ -397,11 +400,7 @@ fn collect_dir(dir: &Path, excludes: &[String], out: &mut Vec<String>) {
     let entries = match fs::read_dir(dir) {
         Ok(e) => e,
         Err(e) => {
-            eprintln!(
-                "ctags: cannot read directory '{}': {}",
-                dir.display(),
-                e
-            );
+            eprintln!("ctags: cannot read directory {}: {e}", quoteaf_os(dir));
             return;
         }
     };
@@ -429,10 +428,9 @@ fn collect_dir(dir: &Path, excludes: &[String], out: &mut Vec<String>) {
                 continue;
             }
             collect_dir(&path, excludes, out);
-        } else if path.is_file()
-            && detect_language(&path_str).is_some() {
-                out.push(path_str);
-            }
+        } else if path.is_file() && detect_language(&path_str).is_some() {
+            out.push(path_str);
+        }
     }
 }
 
@@ -463,9 +461,10 @@ fn glob_match(pattern: &str, text: &str) -> bool {
         // like `node_modules` in `node_modules/foo.js`).
         for component in Path::new(text).components() {
             if let Some(s) = component.as_os_str().to_str()
-                && glob_match_impl(pattern.as_bytes(), s.as_bytes()) {
-                    return true;
-                }
+                && glob_match_impl(pattern.as_bytes(), s.as_bytes())
+            {
+                return true;
+            }
         }
         return false;
     }
@@ -486,9 +485,7 @@ fn glob_match_impl(pat: &[u8], txt: &[u8]) -> bool {
             pi += 1;
             continue;
         }
-        if pi < pat.len()
-            && (pat[pi] == b'?' || pat[pi] == txt[ti])
-        {
+        if pi < pat.len() && (pat[pi] == b'?' || pat[pi] == txt[ti]) {
             pi += 1;
             ti += 1;
             continue;
@@ -536,9 +533,7 @@ fn make_pattern(line: &str) -> String {
 #[cfg_attr(not(test), allow(dead_code))]
 fn strip_quotes(s: &str) -> &str {
     let s = s.trim();
-    if (s.starts_with('"') && s.ends_with('"'))
-        || (s.starts_with('\'') && s.ends_with('\''))
-    {
+    if (s.starts_with('"') && s.ends_with('"')) || (s.starts_with('\'') && s.ends_with('\'')) {
         &s[1..s.len() - 1]
     } else {
         s
@@ -548,9 +543,7 @@ fn strip_quotes(s: &str) -> &str {
 /// Extract an identifier starting at `pos` in `chars`.
 fn extract_ident(chars: &[char], pos: usize) -> String {
     let mut end = pos;
-    while end < chars.len()
-        && (chars[end].is_alphanumeric() || chars[end] == '_')
-    {
+    while end < chars.len() && (chars[end].is_alphanumeric() || chars[end] == '_') {
         end += 1;
     }
     chars[pos..end].iter().collect()
@@ -626,20 +619,21 @@ fn extract_c_tags(content: &str, file: &str, language: Language) -> Vec<Tag> {
 
         // #define MACRO
         if trimmed.starts_with("#define")
-            && let Some(rest) = line_after_keyword(trimmed, "#define") {
-                let name = first_ident(&rest);
-                if !name.is_empty() {
-                    tags.push(Tag {
-                        name,
-                        file: file.to_string(),
-                        line_number: line_num,
-                        pattern: make_pattern(line),
-                        kind: TagKind::Macro,
-                        language,
-                        scope: None,
-                    });
-                }
+            && let Some(rest) = line_after_keyword(trimmed, "#define")
+        {
+            let name = first_ident(&rest);
+            if !name.is_empty() {
+                tags.push(Tag {
+                    name,
+                    file: file.to_string(),
+                    line_number: line_num,
+                    pattern: make_pattern(line),
+                    kind: TagKind::Macro,
+                    language,
+                    scope: None,
+                });
             }
+        }
 
         // typedef ... NAME;
         if trimmed.starts_with("typedef") {
@@ -725,61 +719,61 @@ fn extract_c_tags(content: &str, file: &str, language: Language) -> Vec<Tag> {
         // excluded because we want definitions.
         if let Some(paren) = trimmed.find('(')
             && paren > 0
-                && !trimmed.starts_with('#')
-                && !trimmed.starts_with("typedef")
-                && !trimmed.starts_with("//")
-                && !trimmed.starts_with("if")
-                && !trimmed.starts_with("while")
-                && !trimmed.starts_with("for")
-                && !trimmed.starts_with("switch")
-                && !trimmed.starts_with("return")
+            && !trimmed.starts_with('#')
+            && !trimmed.starts_with("typedef")
+            && !trimmed.starts_with("//")
+            && !trimmed.starts_with("if")
+            && !trimmed.starts_with("while")
+            && !trimmed.starts_with("for")
+            && !trimmed.starts_with("switch")
+            && !trimmed.starts_with("return")
+        {
+            let before_paren = trimmed[..paren].trim();
+            // The function name is the last identifier before `(`.
+            let name = before_paren
+                .rsplit(|c: char| !c.is_alphanumeric() && c != '_')
+                .next()
+                .unwrap_or("");
+            if !name.is_empty()
+                && name != "struct"
+                && name != "enum"
+                && name != "union"
+                && name != "class"
+                && name != "namespace"
+                && name != "define"
+                && name != "if"
+                && name != "while"
+                && name != "for"
+                && name != "switch"
             {
-                let before_paren = trimmed[..paren].trim();
-                // The function name is the last identifier before `(`.
-                let name = before_paren
-                    .rsplit(|c: char| !c.is_alphanumeric() && c != '_')
-                    .next()
-                    .unwrap_or("");
-                if !name.is_empty()
-                    && name != "struct"
-                    && name != "enum"
-                    && name != "union"
-                    && name != "class"
-                    && name != "namespace"
-                    && name != "define"
-                    && name != "if"
-                    && name != "while"
-                    && name != "for"
-                    && name != "switch"
-                {
-                    // Check that this looks like a definition (has `{`
-                    // somewhere nearby, not just a declaration ending in `;`).
-                    let has_brace = trimmed.contains('{')
-                        || lines
-                            .get(idx + 1)
-                            .map(|l| l.trim().starts_with('{'))
-                            .unwrap_or(false);
-                    // Also accept lines that just have `)` (K&R style or
-                    // multi-line params) — only if next lines have `{`.
-                    let has_brace = has_brace
-                        || lines
-                            .get(idx + 2)
-                            .map(|l| l.trim().starts_with('{'))
-                            .unwrap_or(false);
+                // Check that this looks like a definition (has `{`
+                // somewhere nearby, not just a declaration ending in `;`).
+                let has_brace = trimmed.contains('{')
+                    || lines
+                        .get(idx + 1)
+                        .map(|l| l.trim().starts_with('{'))
+                        .unwrap_or(false);
+                // Also accept lines that just have `)` (K&R style or
+                // multi-line params) — only if next lines have `{`.
+                let has_brace = has_brace
+                    || lines
+                        .get(idx + 2)
+                        .map(|l| l.trim().starts_with('{'))
+                        .unwrap_or(false);
 
-                    if has_brace && !trimmed.ends_with(';') {
-                        tags.push(Tag {
-                            name: name.to_string(),
-                            file: file.to_string(),
-                            line_number: line_num,
-                            pattern: make_pattern(line),
-                            kind: TagKind::Function,
-                            language,
-                            scope: None,
-                        });
-                    }
+                if has_brace && !trimmed.ends_with(';') {
+                    tags.push(Tag {
+                        name: name.to_string(),
+                        file: file.to_string(),
+                        line_number: line_num,
+                        pattern: make_pattern(line),
+                        kind: TagKind::Function,
+                        language,
+                        scope: None,
+                    });
                 }
             }
+        }
     }
 
     tags
@@ -938,21 +932,22 @@ fn extract_rust_tags(content: &str, file: &str) -> Vec<Tag> {
 
         // static / const at module level (no indentation).
         if (line.len() == trimmed.len() || line.starts_with("pub"))
-            && let Some(rest) = line_after_keyword(stripped, "static") {
-                let rest = rest.trim_start_matches("mut ");
-                let name = first_ident(rest);
-                if !name.is_empty() && name != "_" {
-                    tags.push(Tag {
-                        name,
-                        file: file.to_string(),
-                        line_number: line_num,
-                        pattern: make_pattern(line),
-                        kind: TagKind::Variable,
-                        language: Language::Rust,
-                        scope: None,
-                    });
-                }
+            && let Some(rest) = line_after_keyword(stripped, "static")
+        {
+            let rest = rest.trim_start_matches("mut ");
+            let name = first_ident(rest);
+            if !name.is_empty() && name != "_" {
+                tags.push(Tag {
+                    name,
+                    file: file.to_string(),
+                    line_number: line_num,
+                    pattern: make_pattern(line),
+                    kind: TagKind::Variable,
+                    language: Language::Rust,
+                    scope: None,
+                });
             }
+        }
 
         // impl Name { ... } — track for method scope.
         if let Some(rest) = line_after_keyword(stripped, "impl") {
@@ -1000,9 +995,7 @@ fn extract_python_tags(content: &str, file: &str) -> Vec<Tag> {
 
         // class Name:  or  class Name(Base):
         if let Some(rest) = line_after_keyword(trimmed, "class") {
-            let name_end = rest
-                .find(['(', ':', ' '])
-                .unwrap_or(rest.len());
+            let name_end = rest.find(['(', ':', ' ']).unwrap_or(rest.len());
             let name = rest[..name_end].trim().to_string();
             if !name.is_empty() {
                 current_class = Some(name.clone());
@@ -1052,44 +1045,47 @@ fn extract_python_tags(content: &str, file: &str) -> Vec<Tag> {
         }
 
         // Module-level assignments: NAME = ...  (simple constant detection)
-        if indent == 0 && !trimmed.starts_with("def") && !trimmed.starts_with("class")
+        if indent == 0
+            && !trimmed.starts_with("def")
+            && !trimmed.starts_with("class")
             && let Some(eq_pos) = trimmed.find('=')
-                && eq_pos > 0
-                    && !trimmed[..eq_pos].contains('(')
-                    && !trimmed[..eq_pos].contains('[')
-                    && trimmed.as_bytes()[eq_pos.saturating_sub(1)] != b'!'
-                    && trimmed.as_bytes()[eq_pos.saturating_sub(1)] != b'<'
-                    && trimmed.as_bytes()[eq_pos.saturating_sub(1)] != b'>'
-                    && trimmed
-                        .as_bytes()
-                        .get(eq_pos + 1)
-                        .is_none_or(|&b| b != b'=')
-                {
-                    let name = trimmed[..eq_pos].trim();
-                    // Must look like a valid identifier (all caps or snake_case).
-                    let looks_like_ident = !name.is_empty()
-                        && name
-                            .chars()
-                            .all(|c| c.is_alphanumeric() || c == '_');
-                    if looks_like_ident
-                        && name.chars().next().is_some_and(|c| c.is_alphabetic() || c == '_')
-                    {
-                        let kind = if name.chars().all(|c| c.is_uppercase() || c == '_') {
-                            TagKind::Constant
-                        } else {
-                            TagKind::Variable
-                        };
-                        tags.push(Tag {
-                            name: name.to_string(),
-                            file: file.to_string(),
-                            line_number: line_num,
-                            pattern: make_pattern(line),
-                            kind,
-                            language: Language::Python,
-                            scope: None,
-                        });
-                    }
-                }
+            && eq_pos > 0
+            && !trimmed[..eq_pos].contains('(')
+            && !trimmed[..eq_pos].contains('[')
+            && trimmed.as_bytes()[eq_pos.saturating_sub(1)] != b'!'
+            && trimmed.as_bytes()[eq_pos.saturating_sub(1)] != b'<'
+            && trimmed.as_bytes()[eq_pos.saturating_sub(1)] != b'>'
+            && trimmed
+                .as_bytes()
+                .get(eq_pos + 1)
+                .is_none_or(|&b| b != b'=')
+        {
+            let name = trimmed[..eq_pos].trim();
+            // Must look like a valid identifier (all caps or snake_case).
+            let looks_like_ident =
+                !name.is_empty() && name.chars().all(|c| c.is_alphanumeric() || c == '_');
+            if looks_like_ident
+                && name
+                    .chars()
+                    .next()
+                    .is_some_and(|c| c.is_alphabetic() || c == '_')
+            {
+                let kind = if name.chars().all(|c| c.is_uppercase() || c == '_') {
+                    TagKind::Constant
+                } else {
+                    TagKind::Variable
+                };
+                tags.push(Tag {
+                    name: name.to_string(),
+                    file: file.to_string(),
+                    line_number: line_num,
+                    pattern: make_pattern(line),
+                    kind,
+                    language: Language::Python,
+                    scope: None,
+                });
+            }
+        }
 
         // Reset class scope on dedent to 0.
         if indent == 0
@@ -1189,48 +1185,48 @@ fn extract_java_tags(content: &str, file: &str) -> Vec<Tag> {
         // Method: TYPE name(...)  inside a class
         if let Some(paren) = stripped.find('(')
             && paren > 0
-                && !stripped.starts_with("if")
-                && !stripped.starts_with("while")
-                && !stripped.starts_with("for")
-                && !stripped.starts_with("switch")
-                && !stripped.starts_with("return")
-                && !stripped.starts_with("class")
-                && !stripped.starts_with("interface")
-                && !stripped.starts_with("new")
+            && !stripped.starts_with("if")
+            && !stripped.starts_with("while")
+            && !stripped.starts_with("for")
+            && !stripped.starts_with("switch")
+            && !stripped.starts_with("return")
+            && !stripped.starts_with("class")
+            && !stripped.starts_with("interface")
+            && !stripped.starts_with("new")
+        {
+            let before_paren = stripped[..paren].trim();
+            let name = before_paren
+                .rsplit(|c: char| !c.is_alphanumeric() && c != '_')
+                .next()
+                .unwrap_or("");
+            if !name.is_empty()
+                && name != "if"
+                && name != "while"
+                && name != "for"
+                && name != "catch"
             {
-                let before_paren = stripped[..paren].trim();
-                let name = before_paren
-                    .rsplit(|c: char| !c.is_alphanumeric() && c != '_')
-                    .next()
-                    .unwrap_or("");
-                if !name.is_empty()
-                    && name != "if"
-                    && name != "while"
-                    && name != "for"
-                    && name != "catch"
-                {
-                    let has_brace = trimmed.contains('{')
-                        || lines
-                            .get(idx + 1)
-                            .map(|l| l.trim().starts_with('{'))
-                            .unwrap_or(false);
-                    if has_brace && !trimmed.ends_with(';') {
-                        tags.push(Tag {
-                            name: name.to_string(),
-                            file: file.to_string(),
-                            line_number: line_num,
-                            pattern: make_pattern(line),
-                            kind: if current_class.is_some() {
-                                TagKind::Method
-                            } else {
-                                TagKind::Function
-                            },
-                            language: Language::Java,
-                            scope: current_class.clone(),
-                        });
-                    }
+                let has_brace = trimmed.contains('{')
+                    || lines
+                        .get(idx + 1)
+                        .map(|l| l.trim().starts_with('{'))
+                        .unwrap_or(false);
+                if has_brace && !trimmed.ends_with(';') {
+                    tags.push(Tag {
+                        name: name.to_string(),
+                        file: file.to_string(),
+                        line_number: line_num,
+                        pattern: make_pattern(line),
+                        kind: if current_class.is_some() {
+                            TagKind::Method
+                        } else {
+                            TagKind::Function
+                        },
+                        language: Language::Java,
+                        scope: current_class.clone(),
+                    });
                 }
             }
+        }
 
         // package declaration
         if let Some(rest) = line_after_keyword(trimmed, "package") {
@@ -1370,27 +1366,26 @@ fn extract_js_tags(content: &str, file: &str) -> Vec<Tag> {
         // const NAME = ... / let NAME = ... / var NAME = ...
         for kw in &["const", "let", "var"] {
             if let Some(rest) = line_after_keyword(stripped, kw)
-                && rest.contains('=') {
-                    let name_end = rest
-                        .find(['=', ':', ' '])
-                        .unwrap_or(rest.len());
-                    let name = rest[..name_end].trim().to_string();
-                    if !name.is_empty()
-                        && name
-                            .chars()
-                            .all(|c| c.is_alphanumeric() || c == '_' || c == '$')
-                    {
-                        tags.push(Tag {
-                            name,
-                            file: file.to_string(),
-                            line_number: line_num,
-                            pattern: make_pattern(line),
-                            kind: TagKind::Variable,
-                            language: Language::JavaScript,
-                            scope: None,
-                        });
-                    }
+                && rest.contains('=')
+            {
+                let name_end = rest.find(['=', ':', ' ']).unwrap_or(rest.len());
+                let name = rest[..name_end].trim().to_string();
+                if !name.is_empty()
+                    && name
+                        .chars()
+                        .all(|c| c.is_alphanumeric() || c == '_' || c == '$')
+                {
+                    tags.push(Tag {
+                        name,
+                        file: file.to_string(),
+                        line_number: line_num,
+                        pattern: make_pattern(line),
+                        kind: TagKind::Variable,
+                        language: Language::JavaScript,
+                        scope: None,
+                    });
                 }
+            }
         }
 
         // Method: name( inside class body (indented, no `function` keyword).
@@ -1575,9 +1570,7 @@ fn extract_shell_tags(content: &str, file: &str) -> Vec<Tag> {
 
         // function name { ... }   or   function name() { ... }
         if let Some(rest) = line_after_keyword(trimmed, "function") {
-            let name_end = rest
-                .find(['(', '{', ' '])
-                .unwrap_or(rest.len());
+            let name_end = rest.find(['(', '{', ' ']).unwrap_or(rest.len());
             let name = rest[..name_end].trim().to_string();
             if !name.is_empty() {
                 tags.push(Tag {
@@ -1598,7 +1591,10 @@ fn extract_shell_tags(content: &str, file: &str) -> Vec<Tag> {
                 && candidate
                     .chars()
                     .all(|c| c.is_alphanumeric() || c == '_' || c == '-')
-                && candidate.chars().next().is_some_and(|c| c.is_alphabetic() || c == '_')
+                && candidate
+                    .chars()
+                    .next()
+                    .is_some_and(|c| c.is_alphabetic() || c == '_')
             {
                 tags.push(Tag {
                     name: candidate.to_string(),
@@ -1615,33 +1611,33 @@ fn extract_shell_tags(content: &str, file: &str) -> Vec<Tag> {
         // Variable: NAME=value (at top level, all caps for "constants").
         if let Some(eq_pos) = trimmed.find('=')
             && eq_pos > 0
-                && !trimmed[..eq_pos].contains(' ')
-                && !trimmed.starts_with("if")
-                && !trimmed.starts_with("local")
-                && !trimmed.starts_with("export")
-                && trimmed
-                    .as_bytes()
-                    .get(eq_pos + 1)
-                    .is_none_or(|&b| b != b'=')
-                && trimmed.as_bytes()[eq_pos.saturating_sub(1)] != b'!'
+            && !trimmed[..eq_pos].contains(' ')
+            && !trimmed.starts_with("if")
+            && !trimmed.starts_with("local")
+            && !trimmed.starts_with("export")
+            && trimmed
+                .as_bytes()
+                .get(eq_pos + 1)
+                .is_none_or(|&b| b != b'=')
+            && trimmed.as_bytes()[eq_pos.saturating_sub(1)] != b'!'
+        {
+            let name = &trimmed[..eq_pos];
+            if name
+                .chars()
+                .all(|c| c.is_uppercase() || c == '_' || c.is_ascii_digit())
+                && name.chars().next().is_some_and(|c| c.is_alphabetic())
             {
-                let name = &trimmed[..eq_pos];
-                if name
-                    .chars()
-                    .all(|c| c.is_uppercase() || c == '_' || c.is_ascii_digit())
-                    && name.chars().next().is_some_and(|c| c.is_alphabetic())
-                {
-                    tags.push(Tag {
-                        name: name.to_string(),
-                        file: file.to_string(),
-                        line_number: line_num,
-                        pattern: make_pattern(line),
-                        kind: TagKind::Variable,
-                        language: Language::Shell,
-                        scope: None,
-                    });
-                }
+                tags.push(Tag {
+                    name: name.to_string(),
+                    file: file.to_string(),
+                    line_number: line_num,
+                    pattern: make_pattern(line),
+                    kind: TagKind::Variable,
+                    language: Language::Shell,
+                    scope: None,
+                });
             }
+        }
     }
 
     tags
@@ -1663,7 +1659,7 @@ fn extract_tags_from_file(path: &str) -> Vec<Tag> {
     let content = match fs::read_to_string(path) {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("ctags: cannot read '{}': {}", path, e);
+            eprintln!("ctags: cannot read {}: {e}", quoteaf_os(path));
             return Vec::new();
         }
     };
@@ -1738,15 +1734,8 @@ fn write_ctags<W: Write>(
             SortMode::Foldcase => '2',
         }
     )?;
-    writeln!(
-        out,
-        "!_TAG_PROGRAM_NAME\tctags\t/SlateOS ctags/"
-    )?;
-    writeln!(
-        out,
-        "!_TAG_PROGRAM_VERSION\t{}\t//",
-        VERSION
-    )?;
+    writeln!(out, "!_TAG_PROGRAM_NAME\tctags\t/SlateOS ctags/")?;
+    writeln!(out, "!_TAG_PROGRAM_VERSION\t{}\t//", VERSION)?;
 
     for tag in tags {
         // Basic format: name<TAB>file<TAB>pattern
@@ -1765,9 +1754,10 @@ fn write_ctags<W: Write>(
             ext_parts.push(format!("line:{}", tag.line_number));
         }
         if (fields.contains('s') || fields.contains('S'))
-            && let Some(ref scope) = tag.scope {
-                ext_parts.push(format!("scope:{}", scope));
-            }
+            && let Some(ref scope) = tag.scope
+        {
+            ext_parts.push(format!("scope:{}", scope));
+        }
 
         // Always write the kind in the compact `;" <TAB> kind:x` form.
         if ext_parts.is_empty() {
@@ -1779,18 +1769,19 @@ fn write_ctags<W: Write>(
 
         // Qualified tag extra.
         if extras.contains('q')
-            && let Some(ref scope) = tag.scope {
-                // Emit extra qualified entry.
-                write!(
-                    out,
-                    "\n{}.{}\t{}\t{};\"\t{}",
-                    scope,
-                    tag.name,
-                    tag.file,
-                    tag.pattern,
-                    tag.kind.letter()
-                )?;
-            }
+            && let Some(ref scope) = tag.scope
+        {
+            // Emit extra qualified entry.
+            write!(
+                out,
+                "\n{}.{}\t{}\t{};\"\t{}",
+                scope,
+                tag.name,
+                tag.file,
+                tag.pattern,
+                tag.kind.letter()
+            )?;
+        }
 
         writeln!(out)?;
     }
@@ -1825,10 +1816,7 @@ fn write_etags<W: Write>(tags: &[Tag], out: &mut W) -> io::Result<()> {
         for tag in &file_tags {
             // etags format: DEFINITION\x7fNAME\x01LINE,OFFSET
             // We use the pattern text (without /^ $/) as the definition.
-            let def_text = tag
-                .pattern
-                .trim_start_matches("/^")
-                .trim_end_matches("$/");
+            let def_text = tag.pattern.trim_start_matches("/^").trim_end_matches("$/");
             writeln!(
                 section,
                 "{}\x7f{}\x01{},0",
@@ -1970,16 +1958,13 @@ fn run(config: &Config) -> i32 {
     }
 
     // In append mode, merge with existing tags.
-    let output_name = config
-        .output_file
-        .clone()
-        .unwrap_or_else(|| {
-            if config.format == OutputFormat::Etags {
-                "TAGS".to_string()
-            } else {
-                "tags".to_string()
-            }
-        });
+    let output_name = config.output_file.clone().unwrap_or_else(|| {
+        if config.format == OutputFormat::Etags {
+            "TAGS".to_string()
+        } else {
+            "tags".to_string()
+        }
+    });
 
     if config.append && config.format == OutputFormat::Ctags {
         let existing_lines = read_existing_ctags(&output_name);
@@ -1991,9 +1976,10 @@ fn run(config: &Config) -> i32 {
             .collect();
         for line in &existing_lines {
             if let Some(tag) = parse_ctags_line(line)
-                && !scanned_files.contains(tag.file.as_str()) {
-                    all_tags.push(tag);
-                }
+                && !scanned_files.contains(tag.file.as_str())
+            {
+                all_tags.push(tag);
+            }
         }
     }
 
@@ -2007,9 +1993,13 @@ fn run(config: &Config) -> i32 {
         let stdout = io::stdout();
         let mut out = stdout.lock();
         match config.format {
-            OutputFormat::Ctags => {
-                write_ctags(&all_tags, &config.fields, &config.extras, config.sort, &mut out)
-            }
+            OutputFormat::Ctags => write_ctags(
+                &all_tags,
+                &config.fields,
+                &config.extras,
+                config.sort,
+                &mut out,
+            ),
             OutputFormat::Etags => write_etags(&all_tags, &mut out),
         }
     } else {
@@ -2025,26 +2015,25 @@ fn run(config: &Config) -> i32 {
             Ok(f) => {
                 let mut out = io::BufWriter::new(f);
                 let result = match config.format {
-                    OutputFormat::Ctags => {
-                        write_ctags(
-                            &all_tags,
-                            &config.fields,
-                            &config.extras,
-                            config.sort,
-                            &mut out,
-                        )
-                    }
+                    OutputFormat::Ctags => write_ctags(
+                        &all_tags,
+                        &config.fields,
+                        &config.extras,
+                        config.sort,
+                        &mut out,
+                    ),
                     OutputFormat::Etags => write_etags(&all_tags, &mut out),
                 };
                 if result.is_ok()
-                    && let Err(e) = out.flush() {
-                        eprintln!("ctags: write error: {}", e);
-                        return 1;
-                    }
+                    && let Err(e) = out.flush()
+                {
+                    eprintln!("ctags: write error: {}", e);
+                    return 1;
+                }
                 result
             }
             Err(e) => {
-                eprintln!("ctags: cannot open '{}': {}", output_name, e);
+                eprintln!("ctags: cannot open {}: {e}", quoteaf_os(&output_name));
                 return 1;
             }
         }
@@ -2249,42 +2238,60 @@ mod tests {
     fn c_define() {
         let src = "#define MAX_SIZE 100\n";
         let tags = extract_tags_from_content(src, "test.c", Language::C);
-        assert!(tags.iter().any(|t| t.name == "MAX_SIZE" && t.kind == TagKind::Macro));
+        assert!(
+            tags.iter()
+                .any(|t| t.name == "MAX_SIZE" && t.kind == TagKind::Macro)
+        );
     }
 
     #[test]
     fn c_typedef() {
         let src = "typedef unsigned int uint32;\n";
         let tags = extract_tags_from_content(src, "test.c", Language::C);
-        assert!(tags.iter().any(|t| t.name == "uint32" && t.kind == TagKind::Typedef));
+        assert!(
+            tags.iter()
+                .any(|t| t.name == "uint32" && t.kind == TagKind::Typedef)
+        );
     }
 
     #[test]
     fn c_struct() {
         let src = "struct Point {\n    int x;\n    int y;\n};\n";
         let tags = extract_tags_from_content(src, "test.c", Language::C);
-        assert!(tags.iter().any(|t| t.name == "Point" && t.kind == TagKind::Struct));
+        assert!(
+            tags.iter()
+                .any(|t| t.name == "Point" && t.kind == TagKind::Struct)
+        );
     }
 
     #[test]
     fn c_enum() {
         let src = "enum Color {\n    RED,\n    GREEN\n};\n";
         let tags = extract_tags_from_content(src, "test.c", Language::C);
-        assert!(tags.iter().any(|t| t.name == "Color" && t.kind == TagKind::Enum));
+        assert!(
+            tags.iter()
+                .any(|t| t.name == "Color" && t.kind == TagKind::Enum)
+        );
     }
 
     #[test]
     fn c_function() {
         let src = "int main(int argc, char **argv) {\n    return 0;\n}\n";
         let tags = extract_tags_from_content(src, "test.c", Language::C);
-        assert!(tags.iter().any(|t| t.name == "main" && t.kind == TagKind::Function));
+        assert!(
+            tags.iter()
+                .any(|t| t.name == "main" && t.kind == TagKind::Function)
+        );
     }
 
     #[test]
     fn c_function_next_line_brace() {
         let src = "void foo(void)\n{\n    return;\n}\n";
         let tags = extract_tags_from_content(src, "test.c", Language::C);
-        assert!(tags.iter().any(|t| t.name == "foo" && t.kind == TagKind::Function));
+        assert!(
+            tags.iter()
+                .any(|t| t.name == "foo" && t.kind == TagKind::Function)
+        );
     }
 
     #[test]
@@ -2307,14 +2314,20 @@ mod tests {
     fn cpp_class() {
         let src = "class Widget {\npublic:\n    void draw();\n};\n";
         let tags = extract_tags_from_content(src, "test.cpp", Language::Cpp);
-        assert!(tags.iter().any(|t| t.name == "Widget" && t.kind == TagKind::Class));
+        assert!(
+            tags.iter()
+                .any(|t| t.name == "Widget" && t.kind == TagKind::Class)
+        );
     }
 
     #[test]
     fn cpp_namespace() {
         let src = "namespace gui {\n}\n";
         let tags = extract_tags_from_content(src, "test.cpp", Language::Cpp);
-        assert!(tags.iter().any(|t| t.name == "gui" && t.kind == TagKind::Module));
+        assert!(
+            tags.iter()
+                .any(|t| t.name == "gui" && t.kind == TagKind::Module)
+        );
     }
 
     // ---- Rust tag extraction ----
@@ -2323,7 +2336,10 @@ mod tests {
     fn rust_function() {
         let src = "fn hello_world() {\n    println!(\"hello\");\n}\n";
         let tags = extract_tags_from_content(src, "test.rs", Language::Rust);
-        assert!(tags.iter().any(|t| t.name == "hello_world" && t.kind == TagKind::Function));
+        assert!(
+            tags.iter()
+                .any(|t| t.name == "hello_world" && t.kind == TagKind::Function)
+        );
     }
 
     #[test]
@@ -2337,56 +2353,80 @@ mod tests {
     fn rust_async_fn() {
         let src = "pub async fn serve() {\n}\n";
         let tags = extract_tags_from_content(src, "test.rs", Language::Rust);
-        assert!(tags.iter().any(|t| t.name == "serve" && t.kind == TagKind::Function));
+        assert!(
+            tags.iter()
+                .any(|t| t.name == "serve" && t.kind == TagKind::Function)
+        );
     }
 
     #[test]
     fn rust_struct() {
         let src = "pub struct Config {\n    verbose: bool,\n}\n";
         let tags = extract_tags_from_content(src, "test.rs", Language::Rust);
-        assert!(tags.iter().any(|t| t.name == "Config" && t.kind == TagKind::Struct));
+        assert!(
+            tags.iter()
+                .any(|t| t.name == "Config" && t.kind == TagKind::Struct)
+        );
     }
 
     #[test]
     fn rust_enum() {
         let src = "enum Direction {\n    North,\n    South,\n}\n";
         let tags = extract_tags_from_content(src, "test.rs", Language::Rust);
-        assert!(tags.iter().any(|t| t.name == "Direction" && t.kind == TagKind::Enum));
+        assert!(
+            tags.iter()
+                .any(|t| t.name == "Direction" && t.kind == TagKind::Enum)
+        );
     }
 
     #[test]
     fn rust_trait() {
         let src = "pub trait Drawable {\n    fn draw(&self);\n}\n";
         let tags = extract_tags_from_content(src, "test.rs", Language::Rust);
-        assert!(tags.iter().any(|t| t.name == "Drawable" && t.kind == TagKind::Trait));
+        assert!(
+            tags.iter()
+                .any(|t| t.name == "Drawable" && t.kind == TagKind::Trait)
+        );
     }
 
     #[test]
     fn rust_type_alias() {
         let src = "type Result<T> = std::result::Result<T, MyError>;\n";
         let tags = extract_tags_from_content(src, "test.rs", Language::Rust);
-        assert!(tags.iter().any(|t| t.name == "Result" && t.kind == TagKind::Typedef));
+        assert!(
+            tags.iter()
+                .any(|t| t.name == "Result" && t.kind == TagKind::Typedef)
+        );
     }
 
     #[test]
     fn rust_macro_rules() {
         let src = "macro_rules! my_macro {\n    () => {};\n}\n";
         let tags = extract_tags_from_content(src, "test.rs", Language::Rust);
-        assert!(tags.iter().any(|t| t.name == "my_macro" && t.kind == TagKind::Macro));
+        assert!(
+            tags.iter()
+                .any(|t| t.name == "my_macro" && t.kind == TagKind::Macro)
+        );
     }
 
     #[test]
     fn rust_module() {
         let src = "pub mod parser {\n}\n";
         let tags = extract_tags_from_content(src, "test.rs", Language::Rust);
-        assert!(tags.iter().any(|t| t.name == "parser" && t.kind == TagKind::Module));
+        assert!(
+            tags.iter()
+                .any(|t| t.name == "parser" && t.kind == TagKind::Module)
+        );
     }
 
     #[test]
     fn rust_impl_method() {
         let src = "impl Config {\n    pub fn new() -> Self {\n        Self { verbose: false }\n    }\n}\n";
         let tags = extract_tags_from_content(src, "test.rs", Language::Rust);
-        assert!(tags.iter().any(|t| t.name == "new" && t.kind == TagKind::Method));
+        assert!(
+            tags.iter()
+                .any(|t| t.name == "new" && t.kind == TagKind::Method)
+        );
         let method = tags.iter().find(|t| t.name == "new").unwrap();
         assert_eq!(method.scope.as_deref(), Some("Config"));
     }
@@ -2395,7 +2435,10 @@ mod tests {
     fn rust_static_variable() {
         let src = "static COUNTER: AtomicUsize = AtomicUsize::new(0);\n";
         let tags = extract_tags_from_content(src, "test.rs", Language::Rust);
-        assert!(tags.iter().any(|t| t.name == "COUNTER" && t.kind == TagKind::Variable));
+        assert!(
+            tags.iter()
+                .any(|t| t.name == "COUNTER" && t.kind == TagKind::Variable)
+        );
     }
 
     // ---- Python tag extraction ----
@@ -2404,49 +2447,70 @@ mod tests {
     fn python_function() {
         let src = "def hello():\n    pass\n";
         let tags = extract_tags_from_content(src, "test.py", Language::Python);
-        assert!(tags.iter().any(|t| t.name == "hello" && t.kind == TagKind::Function));
+        assert!(
+            tags.iter()
+                .any(|t| t.name == "hello" && t.kind == TagKind::Function)
+        );
     }
 
     #[test]
     fn python_class() {
         let src = "class MyClass:\n    pass\n";
         let tags = extract_tags_from_content(src, "test.py", Language::Python);
-        assert!(tags.iter().any(|t| t.name == "MyClass" && t.kind == TagKind::Class));
+        assert!(
+            tags.iter()
+                .any(|t| t.name == "MyClass" && t.kind == TagKind::Class)
+        );
     }
 
     #[test]
     fn python_method() {
         let src = "class Foo:\n    def bar(self):\n        pass\n";
         let tags = extract_tags_from_content(src, "test.py", Language::Python);
-        assert!(tags.iter().any(|t| t.name == "bar" && t.kind == TagKind::Method));
+        assert!(
+            tags.iter()
+                .any(|t| t.name == "bar" && t.kind == TagKind::Method)
+        );
     }
 
     #[test]
     fn python_async_def() {
         let src = "async def fetch():\n    pass\n";
         let tags = extract_tags_from_content(src, "test.py", Language::Python);
-        assert!(tags.iter().any(|t| t.name == "fetch" && t.kind == TagKind::Function));
+        assert!(
+            tags.iter()
+                .any(|t| t.name == "fetch" && t.kind == TagKind::Function)
+        );
     }
 
     #[test]
     fn python_constant() {
         let src = "MAX_RETRIES = 3\n";
         let tags = extract_tags_from_content(src, "test.py", Language::Python);
-        assert!(tags.iter().any(|t| t.name == "MAX_RETRIES" && t.kind == TagKind::Constant));
+        assert!(
+            tags.iter()
+                .any(|t| t.name == "MAX_RETRIES" && t.kind == TagKind::Constant)
+        );
     }
 
     #[test]
     fn python_variable() {
         let src = "config_path = '/etc/app'\n";
         let tags = extract_tags_from_content(src, "test.py", Language::Python);
-        assert!(tags.iter().any(|t| t.name == "config_path" && t.kind == TagKind::Variable));
+        assert!(
+            tags.iter()
+                .any(|t| t.name == "config_path" && t.kind == TagKind::Variable)
+        );
     }
 
     #[test]
     fn python_class_with_bases() {
         let src = "class Child(Parent, Mixin):\n    pass\n";
         let tags = extract_tags_from_content(src, "test.py", Language::Python);
-        assert!(tags.iter().any(|t| t.name == "Child" && t.kind == TagKind::Class));
+        assert!(
+            tags.iter()
+                .any(|t| t.name == "Child" && t.kind == TagKind::Class)
+        );
     }
 
     // ---- Java tag extraction ----
@@ -2455,35 +2519,50 @@ mod tests {
     fn java_class() {
         let src = "public class Main {\n}\n";
         let tags = extract_tags_from_content(src, "Main.java", Language::Java);
-        assert!(tags.iter().any(|t| t.name == "Main" && t.kind == TagKind::Class));
+        assert!(
+            tags.iter()
+                .any(|t| t.name == "Main" && t.kind == TagKind::Class)
+        );
     }
 
     #[test]
     fn java_interface() {
         let src = "public interface Runnable {\n    void run();\n}\n";
         let tags = extract_tags_from_content(src, "Runnable.java", Language::Java);
-        assert!(tags.iter().any(|t| t.name == "Runnable" && t.kind == TagKind::Interface));
+        assert!(
+            tags.iter()
+                .any(|t| t.name == "Runnable" && t.kind == TagKind::Interface)
+        );
     }
 
     #[test]
     fn java_enum() {
         let src = "public enum Color {\n    RED, GREEN, BLUE\n}\n";
         let tags = extract_tags_from_content(src, "Color.java", Language::Java);
-        assert!(tags.iter().any(|t| t.name == "Color" && t.kind == TagKind::Enum));
+        assert!(
+            tags.iter()
+                .any(|t| t.name == "Color" && t.kind == TagKind::Enum)
+        );
     }
 
     #[test]
     fn java_method() {
         let src = "public class Calc {\n    public int add(int a, int b) {\n        return a + b;\n    }\n}\n";
         let tags = extract_tags_from_content(src, "Calc.java", Language::Java);
-        assert!(tags.iter().any(|t| t.name == "add" && t.kind == TagKind::Method));
+        assert!(
+            tags.iter()
+                .any(|t| t.name == "add" && t.kind == TagKind::Method)
+        );
     }
 
     #[test]
     fn java_package() {
         let src = "package com.example.app;\n\npublic class App {\n}\n";
         let tags = extract_tags_from_content(src, "App.java", Language::Java);
-        assert!(tags.iter().any(|t| t.name == "com.example.app" && t.kind == TagKind::Module));
+        assert!(
+            tags.iter()
+                .any(|t| t.name == "com.example.app" && t.kind == TagKind::Module)
+        );
     }
 
     // ---- JavaScript / TypeScript tag extraction ----
@@ -2492,56 +2571,80 @@ mod tests {
     fn js_function() {
         let src = "function greet(name) {\n    console.log(name);\n}\n";
         let tags = extract_tags_from_content(src, "app.js", Language::JavaScript);
-        assert!(tags.iter().any(|t| t.name == "greet" && t.kind == TagKind::Function));
+        assert!(
+            tags.iter()
+                .any(|t| t.name == "greet" && t.kind == TagKind::Function)
+        );
     }
 
     #[test]
     fn js_export_function() {
         let src = "export function doStuff() {\n}\n";
         let tags = extract_tags_from_content(src, "lib.js", Language::JavaScript);
-        assert!(tags.iter().any(|t| t.name == "doStuff" && t.kind == TagKind::Function));
+        assert!(
+            tags.iter()
+                .any(|t| t.name == "doStuff" && t.kind == TagKind::Function)
+        );
     }
 
     #[test]
     fn js_class() {
         let src = "class Widget {\n    constructor() {}\n}\n";
         let tags = extract_tags_from_content(src, "widget.js", Language::JavaScript);
-        assert!(tags.iter().any(|t| t.name == "Widget" && t.kind == TagKind::Class));
+        assert!(
+            tags.iter()
+                .any(|t| t.name == "Widget" && t.kind == TagKind::Class)
+        );
     }
 
     #[test]
     fn ts_interface() {
         let src = "export interface Props {\n    title: string;\n}\n";
         let tags = extract_tags_from_content(src, "types.ts", Language::JavaScript);
-        assert!(tags.iter().any(|t| t.name == "Props" && t.kind == TagKind::Interface));
+        assert!(
+            tags.iter()
+                .any(|t| t.name == "Props" && t.kind == TagKind::Interface)
+        );
     }
 
     #[test]
     fn ts_type_alias() {
         let src = "type Result<T> = Success<T> | Failure;\n";
         let tags = extract_tags_from_content(src, "types.ts", Language::JavaScript);
-        assert!(tags.iter().any(|t| t.name == "Result" && t.kind == TagKind::Typedef));
+        assert!(
+            tags.iter()
+                .any(|t| t.name == "Result" && t.kind == TagKind::Typedef)
+        );
     }
 
     #[test]
     fn ts_enum() {
         let src = "enum Direction {\n    Up,\n    Down,\n}\n";
         let tags = extract_tags_from_content(src, "enums.ts", Language::JavaScript);
-        assert!(tags.iter().any(|t| t.name == "Direction" && t.kind == TagKind::Enum));
+        assert!(
+            tags.iter()
+                .any(|t| t.name == "Direction" && t.kind == TagKind::Enum)
+        );
     }
 
     #[test]
     fn js_const_variable() {
         let src = "const MAX_COUNT = 100;\n";
         let tags = extract_tags_from_content(src, "config.js", Language::JavaScript);
-        assert!(tags.iter().any(|t| t.name == "MAX_COUNT" && t.kind == TagKind::Variable));
+        assert!(
+            tags.iter()
+                .any(|t| t.name == "MAX_COUNT" && t.kind == TagKind::Variable)
+        );
     }
 
     #[test]
     fn js_method_in_class() {
         let src = "class Foo {\n    bar() {\n    }\n}\n";
         let tags = extract_tags_from_content(src, "foo.js", Language::JavaScript);
-        assert!(tags.iter().any(|t| t.name == "bar" && t.kind == TagKind::Method));
+        assert!(
+            tags.iter()
+                .any(|t| t.name == "bar" && t.kind == TagKind::Method)
+        );
     }
 
     // ---- Go tag extraction ----
@@ -2550,49 +2653,70 @@ mod tests {
     fn go_function() {
         let src = "func main() {\n    fmt.Println(\"hello\")\n}\n";
         let tags = extract_tags_from_content(src, "main.go", Language::Go);
-        assert!(tags.iter().any(|t| t.name == "main" && t.kind == TagKind::Function));
+        assert!(
+            tags.iter()
+                .any(|t| t.name == "main" && t.kind == TagKind::Function)
+        );
     }
 
     #[test]
     fn go_method() {
         let src = "func (s *Server) Start() error {\n    return nil\n}\n";
         let tags = extract_tags_from_content(src, "server.go", Language::Go);
-        assert!(tags.iter().any(|t| t.name == "Start" && t.kind == TagKind::Method));
+        assert!(
+            tags.iter()
+                .any(|t| t.name == "Start" && t.kind == TagKind::Method)
+        );
     }
 
     #[test]
     fn go_struct() {
         let src = "type Config struct {\n    Port int\n}\n";
         let tags = extract_tags_from_content(src, "config.go", Language::Go);
-        assert!(tags.iter().any(|t| t.name == "Config" && t.kind == TagKind::Struct));
+        assert!(
+            tags.iter()
+                .any(|t| t.name == "Config" && t.kind == TagKind::Struct)
+        );
     }
 
     #[test]
     fn go_interface() {
         let src = "type Reader interface {\n    Read(p []byte) (n int, err error)\n}\n";
         let tags = extract_tags_from_content(src, "io.go", Language::Go);
-        assert!(tags.iter().any(|t| t.name == "Reader" && t.kind == TagKind::Interface));
+        assert!(
+            tags.iter()
+                .any(|t| t.name == "Reader" && t.kind == TagKind::Interface)
+        );
     }
 
     #[test]
     fn go_type_alias() {
         let src = "type Duration int64\n";
         let tags = extract_tags_from_content(src, "time.go", Language::Go);
-        assert!(tags.iter().any(|t| t.name == "Duration" && t.kind == TagKind::Typedef));
+        assert!(
+            tags.iter()
+                .any(|t| t.name == "Duration" && t.kind == TagKind::Typedef)
+        );
     }
 
     #[test]
     fn go_const() {
         let src = "const MaxRetries = 3\n";
         let tags = extract_tags_from_content(src, "const.go", Language::Go);
-        assert!(tags.iter().any(|t| t.name == "MaxRetries" && t.kind == TagKind::Constant));
+        assert!(
+            tags.iter()
+                .any(|t| t.name == "MaxRetries" && t.kind == TagKind::Constant)
+        );
     }
 
     #[test]
     fn go_package() {
         let src = "package main\n";
         let tags = extract_tags_from_content(src, "main.go", Language::Go);
-        assert!(tags.iter().any(|t| t.name == "main" && t.kind == TagKind::Module));
+        assert!(
+            tags.iter()
+                .any(|t| t.name == "main" && t.kind == TagKind::Module)
+        );
     }
 
     // ---- Shell tag extraction ----
@@ -2601,21 +2725,30 @@ mod tests {
     fn shell_function_keyword() {
         let src = "function setup() {\n    echo setup\n}\n";
         let tags = extract_tags_from_content(src, "run.sh", Language::Shell);
-        assert!(tags.iter().any(|t| t.name == "setup" && t.kind == TagKind::Function));
+        assert!(
+            tags.iter()
+                .any(|t| t.name == "setup" && t.kind == TagKind::Function)
+        );
     }
 
     #[test]
     fn shell_function_parens() {
         let src = "cleanup() {\n    rm -rf /tmp/work\n}\n";
         let tags = extract_tags_from_content(src, "run.sh", Language::Shell);
-        assert!(tags.iter().any(|t| t.name == "cleanup" && t.kind == TagKind::Function));
+        assert!(
+            tags.iter()
+                .any(|t| t.name == "cleanup" && t.kind == TagKind::Function)
+        );
     }
 
     #[test]
     fn shell_variable() {
         let src = "MAX_JOBS=4\n";
         let tags = extract_tags_from_content(src, "config.sh", Language::Shell);
-        assert!(tags.iter().any(|t| t.name == "MAX_JOBS" && t.kind == TagKind::Variable));
+        assert!(
+            tags.iter()
+                .any(|t| t.name == "MAX_JOBS" && t.kind == TagKind::Variable)
+        );
     }
 
     // ---- Output format tests ----
@@ -3001,7 +3134,10 @@ mod tests {
 
     #[test]
     fn is_excluded_dir_name() {
-        assert!(is_excluded("node_modules/foo.js", &["node_modules".to_string()]));
+        assert!(is_excluded(
+            "node_modules/foo.js",
+            &["node_modules".to_string()]
+        ));
     }
 
     // ---- Tag kind properties ----

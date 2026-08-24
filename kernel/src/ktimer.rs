@@ -167,6 +167,37 @@ pub fn schedule(func: fn(u64), arg: u64, delay_ticks: u64) -> Option<TimerHandle
     schedule_internal(func, arg, delay_ticks, 0)
 }
 
+/// Schedule a one-shot timer using a delay in **nanoseconds**.
+///
+/// The kernel's own deadlines are almost all expressed in nanoseconds (the
+/// HPET's unit), while this table counts ticks. Converting at each call site
+/// means every caller carries a copy of the tick rate, and every one of those
+/// copies is wrong the day [`crate::apic::TICK_RATE_HZ`] changes. Doing it here
+/// keeps that arithmetic in the one place that owns the tick.
+///
+/// The delay is rounded **up** to the next whole tick, and never below one:
+/// firing early would defeat the purpose of every caller that has one (a
+/// backoff that expires sooner than requested is not a backoff), and a delay
+/// short enough to round to zero still means "not now".
+#[must_use]
+pub fn schedule_after_ns(func: fn(u64), arg: u64, delay_ns: u64) -> Option<TimerHandle> {
+    schedule(func, arg, ns_to_ticks(delay_ns))
+}
+
+/// Convert a nanosecond duration to whole ticks, rounding up, minimum 1.
+#[must_use]
+pub fn ns_to_ticks(delay_ns: u64) -> u64 {
+    const NS_PER_TICK: u64 = 1_000_000_000 / crate::apic::TICK_RATE_HZ as u64;
+    // Round up: `(n + d - 1) / d`. Saturating on the add so a near-`u64::MAX`
+    // delay yields a huge tick count rather than wrapping to a tiny one --
+    // "effectively never" must not become "immediately".
+    let ticks = delay_ns
+        .saturating_add(NS_PER_TICK.saturating_sub(1))
+        .checked_div(NS_PER_TICK)
+        .unwrap_or(1);
+    ticks.max(1)
+}
+
 /// Schedule a periodic timer.
 ///
 /// Fires `func(arg)` every `interval_ticks` ticks, starting after the

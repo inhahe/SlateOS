@@ -4,11 +4,16 @@
 //!
 //! Multi-personality: `cqlsh`, `nodetool`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_cqlsh(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -29,13 +34,20 @@ fn run_cqlsh(args: &[String]) -> i32 {
         println!("cqlsh 6.1.0 | Cassandra 4.1.5 | CQL spec 3.4.6");
         return 0;
     }
-    let stmt = args.windows(2).find(|w| w[0] == "-e").map(|w| w[1].as_str());
+    let stmt = args
+        .windows(2)
+        .find(|w| w[0] == "-e")
+        .map(|w| w[1].as_str());
     if let Some(s) = stmt {
         println!("{}", s);
         println!("(1 rows)");
         return 0;
     }
-    let host = args.iter().find(|a| !a.starts_with('-')).map(|s| s.as_str()).unwrap_or("127.0.0.1");
+    let host = args
+        .iter()
+        .find(|a| !a.starts_with('-'))
+        .map(|s| s.as_str())
+        .unwrap_or("127.0.0.1");
     println!("Connected to cluster at {}:9042.", host);
     println!("[cqlsh 6.1.0 | Cassandra 4.1.5 | CQL spec 3.4.6]");
     println!("cqlsh> ");
@@ -66,10 +78,18 @@ fn run_nodetool(args: &[String]) -> i32 {
             println!("========================");
             println!("Status=Up/Down");
             println!("|/ State=Normal/Leaving/Joining/Moving");
-            println!("--  Address       Load        Tokens  Owns    Host ID                               Rack");
-            println!("UN  192.168.1.1   256.42 GiB  256     33.3%   abc12345-1234-1234-1234-abc123456789  rack1");
-            println!("UN  192.168.1.2   248.15 GiB  256     33.3%   def12345-1234-1234-1234-def123456789  rack1");
-            println!("UN  192.168.1.3   251.89 GiB  256     33.3%   ghi12345-1234-1234-1234-ghi123456789  rack2");
+            println!(
+                "--  Address       Load        Tokens  Owns    Host ID                               Rack"
+            );
+            println!(
+                "UN  192.168.1.1   256.42 GiB  256     33.3%   abc12345-1234-1234-1234-abc123456789  rack1"
+            );
+            println!(
+                "UN  192.168.1.2   248.15 GiB  256     33.3%   def12345-1234-1234-1234-def123456789  rack1"
+            );
+            println!(
+                "UN  192.168.1.3   251.89 GiB  256     33.3%   ghi12345-1234-1234-1234-ghi123456789  rack2"
+            );
         }
         "info" => {
             println!("ID                     : abc12345-1234-1234-1234-abc123456789");
@@ -90,15 +110,20 @@ fn run_nodetool(args: &[String]) -> i32 {
         "flush" => println!("Flushing all memtables...done."),
         "repair" => println!("Starting repair...repair completed successfully."),
         "compact" => println!("Starting forced compaction...compaction completed."),
-        "snapshot" => println!("Requested creating snapshot(s) for [all keyspaces] with snapshot name [auto_snapshot]"),
-        _ => println!("nodetool: '{}' completed", subcmd),
+        "snapshot" => println!(
+            "Requested creating snapshot(s) for [all keyspaces] with snapshot name [auto_snapshot]"
+        ),
+        _ => println!("nodetool: {} completed", quoteaf_os(subcmd)),
     }
     0
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "cqlsh".to_string());
+    let prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "cqlsh".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = match prog.as_str() {
         "nodetool" => run_nodetool(&rest),
@@ -109,7 +134,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_cqlsh};
+    use super::{basename, run_cqlsh, strip_ext};
 
     #[test]
     fn basename_strips_path() {

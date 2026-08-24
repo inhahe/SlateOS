@@ -20,6 +20,7 @@
 //! padded to 512-byte boundaries. Archives are terminated by two consecutive
 //! zero blocks.
 
+use quoting::{quoteaf, quoteaf_os, quotef_os};
 use std::env;
 use std::fs::{self, File, Metadata};
 use std::io::{self, Read, Write};
@@ -229,11 +230,15 @@ fn parse_args() -> Result<Options, String> {
                             'k' => keep_old_files = true,
                             'j' => {
                                 bzip2 = true;
-                                eprintln!("tar: warning: bzip2 compression not implemented, flag acknowledged");
+                                eprintln!(
+                                    "tar: warning: bzip2 compression not implemented, flag acknowledged"
+                                );
                             }
                             'z' => {
                                 gzip = true;
-                                eprintln!("tar: warning: gzip compression not implemented, flag acknowledged");
+                                eprintln!(
+                                    "tar: warning: gzip compression not implemented, flag acknowledged"
+                                );
                             }
                             'f' => {
                                 // 'f' consumes the rest of the bundled string,
@@ -268,8 +273,7 @@ fn parse_args() -> Result<Options, String> {
     let mode = mode.ok_or_else(|| {
         "no mode specified (use -c to create, -x to extract, -t to list)".to_string()
     })?;
-    let archive = archive
-        .ok_or_else(|| "no archive file specified (use -f <file>)".to_string())?;
+    let archive = archive.ok_or_else(|| "no archive file specified (use -f <file>)".to_string())?;
 
     if mode == Mode::Create && files.is_empty() {
         return Err("create mode requires at least one file argument".to_string());
@@ -402,9 +406,10 @@ fn is_excluded(path: &str, excludes: &[String]) -> bool {
         // Also match against just the filename component.
         if let Some(fname) = Path::new(path).file_name()
             && let Some(fname_str) = fname.to_str()
-                && glob_matches(pattern, fname_str) {
-                    return true;
-                }
+            && glob_matches(pattern, fname_str)
+        {
+            return true;
+        }
     }
     false
 }
@@ -494,11 +499,7 @@ fn get_mtime(meta: &Metadata) -> u64 {
 
 /// Get the file size (0 for directories).
 fn get_size(meta: &Metadata) -> u64 {
-    if meta.is_dir() {
-        0
-    } else {
-        meta.len()
-    }
+    if meta.is_dir() { 0 } else { meta.len() }
 }
 
 // ============================================================================
@@ -583,15 +584,33 @@ fn format_permissions(mode: u32, typeflag: u8) -> String {
         _ => b'-',
     };
 
-    if mode & 0o400 != 0 { perms[1] = b'r'; }
-    if mode & 0o200 != 0 { perms[2] = b'w'; }
-    if mode & 0o100 != 0 { perms[3] = b'x'; }
-    if mode & 0o040 != 0 { perms[4] = b'r'; }
-    if mode & 0o020 != 0 { perms[5] = b'w'; }
-    if mode & 0o010 != 0 { perms[6] = b'x'; }
-    if mode & 0o004 != 0 { perms[7] = b'r'; }
-    if mode & 0o002 != 0 { perms[8] = b'w'; }
-    if mode & 0o001 != 0 { perms[9] = b'x'; }
+    if mode & 0o400 != 0 {
+        perms[1] = b'r';
+    }
+    if mode & 0o200 != 0 {
+        perms[2] = b'w';
+    }
+    if mode & 0o100 != 0 {
+        perms[3] = b'x';
+    }
+    if mode & 0o040 != 0 {
+        perms[4] = b'r';
+    }
+    if mode & 0o020 != 0 {
+        perms[5] = b'w';
+    }
+    if mode & 0o010 != 0 {
+        perms[6] = b'x';
+    }
+    if mode & 0o004 != 0 {
+        perms[7] = b'r';
+    }
+    if mode & 0o002 != 0 {
+        perms[8] = b'w';
+    }
+    if mode & 0o001 != 0 {
+        perms[9] = b'x';
+    }
 
     // SAFETY: all bytes are valid ASCII.
     String::from_utf8(perms.to_vec()).unwrap_or_else(|_| "----------".to_string())
@@ -767,10 +786,7 @@ fn archive_path_recursive<W: Write>(
         format!(
             "{}/{}",
             prefix,
-            base_path
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("")
+            base_path.file_name().and_then(|n| n.to_str()).unwrap_or("")
         )
     };
 
@@ -853,10 +869,7 @@ fn create_archive(opts: &Options) -> Result<(), String> {
         }
 
         // Use empty prefix for top-level entries.
-        let parent_prefix = path
-            .parent()
-            .and_then(|p| p.to_str())
-            .unwrap_or("");
+        let parent_prefix = path.parent().and_then(|p| p.to_str()).unwrap_or("");
         let prefix = if parent_prefix == "." || parent_prefix.is_empty() {
             String::new()
         } else {
@@ -887,10 +900,7 @@ fn create_archive(opts: &Options) -> Result<(), String> {
         .map_err(|e| format!("flush archive: {}", e))?;
 
     if !errors.is_empty() {
-        return Err(format!(
-            "tar: completed with {} error(s)",
-            errors.len()
-        ));
+        return Err(format!("tar: completed with {} error(s)", errors.len()));
     }
 
     Ok(())
@@ -1149,23 +1159,25 @@ fn extract_archive(opts: &Options) -> Result<(), String> {
                     errors.push(msg);
                 }
                 if opts.preserve_permissions
-                    && let Err(e) = set_permissions(&dest, entry.mode) {
-                        let msg = format!("tar: {}: {}", dest.display(), e);
-                        eprintln!("{}", msg);
-                        errors.push(msg);
-                    }
+                    && let Err(e) = set_permissions(&dest, entry.mode)
+                {
+                    let msg = format!("tar: {}: {}", dest.display(), e);
+                    eprintln!("{}", msg);
+                    errors.push(msg);
+                }
             }
             TYPEFLAG_REGULAR | b'\0' => {
                 // Ensure parent directory exists.
                 if let Some(parent) = dest.parent()
                     && !parent.exists()
-                        && let Err(e) = fs::create_dir_all(parent) {
-                            let msg = format!("tar: {}: {}", parent.display(), e);
-                            eprintln!("{}", msg);
-                            errors.push(msg);
-                            skip_data(&mut reader, entry.size)?;
-                            continue;
-                        }
+                    && let Err(e) = fs::create_dir_all(parent)
+                {
+                    let msg = format!("tar: {}: {}", parent.display(), e);
+                    eprintln!("{}", msg);
+                    errors.push(msg);
+                    skip_data(&mut reader, entry.size)?;
+                    continue;
+                }
 
                 if opts.keep_old_files && dest.exists() {
                     eprintln!("tar: {}: already exists, skipping", dest.display());
@@ -1176,11 +1188,12 @@ fn extract_archive(opts: &Options) -> Result<(), String> {
                 match extract_file_data(&mut reader, &dest, entry.size) {
                     Ok(()) => {
                         if opts.preserve_permissions
-                            && let Err(e) = set_permissions(&dest, entry.mode) {
-                                let msg = format!("tar: {}: {}", dest.display(), e);
-                                eprintln!("{}", msg);
-                                errors.push(msg);
-                            }
+                            && let Err(e) = set_permissions(&dest, entry.mode)
+                        {
+                            let msg = format!("tar: {}: {}", dest.display(), e);
+                            eprintln!("{}", msg);
+                            errors.push(msg);
+                        }
                     }
                     Err(e) => {
                         let msg = format!("tar: {}: {}", dest.display(), e);
@@ -1192,14 +1205,13 @@ fn extract_archive(opts: &Options) -> Result<(), String> {
             TYPEFLAG_SYMLINK => {
                 // Symlink creation: best-effort.
                 if let Some(parent) = dest.parent()
-                    && !parent.exists() {
-                        let _ = fs::create_dir_all(parent);
-                    }
+                    && !parent.exists()
+                {
+                    let _ = fs::create_dir_all(parent);
+                }
                 #[cfg(unix)]
                 {
-                    if let Err(e) =
-                        std::os::unix::fs::symlink(&entry.linkname, &dest)
-                    {
+                    if let Err(e) = std::os::unix::fs::symlink(&entry.linkname, &dest) {
                         let msg = format!("tar: symlink {}: {}", dest.display(), e);
                         eprintln!("{}", msg);
                         errors.push(msg);
@@ -1216,9 +1228,13 @@ fn extract_archive(opts: &Options) -> Result<(), String> {
             }
             _ => {
                 eprintln!(
-                    "tar: {}: unsupported type flag '{}', skipping",
-                    entry.path,
-                    entry.typeflag as char
+                    "tar: {}: unsupported type flag {}, skipping",
+                    quotef_os(&entry.path),
+                    // The byte, not `as char`: `u8 as char` is a Latin-1
+                    // widening, so a crafted type flag of 0xE9 would be
+                    // reported as an accented letter that cannot fit in the
+                    // one byte the field actually holds.
+                    quoteaf(&[entry.typeflag])
                 );
                 skip_data(&mut reader, entry.size)?;
             }
@@ -1238,8 +1254,7 @@ fn extract_archive(opts: &Options) -> Result<(), String> {
 /// Read file data from the archive and write it to `dest`, then skip any
 /// padding bytes to the next 512-byte boundary.
 fn extract_file_data<R: Read>(reader: &mut R, dest: &Path, size: u64) -> Result<(), String> {
-    let mut file = File::create(dest)
-        .map_err(|e| format!("create '{}': {}", dest.display(), e))?;
+    let mut file = File::create(dest).map_err(|e| format!("create '{}': {}", dest.display(), e))?;
 
     let mut remaining = size;
     let mut buf = [0u8; 8192];
@@ -1377,9 +1392,7 @@ Options:
 fn main() {
     // Check for help first.
     let args: Vec<String> = env::args().collect();
-    if args.len() < 2
-        || args.iter().any(|a| a == "--help" || a == "-h")
-    {
+    if args.len() < 2 || args.iter().any(|a| a == "--help" || a == "-h") {
         print_usage();
         if args.len() < 2 {
             process::exit(1);
@@ -1399,10 +1412,11 @@ fn main() {
     // Change to target directory if specified (for create mode).
     if let Some(ref dir) = opts.directory
         && opts.mode == Mode::Create
-            && let Err(e) = env::set_current_dir(dir) {
-                eprintln!("tar: cannot change to '{}': {}", dir, e);
-                process::exit(1);
-            }
+        && let Err(e) = env::set_current_dir(dir)
+    {
+        eprintln!("tar: cannot change to {}: {}", quoteaf_os(dir), e);
+        process::exit(1);
+    }
 
     let result = match opts.mode {
         Mode::Create => create_archive(&opts),

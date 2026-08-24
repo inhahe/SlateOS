@@ -2,3 +2,8 @@
 name = "gopass-cli"
 version = "0.1.0"
 edition = "2024"
+
+[dependencies]
+# gopass-cli names secret entries, store mount points and remote URLs, all
+# supplied by the user or read out of a store this tool did not create.
+quoting = { path = "../quoting" }

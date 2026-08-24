@@ -4,11 +4,16 @@
 //!
 //! Multi-personality: `mdbook`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_mdbook(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
@@ -29,7 +34,7 @@ fn run_mdbook(args: &[String]) -> i32 {
         "--version" => println!("mdbook 0.4.37"),
         "init" => {
             let dir = args.get(1).map(|s| s.as_str()).unwrap_or("my-book");
-            println!("Creating a new book in '{}'...", dir);
+            println!("Creating a new book in {}...", quoteaf_os(dir));
             println!("  Created book.toml");
             println!("  Created src/SUMMARY.md");
             println!("  Created src/chapter_1.md");
@@ -37,15 +42,18 @@ fn run_mdbook(args: &[String]) -> i32 {
         }
         "build" => {
             let dir = args.get(1).map(|s| s.as_str()).unwrap_or(".");
-            println!("[INFO] Building book in '{}'...", dir);
+            println!("[INFO] Building book in {}...", quoteaf_os(dir));
             println!("[INFO] Running 0 preprocessors");
             println!("[INFO] Running HTML backend");
             println!("[INFO] Building 12 chapters");
             println!("[INFO] Book built in book/");
         }
         "serve" => {
-            let port = args.windows(2).find(|w| w[0] == "-p" || w[0] == "--port")
-                .map(|w| w[1].as_str()).unwrap_or("3000");
+            let port = args
+                .windows(2)
+                .find(|w| w[0] == "-p" || w[0] == "--port")
+                .map(|w| w[1].as_str())
+                .unwrap_or("3000");
             println!("[INFO] Building book...");
             println!("[INFO] Serving at http://localhost:{}", port);
             println!("[INFO] Watching for changes...");
@@ -66,14 +74,17 @@ fn run_mdbook(args: &[String]) -> i32 {
             println!("[INFO] Deleting book/");
             println!("Done.");
         }
-        _ => println!("mdbook: '{}' completed", subcmd),
+        _ => println!("mdbook: {} completed", quoteaf_os(subcmd)),
     }
     0
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "mdbook".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "mdbook".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_mdbook(&rest);
     process::exit(code);
@@ -81,7 +92,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_mdbook};
+    use super::{basename, run_mdbook, strip_ext};
 
     #[test]
     fn basename_strips_path() {

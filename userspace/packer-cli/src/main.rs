@@ -4,6 +4,7 @@
 //!
 //! Single personality: `packer`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -40,7 +41,8 @@ fn run_packer(args: Vec<String>) -> i32 {
             0
         }
         "build" => {
-            let template = args.iter()
+            let template = args
+                .iter()
                 .filter(|a| !a.starts_with('-'))
                 .nth(1)
                 .map(|s| s.as_str())
@@ -67,7 +69,8 @@ fn run_packer(args: Vec<String>) -> i32 {
             0
         }
         "validate" => {
-            let template = args.iter()
+            let template = args
+                .iter()
                 .filter(|a| !a.starts_with('-'))
                 .nth(1)
                 .map(|s| s.as_str())
@@ -110,7 +113,7 @@ fn run_packer(args: Vec<String>) -> i32 {
             if cmd.is_empty() {
                 eprintln!("Usage: packer <command>. See --help.");
             } else {
-                eprintln!("Error: unknown command '{}'. See --help.", cmd);
+                eprintln!("Error: unknown command {}. See --help.", quoteaf_os(cmd));
             }
             1
         }
@@ -126,7 +129,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_packer};
+    use super::run_packer;
 
     #[test]
     fn help_exits_zero() {

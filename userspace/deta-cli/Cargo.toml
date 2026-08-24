@@ -2,3 +2,8 @@
 name = "deta-cli"
 version = "0.1.0"
 edition = "2024"
+
+[dependencies]
+# deta-cli names projects and micros, identifiers created on the service
+# side.
+quoting = { path = "../quoting" }

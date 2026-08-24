@@ -4,6 +4,7 @@
 //!
 //! Single personality: `jira`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -39,14 +40,28 @@ fn run_jira(args: Vec<String>) -> i32 {
             match sub {
                 "list" => {
                     println!("Key         Type    Status        Priority  Assignee       Summary");
-                    println!("PROJ-123    Bug     In Progress   High      alice.smith    Fix login timeout");
-                    println!("PROJ-124    Story   To Do         Medium    bob.jones      Add search filters");
-                    println!("PROJ-125    Task    Done          Low       charlie.b      Update docs");
-                    println!("PROJ-126    Bug     To Do         Critical  alice.smith    Data loss on save");
-                    println!("PROJ-127    Story   In Review     Medium    bob.jones      Dashboard widgets");
+                    println!(
+                        "PROJ-123    Bug     In Progress   High      alice.smith    Fix login timeout"
+                    );
+                    println!(
+                        "PROJ-124    Story   To Do         Medium    bob.jones      Add search filters"
+                    );
+                    println!(
+                        "PROJ-125    Task    Done          Low       charlie.b      Update docs"
+                    );
+                    println!(
+                        "PROJ-126    Bug     To Do         Critical  alice.smith    Data loss on save"
+                    );
+                    println!(
+                        "PROJ-127    Story   In Review     Medium    bob.jones      Dashboard widgets"
+                    );
                 }
                 "create" => {
-                    let summary = args.windows(2).find(|w| w[0] == "-s" || w[0] == "--summary").map(|w| w[1].as_str()).unwrap_or("New issue");
+                    let summary = args
+                        .windows(2)
+                        .find(|w| w[0] == "-s" || w[0] == "--summary")
+                        .map(|w| w[1].as_str())
+                        .unwrap_or("New issue");
                     println!("✔ Created PROJ-128: {}", summary);
                 }
                 "view" => {
@@ -70,9 +85,11 @@ fn run_jira(args: Vec<String>) -> i32 {
                 "move" => {
                     let key = args.get(2).map(|s| s.as_str()).unwrap_or("PROJ-123");
                     let status = args.get(3).map(|s| s.as_str()).unwrap_or("Done");
-                    println!("✔ {} moved to '{}'", key, status);
+                    println!("✔ {} moved to {}", key, quoteaf_os(status));
                 }
-                _ => { println!("Issue operation: {}", sub); }
+                _ => {
+                    println!("Issue operation: {}", sub);
+                }
             }
             0
         }
@@ -91,7 +108,9 @@ fn run_jira(args: Vec<String>) -> i32 {
                     println!("  Issues: 8 total (3 done, 3 in progress, 2 to do)");
                     println!("  Velocity: 21 story points");
                 }
-                _ => { println!("Sprint operation: {}", sub); }
+                _ => {
+                    println!("Sprint operation: {}", sub);
+                }
             }
             0
         }
@@ -111,7 +130,9 @@ fn run_jira(args: Vec<String>) -> i32 {
                     println!("SUP     Support           bob.jones     Service Desk");
                     println!("INFRA   Infrastructure    charlie.b     Software");
                 }
-                _ => { println!("Project operation: {}", sub); }
+                _ => {
+                    println!("Project operation: {}", sub);
+                }
             }
             0
         }
@@ -124,7 +145,10 @@ fn run_jira(args: Vec<String>) -> i32 {
             0
         }
         "search" => {
-            let jql = args.get(1).map(|s| s.as_str()).unwrap_or("assignee = currentUser() AND status != Done");
+            let jql = args
+                .get(1)
+                .map(|s| s.as_str())
+                .unwrap_or("assignee = currentUser() AND status != Done");
             println!("JQL: {}", jql);
             println!("Results: 3 issues found");
             println!();
@@ -137,7 +161,7 @@ fn run_jira(args: Vec<String>) -> i32 {
             if cmd.is_empty() {
                 eprintln!("Usage: jira <command>. See --help.");
             } else {
-                eprintln!("Error: unknown command '{}'. See --help.", cmd);
+                eprintln!("Error: unknown command {}. See --help.", quoteaf_os(cmd));
             }
             1
         }
@@ -153,7 +177,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_jira};
+    use super::run_jira;
 
     #[test]
     fn help_exits_zero() {

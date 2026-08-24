@@ -4,3 +4,7 @@ version = "0.1.0"
 edition = "2024"
 description = "SlateOS dictionary lookup / sorted file search"
 [dependencies]
+# It interpolates `positional[2]` into "look: extra operand {}". That value
+# is an argv word, so it is whatever the user typed and not text this
+# program chose.
+quoting = { path = "../quoting" }

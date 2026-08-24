@@ -22,6 +22,7 @@
 //! uname -sr              Combine flags: kernel name + release
 //! ```
 
+use quoting::quoteaf_os;
 use std::env;
 use std::fs;
 use std::process;
@@ -157,22 +158,19 @@ struct SystemInfo {
 impl SystemInfo {
     /// Gather system information from proc files, falling back to defaults.
     fn gather() -> Self {
-        let kernel_name = read_proc(PROC_OSTYPE)
-            .unwrap_or_else(|| DEFAULT_KERNEL_NAME.to_string());
+        let kernel_name = read_proc(PROC_OSTYPE).unwrap_or_else(|| DEFAULT_KERNEL_NAME.to_string());
 
-        let node_name = read_proc(PROC_HOSTNAME)
-            .unwrap_or_else(|| "unknown".to_string());
+        let node_name = read_proc(PROC_HOSTNAME).unwrap_or_else(|| "unknown".to_string());
 
-        let kernel_release = read_proc(PROC_OSRELEASE)
-            .unwrap_or_else(|| DEFAULT_RELEASE.to_string());
+        let kernel_release =
+            read_proc(PROC_OSRELEASE).unwrap_or_else(|| DEFAULT_RELEASE.to_string());
 
-        let kernel_version = read_proc(PROC_VERSION)
-            .unwrap_or_else(|| "unknown".to_string());
+        let kernel_version = read_proc(PROC_VERSION).unwrap_or_else(|| "unknown".to_string());
 
         let machine = DEFAULT_MACHINE.to_string();
 
-        let processor = read_processor_from_cpuinfo()
-            .unwrap_or_else(|| DEFAULT_MACHINE.to_string());
+        let processor =
+            read_processor_from_cpuinfo().unwrap_or_else(|| DEFAULT_MACHINE.to_string());
 
         // Hardware platform: same as machine on x86_64.
         let hardware_platform = DEFAULT_MACHINE.to_string();
@@ -212,14 +210,35 @@ impl SystemInfo {
     fn to_json(&self) -> String {
         let mut out = String::with_capacity(512);
         out.push_str("{\n");
-        out.push_str(&format!("  \"kernel_name\": {},\n", json_escape(&self.kernel_name)));
-        out.push_str(&format!("  \"node_name\": {},\n", json_escape(&self.node_name)));
-        out.push_str(&format!("  \"kernel_release\": {},\n", json_escape(&self.kernel_release)));
-        out.push_str(&format!("  \"kernel_version\": {},\n", json_escape(&self.kernel_version)));
+        out.push_str(&format!(
+            "  \"kernel_name\": {},\n",
+            json_escape(&self.kernel_name)
+        ));
+        out.push_str(&format!(
+            "  \"node_name\": {},\n",
+            json_escape(&self.node_name)
+        ));
+        out.push_str(&format!(
+            "  \"kernel_release\": {},\n",
+            json_escape(&self.kernel_release)
+        ));
+        out.push_str(&format!(
+            "  \"kernel_version\": {},\n",
+            json_escape(&self.kernel_version)
+        ));
         out.push_str(&format!("  \"machine\": {},\n", json_escape(&self.machine)));
-        out.push_str(&format!("  \"processor\": {},\n", json_escape(&self.processor)));
-        out.push_str(&format!("  \"hardware_platform\": {},\n", json_escape(&self.hardware_platform)));
-        out.push_str(&format!("  \"operating_system\": {}\n", json_escape(&self.operating_system)));
+        out.push_str(&format!(
+            "  \"processor\": {},\n",
+            json_escape(&self.processor)
+        ));
+        out.push_str(&format!(
+            "  \"hardware_platform\": {},\n",
+            json_escape(&self.hardware_platform)
+        ));
+        out.push_str(&format!(
+            "  \"operating_system\": {}\n",
+            json_escape(&self.operating_system)
+        ));
         out.push('}');
         out
     }
@@ -289,7 +308,7 @@ fn parse_args(args: &[String]) -> Request {
                 "--help" => return Request::Help,
                 "--version" => return Request::Version,
                 _ => {
-                    eprintln!("uname: unrecognized option '{arg_str}'");
+                    eprintln!("uname: unrecognized option {}", quoteaf_os(arg_str));
                     eprintln!("Try 'uname --help' for more information.");
                     process::exit(1);
                 }
@@ -314,7 +333,7 @@ fn parse_args(args: &[String]) -> Request {
                     'o' => push_unique(&mut fields, Field::OperatingSystem),
                     'h' => return Request::Help,
                     _ => {
-                        eprintln!("uname: invalid option -- '{ch}'");
+                        eprintln!("uname: invalid option -- {}", quoteaf_os(ch.to_string()));
                         eprintln!("Try 'uname --help' for more information.");
                         process::exit(1);
                     }
@@ -324,7 +343,7 @@ fn parse_args(args: &[String]) -> Request {
         }
 
         // Bare argument — not expected for uname.
-        eprintln!("uname: extra operand '{arg_str}'");
+        eprintln!("uname: extra operand {}", quoteaf_os(arg_str));
         eprintln!("Try 'uname --help' for more information.");
         process::exit(1);
     }
@@ -355,9 +374,9 @@ fn push_unique(fields: &mut Vec<Field>, field: Field) {
         Some(rank) => {
             // Find the insertion point: after all existing fields whose rank
             // is less than ours.
-            let pos = fields.iter().position(|f| {
-                ALL_FIELDS.iter().position(|af| af == f).unwrap_or(0) > rank
-            });
+            let pos = fields
+                .iter()
+                .position(|f| ALL_FIELDS.iter().position(|af| af == f).unwrap_or(0) > rank);
             match pos {
                 Some(p) => fields.insert(p, field),
                 None => fields.push(field),

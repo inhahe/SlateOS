@@ -266,7 +266,8 @@ static TOTAL_COMPLETED: AtomicU64 = AtomicU64::new(0);
 static TOTAL_CANCELLED: AtomicU64 = AtomicU64::new(0);
 static TOTAL_BYTES_MOVED: AtomicU64 = AtomicU64::new(0);
 
-static OPERATIONS: PreemptSpinMutex<Vec<FileOperation>> = PreemptSpinMutex::named(Vec::new(), b"OPERATIONS");
+static OPERATIONS: PreemptSpinMutex<Vec<FileOperation>> =
+    PreemptSpinMutex::named(Vec::new(), b"OPERATIONS");
 
 // ---------------------------------------------------------------------------
 // Conflict resolution helpers

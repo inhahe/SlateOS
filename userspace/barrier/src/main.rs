@@ -4,6 +4,7 @@
 //!
 //! Multi-personality: `barriers`, `barrierc`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -27,15 +28,19 @@ fn run_barriers(args: Vec<String>) -> i32 {
         return 0;
     }
 
-    let name = args.iter().position(|a| a == "-n" || a == "--name")
+    let name = args
+        .iter()
+        .position(|a| a == "-n" || a == "--name")
         .and_then(|i| args.get(i + 1))
         .map(|s| s.as_str())
         .unwrap_or("server");
-    let addr = args.iter().position(|a| a == "-a" || a == "--address")
+    let addr = args
+        .iter()
+        .position(|a| a == "-a" || a == "--address")
         .and_then(|i| args.get(i + 1))
         .map(|s| s.as_str())
         .unwrap_or("0.0.0.0:24800");
-    println!("Barrier server '{}' listening on {}", name, addr);
+    println!("Barrier server {} listening on {}", quoteaf_os(name), addr);
     0
 }
 
@@ -51,12 +56,22 @@ fn run_barrierc(args: Vec<String>) -> i32 {
         return 0;
     }
 
-    let server = args.iter().find(|a| !a.starts_with('-')).map(|s| s.as_str()).unwrap_or("localhost");
-    let name = args.iter().position(|a| a == "-n" || a == "--name")
+    let server = args
+        .iter()
+        .find(|a| !a.starts_with('-'))
+        .map(|s| s.as_str())
+        .unwrap_or("localhost");
+    let name = args
+        .iter()
+        .position(|a| a == "-n" || a == "--name")
         .and_then(|i| args.get(i + 1))
         .map(|s| s.as_str())
         .unwrap_or("client");
-    println!("Barrier client '{}' connecting to {}", name, server);
+    println!(
+        "Barrier client {} connecting to {}",
+        quoteaf_os(name),
+        server
+    );
     0
 }
 
@@ -67,7 +82,9 @@ fn main() {
         let bytes = s.as_bytes();
         let mut last_sep = 0;
         for (i, &b) in bytes.iter().enumerate() {
-            if b == b'/' || b == b'\\' { last_sep = i + 1; }
+            if b == b'/' || b == b'\\' {
+                last_sep = i + 1;
+            }
         }
         let base = &s[last_sep..];
         base.strip_suffix(".exe").unwrap_or(base).to_string()
@@ -82,7 +99,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_barriers};
+    use super::run_barriers;
 
     #[test]
     fn help_exits_zero() {

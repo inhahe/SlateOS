@@ -2,3 +2,8 @@
 name = "bun-cli"
 version = "0.1.0"
 edition = "2024"
+
+[dependencies]
+# bun-cli names packages, scripts and entry points, read from the command
+# line and from package.json on disk.
+quoting = { path = "../quoting" }

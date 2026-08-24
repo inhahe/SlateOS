@@ -1566,12 +1566,28 @@ pub fn procfs_content() -> String {
 // Self-tests
 // ---------------------------------------------------------------------------
 
-/// Run HTTP module self-tests.
+/// Run the module's self-test suite against state of its own.
 ///
-/// Tests parsing, Base64 encoding, URL handling, and response parsing.
-/// Network-dependent tests (actual HTTP requests) only run if the
-/// network interface is up.
+/// The suite mutates module state and asserts exact contents, and it used to
+/// do that to the *live* state -- which, since it is also a kernel-shell
+/// subcommand, changed or destroyed whatever the user had here and then
+/// reported success.  It is moved aside for the duration and put back
+/// afterwards; `crate::fs::selftest` records why this shape rather than the
+/// alternatives.
+///
+/// Each pristine value is the `static`'s own initialiser, which is the one
+/// spelling of "what a fresh boot holds" that cannot drift away from it.
 pub fn self_test() -> KernelResult<()> {
+    let _pristine_requests_total = crate::fs::selftest::pristine_atomic(&REQUESTS_TOTAL, 0);
+    let _pristine_requests_success = crate::fs::selftest::pristine_atomic(&REQUESTS_SUCCESS, 0);
+    let _pristine_requests_failed = crate::fs::selftest::pristine_atomic(&REQUESTS_FAILED, 0);
+    let _pristine_redirects_followed = crate::fs::selftest::pristine_atomic(&REDIRECTS_FOLLOWED, 0);
+    let _pristine_bytes_received = crate::fs::selftest::pristine_atomic(&BYTES_RECEIVED, 0);
+    let _pristine_bytes_sent = crate::fs::selftest::pristine_atomic(&BYTES_SENT, 0);
+    self_test_inner()
+}
+
+fn self_test_inner() -> KernelResult<()> {
     crate::serial_println!("[http] Running HTTP self-tests...");
     let mut passed = 0u32;
 

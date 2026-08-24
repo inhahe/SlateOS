@@ -23,6 +23,7 @@
 //! df --help                 Show help
 //! ```
 
+use quoting::{quoteaf_os, quotef_os};
 use std::env;
 use std::fs;
 use std::process;
@@ -163,9 +164,25 @@ struct MountEntry {
 
 /// Pseudo-filesystem types that are skipped by default.
 const PSEUDO_FS: &[&str] = &[
-    "proc", "sysfs", "devfs", "devpts", "devtmpfs", "tmpfs", "ramfs",
-    "hugetlbfs", "mqueue", "debugfs", "tracefs", "securityfs", "configfs",
-    "fusectl", "cgroup", "cgroup2", "pstore", "bpf", "autofs",
+    "proc",
+    "sysfs",
+    "devfs",
+    "devpts",
+    "devtmpfs",
+    "tmpfs",
+    "ramfs",
+    "hugetlbfs",
+    "mqueue",
+    "debugfs",
+    "tracefs",
+    "securityfs",
+    "configfs",
+    "fusectl",
+    "cgroup",
+    "cgroup2",
+    "pstore",
+    "bpf",
+    "autofs",
 ];
 
 fn is_pseudo_fs(fstype: &str) -> bool {
@@ -291,8 +308,8 @@ fn gather_fs_info(entry: &MountEntry) -> Option<FsInfo> {
     }
 
     // Fallback: sysfs / procfs.
-    let total = sysblock_size_bytes(&entry.device)
-        .or_else(|| procpart_size_bytes(&entry.device))?;
+    let total =
+        sysblock_size_bytes(&entry.device).or_else(|| procpart_size_bytes(&entry.device))?;
 
     // Without the syscall we cannot distinguish free/avail, so report the
     // whole device as total and zero used. This is imprecise but better
@@ -504,7 +521,7 @@ fn parse_args() -> Config {
                 if i < args.len() {
                     cfg.include_types.push(args[i].clone());
                 } else {
-                    eprintln!("df: option '{arg}' requires an argument");
+                    eprintln!("df: option {} requires an argument", quoteaf_os(arg));
                     process::exit(1);
                 }
             }
@@ -513,7 +530,7 @@ fn parse_args() -> Config {
                 if i < args.len() {
                     cfg.exclude_types.push(args[i].clone());
                 } else {
-                    eprintln!("df: option '{arg}' requires an argument");
+                    eprintln!("df: option {} requires an argument", quoteaf_os(arg));
                     process::exit(1);
                 }
             }
@@ -529,7 +546,7 @@ fn parse_args() -> Config {
                 process::exit(0);
             }
             other if other.starts_with('-') => {
-                eprintln!("df: unknown option '{other}'");
+                eprintln!("df: unknown option {}", quoteaf_os(other));
                 eprintln!("Try 'df --help' for more information.");
                 process::exit(1);
             }
@@ -554,13 +571,20 @@ fn parse_args() -> Config {
 fn should_display(entry: &MountEntry, cfg: &Config) -> bool {
     // Type include filter.
     if !cfg.include_types.is_empty()
-        && !cfg.include_types.iter().any(|t| t.eq_ignore_ascii_case(&entry.fstype))
+        && !cfg
+            .include_types
+            .iter()
+            .any(|t| t.eq_ignore_ascii_case(&entry.fstype))
     {
         return false;
     }
 
     // Type exclude filter.
-    if cfg.exclude_types.iter().any(|t| t.eq_ignore_ascii_case(&entry.fstype)) {
+    if cfg
+        .exclude_types
+        .iter()
+        .any(|t| t.eq_ignore_ascii_case(&entry.fstype))
+    {
         return false;
     }
 
@@ -599,8 +623,7 @@ fn best_mount_for_paths(infos: &mut Vec<FsInfo>, filter_paths: &[String]) {
             .iter()
             .enumerate()
             .filter(|(_, fi)| {
-                fpath == &fi.mountpoint
-                    || fpath.starts_with(&format!("{}/", fi.mountpoint))
+                fpath == &fi.mountpoint || fpath.starts_with(&format!("{}/", fi.mountpoint))
             })
             .max_by_key(|(_, fi)| fi.mountpoint.len());
         if let Some((idx, _)) = best
@@ -746,7 +769,7 @@ fn compute_widths(rows: &[Row], cfg: &Config) -> ColWidths {
     let (size_header, used_header, avail_header) = if cfg.inodes {
         ("Inodes", "IUsed", "IFree")
     } else if cfg.human || cfg.si {
-        ("Size", "Used", "Avail", )
+        ("Size", "Used", "Avail")
     } else {
         (cfg.block_label, "Used", "Available")
     };
@@ -887,10 +910,7 @@ fn json_escape(s: &str) -> String {
             c if c.is_control() => {
                 // \uXXXX encoding for other control characters.
                 for unit in c.encode_utf16(&mut [0u16; 2]) {
-                    let _ = std::fmt::Write::write_fmt(
-                        &mut out,
-                        format_args!("\\u{unit:04x}"),
-                    );
+                    let _ = std::fmt::Write::write_fmt(&mut out, format_args!("\\u{unit:04x}"));
                 }
             }
             c => out.push(c),
@@ -984,7 +1004,7 @@ fn run() -> i32 {
             eprintln!("df: no matching filesystems");
         } else {
             for p in &cfg.filter_paths {
-                eprintln!("df: {p}: no file system information available");
+                eprintln!("df: {}: no file system information available", quotef_os(p));
             }
         }
         return 1;

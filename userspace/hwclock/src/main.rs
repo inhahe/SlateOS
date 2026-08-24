@@ -4,6 +4,7 @@
 //! synchronizes system and hardware clocks, supports timezone offsets,
 //! and can query NTP servers for accurate time.
 
+use quoting::quoteaf_os;
 use std::env;
 use std::fmt;
 use std::fs;
@@ -86,8 +87,8 @@ fn validate_datetime(dt: &DateTime) -> Result<(), String> {
     if dt.month < 1 || dt.month > 12 {
         return Err(format!("month out of range: {}", dt.month));
     }
-    let max_day = days_in_month(dt.year, dt.month)
-        .ok_or_else(|| format!("invalid month: {}", dt.month))?;
+    let max_day =
+        days_in_month(dt.year, dt.month).ok_or_else(|| format!("invalid month: {}", dt.month))?;
     if dt.day < 1 || dt.day > max_day {
         return Err(format!(
             "day out of range for {:04}-{:02}: {} (max {})",
@@ -122,9 +123,7 @@ fn datetime_to_unix(dt: &DateTime) -> Result<u64, String> {
     }
     // Full months in dt.year up to (but not including) dt.month.
     for m in 1..dt.month {
-        days += u64::from(
-            days_in_month(dt.year, m).ok_or_else(|| format!("invalid month: {m}"))?,
-        );
+        days += u64::from(days_in_month(dt.year, m).ok_or_else(|| format!("invalid month: {m}"))?);
     }
     // Days within the month (1-based, so subtract 1).
     days += u64::from(dt.day.saturating_sub(1));
@@ -173,7 +172,14 @@ fn unix_to_datetime(mut secs: u64) -> DateTime {
 
     let day = days as u32 + 1; // 1-based
 
-    DateTime { year, month, day, hour, minute, second }
+    DateTime {
+        year,
+        month,
+        day,
+        hour,
+        minute,
+        second,
+    }
 }
 
 /// Apply a signed UTC offset (in seconds) to a Unix timestamp and produce a
@@ -289,7 +295,9 @@ fn parse_numeric_offset(tz: &str) -> Option<i32> {
     if hours < 0 || !(0..60).contains(&minutes) {
         return None;
     }
-    let magnitude = hours.checked_mul(3600)?.checked_add(minutes.checked_mul(60)?)?;
+    let magnitude = hours
+        .checked_mul(3600)?
+        .checked_add(minutes.checked_mul(60)?)?;
     Some(if negative { -magnitude } else { magnitude })
 }
 
@@ -321,14 +329,33 @@ fn parse_datetime(s: &str) -> Result<DateTime, String> {
     if date_parts.len() != 3 || time_parts.len() != 3 {
         return Err(format!("expected 'YYYY-MM-DD HH:MM:SS', got: {s}"));
     }
-    let year = date_parts[0].parse::<u32>().map_err(|e| format!("bad year: {e}"))?;
-    let month = date_parts[1].parse::<u32>().map_err(|e| format!("bad month: {e}"))?;
-    let day = date_parts[2].parse::<u32>().map_err(|e| format!("bad day: {e}"))?;
-    let hour = time_parts[0].parse::<u32>().map_err(|e| format!("bad hour: {e}"))?;
-    let minute = time_parts[1].parse::<u32>().map_err(|e| format!("bad minute: {e}"))?;
-    let second = time_parts[2].parse::<u32>().map_err(|e| format!("bad second: {e}"))?;
+    let year = date_parts[0]
+        .parse::<u32>()
+        .map_err(|e| format!("bad year: {e}"))?;
+    let month = date_parts[1]
+        .parse::<u32>()
+        .map_err(|e| format!("bad month: {e}"))?;
+    let day = date_parts[2]
+        .parse::<u32>()
+        .map_err(|e| format!("bad day: {e}"))?;
+    let hour = time_parts[0]
+        .parse::<u32>()
+        .map_err(|e| format!("bad hour: {e}"))?;
+    let minute = time_parts[1]
+        .parse::<u32>()
+        .map_err(|e| format!("bad minute: {e}"))?;
+    let second = time_parts[2]
+        .parse::<u32>()
+        .map_err(|e| format!("bad second: {e}"))?;
 
-    let dt = DateTime { year, month, day, hour, minute, second };
+    let dt = DateTime {
+        year,
+        month,
+        day,
+        hour,
+        minute,
+        second,
+    };
     validate_datetime(&dt)?;
     Ok(dt)
 }
@@ -353,8 +380,7 @@ fn parse_u32(s: &str) -> Result<u32, String> {
 /// rtc_date    : 2026-05-17
 /// ```
 fn read_rtc_proc() -> Result<DateTime, String> {
-    let content = fs::read_to_string("/proc/rtc")
-        .map_err(|e| format!("/proc/rtc: {e}"))?;
+    let content = fs::read_to_string("/proc/rtc").map_err(|e| format!("/proc/rtc: {e}"))?;
 
     let mut time_str: Option<&str> = None;
     let mut date_str: Option<&str> = None;
@@ -431,12 +457,10 @@ fn write_rtc(dt: &DateTime) -> Result<(), String> {
     let time_str = format!("{:02}:{:02}:{:02}", dt.hour, dt.minute, dt.second);
 
     let date_path = "/sys/class/rtc/rtc0/date";
-    fs::write(date_path, date_str.as_bytes())
-        .map_err(|e| format!("{date_path}: {e}"))?;
+    fs::write(date_path, date_str.as_bytes()).map_err(|e| format!("{date_path}: {e}"))?;
 
     let time_path = "/sys/class/rtc/rtc0/time";
-    fs::write(time_path, time_str.as_bytes())
-        .map_err(|e| format!("{time_path}: {e}"))?;
+    fs::write(time_path, time_str.as_bytes()).map_err(|e| format!("{time_path}: {e}"))?;
 
     Ok(())
 }
@@ -487,8 +511,8 @@ fn read_system_time() -> Result<u64, String> {
 
     // Fallback: derive from boot time + uptime if the wall clock is not yet
     // initialised (kernel returns EINVAL until timekeeping is up).
-    let uptime_content = fs::read_to_string("/proc/uptime")
-        .map_err(|e| format!("/proc/uptime: {e}"))?;
+    let uptime_content =
+        fs::read_to_string("/proc/uptime").map_err(|e| format!("/proc/uptime: {e}"))?;
     let uptime_secs_str = uptime_content
         .trim()
         .split(|c: char| c.is_whitespace() || c == '.')
@@ -499,8 +523,7 @@ fn read_system_time() -> Result<u64, String> {
         .map_err(|e| format!("/proc/uptime parse: {e}"))?;
 
     // Try to find boot time from /proc/stat (btime field).
-    let stat_content = fs::read_to_string("/proc/stat")
-        .map_err(|e| format!("/proc/stat: {e}"))?;
+    let stat_content = fs::read_to_string("/proc/stat").map_err(|e| format!("/proc/stat: {e}"))?;
     for line in stat_content.lines() {
         if let Some(rest) = line.strip_prefix("btime") {
             let btime: u64 = rest
@@ -551,8 +574,7 @@ fn write_system_time(unix_secs: u64) -> Result<(), String> {
 fn ntp_query(server: &str) -> Result<u64, String> {
     let addr = format!("{server}:{NTP_PORT}");
 
-    let socket = UdpSocket::bind("0.0.0.0:0")
-        .map_err(|e| format!("bind UDP: {e}"))?;
+    let socket = UdpSocket::bind("0.0.0.0:0").map_err(|e| format!("bind UDP: {e}"))?;
     socket
         .set_read_timeout(Some(Duration::from_secs(5)))
         .map_err(|e| format!("set timeout: {e}"))?;
@@ -709,7 +731,9 @@ fn parse_args() -> Result<Options, String> {
             // The server argument is optional for --ntp; if the next token
             // looks like a flag, treat it as the next option instead.
             if !arg.starts_with('-') {
-                action = Some(Action::Ntp { server: arg.to_string() });
+                action = Some(Action::Ntp {
+                    server: arg.to_string(),
+                });
                 expect_ntp_server = false;
                 i += 1;
                 continue;
@@ -736,7 +760,9 @@ fn parse_args() -> Result<Options, String> {
             "--set" => {
                 // The actual date comes via --date; mark that we are in "set" mode.
                 if action.is_none() {
-                    action = Some(Action::Set { date: String::new() });
+                    action = Some(Action::Set {
+                        date: String::new(),
+                    });
                 }
             }
             "--date" => {
@@ -782,7 +808,12 @@ fn parse_args() -> Result<Options, String> {
 
     let action = action.unwrap_or(Action::Show);
 
-    Ok(Options { action, utc, localtime, timezone })
+    Ok(Options {
+        action,
+        utc,
+        localtime,
+        timezone,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -882,16 +913,13 @@ fn resolve_tz(opts: &Options, at: i64) -> (String, i32) {
                 let posix = named_tz_posix(tz).unwrap_or(tz);
                 tzrules::Tz::parse(posix.as_bytes()).map_or_else(
                     || format_offset_label(secs),
-                    |rule| {
-                        String::from_utf8_lossy(rule.lookup(at).name.as_bytes())
-                            .into_owned()
-                    },
+                    |rule| String::from_utf8_lossy(rule.lookup(at).name.as_bytes()).into_owned(),
                 )
             };
             (label, secs)
         }
         Err(_) => {
-            eprintln!("warning: unknown timezone '{tz}', using UTC");
+            eprintln!("warning: unknown timezone {}, using UTC", quoteaf_os(tz));
             ("UTC".to_string(), 0)
         }
     }
@@ -976,8 +1004,12 @@ mod tests {
     #[test]
     fn test_validate_good() {
         let dt = DateTime {
-            year: 2026, month: 5, day: 17,
-            hour: 14, minute: 30, second: 0,
+            year: 2026,
+            month: 5,
+            day: 17,
+            hour: 14,
+            minute: 30,
+            second: 0,
         };
         assert!(validate_datetime(&dt).is_ok());
     }
@@ -985,8 +1017,12 @@ mod tests {
     #[test]
     fn test_validate_bad_month() {
         let dt = DateTime {
-            year: 2026, month: 13, day: 1,
-            hour: 0, minute: 0, second: 0,
+            year: 2026,
+            month: 13,
+            day: 1,
+            hour: 0,
+            minute: 0,
+            second: 0,
         };
         assert!(validate_datetime(&dt).is_err());
     }
@@ -994,8 +1030,12 @@ mod tests {
     #[test]
     fn test_validate_bad_day() {
         let dt = DateTime {
-            year: 2023, month: 2, day: 29,
-            hour: 0, minute: 0, second: 0,
+            year: 2023,
+            month: 2,
+            day: 29,
+            hour: 0,
+            minute: 0,
+            second: 0,
         };
         assert!(validate_datetime(&dt).is_err());
     }
@@ -1003,8 +1043,12 @@ mod tests {
     #[test]
     fn test_validate_bad_hour() {
         let dt = DateTime {
-            year: 2026, month: 1, day: 1,
-            hour: 24, minute: 0, second: 0,
+            year: 2026,
+            month: 1,
+            day: 1,
+            hour: 24,
+            minute: 0,
+            second: 0,
         };
         assert!(validate_datetime(&dt).is_err());
     }
@@ -1014,8 +1058,12 @@ mod tests {
     #[test]
     fn test_unix_epoch() {
         let dt = DateTime {
-            year: 1970, month: 1, day: 1,
-            hour: 0, minute: 0, second: 0,
+            year: 1970,
+            month: 1,
+            day: 1,
+            hour: 0,
+            minute: 0,
+            second: 0,
         };
         assert_eq!(datetime_to_unix(&dt).unwrap(), 0);
     }
@@ -1024,8 +1072,12 @@ mod tests {
     fn test_known_timestamp() {
         // 2026-05-17 00:00:00 UTC
         let dt = DateTime {
-            year: 2026, month: 5, day: 17,
-            hour: 0, minute: 0, second: 0,
+            year: 2026,
+            month: 5,
+            day: 17,
+            hour: 0,
+            minute: 0,
+            second: 0,
         };
         // Manually computed: days from 1970-01-01 to 2026-05-17
         // 56 full years (1970..2025) then Jan-Apr 2026 + 17 days in May - 1
@@ -1038,10 +1090,38 @@ mod tests {
     #[test]
     fn test_roundtrip_various() {
         let cases = [
-            DateTime { year: 1970, month: 1, day: 1, hour: 0, minute: 0, second: 0 },
-            DateTime { year: 2000, month: 2, day: 29, hour: 23, minute: 59, second: 59 },
-            DateTime { year: 2024, month: 12, day: 31, hour: 12, minute: 0, second: 0 },
-            DateTime { year: 2038, month: 1, day: 19, hour: 3, minute: 14, second: 7 },
+            DateTime {
+                year: 1970,
+                month: 1,
+                day: 1,
+                hour: 0,
+                minute: 0,
+                second: 0,
+            },
+            DateTime {
+                year: 2000,
+                month: 2,
+                day: 29,
+                hour: 23,
+                minute: 59,
+                second: 59,
+            },
+            DateTime {
+                year: 2024,
+                month: 12,
+                day: 31,
+                hour: 12,
+                minute: 0,
+                second: 0,
+            },
+            DateTime {
+                year: 2038,
+                month: 1,
+                day: 19,
+                hour: 3,
+                minute: 14,
+                second: 7,
+            },
         ];
         for dt in &cases {
             let ts = datetime_to_unix(dt).unwrap();
@@ -1053,8 +1133,12 @@ mod tests {
     #[test]
     fn test_before_epoch() {
         let dt = DateTime {
-            year: 1969, month: 12, day: 31,
-            hour: 23, minute: 59, second: 59,
+            year: 1969,
+            month: 12,
+            day: 31,
+            hour: 23,
+            minute: 59,
+            second: 59,
         };
         assert!(datetime_to_unix(&dt).is_err());
     }
@@ -1161,13 +1245,12 @@ mod tests {
         // A typo in the table above is a typo, and the right place to catch a
         // typo is a failing test rather than a wrong clock on a running system.
         for name in [
-            "UTC", "GMT", "Z", "EST", "EDT", "CST", "CDT", "MST", "MDT", "PST",
-            "PDT", "AKST", "AKDT", "HST", "CET", "CEST", "EET", "EEST", "WET",
-            "WEST", "IST", "JST", "KST", "CST_CN", "AEST", "AEDT", "ACST",
-            "ACDT", "AWST", "NZST", "NZDT",
+            "UTC", "GMT", "Z", "EST", "EDT", "CST", "CDT", "MST", "MDT", "PST", "PDT", "AKST",
+            "AKDT", "HST", "CET", "CEST", "EET", "EEST", "WET", "WEST", "IST", "JST", "KST",
+            "CST_CN", "AEST", "AEDT", "ACST", "ACDT", "AWST", "NZST", "NZDT",
         ] {
-            let posix = named_tz_posix(name)
-                .unwrap_or_else(|| panic!("{name} missing from the table"));
+            let posix =
+                named_tz_posix(name).unwrap_or_else(|| panic!("{name} missing from the table"));
             let rule = tzrules::Tz::parse(posix.as_bytes())
                 .unwrap_or_else(|| panic!("{name} → {posix:?} does not parse"));
             // These are fixed-offset names by construction; none may shift.
@@ -1228,8 +1311,12 @@ mod tests {
     #[test]
     fn test_format_display() {
         let dt = DateTime {
-            year: 2026, month: 5, day: 17,
-            hour: 14, minute: 30, second: 0,
+            year: 2026,
+            month: 5,
+            day: 17,
+            hour: 14,
+            minute: 30,
+            second: 0,
         };
         let s = format_display(&dt, "UTC");
         assert!(s.contains("Sun"));
@@ -1243,8 +1330,12 @@ mod tests {
     #[test]
     fn test_datetime_display() {
         let dt = DateTime {
-            year: 2026, month: 1, day: 5,
-            hour: 3, minute: 7, second: 9,
+            year: 2026,
+            month: 1,
+            day: 5,
+            hour: 3,
+            minute: 7,
+            second: 9,
         };
         assert_eq!(format!("{dt}"), "2026-01-05 03:07:09");
     }

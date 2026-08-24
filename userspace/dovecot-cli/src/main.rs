@@ -4,6 +4,7 @@
 //!
 //! Multi-personality: `dovecot`, `doveconf`, `doveadm`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -115,7 +116,7 @@ fn run_doveadm(args: &[String]) -> i32 {
                 "status" => {
                     println!("INBOX messages=42 unseen=3 recent=2");
                 }
-                _ => println!("doveadm: unknown mailbox subcommand '{}'", subcmd),
+                _ => println!("doveadm: unknown mailbox subcommand {}", quoteaf_os(subcmd)),
             }
         }
         "user" => {
@@ -134,7 +135,7 @@ fn run_doveadm(args: &[String]) -> i32 {
         "stop" => println!("doveadm: server stopped"),
         "log" => println!("(no errors)"),
         _ => {
-            eprintln!("doveadm: unknown command '{}'", cmd);
+            eprintln!("doveadm: unknown command {}", quoteaf_os(cmd));
             return 1;
         }
     }
@@ -143,7 +144,8 @@ fn run_doveadm(args: &[String]) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first()
+    let prog = args
+        .first()
         .map(|s| strip_ext(basename(s)).to_string())
         .unwrap_or_else(|| "dovecot".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
@@ -158,7 +160,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_dovecot};
+    use super::{basename, run_dovecot, strip_ext};
 
     #[test]
     fn basename_strips_path() {

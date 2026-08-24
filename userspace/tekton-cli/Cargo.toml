@@ -2,3 +2,8 @@
 name = "tekton-cli"
 version = "0.1.0"
 edition = "2024"
+
+[dependencies]
+# tekton-cli names pipelines, tasks and runs, identifiers created by whoever
+# applied them to the cluster.
+quoting = { path = "../quoting" }

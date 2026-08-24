@@ -4,6 +4,7 @@
 //!
 //! Multi-personality: `cfssl`, `cfssljson`, `mkbundle`, `multirootca`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -61,7 +62,7 @@ fn run_cfssl(args: Vec<String>) -> i32 {
         }
         "bundle" => println!("(bundle created — simulated)"),
         _ => {
-            eprintln!("Unknown command '{}'. Use --help.", cmd);
+            eprintln!("Unknown command {}. Use --help.", quoteaf_os(cmd));
             return 1;
         }
     }
@@ -103,7 +104,9 @@ fn main() {
         let bytes = s.as_bytes();
         let mut last_sep = 0;
         for (i, &b) in bytes.iter().enumerate() {
-            if b == b'/' || b == b'\\' { last_sep = i + 1; }
+            if b == b'/' || b == b'\\' {
+                last_sep = i + 1;
+            }
         }
         let base = &s[last_sep..];
         base.strip_suffix(".exe").unwrap_or(base).to_string()
@@ -112,7 +115,10 @@ fn main() {
     let code = match prog_name.as_str() {
         "cfssljson" => run_cfssljson(rest),
         "mkbundle" => run_mkbundle(rest),
-        "multirootca" => { println!("multirootca: serving on :8888"); 0 }
+        "multirootca" => {
+            println!("multirootca: serving on :8888");
+            0
+        }
         _ => run_cfssl(rest),
     };
     process::exit(code);
@@ -120,7 +126,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_cfssl};
+    use super::run_cfssl;
 
     #[test]
     fn help_exits_zero() {

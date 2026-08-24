@@ -4,6 +4,7 @@
 //!
 //! Multi-personality: `crontab`, `crond`, `anacron`, `at`, `atq`, `atrm`, `batch`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -45,9 +46,12 @@ fn run_crontab(args: &[String]) -> i32 {
     } else if remove {
         println!("crontab: removed crontab for user");
     } else {
-        let file = args.iter().find(|a| !a.starts_with('-')).map(|s| s.as_str());
+        let file = args
+            .iter()
+            .find(|a| !a.starts_with('-'))
+            .map(|s| s.as_str());
         if let Some(f) = file {
-            println!("crontab: installing new crontab from '{}'", f);
+            println!("crontab: installing new crontab from {}", quoteaf_os(f));
         } else {
             eprintln!("crontab: usage error. See --help.");
             return 1;
@@ -105,7 +109,8 @@ fn run_at(args: &[String]) -> i32 {
         return 0;
     }
 
-    let time = args.iter()
+    let time = args
+        .iter()
         .filter(|a| !a.starts_with('-'))
         .map(|s| s.as_str())
         .collect::<Vec<_>>()
@@ -117,7 +122,14 @@ fn run_at(args: &[String]) -> i32 {
     }
 
     println!("warning: commands will be executed using /bin/sh");
-    println!("job 42 at Thu Jan  1 {}", if time.is_empty() { "12:00:00 2025" } else { "2025" });
+    println!(
+        "job 42 at Thu Jan  1 {}",
+        if time.is_empty() {
+            "12:00:00 2025"
+        } else {
+            "2025"
+        }
+    );
     0
 }
 
@@ -139,13 +151,16 @@ fn run_atrm(args: &[String]) -> i32 {
 
 fn run_batch(_args: &[String]) -> i32 {
     println!("warning: commands will be executed using /bin/sh");
-    println!("job 44 at Thu Jan  1 12:00:00 2025 (queued, will run when load average drops below 1.5)");
+    println!(
+        "job 44 at Thu Jan  1 12:00:00 2025 (queued, will run when load average drops below 1.5)"
+    );
     0
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first()
+    let prog = args
+        .first()
         .map(|s| strip_ext(basename(s)).to_string())
         .unwrap_or_else(|| "crontab".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
@@ -164,7 +179,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_crontab};
+    use super::{basename, run_crontab, strip_ext};
 
     #[test]
     fn basename_strips_path() {

@@ -4,3 +4,6 @@ version = "0.1.0"
 edition = "2024"
 description = "SlateOS yacc - parser generator (yacc/bison)"
 [dependencies]
+# yacc names the grammar file it parses and the output files it writes, both
+# from the command line.
+quoting = { path = "../quoting" }

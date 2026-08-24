@@ -4,11 +4,15 @@
 //!
 //! Single personality: `az`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
 fn run_az(args: Vec<String>) -> i32 {
-    if args.iter().any(|a| a == "--help" || a == "-h" || a == "help") {
+    if args
+        .iter()
+        .any(|a| a == "--help" || a == "-h" || a == "help")
+    {
         println!("Usage: az [GROUP] [COMMAND] [OPTIONS]");
         println!();
         println!("Azure CLI — manage Azure resources (Slate OS).");
@@ -42,7 +46,9 @@ fn run_az(args: Vec<String>) -> i32 {
 
     match group {
         "login" => {
-            println!("To sign in, use a web browser to open the page https://microsoft.com/devicelogin");
+            println!(
+                "To sign in, use a web browser to open the page https://microsoft.com/devicelogin"
+            );
             println!("and enter the code ABCD1234 to authenticate.");
             println!("[");
             println!("  {{");
@@ -73,7 +79,12 @@ fn run_az(args: Vec<String>) -> i32 {
                 println!("  \"state\": \"Enabled\"");
                 println!("}}");
             }
-            _ => { println!("az account: subcommand '{}'. See az account -h.", sub); }
+            _ => {
+                println!(
+                    "az account: subcommand {}. See az account -h.",
+                    quoteaf_os(sub)
+                );
+            }
         },
         "vm" => match sub {
             "list" => {
@@ -88,15 +99,20 @@ fn run_az(args: Vec<String>) -> i32 {
                 println!("]");
             }
             "create" => {
-                let name = args.windows(2).find(|w| w[0] == "--name" || w[0] == "-n")
-                    .map(|w| w[1].as_str()).unwrap_or("new-vm");
+                let name = args
+                    .windows(2)
+                    .find(|w| w[0] == "--name" || w[0] == "-n")
+                    .map(|w| w[1].as_str())
+                    .unwrap_or("new-vm");
                 println!("{{");
                 println!("  \"name\": \"{}\",", name);
                 println!("  \"provisioningState\": \"Succeeded\",");
                 println!("  \"publicIpAddress\": \"20.123.45.67\"");
                 println!("}}");
             }
-            _ => { println!("az vm {}: see az vm -h.", sub); }
+            _ => {
+                println!("az vm {}: see az vm -h.", sub);
+            }
         },
         "group" => match sub {
             "list" => {
@@ -106,23 +122,32 @@ fn run_az(args: Vec<String>) -> i32 {
                 println!("]");
             }
             "create" => {
-                let name = args.windows(2).find(|w| w[0] == "--name" || w[0] == "-n")
-                    .map(|w| w[1].as_str()).unwrap_or("new-rg");
+                let name = args
+                    .windows(2)
+                    .find(|w| w[0] == "--name" || w[0] == "-n")
+                    .map(|w| w[1].as_str())
+                    .unwrap_or("new-rg");
                 println!("{{");
                 println!("  \"name\": \"{}\",", name);
                 println!("  \"provisioningState\": \"Succeeded\"");
                 println!("}}");
             }
-            _ => { println!("az group {}: see az group -h.", sub); }
+            _ => {
+                println!("az group {}: see az group -h.", sub);
+            }
         },
         "aks" => match sub {
             "list" => {
-                println!("[{{\"name\": \"my-cluster\", \"location\": \"eastus\", \"kubernetesVersion\": \"1.28.3\"}}]");
+                println!(
+                    "[{{\"name\": \"my-cluster\", \"location\": \"eastus\", \"kubernetesVersion\": \"1.28.3\"}}]"
+                );
             }
             "get-credentials" => {
                 println!("Merged \"my-cluster\" as current context in /home/user/.kube/config");
             }
-            _ => { println!("az aks {}: see az aks -h.", sub); }
+            _ => {
+                println!("az aks {}: see az aks -h.", sub);
+            }
         },
         "storage" => {
             println!("az storage {}: see az storage -h.", sub);
@@ -153,7 +178,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_az};
+    use super::run_az;
 
     #[test]
     fn help_exits_zero() {

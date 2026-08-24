@@ -45,6 +45,13 @@ use std::env;
 use std::fmt;
 use std::process;
 
+// An application id, a remote name, a branch and a file path are all
+// attacker-chosen text -- a path may hold any byte but `/` and NUL, including
+// a newline. `quoteaf_os` renders an ordinary word as `'abc'`, byte for byte
+// what the hand-written quotes here used to print, and escapes a hostile one
+// so it cannot close the quotes and keep writing. See `userspace/quoting`.
+use quoting::quoteaf_os;
+
 // ============================================================================
 // Data model
 // ============================================================================
@@ -137,8 +144,7 @@ impl FlatpakRef {
     #[cfg_attr(not(test), allow(dead_code))]
     fn matches_query(&self, query: &str) -> bool {
         let q = query.to_lowercase();
-        self.app_id.to_lowercase().contains(&q)
-            || self.description.to_lowercase().contains(&q)
+        self.app_id.to_lowercase().contains(&q) || self.description.to_lowercase().contains(&q)
     }
 }
 
@@ -289,9 +295,10 @@ fn get_option_value<'a>(args: &'a [String], short: &str, long: &str) -> Option<&
         }
         // Handle --option=value
         if let Some(rest) = arg.strip_prefix(long)
-            && let Some(val) = rest.strip_prefix('=') {
-                return Some(val);
-            }
+            && let Some(val) = rest.strip_prefix('=')
+        {
+            return Some(val);
+        }
     }
     None
 }
@@ -370,10 +377,7 @@ fn is_valid_url(url: &str) -> bool {
 
 /// Validate an architecture string.
 fn is_valid_arch(arch: &str) -> bool {
-    matches!(
-        arch,
-        "x86_64" | "aarch64" | "i386" | "arm" | "riscv64"
-    )
+    matches!(arch, "x86_64" | "aarch64" | "i386" | "arm" | "riscv64")
 }
 
 /// Parse a ref string: could be a full ref or just an app ID.
@@ -510,15 +514,19 @@ fn cmd_install(args: &[String]) -> i32 {
     let (_kind, app_id, arch, branch) = parse_ref_string(app_ref);
 
     if !is_valid_app_id(&app_id) {
-        eprintln!("error: '{}' is not a valid application ID", app_id);
+        eprintln!(
+            "error: {} is not a valid application ID",
+            quoteaf_os(&app_id)
+        );
         return 1;
     }
 
     if let Some(ref a) = arch
-        && !is_valid_arch(a) {
-            eprintln!("error: unsupported architecture '{}'", a);
-            return 1;
-        }
+        && !is_valid_arch(a)
+    {
+        eprintln!("error: unsupported architecture {}", quoteaf_os(a));
+        return 1;
+    }
 
     let remote_name = remote.unwrap_or("flathub");
     let branch_name = branch.as_deref().unwrap_or("stable");
@@ -574,7 +582,10 @@ fn cmd_uninstall(args: &[String]) -> i32 {
     let (_kind, app_id, _arch, _branch) = parse_ref_string(app_ref);
 
     if !is_valid_app_id(&app_id) {
-        eprintln!("error: '{}' is not a valid application ID", app_id);
+        eprintln!(
+            "error: {} is not a valid application ID",
+            quoteaf_os(&app_id)
+        );
         return 1;
     }
 
@@ -607,7 +618,10 @@ fn cmd_update(args: &[String]) -> i32 {
     if let Some(app_ref) = positional.first() {
         let (_kind, app_id, _arch, _branch) = parse_ref_string(app_ref);
         if !is_valid_app_id(&app_id) {
-            eprintln!("error: '{}' is not a valid application ID", app_id);
+            eprintln!(
+                "error: {} is not a valid application ID",
+                quoteaf_os(&app_id)
+            );
             return 1;
         }
         println!("Checking for updates to {}...", app_id);
@@ -644,11 +658,12 @@ fn cmd_run(args: &[String]) -> i32 {
     let mut env_vars: Vec<(String, String)> = Vec::new();
     for arg in args {
         if let Some(rest) = arg.strip_prefix("--env=")
-            && let Some(eq_pos) = rest.find('=') {
-                let key = rest[..eq_pos].to_string();
-                let val = rest[eq_pos + 1..].to_string();
-                env_vars.push((key, val));
-            }
+            && let Some(eq_pos) = rest.find('=')
+        {
+            let key = rest[..eq_pos].to_string();
+            let val = rest[eq_pos + 1..].to_string();
+            env_vars.push((key, val));
+        }
     }
 
     // Collect sandbox modifications
@@ -669,7 +684,7 @@ fn cmd_run(args: &[String]) -> i32 {
                 i += 1;
                 let val = &args[i];
                 if !is_valid_shared(val) {
-                    eprintln!("error: unknown share type '{val}'");
+                    eprintln!("error: unknown share type {}", quoteaf_os(val));
                     return 1;
                 }
                 shares.push(val.clone());
@@ -678,7 +693,7 @@ fn cmd_run(args: &[String]) -> i32 {
                 i += 1;
                 let val = &args[i];
                 if !is_valid_shared(val) {
-                    eprintln!("error: unknown share type '{val}'");
+                    eprintln!("error: unknown share type {}", quoteaf_os(val));
                     return 1;
                 }
                 unshares.push(val.clone());
@@ -687,7 +702,7 @@ fn cmd_run(args: &[String]) -> i32 {
                 i += 1;
                 let val = &args[i];
                 if !is_valid_socket(val) {
-                    eprintln!("error: unknown socket type '{val}'");
+                    eprintln!("error: unknown socket type {}", quoteaf_os(val));
                     return 1;
                 }
                 sockets.push(val.clone());
@@ -696,7 +711,7 @@ fn cmd_run(args: &[String]) -> i32 {
                 i += 1;
                 let val = &args[i];
                 if !is_valid_socket(val) {
-                    eprintln!("error: unknown socket type '{val}'");
+                    eprintln!("error: unknown socket type {}", quoteaf_os(val));
                     return 1;
                 }
                 nosockets.push(val.clone());
@@ -705,7 +720,7 @@ fn cmd_run(args: &[String]) -> i32 {
                 i += 1;
                 let val = &args[i];
                 if !is_valid_device(val) {
-                    eprintln!("error: unknown device type '{val}'");
+                    eprintln!("error: unknown device type {}", quoteaf_os(val));
                     return 1;
                 }
                 devices.push(val.clone());
@@ -714,7 +729,7 @@ fn cmd_run(args: &[String]) -> i32 {
                 i += 1;
                 let val = &args[i];
                 if !is_valid_device(val) {
-                    eprintln!("error: unknown device type '{val}'");
+                    eprintln!("error: unknown device type {}", quoteaf_os(val));
                     return 1;
                 }
                 nodevices.push(val.clone());
@@ -723,11 +738,10 @@ fn cmd_run(args: &[String]) -> i32 {
                 i += 1;
                 filesystems.push(args[i].clone());
             }
-            "--nofilesystem"
-                if i + 1 < args.len() => {
-                    i += 1;
-                    nofilesystems.push(args[i].clone());
-                }
+            "--nofilesystem" if i + 1 < args.len() => {
+                i += 1;
+                nofilesystems.push(args[i].clone());
+            }
             _ => {}
         }
         i += 1;
@@ -757,15 +771,19 @@ fn cmd_run(args: &[String]) -> i32 {
 
     let app_id = positional[0].as_str();
     if !is_valid_app_id(app_id) {
-        eprintln!("error: '{}' is not a valid application ID", app_id);
+        eprintln!(
+            "error: {} is not a valid application ID",
+            quoteaf_os(app_id)
+        );
         return 1;
     }
 
     if let Some(a) = arch
-        && !is_valid_arch(a) {
-            eprintln!("error: unsupported architecture '{}'", a);
-            return 1;
-        }
+        && !is_valid_arch(a)
+    {
+        eprintln!("error: unsupported architecture {}", quoteaf_os(a));
+        return 1;
+    }
 
     let branch_name = branch.unwrap_or("stable");
     let arch_name = arch.unwrap_or("x86_64");
@@ -826,11 +844,8 @@ fn cmd_list(args: &[String]) -> i32 {
         for col in cols.split(',') {
             let trimmed = col.trim();
             if !is_valid_column(trimmed) {
-                eprintln!("error: unknown column '{}'", trimmed);
-                eprintln!(
-                    "Valid columns: {}",
-                    VALID_COLUMNS.join(", ")
-                );
+                eprintln!("error: unknown column {}", quoteaf_os(trimmed));
+                eprintln!("Valid columns: {}", VALID_COLUMNS.join(", "));
                 return 1;
             }
         }
@@ -878,7 +893,10 @@ fn cmd_info(args: &[String]) -> i32 {
     let (_kind, app_id, arch, branch) = parse_ref_string(app_ref);
 
     if !is_valid_app_id(&app_id) {
-        eprintln!("error: '{}' is not a valid application ID", app_id);
+        eprintln!(
+            "error: {} is not a valid application ID",
+            quoteaf_os(&app_id)
+        );
         return 1;
     }
 
@@ -906,7 +924,10 @@ fn cmd_info(args: &[String]) -> i32 {
         println!();
         println!("[Application]");
         println!("name={}", app_id);
-        println!("runtime=org.freedesktop.Platform/{}/{}", arch_name, branch_name);
+        println!(
+            "runtime=org.freedesktop.Platform/{}/{}",
+            arch_name, branch_name
+        );
     }
 
     if show_permissions {
@@ -930,7 +951,7 @@ fn cmd_search(args: &[String]) -> i32 {
     }
 
     let query = positional.join(" ");
-    println!("Searching for '{}'...", query);
+    println!("Searching for {}...", quoteaf_os(&query));
     println!("No matches found.");
     0
 }
@@ -951,31 +972,35 @@ fn cmd_remote_add(args: &[String]) -> i32 {
 
     if !is_valid_remote_name(name) {
         eprintln!(
-            "error: '{}' is not a valid remote name (use alphanumeric, -, _)",
-            name
+            "error: {} is not a valid remote name (use alphanumeric, -, _)",
+            quoteaf_os(name)
         );
         return 1;
     }
 
     if !is_valid_url(url) {
         eprintln!(
-            "error: '{}' does not look like a valid URL (must start with http://, https://, file://, or oci+)",
-            url
+            "error: {} does not look like a valid URL (must start with http://, https://, file://, or oci+)",
+            quoteaf_os(url)
         );
         return 1;
     }
 
     if if_not_exists {
-        println!("Adding remote '{}' at {} (if not exists)...", name, url);
+        println!(
+            "Adding remote {} at {} (if not exists)...",
+            quoteaf_os(name),
+            url
+        );
     } else {
-        println!("Adding remote '{}' at {}...", name, url);
+        println!("Adding remote {} at {}...", quoteaf_os(name), url);
     }
 
     if no_gpg_verify {
         println!("  Warning: GPG verification disabled for this remote.");
     }
 
-    println!("Remote '{}' added.", name);
+    println!("Remote {} added.", quoteaf_os(name));
     0
 }
 
@@ -992,17 +1017,17 @@ fn cmd_remote_delete(args: &[String]) -> i32 {
     let name = positional[0].as_str();
 
     if !is_valid_remote_name(name) {
-        eprintln!("error: '{}' is not a valid remote name", name);
+        eprintln!("error: {} is not a valid remote name", quoteaf_os(name));
         return 1;
     }
 
     if force {
-        println!("Force-removing remote '{}'...", name);
+        println!("Force-removing remote {}...", quoteaf_os(name));
     } else {
-        println!("Removing remote '{}'...", name);
+        println!("Removing remote {}...", quoteaf_os(name));
     }
 
-    println!("Remote '{}' deleted.", name);
+    println!("Remote {} deleted.", quoteaf_os(name));
     0
 }
 
@@ -1031,14 +1056,17 @@ fn cmd_remote_info(args: &[String]) -> i32 {
     let app_ref = positional[1].as_str();
 
     if !is_valid_remote_name(remote) {
-        eprintln!("error: '{}' is not a valid remote name", remote);
+        eprintln!("error: {} is not a valid remote name", quoteaf_os(remote));
         return 1;
     }
 
     let (_kind, app_id, arch, branch) = parse_ref_string(app_ref);
 
     if !is_valid_app_id(&app_id) {
-        eprintln!("error: '{}' is not a valid application ID", app_id);
+        eprintln!(
+            "error: {} is not a valid application ID",
+            quoteaf_os(&app_id)
+        );
         return 1;
     }
 
@@ -1099,17 +1127,20 @@ fn cmd_history(args: &[String]) -> i32 {
 }
 
 fn cmd_override(args: &[String]) -> i32 {
-    let positional = collect_positionals(args, &[
-        "--share",
-        "--unshare",
-        "--socket",
-        "--nosocket",
-        "--device",
-        "--nodevice",
-        "--filesystem",
-        "--nofilesystem",
-        "--env",
-    ]);
+    let positional = collect_positionals(
+        args,
+        &[
+            "--share",
+            "--unshare",
+            "--socket",
+            "--nosocket",
+            "--device",
+            "--nodevice",
+            "--filesystem",
+            "--nofilesystem",
+            "--env",
+        ],
+    );
 
     if positional.is_empty() {
         eprintln!("error: no application specified");
@@ -1119,7 +1150,10 @@ fn cmd_override(args: &[String]) -> i32 {
 
     let app_id = positional[0].as_str();
     if !is_valid_app_id(app_id) {
-        eprintln!("error: '{}' is not a valid application ID", app_id);
+        eprintln!(
+            "error: {} is not a valid application ID",
+            quoteaf_os(app_id)
+        );
         return 1;
     }
 
@@ -1189,7 +1223,10 @@ fn cmd_permission_show(args: &[String]) -> i32 {
 
     let app_id = positional[0].as_str();
     if !is_valid_app_id(app_id) {
-        eprintln!("error: '{}' is not a valid application ID", app_id);
+        eprintln!(
+            "error: {} is not a valid application ID",
+            quoteaf_os(app_id)
+        );
         return 1;
     }
 
@@ -1221,17 +1258,20 @@ fn cmd_build_init(args: &[String]) -> i32 {
     };
 
     if !is_valid_app_id(app_id) {
-        eprintln!("error: '{}' is not a valid application ID", app_id);
+        eprintln!(
+            "error: {} is not a valid application ID",
+            quoteaf_os(app_id)
+        );
         return 1;
     }
 
     if !is_valid_app_id(sdk) {
-        eprintln!("error: '{}' is not a valid SDK ID", sdk);
+        eprintln!("error: {} is not a valid SDK ID", quoteaf_os(sdk));
         return 1;
     }
 
     if !is_valid_app_id(runtime) {
-        eprintln!("error: '{}' is not a valid runtime ID", runtime);
+        eprintln!("error: {} is not a valid runtime ID", quoteaf_os(runtime));
         return 1;
     }
 
@@ -1264,14 +1304,17 @@ fn cmd_build(args: &[String]) -> i32 {
 }
 
 fn cmd_build_finish(args: &[String]) -> i32 {
-    let positional = collect_positionals(args, &[
-        "--share",
-        "--socket",
-        "--device",
-        "--filesystem",
-        "--command",
-        "--env",
-    ]);
+    let positional = collect_positionals(
+        args,
+        &[
+            "--share",
+            "--socket",
+            "--device",
+            "--filesystem",
+            "--command",
+            "--env",
+        ],
+    );
 
     if positional.is_empty() {
         eprintln!("error: build directory required");
@@ -1388,7 +1431,7 @@ fn cmd_build_bundle(args: &[String]) -> i32 {
 
     let (_kind, app_id, _arch_parsed, _branch) = parse_ref_string(ref_name);
     if !is_valid_app_id(&app_id) {
-        eprintln!("error: '{}' is not a valid ref", ref_name);
+        eprintln!("error: {} is not a valid ref", quoteaf_os(ref_name));
         return 1;
     }
 
@@ -1410,10 +1453,7 @@ fn cmd_config(args: &[String]) -> i32 {
     let do_get = has_long_flag(args, "--get");
     let do_unset = has_long_flag(args, "--unset");
 
-    let flag_count = [do_set, do_get, do_unset]
-        .iter()
-        .filter(|&&v| v)
-        .count();
+    let flag_count = [do_set, do_get, do_unset].iter().filter(|&&v| v).count();
 
     if flag_count == 0 {
         eprintln!("error: one of --set, --get, or --unset required");
@@ -1436,7 +1476,7 @@ fn cmd_config(args: &[String]) -> i32 {
             return 1;
         }
         let key = positional[0].as_str();
-        println!("Config key '{}' is not set.", key);
+        println!("Config key {} is not set.", quoteaf_os(key));
         return 0;
     }
 
@@ -1446,7 +1486,7 @@ fn cmd_config(args: &[String]) -> i32 {
             return 1;
         }
         let key = positional[0].as_str();
-        println!("Unset config key '{}'.", key);
+        println!("Unset config key {}.", quoteaf_os(key));
         return 0;
     }
 
@@ -1457,7 +1497,7 @@ fn cmd_config(args: &[String]) -> i32 {
     }
     let key = positional[0].as_str();
     let value = positional[1].as_str();
-    println!("Set config '{}' = '{}'.", key, value);
+    println!("Set config {} = {}.", quoteaf_os(key), quoteaf_os(value));
     0
 }
 
@@ -1583,7 +1623,11 @@ fn run(args: Vec<String>) -> i32 {
             0
         }
         _ => {
-            eprintln!("error: unknown command '{}' for '{}'", subcmd, prog_name);
+            eprintln!(
+                "error: unknown command {} for {}",
+                quoteaf_os(subcmd),
+                quoteaf_os(&prog_name)
+            );
             eprintln!("Run '{} --help' for usage information.", prog_name);
             1
         }
@@ -1628,26 +1672,17 @@ mod tests {
 
     #[test]
     fn personality_with_unix_path() {
-        assert_eq!(
-            run(vec!["/usr/bin/flatpak".to_string()]),
-            0
-        );
+        assert_eq!(run(vec!["/usr/bin/flatpak".to_string()]), 0);
     }
 
     #[test]
     fn personality_with_windows_path() {
-        assert_eq!(
-            run(vec!["C:\\Program Files\\flatpak.exe".to_string()]),
-            0
-        );
+        assert_eq!(run(vec!["C:\\Program Files\\flatpak.exe".to_string()]), 0);
     }
 
     #[test]
     fn personality_strips_exe() {
-        assert_eq!(
-            run(vec!["flatpak.exe".to_string()]),
-            0
-        );
+        assert_eq!(run(vec!["flatpak.exe".to_string()]), 0);
     }
 
     #[test]
@@ -1792,8 +1827,7 @@ mod tests {
 
     #[test]
     fn parse_full_ref() {
-        let (kind, id, arch, branch) =
-            parse_ref_string("app/org.example.App/x86_64/stable");
+        let (kind, id, arch, branch) = parse_ref_string("app/org.example.App/x86_64/stable");
         assert_eq!(kind, Some(RefKind::App));
         assert_eq!(id, "org.example.App");
         assert_eq!(arch.as_deref(), Some("x86_64"));
@@ -1812,8 +1846,7 @@ mod tests {
 
     #[test]
     fn parse_three_part_ref() {
-        let (kind, id, arch, branch) =
-            parse_ref_string("org.example.App/x86_64/stable");
+        let (kind, id, arch, branch) = parse_ref_string("org.example.App/x86_64/stable");
         assert_eq!(kind, None);
         assert_eq!(id, "org.example.App");
         assert_eq!(arch.as_deref(), Some("x86_64"));
@@ -1864,7 +1897,11 @@ mod tests {
 
     #[test]
     fn remote_new() {
-        let r = Remote::new("flathub", "https://dl.flathub.org/repo/", InstallationType::System);
+        let r = Remote::new(
+            "flathub",
+            "https://dl.flathub.org/repo/",
+            InstallationType::System,
+        );
         assert_eq!(r.name, "flathub");
         assert!(r.gpg_verify);
         assert!(r.enabled);
@@ -2442,10 +2479,7 @@ mod tests {
 
     #[test]
     fn run_with_filesystem() {
-        assert_eq!(
-            flatpak("run --filesystem /home/user org.example.App"),
-            0
-        );
+        assert_eq!(flatpak("run --filesystem /home/user org.example.App"), 0);
     }
 
     // ====================================================================
@@ -2575,10 +2609,7 @@ mod tests {
 
     #[test]
     fn remote_add_invalid_name() {
-        assert_eq!(
-            flatpak("remote-add bad@name https://example.com/repo"),
-            1
-        );
+        assert_eq!(flatpak("remote-add bad@name https://example.com/repo"), 1);
     }
 
     #[test]
@@ -2628,10 +2659,7 @@ mod tests {
 
     #[test]
     fn remote_info_basic() {
-        assert_eq!(
-            flatpak("remote-info flathub org.example.App"),
-            0
-        );
+        assert_eq!(flatpak("remote-info flathub org.example.App"), 0);
     }
 
     #[test]
@@ -2698,10 +2726,7 @@ mod tests {
 
     #[test]
     fn override_with_share() {
-        assert_eq!(
-            flatpak("override --share network org.example.App"),
-            0
-        );
+        assert_eq!(flatpak("override --share network org.example.App"), 0);
     }
 
     #[test]
@@ -2740,7 +2765,9 @@ mod tests {
     #[test]
     fn build_init_basic() {
         assert_eq!(
-            flatpak("build-init builddir org.example.App org.freedesktop.Sdk org.freedesktop.Platform"),
+            flatpak(
+                "build-init builddir org.example.App org.freedesktop.Sdk org.freedesktop.Platform"
+            ),
             0
         );
     }
@@ -2816,10 +2843,7 @@ mod tests {
 
     #[test]
     fn build_bundle_basic() {
-        assert_eq!(
-            flatpak("build-bundle repo app.flatpak org.example.App"),
-            0
-        );
+        assert_eq!(flatpak("build-bundle repo app.flatpak org.example.App"), 0);
     }
 
     #[test]
@@ -2911,10 +2935,7 @@ mod tests {
 
     #[test]
     fn install_path_system() {
-        assert_eq!(
-            install_path(InstallationType::System),
-            "/var/lib/flatpak"
-        );
+        assert_eq!(install_path(InstallationType::System), "/var/lib/flatpak");
     }
 
     #[test]
@@ -2930,50 +2951,32 @@ mod tests {
 
     #[test]
     fn install_full_ref_with_arch() {
-        assert_eq!(
-            flatpak("install app/org.example.App/aarch64/beta"),
-            0
-        );
+        assert_eq!(flatpak("install app/org.example.App/aarch64/beta"), 0);
     }
 
     #[test]
     fn run_with_unshare() {
-        assert_eq!(
-            flatpak("run --unshare network org.example.App"),
-            0
-        );
+        assert_eq!(flatpak("run --unshare network org.example.App"), 0);
     }
 
     #[test]
     fn run_with_nosocket() {
-        assert_eq!(
-            flatpak("run --nosocket x11 org.example.App"),
-            0
-        );
+        assert_eq!(flatpak("run --nosocket x11 org.example.App"), 0);
     }
 
     #[test]
     fn run_with_nodevice() {
-        assert_eq!(
-            flatpak("run --nodevice dri org.example.App"),
-            0
-        );
+        assert_eq!(flatpak("run --nodevice dri org.example.App"), 0);
     }
 
     #[test]
     fn run_with_nofilesystem() {
-        assert_eq!(
-            flatpak("run --nofilesystem /home org.example.App"),
-            0
-        );
+        assert_eq!(flatpak("run --nofilesystem /home org.example.App"), 0);
     }
 
     #[test]
     fn build_export_with_subject() {
-        assert_eq!(
-            flatpak("build-export --subject Release repo builddir"),
-            0
-        );
+        assert_eq!(flatpak("build-export --subject Release repo builddir"), 0);
     }
 
     #[test]

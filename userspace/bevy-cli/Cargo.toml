@@ -2,3 +2,7 @@
 name = "bevy-cli"
 version = "0.1.0"
 edition = "2024"
+
+[dependencies]
+# The new project's name and the subcommand name are argv words echoed back.
+quoting = { path = "../quoting" }

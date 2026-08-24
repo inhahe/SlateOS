@@ -4,6 +4,7 @@
 //!
 //! Single personality: `diesel`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -122,7 +123,7 @@ fn run_diesel(args: Vec<String>) -> i32 {
             if cmd.is_empty() {
                 eprintln!("Error: command required. See --help.");
             } else {
-                eprintln!("Error: unknown command '{}'. See --help.", cmd);
+                eprintln!("Error: unknown command {}. See --help.", quoteaf_os(cmd));
             }
             1
         }
@@ -138,7 +139,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_diesel};
+    use super::run_diesel;
 
     #[test]
     fn help_exits_zero() {

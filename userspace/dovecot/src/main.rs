@@ -4,6 +4,7 @@
 //!
 //! Multi-personality: `dovecot` (server), `doveconf` (config dumper), `doveadm` (admin)
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -45,7 +46,11 @@ fn run_doveconf(args: Vec<String>) -> i32 {
         return 0;
     }
     let nondefault = args.iter().any(|a| a == "-n");
-    let params: Vec<&str> = args.iter().filter(|a| !a.starts_with('-')).map(|s| s.as_str()).collect();
+    let params: Vec<&str> = args
+        .iter()
+        .filter(|a| !a.starts_with('-'))
+        .map(|s| s.as_str())
+        .collect();
 
     if !params.is_empty() {
         for p in params {
@@ -53,8 +58,12 @@ fn run_doveconf(args: Vec<String>) -> i32 {
                 "mail_location" => println!("mail_location = maildir:~/Maildir"),
                 "protocols" => println!("protocols = imap pop3 lmtp"),
                 "ssl" => println!("ssl = required"),
-                "ssl_cert" => println!("ssl_cert = </etc/letsencrypt/live/mail.example.com/fullchain.pem"),
-                "ssl_key" => println!("ssl_key = </etc/letsencrypt/live/mail.example.com/privkey.pem"),
+                "ssl_cert" => {
+                    println!("ssl_cert = </etc/letsencrypt/live/mail.example.com/fullchain.pem")
+                }
+                "ssl_key" => {
+                    println!("ssl_key = </etc/letsencrypt/live/mail.example.com/privkey.pem")
+                }
                 _ => println!("{} = (unknown setting)", p),
             }
         }
@@ -117,7 +126,9 @@ fn run_doveadm(args: Vec<String>) -> i32 {
             let sub = cmd_args.first().map(|s| s.as_str()).unwrap_or("list");
             match sub {
                 "list" => {
-                    let user = cmd_args.iter().position(|a| a == "-u")
+                    let user = cmd_args
+                        .iter()
+                        .position(|a| a == "-u")
                         .and_then(|i| cmd_args.get(i + 1))
                         .map(|s| s.as_str())
                         .unwrap_or("alice");
@@ -165,13 +176,22 @@ fn run_doveadm(args: Vec<String>) -> i32 {
             println!("Kicked {} connections for {}", 2, user);
             0
         }
-        "reload" => { println!("Configuration reloaded"); 0 }
-        "stop" => { println!("Dovecot stopped"); 0 }
+        "reload" => {
+            println!("Configuration reloaded");
+            0
+        }
+        "stop" => {
+            println!("Dovecot stopped");
+            0
+        }
         "log" => {
             println!("May 22 10:00:00 imap(alice)<12345>: Logged out in=142 out=28456 bytes=28456");
             0
         }
-        other => { eprintln!("doveadm: unknown command '{}'", other); 1 }
+        other => {
+            eprintln!("doveadm: unknown command {}", quoteaf_os(other));
+            1
+        }
     }
 }
 
@@ -182,7 +202,9 @@ fn main() {
         let bytes = s.as_bytes();
         let mut last_sep = 0;
         for (i, &b) in bytes.iter().enumerate() {
-            if b == b'/' || b == b'\\' { last_sep = i + 1; }
+            if b == b'/' || b == b'\\' {
+                last_sep = i + 1;
+            }
         }
         let base = &s[last_sep..];
         base.strip_suffix(".exe").unwrap_or(base).to_string()
@@ -198,7 +220,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_dovecot};
+    use super::run_dovecot;
 
     #[test]
     fn help_exits_zero() {

@@ -4,6 +4,7 @@
 //!
 //! Single personality: `lottie-player`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -48,7 +49,8 @@ fn run_lottie(args: Vec<String>) -> i32 {
                 println!("  --background <COLOR>   Background color");
                 return 0;
             }
-            let file = args.iter()
+            let file = args
+                .iter()
                 .filter(|a| !a.starts_with('-'))
                 .nth(1)
                 .map(|s| s.as_str())
@@ -64,7 +66,8 @@ fn run_lottie(args: Vec<String>) -> i32 {
             0
         }
         "convert" => {
-            let file = args.iter()
+            let file = args
+                .iter()
                 .filter(|a| !a.starts_with('-'))
                 .nth(1)
                 .map(|s| s.as_str())
@@ -77,7 +80,8 @@ fn run_lottie(args: Vec<String>) -> i32 {
             0
         }
         "info" => {
-            let file = args.iter()
+            let file = args
+                .iter()
                 .filter(|a| !a.starts_with('-'))
                 .nth(1)
                 .map(|s| s.as_str())
@@ -104,7 +108,8 @@ fn run_lottie(args: Vec<String>) -> i32 {
             0
         }
         "gif" => {
-            let file = args.iter()
+            let file = args
+                .iter()
                 .filter(|a| !a.starts_with('-'))
                 .nth(1)
                 .map(|s| s.as_str())
@@ -117,7 +122,8 @@ fn run_lottie(args: Vec<String>) -> i32 {
             0
         }
         "apng" => {
-            let file = args.iter()
+            let file = args
+                .iter()
                 .filter(|a| !a.starts_with('-'))
                 .nth(1)
                 .map(|s| s.as_str())
@@ -130,7 +136,8 @@ fn run_lottie(args: Vec<String>) -> i32 {
             0
         }
         "webp" => {
-            let file = args.iter()
+            let file = args
+                .iter()
                 .filter(|a| !a.starts_with('-'))
                 .nth(1)
                 .map(|s| s.as_str())
@@ -144,7 +151,7 @@ fn run_lottie(args: Vec<String>) -> i32 {
             0
         }
         _ => {
-            eprintln!("Error: unknown command '{}'. See --help.", cmd);
+            eprintln!("Error: unknown command {}. See --help.", quoteaf_os(cmd));
             1
         }
     }
@@ -159,7 +166,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_lottie};
+    use super::run_lottie;
 
     #[test]
     fn help_exits_zero() {

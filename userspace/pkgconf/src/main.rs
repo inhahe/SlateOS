@@ -8,6 +8,7 @@
 //! - `pkg-config` — GNU pkg-config compatible interface
 //! - `bomtool` — bill of materials tool
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -26,33 +27,43 @@ struct _PkgInfo {
 fn _sample_packages() -> Vec<_PkgInfo> {
     vec![
         _PkgInfo {
-            name: "zlib".to_string(), version: "1.3.1".to_string(),
+            name: "zlib".to_string(),
+            version: "1.3.1".to_string(),
             description: "zlib compression library".to_string(),
-            cflags: "-I/usr/include".to_string(), libs: "-lz".to_string(),
+            cflags: "-I/usr/include".to_string(),
+            libs: "-lz".to_string(),
             _requires: vec![],
         },
         _PkgInfo {
-            name: "libpng".to_string(), version: "1.6.40".to_string(),
+            name: "libpng".to_string(),
+            version: "1.6.40".to_string(),
             description: "Portable Network Graphics library".to_string(),
-            cflags: "-I/usr/include/libpng16".to_string(), libs: "-lpng16 -lz".to_string(),
+            cflags: "-I/usr/include/libpng16".to_string(),
+            libs: "-lpng16 -lz".to_string(),
             _requires: vec!["zlib".to_string()],
         },
         _PkgInfo {
-            name: "openssl".to_string(), version: "3.2.0".to_string(),
+            name: "openssl".to_string(),
+            version: "3.2.0".to_string(),
             description: "OpenSSL cryptography library".to_string(),
-            cflags: "-I/usr/include/openssl".to_string(), libs: "-lssl -lcrypto".to_string(),
+            cflags: "-I/usr/include/openssl".to_string(),
+            libs: "-lssl -lcrypto".to_string(),
             _requires: vec![],
         },
         _PkgInfo {
-            name: "freetype2".to_string(), version: "2.13.2".to_string(),
+            name: "freetype2".to_string(),
+            version: "2.13.2".to_string(),
             description: "FreeType font rendering library".to_string(),
-            cflags: "-I/usr/include/freetype2".to_string(), libs: "-lfreetype".to_string(),
+            cflags: "-I/usr/include/freetype2".to_string(),
+            libs: "-lfreetype".to_string(),
             _requires: vec!["zlib".to_string(), "libpng".to_string()],
         },
         _PkgInfo {
-            name: "cairo".to_string(), version: "1.18.0".to_string(),
+            name: "cairo".to_string(),
+            version: "1.18.0".to_string(),
             description: "Cairo 2D graphics library".to_string(),
-            cflags: "-I/usr/include/cairo".to_string(), libs: "-lcairo".to_string(),
+            cflags: "-I/usr/include/cairo".to_string(),
+            libs: "-lcairo".to_string(),
             _requires: vec!["freetype2".to_string(), "libpng".to_string()],
         },
     ]
@@ -103,17 +114,24 @@ fn run_pkgconf(args: Vec<String>) -> i32 {
     }
 
     // Gather options and package names
-    let want_cflags = args.iter().any(|a| a == "--cflags" || a == "--cflags-only-I");
-    let want_libs = args.iter().any(|a| a == "--libs" || a == "--libs-only-l" || a == "--libs-only-L");
+    let want_cflags = args
+        .iter()
+        .any(|a| a == "--cflags" || a == "--cflags-only-I");
+    let want_libs = args
+        .iter()
+        .any(|a| a == "--libs" || a == "--libs-only-l" || a == "--libs-only-L");
     let want_version = args.iter().any(|a| a == "--modversion");
     let want_exists = args.iter().any(|a| a == "--exists");
     let want_variables = args.iter().any(|a| a == "--print-variables");
     let want_validate = args.iter().any(|a| a == "--validate");
 
-    let specific_var = args.iter().find(|a| a.starts_with("--variable="))
+    let specific_var = args
+        .iter()
+        .find(|a| a.starts_with("--variable="))
         .map(|a| a.split('=').nth(1).unwrap_or(""));
 
-    let pkg_names: Vec<&str> = args.iter()
+    let pkg_names: Vec<&str> = args
+        .iter()
         .filter(|a| !a.starts_with('-'))
         .map(|s| s.as_str())
         .collect();
@@ -163,11 +181,21 @@ fn run_pkgconf(args: Vec<String>) -> i32 {
             }
 
             // Default: if no specific query, show summary
-            if !want_cflags && !want_libs && !want_version && !want_exists && !want_variables && specific_var.is_none() && !want_validate {
+            if !want_cflags
+                && !want_libs
+                && !want_version
+                && !want_exists
+                && !want_variables
+                && specific_var.is_none()
+                && !want_validate
+            {
                 println!("{} {}", pkg.name, pkg.version);
             }
         } else {
-            eprintln!("Package '{}' was not found in the pkg-config search path.", name);
+            eprintln!(
+                "Package {} was not found in the pkg-config search path.",
+                quoteaf_os(name)
+            );
             return 1;
         }
     }
@@ -184,7 +212,9 @@ fn main() {
         let bytes = s.as_bytes();
         let mut last_sep = 0;
         for (i, &b) in bytes.iter().enumerate() {
-            if b == b'/' || b == b'\\' { last_sep = i + 1; }
+            if b == b'/' || b == b'\\' {
+                last_sep = i + 1;
+            }
         }
         let base = &s[last_sep..];
         let base = base.strip_suffix(".exe").unwrap_or(base);

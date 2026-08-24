@@ -2,3 +2,8 @@
 name = "libvirt-cli"
 version = "0.1.0"
 edition = "2024"
+
+[dependencies]
+# libvirt-cli names domains, networks and storage pools -- identifiers
+# chosen by whoever defined the guest, not by this tool.
+quoting = { path = "../quoting" }

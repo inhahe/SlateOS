@@ -4,3 +4,7 @@ version = "0.1.0"
 edition = "2024"
 description = "SlateOS tape archive utility"
 [dependencies]
+# The entry path and the type flag come out of the *archive header*, so they
+# are not even this user's text -- a crafted archive picks them. This is the
+# site the whole sweep was named for.
+quoting = { path = "../quoting" }

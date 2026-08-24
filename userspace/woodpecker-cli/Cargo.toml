@@ -2,3 +2,8 @@
 name = "woodpecker-cli"
 version = "0.1.0"
 edition = "2024"
+
+[dependencies]
+# woodpecker-cli names repositories, pipelines and secrets, identifiers
+# created on the service side.
+quoting = { path = "../quoting" }

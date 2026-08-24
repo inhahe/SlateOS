@@ -1,5 +1,35 @@
+#![deny(clippy::all)]
+// The workspace's defensive lints (`unwrap_used`, `indexing_slicing`,
+// `arithmetic_side_effects`, …) exist to stop a shaped input turning into a
+// panic in a *caller's* process — a file name from a directory listing, an
+// argument from a script. A test has no caller and no attacker: its inputs are
+// literals in the file below it, and a `.unwrap()` that fires is the assertion
+// doing its job. Per CLAUDE.md, they are enabled in production code and
+// allowed under `test`.
+#![cfg_attr(
+    test,
+    allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::indexing_slicing,
+        clippy::arithmetic_side_effects
+    )
+)]
+
 //! How a utility renders a name, or any other untrusted text, inside a
 //! diagnostic.
+//!
+//! ## Why this is a crate rather than a module of `coreutils`
+//!
+//! It was `coreutils/src/quote.rs` until 2026-08-23, and `coreutils` still
+//! re-exports it as `coreutils::quote`, so nothing that called it had to
+//! change. What changed is who *can* call it: the 777 utility crates under
+//! `userspace/` do not depend on the `coreutils` bundle, and a tree-wide scan
+//! found 1798 diagnostics in them pasting a file name straight into the
+//! message — the exact defect the first section below describes. The fix is a
+//! one-line call, and until this move it was a one-line call they could not
+//! make. See `design-decisions.md` §370.
 //!
 //! ## Why a diagnostic cannot just print the name
 //!
@@ -82,7 +112,9 @@
 //! ```
 //!
 //! Both pairs reject the same argument for the same reason. See
-//! [`crate::xnum::strtol_fatal`], which is the straight one.
+//! `coreutils::xnum::strtol_fatal`, which is the straight one. (Not a doc
+//! link: that function is in `coreutils`, which depends on this crate rather
+//! than the other way round.)
 //!
 //! The last style, [`quote_c_maybe_colon`], is a C-string rendering rather than
 //! a shell one, and is rare: `paste` uses it for its delimiter list and `ls`
@@ -259,7 +291,7 @@ pub enum Mb {
 /// The [`Mb`] at the front of `text`, or `None` if `text` is empty.
 ///
 /// ```
-/// use coreutils::quote::{Mb, next_mb};
+/// use quoting::{Mb, next_mb};
 /// assert_eq!(next_mb(b"abc"), Some(Mb::Char('a', 1)));
 /// assert_eq!(next_mb("é".as_bytes()), Some(Mb::Char('é', 2)));
 /// // `\xff` can begin no sequence at all, so it is invalid rather than short.
@@ -434,7 +466,7 @@ const RIGHT_QUOTE: char = '\u{2019}';
 /// the code point — not `195`, its first byte.
 ///
 /// ```
-/// use coreutils::quote::first_char;
+/// use quoting::first_char;
 /// assert_eq!(first_char(b"abc"), Some(('a', 1)));
 /// assert_eq!(first_char("é".as_bytes()), Some(('é', 2)));
 /// assert_eq!(first_char("😀".as_bytes()), Some(('😀', 4)));
@@ -465,7 +497,7 @@ pub fn first_char(text: &[u8]) -> Option<(char, usize)> {
 /// reads as one uniform mechanism where `\n` next to `\302\200` reads as two.
 ///
 /// ```
-/// use coreutils::quote::escape_unprintable;
+/// use quoting::escape_unprintable;
 /// assert_eq!(escape_unprintable(b"abc"), "abc");
 /// assert_eq!(escape_unprintable(b"a\nb"), r"a\012b");
 /// assert_eq!(escape_unprintable("é".as_bytes()), "é");
@@ -513,7 +545,7 @@ pub fn escape_unprintable(text: &[u8]) -> String {
 /// UTF-8 at all, comes back as one three-digit octal escape *per byte*.
 ///
 /// ```
-/// use coreutils::quote::quote;
+/// use quoting::quote;
 /// assert_eq!(quote(b"bogus"), "\u{2018}bogus\u{2019}");
 /// assert_eq!(quote(b"a b"), "\u{2018}a b\u{2019}");
 /// assert_eq!(quote(b"it's"), "\u{2018}it's\u{2019}");
@@ -607,7 +639,7 @@ fn push_maybe_escaped(c: char, extra: &[u8], out: &mut String) {
 /// `é`, exactly as glibc would print it.
 ///
 /// ```
-/// use coreutils::quote::quote_glibc;
+/// use quoting::quote_glibc;
 /// assert_eq!(quote_glibc(b"--key"), "'--key'");
 /// assert_eq!(quote_glibc(b"x"), "'x'");
 /// assert_eq!(quote_glibc(b"it's"), r"'it\'s'");
@@ -649,7 +681,7 @@ pub fn quote_glibc(arg: &[u8]) -> String {
 /// C-style, including the backslash that was bare a moment earlier.
 ///
 /// ```
-/// use coreutils::quote::quote_c_maybe;
+/// use quoting::quote_c_maybe;
 /// assert_eq!(quote_c_maybe(br"a b\"), r"a b\");
 /// assert_eq!(quote_c_maybe(b"a'b"), "a'b");
 /// assert_eq!(quote_c_maybe(br#"a"b\"#), r#""a\"b\\""#);
@@ -673,7 +705,7 @@ pub fn quote_c_maybe(text: &[u8]) -> String {
 /// the boundary unambiguous.
 ///
 /// ```
-/// use coreutils::quote::quote_c_maybe_colon;
+/// use quoting::quote_c_maybe_colon;
 /// assert_eq!(quote_c_maybe_colon(br"a b\"), r"a b\");
 /// assert_eq!(quote_c_maybe_colon(br"a:b\"), r#""a:b\\""#);
 /// assert_eq!(quote_c_maybe_colon(b":"), r#"":""#);
@@ -743,7 +775,7 @@ fn c_always(text: &[u8], extra: &[u8]) -> String {
 /// as that text, which is the point. A name that was not comes back in octal.
 ///
 /// ```
-/// use coreutils::quote::quotef;
+/// use quoting::quotef;
 /// assert_eq!(quotef(b"notes.txt"), "notes.txt");
 /// assert_eq!(quotef(b"my notes.txt"), "'my notes.txt'");
 /// assert_eq!(quotef(b"it's"), "\"it's\"");
@@ -782,7 +814,7 @@ pub fn quotef(name: &[u8]) -> String {
 /// ```
 ///
 /// ```
-/// use coreutils::quote::quoteaf;
+/// use quoting::quoteaf;
 /// assert_eq!(quoteaf(b"notes.txt"), "'notes.txt'");
 /// assert_eq!(quoteaf(b"my notes.txt"), "'my notes.txt'");
 /// assert_eq!(quoteaf(b"it's"), "\"it's\"");
@@ -993,7 +1025,7 @@ impl Style {
     /// The words `--quoting-style` accepts, in the order `ls` lists them when
     /// it rejects one.
     ///
-    /// Shaped for [`crate::getopt::Program::argmatch`], which prefix-matches
+    /// Shaped for `coreutils::getopt::Program::argmatch`, which prefix-matches
     /// and prints this list back on a miss — so the order here *is* the order
     /// in the diagnostic, and the values are what decides whether a prefix is
     /// ambiguous. Every value is distinct except the last two, which means
@@ -1015,7 +1047,7 @@ impl Style {
     /// `text` rendered in this style.
     ///
     /// ```
-    /// use coreutils::quote::Style;
+    /// use quoting::Style;
     /// assert_eq!(Style::Literal.quote(b"a\tb"), b"a\tb");
     /// assert_eq!(Style::Shell.quote(b"a\tb"), b"'a\tb'");
     /// assert_eq!(Style::ShellEscape.quote(b"a\tb"), br"'a'$'\t''b'");
@@ -1069,7 +1101,7 @@ impl Style {
     ///   these three it is measurably a no-op.
     ///
     /// ```
-    /// use coreutils::quote::Style;
+    /// use quoting::Style;
     /// // Eliding: the set forces the quotes on, and is gone inside them.
     /// assert_eq!(Style::Shell.quote_with(b"a=b", b"="), b"'a=b'");
     /// assert_eq!(Style::CMaybe.quote_with(b"a=b", b"="), br#""a=b""#);
@@ -1287,7 +1319,7 @@ pub fn os_from_bytes(b: &[u8]) -> std::ffi::OsString {
 /// skipped, and a skipped one is the bug this module exists to prevent.
 ///
 /// ```
-/// use coreutils::quote::quotef_os;
+/// use quoting::quotef_os;
 /// use std::path::Path;
 /// assert_eq!(quotef_os("a b"), "'a b'");
 /// assert_eq!(quotef_os(Path::new("notes.txt")), "notes.txt");
@@ -1300,7 +1332,7 @@ pub fn quotef_os<S: AsRef<std::ffi::OsStr>>(s: S) -> String {
 /// [`quoteaf`] for a path, a `String`, or anything else a call site holds.
 ///
 /// ```
-/// use coreutils::quote::quoteaf_os;
+/// use quoting::quoteaf_os;
 /// assert_eq!(quoteaf_os("a.txt"), "'a.txt'");
 /// ```
 #[must_use]
@@ -1311,7 +1343,7 @@ pub fn quoteaf_os<S: AsRef<std::ffi::OsStr>>(s: S) -> String {
 /// [`quote`] for a path, a `String`, or anything else a call site holds.
 ///
 /// ```
-/// use coreutils::quote::quote_os;
+/// use quoting::quote_os;
 /// assert_eq!(quote_os("--sort"), "‘--sort’");
 /// ```
 #[must_use]

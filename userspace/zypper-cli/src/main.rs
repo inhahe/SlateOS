@@ -4,6 +4,7 @@
 //!
 //! Multi-personality: `zypper`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -39,7 +40,9 @@ fn run_zypper(args: &[String]) -> i32 {
             println!("libzypp 17.31.26");
         }
         "install" | "in" => {
-            let pkgs: Vec<&str> = args.iter().skip(1)
+            let pkgs: Vec<&str> = args
+                .iter()
+                .skip(1)
                 .filter(|a| !a.starts_with('-'))
                 .map(|s| s.as_str())
                 .collect();
@@ -115,7 +118,7 @@ fn run_zypper(args: &[String]) -> i32 {
             println!("5 packages to upgrade, 2 to downgrade, 1 new.");
             println!("Overall download size: 250 MiB.");
         }
-        _ => println!("zypper: '{}' completed", subcmd),
+        _ => println!("zypper: {} completed", quoteaf_os(subcmd)),
     }
     0
 }
@@ -129,7 +132,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_zypper};
+    use super::run_zypper;
 
     #[test]
     fn help_exits_zero() {

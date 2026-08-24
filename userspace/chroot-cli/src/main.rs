@@ -4,6 +4,7 @@
 //!
 //! Multi-personality: `chroot`, `unshare`, `pivot_root`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -28,7 +29,8 @@ fn run_chroot(args: &[String]) -> i32 {
         return 0;
     }
 
-    let positional: Vec<&str> = args.iter()
+    let positional: Vec<&str> = args
+        .iter()
         .filter(|a| !a.starts_with('-'))
         .map(|s| s.as_str())
         .collect();
@@ -36,8 +38,8 @@ fn run_chroot(args: &[String]) -> i32 {
     let root = positional.first().copied().unwrap_or("/mnt/newroot");
     let cmd = positional.get(1).copied().unwrap_or("/bin/sh");
 
-    println!("chroot: changing root to '{}'", root);
-    println!("chroot: running '{}'", cmd);
+    println!("chroot: changing root to {}", quoteaf_os(root));
+    println!("chroot: running {}", quoteaf_os(cmd));
     0
 }
 
@@ -61,27 +63,34 @@ fn run_unshare(args: &[String]) -> i32 {
         return 0;
     }
 
-    let namespaces: Vec<&str> = args.iter().filter_map(|a| match a.as_str() {
-        "-m" | "--mount" => Some("mount"),
-        "-u" | "--uts" => Some("uts"),
-        "-i" | "--ipc" => Some("ipc"),
-        "-n" | "--net" => Some("net"),
-        "-p" | "--pid" => Some("pid"),
-        "-U" | "--user" => Some("user"),
-        "-C" | "--cgroup" => Some("cgroup"),
-        _ => None,
-    }).collect();
+    let namespaces: Vec<&str> = args
+        .iter()
+        .filter_map(|a| match a.as_str() {
+            "-m" | "--mount" => Some("mount"),
+            "-u" | "--uts" => Some("uts"),
+            "-i" | "--ipc" => Some("ipc"),
+            "-n" | "--net" => Some("net"),
+            "-p" | "--pid" => Some("pid"),
+            "-U" | "--user" => Some("user"),
+            "-C" | "--cgroup" => Some("cgroup"),
+            _ => None,
+        })
+        .collect();
 
-    let cmd = args.iter()
+    let cmd = args
+        .iter()
         .find(|a| !a.starts_with('-'))
         .map(|s| s.as_str())
         .unwrap_or("/bin/sh");
 
     if namespaces.is_empty() {
-        println!("unshare: running '{}' (no namespaces specified)", cmd);
+        println!(
+            "unshare: running {} (no namespaces specified)",
+            quoteaf_os(cmd)
+        );
     } else {
         println!("unshare: new namespaces: {}", namespaces.join(", "));
-        println!("unshare: running '{}'", cmd);
+        println!("unshare: running {}", quoteaf_os(cmd));
     }
     0
 }
@@ -94,7 +103,8 @@ fn run_pivot_root(args: &[String]) -> i32 {
         return 0;
     }
 
-    let positional: Vec<&str> = args.iter()
+    let positional: Vec<&str> = args
+        .iter()
         .filter(|a| !a.starts_with('-'))
         .map(|s| s.as_str())
         .collect();
@@ -108,7 +118,8 @@ fn run_pivot_root(args: &[String]) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first()
+    let prog = args
+        .first()
         .map(|s| strip_ext(basename(s)).to_string())
         .unwrap_or_else(|| "chroot".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
@@ -123,7 +134,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_chroot};
+    use super::{basename, run_chroot, strip_ext};
 
     #[test]
     fn basename_strips_path() {

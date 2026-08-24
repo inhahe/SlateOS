@@ -507,9 +507,11 @@ fn find_algorithm(path: &Path) -> Option<Algorithm> {
         }
         // Check extension filter.
         if !rule.extensions.is_empty() {
-            let matches_ext = path
-                .extension()
-                .is_some_and(|ext| rule.extensions.iter().any(|e| e.as_bytes() == ext.as_bytes()));
+            let matches_ext = path.extension().is_some_and(|ext| {
+                rule.extensions
+                    .iter()
+                    .any(|e| e.as_bytes() == ext.as_bytes())
+            });
             if !matches_ext {
                 continue;
             }
@@ -684,7 +686,11 @@ fn test_non_utf8_prefix() {
     );
 
     // Removal is byte-exact too: the other spelling removes nothing.
-    assert_eq!(remove_rules(dir_b), 0, "removing by the other name is a no-op");
+    assert_eq!(
+        remove_rules(dir_b),
+        0,
+        "removing by the other name is a no-op"
+    );
     assert_eq!(remove_rules(dir_a), 1, "removing by the exact name works");
 
     set_min_size(old_min);
@@ -807,7 +813,10 @@ fn test_compress_decompress_gzip() {
     let compressed = compress_for_write("/tmp/fcomp_gz/data.bin", &original);
     assert!(compressed.is_some(), "should have compressed");
     let compressed = compressed.expect("checked");
-    assert!(compressed.len() < original.len(), "stored form must be smaller");
+    assert!(
+        compressed.len() < original.len(),
+        "stored form must be smaller"
+    );
 
     let decompressed = decompress_for_read(&compressed);
     assert!(decompressed.is_some());
@@ -837,7 +846,10 @@ fn test_compress_decompress_zstd() {
     let compressed = compress_for_write("/tmp/fcomp_zst/test.dat", &original);
     assert!(compressed.is_some(), "should have compressed");
     let compressed = compressed.expect("checked");
-    assert!(compressed.len() < original.len(), "stored form must be smaller");
+    assert!(
+        compressed.len() < original.len(),
+        "stored form must be smaller"
+    );
 
     let decompressed = decompress_for_read(&compressed);
     assert!(decompressed.is_some());

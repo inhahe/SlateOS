@@ -201,7 +201,8 @@ struct CustomExtractor {
 // ---------------------------------------------------------------------------
 
 /// Custom extractors registry.
-static EXTRACTORS: PreemptSpinMutex<Vec<CustomExtractor>> = PreemptSpinMutex::named(Vec::new(), b"EXTRACTORS");
+static EXTRACTORS: PreemptSpinMutex<Vec<CustomExtractor>> =
+    PreemptSpinMutex::named(Vec::new(), b"EXTRACTORS");
 
 /// Statistics.
 static EXTRACT_COUNT: AtomicU64 = AtomicU64::new(0);

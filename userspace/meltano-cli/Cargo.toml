@@ -2,3 +2,8 @@
 name = "meltano-cli"
 version = "0.1.0"
 edition = "2024"
+
+[dependencies]
+# meltano-cli names plugins, extractors and loaders, taken from the command
+# line and from meltano.yml on disk.
+quoting = { path = "../quoting" }

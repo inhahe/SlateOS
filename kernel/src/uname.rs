@@ -103,7 +103,12 @@ pub fn self_test() {
         major > 6 || (major == 6 && minor >= 6),
         "release {RELEASE} parses as {major}.{minor}, below the 6.6 baseline"
     );
-    serial_println!("[uname]   release {} parses as {}.{}: OK", RELEASE, major, minor);
+    serial_println!(
+        "[uname]   release {} parses as {}.{}: OK",
+        RELEASE,
+        major,
+        minor
+    );
 
     // 2. Whitespace. `uname -a` prints the fields space-separated and callers
     //    routinely split it on whitespace, so a two-word field silently becomes

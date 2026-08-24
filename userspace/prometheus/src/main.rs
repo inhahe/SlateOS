@@ -4,6 +4,7 @@
 //!
 //! Multi-personality: `prometheus` (server), `promtool` (CLI tool)
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -28,9 +29,15 @@ fn run_prometheus(args: Vec<String>) -> i32 {
         println!("  go version: go1.22.0");
         return 0;
     }
-    println!("ts=2025-05-22T10:00:00Z caller=main.go:1 level=info msg=\"Starting Prometheus\" version=2.50.0");
-    println!("ts=2025-05-22T10:00:00Z caller=main.go:2 level=info msg=\"Loading configuration file\" filename=prometheus.yml");
-    println!("ts=2025-05-22T10:00:01Z caller=main.go:3 level=info msg=\"Server is ready to receive web requests.\"");
+    println!(
+        "ts=2025-05-22T10:00:00Z caller=main.go:1 level=info msg=\"Starting Prometheus\" version=2.50.0"
+    );
+    println!(
+        "ts=2025-05-22T10:00:00Z caller=main.go:2 level=info msg=\"Loading configuration file\" filename=prometheus.yml"
+    );
+    println!(
+        "ts=2025-05-22T10:00:01Z caller=main.go:3 level=info msg=\"Server is ready to receive web requests.\""
+    );
     println!("ts=2025-05-22T10:00:01Z caller=main.go:4 level=info msg=\"Listening on :9090\"");
     0
 }
@@ -57,7 +64,10 @@ fn run_promtool(args: Vec<String>) -> i32 {
             let sub = cmd_args.first().map(|s| s.as_str()).unwrap_or("config");
             match sub {
                 "config" => {
-                    let file = cmd_args.get(1).map(|s| s.as_str()).unwrap_or("prometheus.yml");
+                    let file = cmd_args
+                        .get(1)
+                        .map(|s| s.as_str())
+                        .unwrap_or("prometheus.yml");
                     println!("Checking {}...", file);
                     println!("  SUCCESS: {} is valid prometheus config file", file);
                 }
@@ -84,8 +94,14 @@ fn run_promtool(args: Vec<String>) -> i32 {
             }
             0
         }
-        "tsdb" => { println!("TSDB utility (simulated)"); 0 }
-        other => { eprintln!("promtool: unknown command '{}'", other); 1 }
+        "tsdb" => {
+            println!("TSDB utility (simulated)");
+            0
+        }
+        other => {
+            eprintln!("promtool: unknown command {}", quoteaf_os(other));
+            1
+        }
     }
 }
 
@@ -96,7 +112,9 @@ fn main() {
         let bytes = s.as_bytes();
         let mut last_sep = 0;
         for (i, &b) in bytes.iter().enumerate() {
-            if b == b'/' || b == b'\\' { last_sep = i + 1; }
+            if b == b'/' || b == b'\\' {
+                last_sep = i + 1;
+            }
         }
         let base = &s[last_sep..];
         base.strip_suffix(".exe").unwrap_or(base).to_string()
@@ -111,7 +129,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_prometheus};
+    use super::run_prometheus;
 
     #[test]
     fn help_exits_zero() {

@@ -4,6 +4,7 @@
 //!
 //! Single personality: `rclone`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -18,9 +19,21 @@ struct Remote {
 
 fn sample_remotes() -> Vec<Remote> {
     vec![
-        Remote { name: "gdrive".to_string(), remote_type: "drive".to_string(), _config: vec![] },
-        Remote { name: "s3backup".to_string(), remote_type: "s3".to_string(), _config: vec![] },
-        Remote { name: "dropbox".to_string(), remote_type: "dropbox".to_string(), _config: vec![] },
+        Remote {
+            name: "gdrive".to_string(),
+            remote_type: "drive".to_string(),
+            _config: vec![],
+        },
+        Remote {
+            name: "s3backup".to_string(),
+            remote_type: "s3".to_string(),
+            _config: vec![],
+        },
+        Remote {
+            name: "dropbox".to_string(),
+            remote_type: "dropbox".to_string(),
+            _config: vec![],
+        },
     ]
 }
 
@@ -56,15 +69,31 @@ fn run_rclone(args: Vec<String>) -> i32 {
             println!("  --version   Show version");
             0
         }
-        "--version" | "version" => { println!("rclone v0.1.0 (Slate OS)"); 0 }
+        "--version" | "version" => {
+            println!("rclone v0.1.0 (Slate OS)");
+            0
+        }
         "copy" | "sync" | "move" => {
             let dry_run = cmd_args.iter().any(|a| a == "--dry-run" || a == "-n");
             let verbose = cmd_args.iter().any(|a| a == "-v" || a == "--verbose");
-            let src = cmd_args.iter().find(|a| !a.starts_with('-')).map(|s| s.as_str()).unwrap_or("source:");
-            let dst = cmd_args.get(1).filter(|a| !a.starts_with('-')).map(|s| s.as_str()).unwrap_or("dest:");
+            let src = cmd_args
+                .iter()
+                .find(|a| !a.starts_with('-'))
+                .map(|s| s.as_str())
+                .unwrap_or("source:");
+            let dst = cmd_args
+                .get(1)
+                .filter(|a| !a.starts_with('-'))
+                .map(|s| s.as_str())
+                .unwrap_or("dest:");
 
-            println!("{}: {} → {}{}", cmd, src, dst,
-                if dry_run { " (dry run)" } else { "" });
+            println!(
+                "{}: {} → {}{}",
+                cmd,
+                src,
+                dst,
+                if dry_run { " (dry run)" } else { "" }
+            );
             if verbose {
                 println!("  Transferred:   125.00 MiB / 48.93 GiB, 0%");
                 println!("  Checks:        56 / 56, 100%");
@@ -116,13 +145,22 @@ fn run_rclone(args: Vec<String>) -> i32 {
             println!("({})", remote);
             0
         }
-        "check" => { println!("0 differences found (simulated)"); 0 }
+        "check" => {
+            println!("0 differences found (simulated)");
+            0
+        }
         "mkdir" | "rmdir" | "delete" | "purge" => {
-            let path = cmd_args.first().map(|s| s.as_str()).unwrap_or("remote:path");
+            let path = cmd_args
+                .first()
+                .map(|s| s.as_str())
+                .unwrap_or("remote:path");
             println!("{}: {} (simulated)", cmd, path);
             0
         }
-        other => { eprintln!("rclone: unknown command '{}'", other); 1 }
+        other => {
+            eprintln!("rclone: unknown command {}", quoteaf_os(other));
+            1
+        }
     }
 }
 

@@ -4,11 +4,16 @@
 //!
 //! Single personality: `mcfly`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_mcfly(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
@@ -37,14 +42,14 @@ fn run_mcfly(args: &[String], _prog: &str) -> i32 {
             if query.is_empty() {
                 println!("mcfly: Interactive history search...");
             } else {
-                println!("mcfly search for '{}':", query);
+                println!("mcfly search for {}:", quoteaf_os(query));
                 println!("  1. {} --help", query);
                 println!("  2. {} -v", query);
             }
         }
         "add" => {
             let command = args.get(1).map(|s| s.as_str()).unwrap_or("");
-            println!("mcfly: Added '{}' to history.", command);
+            println!("mcfly: Added {} to history.", quoteaf_os(command));
         }
         "train" => println!("mcfly: Training neural network on history..."),
         "move" => println!("mcfly: Moving database to new location..."),
@@ -53,14 +58,17 @@ fn run_mcfly(args: &[String], _prog: &str) -> i32 {
             println!("# mcfly init for {}", shell);
             println!("eval \"$(mcfly init {})\"", shell);
         }
-        _ => println!("mcfly: unknown command '{}'", cmd),
+        _ => println!("mcfly: unknown command {}", quoteaf_os(cmd)),
     }
     0
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "mcfly".to_string());
+    let prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "mcfly".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_mcfly(&rest, &prog);
     process::exit(code);
@@ -68,7 +76,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_mcfly};
+    use super::{basename, run_mcfly, strip_ext};
 
     #[test]
     fn basename_strips_path() {

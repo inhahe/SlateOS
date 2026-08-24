@@ -525,7 +525,10 @@ fn test_type_filter() -> KernelResult<()> {
     };
     let result = readdir_plus(dir, &opts)?;
     assert!(
-        result.entries.iter().any(|e| e.name.as_bytes() == b"file.txt"),
+        result
+            .entries
+            .iter()
+            .any(|e| e.name.as_bytes() == b"file.txt"),
         "FilesOnly dropped the one regular file in the directory"
     );
     for entry in &result.entries {
@@ -545,7 +548,10 @@ fn test_type_filter() -> KernelResult<()> {
     };
     let result2 = readdir_plus(dir, &opts2)?;
     assert!(
-        result2.entries.iter().any(|e| e.name.as_bytes() == b"subdir"),
+        result2
+            .entries
+            .iter()
+            .any(|e| e.name.as_bytes() == b"subdir"),
         "DirsOnly dropped the one subdirectory in the directory"
     );
     for entry in &result2.entries {
@@ -632,7 +638,11 @@ fn test_pagination() -> KernelResult<()> {
         ..Default::default()
     };
     let result = readdir_plus(dir, &opts)?;
-    assert_eq!(result.entries.len(), 3, "limit=3 returned a different count");
+    assert_eq!(
+        result.entries.len(),
+        3,
+        "limit=3 returned a different count"
+    );
     assert!(
         result.has_more,
         "10 entries with limit=3 must report more remaining"
@@ -649,7 +659,11 @@ fn test_pagination() -> KernelResult<()> {
         ..Default::default()
     };
     let result2 = readdir_plus(dir, &opts2)?;
-    assert_eq!(result2.entries.len(), 3, "offset=3 limit=3 returned a different count");
+    assert_eq!(
+        result2.entries.len(),
+        3,
+        "offset=3 limit=3 returned a different count"
+    );
 
     // Verify no overlap between pages.
     let page1_names: Vec<&Path> = result.entries.iter().map(|e| e.name.as_path()).collect();
@@ -669,7 +683,11 @@ fn test_pagination() -> KernelResult<()> {
         ..Default::default()
     };
     let result3 = readdir_plus(dir, &opts3)?;
-    assert_eq!(result3.entries.len(), 1, "offset=9 of 10 entries should yield 1");
+    assert_eq!(
+        result3.entries.len(),
+        1,
+        "offset=9 of 10 entries should yield 1"
+    );
     assert!(
         !result3.has_more,
         "the final page must not claim more entries remain"

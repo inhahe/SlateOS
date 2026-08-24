@@ -4,6 +4,7 @@
 //!
 //! Multi-personality: `scmp_sys_resolver`, `firejail`, `bwrap`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -23,7 +24,11 @@ fn run_scmp_sys_resolver(args: &[String]) -> i32 {
         return 0;
     }
 
-    let query = args.iter().find(|a| !a.starts_with('-')).map(|s| s.as_str()).unwrap_or("");
+    let query = args
+        .iter()
+        .find(|a| !a.starts_with('-'))
+        .map(|s| s.as_str())
+        .unwrap_or("");
     match query {
         "read" => println!("0"),
         "write" => println!("1"),
@@ -79,7 +84,11 @@ fn run_firejail(args: &[String]) -> i32 {
         return 0;
     }
 
-    let program = args.iter().find(|a| !a.starts_with('-')).map(|s| s.as_str()).unwrap_or("bash");
+    let program = args
+        .iter()
+        .find(|a| !a.starts_with('-'))
+        .map(|s| s.as_str())
+        .unwrap_or("bash");
     println!("Reading profile /etc/firejail/{}.profile", program);
     println!("Parent pid 1234, child pid 1235");
     println!("Child process initialized in 0.01 ms");
@@ -107,14 +116,19 @@ fn run_bwrap(args: &[String]) -> i32 {
         return 0;
     }
 
-    let command = args.iter().find(|a| !a.starts_with('-')).map(|s| s.as_str()).unwrap_or("sh");
-    println!("bwrap: running '{}' in sandbox", command);
+    let command = args
+        .iter()
+        .find(|a| !a.starts_with('-'))
+        .map(|s| s.as_str())
+        .unwrap_or("sh");
+    println!("bwrap: running {} in sandbox", quoteaf_os(command));
     0
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first()
+    let prog = args
+        .first()
         .map(|s| strip_ext(basename(s)).to_string())
         .unwrap_or_else(|| "firejail".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
@@ -129,7 +143,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_scmp_sys_resolver};
+    use super::{basename, run_scmp_sys_resolver, strip_ext};
 
     #[test]
     fn basename_strips_path() {

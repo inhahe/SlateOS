@@ -4,6 +4,7 @@
 //!
 //! Single personality: `monday`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -42,7 +43,9 @@ fn run_monday(args: Vec<String>) -> i32 {
                     println!("2345678     Content Calendar        board     25     Marketing");
                     println!("3456789     Bug Tracker             board     12     Engineering");
                 }
-                _ => { println!("Board operation: {}", sub); }
+                _ => {
+                    println!("Board operation: {}", sub);
+                }
             }
             0
         }
@@ -50,28 +53,48 @@ fn run_monday(args: Vec<String>) -> i32 {
             let sub = args.get(1).map(|s| s.as_str()).unwrap_or("list");
             match sub {
                 "list" => {
-                    let board = args.windows(2).find(|w| w[0] == "--board").map(|w| w[1].as_str()).unwrap_or("1234567");
+                    let board = args
+                        .windows(2)
+                        .find(|w| w[0] == "--board")
+                        .map(|w| w[1].as_str())
+                        .unwrap_or("1234567");
                     println!("Items in board {}:", board);
                     println!("  ID          Group          Status         Person      Name");
-                    println!("  i-abc123    Sprint 42      Working on it  Alice       Fix auth bug");
-                    println!("  i-def456    Sprint 42      Stuck          Bob         API migration");
+                    println!(
+                        "  i-abc123    Sprint 42      Working on it  Alice       Fix auth bug"
+                    );
+                    println!(
+                        "  i-def456    Sprint 42      Stuck          Bob         API migration"
+                    );
                     println!("  i-ghi789    Sprint 42      Done           Charlie     Write tests");
-                    println!("  i-jkl012    Backlog        -              -           Add dark mode");
+                    println!(
+                        "  i-jkl012    Backlog        -              -           Add dark mode"
+                    );
                 }
                 "create" => {
-                    let name = args.windows(2).find(|w| w[0] == "--name").map(|w| w[1].as_str()).unwrap_or("New item");
+                    let name = args
+                        .windows(2)
+                        .find(|w| w[0] == "--name")
+                        .map(|w| w[1].as_str())
+                        .unwrap_or("New item");
                     println!("✔ Created item: {} (ID: i-new123)", name);
                 }
                 "update" => {
                     let id = args.get(2).map(|s| s.as_str()).unwrap_or("i-abc123");
                     println!("✔ Item {} updated", id);
                 }
-                _ => { println!("Item operation: {}", sub); }
+                _ => {
+                    println!("Item operation: {}", sub);
+                }
             }
             0
         }
         "groups" => {
-            let board = args.windows(2).find(|w| w[0] == "--board").map(|w| w[1].as_str()).unwrap_or("1234567");
+            let board = args
+                .windows(2)
+                .find(|w| w[0] == "--board")
+                .map(|w| w[1].as_str())
+                .unwrap_or("1234567");
             println!("Groups in board {}:", board);
             println!("  Sprint 42    (3 items)  color: blue");
             println!("  Sprint 43    (0 items)  color: green");
@@ -79,7 +102,11 @@ fn run_monday(args: Vec<String>) -> i32 {
             0
         }
         "columns" => {
-            let board = args.windows(2).find(|w| w[0] == "--board").map(|w| w[1].as_str()).unwrap_or("1234567");
+            let board = args
+                .windows(2)
+                .find(|w| w[0] == "--board")
+                .map(|w| w[1].as_str())
+                .unwrap_or("1234567");
             println!("Columns in board {}:", board);
             println!("  Name          Type         Settings");
             println!("  Status        status       Working on it, Stuck, Done");
@@ -90,7 +117,11 @@ fn run_monday(args: Vec<String>) -> i32 {
             0
         }
         "updates" => {
-            let item = args.windows(2).find(|w| w[0] == "--item").map(|w| w[1].as_str()).unwrap_or("i-abc123");
+            let item = args
+                .windows(2)
+                .find(|w| w[0] == "--item")
+                .map(|w| w[1].as_str())
+                .unwrap_or("i-abc123");
             println!("Updates for {}:", item);
             println!("  [2024-01-15 14:00] Alice: Found the root cause, working on fix");
             println!("  [2024-01-15 10:00] Bob: Can reproduce on staging");
@@ -109,7 +140,7 @@ fn run_monday(args: Vec<String>) -> i32 {
             if cmd.is_empty() {
                 eprintln!("Usage: monday <command>. See --help.");
             } else {
-                eprintln!("Error: unknown command '{}'. See --help.", cmd);
+                eprintln!("Error: unknown command {}. See --help.", quoteaf_os(cmd));
             }
             1
         }
@@ -125,7 +156,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_monday};
+    use super::run_monday;
 
     #[test]
     fn help_exits_zero() {

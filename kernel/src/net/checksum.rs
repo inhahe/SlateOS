@@ -123,10 +123,16 @@ pub fn pseudo_v4(src: Ipv4Addr, dst: Ipv4Addr, protocol: u8, seg_len: u16) -> u3
 pub fn pseudo_v6(src: &Ipv6Addr, dst: &Ipv6Addr, next_header: u8, seg_len: u32) -> u32 {
     let mut sum: u32 = 0;
     for i in 0..8 {
-        sum = sum.wrapping_add(u32::from(u16::from_be_bytes([src.0[i * 2], src.0[i * 2 + 1]])));
+        sum = sum.wrapping_add(u32::from(u16::from_be_bytes([
+            src.0[i * 2],
+            src.0[i * 2 + 1],
+        ])));
     }
     for i in 0..8 {
-        sum = sum.wrapping_add(u32::from(u16::from_be_bytes([dst.0[i * 2], dst.0[i * 2 + 1]])));
+        sum = sum.wrapping_add(u32::from(u16::from_be_bytes([
+            dst.0[i * 2],
+            dst.0[i * 2 + 1],
+        ])));
     }
     // Upper-layer packet length is a full 32-bit field: two words.
     sum = sum.wrapping_add(seg_len >> 16);

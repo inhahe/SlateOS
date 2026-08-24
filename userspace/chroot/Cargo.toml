@@ -7,4 +7,9 @@ description = "SlateOS chroot utility"
 # `userdb` for `/etc/users.yaml`. This crate carried the fifth hand-rolled
 # parser of that file. See `design-decisions.md` §330.
 [dependencies]
+# chroot names the new root directory and the command it will exec, both
+# from the command line. It is a privilege boundary, so a word it prints
+# unquoted is one an unprivileged caller steered into a privileged program's
+# output.
+quoting = { path = "../quoting" }
 userdb = { path = "../userdb" }

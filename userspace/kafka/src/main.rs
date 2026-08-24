@@ -5,6 +5,7 @@
 //! Multi-personality: `kafka-server-start` (broker), `kafka-topics`,
 //!   `kafka-console-producer`, `kafka-console-consumer`, `kafka-consumer-groups`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -20,11 +21,16 @@ fn run_kafka_server(args: Vec<String>) -> i32 {
         println!("Apache Kafka 3.7.0 (Slate OS) (Commit: abc1234)");
         return 0;
     }
-    let config = args.first().map(|s| s.as_str()).unwrap_or("config/server.properties");
+    let config = args
+        .first()
+        .map(|s| s.as_str())
+        .unwrap_or("config/server.properties");
     println!("[2025-05-22 10:00:00,000] INFO KafkaServer starting (kafka.server.KafkaServer)");
     println!("[2025-05-22 10:00:00,100] INFO Connecting to zookeeper on localhost:2181");
     println!("[2025-05-22 10:00:00,500] INFO Cluster ID = abc123-def456-ghi789");
-    println!("[2025-05-22 10:00:01,000] INFO [KafkaServer id=0] started (kafka.server.KafkaServer)");
+    println!(
+        "[2025-05-22 10:00:01,000] INFO [KafkaServer id=0] started (kafka.server.KafkaServer)"
+    );
     println!("[2025-05-22 10:00:01,001] INFO Loading config: {}", config);
     println!("[2025-05-22 10:00:01,100] INFO [SocketServer] Awaiting connections on port 9092");
     0
@@ -51,7 +57,9 @@ fn run_kafka_topics(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--create") {
-        let topic = args.iter().position(|a| a == "--topic")
+        let topic = args
+            .iter()
+            .position(|a| a == "--topic")
             .and_then(|i| args.get(i + 1))
             .map(|s| s.as_str())
             .unwrap_or("new-topic");
@@ -59,7 +67,9 @@ fn run_kafka_topics(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--delete") {
-        let topic = args.iter().position(|a| a == "--topic")
+        let topic = args
+            .iter()
+            .position(|a| a == "--topic")
             .and_then(|i| args.get(i + 1))
             .map(|s| s.as_str())
             .unwrap_or("topic");
@@ -67,14 +77,28 @@ fn run_kafka_topics(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--describe") {
-        let topic = args.iter().position(|a| a == "--topic")
+        let topic = args
+            .iter()
+            .position(|a| a == "--topic")
             .and_then(|i| args.get(i + 1))
             .map(|s| s.as_str())
             .unwrap_or("orders");
-        println!("Topic: {}\tPartitionCount: 6\tReplicationFactor: 3\tConfigs: retention.ms=604800000", topic);
-        println!("\tTopic: {}\tPartition: 0\tLeader: 0\tReplicas: 0,1,2\tIsr: 0,1,2", topic);
-        println!("\tTopic: {}\tPartition: 1\tLeader: 1\tReplicas: 1,2,0\tIsr: 1,2,0", topic);
-        println!("\tTopic: {}\tPartition: 2\tLeader: 2\tReplicas: 2,0,1\tIsr: 2,0,1", topic);
+        println!(
+            "Topic: {}\tPartitionCount: 6\tReplicationFactor: 3\tConfigs: retention.ms=604800000",
+            topic
+        );
+        println!(
+            "\tTopic: {}\tPartition: 0\tLeader: 0\tReplicas: 0,1,2\tIsr: 0,1,2",
+            topic
+        );
+        println!(
+            "\tTopic: {}\tPartition: 1\tLeader: 1\tReplicas: 1,2,0\tIsr: 1,2,0",
+            topic
+        );
+        println!(
+            "\tTopic: {}\tPartition: 2\tLeader: 2\tReplicas: 2,0,1\tIsr: 2,0,1",
+            topic
+        );
         return 0;
     }
     println!("kafka-topics: no command specified. Use --help.");
@@ -86,23 +110,29 @@ fn run_kafka_producer(args: Vec<String>) -> i32 {
         println!("Usage: kafka-console-producer --bootstrap-server <host:port> --topic <topic>");
         return 0;
     }
-    let topic = args.iter().position(|a| a == "--topic")
+    let topic = args
+        .iter()
+        .position(|a| a == "--topic")
         .and_then(|i| args.get(i + 1))
         .map(|s| s.as_str())
         .unwrap_or("test");
     println!(">Hello Kafka!");
     println!(">{{\"event\":\"order_placed\",\"id\":12345}}");
     println!(">^C");
-    println!("Produced 2 messages to topic '{}'.", topic);
+    println!("Produced 2 messages to topic {}.", quoteaf_os(topic));
     0
 }
 
 fn run_kafka_consumer(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
-        println!("Usage: kafka-console-consumer --bootstrap-server <host:port> --topic <topic> [--from-beginning] [--group <group>]");
+        println!(
+            "Usage: kafka-console-consumer --bootstrap-server <host:port> --topic <topic> [--from-beginning] [--group <group>]"
+        );
         return 0;
     }
-    let topic = args.iter().position(|a| a == "--topic")
+    let topic = args
+        .iter()
+        .position(|a| a == "--topic")
         .and_then(|i| args.get(i + 1))
         .map(|s| s.as_str())
         .unwrap_or("test");
@@ -130,14 +160,27 @@ fn run_consumer_groups(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--describe") {
-        let group = args.iter().position(|a| a == "--group")
+        let group = args
+            .iter()
+            .position(|a| a == "--group")
             .and_then(|i| args.get(i + 1))
             .map(|s| s.as_str())
             .unwrap_or("order-processor");
-        println!("GROUP           TOPIC      PARTITION  CURRENT-OFFSET  LOG-END-OFFSET  LAG  CONSUMER-ID                                HOST");
-        println!("{}  orders     0          1420            1420            0    consumer-1-abc123  /127.0.0.1", group);
-        println!("{}  orders     1          1385            1390            5    consumer-2-def456  /127.0.0.1", group);
-        println!("{}  orders     2          1402            1402            0    consumer-3-ghi789  /127.0.0.1", group);
+        println!(
+            "GROUP           TOPIC      PARTITION  CURRENT-OFFSET  LOG-END-OFFSET  LAG  CONSUMER-ID                                HOST"
+        );
+        println!(
+            "{}  orders     0          1420            1420            0    consumer-1-abc123  /127.0.0.1",
+            group
+        );
+        println!(
+            "{}  orders     1          1385            1390            5    consumer-2-def456  /127.0.0.1",
+            group
+        );
+        println!(
+            "{}  orders     2          1402            1402            0    consumer-3-ghi789  /127.0.0.1",
+            group
+        );
         return 0;
     }
     println!("kafka-consumer-groups: no command specified. Use --help.");
@@ -147,11 +190,16 @@ fn run_consumer_groups(args: Vec<String>) -> i32 {
 fn main() {
     let args: Vec<String> = env::args().collect();
     let prog_name = {
-        let s = args.first().map(|s| s.as_str()).unwrap_or("kafka-server-start");
+        let s = args
+            .first()
+            .map(|s| s.as_str())
+            .unwrap_or("kafka-server-start");
         let bytes = s.as_bytes();
         let mut last_sep = 0;
         for (i, &b) in bytes.iter().enumerate() {
-            if b == b'/' || b == b'\\' { last_sep = i + 1; }
+            if b == b'/' || b == b'\\' {
+                last_sep = i + 1;
+            }
         }
         let base = &s[last_sep..];
         base.strip_suffix(".exe").unwrap_or(base).to_string()
@@ -169,7 +217,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_kafka_server};
+    use super::run_kafka_server;
 
     #[test]
     fn help_exits_zero() {

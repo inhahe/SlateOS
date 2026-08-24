@@ -2,3 +2,8 @@
 name = "atuin"
 version = "0.1.0"
 edition = "2024"
+
+[dependencies]
+# The shell-history search query is echoed back joined by spaces, and
+# history queries routinely contain quotes and shell metacharacters.
+quoting = { path = "../quoting" }

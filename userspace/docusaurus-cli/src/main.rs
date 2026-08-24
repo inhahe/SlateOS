@@ -4,11 +4,16 @@
 //!
 //! Multi-personality: `docusaurus`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_docusaurus(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
@@ -30,10 +35,16 @@ fn run_docusaurus(args: &[String]) -> i32 {
     match subcmd {
         "--version" => println!("3.4.0"),
         "start" => {
-            let port = args.windows(2).find(|w| w[0] == "--port")
-                .map(|w| w[1].as_str()).unwrap_or("3000");
+            let port = args
+                .windows(2)
+                .find(|w| w[0] == "--port")
+                .map(|w| w[1].as_str())
+                .unwrap_or("3000");
             println!("[INFO] Starting development server...");
-            println!("[SUCCESS] Docusaurus website is running at http://localhost:{}/", port);
+            println!(
+                "[SUCCESS] Docusaurus website is running at http://localhost:{}/",
+                port
+            );
         }
         "build" => {
             println!("[INFO] Building Docusaurus site...");
@@ -54,18 +65,24 @@ fn run_docusaurus(args: &[String]) -> i32 {
             println!("[SUCCESS] Removed build/, .docusaurus/");
         }
         "serve" => {
-            let port = args.windows(2).find(|w| w[0] == "--port")
-                .map(|w| w[1].as_str()).unwrap_or("3000");
+            let port = args
+                .windows(2)
+                .find(|w| w[0] == "--port")
+                .map(|w| w[1].as_str())
+                .unwrap_or("3000");
             println!("[INFO] Serving built site at http://localhost:{}/", port);
         }
-        _ => println!("docusaurus: '{}' completed", subcmd),
+        _ => println!("docusaurus: {} completed", quoteaf_os(subcmd)),
     }
     0
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "docusaurus".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "docusaurus".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_docusaurus(&rest);
     process::exit(code);
@@ -73,7 +90,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_docusaurus};
+    use super::{basename, run_docusaurus, strip_ext};
 
     #[test]
     fn basename_strips_path() {

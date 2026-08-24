@@ -4,6 +4,7 @@
 //!
 //! Multi-personality: `flux`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -55,7 +56,9 @@ fn run_flux(args: &[String]) -> i32 {
                 }
                 "sources" | "source" => {
                     println!("NAME       AGE   READY  STATUS");
-                    println!("slateos-repo 4d    True   stored artifact for revision 'main@sha1:abcdef1'");
+                    println!(
+                        "slateos-repo 4d    True   stored artifact for revision 'main@sha1:abcdef1'"
+                    );
                 }
                 "helmreleases" | "hr" => {
                     println!("NAME         AGE   READY  STATUS");
@@ -71,14 +74,21 @@ fn run_flux(args: &[String]) -> i32 {
         "reconcile" => {
             let resource = args.get(1).map(|s| s.as_str()).unwrap_or("kustomization");
             let name = args.get(2).map(|s| s.as_str()).unwrap_or("flux-system");
-            println!("► annotating {} \"{}\" in \"flux-system\" namespace", resource, name);
+            println!(
+                "► annotating {} \"{}\" in \"flux-system\" namespace",
+                resource, name
+            );
             println!("✔ {} \"{}\" annotated", resource, name);
             println!("◎ waiting for {} reconciliation", resource);
             println!("✔ {} reconciliation completed", resource);
         }
         "logs" => {
-            println!("2024-05-22T12:00:00Z info source-controller Reconciliation finished {{\"revision\":\"main@sha1:abcdef1\"}}");
-            println!("2024-05-22T12:00:01Z info kustomize-controller Reconciliation finished {{\"revision\":\"main@sha1:abcdef1\"}}");
+            println!(
+                "2024-05-22T12:00:00Z info source-controller Reconciliation finished {{\"revision\":\"main@sha1:abcdef1\"}}"
+            );
+            println!(
+                "2024-05-22T12:00:01Z info kustomize-controller Reconciliation finished {{\"revision\":\"main@sha1:abcdef1\"}}"
+            );
         }
         "suspend" | "resume" => {
             let resource = args.get(1).map(|s| s.as_str()).unwrap_or("kustomization");
@@ -86,7 +96,7 @@ fn run_flux(args: &[String]) -> i32 {
             println!("► {}ing {} \"{}\"", subcmd, resource, name);
             println!("✔ {} \"{}\" {}d", resource, name, subcmd);
         }
-        _ => println!("flux: command '{}' completed", subcmd),
+        _ => println!("flux: command {} completed", quoteaf_os(subcmd)),
     }
     0
 }
@@ -100,7 +110,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_flux};
+    use super::run_flux;
 
     #[test]
     fn help_exits_zero() {

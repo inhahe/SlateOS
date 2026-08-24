@@ -4,6 +4,7 @@
 //!
 //! Single personality: `paypal`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -49,14 +50,21 @@ fn run_paypal(args: Vec<String>) -> i32 {
                     println!("✔ Order created: 7KL89012MN345678O");
                     println!("  Amount: $99.00 USD");
                     println!("  Status: CREATED");
-                    println!("  Approval URL: https://www.sandbox.paypal.com/checkoutnow?token=7KL89012MN345678O");
+                    println!(
+                        "  Approval URL: https://www.sandbox.paypal.com/checkoutnow?token=7KL89012MN345678O"
+                    );
                 }
                 "capture" => {
-                    let id = args.get(2).map(|s| s.as_str()).unwrap_or("1AB23456CD789012E");
+                    let id = args
+                        .get(2)
+                        .map(|s| s.as_str())
+                        .unwrap_or("1AB23456CD789012E");
                     println!("✔ Order {} captured", id);
                     println!("  Status: COMPLETED");
                 }
-                _ => { println!("Order operation: {}", sub); }
+                _ => {
+                    println!("Order operation: {}", sub);
+                }
             }
             0
         }
@@ -79,13 +87,17 @@ fn run_paypal(args: Vec<String>) -> i32 {
                     println!("  Items: 3");
                     println!("  Total: $300.00");
                 }
-                _ => { println!("Payout operation: {}", sub); }
+                _ => {
+                    println!("Payout operation: {}", sub);
+                }
             }
             0
         }
         "disputes" => {
             println!("ID                  Amount      Reason              Status");
-            println!("PP-D-abc123         $99.00      MERCHANDISE_OR_SERVICE_NOT_RECEIVED  UNDER_REVIEW");
+            println!(
+                "PP-D-abc123         $99.00      MERCHANDISE_OR_SERVICE_NOT_RECEIVED  UNDER_REVIEW"
+            );
             println!("PP-D-def456         $49.99      NOT_AS_DESCRIBED    RESOLVED");
             0
         }
@@ -104,7 +116,9 @@ fn run_paypal(args: Vec<String>) -> i32 {
                     let id = args.get(2).map(|s| s.as_str()).unwrap_or("INV2-abc123");
                     println!("✔ Invoice {} sent", id);
                 }
-                _ => { println!("Invoice operation: {}", sub); }
+                _ => {
+                    println!("Invoice operation: {}", sub);
+                }
             }
             0
         }
@@ -113,9 +127,13 @@ fn run_paypal(args: Vec<String>) -> i32 {
             match sub {
                 "list" => {
                     println!("ID              URL                                  Events");
-                    println!("WH-abc123       https://api.example.com/paypal       PAYMENT.CAPTURE.COMPLETED, CHECKOUT.ORDER.APPROVED");
+                    println!(
+                        "WH-abc123       https://api.example.com/paypal       PAYMENT.CAPTURE.COMPLETED, CHECKOUT.ORDER.APPROVED"
+                    );
                 }
-                _ => { println!("Webhook operation: {}", sub); }
+                _ => {
+                    println!("Webhook operation: {}", sub);
+                }
             }
             0
         }
@@ -123,7 +141,7 @@ fn run_paypal(args: Vec<String>) -> i32 {
             if cmd.is_empty() {
                 eprintln!("Usage: paypal <command>. See --help.");
             } else {
-                eprintln!("Error: unknown command '{}'. See --help.", cmd);
+                eprintln!("Error: unknown command {}. See --help.", quoteaf_os(cmd));
             }
             1
         }
@@ -139,7 +157,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_paypal};
+    use super::run_paypal;
 
     #[test]
     fn help_exits_zero() {

@@ -2,3 +2,8 @@
 name = "pdm-cli"
 version = "0.1.0"
 edition = "2024"
+
+[dependencies]
+# pdm-cli names packages, scripts and virtualenvs, read from the command
+# line and from pyproject.toml.
+quoting = { path = "../quoting" }

@@ -8,6 +8,7 @@
 //! - `mcelog` (default) — machine check exception logger/daemon
 //! - `mcelog-client` — query running mcelog daemon
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -198,25 +199,28 @@ fn format_timestamp(ts: u64) -> String {
 fn read_mce_events() -> Vec<MceEvent> {
     // In a real kernel, read from /dev/mcelog or kernel MCE ring buffer
     let statuses: &[(u64, u32, u32)] = &[
-        (0x8000004000010005, 0, 3),  // Corrected memory controller error
-        (0xA000004000010005, 1, 3),  // UC memory controller error
-        (0x8000004000010100, 0, 1),  // Corrected cache hierarchy error
+        (0x8000004000010005, 0, 3), // Corrected memory controller error
+        (0xA000004000010005, 1, 3), // UC memory controller error
+        (0x8000004000010100, 0, 1), // Corrected cache hierarchy error
     ];
 
-    statuses.iter().map(|&(status, cpu, bank)| {
-        let (error_type, severity) = decode_mce_status(status);
-        MceEvent {
-            cpu,
-            bank,
-            status,
-            address: 0x0000_7F80_1234_0000,
-            misc: 0,
-            timestamp: 1716000000 + cpu as u64 * 100,
-            severity,
-            error_type,
-            _corrected: severity == MceSeverity::Corrected,
-        }
-    }).collect()
+    statuses
+        .iter()
+        .map(|&(status, cpu, bank)| {
+            let (error_type, severity) = decode_mce_status(status);
+            MceEvent {
+                cpu,
+                bank,
+                status,
+                address: 0x0000_7F80_1234_0000,
+                misc: 0,
+                timestamp: 1716000000 + cpu as u64 * 100,
+                severity,
+                error_type,
+                _corrected: severity == MceSeverity::Corrected,
+            }
+        })
+        .collect()
 }
 
 fn read_dimm_info() -> Vec<DimmInfo> {
@@ -239,7 +243,10 @@ fn read_dimm_info() -> Vec<DimmInfo> {
 // ── mcelog personality ────────────────────────────────────────────────
 
 fn run_mcelog(args: Vec<String>) -> i32 {
-    let cmd = args.first().cloned().unwrap_or_else(|| "summary".to_string());
+    let cmd = args
+        .first()
+        .cloned()
+        .unwrap_or_else(|| "summary".to_string());
     let cmd_args: Vec<String> = args.into_iter().skip(1).collect();
 
     match cmd.as_str() {
@@ -271,7 +278,7 @@ fn run_mcelog(args: Vec<String>) -> i32 {
         "--drop-old-memory" => cmd_drop_old_memory(&cmd_args),
         "--dmi" | "dmi" => cmd_dmi(),
         other => {
-            eprintln!("mcelog: unknown command '{}'", other);
+            eprintln!("mcelog: unknown command {}", quoteaf_os(other));
             eprintln!("Try 'mcelog --help' for more information.");
             1
         }
@@ -285,9 +292,18 @@ fn cmd_summary() -> i32 {
         return 0;
     }
 
-    let corrected = events.iter().filter(|e| e.severity == MceSeverity::Corrected).count();
-    let uncorrected = events.iter().filter(|e| e.severity == MceSeverity::Uncorrected).count();
-    let fatal = events.iter().filter(|e| e.severity == MceSeverity::Fatal).count();
+    let corrected = events
+        .iter()
+        .filter(|e| e.severity == MceSeverity::Corrected)
+        .count();
+    let uncorrected = events
+        .iter()
+        .filter(|e| e.severity == MceSeverity::Uncorrected)
+        .count();
+    let fatal = events
+        .iter()
+        .filter(|e| e.severity == MceSeverity::Fatal)
+        .count();
 
     println!("Machine Check Event Summary");
     println!("===========================");
@@ -313,7 +329,8 @@ fn cmd_summary() -> i32 {
     // Group by error type
     println!();
     println!("Events by type:");
-    let mut type_counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    let mut type_counts: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
     for e in &events {
         *type_counts.entry(format!("{}", e.error_type)).or_insert(0) += 1;
     }
@@ -380,17 +397,19 @@ fn cmd_ascii() -> i32 {
 }
 
 fn cmd_drop_old_memory(args: &[String]) -> i32 {
-    let threshold_days: u64 = args.first()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(30);
+    let threshold_days: u64 = args.first().and_then(|s| s.parse().ok()).unwrap_or(30);
 
     let events = read_mce_events();
-    let memory_events: Vec<_> = events.iter()
+    let memory_events: Vec<_> = events
+        .iter()
         .filter(|e| e.error_type == MceErrorType::MemoryController)
         .filter(|e| e.severity == MceSeverity::Corrected)
         .collect();
 
-    println!("Dropping corrected memory errors older than {} days", threshold_days);
+    println!(
+        "Dropping corrected memory errors older than {} days",
+        threshold_days
+    );
     println!("Found {} corrected memory errors", memory_events.len());
     println!("Dropped 0 old entries (simulated)");
     0
@@ -420,7 +439,10 @@ fn cmd_dmi() -> i32 {
 // ── mcelog-client personality ─────────────────────────────────────────
 
 fn run_client(args: Vec<String>) -> i32 {
-    let cmd = args.first().cloned().unwrap_or_else(|| "status".to_string());
+    let cmd = args
+        .first()
+        .cloned()
+        .unwrap_or_else(|| "status".to_string());
 
     match cmd.as_str() {
         "--help" | "help" => {
@@ -446,11 +468,9 @@ fn run_client(args: Vec<String>) -> i32 {
             println!("mcelog daemon: alive (simulated)");
             0
         }
-        "dump" => {
-            cmd_show()
-        }
+        "dump" => cmd_show(),
         other => {
-            eprintln!("mcelog-client: unknown command '{}'", other);
+            eprintln!("mcelog-client: unknown command {}", quoteaf_os(other));
             1
         }
     }

@@ -4,11 +4,15 @@
 //!
 //! Single personality: `systemctl`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
 fn run_systemctl(args: Vec<String>) -> i32 {
-    if args.iter().any(|a| a == "--help" || a == "-h" || a == "help") {
+    if args
+        .iter()
+        .any(|a| a == "--help" || a == "-h" || a == "help")
+    {
         println!("Usage: systemctl [OPTIONS] COMMAND [UNIT...]");
         println!();
         println!("systemctl — service manager control (Slate OS).");
@@ -54,7 +58,10 @@ fn run_systemctl(args: Vec<String>) -> i32 {
                 println!("● {}", svc);
                 println!("     Loaded: loaded (/etc/systemd/system/{}; enabled)", svc);
                 println!("     Active: active (running) since Mon 2024-01-15 08:00:00 UTC; 4h ago");
-                println!("   Main PID: 1234 ({})", svc.split('.').next().unwrap_or(svc));
+                println!(
+                    "   Main PID: 1234 ({})",
+                    svc.split('.').next().unwrap_or(svc)
+                );
                 println!("      Tasks: 4 (limit: 4096)");
                 println!("     Memory: 24.0M");
                 println!("        CPU: 1.234s");
@@ -63,20 +70,42 @@ fn run_systemctl(args: Vec<String>) -> i32 {
                 println!("Jan 15 08:00:00 slateos systemd[1]: Started {}.", svc);
             }
         }
-        "start" => { println!("Started {}", unit); }
-        "stop" => { println!("Stopped {}", unit); }
-        "restart" => { println!("Restarted {}", unit); }
-        "reload" => { println!("Reloaded {}", unit); }
+        "start" => {
+            println!("Started {}", unit);
+        }
+        "stop" => {
+            println!("Stopped {}", unit);
+        }
+        "restart" => {
+            println!("Restarted {}", unit);
+        }
+        "reload" => {
+            println!("Reloaded {}", unit);
+        }
         "enable" => {
-            println!("Created symlink /etc/systemd/system/multi-user.target.wants/{} -> /usr/lib/systemd/system/{}", unit, unit);
+            println!(
+                "Created symlink /etc/systemd/system/multi-user.target.wants/{} -> /usr/lib/systemd/system/{}",
+                unit, unit
+            );
         }
         "disable" => {
-            println!("Removed /etc/systemd/system/multi-user.target.wants/{}", unit);
+            println!(
+                "Removed /etc/systemd/system/multi-user.target.wants/{}",
+                unit
+            );
         }
-        "is-active" => { println!("active"); }
-        "is-enabled" => { println!("enabled"); }
-        "mask" => { println!("Created symlink /etc/systemd/system/{} -> /dev/null", unit); }
-        "unmask" => { println!("Removed /etc/systemd/system/{}", unit); }
+        "is-active" => {
+            println!("active");
+        }
+        "is-enabled" => {
+            println!("enabled");
+        }
+        "mask" => {
+            println!("Created symlink /etc/systemd/system/{} -> /dev/null", unit);
+        }
+        "unmask" => {
+            println!("Removed /etc/systemd/system/{}", unit);
+        }
         "daemon-reload" => { /* silent success */ }
         "list-units" => {
             println!("  UNIT                          LOAD   ACTIVE SUB     DESCRIPTION");
@@ -85,7 +114,9 @@ fn run_systemctl(args: Vec<String>) -> i32 {
             println!("  sshd.service                  loaded active running OpenSSH Server");
             println!("  nginx.service                 loaded active running Nginx HTTP Server");
             println!("  postgresql.service             loaded active running PostgreSQL Database");
-            println!("  cron.service                  loaded active running Periodic Task Scheduler");
+            println!(
+                "  cron.service                  loaded active running Periodic Task Scheduler"
+            );
             println!();
             println!("LOAD   = Reflects whether the unit definition was properly loaded.");
             println!("ACTIVE = The high-level unit activation state, i.e. generalization of SUB.");
@@ -103,10 +134,17 @@ fn run_systemctl(args: Vec<String>) -> i32 {
             println!();
             println!("5 unit files listed.");
         }
-        "reboot" => { println!("System is rebooting..."); }
-        "poweroff" => { println!("System is powering off..."); }
+        "reboot" => {
+            println!("System is rebooting...");
+        }
+        "poweroff" => {
+            println!("System is powering off...");
+        }
         _ => {
-            eprintln!("systemctl: unknown command '{}'. See systemctl --help.", cmd);
+            eprintln!(
+                "systemctl: unknown command {}. See systemctl --help.",
+                quoteaf_os(cmd)
+            );
             return 1;
         }
     }
@@ -122,7 +160,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_systemctl};
+    use super::run_systemctl;
 
     #[test]
     fn help_exits_zero() {

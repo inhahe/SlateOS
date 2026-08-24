@@ -2,3 +2,8 @@
 name = "ros-cli"
 version = "0.1.0"
 edition = "2024"
+
+[dependencies]
+# ros-cli names nodes, topics and services; a topic name is registered by
+# whatever node published it, so it is another process's word.
+quoting = { path = "../quoting" }

@@ -4,6 +4,7 @@
 //!
 //! Multi-personality: `nats-server` (server), `nats` (CLI client)
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -27,11 +28,15 @@ fn run_nats_server(args: Vec<String>) -> i32 {
         println!("nats-server: v2.10.14 (Slate OS)");
         return 0;
     }
-    let port = args.iter().position(|a| a == "-p" || a == "--port")
+    let port = args
+        .iter()
+        .position(|a| a == "-p" || a == "--port")
         .and_then(|i| args.get(i + 1))
         .and_then(|s| s.parse::<u16>().ok())
         .unwrap_or(4222);
-    let name = args.iter().position(|a| a == "--name")
+    let name = args
+        .iter()
+        .position(|a| a == "--name")
         .and_then(|i| args.get(i + 1))
         .map(|s| s.as_str())
         .unwrap_or("slateos-nats-1");
@@ -39,15 +44,25 @@ fn run_nats_server(args: Vec<String>) -> i32 {
     println!("[12345] 2025/05/22 10:00:00.000000 [INF] Starting nats-server");
     println!("[12345] 2025/05/22 10:00:00.000001 [INF]   Version:  2.10.14 (Slate OS)");
     println!("[12345] 2025/05/22 10:00:00.000002 [INF]   Git:      [abc1234]");
-    println!("[12345] 2025/05/22 10:00:00.000003 [INF]   Name:     {}", name);
-    println!("[12345] 2025/05/22 10:00:00.000004 [INF]   ID:       NABC123DEF456GHI789JKL012MNO345PQR678STU901");
+    println!(
+        "[12345] 2025/05/22 10:00:00.000003 [INF]   Name:     {}",
+        name
+    );
+    println!(
+        "[12345] 2025/05/22 10:00:00.000004 [INF]   ID:       NABC123DEF456GHI789JKL012MNO345PQR678STU901"
+    );
     if js {
         println!("[12345] 2025/05/22 10:00:00.100000 [INF] Starting JetStream");
-        println!("[12345] 2025/05/22 10:00:00.100001 [INF]   Store Directory:  \"/tmp/nats/jetstream\"");
+        println!(
+            "[12345] 2025/05/22 10:00:00.100001 [INF]   Store Directory:  \"/tmp/nats/jetstream\""
+        );
         println!("[12345] 2025/05/22 10:00:00.100002 [INF]   Max Memory Store: 1.00 GB");
         println!("[12345] 2025/05/22 10:00:00.100003 [INF]   Max File Store:   10.00 GB");
     }
-    println!("[12345] 2025/05/22 10:00:00.200000 [INF] Listening for client connections on 0.0.0.0:{}", port);
+    println!(
+        "[12345] 2025/05/22 10:00:00.200000 [INF] Listening for client connections on 0.0.0.0:{}",
+        port
+    );
     println!("[12345] 2025/05/22 10:00:00.200001 [INF] Server is ready");
     0
 }
@@ -81,7 +96,10 @@ fn run_nats_cli(args: Vec<String>) -> i32 {
             0
         }
         "pub" => {
-            let subj = cmd_args.first().map(|s| s.as_str()).unwrap_or("test.subject");
+            let subj = cmd_args
+                .first()
+                .map(|s| s.as_str())
+                .unwrap_or("test.subject");
             let msg = cmd_args.get(1).map(|s| s.as_str()).unwrap_or("hello");
             println!("Published {} bytes to \"{}\"", msg.len(), subj);
             0
@@ -97,7 +115,10 @@ fn run_nats_cli(args: Vec<String>) -> i32 {
             0
         }
         "req" => {
-            let subj = cmd_args.first().map(|s| s.as_str()).unwrap_or("service.echo");
+            let subj = cmd_args
+                .first()
+                .map(|s| s.as_str())
+                .unwrap_or("service.echo");
             println!("Sending request on \"{}\"", subj);
             println!("Received with rtt 1.234ms");
             println!("echo response");
@@ -170,8 +191,12 @@ fn run_nats_cli(args: Vec<String>) -> i32 {
                     println!("  Data Out: 285 MB");
                 }
                 "ls" | "list" => {
-                    println!("Name              Cluster    Host           Version  Conns  Subs   Msgs In  Msgs Out");
-                    println!("slateos-nats-1      -          0.0.0.0:4222   2.10.14  42     156    1234567  2345678");
+                    println!(
+                        "Name              Cluster    Host           Version  Conns  Subs   Msgs In  Msgs Out"
+                    );
+                    println!(
+                        "slateos-nats-1      -          0.0.0.0:4222   2.10.14  42     156    1234567  2345678"
+                    );
                 }
                 _ => println!("Usage: nats server <info|ls>"),
             }
@@ -182,7 +207,10 @@ fn run_nats_cli(args: Vec<String>) -> i32 {
             println!("  min=0.123ms, avg=0.456ms, max=1.234ms");
             0
         }
-        other => { eprintln!("nats: unknown command '{}'", other); 1 }
+        other => {
+            eprintln!("nats: unknown command {}", quoteaf_os(other));
+            1
+        }
     }
 }
 
@@ -193,7 +221,9 @@ fn main() {
         let bytes = s.as_bytes();
         let mut last_sep = 0;
         for (i, &b) in bytes.iter().enumerate() {
-            if b == b'/' || b == b'\\' { last_sep = i + 1; }
+            if b == b'/' || b == b'\\' {
+                last_sep = i + 1;
+            }
         }
         let base = &s[last_sep..];
         base.strip_suffix(".exe").unwrap_or(base).to_string()
@@ -208,7 +238,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_nats_server};
+    use super::run_nats_server;
 
     #[test]
     fn help_exits_zero() {

@@ -4,6 +4,7 @@
 //!
 //! Single personality: `playwright`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -32,13 +33,20 @@ fn run_playwright(args: Vec<String>) -> i32 {
     let cmd = args.first().map(|s| s.as_str()).unwrap_or("");
     match cmd {
         "test" => {
-            let grep = args.windows(2).find(|w| w[0] == "--grep").map(|w| w[1].as_str());
+            let grep = args
+                .windows(2)
+                .find(|w| w[0] == "--grep")
+                .map(|w| w[1].as_str());
             println!("Running 12 tests using 4 workers");
             println!();
             println!("  ✓  1 [chromium] › login.spec.ts:5 › should login successfully (2.1s)");
-            println!("  ✓  2 [chromium] › login.spec.ts:15 › should show error for wrong password (1.8s)");
+            println!(
+                "  ✓  2 [chromium] › login.spec.ts:15 › should show error for wrong password (1.8s)"
+            );
             println!("  ✓  3 [firefox] › login.spec.ts:5 › should login successfully (2.5s)");
-            println!("  ✓  4 [firefox] › login.spec.ts:15 › should show error for wrong password (2.0s)");
+            println!(
+                "  ✓  4 [firefox] › login.spec.ts:15 › should show error for wrong password (2.0s)"
+            );
             println!("  ✓  5 [chromium] › dashboard.spec.ts:5 › should load dashboard (3.2s)");
             println!("  ✓  6 [chromium] › dashboard.spec.ts:20 › should filter by date (2.8s)");
             println!("  ✗  7 [webkit] › dashboard.spec.ts:5 › should load dashboard (4.1s)");
@@ -59,7 +67,10 @@ fn run_playwright(args: Vec<String>) -> i32 {
             0
         }
         "codegen" => {
-            let url = args.get(1).map(|s| s.as_str()).unwrap_or("http://localhost:3000");
+            let url = args
+                .get(1)
+                .map(|s| s.as_str())
+                .unwrap_or("http://localhost:3000");
             println!("Opening browser for codegen at {}", url);
             println!("  Recording actions...");
             println!("  (close browser to save generated test)");
@@ -73,15 +84,29 @@ fn run_playwright(args: Vec<String>) -> i32 {
             0
         }
         "screenshot" => {
-            let url = args.get(1).map(|s| s.as_str()).unwrap_or("http://localhost:3000");
-            let output = args.windows(2).find(|w| w[0] == "-o" || w[0] == "--output").map(|w| w[1].as_str()).unwrap_or("screenshot.png");
+            let url = args
+                .get(1)
+                .map(|s| s.as_str())
+                .unwrap_or("http://localhost:3000");
+            let output = args
+                .windows(2)
+                .find(|w| w[0] == "-o" || w[0] == "--output")
+                .map(|w| w[1].as_str())
+                .unwrap_or("screenshot.png");
             println!("Capturing screenshot of {}", url);
             println!("  Saved to {}", output);
             0
         }
         "pdf" => {
-            let url = args.get(1).map(|s| s.as_str()).unwrap_or("http://localhost:3000");
-            let output = args.windows(2).find(|w| w[0] == "-o" || w[0] == "--output").map(|w| w[1].as_str()).unwrap_or("page.pdf");
+            let url = args
+                .get(1)
+                .map(|s| s.as_str())
+                .unwrap_or("http://localhost:3000");
+            let output = args
+                .windows(2)
+                .find(|w| w[0] == "-o" || w[0] == "--output")
+                .map(|w| w[1].as_str())
+                .unwrap_or("page.pdf");
             println!("Generating PDF of {}", url);
             println!("  Saved to {}", output);
             0
@@ -94,7 +119,9 @@ fn run_playwright(args: Vec<String>) -> i32 {
                     println!("Opening trace viewer for {}", file);
                     println!("  Serving at http://localhost:9322");
                 }
-                _ => { println!("Trace operation: {}", sub); }
+                _ => {
+                    println!("Trace operation: {}", sub);
+                }
             }
             0
         }
@@ -102,7 +129,7 @@ fn run_playwright(args: Vec<String>) -> i32 {
             if cmd.is_empty() {
                 eprintln!("Usage: playwright <command>. See --help.");
             } else {
-                eprintln!("Error: unknown command '{}'. See --help.", cmd);
+                eprintln!("Error: unknown command {}. See --help.", quoteaf_os(cmd));
             }
             1
         }
@@ -118,7 +145,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_playwright};
+    use super::run_playwright;
 
     #[test]
     fn help_exits_zero() {

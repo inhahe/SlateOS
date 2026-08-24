@@ -786,7 +786,9 @@ fn report_crng_ready(_arg: u64) {
         CREDIT_TARGET_BITS,
         CREDITED_IRQS.load(Ordering::Relaxed),
         READY_AT_IRQ.load(Ordering::Relaxed),
-        READY_AT_NS.load(Ordering::Relaxed).saturating_div(1_000_000),
+        READY_AT_NS
+            .load(Ordering::Relaxed)
+            .saturating_div(1_000_000),
     );
 }
 
@@ -1030,7 +1032,9 @@ pub fn self_test() {
             credit_target_bits(),
             credited_interrupts(),
             READY_AT_IRQ.load(Ordering::Relaxed),
-            READY_AT_NS.load(Ordering::Relaxed).saturating_div(1_000_000),
+            READY_AT_NS
+                .load(Ordering::Relaxed)
+                .saturating_div(1_000_000),
         );
     } else {
         serial_println!(

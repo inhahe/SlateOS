@@ -30,6 +30,7 @@
 //! killall -i <name>               Interactive confirmation
 //! ```
 
+use quoting::quoteaf_os;
 use std::env;
 use std::fs;
 use std::process;
@@ -258,14 +259,7 @@ fn send_process_command(command: &str) -> Result<String, String> {
     // SAFETY: SYS_CHANNEL_SEND takes the channel handle, a pointer to the
     // message buffer, and its length. `msg` lives on the stack and outlives
     // the syscall.
-    let send_ret = unsafe {
-        syscall3(
-            SYS_CHANNEL_SEND,
-            ch,
-            msg.as_ptr() as u64,
-            msg.len() as u64,
-        )
-    };
+    let send_ret = unsafe { syscall3(SYS_CHANNEL_SEND, ch, msg.as_ptr() as u64, msg.len() as u64) };
 
     if send_ret < 0 {
         // SAFETY: SYS_CHANNEL_CLOSE takes the handle and two unused args.
@@ -366,8 +360,7 @@ fn force_kill(pid: u64, exit_code: u64) -> Result<i64, i64> {
 /// to enumerate threads and suspend each one.
 fn stop_process(pid: u64) -> Result<u32, String> {
     let task_dir = format!("/proc/{pid}/task");
-    let entries = fs::read_dir(&task_dir)
-        .map_err(|e| format!("cannot read {task_dir}: {e}"))?;
+    let entries = fs::read_dir(&task_dir).map_err(|e| format!("cannot read {task_dir}: {e}"))?;
 
     let mut count = 0u32;
     let mut last_err: Option<String> = None;
@@ -402,8 +395,7 @@ fn stop_process(pid: u64) -> Result<u32, String> {
 /// Resume all threads of a process.
 fn continue_process(pid: u64) -> Result<u32, String> {
     let task_dir = format!("/proc/{pid}/task");
-    let entries = fs::read_dir(&task_dir)
-        .map_err(|e| format!("cannot read {task_dir}: {e}"))?;
+    let entries = fs::read_dir(&task_dir).map_err(|e| format!("cannot read {task_dir}: {e}"))?;
 
     let mut count = 0u32;
     let mut last_err: Option<String> = None;
@@ -477,9 +469,10 @@ fn find_pids_by_name(target: &str) -> Vec<u64> {
         };
 
         if let Some(proc_name) = read_process_name(pid)
-            && proc_name == target {
-                pids.push(pid);
-            }
+            && proc_name == target
+        {
+            pids.push(pid);
+        }
     }
 
     pids.sort_unstable();
@@ -651,10 +644,7 @@ fn execute_kill(pid: u64, action: Action, verbose: bool) -> KillResult {
                         },
                         Err(errno) => KillResult {
                             success: false,
-                            message: format!(
-                                "failed to HUP {pid}: {}",
-                                errno_to_string(errno)
-                            ),
+                            message: format!("failed to HUP {pid}: {}", errno_to_string(errno)),
                         },
                     }
                 }
@@ -681,10 +671,7 @@ fn execute_kill(pid: u64, action: Action, verbose: bool) -> KillResult {
                         },
                         Err(errno) => KillResult {
                             success: false,
-                            message: format!(
-                                "failed to INT {pid}: {}",
-                                errno_to_string(errno)
-                            ),
+                            message: format!("failed to INT {pid}: {}", errno_to_string(errno)),
                         },
                     }
                 }
@@ -875,28 +862,30 @@ fn parse_args(args: &[String]) -> Result<Options, String> {
 
         // Signal specification: -<number> or -<NAME>
         if let Some(stripped) = arg.strip_prefix('-')
-            && !stripped.is_empty() && !explicit_signal {
-                // Try as a number first.
-                if let Ok(num) = stripped.parse::<u32>() {
-                    if let Some(entry) = signal_by_number(num) {
-                        opts.action = entry.action;
-                        explicit_signal = true;
-                        i += 1;
-                        continue;
-                    }
-                    return Err(format!("unknown signal number: {num}"));
-                }
-
-                // Try as a name.
-                if let Some(entry) = signal_by_name(stripped) {
+            && !stripped.is_empty()
+            && !explicit_signal
+        {
+            // Try as a number first.
+            if let Ok(num) = stripped.parse::<u32>() {
+                if let Some(entry) = signal_by_number(num) {
                     opts.action = entry.action;
                     explicit_signal = true;
                     i += 1;
                     continue;
                 }
-
-                return Err(format!("unknown signal: {stripped}"));
+                return Err(format!("unknown signal number: {num}"));
             }
+
+            // Try as a name.
+            if let Some(entry) = signal_by_name(stripped) {
+                opts.action = entry.action;
+                explicit_signal = true;
+                i += 1;
+                continue;
+            }
+
+            return Err(format!("unknown signal: {stripped}"));
+        }
 
         // Remaining arguments are PIDs or process names.
         if opts.killall_mode {
@@ -907,9 +896,7 @@ fn parse_args(args: &[String]) -> Result<Options, String> {
                 Ok(pid) => opts.pids.push(pid),
                 Err(_) => {
                     // If it looks like a name, suggest killall.
-                    return Err(format!(
-                        "invalid PID: {arg} (use killall to kill by name)"
-                    ));
+                    return Err(format!("invalid PID: {arg} (use killall to kill by name)"));
                 }
             }
         }
@@ -1050,15 +1037,16 @@ fn main() {
         let pids = find_pids_by_name(name);
         if pids.is_empty() {
             if !opts.quiet {
-                eprintln!("kill: no process found with name '{name}'");
+                eprintln!("kill: no process found with name {}", quoteaf_os(name));
             }
             process::exit(1);
         }
 
         if opts.verbose {
             eprintln!(
-                "kill: found {} process(es) named '{name}': {:?}",
+                "kill: found {} process(es) named {}: {:?}",
                 pids.len(),
+                quoteaf_os(name),
                 pids
             );
         }
@@ -1073,10 +1061,7 @@ fn main() {
     for &pid in &target_pids {
         // Interactive confirmation for killall -i.
         if opts.interactive {
-            let name = opts
-                .target_name
-                .as_deref()
-                .unwrap_or("?");
+            let name = opts.target_name.as_deref().unwrap_or("?");
             if !confirm(&format!("Kill {name} (pid {pid})?")) {
                 continue;
             }
@@ -1138,14 +1123,17 @@ fn main() {
 
         // --timeout without --wait: escalate after timeout if the process
         // is still alive. This is a convenience shorthand.
-        if !opts.wait && opts.timeout.is_some() && result.success && opts.action != Action::ForceKill && opts.action != Action::Probe {
+        if !opts.wait
+            && opts.timeout.is_some()
+            && result.success
+            && opts.action != Action::ForceKill
+            && opts.action != Action::Probe
+        {
             let timeout = opts.timeout.unwrap_or(5);
 
             if !wait_for_death(pid, timeout) {
                 if opts.verbose {
-                    eprintln!(
-                        "kill: {pid} still alive after {timeout}s, escalating to force kill"
-                    );
+                    eprintln!("kill: {pid} still alive after {timeout}s, escalating to force kill");
                 }
 
                 let escalated = execute_kill(pid, Action::ForceKill, opts.verbose);

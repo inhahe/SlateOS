@@ -4,6 +4,7 @@
 //!
 //! Single personality: `ouch`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -42,7 +43,8 @@ fn run_ouch(args: Vec<String>) -> i32 {
             0
         }
         "compress" | "c" => {
-            let rest: Vec<&str> = args[1..].iter()
+            let rest: Vec<&str> = args[1..]
+                .iter()
                 .filter(|a| !a.starts_with('-'))
                 .map(|s| s.as_str())
                 .collect();
@@ -76,15 +78,20 @@ fn run_ouch(args: Vec<String>) -> i32 {
                 "tar"
             };
 
-            println!("Compressing {} file(s) into '{}' [{}]...", inputs.len(), output, format);
+            println!(
+                "Compressing {} file(s) into {} [{format}]...",
+                inputs.len(),
+                quoteaf_os(output)
+            );
             for input in &inputs {
-                println!("  + {}", input);
+                println!("  + {}", quoteaf_os(input));
             }
             println!("Done! {} created (1.2 MiB)", output);
             0
         }
         "decompress" | "d" => {
-            let rest: Vec<&str> = args[1..].iter()
+            let rest: Vec<&str> = args[1..]
+                .iter()
                 .filter(|a| !a.starts_with('-'))
                 .map(|s| s.as_str())
                 .collect();
@@ -95,7 +102,7 @@ fn run_ouch(args: Vec<String>) -> i32 {
             }
 
             for archive in &rest {
-                println!("Decompressing '{}'...", archive);
+                println!("Decompressing {}...", quoteaf_os(archive));
                 println!("  → Cargo.toml");
                 println!("  → src/");
                 println!("  → src/main.rs");
@@ -108,12 +115,13 @@ fn run_ouch(args: Vec<String>) -> i32 {
             0
         }
         "list" | "l" | "ls" => {
-            let archive = args.get(1)
+            let archive = args
+                .get(1)
                 .filter(|a| !a.starts_with('-'))
                 .map(|s| s.as_str())
                 .unwrap_or("archive.tar.gz");
 
-            println!("Contents of '{}':", archive);
+            println!("Contents of {}:", quoteaf_os(archive));
             println!("  Cargo.toml           456 B");
             println!("  src/                     -");
             println!("  src/main.rs          1.2 KiB");
@@ -126,7 +134,7 @@ fn run_ouch(args: Vec<String>) -> i32 {
             0
         }
         _ => {
-            eprintln!("Error: unknown command '{}'. See --help.", cmd);
+            eprintln!("Error: unknown command {}. See --help.", quoteaf_os(cmd));
             1
         }
     }
@@ -141,7 +149,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_ouch};
+    use super::run_ouch;
 
     #[test]
     fn help_exits_zero() {

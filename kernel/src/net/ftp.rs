@@ -627,9 +627,35 @@ pub fn procfs_content() -> String {
 // Self-tests
 // ---------------------------------------------------------------------------
 
-/// Run FTP self-tests.
+/// Run the module's self-test suite against state of its own.
+///
+/// The suite mutates module state and asserts exact contents, and it used to
+/// do that to the *live* state -- which, since it is also a kernel-shell
+/// subcommand, changed or destroyed whatever the user had here and then
+/// reported success.  It is moved aside for the duration and put back
+/// afterwards; `crate::fs::selftest` records why this shape rather than the
+/// alternatives.
+///
+/// Each pristine value is the `static`'s own initialiser, which is the one
+/// spelling of "what a fresh boot holds" that cannot drift away from it.
 #[allow(dead_code)] // Public API.
 pub fn self_test() -> KernelResult<()> {
+    let _pristine_connections = crate::fs::selftest::pristine_atomic(&CONNECTIONS, 0);
+    let _pristine_logins = crate::fs::selftest::pristine_atomic(&LOGINS, 0);
+    let _pristine_list_commands = crate::fs::selftest::pristine_atomic(&LIST_COMMANDS, 0);
+    let _pristine_retr_commands = crate::fs::selftest::pristine_atomic(&RETR_COMMANDS, 0);
+    let _pristine_bytes_downloaded = crate::fs::selftest::pristine_atomic(&BYTES_DOWNLOADED, 0);
+    let _pristine_bytes_uploaded = crate::fs::selftest::pristine_atomic(&BYTES_UPLOADED, 0);
+    let _pristine_errors = crate::fs::selftest::pristine_atomic(&ERRORS, 0);
+    self_test_inner()
+}
+
+// `KernelResult` is `self_test`'s signature, which the shell's dispatch table
+// fixes; this body has no failing path of its own and never had one. The lint
+// fires only because the split moved that body into a *private* function, and
+// private is the visibility it inspects -- the code itself is unchanged.
+#[allow(clippy::unnecessary_wraps)]
+fn self_test_inner() -> KernelResult<()> {
     crate::serial_println!("[ftp] Running FTP self-tests...");
     let mut passed = 0u32;
 

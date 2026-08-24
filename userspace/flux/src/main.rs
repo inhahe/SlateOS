@@ -4,6 +4,7 @@
 //!
 //! Single personality: `flux`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -91,11 +92,12 @@ fn run_flux(args: Vec<String>) -> i32 {
             println!("2025-05-22T10:00:00Z info source-controller stored artifact");
             println!("2025-05-22T10:00:01Z info kustomize-controller Applied revision");
         }
-        "bootstrap" | "install" | "uninstall" | "suspend" | "resume" | "create" | "delete" | "export" | "diff" | "trace" | "events" => {
+        "bootstrap" | "install" | "uninstall" | "suspend" | "resume" | "create" | "delete"
+        | "export" | "diff" | "trace" | "events" => {
             println!("({} — simulated)", cmd);
         }
         _ => {
-            eprintln!("Unknown command '{}'. Use --help.", cmd);
+            eprintln!("Unknown command {}. Use --help.", quoteaf_os(cmd));
             return 1;
         }
     }
@@ -111,7 +113,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_flux};
+    use super::run_flux;
 
     #[test]
     fn help_exits_zero() {

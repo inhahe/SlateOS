@@ -4,11 +4,16 @@
 //!
 //! Multi-personality: `proxychains`, `tsocks`, `redsocks`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_proxychains(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
@@ -26,7 +31,11 @@ fn run_proxychains(args: &[String]) -> i32 {
     }
 
     let quiet = args.iter().any(|a| a == "-q");
-    let prog = args.iter().find(|a| !a.starts_with('-')).map(|s| s.as_str()).unwrap_or("curl");
+    let prog = args
+        .iter()
+        .find(|a| !a.starts_with('-'))
+        .map(|s| s.as_str())
+        .unwrap_or("curl");
 
     if !quiet {
         println!("[proxychains] config file found: /etc/proxychains.conf");
@@ -60,7 +69,11 @@ fn run_tsocks(args: &[String]) -> i32 {
         return 0;
     }
 
-    let prog = args.iter().find(|a| !a.starts_with('-')).map(|s| s.as_str()).unwrap_or("curl");
+    let prog = args
+        .iter()
+        .find(|a| !a.starts_with('-'))
+        .map(|s| s.as_str())
+        .unwrap_or("curl");
     println!("tsocks: proxying {} through SOCKS5 127.0.0.1:1080", prog);
     0
 }
@@ -87,10 +100,12 @@ fn run_redsocks(args: &[String]) -> i32 {
         return 0;
     }
 
-    let config = args.windows(2).find(|w| w[0] == "-c")
+    let config = args
+        .windows(2)
+        .find(|w| w[0] == "-c")
         .map(|w| w[1].as_str())
         .unwrap_or("/etc/redsocks.conf");
-    println!("redsocks: reading config from '{}'", config);
+    println!("redsocks: reading config from {}", quoteaf_os(config));
     println!("redsocks: roles:");
     println!("  redsocks: listening on 0.0.0.0:12345 -> SOCKS5 127.0.0.1:1080");
     println!("  redudp: listening on 0.0.0.0:10053 -> 127.0.0.1:1080");
@@ -100,7 +115,10 @@ fn run_redsocks(args: &[String]) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "proxychains".to_string());
+    let prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "proxychains".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = match prog.as_str() {
         "tsocks" => run_tsocks(&rest),
@@ -112,7 +130,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_proxychains};
+    use super::{basename, run_proxychains, strip_ext};
 
     #[test]
     fn basename_strips_path() {

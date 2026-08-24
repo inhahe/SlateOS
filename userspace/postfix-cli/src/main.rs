@@ -4,6 +4,7 @@
 //!
 //! Multi-personality: `postfix`, `postconf`, `postqueue`, `postsuper`, `postalias`, `postmap`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -27,11 +28,16 @@ fn run_postfix(args: &[String]) -> i32 {
         "start" => println!("postfix/postfix-script: starting the Postfix mail system"),
         "stop" => println!("postfix/postfix-script: stopping the Postfix mail system"),
         "reload" => println!("postfix/postfix-script: refreshing the Postfix mail system"),
-        "status" => println!("postfix/postfix-script: the Postfix mail system is running: PID: 1234"),
+        "status" => {
+            println!("postfix/postfix-script: the Postfix mail system is running: PID: 1234")
+        }
         "flush" => println!("postfix/postfix-script: flushing the mail queue"),
         "check" => println!("postfix/postfix-script: no configuration errors found"),
         _ => {
-            eprintln!("postfix: unknown command '{}'. Use: start|stop|reload|status|flush|check", cmd);
+            eprintln!(
+                "postfix: unknown command {}. Use: start|stop|reload|status|flush|check",
+                quoteaf_os(cmd)
+            );
             return 1;
         }
     }
@@ -96,7 +102,9 @@ fn run_postqueue(args: &[String]) -> i32 {
 
 fn run_postsuper(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
-        println!("Usage: postsuper [-d ALL | -d QUEUE_ID | -h QUEUE_ID | -H QUEUE_ID | -r QUEUE_ID]");
+        println!(
+            "Usage: postsuper [-d ALL | -d QUEUE_ID | -h QUEUE_ID | -H QUEUE_ID | -r QUEUE_ID]"
+        );
         println!();
         println!("postsuper — Postfix queue maintenance (Slate OS).");
         return 0;
@@ -141,7 +149,8 @@ fn run_postmap(args: &[String]) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first()
+    let prog = args
+        .first()
         .map(|s| strip_ext(basename(s)).to_string())
         .unwrap_or_else(|| "postfix".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
@@ -159,7 +168,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_postfix};
+    use super::{basename, run_postfix, strip_ext};
 
     #[test]
     fn basename_strips_path() {

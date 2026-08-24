@@ -4,11 +4,16 @@
 //!
 //! Multi-personality: `bentoml`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_bentoml(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
@@ -31,7 +36,7 @@ fn run_bentoml(args: &[String]) -> i32 {
         "--version" => println!("bentoml 1.2.0"),
         "serve" => {
             let service = args.get(1).map(|s| s.as_str()).unwrap_or("service:svc");
-            println!("Starting BentoML server for '{}'...", service);
+            println!("Starting BentoML server for {}...", quoteaf_os(service));
             println!("  API server running on http://0.0.0.0:3000");
             println!("  Swagger UI: http://0.0.0.0:3000/docs");
         }
@@ -53,28 +58,37 @@ fn run_bentoml(args: &[String]) -> i32 {
                 println!("my-model:latest           sklearn          12.3 MB    2024-01-15");
                 println!("text-classifier:v2        transformers     450 MB     2024-01-14");
             } else {
-                println!("bentoml models: '{}' completed", sub);
+                println!("bentoml models: {} completed", quoteaf_os(sub));
             }
         }
         "containerize" => {
-            let bento = args.get(1).map(|s| s.as_str()).unwrap_or("my-service:latest");
-            println!("Containerizing '{}'...", bento);
+            let bento = args
+                .get(1)
+                .map(|s| s.as_str())
+                .unwrap_or("my-service:latest");
+            println!("Containerizing {}...", quoteaf_os(bento));
             println!("  Building Docker image...");
             println!("  Image built: my-service:abc123");
         }
         "push" => {
-            let bento = args.get(1).map(|s| s.as_str()).unwrap_or("my-service:latest");
-            println!("Pushing '{}' to BentoCloud...", bento);
+            let bento = args
+                .get(1)
+                .map(|s| s.as_str())
+                .unwrap_or("my-service:latest");
+            println!("Pushing {} to BentoCloud...", quoteaf_os(bento));
             println!("Done.");
         }
-        _ => println!("bentoml: '{}' completed", subcmd),
+        _ => println!("bentoml: {} completed", quoteaf_os(subcmd)),
     }
     0
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "bentoml".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "bentoml".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_bentoml(&rest);
     process::exit(code);
@@ -82,7 +96,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_bentoml};
+    use super::{basename, run_bentoml, strip_ext};
 
     #[test]
     fn basename_strips_path() {

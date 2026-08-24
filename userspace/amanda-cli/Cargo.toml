@@ -2,3 +2,8 @@
 name = "amanda-cli"
 version = "0.1.0"
 edition = "2024"
+
+[dependencies]
+# The Amanda configuration name comes from argv and is echoed twice -- once
+# by amdump and once when reporting where the config was read from.
+quoting = { path = "../quoting" }

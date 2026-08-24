@@ -4,6 +4,7 @@
 //!
 //! Single personality: `cockroach`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -39,11 +40,15 @@ fn run_cockroach(args: Vec<String>) -> i32 {
         }
         "start" | "start-single-node" => {
             let is_single = cmd.as_str() == "start-single-node";
-            let listen = cmd_args.iter().position(|a| a == "--listen-addr")
+            let listen = cmd_args
+                .iter()
+                .position(|a| a == "--listen-addr")
                 .and_then(|i| cmd_args.get(i + 1))
                 .map(|s| s.as_str())
                 .unwrap_or("localhost:26257");
-            let http = cmd_args.iter().position(|a| a == "--http-addr")
+            let http = cmd_args
+                .iter()
+                .position(|a| a == "--http-addr")
                 .and_then(|i| cmd_args.get(i + 1))
                 .map(|s| s.as_str())
                 .unwrap_or("localhost:8080");
@@ -53,10 +58,19 @@ fn run_cockroach(args: Vec<String>) -> i32 {
             println!("CockroachDB node starting at 2025-05-22 10:00:00.000 (took 1.0s)");
             println!("build:               Slate OS v23.2.5");
             println!("webui:               http://{}", http);
-            println!("sql:                 postgresql://root@{}?sslmode=disable", listen);
+            println!(
+                "sql:                 postgresql://root@{}?sslmode=disable",
+                listen
+            );
             if is_single {
-                println!("sql (JDBC):          jdbc:postgresql://{}/defaultdb?sslmode=disable", listen);
-                println!("RPC client flags:    cockroach <client cmd> --host={}", listen);
+                println!(
+                    "sql (JDBC):          jdbc:postgresql://{}/defaultdb?sslmode=disable",
+                    listen
+                );
+                println!(
+                    "RPC client flags:    cockroach <client cmd> --host={}",
+                    listen
+                );
                 println!("cluster mode:        single-node");
             } else {
                 println!("cluster mode:        multi-node");
@@ -75,7 +89,9 @@ fn run_cockroach(args: Vec<String>) -> i32 {
             0
         }
         "sql" => {
-            let exec_stmt = cmd_args.iter().position(|a| a == "-e" || a == "--execute")
+            let exec_stmt = cmd_args
+                .iter()
+                .position(|a| a == "-e" || a == "--execute")
                 .and_then(|i| cmd_args.get(i + 1));
 
             if let Some(stmt) = exec_stmt {
@@ -97,7 +113,9 @@ fn run_cockroach(args: Vec<String>) -> i32 {
                     println!("(3 rows)");
                 } else if upper.contains("SELECT") {
                     println!("  id | name    | email               | created_at");
-                    println!("-----+---------+---------------------+----------------------------------");
+                    println!(
+                        "-----+---------+---------------------+----------------------------------"
+                    );
                     println!("   1 | alice   | alice@example.com   | 2025-01-15 08:30:00");
                     println!("   2 | bob     | bob@example.com     | 2025-02-20 14:15:00");
                     println!("   3 | charlie | charlie@example.com | 2025-03-10 11:45:00");
@@ -132,9 +150,15 @@ fn run_cockroach(args: Vec<String>) -> i32 {
             let sub = cmd_args.first().map(|s| s.as_str()).unwrap_or("status");
             match sub {
                 "status" => {
-                    println!("  id |     address      |   sql_address    |  build   |         started_at          |         updated_at          | locality | is_available | is_live");
-                    println!("-----+------------------+------------------+----------+-----------------------------+-----------------------------+----------+--------------+---------");
-                    println!("   1 | localhost:26257  | localhost:26257  | v23.2.5  | 2025-05-22 10:00:00         | 2025-05-22 10:00:42         |          | true         | true");
+                    println!(
+                        "  id |     address      |   sql_address    |  build   |         started_at          |         updated_at          | locality | is_available | is_live"
+                    );
+                    println!(
+                        "-----+------------------+------------------+----------+-----------------------------+-----------------------------+----------+--------------+---------"
+                    );
+                    println!(
+                        "   1 | localhost:26257  | localhost:26257  | v23.2.5  | 2025-05-22 10:00:00         | 2025-05-22 10:00:42         |          | true         | true"
+                    );
                 }
                 "ls" => {
                     println!("  id |");
@@ -163,7 +187,10 @@ fn run_cockroach(args: Vec<String>) -> i32 {
             println!("ok");
             0
         }
-        other => { eprintln!("cockroach: unknown command '{}'", other); 1 }
+        other => {
+            eprintln!("cockroach: unknown command {}", quoteaf_os(other));
+            1
+        }
     }
 }
 
@@ -176,7 +203,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_cockroach};
+    use super::run_cockroach;
 
     #[test]
     fn help_exits_zero() {

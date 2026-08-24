@@ -2,3 +2,8 @@
 name = "amqp-cli"
 version = "0.1.0"
 edition = "2024"
+
+[dependencies]
+# amqp-cli names exchanges, queues and routing keys, all of which any client
+# with access to the broker can create.
+quoting = { path = "../quoting" }

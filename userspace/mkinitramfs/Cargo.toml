@@ -4,6 +4,10 @@ version = "0.1.0"
 edition = "2024"
 description = "SlateOS mkinitramfs utility"
 [dependencies]
+# mkinitramfs names the output image, the kernel version directory and every
+# module it packs, so the words come from the command line and from the
+# modules tree on disk.
+quoting = { path = "../quoting" }
 # One definition of a mode word's file-type field, shared with `cpio`, `chmod`,
 # `stat` and `ls -l`. A newc header stores the same integer they read.
 modechange = { path = "../modechange" }

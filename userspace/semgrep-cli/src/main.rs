@@ -4,11 +4,16 @@
 //!
 //! Multi-personality: `semgrep`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_semgrep(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
@@ -56,11 +61,17 @@ fn run_semgrep(args: &[String]) -> i32 {
             println!("Findings: 1 (0 blocking, 1 non-blocking)");
         }
         _ => {
-            let config = args.windows(2).find(|w| w[0] == "--config")
-                .map(|w| w[1].as_str()).unwrap_or("auto");
+            let config = args
+                .windows(2)
+                .find(|w| w[0] == "--config")
+                .map(|w| w[1].as_str())
+                .unwrap_or("auto");
             let json_out = args.iter().any(|a| a == "--json");
-            let path = args.iter().rfind(|a| !a.starts_with('-') && *a != "scan")
-                .map(|s| s.as_str()).unwrap_or(".");
+            let path = args
+                .iter()
+                .rfind(|a| !a.starts_with('-') && *a != "scan")
+                .map(|s| s.as_str())
+                .unwrap_or(".");
 
             if json_out {
                 println!("{{");
@@ -76,7 +87,14 @@ fn run_semgrep(args: &[String]) -> i32 {
                 println!("  \"errors\": []");
                 println!("}}");
             } else {
-                println!("Scanning {} with config '{}'...", path, config);
+                // Both are argv words -- the scanned path and whatever
+                // followed `--config` -- and the hand-written quotes wrapped
+                // only the second, which quoted neither.
+                println!(
+                    "Scanning {} with config {}...",
+                    quoteaf_os(path),
+                    quoteaf_os(config)
+                );
                 println!();
                 println!("  src/app.py");
                 println!("    python.flask.security.xss.direct-use-of-jinja2");
@@ -87,7 +105,9 @@ fn run_semgrep(args: &[String]) -> i32 {
                 println!("  src/db.py");
                 println!("    python.django.security.injection.sql.sql-injection");
                 println!("    Severity: ERROR");
-                println!("    23│     cursor.execute(f\"SELECT * FROM users WHERE id={{user_id}}\")");
+                println!(
+                    "    23│     cursor.execute(f\"SELECT * FROM users WHERE id={{user_id}}\")"
+                );
                 println!("    Fix: Use parameterized queries");
                 println!();
                 println!("Ran 456 rules on 38 files.");
@@ -100,7 +120,10 @@ fn run_semgrep(args: &[String]) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "semgrep".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "semgrep".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_semgrep(&rest);
     process::exit(code);
@@ -108,7 +131,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_semgrep};
+    use super::{basename, run_semgrep, strip_ext};
 
     #[test]
     fn basename_strips_path() {

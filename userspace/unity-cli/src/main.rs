@@ -4,11 +4,16 @@
 //!
 //! Multi-personality: `unity-hub`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_unity(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
@@ -38,7 +43,7 @@ fn run_unity(args: &[String]) -> i32 {
                 println!("  2023.2.20f1    LTS");
                 println!("  2022.3.47f1    LTS");
             } else {
-                println!("unity-hub editors: '{}' completed", sub);
+                println!("unity-hub editors: {} completed", quoteaf_os(sub));
             }
         }
         "install" => {
@@ -55,28 +60,37 @@ fn run_unity(args: &[String]) -> i32 {
         }
         "create" => {
             let name = args.get(1).map(|s| s.as_str()).unwrap_or("MyProject");
-            let template = args.windows(2).find(|w| w[0] == "--template")
-                .map(|w| w[1].as_str()).unwrap_or("3d-core");
-            println!("Creating project '{}'...", name);
+            let template = args
+                .windows(2)
+                .find(|w| w[0] == "--template")
+                .map(|w| w[1].as_str())
+                .unwrap_or("3d-core");
+            println!("Creating project {}...", quoteaf_os(name));
             println!("  Template: {}", template);
             println!("  Project created at ./{}/", name);
         }
         "build" => {
-            let target = args.windows(2).find(|w| w[0] == "--target")
-                .map(|w| w[1].as_str()).unwrap_or("linux64");
+            let target = args
+                .windows(2)
+                .find(|w| w[0] == "--target")
+                .map(|w| w[1].as_str())
+                .unwrap_or("linux64");
             println!("Building project for {}...", target);
             println!("  Compiling scripts...");
             println!("  Building player...");
             println!("  Build complete: build/{}/", target);
         }
-        _ => println!("unity-hub: '{}' completed", subcmd),
+        _ => println!("unity-hub: {} completed", quoteaf_os(subcmd)),
     }
     0
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "unity-hub".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "unity-hub".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_unity(&rest);
     process::exit(code);
@@ -84,7 +98,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_unity};
+    use super::{basename, run_unity, strip_ext};
 
     #[test]
     fn basename_strips_path() {

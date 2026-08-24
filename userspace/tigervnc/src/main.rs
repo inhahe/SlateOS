@@ -4,6 +4,7 @@
 //!
 //! Multi-personality: `vncserver`, `vncviewer`, `vncpasswd`, `vncconfig`, `x0vncserver`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -33,12 +34,25 @@ fn run_vncserver(args: Vec<String>) -> i32 {
         return 0;
     }
 
-    let display = args.iter().find(|a| a.starts_with(':')).map(|s| s.as_str()).unwrap_or(":1");
-    let geometry = args.iter().position(|a| a == "-geometry")
+    let display = args
+        .iter()
+        .find(|a| a.starts_with(':'))
+        .map(|s| s.as_str())
+        .unwrap_or(":1");
+    let geometry = args
+        .iter()
+        .position(|a| a == "-geometry")
         .and_then(|i| args.get(i + 1))
         .map(|s| s.as_str())
         .unwrap_or("1920x1080");
-    println!("New '{}' desktop at {}", display, display);
+    // The same argv word twice -- the first `:`-prefixed argument, unparsed
+    // beyond that first character -- so the hand-written quotes on the first
+    // copy left the second bare on the same line.
+    println!(
+        "New {} desktop at {}",
+        quoteaf_os(display),
+        quoteaf_os(display)
+    );
     println!("Desktop geometry: {}", geometry);
     println!("Starting session on port 590{}", &display[1..]);
     0
@@ -59,7 +73,11 @@ fn run_vncviewer(args: Vec<String>) -> i32 {
         return 0;
     }
 
-    let host = args.iter().find(|a| !a.starts_with('-')).map(|s| s.as_str()).unwrap_or("localhost:1");
+    let host = args
+        .iter()
+        .find(|a| !a.starts_with('-'))
+        .map(|s| s.as_str())
+        .unwrap_or("localhost:1");
     println!("TigerVNC Viewer 1.13.1 (Slate OS)");
     println!("Connected to VNC server at {}", host);
     println!("Desktop name: \"Slate OS Desktop\"");
@@ -84,7 +102,9 @@ fn main() {
         let bytes = s.as_bytes();
         let mut last_sep = 0;
         for (i, &b) in bytes.iter().enumerate() {
-            if b == b'/' || b == b'\\' { last_sep = i + 1; }
+            if b == b'/' || b == b'\\' {
+                last_sep = i + 1;
+            }
         }
         let base = &s[last_sep..];
         base.strip_suffix(".exe").unwrap_or(base).to_string()
@@ -93,8 +113,14 @@ fn main() {
     let code = match prog_name.as_str() {
         "vncviewer" => run_vncviewer(rest),
         "vncpasswd" => run_vncpasswd(rest),
-        "vncconfig" => { println!("(VNC config tool — simulated)"); 0 }
-        "x0vncserver" => { println!("x0vncserver: sharing existing X display"); 0 }
+        "vncconfig" => {
+            println!("(VNC config tool — simulated)");
+            0
+        }
+        "x0vncserver" => {
+            println!("x0vncserver: sharing existing X display");
+            0
+        }
         _ => run_vncserver(rest),
     };
     process::exit(code);
@@ -102,7 +128,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_vncserver};
+    use super::run_vncserver;
 
     #[test]
     fn help_exits_zero() {

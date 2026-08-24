@@ -4,11 +4,16 @@
 //!
 //! Multi-personality: `woodpecker-cli`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_woodpecker(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
@@ -48,7 +53,7 @@ fn run_woodpecker(args: &[String]) -> i32 {
                     println!("  Branch: main");
                     println!("  Duration: 1m 45s");
                 }
-                _ => println!("woodpecker pipeline: '{}' completed", sub),
+                _ => println!("woodpecker pipeline: {} completed", quoteaf_os(sub)),
             }
         }
         "repo" => {
@@ -57,7 +62,7 @@ fn run_woodpecker(args: &[String]) -> i32 {
                 println!("myorg/myapp");
                 println!("myorg/backend");
             } else {
-                println!("woodpecker repo: '{}' completed", sub);
+                println!("woodpecker repo: {} completed", quoteaf_os(sub));
             }
         }
         "lint" => {
@@ -79,14 +84,17 @@ fn run_woodpecker(args: &[String]) -> i32 {
             println!("[test] go test ./...");
             println!("[test] ok  ./... 2.345s");
         }
-        _ => println!("woodpecker-cli: '{}' completed", subcmd),
+        _ => println!("woodpecker-cli: {} completed", quoteaf_os(subcmd)),
     }
     0
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "woodpecker-cli".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "woodpecker-cli".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_woodpecker(&rest);
     process::exit(code);
@@ -94,7 +102,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_woodpecker};
+    use super::{basename, run_woodpecker, strip_ext};
 
     #[test]
     fn basename_strips_path() {

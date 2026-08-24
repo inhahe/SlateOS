@@ -97,7 +97,15 @@ pub struct MaintTask {
     /// Only run when system is idle.
     pub idle_only: bool,
     pub status: TaskStatus,
-    pub last_run_ns: u64,
+    /// Uptime at which this task last completed, or `None` if it never has.
+    ///
+    /// `Option`, not a `0` sentinel. `0` is a *legal* uptime — it means "at
+    /// boot" — so a never-run task read as one that had just run, and
+    /// `check_schedule` then withheld it until the machine had been up for a
+    /// whole interval. With intervals of 12 to 720 hours that meant the monthly
+    /// tasks required thirty days of unbroken uptime before their *first* run,
+    /// which on a desktop that is ever rebooted is never.
+    pub last_run_ns: Option<u64>,
     pub last_duration_ms: u64,
     pub run_count: u64,
     pub fail_count: u64,
@@ -166,7 +174,7 @@ pub fn init_defaults() {
             interval_hours: *interval,
             idle_only: *idle,
             status: TaskStatus::Idle,
-            last_run_ns: 0,
+            last_run_ns: None,
             last_duration_ms: 0,
             run_count: 0,
             fail_count: 0,
@@ -183,6 +191,18 @@ pub fn init_defaults() {
 }
 
 /// Check which tasks are due.
+///
+/// A task that has never run is due immediately. That is the whole point of
+/// the `Option` on [`MaintTask::last_run_ns`]: "never" is not "ran at uptime
+/// zero", and treating it as the latter is what stopped the long-interval
+/// tasks from ever running at all.
+///
+/// The clock is uptime, so "due" is relative to this boot. Nothing persists a
+/// run history across reboots yet, so on a fresh boot every task is reported
+/// due — which is the honest answer to "when did this last run?" when the
+/// answer is "no record". Nothing runs maintenance automatically; `run_pending`
+/// is only ever reached from the `sysmaint` shell command, so this cannot turn
+/// into a monthly scan firing at every boot.
 pub fn check_schedule() -> KernelResult<Vec<u32>> {
     with_state(|state| {
         let now = crate::hpet::elapsed_ns();
@@ -191,9 +211,17 @@ pub fn check_schedule() -> KernelResult<Vec<u32>> {
             if !task.enabled {
                 continue;
             }
-            let interval_ns = (task.interval_hours as u64) * 3600 * 1_000_000_000;
-            let elapsed = now.saturating_sub(task.last_run_ns);
-            if elapsed >= interval_ns {
+            // Saturating: `interval_hours` is clamped to 8760 (one year) by
+            // `set_interval`, which cannot overflow, but the field is `pub` and
+            // a wrapped interval would silently mean "always due".
+            let interval_ns = u64::from(task.interval_hours)
+                .saturating_mul(3600)
+                .saturating_mul(1_000_000_000);
+            let due_now = match task.last_run_ns {
+                None => true,
+                Some(last) => now.saturating_sub(last) >= interval_ns,
+            };
+            if due_now {
                 due.push(task.id);
             }
         }
@@ -212,7 +240,7 @@ pub fn run_task(task_id: u32) -> KernelResult<()> {
             .ok_or(KernelError::NotFound)?;
         task.status = TaskStatus::Running;
         // Simulate task completion.
-        task.last_run_ns = now;
+        task.last_run_ns = Some(now);
         task.last_duration_ms = 100; // Simulated duration.
         task.run_count += 1;
         task.status = TaskStatus::Completed;
@@ -302,7 +330,29 @@ pub fn stats() -> (usize, u64, u64, u64) {
 // Self-test
 // ---------------------------------------------------------------------------
 
+/// Run the module's self-test suite against a table of its own.
+///
+/// The suite mutates module state and asserts exact contents, and it used to
+/// do that to the *live* table -- which, since it is also a kernel-shell
+/// subcommand, changed or destroyed whatever the user had here and then
+/// reported success.  The live state is moved aside for the duration and put
+/// back afterwards; `crate::fs::selftest` records why this shape rather than
+/// the alternatives.
+///
+/// The pristine value is `None` rather than a table: this module initialises
+/// lazily, and `None` is exactly what a fresh boot holds.
 pub fn self_test() {
+    // `OPS` is a lock-free mirror of `state.ops`, which lives *inside* the
+    // table. `with_pristine` restores the table and so restores `state.ops`,
+    // but it cannot know about the mirror -- leave it and the two disagree
+    // permanently, with `<module> stats` reporting the suite's activity as
+    // the user's.
+    let saved_ops = OPS.load(Ordering::Relaxed);
+    crate::fs::selftest::with_pristine(&STATE, None, self_test_inner);
+    OPS.store(saved_ops, Ordering::Relaxed);
+}
+
+fn self_test_inner() {
     crate::serial_println!("sysmaint::self_test() — running tests...");
     // Start from a clean default schedule so the assertions below are exact.
     // This self_test runs tasks (run_task / run_pending), which bumps run_count
@@ -319,18 +369,37 @@ pub fn self_test() {
     assert_eq!(tasks[0].task_type, TaskType::DiskTrim);
     for t in &tasks {
         assert_eq!(t.status, TaskStatus::Idle);
-        assert_eq!(
-            (t.last_run_ns, t.last_duration_ms, t.run_count, t.fail_count),
-            (0, 0, 0, 0)
-        );
+        assert_eq!(t.last_run_ns, None, "a seeded task has never run");
+        assert_eq!((t.last_duration_ms, t.run_count, t.fail_count), (0, 0, 0));
     }
     let (_, runs0, fails0, _) = stats();
     assert_eq!((runs0, fails0), (0, 0));
     crate::serial_println!("  [1/8] default tasks: OK");
 
     // 2: All tasks are due (never run).
+    //
+    // This is the assertion that caught the `0`-sentinel bug, and it caught it
+    // only because the suite finally ran at boot. `last_run_ns: 0` read as "ran
+    // at uptime zero", so `check_schedule` compared the *uptime* against the
+    // interval and reported nothing due — the monthly tasks would have needed
+    // thirty days of unbroken uptime before their first ever run. At boot,
+    // where uptime is seconds, it returned zero due tasks out of ten.
     let due = check_schedule().expect("check");
-    assert_eq!(due.len(), 10);
+    assert_eq!(
+        due.len(),
+        10,
+        "every never-run task is due regardless of uptime"
+    );
+    // Explicitly pin the property rather than only its consequence: a task
+    // whose interval exceeds any plausible uptime must still be due when it
+    // has never run. 8760 hours is the largest interval `set_interval` allows.
+    set_interval(4, 8760).expect("set year interval");
+    let due_year = check_schedule().expect("check year");
+    assert!(
+        due_year.contains(&4),
+        "a never-run task with a one-year interval is still due"
+    );
+    set_interval(4, 720).expect("restore monthly interval");
     crate::serial_println!("  [2/8] all due: OK");
 
     // 3: Run a task.

@@ -23,6 +23,7 @@
 #![deny(clippy::all)]
 #![allow(clippy::manual_range_contains)] // clearer as explicit comparisons in some spots
 
+use quoting::quoteaf_os;
 use std::env;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
@@ -1092,7 +1093,7 @@ fn do_request(
         if opts.output_stdout {
             eprintln!("Saving to: 'stdout'");
         } else {
-            eprintln!("Saving to: '{output_filename}'");
+            eprintln!("Saving to: {}", quoteaf_os(output_filename));
         }
         eprintln!();
     }
@@ -1220,8 +1221,8 @@ fn download_body(
         eprintln!();
         eprintln!();
         eprintln!(
-            "'{}' saved [{} in {:.1}s]",
-            output_filename,
+            "{} saved [{} in {:.1}s]",
+            quoteaf_os(output_filename),
             format_size(body_bytes),
             elapsed
         );

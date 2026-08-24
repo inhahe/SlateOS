@@ -4,6 +4,7 @@
 //!
 //! Multi-personality: `tlp`, `tlp-stat`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -61,7 +62,7 @@ fn run_tlp(args: &[String]) -> i32 {
         "usb" => println!("USB autosuspend enabled for all devices."),
         "fullcharge" => println!("Setting battery to charge to 100%."),
         _ => {
-            eprintln!("tlp: unknown command '{}'. See --help.", cmd);
+            eprintln!("tlp: unknown command {}. See --help.", quoteaf_os(cmd));
             return 1;
         }
     }
@@ -71,7 +72,9 @@ fn run_tlp(args: &[String]) -> i32 {
 fn run_tlp_stat(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: tlp-stat [OPTIONS]");
-        println!("Options: -b (battery), -d (disk), -g (graphics), -p (processor), -s (system), -t (temperatures)");
+        println!(
+            "Options: -b (battery), -d (disk), -g (graphics), -p (processor), -s (system), -t (temperatures)"
+        );
         return 0;
     }
 
@@ -115,7 +118,8 @@ fn run_tlp_stat(args: &[String]) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first()
+    let prog = args
+        .first()
         .map(|s| strip_ext(basename(s)).to_string())
         .unwrap_or_else(|| "tlp".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
@@ -129,7 +133,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_tlp};
+    use super::{basename, run_tlp, strip_ext};
 
     #[test]
     fn basename_strips_path() {

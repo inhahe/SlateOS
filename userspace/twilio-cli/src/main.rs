@@ -4,6 +4,7 @@
 //!
 //! Single personality: `twilio`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -44,11 +45,19 @@ fn run_twilio(args: Vec<String>) -> i32 {
             let sub = args.get(1).map(|s| s.as_str()).unwrap_or("list");
             match sub {
                 "list" => {
-                    println!("ID                                   Account SID                          Active");
-                    println!("default                              AC01234567890123456789012345678901    *");
-                    println!("production                           AC98765432109876543210987654321098");
+                    println!(
+                        "ID                                   Account SID                          Active"
+                    );
+                    println!(
+                        "default                              AC01234567890123456789012345678901    *"
+                    );
+                    println!(
+                        "production                           AC98765432109876543210987654321098"
+                    );
                 }
-                _ => { println!("Profile operation: {}", sub); }
+                _ => {
+                    println!("Profile operation: {}", sub);
+                }
             }
             0
         }
@@ -57,7 +66,9 @@ fn run_twilio(args: Vec<String>) -> i32 {
             match sub {
                 "list" => {
                     println!("SID                                  Phone Number     Capabilities");
-                    println!("PN01234567890123456789012345678901    +15551234567     Voice, SMS, MMS");
+                    println!(
+                        "PN01234567890123456789012345678901    +15551234567     Voice, SMS, MMS"
+                    );
                     println!("PN98765432109876543210987654321098    +15559876543     Voice, SMS");
                 }
                 "buy" => {
@@ -65,7 +76,9 @@ fn run_twilio(args: Vec<String>) -> i32 {
                     println!("  +15551112222  (US, Voice+SMS)  $1.00/mo");
                     println!("  +15553334444  (US, Voice+SMS+MMS)  $1.00/mo");
                 }
-                _ => { println!("Phone number operation: {}", sub); }
+                _ => {
+                    println!("Phone number operation: {}", sub);
+                }
             }
             0
         }
@@ -73,9 +86,21 @@ fn run_twilio(args: Vec<String>) -> i32 {
             let sub = args.get(1).map(|s| s.as_str()).unwrap_or("send");
             match sub {
                 "send" => {
-                    let to = args.windows(2).find(|w| w[0] == "--to").map(|w| w[1].as_str()).unwrap_or("+15559876543");
-                    let from = args.windows(2).find(|w| w[0] == "--from").map(|w| w[1].as_str()).unwrap_or("+15551234567");
-                    let body = args.windows(2).find(|w| w[0] == "--body").map(|w| w[1].as_str()).unwrap_or("Hello!");
+                    let to = args
+                        .windows(2)
+                        .find(|w| w[0] == "--to")
+                        .map(|w| w[1].as_str())
+                        .unwrap_or("+15559876543");
+                    let from = args
+                        .windows(2)
+                        .find(|w| w[0] == "--from")
+                        .map(|w| w[1].as_str())
+                        .unwrap_or("+15551234567");
+                    let body = args
+                        .windows(2)
+                        .find(|w| w[0] == "--body")
+                        .map(|w| w[1].as_str())
+                        .unwrap_or("Hello!");
                     println!("✔ Message sent");
                     println!("  SID:    SM01234567890123456789012345678901");
                     println!("  From:   {}", from);
@@ -84,11 +109,19 @@ fn run_twilio(args: Vec<String>) -> i32 {
                     println!("  Status: queued");
                 }
                 "list" => {
-                    println!("SID                                  From            To              Status    Date");
-                    println!("SM012345...                          +15551234567    +15559876543    delivered 2024-01-15");
-                    println!("SM678901...                          +15551234567    +15551111111    sent      2024-01-15");
+                    println!(
+                        "SID                                  From            To              Status    Date"
+                    );
+                    println!(
+                        "SM012345...                          +15551234567    +15559876543    delivered 2024-01-15"
+                    );
+                    println!(
+                        "SM678901...                          +15551234567    +15551111111    sent      2024-01-15"
+                    );
                 }
-                _ => { println!("Messaging operation: {}", sub); }
+                _ => {
+                    println!("Messaging operation: {}", sub);
+                }
             }
             0
         }
@@ -96,8 +129,16 @@ fn run_twilio(args: Vec<String>) -> i32 {
             let sub = args.get(1).map(|s| s.as_str()).unwrap_or("call");
             match sub {
                 "call" => {
-                    let to = args.windows(2).find(|w| w[0] == "--to").map(|w| w[1].as_str()).unwrap_or("+15559876543");
-                    let from = args.windows(2).find(|w| w[0] == "--from").map(|w| w[1].as_str()).unwrap_or("+15551234567");
+                    let to = args
+                        .windows(2)
+                        .find(|w| w[0] == "--to")
+                        .map(|w| w[1].as_str())
+                        .unwrap_or("+15559876543");
+                    let from = args
+                        .windows(2)
+                        .find(|w| w[0] == "--from")
+                        .map(|w| w[1].as_str())
+                        .unwrap_or("+15551234567");
                     println!("✔ Call initiated");
                     println!("  SID:    CA01234567890123456789012345678901");
                     println!("  From:   {}", from);
@@ -105,10 +146,16 @@ fn run_twilio(args: Vec<String>) -> i32 {
                     println!("  Status: queued");
                 }
                 "list" => {
-                    println!("SID                  From            To              Duration  Status");
-                    println!("CA012345...          +15551234567    +15559876543    45s       completed");
+                    println!(
+                        "SID                  From            To              Duration  Status"
+                    );
+                    println!(
+                        "CA012345...          +15551234567    +15559876543    45s       completed"
+                    );
                 }
-                _ => { println!("Voice operation: {}", sub); }
+                _ => {
+                    println!("Voice operation: {}", sub);
+                }
             }
             0
         }
@@ -121,7 +168,9 @@ fn run_twilio(args: Vec<String>) -> i32 {
                     println!("  [2024-01-15 13:45:00] ERROR   21610 - Message body required");
                     println!("  [2024-01-15 13:30:00] WARNING 11205 - HTTP connection failure");
                 }
-                _ => { println!("Debugger operation: {}", sub); }
+                _ => {
+                    println!("Debugger operation: {}", sub);
+                }
             }
             0
         }
@@ -138,7 +187,9 @@ fn run_twilio(args: Vec<String>) -> i32 {
                     println!("  ✔ Assets deployed");
                     println!("  Domain: my-functions-1234.twil.io");
                 }
-                _ => { println!("Serverless operation: {}", sub); }
+                _ => {
+                    println!("Serverless operation: {}", sub);
+                }
             }
             0
         }
@@ -146,7 +197,7 @@ fn run_twilio(args: Vec<String>) -> i32 {
             if cmd.is_empty() {
                 eprintln!("Usage: twilio <command>. See --help.");
             } else {
-                eprintln!("Error: unknown command '{}'. See --help.", cmd);
+                eprintln!("Error: unknown command {}. See --help.", quoteaf_os(cmd));
             }
             1
         }
@@ -162,7 +213,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_twilio};
+    use super::run_twilio;
 
     #[test]
     fn help_exits_zero() {

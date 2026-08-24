@@ -731,8 +731,12 @@ pub fn self_test() -> KernelResult<()> {
             action: String::from("edit_image"),
             priority: 0,
         }];
-        let ext_id =
-            register_extension("ImageEditor", &[ContextTarget::File], &["*.png"], &ext_items)?;
+        let ext_id = register_extension(
+            "ImageEditor",
+            &[ContextTarget::File],
+            &["*.png"],
+            &ext_items,
+        )?;
 
         let menu = build(ContextTarget::File, p);
         // The path survives the round trip byte for byte.

@@ -4,11 +4,16 @@
 //!
 //! Multi-personality: `alertmanager`, `amtool`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_alertmanager(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -32,10 +37,18 @@ fn run_alertmanager(args: &[String]) -> i32 {
         return 0;
     }
 
-    println!("level=info ts=2024-05-22T12:00:00.000Z caller=main.go:231 msg=\"Starting Alertmanager\" version=\"0.27.0 (Slate OS)\"");
-    println!("level=info ts=2024-05-22T12:00:00.001Z caller=coordinator.go:113 msg=\"Loading configuration file\" file=/etc/alertmanager/alertmanager.yml");
-    println!("level=info ts=2024-05-22T12:00:00.002Z caller=coordinator.go:126 msg=\"Completed loading of configuration file\"");
-    println!("level=info ts=2024-05-22T12:00:00.003Z caller=main.go:535 msg=\"Listening\" address=0.0.0.0:9093");
+    println!(
+        "level=info ts=2024-05-22T12:00:00.000Z caller=main.go:231 msg=\"Starting Alertmanager\" version=\"0.27.0 (Slate OS)\""
+    );
+    println!(
+        "level=info ts=2024-05-22T12:00:00.001Z caller=coordinator.go:113 msg=\"Loading configuration file\" file=/etc/alertmanager/alertmanager.yml"
+    );
+    println!(
+        "level=info ts=2024-05-22T12:00:00.002Z caller=coordinator.go:126 msg=\"Completed loading of configuration file\""
+    );
+    println!(
+        "level=info ts=2024-05-22T12:00:00.003Z caller=main.go:535 msg=\"Listening\" address=0.0.0.0:9093"
+    );
     0
 }
 
@@ -60,9 +73,15 @@ fn run_amtool(args: &[String]) -> i32 {
             let cmd = args.get(1).map(|s| s.as_str()).unwrap_or("query");
             if cmd == "query" {
                 println!("Alertname        Starts At                Summary");
-                println!("HighCPU          2024-05-22 10:00:00 UTC  CPU usage above 90% on slateos-node-1");
-                println!("DiskSpaceLow     2024-05-22 11:00:00 UTC  Disk space below 10% on /dev/sda1");
-                println!("ServiceDown      2024-05-22 11:30:00 UTC  Service 'webapp' not responding");
+                println!(
+                    "HighCPU          2024-05-22 10:00:00 UTC  CPU usage above 90% on slateos-node-1"
+                );
+                println!(
+                    "DiskSpaceLow     2024-05-22 11:00:00 UTC  Disk space below 10% on /dev/sda1"
+                );
+                println!(
+                    "ServiceDown      2024-05-22 11:30:00 UTC  Service 'webapp' not responding"
+                );
             } else {
                 println!("amtool: alert {} completed", cmd);
             }
@@ -70,8 +89,12 @@ fn run_amtool(args: &[String]) -> i32 {
         "silence" => {
             let cmd = args.get(1).map(|s| s.as_str()).unwrap_or("query");
             if cmd == "query" {
-                println!("ID                       Matchers           Ends At                  Created By  Comment");
-                println!("aabbccdd-1122-3344-5566  alertname=HighCPU  2024-05-23 10:00:00 UTC  admin       Maintenance window");
+                println!(
+                    "ID                       Matchers           Ends At                  Created By  Comment"
+                );
+                println!(
+                    "aabbccdd-1122-3344-5566  alertname=HighCPU  2024-05-23 10:00:00 UTC  admin       Maintenance window"
+                );
             } else if cmd == "add" {
                 println!("aabbccdd-1122-3344-5566");
             } else {
@@ -79,8 +102,11 @@ fn run_amtool(args: &[String]) -> i32 {
             }
         }
         "check-config" => {
-            let file = args.get(1).map(|s| s.as_str()).unwrap_or("/etc/alertmanager/alertmanager.yml");
-            println!("Checking '{}'  SUCCESS", file);
+            let file = args
+                .get(1)
+                .map(|s| s.as_str())
+                .unwrap_or("/etc/alertmanager/alertmanager.yml");
+            println!("Checking {}  SUCCESS", quoteaf_os(file));
             println!("Found:");
             println!(" - global config");
             println!(" - route");
@@ -101,14 +127,17 @@ fn run_amtool(args: &[String]) -> i32 {
             println!("    email_configs:");
             println!("      - to: admin@slateos.local");
         }
-        _ => println!("amtool: command '{}' completed", subcmd),
+        _ => println!("amtool: command {} completed", quoteaf_os(subcmd)),
     }
     0
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "alertmanager".to_string());
+    let prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "alertmanager".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = match prog.as_str() {
         "amtool" => run_amtool(&rest),
@@ -119,7 +148,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_alertmanager};
+    use super::{basename, run_alertmanager, strip_ext};
 
     #[test]
     fn basename_strips_path() {

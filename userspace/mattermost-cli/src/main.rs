@@ -4,6 +4,7 @@
 //!
 //! Single personality: `mmctl`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -39,7 +40,10 @@ fn run_mmctl(args: Vec<String>) -> i32 {
             let sub = args.get(1).map(|s| s.as_str()).unwrap_or("login");
             match sub {
                 "login" => {
-                    let server = args.get(2).map(|s| s.as_str()).unwrap_or("https://mattermost.example.com");
+                    let server = args
+                        .get(2)
+                        .map(|s| s.as_str())
+                        .unwrap_or("https://mattermost.example.com");
                     println!("Connecting to {}...", server);
                     println!("✔ Logged in as admin");
                     println!("  Credentials saved to ~/.config/mmctl/credentials");
@@ -49,7 +53,9 @@ fn run_mmctl(args: Vec<String>) -> i32 {
                     println!("production           https://mattermost.example.com      *");
                     println!("staging              https://staging.example.com");
                 }
-                _ => { println!("Auth operation: {}", sub); }
+                _ => {
+                    println!("Auth operation: {}", sub);
+                }
             }
             0
         }
@@ -58,7 +64,7 @@ fn run_mmctl(args: Vec<String>) -> i32 {
             match sub {
                 "list" => {
                     let team = args.get(2).map(|s| s.as_str()).unwrap_or("my-team");
-                    println!("Channels for team '{}':", team);
+                    println!("Channels for team {}:", quoteaf_os(team));
                     println!("  town-square        Town Square          public   42 members");
                     println!("  off-topic          Off-Topic            public   35 members");
                     println!("  engineering        Engineering          private  18 members");
@@ -66,13 +72,15 @@ fn run_mmctl(args: Vec<String>) -> i32 {
                 }
                 "create" => {
                     let name = args.get(2).map(|s| s.as_str()).unwrap_or("new-channel");
-                    println!("✔ Created channel '{}'", name);
+                    println!("✔ Created channel {}", quoteaf_os(name));
                 }
                 "archive" => {
                     let name = args.get(2).map(|s| s.as_str()).unwrap_or("old-channel");
-                    println!("✔ Archived channel '{}'", name);
+                    println!("✔ Archived channel {}", quoteaf_os(name));
                 }
-                _ => { println!("Channel operation: {}", sub); }
+                _ => {
+                    println!("Channel operation: {}", sub);
+                }
             }
             0
         }
@@ -86,9 +94,11 @@ fn run_mmctl(args: Vec<String>) -> i32 {
                 }
                 "create" => {
                     let name = args.get(2).map(|s| s.as_str()).unwrap_or("new-team");
-                    println!("✔ Created team '{}'", name);
+                    println!("✔ Created team {}", quoteaf_os(name));
                 }
-                _ => { println!("Team operation: {}", sub); }
+                _ => {
+                    println!("Team operation: {}", sub);
+                }
             }
             0
         }
@@ -106,9 +116,11 @@ fn run_mmctl(args: Vec<String>) -> i32 {
                 }
                 "deactivate" => {
                     let user = args.get(2).map(|s| s.as_str()).unwrap_or("bob");
-                    println!("✔ User '{}' deactivated.", user);
+                    println!("✔ User {} deactivated.", quoteaf_os(user));
                 }
-                _ => { println!("User operation: {}", sub); }
+                _ => {
+                    println!("User operation: {}", sub);
+                }
             }
             0
         }
@@ -116,8 +128,16 @@ fn run_mmctl(args: Vec<String>) -> i32 {
             let sub = args.get(1).map(|s| s.as_str()).unwrap_or("create");
             match sub {
                 "create" => {
-                    let ch = args.windows(2).find(|w| w[0] == "--channel").map(|w| w[1].as_str()).unwrap_or("town-square");
-                    let msg = args.windows(2).find(|w| w[0] == "--message").map(|w| w[1].as_str()).unwrap_or("Hello!");
+                    let ch = args
+                        .windows(2)
+                        .find(|w| w[0] == "--channel")
+                        .map(|w| w[1].as_str())
+                        .unwrap_or("town-square");
+                    let msg = args
+                        .windows(2)
+                        .find(|w| w[0] == "--message")
+                        .map(|w| w[1].as_str())
+                        .unwrap_or("Hello!");
                     println!("✔ Posted to {}: {}", ch, msg);
                 }
                 "list" => {
@@ -126,7 +146,9 @@ fn run_mmctl(args: Vec<String>) -> i32 {
                     println!("  [14:05] alice: Thanks for the heads up!");
                     println!("  [14:10] bob: Will the API be affected?");
                 }
-                _ => { println!("Post operation: {}", sub); }
+                _ => {
+                    println!("Post operation: {}", sub);
+                }
             }
             0
         }
@@ -139,7 +161,9 @@ fn run_mmctl(args: Vec<String>) -> i32 {
                     println!("com.mattermost.jira         Jira               3.2.0    active");
                     println!("com.mattermost.welcomebot   Welcome Bot        1.3.0    inactive");
                 }
-                _ => { println!("Plugin operation: {}", sub); }
+                _ => {
+                    println!("Plugin operation: {}", sub);
+                }
             }
             0
         }
@@ -153,11 +177,19 @@ fn run_mmctl(args: Vec<String>) -> i32 {
                     println!("FileSettings.MaxFileSize: 52428800");
                 }
                 "set" => {
-                    let key = args.get(2).map(|s| s.as_str()).unwrap_or("ServiceSettings.SiteURL");
-                    let val = args.get(3).map(|s| s.as_str()).unwrap_or("https://new.example.com");
+                    let key = args
+                        .get(2)
+                        .map(|s| s.as_str())
+                        .unwrap_or("ServiceSettings.SiteURL");
+                    let val = args
+                        .get(3)
+                        .map(|s| s.as_str())
+                        .unwrap_or("https://new.example.com");
                     println!("✔ Set {} = {}", key, val);
                 }
-                _ => { println!("Config operation: {}", sub); }
+                _ => {
+                    println!("Config operation: {}", sub);
+                }
             }
             0
         }
@@ -179,7 +211,9 @@ fn run_mmctl(args: Vec<String>) -> i32 {
                     println!("  Active Users:   25");
                     println!("  Uptime:         48h 30m");
                 }
-                _ => { println!("System operation: {}", sub); }
+                _ => {
+                    println!("System operation: {}", sub);
+                }
             }
             0
         }
@@ -187,7 +221,7 @@ fn run_mmctl(args: Vec<String>) -> i32 {
             if cmd.is_empty() {
                 eprintln!("Usage: mmctl <command>. See --help.");
             } else {
-                eprintln!("Error: unknown command '{}'. See --help.", cmd);
+                eprintln!("Error: unknown command {}. See --help.", quoteaf_os(cmd));
             }
             1
         }
@@ -203,7 +237,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_mmctl};
+    use super::run_mmctl;
 
     #[test]
     fn help_exits_zero() {

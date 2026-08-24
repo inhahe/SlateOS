@@ -9,6 +9,7 @@
 //! - `npx` — Execute npm package binaries
 //! - `corepack` — Node.js package manager manager
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -102,9 +103,13 @@ fn run_npm(args: Vec<String>) -> i32 {
             println!("  --version   Show version");
             0
         }
-        "--version" | "-v" => { println!("10.5.0"); 0 }
+        "--version" | "-v" => {
+            println!("10.5.0");
+            0
+        }
         "install" | "i" | "add" => {
-            let pkgs: Vec<&str> = cmd_args.iter()
+            let pkgs: Vec<&str> = cmd_args
+                .iter()
                 .filter(|a| !a.starts_with('-'))
                 .map(|s| s.as_str())
                 .collect();
@@ -184,9 +189,18 @@ fn run_npm(args: Vec<String>) -> i32 {
             }
             0
         }
-        "publish" => { println!("npm notice Publishing myproject@1.0.0 (simulated)"); 0 }
-        "pack" => { println!("npm notice myproject-1.0.0.tgz (simulated)"); 0 }
-        other => { eprintln!("npm: unknown command '{}'", other); 1 }
+        "publish" => {
+            println!("npm notice Publishing myproject@1.0.0 (simulated)");
+            0
+        }
+        "pack" => {
+            println!("npm notice myproject-1.0.0.tgz (simulated)");
+            0
+        }
+        other => {
+            eprintln!("npm: unknown command {}", quoteaf_os(other));
+            1
+        }
     }
 }
 
@@ -209,7 +223,11 @@ fn run_npx(args: Vec<String>) -> i32 {
         return 0;
     }
 
-    let cmd = args.first().filter(|a| !a.starts_with('-')).map(|s| s.as_str()).unwrap_or("help");
+    let cmd = args
+        .first()
+        .filter(|a| !a.starts_with('-'))
+        .map(|s| s.as_str())
+        .unwrap_or("help");
     println!("Need to install the following packages:");
     println!("  {}", cmd);
     println!("Ok to proceed? (y) y");
@@ -232,11 +250,26 @@ fn run_corepack(args: Vec<String>) -> i32 {
             println!("  --version  Show version");
             0
         }
-        "--version" => { println!("0.28.0"); 0 }
-        "enable" => { println!("Enabled pnpm, yarn (simulated)"); 0 }
-        "disable" => { println!("Disabled pnpm, yarn (simulated)"); 0 }
-        "prepare" => { println!("Preparing package manager... done (simulated)"); 0 }
-        other => { eprintln!("corepack: unknown command '{}'", other); 1 }
+        "--version" => {
+            println!("0.28.0");
+            0
+        }
+        "enable" => {
+            println!("Enabled pnpm, yarn (simulated)");
+            0
+        }
+        "disable" => {
+            println!("Disabled pnpm, yarn (simulated)");
+            0
+        }
+        "prepare" => {
+            println!("Preparing package manager... done (simulated)");
+            0
+        }
+        other => {
+            eprintln!("corepack: unknown command {}", quoteaf_os(other));
+            1
+        }
     }
 }
 
@@ -250,7 +283,9 @@ fn main() {
         let bytes = s.as_bytes();
         let mut last_sep = 0;
         for (i, &b) in bytes.iter().enumerate() {
-            if b == b'/' || b == b'\\' { last_sep = i + 1; }
+            if b == b'/' || b == b'\\' {
+                last_sep = i + 1;
+            }
         }
         let base = &s[last_sep..];
         let base = base.strip_suffix(".exe").unwrap_or(base);
@@ -273,7 +308,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_node};
+    use super::run_node;
 
     #[test]
     fn help_exits_zero() {

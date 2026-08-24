@@ -2,3 +2,9 @@
 name = "speechd-cli"
 version = "0.1.0"
 edition = "2024"
+
+[dependencies]
+# It interpolates the joined `text` into "spd-say: speaking {}". That value
+# is every non-option argv word joined by spaces, so it is whatever the user
+# typed and not text this program chose.
+quoting = { path = "../quoting" }

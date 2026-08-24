@@ -4,6 +4,7 @@
 //!
 //! Single personality: `mailgun`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -32,13 +33,29 @@ fn run_mailgun(args: Vec<String>) -> i32 {
     }
 
     let cmd = args.first().map(|s| s.as_str()).unwrap_or("");
-    let domain = args.windows(2).find(|w| w[0] == "--domain").map(|w| w[1].as_str()).unwrap_or("mg.example.com");
+    let domain = args
+        .windows(2)
+        .find(|w| w[0] == "--domain")
+        .map(|w| w[1].as_str())
+        .unwrap_or("mg.example.com");
 
     match cmd {
         "send" => {
-            let to = args.windows(2).find(|w| w[0] == "--to").map(|w| w[1].as_str()).unwrap_or("recipient@example.com");
-            let from = args.windows(2).find(|w| w[0] == "--from").map(|w| w[1].as_str()).unwrap_or("sender@mg.example.com");
-            let subject = args.windows(2).find(|w| w[0] == "--subject").map(|w| w[1].as_str()).unwrap_or("Hello");
+            let to = args
+                .windows(2)
+                .find(|w| w[0] == "--to")
+                .map(|w| w[1].as_str())
+                .unwrap_or("recipient@example.com");
+            let from = args
+                .windows(2)
+                .find(|w| w[0] == "--from")
+                .map(|w| w[1].as_str())
+                .unwrap_or("sender@mg.example.com");
+            let subject = args
+                .windows(2)
+                .find(|w| w[0] == "--subject")
+                .map(|w| w[1].as_str())
+                .unwrap_or("Hello");
             println!("✔ Email queued");
             println!("  From:       {}", from);
             println!("  To:         {}", to);
@@ -73,7 +90,9 @@ fn run_mailgun(args: Vec<String>) -> i32 {
                     println!("  CNAME: ✔ Valid");
                     println!("All DNS records verified.");
                 }
-                _ => { println!("Domain operation: {}", sub); }
+                _ => {
+                    println!("Domain operation: {}", sub);
+                }
             }
             0
         }
@@ -93,14 +112,20 @@ fn run_mailgun(args: Vec<String>) -> i32 {
             match sub {
                 "list" => {
                     println!("ID       Priority  Expression                          Action");
-                    println!("r001     10        match_recipient('support@.*')        forward('https://api.example.com/mail')");
-                    println!("r002     20        match_header('subject','urgent')     forward('mailto:urgent@example.com')");
+                    println!(
+                        "r001     10        match_recipient('support@.*')        forward('https://api.example.com/mail')"
+                    );
+                    println!(
+                        "r002     20        match_header('subject','urgent')     forward('mailto:urgent@example.com')"
+                    );
                 }
                 "create" => {
                     println!("✔ Route created");
                     println!("  ID: r003");
                 }
-                _ => { println!("Route operation: {}", sub); }
+                _ => {
+                    println!("Route operation: {}", sub);
+                }
             }
             0
         }
@@ -113,13 +138,18 @@ fn run_mailgun(args: Vec<String>) -> i32 {
                     println!("team@mg.example.com              Team           25");
                 }
                 "members" => {
-                    let list = args.get(2).map(|s| s.as_str()).unwrap_or("newsletter@mg.example.com");
+                    let list = args
+                        .get(2)
+                        .map(|s| s.as_str())
+                        .unwrap_or("newsletter@mg.example.com");
                     println!("Members of {}:", list);
                     println!("  alice@example.com    subscribed");
                     println!("  bob@example.com      subscribed");
                     println!("  charlie@example.com  unsubscribed");
                 }
-                _ => { println!("List operation: {}", sub); }
+                _ => {
+                    println!("List operation: {}", sub);
+                }
             }
             0
         }
@@ -136,7 +166,10 @@ fn run_mailgun(args: Vec<String>) -> i32 {
             0
         }
         "validate" => {
-            let email = args.get(1).map(|s| s.as_str()).unwrap_or("test@example.com");
+            let email = args
+                .get(1)
+                .map(|s| s.as_str())
+                .unwrap_or("test@example.com");
             println!("Validating: {}", email);
             println!("  Valid:        true");
             println!("  Risk:        low");
@@ -154,7 +187,9 @@ fn run_mailgun(args: Vec<String>) -> i32 {
                     println!("bounced          https://api.example.com/webhooks/bounced");
                     println!("opened           https://api.example.com/webhooks/opened");
                 }
-                _ => { println!("Webhook operation: {}", sub); }
+                _ => {
+                    println!("Webhook operation: {}", sub);
+                }
             }
             0
         }
@@ -162,7 +197,7 @@ fn run_mailgun(args: Vec<String>) -> i32 {
             if cmd.is_empty() {
                 eprintln!("Usage: mailgun <command>. See --help.");
             } else {
-                eprintln!("Error: unknown command '{}'. See --help.", cmd);
+                eprintln!("Error: unknown command {}. See --help.", quoteaf_os(cmd));
             }
             1
         }
@@ -178,7 +213,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_mailgun};
+    use super::run_mailgun;
 
     #[test]
     fn help_exits_zero() {

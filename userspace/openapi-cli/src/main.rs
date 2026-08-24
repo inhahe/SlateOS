@@ -4,11 +4,16 @@
 //!
 //! Multi-personality: `openapi`, `openapi-generator`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_openapi(args: &[String], prog_name: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
@@ -38,10 +43,16 @@ fn run_openapi(args: &[String], prog_name: &str) -> i32 {
     if prog_name == "openapi-generator" {
         match subcmd {
             "generate" => {
-                let generator = args.windows(2).find(|w| w[0] == "-g")
-                    .map(|w| w[1].as_str()).unwrap_or("typescript-axios");
-                let input = args.windows(2).find(|w| w[0] == "-i")
-                    .map(|w| w[1].as_str()).unwrap_or("openapi.yaml");
+                let generator = args
+                    .windows(2)
+                    .find(|w| w[0] == "-g")
+                    .map(|w| w[1].as_str())
+                    .unwrap_or("typescript-axios");
+                let input = args
+                    .windows(2)
+                    .find(|w| w[0] == "-i")
+                    .map(|w| w[1].as_str())
+                    .unwrap_or("openapi.yaml");
                 println!("Generating {} from {}...", generator, input);
                 println!("  Processing models...");
                 println!("  Processing APIs...");
@@ -58,7 +69,7 @@ fn run_openapi(args: &[String], prog_name: &str) -> i32 {
                 println!("  SERVER: spring, fastapi, express, ...");
                 println!("  DOCS: html2, asciidoc, ...");
             }
-            _ => println!("openapi-generator: '{}' completed", subcmd),
+            _ => println!("openapi-generator: {} completed", quoteaf_os(subcmd)),
         }
     } else {
         match subcmd {
@@ -84,7 +95,7 @@ fn run_openapi(args: &[String], prog_name: &str) -> i32 {
                 println!("  Schemas: 15");
                 println!("  Parameters: 8");
             }
-            _ => println!("openapi: '{}' completed", subcmd),
+            _ => println!("openapi: {} completed", quoteaf_os(subcmd)),
         }
     }
     0
@@ -92,7 +103,10 @@ fn run_openapi(args: &[String], prog_name: &str) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "openapi".to_string());
+    let prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "openapi".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_openapi(&rest, &prog);
     process::exit(code);
@@ -100,7 +114,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_openapi};
+    use super::{basename, run_openapi, strip_ext};
 
     #[test]
     fn basename_strips_path() {

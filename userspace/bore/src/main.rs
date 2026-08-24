@@ -4,6 +4,7 @@
 //!
 //! Single personality: `bore`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -39,13 +40,15 @@ fn run_bore(args: Vec<String>) -> i32 {
                 return 0;
             }
 
-            let port = args.iter()
+            let port = args
+                .iter()
                 .filter(|a| !a.starts_with('-'))
                 .nth(1)
                 .and_then(|s| s.parse::<u16>().ok())
                 .unwrap_or(3000);
 
-            let server = args.windows(2)
+            let server = args
+                .windows(2)
                 .find(|w| w[0] == "--to")
                 .map(|w| w[1].as_str())
                 .unwrap_or("bore.pub");
@@ -78,7 +81,7 @@ fn run_bore(args: Vec<String>) -> i32 {
             0
         }
         _ => {
-            eprintln!("Error: unknown command '{}'. See --help.", cmd);
+            eprintln!("Error: unknown command {}. See --help.", quoteaf_os(cmd));
             1
         }
     }
@@ -93,7 +96,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_bore};
+    use super::run_bore;
 
     #[test]
     fn help_exits_zero() {

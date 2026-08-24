@@ -4,3 +4,6 @@ version = "0.1.0"
 edition = "2024"
 description = "SlateOS tab/space conversion utility (expand + unexpand)"
 [dependencies]
+# expand names the files whose tabs it is expanding, which are whatever the
+# caller listed -- commonly a shell glob over a directory nobody audited.
+quoting = { path = "../quoting" }

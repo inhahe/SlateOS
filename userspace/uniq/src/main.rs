@@ -29,6 +29,7 @@
 //!       --version                Output version information and exit
 //! ```
 
+use quoting::{quoteaf, quoteaf_os, quotef_os};
 use std::env;
 use std::fs::File;
 use std::io::{self, BufRead, BufReader, Read, Write};
@@ -122,7 +123,7 @@ fn parse_usize_arg(flag: &str, val: &str) -> usize {
     match val.parse::<usize>() {
         Ok(n) => n,
         Err(_) => {
-            eprintln!("uniq: invalid number for {flag}: '{val}'");
+            eprintln!("uniq: invalid number for {flag}: {}", quoteaf_os(val));
             process::exit(1);
         }
     }
@@ -130,18 +131,13 @@ fn parse_usize_arg(flag: &str, val: &str) -> usize {
 
 /// Consume the value for a flag that takes an argument. The value may be the
 /// remainder of the current short-option cluster, or the next argument.
-fn take_value<'a>(
-    flag: &str,
-    rest: &'a str,
-    args: &'a [String],
-    i: &mut usize,
-) -> &'a str {
+fn take_value<'a>(flag: &str, rest: &'a str, args: &'a [String], i: &mut usize) -> &'a str {
     if !rest.is_empty() {
         return rest;
     }
     *i += 1;
     if *i >= args.len() {
-        eprintln!("uniq: option '{flag}' requires an argument");
+        eprintln!("uniq: option {} requires an argument", quoteaf_os(flag));
         process::exit(1);
     }
     &args[*i]
@@ -172,7 +168,7 @@ fn parse_args(args: &[String]) -> ParseResult {
             } else if output.is_none() {
                 output = Some(arg.clone());
             } else {
-                eprintln!("uniq: extra operand '{arg}'");
+                eprintln!("uniq: extra operand {}", quoteaf_os(arg));
                 process::exit(1);
             }
             i += 1;
@@ -284,7 +280,7 @@ fn parse_args(args: &[String]) -> ParseResult {
             } else if arg == "--version" {
                 return ParseResult::Version;
             } else {
-                eprintln!("uniq: unrecognized option '{arg}'");
+                eprintln!("uniq: unrecognized option {}", quoteaf_os(arg));
                 eprintln!("Try 'uniq --help' for more information.");
                 process::exit(1);
             }
@@ -358,8 +354,7 @@ fn parse_args(args: &[String]) -> ParseResult {
                     continue;
                 }
                 _ => {
-                    let ch = arg_bytes[j] as char;
-                    eprintln!("uniq: invalid option -- '{ch}'");
+                    eprintln!("uniq: invalid option -- {}", quoteaf(&[arg_bytes[j]]));
                     eprintln!("Try 'uniq --help' for more information.");
                     process::exit(1);
                 }
@@ -393,7 +388,10 @@ fn parse_all_repeated_method(s: &str) -> AllRepeatedMethod {
         "prepend" => AllRepeatedMethod::Prepend,
         "separate" => AllRepeatedMethod::Separate,
         _ => {
-            eprintln!("uniq: invalid argument '{s}' for '--all-repeated'");
+            eprintln!(
+                "uniq: invalid argument {} for '--all-repeated'",
+                quoteaf_os(s)
+            );
             eprintln!("Valid arguments are: 'none', 'prepend', 'separate'");
             process::exit(1);
         }
@@ -407,7 +405,7 @@ fn parse_group_method(s: &str) -> GroupMethod {
         "append" => GroupMethod::Append,
         "both" => GroupMethod::Both,
         _ => {
-            eprintln!("uniq: invalid argument '{s}' for '--group'");
+            eprintln!("uniq: invalid argument {} for '--group'", quoteaf_os(s));
             eprintln!("Valid arguments are: 'separate', 'prepend', 'append', 'both'");
             process::exit(1);
         }
@@ -447,10 +445,7 @@ fn comparison_key(
 
     // Limit to N characters.
     if let Some(n) = check_chars {
-        let byte_end = s
-            .char_indices()
-            .nth(n)
-            .map_or(s.len(), |(idx, _)| idx);
+        let byte_end = s.char_indices().nth(n).map_or(s.len(), |(idx, _)| idx);
         s = &s[..byte_end];
     }
 
@@ -481,10 +476,7 @@ fn lines_equal(
 // ============================================================================
 
 /// Read all lines from the input, splitting on the appropriate delimiter.
-fn read_lines(
-    reader: &mut dyn Read,
-    zero_terminated: bool,
-) -> io::Result<Vec<String>> {
+fn read_lines(reader: &mut dyn Read, zero_terminated: bool) -> io::Result<Vec<String>> {
     if zero_terminated {
         // Split on NUL bytes.
         let mut buf = Vec::new();
@@ -612,11 +604,7 @@ fn collect_groups(
 }
 
 /// Process and output lines according to the configured mode.
-fn process(
-    config: &Config,
-    lines: Vec<String>,
-    out: &mut dyn Write,
-) -> io::Result<()> {
+fn process(config: &Config, lines: Vec<String>, out: &mut dyn Write) -> io::Result<()> {
     let need_all_lines = matches!(
         config.mode,
         OutputMode::AllRepeated(_) | OutputMode::Group(_)
@@ -774,7 +762,9 @@ fn print_help() {
     println!("                               METHOD={{none,prepend,separate}} (default: none)");
     println!("  -u, --unique                 Only print unique lines");
     println!("      --group[=METHOD]         Show all lines, separating groups with blank lines");
-    println!("                               METHOD={{separate,prepend,append,both}} (default: separate)");
+    println!(
+        "                               METHOD={{separate,prepend,append,both}} (default: separate)"
+    );
     println!("      --json                   Output JSON with count and line");
     println!();
     println!("COMPARISON OPTIONS:");
@@ -828,7 +818,7 @@ fn run(config: &Config) -> i32 {
         Some(path) if path != "-" => match File::open(path) {
             Ok(f) => Box::new(f),
             Err(e) => {
-                eprintln!("uniq: {path}: {e}");
+                eprintln!("uniq: {}: {e}", quotef_os(path));
                 return 1;
             }
         },
@@ -840,7 +830,7 @@ fn run(config: &Config) -> i32 {
         Ok(l) => l,
         Err(e) => {
             let source = config.input.as_deref().unwrap_or("stdin");
-            eprintln!("uniq: {source}: read error: {e}");
+            eprintln!("uniq: {}: read error: {e}", quotef_os(source));
             return 1;
         }
     };
@@ -851,7 +841,7 @@ fn run(config: &Config) -> i32 {
         Some(path) => match File::create(path) {
             Ok(f) => Box::new(io::BufWriter::new(f)),
             Err(e) => {
-                eprintln!("uniq: {path}: {e}");
+                eprintln!("uniq: {}: {e}", quotef_os(path));
                 return 1;
             }
         },
@@ -863,17 +853,19 @@ fn run(config: &Config) -> i32 {
 
     // Process and write output.
     if let Err(e) = process(config, lines, &mut *out)
-        && e.kind() != io::ErrorKind::BrokenPipe {
-            eprintln!("uniq: write error: {e}");
-            return 1;
-        }
+        && e.kind() != io::ErrorKind::BrokenPipe
+    {
+        eprintln!("uniq: write error: {e}");
+        return 1;
+    }
 
     // Flush output.
     if let Err(e) = out.flush()
-        && e.kind() != io::ErrorKind::BrokenPipe {
-            eprintln!("uniq: write error: {e}");
-            return 1;
-        }
+        && e.kind() != io::ErrorKind::BrokenPipe
+    {
+        eprintln!("uniq: write error: {e}");
+        return 1;
+    }
 
     0
 }

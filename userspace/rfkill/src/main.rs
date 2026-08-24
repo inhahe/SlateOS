@@ -8,6 +8,7 @@
 //! - `rfkill` (default) — wireless device block/unblock control
 //! - `rfkill-event` — monitor rfkill events
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -113,9 +114,15 @@ fn read_devices() -> Vec<RfkillDevice> {
         let base = entry.path();
         let dev_type = read_sysfs(&base.join("type")).unwrap_or_default();
         let dev_name = read_sysfs(&base.join("name")).unwrap_or_else(|| format!("rfkill{}", id));
-        let soft = read_sysfs(&base.join("soft")).map(|s| s == "1").unwrap_or(false);
-        let hard = read_sysfs(&base.join("hard")).map(|s| s == "1").unwrap_or(false);
-        let persistent = read_sysfs(&base.join("persistent")).map(|s| s == "1").unwrap_or(false);
+        let soft = read_sysfs(&base.join("soft"))
+            .map(|s| s == "1")
+            .unwrap_or(false);
+        let hard = read_sysfs(&base.join("hard"))
+            .map(|s| s == "1")
+            .unwrap_or(false);
+        let persistent = read_sysfs(&base.join("persistent"))
+            .map(|s| s == "1")
+            .unwrap_or(false);
 
         devices.push(RfkillDevice {
             id,
@@ -183,9 +190,26 @@ fn cmd_list(args: &[String]) {
             println!("  {{");
             println!("    \"id\": {},", d.id);
             println!("    \"type\": \"{}\",", d.device_type);
-            println!("    \"type-desc\": \"{}\",", type_description(&d.device_type));
-            println!("    \"soft\": \"{}\",", if d.soft_blocked { "blocked" } else { "unblocked" });
-            println!("    \"hard\": \"{}\",", if d.hard_blocked { "blocked" } else { "unblocked" });
+            println!(
+                "    \"type-desc\": \"{}\",",
+                type_description(&d.device_type)
+            );
+            println!(
+                "    \"soft\": \"{}\",",
+                if d.soft_blocked {
+                    "blocked"
+                } else {
+                    "unblocked"
+                }
+            );
+            println!(
+                "    \"hard\": \"{}\",",
+                if d.hard_blocked {
+                    "blocked"
+                } else {
+                    "unblocked"
+                }
+            );
             println!("    \"device\": \"{}\"", d.name);
             if i + 1 < devices.len() {
                 println!("  }},");
@@ -199,25 +223,50 @@ fn cmd_list(args: &[String]) {
 
     if !no_headings {
         if output_all {
-            println!("{:<4} {:>4} {:<12} {:<16} {:<10} {:<10} PERSISTENT",
-                "ID", "TYPE", "TYPE-DESC", "DEVICE", "SOFT", "HARD");
+            println!(
+                "{:<4} {:>4} {:<12} {:<16} {:<10} {:<10} PERSISTENT",
+                "ID", "TYPE", "TYPE-DESC", "DEVICE", "SOFT", "HARD"
+            );
         } else {
-            println!("{:<4} {:>4} {:<12} {:<16} {:<10} HARD",
-                "ID", "TYPE", "TYPE-DESC", "DEVICE", "SOFT");
+            println!(
+                "{:<4} {:>4} {:<12} {:<16} {:<10} HARD",
+                "ID", "TYPE", "TYPE-DESC", "DEVICE", "SOFT"
+            );
         }
     }
 
     for d in &devices {
-        let soft = if d.soft_blocked { "blocked" } else { "unblocked" };
-        let hard = if d.hard_blocked { "blocked" } else { "unblocked" };
-        if output_all {
-            println!("{:<4} {:>4} {:<12} {:<16} {:<10} {:<10} {}",
-                d.id, d.device_type.type_id(), type_description(&d.device_type),
-                d.name, soft, hard, if d._persistent { "yes" } else { "no" });
+        let soft = if d.soft_blocked {
+            "blocked"
         } else {
-            println!("{:<4} {:>4} {:<12} {:<16} {:<10} {}",
-                d.id, d.device_type.type_id(), type_description(&d.device_type),
-                d.name, soft, hard);
+            "unblocked"
+        };
+        let hard = if d.hard_blocked {
+            "blocked"
+        } else {
+            "unblocked"
+        };
+        if output_all {
+            println!(
+                "{:<4} {:>4} {:<12} {:<16} {:<10} {:<10} {}",
+                d.id,
+                d.device_type.type_id(),
+                type_description(&d.device_type),
+                d.name,
+                soft,
+                hard,
+                if d._persistent { "yes" } else { "no" }
+            );
+        } else {
+            println!(
+                "{:<4} {:>4} {:<12} {:<16} {:<10} {}",
+                d.id,
+                d.device_type.type_id(),
+                type_description(&d.device_type),
+                d.name,
+                soft,
+                hard
+            );
         }
     }
 }
@@ -243,12 +292,15 @@ fn cmd_block(args: &[String]) {
         let mut count = 0;
         for d in &devices {
             if rtype == RfkillType::All || d.device_type == rtype {
-                println!("Soft blocked device {} ({}) [{}]", d.id, d.name, d.device_type);
+                println!(
+                    "Soft blocked device {} ({}) [{}]",
+                    d.id, d.name, d.device_type
+                );
                 count += 1;
             }
         }
         if count == 0 {
-            eprintln!("No devices of type '{}'", target);
+            eprintln!("No devices of type {}", quoteaf_os(target));
             process::exit(1);
         }
     }
@@ -281,12 +333,15 @@ fn cmd_unblock(args: &[String]) {
                 if d.hard_blocked {
                     eprintln!("Warning: device {} ({}) is hardware blocked", d.id, d.name);
                 }
-                println!("Soft unblocked device {} ({}) [{}]", d.id, d.name, d.device_type);
+                println!(
+                    "Soft unblocked device {} ({}) [{}]",
+                    d.id, d.name, d.device_type
+                );
                 count += 1;
             }
         }
         if count == 0 {
-            eprintln!("No devices of type '{}'", target);
+            eprintln!("No devices of type {}", quoteaf_os(target));
             process::exit(1);
         }
     }
@@ -303,7 +358,11 @@ fn cmd_toggle(args: &[String]) {
 
     if let Ok(id) = target.parse::<u32>() {
         if let Some(d) = devices.iter().find(|d| d.id == id) {
-            let action = if d.soft_blocked { "unblocked" } else { "blocked" };
+            let action = if d.soft_blocked {
+                "unblocked"
+            } else {
+                "blocked"
+            };
             println!("Soft {} device {} ({})", action, d.id, d.name);
         } else {
             eprintln!("No device with ID {}", id);
@@ -313,7 +372,11 @@ fn cmd_toggle(args: &[String]) {
         let rtype = RfkillType::from_str(target);
         for d in &devices {
             if rtype == RfkillType::All || d.device_type == rtype {
-                let action = if d.soft_blocked { "unblocked" } else { "blocked" };
+                let action = if d.soft_blocked {
+                    "unblocked"
+                } else {
+                    "blocked"
+                };
                 println!("Soft {} device {} ({})", action, d.id, d.name);
             }
         }
@@ -328,11 +391,19 @@ fn cmd_event() {
     // Simulate some events
     let devices = read_devices();
     for d in &devices {
-        let _status = if d.soft_blocked { "blocked" } else { "unblocked" };
-        println!("{:>10}: idx {} type {} op change soft {} hard {}",
-            "rfkill", d.id, d.device_type.type_id(),
+        let _status = if d.soft_blocked {
+            "blocked"
+        } else {
+            "unblocked"
+        };
+        println!(
+            "{:>10}: idx {} type {} op change soft {} hard {}",
+            "rfkill",
+            d.id,
+            d.device_type.type_id(),
             if d.soft_blocked { 1 } else { 0 },
-            if d.hard_blocked { 1 } else { 0 });
+            if d.hard_blocked { 1 } else { 0 }
+        );
     }
 }
 

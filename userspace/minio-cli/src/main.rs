@@ -4,6 +4,7 @@
 //!
 //! Single personality: `mc` (MinIO Client)
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -40,7 +41,10 @@ fn run_mc(args: Vec<String>) -> i32 {
             match sub {
                 "set" => {
                     let name = args.get(2).map(|s| s.as_str()).unwrap_or("myminio");
-                    let url = args.get(3).map(|s| s.as_str()).unwrap_or("http://localhost:9000");
+                    let url = args
+                        .get(3)
+                        .map(|s| s.as_str())
+                        .unwrap_or("http://localhost:9000");
                     println!("Added `{}` successfully.", name);
                     println!("  URL:       {}", url);
                     println!("  AccessKey: ****ABCD");
@@ -51,7 +55,9 @@ fn run_mc(args: Vec<String>) -> i32 {
                     println!("  s3          https://s3.amazonaws.com     AKIA****ABCD");
                     println!("  gcs         https://storage.googleapis.com  gcs-key");
                 }
-                _ => { println!("Alias operation: {}", sub); }
+                _ => {
+                    println!("Alias operation: {}", sub);
+                }
             }
             0
         }
@@ -69,12 +75,18 @@ fn run_mc(args: Vec<String>) -> i32 {
             0
         }
         "mb" => {
-            let bucket = args.get(1).map(|s| s.as_str()).unwrap_or("myminio/new-bucket");
+            let bucket = args
+                .get(1)
+                .map(|s| s.as_str())
+                .unwrap_or("myminio/new-bucket");
             println!("Bucket created successfully `{}`.", bucket);
             0
         }
         "rb" => {
-            let bucket = args.get(1).map(|s| s.as_str()).unwrap_or("myminio/old-bucket");
+            let bucket = args
+                .get(1)
+                .map(|s| s.as_str())
+                .unwrap_or("myminio/old-bucket");
             let force = args.iter().any(|a| a == "--force");
             if force {
                 println!("Removed `{}` and all its contents.", bucket);
@@ -85,20 +97,35 @@ fn run_mc(args: Vec<String>) -> i32 {
         }
         "cp" => {
             let src = args.get(1).map(|s| s.as_str()).unwrap_or("./data.csv");
-            let dst = args.get(2).map(|s| s.as_str()).unwrap_or("myminio/data/data.csv");
-            println!(".../{}: 125.60 MiB / 125.60 MiB  100%", src.rsplit('/').next().unwrap_or(src));
+            let dst = args
+                .get(2)
+                .map(|s| s.as_str())
+                .unwrap_or("myminio/data/data.csv");
+            println!(
+                ".../{}: 125.60 MiB / 125.60 MiB  100%",
+                src.rsplit('/').next().unwrap_or(src)
+            );
             println!("  `{}` -> `{}`", src, dst);
             println!("Total: 125.60 MiB, Transferred: 125.60 MiB, Speed: 234.5 MiB/s");
             0
         }
         "mv" => {
-            let src = args.get(1).map(|s| s.as_str()).unwrap_or("myminio/data/old.csv");
-            let dst = args.get(2).map(|s| s.as_str()).unwrap_or("myminio/archive/old.csv");
+            let src = args
+                .get(1)
+                .map(|s| s.as_str())
+                .unwrap_or("myminio/data/old.csv");
+            let dst = args
+                .get(2)
+                .map(|s| s.as_str())
+                .unwrap_or("myminio/archive/old.csv");
             println!("  `{}` -> `{}`", src, dst);
             0
         }
         "rm" => {
-            let path = args.get(1).map(|s| s.as_str()).unwrap_or("myminio/data/temp.csv");
+            let path = args
+                .get(1)
+                .map(|s| s.as_str())
+                .unwrap_or("myminio/data/temp.csv");
             let recursive = args.iter().any(|a| a == "--recursive" || a == "-r");
             if recursive {
                 println!("Removed `{}/file1.csv`.", path);
@@ -110,7 +137,10 @@ fn run_mc(args: Vec<String>) -> i32 {
             0
         }
         "stat" => {
-            let path = args.get(1).map(|s| s.as_str()).unwrap_or("myminio/data/dataset.csv");
+            let path = args
+                .get(1)
+                .map(|s| s.as_str())
+                .unwrap_or("myminio/data/dataset.csv");
             println!("Name      : {}", path.rsplit('/').next().unwrap_or(path));
             println!("Size      : 125.60 MiB");
             println!("Type      : file");
@@ -147,7 +177,9 @@ fn run_mc(args: Vec<String>) -> i32 {
                     println!("  readonly-user    enabled  readonly");
                     println!("  app-service      enabled  readwrite");
                 }
-                _ => { println!("Admin operation: {}", sub); }
+                _ => {
+                    println!("Admin operation: {}", sub);
+                }
             }
             0
         }
@@ -155,7 +187,7 @@ fn run_mc(args: Vec<String>) -> i32 {
             if cmd.is_empty() {
                 eprintln!("Usage: mc <command>. See --help.");
             } else {
-                eprintln!("Error: unknown command '{}'. See --help.", cmd);
+                eprintln!("Error: unknown command {}. See --help.", quoteaf_os(cmd));
             }
             1
         }
@@ -171,7 +203,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_mc};
+    use super::run_mc;
 
     #[test]
     fn help_exits_zero() {

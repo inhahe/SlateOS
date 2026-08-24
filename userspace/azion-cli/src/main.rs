@@ -1,6 +1,7 @@
 #![deny(clippy::all)]
 //! azion-cli — Slate OS Azion (Brazilian edge platform) personality CLI.
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -252,7 +253,7 @@ fn run_azion(args: &[String], prog: &str) -> i32 {
         "help" | "--help" | "-h" => print_help(prog),
         "version" | "--version" | "-V" => print_version(),
         other => {
-            eprintln!("{prog}: unknown subcommand '{other}'");
+            eprintln!("{prog}: unknown subcommand {}", quoteaf_os(other));
             eprintln!("Try '{prog} help' for the list of subcommands.");
             return 2;
         }

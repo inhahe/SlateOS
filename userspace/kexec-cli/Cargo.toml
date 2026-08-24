@@ -2,3 +2,9 @@
 name = "kexec-cli"
 version = "0.1.0"
 edition = "2024"
+
+[dependencies]
+# kexec-cli names the kernel and initrd it will load and the command line it
+# will pass, all from the caller. It replaces the running kernel, so a
+# misreported path is a misreported boot.
+quoting = { path = "../quoting" }

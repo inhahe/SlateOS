@@ -132,7 +132,8 @@ pub struct PrefetchResult {
 const MAX_ENTRIES: usize = 256;
 
 /// Active advice table.
-static ADVICE_TABLE: PreemptSpinMutex<Vec<AdviceEntry>> = PreemptSpinMutex::named(Vec::new(), b"ADVICE_TABLE");
+static ADVICE_TABLE: PreemptSpinMutex<Vec<AdviceEntry>> =
+    PreemptSpinMutex::named(Vec::new(), b"ADVICE_TABLE");
 
 /// Statistics.
 static ADVISE_COUNT: AtomicU64 = AtomicU64::new(0);

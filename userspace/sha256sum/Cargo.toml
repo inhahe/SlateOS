@@ -8,4 +8,7 @@ description = "SlateOS cryptographic checksum utilities"
 # produce a digest that some other program, on some other machine, compares
 # against its own. SHA-1 and SHA-512 stay local -- `sha2` provides only SHA-256.
 [dependencies]
+# Both diagnostics echo an option the user typed and this program rejected
+# -- the case where the text is least likely to be well-formed.
+quoting = { path = "../quoting" }
 sha2 = { path = "../../sha2" }

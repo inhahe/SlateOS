@@ -4,6 +4,7 @@
 //!
 //! Multi-personality: `amdump`, `amcheck`, `amrecover`, `amrestore`, `amstatus`, `amreport`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -23,7 +24,10 @@ fn run_amdump(args: &[String]) -> i32 {
         return 0;
     }
     let config = args.first().map(|s| s.as_str()).unwrap_or("DailySet1");
-    println!("amdump: starting backup for configuration '{}'", config);
+    println!(
+        "amdump: starting backup for configuration {}",
+        quoteaf_os(config)
+    );
     println!("  Planner: estimating 5 hosts");
     println!("  Driver: starting dumper processes");
     println!("  Dumper: /home/user level 0 (245.6 MB)");
@@ -44,7 +48,11 @@ fn run_amcheck(args: &[String]) -> i32 {
         println!("  -s    Check server only");
         return 0;
     }
-    let config = args.iter().find(|a| !a.starts_with('-')).map(|s| s.as_str()).unwrap_or("DailySet1");
+    let config = args
+        .iter()
+        .find(|a| !a.starts_with('-'))
+        .map(|s| s.as_str())
+        .unwrap_or("DailySet1");
     println!("Amanda Tape Server Host Check");
     println!("----");
     println!("Holding disk /holding: 15.2 GB available, using 10.0 GB");
@@ -92,8 +100,12 @@ fn run_amstatus(args: &[String]) -> i32 {
         println!("amstatus — display Amanda backup status (Slate OS).");
         return 0;
     }
-    let config = args.iter().find(|a| !a.starts_with('-')).map(|s| s.as_str()).unwrap_or("DailySet1");
-    println!("Using config '{}' from /etc/amanda", config);
+    let config = args
+        .iter()
+        .find(|a| !a.starts_with('-'))
+        .map(|s| s.as_str())
+        .unwrap_or("DailySet1");
+    println!("Using config {} from /etc/amanda", quoteaf_os(config));
     println!();
     println!("STATISTICS:");
     println!("                       Total   Full   Incr");
@@ -113,7 +125,11 @@ fn run_amreport(args: &[String]) -> i32 {
         println!("amreport — generate Amanda report (Slate OS).");
         return 0;
     }
-    let config = args.iter().find(|a| !a.starts_with('-')).map(|s| s.as_str()).unwrap_or("DailySet1");
+    let config = args
+        .iter()
+        .find(|a| !a.starts_with('-'))
+        .map(|s| s.as_str())
+        .unwrap_or("DailySet1");
     println!("Amanda Backup Report for {} — 2024-01-15", config);
     println!();
     println!("FAILURE DUMP SUMMARY: (no failures)");
@@ -127,7 +143,8 @@ fn run_amreport(args: &[String]) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first()
+    let prog = args
+        .first()
         .map(|s| strip_ext(basename(s)).to_string())
         .unwrap_or_else(|| "amdump".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
@@ -145,7 +162,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_amdump};
+    use super::{basename, run_amdump, strip_ext};
 
     #[test]
     fn basename_strips_path() {

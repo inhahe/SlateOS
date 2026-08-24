@@ -2,4 +2,11 @@
 name = "cups"
 version = "0.1.0"
 edition = "2024"
+description = "SlateOS CUPS printing system (12 personalities)"
+
 [dependencies]
+# One rendering of untrusted text inside a diagnostic. A printer name, a PPD
+# path and every argv word these twelve personalities echo back may hold a
+# newline -- so a message that pastes one in raw lets whoever chose it write
+# extra lines of this program's output. See `userspace/quoting`.
+quoting = { path = "../quoting" }

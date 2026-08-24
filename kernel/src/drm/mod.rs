@@ -1462,7 +1462,8 @@ pub fn self_test() -> KernelResult<()> {
         //     entirely, since nothing ever wrote `crtc.mode` or (outside the
         //     atomic path) `plane.fb`.
         if fail.is_none() {
-            if let Err(e) = dev.set_crtc(crtc_id, Some(good_fb), 0, 0, &[conn_id], Some(&cur_mode)) {
+            if let Err(e) = dev.set_crtc(crtc_id, Some(good_fb), 0, 0, &[conn_id], Some(&cur_mode))
+            {
                 serial_println!("[drm]   FAIL: set_crtc refused a valid configuration: {e:?}");
                 fail = Some("set_crtc refused a valid configuration");
             }

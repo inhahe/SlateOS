@@ -212,8 +212,7 @@ struct Ac97Device {
 /// preempt-disabling spinlock is the right weight and `lock_irqsave` is not
 /// needed. Every critical section under it must stay short; see
 /// [`play_test_tone`], which deliberately drops it across the playback wait.
-static DEVICE: PreemptSpinMutex<Option<Ac97Device>> =
-    PreemptSpinMutex::named(None, b"AC97_DEVICE");
+static DEVICE: PreemptSpinMutex<Option<Ac97Device>> = PreemptSpinMutex::named(None, b"AC97_DEVICE");
 
 /// Whether AC97 is initialized and available.
 static INITIALIZED: AtomicBool = AtomicBool::new(false);

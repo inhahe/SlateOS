@@ -2,3 +2,9 @@
 name = "useradd-cli"
 version = "0.1.0"
 edition = "2024"
+
+[dependencies]
+# useradd-cli names accounts, home directories and shells. It creates users,
+# so the name it echoes is the one it was just asked to create --
+# attacker-chosen wherever unprivileged account creation is possible.
+quoting = { path = "../quoting" }

@@ -4,6 +4,7 @@
 //!
 //! Single personality: `rclone`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -55,15 +56,20 @@ fn run_rclone(args: Vec<String>) -> i32 {
                 }
                 "create" => {
                     let name = args.get(2).map(|s| s.as_str()).unwrap_or("myremote");
-                    println!("Remote '{}' created successfully", name);
+                    println!("Remote {} created successfully", quoteaf_os(name));
                 }
-                _ => { println!("Config operation: {}", sub); }
+                _ => {
+                    println!("Config operation: {}", sub);
+                }
             }
             0
         }
         "copy" => {
             let src = args.get(1).map(|s| s.as_str()).unwrap_or("./data");
-            let dst = args.get(2).map(|s| s.as_str()).unwrap_or("gdrive:backup/data");
+            let dst = args
+                .get(2)
+                .map(|s| s.as_str())
+                .unwrap_or("gdrive:backup/data");
             println!("Copying from {} to {}...", src, dst);
             println!("Transferred:      250.3 MiB / 250.3 MiB, 100%, 45.2 MiB/s, ETA 0s");
             println!("Transferred:       12 / 12, 100%");
@@ -72,7 +78,10 @@ fn run_rclone(args: Vec<String>) -> i32 {
         }
         "sync" => {
             let src = args.get(1).map(|s| s.as_str()).unwrap_or("./data");
-            let dst = args.get(2).map(|s| s.as_str()).unwrap_or("s3:mybucket/data");
+            let dst = args
+                .get(2)
+                .map(|s| s.as_str())
+                .unwrap_or("s3:mybucket/data");
             println!("Syncing from {} to {}...", src, dst);
             println!("Transferred:      125.6 MiB / 125.6 MiB, 100%, 38.1 MiB/s, ETA 0s");
             println!("Transferred:        8 / 8, 100%");
@@ -108,7 +117,10 @@ fn run_rclone(args: Vec<String>) -> i32 {
         }
         "check" => {
             let src = args.get(1).map(|s| s.as_str()).unwrap_or("./data");
-            let dst = args.get(2).map(|s| s.as_str()).unwrap_or("s3:mybucket/data");
+            let dst = args
+                .get(2)
+                .map(|s| s.as_str())
+                .unwrap_or("s3:mybucket/data");
             println!("Checking {} vs {}...", src, dst);
             println!("  12 files matched");
             println!("  0 files missing from source");
@@ -128,7 +140,11 @@ fn run_rclone(args: Vec<String>) -> i32 {
         "serve" => {
             let proto = args.get(1).map(|s| s.as_str()).unwrap_or("http");
             let remote = args.get(2).map(|s| s.as_str()).unwrap_or("gdrive:");
-            let addr = args.windows(2).find(|w| w[0] == "--addr").map(|w| w[1].as_str()).unwrap_or("localhost:8080");
+            let addr = args
+                .windows(2)
+                .find(|w| w[0] == "--addr")
+                .map(|w| w[1].as_str())
+                .unwrap_or("localhost:8080");
             println!("Serving {} via {} at {}", remote, proto, addr);
             println!("  Access at: {}://{}", proto, addr);
             0
@@ -137,7 +153,7 @@ fn run_rclone(args: Vec<String>) -> i32 {
             if cmd.is_empty() {
                 eprintln!("Usage: rclone <command>. See --help.");
             } else {
-                eprintln!("Error: unknown command '{}'. See --help.", cmd);
+                eprintln!("Error: unknown command {}. See --help.", quoteaf_os(cmd));
             }
             1
         }
@@ -153,7 +169,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_rclone};
+    use super::run_rclone;
 
     #[test]
     fn help_exits_zero() {

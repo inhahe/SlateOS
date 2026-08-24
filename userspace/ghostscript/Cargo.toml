@@ -2,3 +2,11 @@
 name = "ghostscript"
 version = "0.1.0"
 edition = "2024"
+
+[dependencies]
+# It interpolates `device` into "Processing {} file(s) with device {}". That
+# value is a path from the command line, and a path may hold any byte but
+# `/` and NUL -- a newline included. It interpolates `output` into "Output:
+# {}". That value is an argv word, so it is whatever the user typed and not
+# text this program chose.
+quoting = { path = "../quoting" }

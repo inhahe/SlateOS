@@ -2,3 +2,8 @@
 name = "civo-cli"
 version = "0.1.0"
 edition = "2024"
+
+[dependencies]
+# civo-cli names clusters, instances and volumes, identifiers the user chose
+# or the API returned.
+quoting = { path = "../quoting" }

@@ -4,3 +4,6 @@ version = "0.1.0"
 edition = "2024"
 description = "SlateOS firewall management CLI"
 [dependencies]
+# The rule description embeds addresses and ports the user typed; a rule the
+# kernel rejected is by definition one that was not well-formed.
+quoting = { path = "../quoting" }

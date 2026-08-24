@@ -125,19 +125,12 @@ fn cpuid_str(bytes: &[u8]) -> String {
 }
 
 /// Format a byte count as a human-readable power-of-two size.
+///
+/// Delegates to [`crate::bytesize::iec`]. The private copy truncated to whole
+/// units, which in a hardware profile is the difference between `1 GiB` and
+/// `1.9 GiB` of installed RAM reading identically.
 fn format_size(bytes: u64) -> String {
-    const KIB: u64 = 1024;
-    const MIB: u64 = 1024 * 1024;
-    const GIB: u64 = 1024 * 1024 * 1024;
-    if bytes >= GIB {
-        format!("{} GiB", bytes / GIB)
-    } else if bytes >= MIB {
-        format!("{} MiB", bytes / MIB)
-    } else if bytes >= KIB {
-        format!("{} KiB", bytes / KIB)
-    } else {
-        format!("{bytes} B")
-    }
+    crate::bytesize::iec(bytes)
 }
 
 /// Build the CPU section from **real** CPUID + topology detection.

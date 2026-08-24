@@ -2,3 +2,8 @@
 name = "snyk-cli"
 version = "0.1.0"
 edition = "2024"
+
+[dependencies]
+# snyk-cli names projects, packages and vulnerability identifiers read out
+# of a manifest and out of downloaded advisory data.
+quoting = { path = "../quoting" }

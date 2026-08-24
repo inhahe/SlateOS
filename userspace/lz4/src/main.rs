@@ -9,6 +9,7 @@
 //! - `lz4cat` — decompress to stdout
 //! - `unlz4` — decompress LZ4 files
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -84,7 +85,10 @@ fn run_lz4(args: Vec<String>, personality: &str) -> i32 {
 
     match personality {
         "unlz4" => opts.action = Action::Decompress,
-        "lz4cat" => { opts.action = Action::Decompress; opts.stdout = true; }
+        "lz4cat" => {
+            opts.action = Action::Decompress;
+            opts.stdout = true;
+        }
         "lz4c" => {} // legacy compressor, same as lz4
         _ => {}
     }
@@ -130,12 +134,20 @@ fn run_lz4(args: Vec<String>, personality: &str) -> i32 {
             "-q" | "--quiet" => opts._quiet = true,
             "--content-size" => opts._content_size = true,
             "--no-frame-crc" => opts._no_frame_crc = true,
-            "-1" => { opts.mode = CompressionMode::Fast; opts.level = 1; }
-            "-9" | "--best" => { opts.mode = CompressionMode::Hc; opts.level = 9; }
+            "-1" => {
+                opts.mode = CompressionMode::Fast;
+                opts.level = 1;
+            }
+            "-9" | "--best" => {
+                opts.mode = CompressionMode::Hc;
+                opts.level = 9;
+            }
             s if s.starts_with('-') && s.len() == 2 && s.as_bytes()[1].is_ascii_digit() => {
                 let n = i32::from(s.as_bytes()[1] - b'0');
                 opts.level = n;
-                if n >= 4 { opts.mode = CompressionMode::Hc; }
+                if n >= 4 {
+                    opts.mode = CompressionMode::Hc;
+                }
             }
             s if !s.starts_with('-') => opts.files.push(s.to_string()),
             _ => {}
@@ -150,7 +162,10 @@ fn run_lz4(args: Vec<String>, personality: &str) -> i32 {
         Action::Compress => lz4_compress(&opts, personality),
         Action::Decompress => lz4_decompress(&opts, personality),
         Action::Test => lz4_test(&opts, personality),
-        Action::_Benchmark => { eprintln!("{}: benchmark mode not yet implemented", personality); 1 }
+        Action::_Benchmark => {
+            eprintln!("{}: benchmark mode not yet implemented", personality);
+            1
+        }
     }
 }
 
@@ -171,10 +186,9 @@ fn lz4_compress(opts: &Lz4Options, personality: &str) -> i32 {
             // LZ4 is known for speed with moderate ratios
             println!("Compressed {} into {} (ratio 2.10:1, simulated)", file, out);
 
-            if !opts.keep && !opts.stdout
-                && opts.verbose {
-                    eprintln!("{}: removed '{}'", personality, file);
-                }
+            if !opts.keep && !opts.stdout && opts.verbose {
+                eprintln!("{}: removed {}", personality, quoteaf_os(file));
+            }
         }
     }
     0
@@ -193,10 +207,9 @@ fn lz4_decompress(opts: &Lz4Options, personality: &str) -> i32 {
 
             println!("{}: {} → {} (simulated)", personality, file, out);
 
-            if !opts.keep && !opts.stdout
-                && opts.verbose {
-                    eprintln!("{}: removed '{}'", personality, file);
-                }
+            if !opts.keep && !opts.stdout && opts.verbose {
+                eprintln!("{}: removed {}", personality, quoteaf_os(file));
+            }
         }
     }
     0
@@ -222,7 +235,9 @@ fn main() {
         let bytes = s.as_bytes();
         let mut last_sep = 0;
         for (i, &b) in bytes.iter().enumerate() {
-            if b == b'/' || b == b'\\' { last_sep = i + 1; }
+            if b == b'/' || b == b'\\' {
+                last_sep = i + 1;
+            }
         }
         let base = &s[last_sep..];
         let base = base.strip_suffix(".exe").unwrap_or(base);

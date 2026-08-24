@@ -10,6 +10,7 @@
 //! - `sbverify` — verify EFI binary signatures
 //! - `sbkeysync` — synchronize keys to UEFI firmware
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -274,7 +275,7 @@ fn cmd_sign(args: &[String]) {
 
     for file in &files {
         let out = output.as_deref().unwrap_or(file);
-        println!("Signing '{}' -> '{}'", file, out);
+        println!("Signing {} -> {}", quoteaf_os(file), quoteaf_os(out));
         println!("  Using key: {}/db.key", DB_DIR);
 
         if save {
@@ -323,7 +324,7 @@ fn cmd_remove_file(args: &[String]) {
             process::exit(1);
         }
     };
-    println!("Removed '{}' from tracking.", file);
+    println!("Removed {} from tracking.", quoteaf_os(file));
 }
 
 fn cmd_rotate_keys() {
@@ -480,7 +481,12 @@ fn run_sbsign(args: Vec<String>) -> i32 {
     }
 
     let out = output.as_deref().unwrap_or(&file);
-    println!("Signing '{}' with key '{}' cert '{}'", file, key, cert);
+    println!(
+        "Signing {} with key {} cert {}",
+        quoteaf_os(&file),
+        quoteaf_os(&key),
+        quoteaf_os(&cert)
+    );
     println!("Output: {}", out);
     0
 }
@@ -522,9 +528,13 @@ fn run_sbverify(args: Vec<String>) -> i32 {
     }
 
     if let Some(c) = &cert {
-        println!("Verifying '{}' against cert '{}'", file, c);
+        println!(
+            "Verifying {} against cert {}",
+            quoteaf_os(&file),
+            quoteaf_os(c)
+        );
     } else {
-        println!("Verifying '{}'", file);
+        println!("Verifying {}", quoteaf_os(&file));
     }
     println!("Signature verification OK");
     0

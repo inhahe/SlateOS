@@ -4,6 +4,7 @@
 //!
 //! Multi-personality: `v`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -59,7 +60,7 @@ fn run_v(args: &[String]) -> i32 {
         }
         "new" => {
             let name = args.get(1).map(|s| s.as_str()).unwrap_or("myproject");
-            println!("V: creating new project '{}'", name);
+            println!("V: creating new project {}", quoteaf_os(name));
             println!("  Created: {}/src/main.v", name);
             println!("  Created: {}/v.mod", name);
         }
@@ -78,7 +79,7 @@ fn run_v(args: &[String]) -> i32 {
             if subcmd.ends_with(".v") {
                 println!("V: compiling and running {}...", subcmd);
             } else {
-                println!("v: '{}' completed", subcmd);
+                println!("v: {} completed", quoteaf_os(subcmd));
             }
         }
     }
@@ -94,7 +95,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_v};
+    use super::run_v;
 
     #[test]
     fn help_exits_zero() {

@@ -2,3 +2,8 @@
 name = "clearml-cli"
 version = "0.1.0"
 edition = "2024"
+
+[dependencies]
+# clearml-cli names tasks, projects and artifacts created on the tracking
+# server rather than by this tool.
+quoting = { path = "../quoting" }

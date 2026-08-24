@@ -15,6 +15,14 @@ use std::env;
 use std::io::{self, Write};
 use std::process;
 
+// A device or subvolume path may hold any byte except `/` and NUL --
+// including a newline -- so a message that pastes one in raw lets whoever
+// named it write whole extra lines of this program's output. `quoteaf_os`
+// renders `abc` as `'abc'`, which is byte-for-byte what the hand-written
+// quotes here used to print for an ordinary name, and renders a hostile one
+// so it cannot escape. See `userspace/quoting`.
+use quoting::quoteaf_os;
+
 // ============================================================================
 // Constants
 // ============================================================================
@@ -334,7 +342,11 @@ fn parse_size(s: &str) -> Option<u64> {
     } else {
         (s, 1u64)
     };
-    num_part.trim().parse::<u64>().ok().map(|n| n.saturating_mul(multiplier))
+    num_part
+        .trim()
+        .parse::<u64>()
+        .ok()
+        .map(|n| n.saturating_mul(multiplier))
 }
 
 /// Generate a mock UUID for display purposes.
@@ -408,7 +420,8 @@ fn read_mounted_fs_info(mount_path: &str) -> Result<BtrfsFilesystem> {
 fn cmd_filesystem(args: &[String]) -> Result<()> {
     if args.is_empty() {
         return Err(BtrfsError::InvalidArgument(
-            "missing subcommand. Usage: btrfs filesystem <show|df|usage|resize|defrag|label|sync>".into(),
+            "missing subcommand. Usage: btrfs filesystem <show|df|usage|resize|defrag|label|sync>"
+                .into(),
         ));
     }
 
@@ -441,15 +454,23 @@ fn cmd_filesystem_show(args: &[String]) -> Result<()> {
             } else {
                 format!(" Label: '{}'", fs.label)
             };
-            println!("Label: '{}' uuid: {}", fs.label, fs.uuid);
-            println!("\tTotal devices {} FS bytes used {}{label_str}",
-                     fs.devices.len(), format_bytes(fs.used_bytes));
+            println!("Label: {} uuid: {}", quoteaf_os(&fs.label), fs.uuid);
+            println!(
+                "\tTotal devices {} FS bytes used {}{label_str}",
+                fs.devices.len(),
+                format_bytes(fs.used_bytes)
+            );
             println!();
             for dev in &fs.devices {
                 let missing = if dev.missing { " ***MISSING***" } else { "" };
-                println!("\tdevid {:>4} size {} used {} path {}{}",
-                         dev.devid, format_bytes(dev.size),
-                         format_bytes(dev.used), dev.path, missing);
+                println!(
+                    "\tdevid {:>4} size {} used {} path {}{}",
+                    dev.devid,
+                    format_bytes(dev.size),
+                    format_bytes(dev.used),
+                    dev.path,
+                    missing
+                );
             }
             Ok(())
         }
@@ -462,26 +483,35 @@ fn cmd_filesystem_show(args: &[String]) -> Result<()> {
 }
 
 fn cmd_filesystem_df(args: &[String]) -> Result<()> {
-    let path = args.first()
+    let path = args
+        .first()
         .ok_or_else(|| BtrfsError::InvalidArgument("missing path argument".into()))?;
 
     match read_mounted_fs_info(path) {
         Ok(fs) => {
-            println!("Data, {}: total={}, used={}",
-                     fs.data_profile.as_str(),
-                     format_bytes(fs.total_bytes / 2),
-                     format_bytes(fs.used_bytes * 3 / 4));
-            println!("System, {}: total={}, used={}",
-                     fs.metadata_profile.as_str(),
-                     format_bytes(16 * 1024 * 1024),
-                     format_bytes(4 * 1024 * 1024));
-            println!("Metadata, {}: total={}, used={}",
-                     fs.metadata_profile.as_str(),
-                     format_bytes(fs.total_bytes / 8),
-                     format_bytes(fs.used_bytes / 10));
-            println!("GlobalReserve, single: total={}, used={}",
-                     format_bytes(256 * 1024 * 1024),
-                     format_bytes(0));
+            println!(
+                "Data, {}: total={}, used={}",
+                fs.data_profile.as_str(),
+                format_bytes(fs.total_bytes / 2),
+                format_bytes(fs.used_bytes * 3 / 4)
+            );
+            println!(
+                "System, {}: total={}, used={}",
+                fs.metadata_profile.as_str(),
+                format_bytes(16 * 1024 * 1024),
+                format_bytes(4 * 1024 * 1024)
+            );
+            println!(
+                "Metadata, {}: total={}, used={}",
+                fs.metadata_profile.as_str(),
+                format_bytes(fs.total_bytes / 8),
+                format_bytes(fs.used_bytes / 10)
+            );
+            println!(
+                "GlobalReserve, single: total={}, used={}",
+                format_bytes(256 * 1024 * 1024),
+                format_bytes(0)
+            );
             Ok(())
         }
         Err(e) => {
@@ -492,22 +522,40 @@ fn cmd_filesystem_df(args: &[String]) -> Result<()> {
 }
 
 fn cmd_filesystem_usage(args: &[String]) -> Result<()> {
-    let path = args.first()
+    let path = args
+        .first()
         .ok_or_else(|| BtrfsError::InvalidArgument("missing path argument".into()))?;
 
     match read_mounted_fs_info(path) {
         Ok(fs) => {
             println!("Overall:");
-            println!("    Device size:                   {}", format_bytes(fs.total_bytes));
-            println!("    Device allocated:               {}", format_bytes(fs.used_bytes));
-            println!("    Device unallocated:             {}", format_bytes(fs.total_bytes.saturating_sub(fs.used_bytes)));
-            println!("    Used:                           {}", format_bytes(fs.used_bytes * 3 / 4));
-            println!("    Free (estimated):               {}",
-                     format_bytes(fs.total_bytes.saturating_sub(fs.used_bytes)));
+            println!(
+                "    Device size:                   {}",
+                format_bytes(fs.total_bytes)
+            );
+            println!(
+                "    Device allocated:               {}",
+                format_bytes(fs.used_bytes)
+            );
+            println!(
+                "    Device unallocated:             {}",
+                format_bytes(fs.total_bytes.saturating_sub(fs.used_bytes))
+            );
+            println!(
+                "    Used:                           {}",
+                format_bytes(fs.used_bytes * 3 / 4)
+            );
+            println!(
+                "    Free (estimated):               {}",
+                format_bytes(fs.total_bytes.saturating_sub(fs.used_bytes))
+            );
             println!("    Data ratio:                     1.00");
             println!("    Metadata ratio:                 1.00");
-            println!("    Global reserve:                 {} (used: {})",
-                     format_bytes(256 * 1024 * 1024), format_bytes(0));
+            println!(
+                "    Global reserve:                 {} (used: {})",
+                format_bytes(256 * 1024 * 1024),
+                format_bytes(0)
+            );
             println!("    Multiple profiles:              no");
             Ok(())
         }
@@ -634,7 +682,7 @@ fn cmd_filesystem_label(args: &[String]) -> Result<()> {
             ));
         }
         // Real implementation: BTRFS_IOC_SET_FSLABEL
-        println!("Set label of '{path}' to '{label}'");
+        println!("Set label of {} to {}", quoteaf_os(path), quoteaf_os(label));
     } else {
         // Real implementation: BTRFS_IOC_GET_FSLABEL or read superblock
         match read_mounted_fs_info(path) {
@@ -649,7 +697,8 @@ fn cmd_filesystem_label(args: &[String]) -> Result<()> {
 }
 
 fn cmd_filesystem_sync(args: &[String]) -> Result<()> {
-    let path = args.first()
+    let path = args
+        .first()
         .ok_or_else(|| BtrfsError::InvalidArgument("missing path argument".into()))?;
 
     // Real implementation: BTRFS_IOC_SYNC ioctl on the filesystem
@@ -756,7 +805,7 @@ fn cmd_subvolume_delete(args: &[String]) -> Result<()> {
             }
             println!();
         } else {
-            println!("Delete subvolume '{path}'");
+            println!("Delete subvolume {}", quoteaf_os(path));
         }
     }
     Ok(())
@@ -801,7 +850,10 @@ fn cmd_subvolume_list(args: &[String]) -> Result<()> {
                 if show_snapshot_only && sv.parent_uuid.is_empty() {
                     continue;
                 }
-                println!("{}\t{}\t{}\t{}", sv.id, sv.generation, sv.top_level, sv.path);
+                println!(
+                    "{}\t{}\t{}\t{}",
+                    sv.id, sv.generation, sv.top_level, sv.path
+                );
             }
             Ok(())
         }
@@ -813,24 +865,43 @@ fn cmd_subvolume_list(args: &[String]) -> Result<()> {
 }
 
 fn cmd_subvolume_show(args: &[String]) -> Result<()> {
-    let path = args.first()
-        .ok_or_else(|| BtrfsError::InvalidArgument(
-            "usage: btrfs subvolume show <subvolume-path>".into(),
-        ))?;
+    let path = args.first().ok_or_else(|| {
+        BtrfsError::InvalidArgument("usage: btrfs subvolume show <subvolume-path>".into())
+    })?;
 
     // Real implementation: BTRFS_IOC_INO_LOOKUP + BTRFS_IOC_GET_SUBVOL_INFO
     match read_mounted_fs_info(path) {
         Ok(fs) => {
             if let Some(sv) = fs.subvolumes.first() {
                 println!("{}", sv.path);
-                println!("\tName:\t\t\t{}", sv.path.rsplit('/').next().unwrap_or(&sv.path));
+                println!(
+                    "\tName:\t\t\t{}",
+                    sv.path.rsplit('/').next().unwrap_or(&sv.path)
+                );
                 println!("\tUUID:\t\t\t{}", sv.uuid);
-                println!("\tParent UUID:\t\t{}", if sv.parent_uuid.is_empty() { "-" } else { &sv.parent_uuid });
-                println!("\tReceived UUID:\t\t{}", if sv.received_uuid.is_empty() { "-" } else { &sv.received_uuid });
+                println!(
+                    "\tParent UUID:\t\t{}",
+                    if sv.parent_uuid.is_empty() {
+                        "-"
+                    } else {
+                        &sv.parent_uuid
+                    }
+                );
+                println!(
+                    "\tReceived UUID:\t\t{}",
+                    if sv.received_uuid.is_empty() {
+                        "-"
+                    } else {
+                        &sv.received_uuid
+                    }
+                );
                 println!("\tCreation time:\t\t{}", sv.ctime);
                 println!("\tSubvolume ID:\t\t{}", sv.id);
                 println!("\tGeneration:\t\t{}", sv.generation);
-                println!("\tFlags:\t\t\t{}", if sv.readonly { "readonly" } else { "-" });
+                println!(
+                    "\tFlags:\t\t\t{}",
+                    if sv.readonly { "readonly" } else { "-" }
+                );
             }
             Ok(())
         }
@@ -869,17 +940,18 @@ fn cmd_subvolume_snapshot(args: &[String]) -> Result<()> {
     let dest = &positional[1];
 
     // Real implementation: BTRFS_IOC_SNAP_CREATE_V2
-    print!("Create a{} snapshot of '{source}' in '{dest}'",
-           if readonly { " readonly" } else { "" });
+    print!(
+        "Create a{} snapshot of '{source}' in '{dest}'",
+        if readonly { " readonly" } else { "" }
+    );
     println!();
     Ok(())
 }
 
 fn cmd_subvolume_get_default(args: &[String]) -> Result<()> {
-    let path = args.first()
-        .ok_or_else(|| BtrfsError::InvalidArgument(
-            "usage: btrfs subvolume get-default <path>".into(),
-        ))?;
+    let path = args.first().ok_or_else(|| {
+        BtrfsError::InvalidArgument("usage: btrfs subvolume get-default <path>".into())
+    })?;
 
     // Real implementation: BTRFS_IOC_DEFAULT_SUBVOL with GET
     let _fs = read_mounted_fs_info(path)?;
@@ -972,46 +1044,42 @@ fn cmd_balance_start(args: &[String]) -> Result<()> {
 }
 
 fn cmd_balance_pause(args: &[String]) -> Result<()> {
-    let path = args.first()
-        .ok_or_else(|| BtrfsError::InvalidArgument(
-            "usage: btrfs balance pause <path>".into(),
-        ))?;
+    let path = args
+        .first()
+        .ok_or_else(|| BtrfsError::InvalidArgument("usage: btrfs balance pause <path>".into()))?;
 
     // Real implementation: BTRFS_IOC_BALANCE_CTL with BTRFS_BALANCE_CTL_PAUSE
     let _fs = read_mounted_fs_info(path)?;
-    println!("Balance on '{path}' paused");
+    println!("Balance on {} paused", quoteaf_os(path));
     Ok(())
 }
 
 fn cmd_balance_cancel(args: &[String]) -> Result<()> {
-    let path = args.first()
-        .ok_or_else(|| BtrfsError::InvalidArgument(
-            "usage: btrfs balance cancel <path>".into(),
-        ))?;
+    let path = args
+        .first()
+        .ok_or_else(|| BtrfsError::InvalidArgument("usage: btrfs balance cancel <path>".into()))?;
 
     // Real implementation: BTRFS_IOC_BALANCE_CTL with BTRFS_BALANCE_CTL_CANCEL
     let _fs = read_mounted_fs_info(path)?;
-    println!("Balance on '{path}' cancelled");
+    println!("Balance on {} cancelled", quoteaf_os(path));
     Ok(())
 }
 
 fn cmd_balance_resume(args: &[String]) -> Result<()> {
-    let path = args.first()
-        .ok_or_else(|| BtrfsError::InvalidArgument(
-            "usage: btrfs balance resume <path>".into(),
-        ))?;
+    let path = args
+        .first()
+        .ok_or_else(|| BtrfsError::InvalidArgument("usage: btrfs balance resume <path>".into()))?;
 
     // Real implementation: BTRFS_IOC_BALANCE_V2 with resume flag
     let _fs = read_mounted_fs_info(path)?;
-    println!("Balance on '{path}' resumed");
+    println!("Balance on {} resumed", quoteaf_os(path));
     Ok(())
 }
 
 fn cmd_balance_status(args: &[String]) -> Result<()> {
-    let path = args.first()
-        .ok_or_else(|| BtrfsError::InvalidArgument(
-            "usage: btrfs balance status <path>".into(),
-        ))?;
+    let path = args
+        .first()
+        .ok_or_else(|| BtrfsError::InvalidArgument("usage: btrfs balance status <path>".into()))?;
 
     // Real implementation: BTRFS_IOC_BALANCE_PROGRESS
     let _fs = read_mounted_fs_info(path)?;
@@ -1024,15 +1092,19 @@ fn cmd_balance_status(args: &[String]) -> Result<()> {
     };
 
     if status.running {
-        println!("Balance on '{path}' is running");
-        println!("{} out of about {} chunks balanced ({} considered)",
-                 status.completed, status.estimated, status.considered);
+        println!("Balance on {} is running", quoteaf_os(path));
+        println!(
+            "{} out of about {} chunks balanced ({} considered)",
+            status.completed, status.estimated, status.considered
+        );
     } else if status.paused {
-        println!("Balance on '{path}' is paused");
-        println!("{} out of about {} chunks balanced ({} considered)",
-                 status.completed, status.estimated, status.considered);
+        println!("Balance on {} is paused", quoteaf_os(path));
+        println!(
+            "{} out of about {} chunks balanced ({} considered)",
+            status.completed, status.estimated, status.considered
+        );
     } else {
-        println!("No balance found on '{path}'");
+        println!("No balance found on {}", quoteaf_os(path));
     }
     Ok(())
 }
@@ -1044,7 +1116,8 @@ fn cmd_balance_status(args: &[String]) -> Result<()> {
 fn cmd_device(args: &[String]) -> Result<()> {
     if args.is_empty() {
         return Err(BtrfsError::InvalidArgument(
-            "missing subcommand. Usage: btrfs device <add|remove|delete|scan|stats|usage|ready>".into(),
+            "missing subcommand. Usage: btrfs device <add|remove|delete|scan|stats|usage|ready>"
+                .into(),
         ));
     }
 
@@ -1099,7 +1172,11 @@ fn cmd_device_add(args: &[String]) -> Result<()> {
                 "'{dev}' does not appear to be a block device"
             )));
         }
-        println!("Added device '{dev}' to '{mount_path}'");
+        println!(
+            "Added device {} to {}",
+            quoteaf_os(dev),
+            quoteaf_os(mount_path)
+        );
     }
     Ok(())
 }
@@ -1117,7 +1194,11 @@ fn cmd_device_remove(args: &[String]) -> Result<()> {
     // Real implementation: BTRFS_IOC_RM_DEV_V2
     let _fs = read_mounted_fs_info(mount_path)?;
     for dev in devices {
-        println!("Removed device '{dev}' from '{mount_path}'");
+        println!(
+            "Removed device {} from {}",
+            quoteaf_os(dev),
+            quoteaf_os(mount_path)
+        );
     }
     Ok(())
 }
@@ -1139,7 +1220,7 @@ fn cmd_device_scan(args: &[String]) -> Result<()> {
             println!("All device registrations removed");
         } else {
             for dev in &devices {
-                println!("Device '{dev}' forgotten");
+                println!("Device {} forgotten", quoteaf_os(dev));
             }
         }
     } else if devices.is_empty() {
@@ -1149,9 +1230,12 @@ fn cmd_device_scan(args: &[String]) -> Result<()> {
     } else {
         for dev in &devices {
             if !is_device_path(dev) {
-                eprintln!("WARNING: '{dev}' does not look like a device path");
+                eprintln!(
+                    "WARNING: {} does not look like a device path",
+                    quoteaf_os(dev)
+                );
             }
-            println!("Scanning device '{dev}'...");
+            println!("Scanning device {}...", quoteaf_os(dev));
         }
     }
     Ok(())
@@ -1181,7 +1265,7 @@ fn cmd_device_stats(args: &[String]) -> Result<()> {
     // Real implementation: BTRFS_IOC_GET_DEV_STATS
     let _fs = read_mounted_fs_info(&path)?;
     if reset {
-        println!("Device stats reset on '{path}'");
+        println!("Device stats reset on {}", quoteaf_os(&path));
     }
     // Would display: write_io_errs, read_io_errs, flush_io_errs,
     // corruption_errs, generation_errs for each device.
@@ -1189,10 +1273,9 @@ fn cmd_device_stats(args: &[String]) -> Result<()> {
 }
 
 fn cmd_device_usage(args: &[String]) -> Result<()> {
-    let path = args.first()
-        .ok_or_else(|| BtrfsError::InvalidArgument(
-            "usage: btrfs device usage <path>".into(),
-        ))?;
+    let path = args
+        .first()
+        .ok_or_else(|| BtrfsError::InvalidArgument("usage: btrfs device usage <path>".into()))?;
 
     // Real implementation: BTRFS_IOC_DEV_INFO + BTRFS_IOC_SPACE_INFO
     match read_mounted_fs_info(path) {
@@ -1202,10 +1285,15 @@ fn cmd_device_usage(args: &[String]) -> Result<()> {
                 println!("{}{missing}", dev.path);
                 println!("   Device ID:             {}", dev.devid);
                 println!("   Device size:            {}", format_bytes(dev.size));
-                println!("   Data,{}: {}",
-                         fs.data_profile.as_str(), format_bytes(dev.used));
-                println!("   Unallocated:            {}",
-                         format_bytes(dev.size.saturating_sub(dev.used)));
+                println!(
+                    "   Data,{}: {}",
+                    fs.data_profile.as_str(),
+                    format_bytes(dev.used)
+                );
+                println!(
+                    "   Unallocated:            {}",
+                    format_bytes(dev.size.saturating_sub(dev.used))
+                );
                 println!();
             }
             Ok(())
@@ -1218,10 +1306,9 @@ fn cmd_device_usage(args: &[String]) -> Result<()> {
 }
 
 fn cmd_device_ready(args: &[String]) -> Result<()> {
-    let device = args.first()
-        .ok_or_else(|| BtrfsError::InvalidArgument(
-            "usage: btrfs device ready <device>".into(),
-        ))?;
+    let device = args
+        .first()
+        .ok_or_else(|| BtrfsError::InvalidArgument("usage: btrfs device ready <device>".into()))?;
 
     if !is_device_path(device) {
         return Err(BtrfsError::DeviceError(format!(
@@ -1231,7 +1318,7 @@ fn cmd_device_ready(args: &[String]) -> Result<()> {
 
     // Real implementation: BTRFS_IOC_DEVICES_READY
     let _fs = probe_filesystem(device)?;
-    println!("Device '{device}' is ready");
+    println!("Device {} is ready", quoteaf_os(device));
     Ok(())
 }
 
@@ -1281,35 +1368,33 @@ fn cmd_scrub_start(args: &[String]) -> Result<()> {
     // Real implementation: BTRFS_IOC_SCRUB
     let _fs = read_mounted_fs_info(&path)?;
     if background {
-        println!("Scrub started on '{path}' (background)");
+        println!("Scrub started on {} (background)", quoteaf_os(&path));
     } else {
-        println!("Scrub started on '{path}' (foreground)");
-        println!("Scrub completed on '{path}'");
+        println!("Scrub started on {} (foreground)", quoteaf_os(&path));
+        println!("Scrub completed on {}", quoteaf_os(&path));
     }
     Ok(())
 }
 
 fn cmd_scrub_cancel(args: &[String]) -> Result<()> {
-    let path = args.first()
-        .ok_or_else(|| BtrfsError::InvalidArgument(
-            "usage: btrfs scrub cancel <path|device>".into(),
-        ))?;
+    let path = args.first().ok_or_else(|| {
+        BtrfsError::InvalidArgument("usage: btrfs scrub cancel <path|device>".into())
+    })?;
 
     // Real implementation: BTRFS_IOC_SCRUB_CANCEL
     let _fs = read_mounted_fs_info(path)?;
-    println!("Scrub cancelled on '{path}'");
+    println!("Scrub cancelled on {}", quoteaf_os(path));
     Ok(())
 }
 
 fn cmd_scrub_resume(args: &[String]) -> Result<()> {
-    let path = args.first()
-        .ok_or_else(|| BtrfsError::InvalidArgument(
-            "usage: btrfs scrub resume <path|device>".into(),
-        ))?;
+    let path = args.first().ok_or_else(|| {
+        BtrfsError::InvalidArgument("usage: btrfs scrub resume <path|device>".into())
+    })?;
 
     // Real implementation: BTRFS_IOC_SCRUB with resume flag
     let _fs = read_mounted_fs_info(path)?;
-    println!("Scrub resumed on '{path}'");
+    println!("Scrub resumed on {}", quoteaf_os(path));
     Ok(())
 }
 
@@ -1355,10 +1440,19 @@ fn cmd_scrub_status(args: &[String]) -> Result<()> {
         println!("scrub.corrected_errors={}", status.corrected_errors);
         println!("scrub.uncorrectable_errors={}", status.uncorrectable_errors);
     } else {
-        println!("Scrub status for '{path}':");
-        println!("  Status:            {}", if status.running { "running" } else { "idle" });
-        println!("  Data scrubbed:     {}", format_bytes(status.data_bytes_scrubbed));
-        println!("  Tree scrubbed:     {}", format_bytes(status.tree_bytes_scrubbed));
+        println!("Scrub status for {}:", quoteaf_os(&path));
+        println!(
+            "  Status:            {}",
+            if status.running { "running" } else { "idle" }
+        );
+        println!(
+            "  Data scrubbed:     {}",
+            format_bytes(status.data_bytes_scrubbed)
+        );
+        println!(
+            "  Tree scrubbed:     {}",
+            format_bytes(status.tree_bytes_scrubbed)
+        );
         println!("  Read errors:       {}", status.read_errors);
         println!("  Csum errors:       {}", status.csum_errors);
         println!("  Verify errors:     {}", status.verify_errors);
@@ -1395,9 +1489,12 @@ fn cmd_check(args: &[String]) -> Result<()> {
                     mode = match args[i].as_str() {
                         "lowmem" => "lowmem",
                         "original" => "original",
-                        _ => return Err(BtrfsError::InvalidArgument(format!(
-                            "unknown check mode '{}'. Use 'lowmem' or 'original'", args[i]
-                        ))),
+                        _ => {
+                            return Err(BtrfsError::InvalidArgument(format!(
+                                "unknown check mode '{}'. Use 'lowmem' or 'original'",
+                                args[i]
+                            )));
+                        }
                     };
                 }
             }
@@ -1421,8 +1518,16 @@ fn cmd_check(args: &[String]) -> Result<()> {
     }
 
     println!("Opening filesystem on {device}");
-    println!("Checking filesystem (mode: {mode}, {})",
-             if readonly { "readonly" } else if repair { "repair" } else { "check" });
+    println!(
+        "Checking filesystem (mode: {mode}, {})",
+        if readonly {
+            "readonly"
+        } else if repair {
+            "repair"
+        } else {
+            "check"
+        }
+    );
 
     // Real implementation: open the filesystem, walk all trees, verify checksums
     let _fs = probe_filesystem(&device)?;
@@ -1442,47 +1547,46 @@ fn cmd_rescue(args: &[String]) -> Result<()> {
 
     match subcmd.as_str() {
         "super-recover" => {
-            let device = rest.first()
-                .ok_or_else(|| BtrfsError::InvalidArgument(
+            let device = rest.first().ok_or_else(|| {
+                BtrfsError::InvalidArgument(
                     "usage: btrfs rescue super-recover [-v] [-y] <device>".into(),
-                ))?;
-            println!("Recovering superblock on '{device}'...");
+                )
+            })?;
+            println!("Recovering superblock on {}...", quoteaf_os(device));
             let _fs = probe_filesystem(device)?;
             Ok(())
         }
         "zero-log" => {
-            let device = rest.first()
-                .ok_or_else(|| BtrfsError::InvalidArgument(
-                    "usage: btrfs rescue zero-log <device>".into(),
-                ))?;
-            println!("Zeroing log tree on '{device}'...");
+            let device = rest.first().ok_or_else(|| {
+                BtrfsError::InvalidArgument("usage: btrfs rescue zero-log <device>".into())
+            })?;
+            println!("Zeroing log tree on {}...", quoteaf_os(device));
             let _fs = probe_filesystem(device)?;
             Ok(())
         }
         "chunk-recover" => {
-            let device = rest.first()
-                .ok_or_else(|| BtrfsError::InvalidArgument(
+            let device = rest.first().ok_or_else(|| {
+                BtrfsError::InvalidArgument(
                     "usage: btrfs rescue chunk-recover [-v] [-y] <device>".into(),
-                ))?;
-            println!("Recovering chunk tree on '{device}'...");
+                )
+            })?;
+            println!("Recovering chunk tree on {}...", quoteaf_os(device));
             let _fs = probe_filesystem(device)?;
             Ok(())
         }
         "fix-device-size" => {
-            let device = rest.first()
-                .ok_or_else(|| BtrfsError::InvalidArgument(
-                    "usage: btrfs rescue fix-device-size <device>".into(),
-                ))?;
-            println!("Fixing device size records on '{device}'...");
+            let device = rest.first().ok_or_else(|| {
+                BtrfsError::InvalidArgument("usage: btrfs rescue fix-device-size <device>".into())
+            })?;
+            println!("Fixing device size records on {}...", quoteaf_os(device));
             let _fs = probe_filesystem(device)?;
             Ok(())
         }
         "clear-uuid-tree" => {
-            let device = rest.first()
-                .ok_or_else(|| BtrfsError::InvalidArgument(
-                    "usage: btrfs rescue clear-uuid-tree <device>".into(),
-                ))?;
-            println!("Clearing UUID tree on '{device}'...");
+            let device = rest.first().ok_or_else(|| {
+                BtrfsError::InvalidArgument("usage: btrfs rescue clear-uuid-tree <device>".into())
+            })?;
+            println!("Clearing UUID tree on {}...", quoteaf_os(device));
             let _fs = probe_filesystem(device)?;
             Ok(())
         }
@@ -1535,7 +1639,11 @@ fn cmd_restore(args: &[String]) -> Result<()> {
     let device = &positional[0];
     let output = &positional[1];
 
-    println!("Restoring files from '{device}' to '{output}'...");
+    println!(
+        "Restoring files from {} to {}...",
+        quoteaf_os(device),
+        quoteaf_os(output)
+    );
     let _fs = probe_filesystem(device)?;
     println!("Restore complete");
     Ok(())
@@ -1702,9 +1810,11 @@ fn cmd_property_get(args: &[String]) -> Result<()> {
                         "s" | "subvolume" | "subvol" => Some(PropertyType::Subvolume),
                         "d" | "device" | "dev" => Some(PropertyType::Device),
                         "i" | "inode" => Some(PropertyType::Inode),
-                        other => return Err(BtrfsError::InvalidArgument(format!(
-                            "unknown property type '{other}'"
-                        ))),
+                        other => {
+                            return Err(BtrfsError::InvalidArgument(format!(
+                                "unknown property type '{other}'"
+                            )));
+                        }
                     };
                 }
             }
@@ -1727,7 +1837,7 @@ fn cmd_property_get(args: &[String]) -> Result<()> {
 
     if name.is_empty() {
         // List all properties for this object
-        println!("Properties for '{object}' (type: {type_str}):");
+        println!("Properties for {} (type: {type_str}):", quoteaf_os(&object));
         println!("  compression=");
         println!("  ro=false");
         println!("  label=");
@@ -1758,9 +1868,11 @@ fn cmd_property_set(args: &[String]) -> Result<()> {
                     "s" | "subvolume" | "subvol" => Some(PropertyType::Subvolume),
                     "d" | "device" | "dev" => Some(PropertyType::Device),
                     "i" | "inode" => Some(PropertyType::Inode),
-                    other => return Err(BtrfsError::InvalidArgument(format!(
-                        "unknown property type '{other}'"
-                    ))),
+                    other => {
+                        return Err(BtrfsError::InvalidArgument(format!(
+                            "unknown property type '{other}'"
+                        )));
+                    }
                 };
             }
         } else {
@@ -1781,29 +1893,34 @@ fn cmd_property_set(args: &[String]) -> Result<()> {
 
     // Validate known properties
     match name.as_str() {
-        "compression" => {
-            match value.as_str() {
-                "" | "none" | "zlib" | "lzo" | "zstd" => {}
-                other => return Err(BtrfsError::InvalidArgument(format!(
+        "compression" => match value.as_str() {
+            "" | "none" | "zlib" | "lzo" | "zstd" => {}
+            other => {
+                return Err(BtrfsError::InvalidArgument(format!(
                     "unknown compression algorithm '{other}'"
-                ))),
+                )));
             }
-        }
-        "ro" => {
-            match value.as_str() {
-                "true" | "false" => {}
-                other => return Err(BtrfsError::InvalidArgument(format!(
+        },
+        "ro" => match value.as_str() {
+            "true" | "false" => {}
+            other => {
+                return Err(BtrfsError::InvalidArgument(format!(
                     "invalid value '{other}' for 'ro', expected 'true' or 'false'"
-                ))),
+                )));
             }
-        }
+        },
         "label" => { /* any string up to 255 bytes */ }
         _ => { /* allow unknown properties for forward compatibility */ }
     }
 
     let type_str = obj_type.map(|t| t.as_str()).unwrap_or("auto");
     let _ = type_str;
-    println!("Set property '{name}' to '{value}' on '{object}'");
+    println!(
+        "Set property {} to {} on {}",
+        quoteaf_os(name),
+        quoteaf_os(value),
+        quoteaf_os(object)
+    );
     Ok(())
 }
 
@@ -1821,9 +1938,11 @@ fn cmd_property_list(args: &[String]) -> Result<()> {
                     "s" | "subvolume" | "subvol" => Some(PropertyType::Subvolume),
                     "d" | "device" | "dev" => Some(PropertyType::Device),
                     "i" | "inode" => Some(PropertyType::Inode),
-                    other => return Err(BtrfsError::InvalidArgument(format!(
-                        "unknown property type '{other}'"
-                    ))),
+                    other => {
+                        return Err(BtrfsError::InvalidArgument(format!(
+                            "unknown property type '{other}'"
+                        )));
+                    }
                 };
             }
         } else {
@@ -1839,7 +1958,10 @@ fn cmd_property_list(args: &[String]) -> Result<()> {
     }
 
     let type_str = obj_type.map(|t| t.as_str()).unwrap_or("auto");
-    println!("Available properties for '{object}' (type: {type_str}):");
+    println!(
+        "Available properties for {} (type: {type_str}):",
+        quoteaf_os(&object)
+    );
     println!("  ro                   - read-only status (rw: subvolume)");
     println!("  label                - filesystem label (rw: filesystem)");
     println!("  compression          - compression algorithm (rw: inode, filesystem)");
@@ -1868,26 +1990,24 @@ fn cmd_quota(args: &[String]) -> Result<()> {
 }
 
 fn cmd_quota_enable(args: &[String]) -> Result<()> {
-    let path = args.first()
-        .ok_or_else(|| BtrfsError::InvalidArgument(
-            "usage: btrfs quota enable <path>".into(),
-        ))?;
+    let path = args
+        .first()
+        .ok_or_else(|| BtrfsError::InvalidArgument("usage: btrfs quota enable <path>".into()))?;
 
     // Real implementation: BTRFS_IOC_QUOTA_CTL with BTRFS_QUOTA_CTL_ENABLE
     let _fs = read_mounted_fs_info(path)?;
-    println!("Quota enabled on '{path}'");
+    println!("Quota enabled on {}", quoteaf_os(path));
     Ok(())
 }
 
 fn cmd_quota_disable(args: &[String]) -> Result<()> {
-    let path = args.first()
-        .ok_or_else(|| BtrfsError::InvalidArgument(
-            "usage: btrfs quota disable <path>".into(),
-        ))?;
+    let path = args
+        .first()
+        .ok_or_else(|| BtrfsError::InvalidArgument("usage: btrfs quota disable <path>".into()))?;
 
     // Real implementation: BTRFS_IOC_QUOTA_CTL with BTRFS_QUOTA_CTL_DISABLE
     let _fs = read_mounted_fs_info(path)?;
-    println!("Quota disabled on '{path}'");
+    println!("Quota disabled on {}", quoteaf_os(path));
     Ok(())
 }
 
@@ -1911,9 +2031,9 @@ fn cmd_quota_rescan(args: &[String]) -> Result<()> {
 
     // Real implementation: BTRFS_IOC_QUOTA_RESCAN
     let _fs = read_mounted_fs_info(&path)?;
-    println!("Quota rescan started on '{path}'");
+    println!("Quota rescan started on {}", quoteaf_os(&path));
     if wait {
-        println!("Quota rescan completed on '{path}'");
+        println!("Quota rescan completed on {}", quoteaf_os(&path));
     }
     Ok(())
 }
@@ -1925,7 +2045,8 @@ fn cmd_quota_rescan(args: &[String]) -> Result<()> {
 fn cmd_qgroup(args: &[String]) -> Result<()> {
     if args.is_empty() {
         return Err(BtrfsError::InvalidArgument(
-            "missing subcommand. Usage: btrfs qgroup <show|create|destroy|assign|remove|limit>".into(),
+            "missing subcommand. Usage: btrfs qgroup <show|create|destroy|assign|remove|limit>"
+                .into(),
         ));
     }
 
@@ -1997,7 +2118,11 @@ fn cmd_qgroup_create(args: &[String]) -> Result<()> {
 
     // Real implementation: BTRFS_IOC_QGROUP_CREATE
     let _fs = read_mounted_fs_info(path)?;
-    println!("Created qgroup '{qgroupid}' on '{path}'");
+    println!(
+        "Created qgroup {} on {}",
+        quoteaf_os(qgroupid),
+        quoteaf_os(path)
+    );
     Ok(())
 }
 
@@ -2013,7 +2138,11 @@ fn cmd_qgroup_destroy(args: &[String]) -> Result<()> {
 
     // Real implementation: BTRFS_IOC_QGROUP_CREATE with destroy flag
     let _fs = read_mounted_fs_info(path)?;
-    println!("Destroyed qgroup '{qgroupid}' on '{path}'");
+    println!(
+        "Destroyed qgroup {} on {}",
+        quoteaf_os(qgroupid),
+        quoteaf_os(path)
+    );
     Ok(())
 }
 
@@ -2047,7 +2176,12 @@ fn cmd_qgroup_assign(args: &[String]) -> Result<()> {
 
     // Real implementation: BTRFS_IOC_QGROUP_ASSIGN
     let _fs = read_mounted_fs_info(path)?;
-    println!("Assigned qgroup '{src}' to '{dst}' on '{path}'");
+    println!(
+        "Assigned qgroup {} to {} on {}",
+        quoteaf_os(src),
+        quoteaf_os(dst),
+        quoteaf_os(path)
+    );
     if rescan {
         println!("Quota rescan triggered");
     }
@@ -2081,7 +2215,12 @@ fn cmd_qgroup_remove(args: &[String]) -> Result<()> {
 
     // Real implementation: BTRFS_IOC_QGROUP_ASSIGN with remove flag
     let _fs = read_mounted_fs_info(path)?;
-    println!("Removed qgroup '{src}' from '{dst}' on '{path}'");
+    println!(
+        "Removed qgroup {} from {} on {}",
+        quoteaf_os(src),
+        quoteaf_os(dst),
+        quoteaf_os(path)
+    );
     Ok(())
 }
 
@@ -2107,9 +2246,7 @@ fn cmd_qgroup_limit(args: &[String]) -> Result<()> {
     let _ = (compressed, exclusive);
 
     if positional.is_empty() {
-        return Err(BtrfsError::InvalidArgument(
-            "missing size argument".into(),
-        ));
+        return Err(BtrfsError::InvalidArgument("missing size argument".into()));
     }
 
     let size_str = &positional[0];
@@ -2118,26 +2255,29 @@ fn cmd_qgroup_limit(args: &[String]) -> Result<()> {
     } else if positional.len() == 2 {
         (String::new(), positional[1].clone())
     } else {
-        return Err(BtrfsError::InvalidArgument(
-            "missing path argument".into(),
-        ));
+        return Err(BtrfsError::InvalidArgument("missing path argument".into()));
     };
 
     // Validate the size
-    if size_str != "none"
-        && parse_size(size_str).is_none() {
-            return Err(BtrfsError::InvalidArgument(format!(
-                "invalid size '{size_str}'"
-            )));
-        }
+    if size_str != "none" && parse_size(size_str).is_none() {
+        return Err(BtrfsError::InvalidArgument(format!(
+            "invalid size '{size_str}'"
+        )));
+    }
 
     // Real implementation: BTRFS_IOC_QGROUP_LIMIT
     let _fs = read_mounted_fs_info(&path)?;
     let limit_type = if exclusive { "exclusive" } else { "referenced" };
     if qgroup.is_empty() {
-        println!("Set {limit_type} limit to {size_str} on '{path}'");
+        println!(
+            "Set {limit_type} limit to {size_str} on {}",
+            quoteaf_os(&path)
+        );
     } else {
-        println!("Set {limit_type} limit to {size_str} for qgroup {qgroup} on '{path}'");
+        println!(
+            "Set {limit_type} limit to {size_str} for qgroup {qgroup} on {}",
+            quoteaf_os(&path)
+        );
     }
     Ok(())
 }
@@ -2180,7 +2320,8 @@ fn cmd_inspect_dump_tree(args: &[String]) -> Result<()> {
                     tree_id = args[i].parse().ok();
                     if tree_id.is_none() {
                         return Err(BtrfsError::InvalidArgument(format!(
-                            "invalid tree ID '{}'", args[i]
+                            "invalid tree ID '{}'",
+                            args[i]
                         )));
                     }
                 }
@@ -2198,9 +2339,9 @@ fn cmd_inspect_dump_tree(args: &[String]) -> Result<()> {
 
     let _fs = probe_filesystem(&device)?;
     if let Some(tid) = tree_id {
-        println!("Dumping tree {tid} from '{device}'...");
+        println!("Dumping tree {tid} from {}...", quoteaf_os(&device));
     } else {
-        println!("Dumping all trees from '{device}'...");
+        println!("Dumping all trees from {}...", quoteaf_os(&device));
     }
     Ok(())
 }
@@ -2245,10 +2386,9 @@ fn cmd_inspect_dump_super(args: &[String]) -> Result<()> {
 }
 
 fn cmd_inspect_rootid(args: &[String]) -> Result<()> {
-    let path = args.first()
-        .ok_or_else(|| BtrfsError::InvalidArgument(
-            "usage: btrfs inspect-internal rootid <path>".into(),
-        ))?;
+    let path = args.first().ok_or_else(|| {
+        BtrfsError::InvalidArgument("usage: btrfs inspect-internal rootid <path>".into())
+    })?;
 
     // Real implementation: BTRFS_IOC_INO_LOOKUP
     let _fs = read_mounted_fs_info(path)?;
@@ -2285,9 +2425,9 @@ fn cmd_inspect_inode_resolve(args: &[String]) -> Result<()> {
     let inode_str = &positional[0];
     let path = &positional[1];
 
-    let _inode: u64 = inode_str.parse().map_err(|_| {
-        BtrfsError::InvalidArgument(format!("invalid inode number '{inode_str}'"))
-    })?;
+    let _inode: u64 = inode_str
+        .parse()
+        .map_err(|_| BtrfsError::InvalidArgument(format!("invalid inode number '{inode_str}'")))?;
 
     // Real implementation: BTRFS_IOC_INO_PATHS
     let _fs = read_mounted_fs_info(path)?;
@@ -2344,9 +2484,9 @@ fn cmd_inspect_subvolid_resolve(args: &[String]) -> Result<()> {
     let subvolid_str = &args[0];
     let path = &args[1];
 
-    let _subvolid: u64 = subvolid_str.parse().map_err(|_| {
-        BtrfsError::InvalidArgument(format!("invalid subvolid '{subvolid_str}'"))
-    })?;
+    let _subvolid: u64 = subvolid_str
+        .parse()
+        .map_err(|_| BtrfsError::InvalidArgument(format!("invalid subvolid '{subvolid_str}'")))?;
 
     // Real implementation: BTRFS_IOC_INO_LOOKUP
     let _fs = read_mounted_fs_info(path)?;
@@ -2355,13 +2495,12 @@ fn cmd_inspect_subvolid_resolve(args: &[String]) -> Result<()> {
 }
 
 fn cmd_inspect_tree_stats(args: &[String]) -> Result<()> {
-    let device = args.first()
-        .ok_or_else(|| BtrfsError::InvalidArgument(
-            "usage: btrfs inspect-internal tree-stats <device>".into(),
-        ))?;
+    let device = args.first().ok_or_else(|| {
+        BtrfsError::InvalidArgument("usage: btrfs inspect-internal tree-stats <device>".into())
+    })?;
 
     let _fs = probe_filesystem(device)?;
-    println!("Tree statistics for '{device}':");
+    println!("Tree statistics for {}:", quoteaf_os(device));
     println!("  Total nodes:     0");
     println!("  Total leaves:    0");
     println!("  Total items:     0");
@@ -2434,13 +2573,11 @@ fn parse_mkfs_options(args: &[String]) -> Result<MkfsOptions> {
                         "-n requires a node size argument".into(),
                     ));
                 }
-                let size = parse_size(&args[i])
-                    .ok_or_else(|| BtrfsError::InvalidArgument(format!(
-                        "invalid node size '{}'", args[i]
-                    )))?;
-                let size_u32 = u32::try_from(size).map_err(|_| {
-                    BtrfsError::InvalidArgument("node size too large".into())
+                let size = parse_size(&args[i]).ok_or_else(|| {
+                    BtrfsError::InvalidArgument(format!("invalid node size '{}'", args[i]))
                 })?;
+                let size_u32 = u32::try_from(size)
+                    .map_err(|_| BtrfsError::InvalidArgument("node size too large".into()))?;
                 if !validate_node_size(size_u32) {
                     return Err(BtrfsError::InvalidArgument(format!(
                         "invalid node size {size_u32}: must be power of 2 between 4096 and 65536"
@@ -2455,13 +2592,11 @@ fn parse_mkfs_options(args: &[String]) -> Result<MkfsOptions> {
                         "-s requires a sector size argument".into(),
                     ));
                 }
-                let size = parse_size(&args[i])
-                    .ok_or_else(|| BtrfsError::InvalidArgument(format!(
-                        "invalid sector size '{}'", args[i]
-                    )))?;
-                let size_u32 = u32::try_from(size).map_err(|_| {
-                    BtrfsError::InvalidArgument("sector size too large".into())
+                let size = parse_size(&args[i]).ok_or_else(|| {
+                    BtrfsError::InvalidArgument(format!("invalid sector size '{}'", args[i]))
                 })?;
+                let size_u32 = u32::try_from(size)
+                    .map_err(|_| BtrfsError::InvalidArgument("sector size too large".into()))?;
                 if !validate_sector_size(size_u32) {
                     return Err(BtrfsError::InvalidArgument(format!(
                         "invalid sector size {size_u32}: must be power of 2 between 512 and 65536"
@@ -2493,9 +2628,7 @@ fn parse_mkfs_options(args: &[String]) -> Result<MkfsOptions> {
     }
 
     if opts.devices.is_empty() {
-        return Err(BtrfsError::InvalidArgument(
-            "no devices specified".into(),
-        ));
+        return Err(BtrfsError::InvalidArgument("no devices specified".into()));
     }
 
     // Validate device count against RAID profiles
@@ -2517,12 +2650,11 @@ fn parse_mkfs_options(args: &[String]) -> Result<MkfsOptions> {
 
     // Validate devices look like block device paths
     for dev in &opts.devices {
-        if !is_device_path(dev)
-            && !opts.force {
-                return Err(BtrfsError::DeviceError(format!(
-                    "'{dev}' does not appear to be a block device (use -f to force)"
-                )));
-            }
+        if !is_device_path(dev) && !opts.force {
+            return Err(BtrfsError::DeviceError(format!(
+                "'{dev}' does not appear to be a block device (use -f to force)"
+            )));
+        }
     }
 
     Ok(opts)
@@ -2555,9 +2687,21 @@ fn cmd_mkfs(args: &[String]) -> Result<()> {
     println!("Sector size:        {}", opts.sector_size);
     println!("Filesystem size:    {}", format_bytes(total_size));
     println!("Block group profiles:");
-    println!("  Data:             {:<12} {}", opts.data_profile.as_str(), format_bytes(total_size / 2));
-    println!("  Metadata:         {:<12} {}", opts.metadata_profile.as_str(), format_bytes(total_size / 8));
-    println!("  System:           {:<12} {}", opts.metadata_profile.as_str(), format_bytes(8 * 1024 * 1024));
+    println!(
+        "  Data:             {:<12} {}",
+        opts.data_profile.as_str(),
+        format_bytes(total_size / 2)
+    );
+    println!(
+        "  Metadata:         {:<12} {}",
+        opts.metadata_profile.as_str(),
+        format_bytes(total_size / 8)
+    );
+    println!(
+        "  System:           {:<12} {}",
+        opts.metadata_profile.as_str(),
+        format_bytes(8 * 1024 * 1024)
+    );
     println!("SSD detected:       no");
     println!("Zoned device:       no");
     println!("Incompat features:  extref, skinny-metadata, no-holes");
@@ -2566,7 +2710,12 @@ fn cmd_mkfs(args: &[String]) -> Result<()> {
     println!("Devices:");
     for (idx, dev) in opts.devices.iter().enumerate() {
         let devid = idx as u64 + 1;
-        println!("   ID {:>3} size {} path {}", devid, format_bytes(256 * 1024 * 1024 * 1024), dev);
+        println!(
+            "   ID {:>3} size {} path {}",
+            devid,
+            format_bytes(256 * 1024 * 1024 * 1024),
+            dev
+        );
     }
     println!();
 
@@ -2578,8 +2727,12 @@ fn print_mkfs_help() {
     println!();
     println!("Options:");
     println!("  -L, --label <name>     Set filesystem label");
-    println!("  -m, --metadata <prof>  Metadata RAID profile (single, dup, raid0, raid1, raid10, raid5, raid6)");
-    println!("  -d, --data <prof>      Data RAID profile (single, dup, raid0, raid1, raid10, raid5, raid6)");
+    println!(
+        "  -m, --metadata <prof>  Metadata RAID profile (single, dup, raid0, raid1, raid10, raid5, raid6)"
+    );
+    println!(
+        "  -d, --data <prof>      Data RAID profile (single, dup, raid0, raid1, raid10, raid5, raid6)"
+    );
     println!("  -n, --nodesize <size>  B-tree node size (default: {DEFAULT_NODE_SIZE})");
     println!("  -s, --sectorsize <sz>  Sector size (default: {DEFAULT_SECTOR_SIZE})");
     println!("  -f, --force            Force overwrite of existing filesystem");
@@ -2643,14 +2796,13 @@ fn parse_convert_options(args: &[String]) -> Result<ConvertOptions> {
     }
 
     if opts.device.is_empty() {
-        return Err(BtrfsError::InvalidArgument(
-            "no device specified".into(),
-        ));
+        return Err(BtrfsError::InvalidArgument("no device specified".into()));
     }
 
     if !is_device_path(&opts.device) {
         return Err(BtrfsError::DeviceError(format!(
-            "'{}' does not appear to be a block device", opts.device
+            "'{}' does not appear to be a block device",
+            opts.device
         )));
     }
 
@@ -2672,7 +2824,10 @@ fn cmd_convert(args: &[String]) -> Result<()> {
     let opts = parse_convert_options(args)?;
 
     if opts.rollback {
-        println!("Rolling back btrfs conversion on '{}'...", opts.device);
+        println!(
+            "Rolling back btrfs conversion on {}...",
+            quoteaf_os(&opts.device)
+        );
         println!("Rollback requires kernel support and an intact ext2_saved subvolume.");
         // Real implementation: read the ext2_saved subvolume and restore the
         // original ext2/3/4 filesystem metadata.
@@ -2682,7 +2837,10 @@ fn cmd_convert(args: &[String]) -> Result<()> {
     }
 
     println!("btrfs-convert v{VERSION} (Slate OS)");
-    println!("Converting '{}' from ext2/3/4 to btrfs...", opts.device);
+    println!(
+        "Converting {} from ext2/3/4 to btrfs...",
+        quoteaf_os(&opts.device)
+    );
     println!();
 
     if opts.progress {
@@ -3114,8 +3272,12 @@ mod tests {
     #[test]
     fn test_raid_profile_as_str_round_trip() {
         let profiles = [
-            RaidProfile::Single, RaidProfile::Dup, RaidProfile::Raid0,
-            RaidProfile::Raid1, RaidProfile::Raid10, RaidProfile::Raid5,
+            RaidProfile::Single,
+            RaidProfile::Dup,
+            RaidProfile::Raid0,
+            RaidProfile::Raid1,
+            RaidProfile::Raid10,
+            RaidProfile::Raid5,
             RaidProfile::Raid6,
         ];
         for p in &profiles {
@@ -3240,7 +3402,9 @@ mod tests {
             let bytes = s.as_bytes();
             let mut last_sep = 0;
             for (i, &b) in bytes.iter().enumerate() {
-                if b == b'/' || b == b'\\' { last_sep = i + 1; }
+                if b == b'/' || b == b'\\' {
+                    last_sep = i + 1;
+                }
             }
             let base = &s[last_sep..];
             base.strip_suffix(".exe").unwrap_or(base).to_string()
@@ -3255,7 +3419,9 @@ mod tests {
             let bytes = s.as_bytes();
             let mut last_sep = 0;
             for (i, &b) in bytes.iter().enumerate() {
-                if b == b'/' || b == b'\\' { last_sep = i + 1; }
+                if b == b'/' || b == b'\\' {
+                    last_sep = i + 1;
+                }
             }
             let base = &s[last_sep..];
             base.strip_suffix(".exe").unwrap_or(base).to_string()
@@ -3270,7 +3436,9 @@ mod tests {
             let bytes = s.as_bytes();
             let mut last_sep = 0;
             for (i, &b) in bytes.iter().enumerate() {
-                if b == b'/' || b == b'\\' { last_sep = i + 1; }
+                if b == b'/' || b == b'\\' {
+                    last_sep = i + 1;
+                }
             }
             let base = &s[last_sep..];
             base.strip_suffix(".exe").unwrap_or(base).to_string()
@@ -3285,7 +3453,9 @@ mod tests {
             let bytes = s.as_bytes();
             let mut last_sep = 0;
             for (i, &b) in bytes.iter().enumerate() {
-                if b == b'/' || b == b'\\' { last_sep = i + 1; }
+                if b == b'/' || b == b'\\' {
+                    last_sep = i + 1;
+                }
             }
             let base = &s[last_sep..];
             base.strip_suffix(".exe").unwrap_or(base).to_string()
@@ -3300,7 +3470,9 @@ mod tests {
             let bytes = s.as_bytes();
             let mut last_sep = 0;
             for (i, &b) in bytes.iter().enumerate() {
-                if b == b'/' || b == b'\\' { last_sep = i + 1; }
+                if b == b'/' || b == b'\\' {
+                    last_sep = i + 1;
+                }
             }
             let base = &s[last_sep..];
             base.strip_suffix(".exe").unwrap_or(base).to_string()
@@ -3315,7 +3487,9 @@ mod tests {
             let bytes = s.as_bytes();
             let mut last_sep = 0;
             for (i, &b) in bytes.iter().enumerate() {
-                if b == b'/' || b == b'\\' { last_sep = i + 1; }
+                if b == b'/' || b == b'\\' {
+                    last_sep = i + 1;
+                }
             }
             let base = &s[last_sep..];
             base.strip_suffix(".exe").unwrap_or(base).to_string()

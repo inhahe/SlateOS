@@ -128,7 +128,8 @@ pub struct FieldStat {
 static INDEX: PreemptSpinMutex<Vec<IndexedFile>> = PreemptSpinMutex::named(Vec::new(), b"INDEX");
 
 /// Known field names with labels.
-static FIELD_NAMES: PreemptSpinMutex<Vec<(String, String)>> = PreemptSpinMutex::named(Vec::new(), b"FIELD_NAMES");
+static FIELD_NAMES: PreemptSpinMutex<Vec<(String, String)>> =
+    PreemptSpinMutex::named(Vec::new(), b"FIELD_NAMES");
 
 /// Statistics.
 static BUILD_COUNT: AtomicU64 = AtomicU64::new(0);

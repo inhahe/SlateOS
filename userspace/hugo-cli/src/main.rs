@@ -4,6 +4,7 @@
 //!
 //! Multi-personality: `hugo`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -44,7 +45,11 @@ fn run_hugo(args: &[String]) -> i32 {
             }
         }
         "server" | "serve" => {
-            let port = args.windows(2).find(|w| w[0] == "-p" || w[0] == "--port").map(|w| w[1].as_str()).unwrap_or("1313");
+            let port = args
+                .windows(2)
+                .find(|w| w[0] == "-p" || w[0] == "--port")
+                .map(|w| w[1].as_str())
+                .unwrap_or("1313");
             println!("Start building sites ...");
             println!("hugo v0.122.0");
             println!();
@@ -75,7 +80,7 @@ fn run_hugo(args: &[String]) -> i32 {
             println!("GOARCH=\"amd64\"");
             println!("GOVERSION=\"go1.21.6\"");
         }
-        _ => println!("hugo: '{}' completed", subcmd),
+        _ => println!("hugo: {} completed", quoteaf_os(subcmd)),
     }
     0
 }
@@ -89,7 +94,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_hugo};
+    use super::run_hugo;
 
     #[test]
     fn help_exits_zero() {

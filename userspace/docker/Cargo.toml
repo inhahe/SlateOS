@@ -3,3 +3,6 @@ name = "docker"
 version = "0.1.0"
 edition = "2024"
 [dependencies]
+# docker names images, containers and volumes; an image name and its labels
+# come out of a registry, so they are a stranger's words.
+quoting = { path = "../quoting" }

@@ -4,6 +4,7 @@
 //!
 //! Single personality: `clickup`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -44,14 +45,20 @@ fn run_clickup(args: Vec<String>) -> i32 {
                     println!("jkl012      complete      low       alice       Refactor tests");
                 }
                 "create" => {
-                    let name = args.windows(2).find(|w| w[0] == "--name").map(|w| w[1].as_str()).unwrap_or("New task");
+                    let name = args
+                        .windows(2)
+                        .find(|w| w[0] == "--name")
+                        .map(|w| w[1].as_str())
+                        .unwrap_or("New task");
                     println!("✔ Created task: {} (ID: mno345)", name);
                 }
                 "update" => {
                     let id = args.get(2).map(|s| s.as_str()).unwrap_or("abc123");
                     println!("✔ Task {} updated", id);
                 }
-                _ => { println!("Task operation: {}", sub); }
+                _ => {
+                    println!("Task operation: {}", sub);
+                }
             }
             0
         }
@@ -64,7 +71,11 @@ fn run_clickup(args: Vec<String>) -> i32 {
             0
         }
         "folders" => {
-            let space = args.windows(2).find(|w| w[0] == "--space").map(|w| w[1].as_str()).unwrap_or("sp-abc");
+            let space = args
+                .windows(2)
+                .find(|w| w[0] == "--space")
+                .map(|w| w[1].as_str())
+                .unwrap_or("sp-abc");
             println!("Folders in {}:", space);
             println!("  Backend      (3 lists, 15 tasks)");
             println!("  Frontend     (2 lists, 10 tasks)");
@@ -96,7 +107,9 @@ fn run_clickup(args: Vec<String>) -> i32 {
                 "stop" => {
                     println!("✔ Timer stopped. Duration: 1h 23m");
                 }
-                _ => { println!("Time operation: {}", sub); }
+                _ => {
+                    println!("Time operation: {}", sub);
+                }
             }
             0
         }
@@ -104,7 +117,7 @@ fn run_clickup(args: Vec<String>) -> i32 {
             if cmd.is_empty() {
                 eprintln!("Usage: clickup <command>. See --help.");
             } else {
-                eprintln!("Error: unknown command '{}'. See --help.", cmd);
+                eprintln!("Error: unknown command {}. See --help.", quoteaf_os(cmd));
             }
             1
         }
@@ -120,7 +133,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_clickup};
+    use super::run_clickup;
 
     #[test]
     fn help_exits_zero() {

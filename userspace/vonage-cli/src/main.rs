@@ -1,6 +1,7 @@
 #![deny(clippy::all)]
 //! vonage-cli — Slate OS personality CLI for Vonage, now an Ericsson Communications Platform.
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -120,8 +121,7 @@ fn cmd_business() {
     println!("  identity. Used by SaaS apps that need cross-channel session");
     println!("  state without building it themselves.");
     println!();
-    println!("MEETINGS")
-    ;
+    println!("MEETINGS");
     println!("  Video meetings (TokBox-derived) embeddable in the UCaaS");
     println!("  product. Smaller in scale than Zoom but native to the same");
     println!("  Vonage account + identity.");
@@ -245,17 +245,47 @@ fn run_vonage(args: &[String], prog: &str) -> i32 {
         return 0;
     };
     match sub.as_str() {
-        "help" | "-h" | "--help" => { print_help(prog); 0 }
-        "version" | "-V" | "--version" => { print_version(); 0 }
-        "about" => { cmd_about(); 0 }
-        "apis" => { cmd_apis(); 0 }
-        "business" => { cmd_business(); 0 }
-        "ericsson" => { cmd_ericsson(); 0 }
-        "network" => { cmd_network(); 0 }
-        "pricing" => { cmd_pricing(); 0 }
-        "history" => { cmd_history(); 0 }
+        "help" | "-h" | "--help" => {
+            print_help(prog);
+            0
+        }
+        "version" | "-V" | "--version" => {
+            print_version();
+            0
+        }
+        "about" => {
+            cmd_about();
+            0
+        }
+        "apis" => {
+            cmd_apis();
+            0
+        }
+        "business" => {
+            cmd_business();
+            0
+        }
+        "ericsson" => {
+            cmd_ericsson();
+            0
+        }
+        "network" => {
+            cmd_network();
+            0
+        }
+        "pricing" => {
+            cmd_pricing();
+            0
+        }
+        "history" => {
+            cmd_history();
+            0
+        }
         other => {
-            eprintln!("{prog}: unknown subcommand '{other}'. Try '{prog} help'.");
+            eprintln!(
+                "{prog}: unknown subcommand {}. Try '{prog} help'.",
+                quoteaf_os(other)
+            );
             2
         }
     }

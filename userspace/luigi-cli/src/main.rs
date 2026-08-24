@@ -4,11 +4,16 @@
 //!
 //! Multi-personality: `luigi`, `luigid`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_luigi(args: &[String], is_daemon: bool) -> i32 {
     if is_daemon {
@@ -30,8 +35,11 @@ fn run_luigi(args: &[String], is_daemon: bool) -> i32 {
         return 0;
     }
     let task = args.first().map(|s| s.as_str()).unwrap_or("MyTask");
-    let workers = args.windows(2).find(|w| w[0] == "--workers")
-        .map(|w| w[1].as_str()).unwrap_or("1");
+    let workers = args
+        .windows(2)
+        .find(|w| w[0] == "--workers")
+        .map(|w| w[1].as_str())
+        .unwrap_or("1");
     let local = args.iter().any(|a| a == "--local-scheduler");
 
     if local {
@@ -39,7 +47,7 @@ fn run_luigi(args: &[String], is_daemon: bool) -> i32 {
     } else {
         println!("Connecting to central scheduler at localhost:8082...");
     }
-    println!("Running task '{}'...", task);
+    println!("Running task {}...", quoteaf_os(task));
     println!("  Worker count: {}", workers);
     println!();
     println!("===== Luigi Execution Summary =====");
@@ -59,7 +67,10 @@ fn run_luigi(args: &[String], is_daemon: bool) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "luigi".to_string());
+    let prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "luigi".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let is_daemon = prog == "luigid";
     let code = run_luigi(&rest, is_daemon);
@@ -68,7 +79,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_luigi};
+    use super::{basename, run_luigi, strip_ext};
 
     #[test]
     fn basename_strips_path() {

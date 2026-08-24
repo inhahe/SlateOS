@@ -2,3 +2,7 @@
 name = "pdftk-cli"
 version = "0.1.0"
 edition = "2024"
+
+[dependencies]
+# The operation name and the PDF being processed are argv words.
+quoting = { path = "../quoting" }

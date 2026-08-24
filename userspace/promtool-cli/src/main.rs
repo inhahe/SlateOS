@@ -4,11 +4,16 @@
 //!
 //! Multi-personality: `promtool`, `prometheus`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_promtool(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
@@ -33,7 +38,7 @@ fn run_promtool(args: &[String]) -> i32 {
                 "config" => println!("Checking {}... SUCCESS. {} is valid.", file, file),
                 "rules" => println!("Checking {}... SUCCESS. 5 rules found.", file),
                 "metrics" => println!("Checking metrics... all valid."),
-                _ => println!("promtool check: '{}' completed", what),
+                _ => println!("promtool check: {} completed", quoteaf_os(what)),
             }
         }
         "query" => {
@@ -50,7 +55,9 @@ fn run_promtool(args: &[String]) -> i32 {
         "tsdb" => {
             let sub = args.get(1).map(|s| s.as_str()).unwrap_or("list");
             match sub {
-                "list" => println!("Block ID: 01ABC... MinTime: 2024-06-01 MaxTime: 2024-06-14 NumSeries: 1234"),
+                "list" => println!(
+                    "Block ID: 01ABC... MinTime: 2024-06-01 MaxTime: 2024-06-14 NumSeries: 1234"
+                ),
                 "analyze" => {
                     println!("Block: 01ABC...");
                     println!("  Duration: 2h0m0s");
@@ -58,17 +65,20 @@ fn run_promtool(args: &[String]) -> i32 {
                     println!("  Samples: 567890");
                 }
                 "compact" => println!("Compaction completed."),
-                _ => println!("promtool tsdb: '{}' completed", sub),
+                _ => println!("promtool tsdb: {} completed", quoteaf_os(sub)),
             }
         }
-        _ => println!("promtool: '{}' completed", subcmd),
+        _ => println!("promtool: {} completed", quoteaf_os(subcmd)),
     }
     0
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "promtool".to_string());
+    let _prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "promtool".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_promtool(&rest);
     process::exit(code);
@@ -76,7 +86,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_promtool};
+    use super::{basename, run_promtool, strip_ext};
 
     #[test]
     fn basename_strips_path() {

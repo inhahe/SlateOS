@@ -3,3 +3,6 @@ name = "acpid"
 version = "0.1.0"
 edition = "2024"
 [dependencies]
+# acpid names ACPI event rules and the actions they run, strings read out of
+# the rules directory on disk rather than chosen by this daemon.
+quoting = { path = "../quoting" }

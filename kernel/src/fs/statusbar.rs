@@ -305,19 +305,11 @@ fn generate_right(input: &StatusInput) -> String {
 // ---------------------------------------------------------------------------
 
 /// Format bytes into a human-readable size string.
+///
+/// Delegates to [`crate::bytesize::iec`], which already prints `0 B` for zero,
+/// so the special case the private copy carried is not needed.
 fn format_size(bytes: u64) -> String {
-    if bytes == 0 {
-        return String::from("0 B");
-    }
-    if bytes < 1024 {
-        alloc::format!("{} B", bytes)
-    } else if bytes < 1024 * 1024 {
-        alloc::format!("{:.1} KiB", bytes as f64 / 1024.0)
-    } else if bytes < 1024 * 1024 * 1024 {
-        alloc::format!("{:.1} MiB", bytes as f64 / (1024.0 * 1024.0))
-    } else {
-        alloc::format!("{:.1} GiB", bytes as f64 / (1024.0 * 1024.0 * 1024.0))
-    }
+    crate::bytesize::iec(bytes)
 }
 
 // ---------------------------------------------------------------------------

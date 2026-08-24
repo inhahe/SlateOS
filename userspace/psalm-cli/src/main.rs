@@ -4,11 +4,16 @@
 //!
 //! Multi-personality: `psalm`, `psalter`, `psalm-plugin`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_psalm(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
@@ -38,7 +43,8 @@ fn run_psalm(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--init") {
-        let level = args.windows(2)
+        let level = args
+            .windows(2)
             .find(|w| w[0] == "--level")
             .map(|w| w[1].as_str())
             .unwrap_or("3");
@@ -107,7 +113,8 @@ fn run_psalter(args: &[String]) -> i32 {
         return 0;
     }
     let dry_run = args.iter().any(|a| a == "--dry-run");
-    let issues = args.windows(2)
+    let issues = args
+        .windows(2)
         .find(|w| w[0] == "--issues")
         .map(|w| w[1].as_str())
         .unwrap_or("MissingReturnType");
@@ -139,11 +146,17 @@ fn run_psalm_plugin(args: &[String]) -> i32 {
     let subcmd = args.first().map(|s| s.as_str()).unwrap_or("show");
     match subcmd {
         "enable" => {
-            let plugin = args.get(1).map(|s| s.as_str()).unwrap_or("psalm/plugin-symfony");
+            let plugin = args
+                .get(1)
+                .map(|s| s.as_str())
+                .unwrap_or("psalm/plugin-symfony");
             println!("Plugin {} enabled in psalm.xml", plugin);
         }
         "disable" => {
-            let plugin = args.get(1).map(|s| s.as_str()).unwrap_or("psalm/plugin-symfony");
+            let plugin = args
+                .get(1)
+                .map(|s| s.as_str())
+                .unwrap_or("psalm/plugin-symfony");
             println!("Plugin {} disabled in psalm.xml", plugin);
         }
         "show" => {
@@ -155,14 +168,17 @@ fn run_psalm_plugin(args: &[String]) -> i32 {
             println!("  psalm/plugin-laravel");
             println!("  weirdan/doctrine-psalm-plugin");
         }
-        _ => println!("psalm-plugin: unknown command '{}'", subcmd),
+        _ => println!("psalm-plugin: unknown command {}", quoteaf_os(subcmd)),
     }
     0
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "psalm".to_string());
+    let prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "psalm".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = match prog.as_str() {
         "psalter" => run_psalter(&rest),
@@ -174,7 +190,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_psalm};
+    use super::{basename, run_psalm, strip_ext};
 
     #[test]
     fn basename_strips_path() {

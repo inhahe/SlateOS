@@ -4,6 +4,7 @@
 //!
 //! Single personality: `task`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -48,11 +49,16 @@ fn run_task(args: Vec<String>) -> i32 {
     }
 
     let dry = args.iter().any(|a| a == "-d" || a == "--dry");
-    let tasks: Vec<&str> = args.iter()
+    let tasks: Vec<&str> = args
+        .iter()
         .filter(|a| !a.starts_with('-'))
         .map(|s| s.as_str())
         .collect();
-    let task_name = if tasks.is_empty() { "default" } else { tasks[0] };
+    let task_name = if tasks.is_empty() {
+        "default"
+    } else {
+        tasks[0]
+    };
 
     if dry {
         println!("task: [{}] (dry run)", task_name);
@@ -79,7 +85,7 @@ fn run_task(args: Vec<String>) -> i32 {
                 println!("  Cleaned.");
             }
             _ => {
-                println!("  Task '{}' completed.", task_name);
+                println!("  Task {} completed.", quoteaf_os(task_name));
             }
         }
     }
@@ -95,7 +101,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_task};
+    use super::run_task;
 
     #[test]
     fn help_exits_zero() {

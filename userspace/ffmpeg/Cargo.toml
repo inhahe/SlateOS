@@ -3,3 +3,7 @@ name = "ffmpeg"
 version = "0.1.0"
 edition = "2024"
 [dependencies]
+# ffmpeg names input and output files and the codec and format strings it
+# read out of a media container -- and a container's metadata is written by
+# whoever produced the file.
+quoting = { path = "../quoting" }

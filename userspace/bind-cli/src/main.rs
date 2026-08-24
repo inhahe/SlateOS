@@ -4,11 +4,16 @@
 //!
 //! Multi-personality: `named`, `rndc`, `dig`, `nslookup`, `host`, `named-checkconf`, `named-checkzone`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_dig(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
@@ -22,9 +27,22 @@ fn run_dig(args: &[String]) -> i32 {
         return 0;
     }
 
-    let name = args.iter().find(|a| !a.starts_with('-') && !a.starts_with('@')).map(|s| s.as_str()).unwrap_or("example.com");
-    let qtype = args.iter().skip_while(|a| a.as_str() != name).nth(1).map(|s| s.as_str()).unwrap_or("A");
-    let server = args.iter().find(|a| a.starts_with('@')).map(|s| &s[1..]).unwrap_or("127.0.0.1");
+    let name = args
+        .iter()
+        .find(|a| !a.starts_with('-') && !a.starts_with('@'))
+        .map(|s| s.as_str())
+        .unwrap_or("example.com");
+    let qtype = args
+        .iter()
+        .skip_while(|a| a.as_str() != name)
+        .nth(1)
+        .map(|s| s.as_str())
+        .unwrap_or("A");
+    let server = args
+        .iter()
+        .find(|a| a.starts_with('@'))
+        .map(|s| &s[1..])
+        .unwrap_or("127.0.0.1");
 
     println!("; <<>> DiG 9.18.24 <<>> {} {}", name, qtype);
     println!(";; global options: +cmd");
@@ -37,13 +55,19 @@ fn run_dig(args: &[String]) -> i32 {
     println!();
     println!(";; ANSWER SECTION:");
     match qtype {
-        "AAAA" => println!("{}.\t\t300\tIN\tAAAA\t2606:2800:220:1:248:1893:25c8:1946", name),
+        "AAAA" => println!(
+            "{}.\t\t300\tIN\tAAAA\t2606:2800:220:1:248:1893:25c8:1946",
+            name
+        ),
         "MX" => println!("{}.\t\t300\tIN\tMX\t10 mail.{}.", name, name),
         "NS" => {
             println!("{}.\t\t300\tIN\tNS\tns1.{}.", name, name);
             println!("{}.\t\t300\tIN\tNS\tns2.{}.", name, name);
         }
-        "TXT" => println!("{}.\t\t300\tIN\tTXT\t\"v=spf1 include:_spf.{} ~all\"", name, name),
+        "TXT" => println!(
+            "{}.\t\t300\tIN\tTXT\t\"v=spf1 include:_spf.{} ~all\"",
+            name, name
+        ),
         _ => println!("{}.\t\t300\tIN\tA\t93.184.216.34", name),
     }
     println!();
@@ -75,9 +99,16 @@ fn run_host(args: &[String]) -> i32 {
         println!("Usage: host [-t type] name [server]");
         return 0;
     }
-    let name = args.iter().find(|a| !a.starts_with('-')).map(|s| s.as_str()).unwrap_or("example.com");
+    let name = args
+        .iter()
+        .find(|a| !a.starts_with('-'))
+        .map(|s| s.as_str())
+        .unwrap_or("example.com");
     println!("{} has address 93.184.216.34", name);
-    println!("{} has IPv6 address 2606:2800:220:1:248:1893:25c8:1946", name);
+    println!(
+        "{} has IPv6 address 2606:2800:220:1:248:1893:25c8:1946",
+        name
+    );
     println!("{} mail is handled by 10 mail.{}.", name, name);
     0
 }
@@ -102,7 +133,7 @@ fn run_rndc(args: &[String]) -> i32 {
         "flush" => println!("flushed cache"),
         "reconfig" => println!("reconfigured zone list"),
         "stats" => println!("statistics dump written to /var/named/data/named_stats.txt"),
-        _ => println!("rndc: '{}' completed", subcmd),
+        _ => println!("rndc: {} completed", quoteaf_os(subcmd)),
     }
     0
 }
@@ -128,14 +159,20 @@ fn run_named(args: &[String]) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "dig".to_string());
+    let prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "dig".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = match prog.as_str() {
         "nslookup" => run_nslookup(&rest),
         "host" => run_host(&rest),
         "rndc" => run_rndc(&rest),
         "named" => run_named(&rest),
-        "named-checkconf" => { println!("Configuration OK"); 0 }
+        "named-checkconf" => {
+            println!("Configuration OK");
+            0
+        }
         "named-checkzone" => {
             let zone = rest.first().map(|s| s.as_str()).unwrap_or("example.com");
             println!("zone {}/IN: loaded serial 2024052201", zone);
@@ -149,7 +186,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_dig};
+    use super::{basename, run_dig, strip_ext};
 
     #[test]
     fn basename_strips_path() {

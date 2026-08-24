@@ -4,6 +4,7 @@
 //!
 //! Single personality: `vault`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -47,7 +48,9 @@ fn run_vault(args: Vec<String>) -> i32 {
                 println!("         Cluster Address: https://127.0.0.1:8201");
                 println!("   Environment Variables: VAULT_DEV_ROOT_TOKEN_ID");
                 println!("              Go Version: go1.22.2");
-                println!("              Listener 1: tcp (addr: \"0.0.0.0:8200\", cluster address: \"0.0.0.0:8201\", tls: \"disabled\")");
+                println!(
+                    "              Listener 1: tcp (addr: \"0.0.0.0:8200\", cluster address: \"0.0.0.0:8201\", tls: \"disabled\")"
+                );
                 println!("               Log Level: info");
                 println!("                   Mlock: supported: false, enabled: false");
                 println!("           Recovery Mode: false");
@@ -65,7 +68,9 @@ fn run_vault(args: Vec<String>) -> i32 {
                 println!("==> Vault server configuration:");
                 println!();
                 println!("             Api Address: http://127.0.0.1:8200");
-                println!("              Listener 1: tcp (addr: \"0.0.0.0:8200\", tls: \"enabled\")");
+                println!(
+                    "              Listener 1: tcp (addr: \"0.0.0.0:8200\", tls: \"enabled\")"
+                );
                 println!("               Log Level: info");
                 println!("                 Storage: raft");
                 println!("                 Version: Vault v1.16.2 (Slate OS)");
@@ -108,7 +113,10 @@ fn run_vault(args: Vec<String>) -> i32 {
             let sub = cmd_args.first().map(|s| s.as_str()).unwrap_or("help");
             match sub {
                 "get" => {
-                    let path = cmd_args.get(1).map(|s| s.as_str()).unwrap_or("secret/data/myapp");
+                    let path = cmd_args
+                        .get(1)
+                        .map(|s| s.as_str())
+                        .unwrap_or("secret/data/myapp");
                     println!("====== Secret Path ======");
                     println!("Path:   {}", path);
                     println!();
@@ -119,7 +127,10 @@ fn run_vault(args: Vec<String>) -> i32 {
                     println!("username    admin");
                 }
                 "put" => {
-                    let path = cmd_args.get(1).map(|s| s.as_str()).unwrap_or("secret/data/myapp");
+                    let path = cmd_args
+                        .get(1)
+                        .map(|s| s.as_str())
+                        .unwrap_or("secret/data/myapp");
                     println!("======= Secret Path =======");
                     println!("Path:    {}", path);
                     println!("Version: 2");
@@ -147,14 +158,21 @@ fn run_vault(args: Vec<String>) -> i32 {
                 "list" => {
                     println!("Path          Type         Accessor              Description");
                     println!("----          ----         --------              -----------");
-                    println!("cubbyhole/    cubbyhole    cubbyhole_abc123      per-token private secret storage");
+                    println!(
+                        "cubbyhole/    cubbyhole    cubbyhole_abc123      per-token private secret storage"
+                    );
                     println!("identity/     identity     identity_abc123       identity store");
-                    println!("secret/       kv           kv_abc123             key/value secret storage");
+                    println!(
+                        "secret/       kv           kv_abc123             key/value secret storage"
+                    );
                     println!("sys/          system       system_abc123         system endpoints");
                 }
                 "enable" => {
                     let engine = cmd_args.get(1).map(|s| s.as_str()).unwrap_or("kv");
-                    println!("Success! Enabled the {} secrets engine at: {}/", engine, engine);
+                    println!(
+                        "Success! Enabled the {} secrets engine at: {}/",
+                        engine, engine
+                    );
                 }
                 _ => println!("Usage: vault secrets <list|enable> [engine]"),
             }
@@ -166,8 +184,12 @@ fn run_vault(args: Vec<String>) -> i32 {
                 "list" => {
                     println!("Path        Type       Accessor               Description");
                     println!("----        ----       --------               -----------");
-                    println!("token/      token      auth_token_abc123      token based credentials");
-                    println!("userpass/   userpass   auth_userpass_abc123   username/password credentials");
+                    println!(
+                        "token/      token      auth_token_abc123      token based credentials"
+                    );
+                    println!(
+                        "userpass/   userpass   auth_userpass_abc123   username/password credentials"
+                    );
                 }
                 "enable" => {
                     let method = cmd_args.get(1).map(|s| s.as_str()).unwrap_or("userpass");
@@ -221,9 +243,15 @@ fn run_vault(args: Vec<String>) -> i32 {
                 }
                 "seal" => println!("Success! Vault is sealed."),
                 "raft" => {
-                    println!("Node                                    Address              State     Voter");
-                    println!("----                                    -------              -----     -----");
-                    println!("a1b2c3d4-e5f6-7890-abcd-ef1234567890   127.0.0.1:8201       leader    true");
+                    println!(
+                        "Node                                    Address              State     Voter"
+                    );
+                    println!(
+                        "----                                    -------              -----     -----"
+                    );
+                    println!(
+                        "a1b2c3d4-e5f6-7890-abcd-ef1234567890   127.0.0.1:8201       leader    true"
+                    );
                 }
                 _ => println!("Usage: vault operator <init|unseal|seal|raft>"),
             }
@@ -261,7 +289,10 @@ fn run_vault(args: Vec<String>) -> i32 {
             println!("({} on {} — simulated)", cmd, path);
             0
         }
-        other => { eprintln!("vault: unknown command '{}'", other); 1 }
+        other => {
+            eprintln!("vault: unknown command {}", quoteaf_os(other));
+            1
+        }
     }
 }
 
@@ -274,7 +305,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_vault};
+    use super::run_vault;
 
     #[test]
     fn help_exits_zero() {

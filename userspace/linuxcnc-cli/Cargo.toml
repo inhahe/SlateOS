@@ -2,3 +2,8 @@
 name = "linuxcnc-cli"
 version = "0.1.0"
 edition = "2024"
+
+[dependencies]
+# linuxcnc-cli names configurations and HAL component files, read from the
+# command line and from the configs directory.
+quoting = { path = "../quoting" }

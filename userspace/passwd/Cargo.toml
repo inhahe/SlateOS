@@ -18,5 +18,10 @@ description = "SlateOS password management utility"
 # where guessing was free. See `design-decisions.md` §354 and
 # `known-issues.md` -> `B-PASSWD-VERIFIES-WITHOUT-AUTHLIB`.
 [dependencies]
+# passwd names user accounts and the files under /etc it edits. A user name
+# is attacker-chosen on any machine where an unprivileged account can be
+# created, and this tool runs setuid, so a forged line in its output is a
+# forged line from a privileged program.
+quoting = { path = "../quoting" }
 authlib = { path = "../authlib" }
 posix = { path = "../../posix" }

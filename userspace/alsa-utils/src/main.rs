@@ -4,6 +4,7 @@
 //!
 //! Multi-personality: `aplay`, `arecord`, `amixer`, `alsamixer`, `alsactl`, `speaker-test`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -29,7 +30,10 @@ fn run_aplay(args: Vec<String>, recording: bool) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-l" || a == "--list-devices") {
-        println!("**** List of {} Hardware Devices ****", if recording { "CAPTURE" } else { "PLAYBACK" });
+        println!(
+            "**** List of {} Hardware Devices ****",
+            if recording { "CAPTURE" } else { "PLAYBACK" }
+        );
         println!("card 0: HDA [HDA Intel PCH], device 0: ALC897 Analog [ALC897 Analog]");
         println!("  Subdevices: 1/1");
         println!("  Subdevice #0: subdevice #0");
@@ -39,11 +43,21 @@ fn run_aplay(args: Vec<String>, recording: bool) -> i32 {
         return 0;
     }
 
-    let file = args.iter().find(|a| !a.starts_with('-')).map(|s| s.as_str()).unwrap_or("audio.wav");
+    let file = args
+        .iter()
+        .find(|a| !a.starts_with('-'))
+        .map(|s| s.as_str())
+        .unwrap_or("audio.wav");
     if recording {
-        println!("Recording WAVE '{}' : Signed 16 bit LE, Rate 44100 Hz, Stereo", file);
+        println!(
+            "Recording WAVE {} : Signed 16 bit LE, Rate 44100 Hz, Stereo",
+            quoteaf_os(file)
+        );
     } else {
-        println!("Playing WAVE '{}' : Signed 16 bit LE, Rate 44100 Hz, Stereo", file);
+        println!(
+            "Playing WAVE {} : Signed 16 bit LE, Rate 44100 Hz, Stereo",
+            quoteaf_os(file)
+        );
     }
     0
 }
@@ -80,7 +94,7 @@ fn run_amixer(args: Vec<String>) -> i32 {
         "sset" => {
             let name = args.get(1).map(|s| s.as_str()).unwrap_or("Master");
             let val = args.get(2).map(|s| s.as_str()).unwrap_or("85%");
-            println!("Simple mixer control '{}',0", name);
+            println!("Simple mixer control {},0", quoteaf_os(name));
             println!("  Front Left: Playback {} [on]", val);
             println!("  Front Right: Playback {} [on]", val);
         }
@@ -114,7 +128,9 @@ fn run_speaker_test(args: Vec<String>) -> i32 {
         return 0;
     }
 
-    let channels = args.iter().position(|a| a == "-c")
+    let channels = args
+        .iter()
+        .position(|a| a == "-c")
         .and_then(|i| args.get(i + 1))
         .map(|s| s.as_str())
         .unwrap_or("2");
@@ -134,7 +150,9 @@ fn main() {
         let bytes = s.as_bytes();
         let mut last_sep = 0;
         for (i, &b) in bytes.iter().enumerate() {
-            if b == b'/' || b == b'\\' { last_sep = i + 1; }
+            if b == b'/' || b == b'\\' {
+                last_sep = i + 1;
+            }
         }
         let base = &s[last_sep..];
         base.strip_suffix(".exe").unwrap_or(base).to_string()
@@ -143,7 +161,10 @@ fn main() {
     let code = match prog_name.as_str() {
         "arecord" => run_aplay(rest, true),
         "amixer" => run_amixer(rest),
-        "alsamixer" => { println!("alsamixer: TUI mixer (simulated)"); 0 }
+        "alsamixer" => {
+            println!("alsamixer: TUI mixer (simulated)");
+            0
+        }
         "alsactl" => run_alsactl(rest),
         "speaker-test" => run_speaker_test(rest),
         _ => run_aplay(rest, false),
@@ -153,7 +174,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_aplay};
+    use super::run_aplay;
 
     #[test]
     fn help_exits_zero() {

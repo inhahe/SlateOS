@@ -12,6 +12,12 @@ description = "SlateOS doas - lightweight privilege elevation"
 # solely for that hasher; the header above it claimed it "matched the passwd
 # utility", which nothing checked and which had stopped being true.
 [dependencies]
+# It interpolates `caller_name`, `command` and `args.target_user` into
+# "doas: {} is not allowed to run {} as {}". The caller name comes from the
+# password database and the other two come from argv, so none of the three
+# is text this program chose -- and this particular line is a security
+# decision, which is the one kind of output that must not be forgeable.
+quoting = { path = "../quoting" }
 authlib = { path = "../authlib" }
 
 # Tests only: they build a real `$6$` entry with the same hasher `passwd` uses,

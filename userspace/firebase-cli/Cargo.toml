@@ -2,3 +2,8 @@
 name = "firebase-cli"
 version = "0.1.0"
 edition = "2024"
+
+[dependencies]
+# The emulators subcommand and the top-level subcommand it echoes back are
+# argv words.
+quoting = { path = "../quoting" }

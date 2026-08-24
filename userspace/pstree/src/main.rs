@@ -9,6 +9,7 @@
 
 #![deny(clippy::all)]
 
+use quoting::quoteaf_os;
 use std::collections::HashMap;
 use std::env;
 use std::fs;
@@ -102,15 +103,9 @@ fn read_proc_stat(pid: u32) -> Option<ProcessInfo> {
     let fields: Vec<&str> = rest.split_whitespace().collect();
 
     // Field 0 = state, Field 1 = ppid, Field 17 = num_threads.
-    let state = fields.first()
-        .and_then(|s| s.chars().next())
-        .unwrap_or('?');
-    let ppid: u32 = fields.get(1)
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(0);
-    let threads: u32 = fields.get(17)
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(1);
+    let state = fields.first().and_then(|s| s.chars().next()).unwrap_or('?');
+    let ppid: u32 = fields.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+    let threads: u32 = fields.get(17).and_then(|s| s.parse().ok()).unwrap_or(1);
 
     // Read UID from /proc/<pid>/status.
     let uid = read_proc_uid(pid);
@@ -131,7 +126,9 @@ fn read_proc_uid(pid: u32) -> u32 {
     if let Some(content) = read_file(&format!("/proc/{pid}/status")) {
         for line in content.lines() {
             if let Some(val) = line.strip_prefix("Uid:") {
-                return val.split_whitespace().next()
+                return val
+                    .split_whitespace()
+                    .next()
                     .and_then(|s| s.parse().ok())
                     .unwrap_or(0);
             }
@@ -158,9 +155,10 @@ fn uid_to_name(uid: u32) -> String {
             let fields: Vec<&str> = line.split(':').collect();
             if fields.len() >= 3
                 && let Ok(file_uid) = fields[2].parse::<u32>()
-                    && file_uid == uid {
-                        return fields[0].to_string();
-                    }
+                && file_uid == uid
+            {
+                return fields[0].to_string();
+            }
         }
     }
     uid.to_string()
@@ -172,9 +170,10 @@ fn enumerate_pids() -> Vec<u32> {
     if let Ok(entries) = fs::read_dir("/proc") {
         for entry in entries.flatten() {
             if let Some(name) = entry.file_name().to_str()
-                && let Ok(pid) = name.parse::<u32>() {
-                    pids.push(pid);
-                }
+                && let Ok(pid) = name.parse::<u32>()
+            {
+                pids.push(pid);
+            }
         }
     }
     pids.sort_unstable();
@@ -290,8 +289,18 @@ fn render_tree(ctx: &mut TreeCtx<'_, '_>, pid: u32, prefix: &str, is_last: bool,
     // Sort by name if requested.
     if ctx.opts.sort_by_name {
         kids.sort_by(|a, b| {
-            let name_a = ctx.procs.get(a).map(|p| &p.name).unwrap_or(&String::new()).clone();
-            let name_b = ctx.procs.get(b).map(|p| &p.name).unwrap_or(&String::new()).clone();
+            let name_a = ctx
+                .procs
+                .get(a)
+                .map(|p| &p.name)
+                .unwrap_or(&String::new())
+                .clone();
+            let name_b = ctx
+                .procs
+                .get(b)
+                .map(|p| &p.name)
+                .unwrap_or(&String::new())
+                .clone();
             name_a.cmp(&name_b)
         });
     }
@@ -301,7 +310,12 @@ fn render_tree(ctx: &mut TreeCtx<'_, '_>, pid: u32, prefix: &str, is_last: bool,
         let mut merged: Vec<(u32, u32)> = Vec::new(); // (pid, count)
         let mut prev_name = String::new();
         for &kid_pid in &kids {
-            let kid_name = ctx.procs.get(&kid_pid).map(|p| &p.name).cloned().unwrap_or_default();
+            let kid_name = ctx
+                .procs
+                .get(&kid_pid)
+                .map(|p| &p.name)
+                .cloned()
+                .unwrap_or_default();
             if kid_name == prev_name && !merged.is_empty() {
                 if let Some(last_entry) = merged.last_mut() {
                     last_entry.1 += 1;
@@ -423,7 +437,8 @@ fn parse_args() -> Options {
                 }
             }
             s if s.starts_with("--highlight-pid=") => {
-                opts.highlight_pid = s.strip_prefix("--highlight-pid=")
+                opts.highlight_pid = s
+                    .strip_prefix("--highlight-pid=")
                     .and_then(|v| v.parse().ok());
             }
             s if !s.starts_with('-') => {
@@ -437,7 +452,7 @@ fn parse_args() -> Options {
                         opts.root_pid = find_first_pid_for_uid(uid);
                         opts.show_uid = true;
                     } else {
-                        eprintln!("pstree: user '{s}' not found");
+                        eprintln!("pstree: user {} not found", quoteaf_os(s));
                         process::exit(1);
                     }
                 }
@@ -466,7 +481,9 @@ fn resolve_username(name: &str) -> Option<u32> {
 }
 
 fn find_first_pid_for_uid(uid: u32) -> Option<u32> {
-    enumerate_pids().into_iter().find(|&pid| read_proc_uid(pid) == uid)
+    enumerate_pids()
+        .into_iter()
+        .find(|&pid| read_proc_uid(pid) == uid)
 }
 
 // ============================================================================
@@ -484,7 +501,12 @@ fn main() {
     let root = opts.root_pid.unwrap_or(1);
 
     if procs.contains_key(&root) {
-        let mut ctx = TreeCtx { out: &mut out, procs: &procs, children: &children, opts: &opts };
+        let mut ctx = TreeCtx {
+            out: &mut out,
+            procs: &procs,
+            children: &children,
+            opts: &opts,
+        };
         render_tree(&mut ctx, root, "", true, true);
     } else if procs.is_empty() {
         eprintln!("pstree: no processes found");
@@ -532,10 +554,18 @@ mod tests {
     fn test_format_process_basic() {
         let info = make_proc(42, 1, "bash");
         let opts = Options {
-            show_pids: false, show_uid: false, show_threads: false,
-            ascii: false, compact: true, root_pid: None, highlight_pid: None,
-            show_kernel: false, long_format: false, sort_by_name: false,
-            show_args: false, numeric_uid: false,
+            show_pids: false,
+            show_uid: false,
+            show_threads: false,
+            ascii: false,
+            compact: true,
+            root_pid: None,
+            highlight_pid: None,
+            show_kernel: false,
+            long_format: false,
+            sort_by_name: false,
+            show_args: false,
+            numeric_uid: false,
         };
         assert_eq!(format_process(&info, &opts), "bash");
     }
@@ -544,10 +574,18 @@ mod tests {
     fn test_format_process_with_pid() {
         let info = make_proc(42, 1, "bash");
         let opts = Options {
-            show_pids: true, show_uid: false, show_threads: false,
-            ascii: false, compact: true, root_pid: None, highlight_pid: None,
-            show_kernel: false, long_format: false, sort_by_name: false,
-            show_args: false, numeric_uid: false,
+            show_pids: true,
+            show_uid: false,
+            show_threads: false,
+            ascii: false,
+            compact: true,
+            root_pid: None,
+            highlight_pid: None,
+            show_kernel: false,
+            long_format: false,
+            sort_by_name: false,
+            show_args: false,
+            numeric_uid: false,
         };
         assert_eq!(format_process(&info, &opts), "bash(42)");
     }
@@ -555,15 +593,27 @@ mod tests {
     #[test]
     fn test_format_process_with_uid() {
         let info = ProcessInfo {
-            pid: 42, ppid: 1, name: "bash".to_string(),
-            uid: 1000, threads: 1, state: 'S',
+            pid: 42,
+            ppid: 1,
+            name: "bash".to_string(),
+            uid: 1000,
+            threads: 1,
+            state: 'S',
             username: "alice".to_string(),
         };
         let opts = Options {
-            show_pids: false, show_uid: true, show_threads: false,
-            ascii: false, compact: true, root_pid: None, highlight_pid: None,
-            show_kernel: false, long_format: false, sort_by_name: false,
-            show_args: false, numeric_uid: false,
+            show_pids: false,
+            show_uid: true,
+            show_threads: false,
+            ascii: false,
+            compact: true,
+            root_pid: None,
+            highlight_pid: None,
+            show_kernel: false,
+            long_format: false,
+            sort_by_name: false,
+            show_args: false,
+            numeric_uid: false,
         };
         assert_eq!(format_process(&info, &opts), "bash[alice]");
     }
@@ -571,15 +621,27 @@ mod tests {
     #[test]
     fn test_format_process_with_numeric_uid() {
         let info = ProcessInfo {
-            pid: 42, ppid: 1, name: "bash".to_string(),
-            uid: 1000, threads: 1, state: 'S',
+            pid: 42,
+            ppid: 1,
+            name: "bash".to_string(),
+            uid: 1000,
+            threads: 1,
+            state: 'S',
             username: "alice".to_string(),
         };
         let opts = Options {
-            show_pids: false, show_uid: true, show_threads: false,
-            ascii: false, compact: true, root_pid: None, highlight_pid: None,
-            show_kernel: false, long_format: false, sort_by_name: false,
-            show_args: false, numeric_uid: true,
+            show_pids: false,
+            show_uid: true,
+            show_threads: false,
+            ascii: false,
+            compact: true,
+            root_pid: None,
+            highlight_pid: None,
+            show_kernel: false,
+            long_format: false,
+            sort_by_name: false,
+            show_args: false,
+            numeric_uid: true,
         };
         assert_eq!(format_process(&info, &opts), "bash[1000]");
     }
@@ -589,10 +651,18 @@ mod tests {
         let mut info = make_proc(42, 1, "java");
         info.threads = 16;
         let opts = Options {
-            show_pids: false, show_uid: false, show_threads: true,
-            ascii: false, compact: true, root_pid: None, highlight_pid: None,
-            show_kernel: false, long_format: false, sort_by_name: false,
-            show_args: false, numeric_uid: false,
+            show_pids: false,
+            show_uid: false,
+            show_threads: true,
+            ascii: false,
+            compact: true,
+            root_pid: None,
+            highlight_pid: None,
+            show_kernel: false,
+            long_format: false,
+            sort_by_name: false,
+            show_args: false,
+            numeric_uid: false,
         };
         assert_eq!(format_process(&info, &opts), "java{16 threads}");
     }
@@ -601,10 +671,18 @@ mod tests {
     fn test_format_process_single_thread() {
         let info = make_proc(42, 1, "bash");
         let opts = Options {
-            show_pids: false, show_uid: false, show_threads: true,
-            ascii: false, compact: true, root_pid: None, highlight_pid: None,
-            show_kernel: false, long_format: false, sort_by_name: false,
-            show_args: false, numeric_uid: false,
+            show_pids: false,
+            show_uid: false,
+            show_threads: true,
+            ascii: false,
+            compact: true,
+            root_pid: None,
+            highlight_pid: None,
+            show_kernel: false,
+            long_format: false,
+            sort_by_name: false,
+            show_args: false,
+            numeric_uid: false,
         };
         // Single thread = no thread count shown.
         assert_eq!(format_process(&info, &opts), "bash");
@@ -613,18 +691,33 @@ mod tests {
     #[test]
     fn test_format_process_all_options() {
         let mut info = ProcessInfo {
-            pid: 42, ppid: 1, name: "httpd".to_string(),
-            uid: 33, threads: 4, state: 'S',
+            pid: 42,
+            ppid: 1,
+            name: "httpd".to_string(),
+            uid: 33,
+            threads: 4,
+            state: 'S',
             username: "www-data".to_string(),
         };
         info.threads = 4;
         let opts = Options {
-            show_pids: true, show_uid: true, show_threads: true,
-            ascii: false, compact: true, root_pid: None, highlight_pid: None,
-            show_kernel: false, long_format: false, sort_by_name: false,
-            show_args: false, numeric_uid: false,
+            show_pids: true,
+            show_uid: true,
+            show_threads: true,
+            ascii: false,
+            compact: true,
+            root_pid: None,
+            highlight_pid: None,
+            show_kernel: false,
+            long_format: false,
+            sort_by_name: false,
+            show_args: false,
+            numeric_uid: false,
         };
-        assert_eq!(format_process(&info, &opts), "httpd(42)[www-data]{4 threads}");
+        assert_eq!(
+            format_process(&info, &opts),
+            "httpd(42)[www-data]{4 threads}"
+        );
     }
 
     #[test]

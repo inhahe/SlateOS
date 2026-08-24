@@ -4,6 +4,7 @@
 //!
 //! Multi-personality: `jenkins-cli`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -42,12 +43,18 @@ fn run_jenkins_cli(args: &[String]) -> i32 {
             println!("slateos-deploy-staging    SUCCESS   #67 (6h ago)");
         }
         "build" => {
-            let job = args.get(1).map(|s| s.as_str()).unwrap_or("slateos-kernel-build");
-            println!("Build triggered for '{}'.", job);
+            let job = args
+                .get(1)
+                .map(|s| s.as_str())
+                .unwrap_or("slateos-kernel-build");
+            println!("Build triggered for {}.", quoteaf_os(job));
             println!("Queue item: #143");
         }
         "console" => {
-            let job = args.get(1).map(|s| s.as_str()).unwrap_or("slateos-kernel-build");
+            let job = args
+                .get(1)
+                .map(|s| s.as_str())
+                .unwrap_or("slateos-kernel-build");
             println!("Console output for {} #142:", job);
             println!("[Pipeline] Start of Pipeline");
             println!("[Pipeline] stage (Build)");
@@ -68,7 +75,7 @@ fn run_jenkins_cli(args: &[String]) -> i32 {
             println!("credentials                 1311.vcf0a_900b_37c2  true");
         }
         "safe-restart" => println!("Jenkins is restarting..."),
-        _ => println!("jenkins-cli: command '{}' completed", subcmd),
+        _ => println!("jenkins-cli: command {} completed", quoteaf_os(subcmd)),
     }
     0
 }
@@ -82,7 +89,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_jenkins_cli};
+    use super::run_jenkins_cli;
 
     #[test]
     fn help_exits_zero() {

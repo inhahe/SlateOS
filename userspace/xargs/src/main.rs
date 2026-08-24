@@ -15,6 +15,7 @@
 //! echo file1 file2 | xargs -I {} cp {} /backup/{}
 //! ```
 
+use quoting::{quoteaf, quoteaf_os};
 use std::env;
 use std::io::{self, Read as _, Write as _};
 use std::process;
@@ -110,7 +111,7 @@ impl Config {
 /// failure.
 fn parse_usize(flag: &str, value: &str) -> Result<usize, i32> {
     value.parse::<usize>().map_err(|_| {
-        eprintln!("xargs: invalid number for {flag}: '{value}'");
+        eprintln!("xargs: invalid number for {flag}: {}", quoteaf_os(value));
         EXIT_INTERNAL
     })
 }
@@ -121,7 +122,7 @@ fn require_arg<'a>(
     iter: &mut impl Iterator<Item = &'a String>,
 ) -> Result<&'a String, i32> {
     iter.next().ok_or_else(|| {
-        eprintln!("xargs: option '{flag}' requires an argument");
+        eprintln!("xargs: option {} requires an argument", quoteaf_os(flag));
         EXIT_INTERNAL
     })
 }
@@ -250,7 +251,7 @@ fn parse_args(args: &[String]) -> Result<Config, i32> {
                     config.replace_str = Some(v.to_string());
                 }
                 _ => {
-                    eprintln!("xargs: unrecognized option '{arg}'");
+                    eprintln!("xargs: unrecognized option {}", quoteaf_os(arg));
                     eprintln!("Try 'xargs --help' for more information.");
                     return Err(EXIT_INTERNAL);
                 }
@@ -324,10 +325,7 @@ fn parse_args(args: &[String]) -> Result<Config, i32> {
                         continue;
                     }
                     _ => {
-                        eprintln!(
-                            "xargs: invalid option -- '{}'",
-                            char::from(bytes[j])
-                        );
+                        eprintln!("xargs: invalid option -- {}", quoteaf(&[bytes[j]]));
                         eprintln!("Try 'xargs --help' for more information.");
                         return Err(EXIT_INTERNAL);
                     }
@@ -376,7 +374,7 @@ fn consume_short_value<'a>(
     } else {
         // Next argument is the value.
         let v = iter.next().ok_or_else(|| {
-            eprintln!("xargs: option '{flag}' requires an argument");
+            eprintln!("xargs: option {} requires an argument", quoteaf_os(flag));
             EXIT_INTERNAL
         })?;
         Ok(v.clone())
@@ -396,12 +394,15 @@ fn parse_delimiter(s: &str) -> Result<u8, i32> {
             b'0' => Ok(0),
             b'\\' => Ok(b'\\'),
             _ => {
-                eprintln!("xargs: invalid delimiter escape: '{s}'");
+                eprintln!("xargs: invalid delimiter escape: {}", quoteaf_os(s));
                 Err(EXIT_INTERNAL)
             }
         },
         _ => {
-            eprintln!("xargs: delimiter must be a single character: '{s}'");
+            eprintln!(
+                "xargs: delimiter must be a single character: {}",
+                quoteaf_os(s)
+            );
             Err(EXIT_INTERNAL)
         }
     }
@@ -590,10 +591,7 @@ fn batch_by_args(
         }
 
         // A single item that exceeds the limit on its own.
-        if current_batch.is_empty()
-            && base_len + item_len > max_chars
-            && exit_on_too_long
-        {
+        if current_batch.is_empty() && base_len + item_len > max_chars && exit_on_too_long {
             eprintln!(
                 "xargs: single argument too long ({} > {max_chars})",
                 base_len + item_len,
@@ -982,7 +980,12 @@ fn run_replace_mode(config: &Config, data: &[u8], replace_str: &str) -> i32 {
         return EXIT_SUCCESS;
     }
 
-    execute_batches(&cmd_lines, config.verbose, config.interactive, config.max_procs)
+    execute_batches(
+        &cmd_lines,
+        config.verbose,
+        config.interactive,
+        config.max_procs,
+    )
 }
 
 /// Execute in `-L` (max-lines) mode.
@@ -1033,7 +1036,12 @@ fn run_line_mode(config: &Config, data: &[u8], max_lines: usize) -> i32 {
         return EXIT_SUCCESS;
     }
 
-    execute_batches(&cmd_lines, config.verbose, config.interactive, config.max_procs)
+    execute_batches(
+        &cmd_lines,
+        config.verbose,
+        config.interactive,
+        config.max_procs,
+    )
 }
 
 /// Execute in default / `-n` (max-args) mode.
@@ -1081,7 +1089,12 @@ fn run_arg_mode(config: &Config, data: &[u8]) -> i32 {
         return EXIT_SUCCESS;
     }
 
-    execute_batches(&cmd_lines, config.verbose, config.interactive, config.max_procs)
+    execute_batches(
+        &cmd_lines,
+        config.verbose,
+        config.interactive,
+        config.max_procs,
+    )
 }
 
 /// Parse input items from raw data according to the delimiter configuration.

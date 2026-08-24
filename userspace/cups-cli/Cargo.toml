@@ -2,3 +2,8 @@
 name = "cups-cli"
 version = "0.1.0"
 edition = "2024"
+
+[dependencies]
+# cups-cli names printers and print jobs; a job title comes from whoever
+# submitted it, which on a shared queue is anyone.
+quoting = { path = "../quoting" }

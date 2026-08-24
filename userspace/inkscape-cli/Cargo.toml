@@ -2,3 +2,8 @@
 name = "inkscape-cli"
 version = "0.1.0"
 edition = "2024"
+
+[dependencies]
+# inkscape-cli names the SVG files it reads and the files it exports to,
+# both taken from the command line.
+quoting = { path = "../quoting" }

@@ -4,3 +4,7 @@ version = "0.1.0"
 edition = "2024"
 description = "SlateOS head - output first part of files"
 [dependencies]
+# head names each input file, and it is routinely pointed at a whole
+# directory via a glob, so the names are the filesystem's rather than its
+# own.
+quoting = { path = "../quoting" }

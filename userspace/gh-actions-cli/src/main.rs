@@ -4,6 +4,7 @@
 //!
 //! Single personality: `gh-actions`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -39,12 +40,24 @@ fn run_gh_actions(args: Vec<String>) -> i32 {
     let cmd = args.first().map(|s| s.as_str()).unwrap_or("");
     match cmd {
         "list" => {
-            println!("STATUS  TITLE                    WORKFLOW  BRANCH  EVENT   ID          ELAPSED");
-            println!("✓       Fix login bug            CI        main    push    12345678    2m34s");
-            println!("✓       Update deps              CI        main    push    12345677    3m12s");
-            println!("✗       Add feature X            CI        feat-x  push    12345676    1m45s");
-            println!("●       Deploy to staging         Deploy    main    push    12345675    Running");
-            println!("✓       Weekly security scan      Security  main    sched   12345674    5m23s");
+            println!(
+                "STATUS  TITLE                    WORKFLOW  BRANCH  EVENT   ID          ELAPSED"
+            );
+            println!(
+                "✓       Fix login bug            CI        main    push    12345678    2m34s"
+            );
+            println!(
+                "✓       Update deps              CI        main    push    12345677    3m12s"
+            );
+            println!(
+                "✗       Add feature X            CI        feat-x  push    12345676    1m45s"
+            );
+            println!(
+                "●       Deploy to staging         Deploy    main    push    12345675    Running"
+            );
+            println!(
+                "✓       Weekly security scan      Security  main    sched   12345674    5m23s"
+            );
             0
         }
         "view" => {
@@ -103,7 +116,10 @@ fn run_gh_actions(args: Vec<String>) -> i32 {
                     println!("docker-layers-ghi789             890 MB   3 days ago");
                 }
                 "delete" => {
-                    let key = args.get(2).map(|s| s.as_str()).unwrap_or("node-modules-abc123");
+                    let key = args
+                        .get(2)
+                        .map(|s| s.as_str())
+                        .unwrap_or("node-modules-abc123");
                     println!("Deleted cache: {}", key);
                 }
                 _ => println!("Usage: gh-actions cache <list|delete>"),
@@ -136,7 +152,7 @@ fn run_gh_actions(args: Vec<String>) -> i32 {
             if cmd.is_empty() {
                 eprintln!("Usage: gh-actions <command>. See --help.");
             } else {
-                eprintln!("Error: unknown command '{}'. See --help.", cmd);
+                eprintln!("Error: unknown command {}. See --help.", quoteaf_os(cmd));
             }
             1
         }
@@ -152,7 +168,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_gh_actions};
+    use super::run_gh_actions;
 
     #[test]
     fn help_exits_zero() {

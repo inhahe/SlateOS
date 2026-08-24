@@ -131,7 +131,8 @@ static SKIP_COUNT: AtomicU64 = AtomicU64::new(0);
 
 /// Per-mount overrides (limited capacity, behind a spinlock since
 /// modifications are rare and only happen during mount/remount).
-static MOUNT_OVERRIDES: PreemptSpinMutex<Vec<MountOverride>> = PreemptSpinMutex::named(Vec::new(), b"MOUNT_OVERRIDES");
+static MOUNT_OVERRIDES: PreemptSpinMutex<Vec<MountOverride>> =
+    PreemptSpinMutex::named(Vec::new(), b"MOUNT_OVERRIDES");
 
 /// 24 hours in nanoseconds.
 const DAY_NS: u64 = 24 * 60 * 60 * 1_000_000_000;
@@ -253,11 +254,7 @@ pub fn list_overrides() -> Vec<MountOverride> {
 /// - `current_mtime_ns`: file's current mtime in nanoseconds
 ///
 /// Returns `true` if atime should be updated to `now`.
-pub fn should_update(
-    path: impl AsRef<Path>,
-    current_atime_ns: u64,
-    current_mtime_ns: u64,
-) -> bool {
+pub fn should_update(path: impl AsRef<Path>, current_atime_ns: u64, current_mtime_ns: u64) -> bool {
     CHECK_COUNT.fetch_add(1, Ordering::Relaxed);
 
     let policy = effective_policy(path);

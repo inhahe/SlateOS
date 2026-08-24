@@ -4,6 +4,7 @@
 //!
 //! Multi-personality: `ansible`, `ansible-playbook`, `ansible-galaxy`, `ansible-vault`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -38,7 +39,8 @@ fn run_ansible(args: &[String]) -> i32 {
     }
 
     let host = args.first().map(|s| s.as_str()).unwrap_or("all");
-    let module = args.windows(2)
+    let module = args
+        .windows(2)
         .find(|w| w[0] == "-m" || w[0] == "--module-name")
         .map(|w| w[1].as_str())
         .unwrap_or("ping");
@@ -75,7 +77,8 @@ fn run_playbook(args: &[String]) -> i32 {
         return 0;
     }
 
-    let playbook = args.iter()
+    let playbook = args
+        .iter()
         .find(|a| !a.starts_with('-'))
         .map(|s| s.as_str())
         .unwrap_or("site.yml");
@@ -129,8 +132,11 @@ fn run_galaxy(args: &[String]) -> i32 {
             println!("- geerlingguy.postgresql, 3.5.0");
         }
         ("role", "install") => {
-            let role = args.get(2).map(|s| s.as_str()).unwrap_or("geerlingguy.docker");
-            println!("- downloading role '{}' ...", role);
+            let role = args
+                .get(2)
+                .map(|s| s.as_str())
+                .unwrap_or("geerlingguy.docker");
+            println!("- downloading role {} ...", quoteaf_os(role));
             println!("- {} was installed successfully", role);
         }
         ("collection", "list") => {
@@ -176,7 +182,10 @@ fn run_vault(args: &[String]) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let argv0 = args.first().cloned().unwrap_or_else(|| String::from("ansible"));
+    let argv0 = args
+        .first()
+        .cloned()
+        .unwrap_or_else(|| String::from("ansible"));
     let p = personality(&argv0);
     let rest: Vec<String> = args.into_iter().skip(1).collect();
 
@@ -197,7 +206,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_ansible};
+    use super::run_ansible;
 
     #[test]
     fn help_exits_zero() {

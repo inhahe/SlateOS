@@ -4,6 +4,7 @@
 //!
 //! Single personality: `tg`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -32,7 +33,11 @@ fn run_tg(args: Vec<String>) -> i32 {
     }
 
     let cmd = args.first().map(|s| s.as_str()).unwrap_or("");
-    let chat = args.windows(2).find(|w| w[0] == "--chat").map(|w| w[1].as_str()).unwrap_or("123456789");
+    let chat = args
+        .windows(2)
+        .find(|w| w[0] == "--chat")
+        .map(|w| w[1].as_str())
+        .unwrap_or("123456789");
 
     match cmd {
         "getme" => {
@@ -46,8 +51,15 @@ fn run_tg(args: Vec<String>) -> i32 {
             0
         }
         "send" => {
-            let msg = args.windows(2).find(|w| w[0] == "-m" || w[0] == "--message").map(|w| w[1].as_str()).unwrap_or("Hello!");
-            let parse = args.windows(2).find(|w| w[0] == "--parse-mode").map(|w| w[1].as_str());
+            let msg = args
+                .windows(2)
+                .find(|w| w[0] == "-m" || w[0] == "--message")
+                .map(|w| w[1].as_str())
+                .unwrap_or("Hello!");
+            let parse = args
+                .windows(2)
+                .find(|w| w[0] == "--parse-mode")
+                .map(|w| w[1].as_str());
             println!("✔ Message sent to chat {}", chat);
             println!("  Text: {}", msg);
             println!("  Message ID: 42");
@@ -98,7 +110,10 @@ fn run_tg(args: Vec<String>) -> i32 {
             let sub = args.get(1).map(|s| s.as_str()).unwrap_or("info");
             match sub {
                 "set" => {
-                    let url = args.get(2).map(|s| s.as_str()).unwrap_or("https://example.com/webhook");
+                    let url = args
+                        .get(2)
+                        .map(|s| s.as_str())
+                        .unwrap_or("https://example.com/webhook");
                     println!("✔ Webhook set to {}", url);
                 }
                 "delete" => {
@@ -115,7 +130,11 @@ fn run_tg(args: Vec<String>) -> i32 {
             0
         }
         "poll" => {
-            let question = args.windows(2).find(|w| w[0] == "-q" || w[0] == "--question").map(|w| w[1].as_str()).unwrap_or("What do you think?");
+            let question = args
+                .windows(2)
+                .find(|w| w[0] == "-q" || w[0] == "--question")
+                .map(|w| w[1].as_str())
+                .unwrap_or("What do you think?");
             println!("✔ Poll created in chat {}", chat);
             println!("  Question: {}", question);
             println!("  Message ID: 45");
@@ -130,7 +149,7 @@ fn run_tg(args: Vec<String>) -> i32 {
             if cmd.is_empty() {
                 eprintln!("Usage: tg <command>. See --help.");
             } else {
-                eprintln!("Error: unknown command '{}'. See --help.", cmd);
+                eprintln!("Error: unknown command {}. See --help.", quoteaf_os(cmd));
             }
             1
         }
@@ -146,7 +165,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_tg};
+    use super::run_tg;
 
     #[test]
     fn help_exits_zero() {

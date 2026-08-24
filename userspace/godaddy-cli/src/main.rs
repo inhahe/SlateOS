@@ -1,6 +1,7 @@
 #![deny(clippy::all)]
 //! godaddy-cli — Slate OS personality CLI for GoDaddy, the world's largest domain registrar.
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -87,8 +88,7 @@ fn cmd_domains() {
     println!("  comparable sales). Available to domain owners free; used by");
     println!("  Afternic to anchor listings.");
     println!();
-    println!("AUCTIONS")
-    ;
+    println!("AUCTIONS");
     println!("  GoDaddy Auctions hosts ~10K expiring + premium auctions per day.");
     println!("  Includes 'Closeout' bargain bin and members-only premium access.");
     println!();
@@ -150,8 +150,7 @@ fn cmd_products() {
     println!("  segment with declining growth; cross-sells to higher-ARPU");
     println!("  products is the strategic focus.");
     println!();
-    println!("CLOUD DOMAINS")
-    ;
+    println!("CLOUD DOMAINS");
     println!("  In April 2023 GoDaddy acquired Google Domains' customer base");
     println!("  from Google for an undisclosed sum, adding ~10M domains and");
     println!("  significantly broadening the developer-friendly registrar's");
@@ -254,17 +253,47 @@ fn run_godaddy(args: &[String], prog: &str) -> i32 {
         return 0;
     };
     match sub.as_str() {
-        "help" | "-h" | "--help" => { print_help(prog); 0 }
-        "version" | "-V" | "--version" => { print_version(); 0 }
-        "about" => { cmd_about(); 0 }
-        "domains" => { cmd_domains(); 0 }
-        "aftermarket" => { cmd_aftermarket(); 0 }
-        "products" => { cmd_products(); 0 }
-        "payments" => { cmd_payments(); 0 }
-        "api" => { cmd_api(); 0 }
-        "finance" => { cmd_finance(); 0 }
+        "help" | "-h" | "--help" => {
+            print_help(prog);
+            0
+        }
+        "version" | "-V" | "--version" => {
+            print_version();
+            0
+        }
+        "about" => {
+            cmd_about();
+            0
+        }
+        "domains" => {
+            cmd_domains();
+            0
+        }
+        "aftermarket" => {
+            cmd_aftermarket();
+            0
+        }
+        "products" => {
+            cmd_products();
+            0
+        }
+        "payments" => {
+            cmd_payments();
+            0
+        }
+        "api" => {
+            cmd_api();
+            0
+        }
+        "finance" => {
+            cmd_finance();
+            0
+        }
         other => {
-            eprintln!("{prog}: unknown subcommand '{other}'. Try '{prog} help'.");
+            eprintln!(
+                "{prog}: unknown subcommand {}. Try '{prog} help'.",
+                quoteaf_os(other)
+            );
             2
         }
     }

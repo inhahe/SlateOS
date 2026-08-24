@@ -4,11 +4,16 @@
 //!
 //! Multi-personality: `iverilog`, `vvp`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_iverilog(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
@@ -29,8 +34,16 @@ fn run_iverilog(args: &[String]) -> i32 {
         println!("Copyright (c) 1998-2024 Stephen Williams (steve@icarus.com)");
         return 0;
     }
-    let output = args.windows(2).find(|w| w[0] == "-o").map(|w| w[1].as_str()).unwrap_or("a.out");
-    let files: Vec<&str> = args.iter().filter(|a| a.ends_with(".v") || a.ends_with(".sv")).map(|s| s.as_str()).collect();
+    let output = args
+        .windows(2)
+        .find(|w| w[0] == "-o")
+        .map(|w| w[1].as_str())
+        .unwrap_or("a.out");
+    let files: Vec<&str> = args
+        .iter()
+        .filter(|a| a.ends_with(".v") || a.ends_with(".sv"))
+        .map(|s| s.as_str())
+        .collect();
     if files.is_empty() {
         println!("iverilog: no source files");
         return 1;
@@ -55,8 +68,12 @@ fn run_vvp(args: &[String]) -> i32 {
         println!("Icarus Verilog runtime version 12.0 (Slate OS)");
         return 0;
     }
-    let file = args.iter().find(|a| !a.starts_with('-') && !a.starts_with('+')).map(|s| s.as_str()).unwrap_or("a.out");
-    println!("vvp: loading simulation '{}'", file);
+    let file = args
+        .iter()
+        .find(|a| !a.starts_with('-') && !a.starts_with('+'))
+        .map(|s| s.as_str())
+        .unwrap_or("a.out");
+    println!("vvp: loading simulation {}", quoteaf_os(file));
     println!("VCD info: dumpfile dump.vcd opened for output.");
     println!("Simulation started...");
     println!("All tests passed.");
@@ -66,7 +83,10 @@ fn run_vvp(args: &[String]) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "iverilog".to_string());
+    let prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "iverilog".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = match prog.as_str() {
         "vvp" => run_vvp(&rest),
@@ -77,7 +97,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_iverilog};
+    use super::{basename, run_iverilog, strip_ext};
 
     #[test]
     fn basename_strips_path() {

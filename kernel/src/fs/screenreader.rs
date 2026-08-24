@@ -224,7 +224,7 @@ where
 {
     let mut guard = STATE.lock();
     let state = guard.as_mut().ok_or(KernelError::NotSupported)?;
-    state.ops += 1;
+    state.ops = state.ops.saturating_add(1);
     OPS.store(state.ops, Ordering::Relaxed);
     f(state)
 }
@@ -255,6 +255,12 @@ pub fn set_enabled(enabled: bool) -> KernelResult<()> {
             state
                 .speech_queue
                 .push(String::from("Screen reader enabled"));
+            // Counted, like every other producer of speech. This was the one
+            // path that queued an utterance without counting it, so `stats()`
+            // reported fewer announcements than the reader had actually
+            // spoken -- and the discrepancy grew by one every time the reader
+            // was switched on.
+            state.total_announcements = state.total_announcements.saturating_add(1);
         }
         Ok(())
     })
@@ -336,7 +342,7 @@ pub fn announce(text: &str) -> KernelResult<()> {
             return Ok(());
         }
         state.speech_queue.push(String::from(text));
-        state.total_announcements += 1;
+        state.total_announcements = state.total_announcements.saturating_add(1);
         // Cap queue size.
         while state.speech_queue.len() > 50 {
             state.speech_queue.remove(0);
@@ -407,7 +413,7 @@ pub fn focus_changed(element_id: u32) -> KernelResult<()> {
             };
 
             state.speech_queue.push(announcement);
-            state.total_announcements += 1;
+            state.total_announcements = state.total_announcements.saturating_add(1);
         }
 
         Ok(())
@@ -467,7 +473,29 @@ pub fn stats() -> (usize, u64, usize, bool, &'static str, u64) {
 // Self-test
 // ---------------------------------------------------------------------------
 
+/// Run the module's self-test suite against a table of its own.
+///
+/// The suite mutates module state and asserts exact contents, and it used to
+/// do that to the *live* table -- which, since it is also a kernel-shell
+/// subcommand, changed or destroyed whatever the user had here and then
+/// reported success.  The live state is moved aside for the duration and put
+/// back afterwards; `crate::fs::selftest` records why this shape rather than
+/// the alternatives.
+///
+/// The pristine value is `None` rather than a table: this module initialises
+/// lazily, and `None` is exactly what a fresh boot holds.
 pub fn self_test() {
+    // `OPS` is a lock-free mirror of `state.ops`, which lives *inside* the
+    // table. `with_pristine` restores the table and so restores `state.ops`,
+    // but it cannot know about the mirror -- leave it and the two disagree
+    // permanently, with `<module> stats` reporting the suite's activity as
+    // the user's.
+    let saved_ops = OPS.load(Ordering::Relaxed);
+    crate::fs::selftest::with_pristine(&STATE, None, self_test_inner);
+    OPS.store(saved_ops, Ordering::Relaxed);
+}
+
+fn self_test_inner() {
     crate::serial_println!("screenreader::self_test() — running tests...");
     init_defaults();
 
@@ -476,8 +504,20 @@ pub fn self_test() {
     crate::serial_println!("  [1/11] disabled by default: OK");
 
     // 2: Enable.
+    //
+    // Turning the reader on queues an announcement saying so -- a screen
+    // reader that switches on silently has told the one user who needs to
+    // know nothing at all.  Drained here rather than left in the queue: it
+    // is the head of the queue, so test 4's `next_speech()` used to return
+    // *this* instead of the focus announcement it asserts against, and that
+    // is how this suite failed the first time it was ever run.
     set_enabled(true).expect("enable");
     assert!(is_enabled());
+    assert_eq!(
+        next_speech().as_deref(),
+        Some("Screen reader enabled"),
+        "enabling announces itself"
+    );
     crate::serial_println!("  [2/11] enable: OK");
 
     // 3: Register elements.
@@ -532,9 +572,19 @@ pub fn self_test() {
     crate::serial_println!("  [10/11] focused element: OK");
 
     // 11: Stats.
-    let (elems, announcements, _queue, enabled, rate, ops) = stats();
+    //
+    // Four announcements: the one enabling produced, two focus changes, and
+    // the custom `announce`. Stated exactly -- `>= 3` would have gone on
+    // passing after the enable announcement stopped being counted, which is
+    // the bug this test now pins.
+    //
+    // The queue is empty because every announcement above was drained by the
+    // `next_speech()` that asserted its contents. Worth saying: a leftover
+    // would mean some call queued speech nobody asked it to.
+    let (elems, announcements, queue, enabled, rate, ops) = stats();
     assert_eq!(elems, 2);
-    assert!(announcements >= 3);
+    assert_eq!(announcements, 4, "enable, two focus changes, one announce");
+    assert_eq!(queue, 0, "every announcement was drained and checked");
     assert!(enabled);
     assert_eq!(rate, "Fast");
     assert!(ops > 0);

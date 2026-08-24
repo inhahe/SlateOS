@@ -163,8 +163,18 @@ pub struct SchedTask {
     pub timeout_seconds: u32,
     /// Number of times this task has run.
     pub run_count: u64,
-    /// Last run timestamp (ns).
-    pub last_run_ns: u64,
+    /// When the most recent run *started* (ns since boot), or `None` if the
+    /// task has never been started.
+    ///
+    /// This is an `Option` rather than a `0`-means-never `u64` because `0` is
+    /// a perfectly legal uptime — the instant the machine came up — so the
+    /// two readings are indistinguishable in band. `check_due` happened to
+    /// special-case the zero, but `record_complete` did not, and computed the
+    /// task's duration as `now - 0`, i.e. reported the entire uptime as the
+    /// run time of a task that was never timed. See
+    /// `known-issues.md -> FIXED-A-SYSMAINT-NEVER-RUN-TASKS-WERE-NEVER-DUE`
+    /// for the same sentinel getting it wrong in the other direction.
+    pub last_run_ns: Option<u64>,
     /// Last run duration (us).
     pub last_duration_us: u64,
     /// Last run success.
@@ -265,7 +275,7 @@ pub fn init_defaults() {
         elevated: false,
         timeout_seconds: 300,
         run_count: 0,
-        last_run_ns: 0,
+        last_run_ns: None,
         last_duration_us: 0,
         last_success: true,
         retry_count: 0,
@@ -298,7 +308,7 @@ pub fn init_defaults() {
         elevated: false,
         timeout_seconds: 120,
         run_count: 0,
-        last_run_ns: 0,
+        last_run_ns: None,
         last_duration_us: 0,
         last_success: true,
         retry_count: 0,
@@ -331,7 +341,7 @@ pub fn init_defaults() {
         elevated: true,
         timeout_seconds: 600,
         run_count: 0,
-        last_run_ns: 0,
+        last_run_ns: None,
         last_duration_us: 0,
         last_success: true,
         retry_count: 0,
@@ -380,7 +390,7 @@ pub fn create_task(name: &str, command: &str, schedule_type: ScheduleType) -> Ke
             elevated: false,
             timeout_seconds: 0,
             run_count: 0,
-            last_run_ns: 0,
+            last_run_ns: None,
             last_duration_us: 0,
             last_success: true,
             retry_count: 0,
@@ -638,9 +648,23 @@ pub fn check_due(hour: u8, minute: u8, weekday: u8) -> Vec<u64> {
             }
             ScheduleType::Interval => {
                 // For interval tasks, check if enough time has elapsed.
+                //
+                // The multiply saturates because `set_interval` accepts any
+                // non-zero u32, and u32::MAX minutes overflows u64 nanoseconds
+                // by an order of magnitude. A wrapped product is a *small*
+                // interval, so "run this every eight thousand years" would have
+                // become "run this on every tick" — a failure in the direction
+                // that looks like the feature working.
                 let now_ns = crate::hpet::elapsed_ns();
-                let interval_ns = task.interval_minutes as u64 * 60 * 1_000_000_000;
-                if task.last_run_ns == 0 || now_ns.saturating_sub(task.last_run_ns) >= interval_ns {
+                let interval_ns = u64::from(task.interval_minutes)
+                    .saturating_mul(60)
+                    .saturating_mul(1_000_000_000);
+                let due_now = match task.last_run_ns {
+                    // Never started: due immediately.
+                    None => true,
+                    Some(last) => now_ns.saturating_sub(last) >= interval_ns,
+                };
+                if due_now {
                     due.push(task.id);
                 }
             }
@@ -689,7 +713,7 @@ pub fn record_start(id: u64) -> KernelResult<()> {
             .find(|t| t.id == id)
             .ok_or(KernelError::NotFound)?;
         task.status = TaskStatus::Running;
-        task.last_run_ns = crate::hpet::elapsed_ns();
+        task.last_run_ns = Some(crate::hpet::elapsed_ns());
         Ok(())
     })
 }
@@ -704,12 +728,18 @@ pub fn record_complete(id: u64, success: bool, exit_code: i32) -> KernelResult<(
             .ok_or(KernelError::NotFound)?;
 
         let now = crate::hpet::elapsed_ns();
-        let duration_us = now.saturating_sub(task.last_run_ns) / 1000;
+        // A completion without a matching `record_start` has no start time to
+        // subtract. Attributing `now - 0` to it — which is what the old
+        // `u64` sentinel did — reported the machine's entire uptime as this
+        // task's run duration. Treat the completion instant as the start
+        // instead, which yields a duration of zero: unknown, not enormous.
+        let started_ns = task.last_run_ns.unwrap_or(now);
+        let duration_us = now.saturating_sub(started_ns) / 1000;
 
-        task.run_count += 1;
+        task.run_count = task.run_count.saturating_add(1);
         task.last_duration_us = duration_us;
         task.last_success = success;
-        state.total_runs += 1;
+        state.total_runs = state.total_runs.saturating_add(1);
 
         if success {
             task.retry_count = 0;
@@ -735,7 +765,7 @@ pub fn record_complete(id: u64, success: bool, exit_code: i32) -> KernelResult<(
         state.history.push(TaskRun {
             task_id: id,
             task_name: task.name.clone(),
-            started_ns: task.last_run_ns,
+            started_ns,
             duration_us,
             success,
             exit_code,
@@ -820,8 +850,29 @@ pub fn stats() -> (usize, u64, u64, usize, u64) {
 // Self-tests
 // ---------------------------------------------------------------------------
 
-/// Run self-tests for the task scheduler module.
+/// Run the module's self-test suite against a table of its own.
+///
+/// The suite mutates module state and asserts exact contents, and it used to
+/// do that to the *live* table -- which, since it is also a kernel-shell
+/// subcommand, changed or destroyed whatever the user had here and then
+/// reported success.  The live state is moved aside for the duration and put
+/// back afterwards; `crate::fs::selftest` records why this shape rather than
+/// the alternatives.
+///
+/// The pristine value is `None` rather than a table: this module initialises
+/// lazily, and `None` is exactly what a fresh boot holds.
 pub fn self_test() {
+    // `OPS` is a lock-free mirror of `state.ops`, which lives *inside* the
+    // table. `with_pristine` restores the table and so restores `state.ops`,
+    // but it cannot know about the mirror -- leave it and the two disagree
+    // permanently, with `<module> stats` reporting the suite's activity as
+    // the user's.
+    let saved_ops = OPS.load(Ordering::Relaxed);
+    crate::fs::selftest::with_pristine(&STATE, None, self_test_inner);
+    OPS.store(saved_ops, Ordering::Relaxed);
+}
+
+fn self_test_inner() {
     use crate::serial_println;
 
     serial_println!("[tasksched] Running self-tests...");
@@ -839,7 +890,7 @@ pub fn self_test() {
         assert!(tasks.iter().any(|t| t.name == "System Diagnostics"));
         assert!(tasks.iter().any(|t| t.name == "Filesystem Trim"));
     }
-    serial_println!("[tasksched]  1/11 initial state OK");
+    serial_println!("[tasksched]  1/12 initial state OK");
 
     // Test 2: create task.
     {
@@ -851,7 +902,7 @@ pub fn self_test() {
         assert_eq!(task.schedule_type, ScheduleType::Daily);
         assert_eq!(task.status, TaskStatus::Ready);
     }
-    serial_println!("[tasksched]  2/11 create task OK");
+    serial_println!("[tasksched]  2/12 create task OK");
 
     // Test 3: set time.
     {
@@ -862,7 +913,7 @@ pub fn self_test() {
         assert_eq!(task.minute, 30);
         assert!(set_time(id, 25, 0).is_err());
     }
-    serial_println!("[tasksched]  3/11 set time OK");
+    serial_println!("[tasksched]  3/12 set time OK");
 
     // Test 4: weekday schedule.
     {
@@ -876,7 +927,7 @@ pub fn self_test() {
         assert!(!task.weekdays[0]);
         assert!(set_weekday(id, 7, true).is_err());
     }
-    serial_println!("[tasksched]  4/11 weekday schedule OK");
+    serial_println!("[tasksched]  4/12 weekday schedule OK");
 
     // Test 5: check_due.
     {
@@ -887,7 +938,7 @@ pub fn self_test() {
         let not_due = check_due(11, 0, 0);
         assert!(!not_due.contains(&id));
     }
-    serial_println!("[tasksched]  5/11 check_due OK");
+    serial_println!("[tasksched]  5/12 check_due OK");
 
     // Test 6: record execution.
     {
@@ -902,7 +953,7 @@ pub fn self_test() {
         assert_eq!(task.run_count, 1);
         assert!(task.last_success);
     }
-    serial_println!("[tasksched]  6/11 record execution OK");
+    serial_println!("[tasksched]  6/12 record execution OK");
 
     // Test 7: history.
     {
@@ -911,7 +962,7 @@ pub fn self_test() {
         let hist = all_history();
         assert!(!hist.is_empty());
     }
-    serial_println!("[tasksched]  7/11 history OK");
+    serial_println!("[tasksched]  7/12 history OK");
 
     // Test 8: disable/enable.
     {
@@ -927,7 +978,7 @@ pub fn self_test() {
         let due = check_due(12, 0, 0);
         assert!(due.contains(&id));
     }
-    serial_println!("[tasksched]  8/11 disable/enable OK");
+    serial_println!("[tasksched]  8/12 disable/enable OK");
 
     // Test 9: remove task.
     {
@@ -940,7 +991,7 @@ pub fn self_test() {
         let system_id = tasks.iter().find(|t| t.system).map(|t| t.id).unwrap();
         assert!(remove_task(system_id).is_err());
     }
-    serial_println!("[tasksched]  9/11 remove task OK");
+    serial_println!("[tasksched]  9/12 remove task OK");
 
     // Test 10: once task completion.
     {
@@ -954,7 +1005,7 @@ pub fn self_test() {
         let due = check_due(15, 0, 0);
         assert!(!due.contains(&id));
     }
-    serial_println!("[tasksched] 10/11 once completion OK");
+    serial_println!("[tasksched] 10/12 once completion OK");
 
     // Test 11: failure and retry.
     {
@@ -975,7 +1026,59 @@ pub fn self_test() {
         // Should be Failed after exceeding retries.
         assert_eq!(task.status, TaskStatus::Failed);
     }
-    serial_println!("[tasksched] 11/11 failure/retry OK");
+    serial_println!("[tasksched] 11/12 failure/retry OK");
+
+    // Test 12: interval scheduling — the two things the `u64` sentinel and
+    // the unchecked multiply each got wrong.
+    {
+        // A task that has never run is due, whatever its interval. This is
+        // the case `last_run_ns: Option<u64>` exists to express; the old
+        // `0`-means-never encoding only worked because `check_due` carried a
+        // hand-written special case for it.
+        let id = create_task("Interval", "poll", ScheduleType::Interval).unwrap();
+        let task = get_task(id).unwrap();
+        assert_eq!(task.last_run_ns, None, "a fresh task has never run");
+        assert_eq!(task.interval_minutes, 60, "and defaults to hourly");
+        assert!(check_due(0, 0, 0).contains(&id), "never run means due now");
+
+        // Having just run, it is not due again for an hour. The clock does
+        // not advance inside this suite, so "an hour from now" is a bound the
+        // test can rely on.
+        record_start(id).unwrap();
+        record_complete(id, true, 0).unwrap();
+        assert!(get_task(id).unwrap().last_run_ns.is_some());
+        assert!(
+            !check_due(0, 0, 0).contains(&id),
+            "just ran, so not due for another hour"
+        );
+
+        // An interval too large to express in nanoseconds must saturate, not
+        // wrap. u32::MAX minutes is ~8,000 years, which overflows u64 ns by
+        // more than tenfold; a wrapped product is a *short* interval, so the
+        // bug would have made "almost never" mean "every single tick" — the
+        // failure direction that looks like the feature working.
+        set_interval(id, u32::MAX).unwrap();
+        assert!(
+            !check_due(0, 0, 0).contains(&id),
+            "an eight-thousand-year interval is not due one tick later"
+        );
+        assert!(set_interval(id, 0).is_err(), "a zero interval is refused");
+
+        // A completion with no matching start has no duration to report. The
+        // old code subtracted the sentinel and so attributed the machine's
+        // entire uptime to a task that was never timed.
+        let orphan = create_task("Orphan", "never-started", ScheduleType::Daily).unwrap();
+        record_complete(orphan, true, 0).unwrap();
+        assert_eq!(
+            get_task(orphan).unwrap().last_duration_us,
+            0,
+            "an untimed run lasted an unknown time, not the whole uptime"
+        );
+
+        remove_task(id).unwrap();
+        remove_task(orphan).unwrap();
+    }
+    serial_println!("[tasksched] 12/12 interval scheduling OK");
 
     serial_println!("[tasksched] All self-tests passed.");
 }

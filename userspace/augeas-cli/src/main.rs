@@ -4,11 +4,16 @@
 //!
 //! Multi-personality: `augtool`, `augparse`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_augtool(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -30,7 +35,10 @@ fn run_augtool(args: &[String], _prog: &str) -> i32 {
         println!("  save          Write changes to disk");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("augtool v1.14 (Slate OS, Augeas)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("augtool v1.14 (Slate OS, Augeas)");
+        return 0;
+    }
     println!("augtool: Augeas shell (interactive mode)");
     println!("  Root: /");
     println!("  Lenses loaded: 215");
@@ -44,9 +52,12 @@ fn run_augparse(args: &[String], _prog: &str) -> i32 {
         println!("augparse v1.14 (Slate OS) — Test Augeas lens files");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("augparse v1.14 (Slate OS, Augeas)"); return 0; }
+    if args.iter().any(|a| a == "--version") {
+        println!("augparse v1.14 (Slate OS, Augeas)");
+        return 0;
+    }
     if let Some(lens) = args.iter().find(|a| !a.starts_with('-')) {
-        println!("augparse: lens '{}' parsed successfully", lens);
+        println!("augparse: lens {} parsed successfully", quoteaf_os(lens));
         println!("  Tests: all passed");
     } else {
         println!("augparse: no lens file specified");
@@ -56,7 +67,10 @@ fn run_augparse(args: &[String], _prog: &str) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "augtool".to_string());
+    let prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "augtool".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = match prog.as_str() {
         "augparse" => run_augparse(&rest, &prog),
@@ -67,7 +81,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_augtool};
+    use super::{basename, run_augtool, strip_ext};
 
     #[test]
     fn basename_strips_path() {

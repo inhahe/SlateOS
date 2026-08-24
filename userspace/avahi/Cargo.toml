@@ -3,3 +3,7 @@ name = "avahi"
 version = "0.1.0"
 edition = "2024"
 [dependencies]
+# avahi names services and hostnames advertised on the local network by
+# other machines, so every word it prints was chosen by a peer rather than
+# by this host.
+quoting = { path = "../quoting" }

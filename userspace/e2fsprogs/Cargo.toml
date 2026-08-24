@@ -3,3 +3,7 @@ name = "e2fsprogs"
 version = "0.1.0"
 edition = "2024"
 [dependencies]
+# e2fsprogs names block devices and image files by path, all supplied by the
+# caller, and it is a filesystem tool -- a diagnostic that misreports which
+# device it touched is a diagnostic that matters.
+quoting = { path = "../quoting" }

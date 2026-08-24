@@ -2,3 +2,9 @@
 name = "ouch"
 version = "0.1.0"
 edition = "2024"
+
+[dependencies]
+# ouch names the archives it creates and every member it packs or extracts,
+# and an archive member name is chosen by whoever built the archive -- the
+# classic case of a name arriving from a stranger.
+quoting = { path = "../quoting" }

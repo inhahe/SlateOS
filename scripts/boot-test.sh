@@ -2547,15 +2547,30 @@ echo "=== Staging boot files ==="
 mkdir -p "$ESP_DIR/EFI/BOOT" "$ESP_DIR/boot"
 cp "$PROJECT_ROOT/limine/BOOTX64.EFI" "$ESP_DIR/EFI/BOOT/BOOTX64.EFI"
 
-# Strip debug symbols — the unstripped debug binary is ~280 MiB.  Stripping
-# removes the symbol table + .debug_* sections (~80 MiB), but the staged image
-# is still large because it carries a big .rodata payload: ~47 fastpy self-test
-# ELFs are embedded into the kernel via include_bytes! (~3.5 MiB each → ~165 MiB
-# of .rodata that stripping CANNOT remove — it's genuine program data).  Limine
-# must load that whole image into high memory, so the QEMU RAM below (-m) has to
-# comfortably exceed the staged kernel size (see the "-m" note near the QEMU
-# invocation).  We try llvm-strip (ships with rustup) first, falling back to a
-# plain copy if no strip tool is found.
+# Strip DWARF, but keep .symtab — the unstripped debug binary is ~215 MiB.
+# The staged image is still large because it carries a big .rodata payload:
+# ~47 fastpy self-test ELFs are embedded into the kernel via include_bytes!
+# (~3.5 MiB each → ~165 MiB of .rodata that stripping CANNOT remove — it's
+# genuine program data).  Limine must load that whole image into high memory,
+# so the QEMU RAM below (-m) has to comfortably exceed the staged kernel size
+# (see the "-m" note near the QEMU invocation).  We try llvm-strip (ships with
+# rustup) first, falling back to a plain copy if no strip tool is found.
+#
+# --strip-debug, NOT a bare strip.  A bare `llvm-strip` removes .symtab along
+# with the .debug_* sections, and .symtab is the only thing `ksyms` reads: it
+# parses the kernel file Limine hands it and builds the address→name table
+# that symbolises every panic backtrace.  With the symbol table gone, ksyms
+# printed "No symbol table found in kernel ELF" on every boot and every
+# backtrace in the serial log — the primary diagnostic this project has, since
+# a panic is how a boot test reports a bug — degraded to a column of raw
+# addresses that can only be resolved offline, against a build that has
+# usually already been overwritten by the next one.  It also silently defeats
+# lockdep's violation reports, which name the two inverted locks by address on
+# the explicit assumption that the address resolves to its owning symbol.
+#
+# The flag costs ~15 MiB of staged image (43 → 58 MiB) and still removes ~73%
+# of the binary.  Against the 5 GiB of guest RAM the image is loaded into,
+# that is not a tradeoff.
 #
 # NOTE (tech debt, tracked in known-issues.md): embedding every fastpy self-test
 # ELF into the kernel .rodata makes the image grow ~3.5 MiB per new self-test.
@@ -2593,8 +2608,8 @@ if [ "$NO_STAGE" -eq 1 ]; then
     echo "Reusing staged kernel (--no-stage): $(stat -c %y "$STAGED_KERNEL" 2>/dev/null || echo "$STAGED_KERNEL")"
     stage_ok=1
 elif [ -n "$LLVM_STRIP" ]; then
-    echo "Stripping kernel binary with $LLVM_STRIP..."
-    if "$LLVM_STRIP" "$KERNEL_BIN" -o "$STAGED_KERNEL"; then
+    echo "Stripping kernel binary with $LLVM_STRIP --strip-debug (keeps .symtab for ksyms)..."
+    if "$LLVM_STRIP" --strip-debug "$KERNEL_BIN" -o "$STAGED_KERNEL"; then
         stage_ok=1
     else
         echo "WARNING: strip failed; falling back to an unstripped copy." >&2

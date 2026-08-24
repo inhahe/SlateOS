@@ -4,11 +4,16 @@
 //!
 //! Multi-personality: `amqp-publish`, `amqp-consume`, `amqp-declare-queue`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
-fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
-fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+fn basename(path: &str) -> &str {
+    path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name)
+}
+fn strip_ext(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(base, _)| base)
+}
 
 fn run_amqp(args: &[String], prog_name: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -38,33 +43,58 @@ fn run_amqp(args: &[String], prog_name: &str) -> i32 {
         println!("AMQP CLI tools (amqp-tools 0.10.0, Slate OS)");
         return 0;
     }
-    let url = args.windows(2).find(|w| w[0] == "--url")
-        .map(|w| w[1].as_str()).unwrap_or("amqp://guest:guest@localhost:5672/");
+    let url = args
+        .windows(2)
+        .find(|w| w[0] == "--url")
+        .map(|w| w[1].as_str())
+        .unwrap_or("amqp://guest:guest@localhost:5672/");
 
     match prog_name {
         "amqp-publish" => {
-            let exchange = args.windows(2).find(|w| w[0] == "-e")
-                .map(|w| w[1].as_str()).unwrap_or("");
-            let key = args.windows(2).find(|w| w[0] == "-r")
-                .map(|w| w[1].as_str()).unwrap_or("test");
-            let body = args.windows(2).find(|w| w[0] == "--body")
-                .map(|w| w[1].as_str()).unwrap_or("hello");
-            println!("Publishing to {} exchange='{}' routing_key='{}'", url, exchange, key);
+            let exchange = args
+                .windows(2)
+                .find(|w| w[0] == "-e")
+                .map(|w| w[1].as_str())
+                .unwrap_or("");
+            let key = args
+                .windows(2)
+                .find(|w| w[0] == "-r")
+                .map(|w| w[1].as_str())
+                .unwrap_or("test");
+            let body = args
+                .windows(2)
+                .find(|w| w[0] == "--body")
+                .map(|w| w[1].as_str())
+                .unwrap_or("hello");
+            println!(
+                "Publishing to {url} exchange={} routing_key={}",
+                quoteaf_os(exchange),
+                quoteaf_os(key)
+            );
             println!("Body: {}", body);
             println!("Published.");
         }
         "amqp-consume" => {
-            let queue = args.windows(2).find(|w| w[0] == "-q")
-                .map(|w| w[1].as_str()).unwrap_or("test-queue");
-            println!("Consuming from {} queue='{}'", url, queue);
+            let queue = args
+                .windows(2)
+                .find(|w| w[0] == "-q")
+                .map(|w| w[1].as_str())
+                .unwrap_or("test-queue");
+            println!("Consuming from {url} queue={}", quoteaf_os(queue));
             println!("  [msg 1] hello");
             println!("  [msg 2] world");
         }
         _ => {
-            let queue = args.windows(2).find(|w| w[0] == "-q")
-                .map(|w| w[1].as_str()).unwrap_or("test-queue");
+            let queue = args
+                .windows(2)
+                .find(|w| w[0] == "-q")
+                .map(|w| w[1].as_str())
+                .unwrap_or("test-queue");
             let durable = args.iter().any(|a| a == "--durable");
-            println!("Declaring queue '{}' at {} (durable={})", queue, url, durable);
+            println!(
+                "Declaring queue {} at {url} (durable={durable})",
+                quoteaf_os(queue)
+            );
             println!("Queue declared: 0 messages, 0 consumers.");
         }
     }
@@ -73,7 +103,10 @@ fn run_amqp(args: &[String], prog_name: &str) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "amqp-publish".to_string());
+    let prog = args
+        .first()
+        .map(|s| strip_ext(basename(s)).to_string())
+        .unwrap_or_else(|| "amqp-publish".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_amqp(&rest, &prog);
     process::exit(code);
@@ -81,7 +114,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, strip_ext, run_amqp};
+    use super::{basename, run_amqp, strip_ext};
 
     #[test]
     fn basename_strips_path() {

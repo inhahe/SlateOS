@@ -4,6 +4,7 @@
 //!
 //! Single personality: `borg`
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -77,10 +78,15 @@ fn sample_repo() -> RepoInfo {
 }
 
 fn format_size(bytes: u64) -> String {
-    if bytes >= 1_000_000_000 { format!("{:.2} GB", bytes as f64 / 1_000_000_000.0) }
-    else if bytes >= 1_000_000 { format!("{:.2} MB", bytes as f64 / 1_000_000.0) }
-    else if bytes >= 1_000 { format!("{:.2} kB", bytes as f64 / 1_000.0) }
-    else { format!("{} B", bytes) }
+    if bytes >= 1_000_000_000 {
+        format!("{:.2} GB", bytes as f64 / 1_000_000_000.0)
+    } else if bytes >= 1_000_000 {
+        format!("{:.2} MB", bytes as f64 / 1_000_000.0)
+    } else if bytes >= 1_000 {
+        format!("{:.2} kB", bytes as f64 / 1_000.0)
+    } else {
+        format!("{} B", bytes)
+    }
 }
 
 // ── Main logic ────────────────────────────────────────────────────────
@@ -112,28 +118,50 @@ fn run_borg(args: Vec<String>) -> i32 {
             println!("  --version      Show version");
             0
         }
-        "--version" | "-V" => { println!("borg 0.1.0 (Slate OS)"); 0 }
+        "--version" | "-V" => {
+            println!("borg 0.1.0 (Slate OS)");
+            0
+        }
         "init" => borg_init(&cmd_args),
         "create" => borg_create(&cmd_args),
         "list" => borg_list(&cmd_args),
         "info" => borg_info(&cmd_args),
         "delete" => borg_delete(&cmd_args),
         "prune" => borg_prune(&cmd_args),
-        "compact" => { println!("borg compact: compacting segments (simulated)"); println!("Repository size: 2.10 GB → 2.05 GB"); 0 }
+        "compact" => {
+            println!("borg compact: compacting segments (simulated)");
+            println!("Repository size: 2.10 GB → 2.05 GB");
+            0
+        }
         "check" => borg_check(&cmd_args),
-        "extract" => { println!("borg extract: extracting archive (simulated)"); 0 }
-        "mount" => { println!("borg mount: FUSE mount not available (simulated)"); 0 }
+        "extract" => {
+            println!("borg extract: extracting archive (simulated)");
+            0
+        }
+        "mount" => {
+            println!("borg mount: FUSE mount not available (simulated)");
+            0
+        }
         "diff" => borg_diff(&cmd_args),
-        other => { eprintln!("borg: unknown command '{}'", other); 1 }
+        other => {
+            eprintln!("borg: unknown command {}", quoteaf_os(other));
+            1
+        }
     }
 }
 
 fn borg_init(args: &[String]) -> i32 {
-    let encryption = args.iter().position(|a| a == "-e" || a == "--encryption")
+    let encryption = args
+        .iter()
+        .position(|a| a == "-e" || a == "--encryption")
         .and_then(|i| args.get(i + 1))
         .map(|s| s.as_str())
         .unwrap_or("repokey");
-    let repo = args.iter().find(|a| !a.starts_with('-')).map(|s| s.as_str()).unwrap_or("/backup/repo");
+    let repo = args
+        .iter()
+        .find(|a| !a.starts_with('-'))
+        .map(|s| s.as_str())
+        .unwrap_or("/backup/repo");
 
     println!("Initializing repository at {}", repo);
     println!("Encryption: {}", encryption);
@@ -203,25 +231,37 @@ fn borg_info(args: &[String]) -> i32 {
         println!("Duration: {} seconds", a._duration_secs);
         println!("Number of files: {}", a._nfiles);
         println!("                       Original size      Compressed size    Deduplicated size");
-        println!("This archive:          {:>14}     {:>14}     {:>14}",
-            format_size(a.original_size), format_size(a.compressed_size), format_size(a.deduplicated_size));
+        println!(
+            "This archive:          {:>14}     {:>14}     {:>14}",
+            format_size(a.original_size),
+            format_size(a.compressed_size),
+            format_size(a.deduplicated_size)
+        );
         println!();
     }
     0
 }
 
 fn borg_delete(args: &[String]) -> i32 {
-    let target = args.iter().find(|a| !a.starts_with('-')).map(|s| s.as_str()).unwrap_or("(none)");
+    let target = args
+        .iter()
+        .find(|a| !a.starts_with('-'))
+        .map(|s| s.as_str())
+        .unwrap_or("(none)");
     println!("Deleting archive {} (simulated)", target);
     0
 }
 
 fn borg_prune(args: &[String]) -> i32 {
-    let keep_daily = args.iter().position(|a| a == "--keep-daily")
+    let keep_daily = args
+        .iter()
+        .position(|a| a == "--keep-daily")
         .and_then(|i| args.get(i + 1))
         .and_then(|s| s.parse::<u32>().ok())
         .unwrap_or(7);
-    let keep_weekly = args.iter().position(|a| a == "--keep-weekly")
+    let keep_weekly = args
+        .iter()
+        .position(|a| a == "--keep-weekly")
         .and_then(|i| args.get(i + 1))
         .and_then(|s| s.parse::<u32>().ok())
         .unwrap_or(4);

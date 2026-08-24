@@ -1,6 +1,7 @@
 #![deny(clippy::all)]
 //! cdn77-cli — Slate OS CDN77 Czech CDN personality CLI.
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -246,7 +247,7 @@ fn run_cdn77(args: &[String], prog: &str) -> i32 {
         "help" | "--help" | "-h" => print_help(prog),
         "version" | "--version" | "-V" => print_version(),
         other => {
-            eprintln!("{prog}: unknown subcommand '{other}'");
+            eprintln!("{prog}: unknown subcommand {}", quoteaf_os(other));
             eprintln!("Try '{prog} help' for the list of subcommands.");
             return 2;
         }

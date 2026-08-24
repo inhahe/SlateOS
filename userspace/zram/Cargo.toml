@@ -3,3 +3,6 @@ name = "zram"
 version = "0.1.0"
 edition = "2024"
 [dependencies]
+# The compression algorithm zramctl rejected and the zram-generator command
+# it did not recognise are argv words.
+quoting = { path = "../quoting" }

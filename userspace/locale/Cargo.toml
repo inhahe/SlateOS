@@ -4,3 +4,13 @@ version = "0.1.0"
 edition = "2024"
 description = "SlateOS locale/localedef/getconf - locale and system configuration"
 [dependencies]
+# It interpolates `name` into "localedef: locale {} created from input {}
+# with charmap {}". That value is a path from the command line, and a path
+# may hold any byte but `/` and NUL -- a newline included. It interpolates
+# `input_file` into "localedef: locale {} created from input {} with charmap
+# {}". That value is a path from the command line, and a path may hold any
+# byte but `/` and NUL -- a newline included. It interpolates `charmap_name`
+# into "localedef: locale {} created from input {} with charmap {}". That
+# value is a path from the command line, and a path may hold any byte but
+# `/` and NUL -- a newline included.
+quoting = { path = "../quoting" }

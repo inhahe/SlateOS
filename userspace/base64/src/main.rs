@@ -8,6 +8,7 @@
 
 #![allow(unexpected_cfgs)]
 
+use quoting::quoteaf_os;
 use std::env;
 use std::fs;
 use std::io::{self, Read, Write};
@@ -24,10 +25,7 @@ enum Mode {
 }
 
 fn detect_mode(argv0: &str) -> Mode {
-    let name = argv0
-        .rsplit(['/', '\\'])
-        .next()
-        .unwrap_or(argv0);
+    let name = argv0.rsplit(['/', '\\']).next().unwrap_or(argv0);
     let name = name.strip_suffix(".exe").unwrap_or(name);
     let lower = name.to_ascii_lowercase();
     match lower.as_str() {
@@ -40,8 +38,7 @@ fn detect_mode(argv0: &str) -> Mode {
 
 // ── Base64 encoding/decoding (RFC 4648) ────────────────────────────
 
-const B64_ALPHABET: &[u8; 64] =
-    b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+const B64_ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
 const B64_URL_ALPHABET: &[u8; 64] =
     b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
@@ -120,7 +117,11 @@ fn b64_decode(input: &str, alphabet: &[u8; 64]) -> Result<Vec<u8>, String> {
         if pad_count > 0 {
             return Err(format!("invalid character after padding at position {pos}"));
         }
-        let val = if (ch as u32) < 256 { table[ch as usize] } else { 0xFF };
+        let val = if (ch as u32) < 256 {
+            table[ch as usize]
+        } else {
+            0xFF
+        };
         if val == 0xFF {
             return Err(format!("invalid character '{}' at position {pos}", ch));
         }
@@ -230,7 +231,11 @@ fn b32_decode(input: &str, alphabet: &[u8; 32]) -> Result<Vec<u8>, String> {
         if ch == '\n' || ch == '\r' || ch == ' ' || ch == '\t' || ch == '=' {
             continue;
         }
-        let val = if (ch as u32) < 256 { table[ch as usize] } else { 0xFF };
+        let val = if (ch as u32) < 256 {
+            table[ch as usize]
+        } else {
+            0xFF
+        };
         if val == 0xFF {
             return Err(format!("invalid character '{}' at position {pos}", ch));
         }
@@ -293,8 +298,8 @@ fn uu_decode(input: &str) -> Result<(Vec<u8>, String, u32), String> {
     if parts.len() < 3 {
         return Err("malformed begin line".to_string());
     }
-    let mode = u32::from_str_radix(parts[1], 8)
-        .map_err(|_| format!("invalid mode: {}", parts[1]))?;
+    let mode =
+        u32::from_str_radix(parts[1], 8).map_err(|_| format!("invalid mode: {}", parts[1]))?;
     let filename = parts[2].to_string();
 
     let mut data = Vec::new();
@@ -308,7 +313,11 @@ fn uu_decode(input: &str) -> Result<(Vec<u8>, String, u32), String> {
             continue;
         }
 
-        let length = if bytes[0] == b'`' { 0 } else { (bytes[0] - 32) as usize };
+        let length = if bytes[0] == b'`' {
+            0
+        } else {
+            (bytes[0] - 32) as usize
+        };
         if length == 0 {
             continue;
         }
@@ -347,9 +356,9 @@ struct Args {
     decode: bool,
     wrap: usize,
     ignore_garbage: bool,
-    url_safe: bool,    // base64 URL-safe alphabet
-    hex: bool,         // base32 hex alphabet
-    no_pad: bool,      // omit padding
+    url_safe: bool, // base64 URL-safe alphabet
+    hex: bool,      // base32 hex alphabet
+    no_pad: bool,   // omit padding
     input_files: Vec<String>,
     // uuencode specific
     uu_filename: Option<String>,
@@ -378,7 +387,10 @@ impl Default for Args {
 
 fn parse_args(mode: Mode) -> Args {
     let argv: Vec<String> = env::args().collect();
-    let mut args = Args { mode, ..Args::default() };
+    let mut args = Args {
+        mode,
+        ..Args::default()
+    };
 
     // Set default wrap by mode
     args.wrap = match mode {
@@ -396,12 +408,15 @@ fn parse_args(mode: Mode) -> Args {
                 process::exit(0);
             }
             "-V" | "--version" => {
-                println!("{} (Slate OS) 0.1.0", match mode {
-                    Mode::Base64 => "base64",
-                    Mode::Base32 => "base32",
-                    Mode::Uuencode => "uuencode",
-                    Mode::Uudecode => "uudecode",
-                });
+                println!(
+                    "{} (Slate OS) 0.1.0",
+                    match mode {
+                        Mode::Base64 => "base64",
+                        Mode::Base32 => "base32",
+                        Mode::Uuencode => "uuencode",
+                        Mode::Uudecode => "uudecode",
+                    }
+                );
                 process::exit(0);
             }
             "-d" | "--decode" => args.decode = true,
@@ -413,14 +428,14 @@ fn parse_args(mode: Mode) -> Args {
                     process::exit(1);
                 }
                 args.wrap = argv[i].parse::<usize>().unwrap_or_else(|_| {
-                    eprintln!("{}: invalid wrap size '{}'", argv[0], argv[i]);
+                    eprintln!("{}: invalid wrap size {}", argv[0], quoteaf_os(&argv[i]));
                     process::exit(1);
                 });
             }
             _ if arg.starts_with("--wrap=") => {
                 let val = &arg["--wrap=".len()..];
                 args.wrap = val.parse::<usize>().unwrap_or_else(|_| {
-                    eprintln!("{}: invalid wrap size '{val}'", argv[0]);
+                    eprintln!("{}: invalid wrap size {}", argv[0], quoteaf_os(val));
                     process::exit(1);
                 });
             }
@@ -451,7 +466,7 @@ fn parse_args(mode: Mode) -> Args {
                 break;
             }
             _ if arg.starts_with('-') && arg.len() > 1 => {
-                eprintln!("{}: unknown option '{arg}'", argv[0]);
+                eprintln!("{}: unknown option {}", argv[0], quoteaf_os(arg));
                 process::exit(1);
             }
             _ => {
@@ -569,14 +584,18 @@ fn run() -> Result<(), String> {
 
             if args.decode {
                 let input = read_input(&args.input_files)?;
-                let text = String::from_utf8(input)
-                    .map_err(|_| "input is not valid text".to_string())?;
+                let text =
+                    String::from_utf8(input).map_err(|_| "input is not valid text".to_string())?;
 
                 let cleaned = if args.ignore_garbage {
                     let table = b64_decode_table(alphabet);
                     text.chars()
-                        .filter(|&c| c == '=' || c == '\n' || c == '\r'
-                            || ((c as u32) < 256 && table[c as usize] != 0xFF))
+                        .filter(|&c| {
+                            c == '='
+                                || c == '\n'
+                                || c == '\r'
+                                || ((c as u32) < 256 && table[c as usize] != 0xFF)
+                        })
                         .collect::<String>()
                 } else {
                     text
@@ -604,14 +623,18 @@ fn run() -> Result<(), String> {
 
             if args.decode {
                 let input = read_input(&args.input_files)?;
-                let text = String::from_utf8(input)
-                    .map_err(|_| "input is not valid text".to_string())?;
+                let text =
+                    String::from_utf8(input).map_err(|_| "input is not valid text".to_string())?;
 
                 let cleaned = if args.ignore_garbage {
                     let table = b32_decode_table(alphabet);
                     text.chars()
-                        .filter(|&c| c == '=' || c == '\n' || c == '\r'
-                            || ((c as u32) < 256 && table[c as usize] != 0xFF))
+                        .filter(|&c| {
+                            c == '='
+                                || c == '\n'
+                                || c == '\r'
+                                || ((c as u32) < 256 && table[c as usize] != 0xFF)
+                        })
                         .collect::<String>()
                 } else {
                     text
@@ -631,17 +654,14 @@ fn run() -> Result<(), String> {
         }
         Mode::Uuencode => {
             let data = read_input(&args.input_files)?;
-            let filename = args
-                .uu_filename
-                .as_deref()
-                .unwrap_or("/dev/stdout");
+            let filename = args.uu_filename.as_deref().unwrap_or("/dev/stdout");
             let encoded = uu_encode(&data, filename, args.uu_mode);
             write_output(encoded.as_bytes(), args.output_file.as_deref())?;
         }
         Mode::Uudecode => {
             let input = read_input(&args.input_files)?;
-            let text = String::from_utf8(input)
-                .map_err(|_| "input is not valid text".to_string())?;
+            let text =
+                String::from_utf8(input).map_err(|_| "input is not valid text".to_string())?;
             let (decoded, filename, _mode) = uu_decode(&text)?;
 
             let out_path = args.output_file.as_deref().unwrap_or(&filename);
@@ -659,10 +679,7 @@ fn run() -> Result<(), String> {
 fn main() {
     if let Err(e) = run() {
         let prog = env::args().next().unwrap_or_else(|| "base64".to_string());
-        let name = prog
-            .rsplit(['/', '\\'])
-            .next()
-            .unwrap_or(&prog);
+        let name = prog.rsplit(['/', '\\']).next().unwrap_or(&prog);
         eprintln!("{name}: {e}");
         process::exit(1);
     }
@@ -851,7 +868,10 @@ mod tests {
         assert_eq!(b32_encode(b"foo", B32_ALPHABET, 0, true), "MZXW6===");
         assert_eq!(b32_encode(b"foob", B32_ALPHABET, 0, true), "MZXW6YQ=");
         assert_eq!(b32_encode(b"fooba", B32_ALPHABET, 0, true), "MZXW6YTB");
-        assert_eq!(b32_encode(b"foobar", B32_ALPHABET, 0, true), "MZXW6YTBOI======");
+        assert_eq!(
+            b32_encode(b"foobar", B32_ALPHABET, 0, true),
+            "MZXW6YTBOI======"
+        );
     }
 
     #[test]
@@ -864,7 +884,10 @@ mod tests {
     fn test_b32_hex_encode() {
         // base32hex uses 0-9, A-V
         assert_eq!(b32_encode(b"f", B32_HEX_ALPHABET, 0, true), "CO======");
-        assert_eq!(b32_encode(b"foobar", B32_HEX_ALPHABET, 0, true), "CPNMUOJ1E8======");
+        assert_eq!(
+            b32_encode(b"foobar", B32_HEX_ALPHABET, 0, true),
+            "CPNMUOJ1E8======"
+        );
     }
 
     // ── Base32 decode ──
@@ -877,7 +900,10 @@ mod tests {
         assert_eq!(b32_decode("MZXW6===", B32_ALPHABET).unwrap(), b"foo");
         assert_eq!(b32_decode("MZXW6YQ=", B32_ALPHABET).unwrap(), b"foob");
         assert_eq!(b32_decode("MZXW6YTB", B32_ALPHABET).unwrap(), b"fooba");
-        assert_eq!(b32_decode("MZXW6YTBOI======", B32_ALPHABET).unwrap(), b"foobar");
+        assert_eq!(
+            b32_decode("MZXW6YTBOI======", B32_ALPHABET).unwrap(),
+            b"foobar"
+        );
     }
 
     #[test]

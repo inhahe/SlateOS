@@ -3,3 +3,8 @@ name = "pipewire"
 version = "0.1.0"
 edition = "2024"
 [dependencies]
+# pipewire names nodes, ports, metadata keys and their values, all of which
+# are strings that other processes registered with the daemon. A client can
+# pick its own node name, so those words are supplied by a peer rather than
+# by this tool.
+quoting = { path = "../quoting" }

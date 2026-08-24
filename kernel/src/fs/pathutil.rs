@@ -354,7 +354,11 @@ fn check_confine_escapes() -> crate::error::KernelResult<()> {
     const CASES: &[(&str, &str, &str)] = &[
         ("/dest", "../etc/passwd", "leading .."),
         ("/dest", "a/../../etc/passwd", ".. after a real component"),
-        ("/dest", "/../etc/passwd", ".. behind a stripped leading slash"),
+        (
+            "/dest",
+            "/../etc/passwd",
+            ".. behind a stripped leading slash",
+        ),
         ("/dest", "a/..", "trailing .."),
         ("/dest", "", "empty names the base itself"),
         ("/dest", "/", "root names the base itself"),

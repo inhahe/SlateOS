@@ -13,6 +13,9 @@ description = "SlateOS SSH-2 client"
 # signature was not checked at all, and the exponent was two hard-coded
 # constants hashed together -- one secret shared by every copy of the binary.
 [dependencies]
+# The host name added to known_hosts comes from the command line or from the
+# ssh config file, so it is not text ssh chose.
+quoting = { path = "../quoting" }
 sha2 = { path = "../../sha2" }
 posix = { path = "../../posix" }
 

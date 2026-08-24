@@ -9,6 +9,7 @@
 //! - `zstdcat` — decompress to stdout
 //! - `zstdmt` — multi-threaded zstd
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -75,7 +76,10 @@ fn run_zstd(args: Vec<String>, personality: &str) -> i32 {
 
     match personality {
         "unzstd" => opts.action = Action::Decompress,
-        "zstdcat" => { opts.action = Action::Decompress; opts.stdout = true; }
+        "zstdcat" => {
+            opts.action = Action::Decompress;
+            opts.stdout = true;
+        }
         "zstdmt" => opts.threads = 0, // auto-detect
         _ => {}
     }
@@ -139,7 +143,10 @@ fn run_zstd(args: Vec<String>, personality: &str) -> i32 {
         Action::Compress => zstd_compress(&opts, personality),
         Action::Decompress => zstd_decompress(&opts, personality),
         Action::Test => zstd_test(&opts, personality),
-        _ => { eprintln!("{}: unsupported action", personality); 1 }
+        _ => {
+            eprintln!("{}: unsupported action", personality);
+            1
+        }
     }
 }
 
@@ -155,17 +162,24 @@ fn zstd_compress(opts: &ZstdOptions, personality: &str) -> i32 {
             };
 
             if opts.verbose {
-                eprintln!("{}: {} → {} (level {}, {} thread{})",
-                    personality, file, out, opts.level,
-                    opts.threads, if opts.threads == 1 { "" } else { "s" });
+                eprintln!(
+                    "{}: {} → {} (level {}, {} thread{})",
+                    personality,
+                    file,
+                    out,
+                    opts.level,
+                    opts.threads,
+                    if opts.threads == 1 { "" } else { "s" }
+                );
             }
-            println!("{}: {} : 55.00% (1048576 B → 576716 B, simulated)",
-                personality, file);
+            println!(
+                "{}: {} : 55.00% (1048576 B → 576716 B, simulated)",
+                personality, file
+            );
 
-            if !opts.keep && !opts.stdout
-                && opts.verbose {
-                    eprintln!("{}: removed '{}'", personality, file);
-                }
+            if !opts.keep && !opts.stdout && opts.verbose {
+                eprintln!("{}: removed {}", personality, quoteaf_os(file));
+            }
         }
     }
     0
@@ -185,12 +199,14 @@ fn zstd_decompress(opts: &ZstdOptions, personality: &str) -> i32 {
             if opts.verbose {
                 eprintln!("{}: {} → {}", personality, file, out);
             }
-            println!("{}: decompressed {} → {} (simulated)", personality, file, out);
+            println!(
+                "{}: decompressed {} → {} (simulated)",
+                personality, file, out
+            );
 
-            if !opts.keep && !opts.stdout
-                && opts.verbose {
-                    eprintln!("{}: removed '{}'", personality, file);
-                }
+            if !opts.keep && !opts.stdout && opts.verbose {
+                eprintln!("{}: removed {}", personality, quoteaf_os(file));
+            }
         }
     }
     0
@@ -216,7 +232,9 @@ fn main() {
         let bytes = s.as_bytes();
         let mut last_sep = 0;
         for (i, &b) in bytes.iter().enumerate() {
-            if b == b'/' || b == b'\\' { last_sep = i + 1; }
+            if b == b'/' || b == b'\\' {
+                last_sep = i + 1;
+            }
         }
         let base = &s[last_sep..];
         let base = base.strip_suffix(".exe").unwrap_or(base);
@@ -245,7 +263,10 @@ mod tests {
     #[test]
     fn test_personality_defaults() {
         // unzstd defaults to decompress
-        let opts = ZstdOptions { action: Action::Decompress, ..ZstdOptions::default() };
+        let opts = ZstdOptions {
+            action: Action::Decompress,
+            ..ZstdOptions::default()
+        };
         assert_eq!(opts.action, Action::Decompress);
     }
 }

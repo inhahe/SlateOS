@@ -8,6 +8,7 @@
 //! - `wg` (default) — WireGuard configuration tool
 //! - `wg-quick` — quick WireGuard interface setup/teardown
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 
@@ -72,37 +73,35 @@ struct _WgQuickPeer {
 // ── Simulated data ────────────────────────────────────────────────────
 
 fn simulated_interfaces() -> Vec<WgInterface> {
-    vec![
-        WgInterface {
-            name: "wg0".to_string(),
-            private_key: "yAnz5TF+lXXJte14tji3zlMNq+hd2rYUIgJBgB3fBmk=".to_string(),
-            public_key: "HIgo9xNzJMWLKASShiTqIybxR0V1tB1ZbFCP9d0RvEY=".to_string(),
-            listen_port: 51820,
-            _fwmark: None,
-            peers: vec![
-                WgPeer {
-                    public_key: "xTIBA5rboUvnH4htodjb6e697QjLERt1NAB4mZqp8Dg=".to_string(),
-                    _preshared_key: None,
-                    endpoint: Some("198.51.100.1:51820".to_string()),
-                    allowed_ips: vec!["10.0.0.2/32".to_string(), "192.168.88.0/24".to_string()],
-                    latest_handshake: 1716000000,
-                    transfer_rx: 124_456_789,
-                    transfer_tx: 98_765_432,
-                    persistent_keepalive: Some(25),
-                },
-                WgPeer {
-                    public_key: "TrMvSoP4jYQlY6RIzBgbssQqY3vxI2piVFBs2LM9F28=".to_string(),
-                    _preshared_key: None,
-                    endpoint: Some("203.0.113.50:51820".to_string()),
-                    allowed_ips: vec!["10.0.0.3/32".to_string()],
-                    latest_handshake: 1715999000,
-                    transfer_rx: 56_789_012,
-                    transfer_tx: 34_567_890,
-                    persistent_keepalive: None,
-                },
-            ],
-        },
-    ]
+    vec![WgInterface {
+        name: "wg0".to_string(),
+        private_key: "yAnz5TF+lXXJte14tji3zlMNq+hd2rYUIgJBgB3fBmk=".to_string(),
+        public_key: "HIgo9xNzJMWLKASShiTqIybxR0V1tB1ZbFCP9d0RvEY=".to_string(),
+        listen_port: 51820,
+        _fwmark: None,
+        peers: vec![
+            WgPeer {
+                public_key: "xTIBA5rboUvnH4htodjb6e697QjLERt1NAB4mZqp8Dg=".to_string(),
+                _preshared_key: None,
+                endpoint: Some("198.51.100.1:51820".to_string()),
+                allowed_ips: vec!["10.0.0.2/32".to_string(), "192.168.88.0/24".to_string()],
+                latest_handshake: 1716000000,
+                transfer_rx: 124_456_789,
+                transfer_tx: 98_765_432,
+                persistent_keepalive: Some(25),
+            },
+            WgPeer {
+                public_key: "TrMvSoP4jYQlY6RIzBgbssQqY3vxI2piVFBs2LM9F28=".to_string(),
+                _preshared_key: None,
+                endpoint: Some("203.0.113.50:51820".to_string()),
+                allowed_ips: vec!["10.0.0.3/32".to_string()],
+                latest_handshake: 1715999000,
+                transfer_rx: 56_789_012,
+                transfer_tx: 34_567_890,
+                persistent_keepalive: None,
+            },
+        ],
+    }]
 }
 
 fn format_transfer(bytes: u64) -> String {
@@ -126,7 +125,11 @@ fn format_handshake_age(ts: u64) -> String {
     if age_secs < 60 {
         format!("{} seconds ago", age_secs)
     } else if age_secs < 3600 {
-        format!("{} minute(s), {} second(s) ago", age_secs / 60, age_secs % 60)
+        format!(
+            "{} minute(s), {} second(s) ago",
+            age_secs / 60,
+            age_secs % 60
+        )
     } else {
         format!("{} hour(s) ago", age_secs / 3600)
     }
@@ -185,9 +188,11 @@ fn wg_show(args: &[String]) -> i32 {
 
     for iface in &interfaces {
         if let Some(filter) = iface_filter
-            && filter != "all" && filter != iface.name {
-                continue;
-            }
+            && filter != "all"
+            && filter != iface.name
+        {
+            continue;
+        }
 
         println!("interface: {}", iface.name);
         println!("  public key: {}", iface.public_key);
@@ -202,11 +207,16 @@ fn wg_show(args: &[String]) -> i32 {
             }
             println!("  allowed ips: {}", peer.allowed_ips.join(", "));
             if peer.latest_handshake > 0 {
-                println!("  latest handshake: {}", format_handshake_age(peer.latest_handshake));
+                println!(
+                    "  latest handshake: {}",
+                    format_handshake_age(peer.latest_handshake)
+                );
             }
-            println!("  transfer: {} received, {} sent",
+            println!(
+                "  transfer: {} received, {} sent",
                 format_transfer(peer.transfer_rx),
-                format_transfer(peer.transfer_tx));
+                format_transfer(peer.transfer_tx)
+            );
             if let Some(ka) = peer.persistent_keepalive {
                 println!("  persistent keepalive: every {} seconds", ka);
             }
@@ -229,7 +239,7 @@ fn wg_showconf(args: &[String]) -> i32 {
     let iface = match interfaces.iter().find(|i| i.name == iface_name) {
         Some(i) => i,
         None => {
-            eprintln!("wg: interface '{}' not found", iface_name);
+            eprintln!("wg: interface {} not found", quoteaf_os(iface_name));
             return 1;
         }
     };
@@ -335,7 +345,7 @@ fn run_wg_quick(args: Vec<String>) -> i32 {
         "strip" => wg_quick_strip(&cmd_args),
         "save" => wg_quick_save(&cmd_args),
         other => {
-            eprintln!("wg-quick: unknown command '{}'", other);
+            eprintln!("wg-quick: unknown command {}", quoteaf_os(other));
             1
         }
     }
@@ -411,7 +421,10 @@ fn wg_quick_save(args: &[String]) -> i32 {
         }
     };
 
-    println!("wg-quick: saving {} to {}/{}.conf (simulated)", iface, _WG_CONF_DIR, iface);
+    println!(
+        "wg-quick: saving {} to {}/{}.conf (simulated)",
+        iface, _WG_CONF_DIR, iface
+    );
     println!("Configuration saved");
     0
 }

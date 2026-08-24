@@ -302,13 +302,13 @@ mod imp {
     };
     use coreutils::errmsg::strerror;
     use coreutils::quote::quoteaf_os;
+    use coreutils::stdfd;
     use std::ffi::OsString;
     use std::fs::{File, OpenOptions};
     use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd};
     use std::os::unix::process::CommandExt;
     use std::path::{Path, PathBuf};
     use std::process::{Command, ExitCode};
-    use std::sync::atomic::{AtomicU8, Ordering};
 
     unsafe extern "C" {
         fn isatty(fd: i32) -> i32;
@@ -317,88 +317,33 @@ mod imp {
         fn fcntl(fd: i32, cmd: i32, ...) -> i32;
         fn signal(signum: i32, handler: usize) -> usize;
         fn umask(mask: u32) -> u32;
-        // `*const c_void`, not `*const u8`: rustc's
-        // `suspicious_runtime_symbol_definitions` lint compares this
-        // declaration against the `write` the standard library itself links
-        // and warns on any divergence — the point being that a program which
-        // redeclares a runtime symbol differently from the runtime is one
-        // mismatch away from a miscompile.
-        fn write(fd: i32, buf: *const core::ffi::c_void, count: usize) -> isize;
     }
 
     const F_DUPFD_CLOEXEC: i32 = 1030;
-    const F_GETFD: i32 = 1;
     const SIGHUP: i32 = 1;
     const SIG_IGN: usize = 1;
     const EBADF: i32 = 9;
 
     // ------------------------------------- the descriptors we were handed ----
 
-    /// Bit `n` is set if descriptor `n` was **not open** when the process
-    /// started. Written once, before anything else runs; see below.
-    static CLOSED_AT_STARTUP: AtomicU8 = AtomicU8::new(0);
-
-    /// Recorded from an ELF constructor, because by the time `main` runs the
-    /// answer is gone.
-    ///
-    /// Rust's runtime start-up "sanitises" the standard descriptors: any of 0,
-    /// 1 and 2 that is closed when the process begins is quietly reopened on
-    /// `/dev/null`. For almost every program that is a kindness — it stops a
-    /// later `open` from landing on descriptor 1 and having its contents
-    /// printed. For this one it is destructive, and in the program's own
-    /// subject matter:
-    ///
-    /// * `nohup cmd >&-` from a terminal must create `nohup.out`, because
-    ///   stderr is about to be pointed at descriptor 1 and would otherwise have
-    ///   nothing to point at. With the descriptor silently replaced by
-    ///   `/dev/null`, we would instead redirect the command's stderr *into*
-    ///   `/dev/null` — losing output that GNU saves to a file.
-    /// * `nohup cmd 2>&-` must fail with 125, because the message saying where
-    ///   the output went cannot be delivered. With the descriptor replaced, the
-    ///   message is "delivered" to `/dev/null` and the command runs with nobody
-    ///   told anything.
-    /// * The command itself must inherit the descriptors it was invoked with. A
-    ///   command run with stdout closed gets `EBADF` on write under GNU; under
-    ///   the substitution it would silently discard its output instead.
-    ///
-    /// `.init_array` runs during `__libc_start_main`, before libc calls `main`
-    /// and therefore before Rust's `lang_start` does the substitution, which is
-    /// the only window in which `F_GETFD` still tells the truth.
-    #[used]
-    #[unsafe(link_section = ".init_array")]
-    static RECORD_CLOSED_STD_FDS: extern "C" fn() = record_closed_std_fds;
-
-    extern "C" fn record_closed_std_fds() {
-        let mut mask: u8 = 0;
-        for fd in 0..3 {
-            // SAFETY: `F_GETFD` only reads a descriptor's flags, and is defined
-            // for any `int` — it reports `EBADF` rather than misbehaving.
-            if unsafe { fcntl(fd, F_GETFD) } < 0 {
-                mask |= 1 << fd;
-            }
-        }
-        CLOSED_AT_STARTUP.store(mask, Ordering::Relaxed);
-    }
-
-    /// Undo the substitution described above, restoring the descriptor table
-    /// the process was actually invoked with.
-    ///
-    /// Called first thing, so that every decision afterwards — `isatty`
-    /// reporting `EBADF`, a diagnostic failing to write, the command inheriting
-    /// a closed descriptor — follows from the truth rather than having to be
-    /// special-cased at each site.
-    fn restore_closed_std_fds() {
-        let mask = CLOSED_AT_STARTUP.load(Ordering::Relaxed);
-        for fd in 0..3 {
-            if mask & (1 << fd) != 0 {
-                // SAFETY: the descriptor at `fd` is the `/dev/null` the runtime
-                // opened to stand in for a closed one; nothing in this program
-                // holds a Rust object owning it, because the program has not
-                // touched standard I/O yet.
-                unsafe { close(fd) };
-            }
-        }
-    }
+    // Record which of the standard descriptors were closed when the process
+    // began, before Rust's start-up reopens them on `/dev/null`; see
+    // `coreutils::stdfd`, which exists because of this program. The
+    // substitution is destructive here in the program's own subject matter:
+    //
+    // * `nohup cmd >&-` from a terminal must create `nohup.out`, because
+    //   stderr is about to be pointed at descriptor 1 and would otherwise have
+    //   nothing to point at. With the descriptor silently replaced by
+    //   `/dev/null`, we would instead redirect the command's stderr *into*
+    //   `/dev/null` — losing output that GNU saves to a file.
+    // * `nohup cmd 2>&-` must fail with 125, because the message saying where
+    //   the output went cannot be delivered. With the descriptor replaced, the
+    //   message is "delivered" to `/dev/null` and the command runs with nobody
+    //   told anything.
+    // * The command itself must inherit the descriptors it was invoked with. A
+    //   command run with stdout closed gets `EBADF` on write under GNU; under
+    //   the substitution it would silently discard its output instead.
+    coreutils::guard_std_fds!();
 
     /// The lowest descriptor the saved stderr may take: above all three
     /// standard ones, so saving it can never collide with a descriptor that is
@@ -441,46 +386,6 @@ mod imp {
         (false, closed)
     }
 
-    /// Write every byte of `bytes` to `fd`, reporting a failure honestly.
-    ///
-    /// This exists instead of `std::io::stderr().write_all(..)` for one
-    /// reason, and it is not style: `StderrRaw`'s `Write` impl passes its
-    /// result through the standard library's `handle_ebadf`, which turns
-    /// `EBADF` into `Ok(buf.len())` — a write to a *closed* stderr is reported
-    /// as a write that fully succeeded. For almost every program that is a
-    /// kindness. For this one it is the difference between exiting 125 and
-    /// exiting 0, because "the diagnostic could not be delivered" is precisely
-    /// the condition `run` tests before letting the command start. Measured:
-    /// with `handle_ebadf` in the path, `nohup true 2>&-` exited 0 against
-    /// GNU's 125 while `nohup.out` sat there with no explanation of itself.
-    ///
-    /// The same runtime paternalism as `sanitize_standard_fds` above, arriving
-    /// by a different door.
-    fn write_all_fd(fd: i32, bytes: &[u8]) -> std::io::Result<()> {
-        let mut written = 0usize;
-        while let Some(rest) = bytes.get(written..).filter(|r| !r.is_empty()) {
-            // SAFETY: `rest` is a live slice, and `write` reads at most
-            // `rest.len()` bytes from its start.
-            let n = unsafe { write(fd, rest.as_ptr().cast(), rest.len()) };
-            if n < 0 {
-                let e = std::io::Error::last_os_error();
-                // A signal that arrived mid-write is not a delivery failure.
-                if e.kind() == std::io::ErrorKind::Interrupted {
-                    continue;
-                }
-                return Err(e);
-            }
-            let Ok(n) = usize::try_from(n) else {
-                return Err(std::io::Error::from(std::io::ErrorKind::WriteZero));
-            };
-            if n == 0 {
-                return Err(std::io::Error::from(std::io::ErrorKind::WriteZero));
-            }
-            written = written.saturating_add(n);
-        }
-        Ok(())
-    }
-
     /// Where `nohup`'s own diagnostics go once stderr may have been redirected.
     ///
     /// Holds a duplicate of the original stderr when one could be made, and
@@ -513,9 +418,16 @@ mod imp {
             let line = format!("nohup: {message}\n");
             // The saved duplicate when there is one, and the live descriptor 2
             // otherwise — which, when stderr was closed, is a closed
-            // descriptor, and `write_all_fd` says so rather than pretending.
+            // descriptor, and `stdfd::write_all` says so rather than
+            // pretending. `std::io::stderr().write_all` would not: its `Write`
+            // impl passes the result through the standard library's
+            // `handle_ebadf`, which turns `EBADF` into `Ok(buf.len())`.
+            // Measured, that was the difference between exiting 125 and
+            // exiting 0 for `nohup true 2>&-`, because "the diagnostic could
+            // not be delivered" is precisely the condition `run` tests before
+            // letting the command start.
             let fd = self.to.as_ref().map_or(2, AsRawFd::as_raw_fd);
-            let result = write_all_fd(fd, line.as_bytes());
+            let result = stdfd::write_all(fd, line.as_bytes());
             if let Err(e) = result
                 && self.failure.is_none()
             {
@@ -552,7 +464,7 @@ mod imp {
     ///
     /// The `raw == fd` case is not a micro-optimisation but a correctness
     /// requirement, and it is reachable precisely because
-    /// [`restore_closed_std_fds`] runs first: with descriptor 1 closed, the
+    /// [`stdfd::restore`] runs first: with descriptor 1 closed, the
     /// `open` of `nohup.out` lands *on* descriptor 1, and a `dup2(1, 1)`
     /// followed by dropping the `File` would close the descriptor that was just
     /// put in place — leaving the command with no stdout at all.
@@ -618,7 +530,7 @@ mod imp {
     pub fn run(argv: &[OsString]) -> ExitCode {
         // Before `Diagnostics::save`, so that a stderr the caller closed is
         // seen as closed rather than as the runtime's `/dev/null`.
-        restore_closed_std_fds();
+        stdfd::restore();
 
         let mut diag = Diagnostics::save();
 
@@ -901,8 +813,10 @@ mod tests {
         // correct *together*: each measured combination names exactly the lines
         // GNU printed for it, in order. `t` marks a terminal.
         let path = std::path::Path::new("nohup.out");
-        // (stdin, stdout, stderr) -> the lines, in order.
-        let cases: &[((bool, bool, bool), &[&str])] = &[
+        /// `(stdin, stdout, stderr)` — each `true` meaning "that descriptor is a
+        /// terminal" — paired with the lines GNU printed for it, in order.
+        type Case = ((bool, bool, bool), &'static [&'static str]);
+        let cases: &[Case] = &[
             (
                 (true, true, true),
                 &["ignoring input and appending output to 'nohup.out'"],
